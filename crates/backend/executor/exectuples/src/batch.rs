@@ -19,6 +19,9 @@ pub struct SoaDeformPlan<'mcx> {
     ncols: u16,
     end_off: u32,
     offs: PgVec<'mcx, u32>,
+    // Deform-JIT batch kernel (docs/optimizations/jit-deform.md): replaces
+    // the AOT column pass on dense full-prefix batches when armed.
+    jit: Option<alloc::rc::Rc<jit_deform::DeformKernel>>,
 }
 
 impl<'mcx> SoaDeformPlan<'mcx> {
@@ -40,7 +43,7 @@ impl<'mcx> SoaDeformPlan<'mcx> {
             offs.push(off as u32);
             off += att.attlen as usize;
         }
-        Some(SoaDeformPlan { ncols: ncols as u16, end_off: off as u32, offs })
+        Some(SoaDeformPlan { ncols: ncols as u16, end_off: off as u32, offs, jit: None })
     }
 
     #[inline]
@@ -48,9 +51,16 @@ impl<'mcx> SoaDeformPlan<'mcx> {
         self.ncols
     }
 
+    /// Arm the JIT batch kernel; layout identity with this plan is required
+    /// (same ncols and offset chain) so batch output is bit-identical.
+    pub fn arm_jit(&mut self, k: alloc::rc::Rc<jit_deform::DeformKernel>) {
+        debug_assert!(k.ncols() == self.ncols && k.end_off() == self.end_off);
+        self.jit = Some(k);
+    }
+
     /// Placeholder for varkey-mode batches; the varkey pass never reads it.
     pub fn unused(mcx: Mcx<'mcx>) -> SoaDeformPlan<'mcx> {
-        SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx) }
+        SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx), jit: None }
     }
 }
 
@@ -290,6 +300,27 @@ pub fn soa_deform_columns(
     // Dense lane: every staged row is kind 0, so the per-row kind test drops
     // and the isnull column becomes one vectorizable fill.
     let dense = soa.kinds_or == 0;
+    if dense && qual_col_only.is_none() {
+        if let Some(k) = plan.jit.as_deref() {
+            debug_assert!(k.ncols() as usize == ncols);
+            for c in 0..ncols {
+                soa.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n].fill(false);
+            }
+            // SAFETY: kind-0 rows are null-free with natts >= ncols (kernel
+            // domain); the kernel stores ncols datums at SOA_MAX_ROWS*8
+            // stride from &values[i] — in bounds of the ncols*SOA_MAX_ROWS
+            // buffer for every i < n <= SOA_MAX_ROWS. Layout identity with
+            // the plan is arm_jit's contract; output is bit-identical to the
+            // AOT column pass below (exercised by jit_batch_matches_aot).
+            unsafe {
+                let base = soa.values.as_mut_ptr();
+                for i in 0..n {
+                    k.soa(*soa.tps.get_unchecked(i), base.add(i), SOA_MAX_ROWS * 8);
+                }
+            }
+            return;
+        }
+    }
     for c in first..last {
         let att = &atts[c];
         let off = plan.offs[c] as usize;
@@ -405,7 +436,8 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
 
 mcx::forget_safe_nodrop!(SoaVarKeyPlan);
 
+// jit exempt: released in exec_end_seq_scan (the bloom-filter Rc precedent).
 mcx::forget_safe_struct!(
-    SoaDeformPlan<'_> { ncols, end_off, offs },
+    SoaDeformPlan<'_> { ncols, end_off, offs; jit },
     SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or },
 );

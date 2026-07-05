@@ -187,6 +187,11 @@ pub struct HeapTupleTableSlot<'mcx> {
     pub base: SlotBase<'mcx>,
     pub tuple: Option<HeapTupleData<'mcx>>,
     pub off: u32,
+    // Deform-JIT arm (docs/optimizations/jit-deform.md): set only by scan
+    // nodes that passed the row gate against this slot's relation; the fresh
+    // (nvalid == 0) null-free deform runs the kernel, everything else keeps
+    // the interpreted walk.
+    pub jit_deform: Option<alloc::rc::Rc<jit_deform::DeformKernel>>,
 }
 
 #[repr(C)]
@@ -375,6 +380,7 @@ mod tests {
                 base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
                 tuple: None,
                 off: 0,
+                jit_deform: None,
             },
             buffer: 0,
         });

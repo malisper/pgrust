@@ -116,6 +116,7 @@ pub fn make_tuple_table_slot<'mcx>(
             base,
             tuple: None,
             off: 0,
+            jit_deform: None,
         }),
         // C's minhdr wrapper (mslot->tuple = &mslot->minhdr) dissolves: the
         // minimal deform lane reads the minimal header directly.
@@ -130,6 +131,7 @@ pub fn make_tuple_table_slot<'mcx>(
                 base,
                 tuple: None,
                 off: 0,
+                jit_deform: None,
             },
             buffer: InvalidBuffer,
         }),
@@ -143,6 +145,12 @@ pub fn exec_set_slot_descriptor<'mcx>(
 ) {
     debug_assert!(!slot.base().is_fixed());
     exec_clear_tuple(slot, mcx);
+    // A rebound descriptor orphans any deform-JIT arm (kernels are per-desc).
+    match slot {
+        SlotData::Heap(h) => h.jit_deform = None,
+        SlotData::BufferHeap(b) => b.base.jit_deform = None,
+        _ => {}
+    }
     let base = slot.base_mut();
     base.tts_tupleDescriptor = None;
     base.set_descriptor(mcx, desc);
@@ -878,7 +886,7 @@ fn force_store_deformed<'mcx>(slot: &mut SlotData<'mcx>, img: TupleImage) {
         .expect("force store without descriptor")
         .natts;
     let mut off = 0u32;
-    crate::deform::slot_deform_heap_tuple(base, img, &mut off, natts);
+    crate::deform::slot_deform_heap_tuple(base, img, &mut off, natts, None);
     if (base.tts_nvalid as i32) < natts {
         slot_getmissingattrs(base, base.tts_nvalid as i32, natts);
     }

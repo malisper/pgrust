@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub mod build;
+pub mod deform_jit;
 pub mod indexlist;
 mod trigdesc;
 pub mod initfile;
@@ -67,6 +68,8 @@ pub(crate) struct RelcacheState {
         PgHashMap<'static, Oid, std::rc::Rc<relcache_seams::IndexAttrBitmaps>>,
     pub(crate) statext_cache: PgHashMap<'static, Oid, std::rc::Rc<[Oid]>>,
     pub(crate) fkey_cache: PgHashMap<'static, Oid, std::rc::Rc<[types_rel::ForeignKeyCacheInfo]>>,
+    pub(crate) deform_jit_cache:
+        PgHashMap<'static, (Oid, u16), std::rc::Rc<jit_deform::DeformKernel>>,
     // C rebuilds swap entry contents in place, preserving rd_refcnt identity;
     // our rebuild replaces the Rc, so still-held predecessors are tracked here
     // (weak, pruned on read) to keep per-oid refcounts C-exact.
@@ -100,6 +103,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
                 indexattr_cache: PgHashMap::new_in(mcx),
                 statext_cache: PgHashMap::new_in(mcx),
                 fkey_cache: PgHashMap::new_in(mcx),
+                deform_jit_cache: PgHashMap::new_in(mcx),
                 stale_refs: PgHashMap::new_in(mcx),
                 in_progress: PgVec::new_in(mcx),
                 eoxact_list: [0; MAX_EOXACT_LIST],
@@ -183,4 +187,5 @@ pub fn init_seams() {
     relcache_seams::at_eoxact_relation_cache::set(invalidate::AtEOXact_RelationCache);
     relcache_seams::at_eosubxact_relation_cache::set(invalidate::AtEOSubXact_RelationCache);
     relcache_seams::relation_get_rules::set(rules::RelationGetRulesShapes);
+    relcache_seams::relation_get_deform_kernel::set(deform_jit::RelationGetDeformKernel);
 }

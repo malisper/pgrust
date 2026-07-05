@@ -17,7 +17,7 @@ use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE}
 use ::types_nodes::plannodes::SeqScan;
 use ::types_rel::Relation;
 use ::types_slot::{
-    EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_MARK, EXEC_FLAG_WITH_NO_DATA,
+    SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_MARK, EXEC_FLAG_WITH_NO_DATA,
 };
 
 pub fn init_seams() {}
@@ -219,8 +219,58 @@ impl<'mcx> SeqScanState<'mcx> {
             0,
             PgVec::new_in(mcx),
         )?);
+        self.arm_slot_jit_deform(estate);
         Ok(())
     }
+
+    // Rung 1 (per-row lazy path): arm the scan slot with the full-fixed-prefix
+    // kernel; slot deform then runs it for fresh null-free tuples and resumes
+    // the interpreted walk past the prefix. Fallback rows and hasnulls tuples
+    // are untouched by construction.
+    fn arm_slot_jit_deform(&mut self, estate: &mut EStateData<'mcx>) {
+        let scandesc = self.ss.ss_currentScanDesc.as_ref().expect("armed after beginscan");
+        let nblocks = ::tableam::table_scan_nblocks(scandesc);
+        let rel = self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+        let prefix = ::jit_deform::fixed_prefix(&rel.rd_att.compact_attrs);
+        let Some(k) = jit_deform_kernel(rel, prefix, nblocks, JIT_DEFORM_ROW_MIN_PAGES) else {
+            return;
+        };
+        match estate.slot_mut(self.ss.ss_ScanTupleSlot) {
+            SlotData::Heap(h) => h.jit_deform = Some(k),
+            SlotData::BufferHeap(b) => b.base.jit_deform = Some(k),
+            _ => {}
+        }
+    }
+}
+
+// Deform-JIT gates (docs/optimizations/jit-deform.md). Measured break-evens:
+// <2 pages for the row kernel vs the interpreted walk, ~23 pages for the
+// batch kernel vs the AOT column pass — both gated with ~2x margin.
+// Relation-local page counts stand in for C's query-level jit_above_cost
+// shape: a ~5us stencil install cannot use thresholds sized for ~ms LLVM
+// compiles. C's jit + jit_tuple_deforming GUCs stay the kill switches.
+const JIT_DEFORM_ROW_MIN_PAGES: u32 = 4;
+const JIT_DEFORM_BATCH_MIN_PAGES: u32 = 48;
+
+fn jit_deform_kernel(
+    rel: &Relation<'_>,
+    ncols: usize,
+    nblocks: u32,
+    min_pages: u32,
+) -> Option<std::rc::Rc<::jit_deform::DeformKernel>> {
+    if ncols == 0 || nblocks < min_pages || !::jit_deform::available() {
+        return None;
+    }
+    let jit_on = ::guc_tables::vars::jit_enabled.installed()
+        && ::guc_tables::vars::jit_tuple_deforming.installed()
+        && ::guc_tables::vars::jit_enabled.read()
+        && ::guc_tables::vars::jit_tuple_deforming.read();
+    if !jit_on || !relcache_seams::relation_get_deform_kernel::is_installed() {
+        return None;
+    }
+    let k = relcache_seams::relation_get_deform_kernel::call(rel.rd_id, ncols as u16)?;
+    // A held-but-rebuilt relation must never run the current entry's kernel.
+    k.matches(&rel.rd_att).then_some(k)
 }
 
 /// Fused page-batch drive support (upstream batch scan, CF 6176). The caller
@@ -274,6 +324,21 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
         return;
     }
     node.batch_soa = ::exectuples::SoaDeformPlan::try_new(mcx, atts, prefix as usize).map(|plan| {
+        // Rung 2 (dense batch pass): the JIT batch kernel replaces the AOT
+        // column loops on dense full-prefix deforms; col-only passes and
+        // mixed batches keep the AOT/interpreted paths.
+        let mut plan = plan;
+        if let Some(sd) = node.ss.ss_currentScanDesc.as_ref() {
+            let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+            if let Some(k) = jit_deform_kernel(
+                rel,
+                plan.ncols() as usize,
+                ::tableam::table_scan_nblocks(sd),
+                JIT_DEFORM_BATCH_MIN_PAGES,
+            ) {
+                plan.arm_jit(k);
+            }
+        }
         ::mcx::PgBox::new_in(
             BatchSoa {
                 soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
@@ -827,6 +892,8 @@ pub fn exec_init_seq_scan_rel<'mcx>(
 /// `ExecEndSeqScan`.
 pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
+    // Releases the plan's deform-JIT kernel Rc (forget-exempt in batch.rs).
+    node.batch_soa = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -871,6 +938,7 @@ pub fn exec_seq_scan_initialize_dsm<'mcx>(
     )?;
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.arm_slot_jit_deform(estate);
     node.parallel = Some(std::sync::Arc::clone(&shared));
     Ok(shared)
 }
@@ -892,6 +960,7 @@ pub fn exec_seq_scan_initialize_worker<'mcx>(
     let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.arm_slot_jit_deform(estate);
     node.parallel = Some(shared);
     Ok(())
 }

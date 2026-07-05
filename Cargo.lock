@@ -4755,6 +4755,7 @@ dependencies = [
  "bufmgr_seams",
  "datum",
  "heaptuple",
+ "jit_deform",
  "mcx",
  "types_core",
  "types_error",
@@ -6639,6 +6640,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jit_deform"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "libc",
+ "mcx",
+ "types_tuple",
+]
+
+[[package]]
 name = "keywords"
 version = "0.1.0"
 
@@ -8263,14 +8274,17 @@ dependencies = [
  "execscan",
  "exectuples",
  "executils",
+ "guc_tables",
  "hashfn",
  "heapam_visibility_seams",
+ "jit_deform",
  "mcx",
  "miscinit_seams",
  "nodehash",
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",
+ "relcache_seams",
  "syscache_seams",
  "tableam",
  "types_core",
@@ -11738,6 +11752,7 @@ dependencies = [
  "fmgr_seams",
  "init_small",
  "inval_seams",
+ "jit_deform",
  "lmgr",
  "lwlock",
  "mcx",
@@ -11811,6 +11826,7 @@ dependencies = [
 name = "relcache_seams"
 version = "0.0.0"
 dependencies = [
+ "jit_deform",
  "mcx",
  "seam_core",
  "types_core",
@@ -15458,6 +15474,7 @@ name = "types_slot"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "jit_deform",
  "mcx",
  "types_core",
  "types_tuple",

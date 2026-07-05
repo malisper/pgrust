@@ -117,3 +117,16 @@ seam_core::seam!(
     // this shape; empty Vec == rd_rules == NULL.
     pub fn relation_get_rules(relid: Oid) -> PgResult<Vec<RuleShape>>
 );
+
+seam_core::seam!(
+    // Deform-JIT kernel for the current relcache entry's leading `ncols`
+    // fixed columns (docs/optimizations/jit-deform.md); cached on the
+    // implementation side, dropped by relcache invalidation. None = refused
+    // (shape, arch, kill switch, arena) — callers keep the interpreted path.
+    // Callers holding a possibly-stale relation MUST check
+    // kernel.matches(rel.rd_att) before arming.
+    pub fn relation_get_deform_kernel(
+        relid: Oid,
+        ncols: u16,
+    ) -> Option<Rc<jit_deform::DeformKernel>>
+);

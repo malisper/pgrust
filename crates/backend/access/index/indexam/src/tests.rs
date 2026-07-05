@@ -271,6 +271,7 @@ fn fetch_heap_sets_kill_prior_tuple_except_in_recovery() {
             base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
             tuple: None,
             off: 0,
+            jit_deform: None,
         },
         buffer: types_core::InvalidBuffer,
     });
@@ -302,6 +303,7 @@ fn getnext_slot_skips_dead_chains_and_propagates_kill() {
             base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
             tuple: None,
             off: 0,
+            jit_deform: None,
         },
         buffer: types_core::InvalidBuffer,
     });
@@ -326,6 +328,7 @@ fn getnext_slot_continues_hot_chain_without_new_tid() {
             base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
             tuple: None,
             off: 0,
+            jit_deform: None,
         },
         buffer: types_core::InvalidBuffer,
     });
@@ -350,6 +353,7 @@ fn getnext_slot_exhausted_returns_false() {
             base: TupleTableSlot::new_in(ctx.mcx(), TupleSlotKind::BufferHeapTuple),
             tuple: None,
             off: 0,
+            jit_deform: None,
         },
         buffer: types_core::InvalidBuffer,
     });

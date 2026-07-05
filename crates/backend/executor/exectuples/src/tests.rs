@@ -771,3 +771,143 @@ fn soa_stage_varkey_matches_slot_getattr() {
         assert!(soa.is_fallback(0), "key {key} narrow");
     }
 }
+
+// Deform-JIT integration parity (docs/optimizations/jit-deform.md): an armed
+// plan/slot must produce bit-identical batch and slot state to the AOT/
+// interpreted paths across dense, mixed (hasnulls), and narrow batches.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn jit_deform_matches_aot_and_interpreter() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    // Leaked context: jit_deform::install pins the descriptor as 'static
+    // (the relcache-entry contract).
+    let mcx = alloc::boxed::Box::leak(alloc::boxed::Box::new(MemoryContext::new("jit-int"))).mcx();
+    // char, int2, int4, int8 fixed prefix (padding holes); text tail.
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 1, true, ::types_tuple::TYPALIGN_CHAR, TYPSTORAGE_PLAIN),
+            col(2, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+            col(3, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(4, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+            col(5, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+        ],
+    );
+    let ncols = 4usize;
+    let kernel = ::jit_deform::install(&desc, ncols).expect("install");
+    assert!(kernel.matches(&desc));
+    let txt = text_varlena("tail");
+
+    let rows: [([Datum; 5], [bool; 5]); 4] = [
+        (
+            [Datum::from_char(-7), Datum::from_i16(-3), Datum::from_i32(9), Datum::from_i64(1_234_567), text_datum(&txt)],
+            [false, false, false, false, false],
+        ),
+        (
+            [Datum::from_char(1), Datum::from_i16(i16::MIN), Datum::from_i32(i32::MAX), Datum::from_i64(i64::MIN), Datum::null()],
+            [false, false, false, false, true],
+        ),
+        (
+            [Datum::from_char(0), Datum::null(), Datum::from_i32(-1), Datum::null(), text_datum(&txt)],
+            [false, true, false, true, false],
+        ),
+        (
+            [Datum::from_char(66), Datum::from_i16(2), Datum::from_i32(3), Datum::from_i64(4), text_datum(&txt)],
+            [false, false, false, false, false],
+        ),
+    ];
+    // Rows 0 and 3 are fully null-free (dense lane); adding rows 1/2 stages
+    // a mixed batch where the armed kernel must stand down.
+    let dense: [usize; 2] = [0, 3];
+
+    // Batch pass, dense staging: armed plan vs AOT plan bit-identical.
+    let plan_aot = SoaDeformPlan::try_new(mcx, &desc.compact_attrs, ncols).unwrap();
+    let mut plan_jit = SoaDeformPlan::try_new(mcx, &desc.compact_attrs, ncols).unwrap();
+    plan_jit.arm_jit(kernel.clone());
+    let mut tuples = Vec::new();
+    for (values, isnull) in &rows {
+        tuples.push(heap_form_tuple(mcx, &desc, values, isnull).unwrap());
+    }
+    let all: [usize; 4] = [0, 1, 2, 3];
+    for stage in [&dense[..], &all[..]] {
+        let mut a = SoaBatch::new_in(mcx, plan_aot.ncols());
+        let mut j = SoaBatch::new_in(mcx, plan_jit.ncols());
+        a.begin(stage.len() as u32);
+        j.begin(stage.len() as u32);
+        for (i, &t) in stage.iter().enumerate() {
+            soa_classify_row(&mut a, &plan_aot, &desc.compact_attrs, i as u32, &tuples[t]);
+            soa_classify_row(&mut j, &plan_jit, &desc.compact_attrs, i as u32, &tuples[t]);
+        }
+        soa_deform_columns(&mut a, &plan_aot, &desc.compact_attrs, None);
+        soa_deform_columns(&mut j, &plan_jit, &desc.compact_attrs, None);
+        for c in 0..ncols {
+            for i in 0..stage.len() {
+                assert_eq!(a.col_isnull(c)[i], j.col_isnull(c)[i], "batch col {c} row {i}");
+                if !a.col_isnull(c)[i] {
+                    assert_eq!(
+                        a.col_values(c)[i].as_i64(),
+                        j.col_values(c)[i].as_i64(),
+                        "batch col {c} row {i}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Slot lazy path: armed slot vs interpreted slot, full state compare,
+    // including resume past the prefix into the varlena tail.
+    for (i, (values, isnull)) in rows.iter().enumerate() {
+        let mut got = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        if let SlotData::Heap(h) = &mut got {
+            h.jit_deform = Some(kernel.clone());
+        }
+        let tg = heap_form_tuple(mcx, &desc, values, isnull).unwrap();
+        exec_store_heap_tuple_owned(&mut got, mcx, tg);
+        let mut want = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+        let tw = heap_form_tuple(mcx, &desc, values, isnull).unwrap();
+        exec_store_heap_tuple_owned(&mut want, mcx, tw);
+        for attnum in [ncols as i32, desc.natts] {
+            slot_getsomeattrs(&mut got, attnum);
+            slot_getsomeattrs(&mut want, attnum);
+            let (gb, wb) = (got.base(), want.base());
+            assert_eq!(gb.tts_nvalid, wb.tts_nvalid, "row {i} attnum {attnum}");
+            assert_eq!(gb.tts_flags, wb.tts_flags, "row {i} attnum {attnum}");
+            for c in 0..gb.tts_nvalid as usize {
+                assert_eq!(gb.tts_isnull[c], wb.tts_isnull[c], "row {i} col {c}");
+                if !gb.tts_isnull[c] {
+                    if desc.compact_attrs[c].attbyval {
+                        assert_eq!(gb.tts_values[c].as_i64(), wb.tts_values[c].as_i64(), "row {i} col {c}");
+                    } else {
+                        assert_eq!(
+                            datum_text_bytes(gb.tts_values[c]),
+                            datum_text_bytes(wb.tts_values[c]),
+                            "row {i} col {c}"
+                        );
+                    }
+                }
+            }
+            let (SlotData::Heap(gh), SlotData::Heap(wh)) = (&got, &want) else { unreachable!() };
+            assert_eq!(gh.off, wh.off, "row {i} attnum {attnum}");
+        }
+        exec_clear_tuple(&mut got, mcx);
+        exec_clear_tuple(&mut want, mcx);
+    }
+
+    // Narrow tuple (pre-ALTER ADD COLUMN image): kernel gated off by
+    // ncols <= min(tuple natts, requested), missing-attr pad unchanged.
+    let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
+    let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+    if let SlotData::Heap(h) = &mut slot {
+        h.jit_deform = Some(kernel.clone());
+    }
+    let nt = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(5)], &[false]).unwrap();
+    exec_store_heap_tuple_owned(&mut slot, mcx, nt);
+    slot_getsomeattrs(&mut slot, desc.natts);
+    let b = slot.base();
+    assert_eq!(b.tts_values[0].as_i64(), 5);
+    assert!(!b.tts_isnull[0]);
+    for c in 1..desc.natts as usize {
+        assert!(b.tts_isnull[c], "narrow pad col {c}");
+    }
+    exec_clear_tuple(&mut slot, mcx);
+}
