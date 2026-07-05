@@ -1245,6 +1245,45 @@ fn get_index_paths<'mcx>(
     Ok(())
 }
 
+// Decide-once mirror of compute_parallel_worker's zero-worker outcomes: the
+// partial leg's cost_index inputs are bounded (Mackert-Lohman clamps
+// rand_heap_pages <= rel.pages; genericcostestimate clamps index_pages <=
+// index.pages), so when these upper bounds already trip the size gates the
+// leg's parallel_workers is 0 and build_index_paths would drop the path —
+// skipping the second cost_index entirely is plan-identical. C runs the full
+// costing every time; the serial point/range lanes must not pay for it.
+fn partial_leg_can_get_workers(
+    run: &PlannerRun<'_>,
+    rel: RelId,
+    index: &IndexOptInfo<'_>,
+    index_only_scan: bool,
+) -> bool {
+    if guc_tables::vars::max_parallel_workers_per_gather.read() <= 0 {
+        return false;
+    }
+    let r = run.root.rel(rel);
+    // Explicit reloption bypasses the size gates (allpaths.c).
+    if r.rel_parallel_workers != -1 {
+        return r.rel_parallel_workers > 0;
+    }
+    if r.reloptkind != types_pathnodes::RELOPT_BASEREL {
+        return true;
+    }
+    // genericcostestimate floors numIndexPages at 1 and clamps it to
+    // index.pages, so max(pages, 1) bounds the leg's index_pages from above.
+    if (index.pages.max(1) as i64) < ::allpaths::gucs::min_parallel_index_scan_size() as i64 {
+        return false;
+    }
+    // Index-only legs pass rand_heap_pages = -1: the heap gate never applies.
+    // Mackert-Lohman's T = max(pages, 1): a 0-page rel still fetches 1 page.
+    if !index_only_scan
+        && (r.pages.max(1) as i64) < ::allpaths::gucs::min_parallel_table_scan_size() as i64
+    {
+        return false;
+    }
+    true
+}
+
 // build_index_paths (indxpath.c), ST_ANYSCAN (bitmap=false) and ST_BITMAPSCAN
 // (bitmap=true) arms.
 fn build_index_paths<'mcx>(
@@ -1309,7 +1348,8 @@ fn build_index_paths<'mcx>(
     let parallel_arm = index.amcanparallel
         && run.root.rel(rel).consider_parallel
         && types_pathnodes::relids::relids_is_empty(&outer_relids)
-        && !bitmap;
+        && !bitmap
+        && partial_leg_can_get_workers(run, rel, index, index_only_scan);
     let clone_clauses = |src: &PgVec<'mcx, IndexClause<'mcx>>| {
         let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
         v.extend(src.iter().cloned());
