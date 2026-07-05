@@ -434,12 +434,14 @@ pub fn DefineRelation<'mcx>(
         mcx::PgVec::new_in(mcx);
     let mut partition_gendefs: mcx::PgVec<'mcx, (AttrNumber, types_nodes::Node<'mcx>)> =
         mcx::PgVec::new_in(mcx);
+    let mut partition_raw_defaults: mcx::PgVec<'mcx, (AttrNumber, types_nodes::Node<'mcx>, u8)> =
+        mcx::PgVec::new_in(mcx);
     let descriptor = match parent_oid {
-        // MergeAttributes, empty-column partition arm: the partition's
-        // columns are exactly the parent's (attislocal=false, attinhcount=1),
-        // so parent CHECK ccbin and generation expressions ride unmapped.
+        // MergeAttributes, partition arm: the partition's columns are exactly
+        // the parent's (attislocal=false, attinhcount=1), so parent CHECK
+        // ccbin and generation expressions ride unmapped. Any tableElts are
+        // column options merged below (tablecmds.c:3031 saved_columns loop).
         Some(parent_oid) => {
-            assert!(stmt.tableElts.is_nil(), "loud in transformCreateStmt");
             let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
             if parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
                 let pname = parent.name().to_string();
@@ -522,6 +524,91 @@ pub fn DefineRelation<'mcx>(
             None => BuildDescForRelation(mcx, table_elts)?,
         },
     };
+
+    // MergeAttributes' is_partition saved_columns pass (tablecmds.c:3031):
+    // each column option must name an inherited column; generated-ness must
+    // match the parent; a local raw default/generation expression overrides
+    // the parent's inherited one.
+    if parent_oid.is_some() {
+        for elt in stmt.tableElts.iter() {
+            if elt.node_tag() != types_nodes::NodeTag::T_ColumnDef {
+                continue;
+            }
+            let restdef =
+                elt.as_variant::<types_nodes::rawnodes::ColumnDef>().expect("ColumnDef");
+            let colname = restdef.colname.expect("ColumnDef.colname");
+            let attno = (0..descriptor.natts as usize).find(|&i| {
+                let a = descriptor.attr(i);
+                !a.attisdropped && a.attname.name_str() == colname.as_bytes()
+            });
+            let Some(i) = attno else {
+                return Err(Box::new(
+                    PgError::new(ERROR, format!("column \"{colname}\" does not exist"))
+                        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+                ));
+            };
+            let coldef_generated = descriptor.attr(i).attgenerated as u8;
+            if coldef_generated != 0 {
+                if restdef.raw_default.is_some() && restdef.generated == 0 {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "column \"{colname}\" inherits from generated column but specifies default"
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
+                    ));
+                }
+                if restdef.identity != 0 {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "column \"{colname}\" inherits from generated column but specifies identity"
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION),
+                    ));
+                }
+            } else if restdef.generated != 0 {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!("child column \"{colname}\" specifies generation expression"),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION)
+                    .with_hint(
+                        "A child table column cannot be generated unless its parent column is."
+                            .to_string(),
+                    ),
+                ));
+            }
+            if coldef_generated != 0 && restdef.generated != 0 && coldef_generated != restdef.generated
+            {
+                let kind = |g: u8| if g == b's' { "STORED" } else { "VIRTUAL" };
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "column \"{colname}\" inherits from generated column of different kind"
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION)
+                    .with_detail(format!(
+                        "Parent column is {}, child column is {}.",
+                        kind(coldef_generated),
+                        kind(restdef.generated)
+                    )),
+                ));
+            }
+            if let Some(raw) = restdef.raw_default {
+                let attnum = (i + 1) as AttrNumber;
+                partition_gendefs.retain(|&(a, _)| a != attnum);
+                partition_raw_defaults.push((attnum, raw, restdef.generated));
+            }
+        }
+    }
 
     let relation_id = catalog_heap::heap_create_with_catalog(
         mcx,
@@ -696,6 +783,8 @@ pub fn DefineRelation<'mcx>(
     // Merged columns re-number local attributes; raw defaults ride them.
     let raw_defaults = match &merged {
         Some(m) => constraints::collect_raw_defaults(mcx, &m.columns)?,
+        // Partition column options carry name-resolved attnos, not positions.
+        None if parent_oid.is_some() => partition_raw_defaults,
         None => constraints::collect_raw_defaults(mcx, table_elts)?,
     };
     let old_notnulls: &[inheritance::InheritedNotNull<'mcx>] = match &merged {

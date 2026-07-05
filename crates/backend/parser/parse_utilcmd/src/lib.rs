@@ -772,6 +772,7 @@ fn transformColumnDefinition<'mcx>(
     fkconstraints: &mut NodeList<'mcx>,
     is_foreign: bool,
     of_type: bool,
+    partbound: bool,
 ) -> PgResult<()> {
     let relname = relation.relname.unwrap_or("");
     if column.raw_default.is_some() || column.cooked_default.is_some() {
@@ -896,6 +897,15 @@ fn transformColumnDefinition<'mcx>(
                         PgError::new(
                             ERROR,
                             "identity columns are not supported on typed tables".to_string(),
+                        )
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                if partbound {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "identity columns are not supported on partitions".to_string(),
                         )
                         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
@@ -1227,9 +1237,6 @@ pub fn transformCreateStmt<'mcx>(
         stmt_node.as_variant::<CreateStmt>().expect("transformCreateStmt on non-CreateStmt")
     };
 
-    if stmt.partbound.is_some() && !stmt.tableElts.is_nil() {
-        unported("PARTITION OF with a column/constraint list");
-    }
     debug_assert!(stmt.constraints.is_nil() && stmt.nnconstraints.is_nil());
     debug_assert!(stmt.ofTypename.is_none() || stmt.inhRelations.is_nil());
 
@@ -1285,6 +1292,7 @@ pub fn transformCreateStmt<'mcx>(
                     &mut fkconstraints,
                     is_foreign,
                     stmt.ofTypename.is_some(),
+                    stmt.partbound.is_some(),
                 )?;
                 columns.lappend(mcx, elt)?;
             }
@@ -2303,6 +2311,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 &mut nnconstraints,
                 &mut ixconstraints,
                 &mut fkconstraints,
+                false,
                 false,
                 false,
             )?;

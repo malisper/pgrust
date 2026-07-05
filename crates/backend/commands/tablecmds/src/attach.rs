@@ -486,10 +486,42 @@ fn MergeAttributesIntoExisting<'mcx>(
                     }
                 }
             }
-            assert!(
-                parent_att.attgenerated == 0 && child_att.attgenerated == 0,
-                "generated columns unported"
-            );
+            if parent_att.attgenerated != 0 && child_att.attgenerated == 0 {
+                return Err(err(
+                    format!(
+                        "column \"{parent_attname}\" in child table must be a generated column"
+                    ),
+                    ERRCODE_DATATYPE_MISMATCH,
+                ));
+            }
+            if child_att.attgenerated != 0 && parent_att.attgenerated == 0 {
+                return Err(err(
+                    format!(
+                        "column \"{parent_attname}\" in child table must not be a generated column"
+                    ),
+                    ERRCODE_DATATYPE_MISMATCH,
+                ));
+            }
+            if parent_att.attgenerated != 0
+                && child_att.attgenerated != 0
+                && child_att.attgenerated != parent_att.attgenerated
+            {
+                let kind = |g: i8| if g == b's' as i8 { "STORED" } else { "VIRTUAL" };
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "column \"{parent_attname}\" inherits from generated column of different kind"
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+                    .with_detail(format!(
+                        "Parent column is {}, child column is {}.",
+                        kind(parent_att.attgenerated),
+                        kind(child_att.attgenerated)
+                    )),
+                ));
+            }
             let (inhcount, _) = getattr(tup, desc, Anum_pg_attribute_attinhcount);
             let inhcount = inhcount.as_i16();
             if inhcount == i16::MAX {
