@@ -69,6 +69,8 @@ pub struct ModifyTableState<'mcx> {
     // ri_CheckConstraintExprs (built on first ExecRelCheck, per C); each
     // compiled qual rides with its constraint name for the 23514 report.
     check_exprs: Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>,
+    // ri_PartitionCheckExpr (built on first ExecPartitionCheck, per C).
+    partition_check: Option<PgBox<'mcx, ExprState<'mcx>>>,
     // ri_WithCheckOptions + ri_WithCheckOptionExprs, flattened.
     wco_exprs: mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     // C ri_TrigDesc; Rc clone of the relcache entry's desc (CopyTriggerDesc).
@@ -522,6 +524,7 @@ pub fn exec_init_modify_table<'mcx>(
         project_returning,
         on_conflict,
         check_exprs: None,
+        partition_check: None,
         wco_exprs,
         trigdesc,
         trig_fmgr: ::trigger::TriggerFmgrCache::default(),
@@ -563,14 +566,6 @@ fn check_valid_result_rel<'mcx>(
     trigdesc: Option<&types_trigger::TriggerDesc<'static>>,
 ) -> PgResult<()> {
     let operation = node.operation;
-    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        if operation != CmdType::CMD_INSERT {
-            panic!(
-                "ExecInitModifyTable: {operation:?} on a partitioned table                  (inherited result relations) not ported"
-            );
-        }
-        return Ok(());
-    }
     if rel.rd_rel.relkind == types_rel::RELKIND_VIEW {
         let has_instead = match operation {
             CmdType::CMD_INSERT => trigdesc.is_some_and(|td| td.trig_insert_instead_row),
@@ -595,7 +590,9 @@ fn check_valid_result_rel<'mcx>(
         }
         return Ok(());
     }
-    if rel.rd_rel.relkind != RELKIND_RELATION {
+    if rel.rd_rel.relkind != RELKIND_RELATION
+        && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
+    {
         panic!(
             "CheckValidResultRel (execMain.c): relkind '{}' result relation not ported",
             rel.rd_rel.relkind as char
@@ -616,13 +613,6 @@ fn check_valid_result_rel<'mcx>(
     }
     if node.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
         execreplication_seams::check_cmd_replica_identity::call(mcx, rel, CmdType::CMD_UPDATE)?;
-    }
-    if rel.rd_rel.relispartition
-        && matches!(operation, CmdType::CMD_INSERT | CmdType::CMD_UPDATE)
-    {
-        panic!(
-            "ExecPartitionCheck (execPartition.c): direct {operation:?} into a              partition not ported (route via the parent)"
-        );
     }
     Ok(())
 }
@@ -1329,6 +1319,14 @@ fn merge_update_act<'mcx>(
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
 
+        // C shares ExecUpdateAct with MERGE; same direct-leaf partition
+        // constraint enforcement as exec_update.
+        if rel.rd_rel.relispartition
+            && !execpartition::exec_partition_check(mcx, &mut mt.partition_check, rel, slot)?
+        {
+            return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
+        }
+
         if rel.rd_rel.relhasindex && mt.indexes.is_none() {
             mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
         }
@@ -1942,17 +1940,29 @@ fn exec_update<'mcx>(
             exectuples::exec_materialize_slot(slot, mcx)?;
             slot.base_mut().tts_tableOid = rel.rd_id;
 
+            // ExecUpdateAct (nodeModifyTable.c): the new tuple must satisfy
+            // this partition's constraint. On a single-result-relation plan
+            // the target IS the root (C resultRelInfo == rootResultRelInfo),
+            // so a failure is ExecCrossPartitionUpdate's direct-leaf error
+            // leg, after its ON CONFLICT DO UPDATE refusal.
+            if rel.rd_rel.relispartition
+                && !execpartition::exec_partition_check(mcx, &mut mt.partition_check, rel, slot)?
+            {
+                if mt.plan.onConflictAction
+                    == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
+                {
+                    return Err(invalid_on_update_specification());
+                }
+                return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
+            }
+
             if rel.rd_rel.relhasindex && mt.indexes.is_none() {
                 mt.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
             }
 
             if !mt.wco_exprs.is_empty() {
-                if rel.rd_rel.relispartition {
-                    panic!(
-                        "ExecUpdate: WCOs on a partition (cross-partition move \
-                         check) not ported"
-                    );
-                }
+                // C skips these when the partition constraint failed; that
+                // path errored just above, so this only runs on success.
                 exec_with_check_options(&mut mt.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
             }
             exec_constraints(mcx, &mut mt.check_exprs, &mut mt.virtual_nn_exprs, rel, slot)?;
@@ -2264,6 +2274,21 @@ fn serialization_conflict(kind: &str) -> Box<PgError> {
     Box::new(
         PgError::error(format!("could not serialize access due to concurrent {kind}"))
             .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE),
+    )
+}
+
+// ExecCrossPartitionUpdate (nodeModifyTable.c): ON CONFLICT DO UPDATE may
+// not move a row to another partition.
+#[cold]
+#[inline(never)]
+fn invalid_on_update_specification() -> Box<PgError> {
+    Box::new(
+        PgError::error("invalid ON UPDATE specification".to_string())
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "The result tuple would appear in a different partition than the original tuple."
+                    .to_string(),
+            ),
     )
 }
 
@@ -2845,18 +2870,29 @@ fn exec_insert<'mcx>(
 
     {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-        let (rel, indexes, check_exprs, virtual_nn_exprs) = match leaf_idx {
-            Some(idx) => (
-                mt.router.as_ref().unwrap().leaf_rel(idx),
-                &mut mt.leaf_indexes[idx],
-                &mut mt.leaf_checks[idx],
-                &mut mt.leaf_virtual_nn[idx],
-            ),
+        let in_slot = &mut es_tupleTable[slot_id.0 as usize];
+        // ExecPrepareTupleRouting: an attno-remapped leaf takes the tuple
+        // converted into its own layout via the router's leaf slot.
+        let (rel, conv_slot, indexes, check_exprs, virtual_nn_exprs) = match leaf_idx {
+            Some(idx) => {
+                let (rel, conv) = mt
+                    .router
+                    .as_mut()
+                    .unwrap()
+                    .leaf_rel_and_converted_slot(idx, &mut *in_slot);
+                (
+                    rel,
+                    conv,
+                    &mut mt.leaf_indexes[idx],
+                    &mut mt.leaf_checks[idx],
+                    &mut mt.leaf_virtual_nn[idx],
+                )
+            }
             None => (
                 es_relations[(mt.result_rti - 1) as usize]
                     .as_ref()
                     .expect("result relation opened"),
+                None,
                 &mut mt.indexes,
                 &mut mt.check_exprs,
                 &mut mt.virtual_nn_exprs,
@@ -2865,9 +2901,21 @@ fn exec_insert<'mcx>(
         if leaf_idx.is_some() && rel.rd_hastriggers {
             panic!("ExecInsert: row triggers on a routed-into partition not ported");
         }
+        let remapped = conv_slot.is_some();
+        let slot: &mut SlotData<'mcx> = match conv_slot {
+            Some(s) => s,
+            None => &mut *in_slot,
+        };
 
         slot.base_mut().tts_tableOid = rel.rd_id;
         if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+            if remapped {
+                // mt.generated_exprs is compiled against the root's attnos.
+                panic!(
+                    "ExecInsert: stored generated columns on an attno-remapped \
+                     partition not ported"
+                );
+            }
             exec_compute_stored_generated(mcx, &mut mt.generated_exprs, rel, slot)?;
         }
         exectuples::exec_materialize_slot(slot, mcx)?;
@@ -2890,6 +2938,21 @@ fn exec_insert<'mcx>(
         }
 
         exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot)?;
+
+        // ExecInsert (nodeModifyTable.c): a direct INSERT into a partition
+        // checks the partition constraint here; routed tuples skip it (the
+        // router placed them and leaf BR triggers are loud above).
+        if leaf_idx.is_none() && rel.rd_rel.relispartition {
+            if !execpartition::exec_partition_check(mcx, &mut mt.partition_check, rel, slot)? {
+                return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
+            }
+        }
+
+        // RETURNING/transition capture read the root-format slot; carry the
+        // leaf's tableoid onto it.
+        if remapped {
+            in_slot.base_mut().tts_tableOid = rel.rd_id;
+        }
     }
 
     let num_indices = mt.indexes.as_ref().map_or(0, |x| x.num_indices());
@@ -2981,18 +3044,23 @@ fn exec_insert<'mcx>(
         }
     } else {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-        let (rel, indexes) = match leaf_idx {
-            Some(idx) => (
-                mt.router.as_ref().unwrap().leaf_rel(idx),
-                &mut mt.leaf_indexes[idx],
-            ),
+        let in_slot = &mut es_tupleTable[slot_id.0 as usize];
+        let (rel, conv_slot, indexes) = match leaf_idx {
+            Some(idx) => {
+                let (rel, conv) = mt.router.as_mut().unwrap().leaf_rel_and_slot(idx);
+                (rel, conv, &mut mt.leaf_indexes[idx])
+            }
             None => (
                 es_relations[(mt.result_rti - 1) as usize]
                     .as_ref()
                     .expect("result relation opened"),
+                None,
                 &mut mt.indexes,
             ),
+        };
+        let slot: &mut SlotData<'mcx> = match conv_slot {
+            Some(s) => s,
+            None => &mut *in_slot,
         };
 
         tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
