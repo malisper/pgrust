@@ -112,6 +112,7 @@ fn create_toast_table<'mcx>(
             accessmtd: tableam::table_relation_toast_am(rel),
             relkind: RELKIND_TOASTVALUE,
             relpersistence: rel.rd_rel.relpersistence,
+            reloftype: InvalidOid,
             allow_system_table_mods: true,
             reloptions,
         },

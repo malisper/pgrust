@@ -80,6 +80,7 @@ pub fn make_new_heap<'mcx>(
             accessmtd: old_heap.rd_rel.relam,
             relkind: types_rel::RELKIND_RELATION,
             relpersistence: persistence,
+            reloftype: types_core::InvalidOid,
             allow_system_table_mods: true,
             reloptions: None,
         },

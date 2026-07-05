@@ -1,5 +1,6 @@
 // renameatt / RenameRelation lane (tablecmds.c). LOUD: inheritance children,
-// constraint renames.
+// non-table relkinds (except toast/index rides from cluster), constraint
+// renames.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};

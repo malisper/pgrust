@@ -322,6 +322,7 @@ pub fn InsertPgClassTuple<'mcx>(
     rd_rel: &types_rel::FormData_pg_class,
     natts: i16,
     new_rel_oid: Oid,
+    reloftype: Oid,
     relacl: Option<&[u8]>,
     reloptions: Option<&[u8]>,
 ) -> PgResult<()> {
@@ -332,7 +333,7 @@ pub fn InsertPgClassTuple<'mcx>(
     values[1] = name_datum(&rd_rel.relname);
     values[2] = Datum::from_oid(rd_rel.relnamespace);
     values[3] = Datum::from_oid(rd_rel.reltype);
-    values[4] = Datum::from_oid(InvalidOid); // reloftype
+    values[4] = Datum::from_oid(reloftype);
     values[5] = Datum::from_oid(rd_rel.relowner);
     values[6] = Datum::from_oid(rd_rel.relam);
     values[7] = Datum::from_oid(rd_rel.relfilenode);
@@ -382,6 +383,7 @@ fn AddNewRelationTuple<'mcx>(
     new_rel_desc: &RelationData<'static>,
     new_rel_oid: Oid,
     new_type_oid: Oid,
+    reloftype: Oid,
     relowner: Oid,
     relkind: u8,
     relfrozenxid: TransactionId,
@@ -408,6 +410,7 @@ fn AddNewRelationTuple<'mcx>(
         &form,
         new_rel_desc.rd_att.natts as i16,
         new_rel_oid,
+        reloftype,
         relacl,
         reloptions,
     )
@@ -560,6 +563,7 @@ pub struct HeapCreateParams<'a> {
     pub accessmtd: Oid,
     pub relkind: u8,
     pub relpersistence: u8,
+    pub reloftype: Oid,
     pub allow_system_table_mods: bool,
     pub reloptions: Option<&'a [u8]>,
 }
@@ -734,6 +738,7 @@ pub fn heap_create_with_catalog<'mcx>(
         &new_rel_desc,
         relid,
         new_type_oid,
+        p.reloftype,
         p.ownerid,
         p.relkind,
         relfrozenxid,
@@ -760,11 +765,18 @@ pub fn heap_create_with_catalog<'mcx>(
             )?;
         }
         pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
-        let mut addrs: [ObjectAddress; 2] = [
-            ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace),
-            ObjectAddress::set(AccessMethodRelationId, p.accessmtd),
-        ];
-        let live = if p.accessmtd != InvalidOid { 2 } else { 1 };
+        // C address order: namespace, then reloftype, then access method.
+        let mut addrs: [ObjectAddress; 3] =
+            [ObjectAddress::set(catalog::NamespaceRelationId, p.relnamespace); 3];
+        let mut live = 1;
+        if p.reloftype != InvalidOid {
+            addrs[live] = ObjectAddress::set(TYPE_RELATION_ID, p.reloftype);
+            live += 1;
+        }
+        if p.accessmtd != InvalidOid {
+            addrs[live] = ObjectAddress::set(AccessMethodRelationId, p.accessmtd);
+            live += 1;
+        }
         pg_depend::record_object_address_dependencies(
             mcx,
             &myself,
