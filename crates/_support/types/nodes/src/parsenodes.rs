@@ -195,12 +195,6 @@ pub struct RangeTblFunction<'mcx> {
     pub funcparams: Bitmapset<'mcx>,
 }
 
-pub struct TableSampleClause<'mcx> {
-    pub tsmhandler: Oid,
-    pub args: NodeList<'mcx>,
-    pub repeatable: Option<Node<'mcx>>,
-}
-
 impl Default for RangeTblFunction<'_> {
     fn default() -> Self {
         RangeTblFunction {
@@ -1772,11 +1766,6 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_rte_permission_info(self) -> Option<&'mcx RTEPermissionInfo<'mcx>> {
-        self.as_variant()
-    }
-
-    #[inline]
-    pub fn as_table_sample_clause(self) -> Option<&'mcx TableSampleClause<'mcx>> {
         self.as_variant()
     }
 
