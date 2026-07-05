@@ -1,6 +1,6 @@
 // DefineIndex (partitioned recursion included) + ComputeIndexAttrs +
 // CheckPredicate + ChooseIndex*Name* + IndexSetParentIndex (indexcmds.c).
-// Loud: CONCURRENTLY, INCLUDE, named opclasses, WITH options,
+// Loud: CONCURRENTLY, non-btree INCLUDE, named opclasses, WITH options,
 // exclusion/WITHOUT OVERLAPS, index detach.
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
 use catalog_index::{
@@ -126,7 +126,8 @@ pub fn CheckIndexCompatible<'mcx>(
         unported("CheckIndexCompatible: exclusion / WITHOUT OVERLAPS constraints");
     }
     let relationId = catalog_index::IndexGetRelation(mcx, old_id, false)?;
-    let (accessMethodId, amname, amcanorder, _, _) = resolve_index_am(Some(access_method_name));
+    let (accessMethodId, amname, amcanorder, _, _, _) =
+        resolve_index_am(Some(access_method_name));
 
     let numberOfAttributes = attribute_list.len();
     debug_assert!(numberOfAttributes > 0 && numberOfAttributes <= INDEX_MAX_KEYS as usize);
@@ -233,15 +234,15 @@ pub fn CheckIndexCompatible<'mcx>(
 }
 
 // Closed-set AM name resolution (C: get_index_am_oid + GetIndexAmRoutine);
-// tuple is (oid, name, amcanorder, amcanunique, amcanmulticol).
-fn resolve_index_am(name: Option<&str>) -> (Oid, &'static str, bool, bool, bool) {
+// tuple is (oid, name, amcanorder, amcanunique, amcanmulticol, amcaninclude).
+fn resolve_index_am(name: Option<&str>) -> (Oid, &'static str, bool, bool, bool, bool) {
     match name {
-        Some("btree") => (BTREE_AM_OID, "btree", true, true, true),
-        Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false),
-        Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true),
-        Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true),
-        Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true),
-        Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true),
+        Some("btree") => (BTREE_AM_OID, "btree", true, true, true, true),
+        Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false, false),
+        Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true, false),
+        Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true, true),
+        Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true, true),
+        Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true, false),
         other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
     }
 }
@@ -363,19 +364,30 @@ pub fn DefineIndex<'mcx>(
         )?;
     }
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
-    if !stmt.indexIncludingParams.is_nil() {
-        unported("DefineIndex: INCLUDE columns");
-    }
     if (stmt.deferrable || stmt.initdeferred) && !exclusion {
         unported("DefineIndex: DEFERRABLE unique/pk constraint indexes");
     }
-    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol) =
+    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) =
         resolve_index_am(stmt.accessMethod);
     if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {
         return Err(err(
             format!("access method \"{amname}\" does not support unique indexes"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
+    }
+    if !stmt.indexIncludingParams.is_nil() {
+        if !amcaninclude {
+            return Err(err(
+                format!("access method \"{amname}\" does not support included columns"),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        // NARROWED: gist truncates nonkey atts off internal tuples via a
+        // separate nonLeafTupdesc (initGISTstate louds); spgist's INCLUDE
+        // leaf-tuple lane is unverified. Both stay loud.
+        if amname != "btree" {
+            unported(&format!("DefineIndex: INCLUDE columns on {amname}"));
+        }
     }
     // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
     if exclusion && matches!(amname, "gin" | "brin") {
@@ -403,14 +415,18 @@ pub fn DefineIndex<'mcx>(
     guc::RestrictSearchPath()?;
 
     let numberOfKeyAttributes = stmt.indexParams.len();
-    let numberOfAttributes = numberOfKeyAttributes;
+    // C: allIndexParams = list_concat_copy(indexParams, indexIncludingParams);
+    // key columns are list positions < numberOfKeyAttributes (indexcmds.c:652).
+    let mut allIndexParams = stmt.indexParams.clone_in(mcx)?;
+    allIndexParams.concat(mcx, &stmt.indexIncludingParams)?;
+    let numberOfAttributes = allIndexParams.len();
     if numberOfKeyAttributes > 1 && !amcanmulticol {
         return Err(err(
             format!("access method \"{amname}\" does not support multicolumn indexes"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
     }
-    if numberOfAttributes == 0 {
+    if numberOfKeyAttributes == 0 {
         return Err(err("must specify at least one column".into(), ERRCODE_INVALID_OBJECT_DEFINITION));
     }
     if numberOfAttributes > INDEX_MAX_KEYS as usize {
@@ -516,7 +532,7 @@ pub fn DefineIndex<'mcx>(
         ));
     }
 
-    let indexColNames = ChooseIndexColumnNames(mcx, &stmt.indexParams)?;
+    let indexColNames = ChooseIndexColumnNames(mcx, &allIndexParams)?;
     let name_storage;
     let indexRelationName: &str = match stmt.idxname {
         Some(n) => n,
@@ -571,7 +587,7 @@ pub fn DefineIndex<'mcx>(
         &mut collationIds,
         &mut opclassIds,
         &mut coloptions,
-        &stmt.indexParams,
+        &allIndexParams,
         &stmt.excludeOpNames,
         stmt.isconstraint,
         stmt.iswithoutoverlaps,
@@ -1285,7 +1301,8 @@ fn ComputeIndexAttrs<'mcx>(
     amcanorder: bool,
     mut ddl_save_nestlevel: Option<&mut i32>,
 ) -> PgResult<()> {
-    debug_assert!(exclusionOpNames.is_nil() || exclusionOpNames.len() == attList.len());
+    let nkeycols = indexInfo.ii_NumIndexKeyAttrs as usize;
+    debug_assert!(exclusionOpNames.is_nil() || exclusionOpNames.len() == nkeycols);
     let mut excl_iter = exclusionOpNames.iter();
     for (attn, node) in attList.iter().enumerate() {
         let attribute = node
@@ -1324,6 +1341,12 @@ fn ComputeIndexAttrs<'mcx>(
         } else {
             // Expression column. Top-level CollateExpr stripping is dead:
             // COLLATE stays loud upstream (no transformed CollateExpr node).
+            if attn >= nkeycols {
+                return Err(err(
+                    "expressions are not supported in included columns".into(),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
+            }
             let expr = attribute.expr.expect("IndexElem without name or expr");
             let atttype = nodes_core::expr_type(expr);
             let attcollation = nodes_core::expr_collation(expr);
@@ -1339,6 +1362,31 @@ fn ComputeIndexAttrs<'mcx>(
             (atttype, attcollation)
         };
         typeIds[attn] = atttype;
+        // Included columns have no collation, no opclass and no ordering
+        // options (indexcmds.c:2029-2058).
+        if attn >= nkeycols {
+            let unsupported = if !attribute.collation.is_nil() {
+                Some("a collation")
+            } else if !attribute.opclass.is_nil() {
+                Some("an operator class")
+            } else if attribute.ordering != SortByDir::SORTBY_DEFAULT {
+                Some("ASC/DESC options")
+            } else if attribute.nulls_ordering != SortByNulls::SORTBY_NULLS_DEFAULT {
+                Some("NULLS FIRST/LAST options")
+            } else {
+                None
+            };
+            if let Some(what) = unsupported {
+                return Err(err(
+                    format!("including column does not support {what}"),
+                    ERRCODE_INVALID_OBJECT_DEFINITION,
+                ));
+            }
+            opclassIds[attn] = InvalidOid;
+            coloptions[attn] = 0;
+            collationIds[attn] = InvalidOid;
+            continue;
+        }
         let mut attcollation = attcollation;
         // COLLATE clause overrides either leg's collation (indexcmds.c:2050-2062,
         // resolved before the collatable check).
@@ -1672,6 +1720,25 @@ fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
     mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
     mcx::vec_append_bytes(&mut buf, &[0u8; 64][..n - name.len()])?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    // pg_am.dat amcaninclude via each AM handler (PG18): btree/gist/spgist
+    // true, hash/gin/brin false.
+    #[test]
+    fn resolve_index_am_include_flags_match_pg_am() {
+        for (name, caninclude) in [
+            ("btree", true),
+            ("hash", false),
+            ("gin", false),
+            ("gist", true),
+            ("spgist", true),
+            ("brin", false),
+        ] {
+            assert_eq!(super::resolve_index_am(Some(name)).5, caninclude, "{name}");
+        }
+    }
 }
 
 fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
