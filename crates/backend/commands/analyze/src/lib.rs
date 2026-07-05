@@ -1310,20 +1310,23 @@ pub(crate) fn fetch_attr(
     (d, isnull)
 }
 
+// VARSIZE_ANY: stored size of any varlena form (toast pointers included).
 pub(crate) fn varlena_stored_size(d: Datum) -> usize {
+    // SAFETY: non-null varlena datum readable through its header.
+    unsafe { types_tuple::varatt::varsize_any(d.as_usize() as *const u8) }
+}
+
+fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
-    // SAFETY: non-null varlena datum.
-    let b0 = unsafe { *p };
-    if b0 == 0x01 || (b0 & 0x03) == 0x02 {
-        panic!("compute stats (analyze.c): toasted/compressed varlena in sample; detoast lane");
-    }
-    if b0 & 0x01 != 0 {
-        (b0 as usize >> 1) & 0x7F
-    } else {
-        // SAFETY: 4-byte varlena header.
-        let w = unsafe { u32::from_ne_bytes(*(p as *const [u8; 4])) };
-        (w as usize) >> 2
-    }
+    // SAFETY: non-null varlena datum readable through its header.
+    unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) }
+}
+
+// PG_DETOAST_DATUM into `mcx`; the image rides the bump column context until
+// its per-column reset, C's col_context cadence.
+fn detoast_sample_value<'m>(mcx: Mcx<'m>, raw: &[u8]) -> PgResult<Datum> {
+    let img = detoast_seams::detoast_attr::call(mcx, raw)?;
+    Ok(Datum::from_usize(adt_multirangetypes::leak_image(img).as_ptr() as usize))
 }
 
 fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, d: Datum, typbyval: bool, typlen: i16) -> PgResult<Datum> {
@@ -1451,18 +1454,21 @@ fn compute_distinct_stats<'mcx>(
     };
 
     for rowno in 0..samplerows as usize {
-        let (value, isnull) = src.fetch(rowno, stats.tupattnum);
+        let (mut value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
             continue;
         }
         nonnull_cnt += 1;
         if is_varlena {
-            let sz = varlena_stored_size(value);
-            total_width += sz as f64;
-            if sz > WIDTH_THRESHOLD {
+            let raw = varlena_image(value);
+            total_width += raw.len() as f64;
+            if detoast::toast_raw_datum_size(raw) > WIDTH_THRESHOLD {
                 toowide_cnt += 1;
                 continue;
+            }
+            if raw[0] & 0x03 != 0 {
+                value = detoast_sample_value(col_mcx, raw)?;
             }
         } else if is_varwidth {
             panic!("compute_distinct_stats (analyze.c): cstring-width type lane");
@@ -1622,18 +1628,21 @@ fn compute_scalar_stats<'mcx>(
 
     let mut values: PgVec<'_, (Datum, i32)> = mcx::vec_with_capacity_in(col_mcx, samplerows as usize)?;
     for rowno in 0..samplerows as usize {
-        let (value, isnull) = src.fetch(rowno, stats.tupattnum);
+        let (mut value, isnull) = src.fetch(rowno, stats.tupattnum);
         if isnull {
             null_cnt += 1;
             continue;
         }
         nonnull_cnt += 1;
         if is_varlena {
-            let sz = varlena_stored_size(value);
-            total_width += sz as f64;
-            if sz > WIDTH_THRESHOLD {
+            let raw = varlena_image(value);
+            total_width += raw.len() as f64;
+            if detoast::toast_raw_datum_size(raw) > WIDTH_THRESHOLD {
                 toowide_cnt += 1;
                 continue;
+            }
+            if raw[0] & 0x03 != 0 {
+                value = detoast_sample_value(col_mcx, raw)?;
             }
         } else if is_varwidth {
             panic!("compute_scalar_stats (analyze.c): cstring-width type lane");
@@ -2087,9 +2096,119 @@ fn stat_key(attno: i32, func: types_core::primitive::RegProcedure, arg: Datum) -
 
 #[cfg(test)]
 mod tests {
-    use super::{analyze_mcv_list, distinct_track_update};
+    use super::{
+        analyze_mcv_list, compute_scalar_stats, compute_trivial_stats, distinct_track_update,
+        varlena_stored_size, ComputeStats, FetchSource, StdAnalyzeData, VacAttrStats,
+        STATISTIC_NUM_SLOTS,
+    };
     use datum::Datum;
-    use mcx::{MemoryContext, PgVec};
+    use mcx::{Mcx, MemoryContext, PgVec};
+    use types_core::InvalidOid;
+
+    fn plain_image(payload: &[u8]) -> Vec<u8> {
+        let total = payload.len() + 4;
+        let mut image = ((total as u32) << 2).to_ne_bytes().to_vec();
+        image.extend_from_slice(payload);
+        image
+    }
+
+    fn compressed_image(rawsize: u32, payload: &[u8]) -> Vec<u8> {
+        let total = payload.len() + 8;
+        let mut image = (((total as u32) << 2) | 0x02).to_ne_bytes().to_vec();
+        image.extend_from_slice(&(rawsize - 4).to_ne_bytes());
+        image.extend_from_slice(payload);
+        image
+    }
+
+    fn ondisk_image(rawsize: i32, extsize: u32) -> Vec<u8> {
+        let mut image = vec![0x01, 18];
+        image.extend_from_slice(&rawsize.to_ne_bytes());
+        image.extend_from_slice(&extsize.to_ne_bytes());
+        image.extend_from_slice(&0xBEEFu32.to_ne_bytes());
+        image.extend_from_slice(&0xCAFEu32.to_ne_bytes());
+        image
+    }
+
+    fn as_datum(image: &[u8]) -> Datum {
+        Datum::from_usize(image.as_ptr() as usize)
+    }
+
+    fn text_stats<'m>(mcx: Mcx<'m>) -> VacAttrStats<'m> {
+        VacAttrStats {
+            tupattnum: 1,
+            attstattarget: 100,
+            attrtypid: 25,
+            attrcollid: 100,
+            typlen: -1,
+            typbyval: false,
+            typalign: b'i',
+            compute: ComputeStats::Trivial,
+            extra: StdAnalyzeData { eqopr: 98, ltopr: 664 },
+            minrows: 30000,
+            stats_valid: false,
+            stanullfrac: 0.0,
+            stawidth: 0,
+            stadistinct: 0.0,
+            stakind: [0; STATISTIC_NUM_SLOTS],
+            staop: [InvalidOid; STATISTIC_NUM_SLOTS],
+            stacoll: [InvalidOid; STATISTIC_NUM_SLOTS],
+            stanumbers: core::array::from_fn(|_| PgVec::new_in(mcx)),
+            stavalues: core::array::from_fn(|_| PgVec::new_in(mcx)),
+            stavalues_set: [false; STATISTIC_NUM_SLOTS],
+            statypid: [InvalidOid; STATISTIC_NUM_SLOTS],
+            statyplen: [0; STATISTIC_NUM_SLOTS],
+            statypbyval: [false; STATISTIC_NUM_SLOTS],
+            statypalign: [0; STATISTIC_NUM_SLOTS],
+        }
+    }
+
+    #[test]
+    fn stored_size_covers_all_varlena_forms() {
+        let plain = plain_image(&[7u8; 60]);
+        assert_eq!(varlena_stored_size(as_datum(&plain)), 64);
+        let short = {
+            let mut v = vec![(6u8 << 1) | 0x01];
+            v.extend_from_slice(b"short");
+            v
+        };
+        assert_eq!(varlena_stored_size(as_datum(&short)), 6);
+        let compressed = compressed_image(900, &[3u8; 100]);
+        assert_eq!(varlena_stored_size(as_datum(&compressed)), 108);
+        let ondisk = ondisk_image(5000, 3000);
+        assert_eq!(varlena_stored_size(as_datum(&ondisk)), 18);
+    }
+
+    #[test]
+    fn trivial_stats_width_counts_toast_pointers_stored() {
+        let cx = MemoryContext::new("trivial toast test");
+        let mut stats = text_stats(cx.mcx());
+        let compressed = compressed_image(2000, &[9u8; 92]);
+        let ondisk = ondisk_image(8000, 5000);
+        let vals = [as_datum(&compressed), as_datum(&ondisk)];
+        let nulls = [false, false];
+        let src = FetchSource::Expr { vals: &vals, nulls: &nulls, stride: 1, off: 0 };
+        compute_trivial_stats(&mut stats, &src, 2).unwrap();
+        assert!(stats.stats_valid);
+        assert_eq!(stats.stawidth, (100 + 18) / 2);
+    }
+
+    #[test]
+    fn scalar_stats_toowide_toast_pointers_excluded() {
+        let anl = MemoryContext::new("scalar toast test");
+        let col = MemoryContext::new("scalar toast col");
+        let mut stats = text_stats(anl.mcx());
+        stats.compute = ComputeStats::Scalar;
+        let wide = ondisk_image(5000, 3000);
+        let vals = [as_datum(&wide), as_datum(&wide), Datum::null(), as_datum(&wide)];
+        let nulls = [false, false, true, false];
+        let src = FetchSource::Expr { vals: &vals, nulls: &nulls, stride: 1, off: 0 };
+        compute_scalar_stats(anl.mcx(), col.mcx(), &mut stats, &src, 4, 4.0).unwrap();
+        assert!(stats.stats_valid);
+        assert_eq!(stats.stanullfrac, 0.25);
+        assert_eq!(stats.stawidth, 18);
+        assert_eq!(stats.stadistinct, -0.75);
+        assert_eq!(stats.stakind[0], 0);
+    }
 
     fn run_track(values: &[i32], track_max: usize, cx: &MemoryContext) -> Vec<(i32, i32)> {
         let mut track: PgVec<'_, (Datum, i32)> = PgVec::new_in(cx.mcx());
