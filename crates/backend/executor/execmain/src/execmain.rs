@@ -464,6 +464,13 @@ pub(crate) fn init_plan<'mcx>(
         }
     }
     if !pstmt.subplans.is_nil() {
+        // Hooks precede the subplan-init loop: a subplan's own tree can hold
+        // nested SubPlan expressions (plan_id strictly below its own, so the
+        // es_subplanstates lookup mirrors C's incremental lappend order).
+        data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
+        data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
+        data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
+        data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
         for (i, subplan) in pstmt.subplans.iter().enumerate() {
             let mut sp_eflags = eflags
                 & !(types_slot::EXEC_FLAG_REWIND
@@ -486,10 +493,6 @@ pub(crate) fn init_plan<'mcx>(
                 unsafe { core::ptr::NonNull::new_unchecked(raw) }.cast(),
             ));
         }
-        data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
-        data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
-        data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
-        data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
     }
 
     let plan_node = pstmt.planTree.expect("PlannedStmt without planTree");
