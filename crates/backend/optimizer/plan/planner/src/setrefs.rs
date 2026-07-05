@@ -3601,6 +3601,9 @@ fn fix_join_expr_mutator<'mcx>(
             fix_scan_expr_walker(run, node)?;
             Ok(node)
         }
+        // C fix_expr_common has no MergeSupportFunc leg: the node passes
+        // through untouched to the executor (EEOP_MERGE_SUPPORT_FUNC).
+        NodeTag::T_MergeSupportFunc => Ok(node),
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
             let newexpr =

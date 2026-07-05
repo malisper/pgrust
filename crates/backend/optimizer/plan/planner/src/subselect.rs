@@ -1695,8 +1695,8 @@ pub(crate) fn query_cells_copy<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResul
 }
 
 /// SS_replace_correlation_vars (subselect.c): uplevel Vars/PHVs/Aggrefs/
-/// GroupingFuncs become PARAM_EXEC Params, parked on the owning ancestor's
-/// plan_params. MergeSupportFunc/ReturningExpr nodes don't exist in this
+/// GroupingFuncs/MergeSupportFuncs become PARAM_EXEC Params, parked on the
+/// owning ancestor's plan_params. ReturningExpr nodes don't exist in this
 /// tree.
 pub fn ss_replace_correlation_vars<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1729,6 +1729,12 @@ fn replace_correlation_vars_mutator<'mcx>(
         if g.agglevelsup > 0 {
             return Ok(Some(crate::paramassign::replace_outer_grouping(run, g, node)?));
         }
+    }
+    if let Some(m) = node.as_merge_support_func() {
+        if run.parse().commandType != types_nodes::CmdType::CMD_MERGE {
+            return Ok(Some(crate::paramassign::replace_outer_merge_support(run, m, node)?));
+        }
+        return Ok(None);
     }
     clauses::expression_tree_mutator(run.mcx, node, &mut |n| {
         replace_correlation_vars_mutator(run, n)

@@ -869,6 +869,9 @@ fn run_program<'mcx>(
             Step::SqlValueFunction { op, typmod, scratch, out } => {
                 step_sql_value_function(*op, *typmod, *scratch, *out)?;
             }
+            Step::MergeSupportFunc { action, scratch, out } => {
+                step_merge_support_func(*action, *scratch, *out)?;
+            }
             Step::Jump { jumpdone } => {
                 // SAFETY: jump targets validated < steps.len() at ready.
                 sp = unsafe { base.add(*jumpdone as usize) };
@@ -3492,6 +3495,36 @@ fn step_min_max(
     Ok(())
 }
 
+/// C ExecEvalMergeSupportFunc (execExprInterp.c): the active MERGE action's
+/// command word as a text datum, written into the step's scratch image.
+#[inline(always)]
+fn step_merge_support_func(
+    action: core::ptr::NonNull<Option<::types_nodes::nodes_enums::CmdType>>,
+    scratch: core::ptr::NonNull<u8>,
+    out: OutRef,
+) -> PgResult<()> {
+    use ::types_nodes::nodes_enums::CmdType;
+    // SAFETY: compile-allocated cell owned by the state, armed by the owning
+    // ModifyTable node before each RETURNING projection.
+    let word: &[u8; 6] = match unsafe { action.read() } {
+        Some(CmdType::CMD_INSERT) => b"INSERT",
+        Some(CmdType::CMD_UPDATE) => b"UPDATE",
+        Some(CmdType::CMD_DELETE) => b"DELETE",
+        Some(CmdType::CMD_NOTHING) => panic!("unexpected merge action: DO NOTHING"),
+        Some(other) => panic!("unrecognized commandType: {}", other as i32),
+        None => panic!("no merge action in progress"),
+    };
+    // SAFETY: compile-allocated 12-byte 8-aligned image slot owned by this
+    // step; a 10-byte 4-byte-header text varlena is written per eval.
+    unsafe {
+        let hdr = ::datum::varlena::set_varsize_4b(::datum::varlena::VARHDRSZ + 6);
+        core::ptr::copy_nonoverlapping(hdr.as_ptr(), scratch.as_ptr(), 4);
+        core::ptr::copy_nonoverlapping(word.as_ptr(), scratch.as_ptr().add(4), 6);
+    }
+    write_out(out, Datum::from_usize(scratch.as_ptr() as usize), false);
+    Ok(())
+}
+
 #[inline(always)]
 fn step_sql_value_function(
     op: ::types_nodes::primnodes::SQLValueFunctionOp,
@@ -3985,6 +4018,9 @@ pub(crate) fn exec_one_step<'mcx>(
         Step::SqlValueFunction { op, typmod, scratch, out } => {
             step_sql_value_function(op, typmod, scratch, out)?;
         }
+        Step::MergeSupportFunc { action, scratch, out } => {
+            step_merge_support_func(action, scratch, out)?;
+        }
         Step::NullTestRowIsNull { rn, frame, out } => {
             let r = read_out(out);
             let b = eval_row_null(frames, rn, frame, r, true)?;
@@ -4354,6 +4390,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::XmlExprEval { .. }
         | Step::MinMax { .. }
         | Step::SqlValueFunction { .. }
+        | Step::MergeSupportFunc { .. }
         | Step::NullTestRowIsNull { .. }
         | Step::NullTestRowIsNotNull { .. }
         | Step::FieldSelect { .. }

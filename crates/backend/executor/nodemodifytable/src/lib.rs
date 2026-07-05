@@ -615,14 +615,27 @@ fn init_result_rel<'mcx>(
                 .clone();
             // SubPlans in RETURNING compile against the estate's init hook and
             // run through the node's suspension driver (exec_process_returning).
+            let is_merge = node.operation == CmdType::CMD_MERGE;
             project_returning = Some(executils::with_subplan_compile_env(estate, |env| {
-                execexpr::exec_build_projection_info_subplans(
-                    mcx,
-                    rlist,
-                    Some(&desc),
-                    params,
-                    env,
-                )
+                if is_merge {
+                    // MERGE_ACTION() may appear here (C gates EEOP_MERGE_
+                    // SUPPORT_FUNC on the parent being a CMD_MERGE node).
+                    execexpr::exec_build_merge_projection_info_subplans(
+                        mcx,
+                        rlist,
+                        Some(&desc),
+                        params,
+                        env,
+                    )
+                } else {
+                    execexpr::exec_build_projection_info_subplans(
+                        mcx,
+                        rlist,
+                        Some(&desc),
+                        params,
+                        env,
+                    )
+                }
             })?);
         }
     }
@@ -3349,6 +3362,9 @@ fn exec_process_returning<'mcx>(
                 .as_deref_mut()
                 .expect("RETURNING projection built");
             state.set_old_new_null(old_id.is_none(), new_id.is_none());
+            // C mtstate->mt_merge_action: under MERGE, `cmd` is the fired
+            // action's command type; MERGE_SUPPORT_FUNC steps read it.
+            state.set_merge_action(Some(cmd));
             state.arm_result_mcx(mcx);
             let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
             let tlen = table.len();

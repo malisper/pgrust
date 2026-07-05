@@ -300,6 +300,19 @@ pub fn exec_build_projection_info_subplans<'mcx>(
     build_projection_info(mcx, target_list, input_desc, None, params, sub)
 }
 
+/// [`exec_build_projection_info_subplans`] for a MERGE's RETURNING list:
+/// permits MERGE_SUPPORT_FUNC steps (C gates on state->parent being a
+/// CMD_MERGE ModifyTableState).
+pub fn exec_build_merge_projection_info_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info_ext(mcx, target_list, input_desc, None, params, sub, true)
+}
+
 /// Agg-node projection: Aggrefs bound to the AggState's result arrays.
 pub fn exec_build_agg_projection_info<'mcx>(
     mcx: Mcx<'mcx>,
@@ -343,7 +356,20 @@ fn build_projection_info<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info_ext(mcx, target_list, input_desc, agg, params, sub, false)
+}
+
+fn build_projection_info_ext<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+    merge_support: bool,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
+    state.allow_merge_support = merge_support;
     create_expr_setup_steps(&mut state, mcx, target_list.as_slice())?;
 
     for tle_node in target_list.iter() {
@@ -1851,6 +1877,32 @@ pub(crate) fn init_expr_rec<'mcx>(
                 mcx,
                 Step::SqlValueFunction { op: svf.op, typmod: svf.typmod, scratch, out },
             )
+        }
+        NodeTag::T_MergeSupportFunc => {
+            // C ExecInitExprRec: must be under a CMD_MERGE ModifyTableState.
+            if !state.allow_merge_support {
+                panic!("MergeSupportFunc found in non-merge plan node");
+            }
+            let cell = match state.merge_action_cell {
+                Some(c) => c,
+                None => {
+                    let layout = core::alloc::Layout::new::<
+                        Option<::types_nodes::nodes_enums::CmdType>,
+                    >();
+                    let c = mcx
+                        .allocate(layout)
+                        .map_err(|_| mcx.oom(layout.size()))?
+                        .cast::<Option<::types_nodes::nodes_enums::CmdType>>();
+                    // SAFETY: fresh exclusive allocation; no action armed yet.
+                    unsafe { c.write(None) };
+                    state.merge_action_cell = Some(c);
+                    c
+                }
+            };
+            // 10-byte text image ("INSERT"/"UPDATE"/"DELETE"), 8-aligned.
+            let layout = core::alloc::Layout::from_size_align(12, 8).expect("msf layout");
+            let scratch = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+            push_step(state, mcx, Step::MergeSupportFunc { action: cell, scratch, out })
         }
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_SubPlan => {

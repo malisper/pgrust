@@ -565,6 +565,11 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             int_list(js, &e.refs);
             js.f_u32(e.agglevelsup);
         }
+        NodeTag::T_MergeSupportFunc => {
+            let e = cast!(p::MergeSupportFunc);
+            js.f_u32(e.msftype);
+            js.f_u32(e.msfcollid);
+        }
         NodeTag::T_WindowFunc => {
             let e = cast!(p::WindowFunc);
             js.f_u32(e.winfnoid);

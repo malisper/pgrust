@@ -268,6 +268,15 @@ pub enum Step {
         scratch: NonNull<u8>,
         out: OutRef,
     },
+    // C EEOP_MERGE_SUPPORT_FUNC (ExecEvalMergeSupportFunc): `action` is the
+    // state's merge-action cell, armed by the owning ModifyTable node via
+    // set_merge_action before each RETURNING projection. scratch: compile-
+    // allocated 10-byte text image, rewritten per eval as SqlValueFunction's.
+    MergeSupportFunc {
+        action: NonNull<Option<::types_nodes::nodes_enums::CmdType>>,
+        scratch: NonNull<u8>,
+        out: OutRef,
+    },
     // Ready-time fused pairs (fuse_program): the two source steps back-to-back.
     ScanVarFuncStrict2 { attnum: u16, argno: u8, vartype: Oid, call: Call2, out: OutRef },
     FuncFuncStrict2 { call1: Call2, argno: u8, call2: Call2, out: OutRef },
@@ -911,6 +920,10 @@ pub struct ExprState<'mcx> {
     // Copy-and-patch kernel entry (jit.rs); the code block itself is owned by
     // the executor session collector, which outlives this state.
     pub(crate) jit: Option<crate::jit::JitHandle>,
+    // C mtstate->mt_merge_action stand-in: MERGE_SUPPORT_FUNC steps read this
+    // compile-allocated cell; only MERGE RETURNING projections may compile it.
+    pub(crate) merge_action_cell: Option<NonNull<Option<::types_nodes::nodes_enums::CmdType>>>,
+    pub(crate) allow_merge_support: bool,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -944,6 +957,8 @@ impl<'mcx> ExprState<'mcx> {
                 ext_case_test: None,
                 allow_ext_case_test: false,
                 jit: None,
+                merge_action_cell: None,
+                allow_merge_support: false,
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -1053,6 +1068,17 @@ impl<'mcx> ExprState<'mcx> {
         }
         if new_is_null {
             self.flags |= EEO_FLAG_NEW_IS_NULL;
+        }
+    }
+
+    /// C ExecMergeMatched/NotMatched's mtstate->mt_merge_action write: arms
+    /// the active merge action read by MERGE_SUPPORT_FUNC steps.
+    #[inline]
+    pub fn set_merge_action(&mut self, action: Option<::types_nodes::nodes_enums::CmdType>) {
+        if let Some(cell) = self.merge_action_cell {
+            // SAFETY: compile-allocated cell owned by this state, live for
+            // the state's mcx; exclusive access via &mut self.
+            unsafe { cell.write(action) };
         }
     }
 

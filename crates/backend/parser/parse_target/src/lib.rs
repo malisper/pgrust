@@ -1146,6 +1146,11 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
             *name = Some("grouping");
             2
         }
+        // C: make MERGE_ACTION() act like a regular function.
+        NodeTag::T_MergeSupportFunc => {
+            *name = Some("merge_action");
+            2
+        }
         NodeTag::T_FuncCall => {
             let fc = node.as_func_call().unwrap();
             match fc.funcname.last().and_then(|n| n.as_string()) {

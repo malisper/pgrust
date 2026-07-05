@@ -35,6 +35,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_CurrentOfExpr => types_core::catalog::BOOLOID,
+        NodeTag::T_MergeSupportFunc => node.as_merge_support_func().unwrap().msftype,
         NodeTag::T_DistinctExpr => node.as_distinct_expr().unwrap().opresulttype,
         NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opresulttype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
@@ -170,7 +171,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
-        NodeTag::T_OpExpr
+        NodeTag::T_MergeSupportFunc
+        | NodeTag::T_OpExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
         | NodeTag::T_Aggref
@@ -269,6 +271,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         }
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggcollid,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wincollid,
+        NodeTag::T_MergeSupportFunc => node.as_merge_support_func().unwrap().msfcollid,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resultcollid,
         NodeTag::T_FieldSelect => node.as_field_select().unwrap().resultcollid,
         NodeTag::T_CollateExpr => node.as_collate_expr().unwrap().collOid,
@@ -383,6 +386,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_Const => node.as_const().unwrap().location,
         NodeTag::T_Var => node.as_var().unwrap().location,
         NodeTag::T_Param => node.as_param().unwrap().location,
+        NodeTag::T_MergeSupportFunc => node.as_merge_support_func().unwrap().location,
         NodeTag::T_OpExpr => {
             let op = node.as_op_expr().unwrap();
             leftmost_loc(op.location, expr_location_list(&op.args))

@@ -139,6 +139,10 @@ pub(crate) fn get_rule_expr<'mcx>(
         NodeTag::T_Param => get_parameter(node.as_param().unwrap(), ctx),
         NodeTag::T_Aggref => get_agg_expr(node.as_aggref().unwrap(), ctx),
         NodeTag::T_WindowFunc => get_windowfunc_expr(node.as_window_func().unwrap(), ctx),
+        NodeTag::T_MergeSupportFunc => {
+            ctx.buf.push_str("MERGE_ACTION()");
+            Ok(())
+        }
         NodeTag::T_CollateExpr => {
             let collate = node.as_collate_expr().unwrap();
             if !ctx.pretty_paren() {
