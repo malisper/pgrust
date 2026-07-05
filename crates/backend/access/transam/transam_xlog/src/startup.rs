@@ -270,8 +270,12 @@ pub fn StartupXLOG() -> PgResult<()> {
 
         control_file::CheckRequiredParameterValues()?;
 
-        // ResetUnloggedRelations / DeleteAllExportedSnapshotFiles / hot-standby
-        // init: crash+archive recovery legs, unported (reinit.c, snapmgr).
+        // Unlogged relations may be trashed: drop their non-init forks
+        // before anything can read them (reinit.c).
+        fd::reinit::ResetUnloggedRelations(fd::reinit::UNLOGGED_RELATION_CLEANUP)?;
+
+        // DeleteAllExportedSnapshotFiles / hot-standby init: archive-recovery
+        // legs, unported (snapmgr).
         if xlogrecovery_seams::archive_recovery_requested::call()
             && guc_tables::vars::EnableHotStandby.read()
         {
@@ -297,6 +301,12 @@ pub fn StartupXLOG() -> PgResult<()> {
                 .errmsg("WAL ends before end of online backup or consistent recovery point")
                 .finish(loc("StartupXLOG"));
         }
+    }
+
+    // Reset unlogged relations to their INIT fork contents: after recovery
+    // (to include ones created during it), before it is marked complete.
+    if xlogutils::in_recovery() {
+        fd::reinit::ResetUnloggedRelations(fd::reinit::UNLOGGED_RELATION_INIT)?;
     }
 
     let oldest_active_xid: TransactionId =

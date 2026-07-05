@@ -521,3 +521,24 @@ fn buffile_write_seek_read_roundtrip() {
 
     bf.close().unwrap();
 }
+
+#[test]
+fn parse_filename_for_nontemp_relation_shapes() {
+    use crate::reinit::parse_filename_for_nontemp_relation as parse;
+    use types_core::ForkNumber::*;
+    assert_eq!(parse("16384"), Some((16384, MAIN_FORKNUM, 0)));
+    assert_eq!(parse("16384_init"), Some((16384, INIT_FORKNUM, 0)));
+    assert_eq!(parse("16384_fsm"), Some((16384, FSM_FORKNUM, 0)));
+    assert_eq!(parse("16384_vm.3"), Some((16384, VISIBILITYMAP_FORKNUM, 3)));
+    assert_eq!(parse("16384.2"), Some((16384, MAIN_FORKNUM, 2)));
+    // Leading zeroes, zero values, trailing junk, unknown forks all reject.
+    assert_eq!(parse("016384"), None);
+    assert_eq!(parse("0"), None);
+    assert_eq!(parse("16384_"), None);
+    assert_eq!(parse("16384_initx"), None);
+    assert_eq!(parse("16384.02"), None);
+    assert_eq!(parse("16384.2x"), None);
+    assert_eq!(parse("t5_16384"), None);
+    assert_eq!(parse("pg_filenode.map"), None);
+    assert_eq!(parse("99999999999999999999"), None);
+}

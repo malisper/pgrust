@@ -9,6 +9,7 @@
 pub mod buffile;
 pub mod copydir;
 pub mod desc;
+pub mod reinit;
 pub mod io;
 pub mod sync;
 pub mod temp;
