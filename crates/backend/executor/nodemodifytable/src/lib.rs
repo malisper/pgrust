@@ -3055,9 +3055,9 @@ fn row_triggers_common<'mcx>(
     };
     let tg_event = event_op | TRIGGER_EVENT_ROW | event_timing;
     let is_delete = event_op == TRIGGER_EVENT_DELETE;
-    if event_op == types_trigger::TRIGGER_EVENT_UPDATE
-        && trigdesc.triggers.iter().any(|t| t.tgnattr > 0)
-    {
+    // C ExecBR/IR UpdateTriggers hand ExecGetAllUpdatedCols to every row
+    // trigger via tg_updatedcols, not just WHEN-column filters.
+    if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
         ensure_all_updated_cols(mt, estate, false)?;
     }
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
@@ -3108,6 +3108,13 @@ fn row_triggers_common<'mcx>(
         let (trig_nn, newtup_nn) =
             if old_nn.is_some() { (old_nn, new_nn) } else { (new_nn, None) };
         let expected = if newtup_nn.is_some() { newtup_nn } else { trig_nn };
+        // Stable across the call: nothing reassigns all_updated_cols after
+        // ensure_all_updated_cols above.
+        let updatedcols_ptr = if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
+            mt.rel().all_updated_cols.as_ref().map_or(0usize, |b| b as *const _ as usize)
+        } else {
+            0
+        };
         let ret = {
             let ModifyTableState { rels, cur, leaf_trig_fmgr, router, .. } = &mut *mt;
             let cur_rti = rels[*cur].rti;
@@ -3126,6 +3133,7 @@ fn row_triggers_common<'mcx>(
             let mut tdata = types_trigger_call::TriggerData::from_raw(
                 tg_event, rel, trig_nn, newtup_nn, trigger,
             );
+            tdata.tg_updatedcols = updatedcols_ptr;
             ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?
         };
         match ret {
