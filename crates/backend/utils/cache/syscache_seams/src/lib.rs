@@ -29,6 +29,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SearchSysCacheExists1(TABLESPACEOID, tblspcoid).
+    pub fn search_syscache_exists_tablespaceoid(tblspcoid: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn sys_cache_invalidate(cache_id: i32, hash_value: u32) -> PgResult<()>
 );
 
@@ -38,13 +43,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // SearchSysCache1(RELOID, relid) projected to (oid, relisshared);
+    // SearchSysCache1(RELOID, relid) projected to PgClassShape;
     // None mirrors !HeapTupleIsValid(tup).
     pub fn lookup_pg_class_by_relid(relid: Oid) -> PgResult<Option<PgClassShape>>
 );
 
 seam_core::seam!(
-    // GETSTRUCT(tuple) as Form_pg_class, projected to (oid, relisshared).
+    // GETSTRUCT(tuple) as Form_pg_class, projected to PgClassShape.
     pub fn pg_class_shape(tuple: &HeapTupleData<'_>) -> PgClassShape
 );
 

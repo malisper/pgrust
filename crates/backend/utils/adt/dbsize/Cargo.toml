@@ -22,3 +22,11 @@ miscinit_seams = { path = "../../init/miscinit_seams" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
 types_nodes = { path = "../../../../_support/types/nodes" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+relpath = { path = "../../../../common/relpath" }
+relcache_seams = { path = "../../cache/relcache_seams" }
+relmapper_seams = { path = "../../cache/relmapper_seams" }
+relfilenumbermap_seams = { path = "../../cache/relfilenumbermap_seams" }
+tablespace_seams = { path = "../../../commands/tablespace_seams" }
+namespace_seams = { path = "../../../catalog/namespace_seams" }
+init_small = { path = "../../init/init_small" }
