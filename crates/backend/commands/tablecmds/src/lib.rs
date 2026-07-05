@@ -530,7 +530,7 @@ pub fn DefineRelation<'mcx>(
                 att.attinhcount = 1;
                 tupdesc::populate_compact_attribute(&mut desc, i);
             }
-            partition_rawdefaults = inheritance::merge_partition_column_options(
+            partition_raw_defaults = inheritance::merge_partition_column_options(
                 mcx,
                 &stmt.tableElts,
                 &parent,
