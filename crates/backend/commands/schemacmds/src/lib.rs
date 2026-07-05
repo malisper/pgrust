@@ -268,6 +268,10 @@ pub fn RenameSchema<'mcx>(mcx: Mcx<'mcx>, oldname: &str, newname: &str) -> PgRes
     Ok(nsp_oid)
 }
 
+pub fn init_seams() {
+    pg_shdepend::alter_schema_owner_oid::set(AlterSchemaOwner_oid);
+}
+
 pub fn AlterSchemaOwner<'mcx>(mcx: Mcx<'mcx>, name: &str, newOwnerId: Oid) -> PgResult<Oid> {
     let rel = table::table_open(mcx, NAMESPACE_RELATION_ID, RowExclusiveLock)?;
     let nsp_oid = catalog_namespace::get_namespace_oid(name, false)?;

@@ -65,7 +65,7 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<&'mcx str> {
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
-fn name_attr<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<&'mcx str> {
+pub(crate) fn name_attr<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<&'mcx str> {
     // SAFETY: d points at the row's inline NAMEDATALEN name column.
     let name = unsafe { &*(d.as_usize() as *const types_tuple::NameData) };
     str_in(mcx, name.name_str())

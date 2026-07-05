@@ -48,6 +48,10 @@ const LargeObjectMetadataRelationId: Oid = 2995;
 const Anum_pg_opclass_opcmethod: i32 = 2;
 const Anum_pg_opfamily_opfmethod: i32 = 2;
 
+pub fn init_seams() {
+    pg_shdepend::alter_object_owner_internal::set(AlterObjectOwner_internal);
+}
+
 fn eq_key(attno: AttrNumber, arg: Datum) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno;

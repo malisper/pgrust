@@ -1712,4 +1712,5 @@ pub fn init_seams() {
     publicationcmds_seams::remove_publication_by_id::set(RemovePublicationById);
     publicationcmds_seams::remove_publication_rel_by_id::set(RemovePublicationRelById);
     publicationcmds_seams::remove_publication_schema_by_id::set(RemovePublicationSchemaById);
+    pg_shdepend::alter_publication_owner_oid::set(AlterPublicationOwner_oid);
 }

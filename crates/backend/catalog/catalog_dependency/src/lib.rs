@@ -1103,6 +1103,7 @@ pub fn init_seams() {
     pg_shdepend::acquire_deletion_lock::set(seam_acquire_deletion_lock);
     pg_shdepend::release_deletion_lock::set(seam_release_deletion_lock);
     pg_shdepend::perform_multiple_deletions::set(seam_perform_multiple_deletions);
+    pg_shdepend::command_counter_increment::set(xact::CommandCounterIncrement);
 }
 
 // DropObjectById (dependency.c) reduced to the oid-indexed catalogs above:

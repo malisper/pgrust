@@ -11,6 +11,7 @@ pub fn init_seams() {
     typecmds_seams::alter_type_owner_internal::set(alter::AlterTypeOwnerInternal);
     typecmds_seams::alter_domain_add_constraint::set(alter::AlterDomainAddConstraint);
     typecmds_seams::alter_type_namespace_internal::set(alter::AlterTypeNamespaceInternal);
+    pg_shdepend::alter_type_owner_oid::set(alter::AlterTypeOwner_oid);
 }
 pub use range::DefineRange;
 pub use alter::{

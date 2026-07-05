@@ -1234,6 +1234,7 @@ pub fn init_seams() {
     });
     pg_shdepend::remove_role_from_object_acl::set(grant::RemoveRoleFromObjectACL);
     pg_shdepend::remove_role_from_init_priv::set(grant::RemoveRoleFromInitPriv);
+    pg_shdepend::replace_role_in_init_priv::set(grant::ReplaceRoleInInitPriv);
     defacl::init_seams();
 }
 

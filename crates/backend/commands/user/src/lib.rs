@@ -1344,7 +1344,7 @@ pub fn ReassignOwnedObjects<'mcx>(mcx: Mcx<'mcx>, stmt: &ReassignOwnedStmt<'_>) 
         ));
     }
 
-    pg_shdepend::shdepReassignOwned(&role_ids, newrole)
+    pg_shdepend::shdepReassignOwned(mcx, &role_ids, newrole)
 }
 
 fn role_spec_refs<'mcx, 'a>(
