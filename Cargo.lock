@@ -4739,6 +4739,7 @@ dependencies = [
  "pg_sema_seams",
  "pgstat",
  "pgstat_seams",
+ "plancache_portal_seams",
  "pmchild_seams",
  "pmsignal",
  "pmsignal_seams",
