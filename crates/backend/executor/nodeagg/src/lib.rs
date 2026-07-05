@@ -2976,7 +2976,7 @@ mcx::forget_safe_nodrop!(TransTyp, HashAggBatch);
 mcx::forget_safe_struct!(
     PerAggData<'_> { transno, aggref, trans_shared, num_final_args,
         agg_collation, resulttype_len;
-        finalfn, direct_args },
+        finalfn, serialfn, direct_args },
     PerSortData<'_> { have_pending; first_slot, pending_slot, eq },
     HashSpillState<'_> { mode, ever_spilled, batches, all_cols_needed,
         max_colno_needed, colnos_needed, read_buf, input_card, used_bits,
@@ -2988,7 +2988,7 @@ mcx::forget_safe_struct!(
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
-        pergroup_base, agg_values_base, agg_nulls_base, agg_done, numtrans;
+        pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans;
         ps_ResultTupleDesc, proj, evaltrans, perhash, persort, gsets,
         pertrans_sort, qual },
 );
