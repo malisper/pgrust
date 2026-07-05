@@ -15597,6 +15597,8 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_tuple",
+ "unicode_category",
+ "unicode_norm",
  "wchar",
 ]
 
