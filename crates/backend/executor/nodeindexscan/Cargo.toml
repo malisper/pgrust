@@ -10,6 +10,7 @@ mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 types_scan = { path = "../../../_support/types/types_scan" }
 indexam = { path = "../../access/index/indexam" }
 tableam = { path = "../../access/table/tableam" }

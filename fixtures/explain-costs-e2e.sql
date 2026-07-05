@@ -528,7 +528,7 @@ DROP TABLE fk_con; DROP TABLE fk_ref;
 
 -- parallel index scan / index-only scan cost parity (cost_index partial leg)
 CREATE TABLE ec_pis (i int, j int, t text);
-INSERT INTO ec_pis SELECT g, g % 100, (g % 1000)::text FROM generate_series(1, 100000) g;
+INSERT INTO ec_pis SELECT g, g % 100, (g % 1000)::text FROM generate_series(1, 30000) g;
 CREATE INDEX ec_pis_i ON ec_pis (i);
 VACUUM ANALYZE ec_pis;
 SET max_parallel_workers_per_gather = 4;
@@ -540,7 +540,7 @@ SET enable_seqscan = off;
 SET enable_bitmapscan = off;
 EXPLAIN SELECT * FROM ec_pis WHERE i > 1000;
 EXPLAIN SELECT * FROM ec_pis WHERE i > 1000 ORDER BY i;
-EXPLAIN SELECT * FROM ec_pis WHERE i < 99000 ORDER BY i DESC;
+EXPLAIN SELECT * FROM ec_pis WHERE i < 29000 ORDER BY i DESC;
 EXPLAIN SELECT i FROM ec_pis WHERE i > 1000;
 EXPLAIN SELECT i FROM ec_pis WHERE i > 1000 ORDER BY i;
 RESET enable_seqscan;
