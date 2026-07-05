@@ -18,6 +18,7 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // AlterTypeNamespaceInternal (typecmds.c); tablecmds' SET SCHEMA rowtype leg.
     pub fn alter_type_namespace_internal<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         type_oid: Oid,
