@@ -192,6 +192,7 @@ pub(crate) fn slot_deform_heap_tuple(
     img: TupleImage,
     offp: &mut u32,
     natts: i32,
+    jit: Option<&jit_deform::DeformKernel>,
 ) {
     let natts = img.tuple_natts.min(natts) as usize;
     let mut attnum = base.tts_nvalid as usize;
@@ -222,6 +223,19 @@ pub(crate) fn slot_deform_heap_tuple(
         // invariant + clamp above); img is the slot's live stored tuple.
         unsafe {
             let mut cstring = false;
+            // JIT prefix kernel (fresh null-free deforms only): identical
+            // walk state to deform_internal over the fixed prefix — the
+            // interpreted walk resumes at (ncols, end_off), slow stays false.
+            // ncols <= natts keeps nvalid/off resume-consistent.
+            if attnum == 0 && !img.hasnulls {
+                if let Some(k) = jit {
+                    if k.ncols() as usize <= natts {
+                        k.row(img.tp, values.as_mut_ptr(), isnull.as_mut_ptr().cast());
+                        attnum = k.ncols() as usize;
+                        off = k.end_off() as usize;
+                    }
+                }
+            }
             if !slow {
                 if !img.hasnulls {
                     (attnum, cstring) = deform_internal(
@@ -350,28 +364,40 @@ fn virtual_getsomeattrs() -> ! {
 // The missing-attr pad leaves at entry: a call after the walk would pin
 // base/attnum in callee-saved registers across the whole deform.
 #[inline(always)]
-fn getsome_common(base: &mut SlotBase<'_>, img: TupleImage, offp: &mut u32, attnum: i32) {
+fn getsome_common(
+    base: &mut SlotBase<'_>,
+    img: TupleImage,
+    offp: &mut u32,
+    attnum: i32,
+    jit: Option<&jit_deform::DeformKernel>,
+) {
     if img.tuple_natts < attnum {
-        return getsome_narrow(base, img, offp, attnum);
+        return getsome_narrow(base, img, offp, attnum, jit);
     }
-    slot_deform_heap_tuple(base, img, offp, attnum);
+    slot_deform_heap_tuple(base, img, offp, attnum, jit);
     debug_assert!(base.tts_nvalid as i32 >= attnum);
 }
 
 #[cold]
 #[inline(never)]
-fn getsome_narrow(base: &mut SlotBase<'_>, img: TupleImage, offp: &mut u32, attnum: i32) {
-    slot_deform_heap_tuple(base, img, offp, attnum);
+fn getsome_narrow(
+    base: &mut SlotBase<'_>,
+    img: TupleImage,
+    offp: &mut u32,
+    attnum: i32,
+    jit: Option<&jit_deform::DeformKernel>,
+) {
+    slot_deform_heap_tuple(base, img, offp, attnum, jit);
     finish_getsomeattrs(base, attnum);
 }
 
 #[inline]
 pub(crate) fn heap_getsomeattrs_int(h: &mut HeapTupleTableSlot<'_>, attnum: i32) {
-    let HeapTupleTableSlot { base, tuple, off } = h;
+    let HeapTupleTableSlot { base, tuple, off, jit_deform } = h;
     debug_assert!(!base.is_empty());
     check_attnum(base, attnum);
     let img = TupleImage::from_heap(tuple.as_ref().expect("heap slot without tuple"));
-    getsome_common(base, img, off, attnum);
+    getsome_common(base, img, off, attnum, jit_deform.as_deref());
 }
 
 #[inline]
@@ -381,7 +407,7 @@ pub(crate) fn minimal_getsomeattrs_int(m: &mut MinimalTupleTableSlot<'_>, attnum
     // SAFETY: the stored mintuple is live until the slot is cleared/overwritten
     // (slot invariant).
     let img = unsafe { TupleImage::from_minimal(m.mintuple.expect("minimal slot without tuple")) };
-    getsome_common(&mut m.base, img, &mut m.off, attnum);
+    getsome_common(&mut m.base, img, &mut m.off, attnum, None);
 }
 
 #[inline]
@@ -482,11 +508,11 @@ pub fn slot_attisnull(slot: &mut SlotData<'_>, attnum: i32) -> bool {
 // deform kernel is a direct call, no SlotData dispatch (types_slot design).
 #[inline]
 pub fn heap_slot_getattr(h: &mut HeapTupleTableSlot<'_>, attnum: i32, isnull: &mut bool) -> Datum {
-    let HeapTupleTableSlot { base, tuple, off } = h;
+    let HeapTupleTableSlot { base, tuple, off, jit_deform } = h;
     base.slot_getattr(attnum, isnull, |b, n| {
         check_attnum(b, n);
         let img = TupleImage::from_heap(tuple.as_ref().expect("heap slot without tuple"));
-        getsome_common(b, img, off, n);
+        getsome_common(b, img, off, n, jit_deform.as_deref());
     })
 }
 
@@ -507,7 +533,7 @@ pub fn minimal_slot_getattr(
         // SAFETY: the stored mintuple is live until cleared/overwritten.
         let img =
             unsafe { TupleImage::from_minimal(mintuple.expect("minimal slot without tuple")) };
-        getsome_common(b, img, off, n);
+        getsome_common(b, img, off, n, None);
     })
 }
 

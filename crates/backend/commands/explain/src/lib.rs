@@ -449,11 +449,14 @@ fn ExplainOnePlanRef<'mcx>(
         ExplainCloseGroup("Triggers", Some("Triggers"), false, es);
     }
 
-    // ExplainPrintJITSummary: jitFlags is pinned 0 by the planner lane, so
-    // C's PGJIT_PERFORM check makes it a no-op.
-    if es.costs && pstmt.jitFlags != 0 {
-        panic!("ExplainPrintJITSummary (explain.c): JIT display unported (jit lane)");
-    }
+    // ExplainPrintJITSummary: C prints a JIT block only when a loaded JIT
+    // provider actually compiled functions (ExplainPrintJIT returns on
+    // created_functions == 0; without the llvmjit provider es_jit stays NULL
+    // even with PGJIT_PERFORM set). No LLVM provider exists here — the deform
+    // JIT is an availability-gated deform implementation outside C's jit
+    // machinery and never reports as created functions — so the summary is
+    // always absent, matching C run without the llvmjit package
+    // (docs/optimizations/jit-deform.md, GUC/EXPLAIN mapping).
 
     if es.serialize != EXPLAIN_SERIALIZE_NONE {
         ExplainPrintSerialize(es, &serializeMetrics);

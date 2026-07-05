@@ -932,6 +932,13 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
     }
 }
 
+/// Relation size at scan start (heap rs_nblocks): the deform-JIT page gate.
+pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
+    match scan {
+        TableScanDesc::Heap(h) => h.rs_nblocks,
+    }
+}
+
 /// Page-batch scan feed (upstream batch scan API, CF 6176): 0 = exhausted.
 pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
     match scan {
