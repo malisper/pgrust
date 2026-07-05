@@ -73,7 +73,7 @@ impl VarStrAbbrevState {
     /// abbrev compare never disagrees with the authoritative comparator and
     /// ties re-compare originals, so per-pair compare results are identical
     /// armed or aborted. Only the on/off timing (a perf property) diverges.
-    #[inline]
+    #[inline] // lever-pin: convert_slim must inline into abbrev_datum1 (text_sort WATCH)
     pub fn convert_slim(&mut self, payload: &[u8]) -> u64 {
         let data = self.trimmed(payload);
 
