@@ -361,12 +361,13 @@ pub fn preprocess_rowmarks<'mcx>(
         match parse.commandType {
             CmdType::CMD_SELECT | CmdType::CMD_INSERT => return Ok(()),
             // C adds non-locking ROW_MARK_REFERENCE/COPY marks for every
-            // non-target rel so EPQ re-fetches the exact source row via junk
-            // ctid/wholerow columns. DIVERGENCE: no marks here — the EPQ
-            // recheck rescans the source under the same snapshot; identical
-            // results unless several source rows join the same rechecked
-            // target row.
-            CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => return Ok(()),
+            // non-target rel (junk ctid/wholerow columns via the preptlist
+            // rowmark stanza). The marks flow into root.rowMarks and the
+            // subplan tlist; DIVERGENCE: they stop at the planner — the EPQ
+            // recheck rescans the source under the same snapshot instead of
+            // re-fetching by mark; identical results unless several source
+            // rows join the same rechecked target row.
+            CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => {}
             other => panic!("preprocess_rowmarks (planner.c): {other:?} rowmarks; M2 DML lane"),
         }
     }
@@ -553,7 +554,6 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         run.processed_tlist = Some(mcx::leak_in(mcx::alloc_in(mcx, tlist)?));
         return Ok(());
     }
-    debug_assert!(run.root.rowMarks.is_empty());
     let command_type = parse.commandType;
     let rte = parse
         .rtable
@@ -623,6 +623,11 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         }
     }
     table::table_close(rel, types_rel::NoLock)?;
+    // Junk ctid/tableoid columns for rowmarked rels (non-target auto-marks;
+    // C's rowMarks stanza runs before the RETURNING stanza).
+    if !run.root.rowMarks.is_empty() {
+        tlist = add_rowmark_junk_columns(mcx, run, tlist)?;
+    }
     // Resjunk entries for RETURNING Vars of OTHER relations (the MERGE source
     // or, once join DML lands, UPDATE/DELETE FROM/USING rels).
     if !parse.returningList.is_nil() && parse.rtable.len() > 1 {
