@@ -1931,3 +1931,32 @@ mod detoast_payload {
         assert!(r < 0);
     }
 }
+
+mod gist_point_zorder {
+    use super::*;
+    use crate::ssup::{apply_cmp, SortComparator};
+
+    fn box_image(x: f64, y: f64) -> [u8; 32] {
+        let p = ::types_core::geo::Point { x, y };
+        ::types_core::geo::BOX { high: p, low: p }.to_datum_bytes()
+    }
+
+    #[test]
+    fn cmp_over_box_datums() {
+        let cases: [((f64, f64), (f64, f64), i32); 4] = [
+            ((0.0, 0.0), (0.0, 0.0), 0),
+            ((1.0, 1.0), (0.0, 0.0), 1),
+            ((-1.0, 0.0), (0.0, 0.0), -1),
+            ((2.0, 3.0), (3.0, 2.0), 1),
+        ];
+        for ((x1, y1), (x2, y2), expected) in cases {
+            let (a, b) = (box_image(x1, y1), box_image(x2, y2));
+            let r = apply_cmp(
+                SortComparator::GistPointZorder,
+                Datum::from_usize(a.as_ptr() as usize),
+                Datum::from_usize(b.as_ptr() as usize),
+            );
+            assert_eq!(r, expected, "({x1},{y1}) vs ({x2},{y2})");
+        }
+    }
+}

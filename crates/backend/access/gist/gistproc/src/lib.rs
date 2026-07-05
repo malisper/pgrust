@@ -653,8 +653,16 @@ fn fc_gist_point_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> Pg
     panic!("unported: gist_point_distance (KNN ordered-scan lane)")
 }
 
+// gistproc.c:1745-1761: C fills the SortSupport fn pointers; here the sorted
+// build resolves proc 3435 to SortComparator::GistPointZorder (tuplesort
+// ssup over types_core::geo::gist_bbox_zorder_cmp), so the fmgr entry —
+// reachable only through a raw-SortSupport datum this port never forms —
+// stays a guard.
 fn fc_gist_point_sortsupport(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_point_sortsupport (gist sorted-build lane)")
+    panic!(
+        "gist_point_sortsupport: sorted builds ride SortComparator::GistPointZorder, \
+         never through fmgr"
+    )
 }
 
 fn fc_gist_poly_compress(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
