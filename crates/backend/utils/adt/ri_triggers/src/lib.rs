@@ -417,9 +417,10 @@ fn RI_FKey_cascade_del<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -
         None => {
             let mut querybuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
-            debug_assert!(fk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            let fk_only =
+                if fk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
             use core::fmt::Write;
-            write!(querybuf, "DELETE FROM ONLY {}", quote_relation_name(mcx, &fk_rel)?)
+            write!(querybuf, "DELETE FROM {fk_only}{}", quote_relation_name(mcx, &fk_rel)?)
                 .expect("PgString write");
             let mut querysep = "WHERE";
             for i in 0..riinfo.nkeys {
@@ -480,9 +481,10 @@ fn RI_FKey_cascade_upd<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -
             let mut querybuf = PgString::new_in(mcx);
             let mut qualbuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS * 2];
-            debug_assert!(fk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            let fk_only =
+                if fk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
             use core::fmt::Write;
-            write!(querybuf, "UPDATE ONLY {} SET", quote_relation_name(mcx, &fk_rel)?)
+            write!(querybuf, "UPDATE {fk_only}{} SET", quote_relation_name(mcx, &fk_rel)?)
                 .expect("PgString write");
             let mut querysep = "";
             let mut qualsep = "WHERE";
@@ -567,9 +569,10 @@ fn ri_set<'mcx>(
             };
             let mut querybuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
-            debug_assert!(fk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            let fk_only =
+                if fk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
             use core::fmt::Write;
-            write!(querybuf, "UPDATE ONLY {} SET", quote_relation_name(mcx, &fk_rel)?)
+            write!(querybuf, "UPDATE {fk_only}{} SET", quote_relation_name(mcx, &fk_rel)?)
                 .expect("PgString write");
             let mut querysep = "";
             for i in 0..num_cols_to_set {
@@ -745,11 +748,11 @@ pub fn RI_Initial_Check<'mcx>(
         write!(querybuf, "{sep}fk.{fkattname}").expect("PgString write");
         sep = ", ";
     }
-    debug_assert!(fk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
-    debug_assert!(pk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+    let fk_only = if fk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
+    let pk_only = if pk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
     write!(
         querybuf,
-        " FROM ONLY {} fk LEFT OUTER JOIN ONLY {} pk ON",
+        " FROM {fk_only}{} fk LEFT OUTER JOIN {pk_only}{} pk ON",
         quote_relation_name(mcx, fk_rel)?,
         quote_relation_name(mcx, pk_rel)?
     )

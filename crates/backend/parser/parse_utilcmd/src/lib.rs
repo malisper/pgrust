@@ -598,8 +598,7 @@ pub fn transformCreateSchemaStmtElements<'mcx>(
 
 // transformConstraintAttrs (parse_utilcmd.c): fold CONSTR_ATTR_* markers onto
 // the preceding constraint. Deferrable UNIQUE/PK louds downstream in the
-// transformIndexConstraint lanes; NOT ENFORCED louds here, mirroring the
-// processCASbits policy (deferred-unique / not-enforced lanes own them).
+// transformIndexConstraint lanes (deferred-unique lane owns them).
 fn transformConstraintAttrs<'mcx>(
     constraints: &NodeList<'mcx>,
     src: Option<&str>,
@@ -759,7 +758,6 @@ fn transformConstraintAttrs<'mcx>(
                         })
                         .expect("Constraint");
                 }
-                unported("NOT ENFORCED column constraints");
             }
             _ => {
                 lastprimarycon = Some(cnode);
@@ -786,6 +784,7 @@ fn transformColumnDefinition<'mcx>(
     is_foreign: bool,
     of_type: bool,
     partbound: bool,
+    ispartitioned: bool,
 ) -> PgResult<()> {
     let relname = relation.relname.unwrap_or("");
     if column.raw_default.is_some() || column.cooked_default.is_some() {
@@ -877,13 +876,27 @@ fn transformColumnDefinition<'mcx>(
         need_notnull = true;
     }
 
+    // SERIAL implies a not-null that must not be NO INHERIT; PRIMARY KEY and
+    // IDENTITY column constraints do too (pre-scan mirrors C).
+    let mut disallow_noinherit_notnull = is_serial_oid != InvalidOid;
+
     transformConstraintAttrs(&column.constraints, src)?;
+
+    if !disallow_noinherit_notnull {
+        for cnode in column.constraints.iter() {
+            let c = cnode.as_variant::<Constraint>().expect("column constraint");
+            if matches!(c.contype, ConstrType::CONSTR_IDENTITY | ConstrType::CONSTR_PRIMARY) {
+                disallow_noinherit_notnull = true;
+            }
+        }
+    }
 
     let mut saw_nullable = false;
     let mut saw_default = false;
     let mut col_not_null = column.is_not_null;
     let mut saw_identity = false;
     let mut saw_generated = false;
+    let mut notnull_constraint: Option<Node<'mcx>> = None;
     for cnode in column.constraints.iter() {
         let constraint = cnode.as_variant::<Constraint>().expect("column constraint");
         match constraint.contype {
@@ -1012,23 +1025,83 @@ fn transformColumnDefinition<'mcx>(
             }
             ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, cnode)?,
             ConstrType::CONSTR_NOTNULL => {
-                if col_not_null {
-                    unported("redundant NOT NULL merge (notnull_constraint conname)");
-                }
-                saw_nullable = true;
-                col_not_null = true;
                 let colname = column.colname.expect("ColumnDef.colname");
-                let keys = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
-                // SAFETY (both): parse tree is analyze-owned; no derived refs.
-                unsafe {
-                    column_node
-                        .with_mut::<ColumnDef, _>(|c| c.is_not_null = true)
-                        .expect("ColumnDef");
-                    cnode
-                        .with_mut::<Constraint, _>(|c| c.keys = keys)
-                        .expect("Constraint");
+                if ispartitioned && constraint.is_no_inherit {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "not-null constraints on partitioned tables cannot be NO INHERIT"
+                                .to_string(),
+                        )
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
                 }
-                nnconstraints.lappend(mcx, cnode)?;
+                if saw_nullable && !col_not_null {
+                    return Err(conflicting_null_decls(colname, relname));
+                }
+                if disallow_noinherit_notnull && constraint.is_no_inherit {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "conflicting NO INHERIT declarations for not-null constraints on column \"{colname}\""
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                    ));
+                }
+                if !col_not_null {
+                    saw_nullable = true;
+                    col_not_null = true;
+                    need_notnull = false;
+                    let keys = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
+                    // SAFETY (both): parse tree is analyze-owned; no derived
+                    // refs.
+                    unsafe {
+                        column_node
+                            .with_mut::<ColumnDef, _>(|c| c.is_not_null = true)
+                            .expect("ColumnDef");
+                        cnode
+                            .with_mut::<Constraint, _>(|c| c.keys = keys)
+                            .expect("Constraint");
+                    }
+                    notnull_constraint = Some(cnode);
+                    nnconstraints.lappend(mcx, cnode)?;
+                } else if let Some(first_node) = notnull_constraint {
+                    // Redundant specification: merge onto the first one.
+                    let first =
+                        first_node.as_variant::<Constraint>().expect("Constraint");
+                    if let (Some(a), Some(b)) = (first.conname, constraint.conname) {
+                        if a != b {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                format!(
+                                    "conflicting not-null constraint names \"{a}\" and \"{b}\""
+                                ),
+                            )));
+                        }
+                    }
+                    if first.is_no_inherit != constraint.is_no_inherit {
+                        return Err(Box::new(
+                            PgError::new(
+                                ERROR,
+                                format!(
+                                    "conflicting NO INHERIT declarations for not-null constraints on column \"{colname}\""
+                                ),
+                            )
+                            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                        ));
+                    }
+                    if first.conname.is_none() && constraint.conname.is_some() {
+                        let adopted = constraint.conname;
+                        // SAFETY: parse tree is analyze-owned; no derived refs.
+                        unsafe {
+                            first_node
+                                .with_mut::<Constraint, _>(|c| c.conname = adopted)
+                                .expect("Constraint");
+                        }
+                    }
+                }
             }
             ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
                 if constraint.contype == ConstrType::CONSTR_PRIMARY {
@@ -1306,6 +1379,7 @@ pub fn transformCreateStmt<'mcx>(
                     is_foreign,
                     stmt.ofTypename.is_some(),
                     stmt.partbound.is_some(),
+                    stmt.partspec.is_some(),
                 )?;
                 columns.lappend(mcx, elt)?;
             }
@@ -2505,6 +2579,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 false,
                 false,
                 false,
+                rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE,
             )?;
             if !ixconstraints.is_nil() || !fkconstraints.is_nil() {
                 unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE/REFERENCES");
