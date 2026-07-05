@@ -928,25 +928,63 @@ fn exec_materializes_output(pathtype: u16) -> bool {
         || pathtype == tag16(NodeTag::T_WorkTableScan)
 }
 
-// extract_lateral_vars_from_PHVs (joinpath.c): C's fast-outs, then loud on
-// any PHV that would actually contribute memoize cache keys (memoize lane).
-fn extract_lateral_vars_from_phvs(run: &PlannerRun<'_>, innerrelids: &types_pathnodes::Relids<'_>) {
+// extract_lateral_vars_from_PHVs (joinpath.c): lateral references within
+// PHVs due to be evaluated at innerrelids, usable as memoize cache keys.
+fn extract_lateral_vars_from_phvs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    innerrelids: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<PgVec<'mcx, types_pathnodes::NodeId>> {
+    let mcx = run.mcx;
+    let mut ph_lateral_vars: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
     if !run.root.hasLateralRTEs {
-        return;
+        return Ok(ph_lateral_vars);
     }
+    // Memoize never sits atop joinrel paths, so multi-member eval sites are
+    // uninteresting.
     if crate::relnode::relids_num_members(innerrelids) > 1 {
-        return;
+        return Ok(ph_lateral_vars);
     }
-    for &phid in run.root.placeholder_list.iter() {
-        let ph = run.root.phinfo(phid);
-        if crate::relnode::relids_is_empty(&ph.ph_lateral) {
+    let phids = crate::relnode::pgvec_clone_shallow(mcx, &run.root.placeholder_list);
+    for &phid in phids.iter() {
+        {
+            let ph = run.root.phinfo(phid);
+            if crate::relnode::relids_is_empty(&ph.ph_lateral) {
+                continue;
+            }
+            if !crate::relnode::relids_equal(&ph.ph_eval_at, innerrelids) {
+                continue;
+            }
+        }
+        let phexpr_id = run.root.phinfo(phid).ph_var_phexpr;
+        let phexpr = *run.root.expr_node(phexpr_id);
+        // A PHV expression not referencing innerrelids caches on the whole
+        // expression (fewer distinct values than its input Vars).
+        let expr_varnos = crate::initsplan::pull_varnos_relids(run, phexpr)?;
+        if !crate::relnode::relids_overlap(&expr_varnos, innerrelids) {
+            ph_lateral_vars.push(phexpr_id);
             continue;
         }
-        if !crate::relnode::relids_equal(&ph.ph_eval_at, innerrelids) {
-            continue;
+        let ph_lateral = crate::relnode::relids_copy(mcx, &run.root.phinfo(phid).ph_lateral);
+        for node in &vars::pull_vars_of_level(mcx, phexpr, 0)? {
+            if let Some(v) = node.as_var() {
+                debug_assert!(v.varlevelsup == 0);
+                if crate::relnode::relids_is_member(v.varno, &ph_lateral) {
+                    ph_lateral_vars.push(run.intern_expr(node));
+                }
+            } else {
+                let phv = node.as_place_holder_var().expect("pull_vars_of_level node");
+                debug_assert!(phv.phlevelsup == 0);
+                let sub = crate::placeholder::find_placeholder_info(run, phv)?;
+                if crate::relnode::relids_is_subset(
+                    &run.root.phinfo(sub).ph_eval_at,
+                    &ph_lateral,
+                ) {
+                    ph_lateral_vars.push(run.intern_expr(node));
+                }
+            }
         }
-        panic!("extract_lateral_vars_from_PHVs (joinpath.c): lateral PHV memoize keys; memoize lane");
     }
+    Ok(ph_lateral_vars)
 }
 
 // paraminfo_get_equal_hashops (joinpath.c). None = not hashable.
@@ -956,6 +994,7 @@ fn paraminfo_get_equal_hashops<'mcx>(
     inner_path: PathId,
     outerrel: RelId,
     innerrel: RelId,
+    ph_lateral_vars: &[types_pathnodes::NodeId],
 ) -> PgResult<Option<(PgVec<'mcx, types_pathnodes::NodeId>, PgVec<'mcx, u32>, bool)>> {
     let mcx = run.mcx;
     let mut param_exprs: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
@@ -995,8 +1034,11 @@ fn paraminfo_get_equal_hashops<'mcx>(
         }
     }
 
-    let lateral_vars =
-        crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(innerrel).lateral_vars);
+    // C: lateral_vars = list_concat(ph_lateral_vars, innerrel->lateral_vars)
+    // — PHV-extracted keys first; order shapes the cache-key display.
+    let mut lateral_vars: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    lateral_vars.extend(ph_lateral_vars.iter().copied());
+    lateral_vars.extend(run.root.rel(innerrel).lateral_vars.iter().copied());
     for &id in lateral_vars.iter() {
         let expr = *run.root.expr_node(id);
         if clauses::contain_volatile_functions(expr)? {
@@ -1040,10 +1082,10 @@ fn get_memoize_path<'mcx>(
     if run.root.rel(run.root.path(outer_path).base().parent).rows < 2.0 {
         return Ok(None);
     }
-    {
+    let ph_lateral_vars = {
         let inner_relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(innerrel).relids);
-        extract_lateral_vars_from_phvs(run, &inner_relids);
-    }
+        extract_lateral_vars_from_phvs(run, &inner_relids)?
+    };
     let has_ppi_clauses = run
         .root
         .path(inner_path)
@@ -1051,7 +1093,11 @@ fn get_memoize_path<'mcx>(
         .param_info
         .as_ref()
         .is_some_and(|pi| !pi.ppi_clauses.is_empty());
-    if !has_ppi_clauses && run.root.rel(innerrel).lateral_vars.is_empty() {
+    // No cache key at all sounds more like a job for Material.
+    if !has_ppi_clauses
+        && run.root.rel(innerrel).lateral_vars.is_empty()
+        && ph_lateral_vars.is_empty()
+    {
         return Ok(None);
     }
     // Non-unique SEMI/ANTI nestloops don't scan the inner to completion, so
@@ -1110,7 +1156,7 @@ fn get_memoize_path<'mcx>(
     // Parameterization refers to the topmost parent of the outer rel.
     let outerrel = run.root.rel(outerrel).top_parent.unwrap_or(outerrel);
     let Some((param_exprs, hash_operators, binary_mode)) =
-        paraminfo_get_equal_hashops(run, inner_path, outerrel, innerrel)?
+        paraminfo_get_equal_hashops(run, inner_path, outerrel, innerrel, &ph_lateral_vars)?
     else {
         return Ok(None);
     };
