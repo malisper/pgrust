@@ -12,8 +12,8 @@ use crate::io::{cached_range_io_data, range_parse_flags};
 use crate::ops::{self, MinusResult, UnionResult};
 use crate::{
     cached_range_info, make_range, range_deserialize, range_get_flags, range_serialize,
-    range_type_oid, range_types_do_not_match, RangeBound, RangeInfo, RANGE_EMPTY, RANGE_LB_INC,
-    RANGE_LB_INF, RANGE_UB_INC, RANGE_UB_INF,
+    range_type_oid, range_types_do_not_match, ElemInfo, RangeBound, RangeInfo, RANGE_EMPTY,
+    RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC, RANGE_UB_INF,
 };
 
 pub enum RangeArg<'m> {
@@ -525,9 +525,9 @@ pub fn fc_range_sortsupport(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> 
     panic!("range_sortsupport not ported: sorts ride the cmp-proc shim on range_cmp");
 }
 
-// C simplifies only when the range arg is a non-null Const
-// (find_simplified_clause); that rewrite lane stays loud — fold.rs's result
-// plumbing is loud too. Everything else is C's NULL return.
+// find_simplified_clause (rangetypes.c): rewrite `elem <@ const-range` /
+// `const-range @> elem` into btree boundary comparisons. Returns 0 (C NULL)
+// to keep the original clause when no rewrite applies.
 fn range_elem_support(fcinfo: &mut Fcinfo, range_is_left: bool, name: &str) -> PgResult<Datum> {
     use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
     let [a] = fcinfo.args_n::<1>();
@@ -544,12 +544,185 @@ fn range_elem_support(fcinfo: &mut Fcinfo, range_is_left: bool, name: &str) -> P
         .unwrap_or_else(|| panic!("{name}: SupportRequestSimplify without a FuncExpr fcall"));
     assert_eq!(fexpr.args.len(), 2);
     let range_arg = fexpr.args.nth(if range_is_left { 0 } else { 1 });
+    let elem_expr = fexpr.args.nth(if range_is_left { 1 } else { 0 });
     match range_arg.as_const() {
         Some(c) if !c.constisnull => {
-            panic!("{name}: const-range SupportRequestSimplify rewrite lane unported")
+            let mcx = req.mcx.unwrap_or_else(|| panic!("{name}: request carries an mcx"));
+            match find_simplified_clause(mcx, c.constvalue, elem_expr)? {
+                Some(node) => Ok(Datum::from_usize(node.as_raw().as_ptr() as usize)),
+                None => Ok(Datum::from_usize(0)),
+            }
         }
         _ => Ok(Datum::from_usize(0)),
     }
+}
+
+// find_simplified_clause (rangetypes.c) minus the root-based cost gate: C
+// declines when the elemExpr is volatile, contains subplans, or costs more
+// than 10*cpu_operator_cost to evaluate twice; with no PlannerInfo on the
+// request, the two-bound case here only accepts trivially-cheap elemExprs
+// (Var/Param/Const) and declines otherwise — declining is always safe (the
+// original clause stays).
+fn find_simplified_clause<'mcx>(
+    mcx: Mcx<'mcx>,
+    range_const: Datum,
+    elem_expr: ::types_nodes::Node<'mcx>,
+) -> PgResult<Option<::types_nodes::Node<'mcx>>> {
+    use ::types_nodes::NodeTag;
+
+    // DatumGetRangeTypeP: detoast into the request's (planner) context so
+    // by-ref bound datums outlive the rewritten clause.
+    let praw = range_const.as_usize() as *const u8;
+    // SAFETY: a non-null range Const's value is a live varlena.
+    let total = unsafe { ::types_tuple::varatt::varsize_any(praw) };
+    // SAFETY: live varlena of `total` bytes.
+    let raw = unsafe { core::slice::from_raw_parts(praw, total) };
+    let range: &[u8] = if raw[0] & 0x03 == 0 {
+        raw
+    } else {
+        ::detoast_seams::detoast_attr::call(mcx, raw)?.leak()
+    };
+
+    let entry = ::typcache::lookup_type_cache(range_type_oid(range), ::typcache::TYPECACHE_RANGE_INFO)?;
+    let Some(elem_entry) = entry.rngelemtype() else {
+        return Err(crate::not_a_range_type(range_type_oid(range)));
+    };
+    let elem_info = ElemInfo {
+        typlen: elem_entry.typlen(),
+        typbyval: elem_entry.typbyval(),
+        typalign: elem_entry.typalign() as u8,
+        typstorage: elem_entry.typstorage() as u8,
+    };
+    let (lower, upper, empty) = range_deserialize(&elem_info, range);
+
+    if empty {
+        // An empty range matches nothing.
+        return Ok(Some(make_bool_const(mcx, false)?));
+    }
+    if lower.infinite && upper.infinite {
+        // Infinite bounds on both sides match everything.
+        return Ok(Some(make_bool_const(mcx, true)?));
+    }
+
+    if !lower.infinite && !upper.infinite {
+        // The rewrite evaluates elemExpr twice; see the function comment for
+        // the conservative stand-in for C's volatile/subplan/cost gate.
+        if !matches!(
+            elem_expr.node_tag(),
+            NodeTag::T_Var | NodeTag::T_Param | NodeTag::T_Const
+        ) {
+            return Ok(None);
+        }
+    }
+
+    let opfamily = entry.rng_opfamily();
+    let rng_collation = entry.rng_collation();
+    let mut lower_expr = None;
+    let mut upper_expr = None;
+    if !lower.infinite {
+        lower_expr =
+            build_bound_expr(mcx, elem_expr, lower.val, true, lower.inclusive, &elem_entry, opfamily, rng_collation)?;
+        if lower_expr.is_none() {
+            return Ok(None);
+        }
+    }
+    if !upper.infinite {
+        // C copies the elemExpr for the second comparison; nodes here are
+        // immutable arena shares, so the same node serves both OpExprs.
+        upper_expr =
+            build_bound_expr(mcx, elem_expr, upper.val, false, upper.inclusive, &elem_entry, opfamily, rng_collation)?;
+        if upper_expr.is_none() {
+            return Ok(None);
+        }
+    }
+
+    match (lower_expr, upper_expr) {
+        (Some(l), Some(u)) => Ok(Some(::types_nodes::Node::mk(
+            mcx,
+            ::types_nodes::primnodes::BoolExpr {
+                boolop: ::types_nodes::primnodes::BoolExprType::AND_EXPR,
+                args: ::types_nodes::NodeList::make2(mcx, l, u)?,
+                location: -1,
+            },
+        )?)),
+        (Some(l), None) => Ok(Some(l)),
+        (None, Some(u)) => Ok(Some(u)),
+        (None, None) => unreachable!("at least one bound is finite"),
+    }
+}
+
+// build_bound_expr (rangetypes.c): (elemExpr <op> bound-val) via the range's
+// btree opfamily member for the bound's strategy.
+#[allow(clippy::too_many_arguments)]
+fn build_bound_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    elem_expr: ::types_nodes::Node<'mcx>,
+    val: Datum,
+    is_lower_bound: bool,
+    is_inclusive: bool,
+    elem_entry: &::typcache::TypeCacheEntry,
+    opfamily: Oid,
+    rng_collation: Oid,
+) -> PgResult<Option<::types_nodes::Node<'mcx>>> {
+    use ::lsyscache::{BTGreaterStrategyNumber, BTLessStrategyNumber};
+    // stratnum.h members lsyscache doesn't carry yet.
+    const BTLessEqualStrategyNumber: i16 = 2;
+    const BTGreaterEqualStrategyNumber: i16 = 4;
+    let elem_type = elem_entry.type_id;
+    let strategy = if is_lower_bound {
+        if is_inclusive { BTGreaterEqualStrategyNumber } else { BTGreaterStrategyNumber }
+    } else if is_inclusive {
+        BTLessEqualStrategyNumber
+    } else {
+        BTLessStrategyNumber
+    };
+    let oproid = ::lsyscache::get_opfamily_member(opfamily, elem_type, elem_type, strategy)?;
+    if oproid == InvalidOid {
+        return Ok(None);
+    }
+    let const_expr = ::types_nodes::Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Const {
+            consttype: elem_type,
+            consttypmod: -1,
+            constcollid: elem_entry.typcollation(),
+            constlen: elem_entry.typlen() as i32,
+            constvalue: val,
+            constisnull: false,
+            constbyval: elem_entry.typbyval(),
+            location: -1,
+        },
+    )?;
+    Ok(Some(::types_nodes::Node::mk(
+        mcx,
+        ::types_nodes::primnodes::OpExpr {
+            opno: oproid,
+            opfuncid: ::lsyscache::get_opcode(oproid)?,
+            opresulttype: ::types_core::catalog::BOOLOID,
+            opretset: false,
+            opcollid: InvalidOid,
+            inputcollid: rng_collation,
+            args: ::types_nodes::NodeList::make2(mcx, elem_expr, const_expr)?,
+            location: -1,
+        },
+    )?))
+}
+
+// makeBoolConst (makefuncs.c), non-null leg.
+fn make_bool_const<'mcx>(mcx: Mcx<'mcx>, value: bool) -> PgResult<::types_nodes::Node<'mcx>> {
+    ::types_nodes::Node::mk(
+        mcx,
+        ::types_nodes::primnodes::Const {
+            consttype: ::types_core::catalog::BOOLOID,
+            consttypmod: -1,
+            constcollid: InvalidOid,
+            constlen: 1,
+            constvalue: Datum::from_bool(value),
+            constisnull: false,
+            constbyval: true,
+            location: -1,
+        },
+    )
 }
 
 pub fn fc_range_contains_elem_support(
