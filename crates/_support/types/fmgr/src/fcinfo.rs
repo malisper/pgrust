@@ -258,6 +258,50 @@ impl<const N: usize> LocalFcinfo<N> {
             p.add(6).cast::<u16>().write(N as u16);
         }
     }
+
+    // Fresh frame built IN PLACE: every field written exactly once and isnull
+    // ONLY via the volatile byte store. `fresh()` (new() + rearm()) still
+    // carries new()'s non-volatile isnull=false init; with a COMPILE-TIME
+    // collation (the define_calls literal-0 callers) LLVM merges that init
+    // with the adjacent zero fields into one covering store and sinks it past
+    // rearm()'s volatile strb — the post-call isnull ldrb then misses V2
+    // store-to-load forwarding (measured 80% of fmgr_call2's cycles; two
+    // volatile placements inside fresh() were defeated the same way). With no
+    // non-volatile isnull store in existence, no pass can synthesize one over
+    // a volatile-written byte. No move-out: returning Self by value would
+    // recopy the frame with plain stores.
+    #[inline(always)]
+    pub fn init_in_place(slot: &mut core::mem::MaybeUninit<Self>, collation: Oid) -> &mut Self {
+        const {
+            assert!(core::mem::offset_of!(LocalFcinfo<N>, fncollation) % 8 == 0);
+            assert!(
+                core::mem::offset_of!(LocalFcinfo<N>, isnull)
+                    == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 4
+            );
+            assert!(
+                core::mem::offset_of!(LocalFcinfo<N>, nargs)
+                    == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 6
+            );
+        }
+        let p = slot.as_mut_ptr();
+        // SAFETY: p is valid uninitialized storage for Self; every field is
+        // written exactly once below (the byte between isnull and nargs is
+        // repr(C) padding and may stay uninit); the header span is 8-aligned
+        // per the const asserts and p's provenance covers the whole struct.
+        unsafe {
+            (&raw mut (*p).context).write(None);
+            (&raw mut (*p).resultinfo).write(None);
+            (&raw mut (*p).result_mcx).write(None);
+            let h = p
+                .cast::<u8>()
+                .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation));
+            h.cast::<u32>().write(collation);
+            h.add(4).write_volatile(0u8);
+            h.add(6).cast::<u16>().write(N as u16);
+            (&raw mut (*p).args).write([NullableDatum::null(); N]);
+            &mut *p
+        }
+    }
 }
 
 impl<const N: usize> core::ops::Deref for LocalFcinfo<N> {
@@ -502,9 +546,10 @@ macro_rules! define_calls {
             collation: Oid,
             $($arg: Datum,)+
         ) -> PgResult<Datum> {
-            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            let mut slot = core::mem::MaybeUninit::<LocalFcinfo<$n>>::uninit();
+            let fcinfo = LocalFcinfo::<$n>::init_in_place(&mut slot, collation);
             $(fcinfo.set_arg($idx, $arg);)+
-            let result = flinfo.invoke(&mut fcinfo)?;
+            let result = flinfo.invoke(&mut *fcinfo)?;
             if fcinfo.isnull {
                 return Err(returned_null_oid(flinfo.fn_oid));
             }
@@ -513,9 +558,10 @@ macro_rules! define_calls {
 
         #[inline]
         pub fn $dname(func: PGFunction, collation: Oid, $($arg: Datum,)+) -> PgResult<Datum> {
-            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            let mut slot = core::mem::MaybeUninit::<LocalFcinfo<$n>>::uninit();
+            let fcinfo = LocalFcinfo::<$n>::init_in_place(&mut slot, collation);
             $(fcinfo.set_arg($idx, $arg);)+
-            let result = func(None, &mut fcinfo)?;
+            let result = func(None, fcinfo)?;
             if fcinfo.isnull {
                 return Err(returned_null_direct(func));
             }
@@ -529,11 +575,12 @@ macro_rules! define_calls {
             mcx: Mcx<'_>,
             $($arg: Datum,)+
         ) -> PgResult<Datum> {
-            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            let mut slot = core::mem::MaybeUninit::<LocalFcinfo<$n>>::uninit();
+            let fcinfo = LocalFcinfo::<$n>::init_in_place(&mut slot, collation);
             // SAFETY: `mcx` outlives this stack frame's single call.
             unsafe { fcinfo.set_result_mcx(mcx) };
             $(fcinfo.set_arg($idx, $arg);)+
-            let result = flinfo.invoke(&mut fcinfo)?;
+            let result = flinfo.invoke(&mut *fcinfo)?;
             if fcinfo.isnull {
                 return Err(returned_null_oid(flinfo.fn_oid));
             }
@@ -547,11 +594,12 @@ macro_rules! define_calls {
             mcx: Mcx<'_>,
             $($arg: Datum,)+
         ) -> PgResult<Datum> {
-            let mut fcinfo = LocalFcinfo::<$n>::fresh(collation);
+            let mut slot = core::mem::MaybeUninit::<LocalFcinfo<$n>>::uninit();
+            let fcinfo = LocalFcinfo::<$n>::init_in_place(&mut slot, collation);
             // SAFETY: `mcx` outlives this stack frame's single call.
             unsafe { fcinfo.set_result_mcx(mcx) };
             $(fcinfo.set_arg($idx, $arg);)+
-            let result = func(None, &mut fcinfo)?;
+            let result = func(None, fcinfo)?;
             if fcinfo.isnull {
                 return Err(returned_null_direct(func));
             }
