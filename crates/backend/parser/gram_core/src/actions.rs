@@ -1421,7 +1421,7 @@ impl<'mcx> Parser<'mcx> {
                 if pk_pair.is_nil() {
                     n.pk_attrs = NodeList::nil();
                 } else {
-                    n.pk_attrs = pk_pair.nth(0).as_list().expect("column list");
+                    n.pk_attrs = *pk_pair.nth(0).as_list().expect("column list");
                     if pk_pair.len() == 2 {
                         n.pk_attrs.lappend(mcx, pk_pair.nth(1))?;
                         n.pk_with_period = true;
