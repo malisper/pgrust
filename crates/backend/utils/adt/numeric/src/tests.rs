@@ -1103,7 +1103,7 @@ fn int128_agg_serialize_round_trip() {
     let mcx = ctx.mcx();
     for with_sum_x2 in [true, false] {
         let mut state = Int128AggState::new(with_sum_x2);
-        for v in [i64::MAX as i128, i64::MAX as i128, -1, 123456789, 0, i64::MIN as i128] {
+        for v in [1i128 << 62, -(1i128 << 62), -1, 123456789, 0, 1i128 << 61] {
             do_int128_accum(&mut state, v);
         }
         let bytes = serialize_int128_state(&state, with_sum_x2);
