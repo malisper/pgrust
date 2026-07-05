@@ -1022,6 +1022,23 @@ fn slow_switch<'mcx>(
             Ok(None)
         }
 
+        T_AlterTableMoveAllStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterTableMoveAllStmt>()
+                .expect("AlterTableMoveAllStmt");
+            // Retention contract as unify_stmt_lifetime: nothing derived from
+            // the statement arena escapes the utility call.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::AlterTableMoveAllStmt<'_>,
+                    &types_nodes::parsenodes::AlterTableMoveAllStmt<'mcx>,
+                >(stmt)
+            };
+            tablecmds::AlterTableMoveAll(mcx, stmt)?;
+            // Commands are stashed in AlterTableMoveAll (per relation).
+            Ok(None)
+        }
+
         T_IndexStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
             // outlives the utility call; nothing derived escapes it.

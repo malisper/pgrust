@@ -6794,6 +6794,223 @@ fn ATExecSetTableSpace<'mcx>(
     Ok(())
 }
 
+const Anum_pg_class_oid_mv: usize = 1;
+const Anum_pg_class_relnamespace_mv: usize = 3;
+const Anum_pg_class_relowner_mv: usize = 6;
+const Anum_pg_class_reltablespace_mv: usize = 9;
+const Anum_pg_class_relisshared_mv: usize = 15;
+const Anum_pg_class_relkind_mv: usize = 17;
+
+// AlterObjectTypeCommandTag(objtype) restricted to the MoveAll object types
+// (commandtag.rs consts CMDTAG_ALTER_{TABLE,INDEX,MATERIALIZED_VIEW}); the
+// full mapping lives in the tcop::utility crate, which depends on this one.
+fn move_all_command_tag(objtype: ObjectType) -> types_core::CommandTag {
+    match objtype {
+        ObjectType::OBJECT_INDEX => types_core::CommandTag(15),
+        ObjectType::OBJECT_MATVIEW => types_core::CommandTag(18),
+        _ => types_core::CommandTag(34),
+    }
+}
+
+// AlterTableMoveAll (tablecmds.c:16984).
+pub fn AlterTableMoveAll<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::parsenodes::AlterTableMoveAllStmt<'mcx>,
+) -> PgResult<Oid> {
+    if stmt.objtype != ObjectType::OBJECT_TABLE
+        && stmt.objtype != ObjectType::OBJECT_INDEX
+        && stmt.objtype != ObjectType::OBJECT_MATVIEW
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "only tables, indexes, and materialized views exist in tablespaces".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+
+    let role_oids = user::roleSpecsToIds(mcx, &stmt.roles)?;
+
+    let mut orig_tablespaceoid = commands_tablespace::get_tablespace_oid(
+        mcx,
+        stmt.orig_tablespacename.expect("AlterTableMoveAllStmt.orig_tablespacename"),
+        false,
+    )?;
+    let mut new_tablespaceoid = commands_tablespace::get_tablespace_oid(
+        mcx,
+        stmt.new_tablespacename.expect("AlterTableMoveAllStmt.new_tablespacename"),
+        false,
+    )?;
+
+    if orig_tablespaceoid == GLOBALTABLESPACE_OID || new_tablespaceoid == GLOBALTABLESPACE_OID {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot move relations in to or out of pg_global tablespace".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+
+    if new_tablespaceoid != InvalidOid
+        && new_tablespaceoid != init_small::globals::MyDatabaseTableSpace()
+    {
+        let aclresult = aclchk::object_aclcheck(
+            TableSpaceRelationId,
+            new_tablespaceoid,
+            miscinit::GetUserId(),
+            adt_acl::ACL_CREATE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclchk::aclcheck_error(
+                aclresult,
+                ObjectType::OBJECT_TABLESPACE,
+                stmt.new_tablespacename.unwrap_or(""),
+            )?;
+        }
+    }
+
+    if orig_tablespaceoid == init_small::globals::MyDatabaseTableSpace() {
+        orig_tablespaceoid = InvalidOid;
+    }
+    if new_tablespaceoid == init_small::globals::MyDatabaseTableSpace() {
+        new_tablespaceoid = InvalidOid;
+    }
+    if orig_tablespaceoid == new_tablespaceoid {
+        return Ok(new_tablespaceoid);
+    }
+
+    let mut relations: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    {
+        let pg_class = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
+        let key = oid_scankey(Anum_pg_class_reltablespace_mv, orig_tablespaceoid);
+        let mut scan = genam::systable_beginscan(mcx, &pg_class, InvalidOid, false, None, &[key])?;
+        while let Some(tuple) = genam::systable_getnext(mcx, &mut scan)? {
+            let desc = pg_class.descr();
+            let mut isnull = false;
+            let relOid = unsafe {
+                types_tuple::heap_getattr(tuple, Anum_pg_class_oid_mv as i32, desc, &mut isnull)
+            }
+            .as_oid();
+            let relnamespace = unsafe {
+                types_tuple::heap_getattr(
+                    tuple,
+                    Anum_pg_class_relnamespace_mv as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_oid();
+            let relisshared = unsafe {
+                types_tuple::heap_getattr(
+                    tuple,
+                    Anum_pg_class_relisshared_mv as i32,
+                    desc,
+                    &mut isnull,
+                )
+            }
+            .as_bool();
+            let relkind = unsafe {
+                types_tuple::heap_getattr(tuple, Anum_pg_class_relkind_mv as i32, desc, &mut isnull)
+            }
+            .as_char() as u8;
+            let relowner = unsafe {
+                types_tuple::heap_getattr(tuple, Anum_pg_class_relowner_mv as i32, desc, &mut isnull)
+            }
+            .as_oid();
+
+            if catalog::IsCatalogNamespace(relnamespace)
+                || relisshared
+                || catalog_namespace::isAnyTempNamespace(relnamespace)?
+                || catalog::IsToastNamespace(relnamespace)
+            {
+                continue;
+            }
+
+            let matches = match stmt.objtype {
+                ObjectType::OBJECT_TABLE => {
+                    relkind == RELKIND_RELATION || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+                }
+                ObjectType::OBJECT_INDEX => {
+                    relkind == types_rel::RELKIND_INDEX
+                        || relkind == types_rel::RELKIND_PARTITIONED_INDEX
+                }
+                ObjectType::OBJECT_MATVIEW => relkind == types_rel::RELKIND_MATVIEW,
+                _ => false,
+            };
+            if !matches {
+                continue;
+            }
+
+            if !role_oids.is_empty() && !role_oids.iter().any(|&r| r == relowner) {
+                continue;
+            }
+
+            if !aclchk::object_ownercheck(RELATION_RELATION_ID, relOid, miscinit::GetUserId())? {
+                let relname = lsyscache::get_rel_name(mcx, relOid)?;
+                aclchk::aclcheck_error(
+                    aclchk::ACLCHECK_NOT_OWNER,
+                    crate::get_relkind_objtype(relkind),
+                    relname.as_deref().unwrap_or(""),
+                )?;
+            }
+
+            if stmt.nowait {
+                if !lmgr::ConditionalLockRelationOid(relOid, types_rel::AccessExclusiveLock)? {
+                    let nspname = lsyscache::get_namespace_name(mcx, relnamespace)?;
+                    let relname = lsyscache::get_rel_name(mcx, relOid)?;
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "aborting because lock on relation \"{}.{}\" is not available",
+                                nspname.as_deref().unwrap_or(""),
+                                relname.as_deref().unwrap_or("")
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_OBJECT_IN_USE),
+                    ));
+                }
+            } else {
+                lmgr::LockRelationOid(relOid, types_rel::AccessExclusiveLock)?;
+            }
+
+            relations.push(relOid);
+        }
+        genam::systable_endscan(mcx, scan)?;
+        pg_class.close(types_rel::AccessShareLock)?;
+    }
+
+    if relations.is_empty() {
+        let tsname = if orig_tablespaceoid == InvalidOid {
+            "(database default)"
+        } else {
+            stmt.orig_tablespacename.unwrap_or("")
+        };
+        elog_seams::ereport_msg::call(
+            NOTICE,
+            format!("no matching relations in tablespace \"{tsname}\" found"),
+            None,
+        )?;
+    }
+
+    let tag = move_all_command_tag(stmt.objtype);
+    for &relid in relations.iter() {
+        let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
+        cmd.subtype = AlterTableType::AT_SetTableSpace;
+        cmd.name = stmt.new_tablespacename;
+        let cmds = NodeList::make1(mcx, cmd.seal())?;
+
+        event_trigger::EventTriggerAlterTableStart(tag);
+        let res = AlterTableInternal(mcx, relid, &cmds, false);
+        event_trigger::EventTriggerAlterTableEnd();
+        res?;
+    }
+
+    Ok(new_tablespaceoid)
+}
+
 // index_copy_data (tablecmds.c:17103).
 fn index_copy_data(
     rel: &Relation<'_>,

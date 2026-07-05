@@ -8,7 +8,7 @@ use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
     AccessPriv, AlterDefaultPrivilegesStmt, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt,
     AlterRoleSetStmt, AlterRoleStmt,
-    AlterTableCmd, AlterTableStmt, AlterTableType,
+    AlterTableCmd, AlterTableMoveAllStmt, AlterTableStmt, AlterTableType,
     CTECycleClause, CTEMaterialize, CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt,
     CommentStmt, CommonTableExpr,
     CopyStmt, CreateFunctionStmt, CreatePolicyStmt, CreateRoleStmt, CreateSchemaStmt, DeallocateStmt,
@@ -5914,12 +5914,43 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 278;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterTableMoveAllStmt: ALTER TABLE ALL IN TABLESPACE name
+            // [OWNED BY role_list] SET TABLESPACE name [NOWAIT] (gram.y:2136,2148).
+            279 | 280 => {
+                let mut n = Node::build::<AlterTableMoveAllStmt>(mcx)?;
+                n.orig_tablespacename = Some(view.v(6).str_val());
+                n.objtype = ObjectType::OBJECT_TABLE;
+                if rule == 279 {
+                    n.new_tablespacename = Some(view.v(9).str_val());
+                    n.nowait = view.v(10).boolean();
+                } else {
+                    n.roles = view.v(9).list();
+                    n.new_tablespacename = Some(view.v(12).str_val());
+                    n.nowait = view.v(13).boolean();
+                }
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // AlterTableStmt: ALTER INDEX qualified_name index_partition_cmd
             283 => {
                 let mut n = Node::build::<AlterTableStmt>(mcx)?;
                 n.relation = view.v(3).node().expect("qualified_name").as_variant::<RangeVar>();
                 n.cmds = NodeList::make1(mcx, view.v(4).node().expect("index_partition_cmd"))?;
                 n.objtype = ObjectType::OBJECT_INDEX;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTableMoveAllStmt: ALTER INDEX ALL IN TABLESPACE ... (gram.y:2190,2202).
+            284 | 285 => {
+                let mut n = Node::build::<AlterTableMoveAllStmt>(mcx)?;
+                n.orig_tablespacename = Some(view.v(6).str_val());
+                n.objtype = ObjectType::OBJECT_INDEX;
+                if rule == 284 {
+                    n.new_tablespacename = Some(view.v(9).str_val());
+                    n.nowait = view.v(10).boolean();
+                } else {
+                    n.roles = view.v(9).list();
+                    n.new_tablespacename = Some(view.v(12).str_val());
+                    n.nowait = view.v(13).boolean();
+                }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // AlterTableStmt: ALTER SEQUENCE [IF_P EXISTS] qualified_name
@@ -5964,6 +5995,22 @@ impl<'mcx> Parser<'mcx> {
                 n.cmds = cmds.list();
                 n.objtype = ObjectType::OBJECT_MATVIEW;
                 n.missing_ok = rule == 291;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterTableMoveAllStmt: ALTER MATERIALIZED VIEW ALL IN TABLESPACE
+            // ... (gram.y:2274,2286).
+            292 | 293 => {
+                let mut n = Node::build::<AlterTableMoveAllStmt>(mcx)?;
+                n.orig_tablespacename = Some(view.v(7).str_val());
+                n.objtype = ObjectType::OBJECT_MATVIEW;
+                if rule == 292 {
+                    n.new_tablespacename = Some(view.v(10).str_val());
+                    n.nowait = view.v(11).boolean();
+                } else {
+                    n.roles = view.v(10).list();
+                    n.new_tablespacename = Some(view.v(13).str_val());
+                    n.nowait = view.v(14).boolean();
+                }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // AlterTableStmt: ALTER FOREIGN TABLE [IF_P EXISTS] relation_expr

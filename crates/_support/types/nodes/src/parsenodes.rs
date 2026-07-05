@@ -1158,6 +1158,16 @@ pub struct AlterTableStmt<'mcx> {
     pub missing_ok: bool,
 }
 
+// ALTER TABLE/INDEX/MATERIALIZED VIEW ALL IN TABLESPACE ... SET TABLESPACE.
+#[derive(Default)]
+pub struct AlterTableMoveAllStmt<'mcx> {
+    pub orig_tablespacename: Option<&'mcx str>,
+    pub objtype: ObjectType,
+    pub roles: NodeList<'mcx>,
+    pub new_tablespacename: Option<&'mcx str>,
+    pub nowait: bool,
+}
+
 #[derive(Default)]
 pub struct RenameStmt<'mcx> {
     pub renameType: ObjectType,
@@ -1668,6 +1678,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableSpaceOptionsStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableMoveAllStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterTableMoveAllStmt;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableCmd<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterTableCmd;

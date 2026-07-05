@@ -14776,6 +14776,7 @@ dependencies = [
  "types_storage",
  "types_trigger",
  "types_tuple",
+ "user",
  "varlena",
  "vars",
  "xact",
