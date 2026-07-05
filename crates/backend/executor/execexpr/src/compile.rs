@@ -503,7 +503,13 @@ fn build_agg_trans<'mcx>(
     push_fetch_steps(&mut state, mcx, &info)?;
 
     for (transno, spec) in specs.iter().enumerate() {
-        let num_trans_inputs = spec.args.len();
+        // C's numTransInputs: resjunk cells (aggpresorted ORDER BY sort
+        // columns) are evaluated nowhere and take no transfn arg slot.
+        let num_trans_inputs = spec
+            .args
+            .iter()
+            .filter(|n| !n.as_target_entry().is_some_and(|t| t.resjunk))
+            .count();
         let nargs = num_trans_inputs + 1;
         if nargs > FUNC_MAX_ARGS {
             return Err(too_many_args(nargs));
@@ -522,12 +528,6 @@ fn build_agg_trans<'mcx>(
         let init_strict = flinfo.fn_strict && spec.init_value_is_null;
         let fn_strict = flinfo.fn_strict;
         if let Some(ord) = spec.ordered {
-            if spec.aggfilter.is_some() {
-                panic!(
-                    "ExecBuildAggTrans (execExpr.c): FILTER over non-presorted \
-                     DISTINCT/ORDER BY aggregate not ported"
-                );
-            }
             build_agg_trans_ordered(&mut state, mcx, spec, ord, fn_strict, params)?;
             continue;
         }
@@ -604,7 +604,8 @@ fn build_agg_trans<'mcx>(
                 push_step(&mut state, mcx, Step::AggDeserialize { call: ds_call, out: trans_arg1 })?;
             }
         } else {
-            for (argno, tle_node) in spec.args.iter().enumerate() {
+            let mut argno = 0usize;
+            for tle_node in spec.args.iter() {
                 let tle = tle_node.as_target_entry().unwrap_or_else(|| {
                     panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
                 });
@@ -614,12 +615,10 @@ fn build_agg_trans<'mcx>(
                 // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
                 let arg_out =
                     OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
-                init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, None)?;
+                init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, sub)?;
+                argno += 1;
             }
-            // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
-            let arg_out =
-                OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
-            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, sub)?;
+            debug_assert_eq!(argno, num_trans_inputs);
         }
         let mut bailout: Option<usize> = None;
         if fn_strict && num_trans_inputs > 0 {
@@ -764,6 +763,15 @@ fn build_agg_trans_ordered<'mcx>(
     params: ParamBind<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(ord.num_trans_inputs as usize <= spec.args.len());
+    // C evaluates the FILTER before the aggregated arguments; a false filter
+    // skips the row entirely (the parked args never get marked live).
+    let mut filter_jump: Option<usize> = None;
+    if let Some(f) = spec.aggfilter {
+        let rout = state.result_out();
+        init_expr_rec(f, state, mcx, rout, None, params, None)?;
+        filter_jump = Some(state.steps.len());
+        push_step(state, mcx, Step::JumpIfNotTrue { jumpdone: u32::MAX, out: rout })?;
+    }
     for (argno, tle_node) in spec.args.iter().enumerate() {
         let tle = tle_node.as_target_entry().unwrap_or_else(|| {
             panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
@@ -788,11 +796,17 @@ fn build_agg_trans_ordered<'mcx>(
         push_step(state, mcx, step)?;
     }
     push_step(state, mcx, Step::AggOrderedMark { flag: ord.flag })?;
+    let target = state.steps.len() as u32;
     if let Some(ix) = bailout {
-        let target = state.steps.len() as u32;
         match &mut state.steps[ix] {
             Step::AggStrictInputCheck { jumpnull, .. }
             | Step::AggStrictInputCheck1 { jumpnull, .. } => *jumpnull = target,
+            _ => unreachable!(),
+        }
+    }
+    if let Some(ix) = filter_jump {
+        match &mut state.steps[ix] {
+            Step::JumpIfNotTrue { jumpdone, .. } => *jumpdone = target,
             _ => unreachable!(),
         }
     }
