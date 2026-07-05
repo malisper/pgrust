@@ -375,7 +375,7 @@ pub fn AlterForeignDataWrapper<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
-// AlterForeignDataWrapperOwner + _internal (foreigncmds.c).
+// AlterForeignDataWrapperOwner + _oid + _internal (foreigncmds.c).
 pub fn AlterForeignDataWrapperOwner<'mcx>(
     mcx: Mcx<'mcx>,
     name: &str,
@@ -398,14 +398,54 @@ pub fn AlterForeignDataWrapperOwner<'mcx>(
             None,
         ));
     };
+    let fdw_id = AlterForeignDataWrapperOwner_internal(mcx, &rel, &tp, new_owner_id)?;
+
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id))
+}
+
+pub fn AlterForeignDataWrapperOwner_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    fdw_id: Oid,
+    new_owner_id: Oid,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, RowExclusiveLock)?;
+
+    let Some(tp) = SearchSysCacheCopy(
+        mcx,
+        cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID,
+        SysCacheKey::Value(Datum::from_oid(fdw_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("foreign-data wrapper with OID {fdw_id} does not exist"),
+            None,
+        ));
+    };
+    AlterForeignDataWrapperOwner_internal(mcx, &rel, &tp, new_owner_id)?;
+
+    rel.close(RowExclusiveLock)
+}
+
+fn AlterForeignDataWrapperOwner_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    tp: &heaptuple::HeapTuple<'mcx>,
+    new_owner_id: Oid,
+) -> PgResult<Oid> {
     let getattr = |attnum: i32| -> (Datum, bool) {
         let mut isnull = false;
         // SAFETY: pg_foreign_data_wrapper column of the copied tuple.
-        let d = unsafe { types_tuple::heap_getattr(&tp, attnum, rel.descr(), &mut isnull) };
+        let d = unsafe { types_tuple::heap_getattr(tp, attnum, rel.descr(), &mut isnull) };
         (d, isnull)
     };
     let fdw_id = getattr(Anum_pg_foreign_data_wrapper_oid).0.as_oid();
     let old_owner = getattr(Anum_pg_foreign_data_wrapper_fdwowner).0.as_oid();
+    let name = name_attr(mcx, getattr(Anum_pg_foreign_data_wrapper_fdwname).0)?;
 
     if !superuser::superuser()? {
         return Err(err(
@@ -442,9 +482,9 @@ pub fn AlterForeignDataWrapperOwner<'mcx>(
         }
 
         let mut newtup =
-            heaptuple::heap_modify_tuple(mcx, &tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
+            heaptuple::heap_modify_tuple(mcx, tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
         let otid = tp.t_self;
-        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut newtup)?;
 
         pg_shdepend::changeDependencyOnOwner(
             mcx,
@@ -454,11 +494,10 @@ pub fn AlterForeignDataWrapperOwner<'mcx>(
         )?;
     }
 
-    rel.close(RowExclusiveLock)?;
-    Ok(ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id))
+    Ok(fdw_id)
 }
 
-// AlterForeignServerOwner + _internal (foreigncmds.c).
+// AlterForeignServerOwner + _oid + _internal (foreigncmds.c).
 pub fn AlterForeignServerOwner<'mcx>(
     mcx: Mcx<'mcx>,
     name: &str,
@@ -481,15 +520,55 @@ pub fn AlterForeignServerOwner<'mcx>(
             None,
         ));
     };
+    let srv_id = AlterForeignServerOwner_internal(mcx, &rel, &tp, new_owner_id)?;
+
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv_id))
+}
+
+pub fn AlterForeignServerOwner_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    srv_id: Oid,
+    new_owner_id: Oid,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, FOREIGN_SERVER_RELATION_ID, RowExclusiveLock)?;
+
+    let Some(tp) = SearchSysCacheCopy(
+        mcx,
+        FOREIGNSERVEROID,
+        SysCacheKey::Value(Datum::from_oid(srv_id)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("foreign server with OID {srv_id} does not exist"),
+            None,
+        ));
+    };
+    AlterForeignServerOwner_internal(mcx, &rel, &tp, new_owner_id)?;
+
+    rel.close(RowExclusiveLock)
+}
+
+fn AlterForeignServerOwner_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    tp: &heaptuple::HeapTuple<'mcx>,
+    new_owner_id: Oid,
+) -> PgResult<Oid> {
     let getattr = |attnum: i32| -> (Datum, bool) {
         let mut isnull = false;
         // SAFETY: pg_foreign_server column of the copied tuple.
-        let d = unsafe { types_tuple::heap_getattr(&tp, attnum, rel.descr(), &mut isnull) };
+        let d = unsafe { types_tuple::heap_getattr(tp, attnum, rel.descr(), &mut isnull) };
         (d, isnull)
     };
     let srv_id = getattr(Anum_pg_foreign_server_oid).0.as_oid();
     let old_owner = getattr(Anum_pg_foreign_server_srvowner).0.as_oid();
     let srv_fdw = getattr(Anum_pg_foreign_server_srvfdw).0.as_oid();
+    let name = name_attr(mcx, getattr(Anum_pg_foreign_server_srvname).0)?;
 
     if old_owner != new_owner_id {
         if !superuser::superuser()? {
@@ -545,15 +624,14 @@ pub fn AlterForeignServerOwner<'mcx>(
         }
 
         let mut newtup =
-            heaptuple::heap_modify_tuple(mcx, &tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
+            heaptuple::heap_modify_tuple(mcx, tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
         let otid = tp.t_self;
-        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut newtup)?;
 
         pg_shdepend::changeDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, new_owner_id)?;
     }
 
-    rel.close(RowExclusiveLock)?;
-    Ok(ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv_id))
+    Ok(srv_id)
 }
 
 pub fn CreateForeignServer<'mcx>(
@@ -1070,4 +1148,6 @@ pub fn init_seams() {
     foreigncmds_seams::get_foreign_data_wrapper_oid::set(get_foreign_data_wrapper_oid);
     foreigncmds_seams::get_foreign_server_oid::set(get_foreign_server_oid);
     foreigncmds_seams::pg_options_to_table::set(options::pg_options_to_table);
+    pg_shdepend::alter_foreign_server_owner_oid::set(AlterForeignServerOwner_oid);
+    pg_shdepend::alter_foreign_data_wrapper_owner_oid::set(AlterForeignDataWrapperOwner_oid);
 }

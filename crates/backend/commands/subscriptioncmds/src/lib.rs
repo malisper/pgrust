@@ -1306,3 +1306,7 @@ pub fn AlterSubscriptionOwner_oid<'mcx>(
 
     rel.close(RowExclusiveLock)
 }
+
+pub fn init_seams() {
+    pg_shdepend::alter_subscription_owner_oid::set(AlterSubscriptionOwner_oid);
+}

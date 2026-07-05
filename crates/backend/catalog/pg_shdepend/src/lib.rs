@@ -1,6 +1,6 @@
-// pg_shdepend.c recording/mutation/report slice plus shdepDropOwned;
-// shdepReassignOwned is loud unported, and the getObjectDescription arms
-// cover only relation/schema/database/role.
+// pg_shdepend.c recording/mutation/report slice plus shdepDropOwned and
+// shdepReassignOwned; the getObjectDescription arms cover only
+// relation/schema/database/role.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -15,7 +15,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_UNDEFINED_OBJECT,
 };
 use types_rel::{
-    AccessShareLock, Relation, RowExclusiveLock,
+    AccessExclusiveLock, AccessShareLock, Relation, RowExclusiveLock, LOCKMODE,
 };
 use types_nodes::parsenodes::DropBehavior;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
@@ -55,6 +55,84 @@ seam_core::seam!(
         objsubid: i32,
     ) -> PgResult<()>
 );
+
+// shdepReassignOwned_Owner callees; each owning command crate installs its
+// own in init_seams (they all sit above this crate via changeDependencyOnOwner).
+seam_core::seam!(
+    pub fn alter_type_owner_oid(
+        mcx: Mcx<'_>,
+        type_oid: Oid,
+        new_owner_id: Oid,
+        has_depend_entry: bool,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_schema_owner_oid(mcx: Mcx<'_>, schemaoid: Oid, new_owner_id: Oid) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn at_exec_change_owner(
+        mcx: Mcx<'_>,
+        relation_oid: Oid,
+        new_owner_id: Oid,
+        recursing: bool,
+        lockmode: LOCKMODE,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_foreign_server_owner_oid(
+        mcx: Mcx<'_>,
+        srv_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_foreign_data_wrapper_owner_oid(
+        mcx: Mcx<'_>,
+        fdw_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_event_trigger_owner_oid(
+        mcx: Mcx<'_>,
+        trig_oid: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_publication_owner_oid(
+        mcx: Mcx<'_>,
+        pub_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_subscription_owner_oid(
+        mcx: Mcx<'_>,
+        sub_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn alter_object_owner_internal(
+        mcx: Mcx<'_>,
+        class_id: Oid,
+        object_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<()>
+);
+seam_core::seam!(
+    pub fn replace_role_in_init_priv(
+        mcx: Mcx<'_>,
+        oldroleid: Oid,
+        newroleid: Oid,
+        classid: Oid,
+        objid: Oid,
+        objsubid: i32,
+    ) -> PgResult<()>
+);
+// xact sits above this crate; installed by catalog_dependency::init_seams.
+seam_core::seam!(pub fn command_counter_increment() -> PgResult<()>);
 
 #[cfg(test)]
 mod tests;
@@ -1028,9 +1106,130 @@ pub fn shdepDropOwned<'mcx>(
     sdepRel.close(RowExclusiveLock)
 }
 
-pub fn shdepReassignOwned(roleids: &[Oid], newrole: Oid) -> ! {
-    panic!(
-        "shdepReassignOwned (pg_shdepend.c): REASSIGN OWNED unported \
-         (roles {roleids:?} newrole {newrole})"
-    )
+// Classids of shdepReassignOwned_Owner's switch not covered by the
+// types_core/catalog constant sets.
+const ConversionRelationId: Oid = 2607;
+const EventTriggerRelationId: Oid = 3466;
+const PublicationRelationId: Oid = 6104;
+const StatisticExtRelationId: Oid = 3381;
+const TSConfigRelationId: Oid = 3602;
+const TSDictionaryRelationId: Oid = 3600;
+const DefaultAclRelationId: Oid = 826;
+
+pub fn shdepReassignOwned<'mcx>(mcx: Mcx<'mcx>, roleids: &[Oid], newrole: Oid) -> PgResult<()> {
+    let sdepRel = table::table_open(mcx, catalog::SharedDependRelationId, RowExclusiveLock)?;
+    let desc = sdepRel.descr();
+    let myDatabaseId = init_small::globals::MyDatabaseId();
+
+    for &roleid in roleids {
+        if catalog::IsPinnedObject(AUTH_ID_RELATION_ID, roleid) {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "cannot reassign ownership of objects owned by {} because they are required by the database system",
+                    getObjectDescription(mcx, AUTH_ID_RELATION_ID, roleid, 0)?
+                ))
+                .with_sqlstate(ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST),
+            ));
+        }
+
+        let keys = [
+            oid_key(Anum_pg_shdepend_refclassid, AUTH_ID_RELATION_ID),
+            oid_key(Anum_pg_shdepend_refobjid, roleid),
+        ];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &sdepRel,
+            catalog::SharedDependReferenceIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        loop {
+            let Some(tup) = genam::systable_getnext(mcx, &mut scan)? else { break };
+            let form = form_pg_shdepend(tup, desc);
+
+            if form.dbid != myDatabaseId && form.dbid != InvalidOid {
+                continue;
+            }
+
+            // C runs each callee under a short-lived AllocSet purely to bound
+            // leakage across many objects; allocation lifetime only, elided.
+            match form.deptype as u8 {
+                b'o' => shdepReassignOwned_Owner(mcx, &form, newrole)?,
+                b'i' => {
+                    replace_role_in_init_priv::call(
+                        mcx,
+                        roleid,
+                        newrole,
+                        form.classid,
+                        form.objid,
+                        form.objsubid,
+                    )?;
+                }
+                b'a' | b'r' | b't' => {}
+                other => {
+                    return Err(Box::new(PgError::error(format!(
+                        "unrecognized dependency type: {}",
+                        other as i32
+                    ))));
+                }
+            }
+
+            command_counter_increment::call()?;
+        }
+        genam::systable_endscan(mcx, scan)?;
+    }
+
+    sdepRel.close(RowExclusiveLock)
+}
+
+fn shdepReassignOwned_Owner<'mcx>(
+    mcx: Mcx<'mcx>,
+    sdepForm: &FormPgShdepend,
+    newrole: Oid,
+) -> PgResult<()> {
+    match sdepForm.classid {
+        types_core::TYPE_RELATION_ID => {
+            alter_type_owner_oid::call(mcx, sdepForm.objid, newrole, true)
+        }
+        NAMESPACE_RELATION_ID => alter_schema_owner_oid::call(mcx, sdepForm.objid, newrole),
+        // recursing=true so indexes/owned sequences visited before their
+        // parent table don't fail.
+        RELATION_RELATION_ID => {
+            at_exec_change_owner::call(mcx, sdepForm.objid, newrole, true, AccessExclusiveLock)
+        }
+        // Default ACLs and user mappings are DROP OWNED's problem, not
+        // REASSIGN OWNED's.
+        DefaultAclRelationId | types_core::USER_MAPPING_RELATION_ID => Ok(()),
+        types_core::FOREIGN_SERVER_RELATION_ID => {
+            alter_foreign_server_owner_oid::call(mcx, sdepForm.objid, newrole)
+        }
+        types_core::FOREIGN_DATA_WRAPPER_RELATION_ID => {
+            alter_foreign_data_wrapper_owner_oid::call(mcx, sdepForm.objid, newrole)
+        }
+        EventTriggerRelationId => alter_event_trigger_owner_oid::call(mcx, sdepForm.objid, newrole),
+        PublicationRelationId => alter_publication_owner_oid::call(mcx, sdepForm.objid, newrole),
+        catalog::SubscriptionRelationId => {
+            alter_subscription_owner_oid::call(mcx, sdepForm.objid, newrole)
+        }
+        catalog::CollationRelationId
+        | ConversionRelationId
+        | types_core::OPERATOR_RELATION_ID
+        | types_core::PROCEDURE_RELATION_ID
+        | types_core::LANGUAGE_RELATION_ID
+        | catalog::LargeObjectRelationId
+        | types_core::OPERATOR_FAMILY_RELATION_ID
+        | catalog::OperatorClassRelationId
+        | types_core::EXTENSION_RELATION_ID
+        | StatisticExtRelationId
+        | TABLE_SPACE_RELATION_ID
+        | DATABASE_RELATION_ID
+        | TSConfigRelationId
+        | TSDictionaryRelationId => {
+            alter_object_owner_internal::call(mcx, sdepForm.classid, sdepForm.objid, newrole)
+        }
+        other => Err(Box::new(PgError::error(format!(
+            "unexpected classid {other}"
+        )))),
+    }
 }

@@ -1331,6 +1331,89 @@ pub fn RemoveRoleFromInitPriv<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
+// ReplaceRoleInInitPriv (aclchk.c).
+pub fn ReplaceRoleInInitPriv<'mcx>(
+    mcx: Mcx<'mcx>,
+    oldroleid: Oid,
+    newroleid: Oid,
+    classid: Oid,
+    objid: Oid,
+    objsubid: i32,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, InitPrivsRelationId, RowExclusiveLock)?;
+    let desc = rel.descr();
+
+    let keys = [
+        pg_largeobject::oid_key(Anum_pg_init_privs_objoid, objid),
+        pg_largeobject::oid_key(Anum_pg_init_privs_classoid, classid),
+        int4_key(Anum_pg_init_privs_objsubid, objsubid),
+    ];
+    let mut scan = genam::systable_beginscan(mcx, &rel, InitPrivsObjIndexId, true, None, &keys)?;
+
+    let old = match genam::systable_getnext(mcx, &mut scan)? {
+        None => None,
+        Some(tup) => {
+            let mut isnull = false;
+            // SAFETY: fixed catalog columns under the relation's descriptor.
+            let acl_datum = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_init_privs_initprivs as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            debug_assert!(!isnull);
+            let old_acl = with_acl_datum(acl_datum, |acl| adt_acl::aclcopy(mcx, acl))?;
+            // SAFETY: as above.
+            let privtype = unsafe {
+                types_tuple::heap_getattr(
+                    tup,
+                    Anum_pg_init_privs_privtype as i32,
+                    desc,
+                    &mut isnull,
+                )
+            };
+            Some((tup.t_self, old_acl, privtype))
+        }
+    };
+    let Some((tid, old_acl, privtype)) = old else {
+        genam::systable_endscan(mcx, scan)?;
+        return rel.close(RowExclusiveLock);
+    };
+
+    // This usage of aclnewowner is a bit off-label when oldroleid isn't the
+    // owner, but it does the job fine.
+    let new_acl = adt_acl::aclnewowner(mcx, &old_acl, oldroleid, newroleid)?;
+
+    if new_acl.is_empty() {
+        catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
+    } else {
+        // C heap_modify_tuple; an identical row image is rebuilt instead.
+        let acl_img = acl_image(mcx, &new_acl)?;
+        let values = [
+            Datum::from_oid(objid),
+            Datum::from_oid(classid),
+            Datum::from_i32(objsubid),
+            privtype,
+            Datum::from_usize(acl_img.as_ptr() as usize),
+        ];
+        let nulls = [false; Natts_pg_init_privs];
+        let mut newtuple = heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &tid, &mut newtuple)?;
+    }
+
+    let oldmembers = aclmembers(mcx, &old_acl)?;
+    let newmembers = aclmembers(mcx, &new_acl)?;
+    pg_shdepend::updateInitAclDependencies(mcx, classid, objid, objsubid, &oldmembers, &newmembers)?;
+
+    genam::systable_endscan(mcx, scan)?;
+
+    // prevent error when processing objects multiple times
+    xact::CommandCounterIncrement()?;
+    rel.close(RowExclusiveLock)
+}
+
 fn int4_key(attno: types_core::AttrNumber, v: i32) -> types_scan::scankey::ScanKeyData {
     let mut key = types_scan::scankey::ScanKeyData::empty();
     key.sk_attno = attno;

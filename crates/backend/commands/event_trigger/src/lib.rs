@@ -15,7 +15,8 @@ mod srf;
 
 pub use cache_evtcache::EVENT_TRIGGER_RELATION_ID;
 pub use ddl::{
-    get_event_trigger_oid, AlterEventTrigger, AlterEventTriggerOwner, CreateEventTrigger,
+    get_event_trigger_oid, AlterEventTrigger, AlterEventTriggerOwner,
+    AlterEventTriggerOwner_oid, CreateEventTrigger,
 };
 pub use sqldrop::EventTriggerSQLDropAddObject;
 
@@ -611,6 +612,7 @@ pub fn EventTriggerAlterTableEnd() {
 
 pub fn init_seams() {
     event_trigger_seams::track_dropped_objects_needed::set(trackDroppedObjectsNeeded);
+    pg_shdepend::alter_event_trigger_owner_oid::set(ddl::AlterEventTriggerOwner_oid);
     event_trigger_seams::event_trigger_supports_object::set(EventTriggerSupportsObject);
     event_trigger_seams::event_trigger_sql_drop_add_object::set(
         sqldrop::EventTriggerSQLDropAddObject,

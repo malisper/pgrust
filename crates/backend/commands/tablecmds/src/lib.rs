@@ -40,6 +40,7 @@ pub fn init_seams() {
     tablecmds_seams::remove_on_commit_action::set(remove_on_commit_action);
     tablecmds_seams::set_relation_has_subclass::set(partition::SetRelationHasSubclass);
     tablecmds_seams::check_of_type::set(alter::check_of_type);
+    pg_shdepend::at_exec_change_owner::set(owner::ATExecChangeOwner);
 }
 
 use mcx::Mcx;

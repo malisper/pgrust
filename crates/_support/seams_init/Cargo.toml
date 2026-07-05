@@ -29,6 +29,9 @@ commands_vacuum = { path = "../../backend/commands/vacuum" }
 vacuumparallel = { path = "../../backend/commands/vacuumparallel" }
 commands_analyze = { path = "../../backend/commands/analyze" }
 commands_tablespace = { path = "../../backend/commands/tablespace" }
+commands_alter = { path = "../../backend/commands/alter" }
+schemacmds = { path = "../../backend/commands/schemacmds" }
+subscriptioncmds = { path = "../../backend/commands/subscriptioncmds" }
 clog = { path = "../../backend/access/transam/clog" }
 commit_ts = { path = "../../backend/access/transam/commit_ts" }
 multixact = { path = "../../backend/access/transam/multixact" }
@@ -243,7 +246,6 @@ guc = { path = "../../backend/utils/misc/guc" }
 guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
 pg_controldata = { path = "../../backend/utils/misc/pg_controldata" }
 pg_config = { path = "../../backend/utils/misc/pg_config" }
-subscriptioncmds = { path = "../../backend/commands/subscriptioncmds" }
 variable = { path = "../../backend/commands/variable" }
 user = { path = "../../backend/commands/user" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }
