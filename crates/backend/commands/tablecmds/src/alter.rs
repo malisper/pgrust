@@ -3147,17 +3147,23 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
-    if recursing && rel.rd_rel.relkind != RELKIND_RELATION {
-        unported("ATAddCheckNNConstraint: non-plain-table child relkind");
+    if recursing {
+        ATSimplePermissions(
+            AlterTableType::AT_AddConstraint,
+            rel,
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
+        )?;
     }
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     let contype = constr.contype;
     let conname_was_none = constr.conname.is_none();
+    // C copyObject boundary: transformExpr must not scribble the queued tree.
+    let constr_copy = copyfuncs::copy_object(mcx, defnode)?;
     let cooked = crate::constraints::add_relation_new_constraints_ext(
         mcx,
         rel,
         &[],
-        &NodeList::make1(mcx, defnode)?,
+        &NodeList::make1(mcx, constr_copy)?,
         recursing || is_readd,
         !recursing,
         query_string,

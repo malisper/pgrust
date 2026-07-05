@@ -14232,6 +14232,7 @@ dependencies = [
  "commands_cluster",
  "commands_comment",
  "commands_tablespace",
+ "copyfuncs",
  "datum",
  "elog_seams",
  "event_trigger",
