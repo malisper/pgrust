@@ -286,6 +286,69 @@ fn create_command_tag_variable_set() {
     }
 }
 
+// AlterObjectTypeCommandTag arms over the ALTER statement vocabulary,
+// including non-table object types (C utility.c: default = CMDTAG_UNKNOWN).
+#[test]
+fn create_command_tag_alter_object_types() {
+    use types_nodes::parsenodes::{
+        AlterObjectSchemaStmt, AlterOwnerStmt, AlterTableStmt, ObjectType, RenameStmt,
+    };
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    for (objtype, tag) in [
+        (ObjectType::OBJECT_TABLE, CMDTAG_ALTER_TABLE),
+        (ObjectType::OBJECT_INDEX, CMDTAG_ALTER_INDEX),
+        (ObjectType::OBJECT_SEQUENCE, CMDTAG_ALTER_SEQUENCE),
+        (ObjectType::OBJECT_VIEW, CMDTAG_ALTER_VIEW),
+        (ObjectType::OBJECT_MATVIEW, CMDTAG_ALTER_MATERIALIZED_VIEW),
+        (ObjectType::OBJECT_FOREIGN_TABLE, CMDTAG_ALTER_FOREIGN_TABLE),
+        (ObjectType::OBJECT_TYPE, CMDTAG_ALTER_TYPE),
+    ] {
+        let node = Node::mk(mcx, AlterTableStmt { objtype, ..Default::default() }).unwrap();
+        assert_eq!(CreateCommandTag(node), tag);
+    }
+
+    for (objtype, tag) in [
+        (ObjectType::OBJECT_FUNCTION, CMDTAG_ALTER_FUNCTION),
+        (ObjectType::OBJECT_CAST, CMDTAG_ALTER_CAST),
+        (ObjectType::OBJECT_TSCONFIGURATION, CMDTAG_ALTER_TEXT_SEARCH_CONFIGURATION),
+        (ObjectType::OBJECT_LARGEOBJECT, CMDTAG_ALTER_LARGE_OBJECT),
+    ] {
+        let node =
+            Node::mk(mcx, AlterOwnerStmt { objectType: objtype, ..Default::default() }).unwrap();
+        assert_eq!(CreateCommandTag(node), tag);
+    }
+
+    let node = Node::mk(
+        mcx,
+        AlterObjectSchemaStmt {
+            objectType: ObjectType::OBJECT_OPERATOR,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(node), CMDTAG_ALTER_OPERATOR);
+
+    // Column rename tags from the relation type; trigger rename is non-table.
+    let node = Node::mk(
+        mcx,
+        RenameStmt {
+            renameType: ObjectType::OBJECT_COLUMN,
+            relationType: ObjectType::OBJECT_FOREIGN_TABLE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(node), CMDTAG_ALTER_FOREIGN_TABLE);
+    let node = Node::mk(
+        mcx,
+        RenameStmt { renameType: ObjectType::OBJECT_TRIGGER, ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(CreateCommandTag(node), CMDTAG_ALTER_TRIGGER);
+}
+
 #[test]
 fn explain_log_level_and_descriptor() {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD};
