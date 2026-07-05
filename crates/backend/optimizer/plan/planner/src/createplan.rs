@@ -586,7 +586,10 @@ fn create_seqscan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+    }
 
     let mut plan = Node::build::<SeqScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;

@@ -1132,19 +1132,22 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
 
 // set_plain_rel_pathlist (allpaths.c).
 fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    // Join clauses never push into a seqscan, but lateral refs in the tlist
+    // (a PHV evaluated at the scan) still force parameterization.
+    let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
 
     // A CurrentOfExpr qual forces the TID path: the executor handles no other.
     if crate::tidpath::create_tidscan_paths(run, rel)? {
         return Ok(());
     }
 
-    let seqscan = crate::pathnode::create_seqscan_path(run, rel, 0)?;
+    let seqscan = crate::pathnode::create_seqscan_path(run, rel, &required_outer, 0)?;
     add_path(run, rel, seqscan);
 
-    // required_outer is empty here (lateral assert above), so the C
-    // `required_outer == NULL` condition is just consider_parallel.
-    if run.root.rel(rel).consider_parallel {
+    // C: partial paths only when required_outer == NULL.
+    if run.root.rel(rel).consider_parallel
+        && crate::relnode::relids_is_empty(&required_outer)
+    {
         create_plain_partial_paths(run, rel)?;
     }
 
@@ -1166,7 +1169,7 @@ fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<
     if parallel_workers <= 0 {
         return Ok(());
     }
-    let p = crate::pathnode::create_seqscan_path(run, rel, parallel_workers)?;
+    let p = crate::pathnode::create_seqscan_path(run, rel, &None, parallel_workers)?;
     crate::pathnode::add_partial_path(run, rel, p);
     Ok(())
 }

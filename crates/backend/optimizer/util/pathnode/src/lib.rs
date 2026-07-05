@@ -993,13 +993,18 @@ pub fn get_param_path_clause_serials<'mcx>(
     )
 }
 
-// create_seqscan_path (pathnode.c); required_outer is empty on this lane.
+// create_seqscan_path (pathnode.c): required_outer carries lateral refs in
+// the scan's tlist; movable join clauses ride the PPI once lateral forces
+// one (join clauses never parameterize a seqscan on their own).
 pub fn create_seqscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     parallel_workers: i32,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_SeqScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = parallel_workers > 0;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.parallel_workers = parallel_workers;

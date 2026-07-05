@@ -541,18 +541,18 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
         )
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_seqscan (costsize.c): parameterized path; M2 lateral lane"
-    );
-    let mut rows = base_rows;
+    // Parameterized (lateral tlist refs) takes the PPI row estimate.
+    let mut rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
 
     let mut startup_cost = 0.0;
     let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
     let disk_run_cost = spc_seq_page_cost * pages as f64;
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)
-        .expect("unparameterized path has no param clauses");
+    let qpqual_cost =
+        get_restriction_qual_cost(run, rel, path_id).expect("cost_qual_eval over ppi_clauses");
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     let mut cpu_run_cost = cpu_per_tuple * tuples;
