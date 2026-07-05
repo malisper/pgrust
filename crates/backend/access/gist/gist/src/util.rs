@@ -25,21 +25,21 @@ pub(crate) const InvalidOffsetNumber: OffsetNumber = 0;
 const InvalidOid: Oid = 0;
 const SIZEOF_ITEM_ID_DATA: usize = 4;
 
-pub(crate) type ITup = *const u8;
+pub type ITup = *const u8;
 
 #[inline]
-pub(crate) unsafe fn index_tuple_size(itup: ITup) -> usize {
+pub unsafe fn index_tuple_size(itup: ITup) -> usize {
     ::nbtree::itup::index_tuple_size(itup)
 }
 
 #[inline]
-pub(crate) unsafe fn itup_slice<'a>(itup: ITup) -> &'a [u8] {
+pub unsafe fn itup_slice<'a>(itup: ITup) -> &'a [u8] {
     core::slice::from_raw_parts(itup, index_tuple_size(itup))
 }
 
 // PageGetItem for offnum with the per-page max_offset check done by caller.
 #[inline]
-pub(crate) fn page_item(page: &PageRef<'_>, offnum: OffsetNumber) -> ITup {
+pub fn page_item(page: &PageRef<'_>, offnum: OffsetNumber) -> ITup {
     let id = page.item_id(offnum);
     page.item_raw(id).0
 }
@@ -67,7 +67,7 @@ pub(crate) unsafe fn gist_tuple_is_invalid(itup: ITup) -> bool {
 }
 
 #[inline]
-pub(crate) fn itup_set_block_number(itup: &mut [u8], blkno: BlockNumber) {
+pub fn itup_set_block_number(itup: &mut [u8], blkno: BlockNumber) {
     itup[0..2].copy_from_slice(&((blkno >> 16) as u16).to_ne_bytes());
     itup[2..4].copy_from_slice(&((blkno & 0xffff) as u16).to_ne_bytes());
 }

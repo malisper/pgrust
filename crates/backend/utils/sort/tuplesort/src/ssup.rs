@@ -564,6 +564,41 @@ pub fn comparator_for_opfamily(
     })
 }
 
+// gist.h GIST_SORTSUPPORT_PROC; pg_proc.dat range_cmp.
+const GIST_SORTSUPPORT_PROC_NUM: i16 = 11;
+const F_RANGE_CMP: Oid = 3870;
+
+/// PrepareSortSupportFromGistIndexRel's comparator resolve over the closed
+/// proc-11 set. C DIVERGENCE (recorded): range_sortsupport's range_fast_cmp
+/// is order-identical to range_cmp (rangetypes.c: same empty-first +
+/// range_cmp_bounds logic), so it rides the shim; gist_point_sortsupport
+/// (z-order) has no btree-equivalent ordering and stays loud.
+pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<SortComparator> {
+    let ssup_proc = lsyscache::get_opfamily_proc(
+        opfamily,
+        opcintype,
+        opcintype,
+        GIST_SORTSUPPORT_PROC_NUM,
+    )?;
+    match ssup_proc {
+        F_RANGE_SORTSUPPORT => {
+            let flinfo = ::fmgr_seams::fmgr_info::call(F_RANGE_CMP)?;
+            Ok(SortComparator::Shim(ShimCmp {
+                fn_addr: flinfo.fn_addr,
+                fn_oid: F_RANGE_CMP,
+            }))
+        }
+        0 => panic!(
+            "missing support function {GIST_SORTSUPPORT_PROC_NUM}({opcintype},{opcintype}) \
+             in opfamily {opfamily}"
+        ),
+        other => panic!(
+            "unported: gist sortsupport comparator for proc {other} \
+             (gist_point_sortsupport z-order lane)"
+        ),
+    }
+}
+
 // varstr_sortsupport (varlena.c) comparator selection.
 fn varstr_comparator(bpchar: bool, collation: Oid) -> PgResult<SortComparator> {
     varlena::check_collation_set(collation)?;

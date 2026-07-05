@@ -727,6 +727,48 @@ impl Tuplesort {
         ))
     }
 
+    /// `tuplesort_begin_index_gist`, serial arm; comparators resolved from
+    /// each column's GIST_SORTSUPPORT_PROC (never reverse / nulls-first,
+    /// as C's PrepareSortSupportFromGistIndexRel).
+    pub fn begin_index_gist(
+        _heap_rel: &types_rel::Relation<'_>,
+        index_rel: &types_rel::Relation<'_>,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesort> {
+        let nkeys = index_rel.indnkeyatts() as usize;
+        assert!(nkeys > 0);
+        let mut keys = Vec::with_capacity(nkeys);
+        for i in 0..nkeys {
+            let comparator = ssup::comparator_for_gist_index_col(
+                index_rel.rd_opfamily[i],
+                index_rel.rd_opcintype[i],
+            )?;
+            keys.push(SortSupport {
+                ssup_collation: index_rel.rd_indcollation[i],
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: (i + 1) as i16,
+                comparator,
+            });
+        }
+        // SAFETY: lifetime erasure on the relcache tupdesc; the caller keeps
+        // the index relation open for the life of the sort (gistbuild holds
+        // it open across the whole build, as C does).
+        let tup_desc: std::rc::Rc<TupleDescData<'static>> =
+            unsafe { mem::transmute(index_rel.rd_att.clone()) };
+        Ok(Self::begin_index_with_keys(
+            tup_desc,
+            &keys,
+            nkeys as u16,
+            false,
+            false,
+            index_rel.name(),
+            work_mem,
+            sortopt,
+        ))
+    }
+
     /// `tuplesort_begin_index_hash`, serial arm.
     pub fn begin_index_hash(
         _heap_rel: &types_rel::Relation<'_>,
