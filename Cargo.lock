@@ -2658,6 +2658,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "nodes_core",
+ "parse_relation_seams",
  "parser_small1",
  "pg_inherits_seams",
  "syscache_seams",
@@ -8806,6 +8807,7 @@ dependencies = [
  "mcx",
  "namespace_seams",
  "nodes_core",
+ "parse_relation_seams",
  "parse_utilcmd_seams",
  "parser_small1",
  "pg_class_seams",
@@ -8822,6 +8824,18 @@ dependencies = [
  "types_rel",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "parse_relation_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "parser_small1",
+ "seam_core",
+ "types_core",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -12464,6 +12478,7 @@ dependencies = [
  "parse_collate",
  "parse_expr",
  "parse_func",
+ "parse_relation",
  "parse_utilcmd",
  "parser_analyze",
  "parser_driver",

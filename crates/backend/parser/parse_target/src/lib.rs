@@ -220,6 +220,7 @@ fn transformAssignedExprInternal<'mcx>(
             indirection,
             0,
             expr,
+            coerce::COERCION_ASSIGNMENT,
             location,
         );
     }
@@ -1081,12 +1082,11 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
     }
 }
 
-// transformAssignmentIndirection (parse_target.c), subscript arms only —
-// field selection (String cells) needs FieldStore, loud below. `start` is
-// C's indirection_cell; basenode None at start builds the CaseTestExpr
-// substitute (only reachable through nested stores, unreachable today).
+// transformAssignmentIndirection (parse_target.c). `start` is C's
+// indirection_cell; basenode None with cells remaining builds the
+// CaseTestExpr substitute (only FieldStore/SubscriptingRef sit above it).
 #[allow(clippy::too_many_arguments)]
-fn transformAssignmentIndirection<'mcx>(
+pub fn transformAssignmentIndirection<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     basenode: Option<Node<'mcx>>,
@@ -1098,20 +1098,120 @@ fn transformAssignmentIndirection<'mcx>(
     indirection: &NodeList<'mcx>,
     start: usize,
     rhs: Node<'mcx>,
+    ccontext: coerce::CoercionContext,
     location: types_core::ParseLoc,
 ) -> PgResult<Node<'mcx>> {
-    debug_assert!(
-        basenode.is_some() || start > 0,
-        "CaseTestExpr substitution only arises in nested stores"
-    );
+    let basenode = match basenode {
+        None if start < indirection.len() => Some(Node::mk(
+            mcx,
+            types_nodes::primnodes::CaseTestExpr {
+                typeId: target_type_id,
+                typeMod: target_typmod,
+                collation: target_collation,
+            },
+        )?),
+        other => other,
+    };
     let mut subscripts: NodeList<'mcx> = NodeList::nil();
-    for n in indirection.as_slice()[start..].iter() {
+    for (off, n) in indirection.as_slice()[start..].iter().enumerate() {
+        let i = start + off;
         match n.node_tag() {
             NodeTag::T_A_Indices => subscripts.lappend(mcx, *n)?,
-            _ => panic!(
-                "transformAssignmentIndirection (parse_target.c): field store \
-                 (FieldStore) unported — misc2 rowtypes lane"
-            ),
+            NodeTag::T_A_Star => {
+                return Err(star_expansion_not_supported(pstate, location));
+            }
+            _ => {
+                let fieldname = n.as_string().expect("field indirection is a String").sval;
+                if !subscripts.is_nil() {
+                    return transformAssignmentSubscripts(
+                        mcx,
+                        pstate,
+                        basenode,
+                        target_name,
+                        target_type_id,
+                        target_typmod,
+                        target_collation,
+                        &subscripts,
+                        indirection,
+                        i,
+                        rhs,
+                        ccontext,
+                        location,
+                    );
+                }
+
+                let mut base_typmod = target_typmod;
+                let base_type_id =
+                    ::lsyscache::getBaseTypeAndTypmod(target_type_id, &mut base_typmod)?;
+                let typrelid = ::lsyscache::get_typ_typrelid(base_type_id)?;
+                if !types_core::OidIsValid(typrelid) {
+                    return Err(field_of_noncomposite(
+                        pstate,
+                        fieldname,
+                        target_name,
+                        target_type_id,
+                        location,
+                    ));
+                }
+                let attnum = ::lsyscache::get_attnum(typrelid, fieldname)?;
+                if attnum == types_core::InvalidAttrNumber {
+                    return Err(no_such_field(
+                        pstate,
+                        fieldname,
+                        target_name,
+                        target_type_id,
+                        location,
+                    ));
+                }
+                if attnum < 0 {
+                    return Err(assign_system_column_field(pstate, fieldname, location));
+                }
+                let (field_type_id, field_typmod, field_collation) =
+                    ::lsyscache::get_atttypetypmodcoll(typrelid, attnum)?;
+
+                let rhs = transformAssignmentIndirection(
+                    mcx,
+                    pstate,
+                    None,
+                    fieldname,
+                    false,
+                    field_type_id,
+                    field_typmod,
+                    field_collation,
+                    indirection,
+                    i + 1,
+                    rhs,
+                    ccontext,
+                    location,
+                )?;
+
+                let fstore = Node::mk(
+                    mcx,
+                    types_nodes::FieldStore {
+                        arg: basenode.expect("basenode set above (cells remain)"),
+                        newvals: NodeList::make1(mcx, rhs)?,
+                        fieldnums: types_nodes::list::IntList::make1(mcx, attnum as i32)?,
+                        resulttype: base_type_id,
+                    },
+                )?;
+
+                // Domain constraints are checked once per column after the
+                // rewriter merges same-column subfield assignments.
+                if base_type_id != target_type_id {
+                    return coerce::coerce_to_domain(
+                        mcx,
+                        fstore,
+                        base_type_id,
+                        base_typmod,
+                        target_type_id,
+                        coerce::COERCION_IMPLICIT,
+                        CoercionForm::COERCE_IMPLICIT_CAST,
+                        location,
+                        false,
+                    );
+                }
+                return Ok(fstore);
+            }
         }
     }
     if !subscripts.is_nil() {
@@ -1125,7 +1225,9 @@ fn transformAssignmentIndirection<'mcx>(
             target_collation,
             &subscripts,
             indirection,
+            indirection.len(),
             rhs,
+            ccontext,
             location,
         );
     }
@@ -1138,7 +1240,7 @@ fn transformAssignmentIndirection<'mcx>(
         rhs_type,
         target_type_id,
         target_typmod,
-        coerce::COERCION_ASSIGNMENT,
+        ccontext,
         CoercionForm::COERCE_IMPLICIT_CAST,
         -1,
     )?;
@@ -1151,19 +1253,17 @@ fn transformAssignmentIndirection<'mcx>(
             rhs_type,
             location,
         )),
-        None => Err(column_type_mismatch(
+        None => Err(subfield_type_mismatch(
             pstate,
             target_name,
             target_type_id,
             rhs_type,
-            expr_location(rhs),
+            location,
         )),
     }
 }
 
-// transformAssignmentSubscripts (parse_target.c); the whole remaining
-// indirection is subscripts here (field stores are loud above), so the RHS
-// recursion always reaches the base-coercion arm.
+// transformAssignmentSubscripts (parse_target.c).
 #[allow(clippy::too_many_arguments)]
 fn transformAssignmentSubscripts<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1175,7 +1275,9 @@ fn transformAssignmentSubscripts<'mcx>(
     target_collation: types_core::Oid,
     subscripts: &NodeList<'mcx>,
     indirection: &NodeList<'mcx>,
+    next_indirection: usize,
     rhs: Node<'mcx>,
+    ccontext: coerce::CoercionContext,
     location: types_core::ParseLoc,
 ) -> PgResult<Node<'mcx>> {
     debug_assert!(!subscripts.is_nil());
@@ -1186,7 +1288,7 @@ fn transformAssignmentSubscripts<'mcx>(
     let sbsref_node = parse_expr::transformContainerSubscripts(
         mcx,
         pstate,
-        basenode.expect("nested subscript stores unreachable (field stores loud)"),
+        basenode.expect("transformAssignmentIndirection always supplies a base"),
         container_type,
         container_typmod,
         subscripts,
@@ -1196,6 +1298,8 @@ fn transformAssignmentSubscripts<'mcx>(
         let sr = sbsref_node.as_subscripting_ref().unwrap();
         (sr.refrestype, sr.reftypmod)
     };
+    // A domain over a container is subscripted with the base type's
+    // collation (labels a possible CaseTestExpr).
     let collation_needed = if container_type == target_type_id {
         target_collation
     } else {
@@ -1212,8 +1316,9 @@ fn transformAssignmentSubscripts<'mcx>(
         typmod_needed,
         collation_needed,
         indirection,
-        indirection.len(),
+        next_indirection,
         rhs,
+        ccontext,
         location,
     )?;
 
@@ -1227,12 +1332,193 @@ fn transformAssignmentSubscripts<'mcx>(
     }
 
     if container_type != target_type_id {
-        panic!(
-            "transformAssignmentSubscripts (parse_target.c): domain-over-container \
-             re-coercion unported — domains lane"
-        );
+        // Premature if multiple elements are assigned; the rewriter fixes it.
+        let resulttype = expr_type(sbsref_node);
+        return coerce::coerce_to_target_type(
+            mcx,
+            pstate,
+            sbsref_node,
+            resulttype,
+            target_type_id,
+            target_typmod,
+            ccontext,
+            CoercionForm::COERCE_IMPLICIT_CAST,
+            -1,
+        )?
+        .ok_or_else(|| cannot_cast_up(pstate, resulttype, target_type_id, location));
     }
     Ok(sbsref_node)
+}
+
+#[cold]
+fn star_expansion_not_supported(
+    pstate: &ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("row expansion via \"*\" is not supported here")
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentIndirection",
+            )),
+    )
+}
+
+#[cold]
+fn field_of_noncomposite(
+    pstate: &ParseState<'_, '_>,
+    fieldname: &str,
+    target_name: &str,
+    target_type: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let t = format_type::format_type_be(target_type).unwrap_or_else(|_| target_type.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "cannot assign to field \"{fieldname}\" of column \"{target_name}\" \
+                 because its type {t} is not a composite type"
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentIndirection",
+            )),
+    )
+}
+
+#[cold]
+fn no_such_field(
+    pstate: &ParseState<'_, '_>,
+    fieldname: &str,
+    target_name: &str,
+    target_type: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_UNDEFINED_COLUMN, ERROR};
+    let t = format_type::format_type_be(target_type).unwrap_or_else(|_| target_type.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!(
+                "cannot assign to field \"{fieldname}\" of column \"{target_name}\" \
+                 because there is no such column in data type {t}"
+            ))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentIndirection",
+            )),
+    )
+}
+
+#[cold]
+fn assign_system_column_field(
+    pstate: &ParseState<'_, '_>,
+    fieldname: &str,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_UNDEFINED_COLUMN, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!("cannot assign to system column \"{fieldname}\""))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentIndirection",
+            )),
+    )
+}
+
+#[cold]
+fn subfield_type_mismatch(
+    pstate: &ParseState<'_, '_>,
+    target_name: &str,
+    target_type: types_core::Oid,
+    rhs_type: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_DATATYPE_MISMATCH, ERROR};
+    let t = format_type::format_type_be(target_type).unwrap_or_else(|_| target_type.to_string());
+    let r = format_type::format_type_be(rhs_type).unwrap_or_else(|_| rhs_type.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(format!(
+                "subfield \"{target_name}\" is of type {t} but expression is of type {r}"
+            ))
+            .errhint("You will need to rewrite or cast the expression.".to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentIndirection",
+            )),
+    )
+}
+
+#[cold]
+fn cannot_cast_up(
+    pstate: &ParseState<'_, '_>,
+    from: types_core::Oid,
+    to: types_core::Oid,
+    location: types_core::ParseLoc,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_CANNOT_COERCE, ERROR};
+    let f = format_type::format_type_be(from).unwrap_or_else(|_| from.to_string());
+    let t = format_type::format_type_be(to).unwrap_or_else(|_| to.to_string());
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_CANNOT_COERCE)
+            .errmsg(format!("cannot cast type {f} to {t}"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "parse_target.c",
+                0,
+                "transformAssignmentSubscripts",
+            )),
+    )
 }
 
 #[cold]

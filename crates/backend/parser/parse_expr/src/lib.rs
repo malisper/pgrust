@@ -2234,19 +2234,19 @@ fn plpgsql_column_ref<'mcx>(
 // column resolution missed, matching C's hook precedence.
 fn sql_fn_post_column_ref<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
     fields: &[Node<'mcx>],
     location: types_core::ParseLoc,
 ) -> PgResult<Option<Node<'mcx>>> {
-    let Some(state) = pstate.p_ref_hook_state.as_sql_fn_params() else {
+    let Some(state) = pstate.p_ref_hook_state.as_sql_fn_params().cloned() else {
         return Ok(None);
     };
     let mut nnames = fields.len();
     if nnames == 0 || nnames > 3 {
         return Ok(None);
     }
-    let star = fields[nnames - 1].node_tag() == NodeTag::T_A_Star;
-    if star {
+    // A trailing star is ignored: the caller expands the whole-row reference.
+    if fields[nnames - 1].node_tag() == NodeTag::T_A_Star {
         nnames -= 1;
         if nnames == 0 {
             return Ok(None);
@@ -2254,41 +2254,47 @@ fn sql_fn_post_column_ref<'mcx>(
     }
     let name = |i: usize| fields[i].as_string().map(|s| s.sval);
     let resolve = |i: usize| {
-        name(i).and_then(|n| parser_small1::sql_fn_resolve_param_name(state, n))
+        name(i).and_then(|n| parser_small1::sql_fn_resolve_param_name(&state, n))
     };
-    let (param, has_subfield) = match nnames {
-        1 => (resolve(0), false),
+    let (param, subfield) = match nnames {
+        1 => (resolve(0), None),
         2 => {
             if name(0) == Some(state.fname) {
                 match resolve(1) {
-                    Some(p) => (Some(p), false),
-                    None => (resolve(0), true),
+                    Some(p) => (Some(p), None),
+                    None => (resolve(0), name(1)),
                 }
             } else {
-                (resolve(0), true)
+                (resolve(0), name(1))
             }
         }
         _ => {
             if name(0) != Some(state.fname) {
                 return Ok(None);
             }
-            (resolve(1), true)
+            (resolve(1), name(2))
         }
     };
     let Some((paramno, ptype)) = param else { return Ok(None) };
-    if star {
-        panic!(
-            "sql_fn_post_column_ref (functions.c): whole-row reference to a SQL \
-             function parameter unported"
-        );
+    let param = parser_small1::sql_fn_make_param(mcx, &state, paramno, ptype, location)?;
+    let Some(subfield) = subfield else { return Ok(Some(param)) };
+    // C routes through ParseFuncOrColumn(fn = NULL): composite projection,
+    // else function attribute notation, else NULL.
+    match parse_func::ParseComplexProjection(mcx, pstate, subfield, param, location)? {
+        Some(node) => Ok(Some(node)),
+        None => {
+            if !catalog_namespace::FuncnameGetCandidates(mcx, &[subfield], 1, &[], false, false)?
+                .is_empty()
+            {
+                panic!(
+                    "sql_fn_post_column_ref (functions.c): attribute-notation function \
+                     call on a SQL-function parameter unported — reuse \
+                     attribute_notation_func_call once closure-batch-3 lands"
+                );
+            }
+            Ok(None)
+        }
     }
-    if has_subfield {
-        panic!(
-            "sql_fn_post_column_ref (functions.c): composite-parameter field \
-             selection (ParseFuncOrColumn on a Param) unported"
-        );
-    }
-    Ok(Some(parser_small1::sql_fn_make_param(mcx, state, paramno, ptype, location)?))
 }
 
 fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
@@ -2619,7 +2625,7 @@ fn make_row_comparison_op<'mcx>(
 }
 
 // make_row_comparison_op (parse_expr.c), list form: = composes to AND, <>
-// to OR; ordered row comparisons (< <= > >=) need RowCompareExpr — loud.
+// to OR, ordered comparisons to RowCompareExpr.
 fn make_row_comparison_op_lists<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,

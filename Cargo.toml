@@ -224,6 +224,7 @@ members = [
     "crates/backend/parser/parse_agg",
     "crates/backend/parser/coerce",
     "crates/backend/parser/parse_relation",
+    "crates/backend/parser/parse_relation_seams",
     "crates/backend/parser/parse_target",
     "crates/backend/parser/parse_collate",
     "crates/backend/parser/parse_collate_seams",

@@ -20,6 +20,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 nodes_core = { path = "../../nodes/nodes_core" }
+parse_relation_seams = { path = "../parse_relation_seams" }
 parser_small1 = { path = "../parser_small1" }
 pg_inherits_seams = { path = "../../catalog/pg_inherits_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
