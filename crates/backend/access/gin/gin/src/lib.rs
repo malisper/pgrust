@@ -28,7 +28,7 @@ use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageMut, PageRef};
 
 pub use get::gingetbitmap;
-pub use insert::{ginbuildempty, ginEntryInsert, gininsert};
+pub use insert::{ginEntryInsert, gininsert};
 pub use scan::{ginbeginscan, ginendscan, ginrescan};
 pub use opclass::gincost_extract_query;
 pub use util::{ginGetStats, ginUpdateStats};

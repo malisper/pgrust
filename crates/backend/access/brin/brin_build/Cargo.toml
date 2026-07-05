@@ -20,3 +20,4 @@ bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 freespace = { path = "../../../storage/freespace/freespace" }
 execindexing = { path = "../../../executor/execindexing" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
+init_small = { path = "../../../utils/init/init_small" }

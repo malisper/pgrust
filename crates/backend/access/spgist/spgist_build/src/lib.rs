@@ -13,6 +13,34 @@ pub struct IndexBuildResult {
     pub index_tuples: f64,
 }
 
+fn page_mut_of(buf: &mut bulkwrite::BulkWriteBuffer) -> ::types_storage::bufpage::PageMut<'_> {
+    // SAFETY: exclusively owned, aligned build page.
+    unsafe {
+        ::types_storage::bufpage::PageMut::from_raw(core::ptr::NonNull::new_unchecked(
+            buf.page_mut().as_mut_ptr(),
+        ))
+    }
+}
+
+/// spgbuildempty (spginsert.c): unlogged indexes' three INIT_FORKNUM pages.
+pub fn spgbuildempty(index: &Relation<'_>) -> PgResult<()> {
+    let mut bulkstate = bulkwrite::smgr_bulk_start_rel(index, ForkNumber::INIT_FORKNUM)?;
+
+    let mut buf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
+    spgist::SpGistInitMetapage(&mut page_mut_of(&mut buf));
+    bulkwrite::smgr_bulk_write(&mut bulkstate, SPGIST_METAPAGE_BLKNO, buf, true)?;
+
+    let mut buf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
+    ::types_spgist::SpGistInitPage(&mut page_mut_of(&mut buf), SPGIST_LEAF);
+    bulkwrite::smgr_bulk_write(&mut bulkstate, SPGIST_ROOT_BLKNO, buf, true)?;
+
+    let mut buf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
+    ::types_spgist::SpGistInitPage(&mut page_mut_of(&mut buf), SPGIST_LEAF | SPGIST_NULLS);
+    bulkwrite::smgr_bulk_write(&mut bulkstate, SPGIST_NULL_BLKNO, buf, true)?;
+
+    bulkwrite::smgr_bulk_finish(bulkstate)
+}
+
 /// spgbuild.
 pub fn spgbuild<'mcx>(
     mcx: Mcx<'mcx>,

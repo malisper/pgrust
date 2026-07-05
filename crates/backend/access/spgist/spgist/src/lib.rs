@@ -79,12 +79,6 @@ pub fn spginsert<'mcx>(
     Ok(false)
 }
 
-/// spgbuildempty (INIT_FORKNUM arm for unlogged indexes).
-pub fn spgbuildempty(index: &Relation<'_>) -> PgResult<()> {
-    debug_assert!(index.rd_rel.relpersistence == ::types_core::RELPERSISTENCE_UNLOGGED);
-    panic!("unported: spgbuildempty (unlogged SP-GiST INIT_FORKNUM lane)");
-}
-
 /// spgbulkdelete: named LOUD lane (spgvacuum.c).
 pub fn spgbulkdelete(rel: &Relation<'_>) -> PgResult<()> {
     panic!(

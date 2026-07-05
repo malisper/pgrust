@@ -1,6 +1,6 @@
 //! gininsert.c, serial half: ginbuild (accumulate + dump), gininsert (pending
-//! list by default), ginEntryInsert. Parallel build and ginbuildempty
-//! (unlogged indexes) are loud.
+//! list by default), ginEntryInsert. Parallel build is loud; ginbuildempty
+//! lives in the ginbuild crate.
 
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
@@ -274,11 +274,6 @@ pub fn ginEntryInsert<'s>(
         is_delete,
     });
     ginInsertValue(mcx, rel, &mut btree, &mut stack, buildStats)
-}
-
-/// ginbuildempty: unlogged-index INIT_FORKNUM lane, loud.
-pub fn ginbuildempty() -> ! {
-    unported("ginbuildempty (unlogged GIN index INIT_FORKNUM)")
 }
 
 /// ginHeapTupleInsert.

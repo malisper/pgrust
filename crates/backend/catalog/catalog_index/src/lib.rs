@@ -1004,9 +1004,12 @@ pub fn index_build<'mcx>(
             smgr::smgrcreate(key, ForkNumber::INIT_FORKNUM, false)?;
             catalog_storage::log_smgrcreate(&key.locator, ForkNumber::INIT_FORKNUM)?;
             match indexRelation.rd_rel.relam {
+                BTREE_AM_OID => nbtsort::btbuildempty(indexRelation)?,
                 HASH_AM_OID => hashsort::hashbuildempty(indexRelation)?,
+                GIN_AM_OID => ginbuild::ginbuildempty(indexRelation)?,
                 GIST_AM_OID => gistbuild::gistbuildempty(indexRelation)?,
-                types_core::BRIN_AM_OID => brin_build::brinbuildempty(indexRelation),
+                types_core::SPGIST_AM_OID => spgist_build::spgbuildempty(indexRelation)?,
+                types_core::BRIN_AM_OID => brin_build::brinbuildempty(indexRelation)?,
                 other => unported(&format!("index_build: ambuildempty for AM {other}")),
             }
         }

@@ -17,3 +17,4 @@ bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 xloginsert = { path = "../../transam/xloginsert" }
 execindexing = { path = "../../../executor/execindexing" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+init_small = { path = "../../../utils/init/init_small" }
