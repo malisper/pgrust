@@ -33,10 +33,28 @@ const MINMAX_BUFFER_MIN: i32 = 256;
 const MINMAX_BUFFER_MAX: i32 = 8192;
 pub(crate) const MINMAX_BUFFER_LOAD_FACTOR: f64 = 0.5;
 
-const MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE: i32 = 32;
+pub(crate) const MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE: i32 = 32;
+// MinMaxMultiOptions image: vl_len_ u32 | i32 valuesPerRange @4 (size 8).
+pub(crate) const MINMAXMULTIOPTIONS_SIZE: usize = 8;
+pub(crate) const MINMAXMULTIOPTIONS_VPR_OFF: usize = 4;
+
+// MinMaxMultiGetValuesPerRange: option value 0 falls back to the default.
+fn minmax_multi_get_values_per_range(opts: Option<&[u8]>) -> i32 {
+    match opts.map(|img| {
+        i32::from_ne_bytes(
+            img[MINMAXMULTIOPTIONS_VPR_OFF..MINMAXMULTIOPTIONS_VPR_OFF + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }) {
+        Some(v) if v != 0 => v,
+        _ => MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE,
+    }
+}
 
 pub fn brin_minmax_multi_opcinfo(_typoid: Oid) -> BrinColInfo {
     BrinColInfo {
+        oi_opclass_options: None,
         oi_nstored: 1,
         oi_regular_nulls: true,
         kind: BrinOpcKind::MinMaxMulti,
@@ -82,8 +100,7 @@ fn clamp_buffer_size(target_maxvalues: i32, pages_per_range: u32) -> i32 {
     maxvalues.min(MINMAX_BUFFER_MAX)
 }
 
-/// brin_minmax_multi_add_value; opclass options are unported repo-wide, so
-/// values_per_range is always the default.
+/// brin_minmax_multi_add_value.
 pub fn brin_minmax_multi_add_value(
     mcx: Mcx<'_>,
     bdesc: &BrinDesc<'_>,
@@ -101,7 +118,9 @@ pub fn brin_minmax_multi_add_value(
     let mut modified = false;
 
     if column.bv_allnulls {
-        let target_maxvalues = MINMAX_MULTI_DEFAULT_VALUES_PER_PAGE;
+        let target_maxvalues = minmax_multi_get_values_per_range(
+            bdesc.bd_info[attno as usize - 1].oi_opclass_options.as_deref(),
+        );
         let maxvalues = clamp_buffer_size(target_maxvalues, bdesc.bd_pages_per_range);
 
         let mut ranges = minmax_multi_init(maxvalues);

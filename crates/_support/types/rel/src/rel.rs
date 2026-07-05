@@ -60,6 +60,10 @@ pub struct RelationData<'mcx> {
     // C rd_support/rd_supportinfo (rule-5 cache), resolved once per column;
     // std Vec justified: Rc-owned owner structure outside the arenas, FmgrInfo is droppy.
     pub rd_supportinfo: RefCell<Vec<Option<FmgrInfo>>>,
+    // C rd_opcoptions (rule-5 cache): parsed per-key-column opclass options
+    // struct images, built lazily by RelationGetIndexAttOptions; Rc so AM
+    // states keep the parse alive across relcache invalidation.
+    pub rd_opcoptions: RefCell<Option<Rc<[Option<std::boxed::Box<[u8]>>]>>>,
     // C rd_indexlist family (rule-5 cache): None == !rd_indexvalid, inval clears it;
     // 'static (CacheMemoryContext copy, as C's) keeps RelationData covariant in 'mcx.
     pub rd_indexlist: RefCell<Option<RdIndexList>>,

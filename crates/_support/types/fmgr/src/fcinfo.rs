@@ -485,7 +485,32 @@ impl FmgrInfo {
     pub fn fn_extra_mut<T: Any>(&mut self) -> Option<&mut T> {
         Some(self.fn_extra.as_mut()?.downcast_mut::<T>())
     }
+
+    /// C set_fn_opclass_options: options ride fn_expr (support procs are
+    /// never called inside expressions, so the slot is free).
+    /// # Safety
+    /// `opts` must outlive every invocation through this FmgrInfo (C's
+    /// contract: the options Const lives in rd_indexcxt; here the owner
+    /// holding the FmgrInfo also owns the boxed options).
+    pub unsafe fn set_opclass_options(&mut self, opts: &OpclassOptions) {
+        // SAFETY: caller upholds the pointee-outlives-reads contract.
+        self.fn_expr = Some(unsafe { FnExprErased::from_node_ref(opts) });
+    }
+
+    /// C get_fn_opclass_options / has_fn_opclass_options; None = C NULL
+    /// options (AM reads compiled-in defaults).
+    #[inline]
+    pub fn opclass_options(&self) -> Option<&[u8]> {
+        self.fn_expr
+            .as_ref()?
+            .downcast_ref::<OpclassOptions>()
+            .map(|o| &o.0[..])
+    }
 }
+
+// The parsed opclass options struct image (varlena header + fields at C
+// offsetof positions), boxed so its address is stable while carriers move.
+pub struct OpclassOptions(pub Box<[u8]>);
 
 impl core::fmt::Debug for FmgrInfo {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

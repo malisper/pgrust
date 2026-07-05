@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+reloptions = { path = "../../common/reloptions" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }

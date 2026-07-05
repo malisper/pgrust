@@ -24,3 +24,13 @@ seam_core::seam!(
         lockmode: LOCKMODE,
     ) -> PgResult<Option<Relation<'mcx>>>
 );
+
+seam_core::seam!(
+    // RelationGetIndexAttOptions (relcache.c): parsed per-key-column opclass
+    // options struct images (C rd_opcoptions), Rc'd so AM states outlive
+    // relcache invalidation. Implemented by catalog_index (needs syscache +
+    // fmgr, both above the AM layer).
+    pub fn relation_get_index_att_options(
+        rel: &Relation<'_>,
+    ) -> PgResult<std::rc::Rc<[Option<std::boxed::Box<[u8]>>]>>
+);

@@ -402,6 +402,9 @@ impl Default for InclusionOpaque {
 
 pub struct BrinColInfo {
     pub oi_nstored: u16,
+    // Parsed opclass options image for this column (C: each support fn's
+    // flinfo carries it; the direct-dispatch port carries it once here).
+    pub oi_opclass_options: Option<Box<[u8]>>,
     pub oi_regular_nulls: bool,
     pub kind: BrinOpcKind,
     pub oi_typids: [Oid; BRIN_MAX_NSTORED],

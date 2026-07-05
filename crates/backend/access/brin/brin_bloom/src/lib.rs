@@ -24,8 +24,10 @@ const BloomEqualStrategyNumber: u16 = 1;
 const PROCNUM_HASH: u16 = 11;
 
 const BLOOM_MIN_NDISTINCT_PER_RANGE: f64 = 16.0;
-const BLOOM_DEFAULT_NDISTINCT_PER_RANGE: f64 = -0.1;
-const BLOOM_DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
+pub(crate) const BLOOM_DEFAULT_NDISTINCT_PER_RANGE: f64 = -0.1;
+pub(crate) const BLOOM_MIN_FALSE_POSITIVE_RATE: f64 = 0.0001;
+pub(crate) const BLOOM_MAX_FALSE_POSITIVE_RATE: f64 = 0.25;
+pub(crate) const BLOOM_DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
 
 const BLOOM_SEED_1: u64 = 0x71d924af;
 const BLOOM_SEED_2: u64 = 0xba48b314;
@@ -44,6 +46,7 @@ const _: () = assert!(BLOOM_MAX_FILTER_SIZE == 8144);
 
 pub fn brin_bloom_opcinfo(_typoid: Oid) -> BrinColInfo {
     BrinColInfo {
+        oi_opclass_options: None,
         oi_nstored: 1,
         oi_regular_nulls: true,
         kind: BrinOpcKind::Bloom,
@@ -159,11 +162,37 @@ fn bloom_contains_value(filter: &[u8], value: u32) -> bool {
     true
 }
 
-/// brin_bloom_get_ndistinct; opclass options are unported repo-wide, so the
-/// defaults apply (matches C with opts == NULL).
-fn brin_bloom_get_ndistinct(bdesc: &BrinDesc<'_>) -> i32 {
+// BloomOptions image: vl_len_ u32 | pad | f64 nDistinctPerRange @8 |
+// f64 falsePositiveRate @16 (size 24).
+pub(crate) const BLOOMOPTIONS_SIZE: usize = 24;
+pub(crate) const BLOOMOPTIONS_NDISTINCT_OFF: usize = 8;
+pub(crate) const BLOOMOPTIONS_FPR_OFF: usize = 16;
+
+fn opts_f64(opts: Option<&[u8]>, off: usize) -> Option<f64> {
+    let img = opts?;
+    Some(f64::from_ne_bytes(img[off..off + 8].try_into().unwrap()))
+}
+
+// BloomGetNDistinctPerRange: option value 0 falls back to the default.
+fn bloom_get_ndistinct_per_range(opts: Option<&[u8]>) -> f64 {
+    match opts_f64(opts, BLOOMOPTIONS_NDISTINCT_OFF) {
+        Some(v) if v != 0.0 => v,
+        _ => BLOOM_DEFAULT_NDISTINCT_PER_RANGE,
+    }
+}
+
+// BloomGetFalsePositiveRate: option value 0 falls back to the default.
+fn bloom_get_false_positive_rate(opts: Option<&[u8]>) -> f64 {
+    match opts_f64(opts, BLOOMOPTIONS_FPR_OFF) {
+        Some(v) if v != 0.0 => v,
+        _ => BLOOM_DEFAULT_FALSE_POSITIVE_RATE,
+    }
+}
+
+/// brin_bloom_get_ndistinct.
+fn brin_bloom_get_ndistinct(bdesc: &BrinDesc<'_>, opts: Option<&[u8]>) -> i32 {
     let pages_per_range = bdesc.bd_pages_per_range;
-    let mut ndistinct = BLOOM_DEFAULT_NDISTINCT_PER_RANGE;
+    let mut ndistinct = bloom_get_ndistinct_per_range(opts);
     let maxtuples = (MaxHeapTuplesPerPage as f64) * pages_per_range as f64;
     if ndistinct < 0.0 {
         ndistinct = -ndistinct * maxtuples;
@@ -184,12 +213,13 @@ pub fn brin_bloom_add_value(
     debug_assert!(!isnull);
     let attno = column.bv_attno;
 
+    let opts = bdesc.bd_info[attno as usize - 1].oi_opclass_options.as_deref();
     let mut updated = false;
     if column.bv_allnulls {
         column.bv_values[0] = bloom_init(
             mcx,
-            brin_bloom_get_ndistinct(bdesc),
-            BLOOM_DEFAULT_FALSE_POSITIVE_RATE,
+            brin_bloom_get_ndistinct(bdesc, opts),
+            bloom_get_false_positive_rate(opts),
         )?;
         column.bv_allnulls = false;
         updated = true;

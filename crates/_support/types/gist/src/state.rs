@@ -31,6 +31,11 @@ pub struct GistState<'mcx> {
 
     pub supportCollation: Vec<Oid>,
 
+    // Owner of the per-column parsed opclass options the support-fn
+    // FmgrInfos' fn_expr slots point into (C: the options Const in
+    // rd_indexcxt); boxed for address stability, dropped with the state.
+    pub opclassOptions: Vec<Option<Box<::types_fmgr::OpclassOptions>>>,
+
     pub frame1: LocalFcinfo<1>,
     pub frame2: LocalFcinfo<2>,
     pub frame3: LocalFcinfo<3>,

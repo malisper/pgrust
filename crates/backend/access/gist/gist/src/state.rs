@@ -80,10 +80,17 @@ pub fn initGISTstate<'mcx>(index: &Relation<'mcx>) -> PgResult<GistState<'mcx>> 
         distanceFn: Vec::with_capacity(n),
         fetchFn: Vec::with_capacity(n),
         supportCollation: Vec::with_capacity(n),
+        opclassOptions: Vec::with_capacity(n),
         frame1: LocalFcinfo::<1>::new(0),
         frame2: LocalFcinfo::<2>::new(0),
         frame3: LocalFcinfo::<3>::new(0),
         frame5: LocalFcinfo::<5>::new(0),
+    };
+
+    let attoptions = if indexam_seams::relation_get_index_att_options::is_installed() {
+        Some(indexam_seams::relation_get_index_att_options::call(index)?)
+    } else {
+        None
     };
 
     for i in 0..nkeys {
@@ -114,6 +121,33 @@ pub fn initGISTstate<'mcx>(index: &Relation<'mcx>) -> PgResult<GistState<'mcx>> 
         } else {
             DEFAULT_COLLATION_OID
         });
+
+        // C index_getprocinfo: every support-fn FmgrInfo carries the column's
+        // parsed opclass options on fn_expr (uninstalled seam = unit-test /
+        // bootstrap paths, where no opclass has options).
+        let opts = attoptions
+            .as_ref()
+            .and_then(|a| a.get(i))
+            .and_then(|o| o.as_ref())
+            .map(|img| Box::new(::types_fmgr::OpclassOptions(img.clone())));
+        if let Some(o) = &opts {
+            for f in [
+                &mut st.consistentFn[i],
+                &mut st.unionFn[i],
+                &mut st.compressFn[i],
+                &mut st.decompressFn[i],
+                &mut st.penaltyFn[i],
+                &mut st.picksplitFn[i],
+                &mut st.equalFn[i],
+                &mut st.distanceFn[i],
+                &mut st.fetchFn[i],
+            ] {
+                // SAFETY: the box lives in st.opclassOptions, dropped with
+                // the FmgrInfos it serves.
+                unsafe { f.set_opclass_options(o) };
+            }
+        }
+        st.opclassOptions.push(opts);
     }
 
     Ok(st)

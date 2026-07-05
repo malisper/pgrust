@@ -20,6 +20,7 @@ types_relscan = { path = "../../index/relscan" }
 nbtree = { path = "../../nbtree/nbtree" }
 tupdesc = { path = "../../common/tupdesc" }
 fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }

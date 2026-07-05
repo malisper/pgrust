@@ -52,6 +52,15 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
     let tupdesc = rel.rd_att.clone();
     let natts = tupdesc.natts as usize;
 
+    // C: options ride each support fn's flinfo via index_getprocinfo; the
+    // direct-dispatch port pins them on the column info instead (uninstalled
+    // seam = unit-test paths, where no opclass has options).
+    let attoptions = if indexam_seams::relation_get_index_att_options::is_installed() {
+        Some(indexam_seams::relation_get_index_att_options::call(rel)?)
+    } else {
+        None
+    };
+
     let mut info: Vec<BrinColInfo> = Vec::with_capacity(natts);
     let mut totalstored = 0usize;
     for keyno in 0..natts {
@@ -72,6 +81,12 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
             F_BRIN_BLOOM_OPCINFO => brin_bloom::brin_bloom_opcinfo(opcintype),
             other => panic!("unported: BRIN opclass with opcinfo proc {other}"),
         };
+        let mut col = col;
+        col.oi_opclass_options = attoptions
+            .as_ref()
+            .and_then(|a| a.get(keyno))
+            .and_then(|o| o.as_ref())
+            .cloned();
         debug_assert!((col.oi_nstored as usize) <= BRIN_MAX_NSTORED);
         totalstored += col.oi_nstored as usize;
         info.push(col);
