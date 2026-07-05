@@ -231,12 +231,15 @@ fn RelationBuildPartitionDesc(
 pub fn RelationGetPartitionQual<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-) -> PgResult<NodeList<'static>> {
+) -> PgResult<NodeList<'mcx>> {
     let _ = mcx;
     if !rel.rd_rel.relispartition {
         return Ok(NodeList::nil());
     }
-    generate_partition_qual(rel)
+    let q = generate_partition_qual(rel)?;
+    // SAFETY: the qual is a caller-owned clone in the leaked (never-freed)
+    // PartDescContext, so shortening 'static to 'mcx only narrows the view.
+    Ok(unsafe { core::mem::transmute::<NodeList<'static>, NodeList<'mcx>>(q) })
 }
 
 fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'static>> {
