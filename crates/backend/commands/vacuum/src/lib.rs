@@ -892,12 +892,17 @@ pub fn vac_update_relstats(
         if getattr(old, Anum_pg_class_relhasindex, desc).as_bool() && !hasindex {
             set(Anum_pg_class_relhasindex, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
         }
-        // C clears relhasrules/relhastriggers off rd_rules/trigdesc; neither
-        // exists here (rules/trigger lanes unported), so a set flag is loud.
+        // C clears relhasrules/relhastriggers off rd_rules/trigdesc; the
+        // relcache seams stand in for the open relcache entry.
         if getattr(old, Anum_pg_class_relhasrules, desc).as_bool()
-            || getattr(old, Anum_pg_class_relhastriggers, desc).as_bool()
+            && relcache_seams::relation_get_rules::call(relid)?.is_empty()
         {
-            unported("vac_update_relstats relhasrules/relhastriggers clear (rules/trigger lanes)");
+            set(Anum_pg_class_relhasrules, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
+        }
+        if getattr(old, Anum_pg_class_relhastriggers, desc).as_bool()
+            && relcache_seams::relation_get_trigger_desc::call(relid)?.is_none()
+        {
+            set(Anum_pg_class_relhastriggers, ::datum::Datum::from_bool(false), &mut values, &mut replaces, &mut dirty);
         }
     }
 
