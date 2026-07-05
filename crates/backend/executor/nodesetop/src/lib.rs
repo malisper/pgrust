@@ -10,7 +10,8 @@ use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{vec_with_capacity_in, PgVec};
 use ::tuplesort::{
-    apply_sort_comparator, prepare_sort_support_from_ordering_op, SortSupport, SortSupportInit,
+    apply_sort_comparator_in, prepare_sort_support_from_ordering_op, SortSupport,
+    SortSupportInit,
 };
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::SetOp;
@@ -263,7 +264,7 @@ where
                 let cmpresult = if right.num_tuples == 0 {
                     -1
                 } else {
-                    setop_compare_slots(&mut left.first_slot, &mut right.first_slot, sort_keys)
+                    setop_compare_slots(mcx, &mut left.first_slot, &mut right.first_slot, sort_keys)
                 };
                 if cmpresult < 0 {
                     left.need_group = true;
@@ -325,7 +326,7 @@ where
         input.next = fetch(estate)?;
         let Some(id) = input.next else { break };
         let cmpresult =
-            setop_compare_slots(&mut input.first_slot, estate.slot_mut(id), sort_keys);
+            setop_compare_slots(mcx, &mut input.first_slot, estate.slot_mut(id), sort_keys);
         debug_assert!(cmpresult <= 0, "SetOp input is mis-sorted");
         if cmpresult != 0 {
             break;
@@ -336,7 +337,9 @@ where
 }
 
 // setop_compare_slots (nodeSetOp.c); NULLs compare equal within a key.
+// mcx feeds the comparison-shim arm (fmgr comparators, e.g. range_cmp).
 fn setop_compare_slots(
+    mcx: ::mcx::Mcx<'_>,
     s1: &mut SlotData<'_>,
     s2: &mut SlotData<'_>,
     sort_keys: &[SortSupport],
@@ -347,7 +350,8 @@ fn setop_compare_slots(
     let b2 = s2.base();
     for key in sort_keys {
         let a = (key.ssup_attno - 1) as usize;
-        let compare = apply_sort_comparator(
+        let compare = apply_sort_comparator_in(
+            mcx,
             b1.tts_values[a],
             b1.tts_isnull[a],
             b2.tts_values[a],

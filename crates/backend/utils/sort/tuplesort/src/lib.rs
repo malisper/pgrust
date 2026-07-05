@@ -40,7 +40,7 @@ pub(crate) mod testhooks {
 
 pub use abbrev::AbbrevState;
 pub use ssup::{
-    apply_sort_comparator, apply_sort_comparator_in, comparator_for_index_col,
+    apply_sort_comparator_in, comparator_for_index_col,
     comparator_for_opfamily,
     prepare_sort_support_abbrev, prepare_sort_support_from_ordering_op, AbbrevArm, AbbrevKind,
     SortComparator, SortSupport, SortSupportInit,
@@ -358,7 +358,8 @@ impl CmpCtx<'_> {
                             minimal_getattr(b.tuple, attno, tup_desc, &mut isnull2),
                         )
                     };
-                    let compare = apply_sort_comparator(datum1, isnull1, datum2, isnull2, key);
+                    let compare =
+                        ssup::apply_sort_comparator_in(self.mcx, datum1, isnull1, datum2, isnull2, key);
                     if compare != 0 {
                         return compare;
                     }
