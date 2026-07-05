@@ -7839,6 +7839,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit_seams",
+ "parallel_seams",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",
