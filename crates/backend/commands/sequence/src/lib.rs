@@ -178,6 +178,8 @@ pub fn init_seams() {
     sequence_seams::delete_sequence_tuple::set(delete_sequence_tuple_entry);
     sequence_seams::define_sequence::set(DefineSequence);
     sequence_seams::alter_sequence::set(AlterSequence);
+    sequence_seams::reset_sequence::set(ResetSequence);
+    sequence_seams::sequence_change_persistence::set(SequenceChangePersistence);
 }
 
 fn my_lxid() -> LocalTransactionId {
@@ -850,6 +852,74 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     let mut newtup = heaptuple::heap_form_tuple(mcx, rel.descr(), &pgs_values, &pgs_nulls)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
     rel.close(RowExclusiveLock)?;
+    seqrel.close(NoLock)
+}
+
+// Caller holds AccessExclusiveLock on the sequence until end of transaction
+// and has done the permissions check.
+pub fn ResetSequence(mcx: Mcx<'_>, seq_relid: Oid) -> PgResult<()> {
+    let seqrel = init_sequence(mcx, seq_relid)?;
+    let (buf, seq) = read_seq_tuple(&seqrel)?;
+
+    let startv = pgs_form(seq_relid)?.seqstart;
+
+    // SAFETY: views the page item for the copy only, under the buffer lock.
+    let view = unsafe {
+        types_tuple::HeapTupleData::from_raw_parts(
+            seq.data,
+            seq.t_len,
+            types_tuple::ItemPointerData::invalid(),
+            types_core::InvalidOid,
+        )
+    };
+    let mut tuple = heaptuple::heap_copytuple(mcx, &view)?;
+    bufmgr::UnlockReleaseBuffer(buf)?;
+
+    let copy = SeqTuple {
+        data: tuple.image_mut().as_mut_ptr(),
+        t_len: tuple.t_len,
+        #[cfg(debug_assertions)]
+        buf: types_core::InvalidBuffer,
+    };
+    copy.set(startv, 0, false);
+
+    catalog_index::RelationSetNewRelfilenumber(mcx, &seqrel, seqrel.rd_rel.relpersistence)?;
+    fill_seq_with_data(&seqrel, &mut tuple)?;
+
+    // Local cache cleared; currval() state intentionally kept.
+    with_elm(seq_relid, |e| e.cached = e.last);
+
+    seqrel.close(NoLock)
+}
+
+pub fn SequenceChangePersistence(mcx: Mcx<'_>, relid: Oid, newrelpersistence: u8) -> PgResult<()> {
+    // ALTER SEQUENCE acquires this lock earlier; the ALTER TABLE owned-
+    // sequence path locks here so increments from concurrent nextval()
+    // between buffer unlock and commit aren't discarded.
+    lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
+    let seqrel = init_sequence(mcx, relid)?;
+
+    if relation_needs_wal(&seqrel) {
+        xact::GetTopTransactionId()?;
+    }
+
+    let (buf, seq) = read_seq_tuple(&seqrel)?;
+    // C reuses the page item in place; fill_seq_with_data here freezes the
+    // header of an owned copy instead, same bytes inserted.
+    let view = unsafe {
+        // SAFETY: views the page item for the copy only, under the buffer lock.
+        types_tuple::HeapTupleData::from_raw_parts(
+            seq.data,
+            seq.t_len,
+            types_tuple::ItemPointerData::invalid(),
+            types_core::InvalidOid,
+        )
+    };
+    let mut tuple = heaptuple::heap_copytuple(mcx, &view)?;
+    catalog_index::RelationSetNewRelfilenumber(mcx, &seqrel, newrelpersistence)?;
+    fill_seq_with_data(&seqrel, &mut tuple)?;
+    bufmgr::UnlockReleaseBuffer(buf)?;
+
     seqrel.close(NoLock)
 }
 
