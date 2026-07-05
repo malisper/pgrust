@@ -644,11 +644,17 @@ pub fn interpret_function_parameter_list<'mcx>(
         // functioncmds.c:409-467: cook input-parameter defaults; later
         // input (and, for procedures, OUT) parameters must keep having them.
         let isinput = matches!(fpmode, FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC);
+        let fp_pos = || {
+            parser_small1::parser_errposition(pstate, fp.location, mbutils::GetDatabaseEncoding())
+        };
         if let Some(defexpr) = fp.defexpr {
             if !isinput {
-                return Err(err(
-                    "only input parameters can have default values".to_string(),
-                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                return Err(Box::new(
+                    (*err(
+                        "only input parameters can have default values".to_string(),
+                        ERRCODE_INVALID_FUNCTION_DEFINITION,
+                    ))
+                    .with_cursor_position(fp_pos()),
                 ));
             }
             let def = parse_expr::transformExpr(
@@ -668,26 +674,35 @@ pub fn interpret_function_parameter_list<'mcx>(
             )?;
             parse_collate::assign_expr_collations(mcx, pstate, def)?;
             if !pstate.p_rtable.is_nil() || var_seams::contain_var_clause::call(def) {
-                return Err(err(
-                    "cannot use table references in parameter default value".to_string(),
-                    types_error::ERRCODE_INVALID_COLUMN_REFERENCE,
+                return Err(Box::new(
+                    (*err(
+                        "cannot use table references in parameter default value".to_string(),
+                        types_error::ERRCODE_INVALID_COLUMN_REFERENCE,
+                    ))
+                    .with_cursor_position(fp_pos()),
                 ));
             }
             parameter_defaults.lappend(mcx, def)?;
             have_defaults = true;
         } else {
             if isinput && have_defaults {
-                return Err(err(
-                    "input parameters after one with a default value must also have defaults"
-                        .to_string(),
-                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                return Err(Box::new(
+                    (*err(
+                        "input parameters after one with a default value must also have defaults"
+                            .to_string(),
+                        ERRCODE_INVALID_FUNCTION_DEFINITION,
+                    ))
+                    .with_cursor_position(fp_pos()),
                 ));
             }
             if is_procedure && have_defaults {
-                return Err(err(
-                    "procedure OUT parameters cannot appear after one with a default value"
-                        .to_string(),
-                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                return Err(Box::new(
+                    (*err(
+                        "procedure OUT parameters cannot appear after one with a default value"
+                            .to_string(),
+                        ERRCODE_INVALID_FUNCTION_DEFINITION,
+                    ))
+                    .with_cursor_position(fp_pos()),
                 ));
             }
         }
