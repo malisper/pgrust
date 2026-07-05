@@ -2717,14 +2717,14 @@ fn alter_constr_enforceability<'mcx>(
         drop_foreign_key_constraint_triggers(mcx, con.oid, InvalidOid, InvalidOid)?;
     } else if changed {
         // Minimal Constraint node carrying what trigger creation reads.
+        // 18.3 leaves deferrable/initdeferred at makeNode zero here, so a
+        // re-ENFORCED constraint's triggers come back NOT DEFERRABLE.
         let fkconstraint = Constraint {
             contype: types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN,
             conname: Some(str_in(mcx, con.name_str())?),
             fk_matchtype: con.confmatchtype,
             fk_upd_action: con.confupdtype,
             fk_del_action: con.confdeltype,
-            deferrable: con.condeferrable,
-            initdeferred: con.condeferred,
             location: -1,
             ..Default::default()
         };
