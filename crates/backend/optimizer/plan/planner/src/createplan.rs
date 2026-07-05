@@ -75,9 +75,9 @@ fn create_plan_recurse<'mcx>(
         PathNode::IncrementalSortPath(_) => create_incremental_sort_plan(run, path_id, flags),
         PathNode::MaterialPath(_) => create_material_plan(run, path_id, flags),
         PathNode::MemoizePath(_) => create_memoize_plan(run, path_id, flags),
-        PathNode::NestPath(_) => create_join_plan(run, path_id),
-        PathNode::MergePath(_) => create_mergejoin_plan(run, path_id),
-        PathNode::HashPath(_) => create_hashjoin_plan(run, path_id),
+        PathNode::NestPath(_) | PathNode::MergePath(_) | PathNode::HashPath(_) => {
+            create_join_plan(run, path_id)
+        }
         PathNode::GatherPath(_) => create_gather_plan(run, path_id),
         PathNode::GatherMergePath(_) => create_gather_merge_plan(run, path_id),
         PathNode::LimitPath(_) => create_limit_plan(run, path_id, flags),
@@ -3251,8 +3251,6 @@ fn create_lockrows_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_join_plan (createplan.c), T_NestLoop arm -> create_nestloop_plan +
-// make_nestloop. Gating (pseudoconstant) clauses are loud upstream.
 // create_material_plan + make_material (createplan.c): the tlist shares the
 // child's (Material never projects).
 fn create_material_plan<'mcx>(
@@ -3357,7 +3355,38 @@ fn pull_paramids<'mcx>(
     Ok(())
 }
 
+// create_join_plan (createplan.c): build the join node, then gate any
+// pseudoconstant joinrestrictinfo clauses with a one-time-filter Result.
 fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
+    let plan = match run.root.path(path_id) {
+        PathNode::NestPath(_) => create_nestloop_plan(run, path_id)?,
+        PathNode::MergePath(_) => create_mergejoin_plan(run, path_id)?,
+        PathNode::HashPath(_) => create_hashjoin_plan(run, path_id)?,
+        other => panic!(
+            "create_join_plan (createplan.c): pathtype {}",
+            other.base().pathtype
+        ),
+    };
+    let restrict = match run.root.path(path_id) {
+        PathNode::NestPath(np) => {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &np.jpath.joinrestrictinfo)
+        }
+        PathNode::MergePath(mp) => {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &mp.jpath.joinrestrictinfo)
+        }
+        PathNode::HashPath(hp) => {
+            crate::relnode::pgvec_clone_shallow(run.mcx, &hp.jpath.joinrestrictinfo)
+        }
+        _ => unreachable!(),
+    };
+    let gating_clauses = get_gating_quals(run, &restrict)?;
+    if !gating_clauses.is_nil() {
+        return create_gating_plan(run, path_id, plan, gating_clauses);
+    }
+    Ok(plan)
+}
+
+fn create_nestloop_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let (outer_path, inner_path, jointype, inner_unique, restrict, target_id, has_param) =
         match run.root.path(path_id) {
@@ -3371,11 +3400,10 @@ fn create_join_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> PgResu
                 np.jpath.path.param_info.is_some(),
             ),
             other => panic!(
-                "create_join_plan (createplan.c): pathtype {}; M2 merge/hash lane",
+                "create_nestloop_plan (createplan.c): pathtype {}",
                 other.base().pathtype
             ),
         };
-    debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
 
     // An inner parameterized by the topmost parent of the outer rel gets its
     // parameterization translated to the child now (partitionwise join).
@@ -3756,7 +3784,6 @@ fn create_mergejoin_plan<'mcx>(
             other.base().pathtype
         ),
     };
-    debug_assert!(restrict.iter().all(|&r| !run.root.rinfo(r).pseudoconstant));
 
     let tlist = build_path_tlist(run, target_id, path_id)?;
     let outer_flags = if outersortkeys.is_empty() { 0 } else { CP_SMALL_TLIST };
