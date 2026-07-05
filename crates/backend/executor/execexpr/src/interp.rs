@@ -3516,7 +3516,9 @@ pub(crate) fn exec_one_step<'mcx>(
         | Step::JsonExprPath { .. }
         | Step::JsonCoercion { .. }
         | Step::JsonCoercionFinish { .. }
-        | Step::IoCoerceSafe { .. } => {
+        | Step::IoCoerceSafe { .. }
+        | Step::AggDeserialize { .. }
+        | Step::AggStrictDeserialize { .. } => {
             unreachable!("step refused by the emitter; never in jitted programs")
         }
         Step::ScanFetchSome { last_var } => {
@@ -4018,7 +4020,9 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::JsonExprPath { .. }
         | Step::JsonCoercion { .. }
         | Step::JsonCoercionFinish { .. }
-        | Step::IoCoerceSafe { .. } => false,
+        | Step::IoCoerceSafe { .. }
+        | Step::AggDeserialize { .. }
+        | Step::AggStrictDeserialize { .. } => false,
         Step::ScanFetchSome { .. }
         | Step::InnerFetchSome { .. }
         | Step::OuterFetchSome { .. }
