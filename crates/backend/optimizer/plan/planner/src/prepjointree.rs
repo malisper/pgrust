@@ -689,6 +689,10 @@ fn pull_up_simple_subquery<'mcx>(
             lowest_outer_join,
         )? || (containing_appendrel.is_some() && !is_safe_append_member(&sub_local))
         {
+            // C discards the whole subroot on decline; nested pull-ups'
+            // AppendRelInfos landed in run.root here, so drop them with the
+            // discarded copy or they dangle with sub-local relids.
+            run.root.append_rel_list.truncate(appinfo_snap);
             return Ok(false);
         }
         let sealed = Node::mk(mcx, sub_local)?;
@@ -726,6 +730,10 @@ fn pull_up_simple_subquery<'mcx>(
             lowest_outer_join,
         )? || (containing_appendrel.is_some() && !is_safe_append_member(&sub_local))
         {
+            // C discards the whole subroot on decline; nested pull-ups'
+            // AppendRelInfos landed in run.root here, so drop them with the
+            // discarded copy or they dangle with sub-local relids.
+            run.root.append_rel_list.truncate(appinfo_snap);
             return Ok(false);
         }
         (mcx::alloc_leak_in(mcx, sub_local)?, false)
