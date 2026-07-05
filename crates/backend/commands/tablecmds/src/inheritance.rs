@@ -155,6 +155,91 @@ pub(crate) fn merge_column_options<'mcx>(
     Ok(out)
 }
 
+// MergeAttributes duplicate-name scan, partition leg: the dummy ColumnDefs
+// carry no typeName (grammar enforced), so only true duplicates error.
+pub(crate) fn partition_column_dup_scan(table_elts: &NodeList<'_>) -> PgResult<()> {
+    if table_elts.len() > MaxHeapAttributeNumber {
+        return Err(too_many_columns());
+    }
+    for (i, elt) in table_elts.iter().enumerate() {
+        let colname =
+            elt.as_variant::<ColumnDef>().expect("ColumnDef").colname.expect("ColumnDef.colname");
+        for rest in table_elts.iter().skip(i + 1) {
+            let restdef = rest.as_variant::<ColumnDef>().expect("ColumnDef");
+            if restdef.colname == Some(colname) {
+                return Err(duplicate_column(colname));
+            }
+        }
+    }
+    Ok(())
+}
+
+// MergeAttributes saved_columns leg (partitions): every dummy ColumnDef must
+// name a parent column; local defaults override the parent's cooked ones.
+pub(crate) fn merge_partition_column_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_elts: &NodeList<'mcx>,
+    parent: &Relation<'mcx>,
+    gendefs: &mut PgVec<'mcx, (AttrNumber, Node<'mcx>)>,
+) -> PgResult<PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)>> {
+    let mut raw_defaults: PgVec<'mcx, (AttrNumber, Node<'mcx>, u8)> = PgVec::new_in(mcx);
+    for elt in table_elts.iter() {
+        let restdef = elt.as_variant::<ColumnDef>().expect("ColumnDef");
+        let colname = restdef.colname.expect("ColumnDef.colname");
+        let attnum = (0..parent.rd_att.natts as usize)
+            .find(|&i| {
+                let att = parent.rd_att.attr(i);
+                !att.attisdropped && att.attname.name_str() == colname.as_bytes()
+            })
+            .map(|i| (i + 1) as AttrNumber);
+        let Some(attnum) = attnum else {
+            return Err(Box::new(
+                PgError::new(ERROR, format!("column \"{colname}\" does not exist"))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+            ));
+        };
+        let parent_att = parent.rd_att.attr(attnum as usize - 1);
+        if parent_att.attgenerated != 0 {
+            if restdef.raw_default.is_some() && restdef.generated == 0 {
+                return Err(invalid_column_definition(format!(
+                    "column \"{colname}\" inherits from generated column but specifies default"
+                )));
+            }
+            if restdef.identity != 0 {
+                return Err(invalid_column_definition(format!(
+                    "column \"{colname}\" inherits from generated column but specifies identity"
+                )));
+            }
+        } else if restdef.generated != 0 {
+            return Err(child_generation_expression(colname));
+        }
+        if parent_att.attgenerated != 0
+            && restdef.generated != 0
+            && restdef.generated != parent_att.attgenerated as u8
+        {
+            return Err(generation_kind_conflict(
+                colname,
+                parent_att.attgenerated as u8,
+                restdef.generated,
+            ));
+        }
+        debug_assert!(restdef.cooked_default.is_none());
+        if let Some(raw) = restdef.raw_default {
+            if let Some(pos) = gendefs.iter().position(|&(a, _)| a == attnum) {
+                let mut kept: PgVec<'mcx, (AttrNumber, Node<'mcx>)> = PgVec::new_in(mcx);
+                for (k, &e) in gendefs.iter().enumerate() {
+                    if k != pos {
+                        kept.push(e);
+                    }
+                }
+                *gendefs = kept;
+            }
+            raw_defaults.push((attnum, raw, restdef.generated));
+        }
+    }
+    Ok(raw_defaults)
+}
+
 // MergeAttributes (tablecmds.c:2546), regular-inheritance leg. The partition
 // leg stays in lib.rs (descriptor copy). Typed-table merging never reaches
 // here: the grammar forbids OF plus INHERITS (parse_utilcmd.c:255).
@@ -1775,5 +1860,25 @@ mod tests {
         cols.lappend(mcx, coldef(mcx, "name", false, false)).unwrap();
         let e = merge_column_options(mcx, &cols).unwrap_err();
         assert_eq!(e.message(), "column \"name\" specified more than once");
+    }
+
+    #[test]
+    fn partition_dup_scan_errors_on_duplicates() {
+        let mcx = ctx().mcx();
+        let mut cols = NodeList::nil();
+        cols.lappend(mcx, coldef(mcx, "b", false, true)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "b", false, false)).unwrap();
+        let e = partition_column_dup_scan(&cols).unwrap_err();
+        assert_eq!(e.message(), "column \"b\" specified more than once");
+    }
+
+    #[test]
+    fn partition_dup_scan_accepts_distinct_names() {
+        let mcx = ctx().mcx();
+        let mut cols = NodeList::nil();
+        cols.lappend(mcx, coldef(mcx, "a", false, true)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "b", false, false)).unwrap();
+        partition_column_dup_scan(&cols).unwrap();
+        partition_column_dup_scan(&NodeList::nil()).unwrap();
     }
 }
