@@ -192,7 +192,6 @@ pub(crate) fn slot_deform_heap_tuple(
     img: TupleImage,
     offp: &mut u32,
     natts: i32,
-    jit: Option<&jit_deform::DeformKernel>,
 ) {
     let natts = img.tuple_natts.min(natts) as usize;
     let mut attnum = base.tts_nvalid as usize;
@@ -223,19 +222,6 @@ pub(crate) fn slot_deform_heap_tuple(
         // invariant + clamp above); img is the slot's live stored tuple.
         unsafe {
             let mut cstring = false;
-            // JIT prefix kernel (fresh null-free deforms only): identical
-            // walk state to deform_internal over the fixed prefix — the
-            // interpreted walk resumes at (ncols, end_off), slow stays false.
-            // ncols <= natts keeps nvalid/off resume-consistent.
-            if attnum == 0 && !img.hasnulls {
-                if let Some(k) = jit {
-                    if k.ncols() as usize <= natts {
-                        k.row(img.tp, values.as_mut_ptr(), isnull.as_mut_ptr().cast());
-                        attnum = k.ncols() as usize;
-                        off = k.end_off() as usize;
-                    }
-                }
-            }
             if !slow {
                 if !img.hasnulls {
                     (attnum, cstring) = deform_internal(
@@ -362,7 +348,10 @@ fn virtual_getsomeattrs() -> ! {
 }
 
 // The missing-attr pad leaves at entry: a call after the walk would pin
-// base/attnum in callee-saved registers across the whole deform.
+// base/attnum in callee-saved registers across the whole deform. The JIT arm
+// is outlined BEFORE the walk for the same reason — a kernel call inside
+// slot_deform_heap_tuple spills the walk state around it (range lane +0.9%
+// instr when tried; docs/optimizations/jit-deform.md).
 #[inline(always)]
 fn getsome_common(
     base: &mut SlotBase<'_>,
@@ -372,22 +361,54 @@ fn getsome_common(
     jit: Option<&jit_deform::DeformKernel>,
 ) {
     if img.tuple_natts < attnum {
-        return getsome_narrow(base, img, offp, attnum, jit);
+        return getsome_narrow(base, img, offp, attnum);
     }
-    slot_deform_heap_tuple(base, img, offp, attnum, jit);
+    if let Some(k) = jit {
+        return getsome_jit(base, img, offp, attnum, k);
+    }
+    slot_deform_heap_tuple(base, img, offp, attnum);
+    debug_assert!(base.tts_nvalid as i32 >= attnum);
+}
+
+// Fresh null-free deforms run the kernel, then finalize the slot exactly as
+// the interpreted walk would at (ncols, end_off, !SLOW); a not-fully-covered
+// request resumes slot_deform_heap_tuple from that state. Kernel domain
+// misses (hasnulls, partial resume) take the walk whole.
+#[inline(never)]
+fn getsome_jit(
+    base: &mut SlotBase<'_>,
+    img: TupleImage,
+    offp: &mut u32,
+    attnum: i32,
+    k: &jit_deform::DeformKernel,
+) {
+    let ncols = k.ncols() as i32;
+    if base.tts_nvalid == 0 && !img.hasnulls && ncols <= img.tuple_natts {
+        // SAFETY: slot arrays span descriptor natts >= ncols (the kernel was
+        // emitted from this slot's descriptor — arm-site contract); img is
+        // the live stored tuple, null-free, with natts >= ncols.
+        unsafe {
+            k.row(
+                img.tp,
+                base.tts_values.as_mut_ptr(),
+                base.tts_isnull.as_mut_ptr().cast(),
+            );
+        }
+        base.tts_nvalid = ncols as AttrNumber;
+        *offp = k.end_off();
+        base.tts_flags &= !TTS_FLAG_SLOW;
+        if ncols >= attnum {
+            return;
+        }
+    }
+    slot_deform_heap_tuple(base, img, offp, attnum);
     debug_assert!(base.tts_nvalid as i32 >= attnum);
 }
 
 #[cold]
 #[inline(never)]
-fn getsome_narrow(
-    base: &mut SlotBase<'_>,
-    img: TupleImage,
-    offp: &mut u32,
-    attnum: i32,
-    jit: Option<&jit_deform::DeformKernel>,
-) {
-    slot_deform_heap_tuple(base, img, offp, attnum, jit);
+fn getsome_narrow(base: &mut SlotBase<'_>, img: TupleImage, offp: &mut u32, attnum: i32) {
+    slot_deform_heap_tuple(base, img, offp, attnum);
     finish_getsomeattrs(base, attnum);
 }
 
