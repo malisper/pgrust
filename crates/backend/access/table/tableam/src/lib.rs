@@ -29,7 +29,7 @@ use ::types_core::xact::{CommandId, TransactionIdIsValid};
 use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::types_rel::{
     Relation, HEAP_DEFAULT_FILLFACTOR, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE,
-    RELKIND_VIEW,
+    RELKIND_RELATION, RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
 use ::types_scan::scankey::ScanKeyData;
 use ::types_scan::sdir::ScanDirection;
@@ -398,17 +398,22 @@ mod heap {
     }
 
     pub(super) fn relation_set_new_filelocator(
-        _rel: &Relation<'_>,
+        rel: &Relation<'_>,
         newrlocator: &RelFileLocator,
         persistence: i8,
     ) -> PgResult<(TransactionId, TransactionId)> {
-        if persistence == b'u' as i8 {
-            unported("heapam_relation_set_new_filelocator INIT_FORKNUM lane (unlogged)");
-        }
         let freeze_xid = procarray::RecentXmin();
         let min_multi = multixact::GetOldestMultiXactId()?;
         let srel =
             catalog_storage::RelationCreateStorage(*newrlocator, persistence as u8, true)?;
+        if persistence as u8 == ::types_core::catalog::RELPERSISTENCE_UNLOGGED {
+            debug_assert!(
+                rel.rd_rel.relkind == RELKIND_RELATION
+                    || rel.rd_rel.relkind == RELKIND_TOASTVALUE
+            );
+            smgr::smgrcreate(srel, ForkNumber::INIT_FORKNUM, false)?;
+            catalog_storage::log_smgrcreate(newrlocator, ForkNumber::INIT_FORKNUM)?;
+        }
         smgr::smgrclose(srel)?;
         Ok((freeze_xid, min_multi))
     }
