@@ -498,3 +498,105 @@ pub fn to_jsonb<'mcx>(mcx: Mcx<'mcx>, val: Datum, val_type: Oid) -> PgResult<PgV
     datum_to_jsonb_internal(mcx, &mut ps, val, false, &mut cat, false)?;
     convert_to_jsonb(mcx, &ps.finish())
 }
+
+// Text-datum payload from a deconstructed text[] element.
+fn obj_elem_payload<'mcx>(d: Datum) -> &'mcx [u8] {
+    // SAFETY: non-null text element datums point into the flat array image,
+    // which lives in the 'mcx arena the array was detoasted into.
+    let pv = unsafe { types_fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
+    pv.data()
+}
+
+#[cold]
+fn obj_subscript_error(msg: &'static str) -> alloc::boxed::Box<types_error::PgError> {
+    alloc::boxed::Box::new(
+        types_error::PgError::error(msg)
+            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+    )
+}
+
+#[cold]
+fn obj_null_key() -> alloc::boxed::Box<types_error::PgError> {
+    alloc::boxed::Box::new(
+        types_error::PgError::error("null value not allowed for object key")
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+    )
+}
+
+fn jsonb_object_finish<'mcx>(
+    mcx: Mcx<'mcx>,
+    pairs: &[(Datum, bool)],
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut ps = crate::mutate::JsonbPush::new(mcx)?;
+    ps.push_token(WjbToken::BeginObject)?;
+    for chunk in pairs.chunks_exact(2) {
+        let (kd, knull) = chunk[0];
+        if knull {
+            return Err(obj_null_key());
+        }
+        ps.push(WjbToken::Key, JsonbItem::String(obj_elem_payload(kd)))?;
+        let (vd, vnull) = chunk[1];
+        if vnull {
+            ps.push(WjbToken::Value, JsonbItem::Null)?;
+        } else {
+            ps.push(WjbToken::Value, JsonbItem::String(obj_elem_payload(vd)))?;
+        }
+    }
+    ps.push_token(WjbToken::EndObject)?;
+    crate::build::convert_to_jsonb(mcx, &ps.finish())
+}
+
+/// C: jsonb_object (text[] key/value pairs).
+pub fn jsonb_object<'mcx>(mcx: Mcx<'mcx>, array: &'mcx [u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let ndims = arrayfuncs::arr_ndim(array);
+    let dims = arrayfuncs::read_dims_lbounds(array).1;
+    match ndims {
+        0 => return jsonb_object_finish(mcx, &[]),
+        1 => {
+            if dims[0] % 2 != 0 {
+                return Err(obj_subscript_error("array must have even number of elements"));
+            }
+        }
+        2 => {
+            if dims[1] != 2 {
+                return Err(obj_subscript_error("array must have two columns"));
+            }
+        }
+        _ => return Err(obj_subscript_error("wrong number of array subscripts")),
+    }
+    let (elems, nulls) =
+        arrayfuncs::deconstruct_array_builtin(mcx, array, types_core::TEXTOID, true)?;
+    let pairs: alloc::vec::Vec<(Datum, bool)> =
+        elems.iter().copied().zip(nulls.iter().copied()).collect();
+    jsonb_object_finish(mcx, &pairs[..(pairs.len() / 2) * 2])
+}
+
+/// C: jsonb_object_two_arg (text[] keys, text[] values).
+pub fn jsonb_object_two_arg<'mcx>(
+    mcx: Mcx<'mcx>,
+    key_array: &'mcx [u8],
+    val_array: &'mcx [u8],
+) -> PgResult<PgVec<'mcx, u8>> {
+    let nkdims = arrayfuncs::arr_ndim(key_array);
+    let nvdims = arrayfuncs::arr_ndim(val_array);
+    if nkdims > 1 || nkdims != nvdims {
+        return Err(obj_subscript_error("wrong number of array subscripts"));
+    }
+    if nkdims == 0 {
+        return jsonb_object_finish(mcx, &[]);
+    }
+    let (key_elems, key_nulls) =
+        arrayfuncs::deconstruct_array_builtin(mcx, key_array, types_core::TEXTOID, true)?;
+    let (val_elems, val_nulls) =
+        arrayfuncs::deconstruct_array_builtin(mcx, val_array, types_core::TEXTOID, true)?;
+    if key_elems.len() != val_elems.len() {
+        return Err(obj_subscript_error("mismatched array dimensions"));
+    }
+    let mut pairs: alloc::vec::Vec<(Datum, bool)> =
+        alloc::vec::Vec::with_capacity(key_elems.len() * 2);
+    for i in 0..key_elems.len() {
+        pairs.push((key_elems[i], key_nulls[i]));
+        pairs.push((val_elems[i], val_nulls[i]));
+    }
+    jsonb_object_finish(mcx, &pairs)
+}

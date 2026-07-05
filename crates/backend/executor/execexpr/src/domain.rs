@@ -32,6 +32,11 @@ struct DomainMemo {
 
 struct EngineState {
     mcx: Mcx<'static>,
+    // C evaluates checks in the caller's per-tuple context; this scratch is
+    // the same lifetime class, reset at depth 0 (checks can re-enter for
+    // nested domains).
+    scratch: NonNull<MemoryContext>,
+    depth: u32,
     memos: PgHashMap<'static, Oid, DomainMemo>,
 }
 
@@ -44,7 +49,14 @@ fn with_state<R>(f: impl FnOnce(&mut EngineState) -> R) -> R {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
             let mcx = Box::leak(Box::new(MemoryContext::new("DomainCheckEngine"))).mcx();
-            ManuallyDrop::new(EngineState { mcx, memos: PgHashMap::with_capacity_in(4, mcx) })
+            let scratch =
+                NonNull::from(Box::leak(Box::new(MemoryContext::new("DomainCheckScratch"))));
+            ManuallyDrop::new(EngineState {
+                mcx,
+                scratch,
+                depth: 0,
+                memos: PgHashMap::with_capacity_in(4, mcx),
+            })
         });
         f(st)
     })
@@ -145,13 +157,29 @@ pub fn domain_check_input(
     // may re-enter this engine for a different domain (map growth would move
     // entries). Ownership round-trips instead of a raw pointer.
     let mut memo = with_state(|st| st.memos.remove(&domain_type)).unwrap();
-    let result = run_checks(&mut memo, value, isnull, domain_type, escontext);
-    with_state(|st| st.memos.insert(domain_type, memo));
+    let (scratch, depth) = with_state(|st| {
+        if st.depth == 0 {
+            // SAFETY: single-threaded TLS engine at depth 0 — no live
+            // borrows of scratch allocations survive a completed call.
+            unsafe { st.scratch.as_mut().reset() };
+        }
+        st.depth += 1;
+        (st.scratch, st.depth)
+    });
+    let _ = depth;
+    // SAFETY: the leaked scratch context is 'static; reset only at depth 0.
+    let scratch_mcx = unsafe { scratch.as_ref() }.mcx();
+    let result = run_checks(&mut memo, scratch_mcx, value, isnull, domain_type, escontext);
+    with_state(|st| {
+        st.depth -= 1;
+        st.memos.insert(domain_type, memo)
+    });
     result
 }
 
 fn run_checks(
     memo: &mut DomainMemo,
+    scratch_mcx: Mcx<'_>,
     value: Datum,
     isnull: bool,
     domain_type: Oid,
@@ -184,6 +212,8 @@ fn run_checks(
                 };
                 // SAFETY: slot is an engine-mcx allocation owned by this memo.
                 unsafe { check.slot.write(NullableDatum { value: ro, isnull }) };
+                // SAFETY: scratch outlives this eval; re-armed every call.
+                unsafe { check.state.arm_result_mcx_raw(scratch_mcx) };
                 let r = exec_eval_expr(&mut check.state, &mut EvalSlots::default())?;
                 // C ExecCheck: NULL is not a failure.
                 if !r.isnull && !r.value.as_bool() {

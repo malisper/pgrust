@@ -916,6 +916,22 @@ fn invalid_param_msg(msg: &str) -> Box<types_error::PgError> {
     )
 }
 
+pub fn fc_jsonb_object(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let array = arg_flat_array(fcinfo, 0, mcx)?;
+    Ok(image_result(crate::tojsonb::jsonb_object(mcx, array)?))
+}
+
+pub fn fc_jsonb_object_two_arg(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let keys = arg_flat_array(fcinfo, 0, mcx)?;
+    let vals = arg_flat_array(fcinfo, 1, mcx)?;
+    Ok(image_result(crate::tojsonb::jsonb_object_two_arg(mcx, keys, vals)?))
+}
+
 pub fn fc_jsonb_strip_nulls(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -931,6 +947,8 @@ pub fn fc_jsonb_strip_nulls(
 pub const JSONB_BUILTINS: &[FmgrBuiltin] = &[
     b(3207, "jsonb_array_length", 1, fc_jsonb_array_length),
     b(3262, "jsonb_strip_nulls", 2, fc_jsonb_strip_nulls),
+    b(3263, "jsonb_object", 1, fc_jsonb_object),
+    b(3264, "jsonb_object_two_arg", 2, fc_jsonb_object_two_arg),
     b_lax(3209, "jsonb_populate_record", 2, crate::populate::fc_jsonb_populate_record),
     b_lax(6338, "jsonb_populate_record_valid", 2, crate::populate::fc_jsonb_populate_record_valid),
     b(3490, "jsonb_to_record", 1, crate::populate::fc_jsonb_to_record),

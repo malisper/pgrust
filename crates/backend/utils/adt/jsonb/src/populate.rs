@@ -147,6 +147,13 @@ impl<'mcx> ColumnIoData<'mcx> {
             _ => None,
         }
     }
+
+    fn composite_io_ref(&self) -> Option<&CompositeIoData<'mcx>> {
+        match &self.kind {
+            ColumnKind::Composite { io } | ColumnKind::CompositeDomain { io } => Some(io),
+            _ => None,
+        }
+    }
 }
 
 /// C JsValue.
@@ -1821,6 +1828,18 @@ fn populate_recordset_worker(
     let rsi = fcinfo.rsinfo_mut().expect("checked above");
     rsi.returnMode = SetFunctionReturnMode::Materialize;
     rsi.setResult = Some(alloc::boxed::Box::new(store));
+    // C: rsi->setDesc = CreateTupleDescCopy(cache tupdesc) — the executor's
+    // tupledesc_match runs against it. The cache outlives the call (fn_extra).
+    let cache_ref = flinfo
+        .fn_extra_ref::<PopulateRecordCache>()
+        .expect("cache just restored");
+    if let Some(io) = cache_ref.c.as_ref().and_then(|c| c.composite_io_ref()) {
+        if let Some(td) = io.tupdesc.as_ref() {
+            rsi.setDesc = Some(
+                core::ptr::NonNull::from(td).cast::<core::ffi::c_void>(),
+            );
+        }
+    }
     Ok(fcinfo.return_null())
 }
 

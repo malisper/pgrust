@@ -33,8 +33,7 @@ pub enum SetFunctionReturnMode {
     Materialize = SFRM_Materialize,
 }
 
-// C ReturnSetInfo minus econtext (contexts thread explicitly) and setDesc
-// (collapsed: both sides derive the tupdesc from pg_proc).
+// C ReturnSetInfo minus econtext (contexts thread explicitly).
 #[repr(C)]
 pub struct ReturnSetInfo {
     tag: u32,
@@ -47,6 +46,11 @@ pub struct ReturnSetInfo {
     pub expectedDesc: Option<NonNull<core::ffi::c_void>>,
     // C's `Tuplestorestate *setResult`, taken by the executor post-call.
     pub setResult: Option<alloc::boxed::Box<dyn core::any::Any>>,
+    // C's `TupleDesc setDesc`, type-erased like expectedDesc: a materialize
+    // SRF may arm it with the rowtype its stored tuples actually carry; the
+    // executor then runs C's tupledesc_match against the scan tupdesc.
+    // SAFETY: when Some, points at a TupleDescData live until the call ends.
+    pub setDesc: Option<NonNull<core::ffi::c_void>>,
     pub srf_shutdown: Option<SrfShutdownHook>,
 }
 
@@ -71,6 +75,7 @@ impl ReturnSetInfo {
             isDone: ExprDoneCond::ExprSingleResult,
             expectedDesc: None,
             setResult: None,
+            setDesc: None,
             srf_shutdown: None,
         }
     }
