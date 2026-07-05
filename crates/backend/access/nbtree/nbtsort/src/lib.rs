@@ -106,6 +106,19 @@ fn spool_begin<'mcx>(
     )
 }
 
+/// btbuildempty (nbtree.c): unlogged indexes' INIT_FORKNUM metapage.
+pub fn btbuildempty(index: &Relation<'_>) -> PgResult<()> {
+    let allequalimage = bt_allequalimage(index)?;
+    let mut bulkstate = bulkwrite::smgr_bulk_start_rel(index, ForkNumber::INIT_FORKNUM)?;
+    let mut metabuf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
+    {
+        let mut page = page_mut_of(&mut metabuf);
+        nbtree::bt_initmetapage(&mut page, P_NONE, 0, allequalimage);
+    }
+    bulkwrite::smgr_bulk_write(&mut bulkstate, BTREE_METAPAGE, metabuf, true)?;
+    bulkwrite::smgr_bulk_finish(bulkstate)
+}
+
 fn leafbuild<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,

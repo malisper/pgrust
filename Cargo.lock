@@ -1848,6 +1848,7 @@ dependencies = [
  "datum",
  "execindexing",
  "freespace",
+ "init_small",
  "mcx",
  "types_brin",
  "types_core",
@@ -5629,6 +5630,7 @@ dependencies = [
  "execindexing",
  "gist",
  "guc_tables",
+ "init_small",
  "mcx",
  "types_core",
  "types_error",
@@ -13363,6 +13365,7 @@ version = "0.1.0"
 dependencies = [
  "bufmgr",
  "bufmgr_seams",
+ "bulkwrite",
  "execindexing",
  "mcx",
  "spgist",
@@ -13370,6 +13373,7 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_spgist",
+ "types_storage",
  "xloginsert",
 ]
 

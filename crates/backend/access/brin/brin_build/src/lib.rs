@@ -25,11 +25,6 @@ use brin_pageops::{
 };
 use brin_tuple::{brin_form_tuple, brin_memtuple_initialize, brin_new_memtuple};
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: {what}")
-}
 pub struct BrinBuildResult {
     pub heap_tuples: f64,
     pub index_tuples: f64,
@@ -193,9 +188,27 @@ fn brinbuildCallback(
     Ok(())
 }
 
-/// brinbuildempty: unlogged-index INIT_FORKNUM arm (loud repo-wide).
-pub fn brinbuildempty(_index: &Relation<'_>) -> ! {
-    unported("brinbuildempty (unlogged-index INIT_FORKNUM lane)")
+/// brinbuildempty (brin.c): unlogged indexes' INIT_FORKNUM metapage.
+pub fn brinbuildempty(index: &Relation<'_>) -> PgResult<()> {
+    let (metabuf, _n) = extend_buffered_rel_by::call(
+        index,
+        ForkNumber::INIT_FORKNUM,
+        None,
+        EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK,
+        1,
+    )?;
+    init_small::globals::StartCriticalSection();
+    {
+        // SAFETY: pinned + exclusively locked (EB_LOCK_FIRST).
+        let mut page = unsafe { PageMut::from_raw(buffer_get_page::call(metabuf)) };
+        brin_metapage_init(&mut page, brin_get_pages_per_range(index), BRIN_CURRENT_VERSION);
+    }
+    mark_buffer_dirty::call(metabuf)?;
+    ::xloginsert_seams::log_newpage_buffer::call(metabuf, true)?;
+    init_small::globals::EndCriticalSection();
+    lock_buffer::call(metabuf, BUFFER_LOCK_UNLOCK)?;
+    release_buffer::call(metabuf)?;
+    Ok(())
 }
 
 fn form_and_insert_tuple(state: &mut BrinBuildState<'_, '_>) -> PgResult<()> {

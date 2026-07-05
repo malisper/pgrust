@@ -22,6 +22,30 @@ pub struct IndexBuildResult {
     pub index_tuples: f64,
 }
 
+/// ginbuildempty (gininsert.c): unlogged indexes' two INIT_FORKNUM pages.
+pub fn ginbuildempty(index: &Relation<'_>) -> PgResult<()> {
+    let flags = bm::EB_LOCK_FIRST | bm::EB_SKIP_EXTENSION_LOCK;
+    let (meta_buffer, _) =
+        bm::extend_buffered_rel_by::call(index, ForkNumber::INIT_FORKNUM, None, flags, 1)?;
+    let (root_buffer, _) =
+        bm::extend_buffered_rel_by::call(index, ForkNumber::INIT_FORKNUM, None, flags, 1)?;
+
+    init_small::globals::StartCriticalSection();
+    GinInitMetabuffer(meta_buffer);
+    bm::mark_buffer_dirty::call(meta_buffer)?;
+    xloginsert::log_newpage_buffer(meta_buffer, true)?;
+    GinInitBuffer(root_buffer, GIN_LEAF);
+    bm::mark_buffer_dirty::call(root_buffer)?;
+    xloginsert::log_newpage_buffer(root_buffer, false)?;
+    init_small::globals::EndCriticalSection();
+
+    bm::lock_buffer::call(meta_buffer, GIN_UNLOCK)?;
+    bm::release_buffer::call(meta_buffer)?;
+    bm::lock_buffer::call(root_buffer, GIN_UNLOCK)?;
+    bm::release_buffer::call(root_buffer)?;
+    Ok(())
+}
+
 /// ginbuild: serial accumulate + dump (parallel workers unported).
 pub fn ginbuild<'mcx>(
     mcx: Mcx<'mcx>,

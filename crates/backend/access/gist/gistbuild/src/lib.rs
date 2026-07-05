@@ -121,8 +121,23 @@ pub fn gistbuild<'mcx>(
     })
 }
 
-/// gistbuildempty (INIT_FORKNUM arm for unlogged indexes).
+/// gistbuildempty (gist.c): unlogged indexes' INIT_FORKNUM root page.
 pub fn gistbuildempty(index: &Relation<'_>) -> PgResult<()> {
     debug_assert!(index.rd_rel.relpersistence == RELPERSISTENCE_UNLOGGED);
-    panic!("unported: gistbuildempty (unlogged gist INIT_FORKNUM lane)");
+    let (buf, _) = bufmgr_seams::extend_buffered_rel_by::call(
+        index,
+        ForkNumber::INIT_FORKNUM,
+        None,
+        bufmgr_seams::EB_SKIP_EXTENSION_LOCK | bufmgr_seams::EB_LOCK_FIRST,
+        1,
+    )?;
+    let pin = bufmgr_seams::BufferPin::adopt(buf).expect("extend returns a valid buffer");
+    init_small::globals::StartCriticalSection();
+    gist_init_buffer(&pin, F_LEAF);
+    bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
+    xloginsert::log_newpage_buffer(pin.buffer(), true)?;
+    init_small::globals::EndCriticalSection();
+    bufmgr_seams::lock_buffer::call(pin.buffer(), bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
+    pin.release();
+    Ok(())
 }
