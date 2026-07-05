@@ -746,8 +746,71 @@ pub fn ProcedureCreate<'mcx>(
                 }
             }
         }
+        // pg_proc.c:533-575: existing defaults may not be removed, and each
+        // retained default must keep its expression type (polymorphic
+        // resolution of existing calls depends on it).
         if old_nargdefaults != 0 {
-            unported("ProcedureCreate: parameter-default replace compare (old pronargdefaults set)");
+            let dropcmd = match a.prokind {
+                PROKIND_PROCEDURE => "DROP PROCEDURE",
+                PROKIND_AGGREGATE => "DROP AGGREGATE",
+                _ => "DROP FUNCTION",
+            };
+            let ndefaults = a.numDefaults as usize;
+            if ndefaults < old_nargdefaults as usize {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot remove parameter defaults from existing function".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+                    .with_hint(format!(
+                        "Use {dropcmd} {} first.",
+                        format_procedure_lite(a.procedureName, a.parameterTypes)?
+                    )),
+                ));
+            }
+            let (old_defaults_d, old_defaults_null) = getattr(Anum_pg_proc_proargdefaults);
+            assert!(!old_defaults_null, "pronargdefaults set but proargdefaults is null");
+            // SAFETY: non-null text attr of a pinned syscache tuple.
+            let old_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    old_defaults_d.as_usize() as *const u8,
+                    types_tuple::varatt::varsize_any(old_defaults_d.as_usize() as *const u8),
+                )
+            };
+            let old_str = varlena::text_to_cstring(mcx, old_bytes)?;
+            let old_node = readfuncs::stringToNode(
+                mcx,
+                core::str::from_utf8(&old_str[..old_str.len() - 1]).expect("stored node text"),
+            )?;
+            let old_defaults = old_node.as_list().expect("proargdefaults holds a List");
+            debug_assert_eq!(old_defaults.len(), old_nargdefaults as usize);
+            // The caller hands defaults pre-serialized (train field shape);
+            // deserialize for the per-default exprType comparison.
+            let new_node = readfuncs::stringToNode(
+                mcx,
+                a.parameterDefaults.expect("ndefaults >= old_nargdefaults > 0"),
+            )?;
+            let newlist = new_node.as_list().expect("parameterDefaults holds a List");
+            let skip = ndefaults - old_nargdefaults as usize;
+            for (olddef, newdef) in old_defaults.iter().zip(newlist.iter().skip(skip)) {
+                if nodes_core::node_funcs::expr_type(olddef)
+                    != nodes_core::node_funcs::expr_type(newdef)
+                {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "cannot change data type of existing parameter default value"
+                                .to_string(),
+                        )
+                        .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+                        .with_hint(format!(
+                            "Use {dropcmd} {} first.",
+                            format_procedure_lite(a.procedureName, a.parameterTypes)?
+                        )),
+                    ));
+                }
+            }
         }
 
         let mut replaces = [true; Natts_pg_proc];
@@ -801,6 +864,18 @@ pub fn ProcedureCreate<'mcx>(
                 DependencyType::Normal,
             )?;
         }
+    }
+
+    // pg_proc.c:669-670: dependencies on objects in parameter defaults.
+    if let Some(defaults) = a.parameterDefaults {
+        let defaults_node = readfuncs::stringToNode(mcx, defaults)?;
+        dependency_seams::record_dependency_on_expr::call(
+            mcx,
+            &myself,
+            defaults_node,
+            &types_nodes::list::NodeList::nil(),
+            DependencyType::Normal,
+        )?;
     }
 
     if !is_update {

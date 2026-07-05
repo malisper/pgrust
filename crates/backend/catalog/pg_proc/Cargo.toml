@@ -30,6 +30,8 @@ outfuncs = { path = "../../nodes/outfuncs" }
 dependency_seams = { path = "../dependency_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 varlena = { path = "../../utils/adt/varlena" }
+readfuncs = { path = "../../nodes/readfuncs" }
+nodes_core = { path = "../../nodes/nodes_core" }
 format_type = { path = "../../utils/adt/format_type" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 dfmgr = { path = "../../utils/fmgr/dfmgr" }
