@@ -11135,6 +11135,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "types_nodes",
  "types_portal",
 ]
 
@@ -11770,6 +11771,7 @@ dependencies = [
  "smgr",
  "snapmgr",
  "syscache_seams",
+ "tableam_vocab",
  "tupdesc",
  "types_core",
  "types_error",
