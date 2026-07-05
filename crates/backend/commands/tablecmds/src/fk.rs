@@ -2467,6 +2467,7 @@ fn clone_fk_referencing<'mcx>(
             &arrays.ff_eq_oprs,
             &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
             false,
+            form.conperiod,
         )?;
         add_fk_recurse_referencing(
             mcx,
