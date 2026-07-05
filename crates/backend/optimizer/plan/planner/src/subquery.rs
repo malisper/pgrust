@@ -41,6 +41,7 @@ pub fn subquery_planner<'mcx>(
         run.root.query_level = 1;
     }
     debug_assert!(run.root.query_level >= 1);
+    run.root.command_type = parse.commandType;
     if parse.resultRelation != 0 {
         run.root.all_result_relids = relids_singleton(mcx, parse.resultRelation as u32);
     }
