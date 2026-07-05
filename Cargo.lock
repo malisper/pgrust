@@ -9805,6 +9805,7 @@ dependencies = [
  "clauses",
  "clauses_seams",
  "coerce",
+ "copyfuncs",
  "costsize",
  "datum",
  "equivclass",

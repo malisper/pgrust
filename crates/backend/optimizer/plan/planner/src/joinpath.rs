@@ -709,10 +709,25 @@ fn exec_materializes_output(pathtype: u16) -> bool {
         || pathtype == tag16(NodeTag::T_WorkTableScan)
 }
 
-// extract_lateral_vars_from_PHVs (joinpath.c): placeholder_list is empty
-// tree-wide (loud at creation), so the PHV crawl reduces to its guards.
-fn extract_lateral_vars_from_phvs(run: &PlannerRun<'_>) {
-    debug_assert!(run.root.placeholder_list.is_empty());
+// extract_lateral_vars_from_PHVs (joinpath.c): C's fast-outs, then loud on
+// any PHV that would actually contribute memoize cache keys (memoize lane).
+fn extract_lateral_vars_from_phvs(run: &PlannerRun<'_>, innerrelids: &types_pathnodes::Relids<'_>) {
+    if !run.root.hasLateralRTEs {
+        return;
+    }
+    if crate::relnode::relids_num_members(innerrelids) > 1 {
+        return;
+    }
+    for &phid in run.root.placeholder_list.iter() {
+        let ph = run.root.phinfo(phid);
+        if crate::relnode::relids_is_empty(&ph.ph_lateral) {
+            continue;
+        }
+        if !crate::relnode::relids_equal(&ph.ph_eval_at, innerrelids) {
+            continue;
+        }
+        panic!("extract_lateral_vars_from_PHVs (joinpath.c): lateral PHV memoize keys; memoize lane");
+    }
 }
 
 // paraminfo_get_equal_hashops (joinpath.c). None = not hashable.
@@ -806,7 +821,10 @@ fn get_memoize_path<'mcx>(
     if run.root.rel(run.root.path(outer_path).base().parent).rows < 2.0 {
         return Ok(None);
     }
-    extract_lateral_vars_from_phvs(run);
+    {
+        let inner_relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(innerrel).relids);
+        extract_lateral_vars_from_phvs(run, &inner_relids);
+    }
     let has_ppi_clauses = run
         .root
         .path(inner_path)

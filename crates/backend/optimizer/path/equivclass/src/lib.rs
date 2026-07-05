@@ -1992,7 +1992,7 @@ fn ec_add_derived_clauses(run: &mut PlannerRun<'_>, ec: EcId, clauses: &[RinfoId
     }
 }
 
-pub(crate) fn ec_clear_derived_clauses(run: &mut PlannerRun<'_>, ec: EcId) {
+pub fn ec_clear_derived_clauses(run: &mut PlannerRun<'_>, ec: EcId) {
     let e = run.root.ec_mut(ec);
     e.ec_derives_list.clear();
     e.ec_derives_hash = None;

@@ -345,6 +345,11 @@ struct ChangeVars<'mcx> {
     rt_index: i32,
     new_index: i32,
     sublevels_up: u32,
+    /// replace_relid_callback (analyzejoins.c) RangeTblRef arm: SJE leaves
+    /// RangeTblRefs untouched so remove_rel_from_joinlist still finds them.
+    /// (Its RestrictInfo arm lives planner-side; RestrictInfos are not
+    /// expression-tree nodes here.)
+    skip_rangetblref: bool,
 }
 
 impl<'mcx> nodes_core::NodeWalker<'mcx> for ChangeVars<'mcx> {
@@ -405,6 +410,9 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for ChangeVars<'mcx> {
                 Ok(false)
             }
             NodeTag::T_RangeTblRef => {
+                if self.skip_rangetblref {
+                    return Ok(false);
+                }
                 if self.sublevels_up == 0 {
                     let (rt_index, new_index) = (self.rt_index, self.new_index);
                     // SAFETY: as above.
@@ -485,7 +493,7 @@ pub fn ChangeVarNodes<'mcx>(
     new_index: i32,
     sublevels_up: u32,
 ) -> PgResult<()> {
-    let mut w = ChangeVars { mcx, rt_index, new_index, sublevels_up };
+    let mut w = ChangeVars { mcx, rt_index, new_index, sublevels_up, skip_rangetblref: false };
     if node.node_tag() == NodeTag::T_Query {
         if sublevels_up == 0 {
             // SAFETY: exclusive tree (module contract).
@@ -530,6 +538,63 @@ pub fn ChangeVarNodes<'mcx>(
         use nodes_core::NodeWalker as _;
         w.visit(node)?;
     }
+    Ok(())
+}
+
+/// ChangeVarNodesExtended with analyzejoins.c's replace_relid_callback,
+/// expression-tree form (RangeTblRefs left untouched). The callback's
+/// RestrictInfo arm has no equivalent here: planner RestrictInfos are arena
+/// structs, adjusted by the caller.
+pub fn ChangeVarNodesExtendedSJE<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    rt_index: i32,
+    new_index: i32,
+    sublevels_up: u32,
+) -> PgResult<()> {
+    debug_assert!(node.node_tag() != NodeTag::T_Query);
+    let mut w = ChangeVars { mcx, rt_index, new_index, sublevels_up, skip_rangetblref: true };
+    use nodes_core::NodeWalker as _;
+    w.visit(node)?;
+    Ok(())
+}
+
+/// ChangeVarNodesExtended over a whole Query reached by reference (SJE's
+/// root->parse rewrite). resultRelation/mergeTargetRelation cannot name an
+/// SJE-removed rel (remove_self_joins_recurse excludes them), so the two
+/// scalar fields need no mutation here.
+pub fn ChangeVarNodesExtendedSJEQueryRef<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: &'mcx Query<'mcx>,
+    rt_index: i32,
+    new_index: i32,
+) -> PgResult<()> {
+    debug_assert!(q.resultRelation != rt_index && q.mergeTargetRelation != rt_index);
+    if let Some(oc) = q.onConflict {
+        // SAFETY: in-place fixup, no derived ref held across the call.
+        unsafe {
+            oc.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                if o.exclRelIndex == rt_index {
+                    o.exclRelIndex = new_index;
+                }
+            })
+        }
+        .expect("OnConflictExpr");
+    }
+    for rc in &q.rowMarks {
+        // SAFETY: as above.
+        unsafe {
+            rc.with_mut::<RowMarkClause, _>(|r| {
+                if r.rti == rt_index as u32 {
+                    r.rti = new_index as u32;
+                }
+            })
+        }
+        .expect("rowMarks holds RowMarkClause");
+    }
+    let mut w = ChangeVars { mcx, rt_index, new_index, sublevels_up: 0, skip_rangetblref: true };
+    use nodes_core::NodeWalker as _;
+    nodes_core::query_tree_walker(q, &mut w, 0)?;
     Ok(())
 }
 

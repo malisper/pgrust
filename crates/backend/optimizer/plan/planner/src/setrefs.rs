@@ -338,6 +338,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let fns = if rtoffset == 0
                 && !run.glob.has_alternative_subplans
                 && run.root.minmax_aggs.is_empty()
+                && run.glob.last_ph_id == 0
             {
                 for rtfunc_node in &s.functions {
                     let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
@@ -1466,6 +1467,29 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            let opfuncid =
+                if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            record_plan_function_dependency(run, opfuncid)?;
+            let mut args = NodeList::nil();
+            for arg in &d.args {
+                args.lappend(mcx, fix_upper_expr(run, arg, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullIfExpr {
+                    opno: d.opno,
+                    opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args,
+                    location: d.location,
+                },
+            )
+        }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             let testexpr = match sp.testexpr {
@@ -1987,7 +2011,11 @@ fn fix_scan_list<'mcx>(
     num_exec: f64,
 ) -> PgResult<Option<NodeList<'mcx>>> {
     debug_assert!(run.root.multiexpr_params.is_empty());
-    if rtoffset == 0 && !run.glob.has_alternative_subplans && run.root.minmax_aggs.is_empty() {
+    if rtoffset == 0
+        && !run.glob.has_alternative_subplans
+        && run.root.minmax_aggs.is_empty()
+        && run.glob.last_ph_id == 0
+    {
         for node in list {
             fix_scan_expr_walker(run, node)?;
         }
@@ -2210,6 +2238,29 @@ fn fix_scan_expr_mutator<'mcx>(
             Node::mk(
                 mcx,
                 types_nodes::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args,
+                    location: d.location,
+                },
+            )
+        }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            let opfuncid =
+                if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            record_plan_function_dependency(run, opfuncid)?;
+            let mut args = NodeList::nil();
+            for arg in &d.args {
+                args.lappend(mcx, fix_scan_expr_mutator(run, arg, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullIfExpr {
                     opno: d.opno,
                     opfuncid,
                     opresulttype: d.opresulttype,
@@ -2732,6 +2783,15 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         },
         NodeTag::T_DistinctExpr => {
             let d = node.as_distinct_expr().unwrap();
+            debug_assert!(d.opfuncid != 0, "fix_scan_expr_walker: unresolved opfuncid");
+            record_plan_function_dependency(run, d.opfuncid)?;
+            for arg in &d.args {
+                fix_scan_expr_walker(run, arg)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
             debug_assert!(d.opfuncid != 0, "fix_scan_expr_walker: unresolved opfuncid");
             record_plan_function_dependency(run, d.opfuncid)?;
             for arg in &d.args {
@@ -3465,6 +3525,29 @@ fn fix_join_expr_mutator<'mcx>(
             Node::mk(
                 mcx,
                 types_nodes::DistinctExpr {
+                    opno: d.opno,
+                    opfuncid,
+                    opresulttype: d.opresulttype,
+                    opretset: d.opretset,
+                    opcollid: d.opcollid,
+                    inputcollid: d.inputcollid,
+                    args,
+                    location: d.location,
+                },
+            )
+        }
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            let opfuncid =
+                if d.opfuncid != 0 { d.opfuncid } else { lsyscache::get_opcode(d.opno)? };
+            record_plan_function_dependency(run, opfuncid)?;
+            let mut args = NodeList::nil();
+            for arg in &d.args {
+                args.lappend(mcx, fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::NullIfExpr {
                     opno: d.opno,
                     opfuncid,
                     opresulttype: d.opresulttype,
