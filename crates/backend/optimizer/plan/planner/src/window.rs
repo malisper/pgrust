@@ -348,6 +348,18 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
                 pull_window_input_vars(a, out);
             }
         }
+        NodeTag::T_NullIfExpr => {
+            for a in &node.as_null_if_expr().unwrap().args {
+                pull_window_input_vars(a, out);
+            }
+        }
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            pull_window_input_vars(fs.arg, out);
+            for a in &fs.newvals {
+                pull_window_input_vars(a, out);
+            }
+        }
         NodeTag::T_RowExpr => {
             for a in &node.as_row_expr().unwrap().args {
                 pull_window_input_vars(a, out);

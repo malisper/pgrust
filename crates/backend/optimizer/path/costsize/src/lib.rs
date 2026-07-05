@@ -238,10 +238,33 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             }
             Ok(())
         }
+        // C's OpExpr/DistinctExpr/NullIfExpr arm charges the operator too.
+        NodeTag::T_NullIfExpr => {
+            let d = node.as_null_if_expr().unwrap();
+            let opfuncid = if d.opfuncid != 0 {
+                d.opfuncid
+            } else {
+                lsyscache::get_opcode(d.opno)?
+            };
+            planner_seams::add_function_cost::call(opfuncid, cost)?;
+            for arg in &d.args {
+                cost_qual_eval_walker(arg, cost)?;
+            }
+            Ok(())
+        }
         NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
             Some(arg) => cost_qual_eval_walker(arg, cost),
             None => Ok(()),
         },
+        // No C case: falls to C's expression_tree_walker default.
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            cost_qual_eval_walker(fs.arg, cost)?;
+            for a in &fs.newvals {
+                cost_qual_eval_walker(a, cost)?;
+            }
+            Ok(())
+        }
         NodeTag::T_RowExpr => {
             for arg in &node.as_row_expr().unwrap().args {
                 cost_qual_eval_walker(arg, cost)?;
