@@ -13,3 +13,10 @@ seam_core::seam!(
     // rendering; latch waits run it on every wake.
     pub fn drain_thread_signals() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // SendThreadSignal — kill(pid, signo)'s thread rendering for seams-only
+    // callers (proc.c's blocking-autovacuum cancel). Returns 0 on success,
+    // errno on failure (ESRCH when no such backend, as C's kill()).
+    pub fn send_thread_signal(pid: i32, signo: i32) -> i32
+);

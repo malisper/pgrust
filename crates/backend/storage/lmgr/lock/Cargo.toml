@@ -21,6 +21,7 @@ lwlock = { path = "../lwlock" }
 lmgr_proc = { path = "../lmgr_proc" }
 lock_seams = { path = "../lock_seams" }
 deadlock_seams = { path = "../deadlock_seams" }
+procsignal_seams = { path = "../../ipc/procsignal_seams" }
 lmgr_seams = { path = "../lmgr_seams" }
 latch_seams = { path = "../../ipc/latch_seams" }
 standby_seams = { path = "../../ipc/standby_seams" }
