@@ -3138,12 +3138,6 @@ pub fn expand_virtual_generated_columns<'mcx>(
                  over a virtual-generated relation unported"
             );
         }
-        if !parse.withCheckOptions.is_nil() {
-            panic!(
-                "expand_virtual_generated_columns (prepjointree.c): WithCheckOptions \
-                 over a virtual-generated relation unported"
-            );
-        }
         assert!(!rte.lateral);
         let mut tlist = NodeList::nil();
         for i in 0..rel.rd_att.natts as usize {
@@ -3185,6 +3179,18 @@ pub fn expand_virtual_generated_columns<'mcx>(
             replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
         })? {
             parse.targetList = l;
+        }
+        // query_tree_mutator's T_WithCheckOption arm replaces only wco->qual.
+        for wco_node in &parse.withCheckOptions {
+            let wco = wco_node.as_with_check_option().expect("withCheckOptions cell");
+            let new_qual = replace_opt(mcx, wco.qual, varno, &tlist, false, Some(&phc))?;
+            // SAFETY: pre-seal tree owned by this planner invocation.
+            unsafe {
+                wco_node.with_mut::<types_nodes::parsenodes::WithCheckOption, _>(|w| {
+                    w.qual = new_qual;
+                })
+            }
+            .expect("WithCheckOption");
         }
         parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, Some(&phc))?;
         if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {

@@ -1,7 +1,7 @@
 // copy.c/copyto.c/copyfrom.c/copyfromparse.c — text, CSV and binary formats,
 // file and wire STDIN/STDOUT variants; column defaults, the DEFAULT marker,
-// FROM ... WHERE and COPY (query) TO live. Loud (named): PROGRAM, HEADER
-// match, volatile defaults/WHERE, RLS rewrite. Option parsing
+// FROM ... WHERE, COPY (query) TO and the RLS TO->SELECT rewrite live. Loud
+// (named): PROGRAM, HEADER match, volatile defaults/WHERE. Option parsing
 // (ProcessCopyOptions) is full-parity.
 #![allow(non_snake_case)]
 
@@ -127,6 +127,7 @@ pub fn DoCopy<'mcx>(
             mcx,
             None,
             Some(&raw_query),
+            types_core::InvalidOid,
             stmt.filename,
             &stmt.attlist,
             &stmt.options,
@@ -176,7 +177,78 @@ pub fn DoCopy<'mcx>(
                     .with_hint("Use INSERT statements instead."),
             ));
         }
-        unported("COPY TO with row-level security (SELECT query conversion, copy.c:236)");
+        // COPY rel TO under RLS becomes COPY (SELECT ...) FROM ONLY rel TO so
+        // the rewriter adds the policy quals (copy.c DoCopy RLS branch).
+        use types_nodes::rawnodes::{A_Star, ColumnRef, ResTarget, SelectStmt};
+        let mk_target = |val: Node<'mcx>| -> PgResult<Node<'mcx>> {
+            Node::mk(
+                mcx,
+                ResTarget { name: None, indirection: NodeList::nil(), val: Some(val), location: -1 },
+            )
+        };
+        let target_list = if stmt.attlist.is_nil() {
+            let cr = Node::mk(
+                mcx,
+                ColumnRef { fields: NodeList::make1(mcx, Node::mk(mcx, A_Star)?)?, location: -1 },
+            )?;
+            NodeList::make1(mcx, mk_target(cr)?)?
+        } else {
+            let mut targets: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+            for col in stmt.attlist.iter() {
+                let cr = Node::mk(
+                    mcx,
+                    ColumnRef { fields: NodeList::make1(mcx, col)?, location: -1 },
+                )?;
+                targets.push(mk_target(cr)?);
+            }
+            NodeList::from_slice(mcx, &targets)?
+        };
+        let nspname = lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace)?
+            .expect("open relation has a namespace");
+        let nspname = core::str::from_utf8(nspname.into_bytes().leak()).expect("PgString is UTF-8");
+        let relname = mcx::PgString::from_str_in(rel.name(), mcx)?;
+        let relname = core::str::from_utf8(relname.into_bytes().leak()).expect("PgString is UTF-8");
+        // inh=false: ONLY, so COPY reads just the target table, as when RLS
+        // doesn't apply.
+        let from = Node::mk(
+            mcx,
+            types_nodes::primnodes::RangeVar {
+                catalogname: None,
+                schemaname: Some(nspname),
+                relname: Some(relname),
+                inh: false,
+                relpersistence: b'p',
+                alias: None,
+                location: -1,
+            },
+        )?;
+        let select = Node::mk(
+            mcx,
+            SelectStmt {
+                targetList: target_list,
+                fromClause: NodeList::make1(mcx, from)?,
+                ..Default::default()
+            },
+        )?;
+        let raw_query =
+            types_nodes::rawnodes::RawStmt { stmt: Some(select), stmt_location, stmt_len };
+        let query_rel_id = rel.rd_id;
+        // C closes the relation here but keeps the lock until end of xact;
+        // the query-based COPY reopens it.
+        table::table_close(rel, types_rel::lock::NoLock)?;
+        let mut cstate = BeginCopyTo(
+            mcx,
+            None,
+            Some(&raw_query),
+            query_rel_id,
+            stmt.filename,
+            &stmt.attlist,
+            &stmt.options,
+            Some(source_text),
+        )?;
+        let processed = DoCopyTo(mcx, &mut cstate, None)?;
+        EndCopyTo(cstate)?;
+        return Ok(processed);
     }
 
     let mut where_clause = NodeList::nil();
@@ -255,6 +327,7 @@ pub fn DoCopy<'mcx>(
             mcx,
             Some(&rel),
             None,
+            types_core::InvalidOid,
             stmt.filename,
             &stmt.attlist,
             &stmt.options,

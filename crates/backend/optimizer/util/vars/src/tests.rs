@@ -70,6 +70,43 @@ fn pull_varnos_recurses_into_rte_subquery() {
 }
 
 #[test]
+fn pull_varnos_recurses_into_sublink_subselect() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+
+    // Subselect tlist holds a subselect-local var (level 0 inside, varno 7 —
+    // must NOT be collected) and an outer reference (level 1, varno 2 — must
+    // be collected once sublevels_up matches inside the subquery).
+    let local_te = Node::mk_target_entry(mcx, var(mcx, 7, 1, 0), 1, None, false).unwrap();
+    let outer_te = Node::mk_target_entry(mcx, var(mcx, 2, 1, 1), 2, None, false).unwrap();
+    let mut sub = Query::default();
+    sub.targetList = NodeList::make2(mcx, local_te, outer_te).unwrap();
+    sub.jointree = Some(Node::mk_mut(mcx, FromExpr::default()).unwrap().seal_ref());
+    let subselect = Node::mk_mut(mcx, sub).unwrap().seal();
+
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::primnodes::SubLink {
+            subLinkType: types_nodes::primnodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let expr = Node::mk_list(mcx, NodeList::make2(mcx, var(mcx, 1, 1, 0), sublink).unwrap())
+        .unwrap();
+
+    let varnos = pull_varnos(mcx, expr).unwrap();
+    assert!(varnos.is_member(1), "top-level var");
+    assert!(varnos.is_member(2), "outer reference inside sublink subselect");
+    assert!(!varnos.is_member(7), "subselect-local var must be excluded");
+    assert_eq!(varnos.num_members(), 2);
+}
+
+#[test]
 fn pull_varattnos_offsets_and_filters_by_varno() {
     let ctx = cx();
     let mcx = ctx.mcx();
