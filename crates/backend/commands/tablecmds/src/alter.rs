@@ -2008,6 +2008,23 @@ fn ATExecAddColumn<'mcx>(
     }
     let col_def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
 
+    // tablecmds.c:7346-7356: regular inheritance children do not inherit
+    // identity; partitions do.
+    if col_def.identity != 0
+        && recurse
+        && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
+        && !pg_inherits::find_inheritance_children(mcx, myrelid, NoLock)?.is_empty()
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot recursively add identity column to table that has child tables"
+                    .to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+
     let pgclass = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
     let key = oid_scankey(1, myrelid);
     let mut scan =
@@ -2184,7 +2201,24 @@ fn add_column_phase3_fill<'mcx>(
 ) -> PgResult<()> {
     let mut has_missing = false;
     let has_domain_constraints = typcache::domain::DomainHasConstraints(attribute.atttypid)?;
-    let mut defval = if rel.rd_att.attr(attnum as usize - 1).atthasdef {
+    // tablecmds.c:7472-7483: identity columns build a NextValueExpr manually
+    // (sequence ownership isn't set yet, so build_column_default can't).
+    let mut defval = if col_def.identity != 0 {
+        let prv = col_def.identitySequence.expect("identity column sequence");
+        let rv = rel_vocab::RangeVar {
+            catalogname: prv.catalogname,
+            schemaname: prv.schemaname,
+            relname: prv.relname.expect("RangeVar.relname"),
+            inh: prv.inh,
+            relpersistence: prv.relpersistence,
+            location: prv.location,
+        };
+        let seqid = catalog_namespace::RangeVarGetRelid(&rv, NoLock, false)?;
+        Some(Node::mk(
+            mcx,
+            types_nodes::primnodes::NextValueExpr { seqid, typeId: attribute.atttypid },
+        )?)
+    } else if rel.rd_att.attr(attnum as usize - 1).atthasdef {
         Some(
             rewrite_handler::build_column_default(mcx, rel, attnum as usize)?
                 .expect("atthasdef column has a default"),
