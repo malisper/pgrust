@@ -1442,3 +1442,123 @@ pub fn AdjustNotNullInheritance<'mcx>(
     }
     Ok(true)
 }
+
+pub const INDEX_MAX_KEYS: usize = types_core::fmgr::INDEX_MAX_KEYS as usize;
+const ARR_1D_HDRSZ: usize = 24;
+
+pub struct FkConstraintArrays {
+    pub numfks: usize,
+    pub conkey: [i16; INDEX_MAX_KEYS],
+    pub confkey: [i16; INDEX_MAX_KEYS],
+    pub pf_eq_oprs: [Oid; INDEX_MAX_KEYS],
+    pub pp_eq_oprs: [Oid; INDEX_MAX_KEYS],
+    pub ff_eq_oprs: [Oid; INDEX_MAX_KEYS],
+    pub num_fk_del_set_cols: usize,
+    pub fk_del_set_cols: [i16; INDEX_MAX_KEYS],
+}
+
+fn fk_array_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &types_tuple::HeapTupleData<'_>,
+    desc: &types_tuple::TupleDescData<'_>,
+    attnum: AttrNumber,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let mut isnull = false;
+    // SAFETY: varlena pg_constraint column under its descriptor.
+    let d = unsafe { types_tuple::heap_getattr(tup, attnum as i32, desc, &mut isnull) };
+    if isnull {
+        return Ok(None);
+    }
+    let p = d.as_usize() as *const u8;
+    // SAFETY: live varlena image through its extent.
+    let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(mcx, image)?;
+    // DatumGetArrayTypeP: rebuild the 4B-header form (image may be packed).
+    let body = payload.as_bytes();
+    let total = body.len() + 4;
+    let mut full: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+    mcx::vec_append_bytes(&mut full, body)?;
+    Ok(Some(full))
+}
+
+fn fk_array_nelems(img: &[u8], elemtype: Oid, errmsg: &str) -> usize {
+    let rd = |off: usize| i32::from_ne_bytes(img[off..off + 4].try_into().unwrap());
+    assert!(
+        img.len() >= ARR_1D_HDRSZ && rd(4) == 1 && rd(8) == 0 && rd(12) as u32 == elemtype,
+        "{errmsg}"
+    );
+    rd(16) as usize
+}
+
+fn fk_i16_array(img: &[u8], errmsg: &str, out: &mut [i16; INDEX_MAX_KEYS]) -> usize {
+    let n = fk_array_nelems(img, INT2OID, errmsg);
+    for (i, o) in out.iter_mut().enumerate().take(n) {
+        let off = ARR_1D_HDRSZ + 2 * i;
+        *o = i16::from_ne_bytes(img[off..off + 2].try_into().unwrap());
+    }
+    n
+}
+
+fn fk_oid_array(img: &[u8], errmsg: &str, out: &mut [Oid; INDEX_MAX_KEYS]) -> usize {
+    let n = fk_array_nelems(img, types_core::OIDOID, errmsg);
+    for (i, o) in out.iter_mut().enumerate().take(n) {
+        let off = ARR_1D_HDRSZ + 4 * i;
+        *o = u32::from_ne_bytes(img[off..off + 4].try_into().unwrap());
+    }
+    n
+}
+
+pub fn DeconstructFkConstraintRow<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &types_tuple::HeapTupleData<'_>,
+    desc: &types_tuple::TupleDescData<'_>,
+) -> PgResult<FkConstraintArrays> {
+    let mut out = FkConstraintArrays {
+        numfks: 0,
+        conkey: [0; INDEX_MAX_KEYS],
+        confkey: [0; INDEX_MAX_KEYS],
+        pf_eq_oprs: [InvalidOid; INDEX_MAX_KEYS],
+        pp_eq_oprs: [InvalidOid; INDEX_MAX_KEYS],
+        ff_eq_oprs: [InvalidOid; INDEX_MAX_KEYS],
+        num_fk_del_set_cols: 0,
+        fk_del_set_cols: [0; INDEX_MAX_KEYS],
+    };
+
+    let req = |attnum: AttrNumber, name: &str| -> PgResult<PgVec<'mcx, u8>> {
+        Ok(fk_array_image(mcx, tup, desc, attnum)?
+            .unwrap_or_else(|| panic!("unexpected null {name} in pg_constraint tuple")))
+    };
+
+    let conkey = req(Anum_pg_constraint_conkey, "conkey")?;
+    let numkeys = fk_i16_array(&conkey, "conkey is not a 1-D smallint array", &mut out.conkey);
+    assert!(
+        numkeys > 0 && numkeys <= INDEX_MAX_KEYS,
+        "foreign key constraint cannot have {numkeys} columns"
+    );
+    out.numfks = numkeys;
+
+    let confkey = req(Anum_pg_constraint_confkey, "confkey")?;
+    let bad_confkey = "confkey is not a 1-D smallint array";
+    assert!(fk_i16_array(&confkey, bad_confkey, &mut out.confkey) == numkeys, "{bad_confkey}");
+
+    for (attnum, name, slot) in [
+        (Anum_pg_constraint_conpfeqop, "conpfeqop", &mut out.pf_eq_oprs),
+        (Anum_pg_constraint_conppeqop, "conppeqop", &mut out.pp_eq_oprs),
+        (Anum_pg_constraint_conffeqop, "conffeqop", &mut out.ff_eq_oprs),
+    ] {
+        let img = req(attnum, name)?;
+        let bad = format!("{name} is not a 1-D Oid array");
+        assert!(fk_oid_array(&img, &bad, slot) == numkeys, "{bad}");
+    }
+
+    if let Some(img) = fk_array_image(mcx, tup, desc, Anum_pg_constraint_confdelsetcols)? {
+        out.num_fk_del_set_cols = fk_i16_array(
+            &img,
+            "confdelsetcols is not a 1-D smallint array",
+            &mut out.fk_del_set_cols,
+        );
+    }
+
+    Ok(out)
+}
