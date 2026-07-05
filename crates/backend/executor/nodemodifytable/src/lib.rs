@@ -628,13 +628,6 @@ fn init_result_rel<'mcx>(
     let mut wco_exprs: mcx::PgVec<'mcx, WcoExpr<'mcx>> = mcx::PgVec::new_in(mcx);
     if let Some(i) = list_index {
         if !node.withCheckOptionLists.is_nil() {
-            if node.operation == CmdType::CMD_MERGE {
-                panic!(
-                    "ExecInitModifyTable (nodeModifyTable.c): WITH CHECK OPTION enforcement \
-                     under MERGE (C ExecMergeMatched/NotMatched checks WCO_RLS_MERGE_* and \
-                     WCO_VIEW_CHECK) not ported"
-                );
-            }
             debug_assert_eq!(node.withCheckOptionLists.len(), node.resultRelations.len());
             let params = estate.param_bind();
             let wlist = node
@@ -1566,6 +1559,20 @@ fn exec_merge_matched_scan<'mcx>(
             continue;
         }
 
+        // The existing target row must pass the USING checks of UPDATE/DELETE
+        // RLS policies, checked only after the WHEN qual (C 3159-3178).
+        if command_type != CmdType::CMD_NOTHING && !mt.rel().wco_exprs.is_empty() {
+            let kind = if command_type == CmdType::CMD_UPDATE {
+                WCOKind::WCO_RLS_MERGE_UPDATE_CHECK
+            } else {
+                WCOKind::WCO_RLS_MERGE_DELETE_CHECK
+            };
+            let ModifyTableState { rels, cur, .. } = &mut *mt;
+            let r = &mut rels[*cur];
+            let old_slot = &mut estate.es_tupleTable[old_id.0 as usize];
+            exec_with_check_options(&mut r.wco_exprs, kind, old_slot)?;
+        }
+
         let mut tmfd = TM_FailureData::default();
         let result = match command_type {
             CmdType::CMD_UPDATE => {
@@ -1791,10 +1798,17 @@ fn merge_update_act<'mcx>(
             mt.rel_mut().indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
         }
 
+        // The WITH CHECK quals of UPDATE RLS policies apply to the NEW row
+        // here, exactly as in ExecUpdateAct (C 2210-2213).
+        if !mt.rel().wco_exprs.is_empty() {
+            let r = &mut mt.rels[mt.cur];
+            exec_with_check_options(&mut r.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
+        }
+
         {
-                let r = &mut mt.rels[mt.cur];
-                exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot)?;
-            }
+            let r = &mut mt.rels[mt.cur];
+            exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot)?;
+        }
 
         tableam::table_tuple_update(
             mcx,
@@ -1869,6 +1883,18 @@ fn merge_update_act<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, &td, *tupleid, ar_new_tid, &recheck_indexes, tc, Some(&mut when),
         )?;
+    }
+
+    // Parent-view CHECK OPTIONs are checked after updating (the qual must see
+    // the actual row, post defaults/triggers) — C's shared WCO_VIEW_CHECK leg.
+    if !mt.rel().wco_exprs.is_empty() {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let r = &mut mt.rels[mt.cur];
+        let rel = es_relations[(r.rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
     }
     Ok(TM_Result::TM_Ok)
 }
@@ -2172,7 +2198,9 @@ fn expr_type(node: Node<'_>) -> u32 {
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_RowCompareExpr => 16,
-        other => panic!("ExecCheckPlanOutput exprType arm for {other:?} not ported"),
+        // Everything else rides execexpr's exprType (nodeFuncs.c) — the
+        // authoritative copy (SQLValueFunction, SubLink, Json*, ...).
+        _ => execexpr::expr_type(node),
     }
 }
 
