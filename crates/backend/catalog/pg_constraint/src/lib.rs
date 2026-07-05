@@ -1164,20 +1164,73 @@ pub fn get_relation_constraint_oid<'mcx>(
 ) -> PgResult<Oid> {
     let found = constraint_oid_by_name(mcx, relid, conname)?;
     if found == InvalidOid && !missing_ok {
-        let relname = lsyscache::relation::get_rel_name(mcx, relid)?
-            .expect("constraint lookup relation has a pg_class row");
-        return Err(Box::new(
-            types_error::PgError::new(
-                types_error::ERROR,
-                format!("constraint \"{conname}\" for table \"{relname}\" does not exist"),
-            )
-            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
-        ));
+        return Err(constraint_does_not_exist(mcx, relid, conname)?);
     }
     Ok(found)
 }
 
+#[cold]
+#[inline(never)]
+fn constraint_does_not_exist<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    conname: &str,
+) -> PgResult<Box<PgError>> {
+    let relname = lsyscache::relation::get_rel_name(mcx, relid)?
+        .expect("constraint lookup relation has a pg_class row");
+    Ok(Box::new(
+        types_error::PgError::new(
+            types_error::ERROR,
+            format!("constraint \"{conname}\" for table \"{relname}\" does not exist"),
+        )
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+    ))
+}
 
+// get_relation_constraint_attnos (pg_constraint.c): constraint oid + raw
+// conkey attnums for the named relation constraint; C returns a Bitmapset
+// offset by FirstLowInvalidHeapAttributeNumber — that offset is the caller's.
+pub fn get_relation_constraint_attnos<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    conname: &str,
+    missing_ok: bool,
+) -> PgResult<(Oid, PgVec<'mcx, i16>)> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let cname = name_arg(mcx, conname)?;
+    let keys = [
+        eq_key(Anum_pg_constraint_conrelid, F_OIDEQ, Datum::from_oid(relid)),
+        eq_key(Anum_pg_constraint_contypid, F_OIDEQ, Datum::from_oid(InvalidOid)),
+        eq_key(Anum_pg_constraint_conname, F_NAMEEQ, Datum::from_usize(cname.as_ptr() as usize)),
+    ];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut constraint_oid = InvalidOid;
+    let mut conattnos: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let desc = con_rel.descr();
+        constraint_oid = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
+        if let Some(img) = fk_array_image(mcx, tup, desc, Anum_pg_constraint_conkey)? {
+            let mut out = [0i16; INDEX_MAX_KEYS];
+            let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out);
+            for &attnum in &out[..n] {
+                conattnos.push(attnum);
+            }
+        }
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    if constraint_oid == InvalidOid && !missing_ok {
+        return Err(constraint_does_not_exist(mcx, relid, conname)?);
+    }
+    Ok((constraint_oid, conattnos))
+}
 
 pub fn get_constraint_deferrability<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<(bool, bool)> {
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;

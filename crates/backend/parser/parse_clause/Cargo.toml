@@ -21,6 +21,7 @@ coerce = { path = "../coerce" }
 elog = { path = "../../utils/error/elog" }
 format_type = { path = "../../utils/adt/format_type" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+pg_constraint = { path = "../../catalog/pg_constraint" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 analyze_seams = { path = "../analyze_seams" }
@@ -42,7 +43,8 @@ types_nodes = { path = "../../../_support/types/nodes" }
 vars = { path = "../../optimizer/util/vars" }
 
 relation_seams = { path = "../../access/common/relation_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+
 [dev-dependencies]
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
-types_tuple = { path = "../../../_support/types/types_tuple" }
