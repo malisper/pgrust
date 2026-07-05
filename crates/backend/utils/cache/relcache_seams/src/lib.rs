@@ -26,6 +26,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // RelationGetFKeyList (relcache.c): rd_fkeylist; shared read-only slice,
+    // scan (index) order — C promises no particular order.
+    pub fn relation_get_fkey_list(
+        relid: Oid,
+    ) -> PgResult<Rc<[types_rel::ForeignKeyCacheInfo]>>
+);
+
+seam_core::seam!(
     pub fn relation_cache_invalidate(debug_discard: bool) -> PgResult<()>
 );
 
@@ -78,11 +86,12 @@ pub struct IndexAttrBitmaps {
     pub hot_blocking: mcx::PgVec<'static, i16>,
     pub summarized: mcx::PgVec<'static, i16>,
     pub key: mcx::PgVec<'static, i16>,
+    pub pk: mcx::PgVec<'static, i16>,
     pub identity: mcx::PgVec<'static, i16>,
 }
 
 seam_core::seam!(
-    // RelationGetIndexAttrBitmap (relcache.c), all four kinds at once; cached
+    // RelationGetIndexAttrBitmap (relcache.c), all five kinds at once; cached
     // on the implementation side, invalidation clears it.
     pub fn relation_get_index_attr_bitmap(
         relid: Oid,

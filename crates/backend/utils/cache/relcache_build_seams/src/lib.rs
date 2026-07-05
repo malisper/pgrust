@@ -133,6 +133,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // RelationGetFKeyList's pg_constraint scan (relcache.c): contype='f' rows
+    // on conrelid, DeconstructFkConstraintRow-decoded, scan (index) order.
+    pub fn scan_pg_constraint_fkeys<'mcx>(
+        mcx: Mcx<'mcx>,
+        conrelid: Oid,
+    ) -> PgResult<PgVec<'mcx, types_rel::ForeignKeyCacheInfo>>
+);
+
+seam_core::seam!(
     pub fn scan_pg_statistic_ext_oids<'mcx>(
         mcx: Mcx<'mcx>,
         stxrelid: Oid,

@@ -9,7 +9,8 @@ use types_core::{
     CONSTRAINT_RELATION_ID, CONSTRAINT_RELID_TYPID_NAME_INDEX_ID, InvalidOid, Oid, RECORDOID,
 };
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_rel::{AccessShareLock, FormData_pg_class};
+use types_core::{AttrNumber, INDEX_MAX_KEYS};
+use types_rel::{AccessShareLock, FormData_pg_class, ForeignKeyCacheInfo};
 use types_scan::scankey::BTGreaterStrategyNumber;
 use types_tuple::{
     AttrDefault, ConstrCheck, FormData_pg_attribute, HeapTupleData, TupleConstr, TupleDescData,
@@ -23,16 +24,21 @@ const Anum_pg_attribute_attnum: i32 = 5;
 const Anum_pg_attrdef_adrelid: i32 = 2;
 const Anum_pg_attrdef_adnum: i32 = 3;
 const Anum_pg_attrdef_adbin: i32 = 4;
+const Anum_pg_constraint_oid: i32 = 1;
 const Anum_pg_constraint_conname: i32 = 2;
 const Anum_pg_constraint_contype: i32 = 4;
 const Anum_pg_constraint_conenforced: i32 = 7;
 const Anum_pg_constraint_convalidated: i32 = 8;
 const Anum_pg_constraint_conrelid: i32 = 9;
+const Anum_pg_constraint_confrelid: i32 = 13;
 const Anum_pg_constraint_connoinherit: i32 = 19;
 const Anum_pg_constraint_conkey: i32 = 21;
+const Anum_pg_constraint_confkey: i32 = 22;
+const Anum_pg_constraint_conpfeqop: i32 = 23;
 const Anum_pg_constraint_conbin: i32 = 28;
 const CONSTRAINT_CHECK: i8 = b'c' as i8;
 const CONSTRAINT_NOTNULL: i8 = b'n' as i8;
+const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 const ATTRIBUTE_GENERATED_STORED: i8 = b's' as i8;
 const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;
 
@@ -289,6 +295,84 @@ fn check_nn_constraint_fetch(
         a.ccname.as_ref().map(|s| s.as_str()).cmp(&b.ccname.as_ref().map(|s| s.as_str()))
     });
     Ok(check)
+}
+
+// RelationGetFKeyList's scan half (relcache.c): contype='f' rows on conrelid,
+// arrays decoded per DeconstructFkConstraintRow (pg_constraint.c), scan order.
+pub(crate) fn scan_pg_constraint_fkeys<'mcx>(
+    mcx: Mcx<'mcx>,
+    conrelid: Oid,
+) -> PgResult<PgVec<'mcx, ForeignKeyCacheInfo>> {
+    let cx = MemoryContext::new("RelationGetFKeyList");
+    let smcx = cx.mcx();
+    let rel = table::table_open(smcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = [oid_key(Anum_pg_constraint_conrelid, conrelid)];
+    let mut scan = genam::systable_beginscan(
+        smcx,
+        &rel,
+        CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut out: PgVec<'mcx, ForeignKeyCacheInfo> = PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(smcx, &mut scan)? {
+        if req(rel.descr(), tup, Anum_pg_constraint_contype)?.as_i8() != CONSTRAINT_FOREIGN {
+            continue;
+        }
+        let td = rel.descr();
+        let conkey = fk_array_elems(smcx, req(td, tup, Anum_pg_constraint_conkey)?, 2, b's')?;
+        let nkeys = conkey.len();
+        assert!(
+            nkeys > 0 && nkeys <= INDEX_MAX_KEYS as usize,
+            "foreign key constraint cannot have {nkeys} columns"
+        );
+        let confkey = fk_array_elems(smcx, req(td, tup, Anum_pg_constraint_confkey)?, 2, b's')?;
+        let conpfeqop =
+            fk_array_elems(smcx, req(td, tup, Anum_pg_constraint_conpfeqop)?, 4, b'i')?;
+        assert!(
+            confkey.len() == nkeys && conpfeqop.len() == nkeys,
+            "confkey/conpfeqop length differs from conkey"
+        );
+        let mut info = ForeignKeyCacheInfo {
+            conoid: req(td, tup, Anum_pg_constraint_oid)?.as_oid(),
+            conrelid: req(td, tup, Anum_pg_constraint_conrelid)?.as_oid(),
+            confrelid: req(td, tup, Anum_pg_constraint_confrelid)?.as_oid(),
+            conenforced: req(td, tup, Anum_pg_constraint_conenforced)?.as_bool(),
+            nkeys: nkeys as i32,
+            conkey: [0 as AttrNumber; INDEX_MAX_KEYS as usize],
+            confkey: [0 as AttrNumber; INDEX_MAX_KEYS as usize],
+            conpfeqop: [InvalidOid; INDEX_MAX_KEYS as usize],
+        };
+        for i in 0..nkeys {
+            info.conkey[i] = conkey[i].as_i16();
+            info.confkey[i] = confkey[i].as_i16();
+            info.conpfeqop[i] = conpfeqop[i].as_oid();
+        }
+        out.push(info);
+    }
+    genam::systable_endscan(smcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(out)
+}
+
+fn fk_array_elems<'s>(
+    smcx: Mcx<'s>,
+    d: Datum,
+    elmlen: i32,
+    elmalign: u8,
+) -> PgResult<PgVec<'s, Datum>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: not-null array column: live varlena image through its extent.
+    let image = unsafe { std::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    let payload = varlena::open_image(smcx, image)?;
+    // DatumGetArrayTypeP: rebuild the 4B-header form (disk image may be packed).
+    let body = payload.as_bytes();
+    let total = body.len() + 4;
+    let mut full: PgVec<'s, u8> = mcx::vec_with_capacity_in(smcx, total)?;
+    mcx::vec_append_bytes(&mut full, &(((total as u32) << 2).to_ne_bytes()))?;
+    mcx::vec_append_bytes(&mut full, body)?;
+    datum::array_build::deconstruct_array_image(smcx, &full, elmlen, true, elmalign)
 }
 
 // extractNotNullColumn (pg_constraint.c): conkey[0] of a not-null row.

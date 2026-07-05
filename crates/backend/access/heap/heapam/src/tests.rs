@@ -913,6 +913,7 @@ fn install_dml_seams() {
                 hot_blocking: PgVec::new_in(mcx),
                 summarized: PgVec::new_in(mcx),
                 key: PgVec::new_in(mcx),
+                pk: PgVec::new_in(mcx),
                 identity,
             }))
         });
