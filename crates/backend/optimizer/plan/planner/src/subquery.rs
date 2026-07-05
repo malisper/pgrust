@@ -103,6 +103,7 @@ pub fn subquery_planner<'mcx>(
                     let ts = preprocess_expression(
                         run,
                         &parse.rtable,
+                        parse.jointree,
                         rte.tablesample,
                         EXPRKIND_TABLESAMPLE,
                         parse.hasSubLinks,
