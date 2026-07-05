@@ -21,6 +21,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 types_dest = { path = "../../../_support/types/types_dest" }
 elog = { path = "../../utils/error/elog" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
 createas_seams = { path = "../createas_seams" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 explain_dr = { path = "../explain_dr" }
