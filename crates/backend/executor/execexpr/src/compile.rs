@@ -1149,6 +1149,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
         NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
         NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
+        NodeTag::T_MergeSupportFunc => node.as_merge_support_func().unwrap().msftype,
         NodeTag::T_XmlExpr => {
             use ::types_nodes::primnodes::XmlExprOp;
             let x = node.as_xml_expr().unwrap();
@@ -1450,6 +1451,7 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
+        NodeTag::T_MergeSupportFunc => {}
         NodeTag::T_CoalesceExpr => {
             for e in node.as_coalesce_expr().unwrap().args.iter() {
                 setup_walker(e, info);
