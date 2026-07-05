@@ -47,7 +47,9 @@ pub fn exec_init_unique<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
 
     let num_cols = node.numCols as usize;
-    debug_assert!(num_cols > 0 && node.uniqColIdx.len() == num_cols);
+    // Zero uniq columns are legal: empty-select-list set ops (allowed since
+    // 9.4) uniquify on no keys, so every pair of rows compares equal.
+    debug_assert!(node.uniqColIdx.len() == num_cols);
     let mut eqfuncoids: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, num_cols)?;
     for &op in node.uniqOperators {
         eqfuncoids.push(lsyscache::get_opcode(op)?);
