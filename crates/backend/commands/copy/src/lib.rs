@@ -204,8 +204,14 @@ pub fn DoCopy<'mcx>(
         // filter runs; virtual kept consistent with stored (copy.c:173-185).
         let mut attnos = types_nodes::Bitmapset::default();
         vars::pull_varattnos(mcx, qual, 1, &mut attnos)?;
+        // A whole-row reference examines every column (copy.c:156-163).
+        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+        if attnos.is_member(-FLIHAN) {
+            attnos.add_range(mcx, 1 - FLIHAN, rel.rd_att.natts as i32 - FLIHAN)?;
+            attnos.del_member(-FLIHAN);
+        }
         for m in attnos.iter() {
-            let attno = m + types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+            let attno = m + FLIHAN;
             if attno <= 0 {
                 continue;
             }
