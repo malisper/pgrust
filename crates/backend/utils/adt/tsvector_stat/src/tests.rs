@@ -16,7 +16,8 @@ fn tsvec(words: &[(&str, &[WordEntryPos])]) -> Vec<u8> {
     for (w, p) in words {
         b.push(w.as_bytes(), p).unwrap();
     }
-    b.finish(mcx).unwrap().to_vec()
+    let img = b.finish(mcx).unwrap().to_vec();
+    img
 }
 
 #[test]

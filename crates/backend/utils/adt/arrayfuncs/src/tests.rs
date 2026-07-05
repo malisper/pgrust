@@ -792,7 +792,7 @@ mod ops_tests {
         let mcx = ctx.mcx();
         let thresholds = int4_arr(mcx, &[Some(1), Some(5), Some(10)]);
         let mut cmp = finfo(fc_i4cmp);
-        let r = |op: i32| {
+        let mut r = |op: i32| {
             width_bucket_array_fixed(mcx, Datum::from_i32(op), &thresholds, 0, INT4_META, &mut cmp, 3)
                 .unwrap()
         };
@@ -808,7 +808,7 @@ mod ops_tests {
         let thresholds = text_arr(mcx, &["b", "m", "t"]);
         let meta = ElemMeta { typlen: -1, typbyval: false, typalign: TYPALIGN_INT };
         let mut cmp = finfo(fc_text_cmp);
-        let r = |op: &str| {
+        let mut r = |op: &str| {
             let operand = build_varlena(mcx, op.as_bytes()).unwrap();
             width_bucket_array_variable(mcx, operand, &thresholds, 0, meta, &mut cmp, 3).unwrap()
         };
