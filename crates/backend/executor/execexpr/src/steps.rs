@@ -794,6 +794,32 @@ impl CmpOp {
     }
 }
 
+/// `n` int8inc transitions collapsed into one add. false = the caller must
+/// re-run this batch through the per-row kernel: an in-batch overflow (the
+/// per-row walk ereports "bigint out of range" at exactly C's row — trans+n
+/// overflows iff some row's increment does) or a null transvalue under a
+/// non-strict call (per-row resolves it; count(*)'s initcond 0 never is).
+#[inline]
+pub fn agg_count_star_advance(pergroup: NonNull<AggPerGroup>, strict: bool, n: u32) -> bool {
+    // SAFETY: once-allocated stable pergroup, sole access here (the kernel
+    // AggTransByVal arm's contract).
+    unsafe {
+        let pg = pergroup.as_ptr();
+        if (*pg).trans_value_is_null {
+            // Strict: every one of the n calls is skipped.
+            return strict;
+        }
+        match (*pg).trans_value.as_i64().checked_add(n as i64) {
+            Some(v) => {
+                (*pg).trans_value = Datum::from_i64(v);
+                (*pg).trans_value_is_null = false;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 // Batched ExecQual over an SoA column (comparisons only — non-erroring, so
 // evaluation order is unobservable): selection bit = !isnull && cmp(v, k).
 // Chunked so LLVM can vectorize the compare and reduce the bit-pack per word.
@@ -992,6 +1018,26 @@ impl<'mcx> ExprState<'mcx> {
         // SAFETY: mcx-boxed FmgrInfo owned by this state; read-only field.
         let oid = unsafe { (*self.frames[frame as usize].flinfo.as_ptr()).fn_oid };
         matches!(oid, 450 | 453).then_some(attnum)
+    }
+
+    /// count(*)-class transition — int8inc (oid 1219) over the transvalue
+    /// alone — where the batched storeless drain may advance the group once
+    /// per page batch. Returns (pergroup, strict).
+    pub fn agg_count_star(&self) -> Option<(NonNull<AggPerGroup>, bool)> {
+        let strict = match self.kernel {
+            Kernel::AggTransByVal { strict, .. } | Kernel::AggTransByValThin { strict, .. } => {
+                strict
+            }
+            _ => return None,
+        };
+        let (call, pergroup) = match self.steps.as_slice().first()? {
+            Step::AggPlainTransByVal { call, pergroup }
+            | Step::AggPlainTransStrictByVal { call, pergroup } => (call, pergroup),
+            _ => return None,
+        };
+        // SAFETY: frame-owned mcx-boxed FmgrInfo, live for 'mcx.
+        let oid = unsafe { call.flinfo.as_ref() }.fn_oid;
+        (oid == 1219 && call.nargs == 1).then_some((*pergroup, strict))
     }
 
     /// Max attnum this expression demands of `src`'s slot (its FETCHSOME

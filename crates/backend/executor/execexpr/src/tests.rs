@@ -1791,6 +1791,25 @@ fn thin_agg_count_star_kernel() {
         }
         assert_eq!(pergroup[0].trans_value.as_i64(), 3);
         assert!(!pergroup[0].trans_value_is_null);
+
+        // Batched drive seam: the count(*) shape is detected and one advance
+        // equals n per-row transitions.
+        let (pg, strict) = trans.agg_count_star().expect("count(*) trans detected");
+        assert!(strict);
+        assert!(crate::steps::agg_count_star_advance(pg, strict, 291));
+        assert_eq!(pergroup[0].trans_value.as_i64(), 294);
+
+        // In-batch overflow refuses the advance (per-row walk owns the error).
+        pergroup[0].trans_value = Datum::from_i64(i64::MAX - 2);
+        assert!(!crate::steps::agg_count_star_advance(pg, strict, 3));
+        assert_eq!(pergroup[0].trans_value.as_i64(), i64::MAX - 2);
+
+        // Strict + null transvalue: all n calls are skipped.
+        pergroup[0].trans_value_is_null = true;
+        assert!(crate::steps::agg_count_star_advance(pg, true, 7));
+        assert!(pergroup[0].trans_value_is_null);
+        // Non-strict + null: refused (per-row resolves it).
+        assert!(!crate::steps::agg_count_star_advance(pg, false, 7));
     });
 }
 
