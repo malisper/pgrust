@@ -245,6 +245,7 @@ pub(crate) fn ginNewScanKey(
             jsp_ops,
             partial_match,
             map_item_operand,
+            null_flags,
         } = extracted;
 
         if !(GIN_SEARCH_MODE_DEFAULT..=GIN_SEARCH_MODE_ALL).contains(&search_mode) {
@@ -258,7 +259,16 @@ pub(crate) fn ginNewScanKey(
             break;
         }
 
-        let categories = vec![GIN_CAT_NORM_KEY; query_values.len()];
+        // C: nullFlags -> category codes.
+        let categories: Vec<GinNullCategory> = (0..query_values.len())
+            .map(|i| {
+                if null_flags.get(i).copied().unwrap_or(false) {
+                    GIN_CAT_NULL_KEY
+                } else {
+                    GIN_CAT_NORM_KEY
+                }
+            })
+            .collect();
         fill_scan_key(
             &state,
             &mut work,

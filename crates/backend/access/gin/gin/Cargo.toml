@@ -29,6 +29,8 @@ lsyscache = { path = "../../../utils/cache/lsyscache" }
 nbtree = { path = "../../nbtree/nbtree" }
 detoast = { path = "../../common/detoast" }
 adt_jsonb = { path = "../../../utils/adt/jsonb" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+varlena = { path = "../../../utils/adt/varlena" }
 adt_tsginidx = { path = "../../../utils/adt/tsginidx" }
 adt_tsvector_core = { path = "../../../utils/adt/tsvector_core" }
 xact = { path = "../../transam/xact" }

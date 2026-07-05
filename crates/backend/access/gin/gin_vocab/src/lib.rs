@@ -215,6 +215,21 @@ pub enum GinOpclass {
     JsonbOps,
     JsonbPathOps,
     TsvectorOps,
+    ArrayOps,
+}
+
+/// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's
+/// default btree comparator via typcache (initGinState). Closed element set,
+/// resolved once at initGinState; None only on states that never compare
+/// (the gincost extractQuery probe).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinElemCmp {
+    None,
+    Int2,
+    Int4,
+    Int8,
+    Oid,
+    Text,
 }
 
 pub const JSP_GIN_OR: u8 = 0;
@@ -232,6 +247,7 @@ pub struct JspGinOp {
 #[derive(Clone, Copy, Debug)]
 pub struct GinState {
     pub opclass: GinOpclass,
+    pub elem_cmp: GinElemCmp,
     pub support_collation: Oid,
     pub can_partial_match: bool,
     pub key_byval: bool,

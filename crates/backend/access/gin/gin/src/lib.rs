@@ -1,7 +1,7 @@
 //! GIN index AM (ginutil.c / ginpostinglist.c / ginentrypage.c /
 //! gindatapage.c / ginbtree.c / ginbulk.c / gininsert.c / ginfast.c /
 //! ginscan.c / ginget.c / ginlogic.c). Loud, never silent: VACUUM entry
-//! points, partial match, parallel build, array_ops, multicolumn indexes,
+//! points, partial match, parallel build, multicolumn indexes,
 //! non-default reloptions.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
