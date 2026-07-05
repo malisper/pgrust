@@ -318,6 +318,11 @@ fn collect_subplans_expr<'mcx>(
         if let Some(te) = sp.testexpr {
             collect_subplans_expr(te, out);
         }
+        // C ExecInitSubPlan inits args after testexpr; nested SubPlans there
+        // (outer-agg arguments) land on the same node's subPlan list.
+        for a in &sp.args {
+            collect_subplans_expr(a, out);
+        }
         return;
     }
     match node.node_tag() {
