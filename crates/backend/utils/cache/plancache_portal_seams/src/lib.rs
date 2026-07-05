@@ -8,3 +8,9 @@ seam_core::seam!(
     // InitPlanCache (plancache.c): registers plancache inval callbacks.
     pub fn init_plan_cache() -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // Extra refcount on a live plan (no C counterpart; C pins via portals
+    // only): the executor-skeleton cache pins its parked plan with this.
+    pub fn incr_cached_plan(cplan: types_portal::CachedPlanHandle)
+);

@@ -28,6 +28,7 @@ types_portal = { path = "../../../_support/types/portal" }
 tcop_dest = { path = "../../tcop/dest" }
 execjunk = { path = "../execjunk" }
 execmain_seams = { path = "../execmain_seams" }
+plancache_portal_seams = { path = "../../utils/cache/plancache_portal_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 executils = { path = "../executils" }

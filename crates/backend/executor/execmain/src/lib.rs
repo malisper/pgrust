@@ -46,6 +46,7 @@ pub use typefromtl::{exec_clean_type_from_tl, exec_type_from_tl, expr_collation,
 pub fn init_seams() {
     execmain_seams::create_query_desc::set(querydesc::create_query_desc_seam);
     execmain_seams::free_query_desc::set(querydesc::free_query_desc_seam);
+    execmain_seams::note_cplan_for_query_desc::set(querydesc::note_cplan_for_query_desc_seam);
     execmain_seams::release_query_desc::set(querydesc::release_query_desc_seam);
     execmain_seams::executor_start::set(execmain::executor_start_seam);
     execmain_seams::executor_run::set(execmain::executor_run_seam);

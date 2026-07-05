@@ -8,7 +8,7 @@ use ::types_dest::CommandDest;
 use ::types_error::PgResult;
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::plannodes::PlannedStmt;
-use ::types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
+use ::types_portal::{CachedPlanHandle, ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use ::types_tuple::TupleDescData;
 
 use crate::procnode::PlanStateNode;
@@ -69,6 +69,17 @@ pub struct QueryDescData {
     // (select1-gate attribution, 2026-07-03).
     pub exec: Option<Box<ExecutorHandle>>,
     pub already_executed: bool,
+    // Cached plan backing pstmt when the portal runs one (skeleton-cache key).
+    pub cplan: CachedPlanHandle,
+}
+
+thread_local! {
+    // Handed by pquery (note_cplan_for_query_desc) just before CreateQueryDesc.
+    static PENDING_CPLAN: Cell<CachedPlanHandle> = const { Cell::new(CachedPlanHandle::NULL) };
+}
+
+pub(crate) fn note_cplan_for_query_desc_seam(cplan: CachedPlanHandle) {
+    PENDING_CPLAN.set(cplan);
 }
 
 impl QueryDescData {
@@ -209,6 +220,9 @@ pub(crate) fn create_query_desc_seam(
     query_env: QueryEnvHandle,
     instrument_options: i32,
 ) -> PgResult<QueryDescHandle> {
+    // Taken before anything fallible: a failed create must not leave a stale
+    // pending handle for an unrelated QueryDesc.
+    let cplan = PENDING_CPLAN.replace(CachedPlanHandle::NULL);
     let snapshot = snapmgr::RegisterSnapshot(snapshot.as_ref())?;
     let crosscheck_snapshot = snapmgr::RegisterSnapshot(crosscheck_snapshot.as_ref())?;
     // SAFETY: lifetime erasure under the seam's retention contract (the
@@ -230,6 +244,7 @@ pub(crate) fn create_query_desc_seam(
         tup_desc: None,
         exec: None,
         already_executed: false,
+        cplan,
     }))
 }
 

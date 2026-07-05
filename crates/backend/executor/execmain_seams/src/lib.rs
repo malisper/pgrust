@@ -5,7 +5,7 @@ use types_dest::CommandDest;
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::plannodes::PlannedStmt;
-use types_portal::{ParamListHandle, QueryDescHandle, QueryEnvHandle};
+use types_portal::{CachedPlanHandle, ParamListHandle, QueryDescHandle, QueryEnvHandle};
 use types_scan::sdir::ScanDirection;
 use types_core::instrument::{
     AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
@@ -35,6 +35,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     pub fn free_query_desc(query_desc: QueryDescHandle)
+);
+
+seam_core::seam!(
+    // Cached-plan handle for the NEXT create_query_desc on this backend (no C
+    // counterpart): the executor-skeleton cache keys and refcounts on it.
+    pub fn note_cplan_for_query_desc(cplan: CachedPlanHandle)
 );
 
 seam_core::seam!(
