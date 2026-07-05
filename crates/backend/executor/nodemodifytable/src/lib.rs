@@ -146,6 +146,9 @@ pub struct ModifyTableState<'mcx> {
     // the leaf's ri_PartitionCheckExpr.
     leaf_slots: Vec<Option<ExecSlotId>>,
     leaf_partition_check: Vec<Option<PgBox<'mcx, ExprState<'mcx>>>>,
+    // C ExecInitPartitionInfo's ri_onConflictArbiterIndexes: the root arbiter
+    // index OIDs mapped to this leaf's own index children.
+    leaf_arbiters: Vec<Option<mcx::PgVec<'mcx, Oid>>>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -534,6 +537,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_generated: Vec::new(),
         leaf_slots: Vec::new(),
         leaf_partition_check: Vec::new(),
+        leaf_arbiters: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
@@ -3732,9 +3736,6 @@ fn exec_insert<'mcx>(
             .as_ref()
             .expect("result relation opened");
         if target.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-            if onconflict != 0 {
-                panic!("ExecInsert: ON CONFLICT on a partitioned table not ported");
-            }
             let slot = &mut es_tupleTable[slot_id.0 as usize];
             let router = match mt.router.as_mut() {
                 Some(r) => r,
@@ -3755,6 +3756,7 @@ fn exec_insert<'mcx>(
                 mt.leaf_generated.push(None);
                 mt.leaf_slots.push(None);
                 mt.leaf_partition_check.push(None);
+                mt.leaf_arbiters.push(None);
             }
             Some(idx)
         } else {
@@ -3787,6 +3789,12 @@ fn exec_insert<'mcx>(
             exectuples::execute_attr_map_slot(map, in_slot, out, mcx);
             work_slot = lsid;
         }
+    }
+
+    // The EXCLUDED pseudo-rel and the SET/WHERE programs are compiled against
+    // the root layout; an attno-remapped leaf would need C's map plumbing.
+    if onconflict != 0 && work_slot != slot_id {
+        panic!("ExecInsert: ON CONFLICT on an attno-remapped partition not ported");
     }
 
     // C fires BR INSERT on the routed leaf's ResultRelInfo (cloned triggers).
@@ -3895,8 +3903,19 @@ fn exec_insert<'mcx>(
         }
     }
 
-    let num_indices = mt.rel_mut().indexes.as_ref().map_or(0, |x| x.num_indices());
+    let num_indices = match leaf_idx {
+        Some(idx) => mt.leaf_indexes[idx].as_ref().map_or(0, |x| x.num_indices()),
+        None => mt.rel_mut().indexes.as_ref().map_or(0, |x| x.num_indices()),
+    };
     if onconflict != 0 && num_indices > 0 {
+        // ExecInitPartitionInfo: a routed leaf arbitrates through its own
+        // index children of the root arbiter indexes.
+        if let Some(idx) = leaf_idx {
+            if mt.leaf_arbiters[idx].is_none() {
+                let mapped = resolve_leaf_arbiters(mt, mcx, idx)?;
+                mt.leaf_arbiters[idx] = Some(mapped);
+            }
+        }
         let existing_id = mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
         // vlock:
         loop {
@@ -3906,15 +3925,26 @@ fn exec_insert<'mcx>(
             ItemPointerSetInvalid(&mut invalid_tid);
 
             let pre_ok = {
-                let ModifyTableState { rels, cur, on_conflict, index_eval_cx, .. } = &mut *mt;
+                let ModifyTableState {
+                    rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
+                } = &mut *mt;
                 let oc = on_conflict.as_ref().expect("on_conflict state");
-                let cur_rti = rels[*cur].rti;
-                let indexes = rels[*cur].indexes.as_mut().expect("indexes opened");
                 let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-                let rel = es_relations[(cur_rti - 1) as usize]
-                    .as_ref()
-                    .expect("result relation opened");
-                let (s, e) = (slot_id.0 as usize, existing_id.0 as usize);
+                let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
+                    Some(idx) => (
+                        router.as_ref().unwrap().leaf_rel(idx),
+                        leaf_indexes[idx].as_mut().expect("indexes opened"),
+                        leaf_arbiters[idx].as_deref().expect("just resolved"),
+                    ),
+                    None => (
+                        es_relations[(rels[*cur].rti - 1) as usize]
+                            .as_ref()
+                            .expect("result relation opened"),
+                        rels[*cur].indexes.as_mut().expect("indexes opened"),
+                        &oc.arbiters,
+                    ),
+                };
+                let (s, e) = (work_slot.0 as usize, existing_id.0 as usize);
                 assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
                 let base = es_tupleTable.as_mut_ptr();
                 // SAFETY: distinct in-bounds indices of one live slice.
@@ -3927,7 +3957,7 @@ fn exec_insert<'mcx>(
                     slot,
                     existing,
                     &invalid_tid,
-                    &oc.arbiters,
+                    arbiters,
                     &mut conflict_tid,
                 )?
             };
@@ -3935,12 +3965,14 @@ fn exec_insert<'mcx>(
             if !pre_ok {
                 // Committed conflict tuple found.
                 if onconflict == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
-                    match exec_on_conflict_update(mt, estate, conflict_tid, slot_id, epq_eval)? {
+                    match exec_on_conflict_update(
+                        mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval,
+                    )? {
                         OnConflictOutcome::Done(rslot) => return Ok(rslot),
                         OnConflictOutcome::Retry => continue,
                     }
                 }
-                exec_check_tid_visible(mt, estate, &conflict_tid)?;
+                exec_check_tid_visible(mt, estate, &conflict_tid, leaf_idx)?;
                 return Ok(None);
             }
 
@@ -3948,15 +3980,26 @@ fn exec_insert<'mcx>(
             let spec_token = lmgr::SpeculativeInsertionLockAcquire(xid)?;
             let mut spec_conflict = false;
             {
-                let ModifyTableState { rels, cur, on_conflict, index_eval_cx, .. } = &mut *mt;
+                let ModifyTableState {
+                    rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
+                } = &mut *mt;
                 let oc = on_conflict.as_ref().expect("on_conflict state");
-                let cur_rti = rels[*cur].rti;
-                let indexes = rels[*cur].indexes.as_mut().expect("indexes opened");
                 let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-                let rel = es_relations[(cur_rti - 1) as usize]
-                    .as_ref()
-                    .expect("result relation opened");
-                let slot = &mut es_tupleTable[slot_id.0 as usize];
+                let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
+                    Some(idx) => (
+                        router.as_ref().unwrap().leaf_rel(idx),
+                        leaf_indexes[idx].as_mut().expect("indexes opened"),
+                        leaf_arbiters[idx].as_deref().expect("just resolved"),
+                    ),
+                    None => (
+                        es_relations[(rels[*cur].rti - 1) as usize]
+                            .as_ref()
+                            .expect("result relation opened"),
+                        rels[*cur].indexes.as_mut().expect("indexes opened"),
+                        &oc.arbiters,
+                    ),
+                };
+                let slot = &mut es_tupleTable[work_slot.0 as usize];
                 tableam::table_tuple_insert_speculative(
                     mcx, rel, slot, output_cid, 0, None, spec_token,
                 )?;
@@ -3968,7 +4011,7 @@ fn exec_insert<'mcx>(
                     slot,
                     true,
                     Some(&mut spec_conflict),
-                    &oc.arbiters,
+                    arbiters,
                 )?;
                 tableam::table_tuple_complete_speculative(
                     mcx,
@@ -4058,6 +4101,7 @@ fn exec_on_conflict_update<'mcx>(
     estate: &mut EStateData<'mcx>,
     conflict_tid: ItemPointerData,
     excluded_id: ExecSlotId,
+    leaf: Option<usize>,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<OnConflictOutcome> {
     let mcx = estate.es_query_cxt;
@@ -4077,9 +4121,12 @@ fn exec_on_conflict_update<'mcx>(
     let lock_result = {
         let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
-        let rel = es_relations[(mt.rel().rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
+        let rel = match leaf {
+            Some(idx) => mt.router.as_ref().expect("routed").leaf_rel(idx),
+            None => es_relations[(mt.rel().rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+        };
         tableam::table_tuple_lock(
             mcx,
             rel,
@@ -4102,9 +4149,12 @@ fn exec_on_conflict_update<'mcx>(
             // C reads xmin off the lock slot; refetch under SnapshotAny.
             let found = {
                 let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = &mut *estate;
-                let rel = es_relations[(mt.rel().rti - 1) as usize]
-                    .as_ref()
-                    .expect("result relation opened");
+                let rel = match leaf {
+                    Some(idx) => mt.router.as_ref().expect("routed").leaf_rel(idx),
+                    None => es_relations[(mt.rel().rti - 1) as usize]
+                        .as_ref()
+                        .expect("result relation opened"),
+                };
                 tableam::table_tuple_fetch_row_version(
                     *es_query_cxt,
                     rel,
@@ -4143,7 +4193,7 @@ fn exec_on_conflict_update<'mcx>(
         ),
     }
 
-    exec_check_tuple_visible(mt, estate, existing_id)?;
+    exec_check_tuple_visible(mt, estate, existing_id, leaf)?;
 
     // EXCLUDED reads through INNER_VAR (setrefs), the existing tuple through
     // scan Vars; evaluate the WHERE qual then the SET projection that way.
@@ -4175,6 +4225,11 @@ fn exec_on_conflict_update<'mcx>(
         }
 
         if !r.wco_exprs.is_empty() {
+            if leaf.is_some() {
+                // C translates the WCOs to the leaf's ResultRelInfo
+                // (ExecInitPartitionInfo); the routed-WCO map is unported.
+                panic!("ExecOnConflictUpdate: WCOs on a routed partition not ported");
+            }
             let scan = slots.scan.take().expect("scan slot");
             exec_with_check_options(&mut r.wco_exprs, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
             slots.scan = Some(scan);
@@ -4219,10 +4274,13 @@ fn exec_on_conflict_update<'mcx>(
     let mut tupleid = conflict_tid;
     // ON CONFLICT DO UPDATE refuses cross-partition moves inside exec_update
     // (invalid_on_update_specification), so CrossPart is unreachable here.
-    let modified = matches!(
-        exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?,
-        UpdateResult::Modified
-    );
+    let modified = match leaf {
+        Some(idx) => exec_leaf_conflict_update(mt, estate, idx, &mut tupleid, existing_id, proj_id)?,
+        None => matches!(
+            exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?,
+            UpdateResult::Modified
+        ),
+    };
     if modified && mt.rel().project_returning.is_some() {
         // C clears `existing` only after ExecUpdate's RETURNING projection.
         mt.oc_old_slot = Some(existing_id);
@@ -4232,12 +4290,181 @@ fn exec_on_conflict_update<'mcx>(
     Ok(OnConflictOutcome::Done(if modified { Some(proj_id) } else { None }))
 }
 
+// ExecInitPartitionInfo's arbiter mapping (nodeModifyTable.c side of
+// execPartition.c): each root arbiter index resolves to the routed leaf's own
+// index child (pg_inherits ancestry over index partition trees).
+fn resolve_leaf_arbiters<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
+    idx: usize,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+    let mut out: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let indexes = mt.leaf_indexes[idx].as_ref().expect("indexes opened");
+    for leaf_ix in indexes.descs.iter() {
+        let leaf_oid = leaf_ix.rd_id;
+        if oc.arbiters.contains(&leaf_oid) {
+            out.push(leaf_oid);
+            continue;
+        }
+        let ancestors = pg_inherits::get_partition_ancestors(mcx, leaf_oid)?;
+        if ancestors.iter().any(|a| oc.arbiters.contains(a)) {
+            out.push(leaf_oid);
+        }
+    }
+    if !oc.arbiters.is_empty() && out.is_empty() {
+        // C: ExecInitPartitionInfo asserts every arbiter maps.
+        panic!("could not find arbiter index on partition");
+    }
+    Ok(out)
+}
+
+// The routed-leaf half of ExecOnConflictUpdate's ExecUpdate call: the locked
+// existing tuple, the projected new tuple and all machinery live on the leaf
+// (C runs ExecUpdate with the leaf's ResultRelInfo). Concurrency legs are
+// unreachable — the caller holds the tuple lock.
+fn exec_leaf_conflict_update<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+    tupleid: &mut ItemPointerData,
+    existing_id: ExecSlotId,
+    proj_id: ExecSlotId,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+
+    // BR UPDATE row triggers on the leaf (cloned triggers).
+    let td = resolve_leaf_trigdesc(mt, idx)?;
+    if td.as_ref().is_some_and(|t| t.trig_update_before_row) {
+        if !br_row_triggers(
+            mt,
+            estate,
+            types_trigger::TRIGGER_TYPE_UPDATE,
+            types_trigger::TRIGGER_EVENT_UPDATE,
+            Some(existing_id),
+            Some(proj_id),
+            Some(idx),
+        )? {
+            return Ok(false);
+        }
+    }
+
+    let mut tmfd = TM_FailureData::default();
+    let mut lockmode = LockTupleMode::LockTupleExclusive;
+    let mut update_indexes = TU_UpdateIndexes::TU_None;
+    let result = {
+        let ModifyTableState {
+            router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check, ..
+        } = &mut *mt;
+        let rel = router.as_ref().expect("routed").leaf_rel(idx);
+        let EStateData { es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let slot = &mut es_tupleTable[proj_id.0 as usize];
+
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+            exec_compute_stored_generated(mcx, &mut leaf_generated[idx], rel, slot)?;
+        }
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = rel.rd_id;
+
+        // ExecUpdateAct: the updated row may not leave this partition under
+        // ON CONFLICT DO UPDATE.
+        if rel.rd_rel.relispartition
+            && !execpartition::exec_partition_check(mcx, &mut leaf_partition_check[idx], rel, slot)?
+        {
+            return Err(invalid_on_update_specification());
+        }
+
+        exec_constraints(mcx, &mut leaf_checks[idx], &mut leaf_virtual_nn[idx], rel, slot)?;
+
+        tableam::table_tuple_update(
+            mcx,
+            rel,
+            tupleid,
+            slot,
+            output_cid,
+            snapshot,
+            &None,
+            true,
+            &mut tmfd,
+            &mut lockmode,
+            &mut update_indexes,
+        )?
+    };
+    if result != TM_Result::TM_Ok {
+        // The caller holds the conflict tuple lock; nothing else can move it.
+        panic!("ExecOnConflictUpdate leaf update: unexpected {result:?} on a locked tuple");
+    }
+
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
+    {
+        let ModifyTableState { router, leaf_indexes, index_eval_cx, .. } = &mut *mt;
+        let rel = router.as_ref().expect("routed").leaf_rel(idx);
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let slot = &mut es_tupleTable[proj_id.0 as usize];
+        if let Some(indexes) = leaf_indexes[idx].as_mut() {
+            if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
+                if update_indexes == TU_UpdateIndexes::TU_Summarizing {
+                    panic!(
+                        "ExecUpdateEpilogue (nodeModifyTable.c): onlySummarizing \
+                         index maintenance (BRIN lane) not ported"
+                    );
+                }
+                recheck_indexes = execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+                    indexes,
+                    rel,
+                    slot,
+                    false,
+                    None,
+                    &[],
+                )?;
+            }
+        }
+    }
+
+    if let Some(td) = td {
+        if td.triggers.iter().any(|t| t.tgnattr > 0) {
+            // C computes ExecGetAllUpdatedCols against the leaf's attmap;
+            // UPDATE OF column triggers on routed leaves stay loud.
+            panic!("ExecOnConflictUpdate leaf update: UPDATE OF column triggers not ported");
+        }
+        let ar_new_tid = estate.es_tupleTable[proj_id.0 as usize].base().tts_tid;
+        let ModifyTableState { router, leaf_trig_when, oc_transition_capture, .. } = &mut *mt;
+        let rel = router.as_ref().expect("routed").leaf_rel(idx);
+        let mut when = ::trigger::TriggerWhenEval {
+            mcx,
+            cache: &mut leaf_trig_when[idx],
+            modified_cols: None,
+        };
+        ::trigger::ExecARUpdateTriggers(
+            mcx,
+            rel,
+            &td,
+            *tupleid,
+            ar_new_tid,
+            &recheck_indexes,
+            oc_transition_capture.as_ref(),
+            Some(&mut when),
+        )?;
+    }
+
+    if mt.canSetTag {
+        estate.es_processed += 1;
+    }
+    Ok(true)
+}
+
 // ExecCheckTIDVisible (nodeModifyTable.c): under xact-snapshot isolation the
 // DO NOTHING skip must not be based on a tuple invisible to our snapshot.
 fn exec_check_tid_visible<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tid: &ItemPointerData,
+    leaf: Option<usize>,
 ) -> PgResult<()> {
     if !xact::IsolationUsesXactSnapshot() {
         return Ok(());
@@ -4245,9 +4472,12 @@ fn exec_check_tid_visible<'mcx>(
     let existing_id = mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
     let found = {
         let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = &mut *estate;
-        let rel = es_relations[(mt.rel().rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
+        let rel = match leaf {
+            Some(idx) => mt.router.as_ref().expect("routed").leaf_rel(idx),
+            None => es_relations[(mt.rel().rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+        };
         tableam::table_tuple_fetch_row_version(
             *es_query_cxt,
             rel,
@@ -4257,7 +4487,7 @@ fn exec_check_tid_visible<'mcx>(
         )?
     };
     assert!(found, "failed to fetch conflicting tuple for ON CONFLICT");
-    exec_check_tuple_visible(mt, estate, existing_id)?;
+    exec_check_tuple_visible(mt, estate, existing_id, leaf)?;
     clear_slot(estate, existing_id);
     Ok(())
 }
@@ -4267,6 +4497,7 @@ fn exec_check_tuple_visible<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
+    leaf: Option<usize>,
 ) -> PgResult<()> {
     if !xact::IsolationUsesXactSnapshot() {
         return Ok(());
@@ -4274,9 +4505,12 @@ fn exec_check_tuple_visible<'mcx>(
     let visible = {
         let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
-        let rel = es_relations[(mt.rel().rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
+        let rel = match leaf {
+            Some(idx) => mt.router.as_ref().expect("routed").leaf_rel(idx),
+            None => es_relations[(mt.rel().rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+        };
         tableam::table_tuple_satisfies_snapshot(
             rel,
             &mut es_tupleTable[slot_id.0 as usize],
@@ -4925,7 +5159,7 @@ mcx::forget_safe_struct!(
         returning_ecxt, oc_old_slot, cross_part_root_slot;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
-        leaf_slots, leaf_partition_check,
+        leaf_slots, leaf_partition_check, leaf_arbiters,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },
