@@ -83,7 +83,13 @@ pub fn fc_prsd_headline(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     // ts_headline frame; the tsquery image spans varsize_any bytes.
     let prs = unsafe { &mut *prs_ptr };
     let options: &[::ts_cache::DefListItem<'_>] =
-        if opts_ptr.is_null() { &[] } else { unsafe { &(*opts_ptr)[..] } };
+        if opts_ptr.is_null() {
+            &[]
+        } else {
+            // SAFETY: internal-arg contract — a live PgVec reference.
+            let v = unsafe { &*opts_ptr };
+            v.as_slice()
+        };
     let payload = unsafe {
         let image =
             core::slice::from_raw_parts(q_ptr, ::types_tuple::varatt::varsize_any(q_ptr));
