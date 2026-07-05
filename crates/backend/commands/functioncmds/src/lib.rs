@@ -564,28 +564,53 @@ pub fn interpret_function_parameter_list<'mcx>(
     })
 }
 
-struct AsClause<'a> {
-    prosrc: &'a str,
-    probin: Option<&'a str>,
+struct AsClause<'mcx> {
+    prosrc: &'mcx str,
+    probin: Option<&'mcx str>,
+    sql_body: Option<Node<'mcx>>,
 }
 
-// interpret_AS_clause (functioncmds.c); sql_body and C-language are loud.
-fn interpret_AS_clause<'a>(
+// interpret_AS_clause (functioncmds.c:865-1020).
+fn interpret_AS_clause<'mcx>(
+    mcx: Mcx<'mcx>,
     languageOid: Oid,
     languageName: &str,
-    funcname: &'a str,
-    as_clause: Option<&'a DefElem<'a>>,
-    sql_body: Option<Node<'a>>,
-) -> PgResult<AsClause<'a>> {
-    if sql_body.is_some() {
-        unported("inline SQL function body (BEGIN ATOMIC / RETURN)");
-    }
-    let Some(as_item) = as_clause else {
+    funcname: &'mcx str,
+    as_clause: Option<&'mcx DefElem<'mcx>>,
+    sql_body_in: Option<Node<'mcx>>,
+    parameterTypes: &[Oid],
+    inParameterNames: &[&str],
+    queryString: &str,
+) -> PgResult<AsClause<'mcx>> {
+    if sql_body_in.is_none() && as_clause.is_none() {
         return Err(err(
             "no function body specified".to_string(),
             ERRCODE_INVALID_FUNCTION_DEFINITION,
         ));
-    };
+    }
+    if sql_body_in.is_some() && as_clause.is_some() {
+        return Err(err(
+            "duplicate function body specified".to_string(),
+            ERRCODE_INVALID_FUNCTION_DEFINITION,
+        ));
+    }
+    if sql_body_in.is_some() && languageOid != SQLlanguageId {
+        return Err(err(
+            "inline SQL function body only valid for language SQL".to_string(),
+            ERRCODE_INVALID_FUNCTION_DEFINITION,
+        ));
+    }
+    if let Some(sql_body_in) = sql_body_in {
+        return interpret_sql_body(
+            mcx,
+            funcname,
+            sql_body_in,
+            parameterTypes,
+            inParameterNames,
+            queryString,
+        );
+    }
+    let as_item = as_clause.expect("checked above");
     let items = as_item.arg.expect("AS DefElem arg").as_list().expect("func_as is a List");
     if languageOid == ClanguageId {
         // File name in probin, link symbol in prosrc; omitted or "-" symbol
@@ -607,7 +632,7 @@ fn interpret_AS_clause<'a>(
                 }
             }
         };
-        return Ok(AsClause { prosrc, probin: Some(probin) });
+        return Ok(AsClause { prosrc, probin: Some(probin), sql_body: None });
     }
     if items.len() != 1 {
         return Err(err(
@@ -624,7 +649,70 @@ fn interpret_AS_clause<'a>(
     if languageOid == INTERNALlanguageId && prosrc.is_empty() {
         prosrc = funcname;
     }
-    Ok(AsClause { prosrc, probin: None })
+    Ok(AsClause { prosrc, probin: None, sql_body: None })
+}
+
+// interpret_AS_clause sql_body branch (functioncmds.c:910-990): parse-analyze
+// each statement under the SQL-function parameter hooks and hand back the
+// querytree(s) for prosqlbody; prosrc becomes the empty string.
+fn interpret_sql_body<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcname: &'mcx str,
+    sql_body_in: Node<'mcx>,
+    parameterTypes: &[Oid],
+    inParameterNames: &[&str],
+    queryString: &str,
+) -> PgResult<AsClause<'mcx>> {
+    for &t in parameterTypes {
+        if coerce::IsPolymorphicType(t) {
+            return Err(err(
+                "SQL function with unquoted function body cannot have polymorphic arguments"
+                    .to_string(),
+                ERRCODE_INVALID_FUNCTION_DEFINITION,
+            ));
+        }
+    }
+    // C indexes the all-parameter name list by input-parameter position.
+    let argnames = &inParameterNames[..parameterTypes.len()];
+
+    let mut transform = |stmt: Node<'mcx>| -> PgResult<types_nodes::parsenodes::Query<'mcx>> {
+        let q = analyze_seams::transform_stmt_sql_fn::call(
+            mcx,
+            stmt,
+            queryString,
+            funcname,
+            parameterTypes,
+            argnames,
+        )?;
+        if q.commandType == types_nodes::nodes_enums::CmdType::CMD_UTILITY {
+            let tag = utility_seams::create_command_tag::call(
+                q.utilityStmt.expect("CMD_UTILITY Query has utilityStmt"),
+            );
+            return Err(err(
+                format!(
+                    "{} is not yet supported in unquoted SQL function body",
+                    cmdtag::GetCommandTagName(tag)
+                ),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        Ok(q)
+    };
+
+    let sql_body = if let Some(outer) = sql_body_in.as_list() {
+        // BEGIN ATOMIC: a single-item list wrapping the statement list.
+        let stmts = outer.nth(0).as_list().expect("routine body wraps a stmt List");
+        let mut transformed = types_nodes::NodeList::nil();
+        for stmt in stmts.iter() {
+            transformed.lappend(mcx, Node::mk(mcx, transform(stmt)?)?)?;
+        }
+        let inner = Node::mk_list(mcx, transformed)?;
+        Node::mk_list(mcx, types_nodes::NodeList::make1(mcx, inner)?)?
+    } else {
+        Node::mk(mcx, transform(sql_body_in)?)?
+    };
+
+    Ok(AsClause { prosrc: "", probin: None, sql_body: Some(sql_body) })
 }
 
 // QualifiedNameGetCreationNamespace (namespace.c) via the RangeVar walk.
@@ -794,8 +882,17 @@ pub fn CreateFunction<'mcx>(
         ));
     };
 
-    let as_parsed =
-        interpret_AS_clause(languageOid, language, funcname, attrs.as_clause, stmt.sql_body)?;
+    let as_parsed = interpret_AS_clause(
+        mcx,
+        languageOid,
+        language,
+        funcname,
+        attrs.as_clause,
+        stmt.sql_body,
+        &params.in_types,
+        &params.names,
+        source_text,
+    )?;
 
     let procost = if attrs.procost < 0.0 {
         if languageOid == INTERNALlanguageId || languageOid == ClanguageId {
@@ -834,6 +931,7 @@ pub fn CreateFunction<'mcx>(
             languageValidator,
             prosrc: as_parsed.prosrc,
             probin: as_parsed.probin,
+            prosqlbody: as_parsed.sql_body,
             prokind: if stmt.is_procedure { PROKIND_PROCEDURE } else { PROKIND_FUNCTION },
             security_definer: attrs.security,
             isLeakProof: attrs.leakproof,
@@ -1192,4 +1290,89 @@ pub fn CallStmtResultDesc<'mcx>(
         )?;
     }
     Ok(Some(desc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcx::MemoryContext;
+
+    fn return_stmt<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+        Node::build::<types_nodes::parsenodes::ReturnStmt>(mcx).unwrap().seal()
+    }
+
+    fn as_defel<'mcx>(mcx: Mcx<'mcx>) -> &'mcx DefElem<'mcx> {
+        let mut d = Node::build::<DefElem>(mcx).unwrap();
+        d.defname = Some("as");
+        let sealed = d.seal();
+        sealed.as_variant::<DefElem>().unwrap()
+    }
+
+    #[test]
+    fn interpret_as_clause_body_checks_match_c_order() {
+        let cx = MemoryContext::new("interpret_AS_clause test");
+        let mcx = cx.mcx();
+
+        // functioncmds.c:873-876
+        let e = interpret_AS_clause(mcx, SQLlanguageId, "sql", "f", None, None, &[], &[], "")
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("no function body specified"));
+
+        // functioncmds.c:878-881
+        let e = interpret_AS_clause(
+            mcx,
+            SQLlanguageId,
+            "sql",
+            "f",
+            Some(as_defel(mcx)),
+            Some(return_stmt(mcx)),
+            &[],
+            &[],
+            "",
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("duplicate function body specified"));
+
+        // functioncmds.c:883-886
+        let e = interpret_AS_clause(
+            mcx,
+            ClanguageId,
+            "c",
+            "f",
+            None,
+            Some(return_stmt(mcx)),
+            &[],
+            &[],
+            "",
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("inline SQL function body only valid for language SQL"));
+    }
+
+    #[test]
+    fn sql_body_rejects_polymorphic_arguments() {
+        let cx = MemoryContext::new("interpret_AS_clause polymorphic test");
+        let mcx = cx.mcx();
+
+        // functioncmds.c:926-929
+        let e = interpret_AS_clause(
+            mcx,
+            SQLlanguageId,
+            "sql",
+            "f",
+            None,
+            Some(return_stmt(mcx)),
+            &[types_core::catalog::ANYELEMENTOID],
+            &["a"],
+            "",
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains(
+            "SQL function with unquoted function body cannot have polymorphic arguments"
+        ));
+    }
 }
