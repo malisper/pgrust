@@ -26,6 +26,9 @@ pub fn btparallelrescan(shared: &BTParallelScanShared) {
 }
 
 /// _bt_parallel_seize: `(status, next_scan_page, last_curr_page)`.
+// Parallel-only; outlined so fat LTO keeps it out of the serial descent.
+#[cold]
+#[inline(never)]
 pub(crate) fn bt_parallel_seize(
     so: &mut BTScanOpaqueData<'_>,
     shared: &BTParallelScanShared,
@@ -95,6 +98,9 @@ pub(crate) fn bt_parallel_seize(
 }
 
 /// _bt_parallel_release.
+// Parallel-only; outlined so fat LTO keeps it out of the serial descent.
+#[cold]
+#[inline(never)]
 pub(crate) fn bt_parallel_release(
     shared: &BTParallelScanShared,
     next_scan_page: BlockNumber,
@@ -110,7 +116,10 @@ pub(crate) fn bt_parallel_release(
     shared.cv.notify_one();
 }
 
-/// _bt_parallel_done.
+/// _bt_parallel_done. The serial (None) fast path stays inlinable; the
+/// shared-state arm is outlined so fat LTO keeps it out of the serial
+/// descent.
+#[inline]
 pub(crate) fn bt_parallel_done(
     so: &BTScanOpaqueData<'_>,
     parallel: Option<&BTParallelScanShared>,
@@ -118,7 +127,12 @@ pub(crate) fn bt_parallel_done(
     debug_assert!(!BTScanPosIsValid(&so.currPos));
 
     let Some(shared) = parallel else { return };
+    bt_parallel_done_shared(so, shared);
+}
 
+#[cold]
+#[inline(never)]
+fn bt_parallel_done_shared(so: &BTScanOpaqueData<'_>, shared: &BTParallelScanShared) {
     if so.needPrimScan {
         return;
     }
@@ -140,6 +154,9 @@ pub(crate) fn bt_parallel_done(
 
 /// _bt_parallel_primscan_schedule: no-op if the shared state was seized since
 /// this backend last advanced the scan.
+// Parallel-only; outlined so fat LTO keeps it out of the serial descent.
+#[cold]
+#[inline(never)]
 pub(crate) fn bt_parallel_primscan_schedule(
     so: &BTScanOpaqueData<'_>,
     shared: &BTParallelScanShared,
