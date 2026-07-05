@@ -30,10 +30,18 @@ const InvalidAttrNumber: AttrNumber = 0;
 const MAX_FUZZY_DISTANCE: i32 = 3;
 
 pub fn init_seams() {
-    parse_relation_seams::expand_nsitem_vars_at::set(|mcx, pstate, varno, sublevels_up, location| {
-        let nsitem = GetNSItemByRangeTablePosn(pstate, varno, sublevels_up);
-        Ok(expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location)?.0)
-    });
+    parse_relation_seams::expand_nsitem_vars_at::set(expand_nsitem_vars_at);
+}
+
+fn expand_nsitem_vars_at<'a, 'p, 'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &'a ParseState<'p, 'mcx>,
+    varno: i32,
+    sublevels_up: i32,
+    location: ParseLoc,
+) -> PgResult<NodeList<'mcx>> {
+    let nsitem = GetNSItemByRangeTablePosn(pstate, varno, sublevels_up);
+    Ok(expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location)?.0)
 }
 
 fn loc(funcname: &'static str) -> ErrorLocation {

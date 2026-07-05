@@ -400,6 +400,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_SubLink
         | NodeTag::T_XmlExpr
         | NodeTag::T_SubscriptingRef
+        | NodeTag::T_FieldStore
         | NodeTag::T_NamedArgExpr) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -463,6 +464,13 @@ fn assign_collations_walker<'mcx>(
                         node.as_convert_rowtype_expr().unwrap().arg,
                         &mut loccontext,
                     )?;
+                }
+                NodeTag::T_FieldStore => {
+                    let f = node.as_field_store().unwrap();
+                    assign_collations_walker(f.arg, &mut loccontext)?;
+                    for v in &f.newvals {
+                        assign_collations_walker(v, &mut loccontext)?;
+                    }
                 }
                 NodeTag::T_BoolExpr => {
                     for arg in &node.as_bool_expr().unwrap().args {
@@ -713,6 +721,11 @@ fn assign_collations_walker<'mcx>(
                         .unwrap(),
                     // exprSetCollation(ConvertRowtypeExpr) is assert-only in C.
                     NodeTag::T_ConvertRowtypeExpr => {
+                        debug_assert!(!OidIsValid(set_coll))
+                    }
+                    // exprSetCollation(FieldStore) is assert-only in C
+                    // (composite result).
+                    NodeTag::T_FieldStore => {
                         debug_assert!(!OidIsValid(set_coll))
                     }
                     // exprSetCollation(BoolExpr/NullTest/GroupingFunc/BooleanTest)
