@@ -307,7 +307,8 @@ fn builtin_table_matches_declared_arity() {
     for row in crate::builtins::VARLENA_BUILTINS {
         assert_eq!(row.strict, !non_strict.contains(&row.foid), "{}", row.name);
         assert!(!row.retset);
-        assert!((1..=3).contains(&row.nargs), "{}", row.name);
+        // unicode_version/icu_unicode_version are 0-arg catalog functions.
+        assert!((0..=3).contains(&row.nargs), "{}", row.name);
     }
 }
 

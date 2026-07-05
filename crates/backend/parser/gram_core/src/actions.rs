@@ -7341,7 +7341,24 @@ impl<'mcx> Parser<'mcx> {
             1153 | 1154 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_INOUT as i32),
             1155 => *yyval = YYSTYPE::Ival(FunctionParameterMode::FUNC_PARAM_VARIADIC as i32),
             1157 => *yyval = view.v(1),
-            // func_arg_with_default DEFAULT/'=' a_expr (%TYPE 1159/1160 stay loud).
+            // func_type: [SETOF] type_function_name attrs '%' TYPE_P.
+            1159 | 1160 => {
+                let off: usize = if rule == 1160 { 1 } else { 0 };
+                let name = view.v(1 + off).str_val();
+                let mut names = view.v(2 + off).list();
+                names.lcons(mcx, Node::mk_string(mcx, name)?)?;
+                let t = make_type_name(mcx, names, NodeList::nil(), view.l(1 + off))?;
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    t.with_mut::<TypeName, _>(|tn| {
+                        tn.pct_type = true;
+                        tn.setof = rule == 1160;
+                    })
+                    .expect("TypeName");
+                }
+                *yyval = YYSTYPE::Node(Some(t));
+            }
+            // func_arg_with_default DEFAULT/'=' a_expr.
             1162 | 1163 => {
                 let param = view.v(1).node().expect("func_arg");
                 let def = view.v(3).node();

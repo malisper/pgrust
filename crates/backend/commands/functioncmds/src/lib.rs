@@ -298,7 +298,7 @@ fn resolve_type_name<'mcx>(
 
 fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oid, &'a str)> {
     if tn.pct_type {
-        unported("%TYPE references");
+        return resolve_pct_type(mcx, tn);
     }
     if !tn.typmods.is_nil() || tn.typemod != -1 {
         unported("type modifiers on function signature types");
@@ -341,6 +341,65 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
         typoid
     };
     Ok((typoid, typname))
+}
+
+// LookupTypeNameExtended's %TYPE arm (parse_type.c): the type of an existing
+// relation column, plus the intentionally unpositioned conversion NOTICE.
+fn resolve_pct_type<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oid, &'a str)> {
+    let nnames = tn.names.len();
+    let mut names: [&str; 4] = [""; 4];
+    if (1..=4).contains(&nnames) {
+        for (i, n) in tn.names.iter().enumerate() {
+            names[i] = n.as_string().expect("TypeName names").sval;
+        }
+    }
+    let (catalogname, schemaname, relname, field) = match nnames {
+        2 => (None, None, names[0], names[1]),
+        3 => (None, Some(names[0]), names[1], names[2]),
+        4 => (Some(names[0]), Some(names[1]), names[2], names[3]),
+        n => {
+            let which = if n < 2 { "too few" } else { "too many" };
+            let joined = tn
+                .names
+                .iter()
+                .map(|x| x.as_string().expect("TypeName names").sval)
+                .collect::<Vec<_>>()
+                .join(".");
+            return Err(err(
+                format!("improper %TYPE reference ({which} dotted names): {joined}"),
+                ERRCODE_SYNTAX_ERROR,
+            ));
+        }
+    };
+    let rv = rel_vocab::RangeVar {
+        catalogname,
+        schemaname,
+        relname,
+        inh: true,
+        relpersistence: b'p',
+        location: tn.location,
+    };
+    let relid = namespace_seams::range_var_get_relid::call(mcx, &rv, types_rel::NoLock, false)?;
+    let attnum = lsyscache::get_attnum(relid, field)?;
+    if attnum == 0 {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("column \"{field}\" of relation \"{relname}\" does not exist"),
+            )
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+        ));
+    }
+    let typoid = lsyscache::get_atttype(relid, attnum)?;
+    debug_assert!(tn.arrayBounds.is_nil());
+    elog::ereport(types_error::NOTICE)
+        .errmsg(format!(
+            "type reference {} converted to {}",
+            catalog_objectaddress::TypeNameToString(tn),
+            format_type::format_type_be(typoid)?
+        ))
+        .finish(types_error::ErrorLocation::new("parse_type.c", 0, "LookupTypeNameExtended"))?;
+    Ok((typoid, field))
 }
 
 fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {

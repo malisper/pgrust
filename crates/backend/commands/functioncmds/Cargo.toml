@@ -26,6 +26,7 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }
