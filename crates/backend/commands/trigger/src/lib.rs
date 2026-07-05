@@ -6,7 +6,7 @@ mod exec;
 mod queue;
 mod state;
 
-pub use catalog::{map_partition_qual, CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs};
+pub use catalog::{map_partition_qual, CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs, TriggerSetParentTrigger};
 pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, EnableDisableTrigger, RemoveTriggerById};
 pub use exec::{
     ExecBSTruncateTriggers, ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache,

@@ -301,13 +301,9 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
 
     AttachPartitionEnsureIndexes(mcx, rel, &attachrel)?;
 
-    if rel.rd_hastriggers {
-        has_row_triggers(mcx, rel.rd_id)?
-            .then(|| unported("CloneRowTriggersToPartition (trigger lane)"));
-    }
-    if crate::rel_has_fk_constraints(mcx, rel.rd_id)? {
-        unported("CloneForeignKeyConstraints onto attached partition (fk lane)");
-    }
+    crate::partition::CloneRowTriggersToPartition(mcx, rel, &attachrel)?;
+
+    crate::fk::CloneForeignKeyConstraints(mcx, Some(wqueue), rel, &attachrel)?;
 
     let part_bound_constraint =
         partbounds::get_qual_from_partbound(mcx, &key, rel.rd_id, pdesc.boundinfo.as_ref(), &pdesc.oids, spec)?;
@@ -397,28 +393,6 @@ fn check_no_transition_table_triggers<'mcx>(
     Ok(())
 }
 
-fn has_row_triggers<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<bool> {
-    const Anum_pg_trigger_tgtype: usize = 6;
-    const Anum_pg_trigger_tgisinternal: usize = 8;
-    const TRIGGER_TYPE_ROW: i16 = 1;
-    let tgrel = table::table_open(mcx, TriggerRelationId, AccessShareLock)?;
-    let keys = [oid_scankey(2, relid)];
-    let mut scan =
-        genam::systable_beginscan(mcx, &tgrel, TriggerRelidNameIndexId, true, None, &keys)?;
-    let desc = tgrel.descr();
-    let mut found = false;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let (tgtype, _) = getattr(tup, desc, Anum_pg_trigger_tgtype);
-        let (internal, _) = getattr(tup, desc, Anum_pg_trigger_tgisinternal);
-        if tgtype.as_i16() & TRIGGER_TYPE_ROW != 0 && !internal.as_bool() {
-            found = true;
-            break;
-        }
-    }
-    genam::systable_endscan(mcx, scan)?;
-    tgrel.close(AccessShareLock)?;
-    Ok(found)
-}
 
 // CreateInheritance (tablecmds.c:17374), ATTACH form: the caller has already
 // proven attachrel has no pg_inherits rows, so inhseqno is always 1.

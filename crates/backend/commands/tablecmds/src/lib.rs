@@ -656,9 +656,7 @@ pub fn DefineRelation<'mcx>(
         if parent.rd_hastriggers {
             partition::CloneRowTriggersToPartition(mcx, &parent, &rel)?;
         }
-        if rel_has_fk_constraints(mcx, parent_oid)? {
-            unported("CloneForeignKeyConstraints onto new partitions");
-        }
+        fk::CloneForeignKeyConstraints(mcx, None, &parent, &rel)?;
         rel.close(types_rel::NoLock)?;
         parent.close(types_rel::NoLock)?;
     }
@@ -735,86 +733,3 @@ pub fn DefineRelation<'mcx>(
     Ok(relation_id)
 }
 
-// CloneForeignKeyConstraints detector: any FK on or referencing the parent
-// means the cloning lane is required.
-fn rel_has_fk_constraints(mcx: Mcx<'_>, relid: Oid) -> PgResult<bool> {
-    let con_rel = table::table_open(
-        mcx,
-        types_core::CONSTRAINT_RELATION_ID,
-        types_rel::AccessShareLock,
-    )?;
-    let mut key = types_scan::scankey::ScanKeyData::empty();
-    key.sk_attno = pg_constraint::Anum_pg_constraint_conrelid;
-    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
-    key.sk_collation = 0;
-    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
-        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
-    key.sk_argument = ::datum::Datum::from_oid(relid);
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &con_rel,
-        pg_constraint::ConstraintRelidTypidNameIndexId,
-        true,
-        None,
-        &[key],
-    )?;
-    let mut found = false;
-    let desc = con_rel.descr();
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let mut isnull = false;
-        // SAFETY: contype is a fixed NOT NULL pg_constraint column.
-        let contype = unsafe {
-            types_tuple::heap_getattr(
-                tup,
-                pg_constraint::Anum_pg_constraint_contype as i32,
-                desc,
-                &mut isnull,
-            )
-        }
-        .as_i8() as u8;
-        if contype == pg_constraint::CONSTRAINT_FOREIGN {
-            found = true;
-            break;
-        }
-    }
-    genam::systable_endscan(mcx, scan)?;
-    if !found {
-        // CloneFkReferenced side: FKs pointing AT the parent (confrelid);
-        // seqscan, no index on confrelid exists (C shape).
-        let mut scan =
-            genam::systable_beginscan(mcx, &con_rel, types_core::InvalidOid, false, None, &[])?;
-        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-            let mut isnull = false;
-            // SAFETY (each): fixed NOT NULL pg_constraint columns.
-            let contype = unsafe {
-                types_tuple::heap_getattr(
-                    tup,
-                    pg_constraint::Anum_pg_constraint_contype as i32,
-                    desc,
-                    &mut isnull,
-                )
-            }
-            .as_i8() as u8;
-            if contype != pg_constraint::CONSTRAINT_FOREIGN {
-                continue;
-            }
-            // SAFETY: as above.
-            let confrelid = unsafe {
-                types_tuple::heap_getattr(
-                    tup,
-                    pg_constraint::Anum_pg_constraint_confrelid as i32,
-                    desc,
-                    &mut isnull,
-                )
-            }
-            .as_oid();
-            if confrelid == relid {
-                found = true;
-                break;
-            }
-        }
-        genam::systable_endscan(mcx, scan)?;
-    }
-    con_rel.close(types_rel::AccessShareLock)?;
-    Ok(found)
-}

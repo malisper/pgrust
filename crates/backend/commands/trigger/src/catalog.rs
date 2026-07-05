@@ -1110,6 +1110,70 @@ fn varlena_image<'mcx>(mcx: Mcx<'mcx>, body: &[u8]) -> PgResult<PgVec<'mcx, u32>
     Ok(buf)
 }
 
+// TriggerSetParentTrigger (trigger.c): set or clear tgparentid on a child
+// trigger, with the matching partition dependency records.
+pub fn TriggerSetParentTrigger<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_trig_id: Oid,
+    parent_trig_id: Oid,
+    child_table_id: Oid,
+) -> PgResult<()> {
+    const TriggerOidIndexId: Oid = 2702;
+    let trig_rel = table::table_open(mcx, TRIGGER_RELATION_ID, RowExclusiveLock)?;
+    let keys = [scan_key(Anum_pg_trigger_oid, F_OIDEQ, Datum::from_oid(child_trig_id))];
+    let mut scan =
+        genam::systable_beginscan(mcx, &trig_rel, TriggerOidIndexId, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("could not find tuple for trigger {child_trig_id}"));
+    let desc = trig_rel.descr();
+    let mut isnull = false;
+    // SAFETY: tgparentid is a fixed NOT NULL pg_trigger column.
+    let tgparentid = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_trigger_tgparentid, desc, &mut isnull)
+    }
+    .as_oid();
+    let natts = desc.natts as usize;
+    let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    values.resize(natts, Datum::null());
+    nulls.resize(natts, false);
+    replace.resize(natts, false);
+    if parent_trig_id != InvalidOid && tgparentid != InvalidOid {
+        panic!("trigger {child_trig_id} already has a parent trigger");
+    }
+    values[Anum_pg_trigger_tgparentid as usize - 1] = Datum::from_oid(parent_trig_id);
+    replace[Anum_pg_trigger_tgparentid as usize - 1] = true;
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+    let otid = tup.t_self;
+    genam::systable_endscan(mcx, scan)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &trig_rel, &otid, &mut newtup)?;
+
+    let depender = ObjectAddress::set(TRIGGER_RELATION_ID, child_trig_id);
+    if parent_trig_id != InvalidOid {
+        let parent = ObjectAddress::set(TRIGGER_RELATION_ID, parent_trig_id);
+        pg_depend::recordDependencyOn(mcx, &depender, &parent, DependencyType::PartitionPri)?;
+        let tbl = ObjectAddress::set(RELATION_RELATION_ID, child_table_id);
+        pg_depend::recordDependencyOn(mcx, &depender, &tbl, DependencyType::PartitionSec)?;
+    } else {
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            TRIGGER_RELATION_ID,
+            child_trig_id,
+            TRIGGER_RELATION_ID,
+            DependencyType::PartitionPri,
+        )?;
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            TRIGGER_RELATION_ID,
+            child_trig_id,
+            RELATION_RELATION_ID,
+            DependencyType::PartitionSec,
+        )?;
+    }
+    trig_rel.close(RowExclusiveLock)
+}
+
 pub(crate) fn scan_key(
     attno: AttrNumber,
     func: types_core::RegProcedure,

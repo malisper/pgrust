@@ -1,8 +1,9 @@
 // ATExecAddConstraint FK slice (tablecmds.c): ATAddForeignKeyConstraint +
 // addFkConstraint/addFkRecurseReferenced/addFkRecurseReferencing +
-// createForeignKey{Action,Check}Triggers + validateForeignKeyConstraint,
-// plain-table lane, all MATCH types and ON DELETE/UPDATE actions. LOUD:
-// PERIOD, partitioned rels, old_conpfeqop re-add lane.
+// createForeignKey{Action,Check}Triggers + validateForeignKeyConstraint +
+// CloneForeignKeyConstraints and the partition attach machinery, all MATCH
+// types and ON DELETE/UPDATE actions. LOUD: PERIOD (temporal FKs), non-btree
+// FK support indexes.
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, INDEX_MAX_KEYS};
@@ -57,11 +58,13 @@ pub(crate) struct FkValidateItem<'mcx> {
     pub conid: Oid,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut crate::alter::Wqueue<'mcx>,
     rel: &Relation<'mcx>,
     constraint: &Constraint<'mcx>,
+    recurse: bool,
     old_desc: &types_tuple::TupleDescData<'mcx>,
     lockmode: types_rel::LOCKMODE,
 ) -> PgResult<()> {
@@ -97,7 +100,7 @@ pub(crate) fn ATExecAddConstraint<'mcx>(
         }
     };
 
-    at_add_foreign_key_constraint(mcx, wqueue, rel, constraint, conname, old_desc, lockmode)
+    at_add_foreign_key_constraint(mcx, wqueue, rel, constraint, conname, recurse, old_desc, lockmode)
 }
 
 // ATAddForeignKeyConstraint (tablecmds.c).
@@ -108,6 +111,7 @@ fn at_add_foreign_key_constraint<'mcx>(
     rel: &Relation<'mcx>,
     fkconstraint: &Constraint<'mcx>,
     conname: &str,
+    recurse: bool,
     old_desc: &types_tuple::TupleDescData<'mcx>,
     lockmode: types_rel::LOCKMODE,
 ) -> PgResult<()> {
@@ -132,7 +136,22 @@ fn at_add_foreign_key_constraint<'mcx>(
         table::table_openrv(mcx, &pkrv, ShareRowExclusiveLock)?
     };
 
-    if pkrel.rd_rel.relkind != RELKIND_RELATION {
+    if !recurse && rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        let e = err(
+            format!(
+                "cannot use ONLY for foreign key on partitioned table \"{}\" referencing relation \"{}\"",
+                rel.name(),
+                pkrel.name()
+            ),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        );
+        pkrel.close(NoLock)?;
+        return Err(e);
+    }
+
+    if pkrel.rd_rel.relkind != RELKIND_RELATION
+        && pkrel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
+    {
         let e = err(
             format!("referenced relation \"{}\" is not a table", pkrel.name()),
             ERRCODE_WRONG_OBJECT_TYPE,
@@ -425,7 +444,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         ffeqoperators[i] = ffeqop;
     }
 
-    let constr_oid = add_fk_constraint(
+    let (constr_oid, _) = add_fk_constraint(
         mcx,
         AddFkSide::BothSides,
         conname,
@@ -511,7 +530,6 @@ fn add_fk_recurse_referenced<'mcx>(
     parent_del_trigger: Oid,
     parent_upd_trigger: Oid,
 ) -> PgResult<()> {
-    let _ = (conname, old_check_ok);
     let (mut delete_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
     if fkconstraint.is_enforced {
         (delete_trigger_oid, update_trigger_oid) = create_foreign_key_action_triggers(
@@ -525,19 +543,61 @@ fn add_fk_recurse_referenced<'mcx>(
             parent_upd_trigger,
         )?;
     }
-    let _ = (
-        delete_trigger_oid,
-        update_trigger_oid,
-        numfks,
-        pkattnum,
-        fkattnum,
-        pfeqoperators,
-        ppeqoperators,
-        ffeqoperators,
-        fkdelsetcols,
-    );
-    if pkrel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        unported("addFkRecurseReferenced onto referenced-side partitions");
+
+    // A partitioned referenced table needs one pg_constraint row per
+    // partition in addition to the parent-table row.
+    if pkrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        let pd = partdesc::RelationGetPartitionDesc(pkrel, true)?;
+        for i in 0..pd.nparts {
+            let part_rel = table::table_open(mcx, pd.oids[i], ShareRowExclusiveLock)?;
+            let map = tupdesc::build_attrmap_by_name(mcx, &part_rel.rd_att, &pkrel.rd_att)?;
+            let mut mapped_pkattnum = [0i16; INDEX_MAX_KEYS as usize];
+            for j in 0..numfks {
+                mapped_pkattnum[j] = map[pkattnum[j] as usize - 1];
+            }
+            let part_index_id = pg_inherits::index_get_partition(mcx, part_rel.rd_id, index_oid)?;
+            if part_index_id == InvalidOid {
+                panic!("index for {index_oid} not found in partition {}", part_rel.name());
+            }
+            let (child_constr, _) = add_fk_constraint(
+                mcx,
+                AddFkSide::ReferencedSide,
+                conname,
+                fkconstraint,
+                rel,
+                &part_rel,
+                part_index_id,
+                parent_constr,
+                numfks,
+                &mapped_pkattnum,
+                fkattnum,
+                pfeqoperators,
+                ppeqoperators,
+                ffeqoperators,
+                fkdelsetcols,
+                true,
+            )?;
+            add_fk_recurse_referenced(
+                mcx,
+                conname,
+                fkconstraint,
+                rel,
+                &part_rel,
+                part_index_id,
+                child_constr,
+                numfks,
+                &mapped_pkattnum,
+                fkattnum,
+                pfeqoperators,
+                ppeqoperators,
+                ffeqoperators,
+                fkdelsetcols,
+                old_check_ok,
+                delete_trigger_oid,
+                update_trigger_oid,
+            )?;
+            part_rel.close(NoLock)?;
+        }
     }
     Ok(())
 }
@@ -547,7 +607,7 @@ fn add_fk_recurse_referenced<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn add_fk_recurse_referencing<'mcx>(
     mcx: Mcx<'mcx>,
-    wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
+    mut wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
     conname: &str,
     fkconstraint: &Constraint<'mcx>,
     rel: &Relation<'mcx>,
@@ -567,7 +627,6 @@ fn add_fk_recurse_referencing<'mcx>(
     parent_upd_trigger: Oid,
 ) -> PgResult<()> {
     debug_assert!(parent_constr != InvalidOid);
-    let _ = (conname, lockmode);
     if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
         return Err(err(
             "foreign key constraints are not supported on foreign tables".into(),
@@ -588,18 +647,6 @@ fn add_fk_recurse_referencing<'mcx>(
             parent_upd_trigger,
         )?;
     }
-    let _ = (
-        insert_trigger_oid,
-        update_trigger_oid,
-        numfks,
-        pkattnum,
-        fkattnum,
-        pfeqoperators,
-        ppeqoperators,
-        ffeqoperators,
-        fkdelsetcols,
-    );
-
     if rel.rd_rel.relkind == RELKIND_RELATION {
         if let Some(wqueue) = wqueue {
             if !old_check_ok && !fkconstraint.skip_validation && fkconstraint.is_enforced {
@@ -614,8 +661,84 @@ fn add_fk_recurse_referencing<'mcx>(
                 });
             }
         }
-    } else if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        unported("addFkRecurseReferencing onto referencing-side partitions");
+    } else if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        let pd = partdesc::RelationGetPartitionDesc(rel, true)?;
+        for i in 0..pd.nparts {
+            let partition = table::table_open(mcx, pd.oids[i], lockmode)?;
+            catalog_heap::CheckTableNotInUse(&partition, "ALTER TABLE")?;
+
+            let attmap = tupdesc::build_attrmap_by_name(mcx, &partition.rd_att, &rel.rd_att)?;
+            let mut mapped_fkattnum = [0i16; INDEX_MAX_KEYS as usize];
+            for j in 0..numfks {
+                mapped_fkattnum[j] = attmap[fkattnum[j] as usize - 1];
+            }
+
+            let part_fks = rel_fk_constraint_list(mcx, partition.rd_id)?;
+            let mut attached = false;
+            for fk in part_fks.iter() {
+                if try_attach_partition_foreign_key(
+                    mcx,
+                    wqueue.as_deref_mut(),
+                    fk,
+                    &partition,
+                    parent_constr,
+                    numfks,
+                    &mapped_fkattnum,
+                    pkattnum,
+                    pfeqoperators,
+                    insert_trigger_oid,
+                    update_trigger_oid,
+                )? {
+                    attached = true;
+                    break;
+                }
+            }
+            if attached {
+                partition.close(NoLock)?;
+                continue;
+            }
+
+            let (child_constr, _) = add_fk_constraint(
+                mcx,
+                AddFkSide::ReferencingSide,
+                conname,
+                fkconstraint,
+                &partition,
+                pkrel,
+                index_oid,
+                parent_constr,
+                numfks,
+                pkattnum,
+                &mapped_fkattnum,
+                pfeqoperators,
+                ppeqoperators,
+                ffeqoperators,
+                fkdelsetcols,
+                true,
+            )?;
+            add_fk_recurse_referencing(
+                mcx,
+                wqueue.as_deref_mut(),
+                conname,
+                fkconstraint,
+                &partition,
+                pkrel,
+                index_oid,
+                child_constr,
+                numfks,
+                pkattnum,
+                &mapped_fkattnum,
+                pfeqoperators,
+                ppeqoperators,
+                ffeqoperators,
+                fkdelsetcols,
+                old_check_ok,
+                lockmode,
+                insert_trigger_oid,
+                update_trigger_oid,
+            )?;
+            partition.close(NoLock)?;
+        }
     }
     Ok(())
 }
@@ -982,7 +1105,7 @@ fn add_fk_constraint<'mcx>(
     // C forwards is_internal to the object-access hooks, which do not exist
     // here.
     _is_internal: bool,
-) -> PgResult<Oid> {
+) -> PgResult<(Oid, &'mcx str)> {
     // Redundant at the top level; needed when recursing to referenced
     // partitions.
     if pkrel.rd_rel.relkind != RELKIND_RELATION
@@ -1072,7 +1195,7 @@ fn add_fk_constraint<'mcx>(
     }
 
     xact::CommandCounterIncrement()?;
-    Ok(constr_oid)
+    Ok((constr_oid, str_in(mcx, conname)?))
 }
 
 // createForeignKeyActionTriggers (tablecmds.c): AFTER DELETE + AFTER UPDATE
@@ -1296,4 +1419,936 @@ fn checkFkeyPermissions(rel: &Relation<'_>, attnums: &[i16]) -> PgResult<()> {
         }
     }
     Ok(())
+}
+
+const TriggerRelationId: Oid = 2620;
+const TriggerConstraintIndexId: Oid = 2699;
+const ConstraintParentIndexId: Oid = 2579;
+const Anum_pg_trigger_oid: usize = 1;
+const Anum_pg_trigger_tgrelid: usize = 2;
+const Anum_pg_trigger_tgfoid: usize = 5;
+const Anum_pg_trigger_tgtype: usize = 6;
+const Anum_pg_trigger_tgconstrrelid: usize = 9;
+const Anum_pg_trigger_tgconstraint: usize = 11;
+
+fn getattr(
+    tup: &types_tuple::HeapTupleData<'_>,
+    desc: &types_tuple::TupleDescData<'_>,
+    attno: usize,
+) -> datum::Datum {
+    let mut isnull = false;
+    // SAFETY: fixed NOT NULL catalog columns under the relation's descriptor.
+    unsafe { types_tuple::heap_getattr(tup, attno as i32, desc, &mut isnull) }
+}
+
+// The Form_pg_constraint fields the FK partition machinery reads.
+struct FkConstraintForm {
+    oid: Oid,
+    conname: [u8; 64],
+    contype: u8,
+    condeferrable: bool,
+    condeferred: bool,
+    conenforced: bool,
+    convalidated: bool,
+    conrelid: Oid,
+    conindid: Oid,
+    conparentid: Oid,
+    confrelid: Oid,
+    confupdtype: u8,
+    confdeltype: u8,
+    confmatchtype: u8,
+    conperiod: bool,
+}
+
+impl FkConstraintForm {
+    fn name_str(&self) -> &str {
+        let len = self.conname.iter().position(|&b| b == 0).unwrap_or(64);
+        core::str::from_utf8(&self.conname[..len]).expect("conname UTF-8")
+    }
+}
+
+fn decode_fk_constraint_form(
+    tup: &types_tuple::HeapTupleData<'_>,
+    desc: &types_tuple::TupleDescData<'_>,
+) -> FkConstraintForm {
+    use pg_constraint::*;
+    let name_datum = getattr(tup, desc, Anum_pg_constraint_conname as usize);
+    let mut conname = [0u8; 64];
+    // SAFETY: NameData is a 64-byte NUL-padded buffer.
+    unsafe {
+        conname.copy_from_slice(core::slice::from_raw_parts(
+            name_datum.as_usize() as *const u8,
+            64,
+        ));
+    }
+    FkConstraintForm {
+        oid: getattr(tup, desc, Anum_pg_constraint_oid as usize).as_oid(),
+        conname,
+        contype: getattr(tup, desc, Anum_pg_constraint_contype as usize).as_i8() as u8,
+        condeferrable: getattr(tup, desc, Anum_pg_constraint_condeferrable as usize).as_bool(),
+        condeferred: getattr(tup, desc, Anum_pg_constraint_condeferred as usize).as_bool(),
+        conenforced: getattr(tup, desc, Anum_pg_constraint_conenforced as usize).as_bool(),
+        convalidated: getattr(tup, desc, Anum_pg_constraint_convalidated as usize).as_bool(),
+        conrelid: getattr(tup, desc, Anum_pg_constraint_conrelid as usize).as_oid(),
+        conindid: getattr(tup, desc, Anum_pg_constraint_conindid as usize).as_oid(),
+        conparentid: getattr(tup, desc, Anum_pg_constraint_conparentid as usize).as_oid(),
+        confrelid: getattr(tup, desc, Anum_pg_constraint_confrelid as usize).as_oid(),
+        confupdtype: getattr(tup, desc, Anum_pg_constraint_confupdtype as usize).as_i8() as u8,
+        confdeltype: getattr(tup, desc, Anum_pg_constraint_confdeltype as usize).as_i8() as u8,
+        confmatchtype: getattr(tup, desc, Anum_pg_constraint_confmatchtype as usize).as_i8()
+            as u8,
+        conperiod: getattr(tup, desc, Anum_pg_constraint_conperiod as usize).as_bool(),
+    }
+}
+
+fn read_fk_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<(FkConstraintForm, pg_constraint::FkConstraintArrays)> {
+    let con_rel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    let keys = [crate::alter::oid_scankey(pg_constraint::Anum_pg_constraint_oid as usize, conoid)];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::CONSTRAINT_OID_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {conoid}"));
+    let desc = con_rel.descr();
+    let form = decode_fk_constraint_form(tup, desc);
+    let arrays = pg_constraint::DeconstructFkConstraintRow(mcx, tup, desc)?;
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok((form, arrays))
+}
+
+// ForeignKeyCacheInfo (rel.h): the fields RelationGetFKeyList exposes.
+struct FkCacheInfo {
+    conoid: Oid,
+    conrelid: Oid,
+    confrelid: Oid,
+    conenforced: bool,
+    numfks: usize,
+    conkey: [i16; INDEX_MAX_KEYS as usize],
+    confkey: [i16; INDEX_MAX_KEYS as usize],
+    conpfeqop: [Oid; INDEX_MAX_KEYS as usize],
+}
+
+// RelationGetFKeyList (relcache.c), uncached: the rel's FK constraints in
+// (conrelid, contypid, conname) index order.
+fn rel_fk_constraint_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<mcx::PgVec<'mcx, FkCacheInfo>> {
+    let con_rel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    let keys =
+        [crate::alter::oid_scankey(pg_constraint::Anum_pg_constraint_conrelid as usize, relid)];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let mut out: mcx::PgVec<'mcx, FkCacheInfo> = mcx::PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let contype =
+            getattr(tup, desc, pg_constraint::Anum_pg_constraint_contype as usize).as_i8() as u8;
+        if contype != pg_constraint::CONSTRAINT_FOREIGN {
+            continue;
+        }
+        let arrays = pg_constraint::DeconstructFkConstraintRow(mcx, tup, desc)?;
+        out.push(FkCacheInfo {
+            conoid: getattr(tup, desc, pg_constraint::Anum_pg_constraint_oid as usize).as_oid(),
+            conrelid: getattr(tup, desc, pg_constraint::Anum_pg_constraint_conrelid as usize)
+                .as_oid(),
+            confrelid: getattr(tup, desc, pg_constraint::Anum_pg_constraint_confrelid as usize)
+                .as_oid(),
+            conenforced: getattr(
+                tup,
+                desc,
+                pg_constraint::Anum_pg_constraint_conenforced as usize,
+            )
+            .as_bool(),
+            numfks: arrays.numfks,
+            conkey: arrays.conkey,
+            confkey: arrays.confkey,
+            conpfeqop: arrays.pf_eq_oprs,
+        });
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok(out)
+}
+
+// RI_FKey_trigger_type (ri_triggers.c), by RI function OID.
+const RI_TRIGGER_PK: u8 = 1;
+const RI_TRIGGER_FK: u8 = 2;
+const RI_TRIGGER_NONE: u8 = 0;
+
+fn ri_fkey_trigger_type(tgfoid: Oid) -> u8 {
+    match tgfoid {
+        F_RI_FKEY_CASCADE_DEL | F_RI_FKEY_CASCADE_UPD | F_RI_FKEY_SETNULL_DEL
+        | F_RI_FKEY_SETNULL_UPD | F_RI_FKEY_SETDEFAULT_DEL | F_RI_FKEY_SETDEFAULT_UPD
+        | F_RI_FKEY_NOACTION_DEL | F_RI_FKEY_NOACTION_UPD | F_RI_FKEY_RESTRICT_DEL
+        | F_RI_FKEY_RESTRICT_UPD => RI_TRIGGER_PK,
+        F_RI_FKEY_CHECK_INS | F_RI_FKEY_CHECK_UPD => RI_TRIGGER_FK,
+        _ => RI_TRIGGER_NONE,
+    }
+}
+
+// GetForeignKeyActionTriggers (tablecmds.c).
+fn get_foreign_key_action_triggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+    confrelid: Oid,
+    conrelid: Oid,
+) -> PgResult<(Oid, Oid)> {
+    let (mut delete_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
+    let trig_rel = table::table_open(mcx, TriggerRelationId, types_rel::RowExclusiveLock)?;
+    let keys = [crate::alter::oid_scankey(Anum_pg_trigger_tgconstraint, conoid)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &trig_rel, TriggerConstraintIndexId, true, None, &keys)?;
+    let desc = trig_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        if getattr(tup, desc, Anum_pg_trigger_tgconstrrelid).as_oid() != conrelid {
+            continue;
+        }
+        if getattr(tup, desc, Anum_pg_trigger_tgrelid).as_oid() != confrelid {
+            continue;
+        }
+        let tgfoid = getattr(tup, desc, Anum_pg_trigger_tgfoid).as_oid();
+        if ri_fkey_trigger_type(tgfoid) != RI_TRIGGER_PK {
+            continue;
+        }
+        let tgtype = getattr(tup, desc, Anum_pg_trigger_tgtype).as_i16();
+        let oid = getattr(tup, desc, Anum_pg_trigger_oid).as_oid();
+        if tgtype & TRIGGER_TYPE_DELETE != 0 {
+            debug_assert!(delete_trigger_oid == InvalidOid);
+            delete_trigger_oid = oid;
+        } else if tgtype & TRIGGER_TYPE_UPDATE != 0 {
+            debug_assert!(update_trigger_oid == InvalidOid);
+            update_trigger_oid = oid;
+        }
+        if cfg!(not(debug_assertions))
+            && delete_trigger_oid != InvalidOid
+            && update_trigger_oid != InvalidOid
+        {
+            break;
+        }
+    }
+    if delete_trigger_oid == InvalidOid {
+        panic!("could not find ON DELETE action trigger of foreign key constraint {conoid}");
+    }
+    if update_trigger_oid == InvalidOid {
+        panic!("could not find ON UPDATE action trigger of foreign key constraint {conoid}");
+    }
+    genam::systable_endscan(mcx, scan)?;
+    trig_rel.close(types_rel::RowExclusiveLock)?;
+    Ok((delete_trigger_oid, update_trigger_oid))
+}
+
+// GetForeignKeyCheckTriggers (tablecmds.c).
+fn get_foreign_key_check_triggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+    confrelid: Oid,
+    conrelid: Oid,
+) -> PgResult<(Oid, Oid)> {
+    let (mut insert_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
+    let trig_rel = table::table_open(mcx, TriggerRelationId, types_rel::RowExclusiveLock)?;
+    let keys = [crate::alter::oid_scankey(Anum_pg_trigger_tgconstraint, conoid)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &trig_rel, TriggerConstraintIndexId, true, None, &keys)?;
+    let desc = trig_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        if getattr(tup, desc, Anum_pg_trigger_tgconstrrelid).as_oid() != confrelid {
+            continue;
+        }
+        if getattr(tup, desc, Anum_pg_trigger_tgrelid).as_oid() != conrelid {
+            continue;
+        }
+        let tgfoid = getattr(tup, desc, Anum_pg_trigger_tgfoid).as_oid();
+        if ri_fkey_trigger_type(tgfoid) != RI_TRIGGER_FK {
+            continue;
+        }
+        let tgtype = getattr(tup, desc, Anum_pg_trigger_tgtype).as_i16();
+        let oid = getattr(tup, desc, Anum_pg_trigger_oid).as_oid();
+        if tgtype & TRIGGER_TYPE_INSERT != 0 {
+            debug_assert!(insert_trigger_oid == InvalidOid);
+            insert_trigger_oid = oid;
+        } else if tgtype & TRIGGER_TYPE_UPDATE != 0 {
+            debug_assert!(update_trigger_oid == InvalidOid);
+            update_trigger_oid = oid;
+        }
+        if cfg!(not(debug_assertions))
+            && insert_trigger_oid != InvalidOid
+            && update_trigger_oid != InvalidOid
+        {
+            break;
+        }
+    }
+    if insert_trigger_oid == InvalidOid {
+        panic!("could not find ON INSERT check triggers of foreign key constraint {conoid}");
+    }
+    if update_trigger_oid == InvalidOid {
+        panic!("could not find ON UPDATE check triggers of foreign key constraint {conoid}");
+    }
+    genam::systable_endscan(mcx, scan)?;
+    trig_rel.close(types_rel::RowExclusiveLock)?;
+    Ok((insert_trigger_oid, update_trigger_oid))
+}
+
+// tryAttachPartitionForeignKey (tablecmds.c): compare an existing partition
+// FK against the one being propagated; attach it if equivalent.
+#[allow(clippy::too_many_arguments)]
+fn try_attach_partition_foreign_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
+    fk: &FkCacheInfo,
+    partition: &Relation<'mcx>,
+    parent_constr_oid: Oid,
+    numfks: usize,
+    mapped_conkey: &[i16],
+    confkey: &[i16],
+    conpfeqop: &[Oid],
+    parent_ins_trigger: Oid,
+    parent_upd_trigger: Oid,
+) -> PgResult<bool> {
+    let (parent_form, _) = read_fk_constraint(mcx, parent_constr_oid)?;
+
+    if fk.confrelid != parent_form.confrelid || fk.numfks != numfks {
+        return Ok(false);
+    }
+    for i in 0..numfks {
+        if fk.conkey[i] != mapped_conkey[i]
+            || fk.confkey[i] != confkey[i]
+            || fk.conpfeqop[i] != conpfeqop[i]
+        {
+            return Ok(false);
+        }
+    }
+
+    let (part_form, _) = read_fk_constraint(mcx, fk.conoid)?;
+
+    // A mismatched enforceability would otherwise silently produce a
+    // duplicate constraint; make the user resolve it.
+    if part_form.conenforced != parent_form.conenforced {
+        return Err(err(
+            format!(
+                "constraint \"{}\" enforceability conflicts with constraint \"{}\" on relation \"{}\"",
+                parent_form.name_str(),
+                part_form.name_str(),
+                partition.name()
+            ),
+            types_error::ERRCODE_INVALID_OBJECT_DEFINITION,
+        ));
+    }
+
+    if part_form.conparentid != InvalidOid
+        || part_form.condeferrable != parent_form.condeferrable
+        || part_form.condeferred != parent_form.condeferred
+        || part_form.confupdtype != parent_form.confupdtype
+        || part_form.confdeltype != parent_form.confdeltype
+        || part_form.confmatchtype != parent_form.confmatchtype
+    {
+        return Ok(false);
+    }
+
+    attach_partition_foreign_key(
+        mcx,
+        wqueue,
+        partition,
+        fk.conoid,
+        parent_constr_oid,
+        parent_ins_trigger,
+        parent_upd_trigger,
+    )?;
+    Ok(true)
+}
+
+// AttachPartitionForeignKey (tablecmds.c).
+fn attach_partition_foreign_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
+    partition: &Relation<'mcx>,
+    part_constr_oid: Oid,
+    parent_constr_oid: Oid,
+    parent_ins_trigger: Oid,
+    parent_upd_trigger: Oid,
+) -> PgResult<()> {
+    let (parent_form, _) = read_fk_constraint(mcx, parent_constr_oid)?;
+    let (part_form, _) = read_fk_constraint(mcx, part_constr_oid)?;
+    let part_constr_frelid = part_form.confrelid;
+    let part_constr_relid = part_form.conrelid;
+
+    // A partitioned referenced table left extra per-partition rows and
+    // action triggers on the attached constraint; remove them.
+    if lsyscache::relation::get_rel_relkind(part_constr_frelid)? as u8
+        == RELKIND_PARTITIONED_TABLE
+    {
+        remove_inherited_constraint(mcx, part_constr_oid, part_constr_relid)?;
+    }
+
+    let queue_validation = parent_form.convalidated && !part_form.convalidated;
+
+    drop_foreign_key_constraint_triggers(mcx, part_constr_oid, part_constr_frelid, part_constr_relid)?;
+
+    pg_constraint::ConstraintSetParentConstraint(
+        mcx,
+        part_constr_oid,
+        parent_constr_oid,
+        partition.rd_id,
+    )?;
+
+    if parent_form.conenforced {
+        let (insert_trigger_oid, update_trigger_oid) = get_foreign_key_check_triggers(
+            mcx,
+            part_constr_oid,
+            part_constr_frelid,
+            part_constr_relid,
+        )?;
+        debug_assert!(insert_trigger_oid != InvalidOid && parent_ins_trigger != InvalidOid);
+        trigger::TriggerSetParentTrigger(mcx, insert_trigger_oid, parent_ins_trigger, partition.rd_id)?;
+        debug_assert!(update_trigger_oid != InvalidOid && parent_upd_trigger != InvalidOid);
+        trigger::TriggerSetParentTrigger(mcx, update_trigger_oid, parent_upd_trigger, partition.rd_id)?;
+    }
+
+    xact::CommandCounterIncrement()?;
+
+    if queue_validation {
+        if let Some(wqueue) = wqueue {
+            let (part_form, _) = read_fk_constraint(mcx, part_constr_oid)?;
+            queue_fk_constraint_validation(
+                mcx,
+                wqueue,
+                partition,
+                part_form.confrelid,
+                &part_form,
+                types_rel::ShareUpdateExclusiveLock,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// QueueFKConstraintValidation (tablecmds.c): queue Phase-3 verification for
+// an invalid FK constraint, recursing over child constraints, and flip
+// convalidated.
+fn queue_fk_constraint_validation<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    fkrel: &Relation<'mcx>,
+    pkrelid: Oid,
+    con: &FkConstraintForm,
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<()> {
+    debug_assert!(con.contype == pg_constraint::CONSTRAINT_FOREIGN);
+    debug_assert!(!con.convalidated);
+
+    // Partitioned tables themselves need no scan; nor do the extra rows a
+    // partitioned referenced table hangs on the referencing rel.
+    if fkrel.rd_rel.relkind == RELKIND_RELATION && con.confrelid == pkrelid {
+        let tabidx = crate::alter::ATGetQueueEntry(mcx, wqueue, fkrel);
+        wqueue[tabidx].fk_checks.push(FkValidateItem {
+            conname: str_in(mcx, con.name_str())?,
+            refrelid: con.confrelid,
+            refindid: con.conindid,
+            conid: con.oid,
+        });
+    }
+
+    if fkrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
+        || lsyscache::relation::get_rel_relkind(con.confrelid)? as u8 == RELKIND_PARTITIONED_TABLE
+    {
+        let con_rel = table::table_open(
+            mcx,
+            types_core::CONSTRAINT_RELATION_ID,
+            types_rel::RowExclusiveLock,
+        )?;
+        let keys = [crate::alter::oid_scankey(
+            pg_constraint::Anum_pg_constraint_conparentid as usize,
+            con.oid,
+        )];
+        let mut scan =
+            genam::systable_beginscan(mcx, &con_rel, ConstraintParentIndexId, true, None, &keys)?;
+        let desc = con_rel.descr();
+        let mut children: mcx::PgVec<'mcx, FkConstraintForm> = mcx::PgVec::new_in(mcx);
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            children.push(decode_fk_constraint_form(tup, desc));
+        }
+        genam::systable_endscan(mcx, scan)?;
+        con_rel.close(types_rel::RowExclusiveLock)?;
+        for childcon in children.iter() {
+            if childcon.convalidated {
+                continue;
+            }
+            let childrel = table::table_open(mcx, childcon.conrelid, lockmode)?;
+            // pkrelid passes through as-is: it identifies the root
+            // referenced table.
+            queue_fk_constraint_validation(mcx, wqueue, &childrel, pkrelid, childcon, lockmode)?;
+            childrel.close(NoLock)?;
+        }
+    }
+
+    pg_constraint::SetConstraintValidated(mcx, con.oid)
+}
+
+// RemoveInheritedConstraint (tablecmds.c): drop the per-partition constraint
+// rows (and their triggers) hanging off a referenced-side clone.
+fn remove_inherited_constraint<'mcx>(mcx: Mcx<'mcx>, conoid: Oid, conrelid: Oid) -> PgResult<()> {
+    let con_rel =
+        table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, types_rel::RowShareLock)?;
+    let keys = [crate::alter::oid_scankey(
+        pg_constraint::Anum_pg_constraint_conrelid as usize,
+        conrelid,
+    )];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::CONSTRAINT_RELID_TYPID_NAME_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let mut objs = catalog_dependency::ObjectAddresses::new();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let form = decode_fk_constraint_form(tup, desc);
+        if form.conparentid != conoid {
+            continue;
+        }
+        objs.add_exact_object_address(pg_depend::ObjectAddress::set(
+            types_core::CONSTRAINT_RELATION_ID,
+            form.oid,
+        ));
+        let n = pg_depend::deleteDependencyRecordsForSpecific(
+            mcx,
+            types_core::CONSTRAINT_RELATION_ID,
+            form.oid,
+            pg_depend::DependencyType::Internal.as_char(),
+            types_core::CONSTRAINT_RELATION_ID,
+            conoid,
+        )?;
+        debug_assert!(n == 1);
+
+        let trig_rel = table::table_open(mcx, TriggerRelationId, types_rel::RowExclusiveLock)?;
+        let keys2 = [crate::alter::oid_scankey(Anum_pg_trigger_tgconstraint, form.oid)];
+        let mut scan2 = genam::systable_beginscan(
+            mcx,
+            &trig_rel,
+            TriggerConstraintIndexId,
+            true,
+            None,
+            &keys2,
+        )?;
+        let tdesc = trig_rel.descr();
+        while let Some(trigtup) = genam::systable_getnext(mcx, &mut scan2)? {
+            objs.add_exact_object_address(pg_depend::ObjectAddress::set(
+                TriggerRelationId,
+                getattr(trigtup, tdesc, Anum_pg_trigger_oid).as_oid(),
+            ));
+        }
+        genam::systable_endscan(mcx, scan2)?;
+        trig_rel.close(types_rel::RowExclusiveLock)?;
+    }
+    xact::CommandCounterIncrement()?;
+    catalog_dependency::performMultipleDeletions(
+        mcx,
+        &objs,
+        catalog_dependency::DropBehavior::DROP_RESTRICT,
+        catalog_dependency::PERFORM_DELETION_INTERNAL,
+    )?;
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::RowShareLock)
+}
+
+// DropForeignKeyConstraintTriggers (tablecmds.c): remove a constraint's RI
+// triggers, severing their dependency records first.
+fn drop_foreign_key_constraint_triggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+    confrelid: Oid,
+    conrelid: Oid,
+) -> PgResult<()> {
+    let trig_rel = table::table_open(mcx, TriggerRelationId, types_rel::RowExclusiveLock)?;
+    let keys = [crate::alter::oid_scankey(Anum_pg_trigger_tgconstraint, conoid)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &trig_rel, TriggerConstraintIndexId, true, None, &keys)?;
+    let desc = trig_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        if getattr(tup, desc, Anum_pg_trigger_tgconstrrelid).as_oid() == InvalidOid {
+            continue;
+        }
+        if conrelid != InvalidOid
+            && getattr(tup, desc, Anum_pg_trigger_tgconstrrelid).as_oid() != conrelid
+        {
+            continue;
+        }
+        if confrelid != InvalidOid
+            && getattr(tup, desc, Anum_pg_trigger_tgrelid).as_oid() != confrelid
+        {
+            continue;
+        }
+        debug_assert!(
+            ri_fkey_trigger_type(getattr(tup, desc, Anum_pg_trigger_tgfoid).as_oid())
+                != RI_TRIGGER_NONE
+        );
+        let trigoid = getattr(tup, desc, Anum_pg_trigger_oid).as_oid();
+        // The dependency record binding trigger to constraint must go first
+        // so the trigger can drop while the constraint stays.
+        pg_depend::deleteDependencyRecordsFor(mcx, TriggerRelationId, trigoid, false)?;
+        xact::CommandCounterIncrement()?;
+        catalog_dependency::performDeletion(
+            mcx,
+            &pg_depend::ObjectAddress::set(TriggerRelationId, trigoid),
+            catalog_dependency::DropBehavior::DROP_RESTRICT,
+            0,
+        )?;
+        xact::CommandCounterIncrement()?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    trig_rel.close(types_rel::RowExclusiveLock)
+}
+
+fn attnames_string_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    desc: &types_tuple::TupleDescData<'mcx>,
+    attnums: &[i16],
+) -> PgResult<NodeList<'mcx>> {
+    let mut list = NodeList::nil();
+    for &attnum in attnums {
+        let att = desc.attr(attnum as usize - 1);
+        let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+        let node = types_nodes::Node::mk(mcx, types_nodes::String { sval: str_in(mcx, name)? })?;
+        list.lappend(mcx, node)?;
+    }
+    Ok(list)
+}
+
+fn clone_constraint_node<'mcx>(
+    form: &FkConstraintForm,
+    conname: Option<&'mcx str>,
+    skip_validation: bool,
+    fk_attrs: NodeList<'mcx>,
+) -> Constraint<'mcx> {
+    Constraint {
+        contype: types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN,
+        conname,
+        deferrable: form.condeferrable,
+        initdeferred: form.condeferred,
+        location: -1,
+        pktable: None,
+        fk_attrs,
+        pk_attrs: NodeList::nil(),
+        fk_matchtype: form.confmatchtype,
+        fk_upd_action: form.confupdtype,
+        fk_del_action: form.confdeltype,
+        fk_del_set_cols: NodeList::nil(),
+        old_conpfeqop: types_nodes::list::OidList::nil(),
+        old_pktable_oid: InvalidOid,
+        is_enforced: form.conenforced,
+        skip_validation,
+        initially_valid: form.convalidated,
+        ..Default::default()
+    }
+}
+
+// CloneForeignKeyConstraints (tablecmds.c): clone FKs from a partitioned
+// table to a newly acquired partition.
+pub(crate) fn CloneForeignKeyConstraints<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
+    parent_rel: &Relation<'mcx>,
+    partition_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
+    clone_fk_referencing(mcx, wqueue.as_deref_mut(), parent_rel, partition_rel)?;
+    clone_fk_referenced(mcx, parent_rel, partition_rel)
+}
+
+// CloneFkReferenced (tablecmds.c): clone constraints that have the parent on
+// the referenced side.
+fn clone_fk_referenced<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent_rel: &Relation<'mcx>,
+    partition_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    // Two steps so a constraint whose parent is also being cloned is skipped
+    // regardless of scan order.
+    let mut clone: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    {
+        let con_rel = table::table_open(
+            mcx,
+            types_core::CONSTRAINT_RELATION_ID,
+            types_rel::RowShareLock,
+        )?;
+        let keys = [
+            crate::alter::oid_scankey(
+                pg_constraint::Anum_pg_constraint_confrelid as usize,
+                parent_rel.rd_id,
+            ),
+            char_scankey(
+                pg_constraint::Anum_pg_constraint_contype as usize,
+                pg_constraint::CONSTRAINT_FOREIGN,
+            ),
+        ];
+        let mut scan = genam::systable_beginscan(mcx, &con_rel, InvalidOid, true, None, &keys)?;
+        let desc = con_rel.descr();
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            clone.push(getattr(tup, desc, pg_constraint::Anum_pg_constraint_oid as usize).as_oid());
+        }
+        genam::systable_endscan(mcx, scan)?;
+        con_rel.close(types_rel::RowShareLock)?;
+    }
+
+    let attmap = tupdesc::build_attrmap_by_name(mcx, &partition_rel.rd_att, &parent_rel.rd_att)?;
+    for &constr_oid in clone.iter() {
+        let (form, arrays) = read_fk_constraint(mcx, constr_oid)?;
+        if form.conparentid != InvalidOid && clone.contains(&form.conparentid) {
+            continue;
+        }
+        if form.conperiod {
+            unported("CloneFkReferenced of a temporal (PERIOD) foreign key");
+        }
+        // Same lock level that CreateTrigger will acquire.
+        let fk_rel = table::table_open(mcx, form.conrelid, ShareRowExclusiveLock)?;
+        let index_oid = form.conindid;
+        let numfks = arrays.numfks;
+        let mut mapped_confkey = [0i16; INDEX_MAX_KEYS as usize];
+        for i in 0..numfks {
+            mapped_confkey[i] = attmap[arrays.confkey[i] as usize - 1];
+        }
+
+        let conname = str_in(mcx, form.name_str())?;
+        let fk_attrs = attnames_string_list(mcx, &fk_rel.rd_att, &arrays.conkey[..numfks])?;
+        let fkconstraint = clone_constraint_node(&form, Some(conname), false, fk_attrs);
+
+        let part_index_id = pg_inherits::index_get_partition(mcx, partition_rel.rd_id, index_oid)?;
+        if part_index_id == InvalidOid {
+            panic!("index for {index_oid} not found in partition {}", partition_rel.name());
+        }
+
+        // The constraint's own action triggers parent the equivalents that
+        // addFkRecurseReferenced creates on the partition.
+        let (mut delete_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
+        if form.conenforced {
+            (delete_trigger_oid, update_trigger_oid) =
+                get_foreign_key_action_triggers(mcx, constr_oid, form.confrelid, form.conrelid)?;
+        }
+
+        let (child_constr, _) = add_fk_constraint(
+            mcx,
+            AddFkSide::ReferencedSide,
+            conname,
+            &fkconstraint,
+            &fk_rel,
+            partition_rel,
+            part_index_id,
+            constr_oid,
+            numfks,
+            &mapped_confkey,
+            &arrays.conkey,
+            &arrays.pf_eq_oprs,
+            &arrays.pp_eq_oprs,
+            &arrays.ff_eq_oprs,
+            &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
+            false,
+        )?;
+        add_fk_recurse_referenced(
+            mcx,
+            conname,
+            &fkconstraint,
+            &fk_rel,
+            partition_rel,
+            part_index_id,
+            child_constr,
+            numfks,
+            &mapped_confkey,
+            &arrays.conkey,
+            &arrays.pf_eq_oprs,
+            &arrays.pp_eq_oprs,
+            &arrays.ff_eq_oprs,
+            &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
+            true,
+            delete_trigger_oid,
+            update_trigger_oid,
+        )?;
+        fk_rel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+// CloneFkReferencing (tablecmds.c): clone (or reparent) each FK of the parent
+// onto the partition.
+fn clone_fk_referencing<'mcx>(
+    mcx: Mcx<'mcx>,
+    mut wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
+    parent_rel: &Relation<'mcx>,
+    part_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    let parent_fks = rel_fk_constraint_list(mcx, parent_rel.rd_id)?;
+    let mut clone: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    for fk in parent_fks.iter() {
+        // A table referenced by this partitioned table cannot become one of
+        // its partitions; that dodges pg_constraint/pg_trigger complexities
+        // on ATTACH/DETACH.
+        if fk.confrelid == part_rel.rd_id {
+            let name = lsyscache::get_constraint_name(mcx, fk.conoid)?
+                .unwrap_or_else(|| panic!("cache lookup failed for constraint {}", fk.conoid));
+            return Err(err(
+                format!(
+                    "cannot attach table \"{}\" as a partition because it is referenced by foreign key \"{}\"",
+                    part_rel.name(),
+                    name.as_str()
+                ),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        clone.push(fk.conoid);
+    }
+
+    // Silently do nothing when there is nothing to do; this avoids a
+    // spurious error for foreign tables.
+    if clone.is_empty() {
+        return Ok(());
+    }
+    if part_rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        return Err(err(
+            "foreign key constraints are not supported on foreign tables".into(),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+
+    let attmap = tupdesc::build_attrmap_by_name(mcx, &part_rel.rd_att, &parent_rel.rd_att)?;
+    let part_fks = rel_fk_constraint_list(mcx, part_rel.rd_id)?;
+
+    for &parent_constr_oid in clone.iter() {
+        let (form, arrays) = read_fk_constraint(mcx, parent_constr_oid)?;
+        if form.conparentid != InvalidOid && clone.contains(&form.conparentid) {
+            continue;
+        }
+        if form.conperiod {
+            unported("CloneFkReferencing of a temporal (PERIOD) foreign key");
+        }
+
+        // Prevent concurrent deletions; a partitioned pkrel means locking
+        // every partition.
+        let pkrel = table::table_open(mcx, form.confrelid, ShareRowExclusiveLock)?;
+        if pkrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            pg_inherits::find_all_inheritors(mcx, pkrel.rd_id, ShareRowExclusiveLock)?;
+        }
+
+        let numfks = arrays.numfks;
+        let mut mapped_conkey = [0i16; INDEX_MAX_KEYS as usize];
+        for i in 0..numfks {
+            mapped_conkey[i] = attmap[arrays.conkey[i] as usize - 1];
+        }
+
+        let (mut insert_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
+        if form.conenforced {
+            (insert_trigger_oid, update_trigger_oid) = get_foreign_key_check_triggers(
+                mcx,
+                form.oid,
+                form.confrelid,
+                form.conrelid,
+            )?;
+        }
+
+        let mut attached = false;
+        for fk in part_fks.iter() {
+            if try_attach_partition_foreign_key(
+                mcx,
+                wqueue.as_deref_mut(),
+                fk,
+                part_rel,
+                parent_constr_oid,
+                numfks,
+                &mapped_conkey,
+                &arrays.confkey,
+                &arrays.pf_eq_oprs,
+                insert_trigger_oid,
+                update_trigger_oid,
+            )? {
+                attached = true;
+                break;
+            }
+        }
+        if attached {
+            pkrel.close(NoLock)?;
+            continue;
+        }
+
+        let conname = str_in(mcx, form.name_str())?;
+        let fk_attrs = attnames_string_list(mcx, &part_rel.rd_att, &mapped_conkey[..numfks])?;
+        let fkconstraint = clone_constraint_node(&form, None, false, fk_attrs);
+
+        let index_oid = form.conindid;
+        let (child_constr, chosen_conname) = add_fk_constraint(
+            mcx,
+            AddFkSide::ReferencingSide,
+            conname,
+            &fkconstraint,
+            part_rel,
+            &pkrel,
+            index_oid,
+            parent_constr_oid,
+            numfks,
+            &arrays.confkey,
+            &mapped_conkey,
+            &arrays.pf_eq_oprs,
+            &arrays.pp_eq_oprs,
+            &arrays.ff_eq_oprs,
+            &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
+            false,
+        )?;
+        add_fk_recurse_referencing(
+            mcx,
+            wqueue.as_deref_mut(),
+            chosen_conname,
+            &fkconstraint,
+            part_rel,
+            &pkrel,
+            index_oid,
+            child_constr,
+            numfks,
+            &arrays.confkey,
+            &mapped_conkey,
+            &arrays.pf_eq_oprs,
+            &arrays.pp_eq_oprs,
+            &arrays.ff_eq_oprs,
+            &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
+            false,
+            types_rel::AccessExclusiveLock,
+            insert_trigger_oid,
+            update_trigger_oid,
+        )?;
+        pkrel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+fn char_scankey(attno: usize, value: u8) -> types_scan::scankey::ScanKeyData {
+    use types_scan::scankey::ScanKeyData;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = attno as AttrNumber;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_CHAREQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(chareq) failed: {e:?}"));
+    key.sk_argument = datum::Datum::from_i8(value as i8);
+    key
 }
