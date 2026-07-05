@@ -808,7 +808,10 @@ mod emit {
     }
 
     // Every index reachable by an emitted or helper-returned jump; the cache
-    // must be empty at these (dispatch can land mid-stream).
+    // must be empty at these (dispatch can land mid-stream). CONTRACT: any
+    // new step arm that can return StepFlow::Jump must either have its
+    // targets enumerated here or force whole-program flushing (JsonExprPath
+    // precedent in emit_program).
     fn jump_targets(steps: &[Step]) -> Vec<bool> {
         let mut t = vec![false; steps.len()];
         for s in steps {
@@ -1084,7 +1087,13 @@ mod emit {
                 return None;
             }
         }
-        let targets = jump_targets(steps);
+        let mut targets = jump_targets(steps);
+        // JsonExprPath jumps to RUNTIME targets (jsestate jump fields) the
+        // static prepass cannot enumerate: the register cache must be empty
+        // at every step of such programs.
+        if steps.iter().any(|st| matches!(st, Step::JsonExprPath { .. })) {
+            targets.iter_mut().for_each(|t| *t = true);
+        }
         // Head FETCHSOME runs hoist into the driver (one direct call per
         // evaluation instead of a per-row helper round trip).
         let mut fetch = [0u16; 3];

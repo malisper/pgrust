@@ -594,37 +594,7 @@ fn run_program<'mcx>(
                 step_io_coerce(*calls, *out)?;
             }
             Step::IoCoerceSafe { calls, out } => {
-                // SAFETY: 'mcx-owned pair written once at compile.
-                let c = unsafe { calls.as_ref() };
-                let nd = read_out(*out);
-                let strv = if nd.isnull {
-                    NullableDatum { value: Datum::null(), isnull: true }
-                } else {
-                    // SAFETY: arg 0 of the outcall's live fcinfo image.
-                    unsafe {
-                        crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
-                            .write(NullableDatum { value: nd.value, isnull: false })
-                    };
-                    let (v, isnull) = invoke(&c.outcall)?;
-                    NullableDatum { value: v, isnull }
-                };
-                if !c.in_strict || !strv.isnull {
-                    // SAFETY: arg 0 of the incall's live fcinfo image.
-                    unsafe {
-                        crate::steps::arg_slot_of(c.incall.fcinfo, 0)
-                            .write(NullableDatum { value: strv.value, isnull: nd.isnull })
-                    };
-                    let (v, _) = invoke(&c.incall)?;
-                    // SAFETY: context is the compile-armed ErrorSaveNode
-                    // (IoCoerceSafe invariant), no other reference live.
-                    let soft = unsafe { fcinfo_mut(c.incall.fcinfo, 3).soft_error_context() }
-                        .is_some_and(|ctx| ctx.error_occurred());
-                    if soft {
-                        write_out(*out, Datum::null(), true);
-                    } else {
-                        write_out(*out, v, nd.isnull);
-                    }
-                }
+                step_io_coerce_safe(*calls, *out)?;
             }
             Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
                 let arr = read_out(*out);
@@ -1170,23 +1140,7 @@ fn run_program<'mcx>(
                 step_distinct(call, *out)?;
             }
             Step::NullIf { call, out } => {
-                // SAFETY: args 0/1 of the call's live fcinfo image.
-                let (a0, a1) = unsafe {
-                    (
-                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
-                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
-                    )
-                };
-                if a0.isnull || a1.isnull {
-                    write_out(*out, a0.value, a0.isnull);
-                } else {
-                    let (value, isnull) = invoke(call)?;
-                    if !isnull && value.as_bool() {
-                        write_out(*out, Datum::null(), true);
-                    } else {
-                        write_out(*out, a0.value, false);
-                    }
-                }
+                step_nullif(call, *out)?;
             }
             Step::RowCompareStep { call, strict, jumpnull, jumpdone, out } => {
                 match eval_row_compare_step(call, *strict)? {
@@ -3150,6 +3104,73 @@ fn eval_row_compare_final(cmptype: i32, cmpresult: i32) -> bool {
 // inline form (the interpreter is instruction-count-gated).
 
 #[inline(always)]
+// NULLIF: null-or-unequal keeps arg0; strict equality only when both
+// non-null (C ExecEvalFuncExpr + NULLIF special case semantics, shared by
+// run_program and the JIT single-step tier).
+#[inline(always)]
+fn step_nullif(call: &FuncCall, out: OutRef) -> PgResult<()> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull || a1.isnull {
+        write_out(out, a0.value, a0.isnull);
+    } else {
+        let (value, isnull) = invoke(call)?;
+        if !isnull && value.as_bool() {
+            write_out(out, Datum::null(), true);
+        } else {
+            write_out(out, a0.value, false);
+        }
+    }
+    Ok(())
+}
+
+// SQL/JSON safe I/O coercion (ERROR ON ERROR OFF): soft errors land in the
+// compile-armed ErrorSaveNode instead of unwinding. Shared by run_program
+// and the JIT single-step tier.
+#[inline(always)]
+fn step_io_coerce_safe(
+    calls: core::ptr::NonNull<crate::steps::IoCoerceCalls>,
+    out: OutRef,
+) -> PgResult<()> {
+    // SAFETY: 'mcx-owned pair written once at compile.
+    let c = unsafe { calls.as_ref() };
+    let nd = read_out(out);
+    let strv = if nd.isnull {
+        NullableDatum { value: Datum::null(), isnull: true }
+    } else {
+        // SAFETY: arg 0 of the outcall's live fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
+                .write(NullableDatum { value: nd.value, isnull: false })
+        };
+        let (v, isnull) = invoke(&c.outcall)?;
+        NullableDatum { value: v, isnull }
+    };
+    if !c.in_strict || !strv.isnull {
+        // SAFETY: arg 0 of the incall's live fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(c.incall.fcinfo, 0)
+                .write(NullableDatum { value: strv.value, isnull: nd.isnull })
+        };
+        let (v, _) = invoke(&c.incall)?;
+        // SAFETY: context is the compile-armed ErrorSaveNode
+        // (IoCoerceSafe invariant), no other reference live.
+        let soft = unsafe { fcinfo_mut(c.incall.fcinfo, 3).soft_error_context() }
+            .is_some_and(|ctx| ctx.error_occurred());
+        if soft {
+            write_out(out, Datum::null(), true);
+        } else {
+            write_out(out, v, nd.isnull);
+        }
+    }
+    Ok(())
+}
+
 fn step_io_coerce(calls: core::ptr::NonNull<crate::steps::IoCoerceCalls>, out: OutRef) -> PgResult<()> {
     // SAFETY: 'mcx-owned pair written once at compile.
     let c = unsafe { calls.as_ref() };
@@ -3512,14 +3533,24 @@ pub(crate) fn exec_one_step<'mcx>(
         | Step::OuterVarNotDistinctThin { .. }
         | Step::NotDistinctQualThin { .. }
         | Step::AggTransStrictByValIndirectThin { .. }
-        | Step::NullIf { .. }
-        | Step::JsonExprPath { .. }
-        | Step::JsonCoercion { .. }
-        | Step::JsonCoercionFinish { .. }
-        | Step::IoCoerceSafe { .. }
         | Step::AggDeserialize { .. }
         | Step::AggStrictDeserialize { .. } => {
             unreachable!("step refused by the emitter; never in jitted programs")
+        }
+        Step::NullIf { call, out } => {
+            step_nullif(&call, out)?;
+        }
+        Step::IoCoerceSafe { calls, out } => {
+            step_io_coerce_safe(calls, out)?;
+        }
+        Step::JsonExprPath { jsestate, frame, out } => {
+            return Ok(StepFlow::Jump(eval_json_expr_path(frames, jsestate, frame, out)?));
+        }
+        Step::JsonCoercion { jc, frame, out } => {
+            eval_json_coercion(frames, jc, frame, out)?;
+        }
+        Step::JsonCoercionFinish { jsestate, out } => {
+            eval_json_coercion_finish(jsestate, out)?;
         }
         Step::ScanFetchSome { last_var } => {
             exectuples::slot_getsomeattrs(slots.get(SlotSrc::Scan), last_var as i32);
@@ -4015,14 +4046,13 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::FuncStrict2QualThin { .. }
         | Step::OuterVarNotDistinctThin { .. }
         | Step::NotDistinctQualThin { .. }
-        | Step::AggTransStrictByValIndirectThin { .. }
-        | Step::NullIf { .. }
+        | Step::AggTransStrictByValIndirectThin { .. } => false,
+        Step::NullIf { .. }
         | Step::JsonExprPath { .. }
         | Step::JsonCoercion { .. }
         | Step::JsonCoercionFinish { .. }
-        | Step::IoCoerceSafe { .. }
-        | Step::AggDeserialize { .. }
-        | Step::AggStrictDeserialize { .. } => false,
+        | Step::IoCoerceSafe { .. } => true,
+        Step::AggDeserialize { .. } | Step::AggStrictDeserialize { .. } => false,
         Step::ScanFetchSome { .. }
         | Step::InnerFetchSome { .. }
         | Step::OuterFetchSome { .. }
