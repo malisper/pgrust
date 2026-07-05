@@ -1073,7 +1073,20 @@ pub fn AlterTypeNamespaceInternal<'mcx>(
     }
 
     if is_composite_type {
-        unported("AlterTypeNamespaceInternal: composite type (AlterRelationNamespaceInternal)");
+        // typecmds.c: relocate the composite type's pg_class entry (no
+        // pg_depend entry of its own).
+        let class_rel =
+            table::table_open(mcx, types_core::RELATION_RELATION_ID, RowExclusiveLock)?;
+        tablecmds::AlterRelationNamespaceInternal(
+            mcx,
+            &class_rel,
+            row.typrelid,
+            old_nsp_oid,
+            nsp_oid,
+            false,
+            objs_moved,
+        )?;
+        class_rel.close(RowExclusiveLock)?;
     } else if row.typtype == TYPTYPE_DOMAIN {
         pg_constraint::AlterConstraintNamespaces(
             mcx,

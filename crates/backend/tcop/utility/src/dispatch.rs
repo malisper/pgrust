@@ -980,11 +980,15 @@ fn slow_switch<'mcx>(
                         );
                     }
                     T_AlterSeqStmt => {
-                        collect_gap("ALTER SEQUENCE (in CREATE TABLE)");
                         let altstmt = stmt
                             .as_variant::<types_nodes::AlterSeqStmt>()
                             .expect("AlterSeqStmt");
-                        sequence::AlterSequence(mcx, altstmt)?;
+                        let seqoid = sequence::AlterSequence(mcx, altstmt)?;
+                        event_trigger::EventTriggerCollectSimpleCommand(
+                            ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid),
+                            INVALID_OBJECT_ADDRESS,
+                            CreateCommandTag(stmt),
+                        );
                     }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
                 }
@@ -1031,10 +1035,8 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateTrigStmt>()
                 .expect("CreateTrigStmt");
-            // C: address = CreateTrigger; the ported form returns no address.
-            collect_gap("CREATE TRIGGER");
-            trigger::CreateTrigger(mcx, stmt, source_text)?;
-            Ok(None)
+            let trigoid = trigger::CreateTrigger(mcx, stmt, source_text)?;
+            Ok(Some(ObjectAddress::set(types_core::TRIGGER_RELATION_ID, trigoid)))
         }
 
         T_ReindexStmt => {
@@ -1062,7 +1064,7 @@ fn slow_switch<'mcx>(
                 mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
                 pstate.p_sourcetext = Some(v.leak());
             }
-            let address = functioncmds::CreateFunction(mcx, &pstate, stmt, source_text)?;
+            let address = functioncmds::CreateFunction(mcx, &mut pstate, stmt, source_text)?;
             parser_small1::free_parsestate(pstate)?;
             Ok(Some(address))
         }
@@ -1158,9 +1160,11 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateFdwStmt>()
                 .expect("CreateFdwStmt");
-            collect_gap("CREATE FOREIGN DATA WRAPPER");
-            foreigncmds::CreateForeignDataWrapper(mcx, stmt, source_text)?;
-            Ok(None)
+            let fdwoid = foreigncmds::CreateForeignDataWrapper(mcx, stmt, source_text)?;
+            Ok(Some(ObjectAddress::set(
+                types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
+                fdwoid,
+            )))
         }
         T_AlterFdwStmt => {
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
@@ -1176,9 +1180,8 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateForeignServerStmt>()
                 .expect("CreateForeignServerStmt");
-            collect_gap("CREATE SERVER");
-            foreigncmds::CreateForeignServer(mcx, stmt)?;
-            Ok(None)
+            let srvoid = foreigncmds::CreateForeignServer(mcx, stmt)?;
+            Ok(Some(ObjectAddress::set(types_core::FOREIGN_SERVER_RELATION_ID, srvoid)))
         }
         T_AlterForeignServerStmt => {
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
@@ -1257,10 +1260,7 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
                 .expect("CreateTableAsStmt");
-            // C: address = ExecCreateTableAs; the ported form returns no
-            // address yet.
-            collect_gap("CREATE TABLE AS / CREATE MATERIALIZED VIEW");
-            commands_createas::ExecCreateTableAs(
+            let relid = commands_createas::ExecCreateTableAs(
                 mcx,
                 stmt,
                 source_text,
@@ -1268,7 +1268,8 @@ fn slow_switch<'mcx>(
                 query_env,
                 qc.as_deref_mut(),
             )?;
-            Ok(None)
+            // C collects InvalidObjectAddress on the if-not-exists skip.
+            Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, relid)))
         }
         T_RefreshMatViewStmt => {
             // REFRESH CONCURRENTLY executes DDL internally; inhibit command
@@ -1304,10 +1305,8 @@ fn slow_switch<'mcx>(
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
             let altstmt =
                 stmt_node.as_variant::<types_nodes::AlterSeqStmt>().expect("AlterSeqStmt");
-            // C: address = AlterSequence; the ported form returns no address.
-            collect_gap("ALTER SEQUENCE");
-            sequence::AlterSequence(mcx, altstmt)?;
-            Ok(None)
+            let seqoid = sequence::AlterSequence(mcx, altstmt)?;
+            Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid)))
         }
         T_CreateDomainStmt => {
             // Retention contract as unify_stmt_lifetime: the statement arena
@@ -1531,11 +1530,14 @@ fn slow_switch<'mcx>(
                     collect_gap("ALTER SET SCHEMA");
                     commands_alter::ExecAlterObjectSchemaStmt_generic(mcx, stmt)?;
                 }
+                // ExecAlterObjectSchemaStmt (alter.c): relations route through
+                // AlterTableNamespace.
                 types_nodes::parsenodes::ObjectType::OBJECT_TABLE
                 | types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE
                 | types_nodes::parsenodes::ObjectType::OBJECT_VIEW
                 | types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
                 | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE => {
+                    collect_gap("ALTER SET SCHEMA");
                     tablecmds::AlterTableNamespace(mcx, stmt)?;
                 }
                 other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
@@ -2102,9 +2104,10 @@ fn exec_alter_table_stmt<'mcx>(
     let lockmode = tablecmds::AlterTableGetLockLevel(&stmt.cmds);
     let relid = tablecmds::AlterTableLookupRelation(mcx, stmt, lockmode)?;
     if relid != types_core::InvalidOid {
-        event_trigger::EventTriggerAlterTableStart(CreateCommandTag(parsetree));
+        let tag = CreateCommandTag(parsetree);
+        event_trigger::EventTriggerAlterTableStart(tag);
         event_trigger::EventTriggerAlterTableRelid(relid);
-        let res = tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text);
+        let res = tablecmds::AlterTable(mcx, relid, lockmode, stmt, source_text, tag);
         event_trigger::EventTriggerAlterTableEnd();
         res?;
     } else {
