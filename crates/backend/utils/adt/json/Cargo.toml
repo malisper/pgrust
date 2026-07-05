@@ -32,3 +32,6 @@ varlena = { path = "../varlena" }
 wchar = { path = "../../../../common/wchar" }
 mbutils = { path = "../../mb/mbutils" }
 stack_depth = { path = "../../misc/stack_depth" }
+
+[dev-dependencies]
+syscache_seams = { path = "../../cache/syscache_seams" }

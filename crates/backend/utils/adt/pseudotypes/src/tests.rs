@@ -63,8 +63,24 @@ fn unported_delegates_are_loud() {
 #[test]
 fn builtins_table_is_oid_ascending() {
     let t = builtins::PSEUDOTYPES_BUILTINS;
-    assert_eq!(t.len(), 48);
+    assert_eq!(t.len(), 49);
     for w in t.windows(2) {
         assert!(w[0].foid < w[1].foid, "{} !< {}", w[0].foid, w[1].foid);
     }
+}
+
+#[test]
+fn cstring_in_fmgr_wrapper_pstrdups() {
+    use types_fmgr::LocalFcinfo;
+
+    let ctx = MemoryContext::new("t");
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    // SAFETY: ctx outlives the call.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    let input = b"blah\0";
+    fcinfo.set_arg(0, datum::Datum::from_usize(input.as_ptr() as usize));
+    let d = builtins::fc_cstring_in(None, &mut fcinfo).unwrap();
+    // SAFETY: fc_cstring_in returns a fresh NUL-terminated cstring.
+    let out = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+    assert_eq!(out.to_bytes(), b"blah");
 }

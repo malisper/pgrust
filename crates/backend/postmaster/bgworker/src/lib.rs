@@ -326,6 +326,17 @@ pub fn ReportBackgroundWorkerExit(idx: usize) {
     }
 }
 
+// GetBackgroundWorkerTypeByPid (bgworker.c): bgw_type from the shmem slot
+// whose live pid matches.
+pub fn GetBackgroundWorkerTypeByPid(pid: pid_t) -> Option<String> {
+    with_registry(|reg| {
+        reg.slots
+            .iter()
+            .find(|slot| slot.pid > 0 && slot.pid == pid)
+            .and_then(|slot| slot.worker.as_ref().map(|w| w.bgw_type.clone()))
+    })
+}
+
 pub fn BackgroundWorkerStopNotifications(pid: pid_t) {
     with_registry(|reg| {
         for rw in reg.registered.iter_mut().flatten() {
@@ -834,6 +845,7 @@ pub fn BackgroundWorkerUnblockSignals() {
 }
 
 pub fn init_seams() {
+    bgworker_seams::get_background_worker_type_by_pid::set(GetBackgroundWorkerTypeByPid);
     bgworker_seams::background_worker_stopped::set(|slot, generation| {
         let handle = BackgroundWorkerHandle { slot, generation };
         matches!(

@@ -715,4 +715,5 @@ fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> PgResult<(
 pub fn init_seams() {
     postmaster_seams::announce_child_exit::set(announce_child_exit);
     postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(libc::SIGUSR1));
+    postmaster_seams::pg_start_time::set(main_entry::pg_start_time);
 }

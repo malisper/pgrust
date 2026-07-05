@@ -1257,3 +1257,60 @@ mod format_variadic {
         run(&armed);
     }
 }
+
+mod pg_column_funcs {
+    use datum::Datum;
+    use mcx::MemoryContext;
+    use types_fmgr::{FmgrInfo, LocalFcinfo, PGFunction};
+
+    use crate::builtins::*;
+
+    fn install() {
+        super::install_detoast_seams();
+        super::install_text_type_shape();
+        if !fmgr_seams::get_fn_expr_argtype::is_installed() {
+            fmgr_seams::get_fn_expr_argtype::set(|_flinfo, _argnum| types_core::TEXTOID);
+        }
+    }
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&datum::varlena::set_varsize_4b(4 + s.len()));
+        v.extend_from_slice(s);
+        v
+    }
+
+    fn call(func: PGFunction, image: &[u8]) -> (Datum, bool) {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mut flinfo = FmgrInfo::unresolved();
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        fcinfo.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+        let d = func(Some(&mut flinfo), &mut fcinfo).unwrap();
+        (d, fcinfo.isnull)
+    }
+
+    #[test]
+    fn pg_column_size_inline_varlena() {
+        let image = text_image(b"hello");
+        let (d, isnull) = call(fc_pg_column_size, &image);
+        assert!(!isnull);
+        assert_eq!(d.as_i32(), image.len() as i32);
+    }
+
+    #[test]
+    fn pg_column_compression_uncompressed_is_null() {
+        let image = text_image(b"hello");
+        let (_, isnull) = call(fc_pg_column_compression, &image);
+        assert!(isnull);
+    }
+
+    #[test]
+    fn pg_column_toast_chunk_id_inline_is_null() {
+        let image = text_image(b"hello");
+        let (_, isnull) = call(fc_pg_column_toast_chunk_id, &image);
+        assert!(isnull);
+    }
+}
