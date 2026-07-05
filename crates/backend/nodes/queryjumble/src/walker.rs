@@ -1497,7 +1497,7 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_u8(e.fk_upd_action);
             js.f_u8(e.fk_del_action);
             list(js, &e.fk_del_set_cols)?;
-            list(js, &e.old_conpfeqop)?;
+            oid_list(js, &e.old_conpfeqop);
             js.f_u32(e.old_pktable_oid);
         }
         NodeTag::T_CreateTableSpaceStmt => {

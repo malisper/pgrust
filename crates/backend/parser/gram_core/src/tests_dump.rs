@@ -83,6 +83,24 @@ fn list_field(out: &mut String, name: &str, v: &NodeList<'_>) {
     list(out, v);
 }
 
+fn oid_list_field(out: &mut String, name: &str, l: &types_nodes::list::OidList<'_>) {
+    out.push_str(" :");
+    out.push_str(name);
+    out.push(' ');
+    if l.is_nil() {
+        out.push_str("<>");
+        return;
+    }
+    out.push('(');
+    for (i, o) in l.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("o {o}"));
+    }
+    out.push(')');
+}
+
 fn int_field(out: &mut String, name: &str, v: i32) {
     out.push_str(&format!(" :{name} {v}"));
 }
@@ -1068,7 +1086,7 @@ fn node(out: &mut String, n: Node<'_>) {
         char_field(out, "fk_upd_action", c.fk_upd_action);
         char_field(out, "fk_del_action", c.fk_del_action);
         list_field(out, "fk_del_set_cols", &c.fk_del_set_cols);
-        list_field(out, "old_conpfeqop", &c.old_conpfeqop);
+        oid_list_field(out, "old_conpfeqop", &c.old_conpfeqop);
         int_field(out, "old_pktable_oid", c.old_pktable_oid as i32);
         int_field(out, "location", c.location);
         out.push('}');

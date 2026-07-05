@@ -61,6 +61,7 @@ pub(crate) fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     constraint: &Constraint<'mcx>,
+    old_desc: &types_tuple::TupleDescData<'mcx>,
 ) -> PgResult<Option<FkValidateItem<'mcx>>> {
     use types_nodes::rawnodes::ConstrType;
     match constraint.contype {
@@ -94,7 +95,7 @@ pub(crate) fn ATExecAddConstraint<'mcx>(
         }
     };
 
-    at_add_foreign_key_constraint(mcx, rel, constraint, conname)
+    at_add_foreign_key_constraint(mcx, rel, constraint, conname, old_desc)
 }
 
 // ATAddForeignKeyConstraint (tablecmds.c).
@@ -103,10 +104,8 @@ fn at_add_foreign_key_constraint<'mcx>(
     rel: &Relation<'mcx>,
     fkconstraint: &Constraint<'mcx>,
     conname: &str,
+    old_desc: &types_tuple::TupleDescData<'mcx>,
 ) -> PgResult<Option<FkValidateItem<'mcx>>> {
-    if !fkconstraint.old_conpfeqop.is_nil() {
-        unported("old_conpfeqop revalidation skip (TryReuseForeignKey)");
-    }
     if fkconstraint.fk_with_period || fkconstraint.pk_with_period {
         unported("PERIOD (temporal FK)");
     }
@@ -283,6 +282,12 @@ fn at_add_foreign_key_constraint<'mcx>(
     let mut pfeqoperators = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut ppeqoperators = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut ffeqoperators = [InvalidOid; INDEX_MAX_KEYS as usize];
+
+    // On the strength of a previous constraint, we might avoid scanning
+    // tables to validate this one.
+    let mut old_check_ok = !fkconstraint.old_conpfeqop.is_nil();
+    debug_assert!(!old_check_ok || numfks == fkconstraint.old_conpfeqop.len());
+
     for i in 0..numpks {
         let pktype = pktypoid[i];
         let fktype = fktypoid[i];
@@ -307,7 +312,9 @@ fn at_add_foreign_key_constraint<'mcx>(
 
         let fktyped = lsyscache::getBaseType(fktype)?;
         let mut pfeqop = lsyscache::get_opfamily_member(opfamily, opcintype, fktyped, eqstrategy)?;
+        let mut pfeqop_right = InvalidOid;
         let mut ffeqop = if pfeqop != InvalidOid {
+            pfeqop_right = fktyped;
             lsyscache::get_opfamily_member(opfamily, fktyped, fktyped, eqstrategy)?
         } else {
             InvalidOid
@@ -322,6 +329,7 @@ fn at_add_foreign_key_constraint<'mcx>(
             )? {
                 pfeqop = ppeqop;
                 ffeqop = ppeqop;
+                pfeqop_right = opcintype;
             }
         }
         if pfeqop == InvalidOid || ffeqop == InvalidOid {
@@ -383,6 +391,30 @@ fn at_add_foreign_key_constraint<'mcx>(
             }
         }
 
+        if old_check_ok {
+            // When a pfeqop changes, revalidate the constraint; ppeqop and
+            // ffeqop are not used by RI_Initial_Check.
+            old_check_ok = pfeqop == fkconstraint.old_conpfeqop.nth(i);
+        }
+        if old_check_ok {
+            let attr = old_desc.attr(fkattnum[i] as usize - 1);
+            let old_fktype = attr.atttypid;
+            let new_fktype = fktype;
+            let (old_pathtype, old_castfunc) = find_fkey_cast(pfeqop_right, old_fktype)?;
+            let (new_pathtype, new_castfunc) = find_fkey_cast(pfeqop_right, new_fktype)?;
+            let old_fkcoll = attr.attcollation;
+            let new_fkcoll = fkcoll;
+
+            // A polymorphic cast destination, or a collation change between
+            // non-deterministic collations, forces revalidation.
+            old_check_ok = new_pathtype == old_pathtype
+                && new_castfunc == old_castfunc
+                && (!coerce::IsPolymorphicType(pfeqop_right) || new_fktype == old_fktype)
+                && (new_fkcoll == old_fkcoll
+                    || (lsyscache::get_collation_isdeterministic(old_fkcoll)?
+                        && lsyscache::get_collation_isdeterministic(new_fkcoll)?));
+        }
+
         pfeqoperators[i] = pfeqop;
         ppeqoperators[i] = ppeqop;
         ffeqoperators[i] = ffeqop;
@@ -409,7 +441,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
     }
 
-    let validate = if !fkconstraint.skip_validation && fkconstraint.is_enforced {
+    let validate = if !old_check_ok && !fkconstraint.skip_validation && fkconstraint.is_enforced {
         debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
         Some(FkValidateItem {
             conname: str_in(mcx, conname)?,
@@ -423,6 +455,22 @@ fn at_add_foreign_key_constraint<'mcx>(
 
     pkrel.close(NoLock)?;
     Ok(validate)
+}
+
+// findFkeyCast (tablecmds.c); a previously-relied-upon cast must still exist.
+fn find_fkey_cast(target_type_id: Oid, source_type_id: Oid) -> PgResult<(coerce::CoercionPathType, Oid)> {
+    if target_type_id == source_type_id {
+        return Ok((coerce::COERCION_PATH_RELABELTYPE, InvalidOid));
+    }
+    let (ret, funcid) = coerce::find_coercion_pathway(
+        target_type_id,
+        source_type_id,
+        coerce::CoercionContext::COERCION_IMPLICIT,
+    )?;
+    if ret == coerce::COERCION_PATH_NONE {
+        panic!("could not find cast from {source_type_id} to {target_type_id}");
+    }
+    Ok((ret, funcid))
 }
 
 // validateFkOnDeleteSetColumns (tablecmds.c); dedups in place.

@@ -6,7 +6,7 @@ use mcx::Mcx;
 use types_core::{Oid, ParseLoc};
 use types_error::PgResult;
 
-use crate::list::NodeList;
+use crate::list::{NodeList, OidList};
 use crate::node_tree::{BitString, Boolean, Float, Integer, Node, NodeVariant, String};
 use crate::nodes_enums::{LimitOption, LockClauseStrength, LockWaitPolicy};
 use crate::parsenodes::SetOperation;
@@ -799,7 +799,7 @@ pub struct Constraint<'mcx> {
     pub fk_upd_action: u8,
     pub fk_del_action: u8,
     pub fk_del_set_cols: NodeList<'mcx>,
-    pub old_conpfeqop: NodeList<'mcx>,
+    pub old_conpfeqop: OidList<'mcx>,
     pub old_pktable_oid: Oid,
     pub location: ParseLoc,
 }
