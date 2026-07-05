@@ -572,7 +572,8 @@ pub fn CreateForeignServer<'mcx>(
                 .errcode(ERRCODE_DUPLICATE_OBJECT)
                 .errmsg(format!("server \"{servername}\" already exists, skipping"))
                 .finish(types_error::ErrorLocation::new("foreigncmds.c", 0, "CreateForeignServer"))?;
-            return rel.close(RowExclusiveLock);
+            rel.close(RowExclusiveLock)?;
+            return Ok(InvalidOid);
         }
         return Err(err(
             ERRCODE_DUPLICATE_OBJECT,
