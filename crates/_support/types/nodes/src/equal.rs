@@ -17,7 +17,7 @@ use crate::parsenodes::{
 use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr, CaseTestExpr,
-    CaseWhen, CoalesceExpr, CoerceViaIO,
+    CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubLink, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
@@ -82,6 +82,8 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_ArrayCoerceExpr => cmp!(as_array_coerce_expr),
         NodeTag::T_ConvertRowtypeExpr => cmp!(as_convert_rowtype_expr),
+        NodeTag::T_CoerceToDomain => cmp!(as_coerce_to_domain),
+        NodeTag::T_CoerceToDomainValue => cmp!(as_coerce_to_domain_value),
         NodeTag::T_CaseExpr => cmp!(as_case_expr),
         NodeTag::T_CaseWhen => cmp!(as_case_when),
         NodeTag::T_CaseTestExpr => cmp!(as_case_test_expr),
@@ -612,6 +614,21 @@ impl NodeEqual for ArrayCoerceExpr<'_> {
 impl NodeEqual for ConvertRowtypeExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         equal(self.arg, b.arg) && self.resulttype == b.resulttype
+    }
+}
+
+impl NodeEqual for CoerceToDomain<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal(self.arg, b.arg)
+            && self.resulttype == b.resulttype
+            && self.resulttypmod == b.resulttypmod
+            && self.resultcollid == b.resultcollid
+    }
+}
+
+impl NodeEqual for CoerceToDomainValue {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.typeId == b.typeId && self.typeMod == b.typeMod && self.collation == b.collation
     }
 }
 

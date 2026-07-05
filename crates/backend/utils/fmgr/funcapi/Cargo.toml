@@ -14,6 +14,7 @@ fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 fmgr_seams = { path = "../fmgr_seams" }
 nodes = { package = "types_nodes", path = "../../../../_support/types/nodes" }
 tupdesc = { path = "../../../access/common/tupdesc" }
+nodes_core = { path = "../../../nodes/nodes_core" }
 format_type = { path = "../../adt/format_type" }
 lsyscache = { path = "../../cache/lsyscache" }
 syscache_seams = { path = "../../cache/syscache_seams" }

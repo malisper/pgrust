@@ -560,7 +560,12 @@ fn build_agg_trans<'mcx>(
         // es_query_cxt by the caller) and this flinfo dies with the plan it
         // serves — from_node_ref's contract; the carrier stays drop-free.
         let argtypes: &'static [Oid] = unsafe { core::mem::transmute(spec.arg_types) };
-        let agg_argtypes = ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(argtypes))?;
+        // C build_aggregate_transfn_expr: the fake FuncExpr returns the
+        // transition type (carrier slot 0).
+        let agg_argtypes = ::mcx::alloc_leak_in(
+            mcx,
+            ::types_core::fmgr::AggFnArgTypes { rettype: argtypes[0], argtypes },
+        )?;
         // SAFETY: agg_argtypes is arena-backed for the query, see above.
         flinfo.fn_expr = Some(unsafe { FnExprErased::from_node_ref(agg_argtypes) });
         if flinfo.fn_retset {

@@ -46,6 +46,8 @@ parse_collate = { path = "../../parser/parse_collate" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 superuser = { path = "../../utils/misc/superuser" }
+aclchk = { path = "../../catalog/aclchk" }
+adt_acl = { path = "../../utils/adt/acl" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }

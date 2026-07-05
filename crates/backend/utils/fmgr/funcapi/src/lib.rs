@@ -147,11 +147,24 @@ pub fn get_call_expr_rettype(node: Node<'_>) -> Oid {
 }
 
 /// C: get_fn_expr_rettype (fmgr.c); InvalidOid mirrors the NULL-fn_expr case.
+/// Aggregate trans/final flinfos carry the fake FuncExpr's funcresulttype in
+/// the AggFnArgTypes carrier.
 pub fn get_fn_expr_rettype(flinfo: &FmgrInfo) -> Oid {
+    if let Some(rettype) = agg_carrier_rettype(flinfo) {
+        return rettype;
+    }
     match call_expr_node(flinfo) {
         None => InvalidOid,
         Some(n) => expr_type(Some(n)),
     }
+}
+
+fn agg_carrier_rettype(flinfo: &FmgrInfo) -> Option<Oid> {
+    flinfo
+        .fn_expr
+        .as_ref()
+        .and_then(|e| e.downcast_ref::<types_core::fmgr::AggFnArgTypes>())
+        .map(|agg| agg.rettype)
 }
 
 /// C: get_fn_expr_argtype (fmgr.c). Aggregate transfns carry an
@@ -161,7 +174,7 @@ pub fn get_fn_expr_argtype(flinfo: Option<&FmgrInfo>, argnum: usize) -> Oid {
         return InvalidOid;
     };
     if let Some(agg) = e.downcast_ref::<types_core::fmgr::AggFnArgTypes>() {
-        return agg.0.get(argnum).copied().unwrap_or(InvalidOid);
+        return agg.argtypes.get(argnum).copied().unwrap_or(InvalidOid);
     }
     let node = *e
         .downcast_ref::<Node<'static>>()
@@ -334,7 +347,16 @@ pub fn get_call_result_type<'mcx>(
     flinfo: &FmgrInfo,
     expected_desc: Option<&TupleDescData<'_>>,
 ) -> PgResult<ResolvedResultType<'mcx>> {
-    internal_get_result_type(mcx, flinfo.fn_oid, call_expr_node(flinfo), expected_desc)
+    // Aggregate trans/final flinfos have no call FuncExpr; the carrier's
+    // rettype stands in for C's fake-FuncExpr funcresulttype.
+    let carrier_rettype = agg_carrier_rettype(flinfo).unwrap_or(InvalidOid);
+    internal_get_result_type(
+        mcx,
+        flinfo.fn_oid,
+        call_expr_node(flinfo),
+        carrier_rettype,
+        expected_desc,
+    )
 }
 
 pub fn get_expr_result_type<'mcx>(
@@ -343,16 +365,45 @@ pub fn get_expr_result_type<'mcx>(
 ) -> PgResult<ResolvedResultType<'mcx>> {
     if let Some(node) = expr {
         if let Some(fe) = node.as_func_expr() {
-            return internal_get_result_type(mcx, fe.funcid, Some(node), None);
+            return internal_get_result_type(mcx, fe.funcid, Some(node), InvalidOid, None);
         }
         if let Some(op) = node.as_op_expr() {
             let funcid = lsyscache::get_opcode(op.opno)?;
-            return internal_get_result_type(mcx, funcid, Some(node), None);
+            return internal_get_result_type(mcx, funcid, Some(node), InvalidOid, None);
         }
         if let Some(re) = node.as_row_expr() {
             // Named rowtypes resolve through the generic typid path below.
             if re.row_typeid == RECORDOID {
-                panic!("funcapi get_expr_result_type: RowExpr(RECORD) leg not ported");
+                // C: resolve the record type by generating the tupdesc
+                // directly from the RowExpr columns, then BlessTupleDesc.
+                debug_assert_eq!(re.args.len(), re.colnames.len());
+                let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, re.args.len() as i32)?;
+                for (i, (col, name)) in re.args.iter().zip(re.colnames.iter()).enumerate() {
+                    let attnum = (i + 1) as AttrNumber;
+                    let colname = name.as_string().expect("RowExpr colname is a String").sval;
+                    tupdesc::TupleDescInitEntry(
+                        &mut tupdesc,
+                        attnum,
+                        Some(colname),
+                        nodes_core::expr_type(col),
+                        nodes_core::expr_typmod(col),
+                        0,
+                    )?;
+                    tupdesc::TupleDescInitEntryCollation(
+                        &mut tupdesc,
+                        attnum,
+                        nodes_core::expr_collation(col),
+                    );
+                }
+                // C BlessTupleDesc: register the anonymous rowtype's typmod.
+                if tupdesc.tdtypeid == RECORDOID && tupdesc.tdtypmod < 0 {
+                    typcache_seams::assign_record_type_typmod::call(&mut tupdesc)?;
+                }
+                return Ok(ResolvedResultType {
+                    class: TypeFuncClass::Composite,
+                    result_type_id: RECORDOID,
+                    result_tuple_desc: Some(tupdesc),
+                });
             }
         }
         if let Some(c) = node.as_const() {
@@ -379,7 +430,7 @@ pub fn get_func_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
 ) -> PgResult<ResolvedResultType<'mcx>> {
-    internal_get_result_type(mcx, function_id, None, None)
+    internal_get_result_type(mcx, function_id, None, InvalidOid, None)
 }
 
 // get_func_result_name: the name of a function's single named OUT parameter,
@@ -419,10 +470,14 @@ pub fn get_func_result_name<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<Optio
     }
 }
 
+// `carrier_rettype` is the AggFnArgTypes carrier's resolved return type
+// (InvalidOid outside aggregate contexts); it stands in for exprType over C's
+// fake trans/final FuncExpr, which has no Node form here.
 fn internal_get_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     funcid: Oid,
     call_expr: Option<Node<'_>>,
+    carrier_rettype: Oid,
     expected_desc: Option<&TupleDescData<'_>>,
 ) -> PgResult<ResolvedResultType<'mcx>> {
     let procform = syscache_seams::lookup_pg_proc_shape::call(funcid)?
@@ -451,7 +506,10 @@ fn internal_get_result_type<'mcx>(
     }
 
     if is_polymorphic_type(rettype) {
-        let newrettype = expr_type(call_expr);
+        let mut newrettype = expr_type(call_expr);
+        if newrettype == InvalidOid {
+            newrettype = carrier_rettype;
+        }
         if newrettype == InvalidOid {
             return Err(unresolved_polymorphic_rettype(funcid, rettype));
         }
