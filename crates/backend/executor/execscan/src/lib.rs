@@ -400,6 +400,16 @@ fn tle<'mcx>(node: Node<'mcx>) -> &'mcx types_nodes::primnodes::TargetEntry<'mcx
         .unwrap_or_else(|| panic!("expected TargetEntry, got tag {:?}", node.node_tag()))
 }
 
+// plancache computes result descriptors over pre-planner tlists, which can
+// still carry raw SubLinks; execexpr's exprType covers plan-tree families
+// only, so route SubLink to the canonical nodeFuncs port.
+fn tl_expr_type(e: Node<'_>) -> Oid {
+    if e.node_tag() == NodeTag::T_SubLink {
+        return nodes_core::expr_type(e);
+    }
+    execexpr::expr_type(e)
+}
+
 /// `ExecTypeFromExprList` (execTuples.c): bare exprs, unnamed columns.
 pub fn exec_type_from_expr_list<'mcx>(
     mcx: Mcx<'mcx>,
@@ -412,7 +422,7 @@ pub fn exec_type_from_expr_list<'mcx>(
             &mut desc,
             cur_resno,
             None,
-            execexpr::expr_type(e),
+            tl_expr_type(e),
             expr_typmod(e),
             0,
         )?;
@@ -439,7 +449,7 @@ fn exec_type_from_tl_internal<'mcx>(
             &mut desc,
             cur_resno,
             t.resname,
-            execexpr::expr_type(t.expr),
+            tl_expr_type(t.expr),
             expr_typmod(t.expr),
             0,
         )?;
