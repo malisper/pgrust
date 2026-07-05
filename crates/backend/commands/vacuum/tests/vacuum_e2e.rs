@@ -859,9 +859,6 @@ fn vacuum_reclaims_dead_rows_e2e() {
     autovacuum::init_seams();
     walwriter::init_seams();
     execmain::init_seams();
-    // pg_publication is not in this fixture harness: no publications, no
-    // replica-identity requirement to enforce.
-    execreplication_seams::check_cmd_replica_identity::set(|_, _, _| Ok(()));
     nodeseqscan::init_seams();
     scan_fgram::init_seams();
     parser_driver::init_seams();
