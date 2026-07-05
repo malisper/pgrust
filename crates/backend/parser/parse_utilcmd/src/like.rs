@@ -1,6 +1,6 @@
 // LIKE arm: transformTableLikeClause + expandTableLikeClause +
 // generateClonedIndexStmt. LOUD: identity/compression copy,
-// non-default opclass/collation, INCLUDE, extended statistics.
+// non-default opclass/collation, extended statistics.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
 use types_error::{
@@ -518,9 +518,6 @@ pub fn generateClonedIndexStmt<'mcx>(
     if idxrec.indisexclusion && !iswithoutoverlaps {
         unported("generateClonedIndexStmt: exclusion constraints");
     }
-    if idxrec.indnatts != idxrec.indnkeyatts {
-        unported("generateClonedIndexStmt: INCLUDE columns");
-    }
     // C copies per-column opclass options (untransformRelOptions of
     // attoptions); dropping them would silently build a different index.
     if index_has_attoptions(mcx, source_idx.rd_id, idxrec.indnkeyatts as usize)? {
@@ -628,6 +625,34 @@ pub fn generateClonedIndexStmt<'mcx>(
         params.lappend(mcx, Node::mk(mcx, iparam)?)?;
     }
     stmt.indexParams = params;
+
+    // Included columns (parse_utilcmd.c:1966-1996).
+    let mut including_params = NodeList::nil();
+    for keyno in idxrec.indnkeyatts as usize..idxrec.indnatts as usize {
+        let attnum = idxrec.indkey[keyno];
+        if attnum == 0 {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "expressions are not supported in included columns".to_string(),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        let attname = lsyscache::get_attname(mcx, indrelid, attnum, false)?
+            .expect("included index column");
+        let iparam = IndexElem {
+            name: Some(str_in(mcx, attname.as_str())?),
+            indexcolname: Some(str_in(
+                mcx,
+                core::str::from_utf8(source_idx.rd_att.attr(keyno).attname.name_str())
+                    .expect("index column name"),
+            )?),
+            ..IndexElem::default()
+        };
+        including_params.lappend(mcx, Node::mk(mcx, iparam)?)?;
+    }
+    stmt.indexIncludingParams = including_params;
 
     if let Some(src) = idxrec.indpred_src.as_ref() {
         let pred = readfuncs::stringToNode(mcx, src.as_str())?;
