@@ -644,9 +644,6 @@ pub fn interpret_function_parameter_list<'mcx>(
         // functioncmds.c:409-467: cook input-parameter defaults; later
         // input (and, for procedures, OUT) parameters must keep having them.
         let isinput = matches!(fpmode, FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC);
-        let fp_pos = || {
-            parser_small1::parser_errposition(pstate, fp.location, mbutils::GetDatabaseEncoding())
-        };
         if let Some(defexpr) = fp.defexpr {
             if !isinput {
                 return Err(Box::new(
@@ -654,7 +651,11 @@ pub fn interpret_function_parameter_list<'mcx>(
                         "only input parameters can have default values".to_string(),
                         ERRCODE_INVALID_FUNCTION_DEFINITION,
                     ))
-                    .with_cursor_position(fp_pos()),
+                    .with_cursor_position(parser_small1::parser_errposition(
+                        pstate,
+                        fp.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
                 ));
             }
             let def = parse_expr::transformExpr(
@@ -679,7 +680,11 @@ pub fn interpret_function_parameter_list<'mcx>(
                         "cannot use table references in parameter default value".to_string(),
                         types_error::ERRCODE_INVALID_COLUMN_REFERENCE,
                     ))
-                    .with_cursor_position(fp_pos()),
+                    .with_cursor_position(parser_small1::parser_errposition(
+                        pstate,
+                        fp.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
                 ));
             }
             parameter_defaults.lappend(mcx, def)?;
@@ -692,7 +697,11 @@ pub fn interpret_function_parameter_list<'mcx>(
                             .to_string(),
                         ERRCODE_INVALID_FUNCTION_DEFINITION,
                     ))
-                    .with_cursor_position(fp_pos()),
+                    .with_cursor_position(parser_small1::parser_errposition(
+                        pstate,
+                        fp.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
                 ));
             }
             if is_procedure && have_defaults {
@@ -702,7 +711,11 @@ pub fn interpret_function_parameter_list<'mcx>(
                             .to_string(),
                         ERRCODE_INVALID_FUNCTION_DEFINITION,
                     ))
-                    .with_cursor_position(fp_pos()),
+                    .with_cursor_position(parser_small1::parser_errposition(
+                        pstate,
+                        fp.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
                 ));
             }
         }
