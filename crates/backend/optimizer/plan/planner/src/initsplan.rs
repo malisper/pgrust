@@ -2639,12 +2639,12 @@ pub fn match_foreign_keys_to_quals(run: &mut PlannerRun<'_>) -> PgResult<()> {
                 if op.args.len() != 2 {
                     continue;
                 }
-                let strip = |mut n: Node<'_>| {
+                fn strip<'m>(mut n: Node<'m>) -> Node<'m> {
                     while n.node_tag() == NodeTag::T_RelabelType {
                         n = n.as_relabel_type().unwrap().arg;
                     }
                     n
-                };
+                }
                 let Some(leftvar) = strip(op.args.nth(0)).as_var() else { continue };
                 let Some(rightvar) = strip(op.args.nth(1)).as_var() else { continue };
                 let conpfeqop = run.root.foreign_key(fkid).conpfeqop[colno];

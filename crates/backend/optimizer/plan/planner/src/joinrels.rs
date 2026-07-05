@@ -458,8 +458,7 @@ pub fn find_join_rel(
     relids: &Relids<'_>,
 ) -> Option<RelId> {
     if let Some(hash) = &root.join_rel_hash {
-        let words = relids.as_ref().map_or(&[][..], |b| b.word_slice());
-        return hash.get(words).copied();
+        return hash.get(&join_rel_hash_key(root.mcx, relids)).copied();
     }
     root.join_rel_list.iter().copied().find(|&jr| relids_equal(&root.rel(jr).relids, relids))
 }
