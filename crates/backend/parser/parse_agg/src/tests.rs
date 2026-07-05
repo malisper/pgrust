@@ -449,6 +449,53 @@ fn expr_sublink<'mcx>(mcx: Mcx<'mcx>, sub_tlist: NodeList<'mcx>) -> Node<'mcx> {
     .unwrap()
 }
 
+/// select_parallel.sql: `max((select pa1.b from part_pa_test pa1 where
+/// pa1.a = pa2.a))` — the aggregate's sublink subquery has its own jointree
+/// (fromlist -> RangeTblRef for pa1), which caa_query/query_tree_walker
+/// feeds straight to check_agg_arguments_walker as it recurses into the
+/// Query. Regression test for the T_RangeTblRef panic.
+#[test]
+fn sublink_query_with_jointree_rangetblref_does_not_panic() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let mut subq = Query::default();
+    let local_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
+    subq.targetList = NodeList::make1(mcx, tle).unwrap();
+    let rtr = Node::mk(mcx, types_nodes::primnodes::RangeTblRef { rtindex: 1 }).unwrap();
+    subq.jointree = Some(
+        Node::mk_mut(
+            mcx,
+            types_nodes::primnodes::FromExpr { fromlist: NodeList::make1(mcx, rtr).unwrap(), quals: None },
+        )
+        .unwrap()
+        .seal_ref(),
+    );
+    let sublink = Node::mk(
+        mcx,
+        types_nodes::SubLink {
+            subLinkType: types_nodes::SubLinkType::EXPR_SUBLINK,
+            subLinkId: 0,
+            testexpr: None,
+            operName: NodeList::nil(),
+            subselect: Node::mk(mcx, subq).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let args = NodeList::make1(mcx, sublink).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2116; // max(int4)
+    agg.aggtype = INT4OID;
+
+    transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
+        .unwrap();
+    assert_eq!(agg.agglevelsup, 0);
+}
+
 #[test]
 fn outer_var_in_sublink_counts_at_agg_level() {
     let ctx = MemoryContext::new("t");
