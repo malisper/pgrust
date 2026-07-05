@@ -598,6 +598,13 @@ pub fn exec_init_window_agg<'mcx>(
                     params,
                     agg_node.expect("winagg implies agg_node"),
                 )?);
+                for st in peragg.last_mut().expect("just pushed").argstates.iter_mut() {
+                    // C evaluates framed-agg args in the tmpcontext per-tuple
+                    // memory; by-ref arg results ride the armed result mcx.
+                    // SAFETY: the tmpcontext ExprContext outlives the
+                    // programs (same estate).
+                    unsafe { st.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+                }
                 agg_specs_args.push(NodeList::nil());
             }
             peragg_wfuncno.push(wfuncno as u16);
@@ -637,6 +644,14 @@ pub fn exec_init_window_agg<'mcx>(
                 ),
             };
             argstates = build_argstates(mcx, &wfunc.args, params)?;
+            for st in argstates.iter_mut() {
+                // C evaluates WinGetFuncArg* in the tmpcontext per-tuple
+                // memory; by-ref arg results (lead/lag default coercions)
+                // ride the armed result mcx.
+                // SAFETY: the tmpcontext ExprContext outlives the programs
+                // (same estate).
+                unsafe { st.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+            }
             if wfunc.args.len() >= 2 {
                 arg1_stable = arg_is_stable(wfunc.args.nth(1));
             }

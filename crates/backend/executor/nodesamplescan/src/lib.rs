@@ -121,10 +121,19 @@ pub fn exec_init_sample_scan<'mcx>(
 
     let mut args = PgVec::new_in(mcx);
     for arg in tsc.args.iter() {
-        let state = ::execexpr::exec_init_expr(mcx, Some(arg), params)?.expect("arg is Some");
+        let mut state = ::execexpr::exec_init_expr(mcx, Some(arg), params)?.expect("arg is Some");
+        // C evaluates TABLESAMPLE args in ps_ExprContext's per-tuple memory;
+        // by-ref intermediates ride the armed result mcx.
+        // SAFETY: the ExprContext outlives the programs (same estate).
+        unsafe { state.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
         args.push(state);
     }
-    let repeatable = ::execexpr::exec_init_expr(mcx, tsc.repeatable, params)?;
+    let mut repeatable = ::execexpr::exec_init_expr(mcx, tsc.repeatable, params)?;
+    if let Some(st) = repeatable.as_mut() {
+        // Same convention as the args above.
+        // SAFETY: the ExprContext outlives the program (same estate).
+        unsafe { st.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
+    }
 
     // Seed once at init so it stays fixed over rescans (C picks it here iff
     // there is no REPEATABLE clause).

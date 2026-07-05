@@ -182,7 +182,7 @@ pub fn exec_init_merge_join<'mcx>(
             Ok((proj, otherqual, joinqual))
         })?;
 
-    let clauses = examine_quals(node, estate)?;
+    let clauses = examine_quals(node, estate, mj_OuterEContext, mj_InnerEContext)?;
 
     // ExtraMarks only helps a Material inner without REWIND.
     let mj_ExtraMarks =
@@ -255,6 +255,8 @@ fn non_mergeable_join_cond(jointype: JoinType) -> Box<PgError> {
 fn examine_quals<'mcx>(
     node: &'mcx MergeJoin<'mcx>,
     estate: &mut EStateData<'mcx>,
+    outer_ecxt: EcxtId,
+    inner_ecxt: EcxtId,
 ) -> PgResult<::mcx::PgVec<'mcx, MergeJoinClause<'mcx>>> {
     let mcx = estate.es_query_cxt;
     let params = estate.param_bind();
@@ -266,10 +268,16 @@ fn examine_quals<'mcx>(
         let op = qual.as_op_expr().filter(|o| o.args.len() == 2).unwrap_or_else(|| {
             panic!("MJExamineQuals (nodeMergejoin.c): mergeclause is not a binary OpExpr")
         });
-        let lexpr =
+        let mut lexpr =
             exec_init_expr(mcx, Some(op.args.nth(0)), params)?.expect("mergeclause left operand");
-        let rexpr =
+        let mut rexpr =
             exec_init_expr(mcx, Some(op.args.nth(1)), params)?.expect("mergeclause right operand");
+        // C evaluates outer key exprs in mj_OuterEContext's per-tuple memory
+        // and inner key exprs in mj_InnerEContext's (MJEvalOuterValues /
+        // MJEvalInnerValues); by-ref results ride the armed result mcx.
+        // SAFETY: both ExprContexts outlive the programs (same estate).
+        unsafe { lexpr.arm_result_mcx_raw(estate.ecxt(outer_ecxt).per_tuple_mcx()) };
+        unsafe { rexpr.arm_result_mcx_raw(estate.ecxt(inner_ecxt).per_tuple_mcx()) };
 
         let opfamily = node.mergeFamilies[i];
         let collation = node.mergeCollations[i];

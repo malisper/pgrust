@@ -108,6 +108,9 @@ pub fn prepare_domain_check_expr<'mcx>(
     crate::compile::init_expr_rec(expr, &mut state, mcx, rout, None, ParamBind::NONE, None)?;
     crate::compile::push_step(&mut state, mcx, Step::DoneReturn)?;
     crate::compile::ready_expr(&mut state);
+    // By-ref call results (record detoast, coercions) land in the caller's
+    // validation-scan mcx (C: per-tuple econtext).
+    state.arm_result_mcx(mcx);
     Ok(DomainCheckExpr { slot, state })
 }
 
