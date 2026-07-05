@@ -82,6 +82,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_PlaceHolderVar => {
             expr_type(node.as_place_holder_var().unwrap().phexpr)
         }
+        NodeTag::T_ReturningExpr => expr_type(node.as_returning_expr().unwrap().retexpr),
         NodeTag::T_JsonValueExpr => {
             expr_type(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
         }
@@ -235,6 +236,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_PlaceHolderVar => {
             expr_typmod(node.as_place_holder_var().unwrap().phexpr)
         }
+        NodeTag::T_ReturningExpr => expr_typmod(node.as_returning_expr().unwrap().retexpr),
         NodeTag::T_JsonValueExpr => {
             expr_typmod(node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"))
         }
@@ -330,6 +332,7 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
         NodeTag::T_PlaceHolderVar => {
             expr_collation(node.as_place_holder_var().unwrap().phexpr)
         }
+        NodeTag::T_ReturningExpr => expr_collation(node.as_returning_expr().unwrap().retexpr),
         NodeTag::T_JsonValueExpr => {
             expr_collation(
                 node.as_json_value_expr().unwrap().formatted_expr.expect("formatted_expr"),
@@ -408,6 +411,7 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         // C: FieldSelect has no location; report the argument's.
         NodeTag::T_FieldSelect => expr_location(node.as_field_select().unwrap().arg),
+        NodeTag::T_ReturningExpr => expr_location(node.as_returning_expr().unwrap().retexpr),
         // C: CollateExpr just uses the argument's location.
         NodeTag::T_CollateExpr => expr_location(node.as_collate_expr().unwrap().arg),
         NodeTag::T_Aggref => node.as_aggref().unwrap().location,

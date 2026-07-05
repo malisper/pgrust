@@ -44,7 +44,7 @@ pub use primnodes::{
     JsonExpr, JsonExprOp, JsonFormat, JsonFormatType, JsonIsPredicate, JsonReturning,
     JsonValueExpr, JsonValueType, JsonWrapper,
     OnConflictAction, OnConflictExpr, OpExpr, OverridingKind, Param, ParamKind, PlaceHolderVar, RangeTblRef,
-    RangeVar, RelabelType, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
+    RangeVar, RelabelType, ReturningExpr, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp, ScalarArrayOpExpr,
     SetToDefault, SubLink, SubLinkType, SubPlan, SubscriptingRef, TableFunc, TableFuncType,
     TargetEntry, Var, VarReturningType, XmlExpr, XmlExprOp, XmlOptionType,
 };

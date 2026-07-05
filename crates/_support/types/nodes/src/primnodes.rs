@@ -466,6 +466,13 @@ pub struct NextValueExpr {
     pub typeId: Oid,
 }
 
+// C `Expr *retexpr` is never NULL in a live ReturningExpr; modeled non-optional.
+pub struct ReturningExpr<'mcx> {
+    pub retlevelsup: i32,
+    pub retold: bool,
+    pub retexpr: Node<'mcx>,
+}
+
 // C `Expr *arg` is never NULL in a live FieldSelect; modeled non-optional.
 pub struct FieldSelect<'mcx> {
     pub arg: Node<'mcx>,
@@ -1193,6 +1200,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for SubscriptingRef<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for RelabelType<'mcx> {
     const TAG: NodeTag = NodeTag::T_RelabelType;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ReturningExpr<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReturningExpr;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for FieldSelect<'mcx> {
     const TAG: NodeTag = NodeTag::T_FieldSelect;
 }
@@ -1505,6 +1515,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_field_select(self) -> Option<&'mcx FieldSelect<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_returning_expr(self) -> Option<&'mcx ReturningExpr<'mcx>> {
         self.as_variant()
     }
 
