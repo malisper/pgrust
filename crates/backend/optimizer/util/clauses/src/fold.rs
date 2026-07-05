@@ -1318,6 +1318,10 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 )?)),
             }
         }
+        // C: "Return a SubPlan unchanged --- too late to do anything with it"
+        // (reached when folding runs over an expression that already went
+        // through SS_process_sublinks).
+        NodeTag::T_SubPlan | NodeTag::T_AlternativeSubPlan => Ok(None),
         other => deferred("eval_const_expressions_mutator", other),
     }
 }
