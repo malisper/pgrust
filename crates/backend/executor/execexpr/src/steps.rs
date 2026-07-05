@@ -10,7 +10,13 @@ use ::types_fmgr::{AggStateNode, FmgrInfo, FunctionCallInfoBaseData, LocalFcinfo
 
 pub const EEO_FLAG_IS_QUAL: u8 = 1 << 0;
 pub const EEO_FLAG_HAS_SUBPLAN: u8 = 1 << 1;
+// C execnodes.h EEO_FLAG_HAS_OLD/HAS_NEW/OLD_IS_NULL/NEW_IS_NULL, repacked
+// into the free bits of this u8.
+pub const EEO_FLAG_HAS_OLD: u8 = 1 << 2;
+pub const EEO_FLAG_HAS_NEW: u8 = 1 << 3;
+pub const EEO_FLAG_OLD_IS_NULL: u8 = 1 << 4;
 pub const EEO_FLAG_INTERPRETER_INITIALIZED: u8 = 1 << 5;
+pub const EEO_FLAG_NEW_IS_NULL: u8 = 1 << 6;
 pub const EEO_FLAG_STILL_VALID_CHECKED: u8 = 1 << 7;
 
 // C's `Datum *resv, bool *resnull` pair, always resolved (a frame's fcinfo
@@ -320,6 +326,15 @@ pub enum Step {
     // C EEOP_IOCOERCE_SAFE: input-fn errors save into the fcinfo-armed
     // ErrorSaveNode instead of throwing.
     IoCoerceSafe { calls: NonNull<IoCoerceCalls>, out: OutRef },
+    // C EEOP_OLD_/NEW_FETCHSOME/VAR/SYSVAR + EEOP_RETURNINGEXPR (RETURNING
+    // OLD/NEW). Appended last: preserves the hot variants' discriminants.
+    OldFetchSome { last_var: u16 },
+    NewFetchSome { last_var: u16 },
+    OldVar { attnum: u16, vartype: Oid, out: OutRef },
+    NewVar { attnum: u16, vartype: Oid, out: OutRef },
+    OldSysVar { attnum: i16, out: OutRef },
+    NewSysVar { attnum: i16, out: OutRef },
+    ReturningExprStep { nullflag: u8, jumpdone: u32, out: OutRef },
 }
 
 // C JsonExprState (execnodes.h): resolve-once carrier for EEOP_JSONEXPR_*.
@@ -844,6 +859,9 @@ pub enum SlotSrc {
     Scan,
     Inner,
     Outer,
+    // RETURNING OLD/NEW rows (C econtext ecxt_oldtuple/ecxt_newtuple).
+    Old,
+    New,
 }
 
 pub struct ExprState<'mcx> {
@@ -994,6 +1012,29 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn is_qual(&self) -> bool {
         self.flags & EEO_FLAG_IS_QUAL != 0
+    }
+
+    #[inline]
+    pub fn has_old(&self) -> bool {
+        self.flags & EEO_FLAG_HAS_OLD != 0
+    }
+
+    #[inline]
+    pub fn has_new(&self) -> bool {
+        self.flags & EEO_FLAG_HAS_NEW != 0
+    }
+
+    /// C ExecProcessReturning's per-row EEO_FLAG_OLD_IS_NULL/NEW_IS_NULL
+    /// toggling: tells RETURNINGEXPR/OLD_*/NEW_* steps whether the rows exist.
+    #[inline]
+    pub fn set_old_new_null(&mut self, old_is_null: bool, new_is_null: bool) {
+        self.flags &= !(EEO_FLAG_OLD_IS_NULL | EEO_FLAG_NEW_IS_NULL);
+        if old_is_null {
+            self.flags |= EEO_FLAG_OLD_IS_NULL;
+        }
+        if new_is_null {
+            self.flags |= EEO_FLAG_NEW_IS_NULL;
+        }
     }
 
     #[inline]

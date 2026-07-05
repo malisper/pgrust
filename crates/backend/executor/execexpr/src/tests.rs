@@ -14,7 +14,7 @@ use ::types_tuple::{
 
 use crate::compile::{exec_build_projection_info, exec_init_expr, exec_init_qual};
 use ::types_portal::params::ParamBind;
-use crate::interp::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
+use crate::interp::{exec_eval_expr, exec_project, exec_project_returning, exec_qual, EvalSlots, RetSlot, RetSlots};
 use crate::steps::{CmpOp, ExprState, Kernel, SlotSrc, Step};
 
 const INT4OID: u32 = 23;
@@ -295,6 +295,32 @@ fn heap_slot<'mcx>(mcx: Mcx<'mcx>, values: &[Option<i32>]) -> SlotData<'mcx> {
 
 fn mk_scan_var<'mcx>(mcx: Mcx<'mcx>, attno: i16, typ: u32) -> Node<'mcx> {
     Node::mk_var(mcx, 1, attno, typ, -1, 0, 0).unwrap()
+}
+
+fn mk_ret_var<'mcx>(
+    mcx: Mcx<'mcx>,
+    attno: i16,
+    rtype: ::types_nodes::primnodes::VarReturningType,
+) -> Node<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::primnodes::Var;
+    Node::mk(
+        mcx,
+        Var {
+            varno: 1,
+            varattno: attno,
+            vartype: INT4OID,
+            vartypmod: -1,
+            varcollid: 0,
+            varnullingrels: Bitmapset::empty(),
+            varlevelsup: 0,
+            varreturningtype: rtype,
+            varnosyn: 1,
+            varattnosyn: attno,
+            location: -1,
+        },
+    )
+    .unwrap()
 }
 
 fn mk_int4_const<'mcx>(mcx: Mcx<'mcx>, v: Option<i32>) -> Node<'mcx> {
@@ -2816,6 +2842,53 @@ fn jit_parity_fuzz() {
         #[cfg(target_arch = "aarch64")]
         assert!(jitted > 0, "no jitted programs in the whole fuzz corpus");
         let _ = jitted;
+
+
+#[test]
+fn old_new_var_projection_reads_ret_slots() {
+    use ::types_nodes::primnodes::VarReturningType;
+    with_mcx(|mcx| {
+        let t1 = Node::mk_target_entry(
+            mcx,
+            mk_ret_var(mcx, 1, VarReturningType::VAR_RETURNING_OLD),
+            1,
+            None,
+            false,
+        )
+        .unwrap();
+        let t2 = Node::mk_target_entry(
+            mcx,
+            mk_ret_var(mcx, 1, VarReturningType::VAR_RETURNING_NEW),
+            2,
+            None,
+            false,
+        )
+        .unwrap();
+        let tlist = NodeList::make2(mcx, t1, t2).unwrap();
+        let desc = desc_int4(mcx, 2);
+        let mut state =
+            exec_build_projection_info(mcx, &tlist, Some(&desc_int4(mcx, 1)), ParamBind::NONE)
+                .unwrap();
+        assert!(state.has_old() && state.has_new());
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::OldFetchSome { last_var: 1 })));
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::NewFetchSome { last_var: 1 })));
+
+        let mut scan = heap_slot(mcx, &[Some(10)]);
+        let mut old = heap_slot(mcx, &[Some(5)]);
+        let mut result =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+        state.set_old_new_null(false, false);
+        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let mut ret = RetSlots { old: RetSlot::Slot(&mut old), new: RetSlot::Scan };
+        exec_project_returning(&mut state, &mut slots, &mut ret, &mut result, mcx).unwrap();
+        assert_eq!(result.base().tts_values[0].as_i32(), 5);
+        assert_eq!(result.base().tts_values[1].as_i32(), 10);
     });
 }
 
@@ -2860,5 +2933,62 @@ fn jit_parity_qual_lists() {
             }
             drop(col);
         }
+
+fn old_var_reads_all_null_substitute() {
+    use ::types_nodes::primnodes::VarReturningType;
+    with_mcx(|mcx| {
+        let tle = Node::mk_target_entry(
+            mcx,
+            mk_ret_var(mcx, 1, VarReturningType::VAR_RETURNING_OLD),
+            1,
+            None,
+            false,
+        )
+        .unwrap();
+        let tlist = NodeList::make1(mcx, tle).unwrap();
+        let mut state =
+            exec_build_projection_info(mcx, &tlist, Some(&desc_int4(mcx, 1)), ParamBind::NONE)
+                .unwrap();
+        let mut scan = heap_slot(mcx, &[Some(10)]);
+        let mut allnull = virtual_slot(mcx, &[None]);
+        let mut result =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc_int4(mcx, 1)));
+        state.set_old_new_null(true, false);
+        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let mut ret = RetSlots { old: RetSlot::Slot(&mut allnull), new: RetSlot::Scan };
+        exec_project_returning(&mut state, &mut slots, &mut ret, &mut result, mcx).unwrap();
+        assert!(result.base().tts_isnull[0]);
+    });
+}
+
+#[test]
+fn returning_expr_step_null_flag_short_circuits() {
+    with_mcx(|mcx| {
+        let rexpr = Node::mk(
+            mcx,
+            ::types_nodes::primnodes::ReturningExpr {
+                retlevelsup: 0,
+                retold: true,
+                retexpr: mk_int4_const(mcx, Some(7)),
+            },
+        )
+        .unwrap();
+        let mut state = exec_init_expr(mcx, Some(rexpr), ParamBind::NONE).unwrap().unwrap();
+        assert!(state.has_old());
+        assert!(state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ReturningExprStep { .. })));
+        state.arm_result_mcx(mcx);
+
+        state.set_old_new_null(false, false);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
+
+        state.set_old_new_null(true, false);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(r.isnull);
     });
 }

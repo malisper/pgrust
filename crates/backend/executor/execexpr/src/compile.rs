@@ -1160,6 +1160,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         }
         NodeTag::T_JsonIsPredicate => ::types_core::catalog::BOOLOID,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
+        NodeTag::T_ReturningExpr => expr_type(node.as_returning_expr().unwrap().retexpr),
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }
@@ -1172,6 +1173,8 @@ struct SetupInfo {
     last_inner: i16,
     last_outer: i16,
     last_scan: i16,
+    last_old: i16,
+    last_new: i16,
 }
 
 #[inline]
@@ -1202,6 +1205,12 @@ fn push_fetch_steps<'mcx>(
     if info.last_scan > 0 {
         push_step(state, mcx, Step::ScanFetchSome { last_var: info.last_scan as u16 })?;
     }
+    if info.last_old > 0 {
+        push_step(state, mcx, Step::OldFetchSome { last_var: info.last_old as u16 })?;
+    }
+    if info.last_new > 0 {
+        push_step(state, mcx, Step::NewFetchSome { last_var: info.last_new as u16 })?;
+    }
     Ok(())
 }
 
@@ -1216,7 +1225,12 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
                     VarReturningType::VAR_RETURNING_DEFAULT => {
                         info.last_scan = info.last_scan.max(v.varattno)
                     }
-                    _ => unported("OLD/NEW FETCHSOME (RETURNING)"),
+                    VarReturningType::VAR_RETURNING_OLD => {
+                        info.last_old = info.last_old.max(v.varattno)
+                    }
+                    VarReturningType::VAR_RETURNING_NEW => {
+                        info.last_new = info.last_new.max(v.varattno)
+                    }
                 },
             }
         }
@@ -1302,6 +1316,9 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             if let Some(d) = c.defresult {
                 setup_walker(d, info);
             }
+        }
+        NodeTag::T_ReturningExpr => {
+            setup_walker(node.as_returning_expr().unwrap().retexpr, info)
         }
         NodeTag::T_RelabelType => setup_walker(node.as_relabel_type().unwrap().arg, info),
         NodeTag::T_CoerceViaIO => setup_walker(node.as_coerce_via_io().unwrap().arg, info),
@@ -1416,16 +1433,23 @@ fn init_whole_row<'mcx>(
     out: OutRef,
 ) -> PgResult<()> {
     use crate::steps::{SlotSrc, WholeRowState};
-    if variable.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
-        unported("EEOP_WHOLEROW OLD/NEW (RETURNING)");
-    }
     if variable.vartype == ::types_core::catalog::RECORDOID {
         unported("EEOP_WHOLEROW RECORD leg (subquery/CTE whole-row + junkfilter)");
     }
     let src = match variable.varno {
         INNER_VAR => SlotSrc::Inner,
         OUTER_VAR => SlotSrc::Outer,
-        _ => SlotSrc::Scan,
+        _ => match variable.varreturningtype {
+            VarReturningType::VAR_RETURNING_DEFAULT => SlotSrc::Scan,
+            VarReturningType::VAR_RETURNING_OLD => {
+                state.flags |= crate::steps::EEO_FLAG_HAS_OLD;
+                SlotSrc::Old
+            }
+            VarReturningType::VAR_RETURNING_NEW => {
+                state.flags |= crate::steps::EEO_FLAG_HAS_NEW;
+                SlotSrc::New
+            }
+        },
     };
     let desc = typcache::lookup_rowtype_tupdesc_copy(mcx, variable.vartype, -1)?;
     let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
@@ -1478,7 +1502,14 @@ pub(crate) fn init_expr_rec<'mcx>(
                         VarReturningType::VAR_RETURNING_DEFAULT => {
                             Step::ScanSysVar { attnum, out }
                         }
-                        _ => unported("EEOP_OLD_SYSVAR/EEOP_NEW_SYSVAR (RETURNING)"),
+                        VarReturningType::VAR_RETURNING_OLD => {
+                            state.flags |= crate::steps::EEO_FLAG_HAS_OLD;
+                            Step::OldSysVar { attnum, out }
+                        }
+                        VarReturningType::VAR_RETURNING_NEW => {
+                            state.flags |= crate::steps::EEO_FLAG_HAS_NEW;
+                            Step::NewSysVar { attnum, out }
+                        }
                     },
                 };
                 return push_step(state, mcx, step);
@@ -1492,7 +1523,14 @@ pub(crate) fn init_expr_rec<'mcx>(
                     VarReturningType::VAR_RETURNING_DEFAULT => {
                         Step::ScanVar { attnum, vartype, out }
                     }
-                    _ => unported("EEOP_OLD_VAR/EEOP_NEW_VAR (RETURNING)"),
+                    VarReturningType::VAR_RETURNING_OLD => {
+                        state.flags |= crate::steps::EEO_FLAG_HAS_OLD;
+                        Step::OldVar { attnum, vartype, out }
+                    }
+                    VarReturningType::VAR_RETURNING_NEW => {
+                        state.flags |= crate::steps::EEO_FLAG_HAS_NEW;
+                        Step::NewVar { attnum, vartype, out }
+                    }
                 },
             };
             push_step(state, mcx, step)
@@ -1801,6 +1839,27 @@ pub(crate) fn init_expr_rec<'mcx>(
                 mcx,
                 Step::NextValueExpr { seqid: nve.seqid, seqtypid: nve.typeId, out },
             )
+        }
+        NodeTag::T_ReturningExpr => {
+            let rexpr = node.as_returning_expr().unwrap();
+            let nullflag = if rexpr.retold {
+                crate::steps::EEO_FLAG_OLD_IS_NULL
+            } else {
+                crate::steps::EEO_FLAG_NEW_IS_NULL
+            };
+            push_step(state, mcx, Step::ReturningExprStep { nullflag, jumpdone: u32::MAX, out })?;
+            let retstep = state.steps.len() - 1;
+            init_expr_rec(rexpr.retexpr, state, mcx, out, agg, params, sub)?;
+            let done = state.steps.len() as u32;
+            if let Step::ReturningExprStep { jumpdone, .. } = &mut state.steps[retstep] {
+                *jumpdone = done;
+            }
+            state.flags |= if rexpr.retold {
+                crate::steps::EEO_FLAG_HAS_OLD
+            } else {
+                crate::steps::EEO_FLAG_HAS_NEW
+            };
+            Ok(())
         }
         NodeTag::T_CoerceViaIO => init_coerce_via_io(node, state, mcx, out, agg, params, sub),
         NodeTag::T_ArrayCoerceExpr => init_array_coerce(node, state, mcx, out, agg, params, sub),
@@ -3914,6 +3973,9 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
                 assert!((*jumpnull as usize) < len, "rowcompare jump target out of range");
                 assert!((*jumpdone as usize) < len, "rowcompare jump target out of range");
             }
+            Step::ReturningExprStep { jumpdone, .. } => {
+                assert!((*jumpdone as usize) < len, "returningexpr jump target out of range");
+            }
             Step::FuncExpr { call, .. }
             | Step::FuncExprStrict1 { call, .. }
             | Step::FuncExprStrict2 { call, .. }
@@ -3975,7 +4037,8 @@ fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
         | Step::FuncStrict2Qual { jumpdone, .. }
         | Step::FuncStrict2QualThin { jumpdone, .. }
         | Step::NotDistinctQual { jumpdone, .. }
-        | Step::NotDistinctQualThin { jumpdone, .. } => Some(jumpdone),
+        | Step::NotDistinctQualThin { jumpdone, .. }
+        | Step::ReturningExprStep { jumpdone, .. } => Some(jumpdone),
         Step::AggStrictInputCheck { jumpnull, .. }
         | Step::AggStrictInputCheck1 { jumpnull, .. }
         | Step::AggStrictDeserialize { jumpnull, .. } => Some(jumpnull),
