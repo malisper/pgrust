@@ -1,6 +1,7 @@
 //! Closed-set opclass dispatch (rule 4): support procs resolved to a
-//! GinOpclass tag at initGinState, called directly here — no fmgr frames on
-//! the compare/extract/consistent paths.
+//! GinOpclass tag at initGinState (jsonb_ops / jsonb_path_ops /
+//! tsvector_ops), called directly here — no fmgr frames on the
+//! compare/extract/consistent paths.
 
 use ::datum::Datum;
 use ::gin_vocab::*;
@@ -13,6 +14,10 @@ pub(crate) const F_GIN_COMPARE_JSONB: ::types_core::Oid = 3480;
 pub(crate) const F_GIN_EXTRACT_JSONB: ::types_core::Oid = 3482;
 pub(crate) const F_GIN_EXTRACT_JSONB_PATH: ::types_core::Oid = 3485;
 pub(crate) const F_BTINT4CMP: ::types_core::Oid = 351;
+pub(crate) const F_GIN_EXTRACT_TSVECTOR: ::types_core::Oid = 3656;
+pub(crate) const F_GIN_EXTRACT_TSQUERY: ::types_core::Oid = 3657;
+pub(crate) const F_GIN_CMP_TSLEXEME: ::types_core::Oid = 3724;
+pub(crate) const F_GIN_CMP_PREFIX: ::types_core::Oid = 2700;
 
 /// Detoasted varlena payload of a datum (header stripped). External and
 /// compressed images take the detoast path; inline images are borrowed.
@@ -89,6 +94,24 @@ pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
                 (x > y) as i32
             }
         }
+        GinOpclass::TsvectorOps => {
+            ::adt_tsginidx::gin_cmp_tslexeme(text_payload(a), text_payload(b))
+        }
+    }
+}
+
+/// comparePartialFn (tsvector_ops gin_cmp_prefix; only partial-match opclass).
+pub(crate) fn compare_partial(
+    state: &GinState,
+    partial_key: Datum,
+    key: Datum,
+    _strategy: StrategyNumber,
+) -> i32 {
+    match state.opclass {
+        GinOpclass::TsvectorOps => {
+            ::adt_tsginidx::gin_cmp_prefix(text_payload(partial_key), text_payload(key))
+        }
+        _ => unreachable!("comparePartialFn on a non-partial-match opclass"),
     }
 }
 
@@ -107,79 +130,130 @@ pub(crate) fn extract_value<'m>(
             let payload = detoast_payload(mcx, value)?;
             ::adt_jsonb::gin::gin_extract_jsonb_path(mcx, payload)
         }
+        GinOpclass::TsvectorOps => {
+            let payload = detoast_payload(mcx, value)?;
+            ::adt_tsginidx::gin_extract_tsvector(
+                mcx,
+                ::adt_tsvector_core::layout::TsVec { payload },
+            )
+        }
     }
 }
 
-/// extractQueryFn: returns (query key datums, searchMode, jsonpath ops). The
-/// closed set yields no null flags and no partial matches; C's extra_data is
-/// the flattened jsonpath ops.
+/// extractQueryFn outputs; C's per-opclass out-params and extra_data.
+pub struct ExtractedQuery<'m> {
+    pub entries: PgVec<'m, Datum>,
+    pub search_mode: i32,
+    pub jsp_ops: PgVec<'m, JspGinOp>,
+    pub partial_match: PgVec<'m, bool>,
+    pub map_item_operand: PgVec<'m, i32>,
+}
+
 pub(crate) fn extract_query<'m>(
     mcx: Mcx<'m>,
     state: &GinState,
     query: Datum,
     strategy: StrategyNumber,
-) -> PgResult<(PgVec<'m, Datum>, i32, PgVec<'m, JspGinOp>)> {
+) -> PgResult<ExtractedQuery<'m>> {
     let image = detoast_image(mcx, query)?;
     match state.opclass {
-        GinOpclass::JsonbOps => ::adt_jsonb::gin::gin_extract_jsonb_query(mcx, image, strategy),
-        GinOpclass::JsonbPathOps => {
-            ::adt_jsonb::gin::gin_extract_jsonb_query_path(mcx, image, strategy)
+        GinOpclass::JsonbOps | GinOpclass::JsonbPathOps => {
+            let (entries, search_mode, jsp_ops) = match state.opclass {
+                GinOpclass::JsonbOps => {
+                    ::adt_jsonb::gin::gin_extract_jsonb_query(mcx, image, strategy)?
+                }
+                _ => ::adt_jsonb::gin::gin_extract_jsonb_query_path(mcx, image, strategy)?,
+            };
+            Ok(ExtractedQuery {
+                entries,
+                search_mode,
+                jsp_ops,
+                partial_match: mcx::vec_new_in(mcx),
+                map_item_operand: mcx::vec_new_in(mcx),
+            })
+        }
+        GinOpclass::TsvectorOps => {
+            let q = ::adt_tsvector_core::query::TsQueryRef { payload: &image[4..] };
+            let out = ::adt_tsginidx::gin_extract_tsquery(mcx, q)?;
+            Ok(ExtractedQuery {
+                entries: out.entries,
+                search_mode: out.search_mode,
+                jsp_ops: mcx::vec_new_in(mcx),
+                partial_match: out.partial_match,
+                map_item_operand: out.map_item_operand,
+            })
         }
     }
 }
 
-/// consistentFn (binary).
+/// consistentFn (binary). `mcx` is the reset-per-call scratch (C tempCtx).
 pub(crate) fn consistent(
+    mcx: Mcx<'_>,
     state: &GinState,
     check: &[GinTernaryValue],
     strategy: StrategyNumber,
-    _query: Datum,
+    query: Datum,
     nkeys: usize,
     _query_values: &[Datum],
     _query_categories: &[GinNullCategory],
     jsp_ops: &[JspGinOp],
+    map_item_operand: &[i32],
     recheck: &mut bool,
-) -> bool {
+) -> PgResult<bool> {
     match state.opclass {
-        GinOpclass::JsonbOps => {
-            ::adt_jsonb::gin::gin_consistent_jsonb(check, strategy, nkeys, recheck, jsp_ops)
-        }
-        GinOpclass::JsonbPathOps => {
-            ::adt_jsonb::gin::gin_consistent_jsonb_path(check, strategy, nkeys, recheck, jsp_ops)
+        GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_consistent_jsonb(
+            check, strategy, nkeys, recheck, jsp_ops,
+        )),
+        GinOpclass::JsonbPathOps => Ok(::adt_jsonb::gin::gin_consistent_jsonb_path(
+            check, strategy, nkeys, recheck, jsp_ops,
+        )),
+        GinOpclass::TsvectorOps => {
+            let image = detoast_image(mcx, query)?;
+            let q = ::adt_tsvector_core::query::TsQueryRef { payload: &image[4..] };
+            let (res, rc) = ::adt_tsginidx::gin_tsquery_consistent(mcx, check, q, map_item_operand)?;
+            *recheck = rc;
+            Ok(res)
         }
     }
 }
 
-/// triConsistentFn.
+/// triConsistentFn. `mcx` is the reset-per-call scratch (C tempCtx).
 pub(crate) fn tri_consistent(
+    mcx: Mcx<'_>,
     state: &GinState,
     check: &[GinTernaryValue],
     strategy: StrategyNumber,
-    _query: Datum,
+    query: Datum,
     nkeys: usize,
     _query_values: &[Datum],
     _query_categories: &[GinNullCategory],
     jsp_ops: &[JspGinOp],
-) -> GinTernaryValue {
+    map_item_operand: &[i32],
+) -> PgResult<GinTernaryValue> {
     match state.opclass {
-        GinOpclass::JsonbOps => {
-            ::adt_jsonb::gin::gin_triconsistent_jsonb(check, strategy, nkeys, jsp_ops)
-        }
-        GinOpclass::JsonbPathOps => {
-            ::adt_jsonb::gin::gin_triconsistent_jsonb_path(check, strategy, nkeys, jsp_ops)
+        GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_triconsistent_jsonb(
+            check, strategy, nkeys, jsp_ops,
+        )),
+        GinOpclass::JsonbPathOps => Ok(::adt_jsonb::gin::gin_triconsistent_jsonb_path(
+            check, strategy, nkeys, jsp_ops,
+        )),
+        GinOpclass::TsvectorOps => {
+            let image = detoast_image(mcx, query)?;
+            let q = ::adt_tsvector_core::query::TsQueryRef { payload: &image[4..] };
+            ::adt_tsginidx::gin_tsquery_triconsistent(mcx, check, q, map_item_operand)
         }
     }
 }
 
 /// gincost_pattern's extractQuery probe (selfuncs.c gincostestimate):
 /// resolves the opclass from the opfamily and runs extractQueryFn, returning
-/// (nentries, searchMode). The closed set has no partial matches.
+/// (nentries, npartial, searchMode).
 pub fn gincost_extract_query(
     opfamily: ::types_core::Oid,
     opcintype: ::types_core::Oid,
     query: Datum,
     strategy: StrategyNumber,
-) -> PgResult<(i32, i32)> {
+) -> PgResult<(i32, i32, i32)> {
     let extract = lsyscache::get_opfamily_proc(
         opfamily,
         opcintype,
@@ -189,18 +263,21 @@ pub fn gincost_extract_query(
     if extract == ::types_core::InvalidOid {
         crate::unported("missing GIN extractQuery support proc (gincostestimate)");
     }
+    let (opclass, can_partial) = match extract {
+        3483 => (GinOpclass::JsonbOps, false),
+        3486 => (GinOpclass::JsonbPathOps, false),
+        F_GIN_EXTRACT_TSQUERY => (GinOpclass::TsvectorOps, true),
+        other => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
+    };
     let state = GinState {
-        opclass: match extract {
-            3483 => GinOpclass::JsonbOps,
-            3486 => GinOpclass::JsonbPathOps,
-            other => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
-        },
+        opclass,
         support_collation: ::types_core::catalog::DEFAULT_COLLATION_OID,
-        can_partial_match: false,
+        can_partial_match: can_partial,
         key_byval: false,
         key_len: -1,
     };
     let scratch = ::mcx::MemoryContext::new_bump("gincost extract scratch");
-    let (entries, mode, _ops) = extract_query(scratch.mcx(), &state, query, strategy)?;
-    Ok((entries.len() as i32, mode))
+    let out = extract_query(scratch.mcx(), &state, query, strategy)?;
+    let npartial = out.partial_match.iter().filter(|&&p| p).count() as i32;
+    Ok((out.entries.len() as i32, npartial, out.search_mode))
 }

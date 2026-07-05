@@ -216,6 +216,22 @@ pub fn fc_pg_stat_get_backend_io(
     Ok(srf.finish(fcinfo))
 }
 
+fn record_datum(
+    flinfo: &FmgrInfo,
+    fcinfo: &Fcinfo,
+    values: &[Datum],
+    nulls: &[bool],
+) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    debug_assert_eq!(resolved.class, funcapi::TypeFuncClass::Composite);
+    let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, values, nulls)?;
+    let d = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
+    Ok(d)
+}
+
 fn wal_build_tuple(
     flinfo: &FmgrInfo,
     fcinfo: &mut Fcinfo,
@@ -235,14 +251,7 @@ fn wal_build_tuple(
         nulls[4] = true;
     }
 
-    let mcx = fcinfo.result_mcx();
-    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
-    debug_assert_eq!(resolved.class, funcapi::TypeFuncClass::Composite);
-    let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
-    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
-    let d = Datum::from_usize(tup.header_ptr() as usize);
-    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
-    Ok(d)
+    record_datum(flinfo, fcinfo, &values, &nulls)
 }
 
 pub fn fc_pg_stat_get_wal(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -295,4 +304,211 @@ pub fn fc_pg_stat_get_slru(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     }
 
     Ok(srf.finish(fcinfo))
+}
+
+pub fn fc_pg_stat_get_progress_info(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    const COLS: usize = backend_status::PGSTAT_NUM_PROGRESS_PARAM + 3;
+    use backend_status::{
+        PROGRESS_COMMAND_ANALYZE, PROGRESS_COMMAND_BASEBACKUP, PROGRESS_COMMAND_CLUSTER,
+        PROGRESS_COMMAND_COPY, PROGRESS_COMMAND_CREATE_INDEX, PROGRESS_COMMAND_VACUUM,
+    };
+    let flinfo = flinfo.expect("pg_stat_get_progress_info: resolved FmgrInfo required");
+
+    let cmd = crate::arg_text_str(fcinfo, 0)?;
+    let cmdtype = if cmd.eq_ignore_ascii_case("VACUUM") {
+        PROGRESS_COMMAND_VACUUM
+    } else if cmd.eq_ignore_ascii_case("ANALYZE") {
+        PROGRESS_COMMAND_ANALYZE
+    } else if cmd.eq_ignore_ascii_case("CLUSTER") {
+        PROGRESS_COMMAND_CLUSTER
+    } else if cmd.eq_ignore_ascii_case("CREATE INDEX") {
+        PROGRESS_COMMAND_CREATE_INDEX
+    } else if cmd.eq_ignore_ascii_case("BASEBACKUP") {
+        PROGRESS_COMMAND_BASEBACKUP
+    } else if cmd.eq_ignore_ascii_case("COPY") {
+        PROGRESS_COMMAND_COPY
+    } else {
+        return Err(Box::new(
+            ::types_error::PgError::error(format!("invalid command name: \"{cmd}\""))
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    };
+
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+
+    let num_backends = backend_status::pgstat_fetch_stat_numbackends();
+    for curr in 1..=num_backends {
+        let Some(be) = backend_status::pgstat_get_local_beentry_by_index(curr) else {
+            continue;
+        };
+        if be.st_progress_command != cmdtype {
+            continue;
+        }
+
+        let mut values = [Datum::from_usize(0); COLS];
+        let mut nulls = [false; COLS];
+        values[0] = Datum::from_i32(be.st_procpid);
+        values[1] = Datum::from_oid(be.st_databaseid);
+        if crate::activity::has_pgstat_permissions(be.st_userid)? {
+            values[2] = Datum::from_oid(be.st_progress_command_target);
+            for (i, p) in be.st_progress_param.into_iter().enumerate() {
+                values[i + 3] = Datum::from_i64(p);
+            }
+        } else {
+            nulls[2] = true;
+            for n in nulls[3..].iter_mut() {
+                *n = true;
+            }
+        }
+        srf.putvalues(&values, &nulls)?;
+    }
+
+    Ok(srf.finish(fcinfo))
+}
+
+pub fn fc_pg_stat_get_backend_subxact(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_stat_get_backend_subxact: resolved FmgrInfo required");
+    let proc_number = fcinfo.args_n::<1>()[0].value.as_i32();
+    let (values, nulls) = match backend_status::pgstat_get_beentry_by_proc_number(proc_number) {
+        Some(be) => (
+            [
+                Datum::from_i32(be.backend_subxact_count),
+                Datum::from_bool(be.backend_subxact_overflowed),
+            ],
+            [false, false],
+        ),
+        None => ([Datum::from_usize(0); 2], [true, true]),
+    };
+    record_datum(flinfo, fcinfo, &values, &nulls)
+}
+
+fn xfn_str(buf: &[u8]) -> &str {
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    core::str::from_utf8(&buf[..len]).expect("WAL file names are ASCII")
+}
+
+pub fn fc_pg_stat_get_archiver(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_stat_get_archiver: resolved FmgrInfo required");
+    let a = pgstat::archiver::pgstat_fetch_stat_archiver();
+
+    let mut values = [Datum::from_usize(0); 7];
+    let mut nulls = [false; 7];
+    values[0] = Datum::from_i64(a.archived_count);
+    match xfn_str(&a.last_archived_wal) {
+        "" => nulls[1] = true,
+        s => values[1] = text_datum(fcinfo, s)?,
+    }
+    if a.last_archived_timestamp == 0 {
+        nulls[2] = true;
+    } else {
+        values[2] = Datum::from_i64(a.last_archived_timestamp);
+    }
+    values[3] = Datum::from_i64(a.failed_count);
+    match xfn_str(&a.last_failed_wal) {
+        "" => nulls[4] = true,
+        s => values[4] = text_datum(fcinfo, s)?,
+    }
+    if a.last_failed_timestamp == 0 {
+        nulls[5] = true;
+    } else {
+        values[5] = Datum::from_i64(a.last_failed_timestamp);
+    }
+    if a.stat_reset_timestamp == 0 {
+        nulls[6] = true;
+    } else {
+        values[6] = Datum::from_i64(a.stat_reset_timestamp);
+    }
+    record_datum(flinfo, fcinfo, &values, &nulls)
+}
+
+const NAMEDATALEN: usize = 64;
+
+// namestrcpy's byte clip, pulled back to a char boundary to stay valid UTF-8.
+fn clip_slot_name(s: &str) -> &str {
+    let mut end = s.len().min(NAMEDATALEN - 1);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+pub(crate) fn pgstat_fetch_replslot(
+    name: &str,
+) -> PgResult<Option<pgstat::replslot::PgStat_StatReplSlotEntry>> {
+    let Some(slot) = slot::SearchNamedReplicationSlot(name, true)? else {
+        return Ok(None);
+    };
+    Ok(pgstat::replslot::pgstat_fetch_replslot_by_index(slot::ReplicationSlotIndex(slot)))
+}
+
+pub fn fc_pg_stat_get_replication_slot(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    const COLS: usize = 10;
+    let flinfo = flinfo.expect("pg_stat_get_replication_slot: resolved FmgrInfo required");
+    let mut namebuf = [0u8; NAMEDATALEN];
+    let name_len = {
+        let clipped = clip_slot_name(crate::arg_text_str(fcinfo, 0)?);
+        namebuf[..clipped.len()].copy_from_slice(clipped.as_bytes());
+        clipped.len()
+    };
+    let name = core::str::from_utf8(&namebuf[..name_len]).expect("clipped from valid UTF-8");
+
+    // C zero-fills when the slot has no stats entry (create message lost).
+    let slotent = pgstat_fetch_replslot(name)?.unwrap_or_default();
+
+    let mut values = [Datum::from_usize(0); COLS];
+    let mut nulls = [false; COLS];
+    values[0] = text_datum(fcinfo, name)?;
+    values[1] = Datum::from_i64(slotent.spill_txns);
+    values[2] = Datum::from_i64(slotent.spill_count);
+    values[3] = Datum::from_i64(slotent.spill_bytes);
+    values[4] = Datum::from_i64(slotent.stream_txns);
+    values[5] = Datum::from_i64(slotent.stream_count);
+    values[6] = Datum::from_i64(slotent.stream_bytes);
+    values[7] = Datum::from_i64(slotent.total_txns);
+    values[8] = Datum::from_i64(slotent.total_bytes);
+    if slotent.stat_reset_timestamp == 0 {
+        nulls[9] = true;
+    } else {
+        values[9] = Datum::from_i64(slotent.stat_reset_timestamp);
+    }
+    record_datum(flinfo, fcinfo, &values, &nulls)
+}
+
+pub fn fc_pg_stat_get_subscription_stats(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    const COLS: usize = 11;
+    let flinfo = flinfo.expect("pg_stat_get_subscription_stats: resolved FmgrInfo required");
+    let subid = fcinfo.args_n::<1>()[0].value.as_oid();
+    let subentry = pgstat::subscription::pgstat_fetch_stat_subscription(subid).unwrap_or_default();
+
+    let mut values = [Datum::from_usize(0); COLS];
+    let mut nulls = [false; COLS];
+    values[0] = Datum::from_oid(subid);
+    values[1] = Datum::from_i64(subentry.apply_error_count);
+    values[2] = Datum::from_i64(subentry.sync_error_count);
+    for (i, c) in subentry.conflict_count.into_iter().enumerate() {
+        values[i + 3] = Datum::from_i64(c);
+    }
+    if subentry.stat_reset_timestamp == 0 {
+        nulls[10] = true;
+    } else {
+        values[10] = Datum::from_i64(subentry.stat_reset_timestamp);
+    }
+    record_datum(flinfo, fcinfo, &values, &nulls)
 }

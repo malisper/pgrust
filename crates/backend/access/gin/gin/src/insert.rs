@@ -52,6 +52,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
             opclass: match g.opclass {
                 0 => GinOpclass::JsonbOps,
                 1 => GinOpclass::JsonbPathOps,
+                2 => GinOpclass::TsvectorOps,
                 other => unported(&format!("rd_amcache gin opclass tag {other}")),
             },
             support_collation: g.support_collation,
@@ -65,6 +66,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
         opclass: match state.opclass {
             GinOpclass::JsonbOps => 0,
             GinOpclass::JsonbPathOps => 1,
+            GinOpclass::TsvectorOps => 2,
         },
         support_collation: state.support_collation,
         can_partial_match: state.can_partial_match,

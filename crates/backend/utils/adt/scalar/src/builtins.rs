@@ -449,6 +449,91 @@ pub fn fc_currtid_byrelname(
     tid_result(fcinfo, Tid { block: ::types_tuple::ItemPointerGetBlockNumberNoCheck(&result), offset: result.ip_posid })
 }
 
+// SAFETY: as fc_oidvectoreq, but layout-checked (SQL-boundary contract).
+unsafe fn arg_oidvector_checked<'a>(
+    fcinfo: &Fcinfo,
+    i: usize,
+) -> PgResult<(&'a ::array::oidvector, &'a [Oid])> {
+    let p = fcinfo.arg(i).as_usize() as *const ::array::oidvector;
+    let v = unsafe { &*p };
+    ::nbt_compare::check_valid_oidvector(v)?;
+    let values =
+        unsafe { core::slice::from_raw_parts(p.add(1) as *const Oid, v.dim1.max(0) as usize) };
+    Ok((v, values))
+}
+
+const OIDVECTOR_HDRSZ: usize = core::mem::size_of::<::array::oidvector>();
+
+pub fn fc_oidvectorin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of oidvectorin is cstring (typlen -2).
+    let s = unsafe { fcinfo.arg_cstring(0) };
+    let s = String::from_utf8_lossy(s.to_bytes());
+    // SAFETY: context, if set, rides per the ErrorSaveNode contract.
+    let mut esc = unsafe { fcinfo.soft_error_context() };
+    let mcx = fcinfo.result_mcx();
+    let mut img: ::mcx::PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, OIDVECTOR_HDRSZ + 32 * 4)?;
+    img.resize(OIDVECTOR_HDRSZ, 0);
+    let mut rest: &str = &s;
+    let mut n: i32 = 0;
+    loop {
+        // C-locale isspace (includes \x0B).
+        rest = rest
+            .trim_start_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r'));
+        if rest.is_empty() {
+            break;
+        }
+        let (v, r) = ::numutils::uint32in_subr(rest, true, "oid", esc.as_deref_mut())?;
+        ::mcx::vec_append_bytes(&mut img, &v.to_ne_bytes())?;
+        rest = r;
+        n += 1;
+    }
+    let total = img.len();
+    img[0..4].copy_from_slice(&::datum::varlena::set_varsize_4b(total));
+    img[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    img[8..12].copy_from_slice(&0i32.to_ne_bytes());
+    img[12..16].copy_from_slice(&(::types_core::catalog::OIDOID as u32).to_ne_bytes());
+    img[16..20].copy_from_slice(&n.to_ne_bytes());
+    img[20..24].copy_from_slice(&0i32.to_ne_bytes());
+    Ok(Datum::from_usize(img.leak().as_ptr() as usize))
+}
+
+pub fn fc_oidvectorout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict catalog arg is a non-null plain-storage oidvector.
+    let (_, values) = unsafe { arg_oidvector_checked(fcinfo, 0) }?;
+    let mcx = fcinfo.result_mcx();
+    let mut out: ::mcx::PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, values.len() * 12 + 1)?;
+    let mut scratch = [0u8; 10];
+    for (i, &v) in values.iter().enumerate() {
+        if i != 0 {
+            ::mcx::vec_append_bytes(&mut out, b" ")?;
+        }
+        let len = ::numutils::pg_ultoa_n(v, &mut scratch);
+        ::mcx::vec_append_bytes(&mut out, &scratch[..len])?;
+    }
+    ::mcx::vec_append_bytes(&mut out, b"\0")?;
+    Ok(::types_fmgr::cstring_result(out))
+}
+
+macro_rules! fc_oidvector_cmp {
+    ($($fc:ident: $op:tt;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: as fc_oidvectoreq.
+            let (a, a_values) = unsafe { arg_oidvector_checked(fcinfo, 0) }?;
+            let (b, b_values) = unsafe { arg_oidvector_checked(fcinfo, 1) }?;
+            let cmp = ::nbt_compare::btoidvectorcmp(a, a_values, b, b_values);
+            Ok(Datum::from_bool(cmp $op 0))
+        }
+    )*};
+}
+
+fc_oidvector_cmp! {
+    fc_oidvectorne: !=;
+    fc_oidvectorlt: <;
+    fc_oidvectorle: <=;
+    fc_oidvectorge: >=;
+    fc_oidvectorgt: >;
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -467,7 +552,14 @@ pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &[
     b(3308, "xidneq", 2, fc_xidneq),
     b(184, "oideq", 2, fc_oideq),
     b(185, "oidne", 2, fc_oidne),
+    b(54, "oidvectorin", 1, fc_oidvectorin),
+    b(55, "oidvectorout", 1, fc_oidvectorout),
+    b(619, "oidvectorne", 2, fc_oidvectorne),
+    b(677, "oidvectorlt", 2, fc_oidvectorlt),
+    b(678, "oidvectorle", 2, fc_oidvectorle),
     b(679, "oidvectoreq", 2, fc_oidvectoreq),
+    b(680, "oidvectorge", 2, fc_oidvectorge),
+    b(681, "oidvectorgt", 2, fc_oidvectorgt),
     b(457, "hashoidvector", 1, fc_hashoidvector),
     b(776, "hashoidvectorextended", 2, fc_hashoidvectorextended),
     b(716, "oidlt", 2, fc_oidlt),

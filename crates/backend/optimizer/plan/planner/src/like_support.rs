@@ -83,12 +83,15 @@ pub fn patternsel<'mcx>(
             return Ok(1.0 - DEFAULT_MATCH_SEL);
         }
     }
-    patternsel_common(run, operator, args, varrelid, collation, ptype, negate)
+    patternsel_common(run, operator, 0, args, varrelid, collation, ptype, negate)
 }
 
-fn patternsel_common<'mcx>(
+// C dual entry: operator path passes oprid (opfuncid 0, resolved lazily);
+// prosupport SupportRequestSelectivity passes opfuncid with oprid 0.
+pub(crate) fn patternsel_common<'mcx>(
     run: &mut PlannerRun<'mcx>,
     oprid: Oid,
+    opfuncid: Oid,
     args: &[NodeId],
     varrelid: i32,
     collation: Oid,
@@ -172,7 +175,7 @@ fn patternsel_common<'mcx>(
             false,
         )?;
     } else {
-        let opfuncid = lsyscache::get_opcode(oprid)?;
+        let opfuncid = if opfuncid != 0 { opfuncid } else { lsyscache::get_opcode(oprid)? };
         let mut opproc = fmgr_core::fmgr_info(opfuncid)?;
 
         let (mut selec, hist_size) = selfuncs::histogram_selectivity(

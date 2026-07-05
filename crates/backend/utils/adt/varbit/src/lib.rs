@@ -1,7 +1,7 @@
-//! varbit.c, I/O slice: bit_in/bit_out/varbit_in/varbit_out. Comparison,
-//! concatenation, substring, casts and the length-coercion functions stay
-//! loud through the canonical fmgr table.
-#![no_std]
+//! varbit.c: I/O, recv/send, comparisons, logical ops, shifts, concat,
+//! substring/overlay, int4/int8 casts, set/get bit, position, lengths,
+//! typmod I/O and the bit()/varbit() length coercions + varbit_support.
+#![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
 use alloc::boxed::Box;
@@ -9,14 +9,18 @@ use alloc::format;
 
 use ::datum::Datum;
 use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::stringinfo::StringInfo;
 use ::types_core::Oid;
 use ::types_error::{
-    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_STRING_DATA_LENGTH_MISMATCH, ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+    ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_STRING_DATA_LENGTH_MISMATCH,
+    ERRCODE_STRING_DATA_RIGHT_TRUNCATION, ERRCODE_SUBSTRING_ERROR,
 };
 use ::types_fmgr::{
-    cstring_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    cstring_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
 };
 
 const VARHDRSZ: usize = 4;
@@ -248,7 +252,7 @@ pub fn fc_bittypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
 }
 
 pub fn fc_varbittypmodin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    fc_bit_typmodin(fcinfo, "bit varying")
+    fc_bit_typmodin(fcinfo, "varbit")
 }
 
 fn fc_bit_typmodout(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -414,6 +418,728 @@ pub fn fc_bitcmp(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     fc_bit_cmp_body(fcinfo, Datum::from_i32)
 }
 
+const HDRSZ: usize = VARHDRSZ + VARBITHDRSZ;
+const BITMASK: u8 = 0xff;
+
+// `payload` below is always the varlena body: [bit_len i32][zero-padded bits].
+fn payload_bitlen(p: &[u8]) -> usize {
+    i32::from_ne_bytes(p[..VARBITHDRSZ].try_into().unwrap()) as usize
+}
+
+fn payload_bits(p: &[u8]) -> &[u8] {
+    &p[VARBITHDRSZ..]
+}
+
+// Full image [varsize][bitlen][zeroed bits]; resize never reallocates (capacity
+// reserved fallibly up front).
+fn varbit_alloc<'mcx>(mcx: Mcx<'mcx>, bitlen: usize) -> PgResult<PgVec<'mcx, u8>> {
+    let len = varbit_total_len(bitlen);
+    let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, len)?;
+    out.extend_from_slice(&::datum::varlena::set_varsize_4b(len));
+    out.extend_from_slice(&(bitlen as i32).to_ne_bytes());
+    out.resize(len, 0);
+    Ok(out)
+}
+
+// VARBIT_PAD: zero the pad bits of the last byte.
+fn pad_last(body: &mut [u8], bitlen: usize) {
+    let pad = body.len() * BITS_PER_BYTE - bitlen;
+    if pad > 0 {
+        let i = body.len() - 1;
+        body[i] &= BITMASK << pad;
+    }
+}
+
+fn image_datum(img: PgVec<'_, u8>) -> Datum {
+    Datum::from_usize(img.leak().as_ptr() as usize)
+}
+
+#[cold]
+#[inline(never)]
+fn size_mismatch_err(opname: &'static str) -> PgError {
+    PgError::error(format!("cannot {opname} bit strings of different sizes"))
+        .with_sqlstate(ERRCODE_STRING_DATA_LENGTH_MISMATCH)
+}
+
+#[cold]
+#[inline(never)]
+fn negative_substring_err() -> PgError {
+    PgError::error("negative substring length not allowed")
+        .with_sqlstate(ERRCODE_SUBSTRING_ERROR)
+}
+
+#[cold]
+#[inline(never)]
+fn out_of_range_err(what: &'static str) -> PgError {
+    PgError::error(format!("{what} out of range")).with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_external_len_err() -> PgError {
+    PgError::error("invalid length in external bit string")
+        .with_sqlstate(ERRCODE_INVALID_BINARY_REPRESENTATION)
+}
+
+#[cold]
+#[inline(never)]
+fn bit_index_err(n: i32, bitlen: usize) -> PgError {
+    PgError::error(format!(
+        "bit index {n} out of valid range (0..{})",
+        bitlen as i64 - 1
+    ))
+    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+}
+
+#[cold]
+#[inline(never)]
+fn new_bit_err() -> PgError {
+    PgError::error("new bit must be 0 or 1").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+}
+
+pub fn bit_logic<'mcx>(
+    mcx: Mcx<'mcx>,
+    a: &[u8],
+    b: &[u8],
+    op: fn(u8, u8) -> u8,
+    opname: &'static str,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen1 = payload_bitlen(a);
+    if bitlen1 != payload_bitlen(b) {
+        return Err(size_mismatch_err(opname).into());
+    }
+    let mut out = varbit_alloc(mcx, bitlen1)?;
+    let r = &mut out[HDRSZ..];
+    for ((r, &p1), &p2) in r.iter_mut().zip(payload_bits(a)).zip(payload_bits(b)) {
+        *r = op(p1, p2);
+    }
+    Ok(out)
+}
+
+fn fc_bit_logic(
+    fcinfo: &mut Fcinfo,
+    op: fn(u8, u8) -> u8,
+    opname: &'static str,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null varbit varlenas (strict fn).
+    let a = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let b = unsafe { fcinfo.arg_varlena_packed(1)? };
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bit_logic(mcx, a.data(), b.data(), op, opname)?))
+}
+
+pub fn fc_bit_and(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_logic(fcinfo, |a, b| a & b, "AND")
+}
+
+pub fn fc_bit_or(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_logic(fcinfo, |a, b| a | b, "OR")
+}
+
+pub fn fc_bitxor(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bit_logic(fcinfo, |a, b| a ^ b, "XOR")
+}
+
+pub fn bitnot_core<'mcx>(mcx: Mcx<'mcx>, p: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = payload_bitlen(p);
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    let r = &mut out[HDRSZ..];
+    for (r, &b) in r.iter_mut().zip(payload_bits(p)) {
+        *r = !b;
+    }
+    pad_last(r, bitlen);
+    Ok(out)
+}
+
+pub fn fc_bitnot(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bitnot_core(mcx, v.data())?))
+}
+
+pub fn bitshiftleft_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    shft: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if shft < 0 {
+        let shft = shft.max(-(VARBITMAXLEN as i32));
+        return bitshiftright_core(mcx, p, -shft);
+    }
+    let bitlen = payload_bitlen(p);
+    let bits = payload_bits(p);
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    if shft as usize >= bitlen {
+        return Ok(out);
+    }
+    let r = &mut out[HDRSZ..];
+    let byte_shift = shft as usize / BITS_PER_BYTE;
+    let ishift = shft as usize % BITS_PER_BYTE;
+    if ishift == 0 {
+        let len = bits.len() - byte_shift;
+        r[..len].copy_from_slice(&bits[byte_shift..]);
+    } else {
+        for (ri, pi) in (byte_shift..bits.len()).enumerate() {
+            r[ri] = bits[pi] << ishift;
+            if pi + 1 < bits.len() {
+                r[ri] |= bits[pi + 1] >> (BITS_PER_BYTE - ishift);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn bitshiftright_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    shft: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if shft < 0 {
+        let shft = shft.max(-(VARBITMAXLEN as i32));
+        return bitshiftleft_core(mcx, p, -shft);
+    }
+    let bitlen = payload_bitlen(p);
+    let bits = payload_bits(p);
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    if shft as usize >= bitlen {
+        return Ok(out);
+    }
+    let r = &mut out[HDRSZ..];
+    let byte_shift = shft as usize / BITS_PER_BYTE;
+    let ishift = shft as usize % BITS_PER_BYTE;
+    if ishift == 0 {
+        let len = bits.len() - byte_shift;
+        r[byte_shift..].copy_from_slice(&bits[..len]);
+    } else {
+        let mut ri = byte_shift;
+        for &pb in bits {
+            if ri >= r.len() {
+                break;
+            }
+            r[ri] |= pb >> ishift;
+            ri += 1;
+            if ri < r.len() {
+                r[ri] = pb << (BITS_PER_BYTE - ishift);
+            }
+        }
+    }
+    // C VARBIT_PAD_LAST: 1s can shift into the pad bits in either branch.
+    pad_last(r, bitlen);
+    Ok(out)
+}
+
+pub fn fc_bitshiftleft(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let shft = fcinfo.arg(1).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bitshiftleft_core(mcx, v.data(), shft)?))
+}
+
+pub fn fc_bitshiftright(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let shft = fcinfo.arg(1).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bitshiftright_core(mcx, v.data(), shft)?))
+}
+
+pub fn bit_catenate<'mcx>(mcx: Mcx<'mcx>, p1: &[u8], p2: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen1 = payload_bitlen(p1);
+    let bitlen2 = payload_bitlen(p2);
+    if bitlen1 as i64 > VARBITMAXLEN - bitlen2 as i64 {
+        return Err(too_long_err().into());
+    }
+    let b1 = payload_bits(p1);
+    let b2 = payload_bits(p2);
+    let mut out = varbit_alloc(mcx, bitlen1 + bitlen2)?;
+    let r = &mut out[HDRSZ..];
+    r[..b1.len()].copy_from_slice(b1);
+    let bit1pad = b1.len() * BITS_PER_BYTE - bitlen1;
+    if bit1pad == 0 {
+        r[b1.len()..b1.len() + b2.len()].copy_from_slice(b2);
+    } else if bitlen2 > 0 {
+        let bit2shift = BITS_PER_BYTE - bit1pad;
+        let mut ri = b1.len() - 1;
+        for &pa in b2 {
+            r[ri] |= pa >> bit2shift;
+            ri += 1;
+            if ri < r.len() {
+                r[ri] = pa << bit1pad;
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn fc_bitcat(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null varbit varlenas (strict fn).
+    let a = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let b = unsafe { fcinfo.arg_varlena_packed(1)? };
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bit_catenate(mcx, a.data(), b.data())?))
+}
+
+pub fn bitsubstring<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    s: i32,
+    l: i32,
+    length_not_specified: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = payload_bitlen(p) as i32;
+    let s1 = s.max(1);
+    let e1 = if length_not_specified {
+        bitlen + 1
+    } else if l < 0 {
+        return Err(negative_substring_err().into());
+    } else {
+        match s.checked_add(l) {
+            // S + L overflow: substring runs to end of string.
+            None => bitlen + 1,
+            Some(e) => e.min(bitlen + 1),
+        }
+    };
+    if s1 > bitlen || e1 <= s1 {
+        return varbit_alloc(mcx, 0);
+    }
+    let rbitlen = (e1 - s1) as usize;
+    let mut out = varbit_alloc(mcx, rbitlen)?;
+    let bits = payload_bits(p);
+    let r = &mut out[HDRSZ..];
+    let start = (s1 - 1) as usize;
+    let ps0 = start / BITS_PER_BYTE;
+    let ishift = start % BITS_PER_BYTE;
+    if ishift == 0 {
+        r.copy_from_slice(&bits[ps0..ps0 + r.len()]);
+    } else {
+        for i in 0..r.len() {
+            r[i] = bits[ps0 + i] << ishift;
+            if ps0 + i + 1 < bits.len() {
+                r[i] |= bits[ps0 + i + 1] >> (BITS_PER_BYTE - ishift);
+            }
+        }
+    }
+    pad_last(r, rbitlen);
+    Ok(out)
+}
+
+pub fn fc_bitsubstr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let s = fcinfo.arg(1).as_i32();
+    let l = fcinfo.arg(2).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bitsubstring(mcx, v.data(), s, l, false)?))
+}
+
+pub fn fc_bitsubstr_no_len(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let s = fcinfo.arg(1).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bitsubstring(mcx, v.data(), s, -1, true)?))
+}
+
+pub fn bit_overlay<'mcx>(
+    mcx: Mcx<'mcx>,
+    t1: &[u8],
+    t2: &[u8],
+    sp: i32,
+    sl: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if sp <= 0 {
+        return Err(negative_substring_err().into());
+    }
+    let Some(sp_pl_sl) = sp.checked_add(sl) else {
+        return Err(out_of_range_err("integer").into());
+    };
+    let s1 = bitsubstring(mcx, t1, 1, sp - 1, false)?;
+    let s2 = bitsubstring(mcx, t1, sp_pl_sl, -1, true)?;
+    let head = bit_catenate(mcx, &s1[VARHDRSZ..], t2)?;
+    bit_catenate(mcx, &head[VARHDRSZ..], &s2[VARHDRSZ..])
+}
+
+pub fn fc_bitoverlay(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null varbit varlenas (strict fn).
+    let t1 = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
+    let sp = fcinfo.arg(2).as_i32();
+    let sl = fcinfo.arg(3).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bit_overlay(mcx, t1.data(), t2.data(), sp, sl)?))
+}
+
+pub fn fc_bitoverlay_no_len(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null varbit varlenas (strict fn).
+    let t1 = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
+    let sp = fcinfo.arg(2).as_i32();
+    let sl = payload_bitlen(t2.data()) as i32;
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bit_overlay(mcx, t1.data(), t2.data(), sp, sl)?))
+}
+
+pub fn fc_bit_bit_count(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let n: i64 = payload_bits(v.data())
+        .iter()
+        .map(|&b| b.count_ones() as i64)
+        .sum();
+    Ok(Datum::from_i64(n))
+}
+
+pub fn fc_bitlength(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i32(payload_bitlen(v.data()) as i32))
+}
+
+pub fn fc_bitoctetlength(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i32(payload_bits(v.data()).len() as i32))
+}
+
+pub fn bittoint4_core(p: &[u8]) -> PgResult<i32> {
+    let bitlen = payload_bitlen(p);
+    if bitlen > 32 {
+        return Err(out_of_range_err("integer").into());
+    }
+    let bits = payload_bits(p);
+    let mut result: u32 = 0;
+    for &b in bits {
+        result <<= BITS_PER_BYTE;
+        result |= b as u32;
+    }
+    result >>= bits.len() * BITS_PER_BYTE - bitlen;
+    Ok(result as i32)
+}
+
+pub fn fc_bittoint4(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i32(bittoint4_core(v.data())?))
+}
+
+pub fn bittoint8_core(p: &[u8]) -> PgResult<i64> {
+    let bitlen = payload_bitlen(p);
+    if bitlen > 64 {
+        return Err(out_of_range_err("bigint").into());
+    }
+    let bits = payload_bits(p);
+    let mut result: u64 = 0;
+    for &b in bits {
+        result <<= BITS_PER_BYTE;
+        result |= b as u64;
+    }
+    result >>= bits.len() * BITS_PER_BYTE - bitlen;
+    Ok(result as i64)
+}
+
+pub fn fc_bittoint8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i64(bittoint8_core(v.data())?))
+}
+
+pub fn bits_recv<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &mut StringInfo<'_>,
+    atttypmod: i32,
+    fixed: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = ::pqformat::pq_getmsgint(buf, 4)? as i32;
+    if bitlen < 0 || bitlen as i64 > VARBITMAXLEN {
+        return Err(invalid_external_len_err().into());
+    }
+    if fixed {
+        if atttypmod > 0 && bitlen != atttypmod {
+            return Err(Box::new(length_mismatch_err(bitlen as i64, atttypmod)));
+        }
+    } else if atttypmod > 0 && bitlen > atttypmod {
+        return Err(Box::new(too_long_for_varying_err(atttypmod)));
+    }
+    let mut out = varbit_alloc(mcx, bitlen as usize)?;
+    let body = &mut out[HDRSZ..];
+    ::pqformat::pq_copymsgbytes(buf, body)?;
+    pad_last(body, bitlen as usize);
+    Ok(out)
+}
+
+fn fc_bits_recv(fcinfo: &mut Fcinfo, fixed: bool) -> PgResult<Datum> {
+    // SAFETY: recv arg0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let atttypmod = fcinfo.arg(2).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bits_recv(mcx, buf, atttypmod, fixed)?))
+}
+
+pub fn fc_bit_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bits_recv(fcinfo, true)
+}
+
+pub fn fc_varbit_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bits_recv(fcinfo, false)
+}
+
+fn fc_bits_send(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let p = v.data();
+    let mcx = fcinfo.result_mcx();
+    let mut buf = ::pqformat::pq_begintypsend(mcx)?;
+    ::pqformat::pq_sendint32(&mut buf, payload_bitlen(p) as u32)?;
+    ::pqformat::pq_sendbytes(&mut buf, payload_bits(p))?;
+    Ok(varlena_result(::pqformat::pq_endtypsend(buf)))
+}
+
+pub fn fc_bit_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bits_send(fcinfo)
+}
+
+pub fn fc_varbit_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    fc_bits_send(fcinfo)
+}
+
+// bit() length coercion. Ok(None) = return the source datum unchanged.
+pub fn bit_coerce<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    len: i32,
+    is_explicit: bool,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let bitlen = payload_bitlen(p);
+    if len <= 0 || len as i64 > VARBITMAXLEN || len as usize == bitlen {
+        return Ok(None);
+    }
+    if !is_explicit {
+        return Err(Box::new(length_mismatch_err(bitlen as i64, len)));
+    }
+    let mut out = varbit_alloc(mcx, len as usize)?;
+    let r = &mut out[HDRSZ..];
+    let bits = payload_bits(p);
+    let n = r.len().min(bits.len());
+    r[..n].copy_from_slice(&bits[..n]);
+    pad_last(r, len as usize);
+    Ok(Some(out))
+}
+
+pub fn fc_bit_coerce(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let len = fcinfo.arg(1).as_i32();
+    let is_explicit = fcinfo.arg(2).as_bool();
+    let mcx = fcinfo.result_mcx();
+    match bit_coerce(mcx, v.data(), len, is_explicit)? {
+        Some(img) => Ok(image_datum(img)),
+        None => Ok(fcinfo.arg(0)),
+    }
+}
+
+// varbit() length coercion. Ok(None) = return the source datum unchanged.
+pub fn varbit_coerce<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    len: i32,
+    is_explicit: bool,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let bitlen = payload_bitlen(p);
+    if len <= 0 || len as usize >= bitlen {
+        return Ok(None);
+    }
+    if !is_explicit {
+        return Err(Box::new(too_long_for_varying_err(len)));
+    }
+    let mut out = varbit_alloc(mcx, len as usize)?;
+    let r = &mut out[HDRSZ..];
+    let bits = payload_bits(p);
+    let n = r.len();
+    r.copy_from_slice(&bits[..n]);
+    pad_last(r, len as usize);
+    Ok(Some(out))
+}
+
+pub fn fc_varbit_coerce(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let len = fcinfo.arg(1).as_i32();
+    let is_explicit = fcinfo.arg(2).as_bool();
+    let mcx = fcinfo.result_mcx();
+    match varbit_coerce(mcx, v.data(), len, is_explicit)? {
+        Some(img) => Ok(image_datum(img)),
+        None => Ok(fcinfo.arg(0)),
+    }
+}
+
+// varbit_support (varbit.c): SupportRequestSimplify only — widening (or
+// unconstraining) a varbit typmod becomes a RelabelType, no rewrite.
+pub fn fc_varbit_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("varbit_support: SupportRequestSimplify without a FuncExpr"));
+    assert!(fexpr.args.len() >= 2);
+    let Some(c) = fexpr.args.nth(1).as_const() else {
+        return Ok(Datum::from_usize(0));
+    };
+    if c.constisnull {
+        return Ok(Datum::from_usize(0));
+    }
+    let source = fexpr.args.nth(0);
+    let old_max = ::nodes_core::expr_typmod(source);
+    let new_typmod = c.constvalue.as_i32();
+    let new_max = new_typmod;
+    // C: varbit() treats typmod 0 as invalid, so simplify that case too.
+    if new_max <= 0 || (old_max > 0 && old_max <= new_max) {
+        let mcx = req.mcx.expect("varbit_support: request carries an mcx");
+        let ret = ::nodes_core::relabel_to_typmod(mcx, source, new_typmod)?;
+        return Ok(Datum::from_usize(ret.as_raw().as_ptr() as usize));
+    }
+    Ok(Datum::from_usize(0))
+}
+
+pub fn bitposition_core(str_p: &[u8], substr_p: &[u8]) -> i32 {
+    let substr_length = payload_bitlen(substr_p);
+    let str_length = payload_bitlen(str_p);
+    if str_length == 0 || substr_length > str_length {
+        return 0;
+    }
+    if substr_length == 0 {
+        return 1;
+    }
+    let sb = payload_bits(str_p);
+    let pb = payload_bits(substr_p);
+    let shl = |b: u8, n: usize| -> u8 { ((b as u32) << n) as u8 };
+    let end_mask = shl(BITMASK, pb.len() * BITS_PER_BYTE - substr_length);
+    let str_mask = shl(BITMASK, sb.len() * BITS_PER_BYTE - str_length);
+    for i in 0..=(sb.len() - pb.len()) {
+        for is in 0..BITS_PER_BYTE {
+            let mut is_match;
+            let mut pi = i;
+            let mut mask1 = BITMASK >> is;
+            let mut mask2 = !mask1;
+            let mut s = 0;
+            loop {
+                let mut cmp = pb[s] >> is;
+                if s == pb.len() - 1 {
+                    mask1 &= end_mask >> is;
+                    if pi == sb.len() - 1 {
+                        if mask1 & !str_mask != 0 {
+                            is_match = false;
+                            break;
+                        }
+                        mask1 &= str_mask;
+                    }
+                }
+                is_match = (cmp ^ sb[pi]) & mask1 == 0;
+                if !is_match {
+                    break;
+                }
+                pi += 1;
+                if pi == sb.len() {
+                    mask2 = shl(end_mask, BITS_PER_BYTE - is);
+                    is_match = mask2 == 0;
+                    break;
+                }
+                cmp = shl(pb[s], BITS_PER_BYTE - is);
+                if s == pb.len() - 1 {
+                    mask2 &= shl(end_mask, BITS_PER_BYTE - is);
+                    if pi == sb.len() - 1 {
+                        if mask2 & !str_mask != 0 {
+                            is_match = false;
+                            break;
+                        }
+                        mask2 &= str_mask;
+                    }
+                }
+                is_match = (cmp ^ sb[pi]) & mask2 == 0;
+                s += 1;
+                if !(is_match && s < pb.len()) {
+                    break;
+                }
+            }
+            if is_match {
+                return (i * BITS_PER_BYTE + is + 1) as i32;
+            }
+        }
+    }
+    0
+}
+
+pub fn fc_bitposition(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null varbit varlenas (strict fn).
+    let s = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let sub = unsafe { fcinfo.arg_varlena_packed(1)? };
+    Ok(Datum::from_i32(bitposition_core(s.data(), sub.data())))
+}
+
+pub fn bitsetbit_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: &[u8],
+    n: i32,
+    new_bit: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bitlen = payload_bitlen(p);
+    if n < 0 || n as usize >= bitlen {
+        return Err(bit_index_err(n, bitlen).into());
+    }
+    if new_bit != 0 && new_bit != 1 {
+        return Err(new_bit_err().into());
+    }
+    let mut out = varbit_alloc(mcx, bitlen)?;
+    let r = &mut out[HDRSZ..];
+    r.copy_from_slice(payload_bits(p));
+    let byte_no = n as usize / BITS_PER_BYTE;
+    let bit_no = BITS_PER_BYTE - 1 - (n as usize % BITS_PER_BYTE);
+    if new_bit == 0 {
+        r[byte_no] &= !(1 << bit_no);
+    } else {
+        r[byte_no] |= 1 << bit_no;
+    }
+    Ok(out)
+}
+
+pub fn fc_bitsetbit(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let n = fcinfo.arg(1).as_i32();
+    let new_bit = fcinfo.arg(2).as_i32();
+    let mcx = fcinfo.result_mcx();
+    Ok(image_datum(bitsetbit_core(mcx, v.data(), n, new_bit)?))
+}
+
+pub fn bitgetbit_core(p: &[u8], n: i32) -> PgResult<i32> {
+    let bitlen = payload_bitlen(p);
+    if n < 0 || n as usize >= bitlen {
+        return Err(bit_index_err(n, bitlen).into());
+    }
+    let byte_no = n as usize / BITS_PER_BYTE;
+    let bit_no = BITS_PER_BYTE - 1 - (n as usize % BITS_PER_BYTE);
+    Ok(((payload_bits(p)[byte_no] >> bit_no) & 1) as i32)
+}
+
+pub fn fc_bitgetbit(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null varbit varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let n = fcinfo.arg(1).as_i32();
+    Ok(Datum::from_i32(bitgetbit_core(v.data(), n)?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -430,10 +1156,47 @@ pub const VARBIT_BUILTINS: &[FmgrBuiltin] = &[
     b(1594, "bitle", 2, fc_bitle),
     b(1595, "bitlt", 2, fc_bitlt),
     b(1596, "bitcmp", 2, fc_bitcmp),
+    // 1666-1672: varbiteq..varbitcmp pg_proc aliases, prosrc = the bit fns.
+    b(1666, "biteq", 2, fc_biteq),
+    b(1667, "bitne", 2, fc_bitne),
+    b(1668, "bitge", 2, fc_bitge),
+    b(1669, "bitgt", 2, fc_bitgt),
+    b(1670, "bitle", 2, fc_bitle),
+    b(1671, "bitlt", 2, fc_bitlt),
+    b(1672, "bitcmp", 2, fc_bitcmp),
+    b(1673, "bit_and", 2, fc_bit_and),
+    b(1674, "bit_or", 2, fc_bit_or),
+    b(1675, "bitxor", 2, fc_bitxor),
+    b(1676, "bitnot", 1, fc_bitnot),
+    b(1677, "bitshiftleft", 2, fc_bitshiftleft),
+    b(1678, "bitshiftright", 2, fc_bitshiftright),
+    b(1679, "bitcat", 2, fc_bitcat),
+    b(1680, "bitsubstr", 3, fc_bitsubstr),
+    b(1681, "bitlength", 1, fc_bitlength),
+    b(1682, "bitoctetlength", 1, fc_bitoctetlength),
     b(1683, "bitfromint4", 2, fc_bitfromint4),
+    b(1684, "bittoint4", 1, fc_bittoint4),
+    b(1685, "bit", 3, fc_bit_coerce),
+    b(1687, "varbit", 3, fc_varbit_coerce),
+    b(1698, "bitposition", 2, fc_bitposition),
+    b(1699, "bitsubstr_no_len", 2, fc_bitsubstr_no_len),
     b(2075, "bitfromint8", 2, fc_bitfromint8),
+    b(2076, "bittoint8", 1, fc_bittoint8),
+    b(2456, "bit_recv", 3, fc_bit_recv),
+    b(2457, "bit_send", 1, fc_bit_send),
+    b(2458, "varbit_recv", 3, fc_varbit_recv),
+    b(2459, "varbit_send", 1, fc_varbit_send),
     b(2902, "varbittypmodin", 1, fc_varbittypmodin),
     b(2919, "bittypmodin", 1, fc_bittypmodin),
     b(2920, "bittypmodout", 1, fc_bittypmodout),
     b(2921, "varbittypmodout", 1, fc_varbittypmodout),
+    b(3030, "bitoverlay", 4, fc_bitoverlay),
+    b(3031, "bitoverlay_no_len", 3, fc_bitoverlay_no_len),
+    b(3032, "bitgetbit", 2, fc_bitgetbit),
+    b(3033, "bitsetbit", 3, fc_bitsetbit),
+    b(3158, "varbit_support", 1, fc_varbit_support),
+    b(6162, "bit_bit_count", 1, fc_bit_bit_count),
 ];
+
+#[cfg(test)]
+mod tests;

@@ -32,8 +32,10 @@ impl<'mcx> ExecPhraseData<'mcx> {
     }
 }
 
+// The usize is the operand's QueryItem index (C passes QueryItem pointers;
+// GIN's checkcondition needs `val - first_item`).
 pub type ChkCond<'c, 'mcx> =
-    &'c mut dyn FnMut(&Operand, Option<&mut ExecPhraseData<'mcx>>) -> PgResult<Ternary>;
+    &'c mut dyn FnMut(usize, &Operand, Option<&mut ExecPhraseData<'mcx>>) -> PgResult<Ternary>;
 
 const TSPO_L_ONLY: u32 = 0x01;
 const TSPO_R_ONLY: u32 = 0x02;
@@ -114,7 +116,7 @@ pub fn ts_phrase_execute<'mcx>(
     mut data: Option<&mut ExecPhraseData<'mcx>>,
 ) -> PgResult<Ternary> {
     match q.item(idx) {
-        Item::Val(op) => chkcond(&op, data),
+        Item::Val(op) => chkcond(idx, &op, data),
         Item::ValStop => panic!("ts_phrase_execute: QI_VALSTOP in stored tsquery"),
         Item::Opr(opr) => match opr.oper {
             OP_NOT => {
@@ -269,7 +271,7 @@ fn ts_execute_recurse<'mcx>(
     chkcond: ChkCond<'_, 'mcx>,
 ) -> PgResult<Ternary> {
     match q.item(idx) {
-        Item::Val(op) => chkcond(&op, None),
+        Item::Val(op) => chkcond(idx, &op, None),
         Item::ValStop => panic!("TS_execute: QI_VALSTOP in stored tsquery"),
         Item::Opr(opr) => match opr.oper {
             OP_NOT => {

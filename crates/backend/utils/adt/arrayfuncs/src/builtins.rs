@@ -792,6 +792,50 @@ pub fn fc_array_ge(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     Ok(Datum::from_bool(array_cmp_internal(flinfo, fcinfo)? >= 0))
 }
 
+// oidvectorrecv/oidvectorsend (oid.c): thin array_recv/array_send delegations;
+// they live here to keep adt_scalar off the lsyscache dependency spine.
+pub fn fc_oidvectorrecv(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of oidvectorrecv is internal (StringInfo).
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    let flinfo = flinfo.expect("oidvectorrecv: NULL flinfo");
+    let ams = cached_meta(
+        flinfo,
+        ::types_core::catalog::OIDOID,
+        IOFuncSelector::IOFunc_receive,
+        true,
+    )?;
+    let img = array_recv(mcx, buf, &ams.meta, &mut ams.proc, -1)?;
+    let ndim = i32::from_ne_bytes(img[4..8].try_into().unwrap());
+    let dataoffset = i32::from_ne_bytes(img[8..12].try_into().unwrap());
+    let elemtype = u32::from_ne_bytes(img[12..16].try_into().unwrap());
+    if ndim != 1
+        || dataoffset != 0
+        || elemtype != ::types_core::catalog::OIDOID as u32
+        || i32::from_ne_bytes(img[20..24].try_into().unwrap()) != 0
+    {
+        return Err(Box::new(
+            PgError::error("invalid oidvector data")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_BINARY_REPRESENTATION),
+        ));
+    }
+    byref_result(mcx, &img)
+}
+
+pub fn fc_oidvectorsend(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let array = arg_array_bytes(fcinfo, 0, mcx)?;
+    let flinfo = flinfo.expect("oidvectorsend: NULL flinfo");
+    let ams = cached_meta(
+        flinfo,
+        ::types_core::catalog::OIDOID,
+        IOFuncSelector::IOFunc_send,
+        true,
+    )?;
+    let out = array_send(mcx, &array, &ams.meta, &mut ams.proc)?;
+    Ok(varlena_result(out))
+}
+
 const fn nb(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
 }
@@ -813,6 +857,8 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(383, "array_cat", 2, fc_array_cat),
     b(2400, "array_recv", 3, fc_array_recv),
     b(2401, "array_send", 1, fc_array_send),
+    b(2420, "oidvectorrecv", 1, fc_oidvectorrecv),
+    b(2421, "oidvectorsend", 1, fc_oidvectorsend),
     agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
     agg(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
     srf(2331, "array_unnest", 1, fc_array_unnest),

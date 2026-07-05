@@ -23,7 +23,7 @@ pub use foundation::{
     arr_data_offset, arr_dim, arr_elemtype, arr_hasnull, arr_lbound, arr_ndim, arr_size,
     read_dims_lbounds, MAXDIM,
 };
-pub use element::{array_get_element, array_get_slice, array_set_element};
+pub use element::{array_get_element, array_get_slice, array_set_element, array_set_slice};
 pub use expanded::{
     datum_get_expanded_array, datum_get_expanded_array_x, deconstruct_expanded_array,
     expand_array, ArrayMetaState, ExpandedArrayHeader, EA_MAGIC,

@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 array = { package = "types_array", path = "../../../../_support/types/array" }
+nbt_compare = { path = "../../../access/nbtree/compare" }
 datum = { path = "../../../../_support/types/datum" }
 numutils = { path = "../numutils" }
 types_core = { path = "../../../../_support/types/types_core" }

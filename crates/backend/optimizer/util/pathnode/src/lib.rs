@@ -1364,19 +1364,21 @@ pub fn create_bitmap_or_path<'mcx>(
     Ok(id)
 }
 
-// create_bitmap_heap_path (pathnode.c); parallel loud upstream.
+// create_bitmap_heap_path (pathnode.c).
 pub fn create_bitmap_heap_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     bitmapqual: PathId,
     required_outer: &types_pathnodes::Relids<'mcx>,
     loop_count: f64,
+    parallel_degree: i32,
 ) -> PgResult<PathId> {
     let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_BitmapHeapPath, NodeTag::T_BitmapHeapScan, rel_id);
     path.param_info = param_info;
-    path.parallel_aware = false;
+    path.parallel_aware = parallel_degree > 0;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.parallel_workers = parallel_degree;
     let node = types_pathnodes::BitmapHeapPath { path, bitmapqual: Some(bitmapqual) };
     let id = run.root.alloc_path(PathNode::BitmapHeapPath(node));
     costsize::cost_bitmap_heap_scan(run, id, rel_id, bitmapqual, loop_count);

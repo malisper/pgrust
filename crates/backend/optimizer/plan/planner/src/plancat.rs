@@ -900,20 +900,38 @@ pub fn join_selectivity<'mcx>(
     Ok(result)
 }
 
-// function_selectivity (plancat.c). The in-core SupportRequestSelectivity
-// providers (like_regex_support, ts match) are unwired; loud until a query
-// reaches one.
-pub fn function_selectivity(funcid: Oid) -> PgResult<f64> {
+// function_selectivity (plancat.c): closed-set SupportRequestSelectivity
+// dispatch on the prosupport oid; like_regex_support (like_support.c) is the
+// only wired in-core provider, everything else stays loud.
+pub fn function_selectivity<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    funcid: Oid,
+    args: &[NodeId],
+    inputcollid: Oid,
+    is_join: bool,
+    varrelid: i32,
+) -> PgResult<f64> {
+    use crate::like_support::PatternType;
     let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
         .unwrap_or_else(|| panic!("cache lookup failed for function {funcid}"));
-    if shape.prosupport != 0 {
-        panic!(
-            "function_selectivity (plancat.c): SupportRequestSelectivity for prosupport {}; \
-             M2 lane",
-            shape.prosupport
-        );
+    let ptype = match shape.prosupport {
+        0 => return Ok(0.3333333),
+        1023 => PatternType::Like,
+        1025 => PatternType::LikeIc,
+        1364 => PatternType::Regex,
+        1024 => PatternType::RegexIc,
+        6242 => PatternType::Prefix,
+        other => panic!(
+            "function_selectivity (plancat.c): SupportRequestSelectivity for prosupport {other}; \
+             M2 lane"
+        ),
+    };
+    if is_join {
+        return Ok(crate::selfuncs::DEFAULT_MATCH_SEL);
     }
-    Ok(0.3333333)
+    crate::like_support::patternsel_common(
+        run, 0, funcid, args, varrelid, inputcollid, ptype, false,
+    )
 }
 
 // add_function_cost (plancat.c). DIVERGENCE: callers don't thread the calling

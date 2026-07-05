@@ -223,7 +223,7 @@ pub enum Step {
     SbsrefSubscripts { state: NonNull<crate::arrayops::SbsRefState>, jumpdone: u32, out: OutRef },
     SbsrefFetch { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
     SbsrefOld { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
-    SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, out: OutRef },
+    SbsrefAssign { state: NonNull<crate::arrayops::SbsRefState>, slice: bool, out: OutRef },
     JsonbSbsrefSubscripts {
         state: NonNull<crate::jsonbsubs::JsonbSbsState>,
         jumpdone: u32,

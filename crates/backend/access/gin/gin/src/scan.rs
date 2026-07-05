@@ -1,5 +1,4 @@
-//! ginscan.c: scan setup. Single key column; partial match is loud at
-//! extract-query time (closed set produces none).
+//! ginscan.c: scan setup. Single key column.
 
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
@@ -44,6 +43,7 @@ pub fn ginbeginscan<'mcx>(
 }
 
 /// ginFillScanEntry: dedup + create.
+#[allow(clippy::too_many_arguments)]
 fn fill_scan_entry(
     state: &GinState,
     work: &mut GinScanWork,
@@ -52,8 +52,9 @@ fn fill_scan_entry(
     search_mode: i32,
     query_key: Datum,
     query_category: GinNullCategory,
+    is_partial_match: bool,
 ) -> PgResult<u32> {
-    if work.entries.len() < 100 {
+    if !is_partial_match && work.entries.len() < 100 {
         for (i, prev) in work.entries.iter().enumerate() {
             if !prev.isPartialMatch
                 && prev.strategy == strategy
@@ -78,6 +79,7 @@ fn fill_scan_entry(
     let mut entry = unsafe { GinScanEntryData::new(kcx)? };
     entry.queryKey = query_key;
     entry.queryCategory = query_category;
+    entry.isPartialMatch = is_partial_match;
     entry.strategy = strategy;
     entry.searchMode = search_mode;
     entry.attnum = attnum;
@@ -108,6 +110,7 @@ fn add_hidden_entry(
         search_mode,
         Datum::null(),
         category,
+        false,
     )?;
     let key = &mut work.keys[key_idx];
     key.nentries += 1;
@@ -117,6 +120,7 @@ fn add_hidden_entry(
 }
 
 /// ginFillScanKey.
+#[allow(clippy::too_many_arguments)]
 fn fill_scan_key(
     state: &GinState,
     work: &mut GinScanWork,
@@ -126,7 +130,9 @@ fn fill_scan_key(
     query: Datum,
     query_values: &[Datum],
     query_categories: &[GinNullCategory],
+    partial_match: &[bool],
     jsp_ops: PgVec<'static, JspGinOp>,
+    map_item_operand: PgVec<'static, i32>,
 ) -> PgResult<()> {
     // SAFETY: vectors stored in work (kcx contract).
     let kcx = unsafe { work.kcx() };
@@ -151,6 +157,7 @@ fn fill_scan_key(
             v
         },
         jspOps: jsp_ops,
+        mapItemOperand: map_item_operand,
         strategy,
         searchMode: search_mode,
         attnum,
@@ -180,6 +187,7 @@ fn fill_scan_key(
             search_mode,
             query_values[i],
             query_categories[i],
+            partial_match.get(i).copied().unwrap_or(false),
         )?;
         work.keys[key_idx].scanEntry.push(id);
     }
@@ -229,8 +237,15 @@ pub(crate) fn ginNewScanKey(
 
         // SAFETY: query values stored in work (kcx contract).
         let kcx = unsafe { work.kcx() };
-        let (query_values, mut search_mode, jsp_ops) =
+        let extracted =
             crate::opclass::extract_query(kcx, &state, skey.sk_argument, skey.sk_strategy)?;
+        let crate::opclass::ExtractedQuery {
+            entries: query_values,
+            search_mode: mut search_mode,
+            jsp_ops,
+            partial_match,
+            map_item_operand,
+        } = extracted;
 
         if !(GIN_SEARCH_MODE_DEFAULT..=GIN_SEARCH_MODE_ALL).contains(&search_mode) {
             search_mode = GIN_SEARCH_MODE_ALL;
@@ -253,7 +268,9 @@ pub(crate) fn ginNewScanKey(
             skey.sk_argument,
             query_values.as_slice(),
             &categories,
+            partial_match.as_slice(),
             jsp_ops,
+            map_item_operand,
         )?;
 
         if search_mode != GIN_SEARCH_MODE_ALL {
@@ -285,7 +302,9 @@ pub(crate) fn ginNewScanKey(
     if work.keys.is_empty() && !so.isVoidRes {
         has_null_query = true;
         // SAFETY: vector stored in the key inside work (kcx contract).
-        let empty_ops = mcx::vec_new_in(unsafe { work.kcx() });
+        let kcx2 = unsafe { work.kcx() };
+        let empty_ops = mcx::vec_new_in(kcx2);
+        let empty_map = mcx::vec_new_in(kcx2);
         fill_scan_key(
             &state,
             &mut work,
@@ -295,7 +314,9 @@ pub(crate) fn ginNewScanKey(
             Datum::null(),
             &[],
             &[],
+            &[],
             empty_ops,
+            empty_map,
         )?;
     }
 

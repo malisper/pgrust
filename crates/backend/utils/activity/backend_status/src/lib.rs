@@ -22,6 +22,12 @@ mod tests;
 const NAMELEN: usize = NAMEDATALEN as usize;
 
 pub const PROGRESS_COMMAND_INVALID: i32 = 0;
+pub const PROGRESS_COMMAND_VACUUM: i32 = 1;
+pub const PROGRESS_COMMAND_ANALYZE: i32 = 2;
+pub const PROGRESS_COMMAND_CLUSTER: i32 = 3;
+pub const PROGRESS_COMMAND_CREATE_INDEX: i32 = 4;
+pub const PROGRESS_COMMAND_BASEBACKUP: i32 = 5;
+pub const PROGRESS_COMMAND_COPY: i32 = 6;
 pub const PGSTAT_NUM_PROGRESS_PARAM: usize = 20;
 
 // PgBackendStatus (backend_status.h). The NAMEDATALEN buffers are inline (C's

@@ -112,7 +112,8 @@ fn cover(
             qr.fill(&doc[ptr]);
             let matched = {
                 let q = qr.q;
-                let mut chk = |val: &::adt_tsvector_core::query::Operand,
+                let mut chk = |_idx: usize,
+                               val: &::adt_tsvector_core::query::Operand,
                                data: Option<&mut ExecPhraseData<'_>>| {
                     Ok(check_query_rep(qr, val.distance, data))
                 };
@@ -140,7 +141,8 @@ fn cover(
             qr.fill(&doc[ptr as usize]);
             let matched = {
                 let q = qr.q;
-                let mut chk = |val: &::adt_tsvector_core::query::Operand,
+                let mut chk = |_idx: usize,
+                               val: &::adt_tsvector_core::query::Operand,
                                data: Option<&mut ExecPhraseData<'_>>| {
                     Ok(check_query_rep(qr, val.distance, data))
                 };

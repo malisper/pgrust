@@ -213,11 +213,13 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         let bitmapqual = choose_bitmap_and(run, rel, &bitindexpaths)?;
         let lateral_relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).lateral_relids);
         let bpath =
-            pathnode::create_bitmap_heap_path(run, rel, bitmapqual, &lateral_relids, 1.0)?;
+            pathnode::create_bitmap_heap_path(run, rel, bitmapqual, &lateral_relids, 1.0, 0)?;
         add_path(run, rel, bpath);
-        // Parallel bitmap heap scan (partial paths): unported; the rel's
-        // partial seqscan paths from the parallel-p3 landing already live in
-        // partial_pathlist.
+        if run.root.rel(rel).consider_parallel
+            && types_pathnodes::relids::relids_is_empty(&run.root.rel(rel).lateral_relids)
+        {
+            create_partial_bitmap_paths(run, rel, bitmapqual)?;
+        }
     }
 
     if !bitjoinpaths.is_empty() {
@@ -260,11 +262,48 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
                 bitmapqual,
                 &required_outer,
                 loop_count,
+                0,
             )?;
             add_path(run, rel, bpath);
         }
     }
     Ok(())
+}
+
+// create_partial_bitmap_paths (allpaths.c).
+fn create_partial_bitmap_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    bitmapqual: PathId,
+) -> PgResult<()> {
+    let (pages_fetched, _, _) = costsize::compute_bitmap_pages(run, rel, bitmapqual, 1.0);
+    let parallel_workers = ::allpaths::compute_parallel_worker(
+        run.root.rel(rel),
+        pages_fetched,
+        -1.0,
+        guc_tables::vars::max_parallel_workers_per_gather.read(),
+    );
+    if parallel_workers <= 0 {
+        return Ok(());
+    }
+    let lateral_relids =
+        types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    let bpath = pathnode::create_bitmap_heap_path(
+        run,
+        rel,
+        bitmapqual,
+        &lateral_relids,
+        1.0,
+        parallel_workers,
+    )?;
+    pathnode::add_partial_path(run, rel, bpath);
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn unported_parallel_index_scan() -> ! {
+    panic!("unported: parallel index scan partial paths (M3 lane)")
 }
 
 // consider_index_join_clauses (indxpath.c).
@@ -968,7 +1007,6 @@ fn get_index_clause_from_support<'mcx>(
         return Ok(None);
     }
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
-    let op = clause.as_op_expr().expect("support request over an OpExpr");
     let exprs = match shape.prosupport {
         1023 | 1025 | 1364 | 1024 | 6242 => {
             let ptype = match shape.prosupport {
@@ -979,29 +1017,39 @@ fn get_index_clause_from_support<'mcx>(
                 _ => PatternType::Prefix,
             };
             // like_regex_support: no reverse-match operators, indexkey-on-left
-            // only.
+            // only; C accepts the OpExpr and FuncExpr clause forms.
             if indexarg != 0 {
                 return Ok(None);
             }
+            let (args, inputcollid) = if let Some(op) = clause.as_op_expr() {
+                (&op.args, op.inputcollid)
+            } else if let Some(f) = clause.as_func_expr() {
+                (&f.args, f.inputcollid)
+            } else {
+                return Ok(None);
+            };
             planner_seams::match_pattern_prefix::call(
                 run,
-                op.args.nth(0),
-                op.args.nth(1),
+                args.nth(0),
+                args.nth(1),
                 ptype,
-                op.inputcollid,
+                inputcollid,
                 index.opfamily[indexcol],
                 index.indexcollations[indexcol],
             )?
         }
         // network_subset_support (network.c): SupportRequestIndexCondition.
-        1173 => match_network_function(
-            run,
-            op.args.nth(0),
-            op.args.nth(1),
-            indexarg,
-            funcid,
-            index.opfamily[indexcol],
-        )?,
+        1173 => {
+            let op = clause.as_op_expr().expect("support request over an OpExpr");
+            match_network_function(
+                run,
+                op.args.nth(0),
+                op.args.nth(1),
+                indexarg,
+                funcid,
+                index.opfamily[indexcol],
+            )?
+        }
         other => panic!("get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"),
     };
     let Some(exprs) = exprs else {
@@ -1287,9 +1335,12 @@ fn build_index_paths<'mcx>(
             loop_count,
         )?;
         result.push(ipath);
-        // Parallel index scan (partial paths): unported; the rel's partial
-        // seqscan paths from the parallel-p3 landing already live in
-        // partial_pathlist.
+        if index.amcanparallel
+            && run.root.rel(rel).consider_parallel
+            && !run.root.rel(rel).partial_pathlist.is_empty()
+        {
+            crate::unported_parallel_index_scan();
+        }
     }
 
     if backward_arm {
@@ -1844,7 +1895,7 @@ fn bitmap_scan_cost_est<'mcx>(
     let cur_relid = run.root.rel(rel).relid;
     let loop_count = get_loop_count(run, cur_relid, &required_outer)?;
     let bpath =
-        pathnode::create_bitmap_heap_path(run, rel, ipath, &required_outer, loop_count)?;
+        pathnode::create_bitmap_heap_path(run, rel, ipath, &required_outer, loop_count, 0)?;
     Ok(run.root.path(bpath).base().total_cost)
 }
 

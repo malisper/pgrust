@@ -877,11 +877,15 @@ fn run_program<'mcx>(
                 let r = crate::jsonbsubs::assign(st, cur)?;
                 write_out(*out, r.value, r.isnull);
             }
-            Step::SbsrefAssign { state, out } => {
+            Step::SbsrefAssign { state, slice, out } => {
                 // SAFETY: as ArrayExprEval.
                 let st = unsafe { &mut *state.as_ptr() };
                 let cur = read_out(*out);
-                let r = crate::arrayops::sbsref_assign(st, cur)?;
+                let r = if *slice {
+                    crate::arrayops::sbsref_assign_slice(st, cur)?
+                } else {
+                    crate::arrayops::sbsref_assign(st, cur)?
+                };
                 write_out(*out, r.value, r.isnull);
             }
             Step::Qual { jumpdone } => {
@@ -2365,10 +2369,7 @@ pub unsafe fn agg_datum_copy(
             -1 => {
                 // C copies toast pointers verbatim; only expanded flattens.
                 if ::types_tuple::varatt::varatt_is_external_expanded(p) {
-                    panic!(
-                        "datumCopy (datum.c): expanded varlena transvalue — \
-                         expanded-object flatten arm has no producers"
-                    );
+                    return ::adt_scalar::datum_ops::datum_copy(mcx, value, false, -1);
                 }
                 ::types_tuple::varatt::varsize_any(p)
             }

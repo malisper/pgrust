@@ -843,6 +843,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "namespace_seams",
+ "nbt_compare",
  "numutils",
  "pqformat",
  "readfuncs",
@@ -891,6 +892,39 @@ dependencies = [
  "types_nodes",
  "xact",
  "xact_seams",
+]
+
+[[package]]
+name = "adt_tsginidx"
+version = "0.1.0"
+dependencies = [
+ "adt_tsquery_core",
+ "adt_tsvector_core",
+ "datum",
+ "gin_vocab",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
+name = "adt_tsgistidx"
+version = "0.1.0"
+dependencies = [
+ "adt_tsquery_core",
+ "adt_tsvector_core",
+ "crc32c",
+ "datum",
+ "detoast",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_storage",
+ "types_tuple",
 ]
 
 [[package]]
@@ -977,9 +1011,13 @@ dependencies = [
  "arrayfuncs",
  "datum",
  "mcx",
+ "nodes_core",
+ "pqformat",
+ "stringinfo",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
  "types_tuple",
 ]
 
@@ -1794,6 +1832,7 @@ name = "brin_minmax_multi"
 version = "0.1.0"
 dependencies = [
  "adt_numeric",
+ "adt_scalar",
  "datum",
  "detoast",
  "fmgr_core",
@@ -1831,6 +1870,7 @@ dependencies = [
 name = "brin_tuple"
 version = "0.1.0"
 dependencies = [
+ "adt_scalar",
  "brin_minmax_multi",
  "datum",
  "detoast",
@@ -4144,6 +4184,7 @@ dependencies = [
  "adt_int",
  "adt_json",
  "adt_jsonb",
+ "adt_scalar",
  "adt_timestamp",
  "adt_xml",
  "arrayfuncs",
@@ -5302,6 +5343,8 @@ name = "gin"
 version = "0.1.0"
 dependencies = [
  "adt_jsonb",
+ "adt_tsginidx",
+ "adt_tsvector_core",
  "bufmgr_seams",
  "datum",
  "detoast",
@@ -6216,10 +6259,12 @@ name = "indxpath"
 version = "0.1.0"
 dependencies = [
  "adt_network",
+ "allpaths",
  "clauses",
  "costsize",
  "datum",
  "equivclass",
+ "guc_tables",
  "lsyscache",
  "mcx",
  "nodes_core",
@@ -9906,6 +9951,7 @@ dependencies = [
  "miscinit",
  "pgstat",
  "procarray",
+ "slot",
  "transam_xlog_seams",
  "types_core",
  "types_error",
@@ -12267,6 +12313,8 @@ dependencies = [
  "adt_regproc",
  "adt_rowtypes",
  "adt_timestamp",
+ "adt_tsginidx",
+ "adt_tsgistidx",
  "adt_xml",
  "aio_config",
  "aio_uring",

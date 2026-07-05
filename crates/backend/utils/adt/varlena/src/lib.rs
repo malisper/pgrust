@@ -25,7 +25,7 @@ use datum::{Bytea, Varlena};
 use mcx::{Mcx, PgVec};
 use stringinfo::StringInfo;
 use types_core::{C_COLLATION_OID, Oid, OidIsValid, POSIX_COLLATION_OID};
-use types_error::{PgError, PgResult, ERRCODE_INDETERMINATE_COLLATION};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION};
 use types_tuple::varatt;
 
 pub const VARHDRSZ: usize = datum::varlena::VARHDRSZ;
@@ -221,6 +221,40 @@ pub fn text_larger<'a>(t1: &'a [u8], t2: &'a [u8], collid: Oid) -> PgResult<&'a 
 
 pub fn text_smaller<'a>(t1: &'a [u8], t2: &'a [u8], collid: Oid) -> PgResult<&'a [u8]> {
     Ok(if text_cmp(t1, t2, collid)? < 0 { t1 } else { t2 })
+}
+
+pub fn text_starts_with(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<bool> {
+    check_collation_set(collid)?;
+    if !collation_is_deterministic(collid)? {
+        return Err(Box::new(
+            PgError::error(
+                "nondeterministic collations are not supported for substring searches",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    Ok(t2.len() <= t1.len() && &t1[..t2.len()] == t2)
+}
+
+// internal_text_pattern_compare: raw memcmp + length tiebreak, sign-normalized.
+pub fn text_pattern_lt(t1: &[u8], t2: &[u8]) -> bool {
+    varstrfastcmp_c(t1, t2) < 0
+}
+
+pub fn text_pattern_le(t1: &[u8], t2: &[u8]) -> bool {
+    varstrfastcmp_c(t1, t2) <= 0
+}
+
+pub fn text_pattern_ge(t1: &[u8], t2: &[u8]) -> bool {
+    varstrfastcmp_c(t1, t2) >= 0
+}
+
+pub fn text_pattern_gt(t1: &[u8], t2: &[u8]) -> bool {
+    varstrfastcmp_c(t1, t2) > 0
+}
+
+pub fn bttext_pattern_cmp(t1: &[u8], t2: &[u8]) -> i32 {
+    varstrfastcmp_c(t1, t2)
 }
 
 pub fn btvarstrequalimage(collid: Oid) -> PgResult<bool> {

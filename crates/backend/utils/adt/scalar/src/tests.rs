@@ -70,6 +70,77 @@ fn xid8_ops() {
     assert_eq!(xid8cmp(7, 7), 0);
 }
 
+mod oidvector_tests {
+    use crate::builtins::*;
+    use datum::Datum;
+    use mcx::MemoryContext;
+    use types_fmgr::LocalFcinfo;
+
+    fn build(values: &[u32]) -> Vec<u8> {
+        let total = 24 + values.len() * 4;
+        let mut v = Vec::from(::datum::set_varsize_4b(total));
+        v.extend_from_slice(&1i32.to_ne_bytes());
+        v.extend_from_slice(&0i32.to_ne_bytes());
+        v.extend_from_slice(&26u32.to_ne_bytes());
+        v.extend_from_slice(&(values.len() as i32).to_ne_bytes());
+        v.extend_from_slice(&0i32.to_ne_bytes());
+        for x in values {
+            v.extend_from_slice(&x.to_ne_bytes());
+        }
+        v
+    }
+
+    fn call1(f: types_fmgr::PGFunction, d: Datum, ctx: &MemoryContext) -> Datum {
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.set_arg(0, d);
+        // SAFETY: ctx outlives the call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        f(None, &mut fcinfo).unwrap()
+    }
+
+    fn call2(f: types_fmgr::PGFunction, a: Datum, b: Datum) -> bool {
+        let mut fcinfo = LocalFcinfo::<2>::new(0);
+        fcinfo.set_arg(0, a);
+        fcinfo.set_arg(1, b);
+        f(None, &mut fcinfo).unwrap().as_bool()
+    }
+
+    #[test]
+    fn in_out_roundtrip() {
+        let ctx = MemoryContext::new("t");
+        let s = b"1 2  40010\0";
+        let d = call1(fc_oidvectorin, Datum::from_usize(s.as_ptr() as usize), &ctx);
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(d.as_usize() as *const u8, 36) },
+            &build(&[1, 2, 40010])[..]
+        );
+        let out = call1(fc_oidvectorout, d, &ctx);
+        let bytes = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
+        assert_eq!(bytes.to_bytes(), b"1 2 40010");
+
+        let empty = call1(fc_oidvectorin, Datum::from_usize(b" \0".as_ptr() as usize), &ctx);
+        let out = call1(fc_oidvectorout, empty, &ctx);
+        let bytes = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
+        assert_eq!(bytes.to_bytes(), b"");
+    }
+
+    #[test]
+    fn comparators() {
+        let a = build(&[1, 2, 3]);
+        let b = build(&[1, 2, 4]);
+        let short = build(&[9]);
+        let d = |v: &Vec<u8>| Datum::from_usize(v.as_ptr() as usize);
+        assert!(call2(fc_oidvectorlt, d(&a), d(&b)));
+        assert!(call2(fc_oidvectorle, d(&a), d(&a)));
+        assert!(call2(fc_oidvectorge, d(&b), d(&a)));
+        assert!(call2(fc_oidvectorgt, d(&b), d(&a)));
+        assert!(call2(fc_oidvectorne, d(&a), d(&b)));
+        assert!(!call2(fc_oidvectorne, d(&a), d(&a)));
+        // Length sorts first (btoidvectorcmp).
+        assert!(call2(fc_oidvectorlt, d(&short), d(&a)));
+    }
+}
+
 mod datum_ops_tests {
     use crate::datum_ops::*;
     use datum::{set_varsize_4b, Datum, VARHDRSZ};
@@ -163,5 +234,41 @@ mod datum_ops_tests {
         assert!(isnull && v.as_usize() == 0);
         let (v, isnull) = datum_restore(mcx, &mut cur).unwrap();
         assert!(!isnull && v.as_usize() == 7 && cur.is_empty());
+    }
+
+    #[test]
+    fn is_equal_image_compare() {
+        assert!(datum_is_equal(Datum::from_i64(9), Datum::from_i64(9), true, 8).unwrap());
+        assert!(!datum_is_equal(Datum::from_i64(9), Datum::from_i64(8), true, 8).unwrap());
+        let a = varlena(b"abc");
+        let b = varlena(b"abc");
+        let c = varlena(b"abd");
+        let short = varlena(b"ab");
+        let d = |v: &Vec<u8>| Datum::from_usize(v.as_ptr() as usize);
+        assert!(datum_is_equal(d(&a), d(&b), false, -1).unwrap());
+        assert!(!datum_is_equal(d(&a), d(&c), false, -1).unwrap());
+        assert!(!datum_is_equal(d(&a), d(&short), false, -1).unwrap());
+        let cs1 = b"xy\0";
+        let cs2 = b"xy\0";
+        assert!(datum_is_equal(
+            Datum::from_usize(cs1.as_ptr() as usize),
+            Datum::from_usize(cs2.as_ptr() as usize),
+            false,
+            -2
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn transfer_copies_non_expanded() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let img = varlena(b"move me");
+        let src = Datum::from_usize(img.as_ptr() as usize);
+        let t = datum_transfer(mcx, src, false, -1).unwrap();
+        assert_ne!(t.as_usize(), src.as_usize());
+        let out = unsafe { core::slice::from_raw_parts(t.as_usize() as *const u8, img.len()) };
+        assert_eq!(out, &img[..]);
+        assert_eq!(datum_transfer(mcx, Datum::from_i32(3), true, 4).unwrap().as_i32(), 3);
     }
 }

@@ -353,7 +353,19 @@ pub(crate) fn clause_selectivity_node<'mcx>(
         }
         NodeTag::T_FuncExpr => {
             let f = clause.as_func_expr().unwrap();
-            crate::plancat::function_selectivity(f.funcid)
+            let mut ids = PgVec::new_in(run.mcx);
+            for a in &f.args {
+                ids.push(run.intern_expr(a));
+            }
+            let is_join = treat_as_join_clause(run, None, clause, varrelid, sjinfo)?;
+            crate::plancat::function_selectivity(
+                run,
+                f.funcid,
+                &ids,
+                f.inputcollid,
+                is_join,
+                varrelid,
+            )
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let is_join = treat_as_join_clause(run, None, clause, varrelid, sjinfo)?;

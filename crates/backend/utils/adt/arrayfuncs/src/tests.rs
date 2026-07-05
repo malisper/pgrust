@@ -249,6 +249,118 @@ fn element_set_replaces_and_extends() {
     assert_eq!(as_str(&array_out(mcx, &low, &m, &mut op).unwrap()), "[-1:3]={0,NULL,1,2,3}");
 }
 
+#[test]
+fn slice_set_replaces_extends_and_nulls() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let m = meta_int4();
+    let mut ip = int4_in();
+    let mut op = int4_out();
+    let img = array_in(mcx, "{1,2,3,4,5}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let one = [true, false, false, false, false, false];
+
+    // Replace [2:4].
+    let src = array_in(mcx, "{20,30,40}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut upper = [4i32, 0, 0, 0, 0, 0];
+    let mut lower = [2i32, 0, 0, 0, 0, 0];
+    let set = crate::element::array_set_slice(
+        mcx, &img, 1, &mut upper, &mut lower, &one, &one, &src, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(as_str(&array_out(mcx, &set, &m, &mut op).unwrap()), "{1,20,30,40,5}");
+
+    // Extension past the end with a NULL gap.
+    let src = array_in(mcx, "{80,90}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut upper = [9i32, 0, 0, 0, 0, 0];
+    let mut lower = [8i32, 0, 0, 0, 0, 0];
+    let ext = crate::element::array_set_slice(
+        mcx, &img, 1, &mut upper, &mut lower, &one, &one, &src, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(
+        as_str(&array_out(mcx, &ext, &m, &mut op).unwrap()),
+        "{1,2,3,4,5,NULL,NULL,80,90}"
+    );
+
+    // NULL-carrying source keeps its bitmap.
+    let src = array_in(mcx, "{NULL,99}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut upper = [2i32, 0, 0, 0, 0, 0];
+    let mut lower = [1i32, 0, 0, 0, 0, 0];
+    let n = crate::element::array_set_slice(
+        mcx, &img, 1, &mut upper, &mut lower, &one, &one, &src, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(as_str(&array_out(mcx, &n, &m, &mut op).unwrap()), "{NULL,99,3,4,5}");
+
+    // ndim == 0: empty target needs both bounds; builds from the source.
+    let all = [true, true, false, false, false, false];
+    let empty = crate::construct::construct_empty_array(mcx, INT4OID).unwrap();
+    let src = array_in(mcx, "{7,8}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut upper = [2i32, 0, 0, 0, 0, 0];
+    let mut lower = [1i32, 0, 0, 0, 0, 0];
+    let built = crate::element::array_set_slice(
+        mcx, &empty, 1, &mut upper, &mut lower, &all, &all, &src, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(as_str(&array_out(mcx, &built, &m, &mut op).unwrap()), "{7,8}");
+    let nope = [false, false, false, false, false, false];
+    let mut upper = [2i32, 0, 0, 0, 0, 0];
+    let mut lower = [1i32, 0, 0, 0, 0, 0];
+    let err = crate::element::array_set_slice(
+        mcx, &empty, 1, &mut upper, &mut lower, &all, &nope, &src, -1, 4, true, b'i',
+    )
+    .unwrap_err();
+    assert!(err.message().contains("must provide both boundaries"));
+
+    // Source too small.
+    let mut upper = [4i32, 0, 0, 0, 0, 0];
+    let mut lower = [1i32, 0, 0, 0, 0, 0];
+    let err = crate::element::array_set_slice(
+        mcx, &img, 1, &mut upper, &mut lower, &one, &one, &src, -1, 4, true, b'i',
+    )
+    .unwrap_err();
+    assert!(err.message().contains("source array too small"));
+}
+
+#[test]
+fn slice_set_multidim_insert() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let m = meta_int4();
+    let mut ip = int4_in();
+    let mut op = int4_out();
+    let img = array_in(mcx, "{{1,2,3},{4,5,6},{7,8,9}}", &m, &mut ip, -1, None)
+        .unwrap()
+        .unwrap();
+    let two = [true, true, false, false, false, false];
+
+    let src = array_in(mcx, "{{50,60},{80,90}}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut upper = [3i32, 3, 0, 0, 0, 0];
+    let mut lower = [2i32, 2, 0, 0, 0, 0];
+    let set = crate::element::array_set_slice(
+        mcx, &img, 2, &mut upper, &mut lower, &two, &two, &src, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(
+        as_str(&array_out(mcx, &set, &m, &mut op).unwrap()),
+        "{{1,2,3},{4,50,60},{7,80,90}}"
+    );
+
+    // NULLs riding through the multidim insert path.
+    let imgn = array_in(mcx, "{{1,NULL},{3,4}}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let src = array_in(mcx, "{NULL}", &m, &mut ip, -1, None).unwrap().unwrap();
+    let mut upper = [2i32, 1, 0, 0, 0, 0];
+    let mut lower = [2i32, 1, 0, 0, 0, 0];
+    let set = crate::element::array_set_slice(
+        mcx, &imgn, 2, &mut upper, &mut lower, &two, &two, &src, -1, 4, true, b'i',
+    )
+    .unwrap();
+    assert_eq!(
+        as_str(&array_out(mcx, &set, &m, &mut op).unwrap()),
+        "{{1,NULL},{NULL,4}}"
+    );
+}
+
 mod expanded {
     use super::*;
     use crate::expanded::{

@@ -13,6 +13,7 @@ use types_error::{PgResult, LOG};
 
 use crate::pending::{
     PgStat_HashKey, PgStat_Kind, PGSTAT_KIND_DATABASE, PGSTAT_KIND_FUNCTION, PGSTAT_KIND_RELATION,
+    PGSTAT_KIND_SUBSCRIPTION,
 };
 use crate::shmem::SharedEntry;
 
@@ -56,8 +57,10 @@ fn entry_payload(entry: &SharedEntry) -> Option<&[u8]> {
         SharedEntry::Relation(t) => Some(as_bytes(t)),
         SharedEntry::Database(d) => Some(as_bytes(d)),
         SharedEntry::Function(f) => Some(as_bytes(f)),
-        // BACKEND is write_to_file = false in C's kind table.
-        SharedEntry::Backend(_) => None,
+        SharedEntry::Subscription(s) => Some(as_bytes(s)),
+        // BACKEND is write_to_file = false in C's kind table. C serializes
+        // REPLSLOT by slot name; no writer exists yet, so no entry can either.
+        SharedEntry::Backend(_) | SharedEntry::ReplSlot(_) => None,
     }
 }
 
@@ -164,6 +167,7 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
                     PGSTAT_KIND_RELATION => SharedEntry::Relation(from_bytes(payload)?),
                     PGSTAT_KIND_DATABASE => SharedEntry::Database(from_bytes(payload)?),
                     PGSTAT_KIND_FUNCTION => SharedEntry::Function(from_bytes(payload)?),
+                    PGSTAT_KIND_SUBSCRIPTION => SharedEntry::Subscription(from_bytes(payload)?),
                     _ => return None,
                 };
                 crate::shmem::import_entry(PgStat_HashKey { kind, dboid, objid }, entry);
