@@ -120,7 +120,6 @@ pub fn IndexAmTranslateCompareType(
     opfamily: Oid,
     missing_ok: bool,
 ) -> PgResult<StrategyNumber> {
-    let _ = opfamily;
     if amoid == BTREE_AM_OID && cmptype > COMPARE_INVALID && cmptype <= COMPARE_GT {
         return Ok(cmptype as StrategyNumber);
     }
@@ -139,10 +138,7 @@ pub fn IndexAmTranslateCompareType(
         }
         // gin has no amtranslatecmptype.
         IndexAmKind::Gin => InvalidStrategy,
-        IndexAmKind::Gist => panic!(
-            "unported: gisttranslatecmptype (AMPROCNUM proc-12 lookup; \
-             temporal/WITHOUT OVERLAPS lane)"
-        ),
+        IndexAmKind::Gist => gisttranslatecmptype(cmptype, opfamily)?,
         // amtranslatecmptype == NULL.
         IndexAmKind::Spgist => InvalidStrategy,
         // amtranslatecmptype == NULL.
@@ -157,6 +153,27 @@ pub fn IndexAmTranslateCompareType(
         ))));
     }
     Ok(result)
+}
+
+// gist.h
+const GIST_TRANSLATE_CMPTYPE_PROC: i16 = 12;
+
+// gisttranslatecmptype (gistutil.c): the opclass's GIST_TRANSLATE_CMPTYPE_PROC
+// support function maps CompareType to the opclass's private stratnum;
+// InvalidStrategy when the opfamily defines no such proc.
+fn gisttranslatecmptype(cmptype: CompareType, opfamily: Oid) -> PgResult<StrategyNumber> {
+    let funcid = syscache_seams::lookup_pg_amproc::call(
+        opfamily,
+        types_core::catalog::ANYOID,
+        types_core::catalog::ANYOID,
+        GIST_TRANSLATE_CMPTYPE_PROC,
+    )?;
+    if funcid == InvalidOid {
+        return Ok(InvalidStrategy);
+    }
+    let result =
+        fmgr_core::oid_function_call1_coll(funcid, InvalidOid, Datum::from_i32(cmptype))?;
+    Ok(result.as_u16())
 }
 
 pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {

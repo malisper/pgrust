@@ -45,6 +45,10 @@ tuplesort = { path = "../../utils/sort/tuplesort" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 
+adt_rangetypes = { path = "../../utils/adt/rangetypes" }
+adt_multirangetypes = { path = "../../utils/adt/multirangetypes" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
+
 [dev-dependencies]
 test_boot = { path = "../../../_support/test_boot" }
 nbtree = { path = "../../access/nbtree/nbtree" }

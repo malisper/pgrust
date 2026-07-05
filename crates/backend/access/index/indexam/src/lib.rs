@@ -868,7 +868,9 @@ fn am_insert<'mcx>(
             heapRelation,
         ),
         IndexAmKind::Gist => {
-            debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
+            // gistinsert ignores checkUnique (temporal PK/UNIQUE indexes are
+            // indisunique gist; enforcement runs via the exclusion recheck).
+            let _ = checkUnique;
             // downcast once per row on a cache slot C derefs as void*; the
             // resolve-once state lives inside (rule-5 ii_AmCache mirror).
             if am_cache.is_none() {

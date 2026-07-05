@@ -153,6 +153,7 @@ pub fn CheckIndexCompatible<'mcx>(
         ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
+        ii_WithoutOverlaps: false,
     };
     let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut collationIds = [InvalidOid; INDEX_MAX_KEYS as usize];
@@ -244,6 +245,93 @@ fn resolve_index_am(name: Option<&str>) -> (Oid, &'static str, bool, bool, bool)
     }
 }
 
+// Closed-set get_am_name (pg_am.dat) for error details.
+fn get_am_name_closed(amid: Oid) -> &'static str {
+    match amid {
+        BTREE_AM_OID => "btree",
+        catalog_index::HASH_AM_OID => "hash",
+        catalog_index::GIN_AM_OID => "gin",
+        catalog_index::GIST_AM_OID => "gist",
+        types_core::SPGIST_AM_OID => "spgist",
+        types_core::BRIN_AM_OID => "brin",
+        _ => "???",
+    }
+}
+
+// GetOperatorFromCompareType (indexcmds.c): equality/overlaps/contained-by
+// operator lookup for temporal constraints via the index AM's stratnum
+// translation. rhstype = InvalidOid means the opclass input type.
+pub fn GetOperatorFromCompareType<'mcx>(
+    mcx: Mcx<'mcx>,
+    opclass: Oid,
+    rhstype: Oid,
+    cmptype: lsyscache::CompareType,
+) -> PgResult<(Oid, u16)> {
+    debug_assert!(matches!(
+        cmptype,
+        lsyscache::COMPARE_EQ | lsyscache::COMPARE_OVERLAP | lsyscache::COMPARE_CONTAINED_BY
+    ));
+    let amid = lsyscache::get_opclass_method(opclass)?;
+    let mut opid = InvalidOid;
+    let mut strat: u16 = 0;
+    let cannot_identify = |opcintype: Oid,
+                           detail: String|
+     -> PgResult<Box<types_error::PgError>> {
+        let msg = match cmptype {
+            lsyscache::COMPARE_EQ => format!(
+                "could not identify an equality operator for type {}",
+                format_type::format_type_be(opcintype)?
+            ),
+            lsyscache::COMPARE_OVERLAP => format!(
+                "could not identify an overlaps operator for type {}",
+                format_type::format_type_be(opcintype)?
+            ),
+            _ => format!(
+                "could not identify a contained-by operator for type {}",
+                format_type::format_type_be(opcintype)?
+            ),
+        };
+        Ok(Box::new((*err(msg, ERRCODE_UNDEFINED_OBJECT)).with_detail(detail)))
+    };
+    let mut opcintype = InvalidOid;
+    if let Some((opfamily, intype)) = lsyscache::get_opclass_opfamily_and_input_type(opclass)? {
+        opcintype = intype;
+        strat = amapi::IndexAmTranslateCompareType(cmptype, amid, opfamily, true)?;
+        if strat == 0 {
+            let famname = lsyscache::get_opfamily_name(mcx, opfamily, false)?
+                .expect("opfamily name");
+            return Err(cannot_identify(
+                opcintype,
+                format!(
+                    "Could not translate compare type {cmptype} for operator family \"{}\" of access method \"{}\".",
+                    famname.as_str(),
+                    get_am_name_closed(amid)
+                ),
+            )?);
+        }
+        // rhstype parameterized so FKs can ask for a <@ whose rhs matches the
+        // aggregate (range_agg returns anymultirange).
+        let rhstype = if rhstype == InvalidOid { opcintype } else { rhstype };
+        opid = lsyscache::get_opfamily_member(opfamily, opcintype, rhstype, strat as i16)?;
+    }
+    if opid == InvalidOid {
+        let famname = match lsyscache::get_opclass_opfamily_and_input_type(opclass)? {
+            Some((opfamily, _)) => lsyscache::get_opfamily_name(mcx, opfamily, false)?
+                .map(|n| n.as_str().to_string())
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        return Err(cannot_identify(
+            opcintype,
+            format!(
+                "There is no suitable operator in operator family \"{famname}\" for access method \"{}\".",
+                get_am_name_closed(amid)
+            ),
+        )?);
+    }
+    Ok((opid, strat))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn DefineIndex<'mcx>(
     mcx: Mcx<'mcx>,
@@ -273,10 +361,7 @@ pub fn DefineIndex<'mcx>(
             false,
         )?;
     }
-    if stmt.iswithoutoverlaps {
-        unported("DefineIndex: WITHOUT OVERLAPS constraints");
-    }
-    let exclusion = !stmt.excludeOpNames.is_nil();
+    let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
     if !stmt.indexIncludingParams.is_nil() {
         unported("DefineIndex: INCLUDE columns");
     }
@@ -285,7 +370,7 @@ pub fn DefineIndex<'mcx>(
     }
     let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol) =
         resolve_index_am(stmt.accessMethod);
-    if stmt.unique && !amcanunique {
+    if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {
         return Err(err(
             format!("access method \"{amname}\" does not support unique indexes"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -295,6 +380,12 @@ pub fn DefineIndex<'mcx>(
     if exclusion && matches!(amname, "gin" | "brin") {
         return Err(err(
             format!("access method \"{amname}\" does not support exclusion constraints"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
+    }
+    if stmt.iswithoutoverlaps && amname != "gist" {
+        return Err(err(
+            format!("access method \"{amname}\" does not support WITHOUT OVERLAPS constraints"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
     }
@@ -464,6 +555,7 @@ pub fn DefineIndex<'mcx>(
         ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
+        ii_WithoutOverlaps: stmt.iswithoutoverlaps,
     };
 
     let mut typeIds = [InvalidOid; INDEX_MAX_KEYS as usize];
@@ -481,6 +573,7 @@ pub fn DefineIndex<'mcx>(
         &stmt.indexParams,
         &stmt.excludeOpNames,
         stmt.isconstraint,
+        stmt.iswithoutoverlaps,
         accessMethodId,
         amname,
         amcanorder,
@@ -708,6 +801,10 @@ pub fn DefineIndex<'mcx>(
             0
         }) | (if stmt.initdeferred {
             catalog_index::INDEX_CONSTR_CREATE_INIT_DEFERRED
+        } else {
+            0
+        }) | (if stmt.iswithoutoverlaps {
+            catalog_index::INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS
         } else {
             0
         }),
@@ -1181,6 +1278,7 @@ fn ComputeIndexAttrs<'mcx>(
     attList: &types_nodes::NodeList<'mcx>,
     exclusionOpNames: &types_nodes::NodeList<'mcx>,
     isconstraint: bool,
+    iswithoutoverlaps: bool,
     accessMethodId: Oid,
     amname: &str,
     amcanorder: bool,
@@ -1347,6 +1445,18 @@ fn ComputeIndexAttrs<'mcx>(
             indexInfo.ii_ExclusionOps[attn] = opid;
             indexInfo.ii_ExclusionProcs[attn] = lsyscache::get_opcode(opid)?;
             indexInfo.ii_ExclusionStrats[attn] = strat as u16;
+        } else if iswithoutoverlaps {
+            // Last key column takes the overlaps operator; the rest equality.
+            let cmptype = if attn == indexInfo.ii_NumIndexKeyAttrs as usize - 1 {
+                lsyscache::COMPARE_OVERLAP
+            } else {
+                lsyscache::COMPARE_EQ
+            };
+            let (opid, strat) =
+                GetOperatorFromCompareType(mcx, opclassIds[attn], InvalidOid, cmptype)?;
+            indexInfo.ii_ExclusionOps[attn] = opid;
+            indexInfo.ii_ExclusionProcs[attn] = lsyscache::get_opcode(opid)?;
+            indexInfo.ii_ExclusionStrats[attn] = strat;
         }
 
         coloptions[attn] = 0;

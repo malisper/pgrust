@@ -511,7 +511,11 @@ pub fn generateClonedIndexStmt<'mcx>(
     if source_idx.rd_options.is_some() {
         unported("generateClonedIndexStmt: index reloptions (untransformRelOptions)");
     }
-    if idxrec.indisexclusion {
+    // Temporal (WITHOUT OVERLAPS) unique/PK indexes are indisexclusion;
+    // plain exclusion constraints stay loud.
+    let iswithoutoverlaps =
+        (idxrec.indisprimary || idxrec.indisunique) && idxrec.indisexclusion;
+    if idxrec.indisexclusion && !iswithoutoverlaps {
         unported("generateClonedIndexStmt: exclusion constraints");
     }
     if idxrec.indnatts != idxrec.indnkeyatts {
@@ -529,6 +533,10 @@ pub fn generateClonedIndexStmt<'mcx>(
         unique: idxrec.indisunique,
         nulls_not_distinct: idxrec.indnullsnotdistinct,
         primary: idxrec.indisprimary,
+        // C also rebuilds excludeOpNames from conexclop here; left NIL so
+        // DefineIndex re-derives the same =/&& operators from the (default,
+        // enforced above) gist opclasses via GetOperatorFromCompareType.
+        iswithoutoverlaps,
         transformed: true,
         ..IndexStmt::default()
     };
