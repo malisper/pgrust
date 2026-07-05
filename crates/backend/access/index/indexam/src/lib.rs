@@ -470,6 +470,10 @@ pub fn index_parkscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     }
     debug_assert!(!scan.xs_temp_snap);
     scan.xs_snapshot = None;
+    // Relation aliases are relcache refcounts (CheckTableNotInUse counts
+    // them): a parked scan must hold none.
+    scan.heapRelation = None;
+    scan.indexRelation = None;
     Ok(())
 }
 
@@ -487,7 +491,7 @@ pub fn index_rearmscan<'mcx>(
     if !kind.ampredlocks() {
         predicate::PredicateLockRelation(indexRelation, &snapshot)?;
     }
-    scan.indexRelation = indexRelation.alias();
+    scan.indexRelation = Some(indexRelation.alias());
     scan.heapRelation = Some(heapRelation.alias());
     scan.xs_heapfetch = Some(fetch::begin(heapRelation));
     scan.xs_snapshot = Some(snapshot);
@@ -521,7 +525,7 @@ pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
 pub fn index_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     let kind = scan.opaque.kind();
     if !kind.has_ammarkpos() {
-        return Err(missing_procedure("ammarkpos", &scan.indexRelation));
+        return Err(missing_procedure("ammarkpos", scan.index_rel()));
     }
 
     am_markpos(scan)
@@ -532,7 +536,7 @@ pub fn index_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 
     let kind = scan.opaque.kind();
     if !kind.has_amrestrpos() {
-        return Err(missing_procedure("amrestrpos", &scan.indexRelation));
+        return Err(missing_procedure("amrestrpos", scan.index_rel()));
     }
 
     if let Some(heapfetch) = scan.xs_heapfetch.as_mut() {
@@ -757,14 +761,14 @@ pub fn index_getnext_tidrun<'mcx>(
 // One probe on the enabled flag then one add: C's pgstat_should_count_relation shape.
 #[inline]
 fn pgstat_count_index_tuples(scan: &mut IndexScanDescData<'_>, n: u64) {
-    if scan.indexRelation.pgstat_enabled.get() {
+    if scan.index_rel().pgstat_enabled.get() {
         scan.xs_pgstat_index_tuples += n;
     }
 }
 
 #[inline]
 fn pgstat_count_heap_fetch(scan: &mut IndexScanDescData<'_>) {
-    if scan.indexRelation.pgstat_enabled.get() {
+    if scan.index_rel().pgstat_enabled.get() {
         scan.xs_pgstat_heap_fetches += 1;
     }
 }
@@ -832,7 +836,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btmarkpos(scan),
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks ammarkpos (guarded by has_ammarkpos)"),
-        IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", &scan.indexRelation)),
+        IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", scan.index_rel())),
         IndexScanOpaque::Spgist(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
         #[cfg(test)]
@@ -847,7 +851,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Btree(_) => nbtree::btrestrpos(scan),
         IndexScanOpaque::Hash(_) => unreachable!("hash lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks amrestrpos (guarded by has_amrestrpos)"),
-        IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", &scan.indexRelation)),
+        IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", scan.index_rel())),
         IndexScanOpaque::Spgist(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
         #[cfg(test)]
@@ -865,12 +869,12 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
         IndexScanOpaque::Hash(_) => hash::hashgettuple(scan, direction),
         IndexScanOpaque::Gin(_) => panic!(
             "index \"{}\" does not support amgettuple (bitmap-only AM)",
-            scan.indexRelation.name()
+            scan.index_rel().name()
         ),
         IndexScanOpaque::Gist(_) => gist::gistgettuple(scan, direction),
         IndexScanOpaque::Spgist(_) => spgist::spggettuple(scan, direction),
         // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
-        IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", &scan.indexRelation)),
+        IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::gettuple(scan)),
         #[allow(unreachable_patterns)]
@@ -1157,7 +1161,7 @@ mod mock {
     ) -> IndexScanDescData<'mcx> {
         IndexScanDescData {
             heapRelation: None,
-            indexRelation: indexRelation.alias(),
+            indexRelation: Some(indexRelation.alias()),
             xs_snapshot: None,
             numberOfKeys: nkeys,
             numberOfOrderBys: norderbys,

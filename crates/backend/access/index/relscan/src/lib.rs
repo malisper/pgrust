@@ -403,7 +403,9 @@ const _: () = assert!(!core::mem::needs_drop::<IndexPrefetchState>());
 // Trimmed to the amgettuple shape; a rule-3 by-value resource owner.
 pub struct IndexScanDescData<'mcx> {
     pub heapRelation: Option<Relation<'mcx>>,
-    pub indexRelation: Relation<'mcx>,
+    // None only while parked in an executor skeleton (relations close per
+    // execution — CheckTableNotInUse counts these aliases).
+    pub indexRelation: Option<Relation<'mcx>>,
     pub xs_snapshot: Option<Rc<SnapshotData<'mcx>>>,
     pub numberOfKeys: i32,
     pub numberOfOrderBys: i32,
@@ -439,6 +441,13 @@ pub struct IndexScanDescData<'mcx> {
     pub xs_nsearches: u64,
 }
 
+impl<'mcx> IndexScanDescData<'mcx> {
+    #[inline]
+    pub fn index_rel(&self) -> &Relation<'mcx> {
+        self.indexRelation.as_ref().expect("index scan parked (skeleton)")
+    }
+}
+
 // ScanKeyData is droppy (sk_func.fn_extra): plain reserve, not arena helpers.
 fn skey_vec<'mcx>(mcx: Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, ScanKeyData>> {
     let mut v = PgVec::new_in(mcx);
@@ -459,7 +468,7 @@ pub fn relation_get_index_scan<'mcx>(
 ) -> PgResult<IndexScanDescData<'mcx>> {
     Ok(IndexScanDescData {
         heapRelation: None,
-        indexRelation: indexRelation.alias(),
+        indexRelation: Some(indexRelation.alias()),
         xs_snapshot: None,
         numberOfKeys: nkeys,
         numberOfOrderBys: norderbys,

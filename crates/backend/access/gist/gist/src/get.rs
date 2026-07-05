@@ -26,7 +26,7 @@ const GIST_SHARE: i32 = bufmgr::BUFFER_LOCK_SHARE;
 
 // gistkillitems.
 fn gistkillitems(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
-    let rel = scan.indexRelation.alias();
+    let rel = scan.index_rel().alias();
     let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
         crate::non_gist_opaque()
     };
@@ -156,7 +156,7 @@ fn gist_scan_page(
     parentlsn: ::types_core::XLogRecPtr,
     mut tbm: Option<&mut tidbitmap::TIDBitmap<'_>>,
 ) -> PgResult<i64> {
-    let rel = scan.indexRelation.alias();
+    let rel = scan.index_rel().alias();
     let want_itup = scan.xs_want_itup;
     let ignore_killed = scan.ignore_killed_tuples;
     let norderbys = scan.numberOfOrderBys;

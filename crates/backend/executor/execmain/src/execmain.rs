@@ -135,8 +135,8 @@ fn skeleton_parkable(node: &PlanStateNode<'_>) -> bool {
     }
 }
 
-// Park-side disarm: close scan descriptors and node-held relation pins;
-// runs only after skeleton_parkable admitted the whole tree.
+// Park-side disarm: quiesce scan descriptors and release node-held relation
+// pins; runs only after skeleton_parkable admitted the whole tree.
 fn skeleton_park_tree(node: &mut PlanStateNode<'_>) -> PgResult<()> {
     match node {
         PlanStateNode::Result(rs) => match rs.outer.as_deref_mut() {
