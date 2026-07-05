@@ -903,6 +903,9 @@ pub fn check_default_partition_contents<'mcx>(
 
         let mut state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
             .expect("partition constraint expr");
+        // By-ref call results land in the statement mcx (C: per-tuple
+        // econtext reset each row).
+        state.arm_result_mcx(mcx);
         let mut slot = tableam::table_slot_create(mcx, part_rel)?;
         let snapshot = snapmgr::GetLatestSnapshot()?;
         let snapshot = snapmgr::RegisterSnapshot(Some(&snapshot))?.expect("registered snapshot");
@@ -1055,6 +1058,10 @@ pub fn fc_satisfies_hash_partition(
             continue;
         }
         let mut call = LocalFcinfo::<2>::new(my.partcollid[i]);
+        // Custom hash opclasses (SQL-function support procs) allocate by-ref
+        // intermediates through the frame's result mcx.
+        // SAFETY: the outer frame's armed context outlives this inner call.
+        unsafe { call.set_result_mcx(fcinfo.result_mcx_detached()) };
         call.set_arg(0, fcinfo.args[argno].value);
         call.set_arg(1, seed);
         let hash = my.partsupfunc[i].invoke(&mut call)?;

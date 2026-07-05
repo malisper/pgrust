@@ -561,6 +561,7 @@ pub fn hash_combine64(a: u64, b: u64) -> u64 {
 }
 
 pub fn compute_partition_hash_value(
+    mcx: Mcx<'_>,
     partsupfunc: &mut [FmgrInfo],
     partcollation: &[Oid],
     values: &[Datum],
@@ -573,6 +574,11 @@ pub fn compute_partition_hash_value(
             continue;
         }
         let mut fcinfo = LocalFcinfo::<2>::new(partcollation[i]);
+        // Custom hash opclasses (SQL-function support procs) allocate by-ref
+        // intermediates through the frame's result mcx (C: caller's
+        // CurrentMemoryContext).
+        // SAFETY: `mcx` outlives this stack frame's single call.
+        unsafe { fcinfo.set_result_mcx(mcx) };
         fcinfo.set_arg(0, values[i]);
         fcinfo.set_arg(1, seed);
         let hash = partsupfunc[i].invoke(&mut fcinfo)?;

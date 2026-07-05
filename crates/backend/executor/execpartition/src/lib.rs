@@ -223,13 +223,14 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                     return Err(no_partition_error(mcx, pd, &values, &isnull));
                 };
                 let part_index = get_partition_for_tuple(
+                    eval_mcx,
                     &pd.key,
                     &mut pd.supfuncs,
                     &pd.partdesc,
                     boundinfo,
                     &values[..n],
                     &isnull[..n],
-                );
+                )?;
                 if part_index < 0 {
                     return Err(no_partition_error(mcx, pd, &values, &isnull));
                 }
@@ -316,6 +317,10 @@ fn check_default_partition<'mcx>(
         pd.default_check = Some(state);
     }
     let state = pd.default_check.as_mut().expect("just built");
+    // C evaluates in the routing econtext's per-tuple memory; by-ref call
+    // results (collated comparisons, lower()-style key exprs) ride the armed
+    // result mcx.
+    state.arm_result_mcx(mcx);
     let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
     let r = execexpr::exec_eval_expr(state, &mut slots)?;
     // ExecCheck: NULL passes.
@@ -343,6 +348,9 @@ pub fn exec_partition_check<'mcx>(
         *cache = Some(state);
     }
     let state = cache.as_mut().expect("just built");
+    // C evaluates in the caller econtext's per-tuple memory; by-ref call
+    // results ride the armed result mcx.
+    state.arm_result_mcx(mcx);
     let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
     let r = execexpr::exec_eval_expr(state, &mut slots)?;
     Ok(r.isnull || r.value.as_bool())
@@ -428,27 +436,33 @@ fn slot_value_description<'mcx>(
 
 // get_partition_for_tuple, LIST/RANGE arms with the last-found cache.
 fn get_partition_for_tuple(
+    eval_mcx: Mcx<'_>,
     key: &partcache::PartitionKeyData,
     supfuncs: &mut [FmgrInfo],
     partdesc: &PartitionDescData,
     boundinfo: &PartitionBoundInfoData<'static>,
     values: &[Datum],
     isnull: &[bool],
-) -> i32 {
+) -> PgResult<i32> {
     let mut bound_offset: i32 = -1;
     let mut part_index: i32 = -1;
     match key.strategy as u8 {
         // Too cheap to cache; hash tables cannot have a DEFAULT partition.
         b'h' => {
-            let row_hash =
-                partbounds::compute_partition_hash_value(supfuncs, &key.partcollation, values, isnull)
-                    .unwrap_or_else(|e| panic!("partition hash support function failed: {e:?}"));
-            return boundinfo.indexes[(row_hash % boundinfo.indexes.len() as u64) as usize];
+            // Errors propagate (C: a user hash support proc may elog).
+            let row_hash = partbounds::compute_partition_hash_value(
+                eval_mcx,
+                supfuncs,
+                &key.partcollation,
+                values,
+                isnull,
+            )?;
+            return Ok(boundinfo.indexes[(row_hash % boundinfo.indexes.len() as u64) as usize]);
         }
         b'l' => {
             if isnull[0] {
                 if boundinfo.accepts_nulls() {
-                    return boundinfo.null_index;
+                    return Ok(boundinfo.null_index);
                 }
             } else {
                 if partdesc.last_found_count.get() >= PARTITION_CACHED_FIND_THRESHOLD {
@@ -461,7 +475,7 @@ fn get_partition_for_tuple(
                         values[0],
                     );
                     if cmpval == 0 {
-                        return boundinfo.indexes[last as usize];
+                        return Ok(boundinfo.indexes[last as usize]);
                     }
                 }
                 let mut equal = false;
@@ -485,7 +499,7 @@ fn get_partition_for_tuple(
                         values,
                     );
                     if cmpval == 0 {
-                        return boundinfo.indexes[last + 1];
+                        return Ok(boundinfo.indexes[last + 1]);
                     }
                     if cmpval < 0 && last + 1 < boundinfo.ndatums {
                         let m = last + 1;
@@ -497,7 +511,7 @@ fn get_partition_for_tuple(
                             values,
                         );
                         if cmpval > 0 {
-                            return boundinfo.indexes[m];
+                            return Ok(boundinfo.indexes[m]);
                         }
                     }
                 }
@@ -512,7 +526,7 @@ fn get_partition_for_tuple(
 
     if part_index < 0 {
         // No bound matched: the DEFAULT partition, if any (cache untouched).
-        return boundinfo.default_index;
+        return Ok(boundinfo.default_index);
     }
 
     debug_assert!(bound_offset >= 0);
@@ -523,7 +537,7 @@ fn get_partition_for_tuple(
         partdesc.last_found_part_index.set(part_index);
         partdesc.last_found_datum_index.set(bound_offset);
     }
-    part_index
+    Ok(part_index)
 }
 
 // FunctionCall2Coll over the dispatch-resolved supfunc (per-row path; the

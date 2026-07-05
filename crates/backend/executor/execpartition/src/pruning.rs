@@ -247,7 +247,14 @@ fn init_prune_context<'mcx>(
                         .unwrap_or_else(|e| panic!("fmgr_info({cmpfn}) failed: {e:?}")),
                 );
                 if expr.node_tag() != NodeTag::T_Const {
-                    ctx.exprstates[stateidx] = execexpr::exec_init_expr(mcx, Some(expr), params)?;
+                    let mut state = execexpr::exec_init_expr(mcx, Some(expr), params)?;
+                    if let Some(st) = state.as_mut() {
+                        // By-ref step-expr results land in the query mcx (C:
+                        // node econtext per-tuple; pruning runs per rescan,
+                        // not per row — bounded growth).
+                        st.arm_result_mcx(mcx);
+                    }
+                    ctx.exprstates[stateidx] = state;
                 }
             }
         }
@@ -457,6 +464,12 @@ fn get_matching_partitions<'mcx>(
 
 fn sup_call(f: &mut FmgrInfo, coll: Oid, a: Datum, b: Datum) -> Datum {
     let mut fcinfo = LocalFcinfo::<2>::new(coll);
+    // range_cmp / SQL-function support procs detoast and build by-ref
+    // intermediates through the result mcx; call-lifetime scratch (sup_cmp
+    // precedent in execpartition).
+    let scratch = ::mcx::MemoryContext::new("partprune sup_call");
+    // SAFETY: scratch outlives this call.
+    unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
     fcinfo.set_arg(0, a);
     fcinfo.set_arg(1, b);
     let r = f

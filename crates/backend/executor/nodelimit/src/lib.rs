@@ -74,8 +74,14 @@ pub fn exec_init_limit<'mcx>(
     let mcx = estate.es_query_cxt;
     let ps_ExprContext = estate.exec_assign_expr_context();
     let params = estate.param_bind();
-    let limitOffset = ::execexpr::exec_init_expr(mcx, node.limitOffset, params)?;
-    let limitCount = ::execexpr::exec_init_expr(mcx, node.limitCount, params)?;
+    let mut limitOffset = ::execexpr::exec_init_expr(mcx, node.limitOffset, params)?;
+    let mut limitCount = ::execexpr::exec_init_expr(mcx, node.limitCount, params)?;
+    for st in [limitOffset.as_mut(), limitCount.as_mut()].into_iter().flatten() {
+        // C recomputes LIMIT/OFFSET in ps_ExprContext's per-tuple memory;
+        // by-ref intermediates ride the armed result mcx.
+        // SAFETY: the ExprContext outlives the programs (same estate).
+        unsafe { st.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
+    }
     if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
         panic!(
             "ExecInitLimit (nodeLimit.c): WITH TIES lane needs \

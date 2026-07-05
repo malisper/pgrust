@@ -46,7 +46,10 @@ impl MultiSort {
         }
         let d = &self.dims[dim];
         let mut finfo = d.entry.cmp_proc_finfo();
-        types_fmgr::function_call2_coll(&mut finfo, d.collation, a, b)
+        // Comparators (numeric_cmp etc.) detoast by-ref args through the
+        // result mcx; call-lifetime scratch (ANALYZE cold path).
+        let scratch = ::mcx::MemoryContext::new("multi_sort compare_dim");
+        types_fmgr::function_call2_coll_in(&mut finfo, d.collation, scratch.mcx(), a, b)
             .unwrap_or_else(|e| panic!("multi_sort_compare: comparison failed: {e:?}"))
             .as_i32()
     }
