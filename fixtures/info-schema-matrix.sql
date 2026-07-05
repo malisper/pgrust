@@ -111,6 +111,15 @@ SELECT 'free text'::information_schema.character_data;
 SELECT 'YES'::information_schema.yes_or_no;
 SELECT '2020-06-01 12:00:00+00'::timestamptz::information_schema.time_stamp;
 
+-- UNION ALL member whose nested subquery pulls up into a join: after the
+-- recursive pull_up_subqueries the member's jointree bottoms out at a
+-- JoinExpr, so the post-recursion is_safe_append_member recheck must reject
+-- the pullup (r4 panic shape; the information_schema *_privileges /
+-- check_constraints UNION ALL views hit this).
+SELECT x FROM (SELECT a.id AS x FROM ischeck.parent a JOIN ischeck.parent b ON a.id = b.id) s
+UNION ALL
+SELECT 99 ORDER BY 1;
+
 -- psql describe family against the zoo.
 \d ischeck.parent
 \d ischeck.child

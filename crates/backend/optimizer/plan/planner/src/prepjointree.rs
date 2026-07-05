@@ -714,6 +714,20 @@ fn pull_up_simple_subquery<'mcx>(
         }
         sub_local.rtable = fresh_rtable;
         pull_up_subqueries(run, &mut sub_local)?;
+        // C rechecks unconditionally after the recursive pull_up_subqueries:
+        // nested pull-ups can leave the member's jointree bottoming out at a
+        // JoinExpr or multiple RTEs, which is_safe_append_member must reject
+        // (graceful non-pullup; the RTE stays for set_subquery_pathlist).
+        if !is_simple_subquery_sub(
+            mcx,
+            &sub_local,
+            rte.lateral,
+            rte.security_barrier,
+            lowest_outer_join,
+        )? || (containing_appendrel.is_some() && !is_safe_append_member(&sub_local))
+        {
+            return Ok(false);
+        }
         (mcx::alloc_leak_in(mcx, sub_local)?, false)
     } else {
         (shared_sub, false)
