@@ -59,6 +59,7 @@ pub struct InternalTriggerArgs<'a> {
     pub tgtype: i16,
     pub deferrable: bool,
     pub initdeferred: bool,
+    pub parent_trigger_oid: Oid,
 }
 
 #[cold]
@@ -106,7 +107,7 @@ pub fn CreateTriggerInternal<'mcx>(
         args.constraint_oid,
         args.index_oid,
         args.funcoid,
-        InvalidOid,
+        args.parent_trigger_oid,
         None,
         true,
         false,

@@ -942,6 +942,7 @@ pub fn index_constraint_create<'mcx>(
                     | types_trigger::TRIGGER_TYPE_UPDATE,
                 deferrable: true,
                 initdeferred,
+                parent_trigger_oid: InvalidOid,
             },
         )?;
     }
