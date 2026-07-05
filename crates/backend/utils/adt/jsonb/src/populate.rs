@@ -1673,6 +1673,9 @@ fn populate_recordset_worker(
     if allowed_modes & SFRM_Materialize == 0 {
         return Err(materialize_required());
     }
+    // C sets returnMode before any early return: a NULL-json exit must read
+    // as Materialize-with-no-store (empty set), not value-per-call.
+    fcinfo.rsinfo_mut().expect("checked above").returnMode = SetFunctionReturnMode::Materialize;
 
     let mut cache = match take_cache(flinfo) {
         Some(c) => c,
