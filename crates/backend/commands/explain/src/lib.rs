@@ -12,7 +12,8 @@ use types_core::instrument::{BufferUsage, INSTRUMENT_BUFFERS, INSTRUMENT_ROWS, I
 use types_core::{Oid, TEXTOID};
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
-use types_nodes::parsenodes::{ExplainStmt, Query};
+use types_nodes::parsenodes::{ExplainStmt, ObjectType, Query};
+use types_nodes::rawnodes::{CreateTableAsStmt, IntoClause};
 use types_nodes::plannodes::PlannedStmt;
 use types_nodes::{Node, NodeTag};
 use types_portal::{ParamListHandle, QueryEnvHandle, CURSOR_OPT_PARALLEL_OK};
@@ -93,7 +94,7 @@ pub fn ExplainQuery<'mcx>(
     } else {
         let last = rewritten.len() - 1;
         for (i, q) in rewritten.into_iter().enumerate() {
-            ExplainOneQuery(mcx, q, CURSOR_OPT_PARALLEL_OK, &mut es, query_string, params, query_env)?;
+            ExplainOneQuery(mcx, q, CURSOR_OPT_PARALLEL_OK, None, &mut es, query_string, params, query_env)?;
             if i != last {
                 ExplainSeparatePlans(&mut es)?;
             }
@@ -136,21 +137,24 @@ pub fn ExplainResultDesc<'mcx>(
     Ok(tupdesc)
 }
 
+// "into" is None unless explaining the contents of a CreateTableAsStmt;
+// it is the IntoClause node handle.
 #[allow(clippy::too_many_arguments)]
 fn ExplainOneQuery<'mcx>(
     mcx: Mcx<'mcx>,
     query: Query<'mcx>,
     cursor_options: i32,
+    into: Option<Node<'mcx>>,
     es: &mut ExplainState<'mcx>,
     query_string: &str,
     params: ParamListHandle,
     query_env: QueryEnvHandle,
 ) -> PgResult<()> {
     if query.commandType == CmdType::CMD_UTILITY {
-        return ExplainOneUtility(mcx, query.utilityStmt, es, query_string, params, query_env);
+        return ExplainOneUtility(mcx, query.utilityStmt, into, es, query_string, params, query_env);
     }
     // ExplainOneQuery_hook: no plugin surface exists.
-    standard_ExplainOneQuery(mcx, query, cursor_options, es, query_string, params, query_env)
+    standard_ExplainOneQuery(mcx, query, cursor_options, into, es, query_string, params, query_env)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -158,6 +162,7 @@ pub fn standard_ExplainOneQuery<'mcx>(
     mcx: Mcx<'mcx>,
     query: Query<'mcx>,
     cursor_options: i32,
+    into: Option<Node<'mcx>>,
     es: &mut ExplainState<'mcx>,
     query_string: &str,
     params: ParamListHandle,
@@ -179,13 +184,15 @@ pub fn standard_ExplainOneQuery<'mcx>(
         instrument::buffer_usage_accum_diff(&mut b, &instrument::pg_buffer_usage(), &start);
         b
     });
-    ExplainOnePlan(mcx, plan, es, query_string, params, query_env, planduration, bufusage.as_ref())
+    ExplainOnePlan(mcx, plan, into, es, query_string, params, query_env, planduration, bufusage.as_ref())
 }
 
-// "into" (CreateTableAsStmt) callers are loud in the CTAS arm.
+// "into" is None unless explaining the contents of a CreateTableAsStmt.
+#[allow(clippy::too_many_arguments)]
 fn ExplainOneUtility<'mcx>(
     mcx: Mcx<'mcx>,
     utility_stmt: Option<Node<'mcx>>,
+    into: Option<Node<'mcx>>,
     es: &mut ExplainState<'mcx>,
     query_string: &str,
     params: ParamListHandle,
@@ -195,10 +202,53 @@ fn ExplainOneUtility<'mcx>(
         return Ok(());
     };
     match stmt.node_tag() {
-        NodeTag::T_CreateTableAsStmt => panic!(
-            "ExplainOneUtility (explain.c): CREATE TABLE AS arm needs \
-             CreateTableAsStmt vocabulary (CTAS lane)"
-        ),
+        NodeTag::T_CreateTableAsStmt => {
+            let ctas = stmt.as_variant::<CreateTableAsStmt>().expect("tag checked");
+            if createas_seams::create_table_as_rel_exists::call(mcx, ctas)? {
+                match ctas.objtype {
+                    ObjectType::OBJECT_TABLE => {
+                        ExplainDummyGroup("CREATE TABLE AS", None, es);
+                    }
+                    ObjectType::OBJECT_MATVIEW => {
+                        ExplainDummyGroup("CREATE MATERIALIZED VIEW", None, es);
+                    }
+                    other => panic!("unexpected object type: {}", other as i32),
+                }
+                return Ok(());
+            }
+            let ctas_into = ctas.into;
+            // C copyObject(ctas->query) guards the plancache-held EXPLAIN
+            // EXECUTE case, which reaches ExplainOnePlan and never this arm;
+            // the tree here is per-statement, so the Query moves out
+            // (DECLARE CURSOR precedent below).
+            // SAFETY: this call holds the only live access to the
+            // CreateTableAsStmt tree.
+            let query_node =
+                unsafe { stmt.with_mut::<CreateTableAsStmt, _>(|c| c.query.take()) }
+                    .flatten()
+                    .expect("EXPLAIN CREATE TABLE AS without analyzed query");
+            // SAFETY: as above.
+            let mut query: Query<'mcx> =
+                unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+                    .expect("CTAS query is not an analyzed Query");
+            if queryjumble::IsQueryIdEnabled() {
+                queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
+            }
+            // post_parse_analyze_hook: no plugin surface exists.
+            let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
+            assert!(rewritten.len() == 1, "CTAS rewrite yielded {} queries", rewritten.len());
+            let query = rewritten.into_iter().next().expect("len == 1");
+            return ExplainOneQuery(
+                mcx,
+                query,
+                CURSOR_OPT_PARALLEL_OK,
+                ctas_into,
+                es,
+                query_string,
+                params,
+                query_env,
+            );
+        }
         NodeTag::T_DeclareCursorStmt => {
             let options = stmt.as_declare_cursor_stmt().expect("tag checked").options;
             // C copyObject(dcs->query) then rewrites the copy; EXPLAIN never
@@ -219,7 +269,7 @@ fn ExplainOneUtility<'mcx>(
             let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
             assert!(rewritten.len() == 1, "DECLARE rewrite yielded {} queries", rewritten.len());
             let query = rewritten.into_iter().next().expect("len == 1");
-            return ExplainOneQuery(mcx, query, options, es, query_string, params, query_env);
+            return ExplainOneQuery(mcx, query, options, None, es, query_string, params, query_env);
         }
         NodeTag::T_ExecuteStmt => {
             if es.memory {
@@ -263,6 +313,7 @@ fn ExplainOneUtility<'mcx>(
                     ExplainOnePlanRef(
                         mcx,
                         pstmt,
+                        into,
                         es,
                         prepared_query,
                         param_li,
@@ -315,10 +366,13 @@ impl Drop for QueryDescOwner {
     }
 }
 
+// "into" is None unless explaining the contents of a CreateTableAsStmt, in
+// which case executing the query creates that table.
 #[allow(clippy::too_many_arguments)]
 pub fn ExplainOnePlan<'mcx>(
     mcx: Mcx<'mcx>,
     plan: PlannedStmt<'mcx>,
+    into: Option<Node<'mcx>>,
     es: &mut ExplainState<'mcx>,
     query_string: &str,
     params: ParamListHandle,
@@ -327,13 +381,14 @@ pub fn ExplainOnePlan<'mcx>(
     bufusage: Option<&BufferUsage>,
 ) -> PgResult<()> {
     let pstmt: &'mcx PlannedStmt<'mcx> = mcx::alloc_leak_in(mcx, plan)?;
-    ExplainOnePlanRef(mcx, pstmt, es, query_string, params, query_env, planduration, bufusage)
+    ExplainOnePlanRef(mcx, pstmt, into, es, query_string, params, query_env, planduration, bufusage)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn ExplainOnePlanRef<'mcx>(
     mcx: Mcx<'mcx>,
     pstmt: &'mcx PlannedStmt<'mcx>,
+    into: Option<Node<'mcx>>,
     es: &mut ExplainState<'mcx>,
     query_string: &str,
     params: ParamListHandle,
@@ -367,8 +422,11 @@ fn ExplainOnePlanRef<'mcx>(
     snapmgr::PushCopiedSnapshot(&snapmgr::GetActiveSnapshot())?;
     snapmgr::UpdateActiveSnapshotCommandId()?;
 
-    // C: into's CreateIntoRelDestReceiver arm is loud upstream (no CTAS lane).
-    let cmd_dest = if es.serialize != EXPLAIN_SERIALIZE_NONE {
+    let into_clause: Option<&IntoClause<'_>> =
+        into.map(|n| n.as_variant::<IntoClause>().expect("IntoClause"));
+    let cmd_dest = if into.is_some() {
+        types_dest::CommandDest::IntoRel
+    } else if es.serialize != EXPLAIN_SERIALIZE_NONE {
         types_dest::CommandDest::ExplainSerialize
     } else {
         types_dest::CommandDest::None
@@ -388,12 +446,16 @@ fn ExplainOnePlanRef<'mcx>(
     if es.generic {
         eflags |= EXEC_FLAG_EXPLAIN_GENERIC;
     }
+    if let Some(ic) = into_clause {
+        eflags |= createas_seams::get_into_rel_eflags::call(ic.skipData);
+    }
     execmain_seams::executor_start::call(qd, eflags)?;
 
     let mut serializeMetrics = explain_dr::SerializeMetrics::default();
     if es.analyze {
-        // CTAS WITH NO DATA's NoMovement arm is loud upstream (no CTAS lane).
-        let mut dest = if es.serialize != EXPLAIN_SERIALIZE_NONE {
+        let mut dest = if let Some(into_node) = into {
+            DestReceiver::IntoRel(createas_seams::IntoRelState::new(mcx, into_node))
+        } else if es.serialize != EXPLAIN_SERIALIZE_NONE {
             DestReceiver::ExplainSerialize(explain_dr::CreateExplainSerializeDestReceiver(
                 mcx,
                 es.serialize == EXPLAIN_SERIALIZE_BINARY,
@@ -403,18 +465,20 @@ fn ExplainOnePlanRef<'mcx>(
         } else {
             DestReceiver::DoNothing
         };
-        execmain_seams::executor_run::call(
-            qd,
-            types_scan::sdir::ScanDirection::ForwardScanDirection,
-            0,
-            &mut dest,
-        )?;
+        // C: EXPLAIN ANALYZE CREATE TABLE AS WITH NO DATA is weird.
+        let dir = if into_clause.is_some_and(|ic| ic.skipData) {
+            types_scan::sdir::ScanDirection::NoMovementScanDirection
+        } else {
+            types_scan::sdir::ScanDirection::ForwardScanDirection
+        };
+        execmain_seams::executor_run::call(qd, dir, 0, &mut dest)?;
         execmain_seams::executor_finish::call(qd)?;
         // C: GetSerializationMetrics(dest) before dest->rDestroy(dest); the
         // IntoRel else-arm (all-zero metrics) is the initializer above.
         if let DestReceiver::ExplainSerialize(dr) = &dest {
             serializeMetrics = dr.metrics;
         }
+        dest.destroy();
         totaltime += elapsed_time(&starttime);
     }
 
