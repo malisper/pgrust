@@ -77,7 +77,7 @@ pub struct LexizeData<'mcx> {
 }
 
 impl<'mcx> LexizeData<'mcx> {
-    fn new(mcx: Mcx<'mcx>) -> Self {
+    pub(crate) fn new(mcx: Mcx<'mcx>) -> Self {
         LexizeData {
             cur_dict: InvalidOid,
             pos_dict: 0,
