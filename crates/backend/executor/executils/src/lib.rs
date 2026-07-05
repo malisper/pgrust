@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::rc::Rc;
 
 use ::datum::Datum;
-use ::mcx::{Mcx, McxOwned, MemoryContext, PgVec};
+use ::mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
@@ -312,7 +312,11 @@ pub struct ExprContextCB {
 
 #[derive(Debug)]
 pub struct ExprContextData<'mcx> {
-    per_tuple: MemoryContext,
+    // P1 address-stability constraint: es_exprcontexts relocates on growth,
+    // and compiled programs arm raw NonNull<MemoryContext> pointers at this
+    // context (arm_result_mcx_raw). The arena box pins the struct so those
+    // pointers survive every later create_expr_context.
+    per_tuple: PgBox<'mcx, MemoryContext>,
     pub ecxt_scantuple: Option<ExecSlotId>,
     pub ecxt_innertuple: Option<ExecSlotId>,
     pub ecxt_outertuple: Option<ExecSlotId>,
@@ -328,7 +332,7 @@ pub struct ExprContextData<'mcx> {
 }
 
 impl<'mcx> ExprContextData<'mcx> {
-    fn new(per_query: Mcx<'mcx>, per_tuple: MemoryContext) -> Self {
+    fn new(per_query: Mcx<'mcx>, per_tuple: PgBox<'mcx, MemoryContext>) -> Self {
         ExprContextData {
             per_tuple,
             ecxt_scantuple: None,
@@ -442,7 +446,7 @@ pub struct EStateData<'mcx> {
     pub es_worker_instrument: PgVec<'mcx, WorkerInstr<'mcx>>,
     // Node-owned resettable contexts (C's node-local AllocSets): droppy, so
     // they live in the estate owner; nodes hold AuxCxtId (docs/no-drop.md).
-    es_aux_contexts: PgVec<'mcx, MemoryContext>,
+    es_aux_contexts: PgVec<'mcx, PgBox<'mcx, MemoryContext>>,
     pub es_finished: bool,
     es_exprcontexts: PgVec<'mcx, Option<ExprContextData<'mcx>>>,
     pub es_subplanstates: PgVec<'mcx, SubplanStateCell>,
@@ -603,7 +607,10 @@ impl<'mcx> EStateData<'mcx> {
 
     /// `CreateExprContext(estate)`.
     pub fn create_expr_context(&mut self) -> EcxtId {
-        let per_tuple = self.es_query_cxt.context().new_child_bump("ExprContext");
+        let per_tuple = PgBox::new_in(
+            self.es_query_cxt.context().new_child_bump("ExprContext"),
+            self.es_query_cxt,
+        );
         let mut ecxt = ExprContextData::new(self.es_query_cxt, per_tuple);
         ecxt.ecxt_param_list_info = self.es_param_list_info;
         ecxt.ecxt_param_exec_vals = core::ptr::NonNull::new(self.es_param_exec_vals.as_mut_ptr());
@@ -629,7 +636,13 @@ impl<'mcx> EStateData<'mcx> {
     }
 
     pub fn create_aux_context(&mut self, name: &'static str) -> AuxCxtId {
-        let cxt = self.es_query_cxt.context().new_child_bump(name);
+        // Boxed for the same address-stability constraint as ExprContextData
+        // per_tuple: PgVec allocator handles taken from aux_mcx must survive
+        // es_aux_contexts growth.
+        let cxt = PgBox::new_in(
+            self.es_query_cxt.context().new_child_bump(name),
+            self.es_query_cxt,
+        );
         let id = AuxCxtId(self.es_aux_contexts.len() as u32);
         self.es_aux_contexts.push(cxt);
         id
@@ -1036,7 +1049,7 @@ pub struct StandaloneExprContext<'mcx>(ExprContextData<'mcx>);
 pub fn create_standalone_expr_context(mcx: Mcx<'_>) -> StandaloneExprContext<'_> {
     StandaloneExprContext(ExprContextData::new(
         mcx,
-        mcx.context().new_child_bump("ExprContext"),
+        PgBox::new_in(mcx.context().new_child_bump("ExprContext"), mcx),
     ))
 }
 
