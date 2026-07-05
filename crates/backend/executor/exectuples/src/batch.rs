@@ -65,6 +65,8 @@ pub struct SoaBatch<'mcx> {
     // Kind 0 rows deform column-major from tps.
     tps: PgVec<'mcx, *const u8>,
     kinds: PgVec<'mcx, u8>,
+    // OR of all staged kinds: 0 = every row is kind 0 (dense lane).
+    kinds_or: u8,
 }
 
 impl<'mcx> SoaBatch<'mcx> {
@@ -80,6 +82,7 @@ impl<'mcx> SoaBatch<'mcx> {
             fallback: [0; SOA_BM_WORDS],
             tps: ::mcx::vec_from_elem_in(mcx, core::ptr::null(), SOA_MAX_ROWS),
             kinds: ::mcx::vec_from_elem_in(mcx, 0u8, SOA_MAX_ROWS),
+            kinds_or: 0,
         }
     }
 
@@ -88,6 +91,7 @@ impl<'mcx> SoaBatch<'mcx> {
         debug_assert!(nrows as usize <= SOA_MAX_ROWS);
         self.nrows = nrows;
         self.fallback = [0; SOA_BM_WORDS];
+        self.kinds_or = 0;
     }
 
     #[inline]
@@ -254,10 +258,12 @@ pub fn soa_classify_row(
         if (tuple.t_data().natts() as usize) < ncols {
             soa.fallback[idx / 64] |= 1u64 << (idx % 64);
             *soa.kinds.get_unchecked_mut(idx) = 2;
+            soa.kinds_or |= 2;
             return;
         }
         if tuple.has_nulls() {
             *soa.kinds.get_unchecked_mut(idx) = 1;
+            soa.kinds_or |= 1;
             return soa_deform_tuple_nulls(soa, atts, idx, ncols, tuple);
         }
         *soa.kinds.get_unchecked_mut(idx) = 0;
@@ -281,6 +287,9 @@ pub fn soa_deform_columns(
         Some(c) => (c as usize, c as usize + 1),
         None => (0, ncols),
     };
+    // Dense lane: every staged row is kind 0, so the per-row kind test drops
+    // and the isnull column becomes one vectorizable fill.
+    let dense = soa.kinds_or == 0;
     for c in first..last {
         let att = &atts[c];
         let off = plan.offs[c] as usize;
@@ -293,11 +302,19 @@ pub fn soa_deform_columns(
             let kinds = &soa.kinds[..n];
             macro_rules! col_loop {
                 (|$p:ident| $load:expr) => {
-                    for i in 0..n {
-                        if *kinds.get_unchecked(i) == 0 {
+                    if dense {
+                        isnull.fill(false);
+                        for i in 0..n {
                             let $p: *const u8 = *tps.get_unchecked(i);
                             *values.get_unchecked_mut(i) = $load;
-                            *isnull.get_unchecked_mut(i) = false;
+                        }
+                    } else {
+                        for i in 0..n {
+                            if *kinds.get_unchecked(i) == 0 {
+                                let $p: *const u8 = *tps.get_unchecked(i);
+                                *values.get_unchecked_mut(i) = $load;
+                                *isnull.get_unchecked_mut(i) = false;
+                            }
                         }
                     }
                 };
@@ -390,5 +407,5 @@ mcx::forget_safe_nodrop!(SoaVarKeyPlan);
 
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs },
-    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds },
+    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or },
 );
