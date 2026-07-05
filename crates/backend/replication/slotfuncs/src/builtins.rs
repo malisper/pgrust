@@ -519,19 +519,29 @@ pub fn fc_pg_copy_logical_replication_slot_c(
     fc_copy_replication_slot(flinfo, fcinfo, true, None, None)
 }
 
-// pg_sync_replication_slots (slotfuncs.c): standby slot sync against the
-// primary over a physical replication connection. Loud: SyncReplicationSlots
-// / ValidateSlotSyncParams / walrcv_connect (libpqwalreceiver) and the
-// slotsync.c worker machinery are all unported (no walreceiver-conn crate
-// exists in this repo yet).
+// pg_sync_replication_slots (slotfuncs.c): the permission and not-a-standby
+// pre-checks are live (byte-parity error shape on a primary); everything past
+// them is loud — SyncReplicationSlots / ValidateSlotSyncParams /
+// walrcv_connect (libpqwalreceiver) and the slotsync.c worker machinery are
+// all unported (no walreceiver-conn crate exists in this repo yet).
 pub fn fc_pg_sync_replication_slots(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    slot::CheckSlotPermissions()?;
+
+    if !transam_xlog::RecoveryInProgress() {
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg("replication slots can only be synchronized to a standby server")
+            .finish(loc("pg_sync_replication_slots"))?;
+        unreachable!("ereport(ERROR) returns Err");
+    }
+
     panic!(
-        "pg_sync_replication_slots not ported: SyncReplicationSlots / \
-         ValidateSlotSyncParams / walrcv_connect substrate unported \
-         (slotsync.c, libpqwalreceiver)"
+        "pg_sync_replication_slots not ported past its pre-checks: \
+         SyncReplicationSlots / ValidateSlotSyncParams / walrcv_connect \
+         substrate unported (slotsync.c, libpqwalreceiver)"
     );
 }
 
