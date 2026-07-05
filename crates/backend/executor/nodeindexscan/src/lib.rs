@@ -56,6 +56,9 @@ pub struct IndexScanState<'mcx> {
     pub iss_OrderDir: ScanDirection,
     pub iss_PlanNodeId: i32,
     pub iss_ParallelAware: bool,
+    // Plan's indexid, kept for skeleton re-open (iss_RelationDesc is closed
+    // while parked).
+    pub iss_IndexOid: ::types_core::Oid,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
@@ -296,6 +299,7 @@ pub fn exec_init_index_scan_rel<'mcx>(
         ss,
         indexqualorig,
         iss_ScanDesc: None,
+        iss_IndexOid: index_rel.rd_id,
         iss_RelationDesc: Some(index_rel),
         iss_ScanKeys,
         iss_Runtime,
@@ -499,6 +503,40 @@ pub fn exec_end_index_scan(node: &mut IndexScanState<'_>) -> PgResult<()> {
     Ok(())
 }
 
+/// Executor-skeleton park: release everything per-run (scan descriptor,
+/// relation pins, runtime-key readiness); compiled expressions, scan keys and
+/// slots stay armed. Pairs with `skeleton_rebind`.
+pub fn skeleton_park(node: &mut IndexScanState<'_>) -> PgResult<()> {
+    if let Some(scandesc) = node.iss_ScanDesc.take() {
+        index_endscan(PgBox::into_inner(scandesc))?;
+    }
+    if let Some(index_rel) = node.iss_RelationDesc.take() {
+        index_close(index_rel, NoLock)?;
+    }
+    node.ss.ss_currentRelation = None;
+    if let Some(rt) = node.iss_Runtime.as_deref_mut() {
+        rt.ready = false;
+    }
+    Ok(())
+}
+
+/// Executor-skeleton re-arm: re-pin both relations for a new execution, as
+/// C's ExecInitIndexScan does per ExecutorStart (locks are already held by
+/// the cached-plan path's AcquireExecutorLocks, as on the fresh init path).
+pub fn skeleton_rebind<'mcx>(
+    node: &mut IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(node.iss_ScanDesc.is_none() && node.iss_RelationDesc.is_none());
+    let mcx = estate.es_query_cxt;
+    let rel = estate
+        .exec_get_range_table_relation(node.ss.scanrelid, false)?
+        .alias();
+    node.ss.ss_currentRelation = Some(rel);
+    node.iss_RelationDesc = Some(indexam::index_open(mcx, node.iss_IndexOid, NoLock)?);
+    Ok(())
+}
+
 /// `ExecReScanIndexScan`; the reorder-queue flush arm is unreachable (ORDER
 /// BY loud-panics at init).
 pub fn exec_rescan_index_scan<'mcx>(
@@ -686,7 +724,7 @@ pub fn exec_index_scan_initialize_worker<'mcx>(
 // is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexScanState<'_> { ss, iss_PlanNodeId, iss_ParallelAware;
+    IndexScanState<'_> { ss, iss_PlanNodeId, iss_ParallelAware, iss_IndexOid;
         indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_Runtime,
         iss_OrderDir },
 );

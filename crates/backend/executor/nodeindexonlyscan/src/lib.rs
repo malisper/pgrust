@@ -44,6 +44,9 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_VMBuffer: VmBuffer,
     pub ioss_PlanNodeId: i32,
     pub ioss_ParallelAware: bool,
+    // Plan's indexid, kept for skeleton re-open (ioss_RelationDesc is closed
+    // while parked).
+    pub ioss_IndexOid: ::types_core::Oid,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
@@ -473,6 +476,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ss,
         recheckqual,
         ioss_ScanDesc: None,
+        ioss_IndexOid: index_rel.rd_id,
         ioss_RelationDesc: Some(index_rel),
         ioss_ScanKeys,
         ioss_Runtime,
@@ -516,6 +520,40 @@ fn order_dir(dir: i32) -> ScanDirection {
 #[inline(never)]
 fn orderby_unported() -> ! {
     panic!("nodeindexonlyscan: indexorderby (amcanorderbyop lane) not ported")
+}
+
+/// Executor-skeleton park: release everything per-run (VM buffer, scan
+/// descriptor, relation pins, runtime-key readiness); compiled expressions,
+/// scan keys and slots stay armed. Pairs with `skeleton_rebind`.
+pub fn skeleton_park(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
+    node.ioss_VMBuffer.release();
+    if let Some(scandesc) = node.ioss_ScanDesc.take() {
+        index_endscan(PgBox::into_inner(scandesc))?;
+    }
+    if let Some(index_rel) = node.ioss_RelationDesc.take() {
+        index_close(index_rel, NoLock)?;
+    }
+    node.ss.ss_currentRelation = None;
+    if let Some(rt) = node.ioss_Runtime.as_deref_mut() {
+        rt.ready = false;
+    }
+    Ok(())
+}
+
+/// Executor-skeleton re-arm: re-pin both relations for a new execution, as
+/// C's ExecInitIndexOnlyScan does per ExecutorStart.
+pub fn skeleton_rebind<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(node.ioss_ScanDesc.is_none() && node.ioss_RelationDesc.is_none());
+    let mcx = estate.es_query_cxt;
+    let rel = estate
+        .exec_get_range_table_relation(node.ss.scanrelid, false)?
+        .alias();
+    node.ss.ss_currentRelation = Some(rel);
+    node.ioss_RelationDesc = Some(indexam::index_open(mcx, node.ioss_IndexOid, NoLock)?);
+    Ok(())
 }
 
 /// `ExecEndIndexOnlyScan`; the parallel-worker instrumentation copy-back
@@ -657,7 +695,7 @@ pub fn exec_index_only_scan_initialize_worker<'mcx>(
 // ScanDirection is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware;
+    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware, ioss_IndexOid;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
         ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
 );

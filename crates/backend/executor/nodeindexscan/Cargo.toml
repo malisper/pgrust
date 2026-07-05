@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 postgres_seams = { path = "../../tcop/postgres_seams" }
 mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
@@ -26,7 +27,6 @@ exectuples = { path = "../exectuples" }
 init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
-types_core = { path = "../../../_support/types/types_core" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nbtree = { path = "../../../_support/types/types_nbtree" }
 types_slot = { path = "../../../_support/types/types_slot" }
