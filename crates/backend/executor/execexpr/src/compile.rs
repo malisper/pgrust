@@ -996,6 +996,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_Param => node.as_param().unwrap().paramtype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
+        NodeTag::T_NullIfExpr => node.as_null_if_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
         NodeTag::T_WindowFunc => node.as_window_func().unwrap().wintype,
         NodeTag::T_GroupingFunc => 23,
@@ -1126,6 +1127,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_OpExpr => {
             for a in node.as_op_expr().unwrap().args.iter() {
+                setup_walker(a, info);
+            }
+        }
+        NodeTag::T_NullIfExpr => {
+            for a in node.as_null_if_expr().unwrap().args.iter() {
                 setup_walker(a, info);
             }
         }
@@ -1429,6 +1435,20 @@ pub(crate) fn init_expr_rec<'mcx>(
                 _ => unreachable!("init_func returns a FuncExpr step"),
             };
             push_step(state, mcx, Step::Distinct { call, out })
+        }
+        NodeTag::T_NullIfExpr => {
+            let op = node.as_null_if_expr().unwrap();
+            let step = init_func(
+                node, &op.args, op.opfuncid, op.inputcollid, state, mcx, out, agg, params, sub,
+            )?;
+            let call = match step {
+                Step::FuncExpr { call, .. }
+                | Step::FuncExprStrict1 { call, .. }
+                | Step::FuncExprStrict2 { call, .. }
+                | Step::FuncExprStrict { call, .. } => call,
+                _ => unreachable!("init_func returns a FuncExpr step"),
+            };
+            push_step(state, mcx, Step::NullIf { call, out })
         }
         NodeTag::T_RowCompareExpr => {
             init_row_compare(node, state, mcx, out, agg, params, sub)?;

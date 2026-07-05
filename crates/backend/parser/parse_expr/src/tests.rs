@@ -229,6 +229,58 @@ fn a_expr_op_transforms_to_op_expr() {
 }
 
 #[test]
+fn a_expr_nullif_transforms_to_null_if_expr() {
+    install_oper_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "=" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_NULLIF,
+        name,
+        Some(int_const(mcx, 1, 7)),
+        Some(int_const(mcx, 2, 11)),
+        9,
+    )
+    .unwrap();
+
+    let out = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .unwrap();
+
+    assert_eq!(out.node_tag(), types_nodes::NodeTag::T_NullIfExpr);
+    let n = out.as_null_if_expr().unwrap();
+    assert_eq!((n.opno, n.opfuncid, n.opresulttype), (96, 65, INT4OID));
+    assert!(!n.opretset);
+    assert_eq!(n.args.len(), 2);
+    assert_eq!(n.location, 9);
+    assert_eq!(expr_type(out), INT4OID);
+}
+
+#[test]
+fn a_expr_nullif_non_boolean_op_errors() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+    let name = NodeList::make1(mcx, Node::mk(mcx, PgStr { sval: "+" }).unwrap()).unwrap();
+    let aexpr = Node::mk_a_expr(
+        mcx,
+        A_Expr_Kind::AEXPR_NULLIF,
+        name,
+        Some(int_const(mcx, 1, 7)),
+        Some(int_const(mcx, 2, 11)),
+        9,
+    )
+    .unwrap();
+
+    let err = transformExpr(mcx, &mut pstate, aexpr, ParseExprKind::EXPR_KIND_SELECT_TARGET)
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_DATATYPE_MISMATCH);
+    assert_eq!(err.message(), "NULLIF requires = operator to yield boolean");
+}
+
+#[test]
 fn expr_location_takes_leftmost_of_node_and_args() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();

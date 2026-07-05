@@ -54,6 +54,10 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out,
             node.as_variant::<types_nodes::primnodes::DistinctExpr>().expect("DistinctExpr"),
         )?,
+        NodeTag::T_NullIfExpr => out_null_if_expr(
+            out,
+            node.as_variant::<types_nodes::primnodes::NullIfExpr>().expect("NullIfExpr"),
+        )?,
         NodeTag::T_FuncExpr => {
             out_func_expr(out, node.as_variant::<FuncExpr>().expect("FuncExpr"))?
         }
@@ -732,6 +736,22 @@ fn out_distinct_expr(
     w!(
         out,
         "{{DISTINCTEXPR :opno {} :opfuncid {} :opresulttype {} :opretset ",
+        o.opno, o.opfuncid, o.opresulttype
+    );
+    out_bool(out, o.opretset);
+    w!(out, " :opcollid {} :inputcollid {} :args ", o.opcollid, o.inputcollid);
+    out_list(out, &o.args)?;
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_null_if_expr(
+    out: &mut PgString<'_>,
+    o: &types_nodes::primnodes::NullIfExpr<'_>,
+) -> PgResult<()> {
+    w!(
+        out,
+        "{{NULLIFEXPR :opno {} :opfuncid {} :opresulttype {} :opretset ",
         o.opno, o.opfuncid, o.opresulttype
     );
     out_bool(out, o.opretset);

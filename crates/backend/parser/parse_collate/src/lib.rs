@@ -371,6 +371,7 @@ fn assign_collations_walker<'mcx>(
         // SubLink: children walked (T_Query arm supplies the EXPR sublink's
         // first-column collation); exprSetCollation on SubLink is a C no-op.
         tag @ (NodeTag::T_OpExpr
+        | NodeTag::T_NullIfExpr
         | NodeTag::T_ScalarArrayOpExpr
         | NodeTag::T_ArrayExpr
         | NodeTag::T_FuncExpr
@@ -433,6 +434,12 @@ fn assign_collations_walker<'mcx>(
                 }
                 NodeTag::T_OpExpr => {
                     for arg in &node.as_op_expr().unwrap().args {
+                        assign_collations_walker(arg, &mut loccontext)?;
+                    }
+                }
+                // NullIfExpr is struct-equivalent to OpExpr (nodeFuncs.c).
+                NodeTag::T_NullIfExpr => {
+                    for arg in &node.as_null_if_expr().unwrap().args {
                         assign_collations_walker(arg, &mut loccontext)?;
                     }
                 }
@@ -686,6 +693,13 @@ fn assign_collations_walker<'mcx>(
                 match tag {
                     NodeTag::T_OpExpr => node
                         .with_mut::<types_nodes::OpExpr, _>(|o| {
+                            o.opcollid = set_coll;
+                            o.inputcollid = input_coll;
+                        })
+                        .unwrap(),
+                    // NullIfExpr is struct-equivalent to OpExpr (nodeFuncs.c).
+                    NodeTag::T_NullIfExpr => node
+                        .with_mut::<types_nodes::NullIfExpr, _>(|o| {
                             o.opcollid = set_coll;
                             o.inputcollid = input_coll;
                         })

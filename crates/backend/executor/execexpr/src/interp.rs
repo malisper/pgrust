@@ -1340,6 +1340,25 @@ fn run_program<'mcx>(
                     write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
                 }
             }
+            Step::NullIf { call, out } => {
+                // SAFETY: args 0/1 of the call's live fcinfo image.
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                if a0.isnull || a1.isnull {
+                    write_out(*out, a0.value, a0.isnull);
+                } else {
+                    let (value, isnull) = invoke(call)?;
+                    if !isnull && value.as_bool() {
+                        write_out(*out, Datum::null(), true);
+                    } else {
+                        write_out(*out, a0.value, false);
+                    }
+                }
+            }
             Step::RowCompareStep { call, strict, jumpnull, jumpdone, out } => {
                 match eval_row_compare_step(call, *strict)? {
                     None => {

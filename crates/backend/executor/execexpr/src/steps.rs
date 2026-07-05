@@ -88,6 +88,9 @@ pub enum Step {
     BoolTestIsNotFalse { out: OutRef },
     // C EEOP_DISTINCT: the resolved "=" call with DISTINCT null semantics.
     Distinct { call: FuncCall, out: OutRef },
+    // C EEOP_NULLIF: the resolved "=" call; equal non-null args -> NULL,
+    // else the first arg unchanged.
+    NullIf { call: FuncCall, out: OutRef },
     // Agg pointers resolve at build into once-allocated never-moved AggState arrays.
     AggrefEval { value: NonNull<Datum>, null: NonNull<bool>, out: OutRef },
     // C EEOP_GROUPING_FUNC: bit per clause col, 1 = ungrouped in the
