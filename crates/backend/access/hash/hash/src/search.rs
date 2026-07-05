@@ -30,6 +30,7 @@ pub(crate) struct HashScanCtx<'a, 'mcx> {
     pub keys: &'a [ScanKeyData],
     pub xs_heaptid: &'a mut ItemPointerData,
     pub xs_pgstat_index_scans: &'a mut u64,
+    pub xs_nsearches: &'a mut u64,
 }
 
 /// _hash_next.
@@ -166,6 +167,8 @@ pub(crate) fn _hash_first(ctx: &mut HashScanCtx<'_, '_>, dir: ScanDirection) -> 
     if rel.pgstat_enabled.get() {
         *ctx.xs_pgstat_index_scans += 1;
     }
+    // C hashsearch.c:301-302 (scan->instrument->nsearches++).
+    *ctx.xs_nsearches += 1;
 
     if ctx.keys.is_empty() {
         return Err(Box::new(

@@ -12,7 +12,7 @@ pub fn DiscardCommand(stmt: &DiscardStmt, is_top_level: bool) -> PgResult<()> {
             Ok(())
         }
         DiscardMode::DISCARD_SEQUENCES => {
-            ResetSequenceCaches();
+            sequence::ResetSequenceCaches();
             Ok(())
         }
         DiscardMode::DISCARD_TEMP => {
@@ -22,8 +22,7 @@ pub fn DiscardCommand(stmt: &DiscardStmt, is_top_level: bool) -> PgResult<()> {
     }
 }
 
-// C no-ops on empty state; what could populate either loud-panics upstream.
-fn ResetSequenceCaches() {}
+// C no-ops on empty state; LISTEN is loud-unported so nothing populates it.
 fn Async_UnlistenAll() {}
 
 fn DiscardAll(is_top_level: bool) -> PgResult<()> {
@@ -36,6 +35,6 @@ fn DiscardAll(is_top_level: bool) -> PgResult<()> {
     lock::LockReleaseAll(USER_LOCKMETHOD.into(), true)?;
     plancache::ResetPlanCache();
     catalog_namespace::ResetTempTableNamespace()?;
-    ResetSequenceCaches();
+    sequence::ResetSequenceCaches();
     Ok(())
 }

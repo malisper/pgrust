@@ -70,6 +70,7 @@ macro_rules! split_scan {
             ignore_killed_tuples,
             xs_heaptid,
             xs_pgstat_index_scans,
+            xs_nsearches,
             opaque,
             ..
         } = $scan;
@@ -84,6 +85,7 @@ macro_rules! split_scan {
             keys: keyData.as_slice(),
             xs_heaptid,
             xs_pgstat_index_scans,
+            xs_nsearches,
         }
     }};
 }

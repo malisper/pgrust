@@ -147,7 +147,11 @@ fn build_setop_child_paths<'mcx>(
     {
         let final_rel = crate::planmain::fetch_final_rel(run);
         consider_parallel = run.root.rel(final_rel).consider_parallel;
-        debug_assert!(run.root.rel(final_rel).partial_pathlist.is_empty());
+        assert!(
+            run.root.rel(final_rel).partial_pathlist.is_empty(),
+            "build_setop_child_paths: parallel-union partial-path arm unported \
+             (C prepunion.c:617-633 builds a partial subqueryscan path)"
+        );
         let cheapest = run
             .root
             .rel(final_rel)
@@ -316,7 +320,11 @@ fn generate_union_paths<'mcx>(
         if !run.root.rel(rel).consider_parallel {
             consider_parallel = false;
         }
-        debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+        assert!(
+            run.root.rel(rel).partial_pathlist.is_empty(),
+            "generate_union_paths: parallel-union partial-path arm unported \
+             (C prepunion.c:794-798 collects child partial paths for Parallel Append)"
+        );
         relids = crate::relnode::relids_union(mcx, &relids, &run.root.rel(rel).relids);
     }
 
