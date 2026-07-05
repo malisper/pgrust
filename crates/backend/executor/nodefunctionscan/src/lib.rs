@@ -319,7 +319,10 @@ fn exec_init_table_function_result<'mcx>(
         );
     }
     // init_sexpr's ACL_EXECUTE check omitted: built-ins are PUBLIC-execute.
-    let flinfo = fmgr_core::fmgr_info(func.funcid)?;
+    let mut flinfo = fmgr_core::fmgr_info(func.funcid)?;
+    // C init_sexpr: fmgr_info_set_expr((Node *) sexpr->expr, &sexpr->func) —
+    // variadic-"any" callees read arg types off fn_expr.
+    flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, fexpr)?);
     Ok(SetExprState {
         flinfo,
         args,
