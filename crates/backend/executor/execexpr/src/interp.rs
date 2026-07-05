@@ -989,6 +989,18 @@ fn run_program<'mcx>(
                     write_out(*out, v, false);
                 }
             }
+            Step::FieldStoreDeForm { fs, frame, out } => {
+                let r = read_out(*out);
+                // SAFETY: compile-allocated state, sole live access.
+                let st = unsafe { fs.as_ref() };
+                eval_field_store_deform(frames, st, *frame, r)?;
+            }
+            Step::FieldStoreForm { fs, frame, out } => {
+                // SAFETY: compile-allocated state, sole live access.
+                let st = unsafe { fs.as_ref() };
+                let v = eval_field_store_form(frames, st, *frame)?;
+                write_out(*out, v, false);
+            }
             Step::NullTestIsNull { out } => {
                 let r = read_out(*out);
                 write_out(*out, Datum::from_bool(r.isnull), false);
@@ -2187,6 +2199,90 @@ fn eval_convert_rowtype(
     };
     core::mem::forget(tuple);
     Ok(result)
+}
+
+// ExecEvalFieldStoreDeForm (execExprInterp.c): a NULL input tuple deforms to
+// an all-nulls row; the detoasted image lives in the armed per-eval mcx, so
+// the deformed column datums stay live through FIELDSTORE_FORM.
+#[inline(never)]
+#[cold]
+fn eval_field_store_deform(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    st: &crate::steps::FieldStoreState,
+    frame: u32,
+    r: NullableDatum,
+) -> PgResult<()> {
+    use ::types_tuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+    let n = st.ncolumns as usize;
+    // SAFETY: compile-allocated workspace of ncolumns slots, sole live access.
+    let columns = unsafe { core::slice::from_raw_parts_mut(st.columns.as_ptr(), n) };
+    if r.isnull {
+        for c in columns {
+            *c = NullableDatum { value: Datum::null(), isnull: true };
+        }
+        return Ok(());
+    }
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let p = r.value.as_usize() as *const u8;
+    // SAFETY: non-null composite datum; detoast covers short/compressed forms.
+    let raw = unsafe { core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p)) };
+    // Leaked into the per-eval mcx: the deformed column datums reference the
+    // detoasted image until FIELDSTORE_FORM copies them out.
+    let rec = ::detoast_seams::detoast_attr::call(mcx, raw)?.leak();
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
+    // SAFETY: MAXALIGN'd detoasted image of datum_length() bytes.
+    let tuple = unsafe {
+        HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+    // SAFETY: compile-time blessed tupdesc, plan-mcx-lived.
+    let desc = unsafe { st.desc.as_ref() };
+    let mut values: ::mcx::PgVec<'_, Datum> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    values.resize(n, Datum::null());
+    nulls.resize(n, true);
+    ::types_tuple::heap_deform_tuple(&tuple, desc, &mut values, &mut nulls);
+    core::mem::forget(tuple);
+    for (i, c) in columns.iter_mut().enumerate() {
+        *c = NullableDatum { value: values[i], isnull: nulls[i] };
+    }
+    Ok(())
+}
+
+// ExecEvalFieldStoreForm (execExprInterp.c): re-form the composite in the
+// armed per-eval result context.
+#[inline(never)]
+#[cold]
+fn eval_field_store_form(
+    frames: &mut [crate::steps::FuncFrame<'_>],
+    st: &crate::steps::FieldStoreState,
+    frame: u32,
+) -> PgResult<Datum> {
+    let f = &mut frames[frame as usize];
+    // SAFETY: the argless frame's fcinfo image is live; armed per eval.
+    let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    let n = st.ncolumns as usize;
+    // SAFETY: workspace written by DEFORM + the per-field steps just executed.
+    let src = unsafe { core::slice::from_raw_parts(st.columns.as_ptr(), n) };
+    let mut values: ::mcx::PgVec<'_, Datum> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, n)?;
+    for nd in src {
+        values.push(nd.value);
+        nulls.push(nd.isnull);
+    }
+    // SAFETY: compile-time blessed tupdesc, plan-mcx-lived.
+    let desc = unsafe { st.desc.as_ref() };
+    let tuple = ::heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+    let d = Datum::from_usize(tuple.image().as_ptr() as usize);
+    core::mem::forget(tuple);
+    Ok(d)
 }
 
 // ExecEvalArrayExpr (execExprInterp.c), 1-D leg; the result array lives in

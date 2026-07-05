@@ -37,6 +37,7 @@ funcapi = { path = "../../utils/fmgr/funcapi" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 
 [dev-dependencies]
+execreplication = { path = "../../executor/execreplication" }
 transam_seams = { path = "../../access/transam/transam_seams" }
 lock = { path = "../../storage/lmgr/lock" }
 logical_worker_seams = { path = "../../replication/logical_worker_seams" }

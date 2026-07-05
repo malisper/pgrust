@@ -11861,6 +11861,7 @@ dependencies = [
  "deadlock_seams",
  "execmain",
  "execmain_seams",
+ "execreplication",
  "exectuples",
  "executils",
  "explain",
