@@ -7,8 +7,6 @@ use types_nodes::node_tree::Node;
 use types_nodes::NodeTag;
 use types_tuple::TupleDescData;
 
-use crate::payload_gap;
-
 // Divergence from C (execmain::desc_mcx precedent): portal-held descriptors
 // outlive the statement, so they live in a backend-lifetime aset, not
 // CurrentMemoryContext.
@@ -107,7 +105,7 @@ pub fn UtilityTupleDescriptor(
     }
 }
 
-// UtilityContainsQuery (utility.c); CTAS nesting is the CTAS lane.
+// UtilityContainsQuery (utility.c).
 pub fn UtilityContainsQuery<'mcx>(parsetree: Node<'mcx>) -> Option<Node<'mcx>> {
     let qry_node = match parsetree.node_tag() {
         NodeTag::T_DeclareCursorStmt => parsetree
@@ -120,9 +118,11 @@ pub fn UtilityContainsQuery<'mcx>(parsetree: Node<'mcx>) -> Option<Node<'mcx>> {
             .expect("tag checked")
             .query
             .expect("analyzed EXPLAIN holds a Query"),
-        NodeTag::T_CreateTableAsStmt => {
-            payload_gap("UtilityContainsQuery", "CreateTableAsStmt")
-        }
+        NodeTag::T_CreateTableAsStmt => parsetree
+            .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+            .expect("tag checked")
+            .query
+            .expect("analyzed CTAS holds a Query"),
         _ => return None,
     };
     let qry = qry_node.as_query().expect("analyzed statement holds a Query");
