@@ -53,6 +53,18 @@ pub(crate) fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> 
 
 #[cold]
 #[inline(never)]
+fn err_at(
+    pstate: &parser_small1::ParseState<'_, '_>,
+    location: types_core::ParseLoc,
+    msg: String,
+    sqlstate: types_error::SqlState,
+) -> Box<PgError> {
+    let pos = parser_small1::parser_errposition(pstate, location, mbutils::GetDatabaseEncoding());
+    Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate).with_cursor_position(pos))
+}
+
+#[cold]
+#[inline(never)]
 fn conflicting_options() -> Box<PgError> {
     err("conflicting or redundant options".to_string(), ERRCODE_SYNTAX_ERROR)
 }
@@ -568,12 +580,19 @@ pub fn interpret_function_parameter_list<'mcx>(
                 ObjectType::OBJECT_PROCEDURE => "procedures cannot accept set arguments",
                 _ => "functions cannot accept set arguments",
             };
-            return Err(err(msg.to_string(), ERRCODE_INVALID_FUNCTION_DEFINITION));
+            return Err(err_at(
+                pstate,
+                fp.location,
+                msg.to_string(),
+                ERRCODE_INVALID_FUNCTION_DEFINITION,
+            ));
         }
 
         if matches!(fpmode, FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC) {
             if var_count > 0 {
-                return Err(err(
+                return Err(err_at(
+                    pstate,
+                    fp.location,
                     "VARIADIC parameter must be the last input parameter".to_string(),
                     ERRCODE_INVALID_FUNCTION_DEFINITION,
                 ));
@@ -586,7 +605,9 @@ pub fn interpret_function_parameter_list<'mcx>(
                 // OUT-after-VARIADIC is disallowed only for procedures: it
                 // would cause confusion in a CALL statement.
                 if var_count > 0 {
-                    return Err(err(
+                    return Err(err_at(
+                        pstate,
+                        fp.location,
                         "VARIADIC parameter must be the last parameter".to_string(),
                         ERRCODE_INVALID_FUNCTION_DEFINITION,
                     ));
@@ -605,7 +626,9 @@ pub fn interpret_function_parameter_list<'mcx>(
                 ANYARRAYOID | ANYCOMPATIBLEARRAYOID | ANYOID => {}
                 _ => {
                     if lsyscache::get_element_type(toid)? == InvalidOid {
-                        return Err(err(
+                        return Err(err_at(
+                            pstate,
+                            fp.location,
                             "VARIADIC parameter must be an array".to_string(),
                             ERRCODE_INVALID_FUNCTION_DEFINITION,
                         ));
@@ -631,7 +654,9 @@ pub fn interpret_function_parameter_list<'mcx>(
                     continue;
                 }
                 if !pn.is_empty() && pn == name {
-                    return Err(err(
+                    return Err(err_at(
+                        pstate,
+                        fp.location,
                         format!("parameter name \"{name}\" used more than once"),
                         ERRCODE_INVALID_FUNCTION_DEFINITION,
                     ));
