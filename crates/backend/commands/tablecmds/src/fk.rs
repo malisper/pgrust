@@ -873,6 +873,12 @@ fn transform_column_name_list(
             }
         }
         let Some(att) = found else {
+            if catalog_heap::SystemAttributeByName(attname).is_some() {
+                return Err(err(
+                    "system columns cannot be used in foreign keys".to_string(),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
+            }
             return Err(err(
                 format!(
                     "column \"{attname}\" referenced in foreign key constraint does not exist"
