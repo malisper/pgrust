@@ -1,4 +1,21 @@
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::Once;
+
+// WaitEventCustomNew/GetWaitEventCustomIdentifier take the real
+// WAIT_EVENT_CUSTOM_LOCK; the process-global LWLock array must exist first
+// (predicate::tests's minimal CreateLWLocks fixture).
+fn setup_lwlocks() {
+    static SETUP: Once = Once::new();
+    SETUP.call_once(|| {
+        shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("size overflow")));
+        shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("size overflow")));
+        shmem_seams::shmem_alloc::set(|size| {
+            Ok(Box::leak(vec![0u8; size].into_boxed_slice()).as_mut_ptr())
+        });
+        xact_seams::get_current_transaction_nest_level::set(|| 1);
+        lwlock::CreateLWLocks(false).unwrap();
+    });
+}
 
 #[test]
 fn report_wait_start_writes_registered_slot_and_end_clears() {
@@ -27,6 +44,10 @@ fn wait_event_type_decodes_classes() {
     assert_eq!(pgstat_get_wait_event_type(PG_WAIT_IPC + 8), Some("IPC"));
     assert_eq!(pgstat_get_wait_event_type(PG_WAIT_TIMEOUT + 1), Some("Timeout"));
     assert_eq!(pgstat_get_wait_event_type(PG_WAIT_IO + 50), Some("IO"));
+    assert_eq!(
+        pgstat_get_wait_event_type(PG_WAIT_INJECTIONPOINT),
+        Some("InjectionPoint")
+    );
 }
 
 #[test]
@@ -66,5 +87,52 @@ fn wait_event_unknown_event_id_panics() {
 #[test]
 #[should_panic(expected = "unknown wait event class")]
 fn wait_event_type_unknown_class_panics() {
-    super::pgstat_get_wait_event_type(0x0B00_0000);
+    super::pgstat_get_wait_event_type(0x0C00_0000);
+}
+
+// A single test: WAIT_EVENT_CUSTOM_LOCK is a real process-global LWLock
+// (CreateLWLocks, not a stub), so two of these run in parallel test threads
+// would genuinely contend it — the queued-waiter path needs PGPROC/latch
+// machinery this crate's tests don't set up. One sequential test never
+// contends itself.
+#[test]
+fn custom_wait_events_register_resolve_and_collide() {
+    setup_lwlocks();
+    let _ = super::custom::WaitEventCustomShmemInit();
+
+    let ext = super::custom::WaitEventExtensionNew("my_ext_wait").unwrap();
+    assert_eq!(ext & super::WAIT_EVENT_CLASS_MASK, super::PG_WAIT_EXTENSION);
+    assert_eq!(super::custom::GetWaitEventCustomIdentifier(ext), "my_ext_wait");
+    assert_eq!(super::pgstat_get_wait_event(ext), Some("my_ext_wait"));
+
+    // Re-registering the same name returns the same info, not a new id.
+    let ext2 = super::custom::WaitEventExtensionNew("my_ext_wait").unwrap();
+    assert_eq!(ext, ext2);
+
+    let inj = super::custom::WaitEventInjectionPointNew("my_inj_point").unwrap();
+    assert_eq!(inj & super::WAIT_EVENT_CLASS_MASK, super::PG_WAIT_INJECTIONPOINT);
+    assert_eq!(super::custom::GetWaitEventCustomIdentifier(inj), "my_inj_point");
+
+    let ext_names = super::custom::GetWaitEventCustomNames(super::PG_WAIT_EXTENSION);
+    assert!(ext_names.iter().any(|n| n == "my_ext_wait"));
+    let inj_names = super::custom::GetWaitEventCustomNames(super::PG_WAIT_INJECTIONPOINT);
+    assert!(inj_names.iter().any(|n| n == "my_inj_point"));
+
+    // Same name, different class -> ERRCODE_DUPLICATE_OBJECT.
+    super::custom::WaitEventExtensionNew("shared_name_for_collision_test").unwrap();
+    assert!(super::custom::WaitEventInjectionPointNew("shared_name_for_collision_test").is_err());
+}
+
+#[test]
+fn wait_event_funcs_data_has_273_rows_across_9_classes() {
+    let rows: Vec<_> = super::funcs::WAIT_EVENT_FUNCS_DATA.lines().collect();
+    assert_eq!(rows.len(), 273);
+    let mut classes = std::collections::BTreeSet::new();
+    for row in &rows {
+        let mut parts = row.splitn(3, '\t');
+        classes.insert(parts.next().unwrap());
+        assert!(parts.next().is_some());
+        assert!(parts.next().is_some());
+    }
+    assert_eq!(classes.len(), 9);
 }

@@ -1,9 +1,11 @@
-//! wait_event.c core (my_wait_event_info indirection); C's never-read local
-//! fallback is dropped; custom (extension/injection-point) events defer.
+//! wait_event.c + wait_event_funcs.c (my_wait_event_info indirection; C's
+//! never-read local fallback is dropped).
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
+pub mod custom;
+pub mod funcs;
 #[cfg(test)]
 mod tests;
 
@@ -40,8 +42,9 @@ pub const PG_WAIT_EXTENSION: u32 = 0x0700_0000;
 pub const PG_WAIT_IPC: u32 = 0x0800_0000;
 pub const PG_WAIT_TIMEOUT: u32 = 0x0900_0000;
 pub const PG_WAIT_IO: u32 = 0x0A00_0000;
+pub const PG_WAIT_INJECTIONPOINT: u32 = 0x0B00_0000;
 
-const WAIT_EVENT_CLASS_MASK: u32 = 0xFF00_0000;
+pub(crate) const WAIT_EVENT_CLASS_MASK: u32 = 0xFF00_0000;
 const WAIT_EVENT_ID_MASK: u32 = 0x0000_FFFF;
 
 // Ordering within each array is the eventId order fixed by
@@ -252,6 +255,7 @@ pub fn pgstat_get_wait_event_type(wait_event_info: u32) -> Option<&'static str> 
         PG_WAIT_IPC => "IPC",
         PG_WAIT_TIMEOUT => "Timeout",
         PG_WAIT_IO => "IO",
+        PG_WAIT_INJECTIONPOINT => "InjectionPoint",
         class => panic!("unknown wait event class {class:#010x}"),
     })
 }
@@ -274,14 +278,8 @@ pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
             "wait event decode for PG_WAIT_LOCK is not ported: \
              GetLockNameFromTagType (src/backend/storage/lmgr/lmgr.c)"
         ),
-        PG_WAIT_EXTENSION => {
-            if wait_event_info != PG_WAIT_EXTENSION {
-                panic!(
-                    "custom wait events are not ported: \
-                     GetWaitEventCustomIdentifier (wait_event.c)"
-                );
-            }
-            "Extension"
+        PG_WAIT_EXTENSION | PG_WAIT_INJECTIONPOINT => {
+            custom::GetWaitEventCustomIdentifier(wait_event_info)
         }
         PG_WAIT_BUFFERPIN => named(&WAIT_EVENT_BUFFERPIN_NAMES),
         PG_WAIT_ACTIVITY => named(&WAIT_EVENT_ACTIVITY_NAMES),

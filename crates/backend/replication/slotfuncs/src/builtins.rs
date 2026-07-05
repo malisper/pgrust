@@ -1,6 +1,10 @@
 use ::datum::Datum;
-use ::types_core::InvalidOid;
-use ::types_error::{PgError, PgResult};
+use ::elog::ereport;
+use ::types_core::{InvalidOid, XLogRecPtr};
+use ::types_error::{
+    ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
+};
 use ::types_fmgr::{
     byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
@@ -319,6 +323,218 @@ pub fn fc_pg_get_replication_slots(
     Ok(srf.finish(fcinfo))
 }
 
+fn arg_lsn(fcinfo: &Fcinfo, i: usize) -> XLogRecPtr {
+    fcinfo.arg_i64(i) as u64
+}
+
+fn loc(func: &'static str) -> ErrorLocation {
+    ErrorLocation::new("slotfuncs.c", 0, func)
+}
+
+fn lsn_pair(lsn: XLogRecPtr) -> (u32, u32) {
+    ((lsn >> 32) as u32, lsn as u32)
+}
+
+pub fn fc_pg_replication_slot_advance(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_replication_slot_advance: resolved FmgrInfo required");
+    let slotname = arg_name(fcinfo, 0);
+    let mut moveto = arg_lsn(fcinfo, 1);
+
+    debug_assert!(slot::MyReplicationSlot().is_none());
+    slot::CheckSlotPermissions()?;
+
+    if moveto == 0 {
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg("invalid target WAL LSN")
+            .finish(loc("pg_replication_slot_advance"))?;
+        unreachable!("ereport(ERROR) returns Err");
+    }
+
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(not_row_type());
+    }
+    let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
+
+    moveto = if !transam_xlog::RecoveryInProgress() {
+        moveto.min(transam_xlog::write::GetFlushRecPtr(None))
+    } else {
+        moveto.min(xlogrecovery::GetXLogReplayRecPtr().0)
+    };
+
+    slot::ReplicationSlotAcquire(&slotname, true, true)?;
+
+    if slot::MyReplicationSlot().unwrap().data.get().restart_lsn == 0 {
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!("replication slot \"{slotname}\" cannot be advanced"))
+            .errdetail("This slot has never previously reserved WAL, or it has been invalidated.")
+            .finish(loc("pg_replication_slot_advance"))?;
+        unreachable!("ereport(ERROR) returns Err");
+    }
+
+    let d = slot::MyReplicationSlot().unwrap().data.get();
+    let minlsn = if d.database != InvalidOid { d.confirmed_flush } else { d.restart_lsn };
+    if moveto < minlsn {
+        let (mh, ml) = lsn_pair(moveto);
+        let (nh, nl) = lsn_pair(minlsn);
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "cannot advance replication slot to {mh:X}/{ml:X}, minimum is {nh:X}/{nl:X}"
+            ))
+            .finish(loc("pg_replication_slot_advance"))?;
+        unreachable!("ereport(ERROR) returns Err");
+    }
+
+    let endlsn = if d.database != InvalidOid {
+        crate::LogicalSlotAdvanceAndCheckSnapState(moveto, None)?
+    } else {
+        crate::pg_physical_replication_slot_advance(moveto)?
+    };
+
+    let name = slot::MyReplicationSlot().unwrap().data.get().name;
+
+    slot::ReplicationSlotsComputeRequiredXmin(false)?;
+    slot::ReplicationSlotsComputeRequiredLSN()?;
+    slot::ReplicationSlotRelease()?;
+
+    let mut values = [Datum::from_usize(0); 2];
+    let nulls = [false; 2];
+    values[0] = byref_result(mcx, &name.data)?;
+    values[1] = Datum::from_u64(endlsn);
+
+    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    let result = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
+    Ok(result)
+}
+
+// Shared core of the pg_copy_{physical,logical}_replication_slot opr_sanity
+// wrappers (slotfuncs.c copy_replication_slot): each wrapper differs only in
+// which optional (temporary, plugin) args it exposes.
+fn fc_copy_replication_slot(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+    logical_slot: bool,
+    temporary: Option<bool>,
+    plugin: Option<String>,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("copy_replication_slot: resolved FmgrInfo required");
+    let src_name = arg_name(fcinfo, 0);
+    let dst_name = arg_name(fcinfo, 1);
+
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(not_row_type());
+    }
+    let tupdesc = resolved.result_tuple_desc.expect("composite result has tupdesc");
+
+    slot::CheckSlotPermissions()?;
+    if logical_slot {
+        logical::CheckLogicalDecodingRequirements()?;
+    } else {
+        slot::CheckSlotRequirements()?;
+    }
+
+    let copied = crate::copy_replication_slot(
+        &src_name,
+        &dst_name,
+        logical_slot,
+        crate::CopySlotOverrides { temporary, plugin: plugin.as_deref() },
+    );
+    if let Err(e) = copied {
+        // As with create_logical: an ephemeral (logical) destination slot
+        // drops itself on release; a physical one just releases (C's
+        // resource-owner-driven drop of a mid-flight physical slot is
+        // unported, matching create_physical_replication_slot's gap above).
+        if slot::MyReplicationSlot().is_some() {
+            let _ = slot::ReplicationSlotRelease();
+        }
+        return Err(e);
+    }
+
+    let s = slot::MyReplicationSlot().unwrap();
+    let d = s.data.get();
+
+    let mut values = [Datum::from_usize(0); 2];
+    let mut nulls = [false; 2];
+    values[0] = byref_result(mcx, &d.name.data)?;
+    if d.confirmed_flush != 0 {
+        values[1] = Datum::from_u64(d.confirmed_flush);
+    } else {
+        nulls[1] = true;
+    }
+
+    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    let result = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
+
+    slot::ReplicationSlotRelease()?;
+    Ok(result)
+}
+
+pub fn fc_pg_copy_physical_replication_slot_a(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let temporary = fcinfo.arg_bool(2);
+    fc_copy_replication_slot(flinfo, fcinfo, false, Some(temporary), None)
+}
+
+pub fn fc_pg_copy_physical_replication_slot_b(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    fc_copy_replication_slot(flinfo, fcinfo, false, None, None)
+}
+
+pub fn fc_pg_copy_logical_replication_slot_a(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let temporary = fcinfo.arg_bool(2);
+    let plugin = arg_name(fcinfo, 3);
+    fc_copy_replication_slot(flinfo, fcinfo, true, Some(temporary), Some(plugin))
+}
+
+pub fn fc_pg_copy_logical_replication_slot_b(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let temporary = fcinfo.arg_bool(2);
+    fc_copy_replication_slot(flinfo, fcinfo, true, Some(temporary), None)
+}
+
+pub fn fc_pg_copy_logical_replication_slot_c(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    fc_copy_replication_slot(flinfo, fcinfo, true, None, None)
+}
+
+// pg_sync_replication_slots (slotfuncs.c): standby slot sync against the
+// primary over a physical replication connection. Loud: SyncReplicationSlots
+// / ValidateSlotSyncParams / walrcv_connect (libpqwalreceiver) and the
+// slotsync.c worker machinery are all unported (no walreceiver-conn crate
+// exists in this repo yet).
+pub fn fc_pg_sync_replication_slots(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    panic!(
+        "pg_sync_replication_slots not ported: SyncReplicationSlots / \
+         ValidateSlotSyncParams / walrcv_connect substrate unported \
+         (slotsync.c, libpqwalreceiver)"
+    );
+}
+
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -335,4 +551,18 @@ pub const SLOTFUNCS_BUILTINS: &[FmgrBuiltin] = &[
         func: fc_pg_get_replication_slots,
     },
     b(3786, "pg_create_logical_replication_slot", 5, fc_pg_create_logical_replication_slot),
+    b(3878, "pg_replication_slot_advance", 2, fc_pg_replication_slot_advance),
+    b(4220, "pg_copy_physical_replication_slot", 3, fc_pg_copy_physical_replication_slot_a),
+    b(4221, "pg_copy_physical_replication_slot", 2, fc_pg_copy_physical_replication_slot_b),
+    b(4222, "pg_copy_logical_replication_slot", 4, fc_pg_copy_logical_replication_slot_a),
+    b(4223, "pg_copy_logical_replication_slot", 3, fc_pg_copy_logical_replication_slot_b),
+    b(4224, "pg_copy_logical_replication_slot", 2, fc_pg_copy_logical_replication_slot_c),
+    FmgrBuiltin {
+        foid: 6344,
+        name: "pg_sync_replication_slots",
+        nargs: 0,
+        strict: false,
+        retset: false,
+        func: fc_pg_sync_replication_slots,
+    },
 ];

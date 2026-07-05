@@ -26,3 +26,9 @@ funcapi = { path = "../../utils/fmgr/funcapi" }
 heaptuple = { path = "../../access/common/heaptuple" }
 logical = { path = "../logical/logical" }
 logical_decode = { path = "../logical/logical_decode" }
+elog = { path = "../../utils/error/elog" }
+resowner = { path = "../../utils/resowner/resowner" }
+inval = { path = "../../utils/cache/inval" }
+xlogreader = { path = "../../access/transam/xlogreader" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+xlogrecovery = { path = "../../access/transam/xlogrecovery" }
