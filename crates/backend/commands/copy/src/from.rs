@@ -649,7 +649,15 @@ fn copy_from_partitioned_body<'mcx>(
                 buf.linenos.push(0);
             }
             let slot = &mut buf.slots[buf.nused];
-            exectuples::exec_copy_slot(slot, &mut rootslot, mcx, mcx)?;
+            // ExecPrepareTupleRouting: attno-remapped leaves take the tuple
+            // converted (then materialized off rootslot's memory).
+            match router.leaf_attrmap(leaf) {
+                Some(map) => {
+                    exectuples::execute_attr_map_slot(map, &mut rootslot, slot, mcx);
+                    exectuples::exec_materialize_slot(slot, mcx)?;
+                }
+                None => exectuples::exec_copy_slot(slot, &mut rootslot, mcx, mcx)?,
+            }
             slot.base_mut().tts_tableOid = lrel.rd_id;
             // Virtual-generated columns on a routed-into partition panic above,
             // so the virtual-NN compile cache is never populated.
