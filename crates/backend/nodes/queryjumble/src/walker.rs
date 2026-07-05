@@ -1380,6 +1380,17 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_bool(e.missing_ok);
             js.f_bool(e.recurse);
         }
+        NodeTag::T_ATAlterConstraint => {
+            let e = cast!(q::ATAlterConstraint);
+            js.f_str(e.conname);
+            js.f_bool(e.alterEnforceability);
+            js.f_bool(e.is_enforced);
+            js.f_bool(e.alterDeferrability);
+            js.f_bool(e.deferrable);
+            js.f_bool(e.initdeferred);
+            js.f_bool(e.alterInheritability);
+            js.f_bool(e.noinherit);
+        }
         NodeTag::T_ReplicaIdentityStmt => {
             let e = cast!(q::ReplicaIdentityStmt);
             js.f_u8(e.identity_type);
