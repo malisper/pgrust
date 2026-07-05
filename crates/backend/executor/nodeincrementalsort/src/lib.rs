@@ -298,6 +298,17 @@ where
         match &mut node.fullsort_state {
             None => {
                 prepare_presorted_cols(node, mcx)?;
+                // The prefix eq detoasts compressed by-ref keys through the
+                // frame's result mcx; every eval site resets ps_ExprContext
+                // after the compare (C: econtext per-tuple memory).
+                // SAFETY: the ps_ExprContext outlives the program (same
+                // estate).
+                unsafe {
+                    node.presorted_eq
+                        .as_mut()
+                        .expect("presorted_eq prepared")
+                        .arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
+                };
                 node.fullsort_state = Some(Tuplesort::begin_heap(
                     node.outer_desc.clone().expect("incremental sort already ended"),
                     plan.sort.sortColIdx,

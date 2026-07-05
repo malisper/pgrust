@@ -36,6 +36,8 @@ hashfn = { path = "../../../common/hashfn" }
 init_small = { path = "../../utils/init/init_small" }
 
 [dev-dependencies]
+detoast = { path = "../../access/common/detoast" }
+pglz = { path = "../../../common/pglz" }
 adt_numeric = { path = "../../utils/adt/numeric" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 elog = { path = "../../utils/error/elog" }
