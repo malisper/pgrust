@@ -2954,6 +2954,46 @@ impl<'mcx> Parser<'mcx> {
                     },
                 )?));
             }
+            // a_expr IS [NOT] [unicode_normal_form] NORMALIZED.
+            2083..=2086 => {
+                let not = rule == 2085 || rule == 2086;
+                let form = match rule {
+                    2084 => Some((view.v(3).str_val(), view.l(3))),
+                    2086 => Some((view.v(4).str_val(), view.l(4))),
+                    _ => None,
+                };
+                let expr = view.v(1).node().expect("a_expr");
+                let args = match form {
+                    Some((sval, loc)) => {
+                        let c = Node::mk_a_const(
+                            mcx,
+                            Some(ValUnion::String(types_nodes::String { sval })),
+                            loc,
+                        )?;
+                        NodeList::make2(mcx, expr, c)?
+                    }
+                    None => NodeList::make1(mcx, expr)?,
+                };
+                let f = make_func_call(
+                    mcx,
+                    system_func_name(mcx, "is_normalized")?,
+                    args,
+                    CoercionForm::COERCE_SQL_SYNTAX,
+                    view.l(2),
+                )?;
+                *yyval = YYSTYPE::Node(Some(if not {
+                    Node::mk(
+                        mcx,
+                        BoolExpr {
+                            boolop: BoolExprType::NOT_EXPR,
+                            args: NodeList::make1(mcx, f.seal())?,
+                            location: view.l(2),
+                        },
+                    )?
+                } else {
+                    f.seal()
+                }));
+            }
             2174 => {
                 *yyval = YYSTYPE::Node(Some(make_xml_expr(
                     mcx,
