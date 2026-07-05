@@ -45,8 +45,8 @@ pub use interp::{
     Resume, RetSlot, RetSlots, Suspension,
 };
 pub use steps::{
-    qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState, GroupedColsCell, Kernel, OutRef,
-    SlotSrc, Step,
+    agg_count_star_advance, qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState,
+    GroupedColsCell, Kernel, OutRef, SlotSrc, Step,
 };
 pub use types_portal::params::ParamBind;
 pub use xmlops::map_sql_value_to_xml_value;

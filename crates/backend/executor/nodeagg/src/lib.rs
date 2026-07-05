@@ -2699,10 +2699,22 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
             node.evaltrans.as_deref().unwrap().kernel(),
             ::execexpr::Kernel::AggTransByVal { .. } | ::execexpr::Kernel::AggTransByValThin { .. }
         );
+    // count(*) advances once per page batch; a refused advance re-runs the
+    // batch through the per-row kernel so overflow ereports at exactly C's
+    // row. The per-row resets are no-ops here (the transition allocates
+    // nothing), so one reset per batch is state-identical.
+    let count_star =
+        if storeless { node.evaltrans.as_deref().unwrap().agg_count_star() } else { None };
     loop {
         let n = src.next_batch(estate)?;
         if n == 0 {
             break;
+        }
+        if let Some((pergroup, strict)) = count_star {
+            if ::execexpr::agg_count_star_advance(pergroup, strict, n) {
+                estate.reset_expr_context(node.tmpcontext);
+                continue;
+            }
         }
         if storeless {
             for _ in 0..n {
