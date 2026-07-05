@@ -1667,7 +1667,28 @@ fn exec_merge_matched_scan<'mcx>(
         let result = match command_type {
             CmdType::CMD_UPDATE => {
                 merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
-                merge_update_act(mt, estate, tupleid, new_id, &mut tmfd)?
+                match merge_update_act(mt, estate, tupleid, new_id, &mut tmfd, &mut *epq_eval)? {
+                    MergeUpdActRes::Tm(r) => r,
+                    // C ExecMergeMatched crossPartUpdate leg: the INSERT half
+                    // counted the row; RETURNING reports the inserted row
+                    // (cpUpdateReturningSlot).
+                    MergeUpdActRes::CrossPart(inserted) => {
+                        let mut rslot = None;
+                        if let Some(islot) = inserted {
+                            if mt.rel().project_returning.is_some() {
+                                rslot = Some(exec_process_returning(
+                                    mt,
+                                    estate,
+                                    CmdType::CMD_UPDATE,
+                                    Some(old_id),
+                                    Some(islot),
+                                    plan_slot,
+                                )?);
+                            }
+                        }
+                        return Ok(MergeMatchedOutcome::Done(rslot));
+                    }
+                }
             }
             CmdType::CMD_DELETE => merge_delete_act(mt, estate, tupleid, &mut tmfd)?,
             CmdType::CMD_NOTHING => TM_Result::TM_Ok,
@@ -1841,20 +1862,29 @@ fn merge_project_update<'mcx>(
     Ok(())
 }
 
+// ExecUpdateAct's MERGE outcome: a cross-partition move carries the INSERT
+// half's result slot (C updateCxt->crossPartUpdate + cpUpdateReturningSlot).
+enum MergeUpdActRes {
+    Tm(TM_Result),
+    CrossPart(Option<ExecSlotId>),
+}
+
 // ExecUpdateAct + ExecUpdateEpilogue for a MERGE UPDATE action; unlike
 // exec_update the TM_Result flows back so lmerge_matched drives the retry.
 fn merge_update_act<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tupleid: &ItemPointerData,
+    tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
     tmfd: &mut TM_FailureData,
-) -> PgResult<TM_Result> {
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<MergeUpdActRes> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let mut lockmode = LockTupleMode::LockTupleExclusive;
     let mut update_indexes = TU_UpdateIndexes::TU_None;
 
+    let mut cross_part = false;
     let result = {
         let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
@@ -1875,19 +1905,14 @@ fn merge_update_act<'mcx>(
         if rel.rd_rel.relispartition
             && !execpartition::exec_partition_check(mcx, &mut mt.rel_mut().partition_check, rel, slot)?
         {
-            if mt.root.is_some() {
-                // C moves the row (ExecCrossPartitionUpdate: DELETE+routed
-                // INSERT); caught ERROR, never a server-killing panic.
-                return Err(Box::new(
-                    PgError::error(
-                        "ExecCrossPartitionUpdate (nodeModifyTable.c): update row movement                          across partitions not ported; batch-modifytable residue"
-                            .to_string(),
-                    )
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                ));
+            if mt.root.is_none() {
+                return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
             }
-            return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
-        }
+            // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
+            // performed outside this borrow scope.
+            cross_part = true;
+            TM_Result::TM_Ok
+        } else {
 
         if rel.rd_rel.relhasindex && mt.rel_mut().indexes.is_none() {
             mt.rel_mut().indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
@@ -1918,9 +1943,19 @@ fn merge_update_act<'mcx>(
             &mut lockmode,
             &mut update_indexes,
         )?
+        }
     };
+    if cross_part {
+        // C: MERGE gets the concurrency tmresult back for redispatch; the
+        // port's delete leg folds those into the moved/no-op outcome (see
+        // exec_cross_partition_update).
+        return match exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval)? {
+            UpdateResult::CrossPart(inserted) => Ok(MergeUpdActRes::CrossPart(inserted)),
+            _ => unreachable!("exec_cross_partition_update returns CrossPart"),
+        };
+    }
     if result != TM_Result::TM_Ok {
-        return Ok(result);
+        return Ok(MergeUpdActRes::Tm(result));
     }
 
     let EStateData { es_relations, es_tupleTable, .. } = estate;
@@ -1991,7 +2026,7 @@ fn merge_update_act<'mcx>(
         let slot = &mut es_tupleTable[slot_id.0 as usize];
         exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
     }
-    Ok(TM_Result::TM_Ok)
+    Ok(MergeUpdActRes::Tm(TM_Result::TM_Ok))
 }
 
 // ExecDeleteAct + ExecDeleteEpilogue for a MERGE DELETE action.
