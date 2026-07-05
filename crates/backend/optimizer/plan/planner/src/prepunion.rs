@@ -146,7 +146,7 @@ fn build_setop_child_paths<'mcx>(
     // Swap back before propagating errors (num_groups block pattern below).
     let subroot_result = (|| -> PgResult<bool> {
         let final_rel = crate::planmain::fetch_final_rel(run);
-        consider_parallel = run.root.rel(final_rel).consider_parallel;
+        let consider_parallel = run.root.rel(final_rel).consider_parallel;
         assert!(
             run.root.rel(final_rel).partial_pathlist.is_empty(),
             "build_setop_child_paths: parallel-union partial-path arm unported \
