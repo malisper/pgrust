@@ -736,7 +736,17 @@ fn ATPrepCmd<'mcx>(
             let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
             run_seq_stmts(mcx, &cxt.blist)?;
             debug_assert!(cxt.alist.is_nil());
-            ATPrepAlterColumnType(mcx, &mut wqueue[tabidx], rel, cmd, query_string)?;
+            ATPrepAlterColumnType(
+                mcx,
+                wqueue,
+                tabidx,
+                rel,
+                recurse,
+                recursing,
+                cnode,
+                lockmode,
+                query_string,
+            )?;
             AT_PASS_ALTER_TYPE
         }
         AlterTableType::AT_SetExpression => {
@@ -4241,13 +4251,19 @@ fn validate_constraint_children<'mcx>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ATPrepAlterColumnType<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    tabidx: usize,
     rel: &Relation<'mcx>,
-    cmd: &AlterTableCmd<'mcx>,
+    recurse: bool,
+    recursing: bool,
+    cnode: Node<'mcx>,
+    lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
+    let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     let col_name = cmd.name.expect("AT_AlterColumnType name");
     let relname = rel.name().to_string();
     let defnode = cmd.def.expect("AT_AlterColumnType ColumnDef");
@@ -4271,7 +4287,7 @@ fn ATPrepAlterColumnType<'mcx>(
             .with_detail(format!("Column \"{col_name}\" is a generated column.")),
         ));
     }
-    if attinhcount > 0 {
+    if attinhcount > 0 && !recursing {
         return Err(Box::new(
             PgError::new(ERROR, format!("cannot alter inherited column \"{col_name}\""))
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
@@ -4317,15 +4333,9 @@ fn ATPrepAlterColumnType<'mcx>(
         )?;
     }
 
-    if att.attgenerated == b'v' as i8 {
-        // C builds no transform for virtual generated columns: no newval,
-        // no rewrite of the column itself.
-        if find_inheritance_children_exist(mcx, rel.rd_id)? {
-            unported("ATPrepAlterColumnType inheritance recursion");
-        }
-        return Ok(());
-    }
-
+    // C builds no transform for virtual generated columns: no newval, no
+    // rewrite of the column itself.
+    if att.attgenerated != b'v' as i8 {
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
     let using = match (def.raw_default, def.cooked_default) {
@@ -4414,14 +4424,105 @@ fn ATPrepAlterColumnType<'mcx>(
     parse_collate::assign_expr_collations(mcx, &mut pstate, transform)?;
     // expression_planner.
     let transform = clauses::eval_const_expressions(mcx, transform)?;
-    tab.newvals.push(NewColumnValue { attnum, expr: transform, is_generated: false });
+    wqueue[tabidx].newvals.push(NewColumnValue { attnum, expr: transform, is_generated: false });
     if at_column_change_requires_rewrite(transform, attnum)? {
-        tab.rewrite |= AT_REWRITE_COLUMN_REWRITE;
+        wqueue[tabidx].rewrite |= AT_REWRITE_COLUMN_REWRITE;
     }
     parser_small1::free_parsestate(pstate)?;
+    }
 
-    if find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATPrepAlterColumnType inheritance recursion");
+    // Manual recursion: attribute numbers in the USING expression must be
+    // remapped per child, so ATSimpleRecursion cannot apply.
+    if recurse {
+        let (child_oids, child_numparents) =
+            pg_inherits::find_all_inheritors_numparents(mcx, rel.rd_id, lockmode)?;
+        for (i, &childrelid) in child_oids.iter().enumerate() {
+            if childrelid == rel.rd_id {
+                continue;
+            }
+            let numparents = child_numparents[i];
+            let childrel = relation_seams::relation_open::call(mcx, childrelid, NoLock)?;
+            catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+            let Some((_, childinhcount)) =
+                attname_lookup(mcx, childrelid, col_name, false)?
+            else {
+                return Err(undefined_column(col_name, &childrel.name().to_string()));
+            };
+            if childinhcount as i32 > numparents {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot alter inherited column \"{col_name}\" of relation \
+                             \"{}\"",
+                            childrel.name()
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+                ));
+            }
+            let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
+            let childcmd = match def.cooked_default {
+                Some(_) => {
+                    // C copyObject boundary: each child gets its own USING
+                    // tree with remapped attnos.
+                    let copy = copyfuncs::copy_object(mcx, cnode)?;
+                    let copy_cooked = copy
+                        .as_variant::<AlterTableCmd>()
+                        .expect("AlterTableCmd")
+                        .def
+                        .expect("AT_AlterColumnType ColumnDef")
+                        .as_variant::<ColumnDef>()
+                        .expect("ColumnDef")
+                        .cooked_default
+                        .expect("cooked_default copied");
+                    let attmap =
+                        tupdesc::build_attrmap_by_name(mcx, childrel.descr(), rel.descr())?;
+                    let (mapped, found_whole_row) = rewrite_manip::map_variable_attnos(
+                        mcx, copy_cooked, 1, 0, &attmap, InvalidOid,
+                    )?;
+                    if found_whole_row {
+                        return Err(Box::new(
+                            PgError::new(
+                                ERROR,
+                                "cannot convert whole-row table reference".to_string(),
+                            )
+                            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+                            .with_detail(
+                                "USING expression contains a whole-row table reference."
+                                    .to_string(),
+                            ),
+                        ));
+                    }
+                    let copy_def = copy
+                        .as_variant::<AlterTableCmd>()
+                        .expect("AlterTableCmd")
+                        .def
+                        .expect("AT_AlterColumnType ColumnDef");
+                    // SAFETY: freshly copied tree; no derived refs live.
+                    unsafe {
+                        copy_def
+                            .with_mut::<ColumnDef, _>(|d| d.cooked_default = Some(mapped))
+                            .expect("ColumnDef");
+                    }
+                    copy
+                }
+                None => cnode,
+            };
+            ATPrepCmd(mcx, wqueue, &childrel, childcmd, false, true, lockmode, query_string)?;
+            childrel.close(NoLock)?;
+        }
+    } else if !recursing && find_inheritance_children_exist(mcx, rel.rd_id)? {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "type of inherited column \"{col_name}\" must be changed in child \
+                     tables too"
+                ),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
     }
     Ok(())
 }
