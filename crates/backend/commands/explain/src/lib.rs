@@ -443,7 +443,11 @@ fn ExplainOnePlanRef<'mcx>(
 
     // ExplainPrintTriggers: no CREATE TRIGGER path exists, so every result
     // relation's ri_TrigDesc is provably absent and report_triggers emits
-    // nothing; the Triggers Open/CloseGroup pair is a text-format no-op.
+    // nothing; non-text formats still print the empty Triggers group.
+    if es.analyze {
+        ExplainOpenGroup("Triggers", Some("Triggers"), false, es);
+        ExplainCloseGroup("Triggers", Some("Triggers"), false, es);
+    }
 
     // ExplainPrintJITSummary: jitFlags is pinned 0 by the planner lane, so
     // C's PGJIT_PERFORM check makes it a no-op.
