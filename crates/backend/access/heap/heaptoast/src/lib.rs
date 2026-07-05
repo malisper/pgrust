@@ -1,9 +1,9 @@
 //! heaptoast.c + toast_helper.c + the toast_internals.c write half, plus
 //! detoast.c's chunk-fetch statics (installed on toast_internals_seams).
 //! Whole path is per-oversized-value cold. Loud arms: toast-index insertion
-//! (nbtree insert lane is phase 2), speculative-abort delete, the rd_toastoid
-//! table-rewrite lane (rewriteheap unported; RelationData carries no
-//! rd_toastoid, so C's OidIsValid(rd_toastoid) is const-false here).
+//! (nbtree insert lane is phase 2), speculative-abort delete. C's transient
+//! NewHeap->rd_toastoid (CLUSTER rewrite) is a threaded parameter here, not a
+//! RelationData field; the dml seam pins it InvalidOid.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -64,8 +64,27 @@ pub(crate) fn check_for_interrupts() {
     }
 }
 
+// The dml paths never rewrite; only rewriteheap's direct call carries a
+// toast OID override.
+fn seam_heap_toast_insert_or_update<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &::types_rel::RelationData<'_>,
+    newtup: &::types_tuple::HeapTupleData<'_>,
+    oldtup: Option<&::types_tuple::HeapTupleData<'_>>,
+    options: i32,
+) -> ::types_error::PgResult<Option<heaptuple::HeapTuple<'mcx>>> {
+    toast::heap_toast_insert_or_update(
+        mcx,
+        rel,
+        newtup,
+        oldtup,
+        ::types_core::InvalidOid,
+        options,
+    )
+}
+
 pub fn init_seams() {
-    heaptoast_seams::heap_toast_insert_or_update::set(toast::heap_toast_insert_or_update);
+    heaptoast_seams::heap_toast_insert_or_update::set(seam_heap_toast_insert_or_update);
     heaptoast_seams::heap_toast_delete::set(toast::heap_toast_delete);
     heaptoast_seams::toast_compress_datum::set(internals::toast_compress_datum);
     heaptoast_seams::toast_flatten_tuple::set(toast::toast_flatten_tuple);

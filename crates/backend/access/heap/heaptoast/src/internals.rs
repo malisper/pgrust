@@ -5,7 +5,7 @@ use ::types_error::{PgError, PgResult};
 use ::types_rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_scan::sdir::ForwardScanDirection;
-use ::types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use ::types_tuple::varatt::{
     set_varsize_4b_c_word, varatt_is_1b, varsize_1b, varsize_4b, VARHDRSZ, VARHDRSZ_SHORT,
 };
@@ -112,12 +112,15 @@ fn pglz_compress_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Option<PgV
 }
 
 /// C `toast_save_datum`: chunk `value` into the toast relation and return
-/// the 18-byte on-disk toast pointer image.
+/// the 18-byte on-disk toast pointer image. `rd_toastoid` is C's transient
+/// NewHeap->rd_toastoid, threaded as a parameter (the rewrite owns it for
+/// exactly the copy; no relcache field to reset).
 pub fn toast_save_datum<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &RelationData<'_>,
     value: &[u8],
-    _oldexternal: Option<&[u8]>,
+    oldexternal: Option<&[u8]>,
+    rd_toastoid: Oid,
     options: i32,
 ) -> PgResult<[u8; TOAST_POINTER_SIZE]> {
     debug_assert!(value[0] != 0x01);
@@ -154,14 +157,47 @@ pub fn toast_save_datum<'mcx>(
         (&value[VARHDRSZ..], todo)
     };
 
-    // rd_toastoid rewrite lane (CLUSTER) is rewriteheap's; const-invalid here.
-    toast_pointer.va_toastrelid = toastrel.rd_id;
-    toast_pointer.va_valueid = catalog_seams::get_new_oid_with_index::call(
-        mcx,
-        &toastrel,
-        toastidxs[valid_index].rd_id,
-        1,
-    )?;
+    toast_pointer.va_toastrelid =
+        if rd_toastoid != InvalidOid { rd_toastoid } else { toastrel.rd_id };
+
+    let mut data_todo = data_todo;
+    if rd_toastoid == InvalidOid {
+        toast_pointer.va_valueid = catalog_seams::get_new_oid_with_index::call(
+            mcx,
+            &toastrel,
+            toastidxs[valid_index].rd_id,
+            1,
+        )?;
+    } else {
+        // Rewrite case: reuse the value OID of a prior external value from the
+        // old toast table; a live + recently-dead pair sharing one value gets
+        // stored once (data_todo = 0 short-circuits the chunk loop).
+        toast_pointer.va_valueid = InvalidOid;
+        if let Some(oldexternal) = oldexternal {
+            debug_assert!(toastdesc::varatt_is_external_ondisk(oldexternal));
+            let old_toast_pointer = VarattExternal::from_image(oldexternal)?;
+            if old_toast_pointer.va_toastrelid == rd_toastoid {
+                toast_pointer.va_valueid = old_toast_pointer.va_valueid;
+                if toastrel_valueid_exists(mcx, &toastrel, toast_pointer.va_valueid)? {
+                    data_todo = 0;
+                }
+            }
+        }
+        if toast_pointer.va_valueid == InvalidOid {
+            // New value: the OID must not conflict in either toast table.
+            loop {
+                toast_pointer.va_valueid = catalog_seams::get_new_oid_with_index::call(
+                    mcx,
+                    &toastrel,
+                    toastidxs[valid_index].rd_id,
+                    1,
+                )?;
+                if !toastid_valueid_exists(mcx, rd_toastoid, toast_pointer.va_valueid)? {
+                    break;
+                }
+            }
+        }
+    }
 
     let mut chunk_image: PgVec<'mcx, u8> =
         ::mcx::vec_with_capacity_in(mcx, TOAST_MAX_CHUNK_SIZE + VARHDRSZ)?;
@@ -271,6 +307,40 @@ pub fn toast_delete_datum<'mcx>(
     toast_close_indexes(toastidxs, NoLock)?;
     table::table_close(toastrel, NoLock)?;
     Ok(())
+}
+
+// C `toastrel_valueid_exists`: any chunk with this value OID, under SnapshotAny.
+fn toastrel_valueid_exists<'mcx>(
+    mcx: Mcx<'mcx>,
+    toastrel: &Relation<'mcx>,
+    valueid: Oid,
+) -> PgResult<bool> {
+    let (toastidxs, valid_index) = toast_open_indexes(mcx, toastrel, RowExclusiveLock)?;
+    let toastkey = [valueid_scan_key(valueid)];
+    let snapshot_any = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        mcx,
+        ::types_snapshot::SnapshotType::SNAPSHOT_ANY,
+    ));
+    let mut toastscan = genam::systable_beginscan(
+        mcx,
+        toastrel,
+        toastidxs[valid_index].rd_id,
+        true,
+        Some(snapshot_any),
+        &toastkey,
+    )?;
+    let result = genam::systable_getnext(mcx, &mut toastscan)?.is_some();
+    genam::systable_endscan(mcx, toastscan)?;
+    toast_close_indexes(toastidxs, RowExclusiveLock)?;
+    Ok(result)
+}
+
+// C `toastid_valueid_exists`.
+fn toastid_valueid_exists<'mcx>(mcx: Mcx<'mcx>, toastrelid: Oid, valueid: Oid) -> PgResult<bool> {
+    let toastrel = table::table_open(mcx, toastrelid, AccessShareLock)?;
+    let result = toastrel_valueid_exists(mcx, &toastrel, valueid)?;
+    table::table_close(toastrel, AccessShareLock)?;
+    Ok(result)
 }
 
 // ScanKeyInit + fmgr_info on a known builtin, resolved direct (the nbtree

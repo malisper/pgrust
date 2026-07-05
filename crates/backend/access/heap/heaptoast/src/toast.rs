@@ -48,11 +48,14 @@ pub fn heap_toast_delete<'mcx>(
 }
 
 /// C `heap_toast_insert_or_update`; `None` is C's "return newtup" (no change).
+/// `rd_toastoid` is C's transient NewHeap->rd_toastoid: InvalidOid everywhere
+/// but the CLUSTER/VACUUM FULL rewrite (rewriteheap threads it through).
 pub fn heap_toast_insert_or_update<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &RelationData<'_>,
     newtup: &HeapTupleData<'_>,
     oldtup: Option<&HeapTupleData<'_>>,
+    rd_toastoid: ::types_core::Oid,
     options: i32,
 ) -> PgResult<Option<HeapTuple<'mcx>>> {
     let options = options & !HEAP_INSERT_SPECULATIVE;
@@ -86,6 +89,7 @@ pub fn heap_toast_insert_or_update<'mcx>(
         ttc_oldisnull: old.as_ref().map(|(_, n)| n.as_slice()),
         ttc_attr: &mut toast_attr,
         ttc_flags: 0,
+        ttc_toastoid: rd_toastoid,
     };
     toast_tuple_init(mcx, &mut ttc)?;
 
