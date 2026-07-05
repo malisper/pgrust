@@ -202,8 +202,10 @@ pub fn CreateConstraintEntry<'mcx>(mcx: Mcx<'mcx>, e: &ConstraintEntry<'_>) -> P
         v.extend(vals.iter().map(|&k| Datum::from_oid(k)));
         Ok(Some(datum::array_build::construct_array_image(mcx, &v, OIDOID, 4, true, b'i')?))
     };
+    // conkey holds the constraintNKeys key-column prefix (pg_constraint.c:
+    // 117-127); included columns appear only in the dependency records below.
     let arrays = [
-        (Anum_pg_constraint_conkey, i16_array(e.conkey)?),
+        (Anum_pg_constraint_conkey, i16_array(&e.conkey[..e.n_keys])?),
         (Anum_pg_constraint_confkey, i16_array(e.confkey)?),
         (Anum_pg_constraint_conpfeqop, oid_array(e.pf_eq_op)?),
         (Anum_pg_constraint_conppeqop, oid_array(e.pp_eq_op)?),
