@@ -287,72 +287,20 @@ pub fn CreateConstraintEntry<'mcx>(mcx: Mcx<'mcx>, e: &ConstraintEntry<'_>) -> P
     Ok(con_oid)
 }
 
-// recordDependencyOnSingleRelExpr slice (CHECK conExpr): self-rel Var refs
-// become NORMAL column deps; every other reference must be pinned.
+// recordDependencyOnSingleRelExpr (dependency.c) over the CHECK conExpr,
+// NORMAL/NORMAL, reverse_self=false (pg_constraint.c:387).
 fn record_check_expr_dependencies<'mcx>(
     mcx: Mcx<'mcx>,
     conobject: &pg_depend::ObjectAddress,
     relid: Oid,
     expr: types_nodes::Node<'mcx>,
 ) -> PgResult<()> {
-    struct W<'m> {
-        relid: Oid,
-        addrs: PgVec<'m, pg_depend::ObjectAddress>,
-    }
-    impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'mcx> {
-        fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
-            use types_nodes::NodeTag::*;
-            const TYPE_CLASS: Oid = types_core::TYPE_RELATION_ID;
-            const PROC_CLASS: Oid = 1255;
-            const OPER_CLASS: Oid = 2617;
-            const COLL_CLASS: Oid = 3456;
-            let pinned = |class: Oid, oid: Oid| oid == 0 || catalog::IsPinnedObject(class, oid);
-            let ok = match node.node_tag() {
-                T_Var => {
-                    let v = node.as_var().expect("Var");
-                    debug_assert!(v.varno == 1);
-                    self.addrs.push(pg_depend::ObjectAddress::sub_set(
-                        types_core::RELATION_RELATION_ID,
-                        self.relid,
-                        v.varattno as i32,
-                    ));
-                    true
-                }
-                T_Const => {
-                    let c = node.as_const().expect("Const");
-                    pinned(TYPE_CLASS, c.consttype) && pinned(COLL_CLASS, c.constcollid)
-                }
-                T_FuncExpr => {
-                    let f = node.as_func_expr().expect("FuncExpr");
-                    pinned(PROC_CLASS, f.funcid) && pinned(TYPE_CLASS, f.funcresulttype)
-                }
-                T_OpExpr => {
-                    let o = node.as_op_expr().expect("OpExpr");
-                    pinned(OPER_CLASS, o.opno) && pinned(TYPE_CLASS, o.opresulttype)
-                }
-                T_RelabelType | T_CoerceViaIO | T_ArrayCoerceExpr | T_ConvertRowtypeExpr
-                | T_BoolExpr | T_CaseExpr | T_CaseWhen
-                | T_NullTest | T_CoalesceExpr | T_MinMaxExpr | T_List => true,
-                other => panic!(
-                    "unported: recordDependencyOnSingleRelExpr over {other:?} CHECK expression"
-                ),
-            };
-            if !ok {
-                panic!(
-                    "unported: recordDependencyOnSingleRelExpr non-pinned reference in \
-                     CHECK expression"
-                );
-            }
-            nodes_core::expression_tree_walker(node, self)
-        }
-    }
-    let mut w = W { relid, addrs: mcx::PgVec::new_in(mcx) };
-    nodes_core::NodeWalker::visit(&mut w, expr)?;
-    let mut addrs = w.addrs;
-    pg_depend::record_object_address_dependencies(
+    pg_depend::recordDependencyOnSingleRelExpr(
         mcx,
         conobject,
-        &mut addrs,
+        expr,
+        relid,
+        pg_depend::DependencyType::Normal,
         pg_depend::DependencyType::Normal,
     )
 }
