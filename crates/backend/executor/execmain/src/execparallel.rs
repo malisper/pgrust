@@ -601,8 +601,18 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         instrument_options,
     )?;
 
+    // Worker-panic containment injection: forced fault on demand, env-gated
+    // so the surface is inert in production (crash-restart-design pattern).
+    let inject = std::env::var_os("PGRUST_CRASH_TEST")
+        .is_some()
+        .then(|| exec.query_text.clone())
+        .unwrap_or_default();
+
     let mut run = || -> PgResult<()> {
         crate::execmain::executor_start_seam(qd, exec.eflags)?;
+        if inject.contains("pgrust:worker-panic-run") {
+            panic!("injected parallel worker panic (run)");
+        }
 
         querydesc::with_qd(qd, |q| {
             let x = q.exec.as_mut().expect("worker ExecutorStart left no exec");
@@ -707,7 +717,21 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         crate::execmain::executor_end_seam(qd)?;
         Ok(())
     };
-    let result = run();
+    // A panic must not skip this cleanup: the qd/params reference the LEADER's
+    // arena, and anything left registered would be torn down at thread-exit
+    // time, racing the leader freeing that arena after it reaps the worker.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut run));
+    let result = match result {
+        Ok(r) => r,
+        Err(payload) => {
+            querydesc::release_query_desc_seam(qd);
+            types_portal::params::free(params);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = receiver.shutdown();
+            }));
+            std::panic::resume_unwind(payload);
+        }
+    };
     if result.is_err() {
         querydesc::release_query_desc_seam(qd);
     } else {
@@ -715,6 +739,9 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     }
     types_portal::params::free(params);
     let _ = receiver.shutdown();
+    if inject.contains("pgrust:worker-panic-teardown") {
+        panic!("injected parallel worker panic (teardown)");
+    }
     result
 }
 

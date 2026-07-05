@@ -438,12 +438,21 @@ fn announce_child_exit(pid: pid_t, exitstatus: i32) {
 }
 
 fn reap_one() -> Option<(pid_t, i32)> {
-    let mut q = CHILD_EXIT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    if q.is_empty() {
-        None
-    } else {
-        Some(q.remove(0))
+    let head = {
+        let mut q = CHILD_EXIT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    };
+    // waitpid semantics: the child is reported dead only once its thread is
+    // fully gone (TLS destructors included); leaders may free shared state
+    // as soon as the bgworker slot clears (parallel worker-teardown race).
+    if let Some((pid, _)) = head {
+        launch_backend::join_announced_child(pid);
     }
+    head
 }
 
 fn exit_status_code(exitstatus: i32) -> Option<i32> {
