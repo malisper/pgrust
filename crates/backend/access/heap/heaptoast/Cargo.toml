@@ -32,6 +32,7 @@ snapmgr = { path = "../../../utils/time/snapmgr" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 xact_seams = { path = "../../transam/xact_seams" }
+types_snapshot = { path = "../../../../_support/types/snapshot" }
 
 [dev-dependencies]
 test_boot = { path = "../../../../_support/test_boot" }
