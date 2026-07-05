@@ -434,7 +434,7 @@ pub fn numericvar_deserialize(buf: &mut StringInfo<'_>, var: &mut NumericVar) ->
     Ok(())
 }
 
-// C numeric.c:5326 numeric_avg_serialize / 5433 numeric_serialize bodies past
+// C numeric.c:5323 numeric_avg_serialize / 5433 numeric_serialize bodies past
 // the AggCheckCallContext gate; they differ only in the sumX2 leg.
 pub fn numeric_agg_state_serialize(
     state: &mut NumericAggState,
@@ -457,7 +457,7 @@ pub fn numeric_agg_state_serialize(
     Ok(())
 }
 
-// C numeric.c:5382 numeric_avg_deserialize / 5489 numeric_deserialize. C
+// C numeric.c:5375 numeric_avg_deserialize / 5489 numeric_deserialize. C
 // allocates with makeNumericAggStateCurrentContext(false) in both variants;
 // `mcx` is the context the caller stores the state in (digit buffers must
 // share it).
@@ -719,7 +719,7 @@ pub fn numeric_poly_sum(state: Option<&Int128AggState>) -> PgResult<Option<Numer
     Ok(Some(make_result(result.view())?))
 }
 
-// C numeric.c:5793 numeric_poly_serialize / 5997 int8_avg_serialize,
+// C numeric.c:5800 numeric_poly_serialize / 5998 int8_avg_serialize,
 // HAVE_INT128 arm: int128 sums cross the wire as NumericVar images
 // (int128_to_numericvar) so the combine format is platform-independent.
 pub fn int128_agg_state_serialize(
@@ -738,7 +738,7 @@ pub fn int128_agg_state_serialize(
     Ok(())
 }
 
-// C numeric.c:5855 numeric_poly_deserialize / 6043 int8_avg_deserialize.
+// C numeric.c:5858 numeric_poly_deserialize / 6047 int8_avg_deserialize.
 // C ignores numericvar_to_int128's overflow bool, leaving the palloc0'd sum
 // at 0; both variants allocate with calcSumX2=false.
 pub fn int128_agg_state_deserialize(
