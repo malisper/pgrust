@@ -238,6 +238,9 @@ pub fn DefineDomain<'mcx>(
     let mut typ_not_null = false;
     let mut null_defined = false;
     let mut saw_default = false;
+    let mut default_value: Option<String> = None;
+    let mut default_value_bin: Option<mcx::PgString<'mcx>> = None;
+    let mut default_expr_node: Option<types_nodes::Node<'mcx>> = None;
     for cnode in stmt.constraints.iter() {
         if cnode.node_tag() != NodeTag::T_Constraint {
             panic!("unrecognized node type: {:?}", cnode.node_tag());
@@ -254,8 +257,33 @@ pub fn DefineDomain<'mcx>(
                     ));
                 }
                 saw_default = true;
-                if constr.raw_expr.is_some() {
-                    unported("DefineDomain (typecmds.c): DEFAULT expression (deparse_expression)");
+                if let Some(raw) = constr.raw_expr {
+                    let default_expr = tablecmds::cook_default(
+                        mcx,
+                        pstate,
+                        raw,
+                        basetypeoid,
+                        basetype_mod,
+                        domain_name,
+                        0,
+                        None,
+                    )?;
+                    // A plain NULL constant is no default; a CoerceToDomain
+                    // over a base domain is kept so this default overrides
+                    // the base domain's (typecmds.c:864-880).
+                    let is_null_const =
+                        default_expr.as_const().is_some_and(|c| c.constisnull);
+                    if !is_null_const {
+                        default_value = Some(ruleutils::deparse_expression_pretty(
+                            mcx,
+                            default_expr,
+                            InvalidOid,
+                            false,
+                            0,
+                        )?);
+                        default_value_bin = Some(outfuncs::nodeToString(mcx, default_expr)?);
+                        default_expr_node = Some(default_expr);
+                    }
                 }
             }
             ConstrType::CONSTR_NOTNULL => {
@@ -405,9 +433,22 @@ pub fn DefineDomain<'mcx>(
             typNDims: typ_ndims,
             typeNotNull: typ_not_null,
             typeCollation: domaincoll,
-            defaultValue: None,
+            defaultValue: default_value.as_deref(),
+            defaultTypeBin: default_value_bin.as_ref().map(|s| s.as_str()),
         },
     )?;
+    // C records the typdefaultbin expression's dependencies inside
+    // GenerateTypeDependencies (pg_type.c:576-581,710-711); pg_type cannot
+    // depend on catalog_dependency, so the same records are written here.
+    if let Some(expr) = default_expr_node {
+        catalog_dependency::recordDependencyOnExpr(
+            mcx,
+            &ObjectAddress::set(TYPE_RELATION_ID, address.objectId),
+            expr,
+            &types_nodes::NodeList::nil(),
+            pg_depend::DependencyType::Normal,
+        )?;
+    }
 
     let domain_array_name = pg_type::makeArrayTypeName(domain_name, domain_namespace)?;
     let array_alignment = if base.typalign == b'd' as i8 { b'd' as i8 } else { b'i' as i8 };
@@ -445,6 +486,7 @@ pub fn DefineDomain<'mcx>(
             typeNotNull: false,
             typeCollation: domaincoll,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
 
@@ -1099,6 +1141,7 @@ pub fn DefineType<'mcx>(
             typeNotNull: false,
             typeCollation: collation,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
 
@@ -1154,6 +1197,7 @@ pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
 
@@ -1198,6 +1242,7 @@ pub fn DefineEnum<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateEnumStmt<'mcx>) -> PgResult
             typeNotNull: false,
             typeCollation: InvalidOid,
             defaultValue: None,
+            defaultTypeBin: None,
         },
     )?;
 
