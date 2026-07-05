@@ -942,6 +942,9 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
             let mcx = estate.es_query_cxt;
             for slot in estate.es_tupleTable.iter_mut() {
                 ::exectuples::exec_clear_tuple(slot, mcx);
+                // Materialize scratch can come from the statement's own
+                // context (dest receivers); never park it.
+                ::exectuples::exec_drop_slot_scratch(slot, mcx);
             }
             snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
             // The source text lives in the portal, freed before the skeleton

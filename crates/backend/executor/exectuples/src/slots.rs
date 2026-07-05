@@ -222,6 +222,19 @@ pub fn exec_clear_tuple<'mcx>(slot: &mut SlotData<'mcx>, mcx: Mcx<'mcx>) {
     }
 }
 
+/// Executor-skeleton park: drop a virtual slot's retained materialize
+/// scratch. Materialize allocates it from the CALLER's context (dest
+/// receivers pass their own), so it must not outlive the statement; parked
+/// skeletons do.
+pub fn exec_drop_slot_scratch<'mcx>(slot: &mut SlotData<'mcx>, mcx: Mcx<'mcx>) {
+    if let SlotData::Virtual(v) = slot {
+        if v.data.capacity() != 0 {
+            debug_assert!(!v.base.should_free());
+            v.data = PgVec::new_in(mcx);
+        }
+    }
+}
+
 #[inline]
 pub fn exec_store_virtual_tuple(slot: &mut SlotData<'_>) {
     let base = slot.base_mut();
