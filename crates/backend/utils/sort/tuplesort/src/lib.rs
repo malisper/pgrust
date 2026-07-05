@@ -1707,6 +1707,10 @@ impl<'m> TuplesortData<'m> {
     /// Out of line: inlined it doubled puttuple_full on no-abbrev lanes
     /// (m3 sort_limit +22 instr/row, jobs -1783120589/-1783120595).
     #[inline(never)]
+    /// Out of line as C keeps it (ssup->abbrev_converter is an indirect
+    /// call): letting the converter fuse into the put complex regressed
+    /// text_sort by register pressure after the spill landing's code growth.
+    #[inline(never)]
     fn abbrev_datum1(&mut self, original: Datum) -> Datum {
         if !self.consider_abort_common() {
             // SAFETY: variant putters pass live non-null datums of the armed
@@ -2130,10 +2134,8 @@ impl<'m> TuplesortData<'m> {
 
     /// Hot leg = TSS_SORTEDINMEM (one predicted-true status compare); the
     /// tape arms live out of line so the in-memory get keeps its pre-spill
-    /// inlining and code size. inline(always): post-landing crate growth made
-    /// the inliner outline the get leg into the with_mut closures (+42/row on
-    /// text_sort's get loop, +6% on the datum get micro lanes).
-    #[inline(always)]
+    /// inlining and code size.
+    #[inline]
     fn gettuple_common(&mut self, forward: bool) -> PgResult<Option<SortTuple>> {
         if self.status == TupSortStatus::SortedInMem {
             debug_assert!(forward || self.sortopt & TUPLESORT_RANDOMACCESS != 0);
