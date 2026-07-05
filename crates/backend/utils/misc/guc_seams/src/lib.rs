@@ -9,6 +9,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // fmgr_security_definer's proconfig loop (fmgr.c:740-753): each
+    // "name=value" entry applied at superuser()?PGC_SUSET:PGC_USERSET,
+    // PGC_S_SESSION, GUC_ACTION_SAVE, changeVal=true.
+    pub fn process_guc_array_secdef<'a>(array: &'a [String]) -> PgResult<()>
+);
+
+seam_core::seam!(
     // SetConfigOption(name, value, PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT) (guc.c);
     // miscinit's SetOuterUserId keeps the is_superuser GUC in sync through it.
     pub fn set_config_option_internal_dynamic_default(name: &str, value: &str) -> PgResult<()>

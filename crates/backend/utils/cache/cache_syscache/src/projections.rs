@@ -1492,6 +1492,48 @@ fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcFmg
         proisstrict: getattr(&t, PROCOID, ANUM_PG_PROC_PROISSTRICT).as_bool(),
         proretset: getattr(&t, PROCOID, ANUM_PG_PROC_PRORETSET).as_bool(),
         prosecdef: getattr(&t, PROCOID, ANUM_PG_PROC_PROSECDEF).as_bool(),
+        proconfig_isnull: getattr_nullable(&t, PROCOID, ANUM_PG_PROC_PROCONFIG).is_none(),
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(shape))
+}
+
+const ANUM_PG_PROC_PROOWNER: i32 = 4;
+
+fn lookup_pg_proc_secdef(funcid: Oid) -> PgResult<Option<syscache_seams::PgProcSecdefShape>> {
+    let Some(tuple) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let cx = mcx::MemoryContext::new("lookup_pg_proc_secdef");
+    let proconfig = match varlena_image(cx.mcx(), &t, PROCOID, ANUM_PG_PROC_PROCONFIG)? {
+        Some(img) => {
+            let elems =
+                datum::array_build::deconstruct_array_image(cx.mcx(), &img, -1, false, b'i')?;
+            let mut out = Vec::with_capacity(elems.len());
+            for e in elems.iter() {
+                let ep = e.as_usize() as *const u8;
+                // SAFETY: by-ref text element datum inside the detoasted image.
+                let payload = unsafe {
+                    if types_tuple::varatt::varatt_is_1b(ep) {
+                        let raw = types_tuple::varatt::varsize_1b(ep);
+                        core::slice::from_raw_parts(ep.add(1), raw - 1)
+                    } else {
+                        let raw = types_tuple::varatt::varsize_4b(ep);
+                        core::slice::from_raw_parts(ep.add(4), raw - 4)
+                    }
+                };
+                out.push(String::from_utf8_lossy(payload).into_owned());
+            }
+            Some(out)
+        }
+        None => None,
+    };
+    let shape = syscache_seams::PgProcSecdefShape {
+        proowner: getattr(&t, PROCOID, ANUM_PG_PROC_PROOWNER).as_oid(),
+        prosecdef: getattr(&t, PROCOID, ANUM_PG_PROC_PROSECDEF).as_bool(),
+        proconfig,
     };
     drop(t);
     ReleaseSysCache(tuple);
@@ -2716,6 +2758,7 @@ pub(crate) fn install() {
     syscache_seams::pg_proc_proname::set(pg_proc_proname);
     syscache_seams::lookup_pg_proc_shape::set(lookup_pg_proc_shape);
     syscache_seams::lookup_pg_proc_fmgr::set(lookup_pg_proc_fmgr);
+    syscache_seams::lookup_pg_proc_secdef::set(lookup_pg_proc_secdef);
     syscache_seams::lookup_pg_language_fmgr::set(lookup_pg_language_fmgr);
     syscache_seams::lookup_pg_language_name::set(lookup_pg_language_name);
     syscache_seams::lookup_pg_proc_prosrc::set(lookup_pg_proc_prosrc);

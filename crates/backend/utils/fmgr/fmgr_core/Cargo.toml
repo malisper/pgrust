@@ -84,6 +84,8 @@ trigfuncs = { path = "../../adt/trigfuncs" }
 conv = { path = "../../mb/conv" }
 mcx = { path = "../../../../_support/mcx" }
 syscache_seams = { path = "../../cache/syscache_seams" }
+guc_seams = { path = "../../misc/guc_seams" }
+miscinit_seams = { path = "../../init/miscinit_seams" }
 dfmgr = { path = "../dfmgr" }
 
 [dev-dependencies]
