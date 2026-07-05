@@ -426,38 +426,6 @@ pub fn text_overlay<'mcx>(
     text_catenate(mcx, result.data(), s2.data())
 }
 
-// C: replace_text — non-overlapping replacement of every occurrence of
-// `from` in `src`; C returns the original varlena when `src`/`from` is
-// empty or `from` is never found (we produce an equal-valued copy instead).
-pub fn replace_text<'mcx>(
-    mcx: Mcx<'mcx>,
-    src: &[u8],
-    from: &[u8],
-    to: &[u8],
-    collid: Oid,
-) -> PgResult<Varlena<'mcx>> {
-    if src.is_empty() || from.is_empty() {
-        return cstring_to_text(mcx, src);
-    }
-    let mut state = text_position_setup(src, from, collid)?;
-    if !text_position_next(&mut state)? {
-        return cstring_to_text(mcx, src);
-    }
-    let mut image = image_with_header(mcx, src.len())?;
-    let mut start = 0usize;
-    loop {
-        let off = text_position_get_match_off(&state);
-        mcx::vec_append_bytes(&mut image, &src[start..off])?;
-        mcx::vec_append_bytes(&mut image, to)?;
-        start = off + text_position_get_match_len(&state);
-        if !text_position_next(&mut state)? {
-            break;
-        }
-    }
-    mcx::vec_append_bytes(&mut image, &src[start..])?;
-    Ok(Varlena::from_image(image))
-}
-
 // C: convert_to_base (workhorse for to_bin/to_oct/to_hex); base in 2..=16.
 pub fn convert_to_base<'mcx>(mcx: Mcx<'mcx>, mut value: u64, base: u64) -> PgResult<Varlena<'mcx>> {
     debug_assert!(base > 1 && base <= 16);

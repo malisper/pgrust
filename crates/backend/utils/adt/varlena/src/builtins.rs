@@ -628,24 +628,6 @@ pub fn fc_unicode_is_normalized(
     )?))
 }
 
-pub fn fc_replace_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: catalog args are non-null text varlenas (strict fn).
-    let (src, from, to) = unsafe {
-        (
-            fcinfo.arg_varlena_packed(0)?,
-            fcinfo.arg_varlena_packed(1)?,
-            fcinfo.arg_varlena_packed(2)?,
-        )
-    };
-    let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::replace_text(
-        mcx,
-        src.data(),
-        from.data(),
-        to.data(),
-        fcinfo.get_collation(),
-    )?))
-}
 
 pub fn fc_textoverlay(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
@@ -956,7 +938,6 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(752, "byteaoverlay_no_len", 3, fc_byteaoverlay_no_len),
     b(1404, "textoverlay", 4, fc_textoverlay),
     b(1405, "textoverlay_no_len", 3, fc_textoverlay_no_len),
-    b(2087, "replace_text", 3, fc_replace_text),
     b(2089, "to_hex32", 1, fc_to_hex32),
     b(2090, "to_hex64", 1, fc_to_hex64),
     b(6163, "bytea_bit_count", 1, fc_bytea_bit_count),
