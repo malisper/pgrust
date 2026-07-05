@@ -43,6 +43,72 @@ mod exec_ctx_pool {
     }
 }
 
+// One parked executor skeleton for a cached plan (no C counterpart: C
+// rebuilds the whole executor state per EXECUTE). v1 scope: SELECT plans
+// with an empty range table, no params, no initplans/subplans, no
+// instrumentation — the estate + planstate + compiled expressions are kept
+// wired and rebound per run (fresh snapshot, counters, rescan). The parked
+// entry pins its plan with a plancache refcount; a key mismatch discards it.
+mod exec_skeleton {
+    use std::rc::Rc;
+
+    use ::types_portal::CachedPlanHandle;
+    use ::types_tuple::TupleDescData;
+
+    use crate::querydesc::ExecutorHandle;
+
+    pub(crate) struct Skeleton {
+        pub pstmt: *const (),
+        pub cplan: CachedPlanHandle,
+        pub eflags: i32,
+        pub exec: Box<ExecutorHandle>,
+        pub tup_desc: Rc<TupleDescData<'static>>,
+    }
+
+    thread_local! {
+        // Raw pointer keeps the TLS payload !needs_drop (leak at backend
+        // exit matches C's memory-context lifetime).
+        static SLOT: core::cell::Cell<*mut Skeleton> =
+            const { core::cell::Cell::new(core::ptr::null_mut()) };
+    }
+
+    pub(crate) fn take_if_match(
+        pstmt: *const (),
+        cplan: CachedPlanHandle,
+        eflags: i32,
+    ) -> Option<Skeleton> {
+        let p = SLOT.with(|s| s.get());
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: parked via Box::into_raw below; slot nulled before the box
+        // leaves this module.
+        let matches = unsafe { (*p).pstmt == pstmt && (*p).cplan == cplan && (*p).eflags == eflags };
+        if !matches {
+            return None;
+        }
+        SLOT.with(|s| s.set(core::ptr::null_mut()));
+        // SAFETY: sole owner (slot nulled above).
+        let sk = unsafe { Box::from_raw(p) };
+        // The running portal holds its own plan refcount; drop the pin here
+        // and re-take it if the skeleton parks again.
+        plancache_portal_seams::release_cached_plan::call(sk.cplan);
+        Some(*sk)
+    }
+
+    pub(crate) fn park(sk: Skeleton) {
+        plancache_portal_seams::incr_cached_plan::call(sk.cplan);
+        let old = SLOT.with(|s| s.replace(Box::into_raw(Box::new(sk))));
+        if !old.is_null() {
+            // SAFETY: parked via Box::into_raw; displaced — release the pin
+            // and drop the executor bundle on its normal (non-arena) path.
+            let old = unsafe { Box::from_raw(old) };
+            plancache_portal_seams::release_cached_plan::call(old.cplan);
+            drop(old);
+        }
+    }
+}
+
 pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
     querydesc::with_qd(h, |qd| {
         backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
@@ -315,6 +381,34 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             output_cid = xact::GetCurrentCommandId(true)?;
         }
         other => return Err(unrecognized_operation(other)),
+    }
+
+    if !qd.cplan.is_null()
+        && qd.operation == CmdType::CMD_SELECT
+        && qd.instrument_options == 0
+        && qd.params.is_null()
+        && query_env.is_null()
+        && qd.crosscheck_snapshot.is_none()
+    {
+        if let Some(sk) =
+            exec_skeleton::take_if_match(qd.plannedstmt() as *const _ as *const (), qd.cplan, eflags)
+        {
+            let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
+            let source_text = qd.source_text();
+            let mut exec = sk.exec;
+            exec.with_mut(|data| -> PgResult<()> {
+                let ExecData { estate, planstate } = data;
+                estate.es_snapshot = es_snapshot;
+                estate.es_sourceText = Some(source_text);
+                estate.es_processed = 0;
+                estate.es_finished = false;
+                let ps = planstate.as_mut().expect("skeleton holds a plan state");
+                crate::execami::exec_re_scan(ps, estate)
+            })?;
+            qd.tup_desc = Some(sk.tup_desc);
+            qd.exec = Some(exec);
+            return Ok(());
+        }
     }
 
     let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
@@ -721,6 +815,55 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
 /// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
 pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
     let mut exec = qd.exec.take().expect("ExecutorEnd before ExecutorStart");
+
+    // Executor-skeleton park (v1 gates mirror the reuse gates in
+    // standard_executor_start; anything droppy per-run is released here).
+    if !qd.cplan.is_null()
+        && qd.operation == CmdType::CMD_SELECT
+        && qd.instrument_options == 0
+        && qd.params.is_null()
+        && qd.query_env.is_null()
+        && qd.crosscheck_snapshot.is_none()
+    {
+        let parked_eflags = exec.with_mut(|data| {
+            let ExecData { estate, planstate } = data;
+            let eligible = planstate.is_some()
+                && estate.es_range_table_size == 0
+                && estate.es_subplanstates.is_empty()
+                && estate.es_subplan_expr_states.is_empty()
+                && estate.es_param_exec_vals.is_empty()
+                && estate.es_result_relations.is_empty()
+                && estate.es_rowmarks.is_empty()
+                && estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
+                && estate.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS != 0
+                && estate.es_instrument == 0
+                && estate.es_crosscheck_snapshot.is_none();
+            if !eligible {
+                return None;
+            }
+            let mcx = estate.es_query_cxt;
+            for slot in estate.es_tupleTable.iter_mut() {
+                ::exectuples::exec_clear_tuple(slot, mcx);
+            }
+            snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
+            // The source text lives in the portal, freed before the skeleton
+            // is reused; never hold it across the park.
+            estate.es_sourceText = None;
+            Some(estate.es_top_eflags)
+        });
+        if let Some(eflags) = parked_eflags {
+            let tup_desc = qd.tup_desc.take().expect("finished query has a tupdesc");
+            exec_skeleton::park(exec_skeleton::Skeleton {
+                pstmt: qd.plannedstmt() as *const _ as *const (),
+                cplan: qd.cplan,
+                eflags,
+                exec,
+                tup_desc,
+            });
+            return Ok(());
+        }
+    }
+
     exec.with_mut(|data| -> PgResult<()> {
         let ExecData { estate, planstate } = data;
         debug_assert!(

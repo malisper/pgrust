@@ -183,6 +183,7 @@ fn reclaim_ctx(ctx: *mut MemoryContext) {
 pub fn init_seams() {
     plancache_portal_seams::init_plan_cache::set(InitPlanCache);
     plancache_portal_seams::release_cached_plan::set(ReleaseCachedPlan);
+    plancache_portal_seams::incr_cached_plan::set(IncrCachedPlan);
     // C: plancache.c owns `int plan_cache_mode = PLAN_CACHE_MODE_AUTO`.
     thread_local! {
         static PLAN_CACHE_MODE: core::cell::Cell<i32> =
@@ -413,6 +414,15 @@ pub fn ReleaseCachedPlan(cplan: CachedPlanHandle) {
     for ctx in freed {
         reclaim_ctx(ctx);
     }
+}
+
+// Extra refcount on a live plan; pairs with ReleaseCachedPlan.
+pub fn IncrCachedPlan(cplan: CachedPlanHandle) {
+    with_cache(|pc| {
+        let plan = plan_mut(pc, cplan);
+        assert!(plan.refcount > 0, "IncrCachedPlan: plan already freed");
+        plan.refcount += 1;
+    });
 }
 
 pub fn CachedPlanIsValid(h: CachedPlanSourceHandle) -> bool {
