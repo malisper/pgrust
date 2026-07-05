@@ -164,6 +164,8 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
             expr_typmod(node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"))
         }
         NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttypmod,
+        // Result is either the first argument or NULL: report its typmod.
+        NodeTag::T_NullIfExpr => expr_typmod(node.as_null_if_expr().unwrap().args.nth(0)),
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttypmod,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeMod,
         NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().reftypmod,
@@ -179,7 +181,6 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest
         | NodeTag::T_DistinctExpr
-        | NodeTag::T_NullIfExpr
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_XmlExpr
         | NodeTag::T_FieldStore
