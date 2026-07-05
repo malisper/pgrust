@@ -50,3 +50,12 @@ seam_core::seam!(
         new_slot: &HeapTupleData<'_>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    pub fn ri_partition_remove_check<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigger: &Trigger<'mcx>,
+        fk_rel: &Relation<'mcx>,
+        pk_rel: &Relation<'mcx>,
+    ) -> PgResult<()>
+);

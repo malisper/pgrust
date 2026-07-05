@@ -105,6 +105,7 @@ pub fn init_seams() {
     ri_triggers_seams::ri_initial_check::set(RI_Initial_Check);
     ri_triggers_seams::ri_fkey_fk_upd_check_required::set(RI_FKey_fk_upd_check_required);
     ri_triggers_seams::ri_fkey_pk_upd_check_required::set(RI_FKey_pk_upd_check_required);
+    ri_triggers_seams::ri_partition_remove_check::set(RI_PartitionRemove_Check);
 }
 
 fn ri_fkey_trigger<'mcx>(
@@ -702,6 +703,7 @@ pub fn RI_Initial_Check<'mcx>(
                 Some(&t.tupdesc),
                 RI_PLAN_CHECK_LOOKUPPK,
                 false,
+                false,
             )
         }));
     }
@@ -709,6 +711,141 @@ pub fn RI_Initial_Check<'mcx>(
     spi::SPI_finish()?;
     guc::AtEOXact_GUC(true, save_nestlevel);
     Ok(true)
+}
+
+// RI_PartitionRemove_Check (ri_triggers.c): verify no referencing values
+// exist when a partition is detached on the referenced side of an FK.
+pub fn RI_PartitionRemove_Check<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigger: &Trigger<'mcx>,
+    fk_rel: &Relation<'mcx>,
+    pk_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    let riinfo = ri_FetchConstraintInfo(trigger, fk_rel, false)?;
+
+    let mut querybuf = PgString::new_in(mcx);
+    use core::fmt::Write;
+    querybuf.try_push_str("SELECT ")?;
+    let mut sep = "";
+    for i in 0..riinfo.nkeys {
+        let fkattname = quote_one_name(att_name(fk_rel, riinfo.fk_attnums[i]));
+        write!(querybuf, "{sep}fk.{fkattname}").expect("PgString write");
+        sep = ", ";
+    }
+
+    let fk_only =
+        if fk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
+    write!(
+        querybuf,
+        " FROM {}{} fk JOIN {} pk ON",
+        fk_only,
+        quote_relation_name(mcx, fk_rel)?,
+        quote_relation_name(mcx, pk_rel)?
+    )
+    .expect("PgString write");
+
+    let mut sep = "(";
+    for i in 0..riinfo.nkeys {
+        let pk_type = att_type(pk_rel, riinfo.pk_attnums[i]);
+        let fk_type = att_type(fk_rel, riinfo.fk_attnums[i]);
+        let pk_coll = att_collation(pk_rel, riinfo.pk_attnums[i]);
+        let fk_coll = att_collation(fk_rel, riinfo.fk_attnums[i]);
+        let pkattname = format!("pk.{}", quote_one_name(att_name(pk_rel, riinfo.pk_attnums[i])));
+        let fkattname = format!("fk.{}", quote_one_name(att_name(fk_rel, riinfo.fk_attnums[i])));
+        ri_GenerateQual(
+            &mut querybuf,
+            sep,
+            &pkattname,
+            pk_type,
+            riinfo.pf_eq_oprs[i],
+            &fkattname,
+            fk_type,
+        )?;
+        if pk_coll != fk_coll {
+            unported("ri_GenerateQualCollation (cross-collation FK partition detach)");
+        }
+        sep = "AND";
+    }
+
+    // Start the WHERE clause with the partition constraint, unless this is a
+    // sole default partition (empty constraint).
+    match ruleutils::pg_get_partconstrdef_string(mcx, pk_rel.rd_id, "pk")? {
+        Some(constraint_def) if !constraint_def.is_empty() => {
+            write!(querybuf, ") WHERE {constraint_def} AND (").expect("PgString write");
+        }
+        _ => querybuf.try_push_str(") WHERE (")?,
+    }
+
+    let mut sep = "";
+    for i in 0..riinfo.nkeys {
+        let fkattname = quote_one_name(att_name(fk_rel, riinfo.fk_attnums[i]));
+        write!(querybuf, "{sep}fk.{fkattname} IS NOT NULL").expect("PgString write");
+        sep = match riinfo.confmatchtype {
+            FKCONSTR_MATCH_SIMPLE => " AND ",
+            FKCONSTR_MATCH_FULL => " OR ",
+            _ => sep,
+        };
+    }
+    querybuf.try_push_str(")")?;
+
+    let save_nestlevel = guc::NewGUCNestLevel();
+    let workmem = format!("{}", init_small::globals::maintenance_work_mem());
+    guc::set_config_option(
+        "work_mem",
+        Some(&workmem),
+        types_guc::PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+        guc::GUC_ACTION_SAVE,
+        true,
+        types_error::ErrorLevel(0),
+        false,
+    )?;
+    guc::set_config_option(
+        "hash_mem_multiplier",
+        Some("1"),
+        types_guc::PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+        guc::GUC_ACTION_SAVE,
+        true,
+        types_error::ErrorLevel(0),
+        false,
+    )?;
+
+    spi::SPI_connect()?;
+    let qplan = spi::SPI_prepare(querybuf.as_str(), &[])?;
+    let snap = snapmgr::GetLatestSnapshot()?;
+    let spi_result =
+        spi::SPI_execute_snapshot(qplan, &[], &[], Some(snap), None, true, false, 1)?;
+    if spi_result != spi::SPI_OK_SELECT {
+        panic!("SPI_execute_snapshot returned {spi_result}");
+    }
+
+    if spi::SPI_processed() > 0 {
+        // The result tuple's columns are 1..N; hack up riinfo so
+        // ri_ReportViolation reads them (and its tupdesc) correctly.
+        let h = spi::SPI_tuptable().expect("SELECT leaves a tuptable");
+        let mut fake_riinfo = riinfo.clone();
+        for i in 0..fake_riinfo.nkeys {
+            fake_riinfo.pk_attnums[i] = i as i16 + 1;
+        }
+        return Err(spi::tuptable_with(h, |t| {
+            ri_ReportViolation(
+                mcx,
+                &fake_riinfo,
+                pk_rel,
+                fk_rel,
+                &t.vals[0],
+                Some(&t.tupdesc),
+                0,
+                false,
+                true,
+            )
+        }));
+    }
+
+    spi::SPI_finish()?;
+    guc::AtEOXact_GUC(true, save_nestlevel);
+    Ok(())
 }
 
 // RI_FKey_pk_upd_check_required (ri_triggers.c).
@@ -1031,6 +1168,7 @@ fn ri_PerformCheck<'mcx>(
             None,
             qkey.1,
             is_restrict,
+            false,
         ));
     }
     Ok(processed != 0)
@@ -1090,6 +1228,7 @@ fn ri_ReportViolation<'mcx>(
     tupdesc: Option<&types_tuple::TupleDescData<'_>>,
     queryno: i32,
     is_restrict: bool,
+    partgone: bool,
 ) -> Box<PgError> {
     let onfk = queryno == RI_PLAN_CHECK_LOOKUPPK;
     let (attnums, rel) = if onfk {
@@ -1123,6 +1262,22 @@ fn ri_ReportViolation<'mcx>(
     }
 
     let conname = conname_str(riinfo);
+    if partgone {
+        return Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "removing partition \"{}\" violates foreign key constraint \"{conname}\"",
+                    pk_rel.name()
+                ),
+            )
+            .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+            .with_detail(format!(
+                "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
+                fk_rel.name()
+            )),
+        );
+    }
     if onfk {
         Box::new(
             PgError::new(
