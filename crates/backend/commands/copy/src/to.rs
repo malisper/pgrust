@@ -13,7 +13,7 @@ use types_core::primitive::InvalidOid;
 use types_dest::CommandDest;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
-    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_fmgr::{function_call1_coll_in, send_function_call, FmgrInfo, PackedVarlena};
 use types_nodes::nodes_enums::CmdType;
@@ -56,11 +56,13 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("copyto.c", 0, funcname)
 }
 
-/// `BeginCopyTo` (copyto.c), relation and query source arms.
+/// `BeginCopyTo` (copyto.c), relation and query source arms. `query_rel_id`
+/// is the OID of the base relation an RLS COPY was converted from.
 pub fn BeginCopyTo<'mcx, 's>(
     mcx: Mcx<'mcx>,
     rel: Option<&Relation<'mcx>>,
     raw_query: Option<&RawStmt<'mcx>>,
+    query_rel_id: types_core::Oid,
     filename: Option<&'s str>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
@@ -81,7 +83,7 @@ pub fn BeginCopyTo<'mcx, 's>(
         Some(raw_query) => {
             debug_assert!(rel.is_none());
             let query_string = source_text.expect("COPY (query) carries its source text");
-            let (qd, td) = begin_copy_query(mcx, raw_query, query_string)?;
+            let (qd, td) = begin_copy_query(mcx, raw_query, query_rel_id, query_string)?;
             (Some(qd), Some(td))
         }
     };
@@ -177,6 +179,7 @@ pub fn BeginCopyTo<'mcx, 's>(
 fn begin_copy_query<'mcx>(
     mcx: Mcx<'mcx>,
     raw_query: &RawStmt<'mcx>,
+    query_rel_id: types_core::Oid,
     query_string: &str,
 ) -> PgResult<(QueryDescHandle, Rc<TupleDescData<'static>>)> {
     let rewritten = postgres::simple_query::pg_analyze_and_rewrite_fixedparams(
@@ -230,6 +233,17 @@ fn begin_copy_query<'mcx>(
         ParamListHandle::NULL,
     )?
     .expect("planner handles non-utility commands");
+
+    // An RLS-converted COPY passed in the relid it checked policies on and
+    // locked; the planner looked the name up again, so re-verify it resolved
+    // to the same relation (copyto.c BeginCopyTo).
+    if query_rel_id != InvalidOid && !plan.relationOids.iter().any(|o| o == query_rel_id) {
+        return Err(Box::new(
+            PgError::error("relation referenced by COPY statement has changed")
+                .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+
     // Arena-pin the plan: create_query_desc's retention contract holds it
     // until free_query_desc, past this frame.
     let plan = mcx::leak_in(mcx::alloc_in(mcx, plan)?);

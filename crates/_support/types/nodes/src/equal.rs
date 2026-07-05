@@ -20,7 +20,7 @@ use crate::primnodes::{
     CaseWhen, CoalesceExpr, CoerceViaIO,
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
-    SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
+    SQLValueFunction, ScalarArrayOpExpr, SubLink, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     WindowFuncRunCondition, XmlExpr,
 };
 use crate::rawnodes::{
@@ -73,6 +73,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_OpExpr => cmp!(as_op_expr),
         NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
         NodeTag::T_ArrayExpr => cmp!(as_array_expr),
+        NodeTag::T_SubLink => cmp!(as_sub_link),
         NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
@@ -389,6 +390,16 @@ impl NodeEqual for crate::parsenodes::TableSampleClause<'_> {
 }
 
 // C: row_format is a CoercionForm field (never compared).
+impl NodeEqual for SubLink<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.subLinkType == b.subLinkType
+            && self.subLinkId == b.subLinkId
+            && equal_opt(self.testexpr, b.testexpr)
+            && self.operName.node_equal(&b.operName)
+            && equal(self.subselect, b.subselect)
+    }
+}
+
 impl NodeEqual for RowExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         self.args.node_equal(&b.args)

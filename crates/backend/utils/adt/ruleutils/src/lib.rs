@@ -1213,23 +1213,17 @@ pub fn pg_get_expr_worker(
             .into());
     }
 
-    let mut bad_var = false;
-    let mut has_var = false;
-    deparse::walk_varnos(node, &mut |varno, levelsup| {
-        has_var = true;
-        if varno != 1 || levelsup != 0 {
-            bad_var = true;
-        }
-    });
+    // C: bms_is_subset(pull_varnos(NULL, node), {1}) / bms_is_empty.
+    let relids = vars::pull_varnos(mcx, node)?;
     if relid != InvalidOid {
-        if bad_var {
+        if relids.iter().any(|v| v != 1) {
             return Err(PgError::error(
                 "expression contains variables of more than one relation".to_string(),
             )
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
             .into());
         }
-    } else if has_var {
+    } else if !relids.is_empty() {
         return Err(PgError::error("expression contains variables".to_string())
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
             .into());
