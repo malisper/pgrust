@@ -1614,14 +1614,17 @@ fn hashagg_finish_initial_spills<'mcx>(
     Ok(())
 }
 
-// hashagg_reset_spill_state (nodeAgg.c).
-fn hashagg_reset_spill_state(ph: &mut PerHashData<'_>) {
+// hashagg_reset_spill_state (nodeAgg.c); the lazy-init parameters go back
+// to the initial pass's (C passes them fresh at each spill site).
+fn hashagg_reset_spill_state(ph: &mut PerHashData<'_>, input_card: f64) {
     let ss = &mut ph.spill;
     ss.spill = None;
     ss.batches.clear();
     if let Some(ts) = ss.tapeset.take() {
         ts.close().expect("hashagg tapeset close");
     }
+    ss.input_card = input_card;
+    ss.used_bits = 0;
 }
 
 fn agg_instrumentation<'a>(
@@ -2667,7 +2670,7 @@ fn agg_retrieve_hash_table<'mcx>(
 pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     node.qual = None;
     if let Some(ph) = node.perhash.as_mut() {
-        hashagg_reset_spill_state(ph);
+        hashagg_reset_spill_state(ph, node.plan.numGroups as f64);
     }
     node.perhash = None;
     node.persort = None;
@@ -2688,6 +2691,7 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
 /// ExecReScanAgg (nodeAgg.c), chgParam-nonnull arm: input changed, so hashed
 /// results are rebuilt (C reuses only when no params changed in the subtree).
 pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
+    let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
     for ps in node.pertrans_sort.iter_mut() {
         if let Some(sort) = ps.sortstate.take() {
@@ -2702,7 +2706,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
         ph.table_filled = false;
         ph.hashiter = 0;
         ph.hash_ngroups_current = 0;
-        hashagg_reset_spill_state(ph);
+        hashagg_reset_spill_state(ph, numgroups);
         ph.spill.ever_spilled = false;
         ph.spill.mode = false;
         ph.hashtable.reset();
@@ -2717,6 +2721,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
 }
 
 pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
+    let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
     for ps in node.pertrans_sort.iter_mut() {
         if let Some(sort) = ps.sortstate.take() {
@@ -2743,7 +2748,7 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         ph.table_filled = false;
         ph.hashiter = 0;
         ph.hash_ngroups_current = 0;
-        hashagg_reset_spill_state(ph);
+        hashagg_reset_spill_state(ph, numgroups);
         ph.spill.ever_spilled = false;
         ph.spill.mode = false;
         ph.hashtable.reset();
