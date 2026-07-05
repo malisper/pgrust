@@ -87,6 +87,8 @@ fn install_seams() {
                 opcmethod: ::types_core::BTREE_AM_OID,
                 opcfamily: INT_BTREE_FAM,
                 opcintype: INT4OID,
+                // int4_ops stores no separate key type (pg_opclass: 0).
+                opckeytype: ::types_core::InvalidOid,
             }))
         });
         syscache_seams::lookup_pg_amproc::set(|opfamily, _l, _r, procnum| {
