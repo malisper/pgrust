@@ -800,10 +800,25 @@ unsafe fn int8_transarray_at(fcinfo: &Fcinfo, i: usize, copy: bool) -> PgResult<
     // SAFETY: forwarded caller contract.
     let arr = unsafe {
         let p = fcinfo.arg_ptr(i);
-        if !::types_tuple::varatt::varatt_is_4b_u(p) {
-            panic!("int8 transarray: packed/toasted array datum (detoast unported)");
-        }
-        if copy {
+        if ::types_tuple::varatt::varatt_is_1b(p) && !::types_tuple::varatt::varatt_is_1b_e(p) {
+            // C pg_detoast_datum: a tuple-packed short image (e.g. a partial
+            // result off the parallel tuple queue) expands into a fresh 4B-U
+            // copy in CurrentMemoryContext (the result mcx here).
+            let payload_len = ::types_tuple::varatt::varsize_1b(p) - 1;
+            let mcx = fcinfo.result_mcx();
+            let layout = core::alloc::Layout::from_size_align(payload_len + 4, 8)
+                .expect("transarray layout");
+            let raw: core::ptr::NonNull<u8> = ::mcx::Allocator::allocate(&mcx, layout)
+                .map_err(|_| mcx.oom(layout.size()))?
+                .cast();
+            let dst = raw.as_ptr();
+            dst.cast::<u32>()
+                .write(::types_tuple::varatt::set_varsize_4b_word((payload_len + 4) as u32));
+            core::ptr::copy_nonoverlapping(p.add(1), dst.add(4), payload_len);
+            dst
+        } else if !::types_tuple::varatt::varatt_is_4b_u(p) {
+            panic!("int8 transarray: toasted array datum (detoast unported)");
+        } else if copy {
             let img = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_4b(p));
             byref_result(fcinfo.result_mcx(), img)?.as_usize() as *mut u8
         } else {
