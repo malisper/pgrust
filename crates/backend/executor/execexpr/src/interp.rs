@@ -25,11 +25,35 @@ impl<'a, 'mcx> EvalSlots<'a, 'mcx> {
             SlotSrc::Scan => self.scan.as_deref_mut(),
             SlotSrc::Inner => self.inner.as_deref_mut(),
             SlotSrc::Outer => self.outer.as_deref_mut(),
+            // OLD/NEW ride in RetSlots (RETURNING projections only).
+            SlotSrc::Old | SlotSrc::New => missing_slot(src),
         };
         match slot {
             Some(s) => s,
             None => missing_slot(src),
         }
+    }
+}
+
+/// One RETURNING OLD/NEW source (C econtext ecxt_oldtuple/ecxt_newtuple).
+/// `Scan` marks C's slot-aliasing (ExecProcessReturning points scantuple and
+/// old/newtuple at the same slot); a second `&mut` would alias.
+pub enum RetSlot<'a, 'mcx> {
+    None,
+    Scan,
+    Slot(&'a mut SlotData<'mcx>),
+}
+
+/// The RETURNING projection's OLD/NEW slot pair; every non-RETURNING entry
+/// point evaluates with [`RetSlots::none`].
+pub struct RetSlots<'a, 'mcx> {
+    pub old: RetSlot<'a, 'mcx>,
+    pub new: RetSlot<'a, 'mcx>,
+}
+
+impl RetSlots<'_, '_> {
+    pub fn none() -> Self {
+        RetSlots { old: RetSlot::None, new: RetSlot::None }
     }
 }
 
@@ -114,7 +138,7 @@ pub fn exec_eval_expr<'mcx>(
     slots: &mut EvalSlots<'_, 'mcx>,
 ) -> PgResult<NullableDatum> {
     check_still_valid(state, slots)?;
-    match eval(state, slots, None, None)? {
+    match eval(state, slots, &mut RetSlots::none(), None, None)? {
         EvalOutcome::Done(nd) => Ok(nd),
         EvalOutcome::Suspended(_) => subplan_without_driver(),
     }
@@ -126,7 +150,7 @@ pub fn exec_eval_expr_outcome<'mcx>(
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
     check_still_valid(state, slots)?;
-    eval(state, slots, None, resume)
+    eval(state, slots, &mut RetSlots::none(), None, resume)
 }
 
 pub enum QualOutcome {
@@ -141,7 +165,7 @@ pub fn exec_qual_outcome<'mcx>(
 ) -> PgResult<QualOutcome> {
     debug_assert!(state.is_qual());
     check_still_valid(state, slots)?;
-    Ok(match eval(state, slots, None, resume)? {
+    Ok(match eval(state, slots, &mut RetSlots::none(), None, resume)? {
         EvalOutcome::Done(r) => {
             debug_assert!(!r.isnull);
             QualOutcome::Done(r.value.as_bool())
@@ -157,7 +181,7 @@ pub fn exec_project_outcome<'mcx>(
     resume: Option<Resume>,
 ) -> PgResult<Option<Suspension>> {
     check_still_valid(state, slots)?;
-    Ok(match eval(state, slots, Some(result_slot), resume)? {
+    Ok(match eval(state, slots, &mut RetSlots::none(), Some(result_slot), resume)? {
         EvalOutcome::Done(_) => None,
         EvalOutcome::Suspended(s) => Some(s),
     })
@@ -190,7 +214,7 @@ pub fn exec_qual<'mcx>(
         let b = exectuples::slot_getattr(slots.get(b_src), b_attnum as i32 + 1, &mut isnull);
         return Ok(!isnull && cmp.eval(a, b));
     }
-    let r = match eval(state, slots, None, None)? {
+    let r = match eval(state, slots, &mut RetSlots::none(), None, None)? {
         EvalOutcome::Done(nd) => nd,
         EvalOutcome::Suspended(_) => subplan_without_driver(),
     };
@@ -220,7 +244,27 @@ pub fn exec_project_prearmed<'mcx>(
 ) -> PgResult<()> {
     check_still_valid(state, slots)?;
     exectuples::exec_clear_tuple(result_slot, slot_mcx);
-    match eval(state, slots, Some(result_slot), None)? {
+    match eval(state, slots, &mut RetSlots::none(), Some(result_slot), None)? {
+        EvalOutcome::Done(_) => {}
+        EvalOutcome::Suspended(_) => subplan_without_driver(),
+    }
+    exectuples::exec_store_virtual_tuple(result_slot);
+    Ok(())
+}
+
+/// [`exec_project`] with RETURNING OLD/NEW sources (C ExecProject through
+/// ExecProcessReturning's econtext old/new slots).
+pub fn exec_project_returning<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
+    result_slot: &mut SlotData<'mcx>,
+    result_mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<()> {
+    state.arm_result_mcx(result_mcx);
+    check_still_valid_ret(state, slots, ret)?;
+    exectuples::exec_clear_tuple(result_slot, result_mcx);
+    match eval(state, slots, ret, Some(result_slot), None)? {
         EvalOutcome::Done(_) => {}
         EvalOutcome::Suspended(_) => subplan_without_driver(),
     }
@@ -232,14 +276,17 @@ pub fn exec_project_prearmed<'mcx>(
 fn eval<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
     result_slot: Option<&mut SlotData<'mcx>>,
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
     if let Kernel::Program = state.kernel {
         if state.jit.is_some() {
+            // RETURNING OLD/NEW + RETURNINGEXPR steps are jit-refused, so a
+            // jit-compiled program never contains them (no ret threading here).
             return crate::jit::run_jit(state, slots, result_slot, resume);
         }
-        return run_program(state, slots, result_slot, resume);
+        return run_program(state, slots, ret, result_slot, resume);
     }
     debug_assert!(resume.is_none());
     eval_kernel(state, slots, result_slot).map(EvalOutcome::Done)
@@ -428,15 +475,37 @@ fn read_out(out: OutRef) -> NullableDatum {
 fn run_program<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
     mut result_slot: Option<&mut SlotData<'mcx>>,
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
+    let flags = state.flags;
     let ExprState { steps, frames, resnd, saop_tables, .. } = state;
     let res = *resnd;
     let steps = steps.as_slice();
     let mut scan = slots.scan.as_deref_mut();
     let mut inner = slots.inner.as_deref_mut();
     let mut outer = slots.outer.as_deref_mut();
+    let (mut old, old_is_scan) = match &mut ret.old {
+        RetSlot::None => (None, false),
+        RetSlot::Scan => (None, true),
+        RetSlot::Slot(s) => (Some(&mut **s), false),
+    };
+    let (mut new, new_is_scan) = match &mut ret.new {
+        RetSlot::None => (None, false),
+        RetSlot::Scan => (None, true),
+        RetSlot::Slot(s) => (Some(&mut **s), false),
+    };
+    macro_rules! old_slot {
+        () => {
+            if old_is_scan { need_slot(&mut scan) } else { need_slot(&mut old) }
+        };
+    }
+    macro_rules! new_slot {
+        () => {
+            if new_is_scan { need_slot(&mut scan) } else { need_slot(&mut new) }
+        };
+    }
     // No entry reset: as in C, every DONE_RETURN path writes the cell first.
     let base = steps.as_ptr();
     let mut sp = base;
@@ -490,6 +559,50 @@ fn run_program<'mcx>(
             Step::OuterFetchSome { last_var } => {
                 exectuples::slot_getsomeattrs(need_slot(&mut outer), *last_var as i32);
             }
+            Step::OldFetchSome { last_var } => {
+                exectuples::slot_getsomeattrs(old_slot!(), *last_var as i32);
+            }
+            Step::NewFetchSome { last_var } => {
+                exectuples::slot_getsomeattrs(new_slot!(), *last_var as i32);
+            }
+            Step::OldVar { attnum, out, .. } => {
+                let nd = read_var(old_slot!(), *attnum);
+                write_out(*out, nd.value, nd.isnull);
+            }
+            Step::NewVar { attnum, out, .. } => {
+                let nd = read_var(new_slot!(), *attnum);
+                write_out(*out, nd.value, nd.isnull);
+            }
+            Step::OldSysVar { attnum, out } => {
+                // C ExecEvalSysVar: OLD system attribute is NULL when the
+                // OLD row doesn't exist.
+                if flags & crate::steps::EEO_FLAG_OLD_IS_NULL != 0 {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let mut isnull = false;
+                    let d =
+                        exectuples::slot_getsysattr(old_slot!(), *attnum as i32, &mut isnull)?;
+                    write_out(*out, d, isnull);
+                }
+            }
+            Step::NewSysVar { attnum, out } => {
+                if flags & crate::steps::EEO_FLAG_NEW_IS_NULL != 0 {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let mut isnull = false;
+                    let d =
+                        exectuples::slot_getsysattr(new_slot!(), *attnum as i32, &mut isnull)?;
+                    write_out(*out, d, isnull);
+                }
+            }
+            Step::ReturningExprStep { nullflag, jumpdone, out } => {
+                if flags & *nullflag != 0 {
+                    write_out(*out, Datum::null(), true);
+                    // SAFETY: jump targets validated < steps.len() at ready.
+                    sp = unsafe { base.add(*jumpdone as usize) };
+                    continue;
+                }
+            }
             Step::ScanVar { attnum, out, .. } => {
                 let nd = read_var(need_slot(&mut scan), *attnum);
                 write_out(*out, nd.value, nd.isnull);
@@ -513,13 +626,25 @@ fn run_program<'mcx>(
                 write_out(*out, d, false);
             }
             Step::WholeRow { src, wr, frame, out } => {
-                let slot = match src {
-                    crate::steps::SlotSrc::Scan => need_slot(&mut scan),
-                    crate::steps::SlotSrc::Inner => need_slot(&mut inner),
-                    crate::steps::SlotSrc::Outer => need_slot(&mut outer),
-                };
-                let (value, isnull) = eval_whole_row(frames, slot, *wr, *frame)?;
-                write_out(*out, value, isnull);
+                // C ExecEvalWholeRowVar: an OLD/NEW whole-row is NULL when
+                // that row doesn't exist.
+                if (matches!(src, crate::steps::SlotSrc::Old)
+                    && flags & crate::steps::EEO_FLAG_OLD_IS_NULL != 0)
+                    || (matches!(src, crate::steps::SlotSrc::New)
+                        && flags & crate::steps::EEO_FLAG_NEW_IS_NULL != 0)
+                {
+                    write_out(*out, Datum::null(), true);
+                } else {
+                    let slot = match src {
+                        crate::steps::SlotSrc::Scan => need_slot(&mut scan),
+                        crate::steps::SlotSrc::Inner => need_slot(&mut inner),
+                        crate::steps::SlotSrc::Outer => need_slot(&mut outer),
+                        crate::steps::SlotSrc::Old => old_slot!(),
+                        crate::steps::SlotSrc::New => new_slot!(),
+                    };
+                    let (value, isnull) = eval_whole_row(frames, slot, *wr, *frame)?;
+                    write_out(*out, value, isnull);
+                }
             }
             Step::ScanSysVar { attnum, out } => {
                 let mut isnull = false;
@@ -2785,7 +2910,18 @@ fn check_still_valid<'mcx>(
     if state.flags & EEO_FLAG_STILL_VALID_CHECKED != 0 {
         return Ok(());
     }
-    check_still_valid_slow(state, slots)
+    check_still_valid_slow(state, slots, &mut RetSlots::none())
+}
+
+fn check_still_valid_ret<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
+) -> PgResult<()> {
+    if state.flags & EEO_FLAG_STILL_VALID_CHECKED != 0 {
+        return Ok(());
+    }
+    check_still_valid_slow(state, slots, ret)
 }
 
 // Once per compiled expression (C's CheckExprStillValid cost class).
@@ -2793,6 +2929,7 @@ fn check_still_valid<'mcx>(
 fn check_still_valid_slow<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
 ) -> PgResult<()> {
     for step in state.steps.as_slice() {
         let (src, attnum, vartype) = match *step {
@@ -2804,9 +2941,23 @@ fn check_still_valid_slow<'mcx>(
             | Step::OuterVarAggTransByValIndirect { attnum, vartype, .. } => {
                 (SlotSrc::Outer, attnum, vartype)
             }
+            Step::OldVar { attnum, vartype, .. } => (SlotSrc::Old, attnum, vartype),
+            Step::NewVar { attnum, vartype, .. } => (SlotSrc::New, attnum, vartype),
             _ => continue,
         };
-        let slot = slots.get(src);
+        let slot = match src {
+            SlotSrc::Old => match &mut ret.old {
+                RetSlot::Slot(s) => &mut **s,
+                RetSlot::Scan => slots.get(SlotSrc::Scan),
+                RetSlot::None => continue,
+            },
+            SlotSrc::New => match &mut ret.new {
+                RetSlot::Slot(s) => &mut **s,
+                RetSlot::Scan => slots.get(SlotSrc::Scan),
+                RetSlot::None => continue,
+            },
+            other => slots.get(other),
+        };
         let desc = slot
             .base()
             .tts_tupleDescriptor

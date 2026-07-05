@@ -3,8 +3,8 @@
 // nodesort precedent) — exec_modify_table takes fetch and EvalPlanQual
 // closures. AFTER ROW triggers queue via the trigger crate (RI lane);
 // BEFORE/INSTEAD/statement triggers, MERGE, ON CONFLICT and FDW batching are
-// loud named panics; RETURNING projects OLD/NEW-free lists (those are loud
-// at projection build).
+// loud named panics; RETURNING supplies OLD/NEW rows per C ExecProcessReturning
+// (all-NULL substitutes when the row doesn't exist).
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -53,6 +53,11 @@ pub struct ModifyTableState<'mcx> {
     ri_newTupleSlot: Option<ExecSlotId>,
     ri_oldTupleSlot: Option<ExecSlotId>,
     ri_ReturningSlot: Option<ExecSlotId>,
+    // C ri_AllNullSlot: all-NULL OLD/NEW source when that row doesn't exist.
+    ri_AllNullSlot: Option<ExecSlotId>,
+    // ON CONFLICT DO UPDATE's locked pre-update row, carried to the INSERT
+    // arm's RETURNING (C processes it inside ExecUpdate instead).
+    oc_old_slot: Option<ExecSlotId>,
     ri_projectNewInfoValid: bool,
     ri_RowIdAttNo: i16,
     update_cols: mcx::PgVec<'mcx, NewColSrc>,
@@ -531,6 +536,8 @@ pub fn exec_init_modify_table<'mcx>(
         ri_newTupleSlot: merge_new_slot,
         ri_oldTupleSlot: merge_old_slot,
         ri_ReturningSlot: None,
+        ri_AllNullSlot: None,
+        oc_old_slot: None,
         ri_projectNewInfoValid: merge_proj_valid,
         ri_RowIdAttNo: rowid_attno,
         update_cols: mcx::PgVec::new_in(estate.es_query_cxt),
@@ -700,7 +707,21 @@ pub fn exec_modify_table<'mcx>(
                 let result = exec_insert(mt, estate, slot, &mut epq_eval)?;
                 if let Some(rslot) = result {
                     if mt.project_returning.is_some() {
-                        return Ok(Some(exec_process_returning(mt, estate, rslot, plan_slot)?));
+                        // ON CONFLICT DO UPDATE carries the locked pre-update
+                        // row here (C runs this inside ExecUpdate: CMD_UPDATE).
+                        let old = mt.oc_old_slot.take();
+                        let cmd = if old.is_some() {
+                            CmdType::CMD_UPDATE
+                        } else {
+                            CmdType::CMD_INSERT
+                        };
+                        let out = exec_process_returning(
+                            mt, estate, cmd, old, Some(rslot), plan_slot,
+                        )?;
+                        if let Some(oid) = old {
+                            clear_slot(estate, oid);
+                        }
+                        return Ok(Some(out));
                     }
                 }
             }
@@ -732,7 +753,14 @@ pub fn exec_modify_table<'mcx>(
                         estate.es_processed += 1;
                     }
                     if mt.project_returning.is_some() {
-                        return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                        return Ok(Some(exec_process_returning(
+                            mt,
+                            estate,
+                            CmdType::CMD_UPDATE,
+                            Some(old_slot),
+                            Some(slot),
+                            plan_slot,
+                        )?));
                     }
                 }
             }
@@ -745,7 +773,14 @@ pub fn exec_modify_table<'mcx>(
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
                 let modified = exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)?;
                 if modified && mt.project_returning.is_some() {
-                    return Ok(Some(exec_process_returning(mt, estate, slot, plan_slot)?));
+                    return Ok(Some(exec_process_returning(
+                        mt,
+                        estate,
+                        CmdType::CMD_UPDATE,
+                        mt.ri_oldTupleSlot,
+                        Some(slot),
+                        plan_slot,
+                    )?));
                 }
             }
             CmdType::CMD_DELETE if mt.result_relkind == types_rel::RELKIND_VIEW => {
@@ -773,7 +808,12 @@ pub fn exec_modify_table<'mcx>(
                     }
                     if mt.project_returning.is_some() {
                         return Ok(Some(exec_process_returning(
-                            mt, estate, old_slot, plan_slot,
+                            mt,
+                            estate,
+                            CmdType::CMD_DELETE,
+                            Some(old_slot),
+                            None,
+                            plan_slot,
                         )?));
                     }
                 }
@@ -783,7 +823,14 @@ pub fn exec_modify_table<'mcx>(
                 let modified = exec_delete(mt, estate, &mut tupleid, &mut epq_eval)?;
                 if modified && mt.project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
-                    return Ok(Some(exec_process_returning(mt, estate, old_slot, plan_slot)?));
+                    return Ok(Some(exec_process_returning(
+                        mt,
+                        estate,
+                        CmdType::CMD_DELETE,
+                        Some(old_slot),
+                        None,
+                        plan_slot,
+                    )?));
                 }
             }
             CmdType::CMD_MERGE => {
@@ -1266,12 +1313,22 @@ fn exec_merge_matched_scan<'mcx>(
         let mut rslot = None;
         if mt.project_returning.is_some() {
             rslot = match command_type {
-                CmdType::CMD_UPDATE => {
-                    Some(exec_process_returning(mt, estate, new_id, plan_slot)?)
-                }
-                CmdType::CMD_DELETE => {
-                    Some(exec_process_returning(mt, estate, old_id, plan_slot)?)
-                }
+                CmdType::CMD_UPDATE => Some(exec_process_returning(
+                    mt,
+                    estate,
+                    CmdType::CMD_UPDATE,
+                    Some(old_id),
+                    Some(new_id),
+                    plan_slot,
+                )?),
+                CmdType::CMD_DELETE => Some(exec_process_returning(
+                    mt,
+                    estate,
+                    CmdType::CMD_DELETE,
+                    Some(old_id),
+                    None,
+                    plan_slot,
+                )?),
                 _ => None,
             };
         }
@@ -1542,7 +1599,12 @@ fn exec_merge_not_matched<'mcx>(
                 if let Some(islot) = inserted {
                     if mt.project_returning.is_some() {
                         return Ok(Some(exec_process_returning(
-                            mt, estate, islot, plan_slot,
+                            mt,
+                            estate,
+                            CmdType::CMD_INSERT,
+                            None,
+                            Some(islot),
+                            plan_slot,
                         )?));
                     }
                 }
@@ -2711,22 +2773,53 @@ fn get_tuple_for_trigger<'mcx>(
     }
 }
 
-// ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple,
-// outer slot = the plan tuple, projected into the node's virtual result slot
-// (C's econtext scantuple/outertuple + ExecProject).
+// ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple
+// (new for INSERT/UPDATE, old for DELETE), outer slot = the plan tuple, and
+// the OLD/NEW RETURNING sources ride as RetSlots; projected into the node's
+// virtual result slot.
 fn exec_process_returning<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tuple_slot: ExecSlotId,
+    cmd: CmdType,
+    old_id: Option<ExecSlotId>,
+    new_id: Option<ExecSlotId>,
     plan_slot: ExecSlotId,
 ) -> PgResult<ExecSlotId> {
     let result_id = mt.returning_slot.expect("RETURNING slot initialized");
+    let (has_old, has_new) = {
+        let st = mt.project_returning.as_deref().expect("RETURNING projection built");
+        (st.has_old(), st.has_new())
+    };
+    let old_src = match old_id {
+        Some(id) => Some(id),
+        None if has_old => Some(exec_get_all_null_slot(mt, estate)?),
+        None => None,
+    };
+    let new_src = match new_id {
+        Some(id) => Some(id),
+        None if has_new => Some(exec_get_all_null_slot(mt, estate)?),
+        None => None,
+    };
+    let tuple_slot = match cmd {
+        CmdType::CMD_INSERT | CmdType::CMD_UPDATE => new_id.expect("returned new tuple"),
+        CmdType::CMD_DELETE => old_id.expect("returned old tuple"),
+        other => panic!("ExecProcessReturning (nodeModifyTable.c): unrecognized commandType: {other:?}"),
+    };
     let state = mt.project_returning.as_deref_mut().expect("RETURNING projection built");
+    state.set_old_new_null(old_id.is_none(), new_id.is_none());
     let mcx = estate.es_query_cxt;
     let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+    let tlen = table.len();
     let (t, p, r) = (tuple_slot.0 as usize, plan_slot.0 as usize, result_id.0 as usize);
-    assert!(t < table.len() && p < table.len() && r < table.len());
+    let (o, n) = (old_src.map(|x| x.0 as usize), new_src.map(|x| x.0 as usize));
+    assert!(t < tlen && p < tlen && r < tlen);
     assert!(r != t && r != p);
+    for i in [o, n].into_iter().flatten() {
+        assert!(i < tlen && i != r && (i == t || i != p));
+    }
+    if let (Some(o), Some(n)) = (o, n) {
+        assert!(o == t || n == t || o != n);
+    }
     let base = table.as_mut_ptr();
     // SAFETY: bounds-checked, result distinct from both inputs; when the plan
     // slot IS the tuple slot (INSERT without slot coercion) only one &mut is
@@ -2736,9 +2829,44 @@ fn exec_process_returning<'mcx>(
     let outer = if p != t { Some(unsafe { &mut *base.add(p) }) } else { None };
     // SAFETY: as above; r is distinct from t and p.
     let result = unsafe { &mut *base.add(r) };
+    let old = match o {
+        None => execexpr::RetSlot::None,
+        Some(i) if i == t => execexpr::RetSlot::Scan,
+        // SAFETY: bounds/distinctness asserted above (i not in {t, p, r, n}).
+        Some(i) => execexpr::RetSlot::Slot(unsafe { &mut *base.add(i) }),
+    };
+    let new = match n {
+        None => execexpr::RetSlot::None,
+        Some(i) if i == t => execexpr::RetSlot::Scan,
+        // SAFETY: as above (i not in {t, p, r, o}).
+        Some(i) => execexpr::RetSlot::Slot(unsafe { &mut *base.add(i) }),
+    };
+    let mut ret = execexpr::RetSlots { old, new };
     let mut slots = EvalSlots { scan: Some(scan), inner: None, outer };
-    execexpr::exec_project(state, &mut slots, result, mcx)?;
+    execexpr::exec_project_returning(state, &mut slots, &mut ret, result, mcx)?;
     Ok(result_id)
+}
+
+// ExecGetAllNullSlot (execUtils.c): lazily-built all-NULL virtual slot in the
+// result relation's row format.
+fn exec_get_all_null_slot<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ExecSlotId> {
+    if let Some(id) = mt.ri_AllNullSlot {
+        return Ok(id);
+    }
+    let mcx = estate.es_query_cxt;
+    let desc = {
+        let rel = estate.es_relations[(mt.result_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        rel.rd_att.clone()
+    };
+    let id = estate.exec_init_extra_tuple_slot(Some(desc), TupleSlotKind::Virtual);
+    exectuples::exec_store_all_null_tuple(&mut estate.es_tupleTable[id.0 as usize], mcx);
+    mt.ri_AllNullSlot = Some(id);
+    Ok(id)
 }
 
 #[cold]
@@ -3349,7 +3477,13 @@ fn exec_on_conflict_update<'mcx>(
 
     let mut tupleid = conflict_tid;
     let modified = exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?;
-    clear_slot(estate, existing_id);
+    if modified && mt.project_returning.is_some() {
+        // Keep the locked pre-update row for RETURNING OLD; the INSERT arm
+        // clears it after projecting (C clears after ExecUpdate's RETURNING).
+        mt.oc_old_slot = Some(existing_id);
+    } else {
+        clear_slot(estate, existing_id);
+    }
     Ok(OnConflictOutcome::Done(if modified { Some(proj_id) } else { None }))
 }
 
@@ -4036,7 +4170,7 @@ mcx::forget_safe_struct!(
     VirtualNnExpr<'_> { attnum; state },
     WcoExpr<'_> { kind, relname, polname; state },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, result_relkind, result_rti,
-        ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
+        ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot, ri_AllNullSlot, oc_old_slot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
         check_exprs, partition_check, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
