@@ -23,9 +23,9 @@ use types_nodes::primnodes::{
     JsonBehavior, JsonConstructorExpr, JsonExpr, JsonFormat, JsonIsPredicate, JsonReturning,
     JsonTablePath, JsonTablePathScan, JsonTableSiblingJoin, JsonValueExpr, MergeAction,
     MinMaxExpr, NamedArgExpr, NextValueExpr, NullIfExpr, NullTest, OnConflictExpr, OpExpr,
-    Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
-    SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan, SubscriptingRef,
-    TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition, XmlExpr,
+    Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, ReturningExpr, RowCompareExpr,
+    RowExpr, SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan,
+    SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition, XmlExpr,
 };
 use types_nodes::parsenodes::{
     ATAlterConstraint, AccessPriv, AlterCollationStmt, AlterDatabaseRefreshCollStmt,
@@ -1073,6 +1073,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_ReturningClause => {
             let s = node.as_variant::<ReturningClause>().expect("ReturningClause");
             Node::mk(mcx, copy_ReturningClause(mcx, s)?)?
+        }
+        NodeTag::T_ReturningExpr => {
+            let s = node.as_variant::<ReturningExpr>().expect("ReturningExpr");
+            Node::mk(mcx, copy_ReturningExpr(mcx, s)?)?
         }
         NodeTag::T_ReturningOption => {
             let s = node.as_variant::<ReturningOption>().expect("ReturningOption");
@@ -3924,6 +3928,14 @@ pub(crate) fn copy_ReturningClause<'d>(mcx: Mcx<'d>, s: &ReturningClause<'_>) ->
     Ok(ReturningClause {
         options: copy_node_list(mcx, &s.options)?,
         exprs: copy_node_list(mcx, &s.exprs)?,
+    })
+}
+
+pub(crate) fn copy_ReturningExpr<'d>(mcx: Mcx<'d>, s: &ReturningExpr<'_>) -> PgResult<ReturningExpr<'d>> {
+    Ok(ReturningExpr {
+        retlevelsup: s.retlevelsup,
+        retold: s.retold,
+        retexpr: copy_node(mcx, s.retexpr)?,
     })
 }
 

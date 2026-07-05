@@ -188,6 +188,7 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
         NodeTag::T_RelabelType => w.visit(node.as_relabel_type().unwrap().arg),
         NodeTag::T_FieldSelect => w.visit(node.as_field_select().unwrap().arg),
+        NodeTag::T_ReturningExpr => w.visit(node.as_returning_expr().unwrap().retexpr),
         NodeTag::T_CollateExpr => w.visit(node.as_collate_expr().unwrap().arg),
         NodeTag::T_CoerceViaIO => w.visit(node.as_coerce_via_io().unwrap().arg),
         NodeTag::T_ArrayCoerceExpr => {
@@ -1165,6 +1166,16 @@ where
                 Some(arg) => Ok(Some(Node::mk(
                     mcx,
                     types_nodes::primnodes::FieldSelect { arg, ..*f },
+                )?)),
+            }
+        }
+        NodeTag::T_ReturningExpr => {
+            let r = node.as_returning_expr().unwrap();
+            match m(r.retexpr)? {
+                None => Ok(None),
+                Some(retexpr) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::ReturningExpr { retexpr, ..*r },
                 )?)),
             }
         }

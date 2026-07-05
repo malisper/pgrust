@@ -18,7 +18,7 @@ use crate::list::OptNodeList;
 use crate::primnodes::{
     Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr, CaseTestExpr,
     CaseWhen, CoalesceExpr, CoerceViaIO,
-    CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
+    CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     WindowFuncRunCondition, XmlExpr,
@@ -64,6 +64,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_TableSampleClause => cmp!(as_table_sample_clause),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
         NodeTag::T_FieldSelect => cmp!(as_field_select),
+        NodeTag::T_ReturningExpr => cmp!(as_returning_expr),
         NodeTag::T_FieldStore => cmp!(as_field_store),
         NodeTag::T_RowCompareExpr => cmp!(as_row_compare_expr),
         NodeTag::T_SQLValueFunction => cmp!(as_sql_value_function),
@@ -393,6 +394,12 @@ impl NodeEqual for RowExpr<'_> {
         self.args.node_equal(&b.args)
             && self.row_typeid == b.row_typeid
             && self.colnames.node_equal(&b.colnames)
+    }
+}
+
+impl NodeEqual for ReturningExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.retlevelsup == b.retlevelsup && self.retold == b.retold && equal(self.retexpr, b.retexpr)
     }
 }
 
