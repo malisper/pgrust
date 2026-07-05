@@ -134,6 +134,7 @@ fn locale_tolower(ch: u8) -> u8 {
 pub mod parse_enr;
 pub mod parse_node;
 pub mod parse_param;
+pub mod udeescape;
 
 pub use parse_enr::{get_visible_ENR, name_matches_visible_ENR};
 pub use parse_node::{

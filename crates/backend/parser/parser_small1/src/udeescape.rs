@@ -1,5 +1,5 @@
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use parser_small1::scanner_isspace;
+use crate::scanner_isspace;
 use wchar::{
     is_utf16_surrogate_first, is_utf16_surrogate_second, is_valid_unicode_codepoint, pg_enc,
     pg_wchar, surrogate_pair_to_codepoint, unicode_to_utf8, unicode_utf8len, PG_UTF8,
