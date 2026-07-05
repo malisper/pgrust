@@ -3385,7 +3385,7 @@ pub(crate) fn copy_NullTest<'d>(mcx: Mcx<'d>, s: &NullTest<'_>) -> PgResult<Null
 pub(crate) fn copy_ObjectWithArgs<'d>(mcx: Mcx<'d>, s: &ObjectWithArgs<'_>) -> PgResult<ObjectWithArgs<'d>> {
     Ok(ObjectWithArgs {
         objname: copy_node_list(mcx, &s.objname)?,
-        objargs: copy_node_list(mcx, &s.objargs)?,
+        objargs: copy_opt_node_list(mcx, &s.objargs)?,
         objfuncargs: copy_node_list(mcx, &s.objfuncargs)?,
         args_unspecified: s.args_unspecified,
     })

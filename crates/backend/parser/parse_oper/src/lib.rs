@@ -18,7 +18,7 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_nodes::{CoercionForm, Node, NodeList, OpExpr, ScalarArrayOpExpr};
+use types_nodes::{CoercionForm, Node, NodeList, OpExpr, OptNodeList, ScalarArrayOpExpr};
 
 pub struct Operator {
     pub oid: Oid,
@@ -112,18 +112,18 @@ pub fn LookupOperName(
     Ok(InvalidOid)
 }
 
-// LookupOperWithArgs (parse_oper.c): ObjectWithArgs from the grammar always
-// carries exactly two TypeName objargs (the NONE oper_argtypes arms are loud
-// in gram_core, so unary forms cannot reach here).
+// LookupOperWithArgs (parse_oper.c): exactly two objargs cells; a None cell
+// is the oper_argtypes NONE side of a unary operator (InvalidOid side).
 pub fn LookupOperWithArgs(
     oper_name: &NodeList<'_>,
-    oper_args: &NodeList<'_>,
+    oper_args: &OptNodeList<'_>,
     noError: bool,
 ) -> PgResult<Oid> {
     assert_eq!(oper_args.len(), 2, "LookupOperWithArgs: objargs must have 2 entries");
     let scratch = mcx::MemoryContext::new("LookupOperWithArgs");
     let mut oids = [InvalidOid; 2];
     for (i, n) in oper_args.iter().enumerate() {
+        let Some(n) = n else { continue };
         let t = n
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("oper_argtypes holds TypeName nodes");

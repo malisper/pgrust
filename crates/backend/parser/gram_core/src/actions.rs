@@ -75,7 +75,8 @@ use types_nodes::rawnodes::{
     FRAMEOPTION_START_UNBOUNDED_FOLLOWING, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
 };
 use types_nodes::{
-    Alias, DefineStmt, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, RangeFunction, RangeVar,
+    Alias, DefineStmt, DeleteStmt, InsertStmt, Node, NodeList, NodeTag, OptNodeList,
+    RangeFunction, RangeVar,
     RawStmt, SelectStmt, UpdateStmt,
     ValUnion,
 };
@@ -874,7 +875,7 @@ impl<'mcx> Parser<'mcx> {
             461..=464 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_TEMP as i32),
             467 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_UNLOGGED as i32),
             468 => *yyval = YYSTYPE::Ival(RELPERSISTENCE_PERMANENT as i32),
-            // ViewStmt (RECURSIVE variants 1490/1491 stay unported).
+            // ViewStmt: CREATE [OR REPLACE] OptTemp VIEW ...
             1488 | 1489 => {
                 let replace = rule == 1489;
                 let off = if replace { 2 } else { 0 };
@@ -893,6 +894,44 @@ impl<'mcx> Parser<'mcx> {
                 n.replace = replace;
                 n.options = view.v(6 + off).list();
                 n.withCheckOption = view_check_option(view.v(9 + off).ival());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ViewStmt: CREATE [OR REPLACE] OptTemp RECURSIVE VIEW name
+            // '(' columnList ')' opt_reloptions AS SelectStmt opt_check_option
+            1490 | 1491 => {
+                let replace = rule == 1491;
+                let off = if replace { 2 } else { 0 };
+                let persistence = view.v(2 + off).ival() as u8;
+                let relation = view.v(5 + off).node().expect("qualified_name");
+                // SAFETY: tree is parser-owned; no derived refs live.
+                unsafe {
+                    relation
+                        .with_mut::<RangeVar, _>(|r| r.relpersistence = persistence)
+                        .expect("qualified_name is RangeVar");
+                }
+                let check = view_check_option(view.v(12 + off).ival());
+                if check != ViewCheckOption::NO_CHECK_OPTION {
+                    return Err(Box::new(
+                        (*self.errposition_error(
+                            "WITH CHECK OPTION not supported on recursive views".into(),
+                            view.l(12 + off),
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                let rv = relation.as_variant::<RangeVar>().expect("qualified_name is RangeVar");
+                let mut n = Node::build::<ViewStmt>(mcx)?;
+                n.view = Some(rv);
+                n.aliases = view.v(7 + off).list();
+                n.query = Some(make_recursive_view_select(
+                    mcx,
+                    rv.relname.expect("view relname"),
+                    view.v(7 + off).list(),
+                    view.v(11 + off).node(),
+                )?);
+                n.replace = replace;
+                n.options = view.v(9 + off).list();
+                n.withCheckOption = check;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1492 | 1493 => *yyval = YYSTYPE::Ival(ViewCheckOption::CASCADED_CHECK_OPTION as i32),
@@ -5912,6 +5951,21 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 289;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterTableStmt: ALTER MATERIALIZED VIEW [IF_P EXISTS]
+            // qualified_name alter_table_cmds
+            290 | 291 => {
+                let (rv, cmds) = if rule == 290 {
+                    (view.v(4), view.v(5))
+                } else {
+                    (view.v(6), view.v(7))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("qualified_name").as_variant::<RangeVar>();
+                n.cmds = cmds.list();
+                n.objtype = ObjectType::OBJECT_MATVIEW;
+                n.missing_ok = rule == 291;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // AlterTableStmt: ALTER FOREIGN TABLE [IF_P EXISTS] relation_expr
             // alter_table_cmds
             294 | 295 => {
@@ -8934,8 +8988,7 @@ impl<'mcx> Parser<'mcx> {
                 n.missing_ok = rule == 1233;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
-            // oper_argtypes: NONE arms (1236/1237) stay loud — NodeList cells
-            // cannot carry C's NULL TypeName cell.
+            // oper_argtypes: '(' Typename ')' is C's missing-argument error.
             1234 => {
                 return Err(Box::new(
                     (*self.errposition_error("missing argument".into(), view.l(3)))
@@ -8987,12 +9040,20 @@ impl<'mcx> Parser<'mcx> {
                     TransformElements { fromsql, tosql },
                 )?));
             }
+            // oper_argtypes: '(' Typename ',' Typename ')' and the unary NONE
+            // forms; C's NULL TypeName cell rides the Option cells.
             1235 => {
-                let l = view.v(2).node().expect("Typename");
-                let r = view.v(4).node().expect("Typename");
-                let mut list = NodeList::make1(mcx, l)?;
-                list.lappend(mcx, r)?;
-                *yyval = YYSTYPE::List(list);
+                let l = view.v(2).node();
+                let r = view.v(4).node();
+                *yyval = YYSTYPE::OptList(OptNodeList::from_slice(mcx, &[l, r])?);
+            }
+            1236 => {
+                let r = view.v(4).node();
+                *yyval = YYSTYPE::OptList(OptNodeList::from_slice(mcx, &[None, r])?);
+            }
+            1237 => {
+                let l = view.v(2).node();
+                *yyval = YYSTYPE::OptList(OptNodeList::from_slice(mcx, &[l, None])?);
             }
             1240 => {
                 let el = view.v(1).node().expect("operator_with_argtypes");
@@ -9006,7 +9067,7 @@ impl<'mcx> Parser<'mcx> {
             1242 => {
                 let mut owa = Node::build::<parsenodes::ObjectWithArgs>(mcx)?;
                 owa.objname = view.v(1).list();
-                owa.objargs = view.v(2).list();
+                owa.objargs = view.v(2).opt_list();
                 *yyval = YYSTYPE::Node(Some(owa.seal()));
             }
             // DoStmt: DO dostmt_opt_list
@@ -10933,19 +10994,20 @@ fn opt_str<'mcx>(v: YYSTYPE<'mcx>) -> Option<&'mcx str> {
     }
 }
 
-// extractArgTypes (gram.y): input-argument TypeNames only.
+// extractArgTypes (gram.y): input-argument TypeNames only. Function argtype
+// cells are never None; the Option cells exist for oper_argtypes NONE.
 fn extract_arg_types<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     params: &NodeList<'mcx>,
-) -> PgResult<NodeList<'mcx>> {
-    let mut result = NodeList::nil();
+) -> PgResult<OptNodeList<'mcx>> {
+    let mut result = OptNodeList::nil();
     for p in params {
         let fp = p.as_function_parameter().expect("FunctionParameter");
         if !matches!(
             fp.mode,
             FunctionParameterMode::FUNC_PARAM_OUT | FunctionParameterMode::FUNC_PARAM_TABLE
         ) {
-            result.lappend(mcx, fp.argType.expect("func_arg argType"))?;
+            result.lappend(mcx, Some(fp.argType.expect("func_arg argType")))?;
         }
     }
     Ok(result)
@@ -11150,6 +11212,43 @@ fn make_range_var<'mcx>(
             location,
         },
     )
+}
+
+// makeRecursiveViewSelect (gram.y): WITH RECURSIVE relname (aliases) AS
+// (query) SELECT aliases FROM relname.
+fn make_recursive_view_select<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relname: &'mcx str,
+    aliases: NodeList<'mcx>,
+    query: Option<Node<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    let mut tl = NodeList::nil();
+    for alias in aliases.iter() {
+        let colname = alias.as_string().expect("alias list holds String nodes").sval;
+        let fields = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
+        let mut rt = Node::build::<types_nodes::ResTarget>(mcx)?;
+        rt.val = Some(Node::mk_column_ref(mcx, fields, -1)?);
+        rt.location = -1;
+        tl.lappend(mcx, rt.seal())?;
+    }
+
+    let mut cte = Node::build::<CommonTableExpr>(mcx)?;
+    cte.ctename = Some(relname);
+    cte.aliascolnames = aliases;
+    cte.ctematerialized = CTEMaterialize::CTEMaterializeDefault;
+    cte.ctequery = query;
+    cte.location = -1;
+
+    let mut w = Node::build::<WithClause>(mcx)?;
+    w.recursive = true;
+    w.ctes = NodeList::make1(mcx, cte.seal())?;
+    w.location = -1;
+
+    let mut s = Node::build::<SelectStmt>(mcx)?;
+    s.withClause = Some(w.seal());
+    s.targetList = tl;
+    s.fromClause = NodeList::make1(mcx, make_range_var(mcx, None, None, Some(relname), -1)?)?;
+    Ok(s.seal())
 }
 
 // doNegateFloat: strip a leading '+'/'-' pair-wise or prepend '-'.
