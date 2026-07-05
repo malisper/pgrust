@@ -881,8 +881,65 @@ const fn b_lax(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> F
     }
 }
 
+const fn srf_lax(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: false,
+        retset: true,
+        func,
+    }
+}
+
+pub fn fc_jsonb_array_length(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let jb = arg_jsonb(fcinfo, 0, mcx)?;
+    let c = jb.as_bytes();
+    if crate::container::container_is_scalar(c) {
+        return Err(invalid_param_msg("cannot get array length of a scalar"));
+    }
+    if !crate::container::container_is_array(c) {
+        return Err(invalid_param_msg("cannot get array length of a non-array"));
+    }
+    Ok(Datum::from_i32(container_size(c) as i32))
+}
+
+#[cold]
+fn invalid_param_msg(msg: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error(msg)
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
+pub fn fc_jsonb_strip_nulls(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let jb = arg_jsonb(fcinfo, 0, mcx)?;
+    let strip_in_arrays = fcinfo.arg(1).as_bool();
+    let d = image_result(crate::mutate::strip_nulls(mcx, jb.as_bytes(), strip_in_arrays)?);
+    Ok(d)
+}
+
 // pg_proc.dat: all listed entries proisstrict except jsonb_set_lax; none retset.
 pub const JSONB_BUILTINS: &[FmgrBuiltin] = &[
+    b(3207, "jsonb_array_length", 1, fc_jsonb_array_length),
+    b(3262, "jsonb_strip_nulls", 2, fc_jsonb_strip_nulls),
+    b_lax(3209, "jsonb_populate_record", 2, crate::populate::fc_jsonb_populate_record),
+    b_lax(6338, "jsonb_populate_record_valid", 2, crate::populate::fc_jsonb_populate_record_valid),
+    b(3490, "jsonb_to_record", 1, crate::populate::fc_jsonb_to_record),
+    srf_lax(3475, "jsonb_populate_recordset", 2, crate::populate::fc_jsonb_populate_recordset),
+    srf_lax(3491, "jsonb_to_recordset", 1, crate::populate::fc_jsonb_to_recordset),
+    b_lax(3960, "json_populate_record", 3, crate::populate::fc_json_populate_record),
+    b(3204, "json_to_record", 1, crate::populate::fc_json_to_record),
+    srf_lax(3961, "json_populate_recordset", 3, crate::populate::fc_json_populate_recordset),
+    srf_lax(3205, "json_to_recordset", 1, crate::populate::fc_json_to_recordset),
     b(2580, "jsonb_float8", 1, fc_jsonb_float8),
     b(3301, "jsonb_concat", 2, fc_jsonb_concat),
     b(3302, "jsonb_delete", 2, fc_jsonb_delete),
