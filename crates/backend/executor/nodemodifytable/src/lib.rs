@@ -707,8 +707,6 @@ pub fn exec_modify_table<'mcx>(
                 let result = exec_insert(mt, estate, slot, &mut epq_eval)?;
                 if let Some(rslot) = result {
                     if mt.project_returning.is_some() {
-                        // ON CONFLICT DO UPDATE carries the locked pre-update
-                        // row here (C runs this inside ExecUpdate: CMD_UPDATE).
                         let old = mt.oc_old_slot.take();
                         let cmd = if old.is_some() {
                             CmdType::CMD_UPDATE
@@ -3478,8 +3476,7 @@ fn exec_on_conflict_update<'mcx>(
     let mut tupleid = conflict_tid;
     let modified = exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?;
     if modified && mt.project_returning.is_some() {
-        // Keep the locked pre-update row for RETURNING OLD; the INSERT arm
-        // clears it after projecting (C clears after ExecUpdate's RETURNING).
+        // C clears `existing` only after ExecUpdate's RETURNING projection.
         mt.oc_old_slot = Some(existing_id);
     } else {
         clear_slot(estate, existing_id);
