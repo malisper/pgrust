@@ -508,13 +508,6 @@ pub fn ExplainNode<'mcx>(
                     strategy = Some("Mixed");
                     "MixedAggregate"
                 }
-=======
-            match agg.aggstrategy {
-                0 => "Aggregate",
-                1 => "GroupAggregate",
-                2 => "HashAggregate",
-                3 => "MixedAggregate",
->>>>>>> 919935100 (port(partial-agg): parallel partial aggregation — planner paths + combine executor)
                 other => node_gap("ExplainNode", &format!("Agg strategy {other} unrecognized")),
             };
             (p, "Aggregate")
