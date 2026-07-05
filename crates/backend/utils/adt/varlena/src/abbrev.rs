@@ -28,6 +28,7 @@ impl VarStrAbbrevState {
     }
 
     /// bpchar-aware trailing-space trim (bpchartruelen arm of the C convert).
+    #[inline]
     pub fn trimmed<'a>(&self, payload: &'a [u8]) -> &'a [u8] {
         if self.is_bpchar {
             bpchar_truelen(payload)
@@ -72,6 +73,7 @@ impl VarStrAbbrevState {
     /// abbrev compare never disagrees with the authoritative comparator and
     /// ties re-compare originals, so per-pair compare results are identical
     /// armed or aborted. Only the on/off timing (a perf property) diverges.
+    #[inline]
     pub fn convert_slim(&mut self, payload: &[u8]) -> u64 {
         let data = self.trimmed(payload);
 
