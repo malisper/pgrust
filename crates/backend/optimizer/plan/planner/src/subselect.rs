@@ -1565,7 +1565,9 @@ pub(crate) fn cost_subplan<'mcx>(
     // cost_qual_eval's walker charges nothing for the AND shell itself, so
     // walking the testexpr whole equals C's implicit-AND list walk.
     let cost = match splan.testexpr {
-        Some(te) => crate::costsize::cost_qual_eval_node(te)?,
+        // C costs testexpr with root; this signature has no run, so an
+        // array-Var SAOP in testexpr misses the DECHIST length estimate.
+        Some(te) => crate::costsize::cost_qual_eval_node(None, te)?,
         None => Default::default(),
     };
     let mut startup = cost.startup;

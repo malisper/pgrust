@@ -285,7 +285,8 @@ fn inline_body<'a, 'mcx>(
             if clauses::contain_subplans(param)? {
                 return Ok(None);
             }
-            let qc = planner::costsize::cost_qual_eval_node(param)?;
+            // C passes a NULL root here.
+            let qc = planner::costsize::cost_qual_eval_node(None, param)?;
             if qc.startup + qc.per_tuple > 10.0 * planner::gucs::cpu_operator_cost() {
                 return Ok(None);
             }

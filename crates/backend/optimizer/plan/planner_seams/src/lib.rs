@@ -89,7 +89,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn estimate_array_length<'a>(node: Node<'a>) -> f64
+    // run=None is C's NULL root (inline_function's cost probe): the
+    // pg_statistic DECHIST arm is skipped.
+    pub fn estimate_array_length<'a, 'mcx>(
+        run: Option<&'a mut PlannerRun<'mcx>>,
+        node: Node<'mcx>,
+    ) -> PgResult<f64>
 );
 
 seam_core::seam!(

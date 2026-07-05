@@ -588,14 +588,14 @@ pub fn get_agg_clause_costs(
                 let arg_id = run.root.agg_trans_info(id).args[a];
                 let arg = *run.root.expr_node(arg_id);
                 let expr = arg.as_target_entry().map(|t| t.expr).unwrap_or(arg);
-                let argcost = cost_qual_eval_node(expr)?;
+                let argcost = cost_qual_eval_node(Some(&mut *run), expr)?;
                 costs.transCost.startup += argcost.startup;
                 costs.transCost.per_tuple += argcost.per_tuple;
             }
 
             if let Some(fid) = run.root.agg_trans_info(id).aggfilter {
                 let filter = *run.root.expr_node(fid);
-                let argcost = cost_qual_eval_node(filter)?;
+                let argcost = cost_qual_eval_node(Some(&mut *run), filter)?;
                 costs.transCost.startup += argcost.startup;
                 costs.transCost.per_tuple += argcost.per_tuple;
             }
@@ -633,7 +633,7 @@ pub fn get_agg_clause_costs(
         let aggref_node = *run.root.expr_node(aggref_id);
         let aggref = aggref_node.as_aggref().expect("AggInfo holds Aggrefs");
         for d in aggref.aggdirectargs.iter() {
-            let argcost = cost_qual_eval_node(d)?;
+            let argcost = cost_qual_eval_node(Some(&mut *run), d)?;
             costs.finalCost.startup += argcost.startup;
             costs.finalCost.per_tuple += argcost.per_tuple;
         }

@@ -491,7 +491,7 @@ fn order_qual_clauses<'mcx>(
     items.reserve(clauses.len());
     for &rid in clauses {
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
-        let cost = crate::costsize::cost_qual_eval_node(clause)?;
+        let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), clause)?;
         let r = run.root.rinfo(rid);
         let security_level =
             if r.leakproof && cost.per_tuple < 10.0 * crate::gucs::cpu_operator_cost() {
@@ -1816,7 +1816,8 @@ fn create_group_result_plan<'mcx>(
     let mut items: mcx::PgVec<'_, (types_pathnodes::NodeId, f64)> = mcx::PgVec::new_in(run.mcx);
     items.reserve(quals.len());
     for &id in quals.iter() {
-        let cost = crate::costsize::cost_qual_eval_node(*run.root.expr_node(id))?;
+        let node = *run.root.expr_node(id);
+        let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), node)?;
         items.push((id, cost.per_tuple));
     }
     if items.len() > 1 {
@@ -2537,7 +2538,7 @@ fn order_bare_qual_clauses<'mcx>(
     let mut items: mcx::PgVec<'_, (Node<'mcx>, f64)> = mcx::PgVec::new_in(mcx);
     for &q in quals {
         let clause = *run.root.expr_node(q);
-        let cost = crate::costsize::cost_qual_eval_node(clause)?;
+        let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), clause)?;
         items.push((clause, cost.per_tuple));
     }
     if items.len() > 1 {
