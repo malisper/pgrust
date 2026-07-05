@@ -737,7 +737,6 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
             debug_assert!(m.rowMarks.is_nil());
-            assert_eq!(rtoffset, 0, "set_plan_refs (setrefs.c): ModifyTable rtoffset leg; M4 lane");
             // set_returning_clause_references: the other-relations index over
             // the subplan tlist is empty on this lane (join DML loud upstream;
             // preprocess_targetlist checked every RETURNING Var references the
@@ -1000,6 +999,28 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                     .expect("ModifyTable node");
                 }
             }
+            if rtoffset != 0 {
+                // wCTE subplans: the CTE subroot's rtable lands in the
+                // flattened rangetable at rtoffset.
+                let mut new_rr = types_nodes::list::IntList::nil();
+                for rti in m.resultRelations.iter() {
+                    new_rr.lappend(run.mcx, rti + rtoffset)?;
+                }
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                        p.nominalRelation += rtoffset as types_core::Index;
+                        if p.rootRelation != 0 {
+                            p.rootRelation += rtoffset as types_core::Index;
+                        }
+                        // C adds unconditionally, even when unused (0).
+                        p.exclRelRTI += rtoffset as types_core::Index;
+                        p.resultRelations = new_rr;
+                    })
+                }
+                .expect("ModifyTable node");
+            }
+            let m = plan.as_modify_table().unwrap();
             for rti in m.resultRelations.iter() {
                 run.glob.result_relations.lappend(run.mcx, rti)?;
             }

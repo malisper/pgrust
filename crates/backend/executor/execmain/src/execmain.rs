@@ -479,6 +479,16 @@ pub(crate) fn init_plan<'mcx>(
             }
             let ps = exec_init_node(Some(subplan), &mut data.estate, sp_eflags)?
                 .expect("subplans cells are plan trees");
+            // C registers inside ExecInitModifyTable (!canSetTag → lcons onto
+            // es_auxmodifytables); a wCTE ModifyTable is always its subplan's
+            // root here, so it registers where the state cell exists.
+            let is_aux_mt = {
+                let mut root = &ps;
+                if let crate::PlanStateNode::Instrumented(instr) = root {
+                    root = &instr.inner;
+                }
+                matches!(root, crate::PlanStateNode::ModifyTable(m) if !m.mt.canSetTag)
+            };
             // Arena-cell ownership (not a struct field) so the type-erased
             // pointer never aliases a live &mut ExecData; the PlanState's Rc
             // releases run in standard_executor_end's explicit take+drop
@@ -486,10 +496,14 @@ pub(crate) fn init_plan<'mcx>(
             let mut cell = ::mcx::alloc_in(data.estate.es_query_cxt, Some(ps))?;
             let raw: *mut Option<crate::PlanStateNode<'_>> = &mut *cell;
             core::mem::forget(cell);
-            data.estate.es_subplanstates.push(::executils::SubplanStateCell(
+            let cell = ::executils::SubplanStateCell(
                 // SAFETY: raw comes from a live arena allocation.
                 unsafe { core::ptr::NonNull::new_unchecked(raw) }.cast(),
-            ));
+            );
+            data.estate.es_subplanstates.push(cell);
+            if is_aux_mt {
+                data.estate.es_auxmodifytables.push(cell);
+            }
         }
     }
 
@@ -659,11 +673,37 @@ pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<bool> {
         let es = &mut data.estate;
         debug_assert!(es.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
         assert!(!es.es_finished, "ExecutorFinish called twice");
-        // ExecPostprocessPlan: only ModifyTable registers aux nodes, unported.
-        debug_assert!(es.es_auxmodifytables.is_empty());
+        exec_postprocess_plan(es)?;
         es.es_finished = true;
         Ok::<bool, Box<types_error::PgError>>(es.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS == 0)
     })
+}
+
+// ExecPostprocessPlan (execMain.c): run wCTE ModifyTable subplans to
+// completion so unread RETURNING rows still execute their modifications.
+// Reverse registration order == C's lcons ordering (later-initialized nodes
+// shut down first, preserving RETURNING rows a later CTE subplan may read).
+fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
+    estate.es_direction = ScanDirection::ForwardScanDirection;
+    for i in (0..estate.es_auxmodifytables.len()).rev() {
+        let cell = estate.es_auxmodifytables[i];
+        // SAFETY: an es_subplanstates cell installed by InitPlan on this
+        // estate; same take-out protocol as cte_proc_hook.
+        let slot =
+            unsafe { &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr() };
+        let mut ps = slot
+            .take()
+            .unwrap_or_else(|| panic!("recursive CTE plan execution (nodeCtescan.c)"));
+        let result: PgResult<()> = (|| loop {
+            estate.reset_per_tuple_expr_context();
+            if exec_proc_node(&mut ps, estate)?.is_none() {
+                return Ok(());
+            }
+        })();
+        *slot = Some(ps);
+        result?;
+    }
+    Ok(())
 }
 
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is

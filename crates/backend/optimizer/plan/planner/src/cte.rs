@@ -48,10 +48,6 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
             continue;
         }
 
-        if cmd_type != types_nodes::CmdType::CMD_SELECT {
-            panic!("SS_process_ctes (subselect.c): data-modifying CTE \"{ctename}\"; M2 DML-CTE lane");
-        }
-
         let subquery = crate::subselect::query_cells_copy(mcx, ctequery)?;
 
         debug_assert!(run.root.plan_params.is_empty());

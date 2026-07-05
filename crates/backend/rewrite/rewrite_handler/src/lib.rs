@@ -107,11 +107,53 @@ fn RewriteQuery<'mcx>(
         }
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
         let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
-        if ctequery.commandType != CmdType::CMD_SELECT {
-            panic!(
-                "RewriteQuery (rewriteHandler.c): data-modifying CTE; \
-                 nodeModifyTable WITH lane"
-            );
+        if ctequery.commandType == CmdType::CMD_SELECT {
+            continue;
+        }
+
+        let ctq = rewrite_manip::flat_copy_query(mcx, ctequery)?;
+        let newstuff = RewriteQuery(mcx, ctq, rewrite_events, 0, 0)?;
+
+        // Only an unconditional single-statement DO INSTEAD rewrite fits back
+        // into the CTE node.
+        match newstuff.len() {
+            1 => {
+                let q = newstuff.into_iter().next().expect("len checked");
+                if q.utilityStmt.is_some()
+                    || !matches!(
+                        q.commandType,
+                        CmdType::CMD_SELECT
+                            | CmdType::CMD_UPDATE
+                            | CmdType::CMD_INSERT
+                            | CmdType::CMD_DELETE
+                            | CmdType::CMD_MERGE
+                    )
+                {
+                    // Currently it could only be NOTIFY (C).
+                    return Err(wcte_rule_unsupported("DO INSTEAD NOTIFY"));
+                }
+                debug_assert!(!q.canSetTag);
+                let query_node = Node::mk(mcx, q)?;
+                // SAFETY: rewriter-owned tree; no live derived refs.
+                unsafe {
+                    cte_node.with_mut::<types_nodes::parsenodes::CommonTableExpr, _>(|c| {
+                        c.ctequery = Some(query_node)
+                    })
+                }
+                .expect("cteList cell");
+            }
+            0 => return Err(wcte_rule_unsupported("DO INSTEAD NOTHING")),
+            _ => {
+                for q in newstuff.iter() {
+                    if q.querySource == QuerySource::QSRC_QUAL_INSTEAD_RULE {
+                        return Err(wcte_rule_unsupported("conditional DO INSTEAD"));
+                    }
+                    if q.querySource == QuerySource::QSRC_NON_INSTEAD_RULE {
+                        return Err(wcte_rule_unsupported("DO ALSO"));
+                    }
+                }
+                return Err(wcte_rule_unsupported("multi-statement DO INSTEAD"));
+            }
         }
     }
     let num_ctes_processed = cte_len;
@@ -431,6 +473,15 @@ fn RewriteQuery<'mcx>(
 
 #[cold]
 #[inline(never)]
+fn wcte_rule_unsupported(kind: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "{kind} rules are not supported for data-modifying statements in WITH"
+        ))
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 fn returning_needs_instead_rule(event: CmdType, relname: &str) -> Box<PgError> {
     let (verb, hint_evt) = match event {
         CmdType::CMD_INSERT => ("INSERT", "INSERT"),

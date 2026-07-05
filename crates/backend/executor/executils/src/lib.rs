@@ -601,7 +601,9 @@ pub struct EStateData<'mcx> {
     pub es_cte_shared: PgVec<'mcx, Option<CteShared>>,
     pub es_worktable_shared: PgVec<'mcx, Option<WorkTableShared>>,
     pub es_cte_proc_hook: Option<CteProcHook>,
-    pub es_auxmodifytables: PgVec<'mcx, ModifyTableP3>,
+    /// wCTE ModifyTable subplan roots (es_subplanstates cells), init order;
+    /// ExecPostprocessPlan drains them in reverse (C builds with lcons).
+    pub es_auxmodifytables: PgVec<'mcx, SubplanStateCell>,
     es_per_tuple_exprcontext: Option<EcxtId>,
     pub es_sourceText: Option<&'mcx str>,
     pub es_use_parallel_mode: bool,
