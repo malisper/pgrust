@@ -45,4 +45,9 @@ adt_int8 = { path = "../../utils/adt/int8" }
 sequence_xlog = { path = "../sequence_xlog" }
 sequence_seams = { path = "../sequence_seams" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+types_fmgr = { path = "../../../_support/types/fmgr" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
+tupdesc = { path = "../../access/common/tupdesc" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
 elog = { path = "../../utils/error/elog" }

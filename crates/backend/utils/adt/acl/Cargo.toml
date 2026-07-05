@@ -37,3 +37,7 @@ tablespace_seams = { path = "../../../commands/tablespace_seams" }
 foreigncmds_seams = { path = "../../../commands/foreigncmds_seams" }
 lsyscache = { path = "../../cache/lsyscache" }
 types_rel = { path = "../../../../_support/types/rel" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
+tupdesc = { path = "../../../access/common/tupdesc" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+typcache_seams = { path = "../../cache/typcache_seams" }

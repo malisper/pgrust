@@ -261,3 +261,15 @@ fn priv_string_maps_match_c() {
         assert_eq!(c(spelled, ROLE_PRIV_MAP), gof(ACL_CREATE));
     }
 }
+
+#[test]
+fn aclright_strings_match_c() {
+    let expected = [
+        "INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "EXECUTE",
+        "USAGE", "CREATE", "TEMPORARY", "CONNECT", "SET", "ALTER SYSTEM", "MAINTAIN",
+    ];
+    assert_eq!(expected.len() as u32, N_ACL_RIGHTS);
+    for (i, want) in expected.iter().enumerate() {
+        assert_eq!(crate::builtins::convert_aclright_to_string(1u64 << i), *want);
+    }
+}

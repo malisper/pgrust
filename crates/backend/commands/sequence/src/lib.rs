@@ -6,6 +6,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod builtins;
+
 use std::cell::RefCell;
 
 use datum::Datum;
