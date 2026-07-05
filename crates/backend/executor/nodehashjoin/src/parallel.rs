@@ -20,6 +20,9 @@ use crate::{
 };
 
 /// `ExecParallelHashJoin` (`ExecHashJoinImpl(pstate, true)`).
+/// Never inlined: the serial dispatch (hash_join_arm) must keep its
+/// pre-parallel inlining budget so the serial join spine stays bit-flat.
+#[inline(never)]
 pub fn exec_parallel_hash_join<'mcx, O, C>(
     node: &mut HashJoinState<'mcx>,
     outer: &mut O,
