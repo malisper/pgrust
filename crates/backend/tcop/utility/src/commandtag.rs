@@ -132,27 +132,18 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             } else {
                 stmt.renameType
             };
-            match alter_object_type_command_tag(objtype) {
-                CMDTAG_UNKNOWN => payload_gap("CreateCommandTag", "RenameStmt non-table"),
-                tag => tag,
-            }
+            alter_object_type_command_tag(objtype)
         }
         T_AlterObjectDependsStmt => payload_gap("CreateCommandTag", "AlterObjectDependsStmt"),
         T_AlterObjectSchemaStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterObjectSchemaStmt>()
                 .expect("AlterObjectSchemaStmt");
-            match alter_object_type_command_tag(stmt.objectType) {
-                CMDTAG_UNKNOWN => payload_gap("CreateCommandTag", "AlterObjectSchemaStmt"),
-                tag => tag,
-            }
+            alter_object_type_command_tag(stmt.objectType)
         }
         T_AlterOwnerStmt => {
             let stmt = parsetree.as_alter_owner_stmt().expect("AlterOwnerStmt");
-            match alter_object_type_command_tag(stmt.objectType) {
-                CMDTAG_UNKNOWN => payload_gap("CreateCommandTag", "AlterOwnerStmt"),
-                tag => tag,
-            }
+            alter_object_type_command_tag(stmt.objectType)
         }
         T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
         // AlterObjectTypeCommandTag over stmt->objtype.
@@ -160,16 +151,7 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterTableStmt>()
                 .expect("AlterTableStmt");
-            match stmt.objtype {
-                types_nodes::parsenodes::ObjectType::OBJECT_TABLE => CMDTAG_ALTER_TABLE,
-                types_nodes::parsenodes::ObjectType::OBJECT_INDEX => CMDTAG_ALTER_INDEX,
-                types_nodes::parsenodes::ObjectType::OBJECT_VIEW => CMDTAG_ALTER_VIEW,
-                types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE => CMDTAG_ALTER_SEQUENCE,
-                types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW => {
-                    CMDTAG_ALTER_MATERIALIZED_VIEW
-                }
-                _ => payload_gap("CreateCommandTag", "AlterObjectTypeCommandTag non-table"),
-            }
+            alter_object_type_command_tag(stmt.objtype)
         }
         T_AlterDomainStmt => CMDTAG_ALTER_DOMAIN,
         T_AlterFunctionStmt => {
@@ -383,12 +365,12 @@ fn tag_for_command_type(
     }
 }
 
-// AlterObjectTypeCommandTag (utility.c); classes whose grammar cannot reach
-// the ported dispatch yet fall through to the payload gap at the call sites.
+// AlterObjectTypeCommandTag (utility.c); C's default arm is CMDTAG_UNKNOWN.
 fn alter_object_type_command_tag(objtype: types_nodes::parsenodes::ObjectType) -> CommandTag {
     use types_nodes::parsenodes::ObjectType::*;
     match objtype {
         OBJECT_AGGREGATE => CMDTAG_ALTER_AGGREGATE,
+        OBJECT_CAST => CMDTAG_ALTER_CAST,
         OBJECT_ATTRIBUTE | OBJECT_TYPE => CMDTAG_ALTER_TYPE,
         OBJECT_COLUMN | OBJECT_TABLE | OBJECT_TABCONSTRAINT => CMDTAG_ALTER_TABLE,
         OBJECT_COLLATION => CMDTAG_ALTER_COLLATION,
