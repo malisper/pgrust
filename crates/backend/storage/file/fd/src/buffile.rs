@@ -137,6 +137,7 @@ pub fn BufFileOpenFileSet<'mcx>(
     }
     if files.is_empty() {
         ereport(ERROR)
+            .with_saved_errno(get_errno())
             .errcode_for_file_access()
             .errmsg(format!("could not open temporary file \"{base}\": %m"))
             .finish(loc("BufFileOpenFileSet"))?;

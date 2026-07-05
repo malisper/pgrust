@@ -22,6 +22,10 @@ const PG_TEMP_FILE_PREFIX: &str = "pgsql_tmp";
 static FILESET_NUMBER: AtomicU64 = AtomicU64::new(0);
 
 pub struct FileSet {
+    // C creator_pid; captured ONCE — MyProcPid is per-thread (virtual backend
+    // pid) in the thread-native substrate, so lazy resolution would give each
+    // participant a different directory.
+    creator_pid: i32,
     number: u64,
     tablespaces: Vec<Oid>,
 }
@@ -36,15 +40,19 @@ impl FileSet {
         if tablespaces.is_empty() {
             tablespaces.push(Oid::default());
         }
-        Ok(FileSet { number: FILESET_NUMBER.fetch_add(1, Relaxed), tablespaces })
+        Ok(FileSet {
+            creator_pid: init_small::globals::MyProcPid(),
+            number: FILESET_NUMBER.fetch_add(1, Relaxed),
+            tablespaces,
+        })
     }
 
-    // `FileSetPath`: <tempdir>/pgsql_tmp<pid>.<set>.fileset
+    // `FileSetPath`: <tempdir>/pgsql_tmp<creator_pid>.<set>.fileset
     fn dir_path(&self, tablespace: Oid) -> String {
         format!(
             "{}/{PG_TEMP_FILE_PREFIX}{}.{}.fileset",
             TempTablespacePath(tablespace),
-            init_small::globals::MyProcPid(),
+            self.creator_pid,
             self.number
         )
     }
