@@ -1612,19 +1612,51 @@ fn ri_KeysEqual(
             };
             let opcode = lsyscache::operator::get_opcode(eq_opr)?;
             let (oprleft, _) = lsyscache::operator::op_input_types(eq_opr)?;
-            // Polymorphic anyrange/anymultirange operands relabel without a
-            // cast function (C ri_HashCompareOp COERCION_PATH_RELABELTYPE).
-            if oprleft != att.atttypid
-                && lsyscache::typ::getBaseType(att.atttypid)? != oprleft
-                && oprleft != types_core::ANYRANGEOID
-                && oprleft != types_core::ANYMULTIRANGEOID
-            {
-                unported("ri_CompareWithCast cast lane (cross-type FK comparison)");
+            // ri_HashCompareOp (ri_triggers.c): cross-type FK comparisons run
+            // both values through the implicit-coercion function to the
+            // operator's input type; binary-coercible operands (incl.
+            // polymorphic anyrange/anymultirange) relabel without one.
+            // Uncached (C caches fmgr state per eq_opr/type pair).
+            let mut castfunc = InvalidOid;
+            if att.atttypid != oprleft {
+                let (pathtype, f) = coerce::find_coercion_pathway(
+                    oprleft,
+                    att.atttypid,
+                    coerce::CoercionContext::COERCION_IMPLICIT,
+                )?;
+                match pathtype {
+                    coerce::CoercionPathType::COERCION_PATH_FUNC => castfunc = f,
+                    coerce::CoercionPathType::COERCION_PATH_RELABELTYPE => {}
+                    _ => {
+                        if !coerce::IsBinaryCoercible(att.atttypid, oprleft)? {
+                            panic!(
+                                "no conversion function from {} to {}",
+                                format_type::format_type_be(att.atttypid)?,
+                                format_type::format_type_be(oprleft)?
+                            );
+                        }
+                    }
+                }
+            }
+            let scratch = mcx::MemoryContext::new("ri-keys-cmp");
+            let (mut newvalue, mut oldvalue) = (newvalue, oldvalue);
+            if castfunc != InvalidOid {
+                let mut cast = |v: Datum| -> PgResult<Datum> {
+                    let mut finfo = fmgr_seams::fmgr_info::call(castfunc)?;
+                    let mut fcinfo = types_fmgr::LocalFcinfo::<3>::fresh(InvalidOid);
+                    // SAFETY: scratch outlives this call.
+                    unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
+                    fcinfo.set_arg(0, v);
+                    fcinfo.set_arg(1, Datum::from_i32(-1));
+                    fcinfo.set_arg(2, Datum::from_bool(false));
+                    finfo.invoke(&mut fcinfo)
+                };
+                newvalue = cast(newvalue)?;
+                oldvalue = cast(oldvalue)?;
             }
             let mut finfo = fmgr_seams::fmgr_info::call(opcode)?;
             let mut fcinfo = types_fmgr::LocalFcinfo::<2>::fresh(att.attcollation);
             // range/multirange operators detoast through the result mcx.
-            let scratch = mcx::MemoryContext::new("ri-keys-cmp");
             // SAFETY: scratch outlives this call.
             unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
             fcinfo.set_arg(0, newvalue);

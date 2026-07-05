@@ -12349,8 +12349,10 @@ name = "ri_triggers"
 version = "0.1.0"
 dependencies = [
  "cache_syscache",
+ "coerce",
  "datum",
  "fmgr_seams",
+ "format_type",
  "guc",
  "heapam",
  "init_small",
