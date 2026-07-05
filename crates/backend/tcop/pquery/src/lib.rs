@@ -303,9 +303,9 @@ pub fn FetchPortalTargetList<'a, 'mcx>(
 // C FetchStatementTargetList, utilityStmt tail: MOVE and anything besides
 // FETCH/EXECUTE return NIL (e.g. plain EXPLAIN, described via
 // ExplainResultDesc rather than a targetlist).
-pub fn FetchUtilityStatementTargetList<'mcx>(
+pub fn FetchUtilityStatementTargetList<'a, 'mcx>(
     mcx: Mcx<'mcx>,
-    utility_stmt: Option<Node<'mcx>>,
+    utility_stmt: Option<Node<'a>>,
 ) -> PgResult<PgVec<'mcx, TargetEntrySummary>> {
     match utility_stmt.map(Node::node_tag) {
         Some(NodeTag::T_FetchStmt) => {
@@ -316,7 +316,10 @@ pub fn FetchUtilityStatementTargetList<'mcx>(
             }
             let sub =
                 portalmem::GetPortalByName(fstmt.portalname).expect("PortalIsValid(subportal)");
-            FetchPortalTargetList(mcx, &sub.borrow())
+            let p = sub.borrow();
+            let out = FetchPortalTargetList(mcx, &p);
+            drop(p);
+            out
         }
         Some(NodeTag::T_ExecuteStmt) => {
             let name = utility_stmt
