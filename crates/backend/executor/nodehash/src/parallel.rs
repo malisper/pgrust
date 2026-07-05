@@ -1,10 +1,7 @@
-// nodeHash.c parallel (shared hash table) arms, thread-native: dsa_pointer is
-// a raw pointer, DSA chunks are global-heap allocations owned by the shared
-// batch state, the DSM ParallelHashJoinState is an Arc, and C's pstate LWLock
-// is the pstate Mutex. Lock order: pstate lock before any batch mutex.
-// Byte-parity: all space accounting (chunk sizes, bucket-array sizes,
-// estimated_size) uses C's constants, so EXPLAIN batch/bucket/memory numbers
-// match C exactly.
+// nodeHash.c parallel arms, thread-native: dsa_pointer = raw pointer, DSA
+// chunks = global-heap allocations owned by the shared batch state, DSM entry
+// = Arc, pstate LWLock = Mutex. Lock order: pstate before any batch mutex.
+// Space accounting keeps C's constants (EXPLAIN byte-parity).
 #![allow(non_snake_case)]
 
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
@@ -87,8 +84,7 @@ fn chunk_layout(maxlen: usize) -> core::alloc::Layout {
         .expect("chunk layout fits")
 }
 
-// dsa_allocate for a chunk: global heap; freed by free_chunk at the same
-// points C calls dsa_free.
+// dsa_allocate analog; freed by free_chunk at C's dsa_free points.
 fn alloc_chunk(chunk_size: usize) -> *mut HashMemoryChunkHdr {
     let maxlen = chunk_size - HASH_CHUNK_HEADER_SIZE;
     // SAFETY: layout is non-zero; header initialized immediately below.
@@ -416,8 +412,7 @@ fn make_batch(
         )),
     };
     if batchno == 0 {
-        // Batch 0 is loaded while hashing; fast-forward its barrier to
-        // PHJ_BATCH_PROBE so batch selection treats it as ready.
+        // Batch 0 loads while hashing: pre-advance to PHJ_BATCH_PROBE.
         batch.batch_barrier.attach();
         while batch.batch_barrier.phase() < PHJ_BATCH_PROBE {
             batch
@@ -589,8 +584,7 @@ pub fn exec_parallel_hash_table_create<'mcx>(
         detached: false,
     };
 
-    // Attach to the build barrier (detach: ExecHashTableDetach); batch 0's
-    // barrier is joined later, pre-advanced to PHJ_BATCH_PROBE.
+    // Attach; detach is ExecHashTableDetach.
     let build_barrier = &pstate.build_barrier;
     build_barrier.attach();
     if build_barrier.phase() == PHJ_BUILD_ELECT && build_barrier.arrive_and_wait()? {
@@ -626,7 +620,7 @@ pub fn multi_exec_parallel_hash_begin<'mcx>(
         phase = PHJ_BUILD_HASH_INNER;
     }
     if phase == PHJ_BUILD_HASH_INNER {
-        // Join (and if late, first help finish) any growth in progress.
+        // If late, first help finish any growth in progress (C).
         if grow_batches_phase(pstate.grow_batches_barrier.attach()) != PHJ_GROW_BATCHES_ELECT {
             exec_parallel_hash_increase_num_batches(table)?;
         }
@@ -656,12 +650,11 @@ pub fn multi_exec_parallel_hash_finish<'mcx>(
         pstate.grow_buckets_barrier.detach();
         pstate.grow_batches_barrier.detach();
         if build_barrier.arrive_and_wait()? {
-            // Elect one backend to freeze the dimensions.
+            // Elected: batches are now fixed.
             pstate.locked().growth = ParallelHashGrowth::Disabled;
         }
     }
 
-    // Everyone agrees on the dimensions and total tuple count.
     table.curbatch = -1;
     {
         let g = pstate.locked();
@@ -689,7 +682,7 @@ fn parallel_tuple_alloc(
     let size = (size + 7) & !7;
     let curbatch = table.curbatch;
 
-    // Fast path: room in this backend's current chunk, no locking.
+    // Fast path: room in this backend's chunk, no locking (C).
     let chunk = table.current_chunk;
     if !chunk.is_null() && size <= HASH_CHUNK_THRESHOLD {
         // SAFETY: current_chunk is this thread's own chunk.
@@ -938,16 +931,14 @@ pub fn exec_parallel_hash_increase_num_batches(
     let mut phase = grow_batches_phase(barrier.phase());
     if phase == PHJ_GROW_BATCHES_ELECT {
         if barrier.arrive_and_wait()? {
-            // Elected: move the old generation aside and set up the new one.
             let (old_gen, old_nbatch, new_nbatch) = {
                 let mut g = pstate.locked();
                 let old_gen = g.batches.take().expect("batches installed");
                 g.old_batches = Some(Arc::clone(&old_gen));
                 g.old_nbatch = table.nbatch;
                 let new_nbatch = if table.nbatch == 1 {
-                    // Single- to multi-batch: drop back to the per-worker
-                    // budget; one batch per participant would likely also
-                    // not fit, so start at two per participant.
+                    // Single->multi: per-worker budget; two batches per
+                    // participant (C's insufficiency argument).
                     g.space_allowed = get_hash_memory_limit();
                     (pstate.nparticipants as u32 * 2).next_power_of_two() as i32
                 } else {
@@ -963,8 +954,7 @@ pub fn exec_parallel_hash_increase_num_batches(
                 let old_batch0 = &old_gen[0];
                 let new_batch0 = &table.batches_gen.as_ref().expect("just set")[0];
                 if old_nbatch == 1 {
-                    // From one large batch to many smaller ones: shrink the
-                    // bucket array too (C's dtuples arithmetic).
+                    // One large batch -> many smaller: shrink buckets too.
                     let old_ntuples = old_batch0.lock().ntuples;
                     let dtuples = (old_ntuples as f64 * 2.0) / new_nbatch as f64;
                     let max_buckets = prevpower2_u32((MAX_ALLOC_SIZE / SIZEOF_BUCKET) as u32);
@@ -977,14 +967,12 @@ pub fn exec_parallel_hash_increase_num_batches(
                     new_batch0.lock().buckets = Some(alloc_buckets(new_nbuckets));
                     g.nbuckets = new_nbuckets;
                 } else {
-                    // Recycle the existing bucket array, cleared.
                     let recycled = old_batch0.lock().buckets.take().expect("batch 0 buckets");
                     for slot in recycled.iter() {
                         slot.store(core::ptr::null_mut(), Ordering::Relaxed);
                     }
                     new_batch0.lock().buckets = Some(recycled);
                 }
-                // All of batch 0's chunks go to the work queue.
                 let chunks = {
                     let mut b = old_batch0.lock();
                     core::mem::replace(&mut b.chunks, SendPtr(core::ptr::null_mut()))
@@ -993,7 +981,6 @@ pub fn exec_parallel_hash_increase_num_batches(
                 g.growth = ParallelHashGrowth::Disabled;
             }
         } else {
-            // Everyone else just flushes and drops their accessors.
             close_batch_accessors(table)?;
         }
         phase = 1; // PHJ_GROW_BATCHES_REALLOCATE
@@ -1090,12 +1077,9 @@ fn repartition_first(table: &mut ParallelHashJoinTable<'_>) -> PgResult<()> {
                 let (bucketno, batchno) = table.get_bucket_and_batch(hashvalue);
                 debug_assert!(batchno < table.nbatch);
                 if batchno == 0 {
-                    // Still batch 0: copy into a new chunk.
                     let copy = parallel_tuple_alloc(table, HJTUPLE_OVERHEAD + t_len)?
                         .expect("growth disabled while repartitioning");
                     install_tuple(copy, hashvalue, image);
-                    // install_tuple clears the match flag, which is also
-                    // clear in the source (build phase).
                     table.push_tuple(bucketno, copy);
                 } else {
                     let tuple_size = (HJTUPLE_OVERHEAD + t_len + 7) & !7;
@@ -1179,7 +1163,6 @@ pub fn exec_parallel_hash_increase_num_buckets(
             let mut b = batch0.lock();
             b.size += size / 2;
             b.buckets = Some(alloc_buckets(nbuckets));
-            // Chunk list onto the work queue for parallel reinsertion.
             let chunks = core::mem::replace(&mut b.chunks, SendPtr(core::ptr::null_mut()));
             drop(b);
             g.chunk_work_queue = chunks;
@@ -1238,8 +1221,7 @@ pub fn exec_hash_table_detach_batch(table: &mut ParallelHashJoinTable<'_>) -> Pg
     let barrier = &batch.batch_barrier;
     debug_assert!(matches!(barrier.phase(), PHJ_BATCH_PROBE | PHJ_BATCH_SCAN));
 
-    // Abandoning the probe early means the match-bit set is incomplete:
-    // command every participant to skip the unmatched scan.
+    // Early probe abandon = incomplete match bits: skip the unmatched scan.
     if barrier.phase() == PHJ_BATCH_PROBE && !table.batches[curbatch as usize].outer_eof {
         batch.skip_unmatched.store(true, Ordering::Relaxed);
     }
@@ -1249,7 +1231,6 @@ pub fn exec_hash_table_detach_batch(table: &mut ParallelHashJoinTable<'_>) -> Pg
         attached = barrier.arrive_and_detach_except_last();
     }
     if attached && barrier.arrive_and_detach() {
-        // Last out: free the batch's memory.
         debug_assert!(barrier.phase() == PHJ_BATCH_FREE);
         let mut b = batch.lock();
         let mut chunk = b.chunks.0;
@@ -1297,7 +1278,6 @@ pub fn exec_hash_table_detach(table: &mut ParallelHashJoinTable<'_>) -> PgResult
     if pstate.build_barrier.phase() == PHJ_BUILD_RUN {
         close_batch_accessors(table)?;
         if pstate.build_barrier.arrive_and_detach() {
-            // Last to detach: free the batch state.
             debug_assert!(pstate.build_barrier.phase() == PHJ_BUILD_FREE);
             let mut g = pstate.locked();
             let gen = g.batches.take();
@@ -1312,8 +1292,7 @@ pub fn exec_hash_table_detach(table: &mut ParallelHashJoinTable<'_>) -> PgResult
     Ok(())
 }
 
-// Free any chunks a generation still owns (normally freed per batch at
-// PHJ_BATCH_FREE; this is the give-up path for skipped batches).
+// Give-up path for skipped batches (normal frees happen at PHJ_BATCH_FREE).
 fn free_generation(gen: &Arc<[ParallelHashJoinBatch]>) {
     for batch in gen.iter() {
         let mut b = batch.lock();
@@ -1333,8 +1312,7 @@ fn free_generation(gen: &Arc<[ParallelHashJoinBatch]>) {
 
 impl Drop for BatchShared {
     fn drop(&mut self) {
-        // Error-path backstop: the coordinated frees above normally leave
-        // nothing behind.
+        // Error-path backstop only.
         let mut chunk = self.chunks.0;
         while !chunk.is_null() {
             // SAFETY: dropping the generation Arc means no accessor remains.
