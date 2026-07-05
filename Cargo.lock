@@ -12903,14 +12903,18 @@ name = "slotfuncs"
 version = "0.0.0"
 dependencies = [
  "datum",
+ "elog",
  "funcapi",
  "guc_tables",
  "heaptuple",
  "init_small",
+ "inval",
  "logical",
  "logical_decode",
  "lwlock",
  "mcx",
+ "postgres_seams",
+ "resowner",
  "slot",
  "transam_xlog",
  "types_core",
@@ -12919,6 +12923,8 @@ dependencies = [
  "types_storage",
  "types_tuple",
  "varlena",
+ "xlogreader",
+ "xlogrecovery",
 ]
 
 [[package]]
@@ -15639,8 +15645,22 @@ dependencies = [
 name = "waitevent"
 version = "0.0.0"
 dependencies = [
+ "datum",
+ "dynahash",
+ "elog",
+ "funcapi",
+ "init_small",
  "lwlock",
+ "mcx",
+ "shmem_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_hash",
+ "types_storage",
+ "varlena",
  "waitevent_seams",
+ "xact_seams",
 ]
 
 [[package]]
