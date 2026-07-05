@@ -207,7 +207,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             // call where C stores a static pointer (fabled #422's 100 Ir/q).
             portal_context.set_ident(Some(name_copy.as_str()));
         }
-        let data = PortalData {
+        let mut data = PortalData {
             name: name_copy,
             prepStmtName: None,
             portalContext: Some(portal_context),
@@ -247,7 +247,14 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
         // previous portal's strings here, where C pfree'd them at drop time.
         let portal = match m.free_portals.pop() {
             Some(slot) if slot.is_unique() => {
-                *slot.borrow_mut() = data;
+                let mut b = slot.borrow_mut();
+                // Retain the formats capacity across slot reuse: the EXECUTE
+                // path rebuilt it per portal (an alloc+free pair per query).
+                let mut formats = core::mem::replace(&mut b.formats, PgVec::new_in(mcx));
+                formats.clear();
+                data.formats = formats;
+                *b = data;
+                drop(b);
                 slot
             }
             _ => Portal::new(data),
