@@ -1,7 +1,7 @@
 // tablecmds.c traditional-inheritance slice: inheritOids lookup +
-// MergeAttributes (columns, NOT NULL, CHECK, generated) +
-// StoreCatalogInheritance. Plain inherited defaults, identity, compression
-// and typed tables are loud; partitions take the empty-column arm in lib.rs.
+// MergeAttributes (columns, defaults, NOT NULL, CHECK, generated,
+// compression) + StoreCatalogInheritance. Typed tables are loud;
+// partitions take the empty-column arm in lib.rs.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERROR, NOTICE};
@@ -188,12 +188,6 @@ pub(crate) fn MergeAttributes<'mcx>(
                 mcx,
                 core::str::from_utf8(attribute.attname.name_str()).expect("attname UTF-8"),
             )?;
-            if attribute.attidentity != 0 {
-                unported("inherited identity columns");
-            }
-            if attribute.attcompression != 0 {
-                unported("inherited column compression (tablecmds.c:2788)");
-            }
             let mut newdef = make_column_def(
                 mcx,
                 att_name,
@@ -203,6 +197,11 @@ pub(crate) fn MergeAttributes<'mcx>(
             )?;
             newdef.storage = attribute.attstorage as u8;
             newdef.generated = attribute.attgenerated as u8;
+            if attribute.attcompression != 0 {
+                newdef.compression = Some(compression_method_name(attribute.attcompression as u8));
+            }
+            // Regular inheritance children do not inherit identity; only
+            // partitions do (they take the lib.rs descriptor-copy leg).
 
             let exist = inh_defs
                 .iter()
@@ -227,9 +226,6 @@ pub(crate) fn MergeAttributes<'mcx>(
                 inh_defs[merged_idx].is_not_null = true;
             }
             if attribute.atthasdef {
-                if attribute.attgenerated == 0 {
-                    unported("inherited column defaults (TupleDescGetDefault lane)");
-                }
                 inherited_defaults.push((merged_idx, parent_attno as AttrNumber));
             }
         }
@@ -401,6 +397,15 @@ fn clone_column_def<'mcx>(mcx: Mcx<'mcx>, d: &ColumnDef<'mcx>) -> PgResult<Colum
     })
 }
 
+// GetCompressionMethodName (toast_compression.c).
+fn compression_method_name(c: u8) -> &'static str {
+    match c {
+        b'p' => "pglz",
+        b'l' => "lz4",
+        _ => panic!("invalid compression method {c}"),
+    }
+}
+
 fn storage_name(c: u8) -> &'static str {
     match c {
         b'p' => "PLAIN",
@@ -489,7 +494,18 @@ fn merge_inherited_attribute<'mcx>(
             types_error::ERRCODE_DATATYPE_MISMATCH,
         ));
     }
-    debug_assert!(prevdef.compression.is_none() && newdef.compression.is_none());
+    if prevdef.compression.is_none() {
+        prevdef.compression = newdef.compression;
+    } else if let Some(newcomp) = newdef.compression {
+        if prevdef.compression != Some(newcomp) {
+            return Err(column_conflict(
+                "column \"{}\" has a compression method conflict",
+                attname,
+                format!("{} versus {newcomp}", prevdef.compression.expect("compression")),
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            ));
+        }
+    }
     if prevdef.generated != newdef.generated {
         return Err(Box::new(
             PgError::new(
@@ -545,7 +561,8 @@ fn merge_child_attribute<'mcx>(
     if inhcollid != newcollid {
         return Err(collation_conflict(attname, inhcollid, newcollid, false)?);
     }
-    debug_assert!(newdef.identity == 0, "identity loud upstream");
+    // Identity is never inherited by a regular child; the child's wins.
+    inhdef.identity = newdef.identity;
     if inhdef.storage == 0 {
         inhdef.storage = newdef.storage;
     } else if newdef.storage != 0 && inhdef.storage != newdef.storage {
@@ -560,8 +577,18 @@ fn merge_child_attribute<'mcx>(
             types_error::ERRCODE_DATATYPE_MISMATCH,
         ));
     }
-    debug_assert!(inhdef.compression.is_none());
-    inhdef.compression = newdef.compression;
+    if inhdef.compression.is_none() {
+        inhdef.compression = newdef.compression;
+    } else if let Some(newcomp) = newdef.compression {
+        if inhdef.compression != Some(newcomp) {
+            return Err(column_conflict(
+                "column \"{}\" has a compression method conflict",
+                attname,
+                format!("{} versus {newcomp}", inhdef.compression.expect("compression")),
+                types_error::ERRCODE_DATATYPE_MISMATCH,
+            ));
+        }
+    }
     inhdef.is_not_null |= newdef.is_not_null;
     if inhdef.generated != 0 {
         if newdef.raw_default.is_some() && newdef.generated == 0 {
