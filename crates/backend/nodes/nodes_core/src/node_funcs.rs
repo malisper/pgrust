@@ -90,8 +90,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         }
         NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
+        // C exprType(NULL) == InvalidOid; ERROR-btype behaviors carry no expr.
         NodeTag::T_JsonBehavior => {
-            expr_type(node.as_json_behavior().unwrap().expr.expect("expr"))
+            node.as_json_behavior().unwrap().expr.map_or(types_core::InvalidOid, expr_type)
         }
         NodeTag::T_AlternativeSubPlan => expr_type(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
@@ -242,7 +243,7 @@ pub fn expr_typmod(node: Node<'_>) -> i32 {
         NodeTag::T_JsonIsPredicate => -1,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typmod,
         NodeTag::T_JsonBehavior => {
-            expr_typmod(node.as_json_behavior().unwrap().expr.expect("expr"))
+            node.as_json_behavior().unwrap().expr.map_or(-1, expr_typmod)
         }
         NodeTag::T_AlternativeSubPlan => expr_typmod(
             node.as_alternative_sub_plan().unwrap().subplans.first().expect("subplans non-empty"),
