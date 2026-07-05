@@ -15,6 +15,7 @@ use types_nodes::primnodes::{
     FuncExpr, MinMaxExpr, MinMaxOp, NullTest, NullTestType, OpExpr, Param, ParamKind,
     ScalarArrayOpExpr, SubLink, SubLinkType, Var, VarReturningType,
 };
+use types_nodes::rawnodes::{PartitionBoundSpec, PartitionRangeDatum, PartitionRangeDatumKind};
 use types_nodes::{BoolTestType, Node, NodeList, NodeTag, RTEKind, RangeTblEntry};
 
 use crate::query::{self, DeparseNamespace};
@@ -225,6 +226,23 @@ pub(crate) fn walk_varnos(node: Node<'_>, f: &mut impl FnMut(i32, u32)) {
             }
             for a in x.args.iter() {
                 walk_varnos(a, f);
+            }
+        }
+        NodeTag::T_PartitionBoundSpec => {
+            let s = node.as_variant::<PartitionBoundSpec>().unwrap();
+            for d in s.listdatums.iter() {
+                walk_varnos(d, f);
+            }
+            for d in s.lowerdatums.iter() {
+                walk_varnos(d, f);
+            }
+            for d in s.upperdatums.iter() {
+                walk_varnos(d, f);
+            }
+        }
+        NodeTag::T_PartitionRangeDatum => {
+            if let Some(v) = node.as_variant::<PartitionRangeDatum>().unwrap().value {
+                walk_varnos(v, f);
             }
         }
         other => gap("pull_varnos", &format!("{other:?} walk arm")),
@@ -644,8 +662,78 @@ pub(crate) fn get_rule_expr<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_PartitionBoundSpec => {
+            let spec = node.as_variant::<PartitionBoundSpec>().unwrap();
+            if spec.is_default {
+                ctx.buf.push_str("DEFAULT");
+                return Ok(());
+            }
+            match spec.strategy {
+                b'h' => {
+                    assert!(spec.modulus > 0 && spec.remainder >= 0);
+                    assert!(spec.modulus > spec.remainder);
+                    ctx.buf.push_str(&format!(
+                        "FOR VALUES WITH (modulus {}, remainder {})",
+                        spec.modulus, spec.remainder
+                    ));
+                }
+                b'l' => {
+                    ctx.buf.push_str("FOR VALUES IN (");
+                    let mut sep = "";
+                    for cell in spec.listdatums.iter() {
+                        let val = cell.as_const().expect("list partition datum is a Const");
+                        ctx.buf.push_str(sep);
+                        get_const_expr(val, ctx, -1)?;
+                        sep = ", ";
+                    }
+                    ctx.buf.push(')');
+                }
+                b'r' => {
+                    assert!(
+                        spec.lowerdatums.len() > 0
+                            && spec.lowerdatums.len() == spec.upperdatums.len()
+                    );
+                    ctx.buf.push_str("FOR VALUES FROM ");
+                    get_range_partbound_string(&spec.lowerdatums, ctx)?;
+                    ctx.buf.push_str(" TO ");
+                    get_range_partbound_string(&spec.upperdatums, ctx)?;
+                }
+                other => panic!("unrecognized partition strategy: {other}"),
+            }
+            Ok(())
+        }
         other => gap("get_rule_expr", &format!("{other:?} deparse arm")),
     }
+}
+
+// C get_range_partbound_string (ruleutils.c); appends into ctx.buf instead of
+// returning a fresh string.
+pub(crate) fn get_range_partbound_string<'mcx>(
+    bound_datums: &NodeList<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+) -> PgResult<()> {
+    ctx.buf.push('(');
+    let mut sep = "";
+    for cell in bound_datums.iter() {
+        let datum = cell
+            .as_variant::<PartitionRangeDatum>()
+            .expect("range bound datum is a PartitionRangeDatum");
+        ctx.buf.push_str(sep);
+        match datum.kind {
+            PartitionRangeDatumKind::Minvalue => ctx.buf.push_str("MINVALUE"),
+            PartitionRangeDatumKind::Maxvalue => ctx.buf.push_str("MAXVALUE"),
+            PartitionRangeDatumKind::Value => {
+                let val = datum
+                    .value
+                    .and_then(|v| v.as_const())
+                    .expect("range partition datum value is a Const");
+                get_const_expr(val, ctx, -1)?;
+            }
+        }
+        sep = ", ";
+    }
+    ctx.buf.push(')');
+    Ok(())
 }
 
 fn get_json_format(format: Option<&types_nodes::JsonFormat>, ctx: &mut DeparseContext<'_>) {
