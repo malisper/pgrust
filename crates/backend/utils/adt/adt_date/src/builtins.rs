@@ -1,7 +1,7 @@
 //! fmgr wrappers (`fc_*`) + `DATE_BUILTINS` for fmgr-core, hosting the
 //! timestamp.c rows too (adt_timestamp has no fmgr table; adt_date already
 //! deps it). Not registrable (established precedents):
-//! sortsupport/skipsupport/time_support (planner nodes), age/overlaps_
+//! sortsupport/skipsupport (planner nodes), age/overlaps_
 //! timestamp, in_range, generate_series,
 //! date_part(text,date) 1384 (SQL-language). recv/send ride the binary-wire
 //! fmgr frame (types_fmgr::wire); interval/timetz by-ref results are
@@ -1099,6 +1099,44 @@ pub fn fc_in_range_timetz_interval(
     Ok(Datum::from_bool(if less { cmp <= 0 } else { cmp >= 0 }))
 }
 
+// time_support (date.c): SupportRequestSimplify only — TemporalSimplify
+// (datetime.c) with MAX_TIME_PRECISION; a time/timetz typmod cast that
+// cannot truncate becomes a RelabelType.
+pub fn fc_time_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("time_support: SupportRequestSimplify without a FuncExpr"));
+    assert!(fexpr.args.len() >= 2);
+    let Some(c) = fexpr.args.nth(1).as_const() else {
+        return Ok(Datum::from_usize(0));
+    };
+    if c.constisnull {
+        return Ok(Datum::from_usize(0));
+    }
+    let source = fexpr.args.nth(0);
+    let old_precis = nodes_core::expr_typmod(source);
+    let new_precis = c.constvalue.as_i32();
+    if new_precis < 0
+        || new_precis == adt_datetime::MAX_TIME_PRECISION
+        || (old_precis >= 0 && new_precis >= old_precis)
+    {
+        let mcx = req.mcx.expect("time_support: request carries an mcx");
+        let ret = nodes_core::relabel_to_typmod(mcx, source, new_precis)?;
+        return Ok(Datum::from_usize(ret.as_raw().as_ptr() as usize));
+    }
+    Ok(Datum::from_usize(0))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -1111,6 +1149,7 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // their row, as in C's fmgr_builtins[].
 pub const DATE_BUILTINS: &[FmgrBuiltin] = &[
     b(2909, "timetypmodin", 1, fc_timetypmodin),
+    b(3944, "time_support", 1, fc_time_support),
     b(2910, "timetypmodout", 1, fc_timetypmodout),
     b(2911, "timetztypmodin", 1, fc_timetztypmodin),
     b(2912, "timetztypmodout", 1, fc_timetztypmodout),
