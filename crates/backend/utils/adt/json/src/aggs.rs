@@ -1,7 +1,7 @@
 //! json.c aggregate slice: json_agg[_strict] and json_object_agg[_strict]
-//! trans/final functions over an INTERNAL aggcontext-lived StringInfo.
-//! The _unique variants (json_unique hash machinery) stay loud via
-//! unported OIDs.
+//! trans/final functions over an INTERNAL aggcontext-lived StringInfo, plus
+//! the _unique variants' json_unique_check_key hash-set (object_id is always
+//! 0 here — flat object aggregation never nests JsonUniqueBuilderState).
 
 extern crate alloc;
 
@@ -10,16 +10,27 @@ use crate::tojson::{
     TypeCat,
 };
 use datum::Datum;
-use mcx::Mcx;
+use mcx::{Mcx, PgFxHashMap};
 use stringinfo::StringInfo;
-use types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
+use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+
+// C JsonUniqueBuilderState (object_id fixed at 0 for this flat builder —
+// never records nested-object collisions); `skipped` is the throwaway
+// key-only buffer for absent_on_null skips under unique_keys.
+type UniqueKeys = PgFxHashMap<'static, &'static [u8], ()>;
+
+struct UniqueCheck {
+    keys: UniqueKeys,
+    skipped: Option<StringInfo<'static>>,
+}
 
 // C: JsonAggState minus the category fields — those depend only on the
 // declared argument types, so they live once per FmgrInfo (fn_extra memo),
 // not per group. ManuallyDrop: the aggcontext arena resets wholesale.
 struct JsonAggState {
     str: core::mem::ManuallyDrop<StringInfo<'static>>,
+    unique: core::mem::ManuallyDrop<Option<UniqueCheck>>,
 }
 
 struct AggCats {
@@ -64,13 +75,21 @@ fn agg_mcx<'a>(fcinfo: &Fcinfo, name: &str) -> PgResult<Mcx<'a>> {
     }
 }
 
-fn new_state(aggmcx: Mcx<'_>, open: &[u8]) -> PgResult<*mut JsonAggState> {
+fn new_state(aggmcx: Mcx<'_>, open: &[u8], unique_keys: bool) -> PgResult<*mut JsonAggState> {
     const { assert!(!core::mem::needs_drop::<JsonAggState>()) }
     let mut str = StringInfo::new_in(aggmcx)?;
     str.append_bytes(open)?;
     // SAFETY: the aggcontext outlives every trans/final call of this node;
     // restamping the arena brand to 'static never outlives it.
     let str: StringInfo<'static> = unsafe { core::mem::transmute(str) };
+    let unique: Option<UniqueCheck> = if unique_keys {
+        let m: PgFxHashMap<'_, &[u8], ()> = PgFxHashMap::with_hasher_in(Default::default(), aggmcx);
+        // SAFETY: as the str transmute above.
+        let keys: UniqueKeys = unsafe { core::mem::transmute(m) };
+        Some(UniqueCheck { keys, skipped: None })
+    } else {
+        None
+    };
     let layout = core::alloc::Layout::new::<JsonAggState>();
     let raw = mcx::Allocator::allocate(&aggmcx, layout).map_err(|_| aggmcx.oom(layout.size()))?;
     let p = raw.cast::<JsonAggState>().as_ptr();
@@ -78,6 +97,7 @@ fn new_state(aggmcx: Mcx<'_>, open: &[u8]) -> PgResult<*mut JsonAggState> {
     unsafe {
         p.write(JsonAggState {
             str: core::mem::ManuallyDrop::new(str),
+            unique: core::mem::ManuallyDrop::new(unique),
         })
     };
     Ok(p)
@@ -115,7 +135,7 @@ fn json_agg_transfn_worker(
                 key: None,
             })
         })?;
-        new_state(aggmcx, b"[")?
+        new_state(aggmcx, b"[", false)?
     } else {
         a.value.as_usize() as *mut JsonAggState
     };
@@ -190,11 +210,32 @@ pub fn fc_json_agg_finalfn(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     finalize(fcinfo, "json_agg_finalfn", b"]")
 }
 
-/// C: json_object_agg_transfn_worker (unique_keys lanes unported loud).
+#[cold]
+#[inline(never)]
+fn duplicate_json_object_key(key: &[u8]) -> Box<PgError> {
+    Box::new(
+        PgError::error(alloc::format!(
+            "duplicate JSON object key value: {}",
+            String::from_utf8_lossy(key)
+        ))
+        .with_sqlstate(ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE),
+    )
+}
+
+// C json_unique_check_key: object_id is always 0 for this flat builder.
+fn check_unique_key(aggmcx: Mcx<'_>, keys: &mut UniqueKeys, key: &[u8]) -> PgResult<bool> {
+    let owned: &[u8] = mcx::slice_in(aggmcx, key)?.leak();
+    // SAFETY: aggcontext outlives every trans/final call of this node.
+    let owned: &'static [u8] = unsafe { core::mem::transmute(owned) };
+    Ok(keys.insert(owned, ()).is_none())
+}
+
+/// C: json_object_agg_transfn_worker.
 fn json_object_agg_transfn_worker(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
     absent_on_null: bool,
+    unique_keys: bool,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("json_object_agg_transfn needs a resolved FmgrInfo");
     let aggmcx = agg_mcx(fcinfo, "json_object_agg_transfn")?;
@@ -215,7 +256,7 @@ fn json_object_agg_transfn_worker(
                 key: Some(json_categorize_type(key_type)?),
             })
         })?;
-        new_state(aggmcx, b"{ ")?
+        new_state(aggmcx, b"{ ", unique_keys)?
     } else {
         a.value.as_usize() as *mut JsonAggState
     };
@@ -226,24 +267,51 @@ fn json_object_agg_transfn_worker(
     if k.isnull {
         return Err(null_object_key());
     }
-    if absent_on_null && v.isnull {
-        return Ok(state_datum);
-    }
+    let skip = absent_on_null && v.isnull;
 
-    if state.str.len() > 2 {
-        state.str.append_bytes(b", ")?;
+    if skip && !unique_keys {
+        return Ok(state_datum);
     }
 
     let mcx = fcinfo.result_mcx();
     let c = flinfo.fn_extra_mut::<AggCats>().expect("cats built on first call");
-    datum_to_json_internal(
-        mcx,
-        &mut *state.str,
-        k.value,
-        false,
-        c.key.as_mut().unwrap(),
-        true,
-    )?;
+
+    // C json_unique_builder_get_throwawaybuf: a key-only scratch buffer that
+    // never enters the output, reset (not reallocated) on each skip.
+    let key_offset;
+    if skip {
+        let scratch = state.str.allocator();
+        let uc = state.unique.as_mut().expect("unique_keys builder present");
+        let out = uc.skipped.get_or_insert_with(|| {
+            // SAFETY: as the str transmute in new_state.
+            unsafe { core::mem::transmute(StringInfo::new_in(scratch).expect("scratch buf")) }
+        });
+        out.truncate(0);
+        key_offset = out.len();
+        datum_to_json_internal(mcx, out, k.value, false, c.key.as_mut().unwrap(), true)?;
+    } else {
+        if state.str.len() > 2 {
+            state.str.append_bytes(b", ")?;
+        }
+        key_offset = state.str.len();
+        datum_to_json_internal(mcx, &mut *state.str, k.value, false, c.key.as_mut().unwrap(), true)?;
+    }
+
+    if unique_keys {
+        let uc = state.unique.as_mut().unwrap();
+        let key_bytes: &[u8] = if skip {
+            &uc.skipped.as_ref().unwrap().as_bytes()[key_offset..]
+        } else {
+            &state.str.as_bytes()[key_offset..]
+        };
+        if !check_unique_key(aggmcx, &mut uc.keys, key_bytes)? {
+            return Err(duplicate_json_object_key(key_bytes));
+        }
+        if skip {
+            return Ok(state_datum);
+        }
+    }
+
     state.str.append_bytes(b" : ")?;
     let val = if v.isnull { Datum::null() } else { v.value };
     datum_to_json_internal(mcx, &mut *state.str, val, v.isnull, &mut c.val, false)?;
@@ -254,14 +322,28 @@ pub fn fc_json_object_agg_transfn(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    json_object_agg_transfn_worker(flinfo, fcinfo, false)
+    json_object_agg_transfn_worker(flinfo, fcinfo, false, false)
 }
 
 pub fn fc_json_object_agg_strict_transfn(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    json_object_agg_transfn_worker(flinfo, fcinfo, true)
+    json_object_agg_transfn_worker(flinfo, fcinfo, true, false)
+}
+
+pub fn fc_json_object_agg_unique_transfn(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    json_object_agg_transfn_worker(flinfo, fcinfo, false, true)
+}
+
+pub fn fc_json_object_agg_unique_strict_transfn(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    json_object_agg_transfn_worker(flinfo, fcinfo, true, true)
 }
 
 pub fn fc_json_object_agg_finalfn(

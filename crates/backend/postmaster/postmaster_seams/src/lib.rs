@@ -10,3 +10,8 @@ seam_core::seam!(
     // SIGUSR1 handler (pend pmsignal + set the PM latch).
     pub fn signal_postmaster_sigusr1()
 );
+
+seam_core::seam!(
+    // C `PgStartTime` (timestamp.c global, written once by the postmaster).
+    pub fn pg_start_time() -> i64
+);

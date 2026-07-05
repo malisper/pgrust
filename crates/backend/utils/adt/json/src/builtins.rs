@@ -436,6 +436,8 @@ pub const JSON_BUILTINS: &[FmgrBuiltin] = &[
     b_lax(6275, "json_agg_strict_transfn", 2, crate::aggs::fc_json_agg_strict_transfn),
     b_lax(3180, "json_object_agg_transfn", 3, crate::aggs::fc_json_object_agg_transfn),
     b_lax(6277, "json_object_agg_strict_transfn", 3, crate::aggs::fc_json_object_agg_strict_transfn),
+    b_lax(6278, "json_object_agg_unique_transfn", 3, crate::aggs::fc_json_object_agg_unique_transfn),
+    b_lax(6279, "json_object_agg_unique_strict_transfn", 3, crate::aggs::fc_json_object_agg_unique_strict_transfn),
     b_lax(3196, "json_object_agg_finalfn", 1, crate::aggs::fc_json_object_agg_finalfn),
     b_lax(3198, "json_build_array", 1, fc_json_build_array),
     b_lax(3199, "json_build_array_noargs", 0, fc_json_build_array_noargs),

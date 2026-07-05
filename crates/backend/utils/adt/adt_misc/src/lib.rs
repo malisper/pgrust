@@ -283,10 +283,6 @@ pub fn fc_any_value_transfn(
     Ok(fcinfo.arg(0))
 }
 
-pub fn fc_pg_trigger_depth(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Ok(Datum::from_i32(trigger::my_trigger_depth()))
-}
-
 #[cold]
 #[inline(never)]
 fn collations_not_supported(type_be: String) -> Box<PgError> {
@@ -331,7 +327,6 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(2626, "pg_sleep", 1, fc_pg_sleep),
     b(6292, "any_value_transfn", 2, fc_any_value_transfn),
     b(6315, "pg_basetype", 1, fc_pg_basetype),
-    b(3163, "pg_trigger_depth", 0, fc_pg_trigger_depth),
     bn(3162, "pg_collation_for", 1, fc_pg_collation_for),
     b(2560, "pg_postmaster_start_time", 0, builtins::fc_pg_postmaster_start_time),
 ];

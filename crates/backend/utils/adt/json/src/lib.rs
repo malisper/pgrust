@@ -3,7 +3,7 @@
 //! verbatim. Rendering (to_json/row_to_json/array_to_json, builders,
 //! aggregates) and the jsonfuncs.c json-half workers are lex-based over the
 //! stored text. Loud via the unported-OID fmgr gap: json_populate_record
-//! family, json_object_agg_unique[_strict], jsonpath.
+//! family, jsonpath.
 
 pub mod aggs;
 pub mod builtins;

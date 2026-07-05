@@ -7,16 +7,6 @@ use types_fmgr::{FmgrInfo, LocalFcinfo};
 use crate::builtins::fc_parse_ident;
 
 #[test]
-fn pg_trigger_depth_reads_the_backend_global() {
-    let ctx = MemoryContext::new("t");
-    let mut fcinfo = LocalFcinfo::<0>::new(0);
-    // SAFETY: mcx outlives the call.
-    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
-    let d = crate::fc_pg_trigger_depth(None, &mut fcinfo).unwrap();
-    assert_eq!(d.as_i32(), trigger::my_trigger_depth());
-}
-
-#[test]
 fn pg_postmaster_start_time_reads_the_seam() {
     if !postmaster_seams::pg_start_time::is_installed() {
         postmaster_seams::pg_start_time::set(|| 123_456_789);

@@ -7,7 +7,7 @@
 
 use datum::Datum;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_fmgr::{
     cstring_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
@@ -738,6 +738,90 @@ fc_convert_to_base! {
     fc_to_hex64: arg_i64 as u64, 16;
 }
 
+// varlena.c: pg_column_size/pg_column_compression/pg_column_toast_chunk_id
+// share the fn_extra-memoized argtype typlen lookup.
+struct ArgTypLen(i16);
+
+#[cold]
+#[inline(never)]
+fn type_cache_lookup_failed(typid: Oid) -> Box<PgError> {
+    Box::new(PgError::error(format!("cache lookup failed for type {typid}")))
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_compression_method_id(cmid: u32) -> Box<PgError> {
+    Box::new(PgError::error(format!("invalid compression method id {cmid}")))
+}
+
+fn cached_arg_typlen(flinfo: &mut FmgrInfo, argno: i16) -> PgResult<i16> {
+    if !flinfo.has_fn_extra() {
+        let argtype = fmgr_seams::get_fn_expr_argtype::call(flinfo, argno);
+        let typlen = lsyscache::get_typlen(argtype)?;
+        if typlen == 0 {
+            return Err(type_cache_lookup_failed(argtype));
+        }
+        flinfo.set_fn_extra(ArgTypLen(typlen));
+    }
+    Ok(flinfo.fn_extra_ref::<ArgTypLen>().unwrap().0)
+}
+
+pub fn fc_pg_column_size(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_column_size needs a resolved FmgrInfo");
+    let typlen = cached_arg_typlen(flinfo, 0)?;
+    let result: i32 = if typlen == -1 {
+        // SAFETY: catalog arg 0 is a non-null varlena (proisstrict 't' "any").
+        ::detoast::toast_datum_size(unsafe { fcinfo.arg_varlena_raw(0) }) as i32
+    } else if typlen == -2 {
+        // SAFETY: catalog arg 0 is a non-null cstring (typlen == -2).
+        unsafe { fcinfo.arg_cstring(0) }.to_bytes().len() as i32 + 1
+    } else {
+        typlen as i32
+    };
+    Ok(Datum::from_i32(result))
+}
+
+pub fn fc_pg_column_compression(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_column_compression needs a resolved FmgrInfo");
+    let typlen = cached_arg_typlen(flinfo, 0)?;
+    if typlen != -1 {
+        return Ok(fcinfo.return_null());
+    }
+    // SAFETY: catalog arg 0 is a non-null varlena (proisstrict 't' "any").
+    let attr = unsafe { fcinfo.arg_varlena_raw(0) };
+    let Some(cmid) = ::detoast::toast_get_compression_id(attr) else {
+        return Ok(fcinfo.return_null());
+    };
+    let name: &[u8] = match cmid {
+        ::detoast::TOAST_PGLZ_COMPRESSION_ID => b"pglz",
+        ::detoast::TOAST_LZ4_COMPRESSION_ID => b"lz4",
+        _ => return Err(invalid_compression_method_id(cmid)),
+    };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::cstring_to_text(mcx, name)?))
+}
+
+pub fn fc_pg_column_toast_chunk_id(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_column_toast_chunk_id needs a resolved FmgrInfo");
+    let typlen = cached_arg_typlen(flinfo, 0)?;
+    if typlen != -1 {
+        return Ok(fcinfo.return_null());
+    }
+    // SAFETY: catalog arg 0 is a non-null varlena (proisstrict 't' "any").
+    let attr = unsafe { fcinfo.arg_varlena_raw(0) };
+    if !::detoast::varatt_is_external_ondisk(attr) {
+        return Ok(fcinfo.return_null());
+    }
+    let tp = ::detoast::VarattExternal::from_image(attr);
+    Ok(Datum::from_oid(tp.va_valueid))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -882,4 +966,7 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(6333, "to_oct64", 1, fc_to_oct64),
     srf(6160, "text_to_table", 2, crate::split_text::fc_text_to_table),
     srf(6161, "text_to_table_null", 3, crate::split_text::fc_text_to_table),
+    b(1269, "pg_column_size", 1, fc_pg_column_size),
+    b(2121, "pg_column_compression", 1, fc_pg_column_compression),
+    b(6316, "pg_column_toast_chunk_id", 1, fc_pg_column_toast_chunk_id),
 ];

@@ -1,16 +1,16 @@
 //! fmgr wrappers (`fc_*`) + `PSEUDOTYPES_BUILTINS` for fmgr-core. Registered:
-//! every ereport-only stub, void_in/void_out/void_recv, cstring_out
-//! (fn_extra scratch), pg_node_tree_out (varlena fc_textout delegate). Not
-//! registrable: cstring_in/cstring_recv/cstring_send/void_send/
-//! pg_node_tree_send (frame allocation/wire, the varlena unknownin
-//! precedent) and the *_out/*_send delegates whose target unit is unported
+//! every ereport-only stub, void_in/void_out/void_recv, cstring_in/cstring_out
+//! (fn_extra scratch / cstring_result frame, the varlena unknownin
+//! precedent), pg_node_tree_out (varlena fc_textout delegate). Not
+//! registrable: cstring_recv/cstring_send/void_send/pg_node_tree_send (wire)
+//! and the *_out/*_send delegates whose target unit is unported
 //! (anyarray/anycompatiblearray/anyenum/anyrange/anycompatiblerange/
 //! anymultirange/anycompatiblemultirange).
 
 use datum::Datum;
 use types_core::Oid;
 use types_error::PgResult;
-use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_fmgr::{cstring_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 macro_rules! fc_stub {
     ($($fc:ident: $core:ident;)*) => {$(
@@ -98,6 +98,13 @@ fn out_scratch<'a>(flinfo: Option<&'a mut FmgrInfo>, name: &'static str) -> &'a 
     &mut flinfo.fn_extra_mut::<OutBuf>().unwrap().0
 }
 
+pub fn fc_cstring_in(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of cstring_in is a non-null cstring (strict fn).
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    let mcx = fcinfo.result_mcx();
+    Ok(cstring_result(crate::cstring_in(mcx, s)?))
+}
+
 pub fn fc_cstring_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of cstring_out is a non-null cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
@@ -136,6 +143,7 @@ pub const PSEUDOTYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(268, "table_am_handler_out", 1, true, fc_table_am_handler_out),
     b(326, "index_am_handler_in", 1, false, fc_index_am_handler_in),
     b(327, "index_am_handler_out", 1, true, fc_index_am_handler_out),
+    b(2292, "cstring_in", 1, true, fc_cstring_in),
     b(2293, "cstring_out", 1, true, fc_cstring_out),
     b(2294, "any_in", 1, true, fc_any_in),
     b(2295, "any_out", 1, true, fc_any_out),

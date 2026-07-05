@@ -425,6 +425,23 @@ pub fn toast_datum_size(value: &[u8]) -> usize {
     }
 }
 
+/// C `VARATT_IS_EXTERNAL_ONDISK`.
+pub fn varatt_is_external_ondisk(b: &[u8]) -> bool {
+    is_external_ondisk(b)
+}
+
+/// C `toast_get_compression_id`: `None` for uncompressed/non-varlena-external.
+pub fn toast_get_compression_id(attr: &[u8]) -> Option<u32> {
+    if is_external_ondisk(attr) {
+        let tp = VarattExternal::from_image(attr);
+        tp.is_compressed().then(|| tp.compress_method())
+    } else if is_compressed(attr) {
+        Some(toast_compress_method(attr))
+    } else {
+        None
+    }
+}
+
 pub fn init_seams() {
     detoast_seams::detoast_attr::set(detoast_attr);
     detoast_seams::detoast_attr_slice::set(detoast_attr_slice);
