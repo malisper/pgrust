@@ -59,6 +59,7 @@ const InheritsParentIndexId: Oid = 2187;
 const Anum_pg_inherits_inhparent: usize = 2;
 const Anum_pg_class_relnatts: usize = 19;
 const CollationRelationId: Oid = 3456;
+pub(crate) const NamespaceRelationId: Oid = 2615;
 
 #[cold]
 #[inline(never)]
@@ -100,22 +101,27 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_SetLogged
             | AlterTableType::AT_SetUnLogged
             | AlterTableType::AT_SetStorage
-            | AlterTableType::AT_SetCompression => AccessExclusiveLock,
+            | AlterTableType::AT_SetCompression
+            | AlterTableType::AT_AddColumnToView
+            | AlterTableType::AT_DropOids
+            | AlterTableType::AT_AlterConstraint
+            | AlterTableType::AT_AlterColumnGenericOptions
+            | AlterTableType::AT_ReplaceRelOptions => AccessExclusiveLock,
             AlterTableType::AT_SetStatistics
             | AlterTableType::AT_SetOptions
             | AlterTableType::AT_ResetOptions
             | AlterTableType::AT_ValidateConstraint
             | AlterTableType::AT_ClusterOn
             | AlterTableType::AT_DropCluster => types_rel::ShareUpdateExclusiveLock,
-            AlterTableType::AT_AddConstraint => {
-                let constr = cmd
-                    .def
-                    .expect("AT_AddConstraint Constraint")
-                    .as_variant::<Constraint>()
-                    .expect("Constraint");
-                match constr.contype {
-                    ConstrType::CONSTR_FOREIGN => ShareRowExclusiveLock,
-                    _ => AccessExclusiveLock,
+            AlterTableType::AT_AddConstraint
+            | AlterTableType::AT_ReAddConstraint
+            | AlterTableType::AT_ReAddDomainConstraint => {
+                match cmd.def.and_then(|d| d.as_variant::<Constraint>()) {
+                    Some(constr) => match constr.contype {
+                        ConstrType::CONSTR_FOREIGN => ShareRowExclusiveLock,
+                        _ => AccessExclusiveLock,
+                    },
+                    None => AccessExclusiveLock,
                 }
             }
             AlterTableType::AT_EnableRowSecurity
@@ -162,13 +168,21 @@ pub fn AlterTableGetLockLevel(cmds: &NodeList<'_>) -> LOCKMODE {
             | AlterTableType::AT_GenericOptions => AccessExclusiveLock,
             AlterTableType::AT_AddColumnToView
             | AlterTableType::AT_ReplaceRelOptions => AccessExclusiveLock,
-            other => unported(&format!("AlterTableGetLockLevel {other:?}")),
+            other => panic!("unrecognized alter table type: {}", other as i32),
         };
         if cmd_lockmode > lockmode {
             lockmode = cmd_lockmode;
         }
     }
     lockmode
+}
+
+// The C callback keys several checks off the calling statement's node type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlterRelationStmtKind {
+    AlterTable,
+    Rename,
+    AlterObjectSchema,
 }
 
 pub fn AlterTableLookupRelation<'mcx>(
@@ -182,6 +196,7 @@ pub fn AlterTableLookupRelation<'mcx>(
         lockmode,
         stmt.missing_ok,
         stmt.objtype,
+        AlterRelationStmtKind::AlterTable,
     )
 }
 
@@ -191,6 +206,7 @@ pub(crate) fn AlterTableLookupRangeVar<'mcx>(
     lockmode: LOCKMODE,
     missing_ok: bool,
     objtype: ObjectType,
+    stmt_kind: AlterRelationStmtKind,
 ) -> PgResult<Oid> {
     let rv = rel_vocab::RangeVar {
         catalogname: prv.catalogname,
@@ -201,7 +217,7 @@ pub(crate) fn AlterTableLookupRangeVar<'mcx>(
         location: prv.location,
     };
     let mut callback = |rv: &rel_vocab::RangeVar<'_>, relOid: Oid, _old: Oid| {
-        RangeVarCallbackForAlterRelation(mcx, rv, relOid, objtype)
+        RangeVarCallbackForAlterRelation(mcx, rv, relOid, objtype, stmt_kind)
     };
     let flags = if missing_ok { catalog_namespace::RVR_MISSING_OK } else { 0 };
     catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, flags, Some(&mut callback))
@@ -212,6 +228,7 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
     rel: &rel_vocab::RangeVar<'_>,
     relOid: Oid,
     objtype: ObjectType,
+    stmt_kind: AlterRelationStmtKind,
 ) -> PgResult<()> {
     if relOid == InvalidOid {
         return Ok(());
@@ -253,17 +270,29 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
             .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
         ));
     }
+    // ALTER .. RENAME also needs (still-valid) CREATE rights on the schema.
+    if stmt_kind == AlterRelationStmtKind::Rename {
+        let aclresult = aclchk::object_aclcheck(
+            NamespaceRelationId,
+            relnamespace,
+            miscinit::GetUserId(),
+            adt_acl::ACL_CREATE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            let nspname = lsyscache::get_namespace_name(mcx, relnamespace)?
+                .expect("namespace has a name");
+            aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_SCHEMA, &nspname)?;
+        }
+    }
     let wrong_type = |msg: String| -> PgResult<()> {
         Err(Box::new(
             PgError::new(ERROR, msg).with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
         ))
     };
     match objtype {
-        ObjectType::OBJECT_INDEX => {
-            if relkind != types_rel::RELKIND_INDEX
-                && relkind != types_rel::RELKIND_PARTITIONED_INDEX
-            {
-                return wrong_type(format!("\"{}\" is not an index", rel.relname));
+        ObjectType::OBJECT_SEQUENCE => {
+            if relkind != types_rel::RELKIND_SEQUENCE {
+                return wrong_type(format!("\"{}\" is not a sequence", rel.relname));
             }
         }
         ObjectType::OBJECT_VIEW => {
@@ -271,20 +300,67 @@ fn RangeVarCallbackForAlterRelation<'mcx>(
                 return wrong_type(format!("\"{}\" is not a view", rel.relname));
             }
         }
-        ObjectType::OBJECT_SEQUENCE => {
-            if relkind != types_rel::RELKIND_SEQUENCE {
-                return wrong_type(format!("\"{}\" is not a sequence", rel.relname));
-            }
-        }
         ObjectType::OBJECT_MATVIEW => {
             if relkind != types_rel::RELKIND_MATVIEW {
                 return wrong_type(format!("\"{}\" is not a materialized view", rel.relname));
             }
         }
-        _ => {
-            if relkind != RELKIND_RELATION && relkind != types_rel::RELKIND_PARTITIONED_TABLE {
-                unported("RangeVarCallbackForAlterRelation: non-plain-table relkind");
+        ObjectType::OBJECT_FOREIGN_TABLE => {
+            if relkind != types_rel::RELKIND_FOREIGN_TABLE {
+                return wrong_type(format!("\"{}\" is not a foreign table", rel.relname));
             }
+        }
+        ObjectType::OBJECT_TYPE => {
+            if relkind != types_rel::RELKIND_COMPOSITE_TYPE {
+                return wrong_type(format!("\"{}\" is not a composite type", rel.relname));
+            }
+        }
+        ObjectType::OBJECT_INDEX => {
+            if relkind != types_rel::RELKIND_INDEX
+                && relkind != types_rel::RELKIND_PARTITIONED_INDEX
+                && stmt_kind != AlterRelationStmtKind::Rename
+            {
+                return wrong_type(format!("\"{}\" is not an index", rel.relname));
+            }
+        }
+        _ => {}
+    }
+    if objtype != ObjectType::OBJECT_TYPE && relkind == types_rel::RELKIND_COMPOSITE_TYPE {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("\"{}\" is a composite type", rel.relname))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_hint("Use ALTER TYPE instead."),
+        ));
+    }
+    if stmt_kind == AlterRelationStmtKind::AlterObjectSchema {
+        if relkind == types_rel::RELKIND_INDEX || relkind == types_rel::RELKIND_PARTITIONED_INDEX
+        {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("cannot change schema of index \"{}\"", rel.relname),
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_hint("Change the schema of the table instead."),
+            ));
+        } else if relkind == types_rel::RELKIND_COMPOSITE_TYPE {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("cannot change schema of composite type \"{}\"", rel.relname),
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_hint("Use ALTER TYPE instead."),
+            ));
+        } else if relkind == types_rel::RELKIND_TOASTVALUE {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("cannot change schema of TOAST table \"{}\"", rel.relname),
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_hint("Change the schema of the table instead."),
+            ));
         }
     }
     Ok(())
@@ -5659,12 +5735,12 @@ fn ATExecForceNoForceRowSecurity<'mcx>(
     set_pg_class_bool(mcx, rel, Anum_pg_class_relforcerowsecurity, force_rls)
 }
 
-const Anum_pg_class_reloftype: usize = 5;
+pub(crate) const Anum_pg_class_reloftype: usize = 5;
 const Anum_pg_class_relreplident: usize = 27;
 const TableSpaceRelationId: Oid = 1213;
 const GLOBALTABLESPACE_OID: Oid = 1664;
 
-fn pg_class_read_attr(mcx: Mcx<'_>, relid: Oid, attnum: usize) -> PgResult<Datum> {
+pub(crate) fn pg_class_read_attr(mcx: Mcx<'_>, relid: Oid, attnum: usize) -> PgResult<Datum> {
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, types_rel::AccessShareLock)?;
     let key = oid_scankey(1, relid);
     let mut scan =
