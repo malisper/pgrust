@@ -103,6 +103,7 @@ execindexing = { path = "../../executor/execindexing" }
 typcache = { path = "../../utils/cache/typcache" }
 commands_tablespace = { path = "../tablespace" }
 commands_amcmds = { path = "../amcmds" }
+user = { path = "../user" }
 partcache = { path = "../../utils/cache/partcache" }
 partbounds = { path = "../../partitioning/partbounds" }
 partdesc = { path = "../../partitioning/partdesc" }

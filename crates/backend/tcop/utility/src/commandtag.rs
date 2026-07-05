@@ -145,7 +145,12 @@ pub fn CreateCommandTag(parsetree: Node<'_>) -> CommandTag {
             let stmt = parsetree.as_alter_owner_stmt().expect("AlterOwnerStmt");
             alter_object_type_command_tag(stmt.objectType)
         }
-        T_AlterTableMoveAllStmt => payload_gap("CreateCommandTag", "AlterTableMoveAllStmt"),
+        T_AlterTableMoveAllStmt => {
+            let stmt = parsetree
+                .as_variant::<types_nodes::parsenodes::AlterTableMoveAllStmt>()
+                .expect("AlterTableMoveAllStmt");
+            alter_object_type_command_tag(stmt.objtype)
+        }
         // AlterObjectTypeCommandTag over stmt->objtype.
         T_AlterTableStmt => {
             let stmt = parsetree

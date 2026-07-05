@@ -16,7 +16,7 @@ mod rename;
 mod truncate;
 pub use alter::{
     find_composite_type_dependencies, AlterTable, AlterTableGetLockLevel, AlterTableInternal,
-    AlterTableLookupRelation,
+    AlterTableLookupRelation, AlterTableMoveAll,
 };
 pub use constraints::cook_default;
 pub use namespace::{
