@@ -2166,23 +2166,13 @@ fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) 
     crate::format::ExplainPropertyUInteger("Index Searches", None, nsearches, es);
 }
 
-<<<<<<< HEAD
-// show_tidbitmap_info (explain.c), text arm.
-=======
 // show_tidbitmap_info (explain.c); parallel worker stats have no parallel
 // lane.
->>>>>>> 9f5c5b5b0 (port(explain): JSON/XML/YAML format emitters + explain.c non-text arms)
 fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if !es.analyze {
         return;
     }
-<<<<<<< HEAD
-    if es.format != EXPLAIN_FORMAT_TEXT {
-        crate::format::nontext_gap(es, "show_tidbitmap_info");
-    }
     let id = plan_of(node).plan_node_id;
-=======
->>>>>>> 9f5c5b5b0 (port(explain): JSON/XML/YAML format emitters + explain.c non-text arms)
     let stats = if es.qd.is_null() {
         None
     } else {
