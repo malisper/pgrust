@@ -173,6 +173,7 @@ impl SeqTuple {
 }
 
 pub fn init_seams() {
+    builtins::register_builtins();
     sequence_seams::nextval_internal::set(nextval_internal_entry);
     sequence_seams::currval_internal::set(currval_internal);
     sequence_seams::lastval_internal::set(lastval_internal);
