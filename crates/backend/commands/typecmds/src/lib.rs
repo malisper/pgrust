@@ -10,6 +10,7 @@ mod range;
 pub fn init_seams() {
     typecmds_seams::alter_type_owner_internal::set(alter::AlterTypeOwnerInternal);
     typecmds_seams::alter_domain_add_constraint::set(alter::AlterDomainAddConstraint);
+    typecmds_seams::alter_type_namespace_internal::set(alter::AlterTypeNamespaceInternal);
 }
 pub use range::DefineRange;
 pub use alter::{
