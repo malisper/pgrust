@@ -1299,8 +1299,12 @@ fn pull_partial_input_exprs<'mcx>(
             }
             for w in &c.args {
                 let cw = w.as_case_when().expect("CaseWhen");
-                pull_partial_input_exprs(cw.expr, out);
-                pull_partial_input_exprs(cw.result, out);
+                if let Some(e) = cw.expr {
+                    pull_partial_input_exprs(e, out);
+                }
+                if let Some(r) = cw.result {
+                    pull_partial_input_exprs(r, out);
+                }
             }
             if let Some(d) = c.defresult {
                 pull_partial_input_exprs(d, out);
@@ -1312,7 +1316,9 @@ fn pull_partial_input_exprs<'mcx>(
             }
         }
         NodeTag::T_NullTest => {
-            pull_partial_input_exprs(node.as_null_test().unwrap().arg, out)
+            if let Some(a) = node.as_null_test().unwrap().arg {
+                pull_partial_input_exprs(a, out);
+            }
         }
         NodeTag::T_ScalarArrayOpExpr => {
             for a in &node.as_scalar_array_op_expr().unwrap().args {
