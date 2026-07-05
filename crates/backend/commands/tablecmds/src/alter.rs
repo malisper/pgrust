@@ -1308,10 +1308,17 @@ fn ATRewriteCatalogs<'mcx>(
                         .expect("AT_AttachPartition PartitionCmd")
                         .as_variant::<types_nodes::rawnodes::PartitionCmd>()
                         .expect("PartitionCmd");
-                    if rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
-                        unported("ATExecAttachPartitionIdx (ALTER TABLE form)");
+                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+                        crate::attach::ATExecAttachPartition(
+                            mcx, wqueue, &rel, pcmd, query_string,
+                        )?;
+                    } else {
+                        crate::attach::ATExecAttachPartitionIdx(
+                            mcx,
+                            &rel,
+                            pcmd.name.expect("PartitionCmd.name"),
+                        )?;
                     }
-                    crate::attach::ATExecAttachPartition(mcx, wqueue, &rel, pcmd, query_string)?;
                 }
                 AlterTableType::AT_DetachPartition => {
                     let pcmd = cmd
