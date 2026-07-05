@@ -253,7 +253,7 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
         with_state(|st| st.callbacks_registered = true);
     }
     let cmcx = with_state(|st| st.mcx);
-    let parent_oid = pg_inherits::get_partition_parent(cmcx, relid, false)?;
+    let parent_oid = pg_inherits::get_partition_parent(cmcx, relid, true)?;
     let parent = table::table_open(cmcx, parent_oid, types_rel::AccessShareLock)?;
     let spec = partbounds::read_boundspec(cmcx, relid)?;
     let key = partcache::RelationGetPartitionKey(&parent)?;

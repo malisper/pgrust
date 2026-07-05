@@ -35,6 +35,7 @@ pub fn init_seams() {
     relcache_build_seams::build_trigger_desc::set(triggers::build_trigger_desc);
     typcache_seams::scan_domain_check_constraints::set(domain::scan_domain_check_constraints);
     relcache_build_seams::scan_pg_statistic_ext_oids::set(index::scan_pg_statistic_ext_oids);
+    relcache_build_seams::scan_pg_constraint_fkeys::set(attrs::scan_pg_constraint_fkeys);
 }
 
 pub(crate) fn scan_key(attno: i32, strategy: StrategyNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {

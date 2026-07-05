@@ -24,19 +24,45 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
         return Ok(hit);
     }
     let cmcx = cache_mcx();
-    // No state borrow across these: they re-enter the relcache.
-    let index_oids = crate::indexlist::RelationGetIndexList(cmcx, relid)?;
-    let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| index_missing(relid))?;
-    let replident_index = rel
-        .rd_indexlist
+    // C's restart loop (relcache.c 5344-5510): concurrent index DDL can change
+    // the set mid-build; recheck list + pk/replident stability before caching.
+    let bm = loop {
+        // No state borrow across these: they re-enter the relcache.
+        let index_oids = crate::indexlist::RelationGetIndexList(cmcx, relid)?;
+        let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| index_missing(relid))?;
+        let (pk_index, replident_index) = pk_replident(&rel);
+        let attempt = build_bitmaps(cmcx, &index_oids, pk_index, replident_index)?;
+        let new_oids = crate::indexlist::RelationGetIndexList(cmcx, relid)?;
+        let rel = store::RelationIdGetRelation(relid)?.ok_or_else(|| index_missing(relid))?;
+        let (pk2, ri2) = pk_replident(&rel);
+        if new_oids[..] == index_oids[..] && pk2 == pk_index && ri2 == replident_index {
+            break attempt;
+        }
+    };
+    let built = Rc::new(bm);
+    with_state(|st| st.indexattr_cache.insert(relid, Rc::clone(&built)));
+    Ok(built)
+}
+
+fn pk_replident(rel: &Rc<types_rel::RelationData<'static>>) -> (Oid, Oid) {
+    rel.rd_indexlist
         .borrow()
         .as_ref()
-        .map(|l| l.replidindex)
-        .unwrap_or(types_core::InvalidOid);
+        .map(|l| (l.pkindex, l.replidindex))
+        .unwrap_or((types_core::InvalidOid, types_core::InvalidOid))
+}
+
+fn build_bitmaps(
+    cmcx: mcx::Mcx<'static>,
+    index_oids: &[Oid],
+    pk_index: Oid,
+    replident_index: Oid,
+) -> PgResult<IndexAttrBitmaps> {
     let mut bm = IndexAttrBitmaps {
         hot_blocking: PgVec::new_in(cmcx),
         summarized: PgVec::new_in(cmcx),
         key: PgVec::new_in(cmcx),
+        pk: PgVec::new_in(cmcx),
         identity: PgVec::new_in(cmcx),
     };
     for &index_oid in index_oids.iter() {
@@ -46,6 +72,7 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
         let summarizing = irel.rd_rel.relam == BRIN_AM_OID;
         let is_key =
             form.indisunique && form.indexprs_src.is_none() && form.indpred_src.is_none();
+        let is_pk = index_oid == pk_index;
         let is_id_key = index_oid == replident_index;
         for (i, &attnum) in form.indkey.iter().enumerate() {
             if attnum == 0 {
@@ -60,6 +87,9 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
             if i < form.indnkeyatts as usize {
                 if is_key {
                     add(&mut bm.key, attnum);
+                }
+                if is_pk {
+                    add(&mut bm.pk, attnum);
                 }
                 if is_id_key {
                     add(&mut bm.identity, attnum);
@@ -76,9 +106,7 @@ pub fn RelationGetIndexAttrBitmap(relid: Oid) -> PgResult<Rc<IndexAttrBitmaps>> 
             pull_expr_attrs(src.as_str(), target)?;
         }
     }
-    let built = Rc::new(bm);
-    with_state(|st| st.indexattr_cache.insert(relid, Rc::clone(&built)));
-    Ok(built)
+    Ok(bm)
 }
 
 pub(crate) fn forget(relid: Oid) {

@@ -857,3 +857,44 @@ fn init_file_rejects_bad_header_and_corruption() {
     }
     assert!(initfile::parse_init_file(&[], mcx).is_none());
 }
+
+#[test]
+fn fkey_list_caches_and_invalidation_forgets() {
+    thread_local! {
+        static FKEY_SCANS: Cell<usize> = const { Cell::new(0) };
+    }
+    install();
+    relcache_build_seams::scan_pg_constraint_fkeys::set(|mcx, conrelid| {
+        FKEY_SCANS.with(|c| c.set(c.get() + 1));
+        let mut out = PgVec::new_in(mcx);
+        let mut info = types_rel::ForeignKeyCacheInfo {
+            conoid: 5001,
+            conrelid,
+            confrelid: 16390,
+            nkeys: 2,
+            conenforced: true,
+            conkey: [0; 32],
+            confkey: [0; 32],
+            conpfeqop: [0; 32],
+        };
+        info.conkey[..2].copy_from_slice(&[1, 3]);
+        info.confkey[..2].copy_from_slice(&[1, 2]);
+        info.conpfeqop[..2].copy_from_slice(&[96, 96]);
+        out.push(info);
+        Ok(out)
+    });
+    seed(16385, "fk_child", RELKIND_RELATION);
+
+    let a = crate::fkeylist::RelationGetFKeyList(16385).unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].confrelid, 16390);
+    assert_eq!(&a[0].conkey[..2], &[1, 3]);
+    let b = crate::fkeylist::RelationGetFKeyList(16385).unwrap();
+    assert!(Rc::ptr_eq(&a, &b));
+    assert_eq!(FKEY_SCANS.with(|c| c.get()), 1);
+
+    invalidate::RelationCacheInvalidateEntry(16385).unwrap();
+    let c = crate::fkeylist::RelationGetFKeyList(16385).unwrap();
+    assert!(!Rc::ptr_eq(&a, &c));
+    assert_eq!(FKEY_SCANS.with(|c| c.get()), 2);
+}

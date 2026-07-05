@@ -314,10 +314,12 @@ pub fn get_relation_info<'mcx>(
         r.amflags |= AMFLAG_HAS_TID_RANGE;
     }
 
-    // Divergence: get_relation_foreign_keys is skipped (RelationGetFKeyList
-    // unported), so fkey_list stays empty and join size estimation uses
-    // fkselec = 1.0 even where C would match FK constraints. Estimate-only:
-    // affects plan choice, never results. The plancat FK unit owns the fix.
+    // Divergence: get_relation_foreign_keys is skipped (the
+    // relcache_seams::relation_get_fkey_list cache leg is live; the planner
+    // wiring — fkey_list population + match_foreign_keys_to_quals — is the
+    // K2 follow-up), so join size estimation uses fkselec = 1.0 where C
+    // would match FK constraints. Estimate-only: affects plan choice, never
+    // results.
     debug_assert!(run.root.fkey_list.is_empty());
 
     if inhparent && relkind == types_rel::RELKIND_PARTITIONED_TABLE {

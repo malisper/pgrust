@@ -58,9 +58,69 @@ pub struct IndexInfo<'mcx> {
     pub ii_ExclusionStrats: [u16; INDEX_MAX_KEYS as usize],
 }
 
-// RelationGetIndexExpressions (relcache.c): the Form caches the nodeToString
-// source instead of a parsed tree (no copyObject port); eval_const_expressions
-// here is required for planner qual matching, exactly as C.
+// C rd_indexprs/rd_indpred: processed trees cached per index relid, deep-copied
+// out per call (copyObject), cleared by relcache inval on the index.
+struct IdxExprCache {
+    mcx: Mcx<'static>,
+    exprs: mcx::PgHashMap<'static, Oid, NodeList<'static>>,
+    preds: mcx::PgHashMap<'static, Oid, NodeList<'static>>,
+    callbacks_registered: bool,
+}
+
+thread_local! {
+    static IDX_EXPR_CACHE: core::cell::RefCell<Option<core::mem::ManuallyDrop<IdxExprCache>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+fn with_expr_cache<R>(f: impl FnOnce(&mut IdxExprCache) -> R) -> R {
+    IDX_EXPR_CACHE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let st = slot.get_or_insert_with(|| {
+            let mcx = Box::leak(Box::new(mcx::MemoryContext::new("IndexExprContext"))).mcx();
+            core::mem::ManuallyDrop::new(IdxExprCache {
+                mcx,
+                exprs: mcx::PgHashMap::new_in(mcx),
+                preds: mcx::PgHashMap::new_in(mcx),
+                callbacks_registered: false,
+            })
+        });
+        f(st)
+    })
+}
+
+fn IdxExprRelCallback(_arg: Datum, relid: Oid) {
+    with_expr_cache(|st| {
+        if relid != types_core::InvalidOid {
+            st.exprs.remove(&relid);
+            st.preds.remove(&relid);
+        } else {
+            st.exprs.clear();
+            st.preds.clear();
+        }
+    });
+}
+
+fn expr_cache_arm() -> PgResult<()> {
+    if !with_expr_cache(|st| st.callbacks_registered) {
+        inval::invalidate::CacheRegisterRelcacheCallback(
+            IdxExprRelCallback,
+            Datum::from_oid(types_core::InvalidOid),
+        )?;
+        with_expr_cache(|st| st.callbacks_registered = true);
+    }
+    Ok(())
+}
+
+fn copy_list_in<'d>(mcx: Mcx<'d>, list: &NodeList<'_>) -> PgResult<NodeList<'d>> {
+    let mut out = NodeList::nil();
+    for e in list.iter() {
+        out.lappend(mcx, copyfuncs::copy_object(mcx, e)?)?;
+    }
+    Ok(out)
+}
+
+// RelationGetIndexExpressions (relcache.c): stringToNode +
+// eval_const_expressions + fix_opfuncids, cached per C rd_indexprs.
 pub fn RelationGetIndexExpressions<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'_>,
@@ -69,19 +129,30 @@ pub fn RelationGetIndexExpressions<'mcx>(
     let Some(src) = form.indexprs_src.as_ref() else {
         return Ok(NodeList::nil());
     };
+    if let Some(hit) = with_expr_cache(|st| st.exprs.get(&index.rd_id).map(|l| copy_list_in(mcx, l)))
+    {
+        return hit;
+    }
+    expr_cache_arm()?;
     let node = readfuncs::stringToNode(mcx, src.as_str())?;
     let list = node.as_list().expect("indexprs is a List");
     let mut out = NodeList::nil();
     for e in list.iter() {
-        out.lappend(mcx, clauses::eval_const_expressions(mcx, e)?)?;
+        let folded = clauses::eval_const_expressions(mcx, e)?;
+        nodes_core::fix_opfuncids(folded)?;
+        out.lappend(mcx, folded)?;
     }
+    let cmcx = with_expr_cache(|st| st.mcx);
+    let cached = copy_list_in(cmcx, &out)?;
+    with_expr_cache(|st| st.exprs.insert(index.rd_id, cached));
     Ok(out)
 }
 
-/// RelationGetIndexPredicate (relcache.c), implicit-AND result. DIVERGENCE:
-/// C canonicalize_quals here (relcache.c:5254-5257); this executor path skips
-/// it — ExecQual truth values are form-independent — and the planner copy
-/// (plancat.rs get_relation_info) canonicalizes independently.
+/// RelationGetIndexPredicate (relcache.c), implicit-AND result, cached per C
+/// rd_indpred. DIVERGENCE: C canonicalize_quals here (relcache.c:5254-5257);
+/// this executor path skips it — ExecQual truth values are form-independent —
+/// and the planner copy (plancat.rs get_relation_info) canonicalizes
+/// independently.
 pub fn RelationGetIndexPredicate<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'_>,
@@ -90,9 +161,21 @@ pub fn RelationGetIndexPredicate<'mcx>(
     let Some(src) = form.indpred_src.as_ref() else {
         return Ok(NodeList::nil());
     };
+    if let Some(hit) = with_expr_cache(|st| st.preds.get(&index.rd_id).map(|l| copy_list_in(mcx, l)))
+    {
+        return hit;
+    }
+    expr_cache_arm()?;
     let node = readfuncs::stringToNode(mcx, src.as_str())?;
     let folded = clauses::eval_const_expressions(mcx, node)?;
-    clauses::make_ands_implicit(mcx, Some(folded))
+    let out = clauses::make_ands_implicit(mcx, Some(folded))?;
+    for e in out.iter() {
+        nodes_core::fix_opfuncids(e)?;
+    }
+    let cmcx = with_expr_cache(|st| st.mcx);
+    let cached = copy_list_in(cmcx, &out)?;
+    with_expr_cache(|st| st.preds.insert(index.rd_id, cached));
+    Ok(out)
 }
 
 /// RelationGetExclusionInfo (relcache.c). DIVERGENCE: C caches the arrays in

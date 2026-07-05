@@ -7,6 +7,7 @@ pub mod initfile;
 pub mod invalidate;
 pub mod local;
 pub mod indexattr;
+pub mod fkeylist;
 pub mod statextlist;
 pub mod rowsecurity;
 pub mod rules;
@@ -65,6 +66,7 @@ pub(crate) struct RelcacheState {
     pub(crate) indexattr_cache:
         PgHashMap<'static, Oid, std::rc::Rc<relcache_seams::IndexAttrBitmaps>>,
     pub(crate) statext_cache: PgHashMap<'static, Oid, std::rc::Rc<[Oid]>>,
+    pub(crate) fkey_cache: PgHashMap<'static, Oid, std::rc::Rc<[types_rel::ForeignKeyCacheInfo]>>,
     // C rebuilds swap entry contents in place, preserving rd_refcnt identity;
     // our rebuild replaces the Rc, so still-held predecessors are tracked here
     // (weak, pruned on read) to keep per-oid refcounts C-exact.
@@ -97,6 +99,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
                 policies_cache: PgHashMap::new_in(mcx),
                 indexattr_cache: PgHashMap::new_in(mcx),
                 statext_cache: PgHashMap::new_in(mcx),
+                fkey_cache: PgHashMap::new_in(mcx),
                 stale_refs: PgHashMap::new_in(mcx),
                 in_progress: PgVec::new_in(mcx),
                 eoxact_list: [0; MAX_EOXACT_LIST],
@@ -164,6 +167,7 @@ pub fn init_seams() {
     relcache_seams::relation_id_get_relation::set(store::RelationIdGetRelation);
     relcache_seams::relation_get_index_list::set(indexlist::RelationGetIndexList);
     relcache_seams::relation_get_stat_ext_list::set(statextlist::RelationGetStatExtList);
+    relcache_seams::relation_get_fkey_list::set(fkeylist::RelationGetFKeyList);
     relcache_seams::relation_get_index_attr_bitmap::set(indexattr::RelationGetIndexAttrBitmap);
     relcache_seams::relation_cache_invalidate::set(invalidate::RelationCacheInvalidate);
     relcache_seams::relation_cache_invalidate_entry::set(invalidate::RelationCacheInvalidateEntry);

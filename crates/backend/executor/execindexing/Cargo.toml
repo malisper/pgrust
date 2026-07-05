@@ -38,6 +38,8 @@ types_nodes = { path = "../../../_support/types/nodes" }
 readfuncs = { path = "../../nodes/readfuncs" }
 nodes_core = { path = "../../nodes/nodes_core" }
 clauses = { path = "../../optimizer/util/clauses" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
+inval = { path = "../../utils/cache/inval" }
 execexpr = { path = "../execexpr" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
 init_small = { path = "../../utils/init/init_small" }
