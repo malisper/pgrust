@@ -467,7 +467,7 @@ fn get_qual_for_list<'mcx>(
 }
 
 // text varlena -> &str, inline images only (relpartbound is written inline).
-fn text_to_str<'a>(d: Datum) -> &'a str {
+fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum) -> &'mcx str {
     let p = d.as_usize() as *const u8;
     // SAFETY: syscache text attribute; toasted/compressed images are loud.
     unsafe {
@@ -480,7 +480,16 @@ fn text_to_str<'a>(d: Datum) -> &'a str {
         } else {
             let w = u32::from_ne_bytes(core::slice::from_raw_parts(p, 4).try_into().unwrap());
             if w & 0x02 != 0 {
-                panic!("partbounds: compressed relpartbound unported");
+                let total = ::types_tuple::varatt::varsize_any(p);
+                let raw = core::slice::from_raw_parts(p, total);
+                let flat = ::detoast_seams::detoast_attr::call(mcx, raw)
+                    .expect("detoast relpartbound");
+                let (ptr, len) = (flat.as_ptr(), flat.len());
+                core::mem::forget(flat);
+                // The detoasted copy lives in the mcx arena until reset;
+                // forget only skips the vec's own dealloc.
+                let s = core::slice::from_raw_parts(ptr, len);
+                return core::str::from_utf8(s).expect("non-UTF-8 relpartbound");
             }
             ((w as usize >> 2) - 4, 4)
         };
@@ -498,7 +507,7 @@ pub fn read_boundspec<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<&'mcx Partit
     let (d, isnull) =
         cache_syscache::SysCacheGetAttr(RELOID, &tuple, Anum_pg_class_relpartbound)?;
     assert!(!isnull, "missing relpartbound for relation {relid}");
-    let node = readfuncs::stringToNode(mcx, text_to_str(d))?;
+    let node = readfuncs::stringToNode(mcx, text_to_str(mcx, d))?;
     cache_syscache::ReleaseSysCache(tuple);
     Ok(node
         .as_variant::<PartitionBoundSpec>()

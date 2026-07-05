@@ -875,6 +875,8 @@ pub const MULTIRANGETYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(4228, "range_merge", 1, true, false, fc_range_merge_from_multirange),
     b(4231, "multirange_in", 3, true, false, fc_multirange_in),
     b(4232, "multirange_out", 1, true, false, fc_multirange_out),
+    // anymultirange_out (pseudotypes.c) is `return multirange_out(fcinfo)`.
+    b(4230, "anymultirange_out", 1, true, false, fc_multirange_out),
     b(4233, "multirange_recv", 3, true, false, fc_multirange_recv),
     b(4234, "multirange_send", 1, true, false, fc_multirange_send),
     b(4235, "lower", 1, true, false, fc_multirange_lower),

@@ -248,7 +248,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         // If the primary key uses WITHOUT OVERLAPS, the fk must use PERIOD.
         if pk_has_without_overlaps && !fkconstraint.fk_with_period {
             let e = err(
-                "foreign key uses PERIOD on the referenced table but not the referencing                  table"
+                "foreign key uses PERIOD on the referenced table but not the referencing table"
                     .into(),
                 ERRCODE_INVALID_FOREIGN_KEY,
             );
@@ -270,7 +270,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         // Since we got pk_attrs, one should be a period.
         if with_period && !fkconstraint.pk_with_period {
             let e = err(
-                "foreign key uses PERIOD on the referencing table but not the referenced                  table"
+                "foreign key uses PERIOD on the referencing table but not the referenced table"
                     .into(),
                 ERRCODE_INVALID_FOREIGN_KEY,
             );
@@ -291,7 +291,7 @@ fn at_add_foreign_key_constraint<'mcx>(
 
     if pk_has_without_overlaps && !with_period {
         let e = err(
-            "foreign key must use PERIOD when referencing a primary key using WITHOUT              OVERLAPS"
+            "foreign key must use PERIOD when referencing a primary key using WITHOUT OVERLAPS"
                 .into(),
             ERRCODE_INVALID_FOREIGN_KEY,
         );

@@ -1585,7 +1585,11 @@ fn transform_index_constraints<'mcx>(
                 break;
             }
             if !found {
-                return Err(key_column_missing(key, constraint.location));
+                return Err(cursor_at(
+                    key_column_missing(key, constraint.location),
+                    Some(src.as_bytes()),
+                    constraint.location,
+                ));
             }
             for ip in index_params.iter() {
                 let iparam = ip.as_variant::<IndexElem>().expect("IndexElem");
