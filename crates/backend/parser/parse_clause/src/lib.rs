@@ -1927,7 +1927,7 @@ pub fn transformOnConflictArbiter<'mcx>(
 
     let mut arbiter_elems = NodeList::nil();
     let mut arbiter_where = None;
-    let constraint = InvalidOid;
+    let mut constraint = InvalidOid;
 
     if let Some(infer) = infer {
         // Arbiter expressions see only non-qualified references to the
@@ -1950,11 +1950,39 @@ pub fn transformOnConflictArbiter<'mcx>(
         }
         pstate.p_namespace = save_namespace;
 
-        if infer.conname.is_some() {
-            panic!(
-                "transformOnConflictArbiter (parse_clause.c): ON CONSTRAINT arbiter \
-                 (get_relation_constraint_attnos) unported — upsert lane"
-            );
+        // ON CONSTRAINT name: resolve the constraint OID and mark the
+        // constrained columns as requiring SELECT privilege, as if the
+        // arbiter had named the constraint's index columns explicitly.
+        if let Some(conname) = infer.conname {
+            let relid = pstate
+                .p_target_relation
+                .as_ref()
+                .expect("ON CONFLICT with no target relation")
+                .rd_id;
+            let (con_oid, conattnos) =
+                pg_constraint::get_relation_constraint_attnos(mcx, relid, conname, false)?;
+            constraint = con_oid;
+            let perminfo = pstate
+                .p_target_nsitem
+                .expect("setTargetTable set p_target_nsitem")
+                .p_perminfo
+                .expect("target relation nsitem has perminfo");
+            // SAFETY: perminfo nodes are read only through transient as_*
+            // lookups; no derived reference is live across this call.
+            unsafe {
+                perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+                    p.requiredPerms |= types_nodes::parsenodes::ACL_SELECT;
+                    for &attnum in conattnos.iter() {
+                        p.selectedCols.add_member(
+                            mcx,
+                            attnum as i32
+                                - types_tuple::htup::FirstLowInvalidHeapAttributeNumber,
+                        )?;
+                    }
+                    Ok::<(), Box<PgError>>(())
+                })
+            }
+            .expect("p_perminfo is RTEPermissionInfo")?;
         }
     }
 
