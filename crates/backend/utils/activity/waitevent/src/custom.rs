@@ -25,7 +25,6 @@ use types_storage::storage::{Spinlock, SyncCell, WAIT_EVENT_CUSTOM_LOCK};
 use crate::{PG_WAIT_EXTENSION, WAIT_EVENT_CLASS_MASK};
 
 const NAMEDATALEN: usize = C_NAMEDATALEN as usize;
-const WAIT_EVENT_CUSTOM_HASH_INIT_SIZE: i64 = 16;
 const WAIT_EVENT_CUSTOM_HASH_MAX_SIZE: i32 = 128;
 const WAIT_EVENT_CUSTOM_INITIAL_ID: i32 = 1;
 
@@ -102,9 +101,10 @@ pub fn WaitEventCustomShmemInit() -> PgResult<()> {
     let mut by_info_ctl = HASHCTL::default();
     by_info_ctl.keysize = size_of::<u32>();
     by_info_ctl.entrysize = size_of::<EntryByInfo>();
+    // HASH_FIXED_SIZE forbids growth: preallocate at max (C grows 16->128).
     let by_info = hash_create(
         "WaitEventCustom hash by wait event information",
-        WAIT_EVENT_CUSTOM_HASH_INIT_SIZE,
+        WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64,
         &by_info_ctl,
         HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM | HASH_FIXED_SIZE,
     )?;
@@ -114,7 +114,7 @@ pub fn WaitEventCustomShmemInit() -> PgResult<()> {
     by_name_ctl.entrysize = size_of::<EntryByName>();
     let by_name = hash_create(
         "WaitEventCustom hash by name",
-        WAIT_EVENT_CUSTOM_HASH_INIT_SIZE,
+        WAIT_EVENT_CUSTOM_HASH_MAX_SIZE as i64,
         &by_name_ctl,
         HASH_ELEM | HASH_STRINGS | HASH_SHARED_MEM | HASH_FIXED_SIZE,
     )?;

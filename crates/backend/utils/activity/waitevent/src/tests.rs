@@ -69,6 +69,10 @@ fn wait_event_decodes_known_constants() {
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IPC + 56), Some("XactGroupUpdate"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_TIMEOUT + 1), Some("CheckpointWriteDelay"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_TIMEOUT + 9), Some("WalSummarizerError"));
+    assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 1), Some("AioIoUringExecution"));
+    assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 2), Some("AioIoUringSubmit"));
+    assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 7), Some("BuffileTruncate"));
+    assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 8), Some("BuffileWrite"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 40), Some("RelationMapRead"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 42), Some("RelationMapWrite"));
     assert_eq!(pgstat_get_wait_event(PG_WAIT_IO + 50), Some("SlruFlushSync"));
@@ -121,6 +125,11 @@ fn custom_wait_events_register_resolve_and_collide() {
     // Same name, different class -> ERRCODE_DUPLICATE_OBJECT.
     super::custom::WaitEventExtensionNew("shared_name_for_collision_test").unwrap();
     assert!(super::custom::WaitEventInjectionPointNew("shared_name_for_collision_test").is_err());
+
+    // Registration must work past C's init size of 16 (grows to 128 in C).
+    for i in 0..30 {
+        super::custom::WaitEventExtensionNew(&format!("bulk_event_{i}")).unwrap();
+    }
 }
 
 #[test]

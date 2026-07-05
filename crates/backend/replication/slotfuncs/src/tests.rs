@@ -21,7 +21,7 @@ fn builtin_table_shape() {
     }
 
     let sync = SLOTFUNCS_BUILTINS.iter().find(|b| b.foid == 6344).unwrap();
-    assert!(!sync.retset && sync.nargs == 0);
+    assert!(sync.strict && !sync.retset && sync.nargs == 0);
 }
 
 #[test]

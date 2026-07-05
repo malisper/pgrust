@@ -157,14 +157,14 @@ static WAIT_EVENT_TIMEOUT_NAMES: [&str; 10] = [
 
 static WAIT_EVENT_IO_NAMES: [&str; 81] = [
     "AioIoCompletion",
-    "AioIoUringSubmit",
     "AioIoUringExecution",
+    "AioIoUringSubmit",
     "BasebackupRead",
     "BasebackupSync",
     "BasebackupWrite",
     "BuffileRead",
-    "BuffileWrite",
     "BuffileTruncate",
+    "BuffileWrite",
     "ControlFileRead",
     "ControlFileSync",
     "ControlFileSyncUpdate",

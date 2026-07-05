@@ -1,7 +1,5 @@
-//! wait_event_funcs.c: `pg_get_wait_events()` (OID 6318), the SRF backing the
-//! `pg_wait_events` view. The static (type, name, description) table is
-//! `wait_event_names.txt` generated data (`wait_event_funcs_data.tsv`, byte
-//! parity checked against the C-generated `wait_event_funcs_data.c`);
+//! wait_event_funcs.c: `pg_get_wait_events()` (OID 6318). The static table is
+//! `wait_event_funcs_data.tsv` (byte parity vs the generated C data);
 //! extension/injection-point rows are appended from the custom registry.
 
 use ::datum::Datum;
