@@ -461,6 +461,19 @@ fn typenameTypeMod<'mcx>(
 pub struct CreateStmtCxt<'mcx> {
     pub blist: NodeList<'mcx>,
     pub alist: NodeList<'mcx>,
+    pub ckconstraints: NodeList<'mcx>,
+    pub nnconstraints: NodeList<'mcx>,
+}
+
+impl<'mcx> CreateStmtCxt<'mcx> {
+    fn new() -> Self {
+        CreateStmtCxt {
+            blist: NodeList::nil(),
+            alist: NodeList::nil(),
+            ckconstraints: NodeList::nil(),
+            nnconstraints: NodeList::nil(),
+        }
+    }
 }
 
 // setSchemaName (parse_utilcmd.c). RangeVars sit behind shared refs, so a
@@ -1267,7 +1280,7 @@ pub fn transformCreateStmt<'mcx>(
     if let Some(of_tn) = stmt.ofTypename {
         transformOfType(mcx, of_tn, &mut columns, Some(query_string))?;
     }
-    let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
+    let mut cxt = CreateStmtCxt::new();
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
     let mut ixconstraints = NodeList::nil();
@@ -2359,10 +2372,11 @@ pub fn quote_qualified_identifier<'mcx>(
 }
 
 // transformAlterTableStmt's per-subcommand slice (ATParseTransformCmd's
-// working half): reuses the CREATE-lane transformColumnDefinition; any
-// queued constraint subcommand (CHECK / NOT NULL / index) is an unported
-// ALTER lane. The subcommand is transformed in place (C rebuilds an equal
-// newcmds list).
+// working half): reuses the CREATE-lane transformColumnDefinition. The
+// subcommand is transformed in place (C rebuilds an equal newcmds list);
+// generated CHECK/NOT NULL constraints come back in cxt for the caller to
+// schedule as AT_AddConstraint subcommands; index/FK column constraints
+// are unported ALTER lanes.
 pub fn transformAlterTableCmd<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
@@ -2373,7 +2387,7 @@ pub fn transformAlterTableCmd<'mcx>(
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
-    let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
+    let mut cxt = CreateStmtCxt::new();
     let arena_relname = || -> PgResult<&'mcx str> {
         let mut s = PgString::new_in(mcx);
         s.try_push_str(relname)?;
@@ -2600,9 +2614,8 @@ pub fn transformAlterTableCmd<'mcx>(
         }
         other => unported(&format!("transformAlterTableStmt {other:?} arm")),
     }
-    if !ckconstraints.is_nil() || !nnconstraints.is_nil() {
-        unported("ALTER TABLE ADD COLUMN with CHECK/NOT NULL (AT_AddConstraint lane)");
-    }
+    cxt.ckconstraints = ckconstraints;
+    cxt.nnconstraints = nnconstraints;
     Ok(cxt)
 }
 
