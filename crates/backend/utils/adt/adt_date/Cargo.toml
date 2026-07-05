@@ -22,6 +22,8 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 elog = { path = "../../error/elog" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
 
 [dev-dependencies]
 pgtz = { path = "../../../timezone/pgtz" }

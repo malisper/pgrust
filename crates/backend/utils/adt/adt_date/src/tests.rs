@@ -513,3 +513,76 @@ fn extract_arms() {
     let e = timetz_part_common(b"month", &ttz, true).unwrap_err();
     assert_eq!(e.message(), "unit \"month\" not supported for type time with time zone");
 }
+
+#[test]
+fn time_support_simplifies_widening_casts_only() {
+    use ::types_nodes::primnodes::{Const, FuncExpr};
+    use ::types_nodes::supportnodes::SupportRequestSimplify;
+    use ::types_nodes::{Node, NodeTag};
+    use adt_datetime::MAX_TIME_PRECISION;
+
+    let ctx = mcx::MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    const TIMEOID: types_core::Oid = 1083;
+
+    let run = |old_typmod: i32, new_typmod: Option<i32>| -> Option<i32> {
+        let src = Node::mk(
+            mcx,
+            Const {
+                consttype: TIMEOID,
+                consttypmod: old_typmod,
+                constcollid: 0,
+                constlen: 8,
+                constvalue: datum::Datum::from_i64(0),
+                constisnull: false,
+                constbyval: true,
+                location: -1,
+            },
+        )
+        .unwrap();
+
+        let tm = Node::mk(
+            mcx,
+            Const {
+                consttype: 23,
+                consttypmod: -1,
+                constcollid: 0,
+                constlen: 4,
+                constvalue: datum::Datum::from_i32(new_typmod.unwrap_or(0)),
+                constisnull: new_typmod.is_none(),
+                constbyval: true,
+                location: -1,
+            },
+        )
+        .unwrap();
+
+        let mut args = types_nodes::NodeList::nil();
+        args.lappend(mcx, src).unwrap();
+        args.lappend(mcx, tm).unwrap();
+        let mut fexpr = FuncExpr::default();
+        fexpr.funcid = 1968;
+        fexpr.funcresulttype = TIMEOID;
+        fexpr.args = args;
+        let fcall = Node::mk(mcx, fexpr).unwrap();
+
+        let mut req = SupportRequestSimplify::new(Some(fcall), Some(mcx));
+        let mut fci = types_fmgr::LocalFcinfo::<1>::new(0);
+        fci.set_arg(0, datum::Datum::from_usize(core::ptr::from_mut(&mut req) as usize));
+        let d = builtins::fc_time_support(None, &mut fci).unwrap();
+        if d.as_usize() == 0 {
+            return None;
+        }
+        // SAFETY: fc_time_support returns a node it allocated in mcx.
+        let ret = unsafe { Node::from_raw(core::ptr::NonNull::new(d.as_usize() as *mut ()).unwrap()) };
+        // applyRelabelType folds into a same-type Const; otherwise wraps.
+        assert!(matches!(ret.node_tag(), NodeTag::T_RelabelType | NodeTag::T_Const));
+        Some(nodes_core::expr_typmod(ret))
+    };
+
+    assert_eq!(run(-1, Some(-1)), Some(-1));
+    assert_eq!(run(-1, Some(MAX_TIME_PRECISION)), Some(MAX_TIME_PRECISION));
+    assert_eq!(run(2, Some(4)), Some(4));
+    assert_eq!(run(4, Some(2)), None);
+    assert_eq!(run(-1, Some(2)), None);
+    assert_eq!(run(2, None), None);
+}
