@@ -125,6 +125,9 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
             node.as_json_constructor_expr().unwrap().returning.expect("returning").typid
         }
         NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
+        NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         tag => panic!("funcapi exprType: node family {tag:?} not ported"),
