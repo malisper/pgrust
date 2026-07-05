@@ -874,6 +874,7 @@ where
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_NextValueExpr
         | NodeTag::T_RangeTblRef
+        | NodeTag::T_MergeSupportFunc
         | NodeTag::T_SortGroupClause => Ok(None),
         NodeTag::T_WithCheckOption => {
             let wco = node.as_with_check_option().unwrap();

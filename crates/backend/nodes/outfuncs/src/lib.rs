@@ -131,6 +131,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_opt_node(out, c.result)?;
             w!(out, " :location -1}}");
         }
+        NodeTag::T_MergeSupportFunc => {
+            let m = node.as_merge_support_func().expect("MergeSupportFunc");
+            w!(
+                out,
+                "{{MERGESUPPORTFUNC :msftype {} :msfcollid {} :location -1}}",
+                m.msftype, m.msfcollid
+            );
+        }
         NodeTag::T_WindowFunc => {
             let f = node.as_window_func().expect("WindowFunc");
             w!(

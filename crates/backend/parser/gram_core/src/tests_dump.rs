@@ -1408,6 +1408,12 @@ fn node(out: &mut String, n: Node<'_>) {
         }
         list_field(out, "actions", &a.actions);
         out.push('}');
+    } else if let Some(m) = n.as_merge_support_func() {
+        out.push_str("{MERGESUPPORTFUNC");
+        int_field(out, "msftype", m.msftype as i32);
+        int_field(out, "msfcollid", m.msfcollid as i32);
+        int_field(out, "location", m.location);
+        out.push('}');
     } else if let Some(m) = n.as_merge_stmt() {
         out.push_str("{MERGESTMT");
         node_field(out, "relation", m.relation);

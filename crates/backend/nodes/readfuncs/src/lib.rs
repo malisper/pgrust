@@ -424,6 +424,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"INFERENCEELEM" => self.read_inference_elem(),
             b"SUBSCRIPTINGREF" => self.read_subscripting_ref(),
             b"WINDOWFUNC" => self.read_window_func(),
+            b"MERGESUPPORTFUNC" => self.read_merge_support_func(),
             b"WINDOWCLAUSE" => self.read_window_clause(),
             b"COMMONTABLEEXPR" => self.read_common_table_expr(),
             b"CTESEARCHCLAUSE" => self.read_cte_search_clause(),
@@ -623,6 +624,15 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         bt.booltesttype = bool_test_type(self.read_u32("booltesttype"));
         bt.location = self.read_location("location");
         Ok(bt.seal())
+    }
+
+    fn read_merge_support_func(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut m = Node::build::<types_nodes::primnodes::MergeSupportFunc>(mcx)?;
+        m.msftype = self.read_u32("msftype");
+        m.msfcollid = self.read_u32("msfcollid");
+        m.location = self.read_location("location");
+        Ok(m.seal())
     }
 
     fn read_window_func(&mut self) -> PgResult<Node<'mcx>> {

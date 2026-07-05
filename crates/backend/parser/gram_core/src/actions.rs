@@ -30,7 +30,7 @@ use types_nodes::parsenodes::{
     REPLICA_IDENTITY_NOTHING,
 };
 use types_nodes::primnodes::{
-    CaseExpr, CaseWhen, CoalesceExpr, CollateClause, CurrentOfExpr, GroupingFunc, JoinExpr, MinMaxExpr, MinMaxOp,
+    CaseExpr, CaseWhen, CoalesceExpr, CollateClause, CurrentOfExpr, GroupingFunc, JoinExpr, MergeSupportFunc, MinMaxExpr, MinMaxOp,
     JsonBehavior, JsonBehaviorType, JsonEncoding, JsonExprOp, JsonFormat, JsonFormatType,
     JsonIsPredicate, JsonReturning, JsonValueExpr, JsonValueType, JsonWrapper,
     OverridingKind, RowExpr,
@@ -9863,6 +9863,16 @@ impl<'mcx> Parser<'mcx> {
                     JsonSerializeExpr {
                         expr: view.v(3).node(),
                         output: view.v(4).node(),
+                        location: view.l(1),
+                    },
+                )?));
+            }
+            2195 => {
+                *yyval = YYSTYPE::Node(Some(Node::mk(
+                    mcx,
+                    MergeSupportFunc {
+                        msftype: types_core::catalog::TEXTOID,
+                        msfcollid: types_core::InvalidOid,
                         location: view.l(1),
                     },
                 )?));

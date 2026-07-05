@@ -1,8 +1,8 @@
-//! paramassign.c slice. MergeSupport/Returning replacement legs are
-//! structurally absent (no MergeSupportFunc/ReturningExpr node types).
+//! paramassign.c slice. The Returning replacement leg is structurally absent
+//! (no ReturningExpr node type).
 
 use types_error::PgResult;
-use types_nodes::primnodes::{Aggref, GroupingFunc, Param, ParamKind, PlaceHolderVar, Var};
+use types_nodes::primnodes::{Aggref, GroupingFunc, MergeSupportFunc, Param, ParamKind, PlaceHolderVar, Var};
 use types_nodes::Node;
 use types_pathnodes::PlannerParamItem;
 
@@ -217,6 +217,45 @@ pub(crate) fn replace_outer_grouping<'mcx>(
             paramtypmod: -1,
             paramcollid: 0,
             location: grp.location,
+        },
+    )
+}
+
+/// replace_outer_merge_support (paramassign.c): PARAM_EXEC Param for a
+/// MergeSupportFunc in a subquery under a MERGE's RETURNING list, parked on
+/// the owning MERGE level's plan_params. No dedupe, as replace_outer_agg.
+pub(crate) fn replace_outer_merge_support<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    msf: &MergeSupportFunc,
+    msf_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let idx = (0..run.suspended_roots.len())
+        .rev()
+        .find(|&i| {
+            let r = &run.suspended_roots[i].root;
+            run.queries[r.parse.0 as usize].commandType == types_nodes::CmdType::CMD_MERGE
+        })
+        .unwrap_or_else(|| {
+            panic!("replace_outer_merge_support (paramassign.c): MergeSupportFunc found outside MERGE")
+        });
+    let mcx = run.mcx;
+    let ptype = msf.msftype;
+    let copy = rewrite_manip::copy_node(mcx, msf_node)?;
+    let param_id = run.glob.param_exec_types.len() as i32;
+    run.glob.param_exec_types.lappend(mcx, ptype)?;
+    let target = &mut run.suspended_roots[idx].root;
+    let item_id = target.alloc_expr_node(copy);
+    let pp = target.alloc_planner_param_item(PlannerParamItem { item: item_id, paramId: param_id });
+    target.plan_params.push(pp);
+    Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: ptype,
+            paramtypmod: -1,
+            paramcollid: 0,
+            location: msf.location,
         },
     )
 }

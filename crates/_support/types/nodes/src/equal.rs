@@ -21,7 +21,7 @@ use crate::primnodes::{
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubLink, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
-    WindowFuncRunCondition, XmlExpr,
+    MergeSupportFunc, WindowFuncRunCondition, XmlExpr,
 };
 use crate::rawnodes::{
     A_Const, A_Expr, A_Star, CollateClause, ColumnRef, DeleteStmt, DistinctClause, FuncCall,
@@ -60,6 +60,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_GroupingFunc => cmp!(as_grouping_func),
         NodeTag::T_WindowFunc => cmp!(as_window_func),
         NodeTag::T_WindowFuncRunCondition => cmp!(as_window_func_run_condition),
+        NodeTag::T_MergeSupportFunc => cmp!(as_merge_support_func),
         NodeTag::T_GroupingSet => cmp!(as_grouping_set),
         NodeTag::T_TableSampleClause => cmp!(as_table_sample_clause),
         NodeTag::T_RowExpr => cmp!(as_row_expr),
@@ -465,6 +466,12 @@ impl NodeEqual for WindowFuncRunCondition<'_> {
             && self.inputcollid == b.inputcollid
             && self.wfunc_left == b.wfunc_left
             && equal(self.arg, b.arg)
+    }
+}
+
+impl NodeEqual for MergeSupportFunc {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.msftype == b.msftype && self.msfcollid == b.msfcollid
     }
 }
 

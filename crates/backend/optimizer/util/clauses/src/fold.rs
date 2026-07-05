@@ -1106,6 +1106,7 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         | NodeTag::T_CurrentOfExpr
         | NodeTag::T_SQLValueFunction
         | NodeTag::T_NextValueExpr
+        | NodeTag::T_MergeSupportFunc
         | NodeTag::T_SortGroupClause => Ok(None),
         // C's T_WindowFunc arm can't simplify the node but still expands
         // named args/defaults in its argument list before recursing.

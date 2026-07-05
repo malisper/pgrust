@@ -85,6 +85,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         | NodeTag::T_Const
         | NodeTag::T_Param
         | NodeTag::T_SQLValueFunction
+        | NodeTag::T_MergeSupportFunc
         | NodeTag::T_NextValueExpr => Ok(()),
         // C charges nothing for Aggref/WindowFunc themselves and does not
         // descend: their costs are get_agg_clause_costs'/cost_windowagg's job.

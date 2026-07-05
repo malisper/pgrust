@@ -153,6 +153,7 @@ pub fn transformExprRecurse<'mcx>(
         NodeTag::T_JsonFuncExpr => json::transformJsonFuncExpr(mcx, pstate, expr),
         NodeTag::T_XmlExpr => transformXmlExpr(mcx, pstate, expr),
         NodeTag::T_XmlSerialize => transformXmlSerialize(mcx, pstate, expr),
+        NodeTag::T_MergeSupportFunc => transformMergeSupportFunc(pstate, expr),
         NodeTag::T_CaseTestExpr | NodeTag::T_Var => Ok(expr),
         NodeTag::T_CurrentOfExpr => transformCurrentOfExpr(mcx, pstate, expr),
         // Everywhere DEFAULT is legal the caller strips it before transformExpr.
@@ -393,6 +394,47 @@ fn construct_requires_boolean_eq(
             .into_error()
             .with_error_location(ErrorLocation::new("parse_expr.c", 0, "transformAExprNullIf")),
     )
+}
+
+/// transformMergeSupportFunc (parse_expr.c): MERGE_ACTION() is only legal in
+/// the RETURNING list of a MERGE command; otherwise error, else pass through.
+#[allow(non_snake_case)]
+fn transformMergeSupportFunc<'mcx>(
+    pstate: &mut ParseState<'_, 'mcx>,
+    expr: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    if pstate.p_expr_kind != ParseExprKind::EXPR_KIND_MERGE_RETURNING {
+        let mut parent = pstate.parentParseState;
+        while let Some(pp) = parent {
+            if pp.p_expr_kind == ParseExprKind::EXPR_KIND_MERGE_RETURNING {
+                break;
+            }
+            parent = pp.parentParseState;
+        }
+        if parent.is_none() {
+            use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+            let f = expr.as_merge_support_func().expect("MergeSupportFunc");
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg(
+                        "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command",
+                    )
+                    .errposition(parser_small1::parser_errposition(
+                        pstate,
+                        f.location,
+                        mbutils::GetDatabaseEncoding(),
+                    ))
+                    .into_error()
+                    .with_error_location(ErrorLocation::new(
+                        "parse_expr.c",
+                        0,
+                        "transformMergeSupportFunc",
+                    )),
+            ));
+        }
+    }
+    Ok(expr)
 }
 
 #[cold]

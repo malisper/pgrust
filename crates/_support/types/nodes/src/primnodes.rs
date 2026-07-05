@@ -361,6 +361,14 @@ pub struct WindowFuncRunCondition<'mcx> {
     pub arg: Node<'mcx>,
 }
 
+/// MERGE_ACTION(); only legal in the RETURNING list of a MERGE command.
+#[derive(Default)]
+pub struct MergeSupportFunc {
+    pub msftype: Oid,
+    pub msfcollid: Oid,
+    pub location: ParseLoc,
+}
+
 // C `Expr *expr` is never NULL in a live TargetEntry (makeTargetEntry
 // requires it); modeled non-optional, so no Default.
 pub struct TargetEntry<'mcx> {
@@ -1140,6 +1148,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for WindowFunc<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for WindowFuncRunCondition<'mcx> {
     const TAG: NodeTag = NodeTag::T_WindowFuncRunCondition;
 }
+unsafe impl NodeVariant<'_> for MergeSupportFunc {
+    const TAG: NodeTag = NodeTag::T_MergeSupportFunc;
+}
 unsafe impl NodeVariant<'_> for JsonFormat {
     const TAG: NodeTag = NodeTag::T_JsonFormat;
 }
@@ -1445,6 +1456,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_window_func_run_condition(self) -> Option<&'mcx WindowFuncRunCondition<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_merge_support_func(self) -> Option<&'mcx MergeSupportFunc> {
         self.as_variant()
     }
 

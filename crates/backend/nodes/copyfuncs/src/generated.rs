@@ -22,10 +22,11 @@ use types_nodes::primnodes::{
     FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, InferenceElem, JoinExpr,
     JsonBehavior, JsonConstructorExpr, JsonExpr, JsonFormat, JsonIsPredicate, JsonReturning,
     JsonTablePath, JsonTablePathScan, JsonTableSiblingJoin, JsonValueExpr, MergeAction,
-    MinMaxExpr, NamedArgExpr, NextValueExpr, NullIfExpr, NullTest, OnConflictExpr, OpExpr,
-    Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, ReturningExpr, RowCompareExpr,
-    RowExpr, SQLValueFunction, ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan,
-    SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition, XmlExpr,
+    MergeSupportFunc, MinMaxExpr, NamedArgExpr, NextValueExpr, NullIfExpr, NullTest,
+    OnConflictExpr, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType,
+    ReturningExpr, RowCompareExpr, RowExpr, SQLValueFunction, ScalarArrayOpExpr, SetToDefault,
+    SubLink, SubPlan, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
+    WindowFuncRunCondition, XmlExpr,
 };
 use types_nodes::parsenodes::{
     ATAlterConstraint, AccessPriv, AlterCollationStmt, AlterDatabaseRefreshCollStmt,
@@ -837,6 +838,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_MergeStmt => {
             let s = node.as_variant::<MergeStmt>().expect("MergeStmt");
             Node::mk(mcx, copy_MergeStmt(mcx, s)?)?
+        }
+        NodeTag::T_MergeSupportFunc => {
+            let s = node.as_variant::<MergeSupportFunc>().expect("MergeSupportFunc");
+            Node::mk(mcx, copy_MergeSupportFunc(mcx, s)?)?
         }
         NodeTag::T_MergeWhenClause => {
             let s = node.as_variant::<MergeWhenClause>().expect("MergeWhenClause");
@@ -3240,6 +3245,14 @@ pub(crate) fn copy_MergeStmt<'d>(mcx: Mcx<'d>, s: &MergeStmt<'_>) -> PgResult<Me
         mergeWhenClauses: copy_node_list(mcx, &s.mergeWhenClauses)?,
         returningClause: copy_node_opt(mcx, s.returningClause)?,
         withClause: copy_node_opt(mcx, s.withClause)?,
+    })
+}
+
+pub(crate) fn copy_MergeSupportFunc(_mcx: Mcx<'_>, s: &MergeSupportFunc) -> PgResult<MergeSupportFunc> {
+    Ok(MergeSupportFunc {
+        msftype: s.msftype,
+        msfcollid: s.msfcollid,
+        location: s.location,
     })
 }
 

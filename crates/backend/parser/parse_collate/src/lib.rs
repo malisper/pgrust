@@ -402,6 +402,7 @@ fn assign_collations_walker<'mcx>(
         | NodeTag::T_XmlExpr
         | NodeTag::T_SubscriptingRef
         | NodeTag::T_FieldStore
+        | NodeTag::T_MergeSupportFunc
         | NodeTag::T_NamedArgExpr) => {
             match tag {
                 // C: never recurse into the CASE test expression — it was
@@ -603,6 +604,7 @@ fn assign_collations_walker<'mcx>(
                     }
                 }
                 NodeTag::T_SQLValueFunction => {}
+                NodeTag::T_MergeSupportFunc => {}
                 NodeTag::T_NamedArgExpr => {
                     assign_collations_walker(
                         node.as_named_arg_expr().unwrap().arg.expect("NamedArgExpr has an arg"),
@@ -852,6 +854,11 @@ fn assign_collations_walker<'mcx>(
                     NodeTag::T_JsonExpr => node
                         .with_mut::<types_nodes::JsonExpr, _>(|j| j.collation = set_coll)
                         .unwrap(),
+                    NodeTag::T_MergeSupportFunc => node
+                        .with_mut::<types_nodes::primnodes::MergeSupportFunc, _>(|m| {
+                            m.msfcollid = set_coll
+                        })
+                        .unwrap(),
                     NodeTag::T_JsonBehavior => {
                         if let Some(e) = node.as_json_behavior().unwrap().expr {
                             expr_set_collation(e, set_coll)
@@ -903,6 +910,9 @@ unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
             NodeTag::T_Const => {
                 node.with_mut::<types_nodes::Const, _>(|c| c.constcollid = coll).unwrap()
             }
+            NodeTag::T_MergeSupportFunc => node
+                .with_mut::<types_nodes::primnodes::MergeSupportFunc, _>(|m| m.msfcollid = coll)
+                .unwrap(),
             other => panic!(
                 "expr_set_collation (exprSetCollation, nodeFuncs.c): arm for {other:?} \
                  unported — sqljson-lane"
