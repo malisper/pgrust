@@ -82,6 +82,8 @@ dependencies = [
  "dbcommands_seams",
  "elog",
  "foreigncmds_seams",
+ "funcapi_srf",
+ "heaptuple",
  "init_small",
  "inval",
  "lsyscache",
@@ -93,6 +95,8 @@ dependencies = [
  "superuser",
  "syscache_seams",
  "tablespace_seams",
+ "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -405,6 +409,7 @@ dependencies = [
  "pqformat",
  "stack_depth",
  "stringinfo",
+ "syscache_seams",
  "tupdesc",
  "typcache_seams",
  "types_core",
@@ -596,6 +601,7 @@ dependencies = [
  "elog",
  "fd",
  "fmgr_seams",
+ "format_type",
  "funcapi",
  "genam_seams",
  "heaptuple",
@@ -609,6 +615,7 @@ dependencies = [
  "parser_small1",
  "postgres_seams",
  "postmaster_seams",
+ "ruleutils",
  "standby",
  "syscache_seams",
  "table",
@@ -9624,6 +9631,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_config"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "funcapi",
+ "init_small",
+ "pg_path",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "pg_constraint"
 version = "0.1.0"
 dependencies = [
@@ -9647,6 +9668,22 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+ "varlena",
+]
+
+[[package]]
+name = "pg_controldata"
+version = "0.0.0"
+dependencies = [
+ "controldata_utils",
+ "datum",
+ "funcapi",
+ "heaptuple",
+ "init_small",
+ "lwlock",
+ "transam_xlog",
+ "types_error",
+ "types_fmgr",
  "varlena",
 ]
 
@@ -10345,11 +10382,13 @@ dependencies = [
  "backend_progress",
  "backend_status",
  "backend_status_seams",
+ "bgworker_seams",
  "catalog_seams",
  "datum",
  "funcapi",
  "heaptuple",
  "init_small",
+ "launcher_seams",
  "libc",
  "lmgr_proc",
  "mcx",
@@ -12891,6 +12930,8 @@ dependencies = [
  "partbounds",
  "partitionfuncs",
  "pg_class",
+ "pg_config",
+ "pg_controldata",
  "pg_database",
  "pg_db_role_setting",
  "pg_enum",
@@ -12965,6 +13006,7 @@ dependencies = [
  "standby",
  "statistics",
  "stats_import",
+ "subscriptioncmds",
  "subtrans",
  "superuser",
  "sync",
@@ -13053,7 +13095,9 @@ dependencies = [
  "catalog_indexing",
  "datum",
  "elog",
+ "fmgr_core",
  "fmgr_seams",
+ "funcapi",
  "genam",
  "heaptuple",
  "init_small",
@@ -13073,8 +13117,11 @@ dependencies = [
  "table",
  "tablecmds",
  "transam_xlog_seams",
+ "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_nodes",
  "types_rel",
  "types_scan",
@@ -13170,11 +13217,13 @@ dependencies = [
 name = "shmem"
 version = "0.0.0"
 dependencies = [
+ "datum",
  "elog",
  "s_lock",
  "s_lock_seams",
  "shmem_seams",
  "types_error",
+ "types_fmgr",
  "waitevent_seams",
 ]
 
@@ -14098,8 +14147,10 @@ dependencies = [
  "pgstat",
  "superuser",
  "table",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_guc",
  "types_nodes",
  "types_rel",

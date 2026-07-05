@@ -236,6 +236,9 @@ guc_file = { path = "../../backend/utils/misc/guc_file" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 guc = { path = "../../backend/utils/misc/guc" }
 guc_funcs = { path = "../../backend/utils/misc/guc_funcs" }
+pg_controldata = { path = "../../backend/utils/misc/pg_controldata" }
+pg_config = { path = "../../backend/utils/misc/pg_config" }
+subscriptioncmds = { path = "../../backend/commands/subscriptioncmds" }
 variable = { path = "../../backend/commands/variable" }
 user = { path = "../../backend/commands/user" }
 ps_status = { path = "../../backend/utils/misc/ps_status" }

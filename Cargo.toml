@@ -692,6 +692,8 @@ members = [
     "crates/backend/commands/prepare_seams",
     "crates/backend/commands/variable",
     "crates/backend/utils/misc/guc_funcs",
+    "crates/backend/utils/misc/pg_controldata",
+    "crates/backend/utils/misc/pg_config",
     "crates/backend/timezone/pgtz_seams",
     "crates/backend/timezone/localtime",
     "crates/backend/timezone/pgtz",
