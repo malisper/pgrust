@@ -13,6 +13,7 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 types_gist = { path = "../../../../_support/types/gist" }
 types_storage = { path = "../../../../_support/types/types_storage" }
+types_scan = { path = "../../../../_support/types/types_scan" }
 adt_tsvector_core = { path = "../tsvector_core" }
 crc32c = { path = "../../../../port/crc32c" }
 detoast = { path = "../../../access/common/detoast" }

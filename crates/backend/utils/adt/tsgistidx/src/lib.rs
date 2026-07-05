@@ -15,6 +15,7 @@ use ::types_fmgr::{
     FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 use ::types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
+use ::types_scan::scankey::{RTContainedByStrategyNumber, RTContainsStrategyNumber};
 use ::types_tuple::varatt;
 
 #[cfg(test)]
@@ -758,6 +759,48 @@ fn fc_gtsquery_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     entry_result(fcinfo, &retval)
 }
 
+// tsquery_gist.c makeTSQuerySign: TSQS_SIGLEN = 64.
+pub fn make_tsquery_sign(q: TsQueryRef<'_>) -> u64 {
+    let mut sign: u64 = 0;
+    for i in 0..q.size() {
+        if let ::adt_tsvector_core::query::Item::Val(op) = q.item(i) {
+            sign |= 1u64 << ((op.valcrc as u32) % 64);
+        }
+    }
+    sign
+}
+
+// tsquery_gist.c gtsquery_consistent; keys are bare TSQuerySign int8 datums.
+fn fc_gtsquery_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    // SAFETY: the armed result mcx outlives this call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let qimg = detoasted_image(mcx, fcinfo.arg(1))?;
+    let strategy = fcinfo.arg_i16(2) as u16;
+    let recheck = fcinfo.arg(4).as_usize() as *mut bool;
+    // SAFETY: recheck out-param live in the caller frame; all lanes inexact.
+    unsafe { *recheck = true };
+    let key = entry.key.as_u64();
+    let sq = make_tsquery_sign(TsQueryRef { payload: &qimg[4..] });
+    let retval = if strategy == RTContainsStrategyNumber {
+        if entry.page_is_leaf {
+            (key & sq) == sq
+        } else {
+            (key & sq) != 0
+        }
+    } else if strategy == RTContainedByStrategyNumber {
+        if entry.page_is_leaf {
+            (key & sq) == key
+        } else {
+            (key & sq) != 0
+        }
+    } else {
+        false
+    };
+    Ok(Datum::from_bool(retval))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -774,5 +817,7 @@ pub const TSGISTIDX_BUILTINS: &[FmgrBuiltin] = &[
     b(3653, "gtsvector_penalty", 3, fc_gtsvector_penalty),
     b(3654, "gtsvector_consistent", 5, fc_gtsvector_consistent),
     b(3695, "gtsquery_compress", 1, fc_gtsquery_compress),
+    b(3701, "gtsquery_consistent", 5, fc_gtsquery_consistent),
     b(3790, "gtsvector_consistent_oldsig", 5, fc_gtsvector_consistent),
+    b(3793, "gtsquery_consistent_oldsig", 5, fc_gtsquery_consistent),
 ];
