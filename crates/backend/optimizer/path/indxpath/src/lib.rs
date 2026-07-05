@@ -300,12 +300,6 @@ fn create_partial_bitmap_paths<'mcx>(
     Ok(())
 }
 
-#[cold]
-#[inline(never)]
-fn unported_parallel_index_scan() -> ! {
-    panic!("unported: parallel index scan partial paths (M3 lane)")
-}
-
 // consider_index_join_clauses (indxpath.c).
 #[allow(clippy::too_many_arguments)]
 fn consider_index_join_clauses<'mcx>(
@@ -1252,7 +1246,7 @@ fn get_index_paths<'mcx>(
 }
 
 // build_index_paths (indxpath.c), ST_ANYSCAN (bitmap=false) and ST_BITMAPSCAN
-// (bitmap=true) arms; no SAOP/parallel legs live.
+// (bitmap=true) arms.
 fn build_index_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
@@ -1310,20 +1304,34 @@ fn build_index_paths<'mcx>(
     let index_only_scan = !bitmap && check_index_only(run, rel, index);
 
     let backward_arm = index_is_ordered && pathkeys_possibly_useful;
+    // Parallel index scans are never built for bitmap collection (C's
+    // ST_BITMAPSCAN exclusion) or parameterized scans (outer_relids != NULL).
+    let parallel_arm = index.amcanparallel
+        && run.root.rel(rel).consider_parallel
+        && types_pathnodes::relids::relids_is_empty(&outer_relids)
+        && !bitmap;
+    let clone_clauses = |src: &PgVec<'mcx, IndexClause<'mcx>>| {
+        let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
+        v.extend(src.iter().cloned());
+        v
+    };
     if !index_clauses.is_empty()
         || !useful_pathkeys.is_empty()
         || useful_predicate
         || index_only_scan
     {
-        // C shares one clause list across both scan directions; clone only if
-        // the backward arm still needs it.
-        let forward_clauses = if backward_arm {
-            let mut v: PgVec<'mcx, IndexClause<'mcx>> = PgVec::new_in(mcx);
-            v.extend(index_clauses.iter().cloned());
-            v
+        // C shares one clause list across all scan arms; clone only if a
+        // later arm still needs it.
+        let forward_clauses = if backward_arm || parallel_arm {
+            clone_clauses(&index_clauses)
         } else {
             core::mem::replace(&mut index_clauses, PgVec::new_in(mcx))
         };
+        let parallel_pathkeys = parallel_arm.then(|| {
+            let mut v: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
+            v.extend(useful_pathkeys.iter().copied());
+            v
+        });
         let ipath = pathnode::create_index_path(
             run,
             index,
@@ -1333,13 +1341,26 @@ fn build_index_paths<'mcx>(
             index_only_scan,
             &outer_relids,
             loop_count,
+            false,
         )?;
         result.push(ipath);
-        if index.amcanparallel
-            && run.root.rel(rel).consider_parallel
-            && !run.root.rel(rel).partial_pathlist.is_empty()
-        {
-            crate::unported_parallel_index_scan();
+
+        if let Some(pathkeys) = parallel_pathkeys {
+            let ipath = pathnode::create_index_path(
+                run,
+                index,
+                clone_clauses(&index_clauses),
+                pathkeys,
+                types_pathnodes::ForwardScanDirection,
+                index_only_scan,
+                &outer_relids,
+                loop_count,
+                true,
+            )?;
+            // Not worth using workers: drop the path (C pfrees it).
+            if run.root.path(ipath).base().parallel_workers > 0 {
+                pathnode::add_partial_path(run, rel, ipath);
+            }
         }
     }
 
@@ -1352,17 +1373,45 @@ fn build_index_paths<'mcx>(
         let useful_pathkeys =
             planner_seams::truncate_useless_pathkeys::call(run, rel, &index_pathkeys)?;
         if !useful_pathkeys.is_empty() {
+            let backward_clauses = if parallel_arm {
+                clone_clauses(&index_clauses)
+            } else {
+                core::mem::replace(&mut index_clauses, PgVec::new_in(mcx))
+            };
+            let parallel_pathkeys = parallel_arm.then(|| {
+                let mut v: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
+                v.extend(useful_pathkeys.iter().copied());
+                v
+            });
             let ipath = pathnode::create_index_path(
                 run,
                 index,
-                index_clauses,
+                backward_clauses,
                 useful_pathkeys,
                 types_pathnodes::BackwardScanDirection,
                 index_only_scan,
                 &outer_relids,
                 loop_count,
+                false,
             )?;
             result.push(ipath);
+
+            if let Some(pathkeys) = parallel_pathkeys {
+                let ipath = pathnode::create_index_path(
+                    run,
+                    index,
+                    index_clauses,
+                    pathkeys,
+                    types_pathnodes::BackwardScanDirection,
+                    index_only_scan,
+                    &outer_relids,
+                    loop_count,
+                    true,
+                )?;
+                if run.root.path(ipath).base().parallel_workers > 0 {
+                    pathnode::add_partial_path(run, rel, ipath);
+                }
+            }
         }
     }
 

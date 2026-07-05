@@ -1491,7 +1491,7 @@ pub fn create_bitmap_heap_path<'mcx>(
     Ok(id)
 }
 
-// create_index_path (pathnode.c); indexorderbys/partial paths loud upstream.
+// create_index_path (pathnode.c); indexorderbys loud upstream.
 #[allow(clippy::too_many_arguments)]
 pub fn create_index_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1502,6 +1502,7 @@ pub fn create_index_path<'mcx>(
     indexonly: bool,
     required_outer: &types_pathnodes::Relids<'mcx>,
     loop_count: f64,
+    partial_path: bool,
 ) -> PgResult<PathId> {
     let rel_id = index.rel.expect("IndexOptInfo rel set");
     let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
@@ -1522,7 +1523,7 @@ pub fn create_index_path<'mcx>(
         indexselectivity: 0.0,
     };
     let id = run.root.alloc_path(PathNode::IndexPath(node));
-    costsize::cost_index(run, id, loop_count)?;
+    costsize::cost_index(run, id, loop_count, partial_path)?;
     Ok(id)
 }
 

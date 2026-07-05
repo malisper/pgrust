@@ -43,6 +43,7 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_NameCStringAttNums: PgBox<'mcx, [AttrNumber]>,
     pub ioss_VMBuffer: VmBuffer,
     pub ioss_PlanNodeId: i32,
+    pub ioss_ParallelAware: bool,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
@@ -476,6 +477,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_NameCStringAttNums,
         ioss_VMBuffer: VmBuffer::new(),
         ioss_PlanNodeId: node.scan.plan.plan_node_id,
+        ioss_ParallelAware: node.scan.plan.parallel_aware,
     })
 }
 
@@ -569,33 +571,89 @@ pub fn exec_index_only_restr_pos(node: &mut IndexOnlyScanState<'_>) -> PgResult<
     )
 }
 
-pub fn exec_index_only_scan_estimate(_node: &mut IndexOnlyScanState<'_>) -> ! {
-    panic!("nodeindexonlyscan: ExecIndexOnlyScanEstimate pending parallel DSM/shm_toc")
+/// `ExecIndexOnlyScanEstimate`: no DSM thread-native; the instrument-only arm
+/// is covered by execParallel's collapsed per-worker retrieval.
+pub fn exec_index_only_scan_estimate(_node: &mut IndexOnlyScanState<'_>) {}
+
+/// `ExecIndexOnlyScanInitializeDSM` (the leader participates too).
+pub fn exec_index_only_scan_initialize_dsm<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<std::sync::Arc<::indexam::ParallelIndexScanDescShared>> {
+    let mcx = estate.es_query_cxt;
+    let heap = node
+        .ss
+        .ss_currentRelation
+        .as_ref()
+        .expect("IOS has a relation");
+    let index = node.ioss_RelationDesc.as_ref().expect("index relation open");
+    let snapshot = estate
+        .es_snapshot
+        .as_ref()
+        .expect("parallel index-only scan requires es_snapshot");
+    let pscan = ::indexam::index_parallelscan_initialize(heap, index, snapshot)?;
+
+    let mut scandesc = ::indexam::index_beginscan_parallel(
+        mcx,
+        heap,
+        index,
+        node.ioss_ScanKeys.len() as i32,
+        0,
+        std::sync::Arc::clone(&pscan),
+    )?;
+    scandesc.xs_want_itup = true;
+    if node.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
+        index_rescan(&mut scandesc, Some(&node.ioss_ScanKeys), None)?;
+    }
+    debug_assert!(node.ioss_ScanDesc.is_none());
+    node.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+    Ok(pscan)
 }
 
-pub fn exec_index_only_scan_initialize_dsm(_node: &mut IndexOnlyScanState<'_>) -> ! {
-    panic!("nodeindexonlyscan: ExecIndexOnlyScanInitializeDSM pending parallel DSM/shm_toc")
-}
-
-pub fn exec_index_only_scan_reinitialize_dsm(_node: &mut IndexOnlyScanState<'_>) -> ! {
-    panic!("nodeindexonlyscan: ExecIndexOnlyScanReInitializeDSM pending parallel DSM/shm_toc")
-}
-
-pub fn exec_index_only_scan_initialize_worker(_node: &mut IndexOnlyScanState<'_>) -> ! {
-    panic!("nodeindexonlyscan: ExecIndexOnlyScanInitializeWorker pending parallel DSM/shm_toc")
-}
-
-pub fn exec_index_only_scan_retrieve_instrumentation(_node: &mut IndexOnlyScanState<'_>) -> ! {
-    panic!(
-        "nodeindexonlyscan: ExecIndexOnlyScanRetrieveInstrumentation pending parallel DSM/shm_toc"
+/// `ExecIndexOnlyScanReInitializeDSM`.
+pub fn exec_index_only_scan_reinitialize_dsm(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
+    ::indexam::index_parallelrescan(
+        node.ioss_ScanDesc
+            .as_deref_mut()
+            .expect("parallel index-only scan was initialized"),
     )
+}
+
+/// `ExecIndexOnlyScanInitializeWorker`.
+pub fn exec_index_only_scan_initialize_worker<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pscan: std::sync::Arc<::indexam::ParallelIndexScanDescShared>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let heap = node
+        .ss
+        .ss_currentRelation
+        .as_ref()
+        .expect("IOS has a relation");
+    let index = node.ioss_RelationDesc.as_ref().expect("index relation open");
+    let mut scandesc = ::indexam::index_beginscan_parallel(
+        mcx,
+        heap,
+        index,
+        node.ioss_ScanKeys.len() as i32,
+        0,
+        pscan,
+    )?;
+    scandesc.xs_want_itup = true;
+    if node.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
+        index_rescan(&mut scandesc, Some(&node.ioss_ScanKeys), None)?;
+    }
+    debug_assert!(node.ioss_ScanDesc.is_none());
+    node.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+    Ok(())
 }
 
 // Exempt: droppy owners, all released in exec_end_index_only_scan;
 // ScanDirection is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId;
+    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
         ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
 );

@@ -1,8 +1,8 @@
 //! B-tree access method (nbtree.c/nbtsearch.c/nbtinsert.c/nbtpage.c/
 //! nbtutils.c/nbtpreprocesskeys.c): read path (SAOP arrays + PG 18 skip
 //! scan), insert/split, and the VACUUM lane (bulkdelete/cleanup + page
-//! deletion). Phase 2, loud panics, never silent: dedup, parallel scans,
-//! row comparisons, mark/restore across primitive scans.
+//! deletion). Phase 2, loud panics, never silent: dedup, row comparisons,
+//! mark/restore across primitive scans.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -15,6 +15,7 @@ mod insert;
 pub mod itup;
 mod page;
 mod pagedel;
+mod parallel;
 mod preprocess;
 mod search;
 mod splitloc;
@@ -26,6 +27,7 @@ mod wal;
 mod tests;
 
 pub use insert::btinsert;
+pub use parallel::btparallelrescan;
 pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion, bt_pageinit};
 pub use vacuum::{btbulkdelete, btbulkdelete_collect, btvacuumcleanup, IndexVacuumInfo};
 
@@ -77,6 +79,7 @@ macro_rules! split_scan {
             xs_pgstat_index_scans,
             xs_nsearches,
             opaque,
+            parallel_scan,
             ..
         } = $scan;
         let IndexScanOpaque::Btree(so) = opaque else {
@@ -92,6 +95,10 @@ macro_rules! split_scan {
             xs_itup,
             xs_pgstat_index_scans,
             xs_nsearches,
+            parallel: parallel_scan.as_deref().map(|p| {
+                let ::types_relscan::ParallelIndexAmShared::Btree(b) = &p.am;
+                b
+            }),
             frame: crate::fcframe::OrderProcFrame::new(),
         }
     }};
@@ -195,7 +202,7 @@ pub fn btgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRes
         if res {
             return Ok(true);
         }
-        if ctx.so.numArrayKeys == 0 || !utils::bt_start_prim_scan(ctx.so) {
+        if ctx.so.numArrayKeys == 0 || !utils::bt_start_prim_scan(ctx.so, ctx.parallel) {
             return Ok(false);
         }
     }
@@ -229,7 +236,7 @@ pub fn btgetbitmap(
                 ntids += 1;
             }
         }
-        if ctx.so.numArrayKeys == 0 || !utils::bt_start_prim_scan(ctx.so) {
+        if ctx.so.numArrayKeys == 0 || !utils::bt_start_prim_scan(ctx.so, ctx.parallel) {
             break;
         }
     }

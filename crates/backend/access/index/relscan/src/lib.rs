@@ -3,6 +3,13 @@
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
+use std::sync::Arc;
+
+pub mod parallel;
+pub use parallel::{
+    BTParallelScanShared, BtParallelArrayElem, BtParallelScanState, BtParallelSkipArg, BtPsState,
+    ParallelIndexAmShared, ParallelIndexScanDescShared,
+};
 
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::gin_vocab::GinScanOpaqueData;
@@ -358,12 +365,16 @@ pub struct IndexScanDescData<'mcx> {
     pub keyData: PgVec<'mcx, ScanKeyData>,
     pub orderByData: PgVec<'mcx, ScanKeyData>,
 
+    pub parallel_scan: Option<Arc<ParallelIndexScanDescShared>>,
+
     pub xs_want_itup: bool,
     // Points into the AM's page-copy buffer (nbtree currTuples); valid until
     // the next amgettuple/amrescan/amendscan on this descriptor.
     pub xs_itup: Option<core::ptr::NonNull<u8>>,
     pub xs_itupdesc: Option<Rc<TupleDescData<'mcx>>>,
     pub xs_temp_snap: bool,
+    // 'mcx-erased xs_snapshot copy: the 'static Rc UnregisterSnapshot needs.
+    pub xs_temp_snapshot: Option<Rc<SnapshotData<'static>>>,
     pub kill_prior_tuple: bool,
     pub ignore_killed_tuples: bool,
     pub xactStartedInRecovery: bool,
@@ -409,10 +420,12 @@ pub fn relation_get_index_scan<'mcx>(
         numberOfOrderBys: norderbys,
         keyData: skey_vec(mcx, nkeys.max(0) as usize)?,
         orderByData: skey_vec(mcx, norderbys.max(0) as usize)?,
+        parallel_scan: None,
         xs_want_itup: false,
         xs_itup: None,
         xs_itupdesc: None,
         xs_temp_snap: false,
+        xs_temp_snapshot: None,
         kill_prior_tuple: false,
         // In recovery killed-tuple hints are ignored (standby xmin skew).
         ignore_killed_tuples: !xactStartedInRecovery,

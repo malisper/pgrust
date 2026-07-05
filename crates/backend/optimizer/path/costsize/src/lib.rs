@@ -959,11 +959,12 @@ pub fn expression_returns_set_rows(clause: Node<'_>) -> PgResult<f64> {
     Ok(1.0)
 }
 
-// cost_index (costsize.c); partial paths are loud.
+// cost_index (costsize.c).
 pub fn cost_index(
     run: &mut PlannerRun<'_>,
     path_id: types_pathnodes::PathId,
     loop_count: f64,
+    partial_path: bool,
 ) -> PgResult<()> {
     let (baserel_id, indexonly, index_total_pages, mut cond_sources) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else {
@@ -1046,7 +1047,7 @@ pub fn cost_index(
     let tuples_fetched = clamp_row_est(am.index_selectivity * baserel_tuples);
     let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
 
-    let (max_io_cost, min_io_cost) = if loop_count > 1.0 {
+    let (max_io_cost, min_io_cost, rand_heap_pages) = if loop_count > 1.0 {
         // Repeated scans: scale tuples by the scan count in the Mackert and
         // Lohman formula, then pro-rate per scan; all fetches random.
         let mut pages_fetched = index_pages_fetched(
@@ -1058,6 +1059,7 @@ pub fn cost_index(
         if indexonly {
             pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
         }
+        let rand_heap_pages = pages_fetched;
         let max_io_cost = (pages_fetched * spc_random_page_cost) / loop_count;
 
         let mut pages_fetched = (am.index_selectivity * baserel_pages as f64).ceil();
@@ -1071,13 +1073,14 @@ pub fn cost_index(
             pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
         }
         let min_io_cost = (pages_fetched * spc_random_page_cost) / loop_count;
-        (max_io_cost, min_io_cost)
+        (max_io_cost, min_io_cost, rand_heap_pages)
     } else {
         let mut pages_fetched =
             index_pages_fetched(run, tuples_fetched, baserel_pages, index_total_pages as f64);
         if indexonly {
             pages_fetched = (pages_fetched * (1.0 - baserel_allvisfrac)).ceil();
         }
+        let rand_heap_pages = pages_fetched;
         let max_io_cost = pages_fetched * spc_random_page_cost;
 
         pages_fetched = (am.index_selectivity * baserel_pages as f64).ceil();
@@ -1093,8 +1096,28 @@ pub fn cost_index(
         } else {
             0.0
         };
-        (max_io_cost, min_io_cost)
+        (max_io_cost, min_io_cost, rand_heap_pages)
     };
+
+    if partial_path {
+        // Index-only scans size workers by index pages: heap fetches can be
+        // few enough to spuriously rule out parallelism.
+        let rand_heap_pages = if indexonly { -1.0 } else { rand_heap_pages };
+        let parallel_workers = ::allpaths::compute_parallel_worker(
+            run.root.rel(baserel_id),
+            rand_heap_pages,
+            am.index_pages,
+            guc_tables::vars::max_parallel_workers_per_gather.read(),
+        );
+        // Workers unassignable: the caller rejects the path; skip the rest.
+        if parallel_workers <= 0 {
+            run.root.path_mut(path_id).base_mut().parallel_workers = parallel_workers;
+            return Ok(());
+        }
+        let p = run.root.path_mut(path_id).base_mut();
+        p.parallel_workers = parallel_workers;
+        p.parallel_aware = true;
+    }
 
     let csquared = am.index_correlation * am.index_correlation;
     run_cost += max_io_cost + csquared * (min_io_cost - max_io_cost);
@@ -1109,7 +1132,14 @@ pub fn cost_index(
     startup_cost += target.cost.startup;
     cpu_run_cost += target.cost.per_tuple * path_rows;
 
-    debug_assert!(run.root.path(path_id).base().parallel_workers == 0);
+    let parallel_workers = run.root.path(path_id).base().parallel_workers;
+    if parallel_workers > 0 {
+        let parallel_divisor = get_parallel_divisor(parallel_workers);
+        let p = run.root.path_mut(path_id).base_mut();
+        p.rows = clamp_row_est(p.rows / parallel_divisor);
+        cpu_run_cost /= parallel_divisor;
+    }
+
     run_cost += cpu_run_cost;
 
     let p = run.root.path_mut(path_id).base_mut();

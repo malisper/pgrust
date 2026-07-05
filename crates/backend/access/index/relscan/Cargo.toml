@@ -9,6 +9,9 @@ mock = []
 
 [dependencies]
 mcx = { path = "../../../../_support/mcx" }
+datum = { path = "../../../../_support/types/datum" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_brin = { path = "../../../../_support/types/types_brin" }

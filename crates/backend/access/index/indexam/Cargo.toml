@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
