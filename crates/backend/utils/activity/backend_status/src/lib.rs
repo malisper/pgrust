@@ -127,6 +127,10 @@ fn track_activities() -> bool {
     guc_tables::vars::pgstat_track_activities.read()
 }
 
+pub fn pgstat_track_activities() -> bool {
+    track_activities()
+}
+
 fn query_size() -> usize {
     guc_tables::vars::pgstat_track_activity_query_size.read() as usize
 }
@@ -149,13 +153,14 @@ fn write_barrier() {
 }
 
 // PGSTAT_BEGIN/END_WRITE_ACTIVITY: odd changecount = write in progress.
-fn begin_write_activity(e: &PgBackendStatus) {
+// Pub for backend_progress (backend_progress.c writes under the same bracket).
+pub fn begin_write_activity(e: &PgBackendStatus) {
     g::StartCriticalSection();
     e.st_changecount.store(e.st_changecount.load(Relaxed).wrapping_add(1), Relaxed);
     write_barrier();
 }
 
-fn end_write_activity(e: &PgBackendStatus) {
+pub fn end_write_activity(e: &PgBackendStatus) {
     write_barrier();
     let c = e.st_changecount.load(Relaxed).wrapping_add(1);
     e.st_changecount.store(c, Relaxed);

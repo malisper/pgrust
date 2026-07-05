@@ -446,10 +446,7 @@ fn clip_slot_name(s: &str) -> &str {
 pub(crate) fn pgstat_fetch_replslot(
     name: &str,
 ) -> PgResult<Option<pgstat::replslot::PgStat_StatReplSlotEntry>> {
-    let Some(slot) = slot::SearchNamedReplicationSlot(name, true)? else {
-        return Ok(None);
-    };
-    Ok(pgstat::replslot::pgstat_fetch_replslot_by_index(slot::ReplicationSlotIndex(slot)))
+    pgstat::pgstat_fetch_replslot(name)
 }
 
 pub fn fc_pg_stat_get_replication_slot(

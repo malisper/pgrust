@@ -855,7 +855,18 @@ pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) {
     if rb.spillBytes <= 0 && rb.streamBytes <= 0 && rb.totalBytes <= 0 {
         return;
     }
-    // pgstat_report_replslot is unported; decoding counters are dropped.
+    let rep = pgstat::replslot::PgStat_StatReplSlotEntry {
+        spill_txns: rb.spillTxns,
+        spill_count: rb.spillCount,
+        spill_bytes: rb.spillBytes,
+        stream_txns: rb.streamTxns,
+        stream_count: rb.streamCount,
+        stream_bytes: rb.streamBytes,
+        total_txns: rb.totalTxns,
+        total_bytes: rb.totalBytes,
+        stat_reset_timestamp: 0,
+    };
+    pgstat::replslot::pgstat_report_replslot(slot::ReplicationSlotIndex(ctx.slot), &rep);
     rb.spillTxns = 0;
     rb.spillCount = 0;
     rb.spillBytes = 0;

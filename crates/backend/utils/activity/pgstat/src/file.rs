@@ -13,7 +13,7 @@ use types_error::{PgResult, LOG};
 
 use crate::pending::{
     PgStat_HashKey, PgStat_Kind, PGSTAT_KIND_DATABASE, PGSTAT_KIND_FUNCTION, PGSTAT_KIND_RELATION,
-    PGSTAT_KIND_SUBSCRIPTION,
+    PGSTAT_KIND_REPLSLOT, PGSTAT_KIND_SUBSCRIPTION,
 };
 use crate::shmem::SharedEntry;
 
@@ -25,6 +25,9 @@ pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x51A5BCB8;
 const PGSTAT_FILE_ENTRY_END: u8 = b'E';
 const PGSTAT_FILE_ENTRY_HASH: u8 = b'S';
 const PGSTAT_FILE_ENTRY_FIXED: u8 = b'F';
+const PGSTAT_FILE_ENTRY_NAME: u8 = b'N';
+
+const NAMEDATALEN: usize = 64;
 
 const PGSTAT_STAT_PERMANENT_FILENAME: &str = "pg_stat/pgstat.stat";
 const PGSTAT_STAT_PERMANENT_TMPFILE: &str = "pg_stat/pgstat.tmp";
@@ -58,9 +61,10 @@ fn entry_payload(entry: &SharedEntry) -> Option<&[u8]> {
         SharedEntry::Database(d) => Some(as_bytes(d)),
         SharedEntry::Function(f) => Some(as_bytes(f)),
         SharedEntry::Subscription(s) => Some(as_bytes(s)),
-        // BACKEND is write_to_file = false in C's kind table. C serializes
-        // REPLSLOT by slot name; no writer exists yet, so no entry can either.
-        SharedEntry::Backend(_) | SharedEntry::ReplSlot(_) => None,
+        // BACKEND is write_to_file = false in C's kind table.
+        SharedEntry::Backend(_) => None,
+        // REPLSLOT serializes by name ('N' records); see pgstat_write_statsfile.
+        SharedEntry::ReplSlot(_) => None,
     }
 }
 
@@ -95,6 +99,26 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
     push_fixed(&mut out, PGSTAT_KIND_SLRU, &crate::slru::export_slru_stats());
     push_fixed(&mut out, PGSTAT_KIND_WAL, &crate::wal::export_wal_stats());
     crate::shmem::export_entries(|key, entry| {
+        if let SharedEntry::ReplSlot(slot_entry) = &entry {
+            // to_serialized_name: late shutdown, the slot set can't change; a
+            // missing name is C's elog(ERROR) here.
+            let namebuf = slot_seams::replication_slot_name::call(key.objid as i32)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "could not find name for replication slot index {}",
+                        key.objid
+                    )
+                });
+            let payload = as_bytes(slot_entry);
+            out.push(PGSTAT_FILE_ENTRY_NAME);
+            out.extend_from_slice(&key.kind.0.to_ne_bytes());
+            out.extend_from_slice(&namebuf);
+            out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+            out.extend_from_slice(payload);
+            return;
+        }
         let Some(payload) = entry_payload(&entry) else {
             return;
         };
@@ -171,6 +195,36 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
                     _ => return None,
                 };
                 crate::shmem::import_entry(PgStat_HashKey { kind, dboid, objid }, entry);
+            }
+            PGSTAT_FILE_ENTRY_NAME => {
+                let kind = PgStat_Kind(c.take_u32()?);
+                let namebuf = c.take(NAMEDATALEN)?;
+                let len = c.take_u32()? as usize;
+                let payload = c.take(len)?;
+                if kind != PGSTAT_KIND_REPLSLOT {
+                    return None;
+                }
+                let entry = SharedEntry::ReplSlot(from_bytes(payload)?);
+                let nul = namebuf.iter().position(|&b| b == 0).unwrap_or(NAMEDATALEN);
+                let Ok(name) = core::str::from_utf8(&namebuf[..nul]) else {
+                    return None;
+                };
+                // from_serialized_name: drop stats for slots removed while
+                // shut down (StartupReplicationSlots runs before restore).
+                let Ok((index, _)) = slot_seams::named_replication_slot_info::call(name, true)
+                else {
+                    return None;
+                };
+                if index >= 0 {
+                    crate::shmem::import_entry(
+                        PgStat_HashKey {
+                            kind,
+                            dboid: types_core::InvalidOid,
+                            objid: index as u64,
+                        },
+                        entry,
+                    );
+                }
             }
             PGSTAT_FILE_ENTRY_FIXED => {
                 use crate::pending::{

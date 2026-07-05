@@ -385,7 +385,10 @@ pub fn ReplicationSlotCreate(
     SetMyReplicationSlot(Some(slot));
     LWLockRelease(control_lock())?;
 
-    // pgstat_create_replslot: pgstat_replslot.c unported (stats-only surface).
+    // Stats are only collected for logical slots.
+    if SlotIsLogical(slot) {
+        pgstat::replslot::pgstat_create_replslot(ReplicationSlotIndex(slot));
+    }
 
     LWLockRelease(allocation_lock())?;
     ConditionVariableBroadcast(&slot.active_cv);
@@ -501,8 +504,13 @@ pub fn ReplicationSlotAcquire(name: &str, nowait: bool, error_if_invalid: bool) 
 
         ConditionVariableBroadcast(&s.active_cv);
 
-        // pgstat_acquire_replslot (pgstat_replslot.c) and the am_walsender
-        // "acquired ... slot" log line: both units unported.
+        // Protects against stats from before a restart, for a different slot,
+        // being present during pgstat_report_replslot.
+        if SlotIsLogical(s) {
+            pgstat::replslot::pgstat_acquire_replslot(ReplicationSlotIndex(s));
+        }
+
+        // am_walsender "acquired ... slot" log line: unit unported.
         return Ok(());
     }
 }
@@ -705,7 +713,11 @@ fn ReplicationSlotDropPtr(slot: &'static ReplicationSlot) -> PgResult<()> {
             .finish(loc("ReplicationSlotDropPtr"))?;
     }
 
-    // pgstat_drop_replslot: pgstat_replslot.c unported (stats-only surface).
+    // Under ReplicationSlotAllocationLock so a same-named slot created in
+    // another session can't lose its just-created stats entry.
+    if SlotIsLogical(slot) {
+        pgstat::replslot::pgstat_drop_replslot(ReplicationSlotIndex(slot));
+    }
 
     LWLockRelease(allocation_lock())?;
     Ok(())
@@ -1723,6 +1735,20 @@ pub fn init_seams() {
     slot_seams::replication_slot_initialize::set(ReplicationSlotInitialize);
     slot_seams::startup_replication_slots::set(StartupReplicationSlots);
     slot_seams::check_point_replication_slots::set(CheckPointReplicationSlots);
+    slot_seams::named_replication_slot_info::set(|name, need_lock| {
+        Ok(match SearchNamedReplicationSlot(name, need_lock)? {
+            Some(s) => (ReplicationSlotIndex(s), SlotIsLogical(s)),
+            None => (-1, false),
+        })
+    });
+    slot_seams::replication_slot_name::set(|index| {
+        Ok(ReplicationSlotName(index)?.map(|n| {
+            let mut buf = [0u8; 64];
+            let s = n.name_str();
+            buf[..s.len().min(63)].copy_from_slice(&s[..s.len().min(63)]);
+            buf
+        }))
+    });
 
     guc_tables::vars::idle_replication_slot_timeout_secs.install(guc_tables::GucVarAccessors {
         get: idle_timeout_get,

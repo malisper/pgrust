@@ -31,3 +31,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn process_parallel_messages() -> PgResult<()>
 );
+
+seam_core::seam!(
+    // pgstat_progress_parallel_incr_param's worker leg: send a PqMsg_Progress
+    // equivalent (WorkerMessage::Progress) to the leader.
+    pub fn parallel_worker_report_progress(index: i32, incr: i64)
+);

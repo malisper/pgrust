@@ -171,6 +171,24 @@ pub(crate) fn flush_function(key: PgStat_HashKey, pending: &crate::function::PgS
     shared.self_time += pending.self_time / 1000;
 }
 
+pub(crate) fn flush_subscription(
+    key: PgStat_HashKey,
+    pending: &crate::subscription::PgStat_BackendSubEntry,
+) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Subscription(shared) = store
+        .entry(key)
+        .or_insert(SharedEntry::Subscription(Default::default()))
+    else {
+        unreachable!("subscription key holds non-subscription shared entry")
+    };
+    shared.apply_error_count += pending.apply_error_count;
+    shared.sync_error_count += pending.sync_error_count;
+    for i in 0..crate::subscription::CONFLICT_NUM_TYPES {
+        shared.conflict_count[i] += pending.conflict_count[i];
+    }
+}
+
 pub(crate) fn drop_entry(key: PgStat_HashKey) {
     SHARED_STATS.lock().unwrap().remove(&key);
 }
@@ -204,6 +222,34 @@ pub(crate) fn update_backend_entry(
         .or_insert(SharedEntry::Backend(Default::default()))
     else {
         unreachable!("backend key holds non-backend shared entry")
+    };
+    f(entry);
+}
+
+pub(crate) fn update_replslot_entry(
+    key: PgStat_HashKey,
+    f: impl FnOnce(&mut crate::replslot::PgStat_StatReplSlotEntry),
+) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::ReplSlot(entry) = store
+        .entry(key)
+        .or_insert(SharedEntry::ReplSlot(Default::default()))
+    else {
+        unreachable!("replslot key holds non-replslot shared entry")
+    };
+    f(entry);
+}
+
+pub(crate) fn update_subscription_entry(
+    key: PgStat_HashKey,
+    f: impl FnOnce(&mut crate::subscription::PgStat_StatSubEntry),
+) {
+    let mut store = SHARED_STATS.lock().unwrap();
+    let SharedEntry::Subscription(entry) = store
+        .entry(key)
+        .or_insert(SharedEntry::Subscription(Default::default()))
+    else {
+        unreachable!("subscription key holds non-subscription shared entry")
     };
     f(entry);
 }
@@ -398,8 +444,7 @@ pub fn pgstat_reset(kind: PgStat_Kind, dboid: types_core::Oid, objid: u64) {
     if let Some(entry) = store.get_mut(&PgStat_HashKey { kind, dboid, objid }) {
         reset_entry_contents(entry, ts);
     }
-    // accessed_across_databases kinds (pgstat.c kind infos): DATABASE,
-    // REPLSLOT, SUBSCRIPTION, BACKEND.
+    // accessed_across_databases kinds (C's kind table) skip the db timestamp.
     if kind != PGSTAT_KIND_DATABASE
         && kind != PGSTAT_KIND_BACKEND
         && kind != PGSTAT_KIND_REPLSLOT
@@ -413,8 +458,7 @@ pub fn pgstat_reset_of_kind(kind: PgStat_Kind) {
     let ts = timestamp_seams::get_current_timestamp::call();
     match kind {
         PGSTAT_KIND_DATABASE | PGSTAT_KIND_RELATION | PGSTAT_KIND_FUNCTION
-        | PGSTAT_KIND_BACKEND | PGSTAT_KIND_REPLSLOT
-        | PGSTAT_KIND_SUBSCRIPTION => {
+        | PGSTAT_KIND_BACKEND | PGSTAT_KIND_REPLSLOT | PGSTAT_KIND_SUBSCRIPTION => {
             let mut store = SHARED_STATS.lock().unwrap();
             for (key, entry) in store.iter_mut() {
                 if key.kind == kind {

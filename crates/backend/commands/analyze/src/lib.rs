@@ -5,6 +5,11 @@ mod range_typanalyze;
 mod ts_typanalyze;
 pub mod sampling;
 
+use backend_progress::progress::*;
+use backend_progress::{
+    pgstat_progress_end_command, pgstat_progress_start_command,
+    pgstat_progress_update_multi_param, pgstat_progress_update_param, PROGRESS_COMMAND_ANALYZE,
+};
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::{AttrNumber, BlockNumber, ForkNumber, InvalidOid, InvalidTransactionId, Oid};
@@ -261,6 +266,8 @@ pub fn analyze_rel(
         }
     };
 
+    pgstat_progress_start_command(PROGRESS_COMMAND_ANALYZE, onerel.rd_id);
+
     if relkind != RELKIND_PARTITIONED_TABLE {
         do_analyze_rel(mcx, &onerel, va_cols, params, relpages, false, in_outer_xact)?;
     }
@@ -269,6 +276,8 @@ pub fn analyze_rel(
     }
 
     onerel.close(NO_LOCK)?;
+
+    pgstat_progress_end_command();
     Ok(())
 }
 
@@ -390,6 +399,14 @@ fn do_analyze_rel<'mcx>(
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
     let mut rows: PgVec<'_, HeapTupleData<'_>> = PgVec::new_in(anl_mcx);
+    pgstat_progress_update_param(
+        PROGRESS_ANALYZE_PHASE,
+        if inh {
+            PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS_INH
+        } else {
+            PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS
+        },
+    );
     let numrows = if inh {
         acquire_inherited_sample_rows(
             anl_mcx,
@@ -411,6 +428,8 @@ fn do_analyze_rel<'mcx>(
     };
 
     if numrows > 0 {
+        pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_COMPUTE_STATS);
+
         // Bump: armed cmp frames detoast packed by-ref args here per comparison,
         // freed wholesale at the per-column reset (C pfrees per call).
         let mut col_cx = anl.new_child_bump("Analyze Column");
@@ -469,6 +488,8 @@ fn do_analyze_rel<'mcx>(
             &mut ExtStatsExprCompute,
         )?;
     }
+
+    pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_FINALIZE_ANALYZE);
 
     if !inh {
         let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;
@@ -1106,7 +1127,10 @@ fn acquire_sample_rows<'mcx>(
     let oldest_xmin = procarray::GetOldestNonRemovableTransactionId(onerel)?;
 
     let randseed = pg_prng::global_prng(|p| p.next_u32());
-    let (mut bs, _nblocks) = sampling::block_sampler_init(totalblocks, targrows as u32, randseed);
+    let (mut bs, nblocks) = sampling::block_sampler_init(totalblocks, targrows as u32, randseed);
+
+    pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL, nblocks as i64);
+
     let mut rstate =
         sampling::reservoir_init_selection_state(pg_prng::global_prng(|p| p.next_u64()), targrows as u32);
 
@@ -1120,6 +1144,7 @@ fn acquire_sample_rows<'mcx>(
         bufmgr_seams::read_buffer::call(onerel, bs.next())
     };
 
+    let mut blksdone: i64 = 0;
     loop {
         let buf = next_buffer(&mut bs)?;
         if !tableam::table_scan_analyze_next_block(mcx, &mut scan, &mut || Ok(buf))? {
@@ -1152,6 +1177,9 @@ fn acquire_sample_rows<'mcx>(
             }
             samplerows += 1.0;
         }
+
+        blksdone += 1;
+        pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE, blksdone);
     }
     drop(slot);
     tableam::table_endscan(scan)?;
@@ -1229,8 +1257,19 @@ fn acquire_inherited_sample_rows<'mcx>(
         return Ok(0);
     }
 
+    pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_TOTAL, children.len() as i64);
+
     let mut numrows: i32 = 0;
-    for (childrel, childblocks) in children {
+    for (i, (childrel, childblocks)) in children.into_iter().enumerate() {
+        pgstat_progress_update_multi_param(
+            &[
+                PROGRESS_ANALYZE_CURRENT_CHILD_TABLE_RELID,
+                PROGRESS_ANALYZE_BLOCKS_DONE,
+                PROGRESS_ANALYZE_BLOCKS_TOTAL,
+            ],
+            &[childrel.rd_id as i64, 0, 0],
+        );
+
         if childblocks > 0.0 {
             let mut childtargrows =
                 (targrows as f64 * childblocks / totalblocks).round() as i32;
@@ -1281,6 +1320,7 @@ fn acquire_inherited_sample_rows<'mcx>(
             }
         }
         table::table_close(childrel, NO_LOCK)?;
+        pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_DONE, (i + 1) as i64);
     }
     Ok(numrows)
 }

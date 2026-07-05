@@ -170,6 +170,7 @@ pub fn init_all() {
     commands_async::init_seams();
     utility::init_seams();
     backend_status::init_seams();
+    backend_progress::init_seams();
     waitevent::init_seams();
     mcxt_stats::init_seams();
     pgstat::init_seams();

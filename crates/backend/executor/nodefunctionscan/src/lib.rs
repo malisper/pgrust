@@ -475,9 +475,24 @@ fn run_value_per_call<'mcx, const N: usize>(
     let mut first_time = true;
     loop {
         estate.ecxt_mut(ecxt).reset();
+        // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
+        // early-out, hoisted to the caller as the crate's API requires.
+        let fcu = if setexpr.flinfo.fn_stats < ::types_fmgr::TRACK_FUNC_ALL
+            && ::pgstat::function::pgstat_track_functions() > setexpr.flinfo.fn_stats as i32
+        {
+            Some(::pgstat::function::pgstat_init_function_usage(setexpr.flinfo.fn_oid)?)
+        } else {
+            None
+        };
         fcinfo.isnull = false;
         rsinfo.isDone = ExprDoneCond::ExprSingleResult;
         let result = setexpr.flinfo.invoke(&mut fcinfo)?;
+        if let Some(fcu) = &fcu {
+            ::pgstat::function::pgstat_end_function_usage(
+                fcu,
+                rsinfo.isDone != ExprDoneCond::ExprMultipleResult,
+            );
+        }
 
         match rsinfo.returnMode {
             SetFunctionReturnMode::ValuePerCall => {

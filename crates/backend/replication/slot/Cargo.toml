@@ -18,6 +18,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 mcx = { path = "../../../_support/mcx" }
 crc32c = { path = "../../../port/crc32c" }
 slot_seams = { path = "../slot_seams" }
+pgstat = { path = "../../utils/activity/pgstat" }
 walsender_config = { path = "../walsender_config" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 procarray = { path = "../../storage/ipc/procarray" }

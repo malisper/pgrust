@@ -38,3 +38,4 @@ exectuples = { path = "../../executor/exectuples" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 varlena = { path = "../../utils/adt/varlena" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+backend_progress = { path = "../../utils/activity/backend_progress" }

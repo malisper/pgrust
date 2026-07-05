@@ -44,6 +44,7 @@ lmgr = { path = "../../../storage/lmgr/lmgr" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+backend_progress = { path = "../../../utils/activity/backend_progress" }
 
 [dev-dependencies]
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }

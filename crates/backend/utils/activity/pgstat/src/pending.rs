@@ -43,6 +43,7 @@ pub enum PendingData {
     Relation(PgStat_TableStatus),
     Database(database::PgStat_StatDBEntry),
     Function(crate::function::PgStat_FunctionCounts),
+    Subscription(crate::subscription::PgStat_BackendSubEntry),
 }
 
 pub const PGSTAT_ENTRY_REF_HASH_SIZE: usize = 128;
@@ -86,6 +87,8 @@ fn new_pending_data(key: PgStat_HashKey, mcx: Mcx<'static>) -> PendingData {
         PendingData::Database(database::PgStat_StatDBEntry::default())
     } else if key.kind == PGSTAT_KIND_FUNCTION {
         PendingData::Function(crate::function::PgStat_FunctionCounts::default())
+    } else if key.kind == PGSTAT_KIND_SUBSCRIPTION {
+        PendingData::Subscription(crate::subscription::PgStat_BackendSubEntry::default())
     } else {
         panic!("pending entry for unported stats kind {:?}", key.kind)
     }
@@ -256,6 +259,11 @@ pub(crate) fn pgstat_flush_pending_entries(_nowait: bool) -> bool {
                     continue;
                 };
                 crate::shmem::flush_function(key, &f);
+            } else if key.kind == PGSTAT_KIND_SUBSCRIPTION {
+                let Some(PendingData::Subscription(s)) = st.pending.remove(&key) else {
+                    continue;
+                };
+                crate::shmem::flush_subscription(key, &s);
             } else {
                 debug_assert_eq!(key.kind, PGSTAT_KIND_DATABASE);
                 let Some(PendingData::Database(db)) = st.pending.remove(&key) else {

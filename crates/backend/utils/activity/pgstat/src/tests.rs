@@ -24,6 +24,7 @@ fn setup() {
         xact_seams::get_current_transaction_stop_timestamp::set(|| NOW.with(|c| c.get()));
         xact_seams::is_transaction_or_transaction_block::set(|| false);
         backend_status_seams::pgstat_clear_backend_status_snapshot::set(|| {});
+        install_replslot_seams();
         crate::init_seams();
     });
     SetMyDatabaseId(5);
@@ -790,4 +791,113 @@ fn checkpointer_and_bgwriter_report_apply_pending() {
 fn wal_flush_without_installed_usage_seam_is_noop() {
     setup();
     assert!(!crate::wal::pgstat_wal_flush_cb(false));
+}
+
+fn install_replslot_seams() {
+    slot_seams::named_replication_slot_info::set(|name, _need_lock| {
+        Ok(match name {
+            "logslot" => (3, true),
+            "physlot" => (4, false),
+            _ => (-1, false),
+        })
+    });
+    slot_seams::replication_slot_name::set(|index| {
+        Ok((index == 3).then(|| {
+            let mut b = [0u8; 64];
+            b[..7].copy_from_slice(b"logslot");
+            b
+        }))
+    });
+}
+
+#[test]
+fn replslot_report_accumulates_and_resets() {
+    setup();
+    crate::replslot::pgstat_create_replslot(3);
+    let rep = crate::replslot::PgStat_StatReplSlotEntry {
+        spill_txns: 2,
+        total_bytes: 100,
+        ..Default::default()
+    };
+    crate::replslot::pgstat_report_replslot(3, &rep);
+    crate::replslot::pgstat_report_replslot(3, &rep);
+    crate::pgstat_clear_snapshot();
+    let e = crate::pgstat_fetch_replslot("logslot").unwrap().unwrap();
+    assert_eq!(e.spill_txns, 4);
+    assert_eq!(e.total_bytes, 200);
+    assert_eq!(e.stat_reset_timestamp, 0);
+
+    crate::replslot::pgstat_reset_replslot("logslot").unwrap();
+    crate::pgstat_clear_snapshot();
+    let e = crate::pgstat_fetch_replslot("logslot").unwrap().unwrap();
+    assert_eq!(e.spill_txns, 0);
+    assert!(e.stat_reset_timestamp > 0);
+
+    // physical slots collect no stats; reset is a no-op, not an error
+    crate::replslot::pgstat_reset_replslot("physlot").unwrap();
+    let err = crate::replslot::pgstat_reset_replslot("gone").unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
+
+    crate::replslot::pgstat_drop_replslot(3);
+    crate::pgstat_clear_snapshot();
+    assert!(crate::pgstat_fetch_replslot("logslot").unwrap().is_none());
+}
+
+#[test]
+fn subscription_counts_flush_and_reset() {
+    setup();
+    crate::subscription::pgstat_report_subscription_error(9001, true);
+    crate::subscription::pgstat_report_subscription_error(9001, true);
+    crate::subscription::pgstat_report_subscription_error(9001, false);
+    crate::subscription::pgstat_report_subscription_conflict(9001, 2);
+    pending::pgstat_flush_pending_entries(false);
+    crate::pgstat_clear_snapshot();
+    let e = crate::pgstat_fetch_stat_subscription(9001).unwrap();
+    assert_eq!(e.apply_error_count, 2);
+    assert_eq!(e.sync_error_count, 1);
+    assert_eq!(e.conflict_count[2], 1);
+    assert_eq!(e.conflict_count[0], 0);
+
+    crate::pgstat_reset(pending::PGSTAT_KIND_SUBSCRIPTION, 0, 9001);
+    crate::pgstat_clear_snapshot();
+    let e = crate::pgstat_fetch_stat_subscription(9001).unwrap();
+    assert_eq!(e.apply_error_count, 0);
+    assert!(e.stat_reset_timestamp > 0);
+}
+
+#[test]
+fn subscription_create_rollback_drops_entry() {
+    setup();
+    crate::subscription::pgstat_create_subscription(9002);
+    crate::pgstat_clear_snapshot();
+    assert!(crate::pgstat_fetch_stat_subscription(9002).is_some());
+    xact::AtEOXact_PgStat(false, false);
+    crate::pgstat_clear_snapshot();
+    assert!(crate::pgstat_fetch_stat_subscription(9002).is_none());
+}
+
+#[test]
+fn statsfile_replslot_roundtrips_by_name() {
+    setup();
+    let dir = std::env::temp_dir().join(format!("pgstat-replslot-test-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("pg_stat")).unwrap();
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+
+    crate::replslot::pgstat_create_replslot(3);
+    let rep = crate::replslot::PgStat_StatReplSlotEntry {
+        stream_count: 7,
+        ..Default::default()
+    };
+    crate::replslot::pgstat_report_replslot(3, &rep);
+    crate::file::pgstat_write_statsfile().unwrap();
+
+    crate::replslot::pgstat_drop_replslot(3);
+    crate::pgstat_clear_snapshot();
+    assert!(crate::pgstat_fetch_replslot("logslot").unwrap().is_none());
+
+    crate::file::pgstat_read_statsfile();
+    crate::pgstat_clear_snapshot();
+    let e = crate::pgstat_fetch_replslot("logslot").unwrap().unwrap();
+    assert_eq!(e.stream_count, 7);
+    crate::replslot::pgstat_drop_replslot(3);
 }

@@ -100,4 +100,5 @@ origin_seams = { path = "../../../replication/origin_seams" }
 commit_ts_seams = { path = "../commit_ts_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
+backend_progress = { path = "../../../utils/activity/backend_progress" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }

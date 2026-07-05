@@ -40,6 +40,11 @@ use ::types_tuple::{
     FirstOffsetNumber, HeapTupleData, InvalidOffsetNumber, ItemPointerData, MaxOffsetNumber,
 };
 
+use ::backend_progress::progress::*;
+use ::backend_progress::{
+    pgstat_progress_end_command, pgstat_progress_start_command,
+    pgstat_progress_update_multi_param, pgstat_progress_update_param, PROGRESS_COMMAND_VACUUM,
+};
 use ::bufmgr_seams::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use ::pruneheap::{
     heap_page_prune_and_freeze, log_heap_prune_and_freeze, PruneFreezeResult, PruneReason,
@@ -129,6 +134,8 @@ pub fn heap_vacuum_rel<'mcx>(
     debug_assert!(!matches!(params.truncate, VacOptValue::Unspecified | VacOptValue::Auto));
 
     let starttime = timestamp_seams::get_current_timestamp::call();
+
+    pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM, rel.rd_id);
 
     let indrels = vac_open_indexes(mcx, rel, RowExclusiveLock)?;
     let nindexes = indrels.len();
@@ -238,6 +245,8 @@ pub fn heap_vacuum_rel<'mcx>(
         lazy_truncate_heap(&mut vacrel)?;
     }
 
+    pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_FINAL_CLEANUP);
+
     // Aggressive VACUUMs must reach FreezeLimit/MultiXactCutoff.
     debug_assert!(
         vacrel.NewRelfrozenXid == vacrel.cutoffs.OldestXmin
@@ -288,6 +297,7 @@ pub fn heap_vacuum_rel<'mcx>(
         vacrel.recently_dead_tuples + vacrel.missed_dead_tuples,
         starttime,
     );
+    pgstat_progress_end_command();
     Ok(())
 }
 
@@ -351,6 +361,14 @@ fn dead_items_add(
 ) -> PgResult<()> {
     vacrel.dead_items.as_mut().unwrap().set_block_offsets(blkno, offsets)?;
     vacrel.dead_items_info.num_items += offsets.len() as i64;
+
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS, PROGRESS_VACUUM_DEAD_TUPLE_BYTES],
+        &[
+            vacrel.dead_items_info.num_items,
+            vacrel.dead_items.as_ref().unwrap().memory_usage() as i64,
+        ],
+    );
     Ok(())
 }
 
@@ -390,6 +408,19 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
     let mut next_fsm_block_to_vacuum: BlockNumber = 0;
     let mut vmbuffer = VmBuffer::new();
 
+    pgstat_progress_update_multi_param(
+        &[
+            PROGRESS_VACUUM_PHASE,
+            PROGRESS_VACUUM_TOTAL_HEAP_BLKS,
+            PROGRESS_VACUUM_MAX_DEAD_TUPLE_BYTES,
+        ],
+        &[
+            PROGRESS_VACUUM_PHASE_SCAN_HEAP,
+            rel_pages as i64,
+            vacrel.dead_items_info.max_bytes as i64,
+        ],
+    );
+
     vacrel.current_block = InvalidBlockNumber;
     vacrel.next_unskippable_block = InvalidBlockNumber;
     vacrel.next_unskippable_allvis = false;
@@ -410,6 +441,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
             lazy_vacuum(vacrel)?;
             freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, blkno + 1)?;
             next_fsm_block_to_vacuum = blkno;
+
+            pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_SCAN_HEAP);
         }
 
         let Some((next_blkno, all_visible_according_to_vm)) = heap_vac_scan_next_block(vacrel)?
@@ -426,6 +459,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
             vacrel.bstrategy.clone(),
         )?;
         vacrel.scanned_pages += 1;
+
+        pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno as i64);
 
         visibilitymap_pin(vacrel.rel, blkno, &mut vmbuffer)?;
 
@@ -489,6 +524,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
     vmbuffer.release();
     vacrel.next_unskippable_vmbuffer.release();
 
+    pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, rel_pages as i64);
+
     vacrel.new_live_tuples = vac_estimate_reltuples(
         vacrel.rel,
         rel_pages,
@@ -506,6 +543,8 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
     if rel_pages > next_fsm_block_to_vacuum {
         freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, rel_pages)?;
     }
+
+    pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, rel_pages as i64);
 
     if vacrel.nindexes > 0 && vacrel.do_index_cleanup {
         lazy_cleanup_all_indexes(vacrel)?;
@@ -974,6 +1013,11 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
         return Ok(false);
     }
 
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_INDEXES_TOTAL],
+        &[PROGRESS_VACUUM_PHASE_VACUUM_INDEX, vacrel.nindexes as i64],
+    );
+
     let dead_tids = collect_dead_tids(vacrel);
 
     if vacrel.pvs.is_none() {
@@ -991,6 +1035,8 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
                 vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &dead_tids)?
             };
             vacrel.indstats[idx] = Some(new_istat);
+
+            pgstat_progress_update_param(PROGRESS_VACUUM_INDEXES_PROCESSED, (idx + 1) as i64);
 
             if lazy_check_wraparound_failsafe(vacrel)? {
                 allindexes = false;
@@ -1020,6 +1066,14 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
     debug_assert!(allindexes || VacuumFailsafeActive());
 
     vacrel.num_index_scans += 1;
+    pgstat_progress_update_multi_param(
+        &[
+            PROGRESS_VACUUM_INDEXES_TOTAL,
+            PROGRESS_VACUUM_INDEXES_PROCESSED,
+            PROGRESS_VACUUM_NUM_INDEX_VACUUMS,
+        ],
+        &[0, 0, vacrel.num_index_scans],
+    );
     Ok(allindexes)
 }
 
@@ -1030,6 +1084,11 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 
     let reltuples = vacrel.new_rel_tuples;
     let estimated_count = vacrel.scanned_pages < vacrel.rel_pages;
+
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_INDEXES_TOTAL],
+        &[PROGRESS_VACUUM_PHASE_INDEX_CLEANUP, vacrel.nindexes as i64],
+    );
 
     if vacrel.pvs.is_none() {
         for idx in 0..vacrel.nindexes {
@@ -1046,6 +1105,8 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
                 vac_cleanup_one_index(vacrel.mcx, &ivinfo, istat)?
             };
             vacrel.indstats[idx] = new_istat;
+
+            pgstat_progress_update_param(PROGRESS_VACUUM_INDEXES_PROCESSED, (idx + 1) as i64);
         }
     } else {
         vacuumparallel::parallel_vacuum_cleanup_all_indexes(
@@ -1059,6 +1120,11 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
             estimated_count,
         )?;
     }
+
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_VACUUM_INDEXES_TOTAL, PROGRESS_VACUUM_INDEXES_PROCESSED],
+        &[0, 0],
+    );
     Ok(())
 }
 
@@ -1093,6 +1159,8 @@ fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> 
 pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut vacuumed_pages: BlockNumber = 0;
     let mut vmbuffer = VmBuffer::new();
+
+    pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_VACUUM_HEAP);
 
     let dead_items = vacrel.dead_items.take().unwrap();
     let mut iter = dead_items.begin_iterate();
@@ -1142,6 +1210,8 @@ fn lazy_vacuum_heap_page(
     deadoffsets: &[OffsetNumber],
     vmbuffer: &VmBuffer,
 ) -> PgResult<()> {
+    pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, blkno as i64);
+
     // SAFETY: caller holds pin + exclusive content lock.
     let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buffer)) };
     let mut unused = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
@@ -1304,6 +1374,8 @@ const VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS: u128 = 20;
 // "truncated N to M pages" messages are DEBUG2 without VERBOSE (loud
 // upstream), so none are emitted.
 fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
+    pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_TRUNCATE);
+
     let mut orig_rel_pages = vacrel.rel_pages;
     loop {
         let mut lock_retry = 0u64;

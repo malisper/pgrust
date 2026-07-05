@@ -22,6 +22,7 @@ catalog_seams = { path = "../../../catalog/catalog_seams" }
 init_small = { path = "../../init/init_small" }
 miscinit = { path = "../../init/miscinit" }
 backend_status = { path = "../../activity/backend_status" }
+backend_progress = { path = "../../activity/backend_progress" }
 pgstat = { path = "../../activity/pgstat" }
 waitevent = { path = "../../activity/waitevent" }
 procarray = { path = "../../../storage/ipc/procarray" }

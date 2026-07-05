@@ -195,7 +195,19 @@ fn EventTriggerInvoke(fn_oid_list: &[Oid], event: &'static str, tag: CommandTag)
         let mut flinfo = fmgr_core::fmgr_info(fnoid)?;
         let mut fcinfo = fmgr::LocalFcinfo::<0>::new(InvalidOid);
         fcinfo.context = Some(core::ptr::NonNull::from(&mut trigdata).cast());
+        // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
+        // early-out, hoisted to the caller as the crate's API requires.
+        let fcu = if flinfo.fn_stats < fmgr::TRACK_FUNC_ALL
+            && pgstat::function::pgstat_track_functions() > flinfo.fn_stats as i32
+        {
+            Some(pgstat::function::pgstat_init_function_usage(flinfo.fn_oid)?)
+        } else {
+            None
+        };
         flinfo.invoke(&mut fcinfo)?;
+        if let Some(fcu) = &fcu {
+            pgstat::function::pgstat_end_function_usage(fcu, true);
+        }
     }
     Ok(())
 }
