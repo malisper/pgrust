@@ -393,9 +393,13 @@ pub fn exec_init_index_only_scan<'mcx>(
     let rel = estate
         .exec_get_range_table_relation(node.scan.scanrelid, false)?
         .alias();
-    // C: lockmode = exec_rt_fetch(scanrelid)->rellockmode, unreachable until
-    // the range-table lane lands (the call above panics first).
-    let index_rel = indexam::index_open(mcx, node.indexid, NoLock)?;
+    // A parallel worker takes its own index lock (C uses rellockmode
+    // unconditionally); the leader relies on the planner already holding it.
+    let index_rel = indexam::index_open(
+        mcx,
+        node.indexid,
+        ::nodeindexscan::worker_index_lockmode(estate, node.scan.scanrelid),
+    )?;
     exec_init_index_only_scan_rel(mcx, node, estate, rel, index_rel)
 }
 
