@@ -25,6 +25,8 @@ lmgr = { path = "../../storage/lmgr/lmgr" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+smgr = { path = "../../storage/smgr/smgr" }
+catalog_storage = { path = "../../catalog/catalog_storage" }
 xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 xact = { path = "../../access/transam/xact" }
