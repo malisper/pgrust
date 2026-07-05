@@ -1195,6 +1195,11 @@ fn build_subplan<'mcx>(
     unknown_eq_false: bool,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
+    // The caller just parked this subplan's subroot; nested subplans made by
+    // the args loop below append their (subroot, plan) pairs first, so this
+    // subroot is rotated to the end before the glob.subplans append to keep
+    // glob.subroots index-aligned (C appends subroot and plan together).
+    let subroot_idx = run.subroots.len() - 1;
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(plan);
     let parallel_safe = plan.as_plan().expect("plan node").parallel_safe;
 
@@ -1321,6 +1326,9 @@ fn build_subplan<'mcx>(
         is_init_plan = false;
     }
 
+    if subroot_idx + 1 != run.subroots.len() {
+        run.subroots[subroot_idx..].rotate_left(1);
+    }
     run.glob.subplans.lappend(mcx, plan)?;
     let plan_id = run.glob.subplans.len() as i32;
     debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
