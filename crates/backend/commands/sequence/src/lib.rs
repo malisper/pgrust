@@ -766,7 +766,7 @@ fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     }
 }
 
-pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<()> {
+pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<Oid> {
     let rv = stmt.sequence.expect("AlterSeqStmt.sequence");
     let v = rel_vocab::RangeVar {
         catalogname: rv.catalogname,
@@ -782,7 +782,7 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
         ::elog::ereport(::types_error::NOTICE)
             .errmsg(format!("relation \"{}\" does not exist, skipping", v.relname))
             .finish(::types_error::ErrorLocation::new("sequence.c", 0, "AlterSequence"))?;
-        return Ok(());
+        return Ok(types_core::InvalidOid);
     }
     // C: RangeVarCallbackOwnsRelation inside RangeVarGetRelidExtended
     // (sequence.c:454-458, tablecmds.c:19554-19579); the lookup seam has no
@@ -859,7 +859,8 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     let mut newtup = heaptuple::heap_form_tuple(mcx, rel.descr(), &pgs_values, &pgs_nulls)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
     rel.close(RowExclusiveLock)?;
-    seqrel.close(NoLock)
+    seqrel.close(NoLock)?;
+    Ok(relid)
 }
 
 // Caller holds AccessExclusiveLock on the sequence until end of transaction
