@@ -42,10 +42,15 @@ impl<'mcx> ArrayBuildState<'mcx> {
     }
 }
 
+// abytes/aitems mirror C's allocation-growth bookkeeping: both are wire
+// fields of array_agg_array_serialize, so parity requires the C formulas
+// even though PgVec manages the real capacity.
 pub struct ArrayBuildStateArr<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub data: PgVec<'mcx, u8>,
     pub nullbitmap: Option<PgVec<'mcx, u8>>,
+    pub abytes: i32,
+    pub aitems: i32,
     pub nbytes: i32,
     pub nitems: i32,
     pub ndims: i32,

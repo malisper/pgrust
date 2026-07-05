@@ -321,6 +321,105 @@ pub fn fc_array_agg_finalfn(
     byref_result(mcx, &img)
 }
 
+fn alloc_build_state<'m>(
+    mcx: ::mcx::Mcx<'m>,
+    st: ::datum::array_build::ArrayBuildState<'m>,
+) -> PgResult<*mut ::datum::array_build::ArrayBuildState<'m>> {
+    let layout = core::alloc::Layout::new::<::datum::array_build::ArrayBuildState<'_>>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: *mut ::datum::array_build::ArrayBuildState<'m> = raw.cast().as_ptr();
+    // SAFETY: fresh allocation of the exact layout; no drop glue runs (PgVec
+    // fields are arena-plain).
+    unsafe { p.write(st) };
+    Ok(p)
+}
+
+pub fn fc_array_agg_combine(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use ::datum::array_build::ArrayBuildState;
+    // SAFETY: fcinfo.context is the executor's live AggStateNode.
+    let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
+        panic!("aggregate function called in non-aggregate context");
+    };
+    let state1 = if fcinfo.argisnull(0) {
+        None
+    } else {
+        Some(fcinfo.arg(0).as_usize() as *mut ArrayBuildState<'_>)
+    };
+    let state2 = if fcinfo.argisnull(1) {
+        None
+    } else {
+        Some(fcinfo.arg(1).as_usize() as *const ArrayBuildState<'_>)
+    };
+    // SAFETY: state pointers address live aggregate-owned build states.
+    match (state1, state2) {
+        (None, None) => Ok(fcinfo.return_null()),
+        (Some(p1), None) => Ok(Datum::from_usize(p1 as usize)),
+        (None, Some(p2)) => {
+            let st = crate::build::array_agg_combine_clone(aggmcx, unsafe { &*p2 })?;
+            Ok(Datum::from_usize(alloc_build_state(aggmcx, st)? as usize))
+        }
+        (Some(p1), Some(p2)) => {
+            let s2 = unsafe { &*p2 };
+            if s2.nelems > 0 {
+                unsafe { crate::build::array_agg_combine_append(&mut *p1, s2)? };
+            }
+            Ok(Datum::from_usize(p1 as usize))
+        }
+    }
+}
+
+pub fn fc_array_agg_serialize(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use ::datum::array_build::ArrayBuildState;
+    // SAFETY: fcinfo.context is the executor's live AggStateNode.
+    debug_assert!(unsafe { fcinfo.agg_context() }.is_some());
+    // SAFETY: transvalue points at the aggcontext-owned build state.
+    let st = unsafe { &*(fcinfo.arg(0).as_usize() as *const ArrayBuildState<'_>) };
+    let mcx = fcinfo.result_mcx();
+    let out = if st.typbyval {
+        crate::build::array_agg_serialize_state(mcx, st, None)?
+    } else {
+        // C's SerialIOData fn_extra memo for the element typsend.
+        let flinfo = flinfo.expect("array_agg_serialize: NULL flinfo");
+        let ams = cached_meta(flinfo, st.element_type, IOFuncSelector::IOFunc_send, true)?;
+        crate::build::array_agg_serialize_state(mcx, st, Some(&mut ams.proc))?
+    };
+    Ok(varlena_result(out))
+}
+
+pub fn fc_array_agg_deserialize(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: fcinfo.context is the executor's live AggStateNode.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        panic!("aggregate function called in non-aggregate context");
+    }
+    // SAFETY: strict fn — arg 0 is a non-null live bytea.
+    let sstate = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let payload = sstate.data();
+    // SAFETY: the executor's per-input context outlives the returned state's
+    // consumption by the immediately-following combine call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    // Wire layout: element_type(4) nelems(8) typlen(2) typbyval(1) — byte 14
+    // decides whether C's DeserialIOData (typreceive) memo is needed.
+    let st = if payload.len() >= 15 && payload[14] == 0 {
+        let element_type = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as Oid;
+        let flinfo = flinfo.expect("array_agg_deserialize: NULL flinfo");
+        let ams = cached_meta(flinfo, element_type, IOFuncSelector::IOFunc_receive, true)?;
+        let typioparam = ams.meta.typioparam;
+        crate::build::array_agg_deserialize_state(mcx, payload, Some((&mut ams.proc, typioparam)))?
+    } else {
+        crate::build::array_agg_deserialize_state(mcx, payload, None)?
+    };
+    Ok(Datum::from_usize(alloc_build_state(mcx, st)? as usize))
+}
+
 // C array_length (arrayfuncs.c).
 pub fn fc_array_length(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (ndim, dims) = {
@@ -863,6 +962,9 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(2421, "oidvectorsend", 1, fc_oidvectorsend),
     agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
     agg(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
+    agg(6293, "array_agg_combine", 2, fc_array_agg_combine),
+    b(6294, "array_agg_serialize", 1, fc_array_agg_serialize),
+    b(6295, "array_agg_deserialize", 2, fc_array_agg_deserialize),
     srf(2331, "array_unnest", 1, fc_array_unnest),
     b(3996, "array_unnest_support", 1, fc_array_unnest_support),
     b(747, "array_dims", 1, crate::ops::fc_array_dims),
@@ -881,4 +983,5 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     nb(1286, "array_fill_with_lower_bounds", 3, crate::ops::fc_array_fill_with_lower_bounds),
     srf(1191, "generate_subscripts", 3, crate::ops::fc_generate_subscripts),
     srf(1192, "generate_subscripts_nodir", 2, crate::ops::fc_generate_subscripts),
+    b(3218, "width_bucket_array", 2, crate::ops::fc_width_bucket_array),
 ];

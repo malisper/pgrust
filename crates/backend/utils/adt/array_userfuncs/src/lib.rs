@@ -342,6 +342,8 @@ pub fn init_array_result_arr<'m>(
         mcx,
         data: PgVec::new_in(mcx),
         nullbitmap: None,
+        abytes: 0,
+        aitems: 0,
         nbytes: 0,
         nitems: 0,
         ndims: 0,
@@ -399,6 +401,7 @@ pub fn accum_array_result_arr<'m>(
         st.dims[1..=ndims as usize].copy_from_slice(&dims[..ndims as usize]);
         st.lbs[0] = 1;
         st.lbs[1..=ndims as usize].copy_from_slice(&lbs[..ndims as usize]);
+        st.abytes = pg_nextpower2_32(core::cmp::max(1024, ndatabytes as i32 + 1) as u32) as i32;
     } else {
         if st.ndims != ndims + 1 {
             return Err(diff_dimensionality());
@@ -408,6 +411,9 @@ pub fn accum_array_result_arr<'m>(
                 return Err(diff_dimensionality());
             }
         }
+        if st.nbytes + ndatabytes as i32 > st.abytes {
+            st.abytes = core::cmp::max(st.abytes * 2, st.nbytes + ndatabytes as i32);
+        }
     }
 
     vec_append_bytes(&mut st.data, &arg[data_off..data_off + ndatabytes])?;
@@ -416,17 +422,19 @@ pub fn accum_array_result_arr<'m>(
     let arg_bitmap = arr_nullbitmap_off(arg);
     if st.nullbitmap.is_some() || arg_bitmap.is_some() {
         let newnitems = st.nitems + nitems;
-        let need = newnitems as usize / 8 + 1;
         match st.nullbitmap.as_mut() {
             None => {
+                st.aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1) as u32) as i32;
+                let need = (st.aitems as usize + 7) / 8;
                 let mut bm: PgVec<u8> = vec_with_capacity_in(mcx, need)?;
                 bm.resize(need, 0);
                 array_bitmap_copy(&mut bm, 0, 0, None, 0, st.nitems);
                 st.nullbitmap = Some(bm);
             }
             Some(bm) => {
-                if bm.len() < need {
-                    bm.resize(need, 0);
+                if newnitems > st.aitems {
+                    st.aitems = core::cmp::max(st.aitems * 2, newnitems);
+                    bm.resize((st.aitems as usize + 7) / 8, 0);
                 }
             }
         }
@@ -473,6 +481,169 @@ pub fn make_array_result_arr<'m>(
         array_bitmap_copy(&mut out, bo, 0, Some((bm, 0)), 0, st.nitems);
     }
     Ok(out)
+}
+
+// pg_bitutils.h pg_nextpower2_32; valid for num in [1, 2^31].
+fn pg_nextpower2_32(num: u32) -> u32 {
+    debug_assert!(num > 0 && num <= 0x8000_0000);
+    if num.is_power_of_two() {
+        num
+    } else {
+        num.next_power_of_two()
+    }
+}
+
+// array_agg_array_combine NULL-state1 arm: clone state2 wholesale into the
+// agg context, preserving abytes/aitems (both are serialize wire fields).
+pub fn clone_array_build_state_arr<'m>(
+    mcx: Mcx<'m>,
+    s2: &ArrayBuildStateArr<'_>,
+) -> PgResult<ArrayBuildStateArr<'m>> {
+    // C initArrayResultArr(state2->array_type, InvalidOid, ...) re-derives the
+    // element type from the catalog; state2 carries the identical value.
+    let mut s1 = init_array_result_arr(mcx, s2.array_type, s2.element_type)?;
+    s1.abytes = s2.abytes;
+    let mut data: PgVec<'m, u8> = vec_with_capacity_in(mcx, s2.abytes as usize)?;
+    vec_append_bytes(&mut data, &s2.data[..s2.nbytes as usize])?;
+    s1.data = data;
+    if let Some(bm2) = s2.nullbitmap.as_deref() {
+        let size = (s2.aitems as usize + 7) / 8;
+        let mut bm: PgVec<'m, u8> = vec_with_capacity_in(mcx, size)?;
+        vec_append_bytes(&mut bm, &bm2[..size])?;
+        s1.nullbitmap = Some(bm);
+    }
+    s1.nbytes = s2.nbytes;
+    s1.aitems = s2.aitems;
+    s1.nitems = s2.nitems;
+    s1.ndims = s2.ndims;
+    s1.dims = s2.dims;
+    s1.lbs = s2.lbs;
+    Ok(s1)
+}
+
+// array_agg_array_combine append arm (state2.nitems > 0 already checked by
+// the caller); errors match accumArrayResultArr's per C.
+pub fn combine_array_build_state_arr(
+    s1: &mut ArrayBuildStateArr<'_>,
+    s2: &ArrayBuildStateArr<'_>,
+) -> PgResult<()> {
+    if s1.ndims != s2.ndims {
+        return Err(diff_dimensionality());
+    }
+    for i in 1..s1.ndims as usize {
+        if s1.dims[i] != s2.dims[i] || s1.lbs[i] != s2.lbs[i] {
+            return Err(diff_dimensionality());
+        }
+    }
+
+    let reqsize = s1.nbytes + s2.nbytes;
+    if s1.abytes < reqsize {
+        s1.abytes = pg_nextpower2_32(reqsize as u32) as i32;
+    }
+    vec_append_bytes(&mut s1.data, &s2.data[..s2.nbytes as usize])?;
+
+    // C only extends the bitmap when state2 carries one: a bitmap-less state2
+    // appended onto a bitmapped state1 leaves state2's bits unwritten.
+    if let Some(bm2) = s2.nullbitmap.as_deref() {
+        let newnitems = s1.nitems + s2.nitems;
+        match s1.nullbitmap.as_mut() {
+            None => {
+                s1.aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1) as u32) as i32;
+                let need = (s1.aitems as usize + 7) / 8;
+                let mut bm: PgVec<u8> = vec_with_capacity_in(s1.mcx, need)?;
+                bm.resize(need, 0);
+                array_bitmap_copy(&mut bm, 0, 0, None, 0, s1.nitems);
+                s1.nullbitmap = Some(bm);
+            }
+            Some(bm) => {
+                if newnitems > s1.aitems {
+                    let newaitems = s1.aitems + s2.aitems;
+                    s1.aitems = pg_nextpower2_32(newaitems as u32) as i32;
+                    bm.resize((s1.aitems as usize + 7) / 8, 0);
+                }
+            }
+        }
+        let bm = s1.nullbitmap.as_mut().unwrap();
+        array_bitmap_copy(bm, 0, s1.nitems, Some((bm2, 0)), 0, s2.nitems);
+    }
+
+    s1.nbytes += s2.nbytes;
+    s1.nitems += s2.nitems;
+    s1.dims[0] += s2.dims[0];
+    debug_assert_eq!(s1.array_type, s2.array_type);
+    debug_assert_eq!(s1.element_type, s2.element_type);
+    Ok(())
+}
+
+// array_agg_array_serialize wire image (field order/widths are byte-law).
+pub fn serialize_array_build_state_arr<'m>(
+    mcx: Mcx<'m>,
+    st: &ArrayBuildStateArr<'_>,
+) -> PgResult<::datum::Bytea<'m>> {
+    let mut buf = ::pqformat::pq_begintypsend(mcx)?;
+    ::pqformat::pq_sendint32(&mut buf, st.element_type as u32)?;
+    ::pqformat::pq_sendint32(&mut buf, st.array_type as u32)?;
+    ::pqformat::pq_sendint32(&mut buf, st.nbytes as u32)?;
+    ::pqformat::pq_sendbytes(&mut buf, &st.data[..st.nbytes as usize])?;
+    ::pqformat::pq_sendint32(&mut buf, st.abytes as u32)?;
+    ::pqformat::pq_sendint32(&mut buf, st.aitems as u32)?;
+    if let Some(bm) = st.nullbitmap.as_deref() {
+        debug_assert!(st.aitems > 0);
+        ::pqformat::pq_sendbytes(&mut buf, &bm[..(st.aitems as usize + 7) / 8])?;
+    }
+    ::pqformat::pq_sendint32(&mut buf, st.nitems as u32)?;
+    ::pqformat::pq_sendint32(&mut buf, st.ndims as u32)?;
+    // C sends the whole fixed dims/lbs arrays (sizeof(state->dims)) raw.
+    ::pqformat::pq_sendbytes(&mut buf, int_array_bytes(&st.dims))?;
+    ::pqformat::pq_sendbytes(&mut buf, int_array_bytes(&st.lbs))?;
+    Ok(::pqformat::pq_endtypsend(buf))
+}
+
+fn int_array_bytes(a: &[i32; MAXDIM]) -> &[u8] {
+    // SAFETY: i32 array reinterpreted as its native-endian bytes.
+    unsafe { core::slice::from_raw_parts(a.as_ptr().cast::<u8>(), MAXDIM * 4) }
+}
+
+pub fn deserialize_array_build_state_arr<'m>(
+    mcx: Mcx<'m>,
+    payload: &[u8],
+) -> PgResult<ArrayBuildStateArr<'m>> {
+    let mut buf = ::stringinfo::StringInfo::with_capacity_in(mcx, payload.len() + 1)?;
+    buf.append_bytes(payload)?;
+    let element_type = ::pqformat::pq_getmsgint(&mut buf, 4)? as Oid;
+    let array_type = ::pqformat::pq_getmsgint(&mut buf, 4)? as Oid;
+    let nbytes = ::pqformat::pq_getmsgint(&mut buf, 4)? as i32;
+
+    // C initArrayResultArr's catalog lookup is skipped: the wire carries the
+    // element type it would return.
+    let mut result = init_array_result_arr(mcx, array_type, element_type)?;
+    let mut data: PgVec<'m, u8> = vec_with_capacity_in(mcx, nbytes as usize)?;
+    vec_append_bytes(&mut data, ::pqformat::pq_getmsgbytes(&mut buf, nbytes as usize)?)?;
+    result.data = data;
+    result.nbytes = nbytes;
+
+    result.abytes = ::pqformat::pq_getmsgint(&mut buf, 4)? as i32;
+    result.aitems = ::pqformat::pq_getmsgint(&mut buf, 4)? as i32;
+    if result.aitems > 0 {
+        let size = (result.aitems as usize + 7) / 8;
+        let mut bm: PgVec<'m, u8> = vec_with_capacity_in(mcx, size)?;
+        vec_append_bytes(&mut bm, ::pqformat::pq_getmsgbytes(&mut buf, size)?)?;
+        result.nullbitmap = Some(bm);
+    }
+    result.nitems = ::pqformat::pq_getmsgint(&mut buf, 4)? as i32;
+    result.ndims = ::pqformat::pq_getmsgint(&mut buf, 4)? as i32;
+    read_int_array(&mut buf, &mut result.dims)?;
+    read_int_array(&mut buf, &mut result.lbs)?;
+    ::pqformat::pq_getmsgend(&buf)?;
+    Ok(result)
+}
+
+fn read_int_array(buf: &mut ::stringinfo::StringInfo<'_>, out: &mut [i32; MAXDIM]) -> PgResult<()> {
+    let bytes = ::pqformat::pq_getmsgbytes(buf, MAXDIM * 4)?;
+    for (i, c) in bytes.chunks_exact(4).enumerate() {
+        out[i] = i32::from_ne_bytes(c.try_into().unwrap());
+    }
+    Ok(())
 }
 
 pub fn trim_array_internal<'m>(
