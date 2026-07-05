@@ -153,15 +153,13 @@ pub fn get_relation_info<'mcx>(
             info.rel = Some(rel);
             info.ncolumns = ncolumns;
             info.nkeycolumns = nkeycolumns;
+            // canreturn spans all columns (plancat.c index_can_return loop);
+            // opfamily/opcintype are key-column-only.
             for i in 0..ncolumns as usize {
                 info.indexkeys.push(ind.indkey[i] as i32);
                 info.indexcollations.push(
                     index_rel.rd_indcollation.get(i).copied().unwrap_or(0),
                 );
-            }
-            for i in 0..nkeycolumns as usize {
-                info.opfamily.push(index_rel.rd_opfamily[i]);
-                info.opcintype.push(index_rel.rd_opcintype[i]);
                 info.canreturn.push(match index_rel.rd_rel.relam {
                     BTREE_AM_OID => btcanreturn(),
                     types_core::GIST_AM_OID => gist::gistcanreturn(&index_rel, i as i32 + 1),
@@ -170,6 +168,10 @@ pub fn get_relation_info<'mcx>(
                     }
                     _ => false,
                 });
+            }
+            for i in 0..nkeycolumns as usize {
+                info.opfamily.push(index_rel.rd_opfamily[i]);
+                info.opcintype.push(index_rel.rd_opcintype[i]);
             }
             info.relam = relam;
             // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers);
