@@ -944,7 +944,9 @@ fn transformColumnDefinition<'mcx>(
                     .expect("ColumnDef.typeName")
                     .as_variant::<TypeName>()
                     .expect("TypeName");
-                let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
+                // C typenameType(cxt->pstate, ...) attaches errposition here.
+                let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
+                    .map_err(|e| position_on_src(e, src, tn.location))?;
                 if saw_identity {
                     return Err(column_syntax_error(
                         format_args!(
@@ -1222,7 +1224,9 @@ fn transformColumnDefinition<'mcx>(
     };
     let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
     // transformColumnType: validate the type reference and any COLLATE spec.
-    let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
+    // C typenameType(cxt->pstate, ...) attaches errposition at tn.location.
+    let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
+        .map_err(|e| position_on_src(e, src, tn.location))?;
     if let Some(cc) = column.collClause {
         let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
         catalog_namespace::get_collation_oid_list(&cc.collname, false)
