@@ -894,8 +894,11 @@ pub fn init_seams() {
 }
 
 // pg_get_partkeydef_columns (ruleutils.c).
+// C pg_get_partkeydef_columns(relid, pretty=true): GET_PRETTY_FLAGS(true),
+// so PRETTYFLAG_PAREN elides the redundant parens inside the expression-key
+// wrap ("(b + 0)", not "((b + 0))") in routing-error DETAIL lines.
 fn pg_get_partkeydef_columns_for_seam(mcx: Mcx<'_>, relid: Oid) -> PgResult<Option<String>> {
-    pg_get_partkeydef_worker(mcx, relid, PRETTYFLAG_INDENT, true, false)
+    pg_get_partkeydef_worker(mcx, relid, get_pretty_flags(true), true, false)
 }
 
 // looks_like_function (ruleutils.c): node types that deparse as func(...).
