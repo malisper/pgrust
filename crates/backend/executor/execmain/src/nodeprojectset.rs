@@ -134,6 +134,9 @@ pub fn exec_init_project_set<'mcx>(
                         );
                         (Some(Rc::new(d)), false)
                     }
+                    // C funcReturnsTuple: RECORD is a rowtype; the read
+                    // slot builds lazily from rsinfo.setDesc (execSRF.c).
+                    funcapi::TypeFuncClass::Record => (None, true),
                     _ => (None, false),
                 };
                 let result_slot = result_desc.as_ref().map(|d| {
@@ -373,12 +376,40 @@ fn exec_make_function_result_set<'mcx>(
                         .expect("rsinfo.setResult downcasts to Tuplestore");
                     store.rescan()?;
                     srf.result_store = Some(store);
+                    // C: a RECORD SRF's read slot comes from rsinfo.setDesc.
+                    if srf.result_slot.is_none() {
+                        let Some(set_desc) = srf.rsinfo.setDesc else {
+                            return Err(setof_record_not_accepted());
+                        };
+                        // SAFETY: setDesc contract — live for this call; the
+                        // copy owns its storage in the query context.
+                        let src = unsafe {
+                            set_desc.cast::<::types_tuple::TupleDescData<'_>>().as_ref()
+                        };
+                        let d = Rc::new(::tupdesc::CreateTupleDescCopy(query_mcx, src)?);
+                        srf.result_slot = Some(::exectuples::make_tuple_table_slot(
+                            query_mcx,
+                            TupleSlotKind::MinimalTuple,
+                            Some(d),
+                        ));
+                    }
                     read_result_store(srf, per_tuple, query_mcx)
                 }
                 None => Ok((Datum::null(), true, ExprDoneCond::ExprEndResult)),
             }
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn setof_record_not_accepted() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "function returning setof record called in context that cannot accept type record",
+        )
+        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+    )
 }
 
 #[cold]
