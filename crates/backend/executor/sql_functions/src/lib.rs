@@ -485,7 +485,7 @@ pub fn fmgr_sql(
 
     let fncollation = fcinfo.fncollation;
     let nargs = fcinfo.nargs();
-    assert!(nargs <= cache::MAX_SQL_FN_ARGS, "fmgr_sql: too many arguments");
+    assert!(nargs <= cache::MAX_SQL_FN_ARGS, "fmgr_sql: >FUNC_MAX_ARGS arguments");
     let mut arg_vals = [datum::NullableDatum::null(); cache::MAX_SQL_FN_ARGS];
     for i in 0..nargs {
         arg_vals[i] = datum::NullableDatum { value: fcinfo.arg(i), isnull: fcinfo.argisnull(i) };
