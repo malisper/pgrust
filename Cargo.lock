@@ -10572,6 +10572,7 @@ dependencies = [
  "shmem_seams",
  "sinval",
  "sinval_seams",
+ "slot",
  "snapbuild_seams",
  "snapmgr",
  "spi_seams",
