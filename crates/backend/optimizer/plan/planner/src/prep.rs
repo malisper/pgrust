@@ -479,7 +479,7 @@ fn add_rowmark_junk_columns<'mcx>(
     Ok(tlist)
 }
 
-fn arena_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+pub(crate) fn arena_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let bytes = mcx::slice_in(mcx, s.as_bytes())?.leak();
     // SAFETY: byte-for-byte copy of a &str.
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })

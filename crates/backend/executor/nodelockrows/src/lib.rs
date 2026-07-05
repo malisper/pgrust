@@ -140,7 +140,36 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
                 (aerm.rti, aerm.ctidAttNo, aerm.toidAttNo, aerm.mark_slot)
             };
             let mut erm = estate.es_rowmarks[(rti - 1) as usize].expect("locking rowmark");
-            debug_assert!(toid_att == 0 && erm.rti == erm.prti);
+            // Clear any leftover EPQ test tuple for this rel (C does this
+            // before the child check so inactive children are cleared too).
+            {
+                let mcx = estate.es_query_cxt;
+                let mark = &mut estate.es_tupleTable[mark_slot.0 as usize];
+                exectuples::exec_clear_tuple(mark, mcx);
+            }
+            // Child rel of an inherited/partitioned FOR UPDATE: check whether
+            // it produced this row (nodeLockRows.c:92-112).
+            if erm.rti != erm.prti {
+                debug_assert!(toid_att > 0);
+                let mut isnull = false;
+                let datum = exectuples::slot_getattr(
+                    estate.slot_mut(slot_id),
+                    toid_att as i32,
+                    &mut isnull,
+                );
+                if isnull {
+                    return Err(internal("tableoid is NULL"));
+                }
+                if datum.as_oid() != erm.relid {
+                    // this child is inactive right now
+                    erm.ermActive = false;
+                    types_tuple::itemptr::ItemPointerSetInvalid(&mut erm.curCtid);
+                    estate.es_rowmarks[(rti - 1) as usize] = Some(erm);
+                    continue;
+                }
+            } else {
+                debug_assert!(toid_att == 0);
+            }
             erm.ermActive = true;
 
             let mut isnull = false;
