@@ -256,21 +256,23 @@ impl<'mcx> SeqScanState<'mcx> {
     }
 }
 
-// Deform-JIT gates (docs/optimizations/jit-deform.md). Measured break-evens:
-// <2 pages for the row kernel vs the interpreted walk, ~23 pages for the
-// batch kernel vs the AOT column pass — both gated with ~2x margin.
-// Relation-local page counts stand in for C's query-level jit_above_cost
-// shape: a ~5us stencil install cannot use thresholds sized for ~ms LLVM
-// compiles. C's jit + jit_tuple_deforming GUCs stay the kill switches.
+// Deform-JIT gates (docs/optimizations/jit-deform.md). Break-even vs the
+// interpreted walk is <2 pages; gated with 2x margin. Both rungs share it
+// since rung 3 removed the AOT column pass (the old 48-page batch gate
+// priced JIT against AOT's ~23-page break-even). Relation-local page counts
+// stand in for C's query-level jit_above_cost shape: a ~5us stencil install
+// cannot use thresholds sized for ~ms LLVM compiles. C's jit +
+// jit_tuple_deforming GUCs stay the kill switches.
 const JIT_DEFORM_ROW_MIN_PAGES: u32 = 4;
-const JIT_DEFORM_BATCH_MIN_PAGES: u32 = 48;
+const JIT_DEFORM_BATCH_MIN_PAGES: u32 = 4;
 // Kernel + double-call overhead vs the warm inline walk crosses between 2
 // and 3 fetched columns (v2 train: sort_limit need-3 -3.2%, distinct
 // need-2 +1.3%).
 const JIT_DEFORM_ROW_MIN_COLS: usize = 3;
-// The AOT batch column loops beat the per-row kernel call below 4 columns
-// (v2: group_agg c=3 +0.58%, joins c=5 -2..3%). Only meaningful while the
-// AOT pass exists (rung 3 removes both it and this floor).
+// The floor survives the AOT removal: LLVM unswitches the generic fetch
+// loop back to monomorphic shape (JIT-off A/B ran flat vs the AOT loops),
+// so the kernel still loses below 4 columns (rung-3 first cut armed c=1
+// hash-build and c=3 agg batches: joins +0.8%, group_agg +0.7%).
 const JIT_DEFORM_BATCH_MIN_COLS: usize = 4;
 
 fn jit_deform_kernel(

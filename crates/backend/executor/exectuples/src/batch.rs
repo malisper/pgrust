@@ -300,30 +300,52 @@ pub fn soa_deform_columns(
     // Dense lane: every staged row is kind 0, so the per-row kind test drops
     // and the isnull column becomes one vectorizable fill.
     let dense = soa.kinds_or == 0;
-    if dense && qual_col_only.is_none() {
+    if qual_col_only.is_none() {
         if let Some(k) = plan.jit.as_deref() {
             debug_assert!(k.ncols() as usize == ncols);
-            for c in 0..ncols {
-                soa.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n].fill(false);
-            }
             // SAFETY: kind-0 rows are null-free with natts >= ncols (kernel
             // domain); the kernel stores ncols datums at SOA_MAX_ROWS*8
             // stride from &values[i] — in bounds of the ncols*SOA_MAX_ROWS
             // buffer for every i < n <= SOA_MAX_ROWS. Layout identity with
             // the plan is arm_jit's contract; output is bit-identical to the
-            // AOT column pass below (exercised by jit_batch_matches_aot).
+            // interpreter pass below (jit_deform_matches_aot_and_interpreter).
             unsafe {
                 let base = soa.values.as_mut_ptr();
-                for i in 0..n {
-                    k.soa(*soa.tps.get_unchecked(i), base.add(i), SOA_MAX_ROWS * 8);
+                if dense {
+                    for c in 0..ncols {
+                        soa.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n].fill(false);
+                    }
+                    for i in 0..n {
+                        k.soa(*soa.tps.get_unchecked(i), base.add(i), SOA_MAX_ROWS * 8);
+                    }
+                } else {
+                    // Kind-1 rows were already deformed at classify; kind-2
+                    // rows carry the fallback bit — only their cells stay
+                    // stale, and no reader consumes fallback cells.
+                    let isnull = soa.isnull.as_mut_ptr();
+                    for i in 0..n {
+                        if *soa.kinds.get_unchecked(i) != 0 {
+                            continue;
+                        }
+                        k.soa(*soa.tps.get_unchecked(i), base.add(i), SOA_MAX_ROWS * 8);
+                        for c in 0..ncols {
+                            *isnull.add(c * SOA_MAX_ROWS + i) = false;
+                        }
+                    }
                 }
             }
             return;
         }
     }
+    // Non-JIT pass: the generic interpreter fetch (fetch_att, runtime
+    // dispatch) — the monomorphized shape-class column loops are removed
+    // (docs/optimizations/jit-deform.md rung 3); JIT-unavailable environments
+    // accept interpreter cost by charter.
     for c in first..last {
         let att = &atts[c];
         let off = plan.offs[c] as usize;
+        let attbyval = att.attbyval;
+        let attlen = att.attlen as i32;
         // SAFETY: kind-0 rows are null-free with natts >= ncols, so tp + off
         // is inside the tuple data area for every prefix column.
         unsafe {
@@ -331,37 +353,20 @@ pub fn soa_deform_columns(
             let isnull = &mut soa.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
             let tps = &soa.tps[..n];
             let kinds = &soa.kinds[..n];
-            macro_rules! col_loop {
-                (|$p:ident| $load:expr) => {
-                    if dense {
-                        isnull.fill(false);
-                        for i in 0..n {
-                            let $p: *const u8 = *tps.get_unchecked(i);
-                            *values.get_unchecked_mut(i) = $load;
-                        }
-                    } else {
-                        for i in 0..n {
-                            if *kinds.get_unchecked(i) == 0 {
-                                let $p: *const u8 = *tps.get_unchecked(i);
-                                *values.get_unchecked_mut(i) = $load;
-                                *isnull.get_unchecked_mut(i) = false;
-                            }
-                        }
+            if dense {
+                isnull.fill(false);
+                for i in 0..n {
+                    *values.get_unchecked_mut(i) =
+                        fetch_att((*tps.get_unchecked(i)).add(off), attbyval, attlen);
+                }
+            } else {
+                for i in 0..n {
+                    if *kinds.get_unchecked(i) == 0 {
+                        *values.get_unchecked_mut(i) =
+                            fetch_att((*tps.get_unchecked(i)).add(off), attbyval, attlen);
+                        *isnull.get_unchecked_mut(i) = false;
                     }
-                };
-            }
-            match (att.attbyval, att.attlen) {
-                (true, 4) => {
-                    col_loop!(|p| Datum::from_i32(p.add(off).cast::<i32>().read_unaligned()))
                 }
-                (true, 8) => {
-                    col_loop!(|p| Datum::from_i64(p.add(off).cast::<i64>().read_unaligned()))
-                }
-                (true, 2) => {
-                    col_loop!(|p| Datum::from_i16(p.add(off).cast::<i16>().read_unaligned()))
-                }
-                (true, _) => col_loop!(|p| Datum::from_char(p.add(off).cast::<i8>().read())),
-                (false, _) => col_loop!(|p| Datum::from_usize(p.add(off) as usize)),
             }
         }
     }
