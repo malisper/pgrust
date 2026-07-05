@@ -20,6 +20,8 @@ use crate::{exec_agg, exec_init_agg, exec_rescan_agg};
 
 const INT4_EQ: u32 = 96;
 const F_INT4EQ: u32 = 65;
+const TEXT_EQ: u32 = 98;
+const F_TEXTEQ: u32 = 67;
 const F_HASHINT4: u32 = 450;
 const INT_HASH_FAM: u32 = 1977;
 const INTEGER_BTREE_FAM: u32 = 1976;
@@ -273,18 +275,33 @@ fn install_seams() {
             })
         });
         syscache_seams::lookup_pg_operator_shape::set(|opno| {
-            Ok((opno == INT4_EQ).then_some(syscache_seams::PgOperatorShape { oprnamespace: 11,
-                oprleft: INT4OID,
-                oprright: INT4OID,
-                oprresult: 16,
-                oprcom: INT4_EQ,
-                oprnegate: 518,
-                oprcode: F_INT4EQ,
-                oprrest: 101,
-                oprjoin: 105,
-                oprcanmerge: true,
-                oprcanhash: true,
-            }))
+            Ok(match opno {
+                INT4_EQ => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                    oprleft: INT4OID,
+                    oprright: INT4OID,
+                    oprresult: 16,
+                    oprcom: INT4_EQ,
+                    oprnegate: 518,
+                    oprcode: F_INT4EQ,
+                    oprrest: 101,
+                    oprjoin: 105,
+                    oprcanmerge: true,
+                    oprcanhash: true,
+                }),
+                TEXT_EQ => Some(syscache_seams::PgOperatorShape { oprnamespace: 11,
+                    oprleft: TEXTOID,
+                    oprright: TEXTOID,
+                    oprresult: 16,
+                    oprcom: TEXT_EQ,
+                    oprnegate: 531,
+                    oprcode: F_TEXTEQ,
+                    oprrest: 101,
+                    oprjoin: 105,
+                    oprcanmerge: true,
+                    oprcanhash: true,
+                }),
+                _ => None,
+            })
         });
         syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
             let mut v = PgVec::new_in(mcx);
@@ -2338,4 +2355,159 @@ mod hashspill {
         assert_eq!(temp_files(&dir), 0, "end must drop the tape files");
         init_small::globals::set_work_mem(saved_work_mem);
     }
+}
+
+// AGG_SORTED with a compressed text group key: the boundary eq (texteq)
+// detoasts its args through the frame's armed result mcx (tmpcontext
+// per-tuple memory). Unarmed frames panic here (ClickBench Q14 shape).
+#[test]
+fn sorted_group_by_compressed_text_key_detoasts_in_boundary_eq() {
+    use core::mem::MaybeUninit;
+    install_seams();
+    detoast::init_seams();
+
+    fn compressed_text(input: &[u8]) -> Vec<u8> {
+        let mut dest = vec![MaybeUninit::<u8>::uninit(); pglz::pglz_max_output(input.len())];
+        let n = pglz::pglz_compress_into(input, &mut dest, &pglz::PGLZ_STRATEGY_ALWAYS).unwrap();
+        let total = 8 + n;
+        // 4B_C header + rawsize word (toast_compress_datum's inline image).
+        let mut image = (((total as u32) << 2) | 0x02).to_ne_bytes().to_vec();
+        image.extend_from_slice(&(input.len() as u32).to_ne_bytes());
+        image.extend(dest[..n].iter().map(|b| unsafe { b.assume_init() }));
+        image
+    }
+
+    let phrase_a: Vec<u8> = (0..600).map(|i| b"aaaa bbbb cccc dddd "[i % 20]).collect();
+    let phrase_b: Vec<u8> = (0..600).map(|i| b"eeee ffff gggg hhhh "[i % 20]).collect();
+    let img_a: &'static [u8] = Vec::leak(compressed_text(&phrase_a));
+    let img_b: &'static [u8] = Vec::leak(compressed_text(&phrase_b));
+    let rows: &'static [&'static [u8]] = Vec::leak(vec![img_a, img_a, img_b]);
+
+    let mcx = leaked_mcx();
+    let outer_var = Node::mk_var(mcx, 1, 1, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    let outer_tle = Node::mk_target_entry(mcx, outer_var, 1, Some("s"), false).unwrap();
+    let outer_plan = {
+        let mut r = Node::build::<types_nodes::plannodes::Result>(mcx).unwrap();
+        r.plan.targetlist = NodeList::make1(mcx, outer_tle).unwrap();
+        r.plan.plan_width = 32;
+        r.seal()
+    };
+    let group_var = Node::mk_var(mcx, OUTER_VAR, 1, TEXTOID, -1, C_COLLATION, 0).unwrap();
+    let group_tle = Node::mk_target_entry(mcx, group_var, 1, Some("s"), false).unwrap();
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = COUNT_STAR_OID;
+    aggref.aggtype = INT8OID;
+    aggref.aggtranstype = INT8OID;
+    aggref.aggstar = true;
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let count_tle = Node::mk_target_entry(mcx, aggref.seal(), 2, Some("count"), false).unwrap();
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    let mut tlist = NodeList::make1(mcx, group_tle).unwrap();
+    tlist.lappend(mcx, count_tle).unwrap();
+    agg.plan.targetlist = tlist;
+    agg.plan.lefttree = Some(outer_plan);
+    agg.aggstrategy = 1; // AGG_SORTED
+    agg.numCols = 1;
+    agg.grpColIdx = mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = mcx::slice_borrow_in(mcx, &[TEXT_EQ]).unwrap();
+    agg.grpCollations = mcx::slice_borrow_in(mcx, &[C_COLLATION]).unwrap();
+    agg.numGroups = 2;
+    let agg = agg.seal_ref();
+
+    fn text_desc(mcx: Mcx<'_>) -> Rc<TupleDescData<'_>> {
+        let att = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: TEXTOID,
+            atttypmod: -1,
+            attlen: -1,
+            attbyval: false,
+            attalign: TYPALIGN_INT,
+            attstorage: b'x' as i8,
+            ..Default::default()
+        };
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+        Rc::new(TupleDescData {
+            natts: 1,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+    fn result_desc(mcx: Mcx<'_>) -> Rc<TupleDescData<'_>> {
+        let a1 = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: TEXTOID,
+            atttypmod: -1,
+            attlen: -1,
+            attbyval: false,
+            attalign: TYPALIGN_INT,
+            attstorage: b'x' as i8,
+            ..Default::default()
+        };
+        let a2 = FormData_pg_attribute {
+            attnum: 2,
+            atttypid: INT8OID,
+            attlen: 8,
+            attbyval: true,
+            attalign: TYPALIGN_DOUBLE,
+            atttypmod: -1,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        };
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&a1));
+        compact.push(CompactAttribute::populate_from(&a2));
+        attrs.push(a1);
+        attrs.push(a2);
+        Rc::new(TupleDescData {
+            natts: 2,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    let estate_owner = create_executor_state(Box::leak(Box::new(MemoryContext::new("q"))));
+    let mut estate_owner = estate_owner.unwrap();
+    let counts = estate_owner.with_mut(|estate| {
+        let mcx = estate.es_query_cxt;
+        let outer_id =
+            estate.exec_init_extra_tuple_slot(Some(text_desc(mcx)), TupleSlotKind::Virtual);
+        // SAFETY: agg is leaked ('static) and read-only.
+        let agg = unsafe { shorten(agg) };
+        let mut state = exec_init_agg(agg, estate, 0, result_desc(leaked_mcx()), None).unwrap();
+        let mut i = 0usize;
+        let mut feed = move |estate: &mut EStateData<'_>| {
+            if i >= rows.len() {
+                return Ok(None);
+            }
+            let mcx = estate.es_query_cxt;
+            let slot = estate.slot_mut(outer_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            slot.base_mut().tts_values[0] = Datum::from_usize(rows[i].as_ptr() as usize);
+            slot.base_mut().tts_isnull[0] = false;
+            exectuples::exec_store_virtual_tuple(slot);
+            i += 1;
+            Ok(Some(outer_id))
+        };
+        let mut counts: Vec<i64> = Vec::new();
+        while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[1]);
+            counts.push(base.tts_values[1].as_i64());
+        }
+        counts
+    });
+    assert_eq!(counts, vec![2, 1]);
 }

@@ -245,6 +245,14 @@ pub(crate) fn init_grouping_sets<'mcx>(
                 eqfunctions[num_cols - 1] =
                     Some(build_grouping_equal_prefix(mcx, &scan_desc, aggnode, num_cols)?);
             }
+            for eq in eqfunctions.iter_mut().flatten() {
+                // Boundary eqs detoast compressed by-ref keys through the
+                // frame's result mcx; C runs them in tmpcontext per-tuple
+                // memory, reset per input row.
+                // SAFETY: the tmpcontext ExprContext outlives every phase
+                // program (same estate).
+                unsafe { eq.arm_result_mcx_raw(per_tuple) };
+            }
         }
 
         let nsets_eff = numsets.max(1);

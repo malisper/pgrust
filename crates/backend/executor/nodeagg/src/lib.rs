@@ -759,13 +759,23 @@ pub fn exec_init_agg<'mcx>(
                              grouping sets not ported (per-set sortstates)"
                         );
                     }
-                    let (ps, ospec) = init_pertrans_sort(
+                    let (mut ps, ospec) = init_pertrans_sort(
                         mcx,
                         aggref,
                         transno,
                         shape.aggtransfn,
                         aggref.inputcollid,
                     )?;
+                    if let Some(eq) = ps.equalfn_multi.as_mut() {
+                        // The DISTINCT dedup eq detoasts compressed by-ref
+                        // args through the frame's result mcx; the drain
+                        // resets tmpcontext per row (C: tmpcontext memory).
+                        // SAFETY: the tmpcontext ExprContext outlives the
+                        // program (same estate).
+                        unsafe {
+                            eq.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx())
+                        };
+                    }
                     pertrans_sort.push(ps);
                     ordered_specs[transno] = Some(ospec);
                 }
@@ -859,11 +869,19 @@ pub fn exec_init_agg<'mcx>(
             exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, fm_agg_node, params)?;
         (Some(evaltrans), Some(ph), None, None)
     } else {
-        let persort = if node.aggstrategy == AGG_SORTED {
+        let mut persort = if node.aggstrategy == AGG_SORTED {
             Some(init_persort(node, estate)?)
         } else {
             None
         };
+        if let Some(ps) = persort.as_mut() {
+            // The boundary eq detoasts compressed by-ref keys through the
+            // frame's result mcx; C runs it in tmpcontext per-tuple memory
+            // (ExecQualAndReset), which agg_retrieve_sorted resets per row.
+            // SAFETY: the tmpcontext ExprContext outlives the program (same
+            // estate).
+            unsafe { ps.eq.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+        }
         (Some(exec_build_agg_trans(mcx, &specs, fm_agg_node, params)?), None, persort, None)
     };
     // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
@@ -895,6 +913,14 @@ pub fn exec_init_agg<'mcx>(
         let qual = exec_build_agg_qual_subplans(mcx, &node.plan.qual, bind, params, env)?;
         Ok((proj, qual))
     })?;
+    let mut qual = qual;
+    if let Some(q) = qual.as_mut() {
+        // HAVING callees allocate by-ref results through the frame's result
+        // mcx; C evaluates the qual in the output ExprContext's per-tuple
+        // memory, reset per group.
+        // SAFETY: the ps_ExprContext outlives the program (same estate).
+        unsafe { q.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
+    }
 
     Ok(AggStateData {
         plan: node,
