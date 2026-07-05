@@ -171,6 +171,7 @@ pub fn CheckIndexCompatible<'mcx>(
         attribute_list,
         exclusion_op_names,
         false,
+        is_without_overlaps,
         accessMethodId,
         amname,
         amcanorder,

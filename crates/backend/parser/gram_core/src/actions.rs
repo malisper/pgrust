@@ -1410,12 +1410,23 @@ impl<'mcx> Parser<'mcx> {
                 n.location = view.l(1);
                 n.pktable = view.v(8).node().and_then(|n| n.as_range_var());
                 n.fk_attrs = view.v(4).list();
-                if view.v(5).node().is_some() {
-                    panic!("gram_core: PERIOD FK columns (temporal FK) unported");
+                if let Some(period) = view.v(5).node() {
+                    n.fk_attrs.lappend(mcx, period)?;
+                    n.fk_with_period = true;
                 }
-                // opt_column_and_period_list flattened: rule 560 panics on a
-                // PERIOD name, so the pair collapses to its column list.
-                n.pk_attrs = view.v(9).list();
+                // opt_column_and_period_list: C's list_make2(cols, period) is
+                // encoded as [mk_list(cols)] or [mk_list(cols), period]
+                // (rule 560); nil = the EMPTY production.
+                let pk_pair = view.v(9).list();
+                if pk_pair.is_nil() {
+                    n.pk_attrs = NodeList::nil();
+                } else {
+                    n.pk_attrs = pk_pair.nth(0).as_list().expect("column list");
+                    if pk_pair.len() == 2 {
+                        n.pk_attrs.lappend(mcx, pk_pair.nth(1))?;
+                        n.pk_with_period = true;
+                    }
+                }
                 n.fk_matchtype = view.v(10).ival() as u8;
                 let ka = view.v(11).key_actions();
                 n.fk_upd_action = ka.update_action.action;
@@ -1445,12 +1456,17 @@ impl<'mcx> Parser<'mcx> {
                 *yyval = YYSTYPE::List(list);
             }
             // opt_column_and_period_list: '(' columnList optionalPeriodName ')'
-            // C: list_make2($2, $3); flattened to the column list (PERIOD loud).
+            // C: list_make2($2, $3). NULL can't sit in a NodeList, so the
+            // pair is [mk_list(cols)] or [mk_list(cols), period]; the EMPTY
+            // production's list_make2(NIL, NULL) is the nil list. Consumed
+            // only by rule 545.
             560 => {
-                if view.v(3).node().is_some() {
-                    panic!("gram_core: PERIOD referenced columns (temporal FK) unported");
-                }
-                *yyval = YYSTYPE::List(view.v(2).list());
+                let cols = Node::mk_list(mcx, view.v(2).list())?;
+                let list = match view.v(3).node() {
+                    Some(period) => NodeList::make2(mcx, cols, period)?,
+                    None => NodeList::make1(mcx, cols)?,
+                };
+                *yyval = YYSTYPE::List(list);
             }
             561 => *yyval = YYSTYPE::List(NodeList::nil()),
             // columnElem: ColId
