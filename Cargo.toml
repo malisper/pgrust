@@ -498,6 +498,7 @@ members = [
     "crates/backend/utils/adt/network_spgist",
     "crates/backend/utils/adt/tsvector_core",
     "crates/backend/utils/adt/tsquery_core",
+    "crates/backend/utils/adt/tsquery_rewrite",
     "crates/backend/utils/adt/tsrank",
     "crates/backend/utils/adt/tsginidx",
     "crates/backend/utils/adt/tsgistidx",
