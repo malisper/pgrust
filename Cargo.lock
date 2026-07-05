@@ -434,6 +434,7 @@ dependencies = [
  "mbutils",
  "mcx",
  "numutils",
+ "pgstrcasecmp",
  "pqformat",
  "regex_core",
  "stack_depth",
@@ -1141,6 +1142,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "archive"
+version = "0.0.0"
+dependencies = [
+ "percentrepl",
+ "types_error",
+]
+
+[[package]]
 name = "array_userfuncs"
 version = "0.1.0"
 dependencies = [
@@ -1655,10 +1664,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "binaryheap"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+
+[[package]]
+name = "blkreftable"
+version = "0.1.0"
+dependencies = [
+ "crc32c",
+ "hashbrown",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
+name = "bloomfilter"
+version = "0.1.0"
+dependencies = [
+ "hashfn",
+ "mcx",
+ "types_error",
+]
 
 [[package]]
 name = "brin"
@@ -2525,6 +2559,7 @@ name = "cmdtag"
 version = "0.1.0"
 dependencies = [
  "numutils",
+ "pgstrcasecmp",
  "types_core",
  "types_portal",
 ]
@@ -3908,6 +3943,19 @@ dependencies = [
  "types_nodes",
  "types_storage",
  "xact",
+]
+
+[[package]]
+name = "dshash"
+version = "0.1.0"
+dependencies = [
+ "hashfn",
+ "init_small",
+ "lmgr_proc_seams",
+ "lwlock",
+ "s_lock_seams",
+ "types_error",
+ "waitevent_seams",
 ]
 
 [[package]]
@@ -5560,6 +5608,7 @@ dependencies = [
  "ifaddr",
  "ip",
  "libc",
+ "pgstrcasecmp",
  "types_core",
  "types_error",
  "types_startup",
@@ -6116,6 +6165,14 @@ dependencies = [
  "bufmgr",
  "fd",
  "types_core",
+]
+
+[[package]]
+name = "integerset"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
 ]
 
 [[package]]
@@ -8244,6 +8301,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pairingheap"
+version = "0.1.0"
+
+[[package]]
 name = "parallel"
 version = "0.0.0"
 dependencies = [
@@ -8878,6 +8939,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "percentrepl"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "types_error",
+]
+
+[[package]]
 name = "pg_aggregate"
 version = "0.0.0"
 dependencies = [
@@ -8934,6 +9003,10 @@ dependencies = [
 
 [[package]]
 name = "pg_b64"
+version = "0.1.0"
+
+[[package]]
+name = "pg_bitutils"
 version = "0.1.0"
 
 [[package]]
@@ -9700,6 +9773,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgstrcasecmp"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pgtz"
 version = "0.1.0"
 dependencies = [
@@ -9710,6 +9790,7 @@ dependencies = [
  "localtime",
  "mcx",
  "pg_path",
+ "pgstrcasecmp",
  "pgtz_seams",
  "types_core",
  "types_error",
@@ -11019,6 +11100,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "radixtree"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "types_error",
 ]
 
 [[package]]
@@ -12390,7 +12479,9 @@ dependencies = [
  "elog",
  "guc_tables",
  "libc",
+ "percentrepl",
  "types_error",
+ "wait_error",
  "waitevent_seams",
 ]
 
@@ -13729,6 +13820,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidstore"
+version = "0.1.0"
+dependencies = [
+ "mcx",
+ "radixtree",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "types_tuple",
+]
+
+[[package]]
 name = "timeline"
 version = "0.0.0"
 dependencies = [
@@ -14965,6 +15068,7 @@ dependencies = [
  "init_small",
  "lmgr",
  "mcx",
+ "miscinit",
  "nbtree",
  "pgstat",
  "postgres_seams",
@@ -14975,6 +15079,7 @@ dependencies = [
  "smgr_seams",
  "tableam_seams",
  "tableam_vocab",
+ "tidstore",
  "timestamp_seams",
  "transam_xlog_seams",
  "types_core",
@@ -15188,6 +15293,7 @@ dependencies = [
  "init_small",
  "inval",
  "mcx",
+ "pg_bitutils",
  "smgr_seams",
  "transam_xlog_seams",
  "types_core",
@@ -15197,6 +15303,13 @@ dependencies = [
  "types_tuple",
  "xloginsert_seams",
  "xlogutils_seams",
+]
+
+[[package]]
+name = "wait_error"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -15451,18 +15564,20 @@ dependencies = [
 name = "xlogarchive"
 version = "0.0.0"
 dependencies = [
+ "archive",
  "elog",
  "fd",
  "guc_tables",
  "init_small",
  "ipc",
  "libc",
+ "percentrepl",
  "pgarch",
  "postmaster_startup",
- "shell_archive",
  "transam_xlog",
  "types_core",
  "types_error",
+ "wait_error",
  "waitevent_seams",
  "xact_seams",
  "xlogarchive_seams",
