@@ -1597,7 +1597,8 @@ fn transform_index_constraints<'mcx>(
             if constraint.without_overlaps && keyidx == nkeys - 1 {
                 if let Some(cn) = found_column {
                     let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
-                    let typid = if let Some(tn) = cd.typeName {
+                    let typid = if let Some(tn_node) = cd.typeName {
+                        let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
                         typenameTypeIdAndMod(mcx, None, tn)?.0
                     } else {
                         InvalidOid
