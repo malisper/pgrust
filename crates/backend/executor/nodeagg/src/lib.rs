@@ -3115,6 +3115,10 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
         if let Some(sort) = ps.sortstate.take() {
             sort.end();
         }
+        // A rescan can cut a group short of finalize: drop the presorted
+        // DISTINCT comparand (C leaves haslast set over reset memory here).
+        ps.haslast = false;
+        ps.last_single = NullableDatum::null();
     }
     if let Some(gs) = node.gsets.as_mut() {
         gsets::rescan_grouping_sets(gs).expect("grouping-sets rescan");
@@ -3145,6 +3149,10 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         if let Some(sort) = ps.sortstate.take() {
             sort.end();
         }
+        // A rescan can cut a group short of finalize: drop the presorted
+        // DISTINCT comparand (C leaves haslast set over reset memory here).
+        ps.haslast = false;
+        ps.last_single = NullableDatum::null();
     }
     if let Some(gs) = node.gsets.as_mut() {
         // C's no-chgParam AGG_HASHED arm: filled tables are reused, only the
