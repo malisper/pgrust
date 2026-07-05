@@ -1626,6 +1626,15 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     fn has_qual(&self) -> bool {
         self.ss.ss.qual.is_some()
     }
+
+    #[inline]
+    fn qualifying_count(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        n: u32,
+    ) -> PgResult<Option<u32>> {
+        ::nodeseqscan::seq_scan_batch_qual_count(self.ss, estate, n)
+    }
 }
 
 impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {

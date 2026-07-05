@@ -519,6 +519,40 @@ pub fn seq_scan_next_pagebatch<'mcx>(
     Ok(n)
 }
 
+/// Bitmap-armed batch census: rows of the staged batch passing the kernel
+/// qual. Bitmap hits count with no per-row work; forced fallback rows (the
+/// SoA prefix deform skipped them) run the per-row store+qual path. None =
+/// no bitmap qual staged, the per-row drain owns the batch.
+pub fn seq_scan_batch_qual_count<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    n: u32,
+) -> PgResult<Option<u32>> {
+    let nwords = (n as usize).div_ceil(64);
+    let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
+    let mut count = 0u32;
+    {
+        let Some(b) = node.batch_soa.as_deref() else { return Ok(None) };
+        if !b.qual_armed {
+            return Ok(None);
+        }
+        for (w, fb) in b.soa.fallback_words()[..nwords].iter().enumerate() {
+            count += (b.sel[w] & !fb).count_ones();
+            fallback[w] = *fb;
+        }
+    }
+    for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
+        while bits != 0 {
+            let i = (w as u32) * 64 + bits.trailing_zeros();
+            bits &= bits - 1;
+            if seq_scan_batch_fetch(node, estate, i)? {
+                count += 1;
+            }
+        }
+    }
+    Ok(Some(count))
+}
+
 /// Store row `i` of the staged batch and apply the scan qual; false =
 /// filtered (bitmap-armed batches test the selection bit, not the kernel).
 #[inline(always)]
