@@ -30,3 +30,4 @@ objectaddress_seams = { path = "../objectaddress_seams" }
 extension_seams = { path = "../../commands/extension_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+pg_inherits = { path = "../pg_inherits" }

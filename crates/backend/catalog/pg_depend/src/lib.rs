@@ -1105,14 +1105,30 @@ pub fn getOwnedSequences<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<mcx::PgVe
     getOwnedSequences_internal(mcx, relid, 0, None)
 }
 
-// getIdentitySequence (pg_depend.c); C's partition-ancestor hop is unported
-// (callers pass the topmost relid).
+// getIdentitySequence (pg_depend.c).
 pub fn getIdentitySequence<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     attnum: i32,
     missing_ok: bool,
 ) -> PgResult<Oid> {
+    let mut relid = relid;
+    let mut attnum = attnum;
+    // The identity sequence hangs off the topmost partitioned table, which
+    // might have a different column order than the partition.
+    if lsyscache::relation::get_rel_relispartition(relid)? {
+        let ancestors = pg_inherits::get_partition_ancestors(mcx, relid)?;
+        let attname = lsyscache::attribute::get_attname(mcx, relid, attnum as i16, false)?
+            .expect("get_attname !missing_ok returns Some");
+        relid = *ancestors.last().expect("partition has ancestors");
+        attnum = lsyscache::attribute::get_attnum(relid, attname.as_str())? as i32;
+        if attnum == 0 {
+            panic!(
+                "cache lookup failed for attribute \"{}\" of relation {relid}",
+                attname.as_str()
+            );
+        }
+    }
     let seqlist = getOwnedSequences_internal(mcx, relid, attnum, Some(DependencyType::Internal))?;
     if seqlist.len() > 1 {
         panic!("more than one owned sequence found for column {relid}.{attnum}");

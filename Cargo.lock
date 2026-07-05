@@ -9596,6 +9596,7 @@ dependencies = [
  "miscinit_seams",
  "nodes_core",
  "objectaddress_seams",
+ "pg_inherits",
  "pg_shdepend",
  "syscache_seams",
  "table",
