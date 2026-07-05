@@ -482,11 +482,15 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_Memoize => ("Memoize", "Memoize"),
         NodeTag::T_Agg => {
             let agg = node.as_agg().expect("Agg plan node");
-            assert!(
-                agg.aggsplit == types_nodes::primnodes::AGGSPLIT_SIMPLE,
-                "ExplainNode (explain.c): partial/finalize Agg display; parallel-agg lane"
+            partialmode = Some(
+                if agg.aggsplit & types_nodes::primnodes::AGGSPLITOP_SKIPFINAL != 0 {
+                    "Partial"
+                } else if agg.aggsplit & types_nodes::primnodes::AGGSPLITOP_COMBINE != 0 {
+                    "Finalize"
+                } else {
+                    "Simple"
+                },
             );
-            partialmode = Some("Simple");
             let p = match agg.aggstrategy {
                 0 => {
                     strategy = Some("Plain");
@@ -504,6 +508,13 @@ pub fn ExplainNode<'mcx>(
                     strategy = Some("Mixed");
                     "MixedAggregate"
                 }
+=======
+            match agg.aggstrategy {
+                0 => "Aggregate",
+                1 => "GroupAggregate",
+                2 => "HashAggregate",
+                3 => "MixedAggregate",
+>>>>>>> 919935100 (port(partial-agg): parallel partial aggregation — planner paths + combine executor)
                 other => node_gap("ExplainNode", &format!("Agg strategy {other} unrecognized")),
             };
             (p, "Aggregate")
@@ -552,6 +563,13 @@ pub fn ExplainNode<'mcx>(
         }
         if plan.async_capable {
             append!(es, "Async ");
+        }
+        if let Some(agg) = node.as_agg() {
+            if agg.aggsplit & types_nodes::primnodes::AGGSPLITOP_SKIPFINAL != 0 {
+                append!(es, "Partial ");
+            } else if agg.aggsplit & types_nodes::primnodes::AGGSPLITOP_COMBINE != 0 {
+                append!(es, "Finalize ");
+            }
         }
         append!(es, "{pname}");
         es.indent += 1;

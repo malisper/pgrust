@@ -1144,6 +1144,19 @@ fn run_program<'mcx>(
                 // is live across expression evaluation.
                 unsafe { agg.as_ref() }.set_current_agg(*aggref, *shared);
             }
+            Step::AggDeserialize { call, out } => {
+                let (value, isnull) = invoke(call)?;
+                write_out(*out, value, isnull);
+            }
+            Step::AggStrictDeserialize { call, out, jumpnull } => {
+                // SAFETY: slot 0 of the live 2-arg ds fcinfo image.
+                if unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read().isnull } {
+                    sp = unsafe { base.add(*jumpnull as usize) };
+                    continue;
+                }
+                let (value, isnull) = invoke(call)?;
+                write_out(*out, value, isnull);
+            }
             Step::AggPlainTransByVal { call, pergroup } => {
                 // SAFETY: once-allocated stable pergroup; sole access here.
                 unsafe {

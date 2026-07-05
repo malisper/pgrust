@@ -33,7 +33,11 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
 use ::types_nodes::primnodes::{Aggref, AGGKIND_NORMAL};
 use ::types_nodes::NodeTag;
-use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED};
+use ::types_pathnodes::{
+    AGGSPLITOP_COMBINE, AGGSPLITOP_DESERIALIZE, AGGSPLITOP_SERIALIZE, AGGSPLITOP_SKIPFINAL,
+    AGGSPLIT_FINAL_DESERIAL, AGGSPLIT_INITIAL_SERIAL, AGGSPLIT_SIMPLE, AGG_HASHED, AGG_MIXED,
+    AGG_PLAIN, AGG_SORTED,
+};
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::htup::MinimalTupleData;
 use ::types_tuple::TupleDescData;
@@ -69,6 +73,7 @@ pub struct AggStateData<'mcx> {
     agg_values_base: NonNull<Datum>,
     agg_nulls_base: NonNull<bool>,
     agg_done: bool,
+    skip_final: bool,
     numtrans: usize,
     perhash: Option<PerHashData<'mcx>>,
     persort: Option<PerSortData<'mcx>>,
@@ -352,6 +357,9 @@ struct PerAggData<'mcx> {
     aggref: &'mcx Aggref<'mcx>,
     trans_shared: bool,
     finalfn: Option<FmgrInfo>,
+    // C AggStatePerTransData.serialfn, hosted per-agg (resolved once; shared
+    // transnos duplicate the resolved carrier, not the resolution).
+    serialfn: Option<FmgrInfo>,
     num_final_args: u16,
     agg_collation: Oid,
     resulttype_len: i16,
@@ -563,9 +571,21 @@ pub fn exec_init_agg<'mcx>(
         node.aggstrategy != AGG_MIXED || has_grouping_sets,
         "ExecInitAgg (nodeAgg.c): AGG_MIXED outside grouping sets cannot happen"
     );
-    if node.aggsplit != AGGSPLIT_SIMPLE {
-        panic!("ExecInitAgg (nodeAgg.c): aggsplit {} not ported", node.aggsplit);
-    }
+    let do_combine = node.aggsplit & AGGSPLITOP_COMBINE != 0;
+    let skip_final = node.aggsplit & AGGSPLITOP_SKIPFINAL != 0;
+    let do_serialize = node.aggsplit & AGGSPLITOP_SERIALIZE != 0;
+    let do_deserialize = node.aggsplit & AGGSPLITOP_DESERIALIZE != 0;
+    assert!(
+        node.aggsplit == AGGSPLIT_SIMPLE
+            || node.aggsplit == AGGSPLIT_INITIAL_SERIAL
+            || node.aggsplit == AGGSPLIT_FINAL_DESERIAL,
+        "ExecInitAgg (nodeAgg.c): aggsplit {} cannot happen",
+        node.aggsplit
+    );
+    assert!(
+        node.aggsplit == AGGSPLIT_SIMPLE || !has_grouping_sets,
+        "ExecInitAgg (nodeAgg.c): partial aggregation under grouping sets cannot happen"
+    );
     if node.aggstrategy == AGG_PLAIN && node.numCols != 0 {
         panic!("ExecInitAgg (nodeAgg.c): AGG_PLAIN with grouping columns cannot happen");
     }
@@ -632,6 +652,8 @@ pub fn exec_init_agg<'mcx>(
     trans_aggref.resize(numtrans, None);
     let mut trans_fnoid: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numtrans)?;
     trans_fnoid.resize(numtrans, 0);
+    let mut trans_deserialfn: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, numtrans)?;
+    trans_deserialfn.resize(numtrans, 0);
     let mut trans_typ: PgVec<'mcx, TransTyp> = vec_with_capacity_in(mcx, numtrans)?;
     trans_typ.resize(numtrans, TransTyp { len: 0, byval: true });
 
@@ -672,13 +694,38 @@ pub fn exec_init_agg<'mcx>(
         assert!(transtype != 0, "Aggref.aggtranstype unset (planner must resolve it)");
         let (translen, transbyval) = lsyscache::get_typlenbyval(transtype)?;
 
+        const INTERNALOID: Oid = 2281;
+        let mut serialfn_oid: Oid = 0;
+        let mut deserialfn_oid: Oid = 0;
+        if transtype == INTERNALOID {
+            if do_serialize {
+                assert!(skip_final, "serialization only valid when not running finalfn");
+                if shape.aggserialfn == 0 {
+                    return Err(Box::new(PgError::error(
+                        "serialfunc not provided for serialization aggregation".to_string(),
+                    )));
+                }
+                serialfn_oid = shape.aggserialfn;
+            }
+            if do_deserialize {
+                assert!(do_combine, "deserialization only valid when combining states");
+                if shape.aggdeserialfn == 0 {
+                    return Err(Box::new(PgError::error(
+                        "deserialfunc not provided for deserialization aggregation".to_string(),
+                    )));
+                }
+                deserialfn_oid = shape.aggdeserialfn;
+            }
+        }
+        let serialfn = if serialfn_oid != 0 { Some(fmgr_core::fmgr_info(serialfn_oid)?) } else { None };
+
         let num_direct_args = aggref.aggdirectargs.len();
         let num_final_args = if shape.aggfinalextra {
             aggref.aggargtypes.len() as u16 + 1
         } else {
             num_direct_args as u16 + 1
         };
-        let finalfn = if shape.aggfinalfn != 0 {
+        let finalfn = if !skip_final && shape.aggfinalfn != 0 {
             // Divergence: C aclchecks as the aggregate owner; differs only
             // under SET ROLE.
             let aclresult = aclchk_seams::object_aclcheck::call(
@@ -729,16 +776,27 @@ pub fn exec_init_agg<'mcx>(
             aggref,
             trans_shared: false,
             finalfn,
+            serialfn,
             num_final_args,
             agg_collation: aggref.inputcollid,
             resulttype_len,
             direct_args,
         });
+        let transfn_oid = if do_combine {
+            if shape.aggcombinefn == 0 {
+                return Err(Box::new(PgError::error(
+                    "combinefn not set for aggregate function".to_string(),
+                )));
+            }
+            shape.aggcombinefn
+        } else {
+            shape.aggtransfn
+        };
         match trans_aggref[transno] {
             // find_compatible_trans keys sharing on the transition state.
             Some((_, prev)) => {
                 assert!(
-                    trans_fnoid[transno] == shape.aggtransfn
+                    trans_fnoid[transno] == transfn_oid
                         && prev.aggtranstype == aggref.aggtranstype,
                     "shared transno with diverging transition state"
                 );
@@ -746,7 +804,8 @@ pub fn exec_init_agg<'mcx>(
             }
             None => {
                 trans_aggref[transno] = Some((aggref_node, aggref));
-                trans_fnoid[transno] = shape.aggtransfn;
+                trans_fnoid[transno] = transfn_oid;
+                trans_deserialfn[transno] = deserialfn_oid;
                 trans_typ[transno] = TransTyp { len: translen, byval: transbyval };
                 if !is_ordered_set
                     && (!aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil())
@@ -788,8 +847,19 @@ pub fn exec_init_agg<'mcx>(
                         isnull: false,
                     },
                 };
-                if trans_init[transno].isnull
-                    && fmgr_core::fmgr_info(shape.aggtransfn)?.fn_strict
+                if do_combine {
+                    if fmgr_core::fmgr_info(transfn_oid)?.fn_strict && transtype == INTERNALOID {
+                        return Err(Box::new(
+                            PgError::error(
+                                "combine function with transition type internal must not be \
+                                 declared STRICT"
+                                    .to_string(),
+                            )
+                            .with_sqlstate(::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION),
+                        ));
+                    }
+                } else if trans_init[transno].isnull
+                    && fmgr_core::fmgr_info(transfn_oid)?.fn_strict
                 {
                     // C checks the FIRST aggregated input (nodeAgg.c
                     // IsBinaryCoercible gate) — the strict first-value path
@@ -836,16 +906,30 @@ pub fn exec_init_agg<'mcx>(
         let pg = unsafe { NonNull::new_unchecked(pergroup_base.as_ptr().add(transno)) };
         let is_ordered_set = aggref.aggkind != AGGKIND_NORMAL;
         let num_direct_args = if is_ordered_set { aggref.aggdirectargs.len() } else { 0 };
-        let mut arg_types: PgVec<'mcx, Oid> =
-            vec_with_capacity_in(mcx, aggref.aggargtypes.len() - num_direct_args + 1)?;
-        arg_types.push(aggref.aggtranstype);
-        for t in aggref.aggargtypes.iter().skip(num_direct_args) {
-            arg_types.push(t);
+        let mut arg_types: PgVec<'mcx, Oid>;
+        if do_combine {
+            // aggcombinefn always has two arguments of aggtranstype.
+            assert!(
+                aggref.args.len() == 1 && ordered_specs[transno].is_none(),
+                "combining Aggref has one arg and no DISTINCT/ORDER BY"
+            );
+            arg_types = vec_with_capacity_in(mcx, 2)?;
+            arg_types.push(aggref.aggtranstype);
+            arg_types.push(aggref.aggtranstype);
+        } else {
+            arg_types =
+                vec_with_capacity_in(mcx, aggref.aggargtypes.len() - num_direct_args + 1)?;
+            arg_types.push(aggref.aggtranstype);
+            for t in aggref.aggargtypes.iter().skip(num_direct_args) {
+                arg_types.push(t);
+            }
         }
         let cur_agg =
             is_ordered_set.then(|| (NonNull::from(aggref).cast::<()>(), trans_shared[transno]));
         specs.push(AggTransSpec {
             transfn_oid: trans_fnoid[transno],
+            deserialfn_oid: trans_deserialfn[transno],
+            combine: do_combine,
             inputcollid: aggref.inputcollid,
             init_value_is_null: trans_init[transno].isnull,
             arg_types: arg_types.leak(),
@@ -939,6 +1023,7 @@ pub fn exec_init_agg<'mcx>(
         agg_values_base,
         agg_nulls_base,
         agg_done: false,
+        skip_final,
         numtrans,
         perhash,
         persort,
@@ -2311,6 +2396,7 @@ pub(crate) fn finalize_aggregates<'mcx>(
     pergroup: NonNull<AggPerGroup>,
 ) -> PgResult<()> {
     let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
+    let skip_final = node.skip_final;
     let AggStateData {
         peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, persort, ..
     } = node;
@@ -2328,6 +2414,48 @@ pub(crate) fn finalize_aggregates<'mcx>(
         } else {
             pg.trans_value
         };
+        // finalize_partialaggregate (nodeAgg.c): serialfn or raw transvalue.
+        if skip_final {
+            let (value, isnull) = match pa.serialfn.as_mut() {
+                None => (trans_value, pg.trans_value_is_null),
+                Some(flinfo) => {
+                    if flinfo.fn_strict && pg.trans_value_is_null {
+                        (Datum::null(), true)
+                    } else {
+                        let mut fcinfo = LocalFcinfo::<MAX_FINAL_ARGS>::fresh(0);
+                        fcinfo.nargs = 1;
+                        fcinfo.context = Some(agg_node.cast());
+                        // SAFETY: the per-tuple context outlives this stack
+                        // frame's single call.
+                        unsafe { fcinfo.set_result_mcx(per_tuple) };
+                        fcinfo.args[0] = NullableDatum {
+                            value: trans_value,
+                            isnull: pg.trans_value_is_null,
+                        };
+                        let result = flinfo.invoke(&mut fcinfo)?;
+                        let isnull = fcinfo.isnull;
+                        // SAFETY: a non-null varlena result points at a live
+                        // image (C MakeExpandedObjectReadOnly on the result).
+                        let value = if !isnull && pa.resulttype_len == -1 {
+                            unsafe {
+                                datum::expandeddatum::make_expanded_object_read_only_internal(
+                                    result,
+                                )
+                            }
+                        } else {
+                            result
+                        };
+                        (value, isnull)
+                    }
+                }
+            };
+            // SAFETY: aggno < the once-allocated result array lengths.
+            unsafe {
+                agg_values_base.as_ptr().add(aggno).write(value);
+                agg_nulls_base.as_ptr().add(aggno).write(isnull);
+            }
+            continue;
+        }
         let mut direct: [NullableDatum; MAX_FINAL_ARGS] =
             [NullableDatum::null(); MAX_FINAL_ARGS];
         let mut anynull = false;

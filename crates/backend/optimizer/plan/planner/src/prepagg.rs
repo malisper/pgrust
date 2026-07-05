@@ -5,7 +5,7 @@ use types_error::PgResult;
 use types_nodes::list::NodeList;
 use types_nodes::primnodes::Aggref;
 use types_nodes::{Node, NodeEqual, NodeTag};
-use types_pathnodes::{AggClauseCosts, AggInfo, AggSplit, AggTransInfo, AGGSPLIT_SIMPLE};
+use types_pathnodes::{AggClauseCosts, AggInfo, AggSplit, AggTransInfo};
 
 use crate::costsize::{cost_qual_eval_node, expr_type_typmod};
 use crate::run::PlannerRun;
@@ -510,41 +510,54 @@ pub fn get_agg_clause_costs(
     aggsplit: AggSplit,
     costs: &mut AggClauseCosts,
 ) -> PgResult<()> {
-    assert!(
-        aggsplit == AGGSPLIT_SIMPLE,
-        "get_agg_clause_costs (prepagg.c): partial aggsplit; M3 parallel-agg lane"
-    );
+    let do_combine = aggsplit & types_pathnodes::AGGSPLITOP_COMBINE != 0;
+    let do_serialize = aggsplit & types_pathnodes::AGGSPLITOP_SERIALIZE != 0;
+    let do_deserialize = aggsplit & types_pathnodes::AGGSPLITOP_DESERIALIZE != 0;
+    let skip_final = aggsplit & types_pathnodes::AGGSPLITOP_SKIPFINAL != 0;
     for i in 0..run.root.aggtransinfos.len() {
         let id = run.root.aggtransinfos[i];
-        let (transfn_oid, byval, transtype, transtypmod, transspace, transfn, nargs) = {
+        let (transfn_oid, combinefn_oid, serialfn_oid, deserialfn_oid) = {
+            let ti = run.root.agg_trans_info(id);
+            (ti.transfn_oid, ti.combinefn_oid, ti.serialfn_oid, ti.deserialfn_oid)
+        };
+        let (byval, transtype, transtypmod, transspace, nargs) = {
             let ti = run.root.agg_trans_info(id);
             (
-                ti.transfn_oid,
                 ti.transtypeByVal,
                 ti.aggtranstype,
                 ti.aggtranstypmod,
                 ti.aggtransspace,
-                ti.transfn_oid,
                 ti.args.len(),
             )
         };
-        let _ = transfn;
-        crate::plancat::add_function_cost(transfn_oid, &mut costs.transCost)?;
-
-        for a in 0..nargs {
-            let arg_id = run.root.agg_trans_info(id).args[a];
-            let arg = *run.root.expr_node(arg_id);
-            let expr = arg.as_target_entry().map(|t| t.expr).unwrap_or(arg);
-            let argcost = cost_qual_eval_node(expr)?;
-            costs.transCost.startup += argcost.startup;
-            costs.transCost.per_tuple += argcost.per_tuple;
+        if do_combine {
+            crate::plancat::add_function_cost(combinefn_oid, &mut costs.transCost)?;
+        } else {
+            crate::plancat::add_function_cost(transfn_oid, &mut costs.transCost)?;
+        }
+        if do_deserialize && deserialfn_oid != 0 {
+            crate::plancat::add_function_cost(deserialfn_oid, &mut costs.transCost)?;
+        }
+        if do_serialize && serialfn_oid != 0 {
+            crate::plancat::add_function_cost(serialfn_oid, &mut costs.finalCost)?;
         }
 
-        if let Some(fid) = run.root.agg_trans_info(id).aggfilter {
-            let filter = *run.root.expr_node(fid);
-            let argcost = cost_qual_eval_node(filter)?;
-            costs.transCost.startup += argcost.startup;
-            costs.transCost.per_tuple += argcost.per_tuple;
+        if !do_combine {
+            for a in 0..nargs {
+                let arg_id = run.root.agg_trans_info(id).args[a];
+                let arg = *run.root.expr_node(arg_id);
+                let expr = arg.as_target_entry().map(|t| t.expr).unwrap_or(arg);
+                let argcost = cost_qual_eval_node(expr)?;
+                costs.transCost.startup += argcost.startup;
+                costs.transCost.per_tuple += argcost.per_tuple;
+            }
+
+            if let Some(fid) = run.root.agg_trans_info(id).aggfilter {
+                let filter = *run.root.expr_node(fid);
+                let argcost = cost_qual_eval_node(filter)?;
+                costs.transCost.startup += argcost.startup;
+                costs.transCost.per_tuple += argcost.per_tuple;
+            }
         }
 
         if !byval {
@@ -573,7 +586,7 @@ pub fn get_agg_clause_costs(
             let info = run.root.agg_info(id);
             (info.finalfn_oid, info.aggrefs[0])
         };
-        if finalfn_oid != 0 {
+        if !skip_final && finalfn_oid != 0 {
             crate::plancat::add_function_cost(finalfn_oid, &mut costs.finalCost)?;
         }
         let aggref_node = *run.root.expr_node(aggref_id);
