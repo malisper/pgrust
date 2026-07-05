@@ -374,6 +374,187 @@ pub fn AlterForeignDataWrapper<'mcx>(
     rel.close(RowExclusiveLock)
 }
 
+// AlterForeignDataWrapperOwner + _internal (foreigncmds.c).
+pub fn AlterForeignDataWrapperOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    new_owner_id: Oid,
+) -> PgResult<ObjectAddress> {
+    let rel = table::table_open(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, RowExclusiveLock)?;
+
+    let Some(tp) = SearchSysCacheCopy(
+        mcx,
+        FOREIGNDATAWRAPPERNAME,
+        SysCacheKey::Str(name),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("foreign-data wrapper \"{name}\" does not exist"),
+            None,
+        ));
+    };
+    let getattr = |attnum: i32| -> (Datum, bool) {
+        let mut isnull = false;
+        // SAFETY: pg_foreign_data_wrapper column of the copied tuple.
+        let d = unsafe { types_tuple::heap_getattr(&tp, attnum, rel.descr(), &mut isnull) };
+        (d, isnull)
+    };
+    let fdw_id = getattr(Anum_pg_foreign_data_wrapper_oid).0.as_oid();
+    let old_owner = getattr(Anum_pg_foreign_data_wrapper_fdwowner).0.as_oid();
+
+    if !superuser::superuser()? {
+        return Err(err(
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+            format!("permission denied to change owner of foreign-data wrapper \"{name}\""),
+            Some("Must be superuser to change owner of a foreign-data wrapper."),
+        ));
+    }
+    if !superuser::superuser_arg(new_owner_id)? {
+        return Err(err(
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+            format!("permission denied to change owner of foreign-data wrapper \"{name}\""),
+            Some("The owner of a foreign-data wrapper must be a superuser."),
+        ));
+    }
+
+    if old_owner != new_owner_id {
+        let mut repl_val = [Datum::null(); Natts_pg_foreign_data_wrapper];
+        let mut repl_null = [false; Natts_pg_foreign_data_wrapper];
+        let mut repl_repl = [false; Natts_pg_foreign_data_wrapper];
+        repl_val[Anum_pg_foreign_data_wrapper_fdwowner as usize - 1] =
+            Datum::from_oid(new_owner_id);
+        repl_repl[Anum_pg_foreign_data_wrapper_fdwowner as usize - 1] = true;
+
+        let (acl_datum, isnull) = getattr(Anum_pg_foreign_data_wrapper_fdwacl);
+        let acl_img;
+        if !isnull {
+            let new_acl = aclchk::with_acl_datum(acl_datum, |acl| {
+                adt_acl::aclnewowner(mcx, acl, old_owner, new_owner_id)
+            })?;
+            acl_img = adt_acl::varlena::acl_image(mcx, &new_acl)?;
+            repl_val[Anum_pg_foreign_data_wrapper_fdwacl as usize - 1] = image_datum(&acl_img);
+            repl_repl[Anum_pg_foreign_data_wrapper_fdwacl as usize - 1] = true;
+        }
+
+        let mut newtup =
+            heaptuple::heap_modify_tuple(mcx, &tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
+        let otid = tp.t_self;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+        pg_shdepend::changeDependencyOnOwner(
+            mcx,
+            FOREIGN_DATA_WRAPPER_RELATION_ID,
+            fdw_id,
+            new_owner_id,
+        )?;
+    }
+
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id))
+}
+
+// AlterForeignServerOwner + _internal (foreigncmds.c).
+pub fn AlterForeignServerOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    new_owner_id: Oid,
+) -> PgResult<ObjectAddress> {
+    let rel = table::table_open(mcx, FOREIGN_SERVER_RELATION_ID, RowExclusiveLock)?;
+
+    let Some(tp) = SearchSysCacheCopy(
+        mcx,
+        FOREIGNSERVERNAME,
+        SysCacheKey::Str(name),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(err(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("server \"{name}\" does not exist"),
+            None,
+        ));
+    };
+    let getattr = |attnum: i32| -> (Datum, bool) {
+        let mut isnull = false;
+        // SAFETY: pg_foreign_server column of the copied tuple.
+        let d = unsafe { types_tuple::heap_getattr(&tp, attnum, rel.descr(), &mut isnull) };
+        (d, isnull)
+    };
+    let srv_id = getattr(Anum_pg_foreign_server_oid).0.as_oid();
+    let old_owner = getattr(Anum_pg_foreign_server_srvowner).0.as_oid();
+    let srv_fdw = getattr(Anum_pg_foreign_server_srvfdw).0.as_oid();
+
+    if old_owner != new_owner_id {
+        if !superuser::superuser()? {
+            if !aclchk::object_ownercheck(
+                FOREIGN_SERVER_RELATION_ID,
+                srv_id,
+                miscinit::GetUserId(),
+            )? {
+                aclchk::aclcheck_error(
+                    aclchk::ACLCHECK_NOT_OWNER,
+                    ObjectType::OBJECT_FOREIGN_SERVER,
+                    name,
+                )?;
+            }
+            // check_can_set_role (acl.c).
+            if !adt_acl::member_can_set_role(miscinit::GetUserId(), new_owner_id)? {
+                let rolename = miscinit::GetUserNameFromId(mcx, new_owner_id, false)?
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                return Err(err(
+                    ERRCODE_INSUFFICIENT_PRIVILEGE,
+                    format!("must be able to SET ROLE \"{rolename}\""),
+                    None,
+                ));
+            }
+            let aclresult = aclchk::object_aclcheck(
+                FOREIGN_DATA_WRAPPER_RELATION_ID,
+                srv_fdw,
+                new_owner_id,
+                adt_acl::ACL_USAGE,
+            )?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                let fdw = GetForeignDataWrapper(mcx, srv_fdw)?;
+                aclchk::aclcheck_error(aclresult, ObjectType::OBJECT_FDW, fdw.fdwname)?;
+            }
+        }
+
+        let mut repl_val = [Datum::null(); Natts_pg_foreign_server];
+        let mut repl_null = [false; Natts_pg_foreign_server];
+        let mut repl_repl = [false; Natts_pg_foreign_server];
+        repl_val[Anum_pg_foreign_server_srvowner as usize - 1] = Datum::from_oid(new_owner_id);
+        repl_repl[Anum_pg_foreign_server_srvowner as usize - 1] = true;
+
+        let (acl_datum, isnull) = getattr(Anum_pg_foreign_server_srvacl);
+        let acl_img;
+        if !isnull {
+            let new_acl = aclchk::with_acl_datum(acl_datum, |acl| {
+                adt_acl::aclnewowner(mcx, acl, old_owner, new_owner_id)
+            })?;
+            acl_img = adt_acl::varlena::acl_image(mcx, &new_acl)?;
+            repl_val[Anum_pg_foreign_server_srvacl as usize - 1] = image_datum(&acl_img);
+            repl_repl[Anum_pg_foreign_server_srvacl as usize - 1] = true;
+        }
+
+        let mut newtup =
+            heaptuple::heap_modify_tuple(mcx, &tp, rel.descr(), &repl_val, &repl_null, &repl_repl)?;
+        let otid = tp.t_self;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+        pg_shdepend::changeDependencyOnOwner(mcx, FOREIGN_SERVER_RELATION_ID, srv_id, new_owner_id)?;
+    }
+
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(FOREIGN_SERVER_RELATION_ID, srv_id))
+}
+
 pub fn CreateForeignServer<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateForeignServerStmt<'mcx>,
@@ -879,4 +1060,5 @@ pub fn init_seams() {
     foreigncmds_seams::get_fdw_routine_by_rel_id::set(GetFdwRoutineByRelId);
     foreigncmds_seams::get_foreign_data_wrapper_oid::set(get_foreign_data_wrapper_oid);
     foreigncmds_seams::get_foreign_server_oid::set(get_foreign_server_oid);
+    foreigncmds_seams::pg_options_to_table::set(options::pg_options_to_table);
 }

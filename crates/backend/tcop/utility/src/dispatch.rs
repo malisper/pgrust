@@ -1750,6 +1750,8 @@ fn slow_switch<'mcx>(
                 | types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE
                 | types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY
                 | types_nodes::parsenodes::ObjectType::OBJECT_TSCONFIGURATION
+                | types_nodes::parsenodes::ObjectType::OBJECT_FDW
+                | types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_SERVER
                 | types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA => {
                     // C: address = ExecAlterOwnerStmt; no address collected yet.
                     collect_gap("ALTER OWNER");
