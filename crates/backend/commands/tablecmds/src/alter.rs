@@ -650,6 +650,17 @@ fn ATPrepCmd<'mcx>(
     if let Some(allowed) = at_allowed_targets(cmd.subtype) {
         ATSimplePermissions(cmd.subtype, rel, allowed)?;
     }
+    // Ownercheck backstop (view-ACL SEV-1 fix): must run here, not only at
+    // RangeVar lookup — AlterTableInternal callers reach ATPrepCmd with no
+    // prior ownercheck. Redundant with ATSimplePermissions' internal check
+    // when a target mask exists; unconditional coverage is the point.
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, rel.rd_id, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            crate::get_relkind_objtype(rel.rd_rel.relkind),
+            rel.name(),
+        )?;
+    }
     let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
     let set_recurse = || {
         if recurse {
