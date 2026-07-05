@@ -1261,15 +1261,17 @@ pub fn pg_get_partconstrdef_string<'mcx>(
     for q in partdesc::RelationGetPartitionQual(mcx, &rel)?.iter() {
         quals.lappend(mcx, q)?;
     }
-    rel.close(types_rel::AccessShareLock)?;
+    // C keeps the AccessShareLock so the caller can deparse safely.
+    rel.close(types_rel::NoLock)?;
     if quals.is_nil() {
         return Ok(None);
     }
     let constr_expr = partbounds::make_ands_explicit(mcx, quals)?;
     let mut ctx = deparse::DeparseContext::new(mcx, 0);
+    ctx.varprefix = true;
     ctx.namespaces
         .push(std::rc::Rc::new(query::deparse_context_for(mcx, aliasname, partition_id)?));
-    deparse::get_rule_expr(constr_expr, &mut ctx, true)?;
+    deparse::get_rule_expr(constr_expr, &mut ctx, false)?;
     Ok(Some(ctx.buf))
 }
 
