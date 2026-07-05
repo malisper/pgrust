@@ -190,7 +190,9 @@ network_spgist = { path = "../../backend/utils/adt/network_spgist" }
 commands_constraint = { path = "../../backend/commands/constraint_cmd" }
 brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 brin_bloom = { path = "../../backend/access/brin/brin_bloom" }
+brin_funcs = { path = "../../backend/access/brin/brin_funcs" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
+adt_tsvector_stat = { path = "../../backend/utils/adt/tsvector_stat" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 adt_tsquery_rewrite = { path = "../../backend/utils/adt/tsquery_rewrite" }
 orderedsetaggs = { path = "../../backend/utils/adt/orderedsetaggs" }
