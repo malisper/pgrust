@@ -948,8 +948,16 @@ pub fn exec_init_agg<'mcx>(
         (None, None, None, Some(gs))
     } else if node.aggstrategy == AGG_HASHED {
         let ph = init_perhash(node, estate, numtrans)?;
-        let evaltrans =
-            exec_build_agg_trans_hashed(mcx, &specs, ph.pergroup_cell, fm_agg_node, params)?;
+        let evaltrans = ::executils::with_subplan_compile_env(estate, |env| {
+            ::execexpr::exec_build_agg_trans_hashed_subplans(
+                mcx,
+                &specs,
+                ph.pergroup_cell,
+                fm_agg_node,
+                params,
+                env,
+            )
+        })?;
         (Some(evaltrans), Some(ph), None, None)
     } else {
         let mut persort = if node.aggstrategy == AGG_SORTED {
@@ -965,7 +973,10 @@ pub fn exec_init_agg<'mcx>(
             // estate).
             unsafe { ps.eq.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
         }
-        (Some(exec_build_agg_trans(mcx, &specs, fm_agg_node, params)?), None, persort, None)
+        let evaltrans = ::executils::with_subplan_compile_env(estate, |env| {
+            ::execexpr::exec_build_agg_trans_subplans(mcx, &specs, fm_agg_node, params, env)
+        })?;
+        (Some(evaltrans), None, persort, None)
     };
     // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
     // results ride the armed result mcx there, reset per tuple (phase
@@ -1849,11 +1860,22 @@ fn agg_refill_hash_table<'mcx>(
             }
         };
         if advance {
+            let tmpcontext = node.tmpcontext;
             let AggStateData { perhash, evaltrans, .. } = node;
             let ph = perhash.as_mut().unwrap();
-            let mut slots =
-                EvalSlots { scan: None, inner: None, outer: Some(&mut ph.spill.rslot) };
-            exec_eval_expr(evaltrans.as_mut().unwrap(), &mut slots)?;
+            let et = evaltrans.as_mut().unwrap();
+            if et.has_subplan() {
+                ::executils::exec_eval_expr_with_subplans_outer(
+                    et,
+                    &mut ph.spill.rslot,
+                    estate,
+                    tmpcontext,
+                )?;
+            } else {
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(&mut ph.spill.rslot) };
+                exec_eval_expr(et, &mut slots)?;
+            }
         }
         estate.reset_expr_context(node.tmpcontext);
     }
@@ -2223,9 +2245,14 @@ where
 
     while let Some(outer_id) = fetch_outer(estate)? {
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
-        let outer_slot = estate.slot_mut(outer_id);
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+        let et = node.evaltrans.as_mut().unwrap();
+        if et.has_subplan() {
+            ::executils::exec_eval_expr_with_subplans(et, estate, node.tmpcontext)?;
+        } else {
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+            exec_eval_expr(et, &mut slots)?;
+        }
         if !node.pertrans_sort.is_empty() {
             collect_ordered_input(node, estate)?;
         }
@@ -2295,7 +2322,7 @@ pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
     node.gsets.is_none()
         && node.pertrans_sort.is_empty()
         && (node.plan.aggstrategy == AGG_PLAIN || node.plan.aggstrategy == AGG_HASHED)
-        && node.evaltrans.is_some()
+        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
 }
 
 /// Outer-slot deform prefix the batched drive reads per row (evaltrans
@@ -2582,11 +2609,22 @@ where
         }
         initialize_aggregates(node)?;
         {
+            let tmpcontext = node.tmpcontext;
             let AggStateData { persort, evaltrans, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
-            let mut slots =
-                EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
-            exec_eval_expr(evaltrans.as_mut().unwrap(), &mut slots)?;
+            let et = evaltrans.as_mut().unwrap();
+            if et.has_subplan() {
+                ::executils::exec_eval_expr_with_subplans_outer(
+                    et,
+                    &mut ps.first_slot,
+                    estate,
+                    tmpcontext,
+                )?;
+            } else {
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+                exec_eval_expr(et, &mut slots)?;
+            }
         }
         if !node.pertrans_sort.is_empty() {
             collect_ordered_input(node, estate)?;
@@ -2597,6 +2635,7 @@ where
                 node.agg_done = true;
                 break;
             };
+            let tmpcontext = node.tmpcontext;
             let AggStateData { persort, evaltrans, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
             let outer_slot = estate.slot_mut(outer_id);
@@ -2611,8 +2650,15 @@ where
                 ps.have_pending = true;
                 break;
             }
-            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-            exec_eval_expr(evaltrans.as_mut().unwrap(), &mut slots)?;
+            let et = evaltrans.as_mut().unwrap();
+            if et.has_subplan() {
+                estate.ecxt_mut(tmpcontext).ecxt_outertuple = Some(outer_id);
+                ::executils::exec_eval_expr_with_subplans(et, estate, tmpcontext)?;
+            } else {
+                let mut slots =
+                    EvalSlots { scan: None, inner: None, outer: Some(&mut *outer_slot) };
+                exec_eval_expr(et, &mut slots)?;
+            }
             if !node.pertrans_sort.is_empty() {
                 collect_ordered_input(node, estate)?;
             }

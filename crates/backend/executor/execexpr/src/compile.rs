@@ -399,7 +399,19 @@ pub fn exec_build_agg_trans<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params)
+    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params, None)
+}
+
+/// [`exec_build_agg_trans`] with SubPlan compile support wired (aggregated
+/// arguments holding SubPlans, e.g. an outer-level agg over a sublink).
+pub fn exec_build_agg_trans_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, PergroupMode::Fixed, agg_node, params, sub)
 }
 
 /// Grouping-sets variant: args evaluated once per transno, one trans call
@@ -411,7 +423,7 @@ pub fn exec_build_agg_trans_gsets<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Sets(set_bases), agg_node, params)
+    build_agg_trans(mcx, specs, PergroupMode::Sets(set_bases), agg_node, params, None)
 }
 
 enum PergroupMode<'a> {
@@ -430,7 +442,7 @@ pub fn exec_build_agg_trans_mixed<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Mixed(set_bases, cells), agg_node, params)
+    build_agg_trans(mcx, specs, PergroupMode::Mixed(set_bases, cells), agg_node, params, None)
 }
 
 /// AGG_HASHED variant: pergroup resolves per tuple through `base`, the cell
@@ -443,7 +455,19 @@ pub fn exec_build_agg_trans_hashed<'mcx>(
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Indirect(base), agg_node, params)
+    build_agg_trans(mcx, specs, PergroupMode::Indirect(base), agg_node, params, None)
+}
+
+/// [`exec_build_agg_trans_hashed`] with SubPlan compile support wired.
+pub fn exec_build_agg_trans_hashed_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    base: NonNull<NonNull<AggPerGroup>>,
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans(mcx, specs, PergroupMode::Indirect(base), agg_node, params, sub)
 }
 
 // The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
@@ -464,6 +488,7 @@ fn build_agg_trans<'mcx>(
     mode: PergroupMode<'_>,
     agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
     let mut info = SetupInfo::default();
@@ -524,7 +549,7 @@ fn build_agg_trans<'mcx>(
             debug_assert!(spec.aggfilter.is_none());
         } else if let Some(f) = spec.aggfilter {
             let rout = state.result_out();
-            init_expr_rec(f, &mut state, mcx, rout, None, params, None)?;
+            init_expr_rec(f, &mut state, mcx, rout, None, params, sub)?;
             filter_jump = Some(state.steps.len());
             push_step(
                 &mut state,
@@ -591,6 +616,10 @@ fn build_agg_trans<'mcx>(
                     OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
                 init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, None)?;
             }
+            // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
+            let arg_out =
+                OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
+            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, sub)?;
         }
         let mut bailout: Option<usize> = None;
         if fn_strict && num_trans_inputs > 0 {
