@@ -463,6 +463,7 @@ pub struct CreateStmtCxt<'mcx> {
     pub alist: NodeList<'mcx>,
     pub ckconstraints: NodeList<'mcx>,
     pub nnconstraints: NodeList<'mcx>,
+    pub fkconstraints: NodeList<'mcx>,
 }
 
 impl<'mcx> CreateStmtCxt<'mcx> {
@@ -472,6 +473,7 @@ impl<'mcx> CreateStmtCxt<'mcx> {
             alist: NodeList::nil(),
             ckconstraints: NodeList::nil(),
             nnconstraints: NodeList::nil(),
+            fkconstraints: NodeList::nil(),
         }
     }
 }
@@ -2535,9 +2537,9 @@ pub fn quote_qualified_identifier<'mcx>(
 // transformAlterTableStmt's per-subcommand slice (ATParseTransformCmd's
 // working half): reuses the CREATE-lane transformColumnDefinition. The
 // subcommand is transformed in place (C rebuilds an equal newcmds list);
-// generated CHECK/NOT NULL constraints come back in cxt for the caller to
-// schedule as AT_AddConstraint subcommands; index/FK column constraints
-// are unported ALTER lanes.
+// generated CHECK/NOT NULL/FK constraints come back in cxt for the caller
+// to schedule as AT_AddConstraint subcommands (C's newcmds tail); index
+// column constraints are unported ALTER lanes.
 pub fn transformAlterTableCmd<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
@@ -2581,11 +2583,27 @@ pub fn transformAlterTableCmd<'mcx>(
                 false,
                 rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE,
             )?;
-            if !ixconstraints.is_nil() || !fkconstraints.is_nil() {
-                unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE/REFERENCES");
+            if !ixconstraints.is_nil() {
+                unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE");
             }
             if !cxt.blist.is_nil() || !cxt.alist.is_nil() {
                 unported("ALTER TABLE ADD COLUMN serial/identity (extra statements)");
+            }
+            // transformFKConstraints(skipValidation = no non-null default,
+            // isAddConstraint = true): the new column has no rows to check.
+            let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
+            if cd.raw_default.is_none() {
+                for fknode in fkconstraints.iter() {
+                    // SAFETY: parse tree is statement-owned; no derived refs.
+                    unsafe {
+                        fknode
+                            .with_mut::<Constraint, _>(|c| {
+                                c.skip_validation = true;
+                                c.initially_valid = c.is_enforced;
+                            })
+                            .expect("Constraint");
+                    }
+                }
             }
             // SAFETY: parse tree is analyze-owned; no derived refs live.
             unsafe {
@@ -2593,6 +2611,7 @@ pub fn transformAlterTableCmd<'mcx>(
                     .with_mut::<ColumnDef, _>(|c| c.constraints = NodeList::nil())
                     .expect("ColumnDef");
             }
+            cxt.fkconstraints = fkconstraints;
         }
         AlterTableType::AT_AddIdentity => {
             let defnode = cmd.def.expect("AT_AddIdentity Constraint");
@@ -3027,6 +3046,7 @@ mod tests {
             "t",
             relation,
             columns,
+            &NodeList::nil(),
             &mut nnconstraints,
             ixconstraints,
             &mut alist,
@@ -3076,5 +3096,46 @@ mod tests {
         .unwrap();
         let alist = run_transform(mcx, &columns, &ix).unwrap();
         assert_eq!(alist.len(), 2);
+    }
+
+    fn mk_con(mcx: Mcx<'_>, contype: ConstrType) -> Node<'_> {
+        let mut c = Node::build::<Constraint>(mcx).unwrap();
+        c.contype = contype;
+        c.location = -1;
+        c.seal()
+    }
+
+    #[test]
+    fn constraint_attrs_not_enforced_marks_invalid() {
+        let mcx = ctx().mcx();
+        let check = mk_con(mcx, ConstrType::CONSTR_CHECK);
+        // CHECK constraints start enforced/valid at parse time (gram rule 503).
+        unsafe {
+            check
+                .with_mut::<Constraint, _>(|c| {
+                    c.is_enforced = true;
+                    c.initially_valid = true;
+                })
+                .unwrap();
+        }
+        let attr = mk_con(mcx, ConstrType::CONSTR_ATTR_NOT_ENFORCED);
+        let mut list = NodeList::make1(mcx, check).unwrap();
+        list.lappend(mcx, attr).unwrap();
+        transformConstraintAttrs(&list, None).unwrap();
+        let c = check.as_variant::<Constraint>().unwrap();
+        assert!(!c.is_enforced);
+        assert!(c.skip_validation);
+        assert!(!c.initially_valid);
+    }
+
+    #[test]
+    fn constraint_attrs_double_enforced_errors() {
+        let mcx = ctx().mcx();
+        let check = mk_con(mcx, ConstrType::CONSTR_CHECK);
+        let mut list = NodeList::make1(mcx, check).unwrap();
+        list.lappend(mcx, mk_con(mcx, ConstrType::CONSTR_ATTR_NOT_ENFORCED)).unwrap();
+        list.lappend(mcx, mk_con(mcx, ConstrType::CONSTR_ATTR_ENFORCED)).unwrap();
+        let err = transformConstraintAttrs(&list, None).unwrap_err();
+        assert_eq!(err.message(), "multiple ENFORCED/NOT ENFORCED clauses not allowed");
     }
 }
