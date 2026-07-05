@@ -247,7 +247,7 @@ fn object_with_args<'mcx>(js: J<'_, 'mcx>, o: Option<&q::ObjectWithArgs<'mcx>>) 
     };
     js.tag(NodeTag::T_ObjectWithArgs);
     list(js, &o.objname)?;
-    list(js, &o.objargs)?;
+    opt_list(js, &o.objargs)?;
     list(js, &o.objfuncargs)?;
     js.f_bool(o.args_unspecified);
     Ok(())
@@ -1429,7 +1429,7 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
         NodeTag::T_ObjectWithArgs => {
             let e = cast!(q::ObjectWithArgs);
             list(js, &e.objname)?;
-            list(js, &e.objargs)?;
+            opt_list(js, &e.objargs)?;
             list(js, &e.objfuncargs)?;
             js.f_bool(e.args_unspecified);
         }

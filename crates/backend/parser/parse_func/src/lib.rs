@@ -2023,7 +2023,10 @@ pub fn LookupFuncWithArgs(
     let scratch = mcx::MemoryContext::new("LookupFuncWithArgs");
     let mut argoids = [InvalidOid; FUNC_MAX_ARGS];
     for (i, n) in objargs.iter().enumerate() {
+        // None cells arise only from oper_argtypes NONE; function paths never
+        // carry them (C extractArgTypes emits no NULLs).
         let t = n
+            .expect("function objargs cell is non-NULL")
             .as_variant::<types_nodes::rawnodes::TypeName>()
             .expect("objargs holds TypeName nodes");
         argoids[i] = parse_utilcmd::LookupTypeNameOidExtended(scratch.mcx(), t, missing_ok)?;

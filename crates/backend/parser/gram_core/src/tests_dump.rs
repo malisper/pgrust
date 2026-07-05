@@ -83,6 +83,28 @@ fn list_field(out: &mut String, name: &str, v: &NodeList<'_>) {
     list(out, v);
 }
 
+// outfuncs _outList over a list with NULL cells: outNode(NULL) prints "<>".
+fn opt_list_field(out: &mut String, name: &str, v: &types_nodes::OptNodeList<'_>) {
+    out.push_str(" :");
+    out.push_str(name);
+    out.push(' ');
+    if v.is_nil() {
+        out.push_str("<>");
+        return;
+    }
+    out.push('(');
+    for (i, n) in v.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        match n {
+            Some(n) => node(out, n),
+            None => out.push_str("<>"),
+        }
+    }
+    out.push(')');
+}
+
 fn oid_list_field(out: &mut String, name: &str, l: &types_nodes::list::OidList<'_>) {
     out.push_str(" :");
     out.push_str(name);
@@ -570,7 +592,7 @@ fn node(out: &mut String, n: Node<'_>) {
     } else if let Some(o) = n.as_variant::<types_nodes::parsenodes::ObjectWithArgs>() {
         out.push_str("{OBJECTWITHARGS");
         list_field(out, "objname", &o.objname);
-        list_field(out, "objargs", &o.objargs);
+        opt_list_field(out, "objargs", &o.objargs);
         list_field(out, "objfuncargs", &o.objfuncargs);
         bool_field(out, "args_unspecified", o.args_unspecified);
         out.push('}');
@@ -1702,7 +1724,7 @@ fn node(out: &mut String, n: Node<'_>) {
 fn object_with_args(out: &mut String, o: &types_nodes::parsenodes::ObjectWithArgs<'_>) {
     out.push_str("{OBJECTWITHARGS");
     list_field(out, "objname", &o.objname);
-    list_field(out, "objargs", &o.objargs);
+    opt_list_field(out, "objargs", &o.objargs);
     list_field(out, "objfuncargs", &o.objfuncargs);
     bool_field(out, "args_unspecified", o.args_unspecified);
     out.push('}');

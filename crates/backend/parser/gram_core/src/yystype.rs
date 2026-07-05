@@ -3,7 +3,7 @@
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use types_nodes::{Alias, LimitOption, Node, NodeList};
+use types_nodes::{Alias, LimitOption, Node, NodeList, OptNodeList};
 
 // func_alias_clause's (alias, coldeflist) pair; arena carrier for the
 // non-NIL-coldeflist forms.
@@ -96,6 +96,7 @@ const T_FUNC_ALIAS_COLS: u32 = 15;
 const T_JOIN_USING: u32 = 16;
 const T_JSON_BEHAVIORS: u32 = 17;
 const T_TRANSFORM_ELEMS: u32 = 18;
+const T_OPT_LIST: u32 = 19;
 
 #[cold]
 #[inline(never)]
@@ -324,6 +325,20 @@ impl<'mcx> YYSTYPE<'mcx> {
         }
         // SAFETY: built by List() via into_raw_parts; arena-live, read once.
         unsafe { NodeList::from_raw_parts(self.p.cast(), self.aux()) }
+    }
+
+    #[inline(always)]
+    pub fn OptList(l: OptNodeList<'mcx>) -> Self {
+        let (p, len) = l.into_raw_parts();
+        Self::mk(p as *mut u8, T_OPT_LIST, len)
+    }
+
+    pub fn opt_list(self) -> OptNodeList<'mcx> {
+        if self.tag() != T_OPT_LIST {
+            confusion("OptList");
+        }
+        // SAFETY: built by OptList() via into_raw_parts; arena-live, read once.
+        unsafe { OptNodeList::from_raw_parts(self.p.cast(), self.aux()) }
     }
 
     pub fn alias(self) -> Option<&'mcx Alias<'mcx>> {

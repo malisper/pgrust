@@ -6,7 +6,7 @@ use types_core::{Cardinality, Index, Oid, ParseLoc};
 
 use crate::bitmapset::Bitmapset;
 use crate::jointype::JoinType;
-use crate::list::{IntList, NodeList, OidList};
+use crate::list::{IntList, NodeList, OidList, OptNodeList};
 use crate::node_tree::{Node, NodeVariant};
 use crate::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 use crate::primnodes::{Alias, CoercionContext, FromExpr, OverridingKind};
@@ -384,7 +384,7 @@ pub struct FunctionParameter<'mcx> {
 #[derive(Default)]
 pub struct ObjectWithArgs<'mcx> {
     pub objname: NodeList<'mcx>,
-    pub objargs: NodeList<'mcx>,
+    pub objargs: OptNodeList<'mcx>,
     pub objfuncargs: NodeList<'mcx>,
     pub args_unspecified: bool,
 }

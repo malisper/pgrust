@@ -79,8 +79,12 @@ fn type_does_not_exist_skipping(tn: &TypeName<'_>) -> PgResult<Option<String>> {
     Ok(None)
 }
 
-fn type_in_list_does_not_exist_skipping(typenames: &NodeList<'_>) -> PgResult<Option<String>> {
+// C skips NULL cells (oper_argtypes NONE sides).
+fn type_in_list_does_not_exist_skipping(
+    typenames: &types_nodes::OptNodeList<'_>,
+) -> PgResult<Option<String>> {
     for n in typenames.iter() {
+        let Some(n) = n else { continue };
         let tn = n.as_variant::<TypeName>().expect("objargs holds TypeName nodes");
         if !OidIsValid(catalog_objectaddress::LookupTypeNameOid(tn, true)?) {
             return Ok(Some(format!(
@@ -268,7 +272,9 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
                                 args.push(',');
                             }
                             args.push_str(&catalog_objectaddress::TypeNameToString(
-                                n.as_variant::<TypeName>().expect("objargs holds TypeName nodes"),
+                                n.expect("function objargs cell is non-NULL")
+                                    .as_variant::<TypeName>()
+                                    .expect("objargs holds TypeName nodes"),
                             ));
                         }
                         format!(

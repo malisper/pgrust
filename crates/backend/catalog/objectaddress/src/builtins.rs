@@ -516,9 +516,10 @@ fn fc_pg_get_object_address(
         }
         OBJECT_FUNCTION | OBJECT_PROCEDURE | OBJECT_ROUTINE | OBJECT_AGGREGATE
         | OBJECT_OPERATOR => {
+            let optargs: Vec<Option<Node>> = args.iter().copied().map(Some).collect();
             let owa = ObjectWithArgs {
                 objname: NodeList::from_slice(mcx, &name)?,
-                objargs: NodeList::from_slice(mcx, &args)?,
+                objargs: types_nodes::OptNodeList::from_slice(mcx, &optargs)?,
                 objfuncargs: NodeList::default(),
                 args_unspecified: false,
             };

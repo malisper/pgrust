@@ -1652,9 +1652,64 @@ fn create_view_with_check_option_kinds() {
 }
 
 #[test]
-#[should_panic(expected = "unimplemented grammar action")]
-fn create_recursive_view_is_loud() {
-    let _ = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
+fn create_recursive_view_shapes() {
+    use types_nodes::rawnodes::ViewStmt;
+    // gram.y makeRecursiveViewSelect: query becomes WITH RECURSIVE vr (n) AS
+    // (SELECT 1) SELECT n FROM vr.
+    let list = parse("CREATE RECURSIVE VIEW vr (n) AS SELECT 1");
+    let v = only_stmt(&list).stmt.unwrap().as_variant::<ViewStmt>().expect("ViewStmt");
+    assert_eq!(v.view.expect("view").relname, Some("vr"));
+    assert!(!v.replace);
+    assert_eq!(v.aliases.len(), 1);
+    assert_eq!(v.withCheckOption, types_nodes::rawnodes::ViewCheckOption::NO_CHECK_OPTION);
+    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
+    let w = sel.withClause.expect("withClause").as_with_clause().expect("WithClause");
+    assert!(w.recursive);
+    assert_eq!(w.location, -1);
+    assert_eq!(w.ctes.len(), 1);
+    let cte = w.ctes.nth(0).as_common_table_expr().expect("CommonTableExpr");
+    assert_eq!(cte.ctename, Some("vr"));
+    assert_eq!(cte.aliascolnames.len(), 1);
+    assert_eq!(cte.aliascolnames.nth(0).as_string().unwrap().sval, "n");
+    let inner = cte.ctequery.expect("ctequery").as_select_stmt().expect("SelectStmt");
+    assert_eq!(inner.targetList.len(), 1);
+    assert_eq!(sel.targetList.len(), 1);
+    let rt = sel.targetList.nth(0).as_res_target().expect("ResTarget");
+    assert!(rt.name.is_none());
+    assert_eq!(rt.location, -1);
+    let cr = rt.val.unwrap().as_column_ref().expect("ColumnRef");
+    assert_eq!(cr.fields.nth(0).as_string().unwrap().sval, "n");
+    let rv = sel.fromClause.nth(0).as_variant::<types_nodes::RangeVar>().expect("RangeVar");
+    assert_eq!(rv.relname, Some("vr"));
+    assert!(rv.schemaname.is_none());
+
+    let list = parse("CREATE OR REPLACE TEMP RECURSIVE VIEW s.vr (a, b) AS SELECT 1, 2");
+    let v = only_stmt(&list).stmt.unwrap().as_variant::<ViewStmt>().expect("ViewStmt");
+    assert!(v.replace);
+    let view_rv = v.view.expect("view");
+    assert_eq!(view_rv.relname, Some("vr"));
+    assert_eq!(view_rv.schemaname, Some("s"));
+    assert_eq!(view_rv.relpersistence, types_core::catalog::RELPERSISTENCE_TEMP);
+    assert_eq!(v.aliases.len(), 2);
+    let sel = v.query.expect("query").as_select_stmt().expect("SelectStmt");
+    assert_eq!(sel.targetList.len(), 2);
+    let rt = sel.targetList.nth(1).as_res_target().unwrap();
+    let cr = rt.val.unwrap().as_column_ref().expect("ColumnRef");
+    assert_eq!(cr.fields.nth(0).as_string().unwrap().sval, "b");
+    // The CTE name is the bare relname even for a qualified view name (C
+    // passes view->relname only).
+    let w = sel.withClause.unwrap().as_with_clause().unwrap();
+    let cte = w.ctes.nth(0).as_common_table_expr().unwrap();
+    assert_eq!(cte.ctename, Some("vr"));
+}
+
+#[test]
+fn create_recursive_view_check_option_rejected() {
+    let e = parse_err("CREATE RECURSIVE VIEW vr (n) AS SELECT 1 WITH CHECK OPTION");
+    assert!(
+        format!("{e:?}").contains("WITH CHECK OPTION not supported on recursive views"),
+        "unexpected error: {e:?}"
+    );
 }
 
 #[test]
@@ -1794,6 +1849,84 @@ fn drop_function_shapes() {
     let a2 = d.objects.nth(1).as_object_with_args().expect("ObjectWithArgs");
     assert_eq!(a2.objargs.len(), 0);
     assert!(!a2.args_unspecified);
+}
+
+#[test]
+fn oper_argtypes_none_shapes() {
+    use types_nodes::parsenodes::ObjectType;
+    use types_nodes::rawnodes::TypeName;
+    // Left unary: NONE cell is None (C's NULL TypeName).
+    let list = parse("DROP OPERATOR !!! (NONE, integer)");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert_eq!(d.removeType, ObjectType::OBJECT_OPERATOR);
+    let o = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(o.objname.nth(0).as_string().unwrap().sval, "!!!");
+    assert_eq!(o.objargs.len(), 2);
+    assert!(o.objargs.nth(0).is_none());
+    let r = o.objargs.nth(1).expect("right type").as_variant::<TypeName>().unwrap();
+    assert_eq!(r.names.nth(1).as_string().unwrap().sval, "int4");
+
+    // Right unary (postfix operators are gone, but the gram form remains).
+    let list = parse("DROP OPERATOR IF EXISTS s.@#@ (bigint, NONE) CASCADE");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    assert!(d.missing_ok);
+    let o = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert_eq!(o.objname.len(), 2);
+    assert!(o.objargs.nth(0).is_some());
+    assert!(o.objargs.nth(1).is_none());
+
+    // Binary form still carries two Some cells.
+    let list = parse("DROP OPERATOR + (integer, integer)");
+    let d = only_stmt(&list).stmt.unwrap().as_drop_stmt().expect("DropStmt");
+    let o = d.objects.nth(0).as_object_with_args().expect("ObjectWithArgs");
+    assert!(o.objargs.nth(0).is_some() && o.objargs.nth(1).is_some());
+
+    let list = parse("COMMENT ON OPERATOR !!! (NONE, boolean) IS 'prefix'");
+    let c = only_stmt(&list).stmt.unwrap().as_comment_stmt().expect("CommentStmt");
+    assert_eq!(c.objtype, ObjectType::OBJECT_OPERATOR);
+    let o = c.object.unwrap().as_object_with_args().expect("ObjectWithArgs");
+    assert!(o.objargs.nth(0).is_none() && o.objargs.nth(1).is_some());
+
+    // '(' Typename ')' is C's missing-argument syntax error.
+    let e = parse_err("DROP OPERATOR !!! (integer)");
+    assert!(format!("{e:?}").contains("missing argument"), "unexpected error: {e:?}");
+}
+
+#[test]
+fn alter_materialized_view_shapes() {
+    use types_nodes::parsenodes::{AlterTableStmt, ObjectType};
+    let list = parse("ALTER MATERIALIZED VIEW mv OWNER TO r");
+    let a = only_stmt(&list).stmt.unwrap().as_variant::<AlterTableStmt>().expect("AlterTableStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_MATVIEW);
+    assert!(!a.missing_ok);
+    assert_eq!(a.relation.expect("relation").relname, Some("mv"));
+    assert_eq!(a.cmds.len(), 1);
+
+    let list = parse("ALTER MATERIALIZED VIEW IF EXISTS s.mv SET (fillfactor = 70), CLUSTER ON idx");
+    let a = only_stmt(&list).stmt.unwrap().as_variant::<AlterTableStmt>().expect("AlterTableStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_MATVIEW);
+    assert!(a.missing_ok);
+    let rel = a.relation.expect("relation");
+    assert_eq!(rel.schemaname, Some("s"));
+    assert_eq!(a.cmds.len(), 2);
+}
+
+#[test]
+fn gram_train_2_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (1235, "oper_argtypes", 9104),
+        (1236, "oper_argtypes", 9106),
+        (1237, "oper_argtypes", 9108),
+        (1490, "ViewStmt", 11314),
+        (1491, "ViewStmt", 11333),
+        (290, "AlterTableStmt", 2253),
+        (291, "AlterTableStmt", 2263),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
 }
 
 #[test]
