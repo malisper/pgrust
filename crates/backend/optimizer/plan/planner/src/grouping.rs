@@ -1292,7 +1292,7 @@ fn make_partial_grouping_target<'mcx>(
     let mcx = run.mcx;
     let mut tlist = types_nodes::list::NodeList::nil();
     let mut kept_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
-    let mut non_group_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut non_group_cols = types_nodes::list::NodeList::nil();
     let n = run.root.pathtarget(grouping_target).exprs.len();
     for i in 0..n {
         let gt = run.root.pathtarget(grouping_target);
@@ -1319,16 +1319,23 @@ fn make_partial_grouping_target<'mcx>(
             tlist.lappend(mcx, tle)?;
             kept_exprs.push(expr);
         } else {
-            pull_partial_input_exprs(expr, &mut non_group_exprs);
+            non_group_cols.lappend(mcx, expr)?;
         }
     }
     if let Some(h) = having_qual {
-        pull_partial_input_exprs(h, &mut non_group_exprs);
+        non_group_cols.lappend(mcx, h)?;
     }
+    let non_group_vars = vars::pull_var_clause(
+        mcx,
+        types_nodes::Node::mk_list(mcx, non_group_cols)?,
+        vars::PVC_INCLUDE_AGGREGATES
+            | vars::PVC_RECURSE_WINDOWFUNCS
+            | vars::PVC_INCLUDE_PLACEHOLDERS,
+    )?;
 
     // add_new_columns_to_pathtarget: dedupe by equal().
     let mut uniq: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
-    for &v in non_group_exprs.iter() {
+    for v in &non_group_vars {
         if kept_exprs.iter().chain(uniq.iter()).any(|&u| types_nodes::equal(u, v)) {
             continue;
         }
@@ -1362,79 +1369,6 @@ fn make_partial_grouping_target<'mcx>(
         marked.lappend(mcx, new_tle)?;
     }
     crate::pathnode::create_pathtarget(run, &marked)
-}
-
-// pull_var_clause PVC_INCLUDE_AGGREGATES|PVC_RECURSE_WINDOWFUNCS|
-// PVC_INCLUDE_PLACEHOLDERS over the agg-lane shapes.
-fn pull_partial_input_exprs<'mcx>(
-    node: types_nodes::Node<'mcx>,
-    out: &mut mcx::PgVec<'_, types_nodes::Node<'mcx>>,
-) {
-    use types_nodes::NodeTag;
-    match node.node_tag() {
-        NodeTag::T_Var | NodeTag::T_Aggref | NodeTag::T_PlaceHolderVar => out.push(node),
-        NodeTag::T_TargetEntry => {
-            pull_partial_input_exprs(node.as_target_entry().unwrap().expr, out)
-        }
-        NodeTag::T_OpExpr => {
-            for a in &node.as_op_expr().unwrap().args {
-                pull_partial_input_exprs(a, out);
-            }
-        }
-        NodeTag::T_FuncExpr => {
-            for a in &node.as_func_expr().unwrap().args {
-                pull_partial_input_exprs(a, out);
-            }
-        }
-        NodeTag::T_BoolExpr => {
-            for a in &node.as_bool_expr().unwrap().args {
-                pull_partial_input_exprs(a, out);
-            }
-        }
-        NodeTag::T_RelabelType => {
-            pull_partial_input_exprs(node.as_relabel_type().unwrap().arg, out)
-        }
-        NodeTag::T_CoerceViaIO => {
-            pull_partial_input_exprs(node.as_coerce_via_io().unwrap().arg, out)
-        }
-        NodeTag::T_Const | NodeTag::T_Param => {}
-        NodeTag::T_CaseExpr => {
-            let c = node.as_case_expr().unwrap();
-            if let Some(arg) = c.arg {
-                pull_partial_input_exprs(arg, out);
-            }
-            for w in &c.args {
-                let cw = w.as_case_when().expect("CaseWhen");
-                if let Some(e) = cw.expr {
-                    pull_partial_input_exprs(e, out);
-                }
-                if let Some(r) = cw.result {
-                    pull_partial_input_exprs(r, out);
-                }
-            }
-            if let Some(d) = c.defresult {
-                pull_partial_input_exprs(d, out);
-            }
-        }
-        NodeTag::T_CoalesceExpr => {
-            for a in &node.as_coalesce_expr().unwrap().args {
-                pull_partial_input_exprs(a, out);
-            }
-        }
-        NodeTag::T_NullTest => {
-            if let Some(a) = node.as_null_test().unwrap().arg {
-                pull_partial_input_exprs(a, out);
-            }
-        }
-        NodeTag::T_ScalarArrayOpExpr => {
-            for a in &node.as_scalar_array_op_expr().unwrap().args {
-                pull_partial_input_exprs(a, out);
-            }
-        }
-        other => panic!(
-            "pull_var_clause (var.c): {other:?} with PVC_INCLUDE_AGGREGATES; partial-agg lane"
-        ),
-    }
 }
 
 // mark_partial_aggref (planner.c) on a flat copy of the Aggref.
