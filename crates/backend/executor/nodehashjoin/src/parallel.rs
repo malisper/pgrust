@@ -14,10 +14,39 @@ use ::types_error::PgResult;
 use ::types_nodes::JoinType;
 
 use crate::{
-    cfi, eval_probe_qual, project_result, HashJoinOuter, HashJoinState, HJ_BUILD_HASHTABLE,
+    cfi, eval_probe_qual, HashJoinOuter, HashJoinState, HJ_BUILD_HASHTABLE,
     HJ_FILL_INNER_TUPLES, HJ_FILL_OUTER_TUPLE, HJ_NEED_NEW_BATCH, HJ_NEED_NEW_OUTER,
     HJ_SCAN_BUCKET,
 };
+
+// Body-duplicate of lib.rs's project_result: sharing it would add callsites
+// to the serial hot path's helper and shift its inlining (M3 flatness gate).
+fn project_result<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    inner_id: ExecSlotId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ExecSlotId> {
+    if node.proj.has_subplan() {
+        let ecxt = node.ps_ExprContext;
+        estate.ecxt_mut(ecxt).ecxt_innertuple = Some(inner_id);
+        let result_id = node.ps_ResultTupleSlot;
+        ::executils::exec_project_with_subplans(&mut node.proj, estate, ecxt, result_id)?;
+        return Ok(result_id);
+    }
+    let mcx = estate.es_query_cxt;
+    let outer_id = estate
+        .ecxt(node.ps_ExprContext)
+        .ecxt_outertuple
+        .expect("hashjoin outer tuple set");
+    let result_id = node.ps_ResultTupleSlot;
+    let table = &mut estate.es_tupleTable[..];
+    let [inner, outer, result] = table
+        .get_disjoint_mut([inner_id.0 as usize, outer_id.0 as usize, result_id.0 as usize])
+        .expect("distinct in-range hashjoin slot ids");
+    let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
+    ::execexpr::exec_project(&mut node.proj, &mut slots, result, mcx)?;
+    Ok(result_id)
+}
 
 /// `ExecParallelHashJoin` (`ExecHashJoinImpl(pstate, true)`).
 /// Never inlined: the serial dispatch (hash_join_arm) must keep its
