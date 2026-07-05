@@ -447,6 +447,9 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         }
         NodeTag::T_ParamRef => node.as_param_ref().unwrap().location,
         NodeTag::T_ResTarget => node.as_res_target().unwrap().location,
+        NodeTag::T_ColumnDef => {
+            node.as_variant::<types_nodes::rawnodes::ColumnDef>().unwrap().location
+        }
         NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
         NodeTag::T_CurrentOfExpr => -1,
