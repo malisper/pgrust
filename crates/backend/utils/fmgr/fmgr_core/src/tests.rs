@@ -88,8 +88,18 @@ fn fmgr_info_non_builtin_reads_pg_proc() {
 #[test]
 #[should_panic(expected = "not ported")]
 fn unported_builtin_invocation_panics() {
-    assert!(ported::PORTED.iter().all(|(o, _)| *o != 1294));
-    let mut f = fmgr_info(1294).unwrap();
+    // Any still-unported canonical entry; a pinned oid goes stale the moment
+    // some lane ports it (1294 did).
+    let oid = FMGR_BUILTINS
+        .iter()
+        .find(|b| {
+            b.func as usize == builtin_not_ported as usize
+                && late_builtin(b.foid).is_none()
+                && extra_builtin(b.foid).is_none()
+        })
+        .expect("no unported canonical builtin left")
+        .foid;
+    let mut f = fmgr_info(oid).unwrap();
     let mut fci = LocalFcinfo::<0>::new(InvalidOid);
     let _ = f.invoke(&mut fci);
 }
