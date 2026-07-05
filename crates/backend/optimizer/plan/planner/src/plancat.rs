@@ -314,19 +314,72 @@ pub fn get_relation_info<'mcx>(
         r.amflags |= AMFLAG_HAS_TID_RANGE;
     }
 
-    // Divergence: get_relation_foreign_keys is skipped (the
-    // relcache_seams::relation_get_fkey_list cache leg is live; the planner
-    // wiring — fkey_list population + match_foreign_keys_to_quals — is the
-    // K2 follow-up), so join size estimation uses fkselec = 1.0 where C
-    // would match FK constraints. Estimate-only: affects plan choice, never
-    // results.
-    debug_assert!(run.root.fkey_list.is_empty());
+    get_relation_foreign_keys(run, rel, &relation, inhparent)?;
 
     if inhparent && relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         set_relation_partition_info(run, rel, &relation)?;
     }
 
     relation.close(NoLock)?;
+    Ok(())
+}
+
+// get_relation_foreign_keys (plancat.c): ForeignKeyOptInfos for FKs that
+// reference some other RTE of the query, appended to root.fkey_list.
+fn get_relation_foreign_keys<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    relation: &Relation<'mcx>,
+    inhparent: bool,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    if run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_BASEREL
+        || run.parse().rtable.len() < 2
+    {
+        return Ok(());
+    }
+    // An inheritance parent's FKs would only help if every member had
+    // equivalent constraints; C doesn't attempt that deduction either.
+    if inhparent {
+        return Ok(());
+    }
+    let cachedfkeys = relcache_seams::relation_get_fkey_list::call(relation.rd_id)?;
+    let rel_relid = run.root.rel(rel).relid;
+    for cachedfk in cachedfkeys.iter() {
+        debug_assert!(cachedfk.conrelid == relation.rd_id);
+        if !cachedfk.conenforced {
+            continue;
+        }
+        for (idx, rte_node) in run.parse().rtable.iter().enumerate() {
+            let rti = idx as u32 + 1;
+            let rte = rte_node.as_range_tbl_entry().expect("rtable cell is a RangeTblEntry");
+            if rte.rtekind != types_nodes::parsenodes::RTEKind::RTE_RELATION
+                || rte.relid != cachedfk.confrelid
+            {
+                continue;
+            }
+            // An inheritance parent doesn't really match, nor does a
+            // self-referential FK (joins only).
+            if rte.inh || rti == rel_relid {
+                continue;
+            }
+            let nkeys = cachedfk.nkeys as usize;
+            let mut info = types_pathnodes::ForeignKeyOptInfo::new(mcx);
+            info.con_relid = rel_relid;
+            info.ref_relid = rti;
+            info.nkeys = cachedfk.nkeys;
+            info.conkey.extend_from_slice(&cachedfk.conkey[..nkeys]);
+            info.confkey.extend_from_slice(&cachedfk.confkey[..nkeys]);
+            info.conpfeqop.extend_from_slice(&cachedfk.conpfeqop[..nkeys]);
+            for _ in 0..nkeys {
+                info.eclass.push(None);
+                info.fk_eclass_member.push(None);
+                info.rinfos.push(PgVec::new_in(mcx));
+            }
+            let id = run.root.alloc_foreign_key(info);
+            run.root.fkey_list.push(id);
+        }
+    }
     Ok(())
 }
 

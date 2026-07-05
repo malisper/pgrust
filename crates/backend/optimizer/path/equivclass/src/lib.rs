@@ -1694,15 +1694,64 @@ pub fn exprs_known_equal(
     false
 }
 
+// match_eclasses_to_foreign_key_col (equivclass.c); on success also fills
+// fkinfo.eclass[colno] and fkinfo.fk_eclass_member[colno].
 pub fn match_eclasses_to_foreign_key_col(
-    _run: &mut PlannerRun<'_>,
-    _fkinfo_idx: usize,
-    _colno: usize,
-) -> Option<EcId> {
-    panic!(
-        "match_eclasses_to_foreign_key_col (equivclass.c): fkey_list is empty until the \
-         FK-selectivity lane ports get_relation_foreign_keys"
-    )
+    run: &mut PlannerRun<'_>,
+    fkinfo_id: types_pathnodes::NodeId,
+    colno: usize,
+) -> PgResult<Option<EcId>> {
+    let mcx = run.mcx;
+    let (var1varno, var1attno, var2varno, var2attno, eqop) = {
+        let fk = run.root.foreign_key(fkinfo_id);
+        (fk.con_relid, fk.conkey[colno], fk.ref_relid, fk.confkey[colno], fk.conpfeqop[colno])
+    };
+    debug_assert!(run.root.ec_merging_done);
+    let rel1 = find_base_rel(&run.root, var1varno as i32);
+    let rel2 = find_base_rel(&run.root, var2varno as i32);
+    let matching_ecs = types_pathnodes::relids::relids_intersect(
+        mcx,
+        &run.root.rel(rel1).eclass_indexes,
+        &run.root.rel(rel2).eclass_indexes,
+    );
+    let mut opfamilies: Option<PgVec<'_, u32>> = None;
+    for i in relids_members(&matching_ecs) {
+        let ec = EcId(i as u32);
+        if run.root.ec(ec).ec_has_volatile {
+            continue;
+        }
+        // Broken ECs are okay to consider, per exprs_known_equal; child
+        // members never appear in ec_members.
+        let mut item1_em: Option<EmId> = None;
+        let mut item2_em: Option<EmId> = None;
+        for m in 0..run.root.ec(ec).ec_members.len() {
+            let em_id = run.root.ec(ec).ec_members[m];
+            debug_assert!(!run.root.em(em_id).em_is_child);
+            let mut expr = *run.root.expr_node(run.root.em(em_id).em_expr);
+            while expr.node_tag() == NodeTag::T_RelabelType {
+                expr = expr.as_relabel_type().unwrap().arg;
+            }
+            let Some(var) = expr.as_var() else { continue };
+            if var.varno == var1varno as i32 && var.varattno == var1attno {
+                item1_em = Some(em_id);
+            } else if var.varno == var2varno as i32 && var.varattno == var2attno {
+                item2_em = Some(em_id);
+            }
+            if let (Some(_), Some(em2)) = (item1_em, item2_em) {
+                if opfamilies.is_none() {
+                    opfamilies = Some(lsyscache::get_mergejoin_opfamilies(mcx, eqop)?);
+                }
+                if opfamilies.as_ref().unwrap()[..] == run.root.ec(ec).ec_opfamilies[..] {
+                    let fk = run.root.foreign_key_mut(fkinfo_id);
+                    fk.eclass[colno] = Some(ec);
+                    fk.fk_eclass_member[colno] = Some(em2);
+                    return Ok(Some(ec));
+                }
+                break;
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn find_derived_clause_for_ec_member(

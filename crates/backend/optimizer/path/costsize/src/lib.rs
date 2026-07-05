@@ -3428,9 +3428,10 @@ pub fn final_cost_mergejoin(
 }
 
 // set_joinrel_size_estimates + calc_joinrel_size_estimate (costsize.c),
-// INNER/LEFT/SEMI/ANTI arms; FK selectivity is 1.0 while fkey_list stays
-// empty. Outer joins (incl. ANTI) split joinquals from pushed-down quals;
-// INNER and SEMI use the whole restrictlist.
+// INNER/LEFT/SEMI/ANTI arms. FK-matched joinclauses are dropped from the
+// restrictlist and estimated with FK semantics; outer joins (incl. ANTI)
+// split joinquals from pushed-down quals; INNER and SEMI use the whole
+// restrictlist.
 pub fn set_joinrel_size_estimates<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinrel: RelId,
@@ -3441,8 +3442,9 @@ pub fn set_joinrel_size_estimates<'mcx>(
 ) -> PgResult<()> {
     let outer_rows = run.root.rel(outer_rel).rows;
     let inner_rows = run.root.rel(inner_rel).rows;
-    let nrows =
-        calc_joinrel_size_estimate(run, joinrel, outer_rows, inner_rows, sjinfo, restrictlist)?;
+    let nrows = calc_joinrel_size_estimate(
+        run, joinrel, outer_rel, inner_rel, outer_rows, inner_rows, sjinfo, restrictlist,
+    )?;
     run.root.rel_mut(joinrel).rows = nrows;
     Ok(())
 }
@@ -3455,26 +3457,167 @@ pub fn get_parameterized_joinrel_size<'mcx>(
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrict_clauses: &[types_pathnodes::RinfoId],
 ) -> PgResult<f64> {
+    let outer_rel = run.root.path(outer_path).base().parent;
+    let inner_rel = run.root.path(inner_path).base().parent;
     let outer_rows = run.root.path(outer_path).base().rows;
     let inner_rows = run.root.path(inner_path).base().rows;
-    let mut nrows =
-        calc_joinrel_size_estimate(run, rel, outer_rows, inner_rows, sjinfo, restrict_clauses)?;
+    let mut nrows = calc_joinrel_size_estimate(
+        run, rel, outer_rel, inner_rel, outer_rows, inner_rows, sjinfo, restrict_clauses,
+    )?;
     if nrows > run.root.rel(rel).rows {
         nrows = run.root.rel(rel).rows;
     }
     Ok(nrows)
 }
 
+// get_foreign_key_join_selectivity (costsize.c): substitute estimate for join
+// clauses matched to FK constraints, removing them from the worklist; 1.0
+// when there are none.
+fn get_foreign_key_join_selectivity<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    outer_rel: RelId,
+    inner_rel: RelId,
+    sjinfo: &SpecialJoinInfo<'mcx>,
+    worklist: &mut PgVec<'mcx, types_pathnodes::RinfoId>,
+) -> PgResult<f64> {
+    use types_pathnodes::relids;
+    let mcx = run.mcx;
+    let mut fkselec = 1.0f64;
+    let jointype = sjinfo.jointype;
+    let fkeys = {
+        let mut v: PgVec<'mcx, NodeId> = PgVec::new_in(mcx);
+        v.extend(run.root.fkey_list.iter().copied());
+        v
+    };
+    for &fkid in fkeys.iter() {
+        let (con_relid, ref_relid, nkeys) = {
+            let fk = run.root.foreign_key(fkid);
+            (fk.con_relid as i32, fk.ref_relid as i32, fk.nkeys as usize)
+        };
+        let outer_relids = &run.root.rel(outer_rel).relids;
+        let inner_relids = &run.root.rel(inner_rel).relids;
+        // Relevant only if the FK connects a baserel on one side of this
+        // join to a baserel on the other side.
+        let ref_is_outer = if relids::relids_is_member(con_relid, outer_relids)
+            && relids::relids_is_member(ref_relid, inner_relids)
+        {
+            false
+        } else if relids::relids_is_member(ref_relid, outer_relids)
+            && relids::relids_is_member(con_relid, inner_relids)
+        {
+            true
+        } else {
+            continue;
+        };
+        // Semi/anti: the FK only tells us the fraction of outer rows with
+        // matches when the referenced rel is exactly the inside of the join.
+        if (jointype == types_pathnodes::JOIN_SEMI || jointype == types_pathnodes::JOIN_ANTI)
+            && (ref_is_outer || relids::relids_singleton_member(inner_relids).is_none())
+        {
+            continue;
+        }
+        let mut removedlist: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(mcx);
+        let mut kept: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(mcx);
+        for &rid in worklist.iter() {
+            let mut remove_it = false;
+            for i in 0..nkeys {
+                if let Some(parent_ec) = run.root.rinfo(rid).parent_ec {
+                    // Any clause derived from the matched EC counts as
+                    // matching the FK: equivclass.c could equally have
+                    // generated one equating the FK's Vars. EC-derived
+                    // clauses without parent_ec compare non-Var expressions
+                    // and can't match the FK anyway.
+                    if run.root.foreign_key(fkid).eclass[i] == Some(parent_ec) {
+                        remove_it = true;
+                        break;
+                    }
+                } else if run.root.foreign_key(fkid).rinfos[i].contains(&rid) {
+                    remove_it = true;
+                    break;
+                }
+            }
+            if remove_it {
+                removedlist.push(rid);
+            } else {
+                kept.push(rid);
+            }
+        }
+        // If we failed to remove all the clauses we expected (a const EC
+        // generates no join clause at all; a previous FK may have consumed a
+        // shared EC-derived clause), applying this FK's selectivity would
+        // double-count: put the removed clauses back and punt.
+        let expected = {
+            let fk = run.root.foreign_key(fkid);
+            fk.nmatched_ec - fk.nconst_ec + fk.nmatched_ri
+        };
+        if removedlist.is_empty() || removedlist.len() != expected as usize {
+            kept.extend(removedlist.iter().copied());
+            *worklist = kept;
+            continue;
+        }
+        *worklist = kept;
+        // Each referencing row matches exactly one referenced-table row; the
+        // null-fraction and inheritance derates are skipped as in C.
+        let ref_rel = relids::find_base_rel(&run.root, ref_relid);
+        let ref_tuples = run.root.rel(ref_rel).tuples.max(1.0);
+        if jointype == types_pathnodes::JOIN_SEMI || jointype == types_pathnodes::JOIN_ANTI {
+            // Referenced table exactly the inside of the join: selectivity is
+            // that of its restriction clauses, rows / tuples.
+            fkselec *= run.root.rel(ref_rel).rows / ref_tuples;
+        } else {
+            fkselec *= 1.0 / ref_tuples;
+        }
+        // Columns in ec_has_const ECs got "var = const" restrictions on both
+        // input rels; divide out the referencing Var's restriction
+        // selectivity so it isn't double-counted.
+        if run.root.foreign_key(fkid).nconst_ec > 0 {
+            for i in 0..nkeys {
+                let Some(ec) = run.root.foreign_key(fkid).eclass[i] else { continue };
+                if !run.root.ec(ec).ec_has_const {
+                    continue;
+                }
+                let em = run.root.foreign_key(fkid).fk_eclass_member[i]
+                    .expect("matched EC column carries fk_eclass_member");
+                if let Some(rinfo) =
+                    planner_seams::find_derived_clause_for_ec_member::call(run, ec, em)
+                {
+                    let s0 = planner_seams::clause_selectivity::call(
+                        run,
+                        rinfo,
+                        0,
+                        jointype,
+                        Some(sjinfo),
+                    )?;
+                    if s0 > 0.0 {
+                        fkselec /= s0;
+                    }
+                }
+            }
+        }
+    }
+    Ok(fkselec.clamp(0.0, 1.0))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn calc_joinrel_size_estimate<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinrel: RelId,
+    outer_rel: RelId,
+    inner_rel: RelId,
     outer_rows: f64,
     inner_rows: f64,
     sjinfo: &SpecialJoinInfo<'mcx>,
     restrictlist: &[types_pathnodes::RinfoId],
 ) -> PgResult<f64> {
-    debug_assert!(run.root.fkey_list.is_empty());
     let jointype = sjinfo.jointype;
+    let mut fk_worklist = {
+        let mut v: PgVec<'mcx, types_pathnodes::RinfoId> = PgVec::new_in(run.mcx);
+        v.extend(restrictlist.iter().copied());
+        v
+    };
+    let fkselec =
+        get_foreign_key_join_selectivity(run, outer_rel, inner_rel, sjinfo, &mut fk_worklist)?;
+    let restrictlist = &fk_worklist[..];
     let is_outer = is_outer_join(jointype);
     let (jselec, pselec) = if is_outer {
         let joinrelids =
@@ -3514,18 +3657,18 @@ fn calc_joinrel_size_estimate<'mcx>(
         (jselec, 0.0)
     };
     let nrows = match jointype {
-        JOIN_INNER => outer_rows * inner_rows * jselec,
+        JOIN_INNER => outer_rows * inner_rows * fkselec * jselec,
         JOIN_LEFT => {
-            let mut nrows = outer_rows * inner_rows * jselec;
+            let mut nrows = outer_rows * inner_rows * fkselec * jselec;
             if nrows < outer_rows {
                 nrows = outer_rows;
             }
             nrows * pselec
         }
-        types_pathnodes::JOIN_SEMI => outer_rows * jselec,
-        types_pathnodes::JOIN_ANTI => outer_rows * (1.0 - jselec) * pselec,
+        types_pathnodes::JOIN_SEMI => outer_rows * fkselec * jselec,
+        types_pathnodes::JOIN_ANTI => outer_rows * (1.0 - fkselec * jselec) * pselec,
         types_pathnodes::JOIN_FULL => {
-            let mut nrows = outer_rows * inner_rows * jselec;
+            let mut nrows = outer_rows * inner_rows * fkselec * jselec;
             if nrows < outer_rows {
                 nrows = outer_rows;
             }

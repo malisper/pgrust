@@ -449,12 +449,54 @@ pub fn mark_dummy_rel(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     crate::allpaths::add_dummy_path(run, rel)
 }
 
-// find_join_rel (relnode.c), linear form (join_rel_hash unported).
+// find_join_rel (relnode.c): linear probe while the list is short, relids-
+// keyed hash past 32 entries. The hash is built eagerly by add_join_rel when
+// the list crosses the threshold (C builds it lazily on the next lookup);
+// same lookups, same results.
 pub fn find_join_rel(
     root: &types_pathnodes::PlannerInfo<'_>,
     relids: &Relids<'_>,
 ) -> Option<RelId> {
+    if let Some(hash) = &root.join_rel_hash {
+        let words = relids.as_ref().map_or(&[][..], |b| b.word_slice());
+        return hash.get(words).copied();
+    }
     root.join_rel_list.iter().copied().find(|&jr| relids_equal(&root.rel(jr).relids, relids))
+}
+
+// build_join_rel_hash (relnode.c).
+fn build_join_rel_hash<'mcx>(root: &mut types_pathnodes::PlannerInfo<'mcx>) {
+    debug_assert!(root.join_rel_hash.is_none());
+    let mcx = root.mcx;
+    let mut hash = mcx::PgFxHashMap::with_capacity_and_hasher_in(256, Default::default(), mcx);
+    for &jr in root.join_rel_list.iter() {
+        hash.insert(join_rel_hash_key(mcx, &root.rel(jr).relids), jr);
+    }
+    root.join_rel_hash = Some(hash);
+}
+
+fn join_rel_hash_key<'mcx>(mcx: mcx::Mcx<'mcx>, relids: &Relids<'_>) -> PgVec<'mcx, u64> {
+    let mut key: PgVec<'mcx, u64> = PgVec::new_in(mcx);
+    if let Some(b) = relids {
+        key.extend_from_slice(b.word_slice());
+    }
+    key
+}
+
+// add_join_rel (relnode.c): append to join_rel_list and the hash once the
+// list has outgrown the linear probe.
+pub(crate) fn add_join_rel<'mcx>(
+    root: &mut types_pathnodes::PlannerInfo<'mcx>,
+    joinrel: RelId,
+) {
+    let mcx = root.mcx;
+    root.join_rel_list.push(joinrel);
+    if root.join_rel_hash.is_none() && root.join_rel_list.len() > 32 {
+        build_join_rel_hash(root);
+    } else if root.join_rel_hash.is_some() {
+        let key = join_rel_hash_key(mcx, &root.rel(joinrel).relids);
+        root.join_rel_hash.as_mut().unwrap().insert(key, joinrel);
+    }
 }
 
 pub(crate) fn populate_joinrel_with_paths<'mcx>(
@@ -780,13 +822,10 @@ fn build_join_rel<'mcx>(
     pushed_down_joins: &PgVec<'mcx, SpecialJoinInfo<'mcx>>,
 ) -> PgResult<(RelId, PgVec<'mcx, types_pathnodes::RinfoId>)> {
     let mcx = run.mcx;
-    for i in 0..run.root.join_rel_list.len() {
-        let jr = run.root.join_rel_list[i];
-        if relids_equal(&run.root.rel(jr).relids, &joinrelids) {
-            let restrictlist =
-                build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel, sjinfo)?;
-            return Ok((jr, restrictlist));
-        }
+    if let Some(jr) = find_join_rel(&run.root, &joinrelids) {
+        let restrictlist =
+            build_joinrel_restrictlist(run, &joinrelids, outer_rel, inner_rel, sjinfo)?;
+        return Ok((jr, restrictlist));
     }
 
     let mut joinrel = types_pathnodes::RelOptInfo::new(mcx);
@@ -866,8 +905,7 @@ fn build_join_rel<'mcx>(
         }
     }
 
-    run.root.join_rel_list.push(joinrel);
-    debug_assert!(run.root.join_rel_hash.is_none());
+    add_join_rel(&mut run.root, joinrel);
     if !run.root.join_rel_level.is_empty() {
         let lev = run.root.join_cur_level;
         debug_assert!(lev > 0);
