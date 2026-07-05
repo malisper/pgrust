@@ -4,7 +4,7 @@ use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{BlockNumber, InvalidBlockNumber};
 use ::types_error::PgResult;
-use ::types_nbtree::{BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsValid};
+use ::types_nbtree::{BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsValid, P_NONE};
 use ::types_relscan::{
     BTParallelScanShared, BtParallelArrayElem, BtParallelScanState, BtParallelSkipArg, BtPsState,
 };
@@ -12,8 +12,6 @@ use ::types_scan::scankey::{
     SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_SKIP, SK_ISNULL, SK_SEARCHNULL,
 };
 use ::types_tuple::varatt::varsize_any;
-
-use crate::page::P_NONE;
 
 fn lock(shared: &BTParallelScanShared) -> std::sync::MutexGuard<'_, BtParallelScanState> {
     shared.state.lock().unwrap_or_else(|e| e.into_inner())
