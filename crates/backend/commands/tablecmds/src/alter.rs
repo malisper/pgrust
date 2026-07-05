@@ -1585,6 +1585,7 @@ fn ATRewriteTable<'mcx>(
     };
 
     let mut notnull_attrs: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
+    let mut notnull_virtual_attrs: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
     if newrel.is_some() || tab.verify_new_notnull {
         // C reads CompactAttribute.attnullability: invalid not-null
         // constraints are not verified.
@@ -1594,14 +1595,39 @@ fn ATRewriteTable<'mcx>(
                 && !att.attisdropped
             {
                 if att.attgenerated == b'v' as i8 {
-                    unported("ATRewriteTable notnull_virtual_attrs (ExecRelGenVirtualNotNull)");
+                    notnull_virtual_attrs.push(att.attnum);
+                } else {
+                    notnull_attrs.push(att.attnum);
                 }
-                notnull_attrs.push(att.attnum);
             }
         }
-        if !notnull_attrs.is_empty() {
+        if !notnull_attrs.is_empty() || !notnull_virtual_attrs.is_empty() {
             needscan = true;
         }
+    }
+
+    // ExecRelGenVirtualNotNull (execMain.c), reimplemented locally: a
+    // resolved-once NullTest over each virtual column's generation
+    // expression (tablecmds cannot dep nodemodifytable — cycle).
+    let mut nn_virtual_states: PgVec<
+        'mcx,
+        (AttrNumber, mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>),
+    > = PgVec::new_in(mcx);
+    for &attnum in notnull_virtual_attrs.iter() {
+        let genexpr = rewrite_handler::build_generation_expression(mcx, &oldrel, attnum as usize)?;
+        let nulltest = Node::mk(
+            mcx,
+            types_nodes::primnodes::NullTest {
+                arg: Some(genexpr),
+                nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+                argisrow: false,
+                location: -1,
+            },
+        )?;
+        let planned = clauses::eval_const_expressions(mcx, nulltest)?;
+        let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
+            .expect("virtual not-null test expr");
+        nn_virtual_states.push((attnum, state));
     }
 
     if newrel.is_some() || needscan {
@@ -1718,6 +1744,30 @@ fn ATRewriteTable<'mcx>(
             for &attn in notnull_attrs.iter() {
                 if exectuples::slot_attisnull(insertslot, attn as i32) {
                     let att = new_tupdesc.attr(attn as usize - 1);
+                    let colname =
+                        core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "column \"{colname}\" of relation \"{relname}\" contains \
+                                 null values"
+                            ),
+                        )
+                        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
+                    ));
+                }
+            }
+            for (attnum, state) in nn_virtual_states.iter_mut() {
+                let mut slots = execexpr::EvalSlots {
+                    scan: Some(insertslot),
+                    inner: None,
+                    outer: None,
+                };
+                let r = execexpr::exec_eval_expr(state, &mut slots)?;
+                // ExecCheck semantics: NULL results pass.
+                if !r.isnull && !r.value.as_bool() {
+                    let att = new_tupdesc.attr(*attnum as usize - 1);
                     let colname =
                         core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
                     return Err(Box::new(
@@ -2002,45 +2052,17 @@ fn ATExecAddColumn<'mcx>(
         xact::CommandCounterIncrement()?;
     }
 
-    // Phase-3 fill / attmissingval fast path. Domain and generated columns
-    // are unreachable (loud at parse), so defval exists iff atthasdef.
-    let mut has_missing = false;
+    // Relations without storage skip the phase-3 fill decision entirely.
     let rel3 = table::table_open(mcx, myrelid, NoLock)?;
-    if rel3.rd_att.attr(newattnum as usize - 1).atthasdef {
-        let defval = rewrite_handler::build_column_default(mcx, &rel3, newattnum as usize)?
-            .expect("atthasdef column has a default");
-        let defval = clauses::eval_const_expressions(mcx, defval)?;
-        wqueue[tabidx].has_newvals = true;
-        wqueue[tabidx].newvals.push(NewColumnValue {
-            attnum: newattnum as AttrNumber,
-            expr: defval,
-            is_generated: col_def.generated != 0,
-        });
-        let has_domain_constraints =
-            typcache::domain::DomainHasConstraints(attribute.atttypid)?;
-        if col_def.generated == 0
-            && !has_domain_constraints
-            && !clauses::contain_volatile_functions(defval)?
-        {
-            let mut state = execexpr::exec_init_expr(mcx, Some(defval), execexpr::ParamBind::NONE)?
-                .expect("non-nil default expression");
-            state.arm_result_mcx(mcx);
-            let mut slots =
-                execexpr::EvalSlots { scan: None, inner: None, outer: None };
-            let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;
-            if !r.isnull {
-                catalog_heap::StoreAttrMissingVal(mcx, &rel3, newattnum as AttrNumber, r.value)?;
-                xact::CommandCounterIncrement()?;
-                has_missing = true;
-            }
-        } else {
-            wqueue[tabidx].rewrite |= AT_REWRITE_DEFAULT_VAL;
-        }
-    } else if typcache::domain::DomainHasConstraints(attribute.atttypid)? {
-        unported("ATExecAddColumn domain-typed column without default (null-coercion fill)");
-    }
-    if !has_missing {
-        wqueue[tabidx].verify_new_notnull |= col_def.is_not_null;
+    if types_rel::RELKIND_HAS_STORAGE(rel3.rd_rel.relkind) {
+        add_column_phase3_fill(
+            mcx,
+            &mut wqueue[tabidx],
+            &rel3,
+            newattnum as AttrNumber,
+            col_def,
+            &attribute,
+        )?;
     }
 
     let myself =
@@ -2103,6 +2125,99 @@ fn ATExecAddColumn<'mcx>(
             query_string,
         )?;
         childrel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+// ATExecAddColumn's defval leg: queue the phase-3 fill, or store the value
+// as attmissingval and skip the rewrite.
+fn add_column_phase3_fill<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: AttrNumber,
+    col_def: &ColumnDef<'mcx>,
+    attribute: &types_tuple::FormData_pg_attribute,
+) -> PgResult<()> {
+    let mut has_missing = false;
+    let has_domain_constraints = typcache::domain::DomainHasConstraints(attribute.atttypid)?;
+    let mut defval = if rel.rd_att.attr(attnum as usize - 1).atthasdef {
+        Some(
+            rewrite_handler::build_column_default(mcx, rel, attnum as usize)?
+                .expect("atthasdef column has a default"),
+        )
+    } else {
+        None
+    };
+    if defval.is_none() && has_domain_constraints {
+        // NULL::basetype through CoerceToDomain so phase 3 evaluates the
+        // domain constraints (C keeps the historical only-if-rows failure).
+        let mut base_type_mod = attribute.atttypmod;
+        let base_type_id =
+            lsyscache::getBaseTypeAndTypmod(attribute.atttypid, &mut base_type_mod)?;
+        let base_type_coll = lsyscache::get_typcollation(base_type_id)?;
+        let (typlen, typbyval) = lsyscache::get_typlenbyval(base_type_id)?;
+        let nullconst = Node::mk(
+            mcx,
+            types_nodes::primnodes::Const {
+                consttype: base_type_id,
+                consttypmod: base_type_mod,
+                constcollid: base_type_coll,
+                constlen: typlen as i32,
+                constvalue: Datum::null(),
+                constisnull: true,
+                constbyval: typbyval,
+                location: -1,
+            },
+        )?;
+        let pstate = parser_small1::make_parsestate(mcx, None);
+        defval = Some(
+            coerce::coerce_to_target_type(
+                mcx,
+                &pstate,
+                nullconst,
+                base_type_id,
+                attribute.atttypid,
+                attribute.atttypmod,
+                coerce::CoercionContext::COERCION_ASSIGNMENT,
+                types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?
+            .unwrap_or_else(|| panic!("failed to coerce base type to domain")),
+        );
+    }
+    if let Some(defval) = defval {
+        let defval = clauses::eval_const_expressions(mcx, defval)?;
+        tab.has_newvals = true;
+        tab.newvals.push(NewColumnValue {
+            attnum,
+            expr: defval,
+            is_generated: col_def.generated != 0,
+        });
+        // Coercion to a constrained domain counts as volatile here: it may
+        // fail, which must only happen when the table has rows.
+        if rel.rd_rel.relkind == RELKIND_RELATION
+            && col_def.generated == 0
+            && !has_domain_constraints
+            && !clauses::contain_volatile_functions(defval)?
+        {
+            let mut state =
+                execexpr::exec_init_expr(mcx, Some(defval), execexpr::ParamBind::NONE)?
+                    .expect("non-nil default expression");
+            state.arm_result_mcx(mcx);
+            let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+            let r = execexpr::exec_eval_expr(&mut state, &mut slots)?;
+            if !r.isnull {
+                catalog_heap::StoreAttrMissingVal(mcx, rel, attnum, r.value)?;
+                xact::CommandCounterIncrement()?;
+                has_missing = true;
+            }
+        } else if col_def.generated != b'v' {
+            tab.rewrite |= AT_REWRITE_DEFAULT_VAL;
+        }
+    }
+    if !has_missing {
+        tab.verify_new_notnull |= col_def.is_not_null;
     }
     Ok(())
 }
@@ -2646,9 +2761,11 @@ fn ATExecDropExpression<'mcx>(
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, false)
 }
 
-// ATParseTransformCmd's beforeStmts leg: the transform only queues
-// CreateSeqStmt/AlterSeqStmt (identity); sequence depends on tablecmds, so
-// execution rides sequence_seams.
+// ATParseTransformCmd's beforeStmts/afterStmts legs. transformAlterTableStmt
+// folds IndexStmts into AT_AddIndex[Constraint] subcommands and emits only
+// CreateSeqStmt (blist) / AlterSeqStmt (alist) for identity columns, so the
+// fallback stays loud; sequence depends on tablecmds, so execution rides
+// sequence_seams.
 fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
     for s in stmts.iter() {
         if let Some(cs) = s.as_variant::<types_nodes::rawnodes::CreateSeqStmt>() {
@@ -2656,7 +2773,10 @@ fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
         } else if let Some(alt) = s.as_variant::<types_nodes::AlterSeqStmt>() {
             sequence_seams::alter_sequence::call(mcx, alt)?;
         } else {
-            unported("ATParseTransformCmd non-sequence queued statement");
+            unported(&format!(
+                "ATParseTransformCmd queued statement {:?}",
+                s.node_tag()
+            ));
         }
         xact::CommandCounterIncrement()?;
     }
