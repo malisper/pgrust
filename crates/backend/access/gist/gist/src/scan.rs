@@ -33,7 +33,26 @@ pub fn gistbeginscan<'mcx>(
         panic!("unported: gist ordered (KNN) scans (distance/pairing-heap lane)");
     }
 
-    let giststate = initGISTstate(r)?;
+    let mut giststate = initGISTstate(r)?;
+    // gistscan.c:180-203 (in C, lazily under gistrescan's xs_want_itup arm;
+    // rescan here has no mcx, so the divergent-type descriptor is built at
+    // beginscan — same contents, once per scan either way). Key columns get
+    // rd_opcintype (opckeytype storage, e.g. point_ops' box leaves), included
+    // columns keep the leaf descriptor's type.
+    if (0..r.indnkeyatts() as usize).any(|i| r.rd_att.attr(i).atttypid != r.rd_opcintype[i]) {
+        let natts = r.rd_att.natts;
+        let nkeyatts = r.indnkeyatts() as usize;
+        let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, natts)?;
+        for attno in 1..=natts as usize {
+            let typid = if attno <= nkeyatts {
+                r.rd_opcintype[attno - 1]
+            } else {
+                r.rd_att.attr(attno - 1).atttypid
+            };
+            tupdesc::TupleDescInitEntry(&mut desc, attno as i16, None, typid, -1, 0)?;
+        }
+        giststate.fetchTupdesc = Some(std::rc::Rc::new(desc));
+    }
     let so = GISTScanOpaqueData {
         giststate,
         temp: ::mcx::MemoryContext::new_bump("GiST temporary context"),
@@ -85,22 +104,12 @@ pub fn gistrescan(
     // queue reuse replaces C's scanCxt/queueCxt dance: reset + reuse slots.
     so.queue.reset();
 
-    if scan.xs_want_itup && so.giststate.fetchTupdesc.is_none() {
-        // C builds fetchTupdesc from rd_opcintype; the closed opclass set has
-        // no opckeytype overrides live (amstorage lanes are loud), so the
-        // index descriptor's types ARE the opcintype set.
-        for (i, &opcintype) in scan.indexRelation.rd_opcintype.iter().enumerate() {
-            let att = scan.indexRelation.rd_att.attr(i);
-            if att.atttypid != opcintype {
-                panic!(
-                    "unported: gist fetchTupdesc with opckeytype storage \
-                     (att {} type {} vs opcintype {opcintype})",
-                    i + 1,
-                    att.atttypid
-                );
-            }
+    if scan.xs_want_itup {
+        // Storage types == opcintypes: the index descriptor IS C's built
+        // descriptor; the divergent case was built at beginscan.
+        if so.giststate.fetchTupdesc.is_none() {
+            so.giststate.fetchTupdesc = Some(scan.indexRelation.rd_att.clone());
         }
-        so.giststate.fetchTupdesc = Some(scan.indexRelation.rd_att.clone());
         scan.xs_itupdesc = so.giststate.fetchTupdesc.clone();
     }
 
