@@ -31,6 +31,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // interpret_AS_clause (functioncmds.c:936-977): bare transformStmt under
+    // sql_fn_parser_setup hooks — no rewrite, no jumble, no query-id report.
+    pub fn transform_stmt_sql_fn<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: types_nodes::Node<'mcx>,
+        source_text: &'a str,
+        fname: &'a str,
+        argtypes: &'a [Oid],
+        argnames: &'a [&'a str],
+    ) -> PgResult<Query<'mcx>>
+);
+
+seam_core::seam!(
     // C's Oid **paramTypes / int *numParams out-params come back as the
     // second tuple element (the resolved parameter types).
     pub fn parse_analyze_varparams<'a, 'mcx>(
