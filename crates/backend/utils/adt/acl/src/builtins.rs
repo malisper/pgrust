@@ -1,17 +1,19 @@
 use datum::Datum;
-use types_core::Oid;
+use types_core::{Oid, BOOLOID, OIDOID, RECORDOID, TEXTOID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_TABLE};
 use types_fmgr::{
-    byref_result, cstring_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
-    PGFunction, ACLITEM_LEN,
+    byref_result, cstring_result, varlena_result, FmgrBuiltin, FmgrInfo,
+    FunctionCallInfoBaseData as Fcinfo, PGFunction, ACLITEM_LEN,
 };
 
 use crate::ops::{convert_any_priv_string, PrivMapEntry};
 use crate::varlena::acl_image;
 use crate::{
-    acl_grant_option_for, acldefault, aclitem_set_privs_goptions, get_role_oid_or_public,
-    AclItem, AclObjectType, ACL_DELETE, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES,
-    ACL_SELECT, ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE,
+    acl_grant_option_for, acldefault, aclitem_get_goptions, aclitem_get_privs,
+    aclitem_set_privs_goptions, get_role_oid_or_public, AclItem, AclObjectType, ACL_ALTER_SYSTEM,
+    ACL_CONNECT, ACL_CREATE, ACL_CREATE_TEMP, ACL_DELETE, ACL_EXECUTE, ACL_INSERT, ACL_MAINTAIN,
+    ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT, ACL_SET, ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE,
+    ACL_USAGE, N_ACL_RIGHTS,
 };
 
 const ACLCHECK_OK: i32 = 0;
@@ -1217,6 +1219,94 @@ fn fc_has_any_column_privilege_id_id(
     any_column_priv_check_ext(fcinfo, roleid, tableoid, mode)
 }
 
+pub(crate) fn convert_aclright_to_string(aclright: u64) -> &'static str {
+    match aclright {
+        ACL_INSERT => "INSERT",
+        ACL_SELECT => "SELECT",
+        ACL_UPDATE => "UPDATE",
+        ACL_DELETE => "DELETE",
+        ACL_TRUNCATE => "TRUNCATE",
+        ACL_REFERENCES => "REFERENCES",
+        ACL_TRIGGER => "TRIGGER",
+        ACL_EXECUTE => "EXECUTE",
+        ACL_USAGE => "USAGE",
+        ACL_CREATE => "CREATE",
+        ACL_CREATE_TEMP => "TEMPORARY",
+        ACL_CONNECT => "CONNECT",
+        ACL_SET => "SET",
+        ACL_ALTER_SYSTEM => "ALTER SYSTEM",
+        ACL_MAINTAIN => "MAINTAIN",
+        _ => panic!("unrecognized aclright: {aclright}"),
+    }
+}
+
+struct AclExplodeRows {
+    tuples: Vec<Vec<u8>>,
+}
+
+fn collect_aclexplode_rows(fcinfo: &Fcinfo) -> PgResult<AclExplodeRows> {
+    let mcx = fcinfo.result_mcx();
+    // SAFETY: strict fn, arg 0 is a non-null aclitem[] varlena.
+    let v = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let n = crate::varlena::check_acl_payload(v.data())?;
+
+    let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, 4)?;
+    tupdesc::TupleDescInitEntry(&mut desc, 1, Some("grantor"), OIDOID, -1, 0)?;
+    tupdesc::TupleDescInitEntry(&mut desc, 2, Some("grantee"), OIDOID, -1, 0)?;
+    tupdesc::TupleDescInitEntry(&mut desc, 3, Some("privilege_type"), TEXTOID, -1, 0)?;
+    tupdesc::TupleDescInitEntry(&mut desc, 4, Some("is_grantable"), BOOLOID, -1, 0)?;
+    desc.tdtypeid = RECORDOID;
+    typcache_seams::assign_record_type_typmod::call(&mut desc)?;
+
+    let mut tuples = Vec::new();
+    for i in 0..n {
+        let item = crate::varlena::read_acl_item(v.data(), i);
+        for right in 0..N_ACL_RIGHTS {
+            let priv_bit = 1u64 << right;
+            if aclitem_get_privs(&item) & priv_bit == 0 {
+                continue;
+            }
+            let ptext = varlena_result(varlena::cstring_to_text(
+                mcx,
+                convert_aclright_to_string(priv_bit).as_bytes(),
+            )?);
+            let values = [
+                Datum::from_oid(item.ai_grantor),
+                Datum::from_oid(item.ai_grantee),
+                ptext,
+                Datum::from_bool(aclitem_get_goptions(&item) & priv_bit != 0),
+            ];
+            let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &[false; 4])?;
+            tuples.push(tuple.image().to_vec());
+        }
+    }
+    Ok(AclExplodeRows { tuples })
+}
+
+fn fc_aclexplode(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("aclexplode: resolved FmgrInfo required");
+    if !flinfo.has_fn_extra() {
+        let rows = collect_aclexplode_rows(fcinfo)?;
+        let fctx = funcapi_srf::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(rows));
+    }
+    let fctx = funcapi_srf::per_MultiFuncCall(flinfo);
+    let idx = fctx.call_cntr as usize;
+    let rows = fctx
+        .user_fctx
+        .as_ref()
+        .expect("aclexplode: rows set at first call")
+        .downcast_ref::<AclExplodeRows>()
+        .expect("aclexplode: user_fctx is AclExplodeRows");
+    match rows.tuples.get(idx) {
+        Some(img) => {
+            let d = byref_result(fcinfo.result_mcx(), img)?;
+            Ok(funcapi_srf::srf_return_next(flinfo, fcinfo, d))
+        }
+        None => Ok(funcapi_srf::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -1239,6 +1329,14 @@ pub const ACL_BUILTINS: &[FmgrBuiltin] = &[
     b(1037, "aclcontains", 2, fc_aclcontains),
     b(1062, "aclitem_eq", 2, fc_aclitem_eq),
     b(1365, "makeaclitem", 4, fc_makeaclitem),
+    FmgrBuiltin {
+        foid: 1689,
+        name: "aclexplode",
+        nargs: 1,
+        strict: true,
+        retset: true,
+        func: fc_aclexplode,
+    },
     b(2181, "has_sequence_privilege_name_name", 3, fc_has_sequence_privilege_name_name),
     b(2182, "has_sequence_privilege_name_id", 3, fc_has_sequence_privilege_name_id),
     b(2183, "has_sequence_privilege_id_name", 3, fc_has_sequence_privilege_id_name),

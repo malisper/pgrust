@@ -1,6 +1,7 @@
 //! misc.c slice: pg_input_is_valid / pg_input_error_info (soft-error probes).
 
 pub mod builtins;
+pub(crate) mod catalog_fk;
 pub mod introspect;
 
 #[cfg(test)]
@@ -282,6 +283,36 @@ pub fn fc_any_value_transfn(
     Ok(fcinfo.arg(0))
 }
 
+pub fn fc_pg_trigger_depth(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_i32(trigger::my_trigger_depth()))
+}
+
+#[cold]
+#[inline(never)]
+fn collations_not_supported(type_be: String) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("collations are not supported by type {type_be}"))
+            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+    )
+}
+
+pub fn fc_pg_collation_for(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let typeid = funcapi::get_fn_expr_argtype(flinfo.as_deref(), 0);
+    if typeid == types_core::InvalidOid {
+        return Ok(fcinfo.return_null());
+    }
+    if !lsyscache::type_is_collatable(typeid)? && typeid != types_core::UNKNOWNOID {
+        return Err(collations_not_supported(format_type::format_type_be(typeid)?));
+    }
+    let collid = fcinfo.get_collation();
+    if collid == types_core::InvalidOid {
+        return Ok(fcinfo.return_null());
+    }
+    let mcx = fcinfo.result_mcx();
+    let name = ruleutils::generate_collation_name(mcx, collid)?;
+    text_datum(mcx, name.as_bytes())
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -300,4 +331,7 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(2626, "pg_sleep", 1, fc_pg_sleep),
     b(6292, "any_value_transfn", 2, fc_any_value_transfn),
     b(6315, "pg_basetype", 1, fc_pg_basetype),
+    b(3163, "pg_trigger_depth", 0, fc_pg_trigger_depth),
+    bn(3162, "pg_collation_for", 1, fc_pg_collation_for),
+    b(2560, "pg_postmaster_start_time", 0, builtins::fc_pg_postmaster_start_time),
 ];

@@ -551,6 +551,110 @@ fn fc_pg_get_object_address(
     composite_result(mcx, flinfo, &values, &[false, false, false])
 }
 
+const LARGE_OBJECT_RELATION_ID: Oid = 2613;
+const LARGE_OBJECT_METADATA_RELATION_ID: Oid = 2995;
+const ATTRIBUTE_RELID_NUM_INDEX_ID: Oid = 2659;
+const ANUM_PG_ATTRIBUTE_ATTACL: i32 = 22;
+
+fn eq_key(
+    attno: types_core::AttrNumber,
+    func: types_core::RegProcedure,
+    arg: Datum,
+) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(func)
+        .unwrap_or_else(|e| panic!("fmgr_info({func}) failed: {e:?}"));
+    key.sk_argument = arg;
+    key
+}
+
+fn acl_attr_image(
+    tup: &types_tuple::HeapTupleData<'_>,
+    attnum: i32,
+    desc: &types_tuple::TupleDescData<'_>,
+) -> Option<Vec<u8>> {
+    let mut isnull = false;
+    // SAFETY: attnum comes from the ObjectProperty row / pg_attribute layout.
+    let d = unsafe { types_tuple::heap_getattr(tup, attnum, desc, &mut isnull) };
+    (!isnull).then(|| varlena_image(d).to_vec())
+}
+
+// pg_get_acl (objectaddress.c): NULL, never error, for nonexistent objects.
+fn fc_pg_get_acl(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let classid = fcinfo.arg_oid(0);
+    let objid = fcinfo.arg_oid(1);
+    let objsubid = fcinfo.arg_i32(2);
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+
+    // Pinned pg_depend entries have no ACL.
+    if !OidIsValid(classid) && !OidIsValid(objid) {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+
+    let catalog_id = if classid == LARGE_OBJECT_RELATION_ID {
+        LARGE_OBJECT_METADATA_RELATION_ID
+    } else {
+        classid
+    };
+    if !properties::is_objectclass_supported(catalog_id) {
+        return Err(Box::new(PgError::error(format!(
+            "unrecognized class ID: {catalog_id}"
+        ))));
+    }
+    let prop = properties::get_object_property_data(catalog_id);
+    let anum_acl = prop.attnum_acl;
+    if anum_acl == 0 {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+
+    let img = if classid == types_core::RELATION_RELATION_ID && objsubid != 0 {
+        let rel =
+            table::table_open(mcx, types_core::ATTRIBUTE_RELATION_ID, types_rel::AccessShareLock)?;
+        let keys = [
+            eq_key(1, types_core::fmgr::F_OIDEQ, Datum::from_oid(objid)),
+            eq_key(5, types_core::fmgr::F_INT2EQ, Datum::from_i16(objsubid as i16)),
+        ];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &rel,
+            ATTRIBUTE_RELID_NUM_INDEX_ID,
+            true,
+            None,
+            &keys,
+        )?;
+        let img = genam::systable_getnext(mcx, &mut scan)?
+            .and_then(|tup| acl_attr_image(tup, ANUM_PG_ATTRIBUTE_ATTACL, rel.descr()));
+        genam::systable_endscan(mcx, scan)?;
+        rel.close(types_rel::AccessShareLock)?;
+        img
+    } else {
+        description::scan_one_row(mcx, catalog_id, prop.oid_index_oid, objid, |tup, desc| {
+            acl_attr_image(tup, anum_acl, desc)
+        })?
+        .flatten()
+    };
+
+    match img {
+        Some(img) => {
+            let v = detoast::detoast_attr(mcx, &img)?;
+            Ok(Datum::from_usize(v.leak().as_ptr() as usize))
+        }
+        None => {
+            fcinfo.isnull = true;
+            Ok(Datum::null())
+        }
+    }
+}
+
 fn mk_type_name_node<'mcx>(mcx: Mcx<'mcx>, tn: &TypeName<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk(
         mcx,
@@ -599,5 +703,13 @@ pub static OBJECTADDRESS_BUILTINS: &[FmgrBuiltin] = &[
         strict: true,
         retset: false,
         func: fc_pg_get_object_address,
+    },
+    FmgrBuiltin {
+        foid: 6385,
+        name: "pg_get_acl",
+        nargs: 3,
+        strict: true,
+        retset: false,
+        func: fc_pg_get_acl,
     },
 ];

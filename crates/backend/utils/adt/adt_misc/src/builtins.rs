@@ -156,6 +156,15 @@ pub fn fc_current_database(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     byref_result(fcinfo.result_mcx(), &db.data)
 }
 
+// timestamp.c pg_postmaster_start_time: C `PgStartTime` global, hosted with
+// the misc slice (postmaster_seams already crosses this dep).
+pub fn fc_pg_postmaster_start_time(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(postmaster_seams::pg_start_time::call()))
+}
+
 fn description_result(
     fcinfo: &mut Fcinfo,
     objoid: Oid,
@@ -771,6 +780,173 @@ pub fn fc_pg_get_keywords(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     }
 }
 
+fn text_list_array_datum(mcx: mcx::Mcx<'_>, cols: &str) -> PgResult<Datum> {
+    let inner = cols.strip_prefix('{').and_then(|s| s.strip_suffix('}'))
+        .expect("generated column list is brace-wrapped");
+    let mut astate: Option<ArrayBuildState<'_>> = None;
+    for name in inner.split(',') {
+        let text = varlena::cstring_to_text(mcx, name.as_bytes())?;
+        astate = Some(arrayfuncs::accum_array_result(
+            mcx,
+            astate.take(),
+            Datum::from_usize(text.as_bytes().as_ptr() as usize),
+            false,
+            TEXTOID,
+        )?);
+    }
+    let img = arrayfuncs::make_array_result(mcx, &astate.expect("column list is non-empty"))?;
+    byref_result(mcx, &img)
+}
+
+struct CatalogFkRows {
+    tuples: Vec<Vec<u8>>,
+}
+
+fn collect_catalog_fk_rows(flinfo: &FmgrInfo, fcinfo: &Fcinfo) -> PgResult<CatalogFkRows> {
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(crate::not_row_type());
+    }
+    let desc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
+
+    let rows = crate::catalog_fk::SYS_FK_RELATIONSHIPS;
+    let mut tuples = Vec::with_capacity(rows.len());
+    for (fk_table, pk_table, fk_columns, pk_columns, is_array, is_opt) in rows {
+        let values = [
+            Datum::from_oid(*fk_table),
+            text_list_array_datum(mcx, fk_columns)?,
+            Datum::from_oid(*pk_table),
+            text_list_array_datum(mcx, pk_columns)?,
+            Datum::from_bool(*is_array),
+            Datum::from_bool(*is_opt),
+        ];
+        let tuple = heaptuple::heap_form_tuple(mcx, &desc, &values, &[false; 6])?;
+        tuples.push(tuple.image().to_vec());
+    }
+    Ok(CatalogFkRows { tuples })
+}
+
+pub fn fc_pg_get_catalog_foreign_keys(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_get_catalog_foreign_keys: NULL flinfo");
+    if !flinfo.has_fn_extra() {
+        let rows = collect_catalog_fk_rows(flinfo, fcinfo)?;
+        let fctx = funcapi::init_MultiFuncCall(flinfo, fcinfo)?;
+        fctx.user_fctx = Some(Box::new(rows));
+    }
+    let fctx = funcapi::per_MultiFuncCall(flinfo);
+    let idx = fctx.call_cntr as usize;
+    let rows = fctx
+        .user_fctx
+        .as_ref()
+        .expect("pg_get_catalog_foreign_keys: rows set at first call")
+        .downcast_ref::<CatalogFkRows>()
+        .expect("pg_get_catalog_foreign_keys: user_fctx is CatalogFkRows");
+    match rows.tuples.get(idx) {
+        Some(img) => {
+            let d = byref_result(fcinfo.result_mcx(), img)?;
+            Ok(funcapi::srf_return_next(flinfo, fcinfo, d))
+        }
+        None => Ok(funcapi::srf_return_done(flinfo, fcinfo)),
+    }
+}
+
+fn tablespace_warning(msg: String) -> PgResult<()> {
+    elog::ereport(types_error::WARNING)
+        .errmsg(msg)
+        .finish(types_error::ErrorLocation::new("misc.c", 0, "pg_tablespace_databases"))
+}
+
+#[cold]
+#[inline(never)]
+fn open_dir_err(e: &std::io::Error, location: &str) -> Box<PgError> {
+    elog::ereport(types_error::ERROR)
+        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        .errcode_for_file_access()
+        .errmsg(format!("could not open directory \"{location}\": %m"))
+        .into_error()
+        .into()
+}
+
+#[cold]
+#[inline(never)]
+fn read_dir_err(e: &std::io::Error, location: &str) -> Box<PgError> {
+    elog::ereport(types_error::ERROR)
+        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        .errcode_for_file_access()
+        .errmsg(format!("could not read directory \"{location}\": %m"))
+        .into_error()
+        .into()
+}
+
+// atooid: strtoul semantics — leading digits, 0 (skipped) when non-numeric.
+pub(crate) fn atooid(name: &str) -> Oid {
+    let digits: &str = &name[..name.bytes().take_while(u8::is_ascii_digit).count()];
+    digits.parse().unwrap_or(0)
+}
+
+fn directory_is_empty(path: &str) -> PgResult<bool> {
+    let mut dir = match std::fs::read_dir(path) {
+        Ok(dir) => dir,
+        Err(e) => return Err(open_dir_err(&e, path)),
+    };
+    Ok(dir.next().is_none())
+}
+
+pub fn fc_pg_tablespace_databases(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let tablespace_oid = fcinfo.arg_oid(0);
+    let flinfo = flinfo.expect("pg_tablespace_databases: NULL flinfo");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf =
+        funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
+
+    if tablespace_oid == GLOBALTABLESPACE_OID {
+        tablespace_warning("global tablespace never has databases".to_string())?;
+        return Ok(srf.finish(fcinfo));
+    }
+
+    let location = if tablespace_oid == DEFAULTTABLESPACE_OID {
+        "base".to_string()
+    } else {
+        format!(
+            "{}/{tablespace_oid}/{}",
+            types_storage::PG_TBLSPC_DIR,
+            types_storage::TABLESPACE_VERSION_DIRECTORY
+        )
+    };
+
+    let dir = match std::fs::read_dir(&location) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tablespace_warning(format!("{tablespace_oid} is not a tablespace OID"))?;
+            return Ok(srf.finish(fcinfo));
+        }
+        Err(e) => return Err(open_dir_err(&e, &location)),
+    };
+
+    for entry in dir {
+        let entry = entry.map_err(|e| read_dir_err(&e, &location))?;
+        let name = entry.file_name();
+        let dat_oid = atooid(&name.to_string_lossy());
+        if dat_oid == 0 {
+            continue;
+        }
+        // An empty database subdir means the tablespace is not in use there.
+        if directory_is_empty(&format!("{location}/{}", name.to_string_lossy()))? {
+            continue;
+        }
+        srf.putvalues(&[Datum::from_oid(dat_oid)], &[false])?;
+    }
+    Ok(srf.finish(fcinfo))
+}
+
 const DEFAULTTABLESPACE_OID: Oid = 1663;
 const GLOBALTABLESPACE_OID: Oid = 1664;
 
@@ -856,4 +1032,20 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     },
     b(1993, "shobj_description", 2, fc_shobj_description),
     b(1268, "parse_ident", 2, fc_parse_ident),
+    FmgrBuiltin {
+        foid: 2556,
+        name: "pg_tablespace_databases",
+        nargs: 1,
+        strict: true,
+        retset: true,
+        func: fc_pg_tablespace_databases,
+    },
+    FmgrBuiltin {
+        foid: 6159,
+        name: "pg_get_catalog_foreign_keys",
+        nargs: 0,
+        strict: true,
+        retset: true,
+        func: fc_pg_get_catalog_foreign_keys,
+    },
 ];
