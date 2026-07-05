@@ -89,6 +89,9 @@ pub fn init_seams() {
     execmain_seams::query_desc_worker_bitmap_instrument::set(
         querydesc::query_desc_worker_bitmap_instrument_seam,
     );
+    execmain_seams::query_desc_worker_incsort_instrument::set(
+        querydesc::query_desc_worker_incsort_instrument_seam,
+    );
     execparallel::register_parallel_query_main();
     {
         use std::sync::atomic::{AtomicBool, Ordering::Relaxed};

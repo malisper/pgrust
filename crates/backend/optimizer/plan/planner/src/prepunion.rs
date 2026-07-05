@@ -143,8 +143,8 @@ fn build_setop_child_paths<'mcx>(
     let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
     run.swap_with_rel_subroot(idx);
     let mut candidates: PgVec<'mcx, ChildCandidate> = PgVec::new_in(run.mcx);
-    let consider_parallel;
-    {
+    // Swap back before propagating errors (num_groups block pattern below).
+    let subroot_result = (|| -> PgResult<bool> {
         let final_rel = crate::planmain::fetch_final_rel(run);
         consider_parallel = run.root.rel(final_rel).consider_parallel;
         assert!(
@@ -180,21 +180,28 @@ fn build_setop_child_paths<'mcx>(
                 {
                     continue;
                 }
+                let keys = crate::relnode::pgvec_clone_shallow(run.mcx, &setop_pathkeys);
                 if presorted_keys == 0 || !crate::gucs::enable_incremental_sort() {
-                    let keys = crate::relnode::pgvec_clone_shallow(run.mcx, &setop_pathkeys);
                     sp = crate::pathnode::create_sort_path(run, final_rel, sp, keys, limittuples);
                 } else {
-                    panic!(
-                        "create_incremental_sort_path (pathnode.c): M2 incremental-sort lane"
-                    );
+                    sp = crate::pathnode::create_incremental_sort_path(
+                        run,
+                        final_rel,
+                        sp,
+                        keys,
+                        presorted_keys,
+                        limittuples,
+                    )?;
                 }
             }
             if sp != cheapest {
                 candidates.push(ChildCandidate { pid: sp, info: child_info(run, sp) });
             }
         }
-    }
+        Ok(consider_parallel)
+    })();
     run.swap_with_rel_subroot(idx);
+    let consider_parallel = subroot_result?;
 
     run.root.rel_mut(rel).consider_parallel = consider_parallel;
     for c in candidates.iter() {
