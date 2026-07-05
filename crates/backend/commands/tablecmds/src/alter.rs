@@ -325,6 +325,7 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     changed_indexes: Vec<(Oid, String)>,
     changed_statistics: Vec<(Oid, String)>,
     replica_identity_index: Option<String>,
+    cluster_on_index: Option<String>,
 }
 
 impl<'mcx> AlteredTableInfo<'mcx> {
@@ -351,6 +352,7 @@ impl<'mcx> AlteredTableInfo<'mcx> {
             changed_indexes: Vec::new(),
             changed_statistics: Vec::new(),
             replica_identity_index: None,
+            cluster_on_index: None,
         }
     }
 }
@@ -1070,6 +1072,14 @@ fn ATRewriteCatalogs<'mcx>(
                         }
                         _ => ATExecAddConstraint(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?,
                     }
+                }
+                AlterTableType::AT_ReAddComment => {
+                    let stmt = cmd
+                        .def
+                        .expect("AT_ReAddComment CommentStmt")
+                        .as_variant::<types_nodes::parsenodes::CommentStmt>()
+                        .expect("CommentStmt");
+                    commands_comment::CommentObject(mcx, stmt)?;
                 }
                 AlterTableType::AT_AlterColumnType => {
                     ATExecAlterColumnType(mcx, &mut wqueue[tabidx], &rel, cmd)?;
@@ -4882,7 +4892,7 @@ fn RememberConstraintForRebuilding<'mcx>(
     let indoid = lsyscache::get_constraint_index(conoid)?;
     if indoid != InvalidOid {
         RememberReplicaIdentityForRebuilding(mcx, tab, indoid)?;
-        RememberClusterOnForRebuilding(indoid)?;
+        RememberClusterOnForRebuilding(mcx, tab, indoid)?;
     }
     Ok(())
 }
@@ -4902,7 +4912,7 @@ fn RememberIndexForRebuilding<'mcx>(
     let defstring = ruleutils::pg_get_indexdef_string(mcx, indoid)?;
     tab.changed_indexes.push((indoid, defstring));
     RememberReplicaIdentityForRebuilding(mcx, tab, indoid)?;
-    RememberClusterOnForRebuilding(indoid)
+    RememberClusterOnForRebuilding(mcx, tab, indoid)
 }
 
 // RememberStatisticsForRebuilding (tablecmds.c:15407): capture the definition
@@ -4937,10 +4947,19 @@ fn RememberReplicaIdentityForRebuilding<'mcx>(
     Ok(())
 }
 
-fn RememberClusterOnForRebuilding(indoid: Oid) -> PgResult<()> {
-    if lsyscache::get_index_isclustered(indoid)? {
-        unported("AT_ClusterOn restore after ALTER TYPE (cluster-on lane)");
+fn RememberClusterOnForRebuilding<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    indoid: Oid,
+) -> PgResult<()> {
+    if !lsyscache::get_index_isclustered(indoid)? {
+        return Ok(());
     }
+    if tab.cluster_on_index.is_some() {
+        panic!("relation {} has multiple clustered indexes", tab.relid);
+    }
+    let name = lsyscache::get_rel_name(mcx, indoid)?.expect("index has a name");
+    tab.cluster_on_index = Some(name.to_string());
     Ok(())
 }
 
@@ -4953,6 +4972,7 @@ fn ATPostAlterTypeCleanup<'mcx>(
         && wqueue[tabidx].changed_indexes.is_empty()
         && wqueue[tabidx].changed_statistics.is_empty()
         && wqueue[tabidx].replica_identity_index.is_none()
+        && wqueue[tabidx].cluster_on_index.is_none()
     {
         return Ok(());
     }
@@ -5008,6 +5028,12 @@ fn ATPostAlterTypeCleanup<'mcx>(
         let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
         cmd.subtype = AlterTableType::AT_ReplicaIdentity;
         cmd.def = Some(subnode);
+        wqueue[tabidx].subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, cmd.seal())?;
+    }
+    if let Some(idxname) = wqueue[tabidx].cluster_on_index.take() {
+        let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
+        cmd.subtype = AlterTableType::AT_ClusterOn;
+        cmd.name = Some(str_arena(mcx, &idxname)?);
         wqueue[tabidx].subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, cmd.seal())?;
     }
     catalog_dependency::performMultipleDeletions(
@@ -5101,7 +5127,20 @@ fn ATPostAlterTypeParse<'mcx>(
                         newcmd.subtype = AlterTableType::AT_ReAddIndex;
                         newcmd.def = Some(istmt);
                         tab.subcmds[AT_PASS_OLD_INDEX].lappend(mcx, newcmd.seal())?;
-                        rebuild_constraint_comment(mcx, old_id)?;
+                        let idxname = istmt
+                            .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                            .expect("IndexStmt")
+                            .idxname
+                            .expect("re-added constraint index has a name");
+                        RebuildConstraintComment(
+                            mcx,
+                            tab,
+                            AT_PASS_OLD_INDEX,
+                            old_id,
+                            Some(&rel),
+                            None,
+                            idxname,
+                        )?;
                         for nn in nnconstraints.iter() {
                             let mut nncmd = Node::build::<AlterTableCmd>(mcx)?;
                             nncmd.subtype = AlterTableType::AT_ReAddConstraint;
@@ -5113,7 +5152,7 @@ fn ATPostAlterTypeParse<'mcx>(
                     | ConstrType::CONSTR_NOTNULL
                     | ConstrType::CONSTR_FOREIGN => {
                         let contype = con.contype;
-                        let has_name = con.conname.is_some();
+                        let conname = con.conname;
                         if contype == ConstrType::CONSTR_FOREIGN {
                             // SAFETY: parse tree is arena-owned; no derived
                             // refs live.
@@ -5137,8 +5176,16 @@ fn ATPostAlterTypeParse<'mcx>(
                                 .expect("AlterTableCmd");
                         }
                         tab.subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, cnode)?;
-                        if has_name {
-                            rebuild_constraint_comment(mcx, old_id)?;
+                        if let Some(conname) = conname {
+                            RebuildConstraintComment(
+                                mcx,
+                                tab,
+                                AT_PASS_OLD_CONSTR,
+                                old_id,
+                                Some(&rel),
+                                None,
+                                conname,
+                            )?;
                         } else {
                             debug_assert!(contype == ConstrType::CONSTR_NOTNULL);
                         }
@@ -5171,13 +5218,57 @@ fn ATPostAlterTypeParse<'mcx>(
     rel.close(NoLock)
 }
 
-// RebuildConstraintComment: constraint comments are loud until CommentObject
-// grows an OBJECT_TABCONSTRAINT arm.
-fn rebuild_constraint_comment(mcx: Mcx<'_>, conoid: Oid) -> PgResult<()> {
-    if commands_comment::GetComment(mcx, conoid, ConstraintRelationId, 0)?.is_some() {
-        unported("RebuildConstraintComment (comment on a rebuilt constraint)");
+fn RebuildConstraintComment<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut AlteredTableInfo<'mcx>,
+    pass: usize,
+    objid: Oid,
+    rel: Option<&Relation<'mcx>>,
+    domname: Option<&NodeList<'mcx>>,
+    conname: &str,
+) -> PgResult<()> {
+    let Some(comment_str) = commands_comment::GetComment(mcx, objid, ConstraintRelationId, 0)?
+    else {
+        return Ok(());
+    };
+    let mut cmd = Node::build::<types_nodes::parsenodes::CommentStmt>(mcx)?;
+    let mut object = NodeList::nil();
+    match rel {
+        Some(rel) => {
+            cmd.objtype = ObjectType::OBJECT_TABCONSTRAINT;
+            let nspname = lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace)?
+                .expect("relation namespace has a name");
+            object.lappend(
+                mcx,
+                Node::mk(mcx, types_nodes::String { sval: str_arena(mcx, &nspname)? })?,
+            )?;
+            object.lappend(
+                mcx,
+                Node::mk(mcx, types_nodes::String { sval: str_arena(mcx, rel.name())? })?,
+            )?;
+        }
+        None => {
+            cmd.objtype = ObjectType::OBJECT_DOMCONSTRAINT;
+            let domname = domname.expect("domain constraint carries its domain name");
+            let mut names = NodeList::nil();
+            for n in domname.iter() {
+                names.lappend(mcx, n)?;
+            }
+            let tn = TypeName { names, typemod: -1, location: -1, ..Default::default() };
+            object.lappend(mcx, Node::mk(mcx, tn)?)?;
+        }
     }
-    Ok(())
+    object.lappend(
+        mcx,
+        Node::mk(mcx, types_nodes::String { sval: str_arena(mcx, conname)? })?,
+    )?;
+    cmd.object = Some(Node::mk(mcx, object)?);
+    cmd.comment = Some(str_arena(mcx, comment_str.as_str())?);
+    let subnode = cmd.seal();
+    let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+    newcmd.subtype = AlterTableType::AT_ReAddComment;
+    newcmd.def = Some(subnode);
+    tab.subcmds[pass].lappend(mcx, newcmd.seal())
 }
 
 // TryReuseIndex (tablecmds.c:15886).
@@ -5216,13 +5307,15 @@ fn TryReuseIndex<'mcx>(
 }
 
 fn readd_index_fixups<'mcx>(mcx: Mcx<'mcx>, old_id: Oid, stmt_node: Node<'mcx>) -> PgResult<()> {
-    if commands_comment::GetComment(mcx, old_id, RELATION_RELATION_ID, 0)?.is_some() {
-        unported("ATPostAlterTypeParse idxcomment (comment on a rebuilt index)");
-    }
+    let idxcomment = match commands_comment::GetComment(mcx, old_id, RELATION_RELATION_ID, 0)? {
+        Some(c) => Some(str_arena(mcx, c.as_str())?),
+        None => None,
+    };
     // SAFETY: parse tree is arena-owned; no derived refs live.
     unsafe {
         stmt_node
             .with_mut::<types_nodes::rawnodes::IndexStmt, _>(|s| {
+                s.idxcomment = idxcomment;
                 s.reset_default_tblspc = true;
             })
             .expect("IndexStmt");
