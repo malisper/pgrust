@@ -369,7 +369,9 @@ pub fn PortalStart(
                     let p = portal.borrow();
                     let source_text = p.sourceText.as_ref().map(|s| s.as_str()).unwrap_or("");
                     let query_env = p.queryEnv;
-                    if !p.cplan.is_null() {
+                    // installed() guard: test fixtures shim only the seams they use.
+                    if !p.cplan.is_null() && execmain_seams::note_cplan_for_query_desc::is_installed()
+                    {
                         // Skeleton-cache key: the plan backing this QueryDesc.
                         execmain_seams::note_cplan_for_query_desc::call(p.cplan);
                     }
