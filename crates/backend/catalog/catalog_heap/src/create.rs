@@ -752,7 +752,9 @@ pub fn heap_create_with_catalog<'mcx>(
 
     AddNewAttributeTuples(mcx, relid, &new_rel_desc.rd_att, p.relkind)?;
 
-    if p.relkind != types_rel::RELKIND_TOASTVALUE
+    // Composite types track these dependencies on the pg_type entry instead.
+    if p.relkind != types_rel::RELKIND_COMPOSITE_TYPE
+        && p.relkind != types_rel::RELKIND_TOASTVALUE
         && !miscinit_seams::is_bootstrap_processing_mode::call()
     {
         let myself = ObjectAddress::set(RELATION_RELATION_ID, relid);
