@@ -60,3 +60,6 @@ adt_acl = { path = "../../utils/adt/acl" }
 coerce = { path = "../../parser/coerce" }
 parse_func = { path = "../../parser/parse_func" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+analyze_seams = { path = "../../parser/analyze_seams" }
+utility_seams = { path = "../../tcop/utility_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
