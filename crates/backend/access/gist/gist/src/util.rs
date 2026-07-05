@@ -723,6 +723,8 @@ pub fn gistGetFakeLSN(rel: &Relation<'_>) -> PgResult<XLogRecPtr> {
         FAKE_LSN_LASTLSN.with(|c| c.set(currlsn));
         Ok(currlsn)
     } else {
-        panic!("unported: gistGetFakeLSN for unlogged relations (GetFakeLSNForUnloggedRel)");
+        // Unlogged relations are visible to other backends and survive clean
+        // restarts: the shared counter (GetFakeLSNForUnloggedRel) handles it.
+        Ok(::transam_xlog::ctl::GetFakeLSNForUnloggedRel())
     }
 }
