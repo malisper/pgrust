@@ -551,6 +551,7 @@ fn parse_filename_for_nontemp_relation_shapes() {
     assert_eq!(parse("t5_16384"), None);
     assert_eq!(parse("pg_filenode.map"), None);
     assert_eq!(parse("99999999999999999999"), None);
+}
 
 // Worker FATAL mid-sort ordering (ClickBench Q19 P2): proc_exit's abort
 // cleanup frees the spill VFDs, then the ProcExitThread unwind drops the
