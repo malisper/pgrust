@@ -37,5 +37,7 @@ varlena = { path = "../varlena" }
 path = "../../../access/common/detoast_seams"
 
 [dev-dependencies]
+adt_int = { path = "../int" }
 pg_locale_seams = { path = "../pg_locale_seams" }
+syscache_seams = { path = "../../cache/syscache_seams" }
 wchar = { path = "../../../../common/wchar" }

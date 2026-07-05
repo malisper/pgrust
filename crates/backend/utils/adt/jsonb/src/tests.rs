@@ -610,3 +610,263 @@ fn gin_jsonpath_execute_ops() {
     assert_eq!(execute_jsp_gin_ops(&ops, &[1, 1, 0], true), 1);
     assert_eq!(execute_jsp_gin_ops(&ops, &[0, 1, 1], true), 0);
 }
+
+// json_populate_type (populate.rs) over a fixed catalog fixture:
+// int4/text/json/jsonb/int4[].
+mod populate {
+    use super::{jsonb_image, setup};
+    use crate::populate::{json_populate_type, ColumnIoData};
+    use datum::Datum;
+    use mcx::{Mcx, MemoryContext};
+    use std::sync::Once;
+    use types_core::catalog::{INT4OID, JSONBOID, JSONOID, TEXTOID};
+    use types_core::Oid;
+    use types_error::PgResult;
+    use types_fmgr::{ErrorSaveNode, FmgrInfo, PackedVarlena};
+
+    const INT4ARRAYOID: Oid = 1007;
+    const F_INT4IN: Oid = 42;
+    const F_TEXTIN: Oid = 46;
+    const F_JSON_IN: Oid = 321;
+    const F_ARRAY_IN: Oid = 750;
+    const F_JSONB_IN: Oid = 3806;
+
+    fn populate_setup() {
+        setup();
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::pg_type_typtype::set(|_typid| Ok(Some(b'b' as i8)));
+            syscache_seams::pg_type_element_shape::set(|typid| {
+                Ok((typid == INT4ARRAYOID).then_some(syscache_seams::PgTypeElementShape {
+                    typelem: INT4OID,
+                    typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
+                }))
+            });
+            syscache_seams::pg_type_io_shape::set(|typid| {
+                let shape = |typinput, typelem, typlen, typbyval| syscache_seams::PgTypeIoShape {
+                    oid: typid,
+                    typinput,
+                    typoutput: 0,
+                    typreceive: 0,
+                    typsend: 0,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem,
+                    typlen,
+                    typbyval,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                };
+                Ok(match typid {
+                    INT4OID => Some(shape(F_INT4IN, 0, 4, true)),
+                    TEXTOID => Some(shape(F_TEXTIN, 0, -1, false)),
+                    JSONOID => Some(shape(F_JSON_IN, 0, -1, false)),
+                    JSONBOID => Some(shape(F_JSONB_IN, 0, -1, false)),
+                    INT4ARRAYOID => Some(shape(F_ARRAY_IN, INT4OID, -1, false)),
+                    _ => None,
+                })
+            });
+            syscache_seams::lookup_pg_type_shape::set(|typid| {
+                Ok((typid == INT4OID).then_some(types_tuple::PgTypeShape {
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: b'i' as i8,
+                    typstorage: b'p' as i8,
+                    typcollation: 0,
+                }))
+            });
+            fmgr_seams::fmgr_info::set(|oid| {
+                Ok(match oid {
+                    F_INT4IN => FmgrInfo::new(adt_int::builtins::fc_int4in, oid, 1, true, false),
+                    F_TEXTIN => FmgrInfo::new(varlena::builtins::fc_textin, oid, 1, true, false),
+                    F_JSON_IN => {
+                        FmgrInfo::new(adt_json::builtins::fc_json_in, oid, 1, true, false)
+                    }
+                    F_JSONB_IN => {
+                        FmgrInfo::new(crate::builtins::fc_jsonb_in, oid, 1, true, false)
+                    }
+                    F_ARRAY_IN => {
+                        FmgrInfo::new(arrayfuncs::builtins::fc_array_in, oid, 3, true, false)
+                    }
+                    other => panic!("populate tests: unexpected fmgr_info oid {other}"),
+                })
+            });
+        });
+    }
+
+    fn populate<'mcx>(
+        mcx: Mcx<'mcx>,
+        cache: &mut Option<ColumnIoData<'mcx>>,
+        doc: &[u8],
+        typid: Oid,
+        omit_quotes: bool,
+        escontext: Option<&mut ErrorSaveNode>,
+    ) -> PgResult<(Datum, bool)> {
+        let img = jsonb_image(mcx, doc);
+        let d = Datum::from_usize(img.as_ptr() as usize);
+        let mut isnull = false;
+        // SAFETY: `img` is a live 4B-header jsonb varlena for the whole call.
+        let res = unsafe {
+            json_populate_type(
+                d, JSONBOID, typid, -1, cache, mcx, mcx, &mut isnull, omit_quotes, escontext,
+            )?
+        };
+        Ok((res, isnull))
+    }
+
+    fn varlena_data(d: Datum) -> Vec<u8> {
+        // SAFETY: tests pass live non-null varlena datums.
+        let pv = unsafe { PackedVarlena::from_ptr(d.as_usize() as *const u8) };
+        pv.data().to_vec()
+    }
+
+    #[test]
+    fn scalar_text_from_string() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let (d, isnull) =
+            populate(mcx, &mut cache, br#""hello""#, TEXTOID, true, None).unwrap();
+        assert!(!isnull);
+        assert_eq!(varlena_data(d), b"hello");
+        // Same cache, quotes kept: text carries the serialized json literal.
+        let (d, isnull) =
+            populate(mcx, &mut cache, br#""hello""#, TEXTOID, false, None).unwrap();
+        assert!(!isnull);
+        assert_eq!(varlena_data(d), br#""hello""#);
+    }
+
+    #[test]
+    fn scalar_int4_from_number() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let (d, isnull) = populate(mcx, &mut cache, b"42", INT4OID, false, None).unwrap();
+        assert!(!isnull);
+        assert_eq!(d.as_i32(), 42);
+    }
+
+    #[test]
+    fn scalar_int4_soft_error() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let mut esc = ErrorSaveNode::new(true);
+        let (d, isnull) =
+            populate(mcx, &mut cache, br#""nope""#, INT4OID, true, Some(&mut esc)).unwrap();
+        assert!(isnull);
+        assert_eq!(d.as_usize(), 0);
+        assert!(esc.ctx.error_occurred());
+    }
+
+    #[test]
+    fn jsonb_round_trip() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let doc = br#"{"a": [1, "x", null]}"#;
+        let (d, isnull) = populate(mcx, &mut cache, doc, JSONBOID, false, None).unwrap();
+        assert!(!isnull);
+        assert_eq!(varlena_data(d), jsonb_image(mcx, doc)[4..].to_vec());
+    }
+
+    #[test]
+    fn json_from_scalar_string_keeps_quotes() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let (d, isnull) = populate(mcx, &mut cache, br#""x""#, JSONOID, false, None).unwrap();
+        assert!(!isnull);
+        assert_eq!(varlena_data(d), br#""x""#);
+    }
+
+    #[test]
+    fn array_int4_from_json_array() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let (d, isnull) = populate(mcx, &mut cache, b"[3, 4]", INT4ARRAYOID, false, None).unwrap();
+        assert!(!isnull);
+        let p = d.as_usize() as *const u8;
+        // SAFETY: live array varlena image of arr_size bytes.
+        let img = unsafe {
+            core::slice::from_raw_parts(p, arrayfuncs::foundation::arr_size(
+                core::slice::from_raw_parts(p, 8),
+            ))
+        };
+        assert_eq!(arrayfuncs::foundation::arr_ndim(img), 1);
+        assert_eq!(arrayfuncs::foundation::arr_dim(img, 0), 2);
+        let (elems, nulls) =
+            arrayfuncs::deconstruct_array_builtin(mcx, img, INT4OID, true).unwrap();
+        assert_eq!(nulls.as_slice(), &[false, false]);
+        assert_eq!(elems.iter().map(|e| e.as_i32()).collect::<Vec<_>>(), vec![3, 4]);
+    }
+
+    #[test]
+    fn array_int4_two_dims() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let (d, isnull) =
+            populate(mcx, &mut cache, b"[[1, 2], [3, 4]]", INT4ARRAYOID, false, None).unwrap();
+        assert!(!isnull);
+        let p = d.as_usize() as *const u8;
+        // SAFETY: live array varlena image of arr_size bytes.
+        let img = unsafe {
+            core::slice::from_raw_parts(p, arrayfuncs::foundation::arr_size(
+                core::slice::from_raw_parts(p, 8),
+            ))
+        };
+        assert_eq!(arrayfuncs::foundation::arr_ndim(img), 2);
+        assert_eq!(arrayfuncs::foundation::arr_dim(img, 0), 2);
+        assert_eq!(arrayfuncs::foundation::arr_dim(img, 1), 2);
+        let (elems, _nulls) =
+            arrayfuncs::deconstruct_array_builtin(mcx, img, INT4OID, true).unwrap();
+        assert_eq!(
+            elems.iter().map(|e| e.as_i32()).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn array_expected_json_array_errors() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        // Hard: no escontext.
+        let mut cache = None;
+        let err = populate(mcx, &mut cache, br#"{"a": 1}"#, INT4ARRAYOID, false, None)
+            .unwrap_err();
+        assert_eq!(err.message(), "expected JSON array");
+        // Soft: escontext armed.
+        let mut cache = None;
+        let mut esc = ErrorSaveNode::new(true);
+        let (d, isnull) =
+            populate(mcx, &mut cache, b"12", INT4ARRAYOID, false, Some(&mut esc)).unwrap();
+        assert!(isnull);
+        assert_eq!(d.as_usize(), 0);
+        assert_eq!(
+            esc.ctx.take_error().expect("soft error saved").message(),
+            "expected JSON array"
+        );
+    }
+
+    #[test]
+    fn array_mismatched_dimensions_error() {
+        populate_setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut cache = None;
+        let err = populate(mcx, &mut cache, b"[[1], [2, 3]]", INT4ARRAYOID, false, None)
+            .unwrap_err();
+        assert_eq!(err.message(), "malformed JSON array");
+    }
+}

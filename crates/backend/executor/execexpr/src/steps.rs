@@ -345,8 +345,10 @@ pub struct JsonExprState {
     pub escontext: ::types_fmgr::ErrorSaveNode,
 }
 
-// C ExprEvalStep d.jsonexpr_coercion minus json_coercion_cache/escontext
-// (their legs are unported louds in the interp).
+// C ExprEvalStep d.jsonexpr_coercion. `escontext` points at the owning
+// JsonExprState's ErrorSaveNode (None = errors are hard); `cache` is C's
+// json_coercion_cache, filled on first eval; `mcx` is the compile mcx
+// restamped 'static — it outlives every eval of this step.
 pub struct JsonCoercionState {
     pub targettype: Oid,
     pub targettypmod: i32,
@@ -354,6 +356,9 @@ pub struct JsonCoercionState {
     pub exists_coerce: bool,
     pub exists_cast_to_int: bool,
     pub exists_check_domain: bool,
+    pub escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
+    pub cache: Option<::adt_jsonb::populate::ColumnIoData<'static>>,
+    pub mcx: Mcx<'static>,
 }
 
 // Blessed tupdesc compile-resolved (C: rowcache on first eval); `columns` is

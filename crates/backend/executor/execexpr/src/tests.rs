@@ -111,6 +111,8 @@ const JSONPATHOID_T: u32 = 4072;
 fn install_json_seams() {
     let _ = mbutils::SetDatabaseEncoding(wchar::PG_UTF8);
     mbutils::init_seams();
+    // json_populate_type resolves input functions through fmgr_seams.
+    fmgr_core::init_seams();
     postgres_seams::check_for_interrupts::set(|| Ok(()));
     syscache_seams::pg_type_typtype::set(|typid| {
         Ok(match typid {
@@ -2026,13 +2028,45 @@ mod json {
     }
 
     #[test]
-    #[should_panic(expected = "json_populate_type")]
-    fn json_query_omit_quotes_coercion_is_loud() {
+    fn json_query_omit_quotes_returning_jsonb() {
         with_mcx(|mcx| {
+            // "hi" unquoted is not valid jsonb: soft error, NULL ON ERROR.
             let mut spec = query_spec(mcx, r#"{"a": "hi"}"#, "$.a", JW::JSW_UNSPEC);
             spec.omit_quotes = true;
             spec.use_json = true;
-            let _ = eval(mcx, mk_json_expr(mcx, spec));
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert!(r.isnull);
+            // "1" unquoted parses as the jsonb number 1.
+            let mut spec = query_spec(mcx, r#"{"a": "1"}"#, "$.a", JW::JSW_UNSPEC);
+            spec.omit_quotes = true;
+            spec.use_json = true;
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert!(!r.isnull);
+            assert_eq!(jsonb_datum_string(mcx, r.value), "1");
+        });
+    }
+
+    #[test]
+    fn json_query_coercion_to_int4() {
+        with_mcx(|mcx| {
+            let mut spec = query_spec(mcx, r#"{"a": 7}"#, "$.a", JW::JSW_UNSPEC);
+            spec.ret_typid = INT4OID;
+            spec.use_json = true;
+            spec.on_empty = Some(behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, INT4OID)));
+            spec.on_error = behavior(mcx, JBT::JSON_BEHAVIOR_NULL, null_const(mcx, INT4OID));
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert_eq!((r.isnull, r.value.as_i32()), (false, 7));
+        });
+    }
+
+    #[test]
+    fn json_query_coercion_identity_jsonb() {
+        with_mcx(|mcx| {
+            let mut spec = query_spec(mcx, r#"{"a": [1, 2]}"#, "$.a", JW::JSW_UNSPEC);
+            spec.use_json = true;
+            let r = eval(mcx, mk_json_expr(mcx, spec)).unwrap();
+            assert!(!r.isnull);
+            assert_eq!(jsonb_datum_string(mcx, r.value), "[1, 2]");
         });
     }
 

@@ -417,6 +417,7 @@ dependencies = [
 name = "adt_jsonb"
 version = "0.1.0"
 dependencies = [
+ "adt_int",
  "adt_json",
  "adt_jsonpath",
  "adt_numeric",
@@ -435,6 +436,7 @@ dependencies = [
  "pqformat",
  "stack_depth",
  "stringinfo",
+ "syscache_seams",
  "tupdesc",
  "typcache_seams",
  "types_core",

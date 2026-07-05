@@ -15,6 +15,7 @@ pub mod io;
 pub mod iter;
 pub mod mutate;
 pub mod ops;
+pub mod populate;
 pub mod srfs;
 pub mod subs;
 pub mod tojsonb;
