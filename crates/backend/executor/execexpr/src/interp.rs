@@ -2360,8 +2360,8 @@ fn eval_json_expr_path(
     Ok(if jump_eval_coercion >= 0 { jump_eval_coercion } else { jump_end } as u32)
 }
 
-// C ExecEvalJsonCoercion (execExprInterp.c:5111); every json_populate_type
-// leg is a loud panic (jsonfuncs lane).
+// C ExecEvalJsonCoercion (execExprInterp.c:5111); the composite/record
+// json_populate_type leg is a loud panic (jsonfuncs lane).
 #[inline(never)]
 fn eval_json_coercion(
     frames: &mut [crate::steps::FuncFrame<'_>],
@@ -2369,21 +2369,30 @@ fn eval_json_coercion(
     frame: u32,
     out: crate::steps::OutRef,
 ) -> PgResult<()> {
-    // SAFETY: compile-allocated state, read-only here.
-    let st = unsafe { jc.as_ref() };
+    // SAFETY: compile-allocated state, exclusive during this step (the
+    // json_populate_type cache fills on first eval).
+    let st = unsafe { &mut *jc.as_ptr() };
     let f = &mut frames[frame as usize];
     // SAFETY: the argless frame's fcinfo image is live; armed per eval.
     let mcx = unsafe { fcinfo_mut(f.fcinfo, 0) }.result_mcx();
+    // SAFETY: the owning JsonExprState's compile-armed ErrorSaveNode,
+    // exclusive during this step.
+    let mut esc = st.escontext.map(|p| unsafe { &mut *p.as_ptr() });
 
     if st.exists_coerce {
         let cur = read_out(out);
         if st.exists_cast_to_int {
             if st.exists_check_domain {
-                panic!(
-                    "execexpr EEOP_JSONEXPR_COERCION: domain_check_safe over an EXISTS \
-                     integer-domain RETURNING type (execExprInterp.c:5132) unported — \
-                     jsonfuncs lane"
-                );
+                ::typcache_seams::domain_check_input::call(
+                    cur.value,
+                    cur.isnull,
+                    st.targettype,
+                    esc.as_deref_mut().map(|n| &mut n.ctx),
+                )?;
+                if esc.as_ref().is_some_and(|n| n.ctx.error_occurred()) {
+                    write_out(out, Datum::null(), true);
+                    return Ok(());
+                }
             }
             write_out(out, Datum::from_i32(cur.value.as_bool() as i32), cur.isnull);
             return Ok(());
@@ -2400,11 +2409,27 @@ fn eval_json_coercion(
             return Ok(());
         }
     }
-    panic!(
-        "execexpr EEOP_JSONEXPR_COERCION: json_populate_type (jsonfuncs.c) unported — \
-         jsonfuncs lane (targettype {})",
-        st.targettype
-    )
+
+    let cur = read_out(out);
+    let mut isnull = cur.isnull;
+    // SAFETY: a non-null out is a live jsonb varlena produced by the jsonpath
+    // steps or the jsonb_in leg above.
+    let value = unsafe {
+        ::adt_jsonb::populate::json_populate_type(
+            cur.value,
+            ::types_core::catalog::JSONBOID,
+            st.targettype,
+            st.targettypmod,
+            &mut st.cache,
+            st.mcx,
+            mcx,
+            &mut isnull,
+            st.omit_quotes,
+            esc,
+        )?
+    };
+    write_out(out, value, isnull);
+    Ok(())
 }
 
 // C ExecEvalJsonCoercionFinish (execExprInterp.c:5191).

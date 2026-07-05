@@ -2843,6 +2843,7 @@ fn init_json_expr<'mcx>(
             state,
             mcx,
             returning,
+            esc_ptr,
             jsexpr.omit_quotes,
             jsexpr.op == JsonExprOp::JSON_EXISTS_OP,
             out,
@@ -2909,7 +2910,7 @@ fn init_json_expr<'mcx>(
         state.escontext = saved_escontext;
 
         if on_error.coerce {
-            init_json_coercion(state, mcx, returning, jsexpr.omit_quotes, false, out)?;
+            init_json_coercion(state, mcx, returning, esc_ptr, jsexpr.omit_quotes, false, out)?;
         }
         if behavior_needs_finish(on_error) {
             push_step(state, mcx, Step::JsonCoercionFinish { jsestate, out })?;
@@ -2942,7 +2943,7 @@ fn init_json_expr<'mcx>(
             state.escontext = saved_escontext;
 
             if on_empty.coerce {
-                init_json_coercion(state, mcx, returning, jsexpr.omit_quotes, false, out)?;
+                init_json_coercion(state, mcx, returning, esc_ptr, jsexpr.omit_quotes, false, out)?;
             }
             if behavior_needs_finish(on_empty) {
                 push_step(state, mcx, Step::JsonCoercionFinish { jsestate, out })?;
@@ -2965,11 +2966,14 @@ fn init_json_expr<'mcx>(
     Ok(())
 }
 
-// C ExecInitJsonCoercion (execExpr.c:5051).
+// C ExecInitJsonCoercion (execExpr.c:5051). The state embeds the droppy
+// json_populate_type cache (FmgrInfo tree); it lives for the ExprState's life
+// and is never arena-dropped.
 fn init_json_coercion<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     returning: &::types_nodes::primnodes::JsonReturning<'_>,
+    escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
     omit_quotes: bool,
     exists_coerce: bool,
     out: OutRef,
@@ -2978,17 +2982,22 @@ fn init_json_coercion<'mcx>(
         && lsyscache::getBaseType(returning.typid)? == ::types_core::catalog::INT4OID;
     let exists_check_domain =
         exists_coerce && typcache::DomainHasConstraints(returning.typid)?;
-    let jc = alloc_state(
-        mcx,
-        crate::steps::JsonCoercionState {
+    let jc: NonNull<crate::steps::JsonCoercionState> = alloc_array_nodrop_exempt(mcx, 1)?;
+    // SAFETY: fresh exclusive allocation; the compile mcx outlives every eval
+    // of this step, so the 'static restamp never escapes it.
+    unsafe {
+        jc.as_ptr().write(crate::steps::JsonCoercionState {
             targettype: returning.typid,
             targettypmod: returning.typmod,
             omit_quotes,
             exists_coerce,
             exists_cast_to_int,
             exists_check_domain,
-        },
-    )?;
+            escontext,
+            cache: None,
+            mcx: core::mem::transmute::<Mcx<'mcx>, Mcx<'static>>(mcx),
+        });
+    }
     let frame_ix = state.frames.len() as u32;
     let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
     state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
