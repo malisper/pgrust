@@ -456,10 +456,37 @@ fn add_rowmark_junk_columns<'mcx>(
             tlist.lappend(mcx, tle)?;
         }
         if rc.allMarkTypes & (1 << RowMarkType::ROW_MARK_COPY as i32) != 0 {
-            panic!(
-                "preprocess_targetlist (preptlist.c): ROW_MARK_COPY wholerow junk \
-                 var (makeWholeRowVar); non-relation rowmark lane"
-            );
+            // makeWholeRowVar (makefuncs.c): named composite for relations
+            // and view-expanded subqueries, RECORD otherwise; the SRF-
+            // expanded-subquery arm stays loud.
+            let rte = run
+                .parse()
+                .rtable
+                .nth(rc.rti as usize - 1)
+                .as_range_tbl_entry()
+                .expect("rtable cell");
+            let vartype = match rte.rtekind {
+                RTEKind::RTE_RELATION => {
+                    let toid = lsyscache::get_rel_type_id(rte.relid)?;
+                    assert!(toid != 0, "relation without a composite type");
+                    toid
+                }
+                RTEKind::RTE_SUBQUERY if rte.relid != 0 => {
+                    let toid = lsyscache::get_rel_type_id(rte.relid)?;
+                    assert!(toid != 0, "relation without a composite type");
+                    toid
+                }
+                RTEKind::RTE_FUNCTION => panic!(
+                    "makeWholeRowVar (makefuncs.c): RTE_FUNCTION wholerow rowmark; \
+                     SRF rowmark lane"
+                ),
+                _ => types_core::catalog::RECORDOID,
+            };
+            let var = Node::mk_var(mcx, rc.rti as i32, 0, vartype, -1, 0, 0)?;
+            let resname = arena_str(mcx, &format!("wholerow{}", rc.rowmarkId))?;
+            let tle =
+                Node::mk_target_entry(mcx, var, tlist.len() as i16 + 1, Some(resname), true)?;
+            tlist.lappend(mcx, tle)?;
         }
         if rc.isParent {
             let var = Node::mk_var(

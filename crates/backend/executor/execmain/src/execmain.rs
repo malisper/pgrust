@@ -442,10 +442,8 @@ pub(crate) fn init_plan<'mcx>(
                     let rel = estate.exec_get_range_table_relation(rc.rti, false)?;
                     check_valid_row_mark_rel(rel, rc.markType)?;
                 }
-                ROW_MARK_COPY => panic!(
-                    "InitPlan (execMain.c): ROW_MARK_COPY rowmark (non-relation RTE) \
-                     lane not ported"
-                ),
+                // C: no physical table access is required (relation = NULL).
+                ROW_MARK_COPY => {}
             }
             let erm = ::executils::ExecRowMark {
                 relid: rte.relid,
