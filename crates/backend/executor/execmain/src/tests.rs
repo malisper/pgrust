@@ -54,6 +54,14 @@ fn install_seams() {
                     typstorage: TYPSTORAGE_PLAIN,
                     typcollation: 0,
                 }),
+                // RECORD: the MULTIEXPR SubPlan junk column's dummy type.
+                2249 => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: ::types_tuple::TYPALIGN_DOUBLE,
+                    typstorage: ::types_tuple::TYPSTORAGE_EXTENDED,
+                    typcollation: 0,
+                }),
                 _ => None,
             })
         });
@@ -3402,4 +3410,120 @@ fn eval_plan_qual_recheck_over_seqscan() {
         estate.exec_close_range_table_relations().unwrap();
     });
     scanfix::quiesced();
+}
+
+// Correlated-MULTIEXPR fixture: the top Result projects [$1, junk SubPlan],
+// where the SubPlan (parParam [$0] fed by Const 42, setParam [$1]) runs the
+// subplans[0] Result whose single column reads $0 back. C shape of
+// `UPDATE t SET (a) = (SELECT ... correlated)`'s child projection.
+fn mk_multiexpr_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    sub_qual: Option<Node<'mcx>>,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::list::{IntList, OidList};
+    use ::types_nodes::primnodes::{Param, ParamKind, SubLinkType, SubPlan};
+
+    let mk_exec_param = |paramid: i32| {
+        Node::mk(
+            mcx,
+            Param {
+                paramkind: ParamKind::PARAM_EXEC,
+                paramid,
+                paramtype: INT4OID,
+                paramtypmod: -1,
+                paramcollid: 0,
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+
+    let sub_tle = Node::mk_target_entry(mcx, mk_exec_param(0), 1, None, false).unwrap();
+    let mut sub_result = Node::build::<ResultPlan>(mcx).unwrap();
+    sub_result.plan.targetlist = NodeList::make1(mcx, sub_tle).unwrap();
+    sub_result.resconstantqual = sub_qual;
+    let sub_plan_tree = sub_result.seal();
+
+    let subplan_expr = Node::mk(
+        mcx,
+        SubPlan {
+            subLinkType: SubLinkType::MULTIEXPR_SUBLINK,
+            testexpr: None,
+            paramIds: IntList::nil(),
+            plan_id: 1,
+            plan_name: Some("SubPlan 1"),
+            firstColType: INT4OID,
+            firstColTypmod: -1,
+            firstColCollation: 0,
+            useHashTable: false,
+            unknownEqFalse: false,
+            parallel_safe: false,
+            setParam: IntList::make1(mcx, 1).unwrap(),
+            parParam: IntList::make1(mcx, 0).unwrap(),
+            args: NodeList::make1(mcx, mk_int4_const(mcx, 42)).unwrap(),
+            startup_cost: 0.0,
+            per_call_cost: 0.0,
+        },
+    )
+    .unwrap();
+
+    let tle1 = Node::mk_target_entry(mcx, mk_exec_param(1), 1, Some("a"), false).unwrap();
+    let tle2 = Node::mk_target_entry(mcx, subplan_expr, 2, None, true).unwrap();
+    let mut top = Node::build::<ResultPlan>(mcx).unwrap();
+    top.plan.targetlist = NodeList::make2(mcx, tle1, tle2).unwrap();
+    let plan_node = top.seal();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(plan_node);
+    pstmt.subplans = NodeList::make1(mcx, sub_plan_tree).unwrap();
+    pstmt.paramExecTypes = OidList::make2(mcx, INT4OID, INT4OID).unwrap();
+    pstmt.seal_ref()
+}
+
+fn run_multiexpr_case(pstmt: &'static PlannedStmt<'static>, expect: Option<i32>) {
+    use ::types_portal::params::ParamExecData;
+    with_exec_data(pstmt, |data, pstmt| {
+        // standard_executor_start's param sizing, replayed for init_plan.
+        let n = pstmt.paramExecTypes.len();
+        data.estate
+            .es_param_exec_vals
+            .extend(core::iter::repeat_n(ParamExecData::EMPTY, n));
+        data.estate
+            .es_param_subplans
+            .extend(core::iter::repeat_n(None, n));
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+        let mut ps = data.planstate.take().unwrap();
+        let slot_id = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
+        {
+            let base = data.estate.slot(slot_id).base();
+            match expect {
+                Some(v) => {
+                    assert!(!base.tts_isnull[0]);
+                    assert_eq!(base.tts_values[0], Datum::from_i32(v));
+                }
+                None => assert!(base.tts_isnull[0], "empty subplan sets the param to NULL"),
+            }
+            assert!(base.tts_isnull[1], "MULTIEXPR SubPlan column is a dummy NULL");
+        }
+        assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
+        data.planstate = Some(ps);
+    });
+}
+
+#[test]
+fn correlated_multiexpr_subplan_fills_set_params() {
+    install_seams();
+    let mcx = leaked_mcx();
+    run_multiexpr_case(mk_multiexpr_pstmt(mcx, None), Some(42));
+}
+
+#[test]
+fn correlated_multiexpr_empty_subplan_sets_params_null() {
+    install_seams();
+    let mcx = leaked_mcx();
+    let qual = Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap())
+        .unwrap();
+    run_multiexpr_case(mk_multiexpr_pstmt(mcx, Some(qual)), None);
 }

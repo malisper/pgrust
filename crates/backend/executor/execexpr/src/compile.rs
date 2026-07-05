@@ -161,7 +161,7 @@ pub fn exec_init_expr_subplans_agg<'mcx>(
         return Ok(None);
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
-    create_expr_setup_steps(&mut state, mcx, &[node])?;
+    create_expr_setup_steps(&mut state, mcx, &[node], agg.map(Bind::Agg), params, sub)?;
     let rout = state.result_out();
     init_expr_rec(node, &mut state, mcx, rout, agg.map(Bind::Agg), params, sub)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
@@ -183,7 +183,7 @@ pub fn exec_init_expr_with_case_test<'mcx>(
     };
     let mut state = ExprState::new_boxed_in(mcx)?;
     state.allow_ext_case_test = true;
-    create_expr_setup_steps(&mut state, mcx, &[node])?;
+    create_expr_setup_steps(&mut state, mcx, &[node], None, params, None)?;
     let rout = state.result_out();
     init_expr_rec(node, &mut state, mcx, rout, None, params, None)?;
     push_step(&mut state, mcx, Step::DoneReturn)?;
@@ -212,7 +212,7 @@ pub fn exec_init_qual_subplans<'mcx>(
     }
     let mut state = ExprState::new_boxed_in(mcx)?;
     state.flags = EEO_FLAG_IS_QUAL;
-    create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
+    create_expr_setup_steps(&mut state, mcx, qual.as_slice(), None, params, sub)?;
 
     for node in qual.iter() {
         let rout = state.result_out();
@@ -259,7 +259,7 @@ pub fn exec_build_agg_qual_subplans<'mcx>(
     }
     let mut state = ExprState::new_boxed_in(mcx)?;
     state.flags = EEO_FLAG_IS_QUAL;
-    create_expr_setup_steps(&mut state, mcx, qual.as_slice())?;
+    create_expr_setup_steps(&mut state, mcx, qual.as_slice(), Some(Bind::Agg(agg)), params, sub)?;
 
     for node in qual.iter() {
         let rout = state.result_out();
@@ -370,7 +370,7 @@ fn build_projection_info_ext<'mcx>(
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let mut state = ExprState::new_boxed_in(mcx)?;
     state.allow_merge_support = merge_support;
-    create_expr_setup_steps(&mut state, mcx, target_list.as_slice())?;
+    create_expr_setup_steps(&mut state, mcx, target_list.as_slice(), agg, params, sub)?;
 
     for tle_node in target_list.iter() {
         let tle = tle_node.as_target_entry().unwrap_or_else(|| {
@@ -541,7 +541,7 @@ fn build_agg_trans<'mcx>(
             setup_walker(f, &mut info);
         }
     }
-    push_fetch_steps(&mut state, mcx, &info)?;
+    push_expr_setup_steps(&mut state, mcx, &info, None, params, sub)?;
 
     for (transno, spec) in specs.iter().enumerate() {
         // C's numTransInputs: resjunk cells (aggpresorted ORDER BY sort
@@ -1004,6 +1004,7 @@ pub fn exec_build_hash32_from_exprs<'mcx>(
         setup_walker(k, &mut info);
     }
     assert!(info.last_scan == 0, "ExecBuildHash32Expr: scan-slot Var in a hash key");
+    debug_assert!(info.multiexpr_subplans.is_empty(), "MULTIEXPR SubPlan in a hash key");
     let last_var = info.last_inner.max(info.last_outer);
     if last_var > 0 {
         push_step(&mut state, mcx, Step::InnerFetchSome { last_var: last_var as u16 })?;
@@ -1269,16 +1270,59 @@ pub fn expr_type(node: Node<'_>) -> Oid {
     }
 }
 
+// C ExecInitSubPlanExpr (execExpr.c): compile the parParam arg expressions
+// into EEOP_PARAM_SET steps, then the EEOP_SUBPLAN step itself.
+fn init_subplan_expr<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let sp = node.as_sub_plan().expect("SubPlan node");
+    let Some(env) = sub else {
+        panic!(
+            "ExecInitSubPlanExpr (execExpr.c): SubPlan in an expression context \
+             without a subplan driver (owning node not wired)"
+        )
+    };
+    debug_assert_eq!(sp.parParam.len(), sp.args.len());
+    for (paramid, arg) in sp.parParam.iter().zip(sp.args.iter()) {
+        init_expr_rec(arg, state, mcx, out, agg, params, sub)?;
+        assert!(
+            paramid >= 0 && (paramid as u32) < params.n_exec,
+            "EEOP_PARAM_SET: paramid {paramid} outside es_param_exec_vals[0..{}]",
+            params.n_exec
+        );
+        let base = params.exec_vals.expect("n_exec > 0 implies a base pointer");
+        // SAFETY: paramid bounds-checked against the once-sized array.
+        let prm = unsafe { NonNull::new_unchecked(base.as_ptr().add(paramid as usize)) };
+        push_step(state, mcx, Step::ParamSet { prm, out })?;
+    }
+    let aggbind = match agg {
+        Some(Bind::Agg(a)) => Some(a),
+        _ => env.agg,
+    };
+    // SAFETY: env.estate is the caller's live estate (SubplanCompileEnv
+    // contract: no aliasing borrows during compile).
+    let sstate = unsafe { (env.init)(env.estate, node, aggbind) }?;
+    state.flags |= crate::steps::EEO_FLAG_HAS_SUBPLAN;
+    push_step(state, mcx, Step::SubPlan { sstate, out })
+}
+
 // C ExprSetupInfo + expr_setup_walker + ExecPushExprSetupSteps. Slots are not
 // knowable here (no PlanState parent), so every referenced slot gets a
 // non-fixed FETCHSOME step, C's parent == NULL shape.
 #[derive(Default)]
-struct SetupInfo {
+struct SetupInfo<'mcx> {
     last_inner: i16,
     last_outer: i16,
     last_scan: i16,
     last_old: i16,
     last_new: i16,
+    multiexpr_subplans: Vec<Node<'mcx>>,
 }
 
 #[inline]
@@ -1286,19 +1330,42 @@ pub(crate) fn create_expr_setup_steps<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     nodes: &[Node<'mcx>],
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<()> {
     let mut info = SetupInfo::default();
     for &n in nodes {
         setup_walker(n, &mut info);
     }
-    push_fetch_steps(state, mcx, &info)
+    push_expr_setup_steps(state, mcx, &info, agg, params, sub)
+}
+
+// C ExecPushExprSetupSteps: slot fetches, then any MULTIEXPR SubPlans — they
+// must run before any Param referencing their outputs, after the Var fetches
+// their args may need.
+fn push_expr_setup_steps<'mcx>(
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    info: &SetupInfo<'mcx>,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    push_fetch_steps(state, mcx, info)?;
+    for &sp in &info.multiexpr_subplans {
+        // C: the result can be ignored, but it needs to go somewhere.
+        let out = state.result_out();
+        init_subplan_expr(sp, state, mcx, out, agg, params, sub)?;
+    }
+    Ok(())
 }
 
 #[inline]
 fn push_fetch_steps<'mcx>(
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
-    info: &SetupInfo,
+    info: &SetupInfo<'_>,
 ) -> PgResult<()> {
     if info.last_inner > 0 {
         push_step(state, mcx, Step::InnerFetchSome { last_var: info.last_inner as u16 })?;
@@ -1318,7 +1385,7 @@ fn push_fetch_steps<'mcx>(
     Ok(())
 }
 
-fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
+fn setup_walker<'mcx>(node: Node<'mcx>, info: &mut SetupInfo<'mcx>) {
     match node.node_tag() {
         NodeTag::T_Var => {
             let v = node.as_var().unwrap();
@@ -1395,6 +1462,11 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
         }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
+            // C expr_setup_walker: collect MULTIEXPR SubPlans for eager
+            // execution in the setup steps.
+            if sp.subLinkType == ::types_nodes::primnodes::SubLinkType::MULTIEXPR_SUBLINK {
+                info.multiexpr_subplans.push(node);
+            }
             if let Some(t) = sp.testexpr {
                 setup_walker(t, info);
             }
@@ -1940,38 +2012,17 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
-            let Some(env) = sub else {
-                panic!(
-                    "ExecInitSubPlanExpr (execExpr.c): SubPlan in an expression context \
-                     without a subplan driver (owning node not wired)"
-                )
-            };
-            assert!(
-                sp.subLinkType != ::types_nodes::primnodes::SubLinkType::MULTIEXPR_SUBLINK,
-                "ExecInitExprRec (execExpr.c): MULTIEXPR SubPlan not ported"
-            );
-            debug_assert_eq!(sp.parParam.len(), sp.args.len());
-            for (paramid, arg) in sp.parParam.iter().zip(sp.args.iter()) {
-                init_expr_rec(arg, state, mcx, out, agg, params, sub)?;
-                assert!(
-                    paramid >= 0 && (paramid as u32) < params.n_exec,
-                    "EEOP_PARAM_SET: paramid {paramid} outside es_param_exec_vals[0..{}]",
-                    params.n_exec
+            // C ExecInitExprRec T_SubPlan: a MULTIEXPR SubPlan was already
+            // executed by the expression's setup steps; in-tree it is only a
+            // dummy NULL::record in case the tlist element is assigned.
+            if sp.subLinkType == ::types_nodes::primnodes::SubLinkType::MULTIEXPR_SUBLINK {
+                return push_step(
+                    state,
+                    mcx,
+                    Step::Const { value: ::datum::Datum::null(), isnull: true, out },
                 );
-                let base = params.exec_vals.expect("n_exec > 0 implies a base pointer");
-                // SAFETY: paramid bounds-checked against the once-sized array.
-                let prm = unsafe { NonNull::new_unchecked(base.as_ptr().add(paramid as usize)) };
-                push_step(state, mcx, Step::ParamSet { prm, out })?;
             }
-            let aggbind = match agg {
-                Some(Bind::Agg(a)) => Some(a),
-                _ => env.agg,
-            };
-            // SAFETY: env.estate is the caller's live estate (SubplanCompileEnv
-            // contract: no aliasing borrows during compile).
-            let sstate = unsafe { (env.init)(env.estate, node, aggbind) }?;
-            state.flags |= crate::steps::EEO_FLAG_HAS_SUBPLAN;
-            push_step(state, mcx, Step::SubPlan { sstate, out })
+            init_subplan_expr(node, state, mcx, out, agg, params, sub)
         }
         NodeTag::T_BoolExpr => init_bool_expr(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CaseExpr => init_case_expr(node, state, mcx, out, agg, params, sub),
@@ -3881,7 +3932,7 @@ fn init_array_coerce<'mcx>(
     let elemexpr = ace.elemexpr.expect("ArrayCoerceExpr has an elemexpr");
     let slot = alloc_nullable_datum(mcx)?;
     let mut substate = ExprState::new_boxed_in(mcx)?;
-    create_expr_setup_steps(&mut substate, mcx, &[elemexpr])?;
+    create_expr_setup_steps(&mut substate, mcx, &[elemexpr], None, ParamBind::NONE, None)?;
     substate.innermost_case = Some(slot);
     let rout = substate.result_out();
     init_expr_rec(elemexpr, &mut substate, mcx, rout, None, ParamBind::NONE, None)?;
