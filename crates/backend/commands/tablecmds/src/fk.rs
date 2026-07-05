@@ -17,7 +17,7 @@ use types_nodes::rawnodes::{
     FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_SIMPLE,
 };
 use types_nodes::NodeList;
-use types_core::catalog::RELPERSISTENCE_PERMANENT;
+use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED};
 use types_rel::{NoLock, Relation, ShareRowExclusiveLock, RELKIND_RELATION};
 use types_trigger::{TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_ROW,
     TRIGGER_TYPE_UPDATE};
@@ -143,21 +143,38 @@ fn at_add_foreign_key_constraint<'mcx>(
         pkrel.close(NoLock)?;
         return Err(e);
     }
-    if catalog::IsSystemRelation(&pkrel) && !init_small::globals::allowSystemTableMods() {
-        unported("FK referencing a system catalog");
+    if !init_small::globals::allowSystemTableMods() && catalog::IsSystemRelation(&pkrel) {
+        let e = err(
+            format!("permission denied: \"{}\" is a system catalog", pkrel.name()),
+            types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        );
+        pkrel.close(NoLock)?;
+        return Err(e);
     }
-    if rel.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT
-        || pkrel.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT
-    {
-        if rel.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT {
-            let e = err(
-                "constraints on permanent tables may reference only permanent tables".into(),
-                ERRCODE_INVALID_TABLE_DEFINITION,
-            );
-            pkrel.close(NoLock)?;
-            return Err(e);
+
+    let persistence_err = match rel.rd_rel.relpersistence {
+        RELPERSISTENCE_PERMANENT => (pkrel.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT)
+            .then_some("constraints on permanent tables may reference only permanent tables"),
+        RELPERSISTENCE_UNLOGGED => (pkrel.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT
+            && pkrel.rd_rel.relpersistence != RELPERSISTENCE_UNLOGGED)
+            .then_some(
+                "constraints on unlogged tables may reference only permanent or unlogged tables",
+            ),
+        RELPERSISTENCE_TEMP => {
+            if pkrel.rd_rel.relpersistence != RELPERSISTENCE_TEMP {
+                Some("constraints on temporary tables may reference only temporary tables")
+            } else if !pkrel.rd_islocaltemp || !rel.rd_islocaltemp {
+                Some("constraints on temporary tables must involve temporary tables of this session")
+            } else {
+                None
+            }
         }
-        unported("FK on temp/unlogged tables (persistence cross-checks)");
+        _ => None,
+    };
+    if let Some(msg) = persistence_err {
+        let e = err(msg.into(), ERRCODE_INVALID_TABLE_DEFINITION);
+        pkrel.close(NoLock)?;
+        return Err(e);
     }
 
     let mut fkattnum = [0i16; INDEX_MAX_KEYS as usize];
@@ -341,11 +358,35 @@ fn at_add_foreign_key_constraint<'mcx>(
         if (pkcoll != InvalidOid) != (fkcoll != InvalidOid) {
             panic!("key columns are not both collatable");
         }
-        if pkcoll != InvalidOid && pkcoll != fkcoll {
-            let pkdet = lsyscache::get_collation_isdeterministic(pkcoll)?;
-            let fkdet = lsyscache::get_collation_isdeterministic(fkcoll)?;
-            if !pkdet || !fkdet {
-                unported("nondeterministic-collation FK mismatch error path");
+        if pkcoll != InvalidOid && fkcoll != InvalidOid {
+            let pkcolldet = lsyscache::get_collation_isdeterministic(pkcoll)?;
+            let fkcolldet = lsyscache::get_collation_isdeterministic(fkcoll)?;
+            if (!pkcolldet || !fkcolldet) && pkcoll != fkcoll {
+                let fk_attname = fkconstraint
+                    .fk_attrs
+                    .nth(i)
+                    .as_string()
+                    .expect("fk_attrs String")
+                    .sval;
+                let fkcollname = lsyscache::get_collation_name(mcx, fkcoll)?
+                    .unwrap_or_else(|| panic!("cache lookup failed for collation {fkcoll}"));
+                let pkcollname = lsyscache::get_collation_name(mcx, pkcoll)?
+                    .unwrap_or_else(|| panic!("cache lookup failed for collation {pkcoll}"));
+                let e = err(
+                    format!("foreign key constraint \"{conname}\" cannot be implemented"),
+                    types_error::ERRCODE_COLLATION_MISMATCH,
+                );
+                let e = Box::new((*e).with_detail(format!(
+                    "Key columns \"{fk_attname}\" of the referencing table and \"{}\" of the \
+                     referenced table have incompatible collations: \"{}\" and \"{}\".  \
+                     If either collation is nondeterministic, then both collations have to be \
+                     the same.",
+                    pk_attnames[i],
+                    fkcollname.as_str(),
+                    pkcollname.as_str(),
+                )));
+                pkrel.close(NoLock)?;
+                return Err(e);
             }
         }
 
@@ -923,15 +964,17 @@ fn choose_fkey_constraint_name_addition<'mcx>(
     mcx: Mcx<'mcx>,
     colnames: &NodeList<'_>,
 ) -> PgResult<mcx::PgString<'mcx>> {
+    let namedatalen = types_core::NAMEDATALEN as usize;
     let mut buf = mcx::PgString::new_in(mcx);
     for lc in colnames.iter() {
         let name = lc.as_string().expect("fk_attrs String").sval;
         if !buf.is_empty() {
             buf.try_push_str("_")?;
         }
-        buf.try_push_str(name)?;
-        if buf.len() >= types_core::NAMEDATALEN as usize {
-            unported("ChooseForeignKeyConstraintNameAddition truncation");
+        let take = name.len().min(namedatalen - 1);
+        buf.try_push_str(&name[..take])?;
+        if buf.len() >= namedatalen {
+            break;
         }
     }
     Ok(buf)
