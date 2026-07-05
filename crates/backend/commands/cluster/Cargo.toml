@@ -44,6 +44,8 @@ tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
 rewriteheap = { path = "../../access/heap/rewriteheap" }
+heaptoast = { path = "../../access/heap/heaptoast" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
 heapam_visibility = { path = "../../access/heap/heapam_visibility" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }

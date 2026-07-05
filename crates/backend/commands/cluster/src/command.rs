@@ -1,8 +1,7 @@
 // cluster.c command surface: cluster()/cluster_rel/rebuild_relation/
 // copy_table_data + the indisclustered maintenance. VACUUM FULL enters via
-// cluster_seams::cluster_rel. Tables with a toast relation keep a named LOUD
-// (heaptoast's rd_toastoid preserve lane is unported), which also fences off
-// swap-by-content.
+// cluster_seams::cluster_rel. Toasted tables rewrite with value-OID
+// preservation and swap toast by content (C's rd_toastoid protocol).
 use crate::{finish_heap_swap, make_new_heap, oid_key, unported};
 
 use mcx::Mcx;
@@ -344,7 +343,7 @@ fn rebuild_relation<'mcx>(
         make_new_heap(mcx, table_oid, old_heap.rd_rel.reltablespace, relpersistence, NoLock)?;
     let new_heap = table::table_open(mcx, oid_new_heap, NoLock)?;
 
-    let (frozen_xid, cutoff_multi) =
+    let (frozen_xid, cutoff_multi, swap_toast_by_content) =
         copy_table_data(mcx, &new_heap, &old_heap, index.as_ref(), verbose)?;
 
     old_heap.close(NoLock)?;
@@ -358,7 +357,7 @@ fn rebuild_relation<'mcx>(
         table_oid,
         oid_new_heap,
         is_system_catalog,
-        false,
+        swap_toast_by_content,
         false,
         true,
         frozen_xid,
@@ -369,25 +368,36 @@ fn rebuild_relation<'mcx>(
 
 // copy_table_data (cluster.c) + heapam_relation_copy_for_cluster
 // (heapam_handler.c, hosted here: heapam_handler cannot see indexam without
-// cycling through tableam). Returns (FreezeXid, MultiXactCutoff).
+// cycling through tableam). Returns (FreezeXid, MultiXactCutoff,
+// swap_toast_by_content).
 fn copy_table_data<'mcx>(
     mcx: Mcx<'mcx>,
     new_heap: &Relation<'mcx>,
     old_heap: &Relation<'mcx>,
     old_index: Option<&Relation<'mcx>>,
     verbose: bool,
-) -> PgResult<(u32, u32)> {
+) -> PgResult<(u32, u32, bool)> {
     debug_assert!(new_heap.rd_att.natts == old_heap.rd_att.natts);
     let ru0 = pg_rusage::pg_rusage_init();
     let nspname = lsyscache::get_namespace_name(mcx, old_heap.namespace())?
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
 
-    if old_heap.rd_rel.reltoastrelid != InvalidOid
-        || new_heap.rd_rel.reltoastrelid != InvalidOid
-    {
-        unported("copy_table_data: toast rewrite (rd_toastoid preserve lane)");
+    // Keep autovacuum off the old toast table for the whole rewrite: it could
+    // remove DEAD toast tuples still referenced by RECENTLY_DEAD main tuples
+    // we copy.
+    if old_heap.rd_rel.reltoastrelid != InvalidOid {
+        lmgr::LockRelationOid(old_heap.rd_rel.reltoastrelid, AccessExclusiveLock)?;
     }
+
+    // Both heaps toasted: swap toast by content, and toast pointers written
+    // into new_heap carry the old toast table's OID with value OIDs preserved
+    // (C's NewHeap->rd_toastoid, threaded to toast_save_datum). Old-only
+    // toast (droppable columns) falls back to swap by links.
+    let swap_toast_by_content = old_heap.rd_rel.reltoastrelid != InvalidOid
+        && new_heap.rd_rel.reltoastrelid != InvalidOid;
+    let toastoid =
+        if swap_toast_by_content { old_heap.rd_rel.reltoastrelid } else { InvalidOid };
 
     // C memsets VacuumParams to zero: freeze ages 0 = freeze aggressively.
     let params = tableam_vocab::VacuumParams {
@@ -457,6 +467,7 @@ fn copy_table_data<'mcx>(
         cutoffs.OldestXmin,
         &mut cutoffs.FreezeLimit,
         &mut cutoffs.MultiXactCutoff,
+        toastoid,
     )?;
 
     let num_pages = bufmgr::RelationGetNumberOfBlocksInFork(
@@ -521,7 +532,7 @@ fn copy_table_data<'mcx>(
     }
     xact::CommandCounterIncrement()?;
 
-    Ok((cutoffs.FreezeLimit, cutoffs.MultiXactCutoff))
+    Ok((cutoffs.FreezeLimit, cutoffs.MultiXactCutoff, swap_toast_by_content))
 }
 
 fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, RelToCluster>> {

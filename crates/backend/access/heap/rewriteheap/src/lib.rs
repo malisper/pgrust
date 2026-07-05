@@ -49,6 +49,9 @@ pub struct RewriteState<'mcx> {
     rs_old_frozenxid: TransactionId,
     rs_old_minmxid: TransactionId,
     rs_new_relkind: u8,
+    // C NewHeap->rd_toastoid: valid only for the CLUSTER/VACUUM FULL rewrite
+    // when both heaps have toast tables (copy_table_data's choice).
+    rs_toastoid: types_core::Oid,
     rs_new_save_free_space: usize,
     rs_unresolved_tups: PgFxHashMap<'mcx, TidHashKey, UnresolvedTupData<'mcx>>,
     rs_old_new_tid_map: PgFxHashMap<'mcx, TidHashKey, ItemPointerData>,
@@ -61,6 +64,7 @@ pub fn begin_heap_rewrite<'mcx>(
     oldest_xmin: TransactionId,
     freeze_xid: TransactionId,
     cutoff_multi: TransactionId,
+    toastoid: types_core::Oid,
 ) -> PgResult<RewriteState<'mcx>> {
     // logical_begin_heap_rewrite gate: RelationIsAccessibleInLogicalDecoding.
     // rd_options.is_some() over-approximates RelationIsUsedAsCatalogTable
@@ -83,6 +87,7 @@ pub fn begin_heap_rewrite<'mcx>(
         rs_old_frozenxid: old_heap.rd_rel.relfrozenxid,
         rs_old_minmxid: old_heap.rd_rel.relminmxid,
         rs_new_relkind: new_heap.rd_rel.relkind,
+        rs_toastoid: toastoid,
         rs_new_save_free_space: new_heap.get_target_page_free_space(HEAP_DEFAULT_FILLFACTOR),
         rs_unresolved_tups: PgFxHashMap::with_hasher_in(Default::default(), mcx),
         rs_old_new_tid_map: PgFxHashMap::with_hasher_in(Default::default(), mcx),
@@ -218,7 +223,14 @@ fn raw_heap_insert<'mcx>(
         // XLOG FPI pages are not logically decoded; the toast writes must not
         // be either.
         let options = heapam::hio::HEAP_INSERT_SKIP_FSM | heapam::hio::HEAP_INSERT_NO_LOGICAL;
-        heaptoast::heap_toast_insert_or_update(state.mcx, new_heap, tup, None, options)?
+        heaptoast::heap_toast_insert_or_update(
+            state.mcx,
+            new_heap,
+            tup,
+            None,
+            state.rs_toastoid,
+            options,
+        )?
     } else {
         None
     };

@@ -35,6 +35,9 @@ pub struct ToastTupleContext<'a, 'rel> {
     pub ttc_oldisnull: Option<&'a [bool]>,
     pub ttc_attr: &'a mut [ToastAttrInfo],
     pub ttc_flags: u8,
+    // C NewHeap->rd_toastoid (CLUSTER rewrite), threaded instead of a
+    // relcache field; InvalidOid outside a rewrite.
+    pub ttc_toastoid: ::types_core::Oid,
 }
 
 /// # Safety
@@ -226,7 +229,8 @@ pub fn toast_tuple_externalize<'mcx>(
     let old_value = unsafe { va_slice(ttc.ttc_values[attribute]) };
     attr.tai_colflags |= TOASTCOL_IGNORE;
     let oldexternal = attr.tai_oldexternal.map(|d| unsafe { va_slice(d) });
-    let pointer = toast_save_datum(mcx, ttc.ttc_rel, old_value, oldexternal, options)?;
+    let pointer =
+        toast_save_datum(mcx, ttc.ttc_rel, old_value, oldexternal, ttc.ttc_toastoid, options)?;
     let mut img = ::mcx::vec_with_capacity_in(mcx, pointer.len())?;
     ::mcx::vec_append_bytes(&mut img, &pointer)?;
     ttc.ttc_values[attribute] = leak_datum(img);

@@ -1,7 +1,6 @@
-// cluster.c ALTER TABLE rewrite slice: make_new_heap / swap_relation_files /
-// finish_heap_swap for plain unindexed heap tables (toast rides the link
-// swap). LOUD: CLUSTER/VACUUM FULL entry points, mapped relations, user
-// index rebuilds (reindex_relation), swap-by-content, reloptions.
+// cluster.c ALTER TABLE + CLUSTER/VACUUM FULL rewrite slice: make_new_heap /
+// swap_relation_files / finish_heap_swap. Toast swaps by content (CLUSTER) or
+// by links (ALTER TABLE rewrites). LOUD: mapped relations, reloptions copy.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod command;
@@ -15,9 +14,10 @@ use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::PgResult;
-use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
+use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE, RELKIND_INDEX, RELKIND_TOASTVALUE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
+const Anum_pg_class_relnamespace: usize = 2;
 const Anum_pg_class_relam: usize = 7;
 const Anum_pg_class_relfilenode: usize = 8;
 const Anum_pg_class_reltablespace: usize = 9;
@@ -27,6 +27,7 @@ const Anum_pg_class_relallvisible: usize = 12;
 const Anum_pg_class_relallfrozen: usize = 13;
 const Anum_pg_class_reltoastrelid: usize = 14;
 const Anum_pg_class_relpersistence: usize = 17;
+const Anum_pg_class_relkind: usize = 18;
 const Anum_pg_class_relrewrite: usize = 29;
 const Anum_pg_class_relfrozenxid: usize = 30;
 const Anum_pg_class_relminmxid: usize = 31;
@@ -127,11 +128,14 @@ pub fn finish_heap_swap<'mcx>(
     cutoff_multi: types_core::primitive::MultiXactId,
     newrelpersistence: u8,
 ) -> PgResult<()> {
-    if swap_toast_by_content {
-        unported("finish_heap_swap: swap_toast_by_content (system-catalog rewrite lane)");
-    }
-    let (toast1, toast2) =
-        swap_relation_files(mcx, old_heap_oid, new_heap_oid, frozen_xid, cutoff_multi)?;
+    let (toast1, toast2) = swap_relation_files(
+        mcx,
+        old_heap_oid,
+        new_heap_oid,
+        swap_toast_by_content,
+        frozen_xid,
+        cutoff_multi,
+    )?;
 
     if is_system_catalog {
         inval::invalidate::CacheInvalidateCatalog(old_heap_oid)?;
@@ -173,8 +177,8 @@ pub fn finish_heap_swap<'mcx>(
 
     // Toast-by-links rename: the surviving toast (swapped onto the old heap)
     // carries the transient name; rename it and its index, reset relrewrite.
-    let _ = toast2;
-    if toast1 != InvalidOid || toast2 != InvalidOid {
+    // By-content swaps keep the old toast row (name already right).
+    if !swap_toast_by_content && (toast1 != InvalidOid || toast2 != InvalidOid) {
         let newrel = table::table_open(mcx, old_heap_oid, NoLock)?;
         let cur_toast = newrel.rd_rel.reltoastrelid;
         newrel.close(NoLock)?;
@@ -216,11 +220,13 @@ fn tablecmds_rename_seam<'mcx>(
 }
 
 // swap_relation_files, non-mapped arm; returns both reltoastrelid values as
-// seen before the swap.
+// seen before the swap. By-content recursion (CLUSTER/VACUUM FULL) swaps the
+// toast tables and their valid indexes in place of the link swap.
 fn swap_relation_files<'mcx>(
     mcx: Mcx<'mcx>,
     r1: Oid,
     r2: Oid,
+    swap_toast_by_content: bool,
     frozen_xid: types_core::primitive::TransactionId,
     cutoff_multi: types_core::primitive::MultiXactId,
 ) -> PgResult<(Oid, Oid)> {
@@ -231,10 +237,12 @@ fn swap_relation_files<'mcx>(
     struct Row<'mcx> {
         tid: types_tuple::ItemPointerData,
         vals: PgVec<'mcx, (usize, Datum)>,
+        relnamespace: Oid,
         relfilenode: Oid,
         reltablespace: Oid,
         relam: Oid,
         relpersistence: i8,
+        relkind: i8,
         reltoastrelid: Oid,
         relpages: Datum,
         reltuples: Datum,
@@ -262,10 +270,12 @@ fn swap_relation_files<'mcx>(
         let row = Row {
             tid: tup.t_self,
             vals: PgVec::new_in(mcx),
+            relnamespace: get(Anum_pg_class_relnamespace).as_oid(),
             relfilenode: get(Anum_pg_class_relfilenode).as_oid(),
             reltablespace: get(Anum_pg_class_reltablespace).as_oid(),
             relam: get(Anum_pg_class_relam).as_oid(),
             relpersistence: get(Anum_pg_class_relpersistence).as_i8(),
+            relkind: get(Anum_pg_class_relkind).as_i8(),
             reltoastrelid: get(Anum_pg_class_reltoastrelid).as_oid(),
             relpages: get(Anum_pg_class_relpages),
             reltuples: get(Anum_pg_class_reltuples),
@@ -293,9 +303,6 @@ fn swap_relation_files<'mcx>(
         (Anum_pg_class_relfilenode, Datum::from_oid(row2.relfilenode)),
         (Anum_pg_class_reltablespace, Datum::from_oid(row2.reltablespace)),
         (Anum_pg_class_relpersistence, Datum::from_i8(row2.relpersistence)),
-        (Anum_pg_class_reltoastrelid, Datum::from_oid(row2.reltoastrelid)),
-        (Anum_pg_class_relfrozenxid, Datum::from_transaction_id(frozen_xid)),
-        (Anum_pg_class_relminmxid, Datum::from_u32(cutoff_multi)),
         (Anum_pg_class_relpages, row2.relpages),
         (Anum_pg_class_reltuples, row2.reltuples),
         (Anum_pg_class_relallvisible, row2.relallvisible),
@@ -303,17 +310,26 @@ fn swap_relation_files<'mcx>(
     ] {
         row1.vals.push(pair);
     }
+    if !swap_toast_by_content {
+        row1.vals.push((Anum_pg_class_reltoastrelid, Datum::from_oid(row2.reltoastrelid)));
+    }
+    if row1.relkind != RELKIND_INDEX as i8 {
+        row1.vals.push((Anum_pg_class_relfrozenxid, Datum::from_transaction_id(frozen_xid)));
+        row1.vals.push((Anum_pg_class_relminmxid, Datum::from_u32(cutoff_multi)));
+    }
     for pair in [
         (Anum_pg_class_relfilenode, Datum::from_oid(row1.relfilenode)),
         (Anum_pg_class_reltablespace, Datum::from_oid(row1.reltablespace)),
         (Anum_pg_class_relpersistence, Datum::from_i8(row1.relpersistence)),
-        (Anum_pg_class_reltoastrelid, Datum::from_oid(row1.reltoastrelid)),
         (Anum_pg_class_relpages, row1.relpages),
         (Anum_pg_class_reltuples, row1.reltuples),
         (Anum_pg_class_relallvisible, row1.relallvisible),
         (Anum_pg_class_relallfrozen, row1.relallfrozen),
     ] {
         row2.vals.push(pair);
+    }
+    if !swap_toast_by_content {
+        row2.vals.push((Anum_pg_class_reltoastrelid, Datum::from_oid(row1.reltoastrelid)));
     }
 
     for (relid, row) in [(r1, &row1), (r2, &row2)] {
@@ -346,38 +362,72 @@ fn swap_relation_files<'mcx>(
     }
     rel_relation.close(RowExclusiveLock)?;
 
-    // Toast link swap: rewire the INTERNAL toast->owner dependencies.
     if row1.reltoastrelid != InvalidOid || row2.reltoastrelid != InvalidOid {
-        if row1.reltoastrelid != InvalidOid {
-            delete_toast_dependency(mcx, row1.reltoastrelid)?;
-        }
-        if row2.reltoastrelid != InvalidOid {
-            delete_toast_dependency(mcx, row2.reltoastrelid)?;
-        }
-        // After the swap r1 owns row2's toast and vice versa.
-        if row2.reltoastrelid != InvalidOid {
-            let toastobject =
-                pg_depend::ObjectAddress::set(RELATION_RELATION_ID, row2.reltoastrelid);
-            let baseobject = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, r1);
-            pg_depend::recordDependencyOn(
+        if swap_toast_by_content {
+            // Recursively swap the toast tables' contents; their pg_class
+            // links stayed put, so the old toast OID now owns the new data.
+            assert!(
+                row1.reltoastrelid != InvalidOid && row2.reltoastrelid != InvalidOid,
+                "cannot swap toast files by content when there's only one"
+            );
+            swap_relation_files(
                 mcx,
-                &toastobject,
-                &baseobject,
-                pg_depend::DependencyType::Internal,
+                row1.reltoastrelid,
+                row2.reltoastrelid,
+                true,
+                frozen_xid,
+                cutoff_multi,
             )?;
-        }
-        if row1.reltoastrelid != InvalidOid {
-            let toastobject =
-                pg_depend::ObjectAddress::set(RELATION_RELATION_ID, row1.reltoastrelid);
-            let baseobject = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, r2);
-            pg_depend::recordDependencyOn(
-                mcx,
-                &toastobject,
-                &baseobject,
-                pg_depend::DependencyType::Internal,
-            )?;
+        } else {
+            // Link swap: rewire the INTERNAL toast->owner dependencies.
+            // Disallowed for system catalogs (the catalog being rebuilt could
+            // be one the dependency changes touch).
+            assert!(
+                !(catalog::IsCatalogRelationOid(r1) || catalog::IsToastNamespace(row1.relnamespace)),
+                "cannot swap toast files by links for system catalogs"
+            );
+            if row1.reltoastrelid != InvalidOid {
+                delete_toast_dependency(mcx, row1.reltoastrelid)?;
+            }
+            if row2.reltoastrelid != InvalidOid {
+                delete_toast_dependency(mcx, row2.reltoastrelid)?;
+            }
+            // After the swap r1 owns row2's toast and vice versa.
+            if row2.reltoastrelid != InvalidOid {
+                let toastobject =
+                    pg_depend::ObjectAddress::set(RELATION_RELATION_ID, row2.reltoastrelid);
+                let baseobject = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, r1);
+                pg_depend::recordDependencyOn(
+                    mcx,
+                    &toastobject,
+                    &baseobject,
+                    pg_depend::DependencyType::Internal,
+                )?;
+            }
+            if row1.reltoastrelid != InvalidOid {
+                let toastobject =
+                    pg_depend::ObjectAddress::set(RELATION_RELATION_ID, row1.reltoastrelid);
+                let baseobject = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, r2);
+                pg_depend::recordDependencyOn(
+                    mcx,
+                    &toastobject,
+                    &baseobject,
+                    pg_depend::DependencyType::Internal,
+                )?;
+            }
         }
     }
+
+    // By-content toast swaps carry their valid indexes with them.
+    if swap_toast_by_content
+        && row1.relkind == RELKIND_TOASTVALUE as i8
+        && row2.relkind == RELKIND_TOASTVALUE as i8
+    {
+        let toast_index1 = heaptoast::toast_get_valid_index(mcx, r1, AccessExclusiveLock)?;
+        let toast_index2 = heaptoast::toast_get_valid_index(mcx, r2, AccessExclusiveLock)?;
+        swap_relation_files(mcx, toast_index1, toast_index2, true, 0, 0)?;
+    }
+
     Ok((row1.reltoastrelid, row2.reltoastrelid))
 }
 

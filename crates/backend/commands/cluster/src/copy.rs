@@ -21,6 +21,7 @@ pub fn copy_for_cluster<'mcx>(
     oldest_xmin: TransactionId,
     xid_cutoff: &mut TransactionId,
     multi_cutoff: &mut MultiXactId,
+    toastoid: types_core::Oid,
 ) -> PgResult<(f64, f64, f64)> {
     let is_system_catalog = catalog::IsSystemRelation(old_heap);
     let old_tup_desc = old_heap.descr();
@@ -36,6 +37,7 @@ pub fn copy_for_cluster<'mcx>(
         oldest_xmin,
         *xid_cutoff,
         *multi_cutoff,
+        toastoid,
     )?;
 
     let mut tuplesort = if use_sort {
