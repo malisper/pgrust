@@ -134,10 +134,46 @@ pub fn with_subplan_compile_env<'mcx, R>(
     estate: &mut EStateData<'mcx>,
     f: impl FnOnce(Option<execexpr::SubplanCompileEnv>) -> R,
 ) -> R {
+    with_subplan_compile_env_parent(estate, None, f)
+}
+
+/// The estate range table, 'static-restamped for SubplanCompileEnv.rtable
+/// (plan-lived; the restamp stays behind the compile-scoped env).
+pub fn subplan_env_rtable<'mcx>(
+    estate: &EStateData<'mcx>,
+) -> core::ptr::NonNull<[&'static RangeTblEntry<'static>]> {
+    // SAFETY: lifetime restamp only; es_range_table lives in es_query_cxt.
+    unsafe {
+        core::mem::transmute::<
+            core::ptr::NonNull<[&RangeTblEntry<'mcx>]>,
+            core::ptr::NonNull<[&'static RangeTblEntry<'static>]>,
+        >(core::ptr::NonNull::from(&estate.es_range_table[..]))
+    }
+}
+
+/// [`with_subplan_compile_env`] under a SubqueryScan/CteScan parent: the
+/// subplan's targetlist reaches EEOP_WHOLEROW's junk-filter build (C
+/// ExecInitWholeRowVar's state->parent walk).
+pub fn with_subplan_compile_env_parent<'mcx, R>(
+    estate: &mut EStateData<'mcx>,
+    parent_subplan_tlist: Option<&types_nodes::list::NodeList<'mcx>>,
+    f: impl FnOnce(Option<execexpr::SubplanCompileEnv>) -> R,
+) -> R {
+    let rtable = subplan_env_rtable(estate);
+    // SAFETY: 'static restamp of a plan-lived (es_query_cxt) node tree; it
+    // stays behind the compile-scoped env.
+    let parent_subplan_tlist = parent_subplan_tlist.map(|t| unsafe {
+        core::mem::transmute::<
+            core::ptr::NonNull<types_nodes::list::NodeList<'mcx>>,
+            core::ptr::NonNull<types_nodes::list::NodeList<'static>>,
+        >(core::ptr::NonNull::from(t))
+    });
     let env = estate.es_subplan_init_hook.map(|init| execexpr::SubplanCompileEnv {
         estate: core::ptr::NonNull::from(&mut *estate).cast(),
         init,
         agg: None,
+        rtable: Some(rtable),
+        parent_subplan_tlist,
     });
     f(env)
 }

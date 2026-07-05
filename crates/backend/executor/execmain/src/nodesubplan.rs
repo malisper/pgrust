@@ -439,10 +439,13 @@ fn exec_init_sub_plan_expr<'mcx>(
     }
 
     let params = estate.param_bind();
+    let nested_rtable = ::executils::subplan_env_rtable(estate);
     let nested_env = ::execexpr::SubplanCompileEnv {
         estate: NonNull::from(&mut *estate).cast(),
         init: subplan_expr_init_hook,
         agg,
+        rtable: Some(nested_rtable),
+        parent_subplan_tlist: None,
     };
     let testexpr = ::execexpr::exec_init_expr_subplans_agg(
         mcx,
@@ -592,10 +595,13 @@ fn init_hashed_state<'mcx>(
     let probe_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc_right.clone()));
 
+    let nested_rtable = ::executils::subplan_env_rtable(estate);
     let nested_env = ::execexpr::SubplanCompileEnv {
         estate: NonNull::from(&mut *estate).cast(),
         init: subplan_expr_init_hook,
         agg,
+        rtable: Some(nested_rtable),
+        parent_subplan_tlist: None,
     };
     let proj_left = match agg {
         Some(a) => ::execexpr::exec_build_agg_projection_info_subplans(

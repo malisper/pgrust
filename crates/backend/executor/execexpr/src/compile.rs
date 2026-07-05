@@ -119,6 +119,14 @@ pub struct SubplanCompileEnv {
     /// Parent Agg's result-array binding: Aggrefs inside the SubPlan's
     /// testexpr/args compile against the owning AggState (C parent PlanState).
     pub agg: Option<AggBind>,
+    /// C ExprState.parent, reduced to what EEOP_WHOLEROW consumes: the
+    /// executor range table (RTE eref aliases for the RECORD leg). Raw and
+    /// 'static-restamped against the same crate cycle as `estate`; lives in
+    /// es_query_cxt for the whole plan.
+    pub rtable: Option<NonNull<[&'static ::types_nodes::parsenodes::RangeTblEntry<'static>]>>,
+    /// The SubqueryScan/CteScan parent's subplan targetlist (C
+    /// ExecInitWholeRowVar's junk-filter source); None under other parents.
+    pub parent_subplan_tlist: Option<NonNull<NodeList<'static>>>,
 }
 
 /// C `ExecInitExpr` (parent-less form; PlanState vocab is the execProcnode
@@ -1460,20 +1468,20 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
     }
 }
 
-// C ExecInitExprRec whole-row Var + ExecEvalWholeRowVar's first-eval split:
-// the composite tupdesc resolves here (plan-stable typcache row; C defers to
-// first eval only to reach the slot). RECORD legs (subquery/join whole-row,
-// junk filtering) and RETURNING OLD/NEW stay loud.
+// C ExecInitWholeRowVar + ExecEvalWholeRowVar's first-eval split: the
+// named-composite tupdesc resolves here (plan-stable typcache row; C defers
+// to first eval only to reach the slot); the RECORD leg's descriptor waits
+// for the slot at first eval. RETURNING OLD/NEW whole-rows are handled by
+// the src legs below.
 fn init_whole_row<'mcx>(
     variable: &::types_nodes::primnodes::Var<'mcx>,
     state: &mut ExprState<'mcx>,
     mcx: Mcx<'mcx>,
     out: OutRef,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<()> {
     use crate::steps::{SlotSrc, WholeRowState};
-    if variable.vartype == ::types_core::catalog::RECORDOID {
-        unported("EEOP_WHOLEROW RECORD leg (subquery/CTE whole-row + junkfilter)");
-    }
+    let record = variable.vartype == ::types_core::catalog::RECORDOID;
     let src = match variable.varno {
         INNER_VAR => SlotSrc::Inner,
         OUTER_VAR => SlotSrc::Outer,
@@ -1489,23 +1497,58 @@ fn init_whole_row<'mcx>(
             }
         },
     };
-    let desc = typcache::lookup_rowtype_tupdesc_copy(mcx, variable.vartype, -1)?;
-    let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
-    let desc_ptr: NonNull<::types_tuple::TupleDescData<'static>> =
-        mcx.allocate(desc_layout).map_err(|_| mcx.oom(desc_layout.size()))?.cast();
-    // SAFETY: fresh exact-layout allocation; the plan mcx outlives every eval
-    // of this step, so the 'static restamp never escapes it.
-    unsafe {
-        desc_ptr.as_ptr().write(core::mem::transmute::<
-            ::types_tuple::TupleDescData<'mcx>,
-            ::types_tuple::TupleDescData<'static>,
-        >(desc));
-    }
+    let desc_ptr: Option<NonNull<::types_tuple::TupleDescData<'static>>> = if record {
+        None
+    } else {
+        let desc = typcache::lookup_rowtype_tupdesc_copy(mcx, variable.vartype, -1)?;
+        let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
+        let p: NonNull<::types_tuple::TupleDescData<'static>> =
+            mcx.allocate(desc_layout).map_err(|_| mcx.oom(desc_layout.size()))?.cast();
+        // SAFETY: fresh exact-layout allocation; the plan mcx outlives every
+        // eval of this step, so the 'static restamp never escapes it.
+        unsafe {
+            p.as_ptr().write(core::mem::transmute::<
+                ::types_tuple::TupleDescData<'mcx>,
+                ::types_tuple::TupleDescData<'static>,
+            >(desc));
+        }
+        Some(p)
+    };
+    // C ExecEvalWholeRowVar's RTE lookup (eref column aliases for the RECORD
+    // output descriptor), hoisted to compile: the range table is init-stable
+    // and the interpreter has no estate. INNER/OUTER varnos are negative and
+    // fall outside the 1..=len guard, as C's es_range_table_size check.
+    let colnames = sub
+        .and_then(|s| s.rtable)
+        .and_then(|rt| {
+            // SAFETY: env rtable is the live es_range_table (plan-lived).
+            let rt = unsafe { rt.as_ref() };
+            usize::try_from(variable.varno)
+                .ok()
+                .and_then(|v| (1..=rt.len()).contains(&v).then(|| rt[v - 1]))
+        })
+        .and_then(|rte| rte.eref.map(|e| NonNull::from(&e.colnames)));
+    let junk = match sub.and_then(|s| s.parent_subplan_tlist) {
+        // SAFETY: env tlist is the parent's plan targetlist (plan-lived).
+        Some(tl) => init_whole_row_junk(mcx, unsafe { tl.as_ref() })?,
+        None => None,
+    };
     let wr_layout = core::alloc::Layout::new::<WholeRowState>();
     let wr: NonNull<WholeRowState> =
         mcx.allocate(wr_layout).map_err(|_| mcx.oom(wr_layout.size()))?.cast();
-    // SAFETY: fresh exact-layout allocation.
-    unsafe { wr.as_ptr().write(WholeRowState { tupdesc: desc_ptr, first: true, slow: false }) };
+    // SAFETY: fresh exact-layout allocation; 'static restamps stay behind the
+    // plan-lived state.
+    unsafe {
+        wr.as_ptr().write(WholeRowState {
+            tupdesc: desc_ptr,
+            first: true,
+            slow: false,
+            record,
+            colnames,
+            junk,
+            mcx: core::mem::transmute::<Mcx<'mcx>, Mcx<'static>>(mcx),
+        })
+    };
 
     let frame_ix = state.frames.len() as u32;
     let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
@@ -1513,6 +1556,61 @@ fn init_whole_row<'mcx>(
     state.frames.push(frame);
 
     push_step(state, mcx, Step::WholeRow { src, wr, frame: frame_ix, out })
+}
+
+// C ExecInitWholeRowVar's junk-filter leg: ExecInitJunkFilter (execJunk.c)
+// over the parent subplan's targetlist, with ExecCleanTypeFromTL
+// (execTuples.c) inlined — execscan's port sits above this crate.
+fn init_whole_row_junk<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: &NodeList<'static>,
+) -> PgResult<Option<NonNull<crate::steps::WholeRowJunk>>> {
+    let tle = |n: Node<'static>| {
+        n.as_target_entry().expect("targetlist holds TargetEntries")
+    };
+    if !tlist.iter().any(|n| tle(n).resjunk) {
+        return Ok(None);
+    }
+    let clean_len = tlist.iter().filter(|&n| !tle(n).resjunk).count();
+    let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, clean_len as i32)?;
+    let mut clean_map: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    clean_map.try_reserve_exact(clean_len).map_err(|_| mcx.oom(clean_len * 2))?;
+    let mut resno: i16 = 1;
+    for n in tlist.iter() {
+        let t = tle(n);
+        if t.resjunk {
+            continue;
+        }
+        ::tupdesc::TupleDescInitEntry(
+            &mut desc,
+            resno,
+            t.resname,
+            expr_type(t.expr),
+            expr_typmod_closed(t.expr),
+            0,
+        )?;
+        ::tupdesc::TupleDescInitEntryCollation(&mut desc, resno, ::nodes_core::expr_collation(t.expr));
+        clean_map.push(t.resno);
+        resno += 1;
+    }
+    let slot = ::exectuples::make_tuple_table_slot(
+        mcx,
+        ::types_slot::TupleSlotKind::Virtual,
+        Some(alloc::rc::Rc::new(desc)),
+    );
+    let slot_ref: &'mcx mut ::types_slot::SlotData<'mcx> = ::mcx::alloc_leak_in(mcx, slot)?;
+    let junk = crate::steps::WholeRowJunk {
+        clean_map: NonNull::from(::mcx::slice_borrow_in(mcx, &clean_map)?),
+        // SAFETY: plan-mcx slot behind a plan-lived state; the 'static
+        // restamp never escapes it.
+        slot: unsafe {
+            core::mem::transmute::<
+                NonNull<::types_slot::SlotData<'mcx>>,
+                NonNull<::types_slot::SlotData<'static>>,
+            >(NonNull::from(slot_ref))
+        },
+    };
+    Ok(Some(NonNull::from(::mcx::alloc_leak_in(mcx, junk)?)))
 }
 
 // C ExecInitExprRec over the ported families.
@@ -1529,7 +1627,7 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_Var => {
             let variable = node.as_var().unwrap();
             if variable.varattno == 0 {
-                return init_whole_row(variable, state, mcx, out);
+                return init_whole_row(variable, state, mcx, out, sub);
             }
             if variable.varattno < 0 {
                 let attnum = variable.varattno;

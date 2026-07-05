@@ -11,6 +11,7 @@ use ::execscan::{exec_scan_extended, ScanNode, ScanState};
 use ::executils::{CteShared, EStateData, ExecSlotId};
 use ::mcx::Mcx;
 use ::types_error::PgResult;
+use ::types_nodes::list::NodeList;
 use ::types_nodes::plannodes::CteScan;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::types_tuple::TupleDescData;
@@ -152,6 +153,9 @@ pub fn exec_init_cte_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
     scan_desc: Rc<TupleDescData<'static>>,
+    // The CTE plan's targetlist (C cteplanstate->plan->targetlist): whole-row
+    // junk filtering in the projection/qual compile.
+    sub_tlist: &NodeList<'mcx>,
 ) -> PgResult<CteScanState<'mcx>> {
     debug_assert!(eflags & EXEC_FLAG_MARK == 0);
     // C forces REWIND: any node may be asked to rescan the shared store.
@@ -189,10 +193,16 @@ pub fn exec_init_cte_scan<'mcx>(
         ss_ScanTupleSlot,
         instr_idx: None,
     };
-    execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
+    execscan::exec_assign_scan_projection_info_parent(
+        mcx,
+        estate,
+        &mut ss,
+        &node.scan.plan.targetlist,
+        Some(sub_tlist),
+    )?;
     ss.qual = {
         let pb = estate.param_bind();
-        ::executils::with_subplan_compile_env(estate, |env| {
+        ::executils::with_subplan_compile_env_parent(estate, Some(sub_tlist), |env| {
             ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, pb, env)
         })?
     };

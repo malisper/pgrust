@@ -3107,10 +3107,12 @@ fn eval_row_null(
     Ok(true)
 }
 
-// C ExecEvalWholeRowVar, named-composite leg. First eval checks the slot's
-// physical rowtype against the Var's declared rowtype (dropped-column
-// storage mismatches downgrade to the per-row slow path); every eval
-// flattens the slot into a composite datum in the armed per-eval mcx.
+// C ExecEvalWholeRowVar. First eval resolves the output descriptor: the
+// named-composite leg checks the slot's physical rowtype against the Var's
+// declared rowtype (dropped-column storage mismatches downgrade to the
+// per-row slow path); the RECORD leg copies the slot's descriptor, adopts
+// the RTE eref aliases, and blesses it. Every eval flattens the slot into a
+// composite datum in the armed per-eval mcx.
 fn eval_whole_row(
     frames: &mut [crate::steps::FuncFrame<'_>],
     slot: &mut SlotData<'_>,
@@ -3119,30 +3121,76 @@ fn eval_whole_row(
 ) -> PgResult<(Datum, bool)> {
     // SAFETY: compile-allocated state, single-threaded interpreter.
     let wr = unsafe { &mut *wr.as_ptr() };
-    // SAFETY: compile-allocated plan-mcx tupdesc, live for the plan.
-    let var_desc = unsafe { wr.tupdesc.as_ref() };
+    // C applies the junkfilter before descriptor capture and flattening.
+    let slot: &mut SlotData<'_> = match wr.junk {
+        // SAFETY: compile-allocated junk state and slot; the source slot is
+        // never the state-owned result slot.
+        Some(j) => unsafe {
+            let j = j.as_ref();
+            // The 'static restamp narrows back to the eval lifetime here.
+            let result = &mut *(j.slot.as_ptr() as *mut SlotData<'_>);
+            exectuples::slot_getallattrs(slot);
+            let old = slot.base();
+            exectuples::exec_clear_tuple(result, wr.mcx);
+            let rb = result.base_mut();
+            for (i, &attno) in j.clean_map.as_ref().iter().enumerate() {
+                rb.tts_values[i] = old.tts_values[attno as usize - 1];
+                rb.tts_isnull[i] = old.tts_isnull[attno as usize - 1];
+            }
+            exectuples::exec_store_virtual_tuple(result);
+            result
+        },
+        None => slot,
+    };
     if wr.first {
         wr.slow = false;
         let slot_desc =
             slot.base().tts_tupleDescriptor.as_ref().expect("slot has a descriptor").clone();
-        if var_desc.natts != slot_desc.natts {
-            return Err(row_type_mismatch_natts(slot_desc.natts, var_desc.natts));
-        }
-        for i in 0..var_desc.natts as usize {
-            let vattr = &var_desc.attrs[i];
-            let sattr = &slot_desc.attrs[i];
-            if vattr.atttypid == sattr.atttypid {
-                continue;
+        if !wr.record {
+            // SAFETY: compile-allocated plan-mcx tupdesc, live for the plan.
+            let var_desc = unsafe { wr.tupdesc.expect("named leg compiles a tupdesc").as_ref() };
+            if var_desc.natts != slot_desc.natts {
+                return Err(row_type_mismatch_natts(slot_desc.natts, var_desc.natts));
             }
-            if !vattr.attisdropped {
-                return Err(row_type_mismatch_type(sattr.atttypid, i, vattr.atttypid));
+            for i in 0..var_desc.natts as usize {
+                let vattr = &var_desc.attrs[i];
+                let sattr = &slot_desc.attrs[i];
+                if vattr.atttypid == sattr.atttypid {
+                    continue;
+                }
+                if !vattr.attisdropped {
+                    return Err(row_type_mismatch_type(sattr.atttypid, i, vattr.atttypid));
+                }
+                if vattr.attlen != sattr.attlen || vattr.attalign != sattr.attalign {
+                    wr.slow = true;
+                }
             }
-            if vattr.attlen != sattr.attlen || vattr.attalign != sattr.attalign {
-                wr.slow = true;
+        } else {
+            let mut desc = ::tupdesc::CreateTupleDescCopy(wr.mcx, slot_desc.as_ref())?;
+            // A relation scan slot arrives stamped with the relation's
+            // rowtype; we return RECORD.
+            desc.tdtypeid = ::types_core::catalog::RECORDOID;
+            desc.tdtypmod = -1;
+            if let Some(cn) = wr.colnames {
+                // SAFETY: plan-lived eref colnames captured at compile.
+                exec_type_set_col_names(&mut desc, unsafe { cn.as_ref() });
             }
+            ::typcache::assign_record_type_typmod(&mut desc)?;
+            let layout = core::alloc::Layout::new::<types_tuple::TupleDescData<'static>>();
+            let p: core::ptr::NonNull<types_tuple::TupleDescData<'static>> = wr
+                .mcx
+                .allocate(layout)
+                .map_err(|_| wr.mcx.oom(layout.size()))?
+                .cast();
+            // SAFETY: fresh exact-layout plan-mcx allocation; the desc is
+            // already 'static (wr.mcx is the restamped compile mcx).
+            unsafe { p.as_ptr().write(desc) };
+            wr.tupdesc = Some(p);
         }
         wr.first = false;
     }
+    // SAFETY: compile- or first-eval-allocated plan-mcx tupdesc.
+    let var_desc = unsafe { wr.tupdesc.expect("resolved above").as_ref() };
     exectuples::slot_getallattrs(slot);
     let base = slot.base();
     let slot_desc = base.tts_tupleDescriptor.as_ref().expect("slot has a descriptor");
@@ -3180,6 +3228,25 @@ fn eval_whole_row(
     let d = Datum::from_usize(tuple.image().as_ptr() as usize);
     core::mem::forget(tuple);
     Ok((d, false))
+}
+
+// C ExecTypeSetColNames (execTuples.c): overwrite attribute names from the
+// alias list; empty aliases and dropped columns keep their names.
+fn exec_type_set_col_names(
+    desc: &mut ::types_tuple::TupleDescData<'_>,
+    colnames: &::types_nodes::list::NodeList<'_>,
+) {
+    for (colno, cn) in colnames.iter().enumerate() {
+        if colno >= desc.natts as usize {
+            break;
+        }
+        let cname = cn.as_string().expect("colnames are String nodes").sval;
+        let att = desc.attr_mut(colno);
+        if cname.is_empty() || att.attisdropped {
+            continue;
+        }
+        att.attname.namestrcpy(cname);
+    }
 }
 
 #[cold]
