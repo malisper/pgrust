@@ -1490,7 +1490,7 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_u8(e.generated_kind);
             js.f_bool(e.nulls_not_distinct);
             list(js, &e.keys)?;
-            js.f_bool(false); // without_overlaps: unported (grammar rejects it)
+            js.f_bool(e.without_overlaps);
             list(js, &e.including)?;
             list(js, &e.exclusions)?;
             list(js, &e.options)?;
