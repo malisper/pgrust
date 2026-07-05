@@ -1263,20 +1263,24 @@ fn ri_ReportViolation<'mcx>(
 
     let conname = conname_str(riinfo);
     if partgone {
-        return Box::new(
-            PgError::new(
-                ERROR,
-                format!(
-                    "removing partition \"{}\" violates foreign key constraint \"{conname}\"",
-                    pk_rel.name()
-                ),
-            )
-            .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
-            .with_detail(format!(
-                "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
-                fk_rel.name()
-            )),
-        );
+        let mut e = PgError::new(
+            ERROR,
+            format!(
+                "removing partition \"{}\" violates foreign key constraint \"{conname}\"",
+                pk_rel.name()
+            ),
+        )
+        .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+        .with_detail(format!(
+            "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
+            fk_rel.name()
+        ))
+        .with_table_name(fk_rel.name().to_owned())
+        .with_constraint_name(conname.to_string());
+        if let Ok(Some(nsp)) = lsyscache::get_namespace_name(mcx, fk_rel.rd_rel.relnamespace) {
+            e = e.with_schema_name(nsp.as_str().to_owned());
+        }
+        return Box::new(e);
     }
     if onfk {
         Box::new(
