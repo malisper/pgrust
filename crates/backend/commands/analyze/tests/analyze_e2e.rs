@@ -647,6 +647,8 @@ fn install_syscache_fixture_overrides() {
             opcmethod: 403,
             opcfamily: INT4_BTREE_FAM,
             opcintype: INT4OID,
+            // int4 opclasses store no separate key type (pg_opclass: 0).
+            opckeytype: ::types_core::InvalidOid,
         }))
     });
     syscache_seams::lookup_pg_amop_by_strategy::set(|opfamily, left, right, strategy| {

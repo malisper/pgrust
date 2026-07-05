@@ -560,11 +560,15 @@ fn install_type_fixture() {
                     opcmethod: types_core::BTREE_AM_OID,
                     opcfamily: 1976,
                     opcintype: INT4OID,
+                    // int4 opclasses store no separate key type (pg_opclass: 0).
+                    opckeytype: ::types_core::InvalidOid,
                 }),
                 1979 => Some(syscache_seams::PgOpclassShape {
                     opcmethod: lsyscache::HASH_AM_OID,
                     opcfamily: 1977,
                     opcintype: INT4OID,
+                    // int4 opclasses store no separate key type (pg_opclass: 0).
+                    opckeytype: ::types_core::InvalidOid,
                 }),
                 _ => None,
             })

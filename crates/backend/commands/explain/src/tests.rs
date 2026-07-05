@@ -1054,6 +1054,8 @@ mod order_by_limit_e2e {
                     opcmethod: 403,
                     opcfamily: INT4_BTREE_FAM,
                     opcintype: INT4OID,
+                    // int4 opclasses store no separate key type (pg_opclass: 0).
+                    opckeytype: ::types_core::InvalidOid,
                 }))
             });
         });
