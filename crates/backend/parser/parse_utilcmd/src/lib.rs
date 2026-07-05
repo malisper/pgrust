@@ -1604,9 +1604,25 @@ fn transform_index_constraints<'mcx>(
             unsafe { cnode.with_mut::<Constraint, _>(|c| core::mem::take(&mut c.options)) }
                 .expect("Constraint");
         index.tableSpace = constraint.indexspace;
-        if !constraint.including.is_nil() {
-            unported("transformIndexConstraint: INCLUDE columns");
+        // Included columns (parse_utilcmd.c:2841-2929): no NOT NULL forcing,
+        // no duplicate complaints. System-column/inherited-column lookups are
+        // narrowed away, as in the key loop below.
+        let mut including_params = NodeList::nil();
+        for keynode in constraint.including.iter() {
+            let key = keynode.as_string().expect("constraint including").sval;
+            if !columns
+                .iter()
+                .any(|cn| cn.as_variant::<ColumnDef>().expect("ColumnDef").colname == Some(key))
+            {
+                return Err(key_column_missing(key, constraint.location));
+            }
+            let mut iparam = Node::build::<IndexElem>(mcx)?;
+            iparam.name = Some(key);
+            iparam.ordering = SortByDir::SORTBY_DEFAULT;
+            iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
+            including_params.lappend(mcx, iparam.seal())?;
         }
+        index.indexIncludingParams = including_params;
 
         if is_exclusion {
             let mut index_params = NodeList::nil();
@@ -1752,6 +1768,7 @@ fn transform_index_constraints<'mcx>(
             // conservatively never merge (only identical duplicate
             // constraints diverge: both indexes get built).
             if index_params_equal(&index.indexParams, &prior.indexParams)
+                && index_params_equal(&index.indexIncludingParams, &prior.indexIncludingParams)
                 && exclude_op_names_equal(&index.excludeOpNames, &prior.excludeOpNames)
                 && index.accessMethod == prior.accessMethod
                 && index.whereClause.is_none()
@@ -1789,7 +1806,7 @@ fn transform_index_constraints<'mcx>(
 // transformIndexConstraint, isalter slice: keys are not resolved against any
 // column list (DefineIndex complains about missing ones); the PK not-null
 // forcing happened in ATPrepAddPrimaryKey. USING INDEX / DEFERRABLE /
-// INCLUDE / WITHOUT OVERLAPS are loud, as in the CREATE lane.
+// WITHOUT OVERLAPS are loud, as in the CREATE lane.
 pub fn transformIndexConstraintForAlter<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
@@ -1809,9 +1826,6 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     }
     if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
         unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
-    }
-    if !constraint.including.is_nil() {
-        unported("transformIndexConstraint: INCLUDE columns");
     }
     let mut index = Node::build::<IndexStmt>(mcx)?;
     index.unique = !is_exclusion;
@@ -1907,6 +1921,18 @@ pub fn transformIndexConstraintForAlter<'mcx>(
         index.accessMethod = Some("gist");
     }
     index.indexParams = index_params;
+    // Included columns, isalter slice: keys may exist already, so no
+    // missing-column complaint here; DefineIndex raises it (2915-2919).
+    let mut including_params = NodeList::nil();
+    for keynode in constraint.including.iter() {
+        let key = keynode.as_string().expect("constraint including").sval;
+        let mut iparam = Node::build::<IndexElem>(mcx)?;
+        iparam.name = Some(key);
+        iparam.ordering = SortByDir::SORTBY_DEFAULT;
+        iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
+        including_params.lappend(mcx, iparam.seal())?;
+    }
+    index.indexIncludingParams = including_params;
     Ok((index.seal(), NodeList::nil()))
 }
 
@@ -2857,5 +2883,123 @@ mod tests {
             quote_qualified_identifier(mcx, Some("public"), "t_id_seq").unwrap().as_str(),
             "public.t_id_seq"
         );
+    }
+
+    fn mk_columns<'mcx>(mcx: Mcx<'mcx>, names: &[&'static str]) -> NodeList<'mcx> {
+        let mut columns = NodeList::nil();
+        for name in names {
+            let mut cd = Node::build::<ColumnDef>(mcx).unwrap();
+            cd.colname = Some(name);
+            columns.lappend(mcx, cd.seal()).unwrap();
+        }
+        columns
+    }
+
+    fn mk_unique_constraint<'mcx>(
+        mcx: Mcx<'mcx>,
+        contype: ConstrType,
+        keys: &[&'static str],
+        including: &[&'static str],
+    ) -> Node<'mcx> {
+        let mut con = Node::build::<Constraint>(mcx).unwrap();
+        con.contype = contype;
+        con.location = -1;
+        let mut keylist = NodeList::nil();
+        for k in keys {
+            keylist.lappend(mcx, Node::mk_string(mcx, k).unwrap()).unwrap();
+        }
+        con.keys = keylist;
+        let mut inclist = NodeList::nil();
+        for k in including {
+            inclist.lappend(mcx, Node::mk_string(mcx, k).unwrap()).unwrap();
+        }
+        con.including = inclist;
+        con.seal()
+    }
+
+    fn elem_names(params: &NodeList<'_>) -> Vec<String> {
+        params
+            .iter()
+            .map(|n| {
+                n.as_variant::<IndexElem>().expect("IndexElem").name.expect("named").to_string()
+            })
+            .collect()
+    }
+
+    fn run_transform<'mcx>(
+        mcx: Mcx<'mcx>,
+        columns: &NodeList<'mcx>,
+        ixconstraints: &NodeList<'mcx>,
+    ) -> PgResult<NodeList<'mcx>> {
+        let relation = Node::mk(
+            mcx,
+            RangeVar {
+                catalogname: None,
+                schemaname: None,
+                relname: Some("t"),
+                inh: false,
+                relpersistence: b'p',
+                alias: None,
+                location: -1,
+            },
+        )?
+        .as_range_var()
+        .expect("RangeVar");
+        let mut nnconstraints = NodeList::nil();
+        let mut alist = NodeList::nil();
+        transform_index_constraints(
+            mcx,
+            "t",
+            relation,
+            columns,
+            &mut nnconstraints,
+            ixconstraints,
+            &mut alist,
+            "",
+        )?;
+        Ok(alist)
+    }
+
+    #[test]
+    fn transform_index_constraint_include_lowering() {
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a", "b", "c"]);
+        let con =
+            mk_unique_constraint(mcx, ConstrType::CONSTR_UNIQUE, &["a"], &["b", "c"]);
+        let ix = NodeList::make1(mcx, con).unwrap();
+        let alist = run_transform(mcx, &columns, &ix).unwrap();
+        assert_eq!(alist.len(), 1);
+        let stmt = alist.nth(0).as_variant::<IndexStmt>().expect("IndexStmt");
+        assert!(stmt.unique);
+        assert_eq!(elem_names(&stmt.indexParams), ["a"]);
+        assert_eq!(elem_names(&stmt.indexIncludingParams), ["b", "c"]);
+    }
+
+    #[test]
+    fn transform_index_constraint_include_missing_column() {
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a"]);
+        let con = mk_unique_constraint(mcx, ConstrType::CONSTR_UNIQUE, &["a"], &["z"]);
+        let ix = NodeList::make1(mcx, con).unwrap();
+        let e = run_transform(mcx, &columns, &ix).unwrap_err();
+        assert_eq!(e.message(), "column \"z\" named in key does not exist");
+    }
+
+    #[test]
+    fn transform_index_constraint_include_blocks_dedup() {
+        // PRIMARY KEY (a) and UNIQUE (a) INCLUDE (b) differ in included
+        // columns, so both indexes survive (parse_utilcmd.c:2296).
+        let mcx = ctx().mcx();
+        let columns = mk_columns(mcx, &["a", "b"]);
+        let mut ix = NodeList::nil();
+        ix.lappend(mcx, mk_unique_constraint(mcx, ConstrType::CONSTR_PRIMARY, &["a"], &[]))
+            .unwrap();
+        ix.lappend(
+            mcx,
+            mk_unique_constraint(mcx, ConstrType::CONSTR_UNIQUE, &["a"], &["b"]),
+        )
+        .unwrap();
+        let alist = run_transform(mcx, &columns, &ix).unwrap();
+        assert_eq!(alist.len(), 2);
     }
 }
