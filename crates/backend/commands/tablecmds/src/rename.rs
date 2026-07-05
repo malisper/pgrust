@@ -526,7 +526,9 @@ pub fn RenameRelationInternal<'mcx>(
     if targetrelation.rd_rel.reltype != InvalidOid {
         pg_type::RenameTypeInternal(mcx, targetrelation.rd_rel.reltype, newrelname, namespace_id)?;
     }
-    if is_index {
+    if targetrelation.rd_rel.relkind == types_rel::RELKIND_INDEX
+        || targetrelation.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX
+    {
         let constraint_id = get_index_constraint(mcx, myrelid)?;
         if constraint_id != InvalidOid {
             pg_constraint::RenameConstraintById(mcx, constraint_id, newrelname)?;
