@@ -16,6 +16,7 @@ pub mod levenshtein;
 pub mod split_text;
 pub mod replace_regexp;
 pub mod string_agg;
+pub mod unicode;
 #[cfg(test)]
 mod tests;
 

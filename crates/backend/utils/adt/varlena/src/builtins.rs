@@ -542,6 +542,55 @@ pub fn fc_bytea_reverse(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     Ok(varlena_result(crate::bytea::bytea_reverse(mcx, v.data())?))
 }
 
+pub fn fc_unicode_version(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::unicode::unicode_version(mcx)?))
+}
+
+// C returns U_UNICODE_VERSION under USE_ICU only; this build has no ICU.
+pub fn fc_icu_unicode_version(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(fcinfo.return_null())
+}
+
+pub fn fc_unicode_assigned(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
+    let input = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_bool(crate::unicode::unicode_assigned(
+        input.data(),
+    )?))
+}
+
+pub fn fc_unicode_normalize_func(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args are non-null text varlenas (strict fn).
+    let (input, form) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::unicode::unicode_normalize_func(
+        mcx,
+        input.data(),
+        form.data(),
+    )?))
+}
+
+pub fn fc_unicode_is_normalized(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args are non-null text varlenas (strict fn).
+    let (input, form) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let mcx = fcinfo.result_mcx();
+    Ok(Datum::from_bool(crate::unicode::unicode_is_normalized(
+        mcx,
+        input.data(),
+        form.data(),
+    )?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -651,4 +700,9 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(6394, "bytea_smaller", 2, fc_bytea_smaller),
     n(394, "text_to_array", 2, crate::split_text::fc_text_to_array),
     n(376, "text_to_array_null", 3, crate::split_text::fc_text_to_array),
+    b(4350, "unicode_normalize_func", 2, fc_unicode_normalize_func),
+    b(4351, "unicode_is_normalized", 2, fc_unicode_is_normalized),
+    b(4549, "unicode_version", 0, fc_unicode_version),
+    b(6099, "icu_unicode_version", 0, fc_icu_unicode_version),
+    b(6105, "unicode_assigned", 1, fc_unicode_assigned),
 ];
