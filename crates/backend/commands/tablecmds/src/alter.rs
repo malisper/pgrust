@@ -1,7 +1,7 @@
 // AlterTable three-phase machinery (ATController): ADD/DROP COLUMN,
-// SET/DROP DEFAULT, SET/DROP NOT NULL, ADD CONSTRAINT CHECK, ALTER TYPE
-// (no-USING; rewrite via the cluster lane). LOUD: other subtypes,
-// inheritance children, partitions, USING, index rebuilds on rewrite.
+// SET/DROP DEFAULT, SET/DROP NOT NULL, ADD CONSTRAINT CHECK, ALTER TYPE,
+// with inheritance/partition recursion. LOUD: other subtypes, index
+// rebuilds on rewrite.
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RELATION_ID, TYPE_RELATION_ID};
@@ -1985,8 +1985,6 @@ fn ATExecAddColumn<'mcx>(
     Ok(())
 }
 
-// ATExecAddConstraint -> ATAddCheckNNConstraint, CHECK-only-cooked slice
-// (recursion moot: no inheritance children on ported lanes).
 // check_for_column_name_collision: deliberately not attisdropped-aware.
 pub(crate) fn check_for_column_name_collision<'mcx>(
     mcx: Mcx<'mcx>,
@@ -4086,8 +4084,8 @@ fn ATExecDropInherit<'mcx>(
 }
 
 // ATExecValidateConstraint + Queue{FK,Check,NN}ConstraintValidation
-// (tablecmds.c), single-level lane: inheritance children are loud, the
-// partitioned arms unreachable (relkind gated at ATPrepCmd).
+// (tablecmds.c); the FK partitioned-recursion arm is unreachable (relkind
+// gated at ATPrepCmd).
 #[allow(clippy::too_many_arguments)]
 fn ATExecValidateConstraint<'mcx>(
     mcx: Mcx<'mcx>,
@@ -4146,13 +4144,9 @@ fn ATExecValidateConstraint<'mcx>(
             validate_constraint_children(
                 mcx, wqueue, rel, &con, None, recurse, recursing, lockmode,
             )?;
-            for i in 0..rel.rd_att.natts as usize {
-                if rel.rd_att.attr(i).attgenerated != 0 {
-                    unported("QueueCheckConstraintValidation expand_generated_columns_in_expr");
-                }
-            }
             let conbin = pg_constraint::constraint_conbin(mcx, con.oid)?;
             let qual = readfuncs::stringToNode(mcx, conbin.as_str())?;
+            let qual = planner::prepjointree::expand_generated_columns_in_expr(mcx, qual, rel, 1)?;
             let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
             wqueue[tabidx]
                 .constraints
