@@ -22,6 +22,7 @@ executils = { path = "../executils" }
 execexpr = { path = "../execexpr" }
 readfuncs = { path = "../../nodes/readfuncs" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+format_type = { path = "../../utils/adt/format_type" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 exectuples = { path = "../exectuples" }
 heaptuple = { path = "../../access/common/heaptuple" }
@@ -132,6 +133,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_storage = { path = "../../../_support/types/types_storage" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 varsup = { path = "../../access/transam/varsup" }
+vars = { path = "../../optimizer/util/vars" }
 waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
 xact = { path = "../../access/transam/xact" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

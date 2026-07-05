@@ -42,6 +42,126 @@ pub fn TriggerEnabled(t: &Trigger<'_>) -> bool {
     t.tgenabled != TRIGGER_DISABLED && t.tgenabled != TRIGGER_FIRES_ON_REPLICA
 }
 
+// build_generation_expression (rewriteHandler.c:4520), adbin-direct copy
+// (rewrite_handler -> execmain -> trigger crate cycle; nodemodifytable
+// precedent); cookDefault stored a coerced tree, so re-coercion is a no-op.
+fn build_generation_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attrno: usize,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    let att = rel.rd_att.attr(attrno - 1);
+    let constr = rel.rd_att.constr.as_deref().expect("caller checked");
+    let adbin = constr
+        .defval
+        .iter()
+        .find(|d| d.adnum == attrno as i16)
+        .and_then(|d| d.adbin.as_ref())
+        .unwrap_or_else(|| {
+            panic!(
+                "no generation expression found for column number {} of table \"{}\"",
+                attrno,
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            )
+        });
+    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+    if att.attcollation != 0 && att.attcollation != nodes_core::node_funcs::expr_collation(expr) {
+        return types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::CollateExpr {
+                arg: expr,
+                collOid: att.attcollation,
+                location: -1,
+            },
+        );
+    }
+    Ok(expr)
+}
+
+// expand_generated_columns_in_expr (rewriteHandler.c:4493): Vars naming a
+// virtual generated column of rel at varno become the generation expression
+// (whose Vars are varno 1 == the WHEN qual's OLD position, matching C where
+// expansion runs before ChangeVarNodes).
+fn expand_generated_columns_in_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: types_nodes::Node<'mcx>,
+    rel: &Relation<'mcx>,
+    varno: i32,
+) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+    const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    if !rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_virtual) {
+        return Ok(None);
+    }
+    if let Some(v) = node.as_var() {
+        if v.varlevelsup != 0 || v.varno != varno {
+            return Ok(None);
+        }
+        if v.varattno == 0 {
+            // ReplaceVarsFromTargetList whole-row arm (rewriteManip.c:1801):
+            // a named-rowtype whole-row Var becomes a RowExpr over per-field
+            // Vars (dropped columns as NULL int4 consts, expandRTE shape),
+            // each field then replaced so virtual columns expand.
+            let mut args = types_nodes::list::NodeList::nil();
+            for i in 0..rel.rd_att.natts as usize {
+                let att = rel.rd_att.attr(i);
+                let field = if att.attisdropped {
+                    types_nodes::Node::mk_const(
+                        mcx,
+                        types_core::catalog::INT4OID,
+                        -1,
+                        0,
+                        4,
+                        datum::Datum::null(),
+                        true,
+                        true,
+                    )?
+                } else if att.attgenerated == VIRTUAL_GEN {
+                    let e = build_generation_expression(mcx, rel, i + 1)?;
+                    if varno != 1 {
+                        rewrite_manip::ChangeVarNodes(mcx, e, 1, varno, 0)?;
+                    }
+                    e
+                } else {
+                    types_nodes::Node::mk_var(
+                        mcx,
+                        varno,
+                        (i + 1) as i16,
+                        att.atttypid,
+                        att.atttypmod,
+                        att.attcollation,
+                        0,
+                    )?
+                };
+                args.lappend(mcx, field)?;
+            }
+            return Ok(Some(types_nodes::Node::mk(
+                mcx,
+                types_nodes::RowExpr {
+                    args,
+                    row_typeid: v.vartype,
+                    row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                    colnames: types_nodes::list::NodeList::nil(),
+                    location: v.location,
+                },
+            )?));
+        }
+        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+            return Ok(None);
+        }
+        let e = build_generation_expression(mcx, rel, v.varattno as usize)?;
+        let e = if varno != 1 {
+            rewrite_manip::ChangeVarNodes(mcx, e, 1, varno, 0)?;
+            e
+        } else {
+            e
+        };
+        return Ok(Some(e));
+    }
+    clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
+        expand_generated_columns_in_expr(mcx, n, rel, varno)
+    })
+}
+
 // C ri_TrigWhenExprs: one compiled tgqual per trigdesc index, per query.
 // Scratch slots serve the tuple-based AFTER save path (C evaluates against
 // the executor's trigger slots; the queue only has fetched tuples).
@@ -81,20 +201,12 @@ impl<'a, 'mcx> TriggerWhenEval<'a, 'mcx> {
         if self.cache.states[idx].is_some() {
             return Ok(());
         }
-        if rel
-            .rd_att
-            .constr
-            .as_ref()
-            .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual)
-        {
-            panic!(
-                "TriggerEnabled (trigger.c): expand_generated_columns_in_expr \
-                 over a WHEN qual unported (trigger {})",
-                trigger.tgname.as_str()
-            );
-        }
         let tgqual = trigger.tgqual.as_ref().expect("caller checked tgqual");
-        let qual = readfuncs::stringToNode(self.mcx, tgqual.as_str())?;
+        let mut qual = readfuncs::stringToNode(self.mcx, tgqual.as_str())?;
+        // trigger.c:3553-3554: virtual generated Vars in the WHEN qual expand
+        // to their generation expressions for both OLD and NEW references.
+        qual = expand_generated_columns_in_expr(self.mcx, qual, rel, 1)?.unwrap_or(qual);
+        qual = expand_generated_columns_in_expr(self.mcx, qual, rel, 2)?.unwrap_or(qual);
         rewrite_manip::ChangeVarNodes(self.mcx, qual, 1, INNER_VAR, 0)?;
         rewrite_manip::ChangeVarNodes(self.mcx, qual, 2, OUTER_VAR, 0)?;
         let implicit = clauses::make_ands_implicit(self.mcx, Some(qual))?;

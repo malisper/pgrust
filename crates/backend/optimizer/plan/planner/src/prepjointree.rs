@@ -3114,10 +3114,12 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
 // generation expressions are immutable, so pullability is unaffected).
 // Retained RTE_SUBQUERYs expand in their own subquery_planner pass.
 pub fn expand_virtual_generated_columns<'mcx>(
-    mcx: Mcx<'mcx>,
+    run: &mut crate::PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
 ) -> PgResult<()> {
     const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    let mcx = run.mcx;
+    let last_ph_id = core::cell::Cell::new(run.glob.last_ph_id);
     let nrte = parse.rtable.len();
     for rt_index in 1..=nrte {
         let rte_node = parse.rtable.nth(rt_index - 1);
@@ -3129,18 +3131,6 @@ pub fn expand_virtual_generated_columns<'mcx>(
         if !rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_virtual) {
             table::table_close(rel, types_rel::NoLock)?;
             continue;
-        }
-        if parse.hasSubLinks {
-            panic!(
-                "expand_virtual_generated_columns (prepjointree.c): residual SubLink \
-                 over a virtual-generated relation; sublevel replace arm unported"
-            );
-        }
-        if !parse.groupingSets.is_nil() {
-            panic!(
-                "expand_virtual_generated_columns (prepjointree.c): grouping sets \
-                 REPLACE_WRAP_ALL PlaceHolderVar arm unported"
-            );
         }
         if parse.onConflict.is_some() {
             panic!(
@@ -3177,22 +3167,36 @@ pub fn expand_virtual_generated_columns<'mcx>(
         table::table_close(rel, types_rel::NoLock)?;
 
         let varno = rt_index as i32;
+        // pullup_replace_vars context (prepjointree.c:1038-1060): PHVs wrap
+        // nulled replacements; REPLACE_WRAP_ALL under grouping sets.
+        let rv_cache = core::cell::RefCell::new(mcx::vec_from_elem_in::<Option<Node<'mcx>>>(
+            mcx,
+            None,
+            tlist.len() + 1,
+        ));
+        let empty_relids = types_nodes::Bitmapset::empty();
+        let phc = PullupPhCtx {
+            wrap_all: !parse.groupingSets.is_nil(),
+            last_ph_id: &last_ph_id,
+            rv_cache: &rv_cache,
+            sub_relids: &empty_relids,
+        };
         if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
-            replace_var_expr(mcx, n, varno, &tlist, false, None)
+            replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
         })? {
             parse.targetList = l;
         }
-        parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, None)?;
+        parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, Some(&phc))?;
         if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {
-            replace_var_expr(mcx, n, varno, &tlist, false, None)
+            replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
         })? {
             parse.returningList = l;
         }
         for action_node in &parse.mergeActionList {
             let action = action_node.as_merge_action().expect("mergeActionList cell");
-            let new_qual = replace_opt(mcx, action.qual, varno, &tlist, false, None)?;
+            let new_qual = replace_opt(mcx, action.qual, varno, &tlist, false, Some(&phc))?;
             let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
-                replace_var_expr(mcx, n, varno, &tlist, false, None)
+                replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
             })? {
                 Some(l) => l,
                 None => action.targetList.clone_in(mcx)?,
@@ -3206,18 +3210,23 @@ pub fn expand_virtual_generated_columns<'mcx>(
             }
             .expect("MergeAction");
         }
-        parse.mergeJoinCondition = replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist, false, None)?;
+        parse.mergeJoinCondition =
+            replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist, false, Some(&phc))?;
         let jt = parse.jointree.expect("jointree is a FromExpr");
         let mut new_fromlist = NodeList::nil();
         for child in &jt.fromlist {
-            new_fromlist.lappend(mcx, replace_vars_in_jointree_expand(mcx, child, varno, &tlist)?)?;
+            new_fromlist.lappend(
+                mcx,
+                replace_vars_in_jointree_expand(mcx, child, varno, &tlist, &phc)?,
+            )?;
         }
-        let new_quals = replace_opt(mcx, jt.quals, varno, &tlist, false, None)?;
+        let new_quals = replace_opt(mcx, jt.quals, varno, &tlist, false, Some(&phc))?;
         parse.jointree = Some(mcx::alloc_leak_in(
             mcx,
             FromExpr { fromlist: new_fromlist, quals: new_quals },
         )?);
     }
+    run.glob.last_ph_id = last_ph_id.get();
     Ok(())
 }
 
@@ -3226,6 +3235,7 @@ fn replace_vars_in_jointree_expand<'mcx>(
     node: Node<'mcx>,
     varno: i32,
     tlist: &NodeList<'mcx>,
+    phc: &PullupPhCtx<'_, 'mcx>,
 ) -> PgResult<Node<'mcx>> {
     match node.node_tag() {
         NodeTag::T_RangeTblRef => Ok(node),
@@ -3233,11 +3243,15 @@ fn replace_vars_in_jointree_expand<'mcx>(
             let f = node.as_from_expr().expect("FromExpr");
             let mut fromlist = NodeList::nil();
             for child in &f.fromlist {
-                fromlist.lappend(mcx, replace_vars_in_jointree_expand(mcx, child, varno, tlist)?)?;
+                fromlist
+                    .lappend(mcx, replace_vars_in_jointree_expand(mcx, child, varno, tlist, phc)?)?;
             }
             Node::mk(
                 mcx,
-                FromExpr { fromlist, quals: replace_opt(mcx, f.quals, varno, tlist, false, None)? },
+                FromExpr {
+                    fromlist,
+                    quals: replace_opt(mcx, f.quals, varno, tlist, false, Some(phc))?,
+                },
             )
         }
         NodeTag::T_JoinExpr => {
@@ -3247,11 +3261,11 @@ fn replace_vars_in_jointree_expand<'mcx>(
                 types_nodes::JoinExpr {
                     jointype: j.jointype,
                     isNatural: j.isNatural,
-                    larg: replace_vars_in_jointree_expand(mcx, j.larg, varno, tlist)?,
-                    rarg: replace_vars_in_jointree_expand(mcx, j.rarg, varno, tlist)?,
+                    larg: replace_vars_in_jointree_expand(mcx, j.larg, varno, tlist, phc)?,
+                    rarg: replace_vars_in_jointree_expand(mcx, j.rarg, varno, tlist, phc)?,
                     usingClause: j.usingClause.clone_in(mcx)?,
                     join_using_alias: j.join_using_alias,
-                    quals: replace_opt(mcx, j.quals, varno, tlist, false, None)?,
+                    quals: replace_opt(mcx, j.quals, varno, tlist, false, Some(phc))?,
                     alias: j.alias,
                     rtindex: j.rtindex,
                 },

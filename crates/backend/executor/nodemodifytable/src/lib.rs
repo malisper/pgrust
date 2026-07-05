@@ -802,8 +802,10 @@ pub fn exec_modify_table<'mcx>(
     Ok(None)
 }
 
-// ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols; extraUpdatedCols
-// would come from generated columns, whose interplay with UPDATE OF is loud.
+// ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols unioned with the
+// ExecInitGenerated(CMD_UPDATE) extraUpdatedCols leg — generated columns whose
+// expressions depend on an updated column (all of them when a BEFORE ROW
+// UPDATE trigger could change more columns).
 fn ensure_all_updated_cols<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &EStateData<'mcx>,
@@ -823,19 +825,45 @@ fn ensure_all_updated_cols<'mcx>(
         cols = pi.updatedCols.clone_in(mcx)?;
     }
     {
+        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
         let rel = estate.es_relations[(mt.result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
-        if rel
+        let has_generated = rel
             .rd_att
             .constr
-            .as_ref()
-            .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual)
-        {
-            panic!(
-                "ExecGetAllUpdatedCols (execUtils.c): extraUpdatedCols over \
-                 generated columns unported (UPDATE OF trigger interplay)"
-            );
+            .as_deref()
+            .is_some_and(|c| c.has_generated_stored || c.has_generated_virtual);
+        if has_generated {
+            let skip_by_deps =
+                !mt.trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row);
+            let constr = rel.rd_att.constr.as_deref().expect("checked above");
+            for i in 0..rel.rd_att.natts as usize {
+                if rel.rd_att.attr(i).attgenerated == 0 {
+                    continue;
+                }
+                if skip_by_deps {
+                    let adbin = constr
+                        .defval
+                        .iter()
+                        .find(|d| d.adnum == (i + 1) as i16)
+                        .and_then(|d| d.adbin.as_ref())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "no generation expression found for column number {} of table \"{}\"",
+                                i + 1,
+                                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+                            )
+                        });
+                    let expr = readfuncs::stringToNode(mcx, adbin.as_str())?;
+                    let mut attrs_used = types_nodes::Bitmapset::empty();
+                    vars::var::pull_varattnos(mcx, expr, 1, &mut attrs_used)?;
+                    if !cols.overlap(&attrs_used) {
+                        continue;
+                    }
+                }
+                cols.add_member(mcx, (i + 1) as i32 - FLIHAN)?;
+            }
         }
     }
     mt.all_updated_cols = Some(cols);
@@ -1645,20 +1673,36 @@ fn exec_check_plan_output<'mcx>(
         }
         let att = desc.attr(attno);
         attno += 1;
-        if !att.attisdropped {
+        // Special cases here match the planner's expand_insert_targetlist.
+        if att.attisdropped {
+            if tle.expr.node_tag() != NodeTag::T_Const
+                || !tle.expr.as_const().unwrap().constisnull
+            {
+                return Err(plan_output_mismatch(format!(
+                    "Query provides a value for a dropped column at ordinal position {attno}."
+                )));
+            }
+        } else if att.attgenerated != 0 {
+            // The planner inserted a null of the column's base type; a null
+            // is type-independent, so only insist on *some* NULL constant.
+            if tle.expr.node_tag() != NodeTag::T_Const
+                || !tle.expr.as_const().unwrap().constisnull
+            {
+                return Err(plan_output_mismatch(format!(
+                    "Query provides a value for a generated column at ordinal position {attno}."
+                )));
+            }
+        } else {
             let exprtype = expr_type(tle.expr);
             if exprtype != att.atttypid {
-                return Err(plan_output_mismatch(
-                    "Table has a column of one type at a position where the \
-                     query expects another type.",
-                ));
+                let want = format_type::format_type_be(att.atttypid)
+                    .unwrap_or_else(|_| "???".into());
+                let got =
+                    format_type::format_type_be(exprtype).unwrap_or_else(|_| "???".into());
+                return Err(plan_output_mismatch(format!(
+                    "Table has type {want} at ordinal position {attno}, but query expects {got}."
+                )));
             }
-        } else if tle.expr.node_tag() != NodeTag::T_Const
-            || !tle.expr.as_const().unwrap().constisnull
-        {
-            return Err(plan_output_mismatch(
-                "Query provides a value for a dropped column.",
-            ));
         }
     }
     if attno != desc.natts as usize {
@@ -3748,10 +3792,50 @@ fn expand_generated_columns_in_expr<'mcx>(
             return Ok(None);
         }
         if v.varattno == 0 {
-            panic!(
-                "expand_generated_columns_in_expr (rewriteHandler.c): whole-row Var \
-                 over a virtual-generated relation unported"
-            );
+            // ReplaceVarsFromTargetList whole-row arm (rewriteManip.c:1801):
+            // a named-rowtype whole-row Var becomes a RowExpr over per-field
+            // Vars (dropped columns as NULL int4 consts, expandRTE shape),
+            // each field then replaced so virtual columns expand.
+            let mut args = types_nodes::list::NodeList::nil();
+            for i in 0..rel.rd_att.natts as usize {
+                let att = rel.rd_att.attr(i);
+                let field = if att.attisdropped {
+                    types_nodes::Node::mk_const(
+                        mcx,
+                        types_core::catalog::INT4OID,
+                        -1,
+                        0,
+                        4,
+                        datum::Datum::null(),
+                        true,
+                        true,
+                    )?
+                } else if att.attgenerated == VIRTUAL_GEN {
+                    debug_assert!(varno == 1, "generation expression Vars are varno 1");
+                    build_generation_expression(mcx, rel, i + 1)?
+                } else {
+                    types_nodes::Node::mk_var(
+                        mcx,
+                        varno,
+                        (i + 1) as i16,
+                        att.atttypid,
+                        att.atttypmod,
+                        att.attcollation,
+                        0,
+                    )?
+                };
+                args.lappend(mcx, field)?;
+            }
+            return Ok(Some(types_nodes::Node::mk(
+                mcx,
+                types_nodes::RowExpr {
+                    args,
+                    row_typeid: v.vartype,
+                    row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                    colnames: types_nodes::list::NodeList::nil(),
+                    location: v.location,
+                },
+            )?));
         }
         if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
             return Ok(None);
@@ -3928,11 +4012,11 @@ fn check_violation<'mcx>(
 
 #[cold]
 #[inline(never)]
-fn plan_output_mismatch(detail: &'static str) -> Box<PgError> {
+fn plan_output_mismatch(detail: impl Into<String>) -> Box<PgError> {
     Box::new(
         PgError::error("table row type and query-specified row type do not match")
             .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
-            .with_detail(detail),
+            .with_detail(detail.into()),
     )
 }
 
