@@ -30,4 +30,5 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+tablespace_seams = { path = "../../commands/tablespace_seams" }
 policy_seams = { path = "../../commands/policy_seams" }
