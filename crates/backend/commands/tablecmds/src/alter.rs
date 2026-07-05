@@ -4069,7 +4069,7 @@ fn ATExecAddConstraint<'mcx>(
     let defnode = cmd.def.expect("AT_AddConstraint Constraint");
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     if constr.contype == ConstrType::CONSTR_FOREIGN {
-        if let Some(item) = crate::fk::ATExecAddConstraint(mcx, rel, constr)? {
+        if let Some(item) = crate::fk::ATExecAddConstraint(mcx, rel, constr, &tab.old_desc)? {
             tab.fk_checks.push(item);
         }
         return Ok(());
@@ -5174,18 +5174,23 @@ fn ATPostAlterTypeParse<'mcx>(
                         let contype = con.contype;
                         let conname = con.conname;
                         if contype == ConstrType::CONSTR_FOREIGN {
+                            let old_pfeqop = if rewrite == 0 && tab.rewrite == 0 {
+                                Some(TryReuseForeignKey(mcx, old_id)?)
+                            } else {
+                                None
+                            };
                             // SAFETY: parse tree is arena-owned; no derived
                             // refs live.
                             unsafe {
                                 connode
                                     .with_mut::<Constraint, _>(|c| {
                                         c.old_pktable_oid = ref_rel_id;
+                                        if let Some(l) = old_pfeqop {
+                                            c.old_conpfeqop = l;
+                                        }
                                     })
                                     .expect("Constraint");
                             }
-                            // TryReuseForeignKey is skipped: the re-added FK
-                            // revalidates instead of reusing conpfeqop —
-                            // catalog end-state identical to C.
                         }
                         // SAFETY: as above.
                         unsafe {
@@ -5346,6 +5351,26 @@ fn TryReuseIndex<'mcx>(
         }
     }
     irel.close(NoLock)
+}
+
+// TryReuseForeignKey (tablecmds.c:15915): stash the old P-F equality
+// operators for the revalidation-skip test in ATAddForeignKeyConstraint.
+fn TryReuseForeignKey<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_id: Oid,
+) -> PgResult<types_nodes::list::OidList<'mcx>> {
+    let con_rel = table::table_open(mcx, ConstraintRelationId, types_rel::AccessShareLock)?;
+    let keys = [oid_scankey(1, old_id)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, ConstraintOidIndexId, true, None, &keys)?;
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for constraint {old_id}"));
+    let arrays = pg_constraint::DeconstructFkConstraintRow(mcx, tup, con_rel.descr())?;
+    let list =
+        types_nodes::list::OidList::from_slice(mcx, &arrays.pf_eq_oprs[..arrays.numfks])?;
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok(list)
 }
 
 fn readd_index_fixups<'mcx>(mcx: Mcx<'mcx>, old_id: Oid, stmt_node: Node<'mcx>) -> PgResult<()> {

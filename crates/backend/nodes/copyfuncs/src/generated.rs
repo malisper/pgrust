@@ -1999,7 +1999,7 @@ pub(crate) fn copy_Constraint<'d>(mcx: Mcx<'d>, s: &Constraint<'_>) -> PgResult<
         fk_upd_action: s.fk_upd_action,
         fk_del_action: s.fk_del_action,
         fk_del_set_cols: copy_node_list(mcx, &s.fk_del_set_cols)?,
-        old_conpfeqop: copy_node_list(mcx, &s.old_conpfeqop)?,
+        old_conpfeqop: OidList::from_slice(mcx, s.old_conpfeqop.as_slice())?,
         old_pktable_oid: s.old_pktable_oid,
         location: s.location,
     })
