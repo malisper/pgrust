@@ -1161,16 +1161,30 @@ impl Tuplesort {
                 return st.puttuple_common(core::ptr::null_mut(), datum1, is_null, 0);
             }
             // C datumCopy: the copy is canonical, valid until reset/end.
-            let src = val.as_usize() as *const u8;
+            // Expanded datums flatten; every other form — on-disk toast
+            // pointers included — copies verbatim, and the varlena
+            // comparators detoast per comparison as C's fastcmps do.
+            let mut src = val.as_usize() as *const u8;
+            let mut _flat_scratch = None;
             // SAFETY: a non-null by-ref datum is readable for its full size.
             let size = unsafe {
                 if byref_typlen == -1 {
-                    // Verbatim toast-pointer copies dangle (C flattens/detoasts).
-                    assert!(
-                        !::types_tuple::varatt::varatt_is_1b_e(src),
-                        "tuplesort_putdatum: external/expanded varlena datum (detoast lane)"
-                    );
-                    ::types_tuple::varatt::varsize_any(src)
+                    if ::types_tuple::varatt::varatt_is_1b_e(src)
+                        && ::types_tuple::varatt::vartag_is_expanded(*src.add(1))
+                    {
+                        let raw = core::slice::from_raw_parts(
+                            src,
+                            ::types_tuple::varatt::varsize_any(src),
+                        );
+                        let scratch = ::mcx::MemoryContext::new_bump("putdatum flatten");
+                        let img = ::detoast_seams::detoast_attr::call(scratch.mcx(), raw)?;
+                        let n = img.len();
+                        src = img.leak().as_ptr();
+                        _flat_scratch = Some(scratch);
+                        n
+                    } else {
+                        ::types_tuple::varatt::varsize_any(src)
+                    }
                 } else {
                     byref_typlen as usize
                 }

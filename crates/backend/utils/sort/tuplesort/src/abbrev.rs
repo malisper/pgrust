@@ -3,7 +3,7 @@
 
 use ::datum::Datum;
 
-use crate::ssup::{varlena_payload, AbbrevArm, AbbrevKind, SortComparator};
+use crate::ssup::{with_varlena_payload, AbbrevArm, AbbrevKind, SortComparator};
 
 enum ConverterState {
     VarStr(varlena::abbrev::VarStrAbbrevState),
@@ -100,20 +100,22 @@ impl AbbrevState {
     }
 
     /// # Safety
-    /// `original` is a live non-null datum of the arm's type: an untoasted
-    /// varlena (VarStrC/BpcharC/Network/Numeric) or a 16-byte uuid (Uuid).
+    /// `original` is a live non-null datum of the arm's type: a varlena of
+    /// any form (VarStrC/BpcharC/Network/Numeric) or a 16-byte uuid (Uuid).
     #[inline]
     pub unsafe fn convert(&mut self, original: Datum) -> Datum {
         let word = match &mut self.conv {
-            ConverterState::VarStr(s) => s.convert_slim(varlena_payload(original)),
-            ConverterState::VarStrXfrm(s) => s.convert(varlena_payload(original)),
+            ConverterState::VarStr(s) => {
+                with_varlena_payload(original, |b| s.convert_slim(b))
+            }
+            ConverterState::VarStrXfrm(s) => with_varlena_payload(original, |b| s.convert(b)),
             ConverterState::Uuid(s) => {
                 s.convert(&*(original.as_usize() as *const ::adt_uuid::PgUuid))
             }
-            ConverterState::Network(s) => s.convert(::adt_network::InetRef::from_payload(
-                varlena_payload(original),
-            )),
-            ConverterState::Numeric(s) => s.convert(varlena_payload(original)),
+            ConverterState::Network(s) => with_varlena_payload(original, |b| {
+                s.convert(::adt_network::InetRef::from_payload(b))
+            }),
+            ConverterState::Numeric(s) => with_varlena_payload(original, |b| s.convert(b)),
         };
         Datum::from_u64(word)
     }

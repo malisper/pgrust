@@ -1877,3 +1877,57 @@ mod spill {
         ts.end();
     }
 }
+
+mod detoast_payload {
+    use super::*;
+    use crate::ssup::with_varlena_payload;
+    use core::mem::MaybeUninit;
+
+    fn compressed_image(input: &[u8]) -> Vec<u8> {
+        let mut dest = vec![MaybeUninit::<u8>::uninit(); pglz::pglz_max_output(input.len())];
+        let n =
+            pglz::pglz_compress_into(input, &mut dest, &pglz::PGLZ_STRATEGY_ALWAYS).unwrap();
+        let total = 8 + n;
+        let mut image = (((total as u32) << 2) | 0x02).to_ne_bytes().to_vec();
+        image.extend_from_slice(&(input.len() as u32).to_ne_bytes());
+        image.extend(dest[..n].iter().map(|b| unsafe { b.assume_init() }));
+        image
+    }
+
+    #[test]
+    fn payload_borrows_plain_and_short_detoasts_compressed() {
+        detoast::init_seams();
+        let phrase: Vec<u8> = (0..2000).map(|i| b"sortable sort key "[i % 18]).collect();
+
+        let mut plain = ((phrase.len() as u32 + 4) << 2).to_ne_bytes().to_vec();
+        plain.extend_from_slice(&phrase);
+        let d = Datum::from_usize(plain.as_ptr() as usize);
+        unsafe { with_varlena_payload(d, |b| assert_eq!(b, &phrase[..])) };
+
+        let mut short = vec![(6u8 << 1) | 0x01];
+        short.extend_from_slice(b"tiny!");
+        let d = Datum::from_usize(short.as_ptr() as usize);
+        unsafe { with_varlena_payload(d, |b| assert_eq!(b, b"tiny!")) };
+
+        let compressed = compressed_image(&phrase);
+        assert!(compressed.len() < phrase.len());
+        let d = Datum::from_usize(compressed.as_ptr() as usize);
+        unsafe { with_varlena_payload(d, |b| assert_eq!(b, &phrase[..])) };
+
+        // Comparator semantics across mixed forms: compressed vs plain
+        // compares decompressed bytes, C's DatumGetVarStringPP cadence.
+        let bigger: Vec<u8> = (0..2000).map(|i| b"zortable sort key "[i % 18]).collect();
+        let mut bigger_plain = ((bigger.len() as u32 + 4) << 2).to_ne_bytes().to_vec();
+        bigger_plain.extend_from_slice(&bigger);
+        let (dc, dp) = (
+            Datum::from_usize(compressed.as_ptr() as usize),
+            Datum::from_usize(bigger_plain.as_ptr() as usize),
+        );
+        let r = unsafe {
+            with_varlena_payload(dc, |a| {
+                with_varlena_payload(dp, |b| varlena::varstrfastcmp_c(a, b))
+            })
+        };
+        assert!(r < 0);
+    }
+}
