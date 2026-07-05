@@ -90,6 +90,7 @@ fn getattr(
 }
 
 const Anum_pg_index_indisprimary: usize = 7;
+const Anum_pg_index_indimmediate: usize = 9;
 
 // index_check_primary_key (index.c); NULLS NOT DISTINCT indexes are
 // unreachable here (USING INDEX is loud upstream).
@@ -845,7 +846,7 @@ pub fn index_create<'mcx>(
     Ok((indexRelationId, constraintId))
 }
 
-// index_constraint_create (index.c), non-deferrable lane.
+// index_constraint_create (index.c).
 #[allow(clippy::too_many_arguments)]
 pub fn index_constraint_create<'mcx>(
     mcx: Mcx<'mcx>,
@@ -934,9 +935,8 @@ pub fn index_constraint_create<'mcx>(
         )?;
     }
 
-    if constr_flags & INDEX_CONSTR_CREATE_UPDATE_INDEX != 0
-        && constr_flags & INDEX_CONSTR_CREATE_MARK_AS_PRIMARY != 0
-    {
+    let mark_as_primary = constr_flags & INDEX_CONSTR_CREATE_MARK_AS_PRIMARY != 0;
+    if constr_flags & INDEX_CONSTR_CREATE_UPDATE_INDEX != 0 && (mark_as_primary || deferrable) {
         let pg_index = table::table_open(mcx, INDEX_RELATION_ID, RowExclusiveLock)?;
         let key = oid_scankey(1, indexRelationId);
         let mut scan =
@@ -945,7 +945,10 @@ pub fn index_constraint_create<'mcx>(
             .unwrap_or_else(|| panic!("cache lookup failed for index {indexRelationId}"));
         let desc = pg_index.descr();
         let isprimary = getattr(tup, Anum_pg_index_indisprimary, desc).as_bool();
-        if !isprimary {
+        let isimmediate = getattr(tup, Anum_pg_index_indimmediate, desc).as_bool();
+        let set_primary = mark_as_primary && !isprimary;
+        let set_deferred = deferrable && isimmediate;
+        if set_primary || set_deferred {
             let natts = desc.natts as usize;
             let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
             let mut nulls: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -953,8 +956,14 @@ pub fn index_constraint_create<'mcx>(
             values.resize(natts, Datum::null());
             nulls.resize(natts, false);
             replace.resize(natts, false);
-            values[Anum_pg_index_indisprimary - 1] = Datum::from_bool(true);
-            replace[Anum_pg_index_indisprimary - 1] = true;
+            if set_primary {
+                values[Anum_pg_index_indisprimary - 1] = Datum::from_bool(true);
+                replace[Anum_pg_index_indisprimary - 1] = true;
+            }
+            if set_deferred {
+                values[Anum_pg_index_indimmediate - 1] = Datum::from_bool(false);
+                replace[Anum_pg_index_indimmediate - 1] = true;
+            }
             let mut newtup =
                 heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
             let otid = tup.t_self;
@@ -962,7 +971,9 @@ pub fn index_constraint_create<'mcx>(
             catalog_indexing::CatalogTupleUpdate(mcx, &pg_index, &otid, &mut newtup)?;
             // Marking an existing index primary must flush the parent
             // table's relcache entry (replication behavior depends on it).
-            inval::invalidate::CacheInvalidateRelcacheByRelid(heapRelation.rd_id)?;
+            if set_primary {
+                inval::invalidate::CacheInvalidateRelcacheByRelid(heapRelation.rd_id)?;
+            }
         } else {
             genam::systable_endscan(mcx, scan)?;
         }
