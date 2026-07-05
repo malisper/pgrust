@@ -758,6 +758,38 @@ fn fc_gtsquery_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     entry_result(fcinfo, &retval)
 }
 
+// tsquery_op.c makeTSQuerySign: TSQS_SIGLEN = 64.
+pub fn make_tsquery_sign(q: TsQueryRef<'_>) -> u64 {
+    let mut sign: u64 = 0;
+    for i in 0..q.size() {
+        if let ::adt_tsvector_core::query::Item::Val(op) = q.item(i) {
+            sign |= 1u64 << ((op.valcrc as u32) % 64);
+        }
+    }
+    sign
+}
+
+// tsquery_gist.c gtsquery_compress; the stored key is the bare TSQuerySign
+// int8 datum, no decompress proc.
+fn fc_gtsquery_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    if !entry.leafkey {
+        return Ok(fcinfo.arg(0));
+    }
+    // SAFETY: the armed result mcx outlives this call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let img = detoasted_image(mcx, entry.key)?;
+    let sign = make_tsquery_sign(TsQueryRef { payload: &img[4..] });
+    let retval = GISTENTRY::init(
+        Datum::from_u64(sign),
+        entry.offset,
+        false,
+        entry.page_is_leaf,
+    );
+    entry_result(fcinfo, &retval)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
