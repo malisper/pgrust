@@ -60,6 +60,7 @@ bool_guc!(ENABLE_MEMOIZE, enable_memoize, set_enable_memoize, true);
 bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
 bool_guc!(ENABLE_GROUP_BY_REORDERING, enable_group_by_reordering, set_enable_group_by_reordering, true);
 bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_distinct_reordering, true);
+bool_guc!(ENABLE_PRESORTED_AGGREGATE, enable_presorted_aggregate, set_enable_presorted_aggregate, true);
 bool_guc!(ENABLE_PARTITION_PRUNING, enable_partition_pruning, set_enable_partition_pruning, true);
 bool_guc!(ENABLE_PARTITIONWISE_JOIN, enable_partitionwise_join, set_enable_partitionwise_join, false);
 bool_guc!(ENABLE_PARTITIONWISE_AGGREGATE, enable_partitionwise_aggregate, set_enable_partitionwise_aggregate, false);
@@ -130,6 +131,8 @@ pub fn install() {
         .install(GucVarAccessors { get: enable_group_by_reordering, set: set_enable_group_by_reordering });
     guc_tables::vars::enable_distinct_reordering
         .install(GucVarAccessors { get: enable_distinct_reordering, set: set_enable_distinct_reordering });
+    guc_tables::vars::enable_presorted_aggregate
+        .install(GucVarAccessors { get: enable_presorted_aggregate, set: set_enable_presorted_aggregate });
     guc_tables::vars::recursive_worktable_factor
         .install(GucVarAccessors { get: recursive_worktable_factor, set: set_recursive_worktable_factor });
     guc_tables::vars::parallel_tuple_cost

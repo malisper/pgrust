@@ -94,6 +94,17 @@ struct PerTransSortData<'mcx> {
     num_inputs: usize,
     num_trans_inputs: usize,
     num_distinct_cols: usize,
+    // C aggpresorted DISTINCT (ExecEvalPreOrderedDistinctSingle/Multi): no
+    // sortstate; each parked row is dedup-checked against the last-seen value
+    // and replayed through the transfn immediately, in input order.
+    presorted: bool,
+    haslast: bool,
+    // Single-column comparand; by-ref values retained in last_buf (C
+    // datumCopy into the group aggcontext, pfree'd per replacement).
+    last_single: NullableDatum,
+    last_buf: PgVec<'mcx, u8>,
+    input_byval: bool,
+    input_typlen: i16,
     sortdesc: Rc<TupleDescData<'mcx>>,
     sort_col_idx: PgVec<'mcx, i16>,
     sort_ops: PgVec<'mcx, Oid>,
@@ -117,6 +128,7 @@ fn init_pertrans_sort<'mcx>(
     transno: usize,
     transfn_oid: Oid,
     agg_collation: Oid,
+    presorted: bool,
 ) -> PgResult<(PerTransSortData<'mcx>, AggOrderedSpec)> {
     let num_inputs = aggref.args.len();
     let num_trans_inputs = aggref.aggargtypes.len();
@@ -240,12 +252,23 @@ fn init_pertrans_sort<'mcx>(
         num_trans_inputs: num_trans_inputs as u16,
         flag,
     };
+    debug_assert!(!presorted || num_distinct_cols > 0);
+    let (input_byval, input_typlen) = {
+        let a = sortdesc.attr(0);
+        (a.attbyval, a.attlen)
+    };
     Ok((
         PerTransSortData {
             transno,
             num_inputs,
             num_trans_inputs,
             num_distinct_cols,
+            presorted,
+            haslast: false,
+            last_single: NullableDatum::null(),
+            last_buf: PgVec::new_in(mcx),
+            input_byval,
+            input_typlen,
             sortdesc,
             sort_col_idx,
             sort_ops,
@@ -806,8 +829,12 @@ pub fn exec_init_agg<'mcx>(
                 trans_fnoid[transno] = transfn_oid;
                 trans_deserialfn[transno] = deserialfn_oid;
                 trans_typ[transno] = TransTyp { len: translen, byval: transbyval };
+                // C build_pertrans_for_aggref: aggpresorted ORDER BY (no
+                // DISTINCT) runs as a plain aggregate; aggpresorted DISTINCT
+                // keeps a pertrans for the consecutive-duplicate check.
                 if !is_ordered_set
                     && (!aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil())
+                    && !(aggref.aggpresorted && aggref.aggdistinct.is_nil())
                 {
                     // C keeps one sortstate per grouping set; PerTransSortData
                     // is single-set — mis-aggregation, not a missing feature.
@@ -823,6 +850,7 @@ pub fn exec_init_agg<'mcx>(
                         transno,
                         shape.aggtransfn,
                         aggref.inputcollid,
+                        aggref.aggpresorted,
                     )?;
                     if let Some(eq) = ps.equalfn_multi.as_mut() {
                         // The DISTINCT dedup eq detoasts compressed by-ref
@@ -1900,6 +1928,9 @@ fn agg_refill_hash_table<'mcx>(
 // into the aggcontext.
 fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
     for ps in node.pertrans_sort.iter_mut() {
+        if ps.presorted {
+            continue;
+        }
         if let Some(old) = ps.sortstate.take() {
             old.end();
         }
@@ -1965,13 +1996,27 @@ fn collect_ordered_input<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    for ps in node.pertrans_sort.iter_mut() {
+    let tmp = node.tmpcontext;
+    let AggStateData { pertrans_sort, trans_typ, agg_node, pergroup_base, .. } = node;
+    for ps in pertrans_sort.iter_mut() {
         // SAFETY: once-allocated cells the trans program writes (steps.rs).
         if !unsafe { ps.flag.read() } {
             continue;
         }
         // SAFETY: as above.
         unsafe { ps.flag.write(false) };
+        if ps.presorted {
+            advance_presorted_distinct(
+                ps,
+                trans_typ[ps.transno],
+                *agg_node,
+                *pergroup_base,
+                estate,
+                tmp,
+                mcx,
+            )?;
+            continue;
+        }
         let sort = ps.sortstate.as_mut().expect("ordered pertrans sort begun");
         if ps.num_inputs == 1 {
             // SAFETY: scratch slot 0 written by the program this row.
@@ -1994,6 +2039,108 @@ fn collect_ordered_input<'mcx>(
         }
     }
     Ok(())
+}
+
+// ExecEvalPreOrderedDistinctSingle/Multi (execExprInterp.c) + the transfn
+// call: presorted DISTINCT rows skip the transfn when equal to the last-seen
+// value; distinct rows become the new comparand and advance the transition.
+fn advance_presorted_distinct<'mcx>(
+    ps: &mut PerTransSortData<'mcx>,
+    typ: TransTyp,
+    agg_node: NonNull<AggStateNode>,
+    pergroup_base: NonNull<AggPerGroup>,
+    estate: &mut EStateData<'mcx>,
+    tmp: EcxtId,
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<()> {
+    if ps.num_inputs == 1 {
+        // SAFETY: scratch slot 0 written by the program this row.
+        let nd = unsafe { ps.scratch.read() };
+        let isdistinct = if !ps.haslast || ps.last_single.isnull != nd.isnull {
+            true
+        } else if nd.isnull {
+            false
+        } else {
+            let eq = ps.equalfn_one.as_mut().expect("single-col DISTINCT eqfn");
+            let mut fc2 = LocalFcinfo::<2>::fresh(ps.agg_collation);
+            // SAFETY: the per-tuple context outlives the call (resets recycle
+            // the same context object).
+            unsafe { fc2.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
+            fc2.args[0] = NullableDatum { value: ps.last_single.value, isnull: false };
+            fc2.args[1] = NullableDatum { value: nd.value, isnull: false };
+            !eq.invoke(&mut fc2)?.as_bool()
+        };
+        if !isdistinct {
+            return Ok(());
+        }
+        ps.haslast = true;
+        ps.last_single = if !nd.isnull && !ps.input_byval {
+            // scratch datums live in per-tuple memory: retain a copy.
+            NullableDatum {
+                value: copy_scratch_datum(&mut ps.last_buf, nd.value, ps.input_typlen)?,
+                isnull: false,
+            }
+        } else {
+            nd
+        };
+    } else {
+        {
+            let slot = ps.insert_slot.as_mut().expect("multi-input ordered agg has a slot");
+            exectuples::exec_clear_tuple(slot, mcx);
+            {
+                let base = slot.base_mut();
+                for i in 0..ps.num_inputs {
+                    // SAFETY: i < num_inputs scratch slots.
+                    let nd = unsafe { ps.scratch.as_ptr().add(i).read() };
+                    base.tts_values[i] = nd.value;
+                    base.tts_isnull[i] = nd.isnull;
+                }
+            }
+            exectuples::exec_store_virtual_tuple(slot);
+        }
+        let matched = if ps.haslast {
+            let (cur, uniq) = (&mut ps.insert_slot, &mut ps.slot2);
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: uniq.as_mut().map(|s| &mut *s),
+                outer: cur.as_mut().map(|s| &mut *s),
+            };
+            exec_qual(ps.equalfn_multi.as_deref_mut(), &mut slots)?
+        } else {
+            false
+        };
+        if matched {
+            return Ok(());
+        }
+        ps.haslast = true;
+        let (cur, uniq) = (&mut ps.insert_slot, &mut ps.slot2);
+        exectuples::exec_copy_slot(
+            uniq.as_mut().expect("presorted multi-col DISTINCT has a uniq slot"),
+            cur.as_mut().expect("multi-input ordered agg has a slot"),
+            mcx,
+            mcx,
+        )?;
+    }
+
+    // SAFETY: transno < numtrans of the once-allocated pergroup array.
+    let pg = unsafe { pergroup_base.as_ptr().add(ps.transno) };
+    let mut fcinfo = LocalFcinfo::<MAX_ORDERED_TRANS_ARGS>::fresh(ps.agg_collation);
+    fcinfo.nargs = (ps.num_trans_inputs + 1) as i16;
+    fcinfo.context = Some(agg_node.cast());
+    // SAFETY: as the equalfn arming above.
+    unsafe { fcinfo.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
+    for i in 0..ps.num_trans_inputs {
+        // SAFETY: i < num_inputs scratch slots (num_trans_inputs <= num_inputs).
+        fcinfo.args[i + 1] = unsafe { ps.scratch.as_ptr().add(i).read() };
+    }
+    advance_transition_function(
+        &mut fcinfo,
+        &mut ps.transfn,
+        typ,
+        ps.num_trans_inputs,
+        agg_node,
+        pg,
+    )
 }
 
 // C advance_transition_function (nodeAgg.c): the sorted-input replay of the
@@ -2068,6 +2215,18 @@ fn process_ordered_aggregates<'mcx>(
     let tmp = node.tmpcontext;
     let AggStateData { pertrans_sort, trans_typ, agg_node, pergroup_base, .. } = node;
     for ps in pertrans_sort.iter_mut() {
+        // Presorted DISTINCT already advanced per row: drop the group's
+        // comparand (C finalize_aggregates' haslast reset).
+        if ps.presorted {
+            if ps.haslast {
+                ps.haslast = false;
+                ps.last_single = NullableDatum::null();
+                if let Some(s2) = ps.slot2.as_mut() {
+                    exectuples::exec_clear_tuple(s2, mcx);
+                }
+            }
+            continue;
+        }
         // SAFETY: transno < numtrans of the once-allocated pergroup array.
         let pg = unsafe { pergroup_base.as_ptr().add(ps.transno) };
         let typ = trans_typ[ps.transno];

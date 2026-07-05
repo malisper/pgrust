@@ -2601,14 +2601,188 @@ fn create_ordered_paths<'mcx>(
     Ok(ordered_rel)
 }
 
+// has_volatile_pathkey (planner.c).
+fn has_volatile_pathkey(run: &PlannerRun<'_>, keys: &[types_pathnodes::PathKey]) -> bool {
+    keys.iter().any(|pk| {
+        let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
+        run.root.ec(ec).ec_has_volatile
+    })
+}
+
+// adjust_group_pathkeys_for_groupagg (planner.c): extend group_pathkeys with
+// the pathkeys suiting the largest set of DISTINCT/ORDER BY aggregates, and
+// mark those Aggrefs aggpresorted so nodeagg skips its per-group sorts.
+fn adjust_group_pathkeys_for_groupagg<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
+    debug_assert!(run.parse().groupingSets.is_nil());
+    debug_assert!(run.root.numOrderedAggs > 0);
+    if !crate::gucs::enable_presorted_aggregate() {
+        return Ok(());
+    }
+    let mcx = run.mcx;
+    let grouppathkeys = crate::relnode::pgvec_clone_shallow(mcx, &run.root.group_pathkeys);
+    let agginfo_ids = crate::relnode::pgvec_clone_shallow(mcx, &run.root.agginfos);
+    let naggs = agginfo_ids.len();
+    let aggref_of = |run: &PlannerRun<'mcx>, i: usize| -> &'mcx types_nodes::primnodes::Aggref<'mcx> {
+        let aggref_id = run.root.agg_info(agginfo_ids[i]).aggrefs[0];
+        run.root
+            .expr_node(aggref_id)
+            .as_aggref()
+            .expect("AggInfo.aggrefs holds Aggrefs")
+    };
+
+    // C's unprocessed_aggs Bitmapset over agginfo indexes.
+    let mut unprocessed: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    unprocessed.resize(naggs, false);
+    let mut n_unprocessed = 0usize;
+    for i in 0..naggs {
+        let aggref = aggref_of(run, i);
+        // AGGKIND_IS_ORDERED_SET covers both ordered-set and hypothetical.
+        if aggref.aggkind != types_nodes::primnodes::AGGKIND_NORMAL {
+            continue;
+        }
+        if aggref.aggdistinct.is_nil() && aggref.aggorder.is_nil() {
+            continue;
+        }
+        if aggref.aggfilter.is_some() {
+            // Presorting evaluates the sort expressions before the FILTER can
+            // remove rows; only error-free arguments (Vars/Consts) qualify.
+            let mut allow_presort = true;
+            for tle_node in &aggref.args {
+                let tle = tle_node.as_target_entry().expect("Aggref.args cell");
+                let mut expr = tle.expr;
+                while let Some(r) = expr.as_relabel_type() {
+                    expr = r.arg;
+                }
+                match expr.node_tag() {
+                    types_nodes::NodeTag::T_Var | types_nodes::NodeTag::T_Const => {}
+                    _ => {
+                        allow_presort = false;
+                        break;
+                    }
+                }
+            }
+            if !allow_presort {
+                continue;
+            }
+        }
+        unprocessed[i] = true;
+        n_unprocessed += 1;
+    }
+
+    let mut bestpathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey> = mcx::PgVec::new_in(mcx);
+    let mut bestaggs: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    bestaggs.resize(naggs, false);
+    let mut n_best = 0usize;
+    while n_unprocessed > n_best {
+        let mut aggindexes: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+        aggindexes.resize(naggs, false);
+        let mut n_agg = 0usize;
+        let mut currpathkeys: Option<mcx::PgVec<'mcx, types_pathnodes::PathKey>> = None;
+        for i in 0..naggs {
+            if !unprocessed[i] {
+                continue;
+            }
+            let aggref = aggref_of(run, i);
+            let sortlist = if !aggref.aggdistinct.is_nil() {
+                &aggref.aggdistinct
+            } else {
+                &aggref.aggorder
+            };
+            let pathkeys =
+                crate::pathkeys::make_pathkeys_for_sortclauses(run, sortlist, &aggref.args)?;
+            // Aggrefs whose ORDER BY/DISTINCT contains volatile functions
+            // always sort on their own (result consistency; planner.c note).
+            if has_volatile_pathkey(run, &pathkeys) {
+                unprocessed[i] = false;
+                n_unprocessed -= 1;
+                continue;
+            }
+            match currpathkeys.as_mut() {
+                None => {
+                    let cur = if !grouppathkeys.is_empty() {
+                        let mut cur =
+                            crate::relnode::pgvec_clone_shallow(mcx, &grouppathkeys);
+                        crate::pathkeys::append_pathkeys(run, &mut cur, &pathkeys);
+                        cur
+                    } else {
+                        pathkeys
+                    };
+                    currpathkeys = Some(cur);
+                    aggindexes[i] = true;
+                    n_agg += 1;
+                }
+                Some(cur) => {
+                    let pathkeys = if !grouppathkeys.is_empty() {
+                        let mut pk =
+                            crate::relnode::pgvec_clone_shallow(mcx, &grouppathkeys);
+                        crate::pathkeys::append_pathkeys(run, &mut pk, &pathkeys);
+                        pk
+                    } else {
+                        pathkeys
+                    };
+                    match crate::pathkeys::compare_pathkeys(cur, &pathkeys) {
+                        crate::pathkeys::PathKeysComparison::Better2 => {
+                            *cur = pathkeys;
+                            aggindexes[i] = true;
+                            n_agg += 1;
+                        }
+                        crate::pathkeys::PathKeysComparison::Better1
+                        | crate::pathkeys::PathKeysComparison::Equal => {
+                            aggindexes[i] = true;
+                            n_agg += 1;
+                        }
+                        crate::pathkeys::PathKeysComparison::Different => {}
+                    }
+                }
+            }
+        }
+        for i in 0..naggs {
+            if aggindexes[i] {
+                debug_assert!(unprocessed[i]);
+                unprocessed[i] = false;
+                n_unprocessed -= 1;
+            }
+        }
+        if n_agg > n_best {
+            bestaggs = aggindexes;
+            n_best = n_agg;
+            bestpathkeys = currpathkeys.expect("n_agg > 0 implies pathkeys were chosen");
+        }
+    }
+
+    // bestpathkeys already includes the original GROUP BY pathkeys.
+    if !bestpathkeys.is_empty() {
+        run.root.group_pathkeys = bestpathkeys;
+    }
+
+    // No Hash Aggregate risk: create_grouping_paths never allows hashing with
+    // ordered aggregates, so aggpresorted is honored by AGG_SORTED/AGG_PLAIN.
+    for i in 0..naggs {
+        if !bestaggs[i] {
+            continue;
+        }
+        let aggref_ids =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.agg_info(agginfo_ids[i]).aggrefs);
+        for &aggref_id in aggref_ids.iter() {
+            let node = *run.root.expr_node(aggref_id);
+            // SAFETY: the planner exclusively owns the sealed parse tree
+            // during planning (C scribbles aggpresorted through shared
+            // pointers); no reference derived from this node is live here.
+            unsafe {
+                node.with_mut::<types_nodes::primnodes::Aggref, _>(|a| {
+                    a.aggpresorted = true;
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 // standard_qp_callback (planner.c); qp_extra arrives as run.qp_setop /
 // run.active_windows.
 fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
     let parse = run.parse();
     let tlist = run.processed_tlist();
-    // DIVERGENCE: adjust_group_pathkeys_for_groupagg (planner.c) unported —
-    // aggpresorted never set, matching C under enable_presorted_aggregate=off;
-    // ordered aggs sort inside nodeagg (presorted-aggregate lane).
 
     if run.gset_data.is_some() {
         // Grouping sets: the first RollupData's groupClause, with C's
@@ -2629,7 +2803,7 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
             run.root.group_pathkeys = mcx::PgVec::new_in(run.mcx);
             run.root.num_groupby_pathkeys = 0;
         }
-    } else if !parse.groupClause.is_nil() {
+    } else if !parse.groupClause.is_nil() || run.root.numOrderedAggs > 0 {
         let mut clauses = core::mem::replace(
             &mut run.root.processed_groupClause,
             mcx::PgVec::new_in(run.mcx),
@@ -2641,7 +2815,11 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
         if sortable {
             run.root.num_groupby_pathkeys = pathkeys.len() as i32;
             run.root.group_pathkeys = pathkeys;
+            if run.root.numOrderedAggs > 0 {
+                adjust_group_pathkeys_for_groupagg(run)?;
+            }
         } else {
+            // Can't sort; no point in considering aggregate ordering either.
             run.root.group_pathkeys = mcx::PgVec::new_in(run.mcx);
             run.root.num_groupby_pathkeys = 0;
         }
