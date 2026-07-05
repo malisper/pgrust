@@ -497,14 +497,18 @@ pub fn set_allocator_release(f: fn()) {
     ALLOC_RELEASE.store(f as *mut (), core::sync::atomic::Ordering::Release);
 }
 
+/// True when an installed hook ran (false = no hook, nothing released).
 #[cold]
 #[inline(never)]
-pub fn release_retained() {
+pub fn release_retained() -> bool {
     let p = ALLOC_RELEASE.load(core::sync::atomic::Ordering::Acquire);
     if !p.is_null() {
         // SAFETY: only set_allocator_release stores here, always from fn().
         let f: fn() = unsafe { core::mem::transmute(p) };
         f();
+        true
+    } else {
+        false
     }
 }
 
