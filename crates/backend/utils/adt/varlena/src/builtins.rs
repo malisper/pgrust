@@ -628,6 +628,116 @@ pub fn fc_unicode_is_normalized(
     )?))
 }
 
+pub fn fc_replace_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args are non-null text varlenas (strict fn).
+    let (src, from, to) = unsafe {
+        (
+            fcinfo.arg_varlena_packed(0)?,
+            fcinfo.arg_varlena_packed(1)?,
+            fcinfo.arg_varlena_packed(2)?,
+        )
+    };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::replace_text(
+        mcx,
+        src.data(),
+        from.data(),
+        to.data(),
+        fcinfo.get_collation(),
+    )?))
+}
+
+pub fn fc_textoverlay(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
+    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let sp = fcinfo.arg_i32(2);
+    let sl = fcinfo.arg_i32(3);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::text_overlay(
+        mcx,
+        t1.data(),
+        t2.data(),
+        sp,
+        sl,
+    )?))
+}
+
+pub fn fc_textoverlay_no_len(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
+    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let sp = fcinfo.arg_i32(2);
+    let sl = crate::text_length(t2.data());
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::text_overlay(
+        mcx,
+        t1.data(),
+        t2.data(),
+        sp,
+        sl,
+    )?))
+}
+
+pub fn fc_byteaoverlay(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null bytea varlenas (strict fn).
+    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let sp = fcinfo.arg_i32(2);
+    let sl = fcinfo.arg_i32(3);
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_overlay(
+        mcx,
+        t1.data(),
+        t2.data(),
+        sp,
+        sl,
+    )?))
+}
+
+pub fn fc_byteaoverlay_no_len(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args 0/1 are non-null bytea varlenas (strict fn).
+    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let sp = fcinfo.arg_i32(2);
+    let sl = crate::bytea::byteaoctetlen(t2.data());
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::bytea::bytea_overlay(
+        mcx,
+        t1.data(),
+        t2.data(),
+        sp,
+        sl,
+    )?))
+}
+
+pub fn fc_bytea_bit_count(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 is a non-null bytea varlena (strict fn).
+    let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+    Ok(Datum::from_i64(crate::bytea::bytea_bit_count(v.data())))
+}
+
+macro_rules! fc_convert_to_base {
+    ($($fname:ident: $argfn:ident as $argty:ty, $base:literal;)*) => {$(
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let value = fcinfo.$argfn(0) as $argty as u64;
+            let mcx = fcinfo.result_mcx();
+            Ok(varlena_result(crate::convert_to_base(mcx, value, $base)?))
+        }
+    )*};
+}
+
+fc_convert_to_base! {
+    fc_to_bin32: arg_i32 as u32, 2;
+    fc_to_bin64: arg_i64 as u64, 2;
+    fc_to_oct32: arg_i32 as u32, 8;
+    fc_to_oct64: arg_i64 as u64, 8;
+    fc_to_hex32: arg_i32 as u32, 16;
+    fc_to_hex64: arg_i64 as u64, 16;
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -646,6 +756,17 @@ const fn n(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
         nargs,
         strict: false,
         retset: false,
+        func,
+    }
+}
+
+const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: false,
+        retset: true,
         func,
     }
 }
@@ -747,4 +868,18 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(4549, "unicode_version", 0, fc_unicode_version),
     b(6099, "icu_unicode_version", 0, fc_icu_unicode_version),
     b(6105, "unicode_assigned", 1, fc_unicode_assigned),
+    b(749, "byteaoverlay", 4, fc_byteaoverlay),
+    b(752, "byteaoverlay_no_len", 3, fc_byteaoverlay_no_len),
+    b(1404, "textoverlay", 4, fc_textoverlay),
+    b(1405, "textoverlay_no_len", 3, fc_textoverlay_no_len),
+    b(2087, "replace_text", 3, fc_replace_text),
+    b(2089, "to_hex32", 1, fc_to_hex32),
+    b(2090, "to_hex64", 1, fc_to_hex64),
+    b(6163, "bytea_bit_count", 1, fc_bytea_bit_count),
+    b(6330, "to_bin32", 1, fc_to_bin32),
+    b(6331, "to_bin64", 1, fc_to_bin64),
+    b(6332, "to_oct32", 1, fc_to_oct32),
+    b(6333, "to_oct64", 1, fc_to_oct64),
+    srf(6160, "text_to_table", 2, crate::split_text::fc_text_to_table),
+    srf(6161, "text_to_table_null", 3, crate::split_text::fc_text_to_table),
 ];

@@ -222,6 +222,50 @@ pub fn fc_set_config_by_name(
     text_datum(fcinfo.result_mcx(), &new_value)
 }
 
+// C: pg_settings_get_flags — NULL for an unknown GUC, else the subset of
+// MAX_GUC_FLAGS names whose bit is set on the GUC's `flags`.
+pub fn fc_pg_settings_get_flags(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let varname = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let varname = String::from_utf8_lossy(varname.data()).into_owned();
+    let flags = guc::store::with_store(|reg| reg.find_option(&varname).map(|c| c.gen().flags))
+        .expect("GUC store not initialized");
+    let Some(flags) = flags else {
+        return Ok(fcinfo.return_null());
+    };
+
+    const FLAG_NAMES: &[(i32, &str)] = &[
+        (types_guc::GUC_EXPLAIN, "EXPLAIN"),
+        (types_guc::GUC_NO_RESET, "NO_RESET"),
+        (types_guc::GUC_NO_RESET_ALL, "NO_RESET_ALL"),
+        (GUC_NO_SHOW_ALL, "NO_SHOW_ALL"),
+        (types_guc::GUC_NOT_IN_SAMPLE, "NOT_IN_SAMPLE"),
+        (types_guc::GUC_RUNTIME_COMPUTED, "RUNTIME_COMPUTED"),
+    ];
+
+    let mcx = fcinfo.result_mcx();
+    let mut astate = None;
+    let mut scratch: Vec<u8> = Vec::new();
+    for (bit, name) in FLAG_NAMES {
+        if flags & bit == 0 {
+            continue;
+        }
+        scratch.clear();
+        scratch.extend_from_slice(&datum::varlena::set_varsize_4b(4 + name.len()));
+        scratch.extend_from_slice(name.as_bytes());
+        let d = Datum::from_usize(scratch.as_ptr() as usize);
+        astate = Some(::arrayfuncs::accum_array_result(mcx, astate.take(), d, false, TEXTOID)?);
+    }
+    let img = match &astate {
+        None => ::arrayfuncs::construct_empty_array(mcx, TEXTOID)?,
+        Some(st) => ::arrayfuncs::make_array_result(mcx, st)?,
+    };
+    types_fmgr::byref_result(mcx, &img)
+}
+
 const fn b(
     foid: types_core::Oid,
     name: &'static str,
@@ -238,4 +282,5 @@ pub const GUC_FUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(2077, "show_config_by_name", 1, true, false, fc_show_config_by_name),
     b(3294, "show_config_by_name_missing_ok", 2, true, false, fc_show_config_by_name_missing_ok),
     b(2078, "set_config_by_name", 3, false, false, fc_set_config_by_name),
+    b(6240, "pg_settings_get_flags", 1, true, false, fc_pg_settings_get_flags),
 ];

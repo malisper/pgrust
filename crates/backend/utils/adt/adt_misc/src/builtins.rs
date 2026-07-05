@@ -1,10 +1,147 @@
+use datum::array_build::ArrayBuildState;
 use datum::Datum;
-use types_core::{InvalidOid, Oid, PG_CATALOG_NAMESPACE, RELATION_RELATION_ID};
-use types_error::PgResult;
+use types_core::{InvalidOid, Oid, TEXTOID, PG_CATALOG_NAMESPACE, RELATION_RELATION_ID};
+use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_fmgr::{
     byref_result, cstring_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
     PGFunction,
 };
+
+fn is_ident_start(c: u8) -> bool {
+    c == b'_' || c.is_ascii_alphabetic() || c >= 0x80
+}
+
+fn is_ident_cont(c: u8) -> bool {
+    c.is_ascii_digit() || c == b'$' || is_ident_start(c)
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_ident_err(qualname: &[u8], detail: Option<&str>) -> Box<PgError> {
+    let e = PgError::error(format!(
+        "string is not a valid identifier: \"{}\"",
+        String::from_utf8_lossy(qualname)
+    ))
+    .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE);
+    Box::new(match detail {
+        Some(d) => e.with_detail(d),
+        None => e,
+    })
+}
+
+pub fn fc_parse_ident(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    // SAFETY: arg 0 is a non-null text datum (strict function).
+    let qualname: Vec<u8> = unsafe { fcinfo.arg_varlena_packed(0)? }.data().to_vec();
+    let strict = fcinfo.arg_bool(1);
+    let encoding = mbutils::GetDatabaseEncoding();
+
+    let mut buf = qualname.clone();
+    let mut pos = 0usize;
+    let mut after_dot = false;
+    let mut astate: Option<ArrayBuildState<'_>> = None;
+
+    while pos < buf.len() && parser_small1::scanner_isspace(buf[pos]) {
+        pos += 1;
+    }
+
+    loop {
+        let mut missing_ident = true;
+
+        if pos < buf.len() && buf[pos] == b'"' {
+            let curname_start = pos + 1;
+            let mut search_start = pos + 1;
+            let endp;
+            loop {
+                match buf[search_start..].iter().position(|&b| b == b'"') {
+                    None => {
+                        return Err(invalid_ident_err(
+                            &qualname,
+                            Some("String has unclosed double quotes."),
+                        ))
+                    }
+                    Some(off) => {
+                        let q = search_start + off;
+                        if q + 1 < buf.len() && buf[q + 1] == b'"' {
+                            buf.remove(q);
+                            search_start = q + 1;
+                            continue;
+                        }
+                        endp = q;
+                        break;
+                    }
+                }
+            }
+            if endp == curname_start {
+                return Err(invalid_ident_err(
+                    &qualname,
+                    Some("Quoted identifier must not be empty."),
+                ));
+            }
+            let text = varlena::cstring_to_text(mcx, &buf[curname_start..endp])?;
+            astate = Some(arrayfuncs::accum_array_result(
+                mcx,
+                astate.take(),
+                Datum::from_usize(text.as_bytes().as_ptr() as usize),
+                false,
+                TEXTOID,
+            )?);
+            pos = endp + 1;
+            missing_ident = false;
+        } else if pos < buf.len() && is_ident_start(buf[pos]) {
+            let start = pos;
+            pos += 1;
+            while pos < buf.len() && is_ident_cont(buf[pos]) {
+                pos += 1;
+            }
+            let down = parser_small1::downcase_identifier(mcx, &buf[start..pos], false, false, encoding)?;
+            let text = varlena::cstring_to_text(mcx, &down)?;
+            astate = Some(arrayfuncs::accum_array_result(
+                mcx,
+                astate.take(),
+                Datum::from_usize(text.as_bytes().as_ptr() as usize),
+                false,
+                TEXTOID,
+            )?);
+            missing_ident = false;
+        }
+
+        if missing_ident {
+            if pos < buf.len() && buf[pos] == b'.' {
+                return Err(invalid_ident_err(&qualname, Some("No valid identifier before \".\".")));
+            } else if after_dot {
+                return Err(invalid_ident_err(&qualname, Some("No valid identifier after \".\".")));
+            } else {
+                return Err(invalid_ident_err(&qualname, None));
+            }
+        }
+
+        while pos < buf.len() && parser_small1::scanner_isspace(buf[pos]) {
+            pos += 1;
+        }
+
+        if pos < buf.len() && buf[pos] == b'.' {
+            after_dot = true;
+            pos += 1;
+            while pos < buf.len() && parser_small1::scanner_isspace(buf[pos]) {
+                pos += 1;
+            }
+        } else if pos >= buf.len() {
+            break;
+        } else {
+            if strict {
+                return Err(invalid_ident_err(&qualname, None));
+            }
+            break;
+        }
+    }
+
+    let img = match &astate {
+        None => arrayfuncs::construct_empty_array(mcx, TEXTOID)?,
+        Some(st) => arrayfuncs::make_array_result(mcx, st)?,
+    };
+    byref_result(mcx, &img)
+}
 
 pub fn fc_version(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
@@ -718,4 +855,5 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
         func: fc_pg_get_keywords,
     },
     b(1993, "shobj_description", 2, fc_shobj_description),
+    b(1268, "parse_ident", 2, fc_parse_ident),
 ];

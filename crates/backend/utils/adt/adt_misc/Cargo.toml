@@ -45,3 +45,4 @@ xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
 standby = { path = "../../../storage/ipc/standby" }
 postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
 fd = { path = "../../../storage/file/fd" }
+parser_small1 = { path = "../../../parser/parser_small1" }

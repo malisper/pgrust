@@ -234,3 +234,47 @@ fn show_emits_through_tup_output() {
     GetPGVariable(ctx.mcx(), "DateStyle", &mut dest).unwrap();
     GetPGVariable(ctx.mcx(), "all", &mut dest).unwrap();
 }
+
+fn text_image(s: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + s.len());
+    v.extend_from_slice(&datum::varlena::set_varsize_4b(4 + s.len()));
+    v.extend_from_slice(s.as_bytes());
+    v
+}
+
+fn flags_of(mcx: mcx::Mcx<'_>, name: &str) -> Option<Vec<String>> {
+    use types_fmgr::LocalFcinfo;
+    let img = text_image(name);
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    // SAFETY: mcx outlives this call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
+    fcinfo.set_arg(0, datum::Datum::from_usize(img.as_ptr() as usize));
+    let d = fc_pg_settings_get_flags(None, &mut fcinfo).unwrap();
+    if fcinfo.isnull {
+        return None;
+    }
+    let p = d.as_usize() as *const u8;
+    let img = unsafe { core::slice::from_raw_parts(p, arrayfuncs::foundation::varsize_any(p)) };
+    let (elems, _) = arrayfuncs::deconstruct_array_builtin(mcx, img, types_core::TEXTOID, true)
+        .unwrap();
+    Some(
+        elems
+            .iter()
+            .map(|d| {
+                let p = d.as_usize() as *const u8;
+                let bytes =
+                    unsafe { datum::VarlenaRef::from_ptr(p) }.data().to_vec();
+                String::from_utf8(bytes).unwrap()
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn pg_settings_get_flags_cases() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(flags_of(mcx, "enable_seqscan").as_deref(), Some(&["EXPLAIN".to_string()][..]));
+    assert_eq!(flags_of(mcx, "no_such_guc_xyz"), None);
+}
