@@ -637,6 +637,30 @@ mod text_surface {
         assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
         assert_eq!(err.message, "field position must not be zero");
     }
+
+    #[test]
+    fn replace_text_arms() {
+        mbutils::SetDatabaseEncoding(PG_UTF8).unwrap();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let rp = |s: &str, from: &str, to: &str| {
+            String::from_utf8(
+                replace_text(mcx, s.as_bytes(), from.as_bytes(), to.as_bytes(), C)
+                    .unwrap()
+                    .data()
+                    .to_vec(),
+            )
+            .unwrap()
+        };
+        assert_eq!(rp("abcdef", "cd", "XX"), "abXXef");
+        assert_eq!(rp("yabadabadoo", "ba", "123"), "ya123da123doo");
+        assert_eq!(rp("abab", "ab", ""), "");
+        assert_eq!(rp("abc", "xyz", "q"), "abc");
+        assert_eq!(rp("", "a", "b"), "");
+        assert_eq!(rp("abc", "", "q"), "abc");
+        assert_eq!(rp("aaa", "a", "aa"), "aaaaaa");
+        assert_eq!(rp("日本語", "本", "外"), "日外語");
+    }
 }
 
 mod string_agg_fns {

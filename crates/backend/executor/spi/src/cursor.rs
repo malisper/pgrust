@@ -1,8 +1,7 @@
 // SPI cursor surface (spi.c): SPI_cursor_open_with_paramlist / _fetch /
-// _close — the plpgsql FOR-IN-query lane. Unspecified scrollability maps to
-// NO_SCROLL (C consults ExecSupportsBackwardScan; forward-only callers are
-// unaffected). The portal keeps the CachedPlan refcount even for unsaved
-// plans (C copies the stmt list into the portal context instead).
+// _close — the plpgsql FOR-IN-query lane. The portal keeps the CachedPlan
+// refcount even for unsaved plans (C copies the stmt list into the portal
+// context instead).
 use datum::Datum;
 use tcop_dest::CreateDestReceiver;
 use types_dest::CommandDest;
@@ -144,7 +143,16 @@ pub fn SPI_cursor_open(
             let mut p = portal.borrow_mut();
             p.cursorOptions = cursor_options;
             if p.cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL) == 0 {
-                p.cursorOptions |= CURSOR_OPT_NO_SCROLL;
+                // C's default-scrollability probe (spi.c SPI_cursor_open_internal).
+                if stmt_slice.len() == 1
+                    && stmt_slice[0].commandType != types_nodes::nodes_enums::CmdType::CMD_UTILITY
+                    && stmt_slice[0].rowMarks.is_nil()
+                    && execmain::exec_supports_backward_scan(stmt_slice[0].planTree)
+                {
+                    p.cursorOptions |= CURSOR_OPT_SCROLL;
+                } else {
+                    p.cursorOptions |= CURSOR_OPT_NO_SCROLL;
+                }
             }
             p.queryEnv = crate::current_query_env();
         }

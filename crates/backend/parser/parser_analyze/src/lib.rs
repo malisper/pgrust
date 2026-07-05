@@ -657,7 +657,7 @@ pub fn analyze_requires_snapshot(parse_tree: &RawStmt<'_>) -> bool {
 }
 
 // transformPLAssignStmt (analyze.c). Unported loud: indirection beyond the
-// dotted-name prefix (transformAssignmentIndirection / SubscriptingRef).
+// dotted-name prefix.
 fn transformPLAssignStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -674,7 +674,9 @@ fn transformPLAssignStmt<'mcx>(
 
     let mut fields = types_nodes::NodeList::make1(mcx, Node::mk_string(mcx, stmt.name)?)?;
     let mut nnames = stmt.nnames;
-    let mut rest = 0usize;
+    // C peels the extra dotted names off a list_copy; the residual list is
+    // the subscript/field indirection handed to transformAssignmentIndirection.
+    let mut indirection: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
     for ind in &stmt.indirection {
         if nnames > 1 {
             if ind.as_string().is_none() {
@@ -685,14 +687,8 @@ fn transformPLAssignStmt<'mcx>(
             fields.lappend(mcx, ind)?;
             nnames -= 1;
         } else {
-            rest += 1;
+            indirection.lappend(mcx, ind)?;
         }
-    }
-    if rest > 0 {
-        panic!(
-            "transformPLAssignStmt (analyze.c): transformAssignmentIndirection \
-             (subscripted/field assignment target) unported — unit backend-parser-analyze"
-        );
     }
 
     let cref = Node::mk_column_ref(mcx, fields, stmt.location)?;
@@ -700,6 +696,7 @@ fn transformPLAssignStmt<'mcx>(
         parse_expr::transformExpr(mcx, pstate, cref, ParseExprKind::EXPR_KIND_UPDATE_TARGET)?;
     let targettype = parse_expr::expr_type(target);
     let targettypmod = parse_expr::expr_typmod(target);
+    let targetcollation = parse_expr::expr_collation(target);
 
     let mut qry = Query::default();
     qry.commandType = CmdType::CMD_SELECT;
@@ -748,7 +745,29 @@ fn transformPLAssignStmt<'mcx>(
         Ok(t == types_core::catalog::RECORDOID
             || types_core::OidIsValid(lsyscache::typ::get_typ_typrelid(t)?))
     };
-    if targettype != type_id && composite(targettype)? && composite(type_id)? {
+    if !indirection.is_nil() {
+        let orig_expr = tle.as_variant::<TargetEntry>().expect("TargetEntry").expr;
+        let newexpr = parse_target::transformAssignmentIndirection(
+            mcx,
+            pstate,
+            Some(target),
+            stmt.name,
+            false,
+            targettype,
+            targettypmod,
+            targetcollation,
+            &indirection,
+            0,
+            orig_expr,
+            coerce::CoercionContext::COERCION_PLPGSQL,
+            parse_expr::expr_location(target),
+        )?;
+        // SAFETY: parser-owned tree; no derived refs live.
+        unsafe {
+            tle.with_mut::<TargetEntry, _>(|te| te.expr = newexpr)
+                .expect("TargetEntry");
+        }
+    } else if targettype != type_id && composite(targettype)? && composite(type_id)? {
         // C hack: inconsistent composite types pass through as-is; the
         // PL/pgSQL executor converts its own way.
     } else {

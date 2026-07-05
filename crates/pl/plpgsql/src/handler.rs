@@ -492,13 +492,10 @@ fn do_compile(
 
         let mut out_arg_variables: Vec<Dno> = Vec::new();
         for (i, &argtypeid) in proc.argtypes.iter().enumerate() {
+            // A VARIADIC parameter needs nothing special here: proargtypes
+            // carries the array type and the caller packs the actuals; C's
+            // only variadic arm in do_compile is the is-input test below.
             let argmode = proc.argmodes.get(i).copied().unwrap_or(PROARGMODE_IN);
-            if argmode == PROARGMODE_VARIADIC {
-                panic!(
-                    "plpgsql_compile: VARIADIC parameters unported (function {fn_oid}, arg {})",
-                    i + 1
-                );
-            }
             let buf = format!("${}", i + 1);
             let argdtype = CompState::build_datatype(argtypeid, -1, fn_collation)?;
             if argdtype.ttype == TypeKind::Pseudo {
