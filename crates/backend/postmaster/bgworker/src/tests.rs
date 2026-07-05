@@ -209,6 +209,7 @@ fn get_background_worker_type_by_pid() {
     let mut w = mk_worker("typed", BGWORKER_SHMEM_ACCESS);
     w.bgw_type = "test worker".to_string();
     let h = RegisterDynamicBackgroundWorker(w).expect("register").expect("slot");
+    BackgroundWorkerStateChange(true);
     let idx = registered_idx_for(&h);
     with_registry(|reg| rw_mut(reg, idx).pid = 4242);
     ReportBackgroundWorkerPID(idx);

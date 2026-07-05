@@ -121,35 +121,47 @@ fn replace_text_cases() {
     assert_eq!(replace_text(mcx, b"abc", b"z", b"x", C).unwrap().data(), b"abc");
 }
 
+// text/bytea_overlay substring their first argument through the
+// detoast_attr_slice fetch, so t1 is a raw varlena image (t2 stays payload).
+fn image_4b(s: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + s.len());
+    v.extend_from_slice(&datum::varlena::set_varsize_4b(4 + s.len()));
+    v.extend_from_slice(s);
+    v
+}
+
 #[test]
 fn text_overlay_cases() {
+    install_detoast_seams();
+    install_mb_for_levenshtein();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     // overlay('Txxxxas' placing 'hom' from 2 for 4) = 'Thomas'.
     assert_eq!(
-        text_overlay(mcx, b"Txxxxas", b"hom", 2, 4).unwrap().data(),
+        text_overlay(mcx, &image_4b(b"Txxxxas"), b"hom", 2, 4).unwrap().data(),
         b"Thomas"
     );
     // no_len defaults sl to length(t2); C caller path exercised via fc_textoverlay_no_len.
     assert_eq!(
-        text_overlay(mcx, b"Txxxas", b"hom", 2, 3).unwrap().data(),
+        text_overlay(mcx, &image_4b(b"Txxxas"), b"hom", 2, 3).unwrap().data(),
         b"Thomas"
     );
-    let err = text_overlay(mcx, b"abc", b"x", 0, 1).unwrap_err();
+    let err = text_overlay(mcx, &image_4b(b"abc"), b"x", 0, 1).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
-    let err = text_overlay(mcx, b"abc", b"x", i32::MAX, 1).unwrap_err();
+    let err = text_overlay(mcx, &image_4b(b"abc"), b"x", i32::MAX, 1).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
 }
 
 #[test]
 fn bytea_overlay_and_bit_count() {
+    install_detoast_seams();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     assert_eq!(
-        bytea::bytea_overlay(mcx, b"Txxxxas", b"hom", 2, 4).unwrap().data(),
+        bytea::bytea_overlay(mcx, &image_4b(b"Txxxxas"), b"hom", 2, 4).unwrap().data(),
         b"Thomas"
     );
-    let err = bytea::bytea_overlay(mcx, b"abc", b"x", 0, 1).unwrap_err();
+    let err = bytea::bytea_overlay(mcx, &image_4b(b"abc"), b"x", 0, 1).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
 
     assert_eq!(bytea::bytea_bit_count(b""), 0);
@@ -587,7 +599,7 @@ mod fc_results {
         let to = text_image(b"XX");
         let d = direct_function_call3_coll_in(
             fc_replace_text,
-            0,
+            types_core::C_COLLATION_OID,
             ctx.mcx(),
             Datum::from_usize(src.as_ptr() as usize),
             Datum::from_usize(from.as_ptr() as usize),
@@ -661,7 +673,7 @@ mod fc_results {
 
         let mut flinfo = FmgrInfo::new(crate::split_text::fc_text_to_table, 6160, 2, false, true);
         let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
-        let mut fci = LocalFcinfo::<2>::new(0);
+        let mut fci = LocalFcinfo::<2>::new(types_core::C_COLLATION_OID);
         fci.resultinfo = rsinfo.as_fmnode_ptr();
         // SAFETY: ctx outlives the call loop.
         unsafe { fci.set_result_mcx(ctx.mcx()) };
@@ -710,7 +722,7 @@ mod fc_results {
         let mut flinfo =
             FmgrInfo::new(crate::split_text::fc_text_to_table, 6161, 3, false, true);
         let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
-        let mut fci = LocalFcinfo::<3>::new(0);
+        let mut fci = LocalFcinfo::<3>::new(types_core::C_COLLATION_OID);
         fci.resultinfo = rsinfo.as_fmnode_ptr();
         // SAFETY: ctx outlives the call loop.
         unsafe { fci.set_result_mcx(ctx.mcx()) };

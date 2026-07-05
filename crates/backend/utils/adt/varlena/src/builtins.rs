@@ -631,17 +631,14 @@ pub fn fc_unicode_is_normalized(
 
 pub fn fc_textoverlay(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
-    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    // t1 stays the raw image: text_overlay substrings it via the
+    // detoast_attr_slice fetch (fc_text_substr convention).
+    let t1 = unsafe { fcinfo.arg_varlena_raw(0) };
+    let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
     let sp = fcinfo.arg_i32(2);
     let sl = fcinfo.arg_i32(3);
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::text_overlay(
-        mcx,
-        t1.data(),
-        t2.data(),
-        sp,
-        sl,
-    )?))
+    Ok(varlena_result(crate::text_overlay(mcx, t1, t2.data(), sp, sl)?))
 }
 
 pub fn fc_textoverlay_no_len(
@@ -649,32 +646,24 @@ pub fn fc_textoverlay_no_len(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
-    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    // t1 stays the raw image (fc_text_substr convention).
+    let t1 = unsafe { fcinfo.arg_varlena_raw(0) };
+    let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
     let sp = fcinfo.arg_i32(2);
     let sl = crate::text_length(t2.data());
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::text_overlay(
-        mcx,
-        t1.data(),
-        t2.data(),
-        sp,
-        sl,
-    )?))
+    Ok(varlena_result(crate::text_overlay(mcx, t1, t2.data(), sp, sl)?))
 }
 
 pub fn fc_byteaoverlay(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null bytea varlenas (strict fn).
-    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    // t1 stays the raw image (fc_bytea_substr convention).
+    let t1 = unsafe { fcinfo.arg_varlena_raw(0) };
+    let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
     let sp = fcinfo.arg_i32(2);
     let sl = fcinfo.arg_i32(3);
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::bytea::bytea_overlay(
-        mcx,
-        t1.data(),
-        t2.data(),
-        sp,
-        sl,
-    )?))
+    Ok(varlena_result(crate::bytea::bytea_overlay(mcx, t1, t2.data(), sp, sl)?))
 }
 
 pub fn fc_byteaoverlay_no_len(
@@ -682,17 +671,13 @@ pub fn fc_byteaoverlay_no_len(
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null bytea varlenas (strict fn).
-    let (t1, t2) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    // t1 stays the raw image (fc_bytea_substr convention).
+    let t1 = unsafe { fcinfo.arg_varlena_raw(0) };
+    let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
     let sp = fcinfo.arg_i32(2);
     let sl = crate::bytea::byteaoctetlen(t2.data());
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(crate::bytea::bytea_overlay(
-        mcx,
-        t1.data(),
-        t2.data(),
-        sp,
-        sl,
-    )?))
+    Ok(varlena_result(crate::bytea::bytea_overlay(mcx, t1, t2.data(), sp, sl)?))
 }
 
 pub fn fc_bytea_bit_count(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

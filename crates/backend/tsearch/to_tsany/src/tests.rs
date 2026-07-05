@@ -192,7 +192,8 @@ mod json_workers {
 
     fn setup() {
         let _ = mbutils::SetDatabaseEncoding(wchar::PG_UTF8);
-        mbutils::init_seams();
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(mbutils::init_seams);
     }
 
     fn jsonb_payload<'m>(mcx: Mcx<'m>, doc: &[u8]) -> Vec<u8> {
