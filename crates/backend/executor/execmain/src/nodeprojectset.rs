@@ -21,7 +21,10 @@ use crate::procnode::{
 };
 use crate::typefromtl::exec_type_from_tl;
 
-const PROJECT_SET_MAX_ARGS: usize = 4;
+// C sizes the fcinfo per call (SizeForFunctionCallInfo(nargs), up to
+// FUNC_MAX_ARGS); this inline frame caps the SRF arg count instead — the
+// init-time guard below rejects wider calls.
+const PROJECT_SET_MAX_ARGS: usize = 8;
 
 // SetExprState; args_valid is C's setArgsValid, result_desc/result_slot/
 // result_store are funcResultDesc/funcResultSlot/funcResultStore.

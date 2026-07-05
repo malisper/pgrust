@@ -5406,6 +5406,7 @@ dependencies = [
  "init_small",
  "lsyscache",
  "mcx",
+ "nodes_core",
  "syscache_seams",
  "tupdesc",
  "tuplestore",
@@ -14962,6 +14963,8 @@ dependencies = [
 name = "trigger"
 version = "0.0.0"
 dependencies = [
+ "aclchk",
+ "adt_acl",
  "catalog",
  "catalog_indexing",
  "catalog_namespace",

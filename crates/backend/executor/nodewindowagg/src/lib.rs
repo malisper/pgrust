@@ -338,10 +338,13 @@ fn resolve_aggregate_transtype<'mcx>(
     coerce::enforce_generic_type_consistency(&actual[..n], &mut declared[..n], aggtranstype, false)
 }
 
-// C build_aggregate_transfn_expr/fmgr_info_set_expr: transfn arg types
-// [transtype, inputs...] ride fn_expr as the AggFnArgTypes carrier.
+// C build_aggregate_transfn_expr/build_aggregate_finalfn_expr +
+// fmgr_info_set_expr: arg types [transtype, inputs...] ride fn_expr as the
+// AggFnArgTypes carrier; `rettype` is the fake FuncExpr's funcresulttype
+// (transtype for transfns, the window function result type for finalfns).
 fn erased_agg_argtypes<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
+    rettype: Oid,
     transtype: Oid,
     args: &NodeList<'mcx>,
 ) -> PgResult<::types_core::fmgr::FnExprErased> {
@@ -353,7 +356,8 @@ fn erased_agg_argtypes<'mcx>(
     // SAFETY: arena-backed for the query; the carrier FmgrInfos die with the
     // plan they serve (execexpr's ExecBuildAggTrans precedent).
     let leaked: &'static [Oid] = unsafe { core::mem::transmute(argtypes.leak()) };
-    let carrier = ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(leaked))?;
+    let carrier =
+        ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes { rettype, argtypes: leaked })?;
     // SAFETY: as above.
     Ok(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) })
 }
@@ -935,10 +939,9 @@ fn initialize_peragg_default<'mcx>(
         }
         trans_argtypes.push(at.leak());
     }
-    let erased = erased_agg_argtypes(mcx, transtype, &wfunc.args)?;
     let finalfn = if shape.aggfinalfn != 0 {
         let mut f = fmgr_core::fmgr_info(shape.aggfinalfn)?;
-        f.fn_expr = Some(erased);
+        f.fn_expr = Some(erased_agg_argtypes(mcx, wfunc.wintype, transtype, &wfunc.args)?);
         Some(f)
     } else {
         None
@@ -1120,7 +1123,7 @@ fn initialize_peragg_framed<'mcx>(
             };
         }
     }
-    let erased = erased_agg_argtypes(mcx, aggtranstype, &wfunc.args)?;
+    let erased = erased_agg_argtypes(mcx, aggtranstype, aggtranstype, &wfunc.args)?;
     match &mut kernel {
         AggKernel::Generic { transfn } => transfn.fn_expr = Some(erased),
         AggKernel::MovingByVal { transfn, invtransfn } => {
@@ -1130,7 +1133,7 @@ fn initialize_peragg_framed<'mcx>(
         AggKernel::MovingIntSum { .. } => {}
     }
     if let Some(f) = finalfn.as_mut() {
-        f.fn_expr = Some(erased);
+        f.fn_expr = Some(erased_agg_argtypes(mcx, wfunc.wintype, aggtranstype, &wfunc.args)?);
     }
     let num_final_args = if finalextra { wfunc.args.len() as u16 + 1 } else { 1 };
     let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval(wfunc.wintype)?;

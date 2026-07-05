@@ -465,3 +465,66 @@ fn materialized_srf_rejects_scalar_result() {
     let err = InitMaterializedSRF(ctx.mcx(), &mut flinfo, &mut fcinfo, 0).unwrap_err();
     assert!(err.message().contains("return type must be a row type"));
 }
+
+#[test]
+fn row_expr_record_builds_blessed_tupdesc() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let args = nodes::NodeList::make2(
+        mcx,
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true).unwrap(),
+        Node::mk_const(mcx, TEXTOID, -1, 100, -1, Datum::from_usize(0), true, false).unwrap(),
+    )
+    .unwrap();
+    let colnames = nodes::NodeList::make2(
+        mcx,
+        Node::mk_string(mcx, "a").unwrap(),
+        Node::mk_string(mcx, "b").unwrap(),
+    )
+    .unwrap();
+    let re = Node::mk(
+        mcx,
+        nodes::primnodes::RowExpr {
+            args,
+            row_typeid: RECORDOID,
+            row_format: nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL,
+            colnames,
+            location: -1,
+        },
+    )
+    .unwrap();
+    let r = get_expr_result_type(mcx, Some(re)).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Composite);
+    assert_eq!(r.result_type_id, RECORDOID);
+    let desc = r.result_tuple_desc.unwrap();
+    assert_eq!(desc.natts, 2);
+    assert_eq!(desc.attr(0).attname.name_str(), b"a");
+    assert_eq!(desc.attr(0).atttypid, INT4OID);
+    assert_eq!(desc.attr(1).attname.name_str(), b"b");
+    assert_eq!(desc.attr(1).atttypid, TEXTOID);
+    assert_eq!(desc.attr(1).attcollation, 100);
+    // BlessTupleDesc went through the assign_record_type_typmod seam.
+    assert_eq!(desc.tdtypmod, 42);
+}
+
+#[test]
+fn polymorphic_rettype_resolves_via_agg_carrier() {
+    install_seams();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut flinfo = flinfo_for(F_POLY);
+    static CARRIER_ARGS: [Oid; 1] = [INT4OID];
+    let carrier = ::mcx::alloc_leak_in(
+        mcx,
+        types_core::fmgr::AggFnArgTypes { rettype: INT4OID, argtypes: &CARRIER_ARGS },
+    )
+    .unwrap();
+    // SAFETY: carrier is arena-backed and outlives the flinfo below.
+    flinfo.fn_expr =
+        Some(unsafe { types_core::fmgr::FnExprErased::from_node_ref(carrier) });
+    assert_eq!(get_fn_expr_rettype(&flinfo), INT4OID);
+    let r = get_call_result_type(mcx, &flinfo, None).unwrap();
+    assert_eq!(r.class, TypeFuncClass::Scalar);
+    assert_eq!(r.result_type_id, INT4OID);
+}

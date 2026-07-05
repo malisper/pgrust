@@ -1711,3 +1711,49 @@ fn definestmt_tail_field_order_matches_c() {
         replace: _, type_name: _, lang: _, fromsql: _, tosql: _,
     } = crate::parsenodes::CreateTransformStmt::default();
 }
+
+#[test]
+fn equal_coerce_to_domain_matches_c_field_rules() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let mk = |typmod: i32, form: crate::primnodes::CoercionForm, location: i32| {
+        Node::mk(
+            mcx,
+            crate::primnodes::CoerceToDomain {
+                arg: mk_var_at(mcx, 1, 2, 0),
+                resulttype: 23,
+                resulttypmod: typmod,
+                resultcollid: 0,
+                coercionformat: form,
+                location,
+            },
+        )
+        .unwrap()
+    };
+    use crate::primnodes::CoercionForm::{COERCE_EXPLICIT_CAST, COERCE_IMPLICIT_CAST};
+    // CoercionForm and location are never compared (C COMPARE_COERCIONFORM_FIELD
+    // / COMPARE_LOCATION_FIELD).
+    assert!(crate::equal(
+        mk(-1, COERCE_EXPLICIT_CAST, 5),
+        mk(-1, COERCE_IMPLICIT_CAST, 99)
+    ));
+    assert!(!crate::equal(
+        mk(-1, COERCE_EXPLICIT_CAST, 5),
+        mk(7, COERCE_EXPLICIT_CAST, 5)
+    ));
+
+    let mkv = |collation: u32, location: i32| {
+        Node::mk(
+            mcx,
+            crate::primnodes::CoerceToDomainValue {
+                typeId: 23,
+                typeMod: -1,
+                collation,
+                location,
+            },
+        )
+        .unwrap()
+    };
+    assert!(crate::equal(mkv(0, 1), mkv(0, 2)));
+    assert!(!crate::equal(mkv(0, 1), mkv(100, 1)));
+}

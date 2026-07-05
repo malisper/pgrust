@@ -200,8 +200,12 @@ fn init_pertrans_sort<'mcx>(
     // plan it serves — from_node_ref's contract (same carrier as
     // build_agg_trans's AggFnArgTypes).
     let fnexpr_types: &'static [Oid] = unsafe { core::mem::transmute(fnexpr_types.leak()) };
-    let carrier =
-        ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(fnexpr_types))?;
+    // C build_aggregate_transfn_expr: the fake FuncExpr returns the
+    // transition type (carrier slot 0).
+    let carrier = ::mcx::alloc_leak_in(
+        mcx,
+        ::types_core::fmgr::AggFnArgTypes { rettype: aggref.aggtranstype, argtypes: fnexpr_types },
+    )?;
     // SAFETY: carrier is arena-backed for the query, see above.
     transfn.fn_expr = Some(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) });
 
@@ -771,8 +775,15 @@ pub fn exec_init_agg<'mcx>(
             // plan (init_pertrans_sort's carrier precedent).
             let fnexpr_types: &'static [Oid] =
                 unsafe { core::mem::transmute(fnexpr_types.leak()) };
-            let carrier =
-                ::mcx::alloc_leak_in(mcx, ::types_core::fmgr::AggFnArgTypes(fnexpr_types))?;
+            // C build_aggregate_finalfn_expr: the fake FuncExpr returns the
+            // aggregate result type.
+            let carrier = ::mcx::alloc_leak_in(
+                mcx,
+                ::types_core::fmgr::AggFnArgTypes {
+                    rettype: aggref.aggtype,
+                    argtypes: fnexpr_types,
+                },
+            )?;
             // SAFETY: carrier is arena-backed for the query, see above.
             flinfo.fn_expr =
                 Some(unsafe { ::types_core::fmgr::FnExprErased::from_node_ref(carrier) });

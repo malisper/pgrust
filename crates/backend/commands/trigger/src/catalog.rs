@@ -112,6 +112,17 @@ pub fn CreateTriggerInternal<'mcx>(
     )
 }
 
+// get_relkind_objtype (objectaddress.c), the kinds reachable from trigger DDL.
+fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    use types_nodes::parsenodes::ObjectType;
+    match relkind {
+        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => ObjectType::OBJECT_TABLE,
+        types_rel::RELKIND_VIEW => ObjectType::OBJECT_VIEW,
+        RELKIND_FOREIGN_TABLE => ObjectType::OBJECT_FOREIGN_TABLE,
+        _ => ObjectType::OBJECT_TABLE,
+    }
+}
+
 // errdetail_relkind_not_supported (pg_class.c), triggerable-rel error slice.
 pub(crate) fn relkind_not_supported_detail(relkind: u8) -> &'static str {
     match relkind {
@@ -246,10 +257,33 @@ pub fn CreateTriggerFiringOn<'mcx>(
         }
     }
 
-    // pg_class_aclcheck(ACL_TRIGGER) + function ACL_EXECUTE: superuser fast
-    // path (aclchk role walk unported; DefineIndex precedent).
-    if !is_internal && !superuser::superuser_arg(miscinit::GetUserId())? {
-        unported("pg_class_aclcheck ACL_TRIGGER for non-superusers");
+    // C: permission checks — ACL_TRIGGER on the relation (and the constraint
+    // referenced relation); the function's ACL_EXECUTE check sits at the
+    // funcoid lookup below, as in C.
+    if !is_internal {
+        let aclresult =
+            aclchk::pg_class_aclcheck(rel.rd_id, miscinit::GetUserId(), adt_acl::ACL_TRIGGER)?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclchk::aclcheck_error(
+                aclresult,
+                get_relkind_objtype(rel.rd_rel.relkind as u8),
+                relname,
+            )?;
+        }
+        if constrrelid != InvalidOid {
+            let aclresult =
+                aclchk::pg_class_aclcheck(constrrelid, miscinit::GetUserId(), adt_acl::ACL_TRIGGER)?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                let constrrelname = lsyscache::relation::get_rel_name(mcx, constrrelid)?
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default();
+                aclchk::aclcheck_error(
+                    aclresult,
+                    get_relkind_objtype(lsyscache::relation::get_rel_relkind(constrrelid)? as u8),
+                    &constrrelname,
+                )?;
+            }
+        }
     }
 
     let partition_recurse =
@@ -309,6 +343,21 @@ pub fn CreateTriggerFiringOn<'mcx>(
 
     if funcoid == InvalidOid {
         funcoid = lookup_trigger_func(mcx, &stmt.funcname)?;
+    }
+    if !is_internal {
+        let aclresult = aclchk::object_aclcheck(
+            PROCEDURE_RELATION_ID,
+            funcoid,
+            miscinit::GetUserId(),
+            adt_acl::ACL_EXECUTE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclchk::aclcheck_error(
+                aclresult,
+                types_nodes::parsenodes::ObjectType::OBJECT_FUNCTION,
+                &name_list_to_string(&stmt.funcname),
+            )?;
+        }
     }
     let funcrettype = lsyscache::function::get_func_rettype(funcoid)?;
     if funcrettype != TRIGGEROID {
