@@ -887,6 +887,8 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 debug_assert_eq!(m.mergeActionLists.len(), m.resultRelations.len());
                 debug_assert_eq!(m.mergeJoinConditions.len(), m.resultRelations.len());
                 let plan_rows = m.plan.plan_rows;
+                let mut new_mjc = NodeList::nil();
+                let mut mjc_changed = false;
                 for ((mal_node, mjc_node), resultrel) in m
                     .mergeActionLists
                     .iter()
@@ -936,13 +938,35 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                         }
                         .expect("MergeAction node");
                     }
+                    // The retained join condition (BY SOURCE recheck) maps
+                    // like the action quals: source Vars become INNER_VAR
+                    // over the subplan tlist, target Vars pass through.
                     let jc = mjc_node.as_list().expect("mergeJoinConditions cell is a List");
                     if !jc.is_nil() {
-                        panic!(
-                            "set_plan_refs (setrefs.c): non-NULL MERGE join condition \
-                             (NOT MATCHED BY SOURCE) unported"
-                        );
+                        let mapped = fix_join_expr_list(
+                            run,
+                            jc,
+                            &empty,
+                            subplan_tlist,
+                            rtoffset,
+                            NrmMatch::Equal,
+                            resultrel,
+                            plan_rows,
+                        )?;
+                        new_mjc.lappend(run.mcx, Node::mk_list(run.mcx, mapped)?)?;
+                        mjc_changed = true;
+                    } else {
+                        new_mjc.lappend(run.mcx, mjc_node)?;
                     }
+                }
+                if mjc_changed {
+                    // SAFETY: exclusive plan-tree ownership (prologue note).
+                    unsafe {
+                        plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                            p.mergeJoinConditions = new_mjc;
+                        })
+                    }
+                    .expect("ModifyTable node");
                 }
             }
             for rti in m.resultRelations.iter() {
