@@ -278,7 +278,12 @@ fn perform_pruning_base_step_planner<'mcx>(
     }
 
     let sup_call = |f: &mut types_fmgr::FmgrInfo, coll: Oid, a: datum::Datum, b: datum::Datum| {
+        // range_cmp (range-typed partition keys) detoasts through the result
+        // mcx; arm the frame with call-lifetime scratch.
+        let scratch = ::mcx::MemoryContext::new("partprune cmp");
         let mut fcinfo = types_fmgr::LocalFcinfo::<2>::new(coll);
+        // SAFETY: scratch outlives this call.
+        unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
         fcinfo.set_arg(0, a);
         fcinfo.set_arg(1, b);
         let r = f

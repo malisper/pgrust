@@ -2272,9 +2272,6 @@ fn clone_fk_referenced<'mcx>(
         if form.conparentid != InvalidOid && clone.contains(&form.conparentid) {
             continue;
         }
-        if form.conperiod {
-            unported("CloneFkReferenced of a temporal (PERIOD) foreign key");
-        }
         // Same lock level that CreateTrigger will acquire.
         let fk_rel = table::table_open(mcx, form.conrelid, ShareRowExclusiveLock)?;
         let index_oid = form.conindid;
@@ -2393,9 +2390,6 @@ fn clone_fk_referencing<'mcx>(
         let (form, arrays) = read_fk_constraint(mcx, parent_constr_oid)?;
         if form.conparentid != InvalidOid && clone.contains(&form.conparentid) {
             continue;
-        }
-        if form.conperiod {
-            unported("CloneFkReferencing of a temporal (PERIOD) foreign key");
         }
 
         // Prevent concurrent deletions; a partitioned pkrel means locking
@@ -2532,9 +2526,6 @@ pub(crate) fn detach_partition_finalize_fks<'mcx>(
             || fkoids.contains(&form.conparentid)
         {
             continue;
-        }
-        if form.conperiod {
-            unported("DetachPartitionFinalize of a temporal (PERIOD) foreign key");
         }
 
         pg_constraint::ConstraintSetParentConstraint(mcx, fk.conoid, InvalidOid, InvalidOid)?;

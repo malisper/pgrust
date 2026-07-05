@@ -384,7 +384,11 @@ pub fn fc_range_agg_finalfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
         return Ok(fcinfo.return_null());
     }
     let flinfo = flinfo.expect("range_agg_finalfn: NULL flinfo");
-    let mltrngtypid = ::funcapi::get_fn_expr_rettype(flinfo);
+    // C reads the rettype off the faked finalfn fn_expr; the collected
+    // element type's pg_range row names the same concrete multirange.
+    let mltrngtypid = syscache_seams::lookup_pg_range_shape::call(st.element_type)?
+        .unwrap_or_else(|| panic!("cache lookup failed for range type {}", st.element_type))
+        .rngmultitypid;
     let mcx = fcinfo.result_mcx();
     let mi = cached_multirange_info(flinfo, mltrngtypid)?;
     let mut ranges: PgVec<'_, &[u8]> = ::mcx::vec_with_capacity_in(mcx, st.nelems as usize)?;

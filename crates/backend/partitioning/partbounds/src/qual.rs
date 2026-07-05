@@ -486,9 +486,10 @@ fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum) -> &'mcx str {
                     .expect("detoast relpartbound");
                 let (ptr, len) = (flat.as_ptr(), flat.len());
                 core::mem::forget(flat);
-                // The detoasted copy lives in the mcx arena until reset;
-                // forget only skips the vec's own dealloc.
-                let s = core::slice::from_raw_parts(ptr, len);
+                // detoast_attr returns the full 4-byte-header image; the
+                // payload follows. Arena-backed until mcx reset; forget only
+                // skips the vec's own dealloc.
+                let s = core::slice::from_raw_parts(ptr.add(4), len - 4);
                 return core::str::from_utf8(s).expect("non-UTF-8 relpartbound");
             }
             ((w as usize >> 2) - 4, 4)
