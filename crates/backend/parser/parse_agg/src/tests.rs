@@ -668,6 +668,14 @@ fn sublink_with_from_clause_in_agg_arg_walks_jointree() {
     let tle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
     let sublink = sublink_with_from(mcx, NodeList::make1(mcx, tle).unwrap());
     let args = NodeList::make1(mcx, sublink).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2108;
+    agg.aggtype = INT8OID;
+
+    transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
+        .unwrap();
+    assert_eq!(agg.agglevelsup, 0);
+}
 
 #[test]
 fn outer_var_arg_hops_to_parent_level() {
@@ -686,7 +694,9 @@ fn outer_var_arg_hops_to_parent_level() {
 
     transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
         .unwrap();
-    assert_eq!(agg.agglevelsup, 0);
+    assert_eq!(agg.agglevelsup, 1);
+    assert!(parent.p_hasAggs.get());
+    assert!(!pstate.p_hasAggs.get());
 }
 
 #[test]
@@ -694,7 +704,7 @@ fn sublink_with_from_clause_passes_ungrouped_check() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
@@ -721,7 +731,7 @@ fn subscripting_ref_over_grouped_var_passes_check() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
@@ -754,7 +764,7 @@ fn grouping_func_in_sublink_resolves_refs() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
@@ -788,10 +798,6 @@ fn grouping_func_in_sublink_resolves_refs() {
     let grp = gf.as_grouping_func().unwrap();
     assert_eq!(grp.refs.len(), 1);
     assert_eq!(grp.refs.nth(0), 1);
-
-    assert_eq!(agg.agglevelsup, 1);
-    assert!(parent.p_hasAggs.get());
-    assert!(!pstate.p_hasAggs.get());
 }
 
 #[test]
