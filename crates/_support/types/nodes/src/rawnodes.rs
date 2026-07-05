@@ -119,8 +119,23 @@ pub struct InsertStmt<'mcx> {
     pub r#override: crate::primnodes::OverridingKind,
 }
 
-/// `options` cells are ReturningOption nodes (the PG18 OLD/NEW alias lane);
-/// the grammar's returning_option arms are unported, so options stays NIL.
+// ReturningOptionKind (parsenodes.h).
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(i32)]
+pub enum ReturningOptionKind {
+    #[default]
+    RETURNING_OPTION_OLD = 0,
+    RETURNING_OPTION_NEW = 1,
+}
+
+#[derive(Default)]
+pub struct ReturningOption<'mcx> {
+    pub option: ReturningOptionKind,
+    pub value: Option<&'mcx str>,
+    pub location: ParseLoc,
+}
+
+/// `options` cells are ReturningOption nodes (the PG18 OLD/NEW alias lane).
 #[derive(Default)]
 pub struct ReturningClause<'mcx> {
     pub options: NodeList<'mcx>,
@@ -767,6 +782,7 @@ pub struct Constraint<'mcx> {
     pub generated_kind: u8,
     pub nulls_not_distinct: bool,
     pub keys: NodeList<'mcx>,
+    pub without_overlaps: bool,
     pub including: NodeList<'mcx>,
     pub exclusions: NodeList<'mcx>,
     pub options: NodeList<'mcx>,
@@ -881,6 +897,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RefreshMatViewStmt<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for InsertStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_InsertStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ReturningOption<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ReturningOption;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ReturningClause<'mcx> {
     const TAG: NodeTag = NodeTag::T_ReturningClause;

@@ -1041,7 +1041,7 @@ fn node(out: &mut String, n: Node<'_>) {
         char_field(out, "generated_kind", c.generated_kind);
         bool_field(out, "nulls_not_distinct", c.nulls_not_distinct);
         list_field(out, "keys", &c.keys);
-        bool_field(out, "without_overlaps", false);
+        bool_field(out, "without_overlaps", c.without_overlaps);
         list_field(out, "including", &c.including);
         list_field(out, "exclusions", &c.exclusions);
         list_field(out, "options", &c.options);
@@ -1622,6 +1622,33 @@ fn node(out: &mut String, n: Node<'_>) {
         list_field(out, "defnames", &s.defnames);
         node_field(out, "stxstattarget", s.stxstattarget);
         bool_field(out, "missing_ok", s.missing_ok);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::CreateSchemaStmt>() {
+        out.push_str("{CREATESCHEMASTMT");
+        string_field(out, "schemaname", s.schemaname);
+        node_field(out, "authrole", s.authrole);
+        list_field(out, "schemaElts", &s.schemaElts);
+        bool_field(out, "if_not_exists", s.if_not_exists);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::CreateFunctionStmt>() {
+        out.push_str("{CREATEFUNCTIONSTMT");
+        bool_field(out, "is_procedure", s.is_procedure);
+        bool_field(out, "replace", s.replace);
+        list_field(out, "funcname", &s.funcname);
+        list_field(out, "parameters", &s.parameters);
+        node_field(out, "returnType", s.returnType);
+        list_field(out, "options", &s.options);
+        node_field(out, "sql_body", s.sql_body);
+        out.push('}');
+    } else if let Some(s) = n.as_variant::<types_nodes::parsenodes::ReturnStmt>() {
+        out.push_str("{RETURNSTMT");
+        node_field(out, "returnval", s.returnval);
+        out.push('}');
+    } else if let Some(o) = n.as_variant::<types_nodes::rawnodes::ReturningOption>() {
+        out.push_str("{RETURNINGOPTION");
+        int_field(out, "option", o.option as i32);
+        string_field(out, "value", o.value);
+        int_field(out, "location", o.location);
         out.push('}');
     } else {
         panic!("tests_dump: unrendered node tag {:?}", n.node_tag());

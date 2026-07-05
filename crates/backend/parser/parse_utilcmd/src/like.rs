@@ -53,7 +53,7 @@ pub(crate) struct LikeCxt<'a, 'mcx> {
     pub is_foreign: bool,
 }
 
-fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
     Ok(core::str::from_utf8(v.leak()).expect("was UTF-8"))
