@@ -524,9 +524,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
     Ok(result.seal())
 }
 
-// transformPartitionBoundValue (parse_utilcmd.c). The evaluate_expr arm runs
-// eval_const_expressions (covers the Const-folding cases this lane meets);
-// anything still non-Const is loud.
+// transformPartitionBoundValue (parse_utilcmd.c).
 fn transformPartitionBoundValue<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut parser_small1::ParseState<'_, 'mcx>,
@@ -558,24 +556,36 @@ fn transformPartitionBoundValue<'mcx>(
         return Err(cannot_cast_bound(mcx, col_type, col_name));
     };
     if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
+        parse_collate::assign_expr_collations(mcx, pstate, value)?;
         value = clauses::eval_const_expressions(mcx, value)?;
+        if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
+            value = execexpr::evaluate_expr(mcx, value, col_type, col_typmod, part_collation)?;
+        }
+        assert!(
+            value.as_variant::<types_nodes::primnodes::Const>().is_some(),
+            "could not evaluate partition bound expression"
+        );
+    } else {
+        // coerce_to_target_type doesn't insert the partition collation.
+        // SAFETY: freshly transformed tree; no derived refs live.
+        unsafe {
+            value
+                .with_mut::<types_nodes::primnodes::Const, _>(|c| {
+                    c.constcollid = part_collation;
+                })
+                .expect("Const");
+        }
     }
     let location = parse_expr::expr_location(val);
-    match value.as_variant::<types_nodes::primnodes::Const>() {
-        Some(_) => {
-            // SAFETY: freshly transformed tree; no derived refs live.
-            unsafe {
-                value
-                    .with_mut::<types_nodes::primnodes::Const, _>(|c| {
-                        c.constcollid = part_collation;
-                        c.location = location;
-                    })
-                    .expect("Const");
-            }
-            Ok(value)
-        }
-        None => unported("evaluate_expr for non-foldable partition bounds"),
+    // SAFETY: freshly transformed tree; no derived refs live.
+    unsafe {
+        value
+            .with_mut::<types_nodes::primnodes::Const, _>(|c| {
+                c.location = location;
+            })
+            .expect("Const");
     }
+    Ok(value)
 }
 
 #[cold]

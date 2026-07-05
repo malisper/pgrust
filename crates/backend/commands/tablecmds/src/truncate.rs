@@ -1,6 +1,5 @@
 #![allow(non_upper_case_globals)]
-// ExecuteTruncate/ExecuteTruncateGuts: permanent plain tables, RESTRICT and
-// CASCADE, no RESTART IDENTITY (sequence lane).
+// ExecuteTruncate/ExecuteTruncateGuts: RESTRICT, CASCADE, RESTART IDENTITY.
 use datum::Datum;
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
@@ -10,8 +9,6 @@ use types_rel::{
     AccessExclusiveLock, NoLock, Relation, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-
-use crate::unported;
 
 const RM_HEAP_ID: u8 = 10;
 const XLOG_HEAP_TRUNCATE: u8 = 0x30;
@@ -33,10 +30,6 @@ fn oid_key(attno: AttrNumber, oid: Oid) -> ScanKeyData {
 }
 
 pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgResult<()> {
-    if stmt.restart_seqs {
-        unported("ExecuteTruncate: RESTART IDENTITY (sequence lane)");
-    }
-
     let mut rels: Vec<Relation<'mcx>> = Vec::new();
     let mut relids: Vec<Oid> = Vec::new();
     let mut relids_logged: Vec<Oid> = Vec::new();
@@ -167,6 +160,32 @@ fn ExecuteTruncateGuts<'mcx>(
         catalog_heap::heap_truncate_check_FKs(mcx, rels, false)?;
     }
 
+    // AccessExclusiveLock: ResetSequence needs it; permissions fail before
+    // any truncation work.
+    let mut seq_relids: Vec<Oid> = Vec::new();
+    if restart_seqs {
+        for rel in rels.iter() {
+            for &seq_relid in pg_depend::getOwnedSequences(mcx, rel.rd_id)?.iter() {
+                let seq_rel =
+                    relation_seams::relation_open::call(mcx, seq_relid, AccessExclusiveLock)?;
+                // This check must match AlterSequence!
+                if !aclchk::object_ownercheck(
+                    RELATION_RELATION_ID,
+                    seq_relid,
+                    miscinit::GetUserId(),
+                )? {
+                    aclchk::aclcheck_error(
+                        aclchk::ACLCHECK_NOT_OWNER,
+                        ObjectType::OBJECT_SEQUENCE,
+                        seq_rel.name(),
+                    )?;
+                }
+                seq_relids.push(seq_relid);
+                seq_rel.close(NoLock)?;
+            }
+        }
+    }
+
     // The BS/AS TRUNCATE trigger bracket (C creates an EState + relinfos;
     // the caches below are its per-statement ri_TrigFunctions/WhenExprs).
     let mut trig_state: Vec<Option<(
@@ -230,6 +249,9 @@ fn ExecuteTruncateGuts<'mcx>(
             )?;
         }
         pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
+    }
+    for &seq_relid in seq_relids.iter() {
+        sequence_seams::reset_sequence::call(mcx, seq_relid)?;
     }
     if !relids_logged.is_empty() {
         let mut xlrec = [0u8; SizeOfHeapTruncate];
