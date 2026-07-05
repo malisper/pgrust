@@ -24,9 +24,10 @@ use crate::costsize::{
 use crate::pathnode::{
     add_partial_path, add_partial_path_precheck, add_path_precheck, compare_path_costs,
     create_hashjoin_path, create_material_path, create_memoize_path, create_mergejoin_path,
-    create_nestloop_path, get_cheapest_parallel_safe_total_inner, tag16, CostSelector,
+    create_nestloop_path, tag16, CostSelector,
 };
 pub use types_pathnodes::{is_outer_join, SemiAntiJoinFactors};
+use crate::pathkeys::get_cheapest_parallel_safe_total_inner;
 use crate::run::PlannerRun;
 
 // PATH_PARAM_BY_PARENT (joinpath.c): paths parameterized by a parent rel

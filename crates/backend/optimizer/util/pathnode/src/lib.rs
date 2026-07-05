@@ -1035,20 +1035,6 @@ pub fn create_seqscan_path<'mcx>(
     Ok(id)
 }
 
-// get_cheapest_parallel_safe_total_inner (pathnode.c): first parallel-safe,
-// unparameterized path in a list ordered by ascending total cost.
-pub fn get_cheapest_parallel_safe_total_inner(
-    run: &PlannerRun<'_>,
-    paths: &[PathId],
-) -> Option<PathId> {
-    for &pid in paths {
-        let p = run.root.path(pid).base();
-        if p.parallel_safe && p.param_info.is_none() {
-            return Some(pid);
-        }
-    }
-    None
-}
 
 // add_partial_path (pathnode.c): simpler than add_path — partial paths are
 // never parameterized, row counts all agree, and startup cost is irrelevant
