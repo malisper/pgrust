@@ -1,6 +1,6 @@
 //! sequence.c write half: DefineSequence, AlterSequence, nextval/currval/
 //! lastval/setval, the backend SeqTable cache, and OWNED BY. Loud (named
-//! panics): unlogged sequences, IF NOT EXISTS, ALTER SEQUENCE IF EXISTS,
+//! panics): unlogged sequences, IF NOT EXISTS,
 //! ResetSequence/SequenceChangePersistence consumers.
 
 #![allow(non_snake_case)]
@@ -764,9 +764,6 @@ fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
 }
 
 pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<()> {
-    if stmt.missing_ok {
-        unported("ALTER SEQUENCE IF EXISTS");
-    }
     let rv = stmt.sequence.expect("AlterSeqStmt.sequence");
     let v = rel_vocab::RangeVar {
         catalogname: rv.catalogname,
@@ -776,7 +773,14 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
         relpersistence: rv.relpersistence,
         location: rv.location,
     };
-    let relid = namespace_seams::range_var_get_relid::call(mcx, &v, ShareRowExclusiveLock, false)?;
+    let relid =
+        namespace_seams::range_var_get_relid::call(mcx, &v, ShareRowExclusiveLock, stmt.missing_ok)?;
+    if relid == types_core::InvalidOid {
+        ::elog::ereport(::types_error::NOTICE)
+            .errmsg(format!("relation \"{}\" does not exist, skipping", v.relname))
+            .finish(::types_error::ErrorLocation::new("sequence.c", 0, "AlterSequence"))?;
+        return Ok(());
+    }
     // C: RangeVarCallbackOwnsRelation inside RangeVarGetRelidExtended
     // (sequence.c:454-458, tablecmds.c:19554-19579); the lookup seam has no
     // callback hook, so it runs post-lookup under the already-taken lock.
