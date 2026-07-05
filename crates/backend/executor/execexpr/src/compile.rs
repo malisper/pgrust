@@ -999,6 +999,7 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
         NodeTag::T_RowCompareExpr => 16,
         NodeTag::T_FieldSelect => node.as_field_select().unwrap().resulttype,
+        NodeTag::T_FieldStore => node.as_field_store().unwrap().resulttype,
         NodeTag::T_NextValueExpr => {
             node.as_variant::<::types_nodes::primnodes::NextValueExpr>().unwrap().typeId
         }
@@ -1218,6 +1219,13 @@ fn setup_walker(node: Node<'_>, info: &mut SetupInfo) {
             }
         }
         NodeTag::T_FieldSelect => setup_walker(node.as_field_select().unwrap().arg, info),
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().unwrap();
+            setup_walker(f.arg, info);
+            for e in f.newvals.iter() {
+                setup_walker(e, info);
+            }
+        }
         NodeTag::T_CoerceToDomain => setup_walker(node.as_coerce_to_domain().unwrap().arg, info),
         NodeTag::T_CoerceToDomainValue => {}
         NodeTag::T_CoalesceExpr => {
@@ -1625,6 +1633,7 @@ pub(crate) fn init_expr_rec<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldStore => init_field_store(node, state, mcx, out, agg, params, sub),
         NodeTag::T_NextValueExpr => {
             let nve = node
                 .as_variant::<::types_nodes::primnodes::NextValueExpr>()
@@ -2158,12 +2167,20 @@ fn init_subscripting_ref<'mcx>(
     if is_assignment {
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
-            unported("EEOP_SBSREF_OLD (nested-assignment CaseTestExpr passing)");
+            push_step(state, mcx, Step::SbsrefOld { state: stp, out })?;
         }
         let replace_slot = unsafe {
             NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
         };
+        // SBSREF_OLD puts the extracted value into `prev`; pass it down via
+        // the CaseTestExpr mechanism (C innermost_caseval).
+        let prev_slot = unsafe {
+            NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).prev))
+        };
+        let save_innermost = state.innermost_case;
+        state.innermost_case = Some(prev_slot);
         init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
+        state.innermost_case = save_innermost;
         push_step(state, mcx, Step::SbsrefAssign { state: stp, slice: is_slice, out })?;
     } else {
         push_step(state, mcx, Step::SbsrefFetch { state: stp, slice: is_slice, out })?;
@@ -2242,7 +2259,7 @@ fn init_jsonb_subscripting_ref<'mcx>(
     if is_assignment {
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
-            unported("EEOP_SBSREF_OLD (nested-assignment CaseTestExpr passing)");
+            unported("jsonb_subscript_fetch_old (EEOP_SBSREF_OLD, jsonbsubs.c)");
         }
         let replace_slot = unsafe {
             NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
@@ -2270,13 +2287,80 @@ fn init_jsonb_subscripting_ref<'mcx>(
 // element (CaseTestExpr under FieldStore/SubscriptingRef)?
 fn assgn_needs_old(expr: Node<'_>) -> bool {
     match expr.node_tag() {
+        NodeTag::T_FieldStore => {
+            expr.as_field_store().unwrap().arg.node_tag() == NodeTag::T_CaseTestExpr
+        }
         NodeTag::T_SubscriptingRef => {
             let sr = expr.as_subscripting_ref().unwrap();
             sr.refexpr.is_some_and(|e| e.node_tag() == NodeTag::T_CaseTestExpr)
         }
+        NodeTag::T_CoerceToDomain => assgn_needs_old(expr.as_coerce_to_domain().unwrap().arg),
         NodeTag::T_RelabelType => assgn_needs_old(expr.as_relabel_type().unwrap().arg),
         _ => false,
     }
+}
+
+// C ExecInitExprRec T_FieldStore (EEOP_FIELDSTORE_DEFORM + per-field
+// subexpressions + EEOP_FIELDSTORE_FORM); the blessed tupdesc is
+// compile-resolved (C: rowcache on first eval).
+fn init_field_store<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let fstore = node.as_field_store().unwrap();
+    let desc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, fstore.resulttype, -1)?;
+    let ncolumns = desc.natts;
+    let desc_layout = core::alloc::Layout::new::<TupleDescData<'static>>();
+    let desc_ptr: NonNull<TupleDescData<'static>> = mcx
+        .allocate(desc_layout)
+        .map_err(|_| mcx.oom(desc_layout.size()))?
+        .cast();
+    // SAFETY: fresh allocation of the exact layout; the plan mcx outlives
+    // every eval of this step, so the 'static restamp never escapes it.
+    unsafe {
+        desc_ptr
+            .as_ptr()
+            .write(core::mem::transmute::<TupleDescData<'mcx>, TupleDescData<'static>>(desc));
+    }
+    let columns: NonNull<::datum::NullableDatum> = alloc_array(mcx, ncolumns as usize)?;
+
+    let frame_ix = state.frames.len() as u32;
+    let frame = FuncFrame::new_in(mcx, FmgrInfo::unresolved(), 0, 0)?;
+    state.frames.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+    state.frames.push(frame);
+
+    let fs = crate::steps::FieldStoreState { ncolumns: ncolumns as u16, desc: desc_ptr, columns };
+    let fsp = alloc_state(mcx, fs)?;
+
+    init_expr_rec(fstore.arg, state, mcx, out, agg, params, sub)?;
+    push_step(state, mcx, Step::FieldStoreDeForm { fs: fsp, frame: frame_ix, out })?;
+
+    for (e, fieldnum) in fstore.newvals.iter().zip(fstore.fieldnums.iter()) {
+        if fieldnum <= 0 || fieldnum > ncolumns {
+            return Err(PgError::error(format!(
+                "field number {fieldnum} is out of range in FieldStore"
+            ))
+            .into());
+        }
+        // The old field value passes down via the CaseTestExpr mechanism
+        // (C innermost_caseval); the column slot doubles as caseval source
+        // and result address, safe because DEFORM/FORM evaluate arg first.
+        // SAFETY: 1 <= fieldnum <= ncolumns slots of the fresh allocation.
+        let slot = unsafe {
+            NonNull::new_unchecked(columns.as_ptr().add((fieldnum - 1) as usize))
+        };
+        let save_innermost = state.innermost_case;
+        state.innermost_case = Some(slot);
+        init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;
+        state.innermost_case = save_innermost;
+    }
+
+    push_step(state, mcx, Step::FieldStoreForm { fs: fsp, frame: frame_ix, out })
 }
 
 // exprTypmod (nodeFuncs.c) over the families RowExpr args carry.

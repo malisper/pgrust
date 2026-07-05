@@ -299,6 +299,21 @@ pub enum Step {
     ArrayCoerce { state: NonNull<crate::arrayops::ArrayCoerceState>, out: OutRef },
     // C EEOP_CONVERT_ROWTYPE; the argless frame supplies the per-eval mcx.
     ConvertRowtype { state: NonNull<ConvertRowtypeState>, frame: u32, out: OutRef },
+    // C EEOP_FIELDSTORE_DEFORM/FORM; DEFORM reads the composite datum from
+    // `out` into the column workspace, FORM writes the re-formed composite
+    // back to `out`. The argless frame supplies the per-eval mcx. Appended
+    // last: preserves the hot variants' discriminants.
+    FieldStoreDeForm { fs: NonNull<FieldStoreState>, frame: u32, out: OutRef },
+    FieldStoreForm { fs: NonNull<FieldStoreState>, frame: u32, out: OutRef },
+}
+
+// Blessed tupdesc compile-resolved (C: rowcache on first eval); `columns` is
+// the values/nulls workspace shared by DEFORM, the per-field subexpressions,
+// and FORM.
+pub struct FieldStoreState {
+    pub ncolumns: u16,
+    pub desc: NonNull<::types_tuple::TupleDescData<'static>>,
+    pub columns: NonNull<NullableDatum>,
 }
 
 // Tupdescs + by-name map compile-resolved (C: first eval; plan invalidation

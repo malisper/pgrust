@@ -692,6 +692,7 @@ fn select_from_view_matches_direct_query() {
     parser_analyze::init_seams();
     rewrite_handler::init_seams();
     planner::init_seams();
+    execreplication::init_seams();
     install_bufmgr_seams();
     install_relation_seams();
     install_parser_fixture_seams();
