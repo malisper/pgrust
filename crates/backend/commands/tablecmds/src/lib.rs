@@ -460,6 +460,9 @@ pub fn DefineRelation<'mcx>(
         // ccbin and generation expressions ride unmapped. Any tableElts are
         // column options merged below (tablecmds.c:3031 saved_columns loop).
         Some(parent_oid) => {
+            // C's duplicate-name scan (tablecmds.c:2589) precedes parent
+            // processing, so it outranks the "is not partitioned" error.
+            inheritance::partition_column_dup_scan(&stmt.tableElts)?;
             let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
             if parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
                 let pname = parent.name().to_string();
