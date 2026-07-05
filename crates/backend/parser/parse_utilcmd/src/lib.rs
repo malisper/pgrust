@@ -82,10 +82,8 @@ fn typename_type_id_and_mod<'mcx>(
             Some(true) => {}
             _ => unported("shell types (typisdefined = false)"),
         }
-        match syscache_seams::pg_type_typtype::call(tn.typeOid)? {
-            Some(t) if t == b'b' as i8 || t == b'e' as i8 || t == b'd' as i8 => {}
-            _ => unported("non-base/enum/domain pre-resolved column types"),
-        }
+        // C typenameTypeIdAndMod applies no typtype gate on the pre-resolved
+        // lane (LIKE / OF type); column legality is CheckAttributeType's job.
         let typmod = typenameTypeMod(mcx, pstate, tn, tn.typeOid)?;
         return Ok((tn.typeOid, typmod));
     }
