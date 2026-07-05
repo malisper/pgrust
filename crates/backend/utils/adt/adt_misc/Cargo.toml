@@ -38,3 +38,9 @@ waitevent = { path = "../../activity/waitevent" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 keywords = { path = "../../../../common/keywords" }
+adt_pg_lsn = { path = "../pg_lsn" }
+xlogrecovery = { path = "../../../access/transam/xlogrecovery" }
+xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }
+standby = { path = "../../../storage/ipc/standby" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+fd = { path = "../../../storage/file/fd" }

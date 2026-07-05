@@ -37,8 +37,8 @@ pub use insert::{
 };
 pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG, UpdateFullPageWrites};
 pub use write::{
-    GetLastSegSwitchData, SetWalWriterSleeping, XLogBackgroundFlush, XLogFileInit, XLogFileOpen,
-    XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN,
+    GetFlushRecPtr, GetLastSegSwitchData, GetXLogWriteRecPtr, SetWalWriterSleeping,
+    XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN,
 };
 
 pub const InvalidXLogRecPtr: XLogRecPtr = 0;

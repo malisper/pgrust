@@ -733,6 +733,11 @@ pub fn GetLastSegSwitchData() -> (i64, XLogRecPtr) {
     result
 }
 
+pub fn GetXLogWriteRecPtr() -> XLogRecPtr {
+    RefreshXLogWriteResult();
+    LOGWRT_RESULT.get().0
+}
+
 pub(crate) fn get_flush_rec_ptr_seam() -> (XLogRecPtr, TimeLineID) {
     let ctl = XLogCtl();
     debug_assert_eq!(ctl.SharedRecoveryState.load(Relaxed), RECOVERY_STATE_DONE);
