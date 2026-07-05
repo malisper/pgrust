@@ -105,8 +105,8 @@ const CAS_ENFORCED: i32 = 0x80;
 // Which pointers C's processCASbits caller passes (NULL target + bit = error).
 // not_valid_exec: the executor path for this production handles NOT VALID
 // (domain constraints); the table lanes stay loud until notvalid lands.
-// enforced_exec: the executor path handles NOT ENFORCED (only ALTER TABLE ..
-// ALTER CONSTRAINT); constraint creation with NOT ENFORCED stays loud.
+// enforced_exec: the executor path handles NOT ENFORCED (ALTER TABLE ..
+// ALTER CONSTRAINT plus CHECK/FOREIGN KEY creation).
 #[derive(Default)]
 struct CasTargets {
     deferrable: bool,
@@ -1247,7 +1247,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(5).ival(),
                     view.l(5),
                     "CHECK",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true, not_valid_exec: true, enforced_exec: false },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true, not_valid_exec: true, enforced_exec: true },
                 )?;
                 n.is_enforced = cas.is_enforced;
                 n.skip_validation = cas.not_valid;
@@ -1439,7 +1439,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(12).ival(),
                     view.l(12),
                     "FOREIGN KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false, not_valid_exec: true, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false, not_valid_exec: true, enforced_exec: true },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;

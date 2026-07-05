@@ -333,10 +333,21 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
     for &n in existing_constraints {
         nnnames.push(str_in(mcx, n)?);
     }
-    let mut seen_attnums: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
+    let mut givennames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
     let mut old_pending: PgVec<'mcx, bool> = mcx::vec_from_elem_in(mcx, true, old_notnulls.len());
-    for cnode in nnconstraints.iter() {
-        let cdef = cnode.as_variant::<Constraint>().expect("Constraint");
+    let cons: PgVec<'mcx, Node<'mcx>> = {
+        let mut v = PgVec::new_in(mcx);
+        for cnode in nnconstraints.iter() {
+            v.push(cnode);
+        }
+        v
+    };
+    let mut merged: PgVec<'mcx, bool> = mcx::vec_from_elem_in(mcx, false, cons.len());
+    for outerpos in 0..cons.len() {
+        if merged[outerpos] {
+            continue;
+        }
+        let cdef = cons[outerpos].as_variant::<Constraint>().expect("Constraint");
         debug_assert!(cdef.contype == ConstrType::CONSTR_NOTNULL);
         let colname = cdef
             .keys
@@ -350,13 +361,50 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
             .unwrap_or_else(|| {
                 panic!("AddRelationNotNullConstraints (heap.c): column {colname:?} not found")
             });
-        if seen_attnums.iter().any(|&a| a == attnum) {
-            panic!(
-                "AddRelationNotNullConstraints (heap.c): duplicate not-null merge lane \
-                 unported (column {colname:?})"
-            );
+        // A column can only have one not-null constraint: merge later
+        // duplicates into this one, checking NO INHERIT and name conflicts.
+        let mut given_name = cdef.conname;
+        for restpos in outerpos + 1..cons.len() {
+            let other = cons[restpos].as_variant::<Constraint>().expect("Constraint");
+            let other_col = other
+                .keys
+                .nth(0)
+                .as_string()
+                .expect("not-null constraint keys")
+                .sval;
+            if other_col != colname {
+                continue;
+            }
+            if other.is_no_inherit != cdef.is_no_inherit {
+                return Err(Box::new(
+                    PgError::new(
+                        types_error::ERROR,
+                        format!(
+                            "conflicting NO INHERIT declaration for not-null constraint on column \"{colname}\""
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                ));
+            }
+            if let Some(othername) = other.conname {
+                match given_name {
+                    None => given_name = Some(othername),
+                    Some(n) if n != othername => {
+                        return Err(Box::new(
+                            PgError::new(
+                                types_error::ERROR,
+                                format!(
+                                    "conflicting not-null constraint names \"{n}\" and \"{othername}\""
+                                ),
+                            )
+                            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            merged[restpos] = true;
         }
-        seen_attnums.push(attnum);
         let mut inhcount: i16 = 0;
         for (i, old) in old_notnulls.iter().enumerate() {
             if old_pending[i] && old.attnum == attnum {
@@ -376,16 +424,11 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
                 old_pending[i] = false;
             }
         }
-        let name = match cdef.conname {
+        // C checks user-specified names only against other user-specified
+        // names (givennames); system-chosen collisions just pick another.
+        let name = match given_name {
             Some(given) => {
-                if pg_constraint::ConstraintNameIsUsed(
-                    mcx,
-                    pg_constraint::ConstraintCategory::Relation,
-                    rel.rd_id,
-                    given,
-                )?
-                    || nnnames.iter().any(|&n| n == given)
-                {
+                if givennames.iter().any(|&n| n == given) {
                     return Err(Box::new(
                         PgError::new(
                             types_error::ERROR,
@@ -396,6 +439,7 @@ pub(crate) fn add_relation_not_null_constraints<'mcx>(
                         .with_sqlstate(ERRCODE_DUPLICATE_OBJECT),
                     ));
                 }
+                givennames.push(str_in(mcx, given)?);
                 mcx::PgString::from_str_in(given, mcx)?
             }
             None => pg_constraint::ChooseConstraintName(
