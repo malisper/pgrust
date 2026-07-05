@@ -5,9 +5,6 @@ use types_error::PgResult;
 use types_nodes::NodeList;
 
 seam_core::seam!(
-    // GetNSItemByRangeTablePosn + expandNSItemVars (parse_relation.c); the Var
-    // list only (colnames dropped). Seam because clauses -> coerce closes a
-    // cycle on a direct dep.
     pub fn expand_nsitem_vars_at<'a, 'p, 'mcx>(
         mcx: Mcx<'mcx>,
         pstate: &'a ParseState<'p, 'mcx>,
