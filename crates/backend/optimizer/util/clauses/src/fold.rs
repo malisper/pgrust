@@ -819,6 +819,11 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             Ok(new)
         }
+        // C has no dedicated FieldStore arm: it falls to the default
+        // ece_generic_processing (recurse into arg/newvals, never fold).
+        NodeTag::T_FieldStore => {
+            expression_tree_mutator(cx.mcx, node, &mut |n| ece_mutator(n, cx))
+        }
         NodeTag::T_NullTest => {
             use types_nodes::primnodes::{NullTest, NullTestType};
             let nt = node.as_null_test().unwrap();

@@ -451,8 +451,7 @@ fn returning_needs_instead_rule(event: CmdType, relname: &str) -> Box<PgError> {
 // rewriteTargetListIU, INSERT/UPDATE arms: reorder non-junk TLEs into
 // attribute order (junk entries keep their post-column resnos and trail the
 // list) and apply stored pg_attrdef defaults for unassigned INSERT columns
-// (no stored default => the planner NULL-fills). Multiple assignment merges
-// (process_matched_tle) are loud.
+// (no stored default => the planner NULL-fills).
 fn rewriteTargetListIU<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &types_nodes::NodeList<'mcx>,
@@ -485,16 +484,16 @@ fn rewriteTargetListIU<'mcx>(
         }
         let attrno = tle.resno as usize;
         assert!(attrno >= 1 && attrno <= numattrs, "bogus resno {attrno} in targetlist");
-        if target_relation.rd_att.attr(attrno - 1).attisdropped {
+        let att = target_relation.rd_att.attr(attrno - 1);
+        if att.attisdropped {
             continue;
         }
-        if new_tles[attrno - 1].is_some() {
-            panic!(
-                "rewriteTargetListIU (rewriteHandler.c): process_matched_tle \
-                 (multiple assignment merge) not ported"
-            );
-        }
-        new_tles[attrno - 1] = Some(tle_node);
+        new_tles[attrno - 1] = Some(process_matched_tle(
+            mcx,
+            tle_node,
+            new_tles[attrno - 1],
+            core::str::from_utf8(att.attname.name_str()).expect("attname"),
+        )?);
     }
 
     use types_core::catalog::{ATTRIBUTE_IDENTITY_ALWAYS, ATTRIBUTE_IDENTITY_BY_DEFAULT};
@@ -645,6 +644,157 @@ fn rewriteTargetListIU<'mcx>(
     }
     new_tlist.concat(mcx, &junk_tlist)?;
     Ok(new_tlist)
+}
+
+// process_matched_tle (rewriteHandler.c): merge multiple assignments to the
+// same attribute; only FieldStore/SubscriptingRef assignment nodes combine
+// (leftmost assignment nests innermost), with matching CoerceToDomain
+// wrappers stripped and reapplied once over the combined node so domain
+// checks run after all updates.
+fn process_matched_tle<'mcx>(
+    mcx: Mcx<'mcx>,
+    src_tle_node: Node<'mcx>,
+    prior_tle_node: Option<Node<'mcx>>,
+    attr_name: &str,
+) -> PgResult<Node<'mcx>> {
+    let Some(prior_tle_node) = prior_tle_node else {
+        return Ok(src_tle_node);
+    };
+    let src_tle = src_tle_node.as_target_entry().expect("TargetEntry");
+    let prior_tle = prior_tle_node.as_target_entry().expect("TargetEntry");
+
+    let mut src_expr = src_tle.expr;
+    let mut prior_expr = prior_tle.expr;
+    let mut coerce_expr: Option<&types_nodes::primnodes::CoerceToDomain<'mcx>> = None;
+    if let (Some(src_cd), Some(prior_cd)) =
+        (src_expr.as_coerce_to_domain(), prior_expr.as_coerce_to_domain())
+    {
+        if src_cd.resulttype == prior_cd.resulttype {
+            // C assumes without checking that resulttypmod/resultcollid match.
+            coerce_expr = Some(src_cd);
+            src_expr = src_cd.arg;
+            prior_expr = prior_cd.arg;
+        }
+    }
+
+    let src_input = get_assignment_input(src_expr);
+    let prior_input = get_assignment_input(prior_expr);
+    if src_input.is_none()
+        || prior_input.is_none()
+        || nodes_core::node_funcs::expr_type(src_expr)
+            != nodes_core::node_funcs::expr_type(prior_expr)
+    {
+        return Err(multiple_assignments_error(attr_name));
+    }
+    let src_input = src_input.expect("checked above");
+
+    // The prior TLE may already be a nest of assignments; the original
+    // column reference is at the bottom.
+    let mut priorbottom = prior_input.expect("checked above");
+    while let Some(newbottom) = get_assignment_input(priorbottom) {
+        priorbottom = newbottom;
+    }
+    if !types_nodes::equal(priorbottom, src_input) {
+        return Err(multiple_assignments_error(attr_name));
+    }
+
+    let newexpr = if let Some(src_fs) = src_expr.as_field_store() {
+        if let Some(prior_fs) = prior_expr.as_field_store() {
+            // Two FieldStores combine into one with multiple target fields.
+            let mut newvals = prior_fs.newvals.clone_in(mcx)?;
+            newvals.concat(mcx, &src_fs.newvals)?;
+            let mut fieldnums = prior_fs.fieldnums.clone_in(mcx)?;
+            fieldnums.concat(mcx, &src_fs.fieldnums)?;
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldStore {
+                    arg: prior_fs.arg,
+                    newvals,
+                    fieldnums,
+                    resulttype: prior_fs.resulttype,
+                },
+            )?
+        } else {
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldStore {
+                    arg: prior_expr,
+                    newvals: src_fs.newvals.clone_in(mcx)?,
+                    fieldnums: src_fs.fieldnums.clone_in(mcx)?,
+                    resulttype: src_fs.resulttype,
+                },
+            )?
+        }
+    } else if let Some(src_sr) = src_expr.as_subscripting_ref() {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::SubscriptingRef {
+                refcontainertype: src_sr.refcontainertype,
+                refelemtype: src_sr.refelemtype,
+                refrestype: src_sr.refrestype,
+                reftypmod: src_sr.reftypmod,
+                refcollid: src_sr.refcollid,
+                refupperindexpr: src_sr.refupperindexpr.clone_in(mcx)?,
+                reflowerindexpr: src_sr.reflowerindexpr.clone_in(mcx)?,
+                refexpr: Some(prior_expr),
+                refassgnexpr: src_sr.refassgnexpr,
+            },
+        )?
+    } else {
+        panic!("cannot happen");
+    };
+
+    let newexpr = match coerce_expr {
+        Some(cd) => Node::mk(
+            mcx,
+            types_nodes::primnodes::CoerceToDomain {
+                arg: newexpr,
+                resulttype: cd.resulttype,
+                resulttypmod: cd.resulttypmod,
+                resultcollid: cd.resultcollid,
+                coercionformat: cd.coercionformat,
+                location: cd.location,
+            },
+        )?,
+        None => newexpr,
+    };
+
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::TargetEntry {
+            expr: newexpr,
+            resno: src_tle.resno,
+            resname: src_tle.resname,
+            ressortgroupref: src_tle.ressortgroupref,
+            resorigtbl: src_tle.resorigtbl,
+            resorigcol: src_tle.resorigcol,
+            resjunk: src_tle.resjunk,
+        },
+    )
+}
+
+// get_assignment_input (rewriteHandler.c): an assignment node's input, or
+// None if node is not an assignment node.
+fn get_assignment_input<'mcx>(node: Node<'mcx>) -> Option<Node<'mcx>> {
+    if let Some(fstore) = node.as_field_store() {
+        return Some(fstore.arg);
+    }
+    if let Some(sbsref) = node.as_subscripting_ref() {
+        if sbsref.refassgnexpr.is_none() {
+            return None;
+        }
+        return sbsref.refexpr;
+    }
+    None
+}
+
+#[cold]
+#[inline(never)]
+fn multiple_assignments_error(attr_name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("multiple assignments to same column \"{attr_name}\""))
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+    )
 }
 
 // rewriteValuesRTE (rewriteHandler.c): replace SetToDefault cells with the

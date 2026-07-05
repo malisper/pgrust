@@ -43,10 +43,9 @@ pub struct PartitionTupleRouting<'mcx> {
     // leaf oid -> index into `leaves` (linear scan: leaf counts are small on
     // this lane; C uses a hash table once >32).
     leaves: Vec<Relation<'mcx>>,
-    // C ri_RootToPartitionMap + ri_PartitionTupleSlot per leaf; map is
-    // root layout -> leaf layout, None for layout-identical leaves.
+    // C ri_RootToPartitionMap per leaf: root layout -> leaf layout, None for
+    // layout-identical leaves (callers own the conversion slots).
     leaf_maps: Vec<Option<mcx::PgVec<'mcx, i16>>>,
-    leaf_slots: Vec<Option<SlotData<'mcx>>>,
 }
 
 impl<'mcx> PartitionTupleRouting<'mcx> {
@@ -59,7 +58,6 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             dispatch_slots: Vec::new(),
             leaves: Vec::new(),
             leaf_maps: Vec::new(),
-            leaf_slots: Vec::new(),
         };
         prt.init_dispatch(root_rc, None)?;
         Ok(prt)
@@ -122,13 +120,6 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             &rel.rd_att,
             false,
         )?;
-        self.leaf_slots.push(map.as_ref().map(|_| {
-            exectuples::make_tuple_table_slot(
-                self.mcx,
-                types_slot::TupleSlotKind::Virtual,
-                Some(rel.rd_att.clone()),
-            )
-        }));
         self.leaf_maps.push(map);
         self.leaves.push(rel);
         Ok(self.leaves.len() - 1)
@@ -139,37 +130,11 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         &self.leaves[idx]
     }
 
-    // ExecPrepareTupleRouting's conversion leg: for an attno-remapped leaf,
-    // converts the root-format tuple into the leaf's layout and returns the
-    // leaf slot; None means the caller's slot already matches.
-    pub fn leaf_rel_and_converted_slot(
-        &mut self,
-        idx: usize,
-        in_slot: &mut SlotData<'mcx>,
-    ) -> (&Relation<'mcx>, Option<&mut SlotData<'mcx>>) {
-        let conv = match (&self.leaf_maps[idx], self.leaf_slots[idx].as_mut()) {
-            (Some(map), Some(out)) => {
-                exectuples::execute_attr_map_slot(map, in_slot, out, self.mcx);
-                Some(out)
-            }
-            _ => None,
-        };
-        (&self.leaves[idx], conv)
-    }
-
-    // ri_RootToPartitionMap accessor (COPY's multi-insert buffers convert
-    // into their own leaf-descriptor slots).
+    // ri_RootToPartitionMap accessor; callers convert into their own
+    // leaf-descriptor slots.
     #[inline]
     pub fn leaf_attrmap(&self, idx: usize) -> Option<&[i16]> {
         self.leaf_maps[idx].as_deref()
-    }
-
-    // Re-access after leaf_rel_and_converted_slot without re-converting.
-    pub fn leaf_rel_and_slot(
-        &mut self,
-        idx: usize,
-    ) -> (&Relation<'mcx>, Option<&mut SlotData<'mcx>>) {
-        (&self.leaves[idx], self.leaf_slots[idx].as_mut())
     }
 
     // ExecFindPartition -> index for leaf_rel(); eval_mcx is C's per-tuple
