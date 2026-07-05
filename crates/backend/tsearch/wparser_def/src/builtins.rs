@@ -118,69 +118,94 @@ pub fn fc_ts_token_type_byid(
 ) -> PgResult<Datum> {
     srf_drive(flinfo, fcinfo, "ts_token_type_byid", |fcinfo| {
         require_default_parser(fcinfo.arg(0).as_oid(), "ts_token_type");
-        let mcx = fcinfo.result_mcx();
-        let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, 3)?;
-        ::tupdesc::TupleDescInitEntry(&mut desc, 1, Some("tokid"), INT4OID, -1, 0)?;
-        ::tupdesc::TupleDescInitEntry(&mut desc, 2, Some("alias"), TEXTOID, -1, 0)?;
-        ::tupdesc::TupleDescInitEntry(&mut desc, 3, Some("description"), TEXTOID, -1, 0)?;
-        desc.tdtypeid = RECORDOID;
-        desc.tdtypmod = -1;
-        let mut rows = Vec::with_capacity(parser::LASTNUM as usize);
-        for d in lextype() {
-            let alias = varlena_result(::varlena::cstring_to_text(mcx, d.alias.as_bytes())?);
-            let descr = varlena_result(::varlena::cstring_to_text(mcx, d.descr.as_bytes())?);
-            let tuple = ::heaptuple::heap_form_tuple(
-                mcx,
-                &desc,
-                &[Datum::from_i32(d.lexid), alias, descr],
-                &[false, false, false],
-            )?;
-            rows.push(tuple.image().to_vec());
-        }
-        Ok(SrfRows::Tuples(rows))
+        token_type_rows(fcinfo)
     })
 }
 
+fn token_type_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
+    let mcx = fcinfo.result_mcx();
+    let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, 3)?;
+    ::tupdesc::TupleDescInitEntry(&mut desc, 1, Some("tokid"), INT4OID, -1, 0)?;
+    ::tupdesc::TupleDescInitEntry(&mut desc, 2, Some("alias"), TEXTOID, -1, 0)?;
+    ::tupdesc::TupleDescInitEntry(&mut desc, 3, Some("description"), TEXTOID, -1, 0)?;
+    desc.tdtypeid = RECORDOID;
+    desc.tdtypmod = -1;
+    let mut rows = Vec::with_capacity(parser::LASTNUM as usize);
+    for d in lextype() {
+        let alias = varlena_result(::varlena::cstring_to_text(mcx, d.alias.as_bytes())?);
+        let descr = varlena_result(::varlena::cstring_to_text(mcx, d.descr.as_bytes())?);
+        let tuple = ::heaptuple::heap_form_tuple(
+            mcx,
+            &desc,
+            &[Datum::from_i32(d.lexid), alias, descr],
+            &[false, false, false],
+        )?;
+        rows.push(tuple.image().to_vec());
+    }
+    Ok(SrfRows::Tuples(rows))
+}
+
 pub fn fc_ts_token_type_byname(
-    _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!("wparser_def: ts_token_type(name) unported (needs parser name lookup)")
+    srf_drive(flinfo, fcinfo, "ts_token_type_byname", |fcinfo| {
+        require_default_parser(parser_oid_from_text_arg(fcinfo, 0)?, "ts_token_type");
+        token_type_rows(fcinfo)
+    })
+}
+
+// textToQualifiedNameList + get_ts_parser_oid (wparser.c byname entries).
+fn parser_oid_from_text_arg(fcinfo: &Fcinfo, i: usize) -> PgResult<::types_core::Oid> {
+    // SAFETY: strict fn; arg i is a text varlena.
+    let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
+    let rawname = core::str::from_utf8(v.data())
+        .map_err(|_| Box::new(::types_error::PgError::error("invalid UTF-8 in parser name")))?;
+    let names = ::varlena::textToQualifiedNameList(fcinfo.result_mcx(), rawname)?;
+    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    namespace_seams::get_ts_parser_oid::call(&name_refs, false)
 }
 
 pub fn fc_ts_parse_byid(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     srf_drive(flinfo, fcinfo, "ts_parse_byid", |fcinfo| {
         require_default_parser(fcinfo.arg(0).as_oid(), "ts_parse");
-        // SAFETY: strict fn; arg 1 is a text varlena.
-        let txt = unsafe { fcinfo.arg_varlena_packed(1)? };
-        let mcx = fcinfo.result_mcx();
-        let data = txt.data();
-        let mut prs = parser::tparser_init(mcx, data.as_ptr(), data.len())?;
-        let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
-        ::tupdesc::TupleDescInitEntry(&mut desc, 1, Some("tokid"), INT4OID, -1, 0)?;
-        ::tupdesc::TupleDescInitEntry(&mut desc, 2, Some("token"), TEXTOID, -1, 0)?;
-        desc.tdtypeid = RECORDOID;
-        desc.tdtypmod = -1;
-        let mut rows = Vec::new();
-        while parser::tparser_get(&mut prs)? {
-            let token = varlena_result(::varlena::cstring_to_text(mcx, prs.token_bytes())?);
-            let tuple = ::heaptuple::heap_form_tuple(
-                mcx,
-                &desc,
-                &[Datum::from_i32(prs.type_), token],
-                &[false, false],
-            )?;
-            rows.push(tuple.image().to_vec());
-        }
-        Ok(SrfRows::Tuples(rows))
+        parse_rows(fcinfo)
     })
 }
 
+fn parse_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
+    // SAFETY: strict fn; arg 1 is a text varlena.
+    let txt = unsafe { fcinfo.arg_varlena_packed(1)? };
+    let mcx = fcinfo.result_mcx();
+    let data = txt.data();
+    let mut prs = parser::tparser_init(mcx, data.as_ptr(), data.len())?;
+    let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
+    ::tupdesc::TupleDescInitEntry(&mut desc, 1, Some("tokid"), INT4OID, -1, 0)?;
+    ::tupdesc::TupleDescInitEntry(&mut desc, 2, Some("token"), TEXTOID, -1, 0)?;
+    desc.tdtypeid = RECORDOID;
+    desc.tdtypmod = -1;
+    let mut rows = Vec::new();
+    while parser::tparser_get(&mut prs)? {
+        let token = varlena_result(::varlena::cstring_to_text(mcx, prs.token_bytes())?);
+        let tuple = ::heaptuple::heap_form_tuple(
+            mcx,
+            &desc,
+            &[Datum::from_i32(prs.type_), token],
+            &[false, false],
+        )?;
+        rows.push(tuple.image().to_vec());
+    }
+    Ok(SrfRows::Tuples(rows))
+}
+
 pub fn fc_ts_parse_byname(
-    _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!("wparser_def: ts_parse(name) unported (needs parser name lookup)")
+    srf_drive(flinfo, fcinfo, "ts_parse_byname", |fcinfo| {
+        require_default_parser(parser_oid_from_text_arg(fcinfo, 0)?, "ts_parse");
+        parse_rows(fcinfo)
+    })
 }
 
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

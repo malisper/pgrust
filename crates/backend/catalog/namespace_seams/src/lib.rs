@@ -14,6 +14,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // get_ts_parser_oid (namespace.c) — wparser_def byname entries resolve
+    // parser names (a direct wparser_def -> catalog_namespace dep would cycle
+    // through fmgr_core).
+    pub fn get_ts_parser_oid(names: &[&str], missing_ok: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     pub fn at_eoxact_namespace(is_commit: bool, is_parallel_worker: bool)
 );
 

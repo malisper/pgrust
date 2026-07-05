@@ -299,6 +299,7 @@ fn opername_get_candidate_oids<'mcx>(
 
 pub fn init_seams() {
     namespace_seams::range_var_get_relid::set(seam_range_var_get_relid);
+    namespace_seams::get_ts_parser_oid::set(get_ts_parser_oid);
     namespace_seams::at_eoxact_namespace::set(AtEOXact_Namespace);
     namespace_seams::at_eosubxact_namespace::set(AtEOSubXact_Namespace);
     namespace_seams::is_temp_toast_namespace::set(isTempToastNamespace);
