@@ -1968,10 +1968,7 @@ fn insert_row_length_error(
     )
 }
 
-// C transformReturningClause (analyze.c). Divergences: the WITH(...) options
-// list (PG18 OLD/NEW aliases) is loud, and instead of adding old/new namespace
-// items we panic when a RETURNING expression would resolve through one; the
-// Query alias fields still get C's "old"/"new" defaults when unmasked.
+// C transformReturningClause (analyze.c).
 pub(crate) fn transformReturningClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -1984,18 +1981,46 @@ pub(crate) fn transformReturningClause<'mcx>(
     };
     let save_nslen = pstate.p_namespace.len();
     let rc = rc_node.as_returning_clause().expect("grammar builds ReturningClause");
-    if !rc.options.is_nil() {
-        panic!(
-            "transformReturningClause (analyze.c): RETURNING WITH (OLD/NEW AS ...) \
-             — gram returning_option arms unported"
-        );
+    for opt_node in &rc.options {
+        use types_nodes::rawnodes::ReturningOptionKind;
+        let opt = opt_node
+            .as_variant::<types_nodes::rawnodes::ReturningOption>()
+            .expect("options cell is a ReturningOption");
+        let value = opt.value.expect("grammar supplies the alias name");
+        match opt.option {
+            ReturningOptionKind::RETURNING_OPTION_OLD => {
+                if qry.returningOldAlias.is_some() {
+                    return Err(returning_option_repeated(pstate, "OLD", opt.location));
+                }
+                qry.returningOldAlias = Some(value);
+            }
+            ReturningOptionKind::RETURNING_OPTION_NEW => {
+                if qry.returningNewAlias.is_some() {
+                    return Err(returning_option_repeated(pstate, "NEW", opt.location));
+                }
+                qry.returningNewAlias = Some(value);
+            }
+        }
+        if parse_relation::refnameNamespaceItem(pstate, None, value, -1, None)?.is_some() {
+            return Err(returning_alias_conflict(pstate, value, opt.location));
+        }
+        let rtype = if opt.option == ReturningOptionKind::RETURNING_OPTION_OLD {
+            VarReturningType::VAR_RETURNING_OLD
+        } else {
+            VarReturningType::VAR_RETURNING_NEW
+        };
+        addNSItemForReturning(mcx, pstate, value, rtype)?;
     }
 
-    if parse_relation::refnameNamespaceItem(pstate, None, "old", -1, None)?.is_none() {
+    if qry.returningOldAlias.is_none()
+        && parse_relation::refnameNamespaceItem(pstate, None, "old", -1, None)?.is_none()
+    {
         qry.returningOldAlias = Some("old");
         addNSItemForReturning(mcx, pstate, "old", VarReturningType::VAR_RETURNING_OLD)?;
     }
-    if parse_relation::refnameNamespaceItem(pstate, None, "new", -1, None)?.is_none() {
+    if qry.returningNewAlias.is_none()
+        && parse_relation::refnameNamespaceItem(pstate, None, "new", -1, None)?.is_none()
+    {
         qry.returningNewAlias = Some("new");
         addNSItemForReturning(mcx, pstate, "new", VarReturningType::VAR_RETURNING_NEW)?;
     }
@@ -2059,6 +2084,46 @@ fn addNSItemForReturning<'mcx>(
     };
     let nsitem = mcx::leak_in(mcx::alloc_in(mcx, nsitem)?);
     parse_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, false)
+}
+
+#[cold]
+fn returning_option_repeated(
+    pstate: &ParseState<'_, '_>,
+    which: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("{which} cannot be specified multiple times"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error(),
+    )
+}
+
+#[cold]
+fn returning_alias_conflict(
+    pstate: &ParseState<'_, '_>,
+    value: &str,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ERRCODE_DUPLICATE_ALIAS, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DUPLICATE_ALIAS)
+            .errmsg(format!("table name \"{value}\" specified more than once"))
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error(),
+    )
 }
 
 #[cold]
