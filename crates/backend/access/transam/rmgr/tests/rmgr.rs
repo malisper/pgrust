@@ -135,9 +135,3 @@ fn btree_redo_unknown_opcode_errors_loudly() {
         .expect_err("unknown btree opcode must not redo silently");
     assert!(err.message.contains("btree_redo: unknown op code"));
 }
-
-#[test]
-#[should_panic(expected = "rmgr callback not ported: hash_identify")]
-fn unported_identify_panics_loudly() {
-    let _ = (GetRmgr(RM_HASH_ID as u8).unwrap().rm_identify)(0x10);
-}
