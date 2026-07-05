@@ -240,10 +240,20 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                     )?;
                     return Ok(Some(result_id));
                 }
+                // By-ref projection results (and callee scratch — e.g.
+                // regexp_replace's wchar buffer) must live in the per-tuple
+                // memory reset at the next exec_scan entry (C projects into
+                // ecxt_per_tuple_memory); es_query_cxt here accumulated
+                // ~26GB anon over one 100M-row scan (ClickBench Q29).
+                // SAFETY: reset-only context, outlives the plan.
+                unsafe {
+                    let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+                    proj.pi_state.arm_result_mcx_raw(per_tuple);
+                }
                 let mcx = estate.es_query_cxt;
                 let (scan_slot, result_slot) = slot_pair(estate, scan_id, result_id);
                 let mut slots = EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
-                exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+                ::execexpr::exec_project_prearmed(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
                 return Ok(Some(result_id));
             }
             return Ok(Some(scan_id));

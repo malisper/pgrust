@@ -196,9 +196,20 @@ pub fn exec_project<'mcx>(
     result_slot: &mut SlotData<'mcx>,
     result_mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
-    check_still_valid(state, slots)?;
     state.arm_result_mcx(result_mcx);
-    exectuples::exec_clear_tuple(result_slot, result_mcx);
+    exec_project_prearmed(state, slots, result_slot, result_mcx)
+}
+
+/// [`exec_project`] for callers that armed the program themselves (the
+/// per-tuple-mcx scan path); `slot_mcx` is only the result slot's owner.
+pub fn exec_project_prearmed<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    result_slot: &mut SlotData<'mcx>,
+    slot_mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<()> {
+    check_still_valid(state, slots)?;
+    exectuples::exec_clear_tuple(result_slot, slot_mcx);
     match eval(state, slots, Some(result_slot), None)? {
         EvalOutcome::Done(_) => {}
         EvalOutcome::Suspended(_) => subplan_without_driver(),
