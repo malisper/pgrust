@@ -7975,7 +7975,10 @@ dependencies = [
  "heaptuple",
  "init_small",
  "mcx",
+ "parallel",
+ "pg_barrier",
  "postgres_seams",
+ "sharedtuplestore",
  "types_core",
  "types_error",
  "types_nodes",
@@ -9690,6 +9693,15 @@ dependencies = [
 [[package]]
 name = "pg_b64"
 version = "0.1.0"
+
+[[package]]
+name = "pg_barrier"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "postgres_seams",
+ "types_error",
+]
 
 [[package]]
 name = "pg_bitutils"
@@ -13323,6 +13335,20 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "sharedtuplestore"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "fd",
+ "init_small",
+ "libc",
+ "mcx",
+ "postgres_seams",
+ "types_error",
+ "types_tuple",
 ]
 
 [[package]]

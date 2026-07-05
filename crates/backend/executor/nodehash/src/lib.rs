@@ -19,6 +19,8 @@ use ::types_tuple::{MinimalTupleData, TupleDescData, SizeofMinimalTupleHeader};
 
 pub fn init_seams() {}
 
+pub mod parallel;
+
 #[cfg(test)]
 mod tests;
 
@@ -134,6 +136,16 @@ impl HashJoinTupleHdr {
     #[inline(always)]
     pub fn hashvalue(&self) -> u32 {
         self.hashvalue
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_next(&mut self, next: *mut HashJoinTupleHdr) {
+        self.next = next;
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_hashvalue(&mut self, hashvalue: u32) {
+        self.hashvalue = hashvalue;
     }
 
     /// C `HJTUPLE_MINTUPLE`.
@@ -781,6 +793,10 @@ pub fn get_saved_tuple<'mcx>(
 pub struct HashState<'mcx> {
     hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     pub table: Option<HashJoinTable<'mcx>>,
+    /// Shared-table state when this is a Parallel Hash (C `hashtable` with
+    /// `parallel_state` set); `table` stays None.
+    pub ptable: Option<parallel::ParallelHashJoinTable<'mcx>>,
+    parallel_state: Option<std::sync::Arc<parallel::ParallelHashJoinState>>,
     pub hash_tuple_slot: ExecSlotId,
     pub ps_ExprContext: EcxtId,
     ntuples_est: f64,
@@ -790,6 +806,31 @@ pub struct HashState<'mcx> {
 }
 
 impl<'mcx> HashState<'mcx> {
+    /// `ExecHashJoinInitializeDSM`/`InitializeWorker` hand-off.
+    pub fn set_parallel_state(&mut self, ps: std::sync::Arc<parallel::ParallelHashJoinState>) {
+        self.parallel_state = Some(ps);
+    }
+
+    pub fn parallel_state(&self) -> Option<&std::sync::Arc<parallel::ParallelHashJoinState>> {
+        self.parallel_state.as_ref()
+    }
+
+    pub fn is_parallel_aware(&self) -> bool {
+        self.parallel_aware
+    }
+
+    /// Hash a build-side tuple bound as the inner slot (shared insert path).
+    pub fn eval_build_hash(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        slot_id: ExecSlotId,
+    ) -> PgResult<u32> {
+        estate.reset_expr_context(self.ps_ExprContext);
+        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+        let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
+        let r = exec_eval_expr(&mut self.hash_expr, &mut slots)?;
+        Ok(r.value.as_u32())
+    }
     /// Slot deform prefix the build-side hash reads per row (its FETCHSOME
     /// bound); None = shape unknown to the batch-deform planner.
     pub fn build_prefix(&self) -> Option<i32> {
@@ -838,6 +879,8 @@ pub fn exec_init_hash<'mcx>(
     Ok(HashState {
         hash_expr,
         table: None,
+        ptable: None,
+        parallel_state: None,
         hash_tuple_slot,
         ps_ExprContext,
         ntuples_est,
@@ -854,9 +897,11 @@ pub fn exec_hash_table_create<'mcx>(
     estate: &mut EStateData<'mcx>,
     want_filter: bool,
 ) -> PgResult<HashJoinTable<'mcx>> {
+    // A parallel-aware Hash builds the shared table via
+    // parallel::exec_parallel_hash_table_create instead.
     assert!(
-        !hs.parallel_aware,
-        "ExecHashTableCreate (nodeHash.c): parallel-aware (shared-table) Hash not ported"
+        !hs.parallel_aware && hs.parallel_state.is_none(),
+        "ExecHashTableCreate (nodeHash.c): parallel-aware Hash outside a parallel context"
     );
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =
@@ -937,6 +982,10 @@ pub fn multi_exec_hash_batched<'mcx, S: HashBuildBatchSource<'mcx>>(
 pub fn exec_end_hash(hs: &mut HashState<'_>) {
     hs.hash_expr.release_frames();
     hs.inner_desc = None;
+    // Parallel: detach ran in the shutdown walk; release the accessors and
+    // this participant's hold on the shared state.
+    hs.ptable = None;
+    hs.parallel_state = None;
 }
 
 // C constants (hashjoin.h / htup_details.h), 64-bit build.
@@ -1108,8 +1157,9 @@ fn oom_tuples(mcx: Mcx<'_>, add: usize) -> Box<PgError> {
 }
 
 // Exempt: released in exec_end_hash_join/exec_end_hash — table (BufFile fds)
-// is destroyed and taken there, hash_expr via release_frames, inner_desc taken.
+// is destroyed and taken there, hash_expr via release_frames, inner_desc taken,
+// ptable/parallel_state detached in the shutdown walk then dropped there.
 mcx::forget_safe_struct!(
     HashState<'_> { hash_tuple_slot, ps_ExprContext, ntuples_est, tupwidth, parallel_aware;
-        table, hash_expr, inner_desc },
+        table, ptable, parallel_state, hash_expr, inner_desc },
 );

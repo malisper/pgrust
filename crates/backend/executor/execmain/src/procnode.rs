@@ -255,6 +255,10 @@ enum ProbeBatchMode {
     Unknown,
     Off,
     On,
+    // Parallel Hash: shared-table machine; probe fusion stays off (the outer
+    // drive must interleave with barrier phases tuple-at-a-time). Folded into
+    // this once-decided mode so the serial per-row dispatch is unchanged.
+    Parallel,
 }
 
 // Probe-side fused-drive cursor: exec_hash_join returns per joined row, so
@@ -2161,8 +2165,11 @@ fn hash_join_arm<'mcx>(
     let HashJoinNode { state, outer, hash, probe_batch } = hj;
     let HashSubNode { state: hstate, child } = &mut **hash;
     if probe_batch.mode == ProbeBatchMode::Unknown {
-        let m = probe_batch_probe(state, &mut **outer, estate, probe_batch)?;
-        probe_batch.mode = m;
+        probe_batch.mode = if hstate.parallel_state().is_some() {
+            ProbeBatchMode::Parallel
+        } else {
+            probe_batch_probe(state, &mut **outer, estate, probe_batch)?
+        };
     }
     if probe_batch.mode == ProbeBatchMode::On {
         let PlanStateNode::SeqScan(ss) = &mut **outer else {
@@ -2170,6 +2177,11 @@ fn hash_join_arm<'mcx>(
         };
         let mut src = SeqScanProbeSource { ss, cur: probe_batch };
         return ::nodehashjoin::exec_hash_join(state, &mut src, hstate, &mut **child, estate);
+    }
+    if probe_batch.mode == ProbeBatchMode::Parallel {
+        return ::nodehashjoin::exec_parallel_hash_join(
+            state, &mut **outer, hstate, &mut **child, estate,
+        );
     }
     ::nodehashjoin::exec_hash_join(state, &mut **outer, hstate, &mut **child, estate)
 }
@@ -2956,7 +2968,7 @@ pub fn exec_shutdown_node<'mcx>(
         // (C: HashState.hinstrument) before EXPLAIN reads it.
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
-            ::nodehashjoin::shutdown_accum_instrumentation(&hj.state, &hj.hash.state, estate);
+            ::nodehashjoin::exec_shutdown_hash_join(&hj.state, &mut hj.hash.state, estate)?;
             exec_shutdown_node(&mut hj.outer, estate)?;
             exec_shutdown_node(&mut hj.hash.child, estate)
         }

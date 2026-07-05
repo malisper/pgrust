@@ -38,6 +38,9 @@ pub struct BufFile<'mcx> {
     is_inter_xact: bool,
     dirty: bool,
     read_only: bool,
+    // FileSet-backed files: segment i lives at "<seg_base>.<i>", creatable
+    // and openable by any participant thread (C's fileset BufFiles).
+    seg_base: Option<PgVec<'mcx, u8>>,
     cur_file: i32,
     cur_offset: i64,
     pos: i32,
@@ -73,6 +76,81 @@ pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<Buf
         is_inter_xact: inter_xact,
         dirty: false,
         read_only: false,
+        seg_base: None,
+        cur_file: 0,
+        cur_offset: 0,
+        pos: 0,
+        nbytes: 0,
+        buffer,
+    })
+}
+
+fn seg_name(base: &[u8], segment: usize) -> String {
+    format!("{}.{segment}", core::str::from_utf8(base).expect("fileset name is utf8"))
+}
+
+/// `BufFileCreateFileSet` (buffile.c): a named, participant-shared temp file.
+pub fn BufFileCreateFileSet<'mcx>(
+    mcx: Mcx<'mcx>,
+    fileset: &crate::fileset::FileSet,
+    name: &str,
+) -> PgResult<BufFile<'mcx>> {
+    let base = fileset.name_path(name);
+    let file = fileset.create_seg(name, &seg_name(base.as_bytes(), 0))?;
+    debug_assert!(file.0 > 0);
+    let mut files = vec_with_capacity_in(mcx, 1)?;
+    files.push(file);
+    let mut seg = vec_with_capacity_in(mcx, base.len())?;
+    seg.extend(base.as_bytes().iter().copied());
+    let mut buffer = vec_with_capacity_in(mcx, BLCKSZ)?;
+    buffer.resize(BLCKSZ, 0);
+    Ok(BufFile {
+        files,
+        is_inter_xact: false,
+        dirty: false,
+        read_only: false,
+        seg_base: Some(seg),
+        cur_file: 0,
+        cur_offset: 0,
+        pos: 0,
+        nbytes: 0,
+        buffer,
+    })
+}
+
+/// `BufFileOpenFileSet`: open another participant's file by name.
+pub fn BufFileOpenFileSet<'mcx>(
+    mcx: Mcx<'mcx>,
+    fileset: &crate::fileset::FileSet,
+    name: &str,
+    read_only: bool,
+) -> PgResult<BufFile<'mcx>> {
+    let base = fileset.name_path(name);
+    let mode = if read_only { libc::O_RDONLY } else { libc::O_RDWR };
+    let mut files: PgVec<'mcx, File> = vec_with_capacity_in(mcx, 1)?;
+    loop {
+        let f = fileset.open_seg(&seg_name(base.as_bytes(), files.len()), mode)?;
+        if f.0 <= 0 {
+            break;
+        }
+        files.push(f);
+    }
+    if files.is_empty() {
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not open temporary file \"{base}\": %m"))
+            .finish(loc("BufFileOpenFileSet"))?;
+    }
+    let mut seg = vec_with_capacity_in(mcx, base.len())?;
+    seg.extend(base.as_bytes().iter().copied());
+    let mut buffer = vec_with_capacity_in(mcx, BLCKSZ)?;
+    buffer.resize(BLCKSZ, 0);
+    Ok(BufFile {
+        files,
+        is_inter_xact: false,
+        dirty: false,
+        read_only,
+        seg_base: Some(seg),
         cur_file: 0,
         cur_offset: 0,
         pos: 0,
@@ -83,7 +161,17 @@ pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, inter_xact: bool) -> PgResult<Buf
 
 impl<'mcx> BufFile<'mcx> {
     fn extend(&mut self) -> PgResult<()> {
-        let pfile = OpenTemporaryFile(self.is_inter_xact)?;
+        let pfile = match &self.seg_base {
+            None => OpenTemporaryFile(self.is_inter_xact)?,
+            Some(base) => {
+                // MakeNewFileSetSegment; requires the fileset caller keep the
+                // set alive, which the sts accessor structure guarantees.
+                crate::temp::PathNameCreateTemporaryFile(
+                    &seg_name(base, self.files.len()),
+                    true,
+                )?
+            }
+        };
         debug_assert!(pfile.0 >= 0);
         self.files.push(pfile);
         Ok(())

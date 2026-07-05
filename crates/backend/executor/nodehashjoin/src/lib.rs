@@ -19,6 +19,9 @@ use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
+mod parallel;
+pub use parallel::exec_parallel_hash_join;
+
 const HJ_BUILD_HASHTABLE: u8 = 1;
 const HJ_NEED_NEW_OUTER: u8 = 2;
 const HJ_SCAN_BUCKET: u8 = 3;
@@ -883,14 +886,20 @@ pub fn exec_end_hash_join<'mcx>(
     Ok(())
 }
 
-/// `ExecShutdownHash`'s hand-off, keyed by the Hash sub-node's plan_node_id
-/// (EXPLAIN reads before ExecutorEnd).
-pub fn shutdown_accum_instrumentation<'mcx>(
+/// `ExecShutdownHashJoin`: detach from shared state before the parallel
+/// context is destroyed (instrumentation accumulates first, as C's
+/// ExecShutdownHash ordering).
+pub fn exec_shutdown_hash_join<'mcx>(
     node: &HashJoinState<'mcx>,
-    hash_state: &HashState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) {
+) -> PgResult<()> {
     accum_instrumentation(node, hash_state, estate);
+    if let Some(table) = hash_state.ptable.as_mut() {
+        ::nodehash::parallel::exec_hash_table_detach_batch(table)?;
+        ::nodehash::parallel::exec_hash_table_detach(table)?;
+    }
+    Ok(())
 }
 
 fn accum_instrumentation<'mcx>(
@@ -901,7 +910,19 @@ fn accum_instrumentation<'mcx>(
     if estate.es_instrument == 0 {
         return;
     }
+    if let Some(t) = hash_state.ptable.as_ref() {
+        accum_hash_instr(node, t.instrumentation(), estate);
+        return;
+    }
     let Some(table) = hash_state.table.as_ref() else { return };
+    accum_hash_instr(node, table.instrumentation(), estate);
+}
+
+fn accum_hash_instr<'mcx>(
+    node: &HashJoinState<'mcx>,
+    hi: ::types_core::instrument::HashInstrumentation,
+    estate: &mut EStateData<'mcx>,
+) {
     let hash_plan_id = node
         .plan
         .join
@@ -912,7 +933,6 @@ fn accum_instrumentation<'mcx>(
         .expect("HashJoin inner is a Hash node")
         .plan
         .plan_node_id;
-    let hi = table.instrumentation();
     if let Some((_, slot)) = estate
         .es_hash_instrumentation
         .iter_mut()
@@ -931,6 +951,7 @@ pub fn exec_rescan_hash_join_chg<'mcx>(
     hash_state: &mut HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    release_parallel_table(node, hash_state, estate)?;
     if hash_state.table.is_some() {
         accum_instrumentation(node, hash_state, estate);
         hash_state.table.as_mut().expect("just checked").destroy()?;
@@ -955,6 +976,27 @@ pub enum RescanInner {
     Rescan,
 }
 
+// A parallel-hash rescan always rebuilds: the shared table was freed when
+// the last participant detached (C forces this via a chgParam dependency).
+fn release_parallel_table<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if hash_state.ptable.is_none() {
+        return Ok(false);
+    }
+    accum_instrumentation(node, hash_state, estate);
+    {
+        let table = hash_state.ptable.as_mut().expect("just checked");
+        ::nodehash::parallel::exec_hash_table_detach_batch(table)?;
+        ::nodehash::parallel::exec_hash_table_detach(table)?;
+    }
+    hash_state.ptable = None;
+    node.hj_JoinState = HJ_BUILD_HASHTABLE;
+    Ok(true)
+}
+
 /// `ExecReScanHashJoin`.
 pub fn exec_rescan_hash_join<'mcx>(
     node: &mut HashJoinState<'mcx>,
@@ -962,6 +1004,9 @@ pub fn exec_rescan_hash_join<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<RescanInner> {
     let mut rescan_inner = RescanInner::Keep;
+    if release_parallel_table(node, hash_state, estate)? {
+        rescan_inner = RescanInner::Rescan;
+    }
     if hash_state.table.is_some() {
         if hash_state.table.as_ref().expect("just checked").nbatch == 1 {
             let table = hash_state.table.as_mut().expect("just checked");
