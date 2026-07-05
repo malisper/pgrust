@@ -341,3 +341,115 @@ pub fn ts_execute_ternary<'mcx>(
 ) -> PgResult<Ternary> {
     ts_execute_recurse(mcx, q, 0, flags, chkcond)
 }
+
+// TS_execute_locations (tsvector_op.c): per-AND'able-term ExecPhraseData
+// lists over operators above any phrase operator; headline cover selection
+// consumes the position lists. Empty result = no match (or a NOT that
+// reports no locations).
+pub fn ts_execute_locations<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: TsQueryRef<'_>,
+    chkcond: ChkCond<'_, 'mcx>,
+) -> PgResult<Vec<ExecPhraseData<'mcx>>> {
+    let mut locations = Vec::new();
+    if ts_execute_locations_recurse(mcx, q, 0, chkcond, &mut locations)? {
+        Ok(locations)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn ts_execute_locations_recurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    q: TsQueryRef<'_>,
+    idx: usize,
+    chkcond: ChkCond<'_, 'mcx>,
+    locations: &mut Vec<ExecPhraseData<'mcx>>,
+) -> PgResult<bool> {
+    locations.clear();
+    match q.item(idx) {
+        Item::Val(op) => {
+            let mut data = ExecPhraseData::new(mcx);
+            if chkcond(idx, &op, Some(&mut data))? == Ternary::Yes {
+                locations.push(data);
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        Item::ValStop => panic!("TS_execute_locations: QI_VALSTOP in stored tsquery"),
+        Item::Opr(opr) => match opr.oper {
+            OP_NOT => {
+                let mut l = Vec::new();
+                // A failed NOT-arm matches; we pass back no locations.
+                Ok(!ts_execute_locations_recurse(mcx, q, idx + 1, chkcond, &mut l)?)
+            }
+            OP_AND => {
+                let mut l = Vec::new();
+                if !ts_execute_locations_recurse(
+                    mcx,
+                    q,
+                    idx + opr.left as usize,
+                    chkcond,
+                    &mut l,
+                )? {
+                    return Ok(false);
+                }
+                let mut r = Vec::new();
+                if !ts_execute_locations_recurse(mcx, q, idx + 1, chkcond, &mut r)? {
+                    return Ok(false);
+                }
+                locations.append(&mut l);
+                locations.append(&mut r);
+                Ok(true)
+            }
+            OP_OR => {
+                let mut l = Vec::new();
+                let mut r = Vec::new();
+                let lmatch =
+                    ts_execute_locations_recurse(mcx, q, idx + opr.left as usize, chkcond, &mut l)?;
+                let rmatch = ts_execute_locations_recurse(mcx, q, idx + 1, chkcond, &mut r)?;
+                if !(lmatch || rmatch) {
+                    return Ok(false);
+                }
+                // (A & B) | (C & D) = (A|C) & (A|D) & (B|C) & (B|D); an
+                // input with no locations (failed or NOT) yields the other
+                // list unchanged.
+                if l.is_empty() {
+                    *locations = r;
+                } else if r.is_empty() {
+                    *locations = l;
+                } else {
+                    for ldata in &l {
+                        for rdata in &r {
+                            let mut data = ExecPhraseData::new(mcx);
+                            ts_phrase_output(
+                                Some(&mut data),
+                                ldata,
+                                rdata,
+                                TSPO_BOTH | TSPO_L_ONLY | TSPO_R_ONLY,
+                                0,
+                                0,
+                            );
+                            data.width = ldata.width.max(rdata.width);
+                            locations.push(data);
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            OP_PHRASE => {
+                let mut data = ExecPhraseData::new(mcx);
+                if ts_phrase_execute(mcx, q, idx, TS_EXEC_EMPTY, chkcond, Some(&mut data))?
+                    == Ternary::Yes
+                {
+                    if !data.negate {
+                        locations.push(data);
+                    }
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            other => panic!("unrecognized operator: {other}"),
+        },
+    }
+}

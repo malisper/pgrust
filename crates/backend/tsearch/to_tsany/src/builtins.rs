@@ -130,6 +130,96 @@ pub fn fc_ts_match_tq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     function_call2_coll(&mut fi, InvalidOid, v, q)
 }
 
+// wparser.c ts_headline family, hosted here (the CacheEnv parser drive and
+// ts_cache live on this side; wparser_def's prsd_headline is reached through
+// fmgr by the catalog prsheadline oid).
+fn ts_headline_common(fcinfo: &mut Fcinfo, cfg: Option<Oid>, has_opts: bool) -> PgResult<Datum> {
+    use ::ts_parse::headline::{generate_headline, hlparsetext, HeadlineParsedText};
+
+    // SAFETY: the armed result mcx outlives this call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let (cfg, base) = match cfg {
+        Some(c) => (c, 1usize),
+        None => (cache_bind::current_config()?, 0usize),
+    };
+    let text = text_data(fcinfo, base)?;
+
+    // The tsquery rides to prsd_headline as its 4-byte-header varlena image.
+    // SAFETY: strict fn: the tsquery arg is a non-null live varlena.
+    let packed = unsafe { fcinfo.arg_varlena_packed(base + 1) }?;
+    let qimage: &[u8] = if packed.is_short() {
+        let data = packed.data();
+        let mut img = ::mcx::vec_with_capacity_in(mcx, 4 + data.len())?;
+        ::mcx::vec_append_bytes(&mut img, &::datum::varlena::set_varsize_4b(4 + data.len()))?;
+        ::mcx::vec_append_bytes(&mut img, data)?;
+        img.leak()
+    } else {
+        // SAFETY: 4B-header varlena spanning its varsize.
+        unsafe {
+            core::slice::from_raw_parts(packed.as_ptr(), ::types_tuple::varatt::varsize_any(packed.as_ptr()))
+        }
+    };
+    let query = ::adt_tsvector_core::query::TsQueryRef { payload: &qimage[4..] };
+
+    let opts = if has_opts {
+        Some(::ts_cache::deserialize_deflist(mcx, text_data(fcinfo, base + 2)?)?)
+    } else {
+        None
+    };
+
+    let map = cache_bind::config_map(mcx, cfg)?;
+    let prsentry = ::ts_cache::lookup_ts_parser_cache(map.prs_id)?;
+    if prsentry.headline_oid == InvalidOid {
+        return Err(Box::new(
+            ::types_error::PgError::error(
+                "text search parser does not support headline creation".to_string(),
+            )
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    let mut prs = HeadlineParsedText::new(mcx);
+    let mut env = CacheEnv::new(mcx, cfg)?;
+    hlparsetext(mcx, &mut env, &mut prs, query, text)?;
+
+    let opts_datum = match &opts {
+        Some(v) => Datum::from_usize(v as *const _ as usize),
+        None => Datum::from_usize(0),
+    };
+    let mut fi = ::fmgr_seams::fmgr_info::call(prsentry.headline_oid)?;
+    ::types_fmgr::function_call3_coll(
+        &mut fi,
+        InvalidOid,
+        Datum::from_usize(core::ptr::from_mut(&mut prs) as usize),
+        opts_datum,
+        Datum::from_usize(qimage.as_ptr() as usize),
+    )?;
+
+    let body = generate_headline(mcx, &prs)?;
+    let mut img = ::mcx::vec_with_capacity_in(mcx, 4 + body.len())?;
+    ::mcx::vec_append_bytes(&mut img, &[0u8; 4])?;
+    ::mcx::vec_append_bytes(&mut img, &body)?;
+    Ok(varlena_result(Varlena::from_image(img)))
+}
+
+pub fn fc_ts_headline_byid_opt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let cfg = fcinfo.arg_oid(0);
+    ts_headline_common(fcinfo, Some(cfg), true)
+}
+
+pub fn fc_ts_headline_byid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let cfg = fcinfo.arg_oid(0);
+    ts_headline_common(fcinfo, Some(cfg), false)
+}
+
+pub fn fc_ts_headline_opt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ts_headline_common(fcinfo, None, true)
+}
+
+pub fn fc_ts_headline(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    ts_headline_common(fcinfo, None, false)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -147,4 +237,8 @@ pub const TO_TSANY_BUILTINS: &[FmgrBuiltin] = &[
     b(5006, "phraseto_tsquery_byid", 2, fc_phraseto_tsquery_byid),
     b(5007, "websearch_to_tsquery_byid", 2, fc_websearch_to_tsquery_byid),
     b(5009, "websearch_to_tsquery", 1, fc_websearch_to_tsquery),
+    b(3743, "ts_headline_byid_opt", 4, fc_ts_headline_byid_opt),
+    b(3744, "ts_headline_byid", 3, fc_ts_headline_byid),
+    b(3754, "ts_headline_opt", 3, fc_ts_headline_opt),
+    b(3755, "ts_headline", 2, fc_ts_headline),
 ];

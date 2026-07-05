@@ -69,8 +69,33 @@ pub fn fc_prsd_lextype(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> 
     Ok(Datum::from_usize(Box::into_raw(Box::new(lextype())) as usize))
 }
 
-pub fn fc_prsd_headline(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("wparser_def: prsd_headline not ported (ts_headline out of tsearch-lane scope)")
+// Internal-arg contract (ts_headline entry in to_tsany):
+//   arg0 *mut HeadlineParsedText, arg1 *const PgVec<DefListItem> (0 = NIL),
+//   arg2 *const u8 tsquery varlena image.
+pub fn fc_prsd_headline(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: the armed result mcx outlives this call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let prs_ptr = fcinfo.arg(0).as_usize() as *mut ::ts_parse::headline::HeadlineParsedText;
+    let opts_ptr = fcinfo.arg(1).as_usize()
+        as *const ::mcx::PgVec<'_, ::ts_cache::DefListItem<'_>>;
+    let q_ptr = fcinfo.arg(2).as_usize() as *const u8;
+    // SAFETY (all): internal-arg contract — live pointers from the
+    // ts_headline frame; the tsquery image spans varsize_any bytes.
+    let prs = unsafe { &mut *prs_ptr };
+    let options: &[::ts_cache::DefListItem<'_>] =
+        if opts_ptr.is_null() { &[] } else { unsafe { &(*opts_ptr)[..] } };
+    let payload = unsafe {
+        let image =
+            core::slice::from_raw_parts(q_ptr, ::types_tuple::varatt::varsize_any(q_ptr));
+        &image[::types_tuple::varatt::VARHDRSZ..]
+    };
+    crate::headline::prsd_headline_impl(
+        mcx,
+        prs,
+        options,
+        ::adt_tsvector_core::query::TsQueryRef { payload },
+    )?;
+    Ok(Datum::from_usize(prs_ptr as usize))
 }
 
 enum SrfRows {

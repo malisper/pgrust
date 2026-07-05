@@ -14622,6 +14622,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
 ]
 
 [[package]]
@@ -14905,6 +14906,7 @@ dependencies = [
 name = "ts_parse"
 version = "0.1.0"
 dependencies = [
+ "adt_tsvector_core",
  "elog_seams",
  "mcx",
  "ts_locale",
@@ -16233,6 +16235,7 @@ version = "0.1.0"
 name = "wparser_def"
 version = "0.1.0"
 dependencies = [
+ "adt_tsvector_core",
  "datum",
  "funcapi",
  "heaptuple",
@@ -16241,11 +16244,14 @@ dependencies = [
  "mcx",
  "namespace_seams",
  "pg_locale",
+ "ts_cache",
  "ts_locale",
+ "ts_parse",
  "tupdesc",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_tuple",
  "varlena",
  "wchar",
 ]

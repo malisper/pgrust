@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod headline;
 pub mod parser;
 
 #[cfg(test)]
