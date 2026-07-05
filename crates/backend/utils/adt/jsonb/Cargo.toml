@@ -19,6 +19,8 @@ heaptuple = { path = "../../../access/common/heaptuple" }
 lsyscache = { path = "../../cache/lsyscache" }
 tupdesc = { path = "../../../access/common/tupdesc" }
 typcache_seams = { path = "../../cache/typcache_seams" }
+tuplestore = { path = "../../sort/tuplestore" }
+init_small = { path = "../../init/init_small" }
 adt_numeric = { path = "../numeric" }
 arrayfuncs = { path = "../arrayfuncs" }
 datum = { path = "../../../../_support/types/datum" }

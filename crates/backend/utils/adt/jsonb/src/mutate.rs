@@ -782,3 +782,43 @@ fn push_path<'mcx>(
     }
     Ok(())
 }
+
+/// C: jsonb_strip_nulls. A scalar root passes through unchanged.
+pub fn strip_nulls<'mcx>(
+    mcx: Mcx<'mcx>,
+    payload: &'mcx [u8],
+    strip_in_arrays: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if container_is_scalar(payload) {
+        return input_image(mcx, payload);
+    }
+    let mut it = JsonbIterator::init(mcx, payload)?;
+    let mut ps = JsonbPush::new(mcx)?;
+    // C last_was_key: a key is held back until its value is known non-null.
+    let mut pending_key: Option<JsonbItem<'_>> = None;
+    loop {
+        let (tok, v) = it.next(false);
+        if tok == WjbToken::Done {
+            break;
+        }
+        if tok == WjbToken::Key {
+            debug_assert!(pending_key.is_none());
+            pending_key = Some(v);
+            continue;
+        }
+        if let Some(k) = pending_key.take() {
+            if tok == WjbToken::Value && matches!(v, JsonbItem::Null) {
+                continue;
+            }
+            ps.push(WjbToken::Key, k)?;
+        }
+        if strip_in_arrays && tok == WjbToken::Elem && matches!(v, JsonbItem::Null) {
+            continue;
+        }
+        match tok {
+            WjbToken::Value | WjbToken::Elem => ps.push(tok, v)?,
+            _ => ps.push_token(tok)?,
+        }
+    }
+    convert_to_jsonb(mcx, &ps.finish())
+}
