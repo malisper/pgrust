@@ -128,9 +128,10 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_MergeJoin) => true,
         t if t == tag16(NodeTag::T_HashJoin) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
-        // C's default arm: Gather/GatherMerge are absent from the can't-project list.
+        // C's default arm: Gather/GatherMerge/Agg are absent from the can't-project list.
         t if t == tag16(NodeTag::T_Gather) => true,
         t if t == tag16(NodeTag::T_GatherMerge) => true,
+        t if t == tag16(NodeTag::T_Agg) => true,
         _ => panic!(
             "is_projection_capable_path (createplan.c): pathtype {pathtype}; \
              M2 plan lane"
