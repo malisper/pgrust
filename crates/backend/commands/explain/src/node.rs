@@ -1112,20 +1112,23 @@ pub fn ExplainNode<'mcx>(
     }
 
     let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
-    // ExplainSubPlans over initPlan.
-    for sp_node in plan.initPlan.iter() {
-        let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
-        explain_sub_plan(sp, "InitPlan", &pushed, es)?;
-    }
-    let haschildren = plan.lefttree.is_some()
+    let member_subplans = collect_node_subplans(es.str.allocator(), node)?;
+    let haschildren = !plan.initPlan.is_nil()
+        || plan.lefttree.is_some()
         || plan.righttree.is_some()
         || node.node_tag() == NodeTag::T_Append
         || node.node_tag() == NodeTag::T_MergeAppend
         || node.node_tag() == NodeTag::T_SubqueryScan
         || node.node_tag() == NodeTag::T_BitmapAnd
-        || node.node_tag() == NodeTag::T_BitmapOr;
+        || node.node_tag() == NodeTag::T_BitmapOr
+        || !member_subplans.is_empty();
     if haschildren {
         ExplainOpenGroup("Plans", Some("Plans"), false, es);
+    }
+    // ExplainSubPlans over initPlan.
+    for sp_node in plan.initPlan.iter() {
+        let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
+        explain_sub_plan(sp, "InitPlan", &pushed, es)?;
     }
     if let Some(l) = plan.lefttree {
         ExplainNode(l, Some("Outer"), None, Some(&pushed), es)?;
@@ -1161,16 +1164,18 @@ pub fn ExplainNode<'mcx>(
     if let Some(sq) = node.as_subquery_scan() {
         ExplainNode(sq.subplan.expect("SubqueryScan subplan"), Some("Subquery"), None, Some(&pushed), es)?;
     }
-    if haschildren {
-        ExplainCloseGroup("Plans", Some("Plans"), false, es);
-    }
     // ExplainSubPlans over planstate->subPlan.
-    let member_subplans = collect_node_subplans(es.str.allocator(), node)?;
     for sp in member_subplans.iter() {
         explain_sub_plan(sp, "SubPlan", &pushed, es)?;
     }
+    if haschildren {
+        ExplainCloseGroup("Plans", Some("Plans"), false, es);
+    }
 
-    es.indent = save_indent;
+    // in text format, undo whatever indentation we added
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        es.indent = save_indent;
+    }
     ExplainCloseGroup("Plan", if relationship.is_some() { None } else { Some("Plan") }, true, es);
     Ok(())
 }
