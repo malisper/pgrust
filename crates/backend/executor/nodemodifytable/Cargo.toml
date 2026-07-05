@@ -28,6 +28,7 @@ fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 exectuples = { path = "../exectuples" }
 heaptuple = { path = "../../access/common/heaptuple" }
 execpartition = { path = "../execpartition" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
 tupdesc = { path = "../../access/common/tupdesc" }
 execindexing = { path = "../execindexing" }
 tableam = { path = "../../access/table/tableam" }

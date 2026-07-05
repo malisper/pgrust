@@ -8219,6 +8219,7 @@ dependencies = [
  "parser_driver",
  "parser_seams",
  "pg_enum_seams",
+ "pg_inherits",
  "pg_sema_seams",
  "pgstat",
  "planner",
