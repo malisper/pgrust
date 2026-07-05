@@ -1182,7 +1182,8 @@ pub fn exec_init_node<'mcx>(
             let epq = crate::epq::EpqState {
                 plan: mt_plan.plan.lefttree,
                 recheck: None,
-                result_rti: mt.result_rti,
+                // Set per-row by the dispatch closure (multi-resultrel).
+                result_rti: 0,
             };
             PlanStateNode::ModifyTable(::mcx::alloc_in(
                 mcx,
@@ -2040,7 +2041,11 @@ fn modify_table_arm<'mcx>(
         &mut mps.mt,
         estate,
         |e| exec_proc_node(subplan, e),
-        |e, inputslot| crate::epq::eval_plan_qual(epq, e, inputslot),
+        |e, inputslot, rti| {
+            // EvalPlanQualSlot keys by the dispatch-current result relation.
+            epq.result_rti = rti;
+            crate::epq::eval_plan_qual(epq, e, inputslot)
+        },
     )
 }
 
