@@ -770,12 +770,16 @@ fn pull_up_simple_subquery<'mcx>(
         get_relids_in_jointree(mcx, jnode, &mut full_relids)?;
         get_relids_in_jointree_no_inner(mcx, jnode, &mut subrelids)?;
     }
+    // C computes nullinfo from the outer jointree before the splice below
+    // rewrites it; lateral-only, like C.
+    let nullinfo = if lateral { Some(get_nullingrels(mcx, parse)?) } else { None };
     let phc = PullupPhCtx {
         wrap_all: !parse.groupingSets.is_nil(),
         last_ph_id: &last_ph_id,
         rv_cache: &rv_cache,
         sub_relids: &full_relids,
         eref: rte.eref,
+        nullinfo: nullinfo.as_deref(),
     };
 
     // OffsetVarNodes/IncrementVarSublevelsUp over the subroot's
@@ -1359,6 +1363,80 @@ pub(crate) struct PullupPhCtx<'a, 'mcx> {
     // The target RTE's eref (C rcon->target_rte through expandRTE): RECORD
     // whole-row expansion carries its aliases as RowExpr colnames.
     eref: Option<&'mcx types_nodes::primnodes::Alias<'mcx>>,
+    // C rcon->nullinfo: per-RTE outer-join nulling sets over the outer
+    // query's jointree, indexed by rti ([0] unused; length = outer rtable
+    // length + 1). Set only when the target RTE is lateral, like C.
+    nullinfo: Option<&'a [types_nodes::Bitmapset<'mcx>]>,
+}
+
+// get_nullingrels (prepjointree.c): for each leaf RTE of the outer query,
+// the set of outer-join relids that potentially null it. Must run before
+// the pulled-up jointree is spliced in.
+fn get_nullingrels<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse: &Query<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, types_nodes::Bitmapset<'mcx>>> {
+    let mut info = mcx::vec_with_capacity_in(mcx, parse.rtable.len() + 1)?;
+    for _ in 0..=parse.rtable.len() {
+        info.push(types_nodes::Bitmapset::empty());
+    }
+    if let Some(jt) = parse.jointree {
+        for child in &jt.fromlist {
+            get_nullingrels_recurse(mcx, child, &types_nodes::Bitmapset::empty(), &mut info)?;
+        }
+    }
+    Ok(info)
+}
+
+fn get_nullingrels_recurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    jtnode: Node<'mcx>,
+    upper_nullingrels: &types_nodes::Bitmapset<'mcx>,
+    info: &mut [types_nodes::Bitmapset<'mcx>],
+) -> PgResult<()> {
+    use types_nodes::JoinType::*;
+    match jtnode.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            let varno = jtnode.as_range_tbl_ref().expect("RangeTblRef").rtindex as usize;
+            info[varno] = upper_nullingrels.clone_in(mcx)?;
+            Ok(())
+        }
+        NodeTag::T_FromExpr => {
+            let f = jtnode.as_from_expr().expect("FromExpr");
+            for child in &f.fromlist {
+                get_nullingrels_recurse(mcx, child, upper_nullingrels, info)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_JoinExpr => {
+            let j = jtnode.as_join_expr().expect("JoinExpr");
+            // C adds j->rtindex unconditionally in the outer-join arms; a
+            // SEMI/ANTI join carries rtindex 0 and member 0 is legal there.
+            let mut local = upper_nullingrels.clone_in(mcx)?;
+            local.add_member(mcx, j.rtindex)?;
+            match j.jointype {
+                JOIN_INNER => {
+                    get_nullingrels_recurse(mcx, j.larg, upper_nullingrels, info)?;
+                    get_nullingrels_recurse(mcx, j.rarg, upper_nullingrels, info)?;
+                }
+                JOIN_LEFT | JOIN_SEMI | JOIN_ANTI => {
+                    get_nullingrels_recurse(mcx, j.larg, upper_nullingrels, info)?;
+                    get_nullingrels_recurse(mcx, j.rarg, &local, info)?;
+                }
+                JOIN_FULL => {
+                    get_nullingrels_recurse(mcx, j.larg, &local, info)?;
+                    get_nullingrels_recurse(mcx, j.rarg, &local, info)?;
+                }
+                JOIN_RIGHT => {
+                    get_nullingrels_recurse(mcx, j.larg, &local, info)?;
+                    get_nullingrels_recurse(mcx, j.rarg, upper_nullingrels, info)?;
+                }
+                other => panic!("get_nullingrels_recurse: unrecognized join type: {other:?}"),
+            }
+            Ok(())
+        }
+        other => panic!("get_nullingrels_recurse: unrecognized node type: {other:?}"),
+    }
 }
 
 // pullup_replace_vars → pullup_replace_vars_callback (prepjointree.c) over
@@ -1463,35 +1541,55 @@ fn replace_var_expr_su<'mcx>(
                     copy_expr(mcx, tle.expr, 0)?
                 };
                 if need_phv {
-                    if nulled && lateral {
-                        // C's lateral legs consult get_nullingrels only for
-                        // replacement varnos outside the subquery; inside, the
-                        // non-lateral logic below is C-identical.
-                        let all = vars::pull_varnos(mcx, gen)?;
-                        let inside = ph
-                            .is_some_and(|p| all.iter().all(|m| p.sub_relids.is_member(m)));
-                        if !inside {
-                            panic!(
-                                "pullup_replace_vars_callback (prepjointree.c): nulled Var \
-                                 over a LATERAL pulled-up subquery with lateral references \
-                                 (get_nullingrels wrap checks unported)"
-                            );
-                        }
-                    }
+                    // C rcon->nullinfo, reachable only under a lateral target
+                    // RTE (only pull_up_simple_subquery builds it).
+                    let nullinfo = || {
+                        ph.and_then(|p| p.nullinfo)
+                            .expect("lateral pull-up carries nullinfo")
+                    };
                     // A whole-row reference wraps the entire RowExpr so it
                     // yields NULL, not ROW(NULL,...), when nulled; simple
-                    // Vars/PHVs escape; a strict expression over the
-                    // subquery's own Vars takes the nullingrels directly
-                    // (non-lateral, so every level-0 Var is the subquery's).
+                    // Vars/PHVs escape unless they are lateral references to
+                    // rels not under the same lowest nulling outer join as
+                    // the subquery; a strict expression over the subquery's
+                    // Vars (or over lateral rels under that same join) takes
+                    // the nullingrels directly.
                     let wrap = if ph.is_some_and(|p| p.wrap_all) || v.varattno == 0 {
                         true
-                    } else if gen.as_var().is_some_and(|nv| nv.varlevelsup == 0)
-                        || gen.as_place_holder_var().is_some_and(|p| p.phlevelsup == 0)
+                    } else if let Some(nv) = gen.as_var().filter(|nv| nv.varlevelsup == 0) {
+                        lateral
+                            && ph.is_some_and(|p| !p.sub_relids.is_member(nv.varno))
+                            && {
+                                let ni = nullinfo();
+                                !ni[varno as usize].is_subset(&ni[nv.varno as usize])
+                            }
+                    } else if let Some(nphv) =
+                        gen.as_place_holder_var().filter(|p| p.phlevelsup == 0)
                     {
-                        false
+                        lateral
+                            && ph.is_some_and(|p| !nphv.phrels.is_subset(p.sub_relids))
+                            && {
+                                let ni = nullinfo();
+                                nphv.phrels
+                                    .iter()
+                                    .any(|lvarno| !ni[varno as usize].is_subset(&ni[lvarno as usize]))
+                            }
                     } else {
-                        !(vars::contain_vars_of_level(gen, 0)?
-                            && !clauses::contain_nonstrict_functions(gen)?)
+                        let contain_nullable_vars = if !lateral {
+                            vars::contain_vars_of_level(gen, 0)?
+                        } else {
+                            let all_varnos = vars::pull_varnos(mcx, gen)?;
+                            let p = ph.expect("lateral pull-up carries PHV context");
+                            if all_varnos.overlap(p.sub_relids) {
+                                true
+                            } else {
+                                let ni = nullinfo();
+                                all_varnos.iter().any(|lvarno| {
+                                    ni[varno as usize].is_subset(&ni[lvarno as usize])
+                                })
+                            }
+                        };
+                        !(contain_nullable_vars && !clauses::contain_nonstrict_functions(gen)?)
                     };
                     if wrap {
                         let Some(p) = ph else {
@@ -1545,8 +1643,27 @@ fn replace_var_expr_su<'mcx>(
                         })
                     }
                     .expect("PlaceHolderVar")?;
+                } else if lateral {
+                    // C's lateral leg: lateral refs inside the expression get
+                    // only the nullingrels that potentially apply to them
+                    // (they may have bubbled up through fewer outer joins
+                    // than the subquery's Vars); collect varnos before
+                    // mutating the tree.
+                    let p = ph.expect("lateral pull-up carries PHV context");
+                    let ni = p.nullinfo.expect("lateral pull-up carries nullinfo");
+                    let mut lvarnos = vars::pull_varnos(mcx, newnode)?;
+                    lvarnos.del_members(p.sub_relids);
+                    for lvarno in lvarnos.iter() {
+                        let lnullingrels =
+                            v.varnullingrels.intersect(&ni[lvarno as usize], mcx)?;
+                        if !lnullingrels.is_empty() {
+                            let target = types_nodes::Bitmapset::make_singleton(mcx, lvarno)?;
+                            add_nulling_relids_expr(mcx, newnode, Some(&target), &lnullingrels)?;
+                        }
+                    }
+                    add_nulling_relids_expr(mcx, newnode, Some(p.sub_relids), &v.varnullingrels)?;
                 } else {
-                    add_nulling_relids_expr(mcx, newnode, &v.varnullingrels)?;
+                    add_nulling_relids_expr(mcx, newnode, None, &v.varnullingrels)?;
                 }
             }
             if sublevels_up > 0 {
@@ -2623,17 +2740,19 @@ pub(crate) fn remove_nulling_relids<'mcx>(
     Ok(())
 }
 
-// add_nulling_relids (rewriteManip.c), in-place expression form with
-// target_relids = NULL: every Var whose varlevelsup addresses this level gets
-// added_relids unioned into varnullingrels. Callers own the tree (fresh
-// copy_expr output).
+// add_nulling_relids (rewriteManip.c), in-place expression form: every Var
+// whose varlevelsup addresses this level and (target = None) or whose varno
+// is in target gets added_relids unioned into varnullingrels; PHVs match on
+// phrels overlap. Callers own the tree (fresh copy_expr output).
 fn add_nulling_relids_expr<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
+    target: Option<&types_nodes::Bitmapset<'mcx>>,
     added: &types_nodes::Bitmapset<'mcx>,
 ) -> PgResult<()> {
     struct W<'a, 'x> {
         mcx: Mcx<'x>,
+        target: Option<&'a types_nodes::Bitmapset<'x>>,
         added: &'a types_nodes::Bitmapset<'x>,
         sublevels_up: u32,
     }
@@ -2641,7 +2760,10 @@ fn add_nulling_relids_expr<'mcx>(
         fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
             match node.node_tag() {
                 NodeTag::T_Var => {
-                    if node.as_var().expect("Var").varlevelsup == self.sublevels_up {
+                    let v = node.as_var().expect("Var");
+                    if v.varlevelsup == self.sublevels_up
+                        && self.target.map_or(true, |t| t.is_member(v.varno))
+                    {
                         let (mcx, added) = (self.mcx, self.added);
                         // SAFETY: exclusive tree (caller contract); the shared
                         // borrow ends before the write.
@@ -2655,8 +2777,9 @@ fn add_nulling_relids_expr<'mcx>(
                 NodeTag::T_PlaceHolderVar => {
                     // C adds to phnullingrels without recursing: the PHV is
                     // assumed evaluated below the nulling join.
-                    if node.as_place_holder_var().expect("PlaceHolderVar").phlevelsup
-                        == self.sublevels_up
+                    let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+                    if phv.phlevelsup == self.sublevels_up
+                        && self.target.map_or(true, |t| phv.phrels.overlap(t))
                     {
                         let (mcx, added) = (self.mcx, self.added);
                         // SAFETY: exclusive tree (caller contract).
@@ -2686,7 +2809,7 @@ fn add_nulling_relids_expr<'mcx>(
             r.map(|_| false)
         }
     }
-    let mut w = W { mcx, added, sublevels_up: 0 };
+    let mut w = W { mcx, target, added, sublevels_up: 0 };
     nodes_core::NodeWalker::visit(&mut w, node)?;
     Ok(())
 }
@@ -3025,6 +3148,62 @@ mod tests {
         let out_var = parse.targetList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
         assert_eq!((out_var.varno, out_var.varattno), (3, 1));
     }
+
+    #[test]
+    fn get_nullingrels_join_shapes() {
+        use types_nodes::JoinType;
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let join = |jt, larg, rarg, rtindex| {
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::JoinExpr {
+                    jointype: jt,
+                    isNatural: false,
+                    larg,
+                    rarg,
+                    usingClause: NodeList::nil(),
+                    join_using_alias: None,
+                    quals: None,
+                    alias: None,
+                    rtindex,
+                },
+            )
+            .unwrap()
+        };
+        let rtr = |rti| Node::mk_range_tbl_ref(mcx, rti).unwrap();
+
+        // (t1 LEFT JOIN t2 [rti 3]) FULL JOIN t4 [rti 5]: t1 nulled by {5},
+        // t2 by {3,5}, t4 by {5}.
+        let inner = join(JoinType::JOIN_LEFT, rtr(1), rtr(2), 3);
+        let outer = join(JoinType::JOIN_FULL, inner, rtr(4), 5);
+        let mut rtable = NodeList::nil();
+        for relid in [11, 12, 13, 14, 15] {
+            rtable.lappend(mcx, rel_rte(mcx, relid, 0)).unwrap();
+        }
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            rtable,
+            jointree: Some(
+                alloc_leak_in(
+                    mcx,
+                    FromExpr { fromlist: NodeList::make1(mcx, outer).unwrap(), quals: None },
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        let info = super::get_nullingrels(mcx, &parse).unwrap();
+        assert_eq!(info.len(), 6);
+        assert_eq!(info[1].iter().collect::<Vec<_>>(), vec![5]);
+        assert_eq!(info[2].iter().collect::<Vec<_>>(), vec![3, 5]);
+        assert_eq!(info[4].iter().collect::<Vec<_>>(), vec![5]);
+        // Nulling sets drive the wrap decision exactly as C: a lateral ref to
+        // t1 from under the LEFT JOIN (subquery at rarg) is NOT a subset case.
+        assert!(!info[2].is_subset(&info[1]));
+        assert!(info[1].is_subset(&info[2]));
+    }
 }
 
 // transform_MERGE_to_join (prepjointree.c): replace the MERGE jointree (the
@@ -3339,6 +3518,7 @@ pub fn expand_virtual_generated_columns<'mcx>(
             sub_relids: &empty_relids,
             // Relation-backed expansion: whole-row Vars are named rowtypes.
             eref: None,
+            nullinfo: None,
         };
         if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
             replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
