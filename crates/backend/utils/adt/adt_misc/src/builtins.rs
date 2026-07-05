@@ -533,6 +533,15 @@ pub fn fc_pg_encoding_to_char(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinf
     byref_result(fcinfo.result_mcx(), &n.data)
 }
 
+// utils/mb/mbutils.c PG_char_to_encoding, hosted with the misc slice.
+pub fn fc_pg_char_to_encoding(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg is name; strict fn.
+    let raw = unsafe { fcinfo.arg_name(0) };
+    let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let name = core::str::from_utf8(&raw[..nul]).unwrap_or("");
+    Ok(Datum::from_i32(mbutils::pg_char_to_encoding(name)))
+}
+
 pub fn fc_anychar_typmodout(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let typmod = fcinfo.arg_i32(0);
     let out = if typmod > 4 { format!("({})", typmod - 4) } else { String::new() };
@@ -670,6 +679,7 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(2918, "numerictypmodout", 1, fc_numerictypmodout),
     b(861, "current_database", 0, fc_current_database),
     b(1215, "obj_description", 2, fc_obj_description),
+    b(1264, "PG_char_to_encoding", 1, fc_pg_char_to_encoding),
     b(1597, "PG_encoding_to_char", 1, fc_pg_encoding_to_char),
     b(1216, "col_description", 2, fc_col_description),
     b(2848, "pg_switch_wal", 0, fc_pg_switch_wal),
