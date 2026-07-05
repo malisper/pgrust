@@ -678,6 +678,16 @@ fn run_program<'mcx>(
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
                 assign_to_result(rslot, *resultnum, nd.value, nd.isnull);
             }
+            Step::AssignOldVar { attnum, resultnum } => {
+                let nd = read_var(old_slot!(), *attnum);
+                let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+                assign_to_result(rslot, *resultnum, nd.value, nd.isnull);
+            }
+            Step::AssignNewVar { attnum, resultnum } => {
+                let nd = read_var(new_slot!(), *attnum);
+                let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+                assign_to_result(rslot, *resultnum, nd.value, nd.isnull);
+            }
             Step::AssignTmp { resultnum } => {
                 let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
                 // SAFETY: res is the state's live result cell.
