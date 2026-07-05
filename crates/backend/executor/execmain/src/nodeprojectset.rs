@@ -101,7 +101,10 @@ pub fn exec_init_project_set<'mcx>(
                     state.arm_result_mcx(mcx);
                     args.push(state);
                 }
-                let flinfo = fmgr_core::fmgr_info(fe.funcid)?;
+                let mut flinfo = fmgr_core::fmgr_info(fe.funcid)?;
+                // C init_sexpr: fmgr_info_set_expr — get_fn_expr_argtype
+                // consumers read arg types off the call expression.
+                flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, expr)?);
                 debug_assert!(flinfo.fn_retset);
                 let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(fe.inputcollid);
                 fcinfo.nargs = fe.args.len() as i16;

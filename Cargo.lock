@@ -7617,12 +7617,14 @@ version = "0.1.0"
 name = "nodefunctionscan"
 version = "0.1.0"
 dependencies = [
+ "coerce",
  "datum",
  "execexpr",
  "execscan",
  "exectuples",
  "executils",
  "fmgr_core",
+ "format_type",
  "funcapi",
  "init_small",
  "mcx",

@@ -528,6 +528,13 @@ fn run_value_per_call<'mcx, const N: usize>(
                 {
                     return Err(materialize_violated());
                 }
+                // C: tupledesc_match(expectedDesc, rsinfo.setDesc).
+                if let Some(set_desc) = rsinfo.setDesc {
+                    // SAFETY: setDesc contract — a live TupleDescData for the
+                    // duration of the call.
+                    let src = unsafe { set_desc.cast::<TupleDescData<'_>>().as_ref() };
+                    tupledesc_match(expected_desc, src)?;
+                }
                 // C's setResult-NULL leg hands back an empty tuplestore; the
                 // pre-built `store` already is one.
                 if let Some(set_result) = rsinfo.setResult.take() {
@@ -541,6 +548,51 @@ fn run_value_per_call<'mcx, const N: usize>(
         first_time = false;
     }
     Ok(store)
+}
+
+#[cold]
+fn tupledesc_mismatch(detail: String) -> Box<PgError> {
+    Box::new(
+        PgError::error("function return row and query-specified return row do not match")
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(detail),
+    )
+}
+
+// C tupledesc_match (execSRF.c).
+fn tupledesc_match(
+    dst_tupdesc: &TupleDescData<'_>,
+    src_tupdesc: &TupleDescData<'_>,
+) -> PgResult<()> {
+    if dst_tupdesc.natts != src_tupdesc.natts {
+        let (s, d) = (src_tupdesc.natts, dst_tupdesc.natts);
+        let noun = if s == 1 { "attribute" } else { "attributes" };
+        return Err(tupledesc_mismatch(format!(
+            "Returned row contains {s} {noun}, but query expects {d}."
+        )));
+    }
+    for i in 0..dst_tupdesc.natts as usize {
+        let dattr = &dst_tupdesc.attrs[i];
+        let sattr = &src_tupdesc.attrs[i];
+        if ::coerce::IsBinaryCoercible(sattr.atttypid, dattr.atttypid)? {
+            continue;
+        }
+        if !dattr.attisdropped {
+            return Err(tupledesc_mismatch(format!(
+                "Returned type {} at ordinal position {}, but query expects {}.",
+                ::format_type::format_type_be(sattr.atttypid)?,
+                i + 1,
+                ::format_type::format_type_be(dattr.atttypid)?,
+            )));
+        }
+        if dattr.attlen != sattr.attlen || dattr.attalign != sattr.attalign {
+            return Err(tupledesc_mismatch(format!(
+                "Physical storage mismatch on dropped attribute at ordinal position {}.",
+                i + 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 // execSRF.c returnsTuple arm: C's RECORD rowtype-consistency check is
