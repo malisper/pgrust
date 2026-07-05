@@ -24,6 +24,8 @@ use crate::*;
 const INT4OID: u32 = 23;
 const INT4OUT: u32 = 43;
 const TEXTOUT: u32 = 47;
+const JSONOUT: u32 = 322;
+const XMLOUT: u32 = 2894;
 
 thread_local! {
     static SENT: RefCell<Vec<(u8, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
@@ -163,6 +165,13 @@ fn install_fixtures() {
                     typstorage: b'x' as i8,
                     typcollation: 100,
                 }),
+                crate::JSONOID | crate::XMLOID => Some(types_tuple::PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: types_tuple::TYPALIGN_INT,
+                    typstorage: b'x' as i8,
+                    typcollation: 0,
+                }),
                 _ => None,
             })
         });
@@ -174,6 +183,8 @@ fn install_fixtures() {
         mbutils_seams::pg_server_to_client::set(|_, _| Ok(None));
         lsyscache_seams::get_type_output_info::set(|oid| match oid {
             types_core::TEXTOID => Ok((TEXTOUT, true)),
+            crate::JSONOID => Ok((JSONOUT, true)),
+            crate::XMLOID => Ok((XMLOUT, true)),
             _ => panic!("get_type_output_info: unexpected oid {oid}"),
         });
         syscache_seams::pg_type_io_shape::set(|typid| {
@@ -199,6 +210,36 @@ fn install_fixtures() {
                     typoutput: TEXTOUT,
                     typreceive: 2414,
                     typsend: 2415,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: 0,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                crate::JSONOID => Some(syscache_seams::PgTypeIoShape {
+                    oid: crate::JSONOID,
+                    typinput: 321,
+                    typoutput: JSONOUT,
+                    typreceive: 3805,
+                    typsend: 3804,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typelem: 0,
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: b'i' as i8,
+                    typdelim: b',' as i8,
+                    typisdefined: true,
+                }),
+                crate::XMLOID => Some(syscache_seams::PgTypeIoShape {
+                    oid: crate::XMLOID,
+                    typinput: 2893,
+                    typoutput: XMLOUT,
+                    typreceive: 2896,
+                    typsend: 2897,
                     typmodin: 0,
                     typmodout: 0,
                     typelem: 0,
@@ -242,6 +283,9 @@ fn install_fixtures() {
         fmgr_seams::fmgr_info::set(|oid| match oid {
             TEXTOUT => Ok(FmgrInfo::new(textout_fn, TEXTOUT, 1, true, false)),
             INT4OUT => Ok(FmgrInfo::new(int4out_fn, INT4OUT, 1, true, false)),
+            // json_out/xml_out share textout's varlena-passthrough shape.
+            JSONOUT => Ok(FmgrInfo::new(textout_fn, JSONOUT, 1, true, false)),
+            XMLOUT => Ok(FmgrInfo::new(textout_fn, XMLOUT, 1, true, false)),
             _ => panic!("fmgr_info: unexpected oid {oid}"),
         });
         guc_tables::vars::standard_conforming_strings.install(guc_tables::GucVarAccessors {
@@ -710,18 +754,186 @@ fn show_buffer_usage_matches_c_shape() {
     assert_eq!(es_text(&es), "");
 }
 
-#[test]
-fn json_format_is_clean_error() {
+fn fmt<'mcx>(mcx: Mcx<'mcx>, name: &'static str) -> Node<'mcx> {
+    let s = Node::mk_string(mcx, name).unwrap();
+    opt(mcx, "format", Some(s))
+}
+
+fn run_explain_fmt(format: &'static str, extra: &[&'static str]) -> Vec<String> {
     install_fixtures();
     let mcx = leaked_mcx();
-    let json = Node::mk_string(mcx, "json").unwrap();
-    let opts = [opt(mcx, "format", Some(json))];
-    let stmt = explain_stmt(mcx, &opts);
-    let mut dest = DestReceiver::DoNothing;
-    let err =
-        ExplainQuery(mcx, &stmt, "q", ParamListHandle::NULL, QueryEnvHandle::NULL, &mut dest)
-            .unwrap_err();
-    assert!(err.message().contains("non-text format lane"));
+    let mut opts = vec![fmt(mcx, format)];
+    opts.extend(extra.iter().map(|n| opt(mcx, n, None)));
+    let stmt = mcx::alloc_leak_in(mcx, explain_stmt(mcx, &opts)).unwrap();
+    run_explain_stmt(mcx, stmt)
+}
+
+// Expected strings derived from explain_format.c/explain.c REL_18_3 emitters
+// over the same plan the TEXT tests pin against real PostgreSQL 18.3.
+#[test]
+fn explain_format_json_matches_pg() {
+    assert_eq!(
+        run_explain_fmt("json", &[]),
+        [concat!(
+            "[\n",
+            "  {\n",
+            "    \"Plan\": {\n",
+            "      \"Node Type\": \"Result\",\n",
+            "      \"Parallel Aware\": false,\n",
+            "      \"Async Capable\": false,\n",
+            "      \"Startup Cost\": 0.00,\n",
+            "      \"Total Cost\": 0.01,\n",
+            "      \"Plan Rows\": 1,\n",
+            "      \"Plan Width\": 4,\n",
+            "      \"Disabled\": false\n",
+            "    }\n",
+            "  }\n",
+            "]"
+        )]
+    );
+}
+
+#[test]
+fn explain_format_json_costs_off_matches_pg() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let costs_off = off(mcx, "costs");
+    let opts = [fmt(mcx, "json"), costs_off];
+    let stmt = mcx::alloc_leak_in(mcx, explain_stmt(mcx, &opts)).unwrap();
+    assert_eq!(
+        run_explain_stmt(mcx, stmt),
+        [concat!(
+            "[\n",
+            "  {\n",
+            "    \"Plan\": {\n",
+            "      \"Node Type\": \"Result\",\n",
+            "      \"Parallel Aware\": false,\n",
+            "      \"Async Capable\": false,\n",
+            "      \"Disabled\": false\n",
+            "    }\n",
+            "  }\n",
+            "]"
+        )]
+    );
+}
+
+#[test]
+fn explain_format_json_verbose_matches_pg() {
+    assert_eq!(
+        run_explain_fmt("json", &["verbose"]),
+        [concat!(
+            "[\n",
+            "  {\n",
+            "    \"Plan\": {\n",
+            "      \"Node Type\": \"Result\",\n",
+            "      \"Parallel Aware\": false,\n",
+            "      \"Async Capable\": false,\n",
+            "      \"Startup Cost\": 0.00,\n",
+            "      \"Total Cost\": 0.01,\n",
+            "      \"Plan Rows\": 1,\n",
+            "      \"Plan Width\": 4,\n",
+            "      \"Disabled\": false,\n",
+            "      \"Output\": [\"1\"]\n",
+            "    }\n",
+            "  }\n",
+            "]"
+        )]
+    );
+}
+
+#[test]
+fn explain_format_yaml_matches_pg() {
+    assert_eq!(
+        run_explain_fmt("yaml", &[]),
+        [concat!(
+            "- Plan: \n",
+            "    Node Type: \"Result\"\n",
+            "    Parallel Aware: false\n",
+            "    Async Capable: false\n",
+            "    Startup Cost: 0.00\n",
+            "    Total Cost: 0.01\n",
+            "    Plan Rows: 1\n",
+            "    Plan Width: 4\n",
+            "    Disabled: false"
+        )]
+    );
+}
+
+#[test]
+fn explain_format_xml_matches_pg() {
+    assert_eq!(
+        run_explain_fmt("xml", &[]),
+        [concat!(
+            "<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n",
+            "  <Query>\n",
+            "    <Plan>\n",
+            "      <Node-Type>Result</Node-Type>\n",
+            "      <Parallel-Aware>false</Parallel-Aware>\n",
+            "      <Async-Capable>false</Async-Capable>\n",
+            "      <Startup-Cost>0.00</Startup-Cost>\n",
+            "      <Total-Cost>0.01</Total-Cost>\n",
+            "      <Plan-Rows>1</Plan-Rows>\n",
+            "      <Plan-Width>4</Plan-Width>\n",
+            "      <Disabled>false</Disabled>\n",
+            "    </Plan>\n",
+            "  </Query>\n",
+            "</explain>"
+        )]
+    );
+}
+
+#[test]
+fn explain_format_json_union_all_matches_pg() {
+    install_fixtures();
+    let mcx = leaked_mcx();
+    let query = Node::mk(mcx, union_all_query(mcx)).unwrap();
+    let opts = NodeList::make1(mcx, fmt(mcx, "json")).unwrap();
+    let stmt =
+        mcx::alloc_leak_in(mcx, ExplainStmt { query: Some(query), options: opts }).unwrap();
+    let member = |relationship: &str| {
+        format!(
+            concat!(
+                "        {{\n",
+                "          \"Node Type\": \"Result\",\n",
+                "          \"Parent Relationship\": \"{}\",\n",
+                "          \"Parallel Aware\": false,\n",
+                "          \"Async Capable\": false,\n",
+                "          \"Startup Cost\": 0.00,\n",
+                "          \"Total Cost\": 0.01,\n",
+                "          \"Plan Rows\": 1,\n",
+                "          \"Plan Width\": 4,\n",
+                "          \"Disabled\": false\n",
+                "        }}"
+            ),
+            relationship
+        )
+    };
+    let expected = format!(
+        concat!(
+            "[\n",
+            "  {{\n",
+            "    \"Plan\": {{\n",
+            "      \"Node Type\": \"Append\",\n",
+            "      \"Parallel Aware\": false,\n",
+            "      \"Async Capable\": false,\n",
+            "      \"Startup Cost\": 0.00,\n",
+            "      \"Total Cost\": 0.03,\n",
+            "      \"Plan Rows\": 2,\n",
+            "      \"Plan Width\": 4,\n",
+            "      \"Disabled\": false,\n",
+            "      \"Subplans Removed\": 0,\n",
+            "      \"Plans\": [\n",
+            "{},\n",
+            "{}\n",
+            "      ]\n",
+            "    }}\n",
+            "  }}\n",
+            "]"
+        ),
+        member("Member"),
+        member("Member")
+    );
+    assert_eq!(run_explain_stmt(mcx, stmt), [expected]);
 }
 
 // EXPLAIN SELECT pk FROM t ORDER BY val LIMIT 2 through the REAL pipeline
@@ -1141,4 +1353,176 @@ mod order_by_limit_e2e {
         );
     }
 
+    #[test]
+    fn explain_format_json_sort_matches_pg() {
+        install_fixtures();
+        install_scan_fixtures();
+        let mcx = leaked_mcx();
+        let query = Node::mk(mcx, order_by_limit_query(mcx)).unwrap();
+        let opts = NodeList::make1(mcx, super::fmt(mcx, "json")).unwrap();
+        let stmt =
+            mcx::alloc_leak_in(mcx, ExplainStmt { query: Some(query), options: opts }).unwrap();
+        assert_eq!(
+            run_explain_stmt(mcx, stmt),
+            [concat!(
+                "[\n",
+                "  {\n",
+                "    \"Plan\": {\n",
+                "      \"Node Type\": \"Limit\",\n",
+                "      \"Parallel Aware\": false,\n",
+                "      \"Async Capable\": false,\n",
+                "      \"Startup Cost\": 300.00,\n",
+                "      \"Total Cost\": 300.01,\n",
+                "      \"Plan Rows\": 2,\n",
+                "      \"Plan Width\": 8,\n",
+                "      \"Disabled\": false,\n",
+                "      \"Plans\": [\n",
+                "        {\n",
+                "          \"Node Type\": \"Sort\",\n",
+                "          \"Parent Relationship\": \"Outer\",\n",
+                "          \"Parallel Aware\": false,\n",
+                "          \"Async Capable\": false,\n",
+                "          \"Startup Cost\": 300.00,\n",
+                "          \"Total Cost\": 325.00,\n",
+                "          \"Plan Rows\": 10000,\n",
+                "          \"Plan Width\": 8,\n",
+                "          \"Disabled\": false,\n",
+                "          \"Sort Key\": [\"val\"],\n",
+                "          \"Plans\": [\n",
+                "            {\n",
+                "              \"Node Type\": \"Seq Scan\",\n",
+                "              \"Parent Relationship\": \"Outer\",\n",
+                "              \"Parallel Aware\": false,\n",
+                "              \"Async Capable\": false,\n",
+                "              \"Relation Name\": \"t\",\n",
+                "              \"Alias\": \"t\",\n",
+                "              \"Startup Cost\": 0.00,\n",
+                "              \"Total Cost\": 200.00,\n",
+                "              \"Plan Rows\": 10000,\n",
+                "              \"Plan Width\": 8,\n",
+                "              \"Disabled\": false\n",
+                "            }\n",
+                "          ]\n",
+                "        }\n",
+                "      ]\n",
+                "    }\n",
+                "  }\n",
+                "]"
+            )]
+        );
+    }
+
+    fn nestloop_pstmt<'mcx>(mcx: Mcx<'mcx>) -> &'mcx PlannedStmt<'mcx> {
+        let mk_rte = |alias: &'static str| {
+            let mut colnames = NodeList::make1(mcx, Node::mk_string(mcx, "pk").unwrap()).unwrap();
+            colnames.lappend(mcx, Node::mk_string(mcx, "val").unwrap()).unwrap();
+            let eref =
+                mcx::alloc_leak_in(mcx, Alias { aliasname: Some(alias), colnames }).unwrap();
+            let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            rte.rtekind = RTEKind::RTE_RELATION;
+            rte.relid = TBL;
+            rte.relkind = b'r';
+            rte.rellockmode = 1;
+            rte.eref = Some(eref);
+            rte.seal()
+        };
+        let mut rtable = NodeList::make1(mcx, mk_rte("t")).unwrap();
+        rtable.lappend(mcx, mk_rte("u")).unwrap();
+
+        let mk_scan = |scanrelid: u32| {
+            let mut s = Node::build::<types_nodes::plannodes::SeqScan>(mcx).unwrap();
+            s.scan.plan.startup_cost = 0.0;
+            s.scan.plan.total_cost = 1.01;
+            s.scan.plan.plan_rows = 2.0;
+            s.scan.plan.plan_width = 4;
+            s.scan.scanrelid = scanrelid;
+            s.seal()
+        };
+        let mut nl = Node::build::<types_nodes::plannodes::NestLoop>(mcx).unwrap();
+        nl.join.plan.startup_cost = 0.0;
+        nl.join.plan.total_cost = 4.06;
+        nl.join.plan.plan_rows = 4.0;
+        nl.join.plan.plan_width = 8;
+        nl.join.plan.lefttree = Some(mk_scan(1));
+        nl.join.plan.righttree = Some(mk_scan(2));
+        nl.join.jointype = types_nodes::JoinType::JOIN_INNER;
+        nl.join.inner_unique = false;
+        let plan_tree = nl.seal();
+
+        mcx::alloc_leak_in(
+            mcx,
+            PlannedStmt {
+                commandType: CmdType::CMD_SELECT,
+                canSetTag: true,
+                planTree: Some(plan_tree),
+                rtable,
+                ..PlannedStmt::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn explain_format_json_join_matches_pg() {
+        install_fixtures();
+        install_scan_fixtures();
+        let mcx = leaked_mcx();
+        let pstmt = nestloop_pstmt(mcx);
+        let mut es = crate::state::NewExplainState(mcx).unwrap();
+        es.format = crate::state::EXPLAIN_FORMAT_JSON;
+        crate::format::ExplainBeginOutput(&mut es);
+        crate::format::ExplainOpenGroup("Query", None, true, &mut es);
+        crate::node::ExplainPrintPlan(mcx, &mut es, pstmt).unwrap();
+        crate::format::ExplainCloseGroup("Query", None, true, &mut es);
+        crate::format::ExplainEndOutput(&mut es);
+        assert_eq!(
+            es_text(&es),
+            concat!(
+                "[\n",
+                "  {\n",
+                "    \"Plan\": {\n",
+                "      \"Node Type\": \"Nested Loop\",\n",
+                "      \"Parallel Aware\": false,\n",
+                "      \"Async Capable\": false,\n",
+                "      \"Join Type\": \"Inner\",\n",
+                "      \"Startup Cost\": 0.00,\n",
+                "      \"Total Cost\": 4.06,\n",
+                "      \"Plan Rows\": 4,\n",
+                "      \"Plan Width\": 8,\n",
+                "      \"Disabled\": false,\n",
+                "      \"Inner Unique\": false,\n",
+                "      \"Plans\": [\n",
+                "        {\n",
+                "          \"Node Type\": \"Seq Scan\",\n",
+                "          \"Parent Relationship\": \"Outer\",\n",
+                "          \"Parallel Aware\": false,\n",
+                "          \"Async Capable\": false,\n",
+                "          \"Relation Name\": \"t\",\n",
+                "          \"Alias\": \"t\",\n",
+                "          \"Startup Cost\": 0.00,\n",
+                "          \"Total Cost\": 1.01,\n",
+                "          \"Plan Rows\": 2,\n",
+                "          \"Plan Width\": 4,\n",
+                "          \"Disabled\": false\n",
+                "        },\n",
+                "        {\n",
+                "          \"Node Type\": \"Seq Scan\",\n",
+                "          \"Parent Relationship\": \"Inner\",\n",
+                "          \"Parallel Aware\": false,\n",
+                "          \"Async Capable\": false,\n",
+                "          \"Relation Name\": \"t\",\n",
+                "          \"Alias\": \"u\",\n",
+                "          \"Startup Cost\": 0.00,\n",
+                "          \"Total Cost\": 1.01,\n",
+                "          \"Plan Rows\": 2,\n",
+                "          \"Plan Width\": 4,\n",
+                "          \"Disabled\": false\n",
+                "        }\n",
+                "      ]\n",
+                "    }\n",
+                "  }\n",
+                "]"
+            )
+        );
+    }
 }

@@ -1,6 +1,6 @@
-// explain.c / explain_state.c / explain_format.c, M1 lane: text format,
+// explain.c / explain_state.c / explain_format.c: all four output formats,
 // costs on/off, VERBOSE tlist, ANALYZE/BUFFERS over the ported node set;
-// non-text formats, wal/memory/settings and ruleutils deparse are loud.
+// wal/memory/settings are loud.
 #![allow(non_snake_case)]
 
 use std::rc::Rc;
@@ -70,18 +70,6 @@ pub fn ExplainQuery<'mcx>(
 ) -> PgResult<()> {
     let mut es = NewExplainState(mcx)?;
     ParseExplainOptionList(&mut es, mcx, &stmt.options)?;
-    if es.format != EXPLAIN_FORMAT_TEXT {
-        // Unported emission arms panic; a panic here unwinds through
-        // plpgsql/SPI callers — gate with a clean error at the boundary.
-        return Err(elog::ereport(types_error::ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(format!(
-                "EXPLAIN {:?} output unported (explain non-text format lane)",
-                es.format
-            ))
-            .into_error()
-            .into());
-    }
 
     let query_node = stmt.query.expect("ExplainQuery: stmt->query is NULL");
 
@@ -293,14 +281,14 @@ fn ExplainOneUtility<'mcx>(
             if es.format == EXPLAIN_FORMAT_TEXT {
                 es.str.append_str("NOTIFY\n")?;
             } else {
-                format::nontext_gap(es, "ExplainDummyGroup");
+                ExplainDummyGroup("Notify", None, es);
             }
         }
         _ => {
             if es.format == EXPLAIN_FORMAT_TEXT {
                 es.str.append_str("Utility statements have no plan structure\n")?;
             } else {
-                format::nontext_gap(es, "ExplainDummyGroup");
+                ExplainDummyGroup("Utility Statement", None, es);
             }
         }
     }
@@ -437,11 +425,15 @@ fn ExplainOnePlanRef<'mcx>(
 
     if bufusage.is_some_and(|bu| peek_buffer_usage(es, bu)) {
         ExplainOpenGroup("Planning", Some("Planning"), true, es);
-        ExplainIndentText(es);
-        es.str.append_str("Planning:\n")?;
-        es.indent += 1;
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            ExplainIndentText(es);
+            es.str.append_str("Planning:\n")?;
+            es.indent += 1;
+        }
         show_buffer_usage(es, bufusage.expect("peeked above"));
-        es.indent -= 1;
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            es.indent -= 1;
+        }
         ExplainCloseGroup("Planning", Some("Planning"), true, es);
     }
 
@@ -566,7 +558,61 @@ fn buffer_usage_flags(u: &BufferUsage) -> (bool, bool, bool, bool, bool, bool) {
 
 pub(crate) fn show_buffer_usage(es: &mut ExplainState<'_>, usage: &BufferUsage) {
     if es.format != EXPLAIN_FORMAT_TEXT {
-        format::nontext_gap(es, "show_buffer_usage");
+        ExplainPropertyInteger("Shared Hit Blocks", None, usage.shared_blks_hit, es);
+        ExplainPropertyInteger("Shared Read Blocks", None, usage.shared_blks_read, es);
+        ExplainPropertyInteger("Shared Dirtied Blocks", None, usage.shared_blks_dirtied, es);
+        ExplainPropertyInteger("Shared Written Blocks", None, usage.shared_blks_written, es);
+        ExplainPropertyInteger("Local Hit Blocks", None, usage.local_blks_hit, es);
+        ExplainPropertyInteger("Local Read Blocks", None, usage.local_blks_read, es);
+        ExplainPropertyInteger("Local Dirtied Blocks", None, usage.local_blks_dirtied, es);
+        ExplainPropertyInteger("Local Written Blocks", None, usage.local_blks_written, es);
+        ExplainPropertyInteger("Temp Read Blocks", None, usage.temp_blks_read, es);
+        ExplainPropertyInteger("Temp Written Blocks", None, usage.temp_blks_written, es);
+        if guc_tables::vars::track_io_timing.read() {
+            ExplainPropertyFloat(
+                "Shared I/O Read Time",
+                Some("ms"),
+                usage.shared_blk_read_time.get_millisec(),
+                3,
+                es,
+            );
+            ExplainPropertyFloat(
+                "Shared I/O Write Time",
+                Some("ms"),
+                usage.shared_blk_write_time.get_millisec(),
+                3,
+                es,
+            );
+            ExplainPropertyFloat(
+                "Local I/O Read Time",
+                Some("ms"),
+                usage.local_blk_read_time.get_millisec(),
+                3,
+                es,
+            );
+            ExplainPropertyFloat(
+                "Local I/O Write Time",
+                Some("ms"),
+                usage.local_blk_write_time.get_millisec(),
+                3,
+                es,
+            );
+            ExplainPropertyFloat(
+                "Temp I/O Read Time",
+                Some("ms"),
+                usage.temp_blk_read_time.get_millisec(),
+                3,
+                es,
+            );
+            ExplainPropertyFloat(
+                "Temp I/O Write Time",
+                Some("ms"),
+                usage.temp_blk_write_time.get_millisec(),
+                3,
+                es,
+            );
+        }
+        return;
     }
     let (has_shared, has_local, has_temp, has_shared_timing, has_local_timing, has_temp_timing) =
         buffer_usage_flags(usage);
