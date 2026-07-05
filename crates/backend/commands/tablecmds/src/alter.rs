@@ -46,6 +46,8 @@ const Anum_pg_attribute_attalign: usize = 9;
 const Anum_pg_attribute_attstorage: usize = 10;
 const Anum_pg_attribute_attcompression: usize = 11;
 pub(crate) const Anum_pg_attribute_attnotnull: usize = 12;
+const Anum_pg_attribute_attislocal: usize = 18;
+const Anum_pg_attribute_attinhcount: usize = 19;
 const Anum_pg_attribute_atthasmissing: usize = 14;
 const Anum_pg_attribute_attidentity: usize = 15;
 const Anum_pg_attribute_attgenerated: usize = 16;
@@ -898,10 +900,30 @@ fn ATRewriteCatalogs<'mcx>(
             let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             match cmd.subtype {
                 AlterTableType::AT_AddColumn | AlterTableType::AT_AddColumnToView => {
-                    ATExecAddColumn(mcx, &mut wqueue[tabidx], &rel, cnode, query_string)?;
+                    ATExecAddColumn(
+                        mcx,
+                        wqueue,
+                        tabidx,
+                        &rel,
+                        cnode,
+                        cmd.recurse,
+                        false,
+                        lockmode,
+                        query_string,
+                    )?;
                 }
                 AlterTableType::AT_DropColumn => {
-                    ATExecDropColumn(mcx, &rel, cmd)?;
+                    ATExecDropColumn(
+                        mcx,
+                        &rel,
+                        cmd.name.expect("AT_DropColumn name"),
+                        cmd.behavior,
+                        cmd.recurse,
+                        false,
+                        cmd.missing_ok,
+                        lockmode,
+                        None,
+                    )?;
                 }
                 AlterTableType::AT_ColumnDefault => {
                     ATExecColumnDefault(mcx, &rel, cmd, query_string)?;
@@ -1646,11 +1668,16 @@ fn ATRewriteTable<'mcx>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ATExecAddColumn<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    tabidx: usize,
     rel: &Relation<'mcx>,
     cnode: Node<'mcx>,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
     let myrelid = rel.rd_id;
@@ -1658,15 +1685,100 @@ fn ATExecAddColumn<'mcx>(
     let if_not_exists = cmd.missing_ok;
     let defnode = cmd.def.expect("AT_AddColumn ColumnDef");
     let col_def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
-    debug_assert!(col_def.inhcount == 0);
     let colname = col_def.colname.expect("ColumnDef.colname");
     let relname = rel.name().to_string();
+
+    if recursing {
+        ATSimplePermissions(
+            AlterTableType::AT_AddColumn,
+            rel,
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
+        )?;
+    }
+    if rel.rd_rel.relispartition && !recursing {
+        return Err(Box::new(
+            PgError::new(ERROR, "cannot add column to a partition".to_string())
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+
+    if col_def.inhcount > 0 {
+        if let Some((childattnum, childinhcount)) =
+            attname_lookup(mcx, myrelid, colname, false)?
+        {
+            let childatt = *rel.rd_att.attr(childattnum as usize - 1);
+            let tn = col_def
+                .typeName
+                .expect("ColumnDef.typeName")
+                .as_variant::<TypeName>()
+                .expect("TypeName");
+            let (ctype_id, ctypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+            if ctype_id != childatt.atttypid || ctypmod != childatt.atttypmod {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "child table \"{relname}\" has different type for column \
+                             \"{colname}\""
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+                ));
+            }
+            let ccollid = crate::GetColumnDefCollation(col_def, ctype_id)?;
+            if ccollid != childatt.attcollation {
+                let collname = |oid| {
+                    lsyscache::misc::get_collation_name(mcx, oid)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default()
+                };
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "child table \"{relname}\" has different collation for column \
+                             \"{colname}\""
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_COLLATION_MISMATCH)
+                    .with_detail(format!(
+                        "\"{}\" versus \"{}\"",
+                        collname(ccollid),
+                        collname(childatt.attcollation)
+                    )),
+                ));
+            }
+            if childinhcount == i16::MAX {
+                return Err(Box::new(
+                    PgError::new(ERROR, "too many inheritance parents".to_string())
+                        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                ));
+            }
+            update_pg_attribute(
+                mcx,
+                myrelid,
+                childattnum,
+                &[(Anum_pg_attribute_attinhcount, Datum::from_i16(childinhcount + 1))],
+            )?;
+            elog_seams::ereport_msg::call(
+                NOTICE,
+                format!(
+                    "merging definition of column \"{colname}\" for child \"{relname}\""
+                ),
+                None,
+            )?;
+            xact::CommandCounterIncrement()?;
+            return Ok(());
+        }
+    }
 
     if !check_for_column_name_collision(mcx, myrelid, &relname, colname, if_not_exists)? {
         return Ok(());
     }
 
-    if cmd.subtype != AlterTableType::AT_AddColumnToView {
+    if !recursing && cmd.subtype != AlterTableType::AT_AddColumnToView {
         parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
     }
     let col_def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
@@ -1766,8 +1878,8 @@ fn ATExecAddColumn<'mcx>(
         let defval = rewrite_handler::build_column_default(mcx, &rel3, newattnum as usize)?
             .expect("atthasdef column has a default");
         let defval = clauses::eval_const_expressions(mcx, defval)?;
-        tab.has_newvals = true;
-        tab.newvals.push(NewColumnValue {
+        wqueue[tabidx].has_newvals = true;
+        wqueue[tabidx].newvals.push(NewColumnValue {
             attnum: newattnum as AttrNumber,
             expr: defval,
             is_generated: col_def.generated != 0,
@@ -1790,13 +1902,13 @@ fn ATExecAddColumn<'mcx>(
                 has_missing = true;
             }
         } else {
-            tab.rewrite |= AT_REWRITE_DEFAULT_VAL;
+            wqueue[tabidx].rewrite |= AT_REWRITE_DEFAULT_VAL;
         }
     } else if typcache::domain::DomainHasConstraints(attribute.atttypid)? {
         unported("ATExecAddColumn domain-typed column without default (null-coercion fill)");
     }
     if !has_missing {
-        tab.verify_new_notnull |= col_def.is_not_null;
+        wqueue[tabidx].verify_new_notnull |= col_def.is_not_null;
     }
 
     let myself =
@@ -1814,8 +1926,51 @@ fn ATExecAddColumn<'mcx>(
     }
     rel3.close(NoLock)?;
 
-    if find_inheritance_children_exist(mcx, myrelid)? {
-        unported("ATExecAddColumn inheritance recursion");
+    let children = pg_inherits::find_inheritance_children(mcx, myrelid, lockmode)?;
+    if !children.is_empty() && !recurse {
+        return Err(Box::new(
+            PgError::new(ERROR, "column must be added to child tables too".to_string())
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
+    }
+    // Children see the column as singly inherited; the clone mirrors C's
+    // copyObject so the parent's queued cmd stays untouched.
+    let childcmd = if !recursing {
+        let copy = copyfuncs::copy_object(mcx, cnode)?;
+        let copy_def = copy
+            .as_variant::<AlterTableCmd>()
+            .expect("AlterTableCmd")
+            .def
+            .expect("AT_AddColumn ColumnDef");
+        // SAFETY: freshly copied tree; no derived refs live.
+        unsafe {
+            copy_def
+                .with_mut::<ColumnDef, _>(|d| {
+                    d.inhcount = 1;
+                    d.is_local = false;
+                })
+                .expect("ColumnDef");
+        }
+        copy
+    } else {
+        cnode
+    };
+    for &childrelid in children.iter() {
+        let childrel = table::table_open(mcx, childrelid, NoLock)?;
+        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        let childtabidx = ATGetQueueEntry(mcx, wqueue, &childrel);
+        ATExecAddColumn(
+            mcx,
+            wqueue,
+            childtabidx,
+            &childrel,
+            childcmd,
+            recurse,
+            true,
+            lockmode,
+            query_string,
+        )?;
+        childrel.close(NoLock)?;
     }
     Ok(())
 }
@@ -1903,16 +2058,38 @@ pub(crate) fn attname_lookup<'mcx>(
     Ok(found)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ATExecDropColumn<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    cmd: &AlterTableCmd<'mcx>,
+    col_name: &str,
+    behavior: types_nodes::parsenodes::DropBehavior,
+    recurse: bool,
+    recursing: bool,
+    missing_ok: bool,
+    lockmode: LOCKMODE,
+    addrs: Option<&mut catalog_dependency::ObjectAddresses>,
 ) -> PgResult<()> {
-    let col_name = cmd.name.expect("AT_DropColumn name");
     let relname = rel.name().to_string();
+    if recursing {
+        ATSimplePermissions(
+            AlterTableType::AT_DropColumn,
+            rel,
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
+        )?;
+    }
+    debug_assert!(!recursing || addrs.is_some());
+    let mut own_addrs;
+    let addrs: &mut catalog_dependency::ObjectAddresses = match addrs {
+        Some(a) => a,
+        None => {
+            own_addrs = catalog_dependency::ObjectAddresses::new();
+            &mut own_addrs
+        }
+    };
 
     let Some((attnum, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
-        if !cmd.missing_ok {
+        if !missing_ok {
             return Err(Box::new(
                 PgError::new(
                     ERROR,
@@ -1937,7 +2114,7 @@ fn ATExecDropColumn<'mcx>(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
-    if attinhcount > 0 {
+    if attinhcount > 0 && !recursing {
         return Err(Box::new(
             PgError::new(ERROR, format!("cannot drop inherited column \"{col_name}\""))
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
@@ -1961,22 +2138,82 @@ fn ATExecDropColumn<'mcx>(
         ));
     }
 
-    if find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATExecDropColumn inheritance recursion");
+    let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+    if !children.is_empty() {
+        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE && !recurse {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "cannot drop column from only the partitioned table when partitions \
+                     exist"
+                        .to_string(),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+                .with_hint("Do not specify the ONLY keyword.".to_string()),
+            ));
+        }
+        for &childrelid in children.iter() {
+            let childrel = table::table_open(mcx, childrelid, NoLock)?;
+            catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+            let Some((childattnum, childinhcount)) =
+                attname_lookup(mcx, childrelid, col_name, false)?
+            else {
+                panic!(
+                    "cache lookup failed for attribute \"{col_name}\" of relation \
+                     {childrelid}"
+                );
+            };
+            if childinhcount <= 0 {
+                panic!("relation {childrelid} has non-inherited attribute \"{col_name}\"");
+            }
+            let childislocal = childrel.rd_att.attr(childattnum as usize - 1).attislocal;
+            if recurse {
+                if childinhcount == 1 && !childislocal {
+                    ATExecDropColumn(
+                        mcx,
+                        &childrel,
+                        col_name,
+                        behavior,
+                        true,
+                        true,
+                        false,
+                        lockmode,
+                        Some(addrs),
+                    )?;
+                } else {
+                    update_pg_attribute(
+                        mcx,
+                        childrelid,
+                        childattnum,
+                        &[(Anum_pg_attribute_attinhcount, Datum::from_i16(childinhcount - 1))],
+                    )?;
+                    xact::CommandCounterIncrement()?;
+                }
+            } else {
+                update_pg_attribute(
+                    mcx,
+                    childrelid,
+                    childattnum,
+                    &[
+                        (Anum_pg_attribute_attinhcount, Datum::from_i16(childinhcount - 1)),
+                        (Anum_pg_attribute_attislocal, Datum::from_bool(true)),
+                    ],
+                )?;
+                xact::CommandCounterIncrement()?;
+            }
+            childrel.close(NoLock)?;
+        }
     }
 
-    let mut addrs = catalog_dependency::ObjectAddresses::new();
     addrs.add_exact_object_address(pg_depend::ObjectAddress::sub_set(
         RELATION_RELATION_ID,
         rel.rd_id,
         attnum as i32,
     ));
-    catalog_dependency::performMultipleDeletions(
-        mcx,
-        &addrs,
-        cmd.behavior,
-        0,
-    )
+    if !recursing {
+        catalog_dependency::performMultipleDeletions(mcx, addrs, behavior, 0)?;
+    }
+    Ok(())
 }
 
 // ATExecColumnDefault (SET/DROP DEFAULT).
