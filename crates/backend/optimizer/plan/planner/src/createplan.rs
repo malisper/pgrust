@@ -2971,12 +2971,23 @@ fn prepare_sort_from_pathkeys<'mcx>(
 
     for pathkey in pathkeys {
         let ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
-        assert!(
-            !run.root.ec(ec).ec_has_volatile,
-            "prepare_sort_from_pathkeys (createplan.c): volatile sortref leg; M2 lane"
-        );
         let mut found: Option<(i16, u32)> = None;
-        if let Some(req) = req_col_idx {
+        if run.root.ec(ec).ec_has_volatile {
+            // A volatile EC came from an ORDER BY clause: match that same
+            // targetlist entry via its sortref (get_sortgroupref_tle).
+            let sortref = run.root.ec(ec).ec_sortref;
+            assert!(sortref != 0, "volatile EquivalenceClass has no sortref");
+            let tle = tlist
+                .iter()
+                .map(|n| n.as_target_entry().expect("TargetEntry"))
+                .find(|tle| tle.ressortgroupref == sortref)
+                .unwrap_or_else(|| {
+                    panic!("ORDER/GROUP BY expression not found in targetlist")
+                });
+            debug_assert_eq!(run.root.ec(ec).ec_members.len(), 1);
+            let em_id = run.root.ec(ec).ec_members[0];
+            found = Some((tle.resno, run.root.em(em_id).em_datatype));
+        } else if let Some(req) = req_col_idx {
             let want = req[sort_col_idx.len()];
             for tle_node in &tlist {
                 let tle = tle_node.as_target_entry().expect("TargetEntry");
