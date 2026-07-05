@@ -82,7 +82,15 @@ pub fn PathNameOpenFilePerm(file_name: &str, file_flags: i32, file_mode: u32) ->
 
 pub fn FileClose(file: File) -> PgResult<()> {
     let file = file.0;
-    debug_assert!(with_fd(|fd| vfd::FileIsValid(fd, file)));
+
+    // Idempotent on an already-freed VFD: abort/exit cleanup can close twice
+    // (resowner release, then late owner-structure drop glue); a second
+    // FreeVfd would push the slot onto the freelist twice and alias two
+    // future Files onto one slot. C asserts FileIsValid instead — its
+    // process exit never revisits sort state; the thread model's unwind does.
+    if !with_fd(|fd| vfd::FileIsValid(fd, file)) {
+        return Ok(());
+    }
 
     let close_failure = with_fd(|fd| {
         if !vfd::FileIsNotOpen(fd, file) {
@@ -617,6 +625,17 @@ pub fn FilePathName(file: File) -> String {
     with_fd(|fd| {
         debug_assert!(vfd::FileIsValid(fd, file.0));
         fd.vfd_cache[file.0 as usize].file_name.clone().expect("FilePathName on unused VFD")
+    })
+}
+
+// Error-report rendering of a File that may already be freed: cleanup-path
+// ereports must never panic (a panic while unwinding aborts the process).
+pub(crate) fn file_path_name_lossy(file: File) -> String {
+    with_fd(|fd| {
+        fd.vfd_cache
+            .get(file.0 as usize)
+            .and_then(|v| v.file_name.clone())
+            .unwrap_or_else(|| format!("<unused VFD {}>", file.0))
     })
 }
 

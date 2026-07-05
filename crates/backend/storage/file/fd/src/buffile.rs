@@ -8,7 +8,7 @@ use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::{PgResult, ERROR};
 use ::types_storage::File;
 
-use crate::io::{FileClose, FilePathName, FileRead, FileSize, FileWrite};
+use crate::io::{file_path_name_lossy, FileClose, FileRead, FileSize, FileWrite};
 use crate::temp::OpenTemporaryFile;
 use crate::vfd::{get_errno, loc};
 
@@ -90,6 +90,15 @@ impl<'mcx> BufFile<'mcx> {
     }
 
     pub fn close(mut self) -> PgResult<()> {
+        // proc_exit already ran the abort resowner release: every temp-file
+        // VFD here is freed, and flushing the dirty buffer would write
+        // through dead Files. Late drop glue (Tuplesort/Tuplestore on the
+        // ProcExitThread unwind or TLS teardown) must be a no-op — C's
+        // process exit never revisits sort state (ClickBench Q19: worker
+        // FATAL mid-sort-spill aborted the postmaster via panic-in-drop).
+        if ::elog::config::proc_exit_inprogress() {
+            return Ok(());
+        }
         self.flush()?;
         for i in 0..self.files.len() {
             FileClose(self.files[i])?;
@@ -277,7 +286,7 @@ impl<'mcx> BufFile<'mcx> {
                         .errcode_for_file_access()
                         .errmsg(format!(
                             "could not determine size of temporary file \"{}\" from BufFile \"\": %m",
-                            FilePathName(self.files[self.files.len() - 1])
+                            file_path_name_lossy(self.files[self.files.len() - 1])
                         ))
                         .finish(loc("BufFileSeek"))?;
                 }
@@ -346,7 +355,7 @@ impl<'mcx> BufFile<'mcx> {
                 .errcode_for_file_access()
                 .errmsg(format!(
                     "could not determine size of temporary file \"{}\" from BufFile \"\": %m",
-                    FilePathName(last)
+                    file_path_name_lossy(last)
                 ))
                 .finish(loc("BufFileSize"))?;
         }
@@ -360,7 +369,7 @@ fn read_failed(file: File) -> PgResult<()> {
     ereport(ERROR)
         .with_saved_errno(get_errno())
         .errcode_for_file_access()
-        .errmsg(format!("could not read file \"{}\": %m", FilePathName(file)))
+        .errmsg(format!("could not read file \"{}\": %m", file_path_name_lossy(file)))
         .finish(loc("BufFileLoadBuffer"))
         .map(|_| ())
 }
@@ -371,7 +380,7 @@ fn write_failed(file: File) -> PgResult<()> {
     ereport(ERROR)
         .with_saved_errno(get_errno())
         .errcode_for_file_access()
-        .errmsg(format!("could not write to file \"{}\": %m", FilePathName(file)))
+        .errmsg(format!("could not write to file \"{}\": %m", file_path_name_lossy(file)))
         .finish(loc("BufFileDumpBuffer"))
         .map(|_| ())
 }
