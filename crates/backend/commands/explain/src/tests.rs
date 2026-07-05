@@ -58,9 +58,11 @@ fn int4out_fn(
 // Proc/shmem substrate for snapmgr's MyProc xmin writes (snapmgr tests' shape).
 fn install_proc_fixture() {
     use init_small::globals as g;
-    g::SetMaxConnections(16);
+    // Proc slots are never released; every #[test] thread claims one, so the
+    // budget must exceed the test count.
+    g::SetMaxConnections(64);
     g::set_max_worker_processes(2);
-    g::SetMaxBackends(16 + 3 + 2 + 2 + 2);
+    g::SetMaxBackends(64 + 3 + 2 + 2 + 2);
     g::SetMyProcPid(777);
 
     pg_sema_seams::pg_semaphore_create::set(|_| {});
@@ -1413,7 +1415,9 @@ mod order_by_limit_e2e {
     }
 
     fn nestloop_pstmt<'mcx>(mcx: Mcx<'mcx>) -> &'mcx PlannedStmt<'mcx> {
-        let mk_rte = |alias: &'static str| {
+        // explicit=true mirrors the parser's rte->alias for "from t, t u";
+        // without it set_rtable_names falls back to get_rel_name.
+        let mk_rte = |alias: &'static str, explicit: bool| {
             let mut colnames = NodeList::make1(mcx, Node::mk_string(mcx, "pk").unwrap()).unwrap();
             colnames.lappend(mcx, Node::mk_string(mcx, "val").unwrap()).unwrap();
             let eref =
@@ -1424,10 +1428,19 @@ mod order_by_limit_e2e {
             rte.relkind = b'r';
             rte.rellockmode = 1;
             rte.eref = Some(eref);
+            if explicit {
+                rte.alias = Some(
+                    mcx::alloc_leak_in(
+                        mcx,
+                        Alias { aliasname: Some(alias), colnames: NodeList::nil() },
+                    )
+                    .unwrap(),
+                );
+            }
             rte.seal()
         };
-        let mut rtable = NodeList::make1(mcx, mk_rte("t")).unwrap();
-        rtable.lappend(mcx, mk_rte("u")).unwrap();
+        let mut rtable = NodeList::make1(mcx, mk_rte("t", false)).unwrap();
+        rtable.lappend(mcx, mk_rte("u", true)).unwrap();
 
         let mk_scan = |scanrelid: u32| {
             let mut s = Node::build::<types_nodes::plannodes::SeqScan>(mcx).unwrap();
