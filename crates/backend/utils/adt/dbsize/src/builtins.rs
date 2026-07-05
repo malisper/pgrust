@@ -23,6 +23,11 @@ fn calculate_relation_size(
     key: ::types_storage::RelFileLocatorBackend,
     forknum: types_core::ForkNumber,
 ) -> PgResult<i64> {
+    // Storage-less rels (views: relfilenumber 0) stat a nonexistent path in C
+    // and count 0 bytes; smgropen asserts on RelFileNumber 0 so gate here.
+    if key.locator.relNumber == 0 {
+        return Ok(0);
+    }
     if smgr_seams::smgr_exists::call(key, forknum)? {
         Ok(smgr_seams::smgr_nblocks::call(key, forknum)? as i64 * types_core::BLCKSZ as i64)
     } else {
