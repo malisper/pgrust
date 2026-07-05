@@ -469,11 +469,21 @@ fn allocate_file_stdio_modes() {
     assert_eq!(vfd::get_errno(), libc::ENOENT);
 }
 
+
+// Test-process-global: resowner seams install once (seam_core forbids
+// reinstall); every test that needs an owner goes through here.
+fn install_resowner_seams_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        resowner::init_seams();
+        ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+    });
+}
+
 #[test]
 fn buffile_write_seek_read_roundtrip() {
     setup();
-    resowner::init_seams();
-    ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+    install_resowner_seams_once();
     let owner = resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "buffile-test")
         .unwrap();
     resowner_seams::set_current_resource_owner::call(owner);
@@ -549,8 +559,7 @@ fn parse_filename_for_nontemp_relation_shapes() {
 #[test]
 fn buffile_close_after_proc_exit_cleanup_is_inert() {
     setup();
-    resowner::init_seams();
-    ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+    install_resowner_seams_once();
     let owner = resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "p2s-test")
         .unwrap();
     resowner_seams::set_current_resource_owner::call(owner);
