@@ -579,6 +579,7 @@ name = "adt_misc"
 version = "0.1.0"
 dependencies = [
  "adt_numeric",
+ "adt_pg_lsn",
  "arrayfuncs",
  "arrayutils",
  "catalog_namespace",
@@ -586,6 +587,7 @@ dependencies = [
  "dbcommands",
  "detoast_seams",
  "elog",
+ "fd",
  "fmgr_seams",
  "funcapi",
  "genam_seams",
@@ -598,6 +600,8 @@ dependencies = [
  "mcx",
  "parse_utilcmd",
  "postgres_seams",
+ "postmaster_seams",
+ "standby",
  "syscache_seams",
  "table",
  "timestamp_seams",
@@ -611,6 +615,8 @@ dependencies = [
  "types_tuple",
  "varlena",
  "waitevent",
+ "xloginsert_seams",
+ "xlogrecovery",
 ]
 
 [[package]]
