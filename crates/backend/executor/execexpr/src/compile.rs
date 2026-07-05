@@ -900,6 +900,16 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
         )?;
         first = false;
     }
+    // Zero key columns with no init value (empty-select-list set ops): the
+    // hash is the constant 0, C's uninitialized-iteration result.
+    if num_cols == 0 && init_value == 0 {
+        let out = state.result_out();
+        push_step(
+            &mut state,
+            mcx,
+            Step::Const { value: ::datum::Datum::from_u32(0), isnull: false, out },
+        )?;
+    }
 
     for i in 0..num_cols {
         let attnum = (key_col_idx[i] - 1) as u16;
@@ -1073,10 +1083,23 @@ pub fn exec_build_grouping_equal<'mcx>(
     eqfuncoids: &[Oid],
     collations: &[Oid],
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    debug_assert!(!key_col_idx.is_empty());
     debug_assert!(eqfuncoids.len() == key_col_idx.len() && collations.len() == key_col_idx.len());
     let mut state = ExprState::new_boxed_in(mcx)?;
     state.flags = EEO_FLAG_IS_QUAL;
+
+    // C pushes an initial TRUE result: with zero key columns (empty-select-
+    // list set ops) every pair matches and no fetch/compare steps exist.
+    if key_col_idx.is_empty() {
+        let rout = state.result_out();
+        push_step(&mut state, mcx, Step::Const {
+            value: ::datum::Datum::from_bool(true),
+            isnull: false,
+            out: rout,
+        })?;
+        push_step(&mut state, mcx, Step::DoneReturn)?;
+        ready_expr(&mut state);
+        return Ok(state);
+    }
 
     let maxatt = key_col_idx.iter().copied().max().unwrap();
     push_step(&mut state, mcx, Step::InnerFetchSome { last_var: maxatt as u16 })?;

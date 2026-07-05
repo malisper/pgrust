@@ -98,9 +98,10 @@ pub fn exec_init_set_op<'mcx>(
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
     let mcx = estate.es_query_cxt;
     let num_cols = node.numCols as usize;
+    // Zero cmp columns are legal: empty-select-list set ops (allowed since
+    // 9.4) compare on no keys, so every pair of rows matches.
     debug_assert!(
-        num_cols > 0
-            && node.cmpColIdx.len() == num_cols
+        node.cmpColIdx.len() == num_cols
             && node.cmpOperators.len() == num_cols
             && node.cmpCollations.len() == num_cols
             && node.cmpNullsFirst.len() == num_cols

@@ -745,17 +745,46 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             // to the fix_expr_common walk over unchanged Vars.
             if !m.withCheckOptionLists.is_nil() {
                 debug_assert_eq!(m.withCheckOptionLists.len(), m.resultRelations.len());
+                let mut new_wlists = NodeList::nil();
+                let mut any_wco_change = false;
                 for wlist_node in &m.withCheckOptionLists {
                     let wlist = wlist_node.as_list().expect("withCheckOptionLists cell");
+                    let mut new_wlist = NodeList::nil();
                     for wco_node in wlist {
                         let wco =
                             wco_node.as_with_check_option().expect("WCO cell");
+                        let mut new_wco_node = wco_node;
                         if let Some(q) = wco.qual {
                             let ql = q.as_list().expect("preprocessed WCO qual is a list");
-                            let fixed = fix_scan_list(run, ql, rtoffset, 1.0)?;
-                            debug_assert!(fixed.is_none());
+                            // C fix_scan_expr rewrites in place (subplan
+                            // references force the rewriting path); a changed
+                            // qual re-wraps into a fresh WCO node.
+                            if let Some(fixed) = fix_scan_list(run, ql, rtoffset, 1.0)? {
+                                any_wco_change = true;
+                                new_wco_node = Node::mk(
+                                    run.mcx,
+                                    types_nodes::parsenodes::WithCheckOption {
+                                        kind: wco.kind,
+                                        relname: wco.relname,
+                                        polname: wco.polname,
+                                        qual: Some(Node::mk_list(run.mcx, fixed)?),
+                                        cascaded: wco.cascaded,
+                                    },
+                                )?;
+                            }
                         }
+                        new_wlist.lappend(run.mcx, new_wco_node)?;
                     }
+                    new_wlists.lappend(run.mcx, Node::mk_list(run.mcx, new_wlist)?)?;
+                }
+                if any_wco_change {
+                    // SAFETY: exclusive plan-tree ownership (prologue note).
+                    unsafe {
+                        plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                            p.withCheckOptionLists = new_wlists;
+                        })
+                    }
+                    .expect("ModifyTable node");
                 }
             }
             let has_returning = !m.returningLists.is_nil();
@@ -861,12 +890,14 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                     }
                 };
                 let fixed = fix_scan_list(run, &m.exclRelTlist, rtoffset, 1.0)?;
-                debug_assert!(fixed.is_none());
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
                     plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
                         p.onConflictSet = new_set;
                         p.onConflictWhere = new_where;
+                        if let Some(fixed) = fixed {
+                            p.exclRelTlist = fixed;
+                        }
                     })
                 }
                 .expect("ModifyTable node");
