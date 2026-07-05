@@ -28,21 +28,21 @@ use types_nodes::primnodes::{
     TableFunc, TargetEntry, Var, WindowFunc, WindowFuncRunCondition, XmlExpr,
 };
 use types_nodes::parsenodes::{
-    AccessPriv, AlterDatabaseRefreshCollStmt, AlterDatabaseSetStmt, AlterDatabaseStmt,
-    AlterCollationStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt, AlterEventTrigStmt, AlterFunctionStmt,
-    AlterObjectSchemaStmt, AlterOpFamilyStmt, AlterOperatorStmt, AlterOwnerStmt,
-    AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt, AlterRoleStmt,
-    AlterSubscriptionStmt, AlterTableCmd, AlterTableSpaceOptionsStmt, AlterTableStmt,
-    CTECycleClause, CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt,
-    CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt, CreateConversionStmt,
-    CreateEventTrigStmt, CreateFunctionStmt, CreateOpClassItem, CreateOpClassStmt,
-    CreateOpFamilyStmt, CreatePLangStmt, CreatePolicyStmt, CreatePublicationStmt,
-    CreateRoleStmt, CreateSchemaStmt, CreateSubscriptionStmt, CreateTableSpaceStmt,
-    CreateTransformStmt, CreatedbStmt, DeallocateStmt, DeclareCursorStmt, DefElem, DefineStmt,
-    DiscardStmt, DoStmt, DropOwnedStmt, DropRoleStmt, DropStmt, DropSubscriptionStmt,
-    DropTableSpaceStmt, DropdbStmt, ExecuteStmt, ExplainStmt, FetchStmt, FunctionParameter,
-    GrantRoleStmt, GrantStmt, GroupingSet, ListenStmt, LoadStmt, LockStmt, NotifyStmt,
-    ObjectWithArgs, PrepareStmt, PublicationObjSpec, PublicationTable, Query,
+    ATAlterConstraint, AccessPriv, AlterCollationStmt, AlterDatabaseRefreshCollStmt,
+    AlterDatabaseSetStmt, AlterDatabaseStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt,
+    AlterEventTrigStmt, AlterFunctionStmt, AlterObjectSchemaStmt, AlterOpFamilyStmt,
+    AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt,
+    AlterRoleStmt, AlterSubscriptionStmt, AlterTableCmd, AlterTableSpaceOptionsStmt,
+    AlterTableStmt, CTECycleClause, CTESearchClause, CheckPointStmt, ClosePortalStmt,
+    ClusterStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt,
+    CreateConversionStmt, CreateEventTrigStmt, CreateFunctionStmt, CreateOpClassItem,
+    CreateOpClassStmt, CreateOpFamilyStmt, CreatePLangStmt, CreatePolicyStmt,
+    CreatePublicationStmt, CreateRoleStmt, CreateSchemaStmt, CreateSubscriptionStmt,
+    CreateTableSpaceStmt, CreateTransformStmt, CreatedbStmt, DeallocateStmt, DeclareCursorStmt,
+    DefElem, DefineStmt, DiscardStmt, DoStmt, DropOwnedStmt, DropRoleStmt, DropStmt,
+    DropSubscriptionStmt, DropTableSpaceStmt, DropdbStmt, ExecuteStmt, ExplainStmt, FetchStmt,
+    FunctionParameter, GrantRoleStmt, GrantStmt, GroupingSet, ListenStmt, LoadStmt, LockStmt,
+    NotifyStmt, ObjectWithArgs, PrepareStmt, PublicationObjSpec, PublicationTable, Query,
     RTEPermissionInfo, RangeTblEntry, RangeTblFunction, ReassignOwnedStmt, ReindexStmt,
     RenameStmt, ReplicaIdentityStmt, ReturnStmt, RoleSpec, RowMarkClause, SecLabelStmt,
     SetOperationStmt, SortGroupClause, TableSampleClause, TransactionStmt, TruncateStmt,
@@ -52,21 +52,22 @@ use types_nodes::parsenodes::{
 use types_nodes::rawnodes::{
     A_ArrayExpr, A_Expr, A_Indices, A_Indirection, AlterEnumStmt, AlterExtensionStmt,
     AlterFdwStmt, AlterForeignServerStmt, AlterSeqStmt, AlterStatsStmt,
-    AlterTSConfigurationStmt, AlterTSDictionaryStmt, AlterUserMappingStmt, CallStmt, ColumnDef,
-    ColumnRef, CompositeTypeStmt, Constraint, ConstraintsSetStmt, CreateDomainStmt,
-    CreateEnumStmt, CreateExtensionStmt, CreateFdwStmt, CreateForeignServerStmt,
-    CreateForeignTableStmt, CreateRangeStmt, CreateSeqStmt, CreateStatsStmt, CreateStmt,
-    CreateTableAsStmt, CreateTrigStmt, CreateUserMappingStmt, DeleteStmt, DropUserMappingStmt,
-    FuncCall, ImportForeignSchemaStmt, IndexElem, IndexStmt, InferClause, InsertStmt,
-    IntoClause, JsonAggConstructor, JsonArgument, JsonArrayAgg, JsonArrayConstructor,
-    JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
+    AlterTSConfigurationStmt, AlterTSDictionaryStmt, AlterTypeStmt, AlterUserMappingStmt,
+    CallStmt, ColumnDef, ColumnRef, CompositeTypeStmt, Constraint, ConstraintsSetStmt,
+    CreateDomainStmt, CreateEnumStmt, CreateExtensionStmt, CreateFdwStmt,
+    CreateForeignServerStmt, CreateForeignTableStmt, CreateRangeStmt, CreateSeqStmt,
+    CreateStatsStmt, CreateStmt, CreateTableAsStmt, CreateTrigStmt, CreateUserMappingStmt,
+    DeleteStmt, DropUserMappingStmt, FuncCall, ImportForeignSchemaStmt, IndexElem, IndexStmt,
+    InferClause, InsertStmt, IntoClause, JsonAggConstructor, JsonArgument, JsonArrayAgg,
+    JsonArrayConstructor, JsonArrayQueryConstructor, JsonFuncExpr, JsonKeyValue, JsonObjectAgg,
     JsonObjectConstructor, JsonOutput, JsonParseExpr, JsonScalarExpr, JsonSerializeExpr,
     JsonTable, JsonTableColumn, JsonTablePathSpec, LockingClause, MergeStmt, MergeWhenClause,
-    OnConflictClause, PLAssignStmt, ParamRef, PartitionBoundSpec, PartitionCmd, PartitionElem,
-    PartitionRangeDatum, PartitionSpec, RangeFunction, RangeSubselect, RangeTableFunc,
-    RangeTableFuncCol, RawStmt, RefreshMatViewStmt, ResTarget, ReturningClause,
-    ReturningOption, RuleStmt, SelectStmt, SortBy, StatsElem, TableLikeClause,
-    TriggerTransition, TypeCast, TypeName, UpdateStmt, ViewStmt, WindowDef, XmlSerialize,
+    MultiAssignRef, OnConflictClause, PLAssignStmt, ParamRef, PartitionBoundSpec, PartitionCmd,
+    PartitionElem, PartitionRangeDatum, PartitionSpec, RangeFunction, RangeSubselect,
+    RangeTableFunc, RangeTableFuncCol, RangeTableSample, RawStmt, RefreshMatViewStmt,
+    ResTarget, ReturningClause, ReturningOption, RuleStmt, SelectStmt, SortBy, StatsElem,
+    TableLikeClause, TriggerTransition, TypeCast, TypeName, UpdateStmt, ViewStmt, WindowDef,
+    XmlSerialize,
 };
 use types_nodes::plannodes::{
     Agg, Append, AppendRelInfo, BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr, CteScan,
@@ -74,13 +75,17 @@ use types_nodes::plannodes::{
     IndexScan, Join, Limit, LockRows, Material, Memoize, MergeAppend, MergeJoin, ModifyTable,
     NamedTuplestoreScan, NestLoop, NestLoopParam, PartitionPruneInfo,
     PartitionPruneStepCombine, PartitionPruneStepOp, PartitionedRelPruneInfo, Plan,
-    PlanInvalItem, PlanRowMark, PlannedStmt, ProjectSet, RecursiveUnion, Result, Scan, SeqScan,
-    SetOp, Sort, SubqueryScan, TableFuncScan, TidRangeScan, TidScan, Unique, ValuesScan,
-    WindowAgg, WorkTableScan,
+    PlanInvalItem, PlanRowMark, PlannedStmt, ProjectSet, RecursiveUnion, Result, SampleScan,
+    Scan, SeqScan, SetOp, Sort, SubqueryScan, TableFuncScan, TidRangeScan, TidScan, Unique,
+    ValuesScan, WindowAgg, WorkTableScan,
 };
 
 pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Option<Node<'d>>> {
     let copy = match node.node_tag() {
+        NodeTag::T_ATAlterConstraint => {
+            let s = node.as_variant::<ATAlterConstraint>().expect("ATAlterConstraint");
+            Node::mk(mcx, copy_ATAlterConstraint(mcx, s)?)?
+        }
         NodeTag::T_A_ArrayExpr => {
             let s = node.as_variant::<A_ArrayExpr>().expect("A_ArrayExpr");
             Node::mk(mcx, copy_A_ArrayExpr(mcx, s)?)?
@@ -113,6 +118,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<Alias>().expect("Alias");
             Node::mk(mcx, copy_Alias(mcx, s)?)?
         }
+        NodeTag::T_AlterCollationStmt => {
+            let s = node.as_variant::<AlterCollationStmt>().expect("AlterCollationStmt");
+            Node::mk(mcx, copy_AlterCollationStmt(mcx, s)?)?
+        }
         NodeTag::T_AlterDatabaseRefreshCollStmt => {
             let s = node.as_variant::<AlterDatabaseRefreshCollStmt>().expect("AlterDatabaseRefreshCollStmt");
             Node::mk(mcx, copy_AlterDatabaseRefreshCollStmt(mcx, s)?)?
@@ -128,10 +137,6 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterDefaultPrivilegesStmt => {
             let s = node.as_variant::<AlterDefaultPrivilegesStmt>().expect("AlterDefaultPrivilegesStmt");
             Node::mk(mcx, copy_AlterDefaultPrivilegesStmt(mcx, s)?)?
-        }
-        NodeTag::T_AlterCollationStmt => {
-            let s = node.as_variant::<AlterCollationStmt>().expect("AlterCollationStmt");
-            Node::mk(mcx, copy_AlterCollationStmt(mcx, s)?)?
         }
         NodeTag::T_AlterDomainStmt => {
             let s = node.as_variant::<AlterDomainStmt>().expect("AlterDomainStmt");
@@ -224,6 +229,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterTableStmt => {
             let s = node.as_variant::<AlterTableStmt>().expect("AlterTableStmt");
             Node::mk(mcx, copy_AlterTableStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterTypeStmt => {
+            let s = node.as_variant::<AlterTypeStmt>().expect("AlterTypeStmt");
+            Node::mk(mcx, copy_AlterTypeStmt(mcx, s)?)?
         }
         NodeTag::T_AlterUserMappingStmt => {
             let s = node.as_variant::<AlterUserMappingStmt>().expect("AlterUserMappingStmt");
@@ -841,6 +850,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<ModifyTable>().expect("ModifyTable");
             Node::mk(mcx, copy_ModifyTable(mcx, s)?)?
         }
+        NodeTag::T_MultiAssignRef => {
+            let s = node.as_variant::<MultiAssignRef>().expect("MultiAssignRef");
+            Node::mk(mcx, copy_MultiAssignRef(mcx, s)?)?
+        }
         NodeTag::T_NamedArgExpr => {
             let s = node.as_variant::<NamedArgExpr>().expect("NamedArgExpr");
             Node::mk(mcx, copy_NamedArgExpr(mcx, s)?)?
@@ -993,6 +1006,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<RangeTableFuncCol>().expect("RangeTableFuncCol");
             Node::mk(mcx, copy_RangeTableFuncCol(mcx, s)?)?
         }
+        NodeTag::T_RangeTableSample => {
+            let s = node.as_variant::<RangeTableSample>().expect("RangeTableSample");
+            Node::mk(mcx, copy_RangeTableSample(mcx, s)?)?
+        }
         NodeTag::T_RangeTblEntry => {
             let s = node.as_variant::<RangeTblEntry>().expect("RangeTblEntry");
             Node::mk(mcx, copy_RangeTblEntry(mcx, s)?)?
@@ -1084,6 +1101,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_SQLValueFunction => {
             let s = node.as_variant::<SQLValueFunction>().expect("SQLValueFunction");
             Node::mk(mcx, copy_SQLValueFunction(mcx, s)?)?
+        }
+        NodeTag::T_SampleScan => {
+            let s = node.as_variant::<SampleScan>().expect("SampleScan");
+            Node::mk(mcx, copy_SampleScan(mcx, s)?)?
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let s = node.as_variant::<ScalarArrayOpExpr>().expect("ScalarArrayOpExpr");
@@ -1325,6 +1346,19 @@ fn alloc_ref<'d, T>(mcx: Mcx<'d>, v: T) -> PgResult<&'d T> {
     Ok(leak_in(alloc_in(mcx, v)?))
 }
 
+pub(crate) fn copy_ATAlterConstraint<'d>(mcx: Mcx<'d>, s: &ATAlterConstraint<'_>) -> PgResult<ATAlterConstraint<'d>> {
+    Ok(ATAlterConstraint {
+        conname: opt_str_in(mcx, s.conname)?,
+        alterEnforceability: s.alterEnforceability,
+        is_enforced: s.is_enforced,
+        alterDeferrability: s.alterDeferrability,
+        deferrable: s.deferrable,
+        initdeferred: s.initdeferred,
+        alterInheritability: s.alterInheritability,
+        noinherit: s.noinherit,
+    })
+}
+
 pub(crate) fn copy_A_ArrayExpr<'d>(mcx: Mcx<'d>, s: &A_ArrayExpr<'_>) -> PgResult<A_ArrayExpr<'d>> {
     Ok(A_ArrayExpr {
         elements: copy_node_list(mcx, &s.elements)?,
@@ -1417,6 +1451,12 @@ pub(crate) fn copy_Alias<'d>(mcx: Mcx<'d>, s: &Alias<'_>) -> PgResult<Alias<'d>>
     })
 }
 
+pub(crate) fn copy_AlterCollationStmt<'d>(mcx: Mcx<'d>, s: &AlterCollationStmt<'_>) -> PgResult<AlterCollationStmt<'d>> {
+    Ok(AlterCollationStmt {
+        collname: copy_node_list(mcx, &s.collname)?,
+    })
+}
+
 pub(crate) fn copy_AlterDatabaseRefreshCollStmt<'d>(mcx: Mcx<'d>, s: &AlterDatabaseRefreshCollStmt<'_>) -> PgResult<AlterDatabaseRefreshCollStmt<'d>> {
     Ok(AlterDatabaseRefreshCollStmt {
         dbname: opt_str_in(mcx, s.dbname)?,
@@ -1441,12 +1481,6 @@ pub(crate) fn copy_AlterDefaultPrivilegesStmt<'d>(mcx: Mcx<'d>, s: &AlterDefault
     Ok(AlterDefaultPrivilegesStmt {
         options: copy_node_list(mcx, &s.options)?,
         action: match s.action { Some(v) => Some(mk_ref(mcx, copy_GrantStmt(mcx, v)?)?), None => None },
-    })
-}
-
-pub(crate) fn copy_AlterCollationStmt<'d>(mcx: Mcx<'d>, s: &AlterCollationStmt<'_>) -> PgResult<AlterCollationStmt<'d>> {
-    Ok(AlterCollationStmt {
-        collname: copy_node_list(mcx, &s.collname)?,
     })
 }
 
@@ -1655,6 +1689,13 @@ pub(crate) fn copy_AlterTableStmt<'d>(mcx: Mcx<'d>, s: &AlterTableStmt<'_>) -> P
         cmds: copy_node_list(mcx, &s.cmds)?,
         objtype: s.objtype,
         missing_ok: s.missing_ok,
+    })
+}
+
+pub(crate) fn copy_AlterTypeStmt<'d>(mcx: Mcx<'d>, s: &AlterTypeStmt<'_>) -> PgResult<AlterTypeStmt<'d>> {
+    Ok(AlterTypeStmt {
+        typeName: copy_node_list(mcx, &s.typeName)?,
+        options: copy_node_list(mcx, &s.options)?,
     })
 }
 
@@ -3250,6 +3291,14 @@ pub(crate) fn copy_ModifyTable<'d>(mcx: Mcx<'d>, s: &ModifyTable<'_>) -> PgResul
     })
 }
 
+pub(crate) fn copy_MultiAssignRef<'d>(mcx: Mcx<'d>, s: &MultiAssignRef<'_>) -> PgResult<MultiAssignRef<'d>> {
+    Ok(MultiAssignRef {
+        source: copy_node_opt(mcx, s.source)?,
+        colno: s.colno,
+        ncolumns: s.ncolumns,
+    })
+}
+
 pub(crate) fn copy_NamedArgExpr<'d>(mcx: Mcx<'d>, s: &NamedArgExpr<'_>) -> PgResult<NamedArgExpr<'d>> {
     Ok(NamedArgExpr {
         arg: copy_node_opt(mcx, s.arg)?,
@@ -3696,6 +3745,16 @@ pub(crate) fn copy_RangeTableFuncCol<'d>(mcx: Mcx<'d>, s: &RangeTableFuncCol<'_>
     })
 }
 
+pub(crate) fn copy_RangeTableSample<'d>(mcx: Mcx<'d>, s: &RangeTableSample<'_>) -> PgResult<RangeTableSample<'d>> {
+    Ok(RangeTableSample {
+        relation: copy_node_opt(mcx, s.relation)?,
+        method: copy_node_list(mcx, &s.method)?,
+        args: copy_node_list(mcx, &s.args)?,
+        repeatable: copy_node_opt(mcx, s.repeatable)?,
+        location: s.location,
+    })
+}
+
 pub(crate) fn copy_RangeTblEntry<'d>(mcx: Mcx<'d>, s: &RangeTblEntry<'_>) -> PgResult<RangeTblEntry<'d>> {
     Ok(RangeTblEntry {
         alias: match s.alias { Some(v) => Some(mk_ref(mcx, copy_Alias(mcx, v)?)?), None => None },
@@ -3932,6 +3991,13 @@ pub(crate) fn copy_SQLValueFunction(_mcx: Mcx<'_>, s: &SQLValueFunction) -> PgRe
         r#type: s.r#type,
         typmod: s.typmod,
         location: s.location,
+    })
+}
+
+pub(crate) fn copy_SampleScan<'d>(mcx: Mcx<'d>, s: &SampleScan<'_>) -> PgResult<SampleScan<'d>> {
+    Ok(SampleScan {
+        scan: copy_Scan(mcx, &s.scan)?,
+        tablesample: copy_node_opt(mcx, s.tablesample)?,
     })
 }
 
