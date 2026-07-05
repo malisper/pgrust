@@ -1024,13 +1024,13 @@ fn numeric_agg_deserialize_errors() {
 
     let mut buf = StringInfo::new_in(mcx).unwrap();
     buf.append_bytes(&bytes[..bytes.len() - 1]).unwrap();
-    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).unwrap_err();
+    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).map(|_| ()).unwrap_err();
     assert_eq!(e.message(), "insufficient data left in message");
 
     let mut buf = StringInfo::new_in(mcx).unwrap();
     buf.append_bytes(&bytes).unwrap();
     buf.append_bytes(&[0]).unwrap();
-    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).unwrap_err();
+    let e = numeric_agg_state_deserialize(&mut buf, mcx, true).map(|_| ()).unwrap_err();
     assert_eq!(e.message(), "invalid message format");
 }
 
