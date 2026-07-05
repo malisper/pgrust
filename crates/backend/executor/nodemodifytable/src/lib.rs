@@ -124,6 +124,9 @@ pub struct ModifyTableState<'mcx> {
     // C ps_ExprContext: SubPlan args in RETURNING evaluate against it (scan =
     // returned tuple, outer = plan tuple); reset per projected row.
     returning_ecxt: Option<executils::EcxtId>,
+    // C mt_root_tuple_slot: root-format staging slot for a cross-partition
+    // UPDATE's re-routed tuple.
+    cross_part_root_slot: Option<ExecSlotId>,
     on_conflict: Option<OnConflictState<'mcx>>,
     // ON CONFLICT DO UPDATE's locked pre-update row, carried to the INSERT
     // arm's RETURNING (C processes it inside ExecUpdate instead).
@@ -513,6 +516,7 @@ pub fn exec_init_modify_table<'mcx>(
         root,
         cur: 0,
         insert_target_root: false,
+        cross_part_root_slot: None,
         last_result_oid: 0,
         result_oid_attno,
         index_eval_cx: Some(mcx::MemoryContext::new_bump("IndexEvalPerTuple")),
@@ -1068,16 +1072,36 @@ pub fn exec_modify_table<'mcx>(
                 }
                 fetch_old_row_version(mt, estate, &tupleid)?;
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                let modified = exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)?;
-                if modified && mt.rel().project_returning.is_some() {
-                    return Ok(Some(exec_process_returning(
-                        mt,
-                        estate,
-                        CmdType::CMD_UPDATE,
-                        mt.rel().ri_oldTupleSlot,
-                        Some(slot),
-                        plan_slot,
-                    )?));
+                match exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)? {
+                    UpdateResult::NotModified => {}
+                    UpdateResult::Modified => {
+                        if mt.rel().project_returning.is_some() {
+                            return Ok(Some(exec_process_returning(
+                                mt,
+                                estate,
+                                CmdType::CMD_UPDATE,
+                                mt.rel().ri_oldTupleSlot,
+                                Some(slot),
+                                plan_slot,
+                            )?));
+                        }
+                    }
+                    // Cross-partition move: RETURNING reports the INSERT
+                    // half's row (C cpUpdateReturningSlot).
+                    UpdateResult::CrossPart(inserted) => {
+                        if let Some(islot) = inserted {
+                            if mt.rel().project_returning.is_some() {
+                                return Ok(Some(exec_process_returning(
+                                    mt,
+                                    estate,
+                                    CmdType::CMD_UPDATE,
+                                    mt.rel().ri_oldTupleSlot,
+                                    Some(islot),
+                                    plan_slot,
+                                )?));
+                            }
+                        }
+                    }
                 }
             }
             CmdType::CMD_DELETE if mt.rel().relkind == types_rel::RELKIND_VIEW => {
@@ -1117,7 +1141,7 @@ pub fn exec_modify_table<'mcx>(
             }
             CmdType::CMD_DELETE => {
                 let mut tupleid = fetch_row_id(mt, estate, plan_slot);
-                let modified = exec_delete(mt, estate, &mut tupleid, &mut epq_eval)?;
+                let modified = exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false)?;
                 if modified && mt.rel().project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
                     return Ok(Some(exec_process_returning(
@@ -2484,13 +2508,21 @@ fn eval_plan_qual_slot<'mcx>(
 // arm: no triggers/FDW/partitions. Concurrent TM_Updated runs the EPQ
 // recheck (redo_act loop); the ri_needLockTagTuple relock is omitted —
 // inplace-update catalogs never reach this executor path.
+// ExecUpdate's outcome: a cross-partition move carries the INSERT half's
+// result slot (C updateCxt->crossPartUpdate + cpUpdateReturningSlot).
+enum UpdateResult {
+    NotModified,
+    Modified,
+    CrossPart(Option<ExecSlotId>),
+}
+
 fn exec_update<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
-) -> PgResult<bool> {
+) -> PgResult<UpdateResult> {
     let output_cid = estate.es_output_cid;
     let mut slot_id = slot_id;
     let mut tmfd = TM_FailureData::default();
@@ -2498,7 +2530,7 @@ fn exec_update<'mcx>(
 
     if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row) {
         let Some(old_slot) = get_tuple_for_trigger(mt, estate, tupleid)? else {
-            return Ok(false);
+            return Ok(UpdateResult::NotModified);
         };
         if !br_row_triggers(
             mt,
@@ -2509,7 +2541,7 @@ fn exec_update<'mcx>(
             Some(slot_id),
             None,
         )? {
-            return Ok(false);
+            return Ok(UpdateResult::NotModified);
         }
     }
     let mut update_indexes = TU_UpdateIndexes::TU_None;
@@ -2517,6 +2549,7 @@ fn exec_update<'mcx>(
     // redo_act:
     loop {
         let mcx = estate.es_query_cxt;
+        let mut cross_part = false;
         let result = {
             let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
             let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
@@ -2545,19 +2578,14 @@ fn exec_update<'mcx>(
                 {
                     return Err(invalid_on_update_specification());
                 }
-                if mt.root.is_some() {
-                    // C moves the row (ExecCrossPartitionUpdate: DELETE+routed
-                    // INSERT); caught ERROR, never a server-killing panic.
-                    return Err(Box::new(
-                        PgError::error(
-                            "ExecCrossPartitionUpdate (nodeModifyTable.c): update row movement                              across partitions not ported; batch-modifytable residue"
-                                .to_string(),
-                        )
-                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ));
+                if mt.root.is_none() {
+                    return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
                 }
-                return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
-            }
+                // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
+                // performed outside this borrow scope.
+                cross_part = true;
+                TM_Result::TM_Ok
+            } else {
 
             if rel.rd_rel.relhasindex && mt.rel_mut().indexes.is_none() {
                 mt.rel_mut().indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
@@ -2586,7 +2614,12 @@ fn exec_update<'mcx>(
                 &mut lockmode,
                 &mut update_indexes,
             )?
+            }
         };
+
+        if cross_part {
+            return exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval);
+        }
 
         match result {
             TM_Result::TM_Ok => break,
@@ -2594,7 +2627,7 @@ fn exec_update<'mcx>(
                 if tmfd.cmax != output_cid {
                     return Err(self_modified_violation("updated"));
                 }
-                return Ok(false);
+                return Ok(UpdateResult::NotModified);
             }
             TM_Result::TM_Updated => {
                 if xact::IsolationUsesXactSnapshot() {
@@ -2629,19 +2662,19 @@ fn exec_update<'mcx>(
                         // clears the test slot.
                         *tupleid = estate.slot(inputslot).base().tts_tid;
                         let Some(epqslot) = epq_eval(estate, inputslot, mt.rel().rti)? else {
-                            return Ok(false);
+                            return Ok(UpdateResult::NotModified);
                         };
                         debug_assert!(mt.rel().ri_projectNewInfoValid);
                         fetch_old_row_version(mt, estate, tupleid)?;
                         slot_id = exec_get_update_new_tuple(mt, estate, epqslot)?;
                         continue;
                     }
-                    TM_Result::TM_Deleted => return Ok(false),
+                    TM_Result::TM_Deleted => return Ok(UpdateResult::NotModified),
                     TM_Result::TM_SelfModified => {
                         if tmfd.cmax != output_cid {
                             return Err(self_modified_violation("updated"));
                         }
-                        return Ok(false);
+                        return Ok(UpdateResult::NotModified);
                     }
                     other => panic!(
                         "ExecUpdate (nodeModifyTable.c): unexpected \
@@ -2653,7 +2686,7 @@ fn exec_update<'mcx>(
                 if xact::IsolationUsesXactSnapshot() {
                     return Err(serialization_conflict("delete"));
                 }
-                return Ok(false);
+                return Ok(UpdateResult::NotModified);
             }
             other => panic!("ExecUpdate (nodeModifyTable.c): unexpected {other:?}"),
         }
@@ -2734,7 +2767,102 @@ fn exec_update<'mcx>(
     if mt.canSetTag {
         estate.es_processed += 1;
     }
-    Ok(true)
+    Ok(UpdateResult::Modified)
+}
+
+// ExecCrossPartitionUpdate (nodeModifyTable.c): move an updated tuple to
+// another partition — DELETE from the source partition (RETURNING skipped,
+// canSetTag=false), convert the new tuple to the root layout, and INSERT
+// through the root, which re-routes to the destination leaf. The INSERT half
+// produces the RETURNING row and the command count.
+fn exec_cross_partition_update<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &mut ItemPointerData,
+    slot_id: ExecSlotId,
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<UpdateResult> {
+    let mcx = estate.es_query_cxt;
+
+    // C captures the moved row into the UPDATE transition tables (delete as
+    // OLD, insert as NEW: ExecDeleteEpilogue's tcs_update_old_table leg);
+    // the port's capture would misfile them as DELETE/INSERT — loud instead
+    // of silently wrong.
+    if mt.transition_capture.is_some() {
+        return Err(Box::new(
+            PgError::error(
+                "ExecCrossPartitionUpdate (nodeModifyTable.c): transition-table capture \
+                 of a moved row (UPDATE OLD/NEW filing) not ported"
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    // Row movement, part 1: delete, marking the tuple moved (changingPart).
+    if !exec_delete(mt, estate, tupleid, epq_eval, true)? {
+        // C re-checks a concurrently-updated row via the EPQ slot and
+        // retries the UPDATE; the port's delete leg cannot return one (loud
+        // at init), so a vanished/blocked tuple skips the INSERT like C's
+        // TupIsNull(epqslot) arm — never turning one row into two.
+        return Ok(UpdateResult::CrossPart(None));
+    }
+
+    // ExecCrossPartitionUpdateForeignKey: when the source partition carries
+    // AR UPDATE triggers (RI enforcement on FK-referenced tables), C queues
+    // root-level update events; silently skipping would break FK checks.
+    if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_after_row) {
+        return Err(Box::new(
+            PgError::error(
+                "ExecCrossPartitionUpdateForeignKey (nodeModifyTable.c): cross-partition \
+                 UPDATE over a source partition with AR UPDATE triggers not ported"
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    // Part 2: convert to the root layout (ExecGetChildToRootMap +
+    // mt_root_tuple_slot) and insert via the root.
+    let mut work_slot = slot_id;
+    let map = {
+        let EStateData { es_relations, .. } = &*estate;
+        let src = es_relations[(mt.rel().rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let root = es_relations[(mt.root_rel().rti - 1) as usize]
+            .as_ref()
+            .expect("root relation opened");
+        tupdesc::build_attrmap_by_name_if_req(mcx, &src.rd_att, &root.rd_att, false)?
+    };
+    if let Some(map) = map {
+        if mt.cross_part_root_slot.is_none() {
+            let (kind, desc) = {
+                let EStateData { es_relations, .. } = &*estate;
+                let root = es_relations[(mt.root_rel().rti - 1) as usize]
+                    .as_ref()
+                    .expect("root relation opened");
+                (tableam::table_slot_callbacks(root), root.rd_att.clone())
+            };
+            mt.cross_part_root_slot = Some(estate.exec_init_extra_tuple_slot(Some(desc), kind));
+        }
+        let rsid = mt.cross_part_root_slot.expect("just built");
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (i, o) = (slot_id.0 as usize, rsid.0 as usize);
+        assert!(i != o && i < es_tupleTable.len() && o < es_tupleTable.len());
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (in_slot, out) = unsafe { (&mut *base.add(i), &mut *base.add(o)) };
+        exectuples::execute_attr_map_slot(&map, in_slot, out, mcx);
+        work_slot = rsid;
+    }
+
+    mt.insert_target_root = mt.root.is_some();
+    let inserted = exec_insert(mt, estate, work_slot, epq_eval);
+    mt.insert_target_root = false;
+    let inserted = inserted?;
+
+    Ok(UpdateResult::CrossPart(inserted))
 }
 
 // ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
@@ -2744,6 +2872,10 @@ fn exec_delete<'mcx>(
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    // C changingPart: this delete is half of a cross-partition UPDATE — the
+    // storage layer marks the tuple moved and the row counts once, via the
+    // INSERT half (C passes canSetTag=false here).
+    changing_part: bool,
 ) -> PgResult<bool> {
     let output_cid = estate.es_output_cid;
     let mut tmfd = TM_FailureData::default();
@@ -2783,7 +2915,7 @@ fn exec_delete<'mcx>(
                 &None,
                 true,
                 &mut tmfd,
-                false,
+                changing_part,
             )?
         };
 
@@ -2872,7 +3004,7 @@ fn exec_delete<'mcx>(
         )?;
     }
 
-    if mt.canSetTag {
+    if mt.canSetTag && !changing_part {
         estate.es_processed += 1;
     }
     Ok(true)
@@ -4085,7 +4217,12 @@ fn exec_on_conflict_update<'mcx>(
     }
 
     let mut tupleid = conflict_tid;
-    let modified = exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?;
+    // ON CONFLICT DO UPDATE refuses cross-partition moves inside exec_update
+    // (invalid_on_update_specification), so CrossPart is unreachable here.
+    let modified = matches!(
+        exec_update(mt, estate, &mut tupleid, proj_id, epq_eval)?,
+        UpdateResult::Modified
+    );
     if modified && mt.rel().project_returning.is_some() {
         // C clears `existing` only after ExecUpdate's RETURNING projection.
         mt.oc_old_slot = Some(existing_id);
@@ -4785,7 +4922,7 @@ mcx::forget_safe_struct!(
         virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
-        returning_ecxt, oc_old_slot;
+        returning_ecxt, oc_old_slot, cross_part_root_slot;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check,
