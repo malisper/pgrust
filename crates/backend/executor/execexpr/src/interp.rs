@@ -3511,8 +3511,13 @@ pub(crate) fn exec_one_step<'mcx>(
         | Step::FuncStrict2QualThin { .. }
         | Step::OuterVarNotDistinctThin { .. }
         | Step::NotDistinctQualThin { .. }
-        | Step::AggTransStrictByValIndirectThin { .. } => {
-            unreachable!("fused steps are not jit-compiled")
+        | Step::AggTransStrictByValIndirectThin { .. }
+        | Step::NullIf { .. }
+        | Step::JsonExprPath { .. }
+        | Step::JsonCoercion { .. }
+        | Step::JsonCoercionFinish { .. }
+        | Step::IoCoerceSafe { .. } => {
+            unreachable!("step refused by the emitter; never in jitted programs")
         }
         Step::ScanFetchSome { last_var } => {
             exectuples::slot_getsomeattrs(slots.get(SlotSrc::Scan), last_var as i32);
@@ -4008,7 +4013,12 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::FuncStrict2QualThin { .. }
         | Step::OuterVarNotDistinctThin { .. }
         | Step::NotDistinctQualThin { .. }
-        | Step::AggTransStrictByValIndirectThin { .. } => false,
+        | Step::AggTransStrictByValIndirectThin { .. }
+        | Step::NullIf { .. }
+        | Step::JsonExprPath { .. }
+        | Step::JsonCoercion { .. }
+        | Step::JsonCoercionFinish { .. }
+        | Step::IoCoerceSafe { .. } => false,
         Step::ScanFetchSome { .. }
         | Step::InnerFetchSome { .. }
         | Step::OuterFetchSome { .. }
