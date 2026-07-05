@@ -777,6 +777,7 @@ fn transformColumnDefinition<'mcx>(
     column_node: Node<'mcx>,
     column: &ColumnDef<'mcx>,
     relation: &RangeVar<'mcx>,
+    rel: Option<&types_rel::Relation<'_>>,
     src: Option<&str>,
     cxt: &mut CreateStmtCxt<'mcx>,
     ckconstraints: &mut NodeList<'mcx>,
@@ -835,7 +836,7 @@ fn transformColumnDefinition<'mcx>(
             is_serial_oid,
             NodeList::nil(),
             false,
-            None,
+            rel,
             false,
             cxt,
         )?;
@@ -964,7 +965,7 @@ fn transformColumnDefinition<'mcx>(
                     // C list_copy: generateSerialExtraStmts prepends AS.
                     constraint.options.clone_in(mcx)?,
                     true,
-                    None,
+                    rel,
                     false,
                     cxt,
                 )?;
@@ -1372,6 +1373,7 @@ pub fn transformCreateStmt<'mcx>(
                     elt,
                     cd,
                     relation,
+                    None,
                     Some(query_string),
                     &mut cxt,
                     &mut ckconstraints,
@@ -2572,6 +2574,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 defnode,
                 cd,
                 &rv,
+                Some(rel),
                 None,
                 &mut cxt,
                 &mut ckconstraints,
@@ -2585,9 +2588,6 @@ pub fn transformAlterTableCmd<'mcx>(
             )?;
             if !ixconstraints.is_nil() {
                 unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE");
-            }
-            if !cxt.blist.is_nil() || !cxt.alist.is_nil() {
-                unported("ALTER TABLE ADD COLUMN serial/identity (extra statements)");
             }
             // transformFKConstraints(skipValidation = no non-null default,
             // isAddConstraint = true): the new column has no rows to check.

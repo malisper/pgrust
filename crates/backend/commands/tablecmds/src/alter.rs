@@ -392,6 +392,7 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     new_access_method: Oid,
     has_newvals: bool,
     verify_new_notnull: bool,
+    after_stmts: NodeList<'mcx>,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
     constraints: PgVec<'mcx, NewConstraint<'mcx>>,
     pub(crate) fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
@@ -419,6 +420,7 @@ impl<'mcx> AlteredTableInfo<'mcx> {
             new_access_method: InvalidOid,
             has_newvals: false,
             verify_new_notnull: false,
+            after_stmts: NodeList::nil(),
             newvals: PgVec::new_in(mcx),
             constraints: PgVec::new_in(mcx),
             fk_checks: PgVec::new_in(mcx),
@@ -1533,6 +1535,9 @@ fn ATRewriteTables<'mcx>(
     for tabidx in 0..wqueue.len() {
         ATRewriteTableOne(mcx, &mut wqueue[tabidx], lockmode)?;
     }
+    for tab in wqueue.iter() {
+        run_seq_stmts(mcx, &tab.after_stmts)?;
+    }
     Ok(())
 }
 
@@ -2076,7 +2081,12 @@ fn ATExecAddColumn<'mcx>(
 
     if !recursing && cmd.subtype != AlterTableType::AT_AddColumnToView {
         let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
-        debug_assert!(cxt.blist.is_nil() && cxt.alist.is_nil());
+        // ATParseTransformCmd: beforeStmts (serial CREATE SEQUENCE) run now;
+        // afterStmts (OWNED BY needs the column) run at the end of phase 3.
+        run_seq_stmts(mcx, &cxt.blist)?;
+        for s in cxt.alist.iter() {
+            wqueue[tabidx].after_stmts.lappend(mcx, s)?;
+        }
         // ATParseTransformCmd: generated AT_AddConstraint subcommands are
         // scheduled into later passes of the same wqueue entry.
         for def in cxt
