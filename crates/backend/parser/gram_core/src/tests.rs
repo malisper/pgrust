@@ -1610,6 +1610,29 @@ fn constraint_statements_parse() {
 }
 
 #[test]
+fn check_constraint_not_enforced() {
+    use types_nodes::rawnodes::{Constraint, ConstrType};
+    // processCASbits: NOT ENFORCED clears is_enforced and implies NOT VALID.
+    let l = parse("create table t (x int, constraint c check (x > 3) not enforced)");
+    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
+    let con = cs.tableElts.nth(1).as_variant::<Constraint>().expect("Constraint");
+    assert_eq!(con.contype, ConstrType::CONSTR_CHECK);
+    assert!(!con.is_enforced);
+    assert!(con.skip_validation);
+    assert!(!con.initially_valid);
+
+    let l = parse("create table t (x int, check (x > 3) enforced)");
+    let cs = only_stmt(&l).stmt.unwrap().as_variant::<types_nodes::rawnodes::CreateStmt>().unwrap();
+    let con = cs.tableElts.nth(1).as_variant::<Constraint>().expect("Constraint");
+    assert!(con.is_enforced);
+    assert!(!con.skip_validation);
+    assert!(con.initially_valid);
+
+    let l = parse("alter table t add constraint c2 check (x > 10) not enforced");
+    assert_eq!(l.len(), 1);
+}
+
+#[test]
 fn create_view_stmt() {
     let list = parse("CREATE VIEW v1 AS SELECT t1.a, t2.d FROM t1 JOIN t2 ON t1.a = t2.a WHERE t1.b > 10");
     let rs = only_stmt(&list);
