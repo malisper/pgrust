@@ -709,8 +709,12 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_COL_ATTRS
         }
         AlterTableType::AT_AddConstraint => {
+            ATPrepAddPrimaryKey(mcx, &mut wqueue[tabidx], rel, cmd, recurse, lockmode)?;
+            if recurse {
+                // Recurses at exec time; lock descendants now.
+                pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode)?;
+            }
             set_recurse();
-            ATPrepAddPrimaryKey(mcx, &mut wqueue[tabidx], rel, cmd, recurse)?;
             AT_PASS_ADD_CONSTR
         }
         AlterTableType::AT_DropConstraint => {
@@ -903,10 +907,13 @@ fn ATRewriteCatalogs<'mcx>(
                     ATExecColumnDefault(mcx, &rel, cmd, query_string)?;
                 }
                 AlterTableType::AT_DropNotNull => {
-                    ATExecDropNotNull(mcx, &rel, cmd)?;
+                    ATExecDropNotNull(mcx, &rel, cmd, lockmode)?;
                 }
                 AlterTableType::AT_SetNotNull => {
-                    ATExecSetNotNull(mcx, &mut wqueue[tabidx], &rel, cmd)?;
+                    let col_name = cmd.name.expect("AT_SetNotNull name");
+                    ATExecSetNotNull(
+                        mcx, wqueue, &rel, None, col_name, cmd.recurse, false, lockmode,
+                    )?;
                 }
                 AlterTableType::AT_CookedColumnDefault => {
                     let defnode = cmd.def.expect("AT_CookedColumnDefault expr");
@@ -984,11 +991,13 @@ fn ATRewriteCatalogs<'mcx>(
                     }
                 }
                 AlterTableType::AT_DropConstraint => {
-                    ATExecDropConstraint(mcx, &rel, cmd)?;
+                    ATExecDropConstraint(mcx, &rel, cmd, lockmode)?;
                 }
                 AlterTableType::AT_ValidateConstraint => {
                     let name = cmd.name.expect("AT_ValidateConstraint name");
-                    ATExecValidateConstraint(mcx, &mut wqueue[tabidx], &rel, name, cmd.recurse)?;
+                    ATExecValidateConstraint(
+                        mcx, wqueue, &rel, name, cmd.recurse, false, lockmode,
+                    )?;
                 }
                 AlterTableType::AT_AddIndex => {
                     ATExecAddIndex(mcx, &mut wqueue[tabidx], &rel, cmd, false)?;
@@ -2670,11 +2679,12 @@ fn ATPrepChangePersistence<'mcx>(
     Ok(())
 }
 
-// ATExecDropNotNull + the reachable dropconstraint_internal slice.
+// ATExecDropNotNull (tablecmds.c).
 fn ATExecDropNotNull<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     let col_name = cmd.name.expect("AT_DropNotNull name");
     let relname = rel.name().to_string();
@@ -2697,7 +2707,21 @@ fn ATExecDropNotNull<'mcx>(
         ));
     }
     if rel.rd_rel.relispartition {
-        unported("ATExecDropNotNull on a partition");
+        let parent_id = pg_inherits::get_partition_parent(mcx, rel.rd_id, false)?;
+        let parent = table::table_open(mcx, parent_id, types_rel::AccessShareLock)?;
+        let parent_attnum = attname_lookup(mcx, parent_id, col_name, false)?
+            .map(|(a, _)| a)
+            .expect("partition column exists in parent");
+        if parent.rd_att.attr(parent_attnum as usize - 1).attnotnull {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("column \"{col_name}\" is marked NOT NULL in parent table"),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
+        parent.close(types_rel::AccessShareLock)?;
     }
     let con = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?
         .unwrap_or_else(|| {
@@ -2707,7 +2731,19 @@ fn ATExecDropNotNull<'mcx>(
             )
         });
 
-    let shape = pg_constraint::ConShape {
+    dropconstraint_internal(
+        mcx,
+        rel,
+        &nn_con_shape(&con),
+        types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
+        cmd.recurse,
+        false,
+        lockmode,
+    )
+}
+
+fn nn_con_shape(con: &pg_constraint::NotNullConTup) -> pg_constraint::ConShape {
+    pg_constraint::ConShape {
         oid: con.oid,
         contype: pg_constraint::CONSTRAINT_NOTNULL,
         conname: con.conname,
@@ -2718,14 +2754,20 @@ fn ATExecDropNotNull<'mcx>(
         convalidated: con.convalidated,
         conindid: InvalidOid,
         confrelid: InvalidOid,
-        notnull_attnum: attnum,
+        notnull_attnum: con.attnum,
+    }
+}
+
+// findNotNullConstraint (pg_constraint.c): by-column-name variant.
+fn find_notnull_constraint_by_colname<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    colname: &str,
+) -> PgResult<Option<pg_constraint::NotNullConTup>> {
+    let Some((attnum, _)) = attname_lookup(mcx, relid, colname, false)? else {
+        return Ok(None);
     };
-    dropconstraint_internal(
-        mcx,
-        rel,
-        &shape,
-        types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
-    )
+    pg_constraint::findNotNullConstraintAttnum(mcx, relid, attnum)
 }
 
 // dropconstraint_internal's PK / replica-identity guards over pg_index.
@@ -2818,14 +2860,26 @@ fn pg_index_shape_full<'mcx>(
     Ok((isprimary, isreplident, keys, nkeyatts as usize))
 }
 
-// ATExecSetNotNull; recursion and merge arms are unreachable (no children).
+// ATExecSetNotNull (tablecmds.c): exec-time recursion, one level at a time.
+#[allow(clippy::too_many_arguments)]
 fn ATExecSetNotNull<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
     rel: &Relation<'mcx>,
-    cmd: &AlterTableCmd<'mcx>,
+    conname: Option<&str>,
+    col_name: &str,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    let col_name = cmd.name.expect("AT_SetNotNull name");
+    if recursing {
+        ATSimplePermissions(
+            AlterTableType::AT_AddConstraint,
+            rel,
+            ATT_PARTITIONED_TABLE | ATT_TABLE | ATT_FOREIGN_TABLE,
+        )?;
+        debug_assert!(conname.is_some());
+    }
     let relname = rel.name().to_string();
     let Some((attnum, _)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
@@ -2834,7 +2888,7 @@ fn ATExecSetNotNull<'mcx>(
         return Err(cannot_alter_system_column(col_name));
     }
     if let Some(con) = pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)? {
-        if con.connoinherit && cmd.recurse {
+        if con.connoinherit && recurse {
             return Err(Box::new(
                 PgError::new(
                     ERROR,
@@ -2847,56 +2901,54 @@ fn ATExecSetNotNull<'mcx>(
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
-        if !con.conislocal {
-            unported("ATExecSetNotNull conislocal flip (inheritance)");
-        }
-        if !con.convalidated {
-            return ATExecValidateConstraint(mcx, tab, rel, con.name_str(), cmd.recurse);
+        if recursing {
+            if con.coninhcount == i16::MAX {
+                return Err(Box::new(
+                    PgError::new(ERROR, "too many inheritance parents".to_string())
+                        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                ));
+            }
+            pg_constraint::update_constraint_fields(
+                mcx,
+                con.oid,
+                &[(
+                    pg_constraint::Anum_pg_constraint_coninhcount,
+                    Datum::from_i16(con.coninhcount + 1),
+                )],
+            )?;
+        } else if !con.conislocal {
+            pg_constraint::update_constraint_fields(
+                mcx,
+                con.oid,
+                &[(pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(true))],
+            )?;
+        } else if !con.convalidated {
+            return ATExecValidateConstraint(
+                mcx,
+                wqueue,
+                rel,
+                con.name_str(),
+                recurse,
+                recursing,
+                lockmode,
+            );
         }
         return Ok(());
     }
-    let is_no_inherit = if !cmd.recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("ATExecSetNotNull inheritance children");
-    } else {
-        false
-    };
-    create_notnull_constraint(mcx, tab, rel, attnum, col_name, None, is_no_inherit, true)
-}
-
-// The CreateConstraintEntry + set_attnotnull tail shared by SET NOT NULL and
-// the ADD CONSTRAINT ... NOT NULL arm (ATAddCheckNNConstraint's NN half).
-fn create_notnull_constraint<'mcx>(
-    mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
-    rel: &Relation<'mcx>,
-    attnum: AttrNumber,
-    col_name: &str,
-    conname: Option<&str>,
-    is_no_inherit: bool,
-    initially_valid: bool,
-) -> PgResult<()> {
-    let relname = rel.name().to_string();
+    let mut is_no_inherit = false;
+    if !recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
+        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+            return Err(Box::new(
+                PgError::new(ERROR, "constraint must be added to child tables too".to_string())
+                    .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+                    .with_hint("Do not specify the ONLY keyword.".to_string()),
+            ));
+        }
+        is_no_inherit = true;
+    }
     let name_storage;
     let con_name: &str = match conname {
-        Some(n) => {
-            if pg_constraint::ConstraintNameIsUsed(
-                mcx,
-                pg_constraint::ConstraintCategory::Relation,
-                rel.rd_id,
-                n,
-            )? {
-                return Err(Box::new(
-                    PgError::new(
-                        ERROR,
-                        format!(
-                            "constraint \"{n}\" for relation \"{relname}\" already exists"
-                        ),
-                    )
-                    .with_sqlstate(types_error::ERRCODE_DUPLICATE_OBJECT),
-                ));
-            }
-            n
-        }
+        Some(n) => n,
         None => {
             name_storage = pg_constraint::ChooseConstraintName(
                 mcx,
@@ -2909,6 +2961,41 @@ fn create_notnull_constraint<'mcx>(
             name_storage.as_str()
         }
     };
+    create_notnull_constraint(mcx, wqueue, rel, attnum, con_name, !recursing, is_no_inherit, true)?;
+    if recurse {
+        let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+        for &childoid in children.iter() {
+            let childrel = table::table_open(mcx, childoid, NoLock)?;
+            xact::CommandCounterIncrement()?;
+            ATExecSetNotNull(
+                mcx,
+                wqueue,
+                &childrel,
+                Some(con_name),
+                col_name,
+                recurse,
+                true,
+                lockmode,
+            )?;
+            childrel.close(NoLock)?;
+        }
+    }
+    Ok(())
+}
+
+// The CreateConstraintEntry + set_attnotnull tail of C's AddRelationNewConstraints
+// NOT NULL leg as reached from ATExecSetNotNull.
+#[allow(clippy::too_many_arguments)]
+fn create_notnull_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+    attnum: AttrNumber,
+    con_name: &str,
+    is_local: bool,
+    is_no_inherit: bool,
+    initially_valid: bool,
+) -> PgResult<()> {
     let conkey = [attnum];
     let mut entry = pg_constraint::ConstraintEntry::base(
         con_name,
@@ -2918,6 +3005,8 @@ fn create_notnull_constraint<'mcx>(
     );
     entry.conkey = &conkey;
     entry.n_keys = 1;
+    entry.is_local = is_local;
+    entry.inhcount = if is_local { 0 } else { 1 };
     entry.is_no_inherit = is_no_inherit;
     entry.is_validated = initially_valid;
     pg_constraint::CreateConstraintEntry(mcx, &entry)?;
@@ -2929,19 +3018,16 @@ fn create_notnull_constraint<'mcx>(
         rel.rd_att.constr.as_deref().map(|c| c.num_check as i16).unwrap_or(0),
     )?;
 
-    // set_attnotnull: NotNullImpliedByRelConstraints proof unported — phase 3
-    // always verifies (C skips the scan when existing constraints imply it).
     // An invalid constraint sets attnotnull without queueing verification.
-    if !rel.rd_att.attr(attnum as usize - 1).attnotnull {
+    if initially_valid {
+        set_attnotnull(mcx, wqueue, rel, attnum)?;
+    } else if !rel.rd_att.attr(attnum as usize - 1).attnotnull {
         update_pg_attribute(
             mcx,
             rel.rd_id,
             attnum,
             &[(Anum_pg_attribute_attnotnull, Datum::from_bool(true))],
         )?;
-        if initially_valid {
-            tab.verify_new_notnull = true;
-        }
         xact::CommandCounterIncrement()?;
     }
     Ok(())
@@ -2957,12 +3043,14 @@ fn ATPrepAddPrimaryKey<'mcx>(
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
     recurse: bool,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     let Some(defnode) = cmd.def else { return Ok(()) };
     let Some(constr) = defnode.as_variant::<Constraint>() else { return Ok(()) };
     if constr.contype != ConstrType::CONSTR_PRIMARY {
         return Ok(());
     }
+    let mut children: Option<PgVec<'mcx, Oid>> = None;
     for keynode in constr.keys.iter() {
         let key = keynode.as_string().expect("constraint keys").sval;
         let attnum = attname_lookup(mcx, rel.rd_id, key, false)?.map(|(a, _)| a).unwrap_or(0);
@@ -2974,8 +3062,29 @@ fn ATPrepAddPrimaryKey<'mcx>(
                 continue;
             }
         }
-        if !recurse && find_inheritance_children_exist(mcx, rel.rd_id)? {
-            unported("ATPrepAddPrimaryKey: ONLY with inheritance children");
+        if !recurse {
+            // ONLY: verify every direct child already carries a compatible
+            // not-null constraint (children searched once).
+            if children.is_none() {
+                children =
+                    Some(pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?);
+            }
+            for &childrelid in children.as_ref().expect("children fetched").iter() {
+                let child_name = lsyscache::relation::get_rel_name(mcx, childrelid)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                let Some(con) = find_notnull_constraint_by_colname(mcx, childrelid, key)?
+                else {
+                    return Err(Box::new(PgError::new(
+                        ERROR,
+                        format!(
+                            "column \"{key}\" of table \"{child_name}\" is not marked \
+                             NOT NULL"
+                        ),
+                    )));
+                };
+                verify_notnull_pk_compatible(&con, key, &child_name)?;
+            }
         }
         let mut nn = Node::build::<Constraint>(mcx)?;
         nn.contype = ConstrType::CONSTR_NOTNULL;
@@ -3140,17 +3249,19 @@ fn set_attnotnull<'mcx>(
     Ok(())
 }
 
-// ATExecDropConstraint + dropconstraint_internal (plain-table slice; children
-// recursion is loud).
+// ATExecDropConstraint + dropconstraint_internal (tablecmds.c).
 fn ATExecDropConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     let constr_name = cmd.name.expect("AT_DropConstraint name");
     let relname = rel.name().to_string();
     match pg_constraint::findConstraintByName(mcx, rel.rd_id, constr_name)? {
-        Some(con) => dropconstraint_internal(mcx, rel, &con, cmd.behavior),
+        Some(con) => {
+            dropconstraint_internal(mcx, rel, &con, cmd.behavior, cmd.recurse, false, lockmode)
+        }
         None => {
             if !cmd.missing_ok {
                 return Err(Box::new(
@@ -3182,9 +3293,19 @@ fn dropconstraint_internal<'mcx>(
     rel: &Relation<'mcx>,
     con: &pg_constraint::ConShape,
     behavior: types_nodes::parsenodes::DropBehavior,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
+    if recursing {
+        ATSimplePermissions(
+            AlterTableType::AT_DropConstraint,
+            rel,
+            ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
+        )?;
+    }
     let relname = rel.name().to_string();
-    if con.coninhcount > 0 {
+    if con.coninhcount > 0 && !recursing {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -3196,11 +3317,13 @@ fn dropconstraint_internal<'mcx>(
             .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
     }
+    let mut colname: Option<String> = None;
     if con.contype == pg_constraint::CONSTRAINT_NOTNULL {
         let attnum = con.notnull_attnum;
         let att = rel.rd_att.attr(attnum as usize - 1);
         let col_name =
             core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8").to_string();
+        colname = Some(col_name.clone());
         check_notnull_droppable(mcx, rel, attnum, &col_name)?;
         if att.attidentity != 0 {
             return Err(Box::new(
@@ -3233,8 +3356,87 @@ fn dropconstraint_internal<'mcx>(
     }
     let object = pg_depend::ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, con.oid);
     catalog_dependency::performDeletion(mcx, &object, behavior, 0)?;
-    if !con.connoinherit && find_inheritance_children_exist(mcx, rel.rd_id)? {
-        unported("dropconstraint_internal inheritance recursion");
+    // Partitioned tables drop non-CHECK, non-NOT-NULL inherited constraints
+    // via the dependency mechanism.
+    if con.contype != pg_constraint::CONSTRAINT_CHECK
+        && con.contype != pg_constraint::CONSTRAINT_NOTNULL
+        && rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        return Ok(());
+    }
+    let children = if !con.connoinherit {
+        pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?
+    } else {
+        PgVec::new_in(mcx)
+    };
+    for &childrelid in children.iter() {
+        let childrel = table::table_open(mcx, childrelid, NoLock)?;
+        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        let childcon = if con.contype == pg_constraint::CONSTRAINT_NOTNULL {
+            let col = colname.as_deref().expect("colname saved for NOT NULL constraint");
+            match find_notnull_constraint_by_colname(mcx, childrelid, col)? {
+                Some(nn) => nn_con_shape(&nn),
+                None => panic!(
+                    "cache lookup failed for not-null constraint on column \"{col}\" of \
+                     relation {childrelid}"
+                ),
+            }
+        } else {
+            match pg_constraint::findConstraintByName(mcx, childrelid, con.name_str())? {
+                Some(c) => c,
+                None => {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "constraint \"{}\" of relation \"{}\" does not exist",
+                                con.name_str(),
+                                childrel.name()
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+                    ));
+                }
+            }
+        };
+        if childcon.contype != pg_constraint::CONSTRAINT_CHECK
+            && childcon.contype != pg_constraint::CONSTRAINT_NOTNULL
+        {
+            panic!("inherited constraint is not a CHECK or not-null constraint");
+        }
+        if childcon.coninhcount <= 0 {
+            panic!(
+                "relation {childrelid} has non-inherited constraint \"{}\"",
+                childcon.name_str()
+            );
+        }
+        if recurse {
+            if childcon.coninhcount == 1 && !childcon.conislocal {
+                dropconstraint_internal(
+                    mcx, &childrel, &childcon, behavior, recurse, true, lockmode,
+                )?;
+            } else {
+                pg_constraint::update_constraint_fields(
+                    mcx,
+                    childcon.oid,
+                    &[(
+                        pg_constraint::Anum_pg_constraint_coninhcount,
+                        Datum::from_i16(childcon.coninhcount - 1),
+                    )],
+                )?;
+                xact::CommandCounterIncrement()?;
+            }
+        } else {
+            let newcount = childcon.coninhcount - 1;
+            let mut fields: PgVec<'_, (AttrNumber, Datum)> = PgVec::new_in(mcx);
+            fields.push((pg_constraint::Anum_pg_constraint_coninhcount, Datum::from_i16(newcount)));
+            if newcount == 0 {
+                fields.push((pg_constraint::Anum_pg_constraint_conislocal, Datum::from_bool(true)));
+            }
+            pg_constraint::update_constraint_fields(mcx, childcon.oid, &fields)?;
+            xact::CommandCounterIncrement()?;
+        }
+        childrel.close(NoLock)?;
     }
     Ok(())
 }
@@ -3633,12 +3835,15 @@ fn ATExecDropInherit<'mcx>(
 // ATExecValidateConstraint + Queue{FK,Check,NN}ConstraintValidation
 // (tablecmds.c), single-level lane: inheritance children are loud, the
 // partitioned arms unreachable (relkind gated at ATPrepCmd).
+#[allow(clippy::too_many_arguments)]
 fn ATExecValidateConstraint<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
     rel: &Relation<'mcx>,
     constr_name: &str,
     recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     let relname = rel.name().to_string();
     let Some(con) = pg_constraint::findConstraintByName(mcx, rel.rd_id, constr_name)? else {
@@ -3674,10 +3879,74 @@ fn ATExecValidateConstraint<'mcx>(
     if con.convalidated {
         return Ok(());
     }
-    if con.contype != pg_constraint::CONSTRAINT_FOREIGN
-        && !con.connoinherit
-        && find_inheritance_children_exist(mcx, rel.rd_id)?
-    {
+    match con.contype {
+        pg_constraint::CONSTRAINT_FOREIGN => {
+            let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
+            wqueue[tabidx].fk_checks.push(crate::fk::FkValidateItem {
+                conname: str_arena(mcx, con.name_str())?,
+                refrelid: con.confrelid,
+                refindid: con.conindid,
+                conid: con.oid,
+            });
+        }
+        pg_constraint::CONSTRAINT_CHECK => {
+            validate_constraint_children(
+                mcx, wqueue, rel, &con, None, recurse, recursing, lockmode,
+            )?;
+            for i in 0..rel.rd_att.natts as usize {
+                if rel.rd_att.attr(i).attgenerated != 0 {
+                    unported("QueueCheckConstraintValidation expand_generated_columns_in_expr");
+                }
+            }
+            let conbin = pg_constraint::constraint_conbin(mcx, con.oid)?;
+            let qual = readfuncs::stringToNode(mcx, conbin.as_str())?;
+            let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
+            wqueue[tabidx]
+                .constraints
+                .push(NewConstraint { name: str_arena(mcx, con.name_str())?, qual });
+            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
+        }
+        _ => {
+            let colname = core::str::from_utf8(
+                rel.rd_att.attr(con.notnull_attnum as usize - 1).attname.name_str(),
+            )
+            .expect("attname UTF-8")
+            .to_string();
+            validate_constraint_children(
+                mcx, wqueue, rel, &con, Some(&colname), recurse, recursing, lockmode,
+            )?;
+            // QueueNNConstraintValidation: attnotnull was set by the invalid
+            // ADD, so set_attnotnull reduces to its relcache-inval arm.
+            debug_assert!(rel.rd_att.attr(con.notnull_attnum as usize - 1).attnotnull);
+            let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
+            wqueue[tabidx].verify_new_notnull = true;
+            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
+        }
+    }
+    pg_constraint::SetConstraintValidated(mcx, con.oid)
+}
+
+// Queue{Check,NN}ConstraintValidation children legs (tablecmds.c): validate
+// on all inheritors before flipping the parent's convalidated.
+#[allow(clippy::too_many_arguments)]
+fn validate_constraint_children<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+    con: &pg_constraint::ConShape,
+    nn_colname: Option<&str>,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    if recursing || con.connoinherit {
+        return Ok(());
+    }
+    let children = pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode)?;
+    for &childoid in children.iter() {
+        if childoid == rel.rd_id {
+            continue;
+        }
         if !recurse {
             return Err(Box::new(
                 PgError::new(
@@ -3687,38 +3956,46 @@ fn ATExecValidateConstraint<'mcx>(
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
             ));
         }
-        unported("Queue{Check,NN}ConstraintValidation inheritance recursion");
-    }
-    match con.contype {
-        pg_constraint::CONSTRAINT_FOREIGN => {
-            tab.fk_checks.push(crate::fk::FkValidateItem {
-                conname: str_arena(mcx, con.name_str())?,
-                refrelid: con.confrelid,
-                refindid: con.conindid,
-                conid: con.oid,
-            });
-        }
-        pg_constraint::CONSTRAINT_CHECK => {
-            for i in 0..rel.rd_att.natts as usize {
-                if rel.rd_att.attr(i).attgenerated != 0 {
-                    unported("QueueCheckConstraintValidation expand_generated_columns_in_expr");
-                }
+        match nn_colname {
+            None => {
+                let childrel = table::table_open(mcx, childoid, NoLock)?;
+                ATExecValidateConstraint(
+                    mcx,
+                    wqueue,
+                    &childrel,
+                    con.name_str(),
+                    false,
+                    true,
+                    lockmode,
+                )?;
+                childrel.close(NoLock)?;
             }
-            let conbin = pg_constraint::constraint_conbin(mcx, con.oid)?;
-            let qual = readfuncs::stringToNode(mcx, conbin.as_str())?;
-            tab.constraints
-                .push(NewConstraint { name: str_arena(mcx, con.name_str())?, qual });
-            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
-        }
-        _ => {
-            // QueueNNConstraintValidation: attnotnull was set by the invalid
-            // ADD, so set_attnotnull reduces to its relcache-inval arm.
-            debug_assert!(rel.rd_att.attr(con.notnull_attnum as usize - 1).attnotnull);
-            tab.verify_new_notnull = true;
-            inval::invalidate::CacheInvalidateRelcacheByRelid(rel.rd_id)?;
+            Some(colname) => {
+                let childcon = find_notnull_constraint_by_colname(mcx, childoid, colname)?
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "cache lookup failed for not-null constraint on column \
+                             \"{colname}\" of relation \"{}\"",
+                            lsyscache::relation::get_rel_name(mcx, childoid)
+                                .ok()
+                                .flatten()
+                                .map(|s| s.as_str().to_string())
+                                .unwrap_or_default()
+                        )
+                    });
+                if childcon.convalidated {
+                    continue;
+                }
+                let childrel = table::table_open(mcx, childoid, NoLock)?;
+                let conname = childcon.name_str().to_string();
+                ATExecValidateConstraint(
+                    mcx, wqueue, &childrel, &conname, false, true, lockmode,
+                )?;
+                childrel.close(NoLock)?;
+            }
         }
     }
-    pg_constraint::SetConstraintValidated(mcx, con.oid)
+    Ok(())
 }
 
 fn ATPrepAlterColumnType<'mcx>(
