@@ -827,7 +827,11 @@ fn ATPrepCmd<'mcx>(
             let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
             run_seq_stmts(mcx, &cxt.blist)?;
             debug_assert!(cxt.alist.is_nil());
-            debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+            debug_assert!(
+                cxt.ckconstraints.is_nil()
+                    && cxt.nnconstraints.is_nil()
+                    && cxt.fkconstraints.is_nil()
+            );
             ATPrepAlterColumnType(
                 mcx,
                 wqueue,
@@ -1383,19 +1387,29 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_AddIdentity => {
                     let relname = rel.name().to_string();
-                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
+                    let cxt =
+                        parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
                     run_seq_stmts(mcx, &cxt.blist)?;
                     debug_assert!(cxt.alist.is_nil());
-                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+                    debug_assert!(
+                        cxt.ckconstraints.is_nil()
+                            && cxt.nnconstraints.is_nil()
+                            && cxt.fkconstraints.is_nil()
+                    );
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
                     ATExecAddIdentity(mcx, &rel, cmd)?;
                 }
                 AlterTableType::AT_SetIdentity => {
                     let relname = rel.name().to_string();
-                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
+                    let cxt =
+                        parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
                     run_seq_stmts(mcx, &cxt.blist)?;
                     debug_assert!(cxt.alist.is_nil());
-                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+                    debug_assert!(
+                        cxt.ckconstraints.is_nil()
+                            && cxt.nnconstraints.is_nil()
+                            && cxt.fkconstraints.is_nil()
+                    );
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
                     ATExecSetIdentity(mcx, &rel, cmd)?;
                 }
@@ -2065,7 +2079,12 @@ fn ATExecAddColumn<'mcx>(
         debug_assert!(cxt.blist.is_nil() && cxt.alist.is_nil());
         // ATParseTransformCmd: generated AT_AddConstraint subcommands are
         // scheduled into later passes of the same wqueue entry.
-        for def in cxt.ckconstraints.iter().chain(cxt.nnconstraints.iter()) {
+        for def in cxt
+            .ckconstraints
+            .iter()
+            .chain(cxt.nnconstraints.iter())
+            .chain(cxt.fkconstraints.iter())
+        {
             let constr = def.as_variant::<Constraint>().expect("Constraint");
             let target_pass = match constr.contype {
                 ConstrType::CONSTR_NOTNULL => AT_PASS_COL_ATTRS,
