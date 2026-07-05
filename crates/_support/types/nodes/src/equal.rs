@@ -16,7 +16,8 @@ use crate::parsenodes::{
 };
 use crate::list::OptNodeList;
 use crate::primnodes::{
-    Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CoalesceExpr, CoerceViaIO,
+    Aggref, Alias, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr, CaseTestExpr,
+    CaseWhen, CoalesceExpr, CoerceViaIO,
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
     SQLValueFunction, ScalarArrayOpExpr, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
@@ -78,6 +79,9 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_CoerceViaIO => cmp!(as_coerce_via_io),
         NodeTag::T_ArrayCoerceExpr => cmp!(as_array_coerce_expr),
         NodeTag::T_ConvertRowtypeExpr => cmp!(as_convert_rowtype_expr),
+        NodeTag::T_CaseExpr => cmp!(as_case_expr),
+        NodeTag::T_CaseWhen => cmp!(as_case_when),
+        NodeTag::T_CaseTestExpr => cmp!(as_case_test_expr),
         NodeTag::T_CoalesceExpr => cmp!(as_coalesce_expr),
         NodeTag::T_NullTest => cmp!(as_null_test),
         NodeTag::T_BooleanTest => cmp!(as_boolean_test),
@@ -583,6 +587,28 @@ impl NodeEqual for ArrayCoerceExpr<'_> {
 impl NodeEqual for ConvertRowtypeExpr<'_> {
     fn node_equal(&self, b: &Self) -> bool {
         equal(self.arg, b.arg) && self.resulttype == b.resulttype
+    }
+}
+
+impl NodeEqual for CaseExpr<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.casetype == b.casetype
+            && self.casecollid == b.casecollid
+            && equal_opt(self.arg, b.arg)
+            && self.args.node_equal(&b.args)
+            && equal_opt(self.defresult, b.defresult)
+    }
+}
+
+impl NodeEqual for CaseWhen<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        equal_opt(self.expr, b.expr) && equal_opt(self.result, b.result)
+    }
+}
+
+impl NodeEqual for CaseTestExpr {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.typeId == b.typeId && self.typeMod == b.typeMod && self.collation == b.collation
     }
 }
 
