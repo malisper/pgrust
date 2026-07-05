@@ -100,6 +100,56 @@ pub(crate) fn replorigin_create(mcx: Mcx<'_>, roname: &str) -> PgResult<Oid> {
     Ok(created)
 }
 
+// replorigin_check_prerequisites(check_origins=false, recoveryOK=false).
+fn replorigin_check_prerequisites_create() -> PgResult<()> {
+    if transam_xlog_seams::recovery_in_progress::call() {
+        return Err(Box::new(
+            PgError::error("cannot manipulate replication origins during recovery")
+                .with_sqlstate(types_error::ERRCODE_READ_ONLY_SQL_TRANSACTION),
+        ));
+    }
+    Ok(())
+}
+
+// IsReservedOriginName: "none" or "any" (pg_strcasecmp).
+fn is_reserved_origin_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("none") || name.eq_ignore_ascii_case("any")
+}
+
+pub fn fc_pg_replication_origin_create(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    replorigin_check_prerequisites_create()?;
+
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let name = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let name = String::from_utf8_lossy(name.data()).into_owned();
+
+    if catalog::IsReservedName(&name) || is_reserved_origin_name(&name) {
+        return Err(Box::new(
+            PgError::error(format!("replication origin name \"{name}\" is reserved"))
+                .with_sqlstate(types_error::ERRCODE_RESERVED_NAME)
+                .with_detail(
+                    "Origin names \"any\", \"none\", and names starting with \"pg_\" are reserved."
+                        .to_string(),
+                ),
+        ));
+    }
+
+    let roident = replorigin_create(fcinfo.result_mcx(), &name)?;
+    Ok(Datum::from_oid(roident))
+}
+
+pub const ORIGIN_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {
+    foid: 6003,
+    name: "pg_replication_origin_create",
+    nargs: 1,
+    strict: true,
+    retset: false,
+    func: fc_pg_replication_origin_create,
+}];
+
 pub(crate) fn replorigin_by_name(roname: &str, missing_ok: bool) -> PgResult<Oid> {
     let mut roident = InvalidOid;
     if let Some(tup) = SearchSysCache1(REPLORIGNAME, SysCacheKey::Str(roname))? {

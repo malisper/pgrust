@@ -32,6 +32,13 @@ pub fn apply_launcher_registered() -> bool {
     LAUNCHER_REGISTERED.load(Ordering::Relaxed)
 }
 
+// GetLeaderApplyWorkerPid (launcher.c): scans LogicalRepCtx->workers for a
+// parallel apply worker owning `pid`. No logical-rep worker pool exists here
+// (workers are never launched), so the scan is empty: always InvalidPid.
+pub fn GetLeaderApplyWorkerPid(_pid: i32) -> i32 {
+    -1
+}
+
 pub fn AtEOXact_ApplyLauncher(is_commit: bool) {
     if is_commit && ON_COMMIT_LAUNCHER_WAKEUP.get() {
         panic!("AtEOXact_ApplyLauncher: ApplyLauncherWakeup unported (backend-replication-logical-launcher)");
@@ -53,4 +60,5 @@ pub fn init_seams() {
         set: |v| MAX_PARALLEL_APPLY_WORKERS_PER_SUBSCRIPTION.store(v, Ordering::Relaxed),
     });
     launcher_seams::apply_launcher_register::set(ApplyLauncherRegister);
+    launcher_seams::get_leader_apply_worker_pid::set(GetLeaderApplyWorkerPid);
 }

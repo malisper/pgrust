@@ -135,10 +135,12 @@ pub fn fc_pg_stat_get_activity(
                         nulls[29] = false;
                     }
                 } else if be.st_backendType == BackendType::BgWorker {
-                    panic!(
-                        "pg_stat_get_activity (pgstatfuncs.c): GetLeaderApplyWorkerPid \
-                         unported — logical-replication lane"
-                    );
+                    // InvalidPid (-1) unless this is a parallel apply worker.
+                    let leader_pid = launcher_seams::get_leader_apply_worker_pid::call(be.st_procpid);
+                    if leader_pid != -1 {
+                        values[29] = Datum::from_i32(leader_pid);
+                        nulls[29] = false;
+                    }
                 }
             }
 
@@ -197,12 +199,14 @@ pub fn fc_pg_stat_get_activity(
             }
 
             if be.st_backendType == BackendType::BgWorker {
-                panic!(
-                    "pg_stat_get_activity (pgstatfuncs.c): GetBackgroundWorkerTypeByPid \
-                     unported — bgworker lane"
-                );
+                match bgworker_seams::get_background_worker_type_by_pid::call(be.st_procpid) {
+                    Some(bgw_type) => values[17] = text_datum(fcinfo, &bgw_type)?,
+                    None => nulls[17] = true,
+                }
+            } else {
+                values[17] =
+                    text_datum(fcinfo, miscinit::GetBackendTypeDesc(be.st_backendType))?;
             }
-            values[17] = text_datum(fcinfo, miscinit::GetBackendTypeDesc(be.st_backendType))?;
 
             if be.st_ssl {
                 values[18] = Datum::from_bool(true);

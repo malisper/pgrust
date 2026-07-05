@@ -1082,6 +1082,88 @@ pub fn fc_in_range_interval_interval(
     )?))
 }
 
+// datetime.c pg_timezone_names. The tuplestore copies each row, so the text
+// and interval images are per-row stack/heap scratch, not mcx allocations.
+pub fn fc_pg_timezone_names(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    use adt_datetime::consts::{
+        pg_itm_in, POSTGRES_EPOCH_JDATE, SECS_PER_DAY, UNIX_EPOCH_JDATE, USECS_PER_SEC,
+    };
+
+    fn text_image(s: &[u8]) -> Vec<u8> {
+        let mut img = Vec::with_capacity(4 + s.len());
+        img.extend_from_slice(&::datum::varlena::set_varsize_4b(4 + s.len()));
+        img.extend_from_slice(s);
+        img
+    }
+
+    let flinfo = flinfo.expect("pg_timezone_names: resolved FmgrInfo required");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+
+    let now = xact::GetCurrentTransactionStartTimestamp();
+    // C: timestamp2tm(now, &tzoff, &tm, &fsec, &tzn, tz), inlined to its
+    // pg_localtime branch — `now` is finite and in Julian range so the C
+    // failure arms cannot fire, and the enumerator's tz borrow is not
+    // 'static as timestamp2tm requires.
+    let fsec = now.rem_euclid(USECS_PER_SEC);
+    let dt_secs = (now - fsec) / USECS_PER_SEC
+        + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i64 * SECS_PER_DAY as i64;
+
+    let mut tzenum = pgtz::pg_tzenumerate_start()?;
+    loop {
+        let (name, abbrev, tzoff, is_dst) = {
+            let Some(tz) = pgtz::pg_tzenumerate_next(&mut tzenum)? else {
+                break;
+            };
+            let (tzoff, isdst, tzn) = match localtime::pg_localtime(dt_secs, tz) {
+                Some(tx) => (-(tx.tm_gmtoff as i32), tx.tm_isdst, tx.tm_zone),
+                // out of pg_time_t range: treat as GMT (C comment)
+                None => (0i32, -1i32, None),
+            };
+            // C rejects >31-byte "abbreviations" (hacked Factory zones).
+            if tzn.is_some_and(|n| n.len() > 31) {
+                continue;
+            }
+            (
+                text_image(localtime::pg_get_timezone_name(tz)),
+                text_image(tzn.unwrap_or("").as_bytes()),
+                tzoff,
+                isdst > 0,
+            )
+        };
+
+        let itm_in = pg_itm_in {
+            tm_usec: -(tzoff as i64) * USECS_PER_SEC,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+        };
+        let mut iv = Interval::default();
+        // C: "can't overflow"
+        crate::interval::itmin2interval(&itm_in, &mut iv)
+            .expect("pg_timezone_names: utc_offset interval overflow");
+        let mut iv_img = [0u8; 16];
+        iv_img[..8].copy_from_slice(&iv.time.to_ne_bytes());
+        iv_img[8..12].copy_from_slice(&iv.day.to_ne_bytes());
+        iv_img[12..].copy_from_slice(&iv.month.to_ne_bytes());
+
+        let values = [
+            Datum::from_usize(name.as_ptr() as usize),
+            Datum::from_usize(abbrev.as_ptr() as usize),
+            Datum::from_usize(iv_img.as_ptr() as usize),
+            Datum::from_bool(is_dst),
+        ];
+        srf.putvalues(&values, &[false; 4])?;
+    }
+    pgtz::pg_tzenumerate_end(tzenum)?;
+
+    Ok(srf.finish(fcinfo))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -1099,6 +1181,7 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 // rows are the timestamptz operators sharing the timestamp prosrc).
 pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     b(274, "timeofday", 0, fc_timeofday),
+    srf(2856, "pg_timezone_names", 0, fc_pg_timezone_names),
     srf(938, "generate_series_timestamp", 3, fc_generate_series_timestamp),
     srf(939, "generate_series_timestamptz", 3, fc_generate_series_timestamptz),
     srf(6274, "generate_series_timestamptz_at_zone", 4, fc_generate_series_timestamptz),

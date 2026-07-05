@@ -1,0 +1,21 @@
+[package]
+name = "pg_controldata"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_controldata"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../../../_support/types/datum" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
+funcapi = { path = "../../fmgr/funcapi" }
+heaptuple = { path = "../../../access/common/heaptuple" }
+varlena = { path = "../../adt/varlena" }
+controldata_utils = { path = "../../../../common/controldata_utils" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+lwlock = { path = "../../../storage/lmgr/lwlock" }
+init_small = { path = "../../init/init_small" }

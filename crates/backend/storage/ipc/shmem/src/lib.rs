@@ -5,7 +5,9 @@
 // Mutex is C's ShmemIndexLock); ShmemLock stays a spinlock (lwlock.c brackets
 // its shared counters with it via the seams). Segment mechanics have no
 // thread-model counterpart and no port: InitShmemAccess/Allocation/Index
-// bootstrap, ShmemAllocUnlocked, ShmemAddrIsValid, pagesize/NUMA SRFs.
+// bootstrap, ShmemAllocUnlocked, ShmemAddrIsValid, and pg_get_shmem_allocations
+// 5052 (off/<anonymous>/free rows need ShmemSegHdr's freeoffset/totalsize).
+// The NUMA builtins (4099/4100) are ported below as C's no-libnuma build.
 #![allow(non_snake_case)]
 
 use std::alloc::Layout;
@@ -188,6 +190,45 @@ fn size_overflow(func: &'static str) -> PgResult<()> {
         .errmsg("requested shared memory size overflows size_t")
         .finish(loc(func))
 }
+
+// pg_numa_available (shmem.c): pg_numa_init() != -1. This build has no
+// libnuma, matching C's src/port/pg_numa.c non-NUMA stub (always -1).
+pub fn fc_pg_numa_available(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    Ok(datum::Datum::from_bool(false))
+}
+
+// pg_get_shmem_allocations_numa (shmem.c): the pg_numa_init() == -1 arm.
+pub fn fc_pg_get_shmem_allocations_numa(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    ereport(ERROR)
+        .errmsg("libnuma initialization failed or NUMA is not supported on this platform")
+        .finish(loc("pg_get_shmem_allocations_numa"))?;
+    unreachable!()
+}
+
+pub const SHMEM_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
+    types_fmgr::FmgrBuiltin {
+        foid: 4099,
+        name: "pg_numa_available",
+        nargs: 0,
+        strict: true,
+        retset: false,
+        func: fc_pg_numa_available,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 4100,
+        name: "pg_get_shmem_allocations_numa",
+        nargs: 0,
+        strict: true,
+        retset: true,
+        func: fc_pg_get_shmem_allocations_numa,
+    },
+];
 
 pub fn init_seams() {
     shmem_seams::shmem_init_struct::set(ShmemInitStruct);

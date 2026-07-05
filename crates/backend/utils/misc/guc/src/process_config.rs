@@ -33,13 +33,24 @@ pub fn process_config_file_internal(
     apply_settings: bool,
     elevel: ErrorLevel,
 ) -> PgResult<bool> {
+    Ok(process_config_file_internal_list(context, apply_settings, elevel)?.0)
+}
+
+// C's ProcessConfigFileInternal returns the parsed ConfigVariable list (its
+// show_all_file_settings caller reads it); the boolean is the bail_out verdict.
+pub fn process_config_file_internal_list(
+    context: GucContext,
+    apply_settings: bool,
+    elevel: ErrorLevel,
+) -> PgResult<(bool, Vec<ConfigVariable>)> {
     let config_file_name = store::get_string("config_file").flatten().unwrap_or_default();
 
     let mut conf_file_with_error = config_file_name.clone();
     let mut head: Vec<ConfigVariable> = Vec::new();
 
     if !ParseConfigFile(&config_file_name, true, None, 0, CONF_FILE_START_DEPTH, elevel, &mut head)? {
-        return bail_out(context, elevel, true, false, apply_settings, &conf_file_with_error);
+        let ok = bail_out(context, elevel, true, false, apply_settings, &conf_file_with_error)?;
+        return Ok((ok, head));
     }
 
     // postgresql.auto.conf lives in the data directory; parse it after the
@@ -47,7 +58,8 @@ pub fn process_config_file_internal(
     if init_small::globals::DataDir().is_some() {
         if !ParseConfigFile(PG_AUTOCONF_FILENAME, false, None, 0, CONF_FILE_START_DEPTH, elevel, &mut head)? {
             conf_file_with_error = PG_AUTOCONF_FILENAME.to_string();
-            return bail_out(context, elevel, true, false, apply_settings, &conf_file_with_error);
+            let ok = bail_out(context, elevel, true, false, apply_settings, &conf_file_with_error)?;
+            return Ok((ok, head));
         }
     } else {
         // Without DataDir accept only the last data_directory item: anything
@@ -64,12 +76,21 @@ pub fn process_config_file_internal(
             None => {
                 // No data_directory: quick exit, PgReloadTime is set by the
                 // subsequent full load.
-                return bail_out(context, elevel, false, false, apply_settings, &conf_file_with_error);
+                let ok =
+                    bail_out(context, elevel, false, false, apply_settings, &conf_file_with_error)?;
+                return Ok((ok, head));
             }
         }
     }
 
-    apply_config_variables(&mut head, context, apply_settings, elevel, &mut conf_file_with_error)
+    let ok = apply_config_variables(
+        &mut head,
+        context,
+        apply_settings,
+        elevel,
+        &mut conf_file_with_error,
+    )?;
+    Ok((ok, head))
 }
 
 // The apply phase of ProcessConfigFileInternal, over the parsed list and the

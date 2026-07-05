@@ -43,3 +43,5 @@ varlena = { path = "../../utils/adt/varlena" }
 adt_pg_lsn = { path = "../../utils/adt/pg_lsn" }
 dbcommands = { path = "../dbcommands" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+types_fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

@@ -22,6 +22,7 @@ numutils = { path = "../numutils" }
 adt_datetime = { path = "../adt_datetime" }
 float = { package = "adt_float", path = "../float" }
 localtime = { path = "../../../timezone/localtime" }
+pgtz = { path = "../../../timezone/pgtz" }
 strftime = { path = "../../../timezone/strftime" }
 timestamp_seams = { path = "../timestamp_seams" }
 xact = { path = "../../../access/transam/xact" }
@@ -32,7 +33,6 @@ nodes_core = { path = "../../../nodes/nodes_core" }
 libc = "0.2"
 
 [dev-dependencies]
-pgtz = { path = "../../../timezone/pgtz" }
 guc_tables = { path = "../../misc/guc_tables" }
 fd = { path = "../../../storage/file/fd" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
