@@ -115,10 +115,6 @@ fn at_add_foreign_key_constraint<'mcx>(
     old_desc: &types_tuple::TupleDescData<'mcx>,
     lockmode: types_rel::LOCKMODE,
 ) -> PgResult<()> {
-    if fkconstraint.fk_with_period || fkconstraint.pk_with_period {
-        unported("PERIOD (temporal FK)");
-    }
-
     // A re-added constraint targets the pktable by OID: concurrent activity
     // could have made the deparsed name resolve differently.
     let pkrel = if fkconstraint.old_pktable_oid != InvalidOid {
@@ -203,6 +199,16 @@ fn at_add_foreign_key_constraint<'mcx>(
         Some(&mut fktypoid),
         Some(&mut fkcolloid),
     )?;
+    let with_period = fkconstraint.fk_with_period || fkconstraint.pk_with_period;
+    if with_period && !fkconstraint.fk_with_period {
+        let e = err(
+            "foreign key uses PERIOD on the referenced table but not the referencing table"
+                .into(),
+            ERRCODE_INVALID_FOREIGN_KEY,
+        );
+        pkrel.close(NoLock)?;
+        return Err(e);
+    }
 
     let mut fkdelsetcols = [0i16; INDEX_MAX_KEYS as usize];
     let numfkdelsetcols = transform_column_name_list(
@@ -226,8 +232,9 @@ fn at_add_foreign_key_constraint<'mcx>(
     let mut opclasses = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut pk_attnames: mcx::PgVec<'mcx, &'mcx str> = mcx::PgVec::new_in(mcx);
 
+    let mut pk_has_without_overlaps = false;
     let (numpks, index_oid) = if fkconstraint.pk_attrs.is_nil() {
-        transform_fkey_get_primary_key(
+        let (n, idx) = transform_fkey_get_primary_key(
             mcx,
             &pkrel,
             &mut pk_attnames,
@@ -235,7 +242,19 @@ fn at_add_foreign_key_constraint<'mcx>(
             &mut pktypoid,
             &mut pkcolloid,
             &mut opclasses,
-        )?
+            &mut pk_has_without_overlaps,
+        )?;
+        // If the primary key uses WITHOUT OVERLAPS, the fk must use PERIOD.
+        if pk_has_without_overlaps && !fkconstraint.fk_with_period {
+            let e = err(
+                "foreign key uses PERIOD on the referenced table but not the referencing                  table"
+                    .into(),
+                ERRCODE_INVALID_FOREIGN_KEY,
+            );
+            pkrel.close(NoLock)?;
+            return Err(e);
+        }
+        (n, idx)
     } else {
         let n = transform_column_name_list(
             &pkrel,
@@ -247,9 +266,37 @@ fn at_add_foreign_key_constraint<'mcx>(
         for a in fkconstraint.pk_attrs.iter() {
             pk_attnames.push(a.as_string().expect("pk_attrs String").sval);
         }
-        let idx = transform_fkey_check_attrs(mcx, &pkrel, n, &pkattnum, &mut opclasses)?;
+        // Since we got pk_attrs, one should be a period.
+        if with_period && !fkconstraint.pk_with_period {
+            let e = err(
+                "foreign key uses PERIOD on the referencing table but not the referenced                  table"
+                    .into(),
+                ERRCODE_INVALID_FOREIGN_KEY,
+            );
+            pkrel.close(NoLock)?;
+            return Err(e);
+        }
+        let idx = transform_fkey_check_attrs(
+            mcx,
+            &pkrel,
+            n,
+            &pkattnum,
+            with_period,
+            &mut opclasses,
+            &mut pk_has_without_overlaps,
+        )?;
         (n, idx)
     };
+
+    if pk_has_without_overlaps && !with_period {
+        let e = err(
+            "foreign key must use PERIOD when referencing a primary key using WITHOUT              OVERLAPS"
+                .into(),
+            ERRCODE_INVALID_FOREIGN_KEY,
+        );
+        pkrel.close(NoLock)?;
+        return Err(e);
+    }
 
     checkFkeyPermissions(&pkrel, &pkattnum[..numpks])?;
 
@@ -303,6 +350,31 @@ fn at_add_foreign_key_constraint<'mcx>(
         return Err(e);
     }
 
+    // Some actions are currently unsupported for foreign keys using PERIOD.
+    if fkconstraint.fk_with_period {
+        for (action, kind) in [
+            (fkconstraint.fk_upd_action, "ON UPDATE"),
+            (fkconstraint.fk_del_action, "ON DELETE"),
+        ] {
+            if matches!(
+                action,
+                FKCONSTR_ACTION_RESTRICT
+                    | FKCONSTR_ACTION_CASCADE
+                    | FKCONSTR_ACTION_SETNULL
+                    | FKCONSTR_ACTION_SETDEFAULT
+            ) {
+                let e = err(
+                    format!(
+                        "unsupported {kind} action for foreign key constraint using PERIOD"
+                    ),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                );
+                pkrel.close(NoLock)?;
+                return Err(e);
+            }
+        }
+    }
+
     let mut pfeqoperators = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut ppeqoperators = [InvalidOid; INDEX_MAX_KEYS as usize];
     let mut ffeqoperators = [InvalidOid; INDEX_MAX_KEYS as usize];
@@ -322,10 +394,34 @@ fn at_add_foreign_key_constraint<'mcx>(
         let (opfamily, opcintype) = lsyscache::get_opclass_opfamily_and_input_type(opclasses[i])?
             .unwrap_or_else(|| panic!("cache lookup failed for opclass {}", opclasses[i]));
 
-        if amid != BTREE_AM_OID {
-            unported("non-btree FK support index (IndexAmTranslateCompareType)");
+        // For a period FK the translation can fail if a non-matching
+        // exclusion constraint was selected earlier (C keeps the check here).
+        let for_overlaps = with_period && i == numpks - 1;
+        let cmptype = if for_overlaps {
+            lsyscache::COMPARE_OVERLAP
+        } else {
+            lsyscache::COMPARE_EQ
+        };
+        let eqstrategy_u16 = amapi::IndexAmTranslateCompareType(cmptype, amid, opfamily, true)?;
+        if eqstrategy_u16 == 0 {
+            let famname = lsyscache::get_opfamily_name(mcx, opfamily, false)?
+                .expect("opfamily name");
+            let msg = if for_overlaps {
+                "could not identify an overlaps operator for foreign key"
+            } else {
+                "could not identify an equality operator for foreign key"
+            };
+            let e = Box::new((*err(msg.into(), ERRCODE_UNDEFINED_OBJECT)).with_detail(
+                format!(
+                    "Could not translate compare type {cmptype} for operator family \"{}\" of access method \"{}\".",
+                    famname.as_str(),
+                    get_am_name_closed(amid)
+                ),
+            ));
+            pkrel.close(NoLock)?;
+            return Err(e);
         }
-        let eqstrategy: i16 = 3;
+        let eqstrategy: i16 = eqstrategy_u16 as i16;
 
         let ppeqop = lsyscache::get_opfamily_member(opfamily, opcintype, opcintype, eqstrategy)?;
         if ppeqop == InvalidOid {
@@ -444,6 +540,12 @@ fn at_add_foreign_key_constraint<'mcx>(
         ffeqoperators[i] = ffeqop;
     }
 
+    // FKs with PERIOD look their operators up at runtime; prove the lookup
+    // works now (fk.periodatt <@ range_agg(pk.periodatt)).
+    if with_period {
+        pg_constraint::FindFKPeriodOpers(opclasses[numpks - 1])?;
+    }
+
     let (constr_oid, _) = add_fk_constraint(
         mcx,
         AddFkSide::BothSides,
@@ -461,6 +563,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         &ffeqoperators,
         &fkdelsetcols[..numfkdelsetcols],
         false,
+        with_period,
     )?;
 
     add_fk_recurse_referenced(
@@ -481,6 +584,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         old_check_ok,
         InvalidOid,
         InvalidOid,
+        with_period,
     )?;
 
     add_fk_recurse_referencing(
@@ -503,6 +607,7 @@ fn at_add_foreign_key_constraint<'mcx>(
         lockmode,
         InvalidOid,
         InvalidOid,
+        with_period,
     )?;
 
     pkrel.close(NoLock)
@@ -529,6 +634,7 @@ fn add_fk_recurse_referenced<'mcx>(
     old_check_ok: bool,
     parent_del_trigger: Oid,
     parent_upd_trigger: Oid,
+    with_period: bool,
 ) -> PgResult<()> {
     let (mut delete_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
     if fkconstraint.is_enforced {
@@ -576,6 +682,7 @@ fn add_fk_recurse_referenced<'mcx>(
                 ffeqoperators,
                 fkdelsetcols,
                 true,
+                with_period,
             )?;
             add_fk_recurse_referenced(
                 mcx,
@@ -595,6 +702,7 @@ fn add_fk_recurse_referenced<'mcx>(
                 old_check_ok,
                 delete_trigger_oid,
                 update_trigger_oid,
+                with_period,
             )?;
             part_rel.close(NoLock)?;
         }
@@ -625,6 +733,7 @@ fn add_fk_recurse_referencing<'mcx>(
     lockmode: types_rel::LOCKMODE,
     parent_ins_trigger: Oid,
     parent_upd_trigger: Oid,
+    with_period: bool,
 ) -> PgResult<()> {
     debug_assert!(parent_constr != InvalidOid);
     if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
@@ -715,6 +824,7 @@ fn add_fk_recurse_referencing<'mcx>(
                 ffeqoperators,
                 fkdelsetcols,
                 true,
+                with_period,
             )?;
             add_fk_recurse_referencing(
                 mcx,
@@ -736,6 +846,7 @@ fn add_fk_recurse_referencing<'mcx>(
                 lockmode,
                 insert_trigger_oid,
                 update_trigger_oid,
+                with_period,
             )?;
             partition.close(NoLock)?;
         }
@@ -907,6 +1018,7 @@ fn transform_column_name_list(
 struct PgIndexFkShape {
     indnkeyatts: i16,
     indisunique: bool,
+    indisexclusion: bool,
     indisprimary: bool,
     indimmediate: bool,
     indisvalid: bool,
@@ -920,6 +1032,7 @@ fn fetch_pg_index_fk_shape(indexoid: Oid) -> PgResult<PgIndexFkShape> {
     use datum::Datum;
     const Anum_indnkeyatts: i32 = 4;
     const Anum_indisunique: i32 = 5;
+    const Anum_indisexclusion: i32 = 8;
     const Anum_indisprimary: i32 = 7;
     const Anum_indimmediate: i32 = 9;
     const Anum_indisvalid: i32 = 11;
@@ -939,6 +1052,7 @@ fn fetch_pg_index_fk_shape(indexoid: Oid) -> PgResult<PgIndexFkShape> {
     let mut shape = PgIndexFkShape {
         indnkeyatts: req(Anum_indnkeyatts)?.as_i16(),
         indisunique: req(Anum_indisunique)?.as_bool(),
+        indisexclusion: req(Anum_indisexclusion)?.as_bool(),
         indisprimary: req(Anum_indisprimary)?.as_bool(),
         indimmediate: req(Anum_indimmediate)?.as_bool(),
         indisvalid: req(Anum_indisvalid)?.as_bool(),
@@ -962,6 +1076,19 @@ fn fetch_pg_index_fk_shape(indexoid: Oid) -> PgResult<PgIndexFkShape> {
     Ok(shape)
 }
 
+// Closed-set get_am_name (pg_am.dat) for error details.
+fn get_am_name_closed(amid: Oid) -> &'static str {
+    match amid {
+        BTREE_AM_OID => "btree",
+        405 => "hash",
+        2742 => "gin",
+        783 => "gist",
+        4000 => "spgist",
+        3580 => "brin",
+        _ => "???",
+    }
+}
+
 // transformFkeyGetPrimaryKey (tablecmds.c).
 fn transform_fkey_get_primary_key<'mcx>(
     mcx: Mcx<'mcx>,
@@ -971,6 +1098,7 @@ fn transform_fkey_get_primary_key<'mcx>(
     atttypids: &mut [Oid],
     attcollids: &mut [Oid],
     opclasses: &mut [Oid],
+    pk_has_without_overlaps: &mut bool,
 ) -> PgResult<(usize, Oid)> {
     let indexes = relcache::RelationGetIndexList(mcx, pkrel.rd_id)?;
     let mut found: Option<(Oid, PgIndexFkShape)> = None;
@@ -1010,6 +1138,7 @@ fn transform_fkey_get_primary_key<'mcx>(
         let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
         pk_attnames.push(str_in(mcx, name)?);
     }
+    *pk_has_without_overlaps = shape.indisexclusion;
     Ok((n, indexoid))
 }
 
@@ -1019,7 +1148,9 @@ fn transform_fkey_check_attrs<'mcx>(
     pkrel: &Relation<'mcx>,
     numattrs: usize,
     attnums: &[i16],
+    with_period: bool,
     opclasses: &mut [Oid],
+    pk_has_without_overlaps: &mut bool,
 ) -> PgResult<Oid> {
     for i in 0..numattrs {
         for j in i + 1..numattrs {
@@ -1035,8 +1166,10 @@ fn transform_fkey_check_attrs<'mcx>(
     let mut found_deferrable = false;
     for &indexoid in indexes.iter() {
         let shape = fetch_pg_index_fk_shape(indexoid)?;
+        // Temporal FKs match an exclusion (WITHOUT OVERLAPS) index instead
+        // of a unique one.
         if shape.indnkeyatts as usize == numattrs
-            && shape.indisunique
+            && (if with_period { shape.indisexclusion } else { shape.indisunique })
             && shape.indisvalid
             && !shape.has_exprs_or_pred
         {
@@ -1055,11 +1188,16 @@ fn transform_fkey_check_attrs<'mcx>(
                     break;
                 }
             }
+            // The last attribute in the index must be the PERIOD FK part.
+            if found && with_period {
+                found = attnums[numattrs - 1] == shape.indkey[numattrs - 1];
+            }
             if found && !shape.indimmediate {
                 found_deferrable = true;
                 found = false;
             }
             if found {
+                *pk_has_without_overlaps = shape.indisexclusion;
                 return Ok(indexoid);
             }
         }
@@ -1111,6 +1249,7 @@ fn add_fk_constraint<'mcx>(
     // C forwards is_internal to the object-access hooks, which do not exist
     // here.
     _is_internal: bool,
+    with_period: bool,
 ) -> PgResult<(Oid, &'mcx str)> {
     // Redundant at the top level; needed when recursing to referenced
     // partitions.
@@ -1171,6 +1310,7 @@ fn add_fk_constraint<'mcx>(
     entry.is_local = conislocal;
     entry.inhcount = coninhcount;
     entry.is_no_inherit = connoinherit;
+    entry.con_period = with_period;
     let constr_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
 
     // Subsidiary rows in partitions hang off the parent constraint: an
@@ -2174,6 +2314,7 @@ fn clone_fk_referenced<'mcx>(
             &arrays.ff_eq_oprs,
             &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
             false,
+            form.conperiod,
         )?;
         add_fk_recurse_referenced(
             mcx,
@@ -2193,6 +2334,7 @@ fn clone_fk_referenced<'mcx>(
             true,
             delete_trigger_oid,
             update_trigger_oid,
+            form.conperiod,
         )?;
         fk_rel.close(NoLock)?;
     }

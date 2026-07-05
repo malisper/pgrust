@@ -1569,3 +1569,70 @@ pub fn DeconstructFkConstraintRow<'mcx>(
 
     Ok(out)
 }
+
+// pg_operator.dat
+const OID_RANGE_INTERSECT_RANGE_OP: Oid = 3900;
+const OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP: Oid = 4394;
+
+// GetOperatorFromCompareType (indexcmds.c), FindFKPeriodOpers callers' slice:
+// the DDL-time lookup in DefineIndex keeps its own copy (richer errors);
+// runtime RI lookups land here below the tablecmds/indexcmds cycle.
+fn operator_from_compare_type(
+    opclass: Oid,
+    rhstype: Oid,
+    cmptype: lsyscache::CompareType,
+) -> PgResult<(Oid, u16)> {
+    let amid = lsyscache::get_opclass_method(opclass)?;
+    let (opfamily, opcintype) = lsyscache::get_opclass_opfamily_and_input_type(opclass)?
+        .unwrap_or_else(|| panic!("cache lookup failed for opclass {opclass}"));
+    let cannot_identify = |opcintype: Oid| -> PgResult<Box<PgError>> {
+        let what = match cmptype {
+            lsyscache::COMPARE_EQ => "an equality",
+            lsyscache::COMPARE_OVERLAP => "an overlaps",
+            _ => "a contained-by",
+        };
+        Ok(Box::new(
+            PgError::error(format!(
+                "could not identify {what} operator for type {}",
+                format_type::format_type_be(opcintype)?
+            ))
+            .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT),
+        ))
+    };
+    let strat = amapi::IndexAmTranslateCompareType(cmptype, amid, opfamily, true)?;
+    if strat == 0 {
+        return Err(cannot_identify(opcintype)?);
+    }
+    let rhstype = if rhstype == InvalidOid { opcintype } else { rhstype };
+    let opid = lsyscache::get_opfamily_member(opfamily, opcintype, rhstype, strat as i16)?;
+    if opid == InvalidOid {
+        return Err(cannot_identify(opcintype)?);
+    }
+    Ok((opid, strat))
+}
+
+// FindFKPeriodOpers (pg_constraint.c): (containedby, agged containedby,
+// intersect) operators for the PERIOD part of a temporal foreign key.
+pub fn FindFKPeriodOpers(opclass: Oid) -> PgResult<(Oid, Oid, Oid)> {
+    let (_, opcintype) = lsyscache::get_opclass_opfamily_and_input_type(opclass)?
+        .unwrap_or_else(|| panic!("cache lookup failed for opclass {opclass}"));
+    if opcintype != types_core::ANYRANGEOID && opcintype != types_core::ANYMULTIRANGEOID {
+        return Err(Box::new(
+            PgError::error("invalid type for PERIOD part of foreign key".to_string())
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail("Only range and multirange are supported.".to_string()),
+        ));
+    }
+    let (containedbyoperoid, _) =
+        operator_from_compare_type(opclass, InvalidOid, lsyscache::COMPARE_CONTAINED_BY)?;
+    let (aggedcontainedbyoperoid, _) = operator_from_compare_type(
+        opclass,
+        types_core::ANYMULTIRANGEOID,
+        lsyscache::COMPARE_CONTAINED_BY,
+    )?;
+    let intersectoperoid = match opcintype {
+        types_core::ANYRANGEOID => OID_RANGE_INTERSECT_RANGE_OP,
+        _ => OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP,
+    };
+    Ok((containedbyoperoid, aggedcontainedbyoperoid, intersectoperoid))
+}
