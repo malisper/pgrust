@@ -27,6 +27,10 @@ const F_BYTEA_SORTSUPPORT: Oid = 3331;
 const F_NUMERIC_SORTSUPPORT: Oid = 3283;
 const F_BTFLOAT4SORTSUPPORT: Oid = 3132;
 const F_BTFLOAT8SORTSUPPORT: Oid = 3133;
+// btboolcmp: bool has no BTSORTSUPPORT_PROC, only this BTORDER_PROC; it's as
+// mcx-free as btint4cmp (PG_GETARG_BOOL, no palloc) so it gets its own arm
+// instead of falling into the comparison shim.
+const F_BTBOOLCMP: Oid = 1693;
 
 /// C's `ssup->comparator` fn pointer as a closed enum: identity is switchable
 /// (tuplesort_sort_memtuples specialization dispatch) and calls monomorphize.
@@ -42,6 +46,9 @@ pub enum SortComparator {
     Int16,
     /// `btoidfastcmp` (btoidsortsupport): unsigned 32-bit.
     Uint32,
+    /// `btboolcmp` direct (C shims BTORDER_PROC 1693); no sortsupport routine
+    /// exists for bool, but the proc itself needs no mcx.
+    Bool,
     /// `btfloat4fastcmp` (btfloat4sortsupport): NaN-aware total order.
     Float32,
     /// `btfloat8fastcmp` (btfloat8sortsupport): NaN-aware total order.
@@ -115,6 +122,7 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let (x, y) = (x.as_u32(), y.as_u32());
             (x > y) as i32 - (x < y) as i32
         }
+        SortComparator::Bool => x.as_bool() as i32 - y.as_bool() as i32,
         SortComparator::Float32 => ::adt_float::float4_cmp_internal(x.as_f32(), y.as_f32()),
         SortComparator::Float64 => ::adt_float::float8_cmp_internal(x.as_f64(), y.as_f64()),
         // SAFETY: TextC contract (enum doc) — both datums are live varlena
@@ -539,6 +547,8 @@ pub fn comparator_for_opfamily(
             }
             if sort_function == F_INTERVAL_CMP {
                 SortComparator::Interval
+            } else if sort_function == F_BTBOOLCMP {
+                SortComparator::Bool
             } else {
                 let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
                 SortComparator::Shim(ShimCmp {
@@ -612,6 +622,8 @@ pub fn comparator_for_index_col(
             }
             if sort_function == F_INTERVAL_CMP {
                 SortComparator::Interval
+            } else if sort_function == F_BTBOOLCMP {
+                SortComparator::Bool
             } else {
                 let flinfo = ::fmgr_seams::fmgr_info::call(sort_function)?;
                 SortComparator::Shim(ShimCmp {
