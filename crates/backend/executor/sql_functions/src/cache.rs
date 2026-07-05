@@ -9,7 +9,7 @@ use mcx::{bind, Mcx, McxOwned, MemoryContext, PgString, PgVec};
 use rustc_hash::FxHashMap;
 use types_core::catalog::VOIDOID;
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
 use types_nodes::{Node, NodeTag};
@@ -386,13 +386,20 @@ fn compile_entry(
     Ok(SqlFnEntry { owned, stamp })
 }
 
-// check_sql_fn_statement (functions.c:2051). CallStmt has no ported node
-// yet, so its outargs check cannot run; loud until CALL lands.
+// check_sql_fn_statement (functions.c:2051): CALL runs through the generic
+// utility lane in postquel_getnext; only OUT-argument procedures are barred.
 pub(crate) fn check_sql_fn_statement(q: &Query<'_>) -> PgResult<()> {
     if q.commandType == CmdType::CMD_UTILITY {
         if let Some(u) = q.utilityStmt {
             if u.node_tag() == NodeTag::T_CallStmt {
-                panic!("check_sql_fn_statement: CALL in SQL function bodies unported");
+                let stmt = u.as_call_stmt().expect("tag-checked");
+                if stmt.outargs.len() != 0 {
+                    return Err(efn(
+                        ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "calling procedures with output arguments is not supported in SQL functions"
+                            .into(),
+                    ));
+                }
             }
         }
     }
@@ -709,5 +716,36 @@ mod fnkey_tests {
         let full = key(100, &t100);
         assert_eq!(full.argtypes[99], 100);
         assert!(full != a);
+    }
+}
+
+#[cfg(test)]
+mod callstmt_tests {
+    use super::*;
+
+    fn call_query<'m>(mcx: Mcx<'m>, outargs: types_nodes::NodeList<'m>) -> Query<'m> {
+        let node = types_nodes::Node::mk(
+            mcx,
+            types_nodes::rawnodes::CallStmt { funccall: None, funcexpr: None, outargs },
+        )
+        .unwrap();
+        let mut q = Query::default();
+        q.commandType = CmdType::CMD_UTILITY;
+        q.utilityStmt = Some(node);
+        q
+    }
+
+    #[test]
+    fn call_without_outargs_passes_with_outargs_errors() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        assert!(check_sql_fn_statement(&call_query(mcx, types_nodes::NodeList::nil())).is_ok());
+
+        let mut outargs = types_nodes::NodeList::nil();
+        let dummy = types_nodes::Node::mk(mcx, types_nodes::Integer { ival: 1 }).unwrap();
+        outargs.lappend(mcx, dummy).unwrap();
+        let err = check_sql_fn_statement(&call_query(mcx, outargs)).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("output arguments is not supported in SQL functions"), "{msg}");
     }
 }
