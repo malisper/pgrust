@@ -89,7 +89,28 @@ pub(crate) fn complete_source(
     let raw = raw_list.get(stmt_index).expect("re-parse reproduces the statement");
     let query_list =
         analyze_and_rewrite(qmcx, raw, src, argtypes).map_err(|e| spi_error_transpose(src, e))?;
-    plancache::CompleteCachedPlan(psrc, query_list, argtypes, cursor_options, false)
+    plancache::CompleteCachedPlan(psrc, query_list, argtypes, cursor_options, false)?;
+    plancache::SetCachedPlanReanalyze(psrc, reanalyze_spi_source, stmt_index as i32);
+    Ok(())
+}
+
+// C revalidates fixed-param SPI sources via pg_analyze_and_rewrite_fixedparams
+// on the retained raw tree (plancache.c:810-814); here the retained source
+// text re-parses and `arg` re-locates this source's statement.
+fn reanalyze_spi_source(
+    qmcx: Mcx<'static>,
+    query_string: &'static str,
+    param_types: &'static [Oid],
+    arg: i32,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    let raw_list = parser_seams::raw_parser::call(
+        qmcx,
+        query_string,
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )?;
+    let raw = raw_list.get(arg as usize).expect("re-parse reproduces the statement");
+    analyze_and_rewrite(qmcx, raw, query_string, param_types)
+        .map_err(|e| spi_error_transpose(query_string, e))
 }
 
 

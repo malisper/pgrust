@@ -438,19 +438,23 @@ impl<'a> Estate<'a> {
     // ------------------------------------------------------------------
 
     fn ensure_plan(&mut self, expr: &PlExpr, cursor_options: i32) -> PgResult<()> {
-        let stale = EXPR_PLANS.with(|t| {
-            t.borrow().get(&expr.expr_id).map(|e| {
-                spi::SPI_plan_single_source(e.plan)
-                    .map(|(psrc, _)| !plancache::CachedPlanSourceIsValid(psrc))
-                    .unwrap_or(false)
-            })
+        let cached = EXPR_PLANS.with(|t| {
+            t.borrow()
+                .get(&expr.expr_id)
+                .map(|e| spi::SPI_plan_single_source(e.plan).map(|(psrc, _)| psrc))
         });
+        // Catalog-probing revalidation runs outside the EXPR_PLANS borrow.
+        let stale = match cached {
+            None => None,
+            Some(None) => Some(false),
+            Some(Some(psrc)) => Some(plancache::CachedPlanSourceRequiresReanalysis(psrc)?),
+        };
         match stale {
             Some(false) => return Ok(()),
             // C's RevalidateCachedQuery re-analyzes the retained raw tree in
             // place; this port re-prepares from the retained query text (same
-            // text, fresh analysis). search_path-only invalidation is not
-            // detected here (hook-resolved plpgsql exprs; divergence).
+            // text, fresh analysis) whenever the source would need re-analysis
+            // (invalidation, search_path mismatch, RLS environment change).
             Some(true) => {
                 // Release this estate's simple-expr pin before the source is
                 // dropped (handles are generation-checked; a stale probe

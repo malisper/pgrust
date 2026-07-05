@@ -425,6 +425,40 @@ pub fn CachedPlanSourceIsValid(h: CachedPlanSourceHandle) -> bool {
     with_cache(|pc| source_mut(pc, h).is_valid)
 }
 
+// RevalidateCachedQuery's pre-lock screen (invalidation, search_path mismatch,
+// RLS environment change) as a pure probe, for owners whose analysis needs
+// parse hooks a ReanalyzeFn cannot carry (plpgsql exprs, SQL-function fcache).
+pub fn CachedPlanSourceRequiresReanalysis(h: CachedPlanSourceHandle) -> PgResult<bool> {
+    let (requires_reval, is_valid, depends_on_rls, role, row_sec) = with_source(h, |src| {
+        (
+            src.requires_reval,
+            src.is_valid,
+            src.depends_on_rls,
+            src.rewrite_role_id,
+            src.rewrite_row_security,
+        )
+    });
+    if !requires_reval {
+        return Ok(false);
+    }
+    if !is_valid {
+        return Ok(true);
+    }
+    let mut matcher = with_source(h, |src| src.search_path.take());
+    let matches = match matcher.as_mut() {
+        Some(m) => catalog_namespace::SearchPathMatchesCurrentEnvironment(m),
+        None => panic!(
+            "CachedPlanSourceRequiresReanalysis: valid revalidatable source lost its search_path"
+        ),
+    };
+    with_source(h, |src| src.search_path = matcher);
+    if !matches? {
+        return Ok(true);
+    }
+    Ok(depends_on_rls
+        && (role != miscinit::GetUserId() || row_sec != guc_tables::backing::row_security()))
+}
+
 // C CachedPlanIsSimplyValid (plancache.c) minus the resowner arm: true only
 // while `cplan` is the source's current generic plan, both are valid, and the
 // captured search_path still matches the current environment. Caller must
@@ -629,10 +663,24 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         (src.query_ctx, src.query_string, src.param_types, src.fixed_result, src.source_ctx)
     });
 
+    // Re-analysis probes catalogs: C pushes a transaction snapshot if none set.
+    let mut snapshot_set = false;
+    if !snapmgr::ActiveSnapshotSet() {
+        let snap: snapmgr::Snapshot = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
+        snapshot_set = true;
+    }
     let new_qctx = leak_ctx("CachedPlanQuery");
-    let rebuilt = (|| -> PgResult<_> {
+    let analyzed = reanalyze(ctx_mcx(new_qctx), query_string, param_types, arg);
+    if snapshot_set {
+        if let Err(e) = snapmgr::PopActiveSnapshot() {
+            drop(analyzed);
+            reclaim_ctx(new_qctx);
+            return Err(e);
+        }
+    }
+    let rebuilt = analyzed.and_then(|query_list| {
         let qmcx = ctx_mcx(new_qctx);
-        let query_list = reanalyze(qmcx, query_string, param_types, arg)?;
         let query_list: &'static [Query<'static>] = mcx::vec_borrow_in(qmcx, query_list)?;
         let mut oids: PgVec<'static, Oid> = PgVec::new_in(qmcx);
         for q in query_list {
@@ -642,7 +690,7 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         let search_path = catalog_namespace::GetSearchPathMatcher(qmcx)?;
         let result_desc = plan_cache_compute_result_desc(ctx_mcx(source_ctx), query_list)?;
         Ok((query_list, relation_oids, search_path, result_desc))
-    })();
+    });
     let (query_list, relation_oids, search_path, result_desc) = match rebuilt {
         Ok(r) => r,
         Err(e) => {
