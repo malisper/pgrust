@@ -1353,17 +1353,21 @@ fn ComputeIndexAttrs<'mcx>(
             indexInfo.ii_IndexAttrNumbers[attn] = attform.attnum;
             (attform.atttypid, attform.attcollation)
         } else {
-            // Expression column. Top-level CollateExpr stripping is dead:
-            // COLLATE stays loud upstream (no transformed CollateExpr node).
+            // Expression column.
             if attn >= nkeycols {
                 return Err(err(
                     "expressions are not supported in included columns".into(),
                     types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                 ));
             }
-            let expr = attribute.expr.expect("IndexElem without name or expr");
+            let mut expr = attribute.expr.expect("IndexElem without name or expr");
             let atttype = nodes_core::expr_type(expr);
             let attcollation = nodes_core::expr_collation(expr);
+            // Strip any top-level COLLATE clause, so "x COLLATE y" and
+            // "(x COLLATE y)" are treated alike (indexcmds.c:1985).
+            while let Some(c) = expr.as_collate_expr() {
+                expr = c.arg;
+            }
             if let Some(var) = expr.as_var() {
                 if var.varattno != 0 {
                     indexInfo.ii_IndexAttrNumbers[attn] = var.varattno;

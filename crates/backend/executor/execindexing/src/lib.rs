@@ -419,9 +419,10 @@ pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
 }
 
 /// FormIndexDatum (catalog/index.c); system columns stay loud. The expression
-/// states resolve once onto the IndexInfo (C's lazy ExecPrepareExprList; the
-/// exprs already passed eval_const_expressions in RelationGetIndexExpressions,
-/// so ExecPrepareExpr's expression_planner rerun is skipped as a no-op).
+/// states resolve once onto the IndexInfo (C's lazy ExecPrepareExprList,
+/// including its expression_planner step — required on the CREATE INDEX build
+/// path, where ii_Expressions are raw parse trees from ComputeIndexAttrs, not
+/// the pre-folded RelationGetIndexExpressions copies).
 /// `eval_mcx` is C's per-tuple context: the caller resets it per row.
 pub fn FormIndexDatum<'mcx>(
     mcx: Mcx<'mcx>,
@@ -433,7 +434,9 @@ pub fn FormIndexDatum<'mcx>(
 ) -> PgResult<()> {
     if !indexInfo.ii_Expressions.is_nil() && indexInfo.ii_ExpressionsState.is_empty() {
         for expr in indexInfo.ii_Expressions.iter() {
-            let state = execexpr::exec_init_expr(mcx, Some(expr), execexpr::ParamBind::NONE)?
+            let planned = clauses::eval_const_expressions(mcx, expr)?;
+            nodes_core::fix_opfuncids(planned)?;
+            let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
                 .expect("index expression");
             indexInfo.ii_ExpressionsState.push(state);
         }
@@ -479,8 +482,16 @@ pub fn index_predicate_passes<'mcx>(
 ) -> PgResult<bool> {
     debug_assert!(!indexInfo.ii_Predicate.is_nil());
     if indexInfo.ii_PredicateState.is_none() {
+        // C ExecPrepareQual: expression_planner over the qual before init —
+        // required on the CREATE INDEX build path (raw parse-tree predicate).
+        let mut planned = NodeList::nil();
+        for e in indexInfo.ii_Predicate.iter() {
+            let folded = clauses::eval_const_expressions(mcx, e)?;
+            nodes_core::fix_opfuncids(folded)?;
+            planned.lappend(mcx, folded)?;
+        }
         indexInfo.ii_PredicateState =
-            execexpr::exec_init_qual(mcx, &indexInfo.ii_Predicate, execexpr::ParamBind::NONE)?;
+            execexpr::exec_init_qual(mcx, &planned, execexpr::ParamBind::NONE)?;
     }
     if let Some(state) = indexInfo.ii_PredicateState.as_deref_mut() {
         // SAFETY: eval_mcx outlives this call; the qual result is consumed
