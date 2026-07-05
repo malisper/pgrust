@@ -128,6 +128,20 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_NullIfExpr => {
+            for a in &node.as_null_if_expr().unwrap().args {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            preprocess_aggrefs_walker(run, fs.arg)?;
+            for a in &fs.newvals {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             for a in &node.as_scalar_array_op_expr().unwrap().args {
                 preprocess_aggrefs_walker(run, a)?;

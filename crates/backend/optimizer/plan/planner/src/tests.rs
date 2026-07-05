@@ -5352,3 +5352,62 @@ mod srf_split {
         assert!(bottom.as_result().unwrap().plan.targetlist.is_nil());
     }
 }
+
+mod pull_var_walker_vocab {
+    use super::*;
+    use mcx::PgVec;
+
+    use crate::initsplan::pull_var_nodes;
+
+    fn two_var_args(mcx: Mcx<'_>) -> NodeList<'_> {
+        let v1 = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let v2 = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        NodeList::make2(mcx, v1, v2).unwrap()
+    }
+
+    #[test]
+    fn null_if_expr_yields_both_vars() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let n = Node::mk(
+            mcx,
+            types_nodes::primnodes::NullIfExpr {
+                opno: 96,
+                opfuncid: 65,
+                opresulttype: 23,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: two_var_args(mcx),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let mut out: PgVec<'_, Node<'_>> = PgVec::new_in(mcx);
+        pull_var_nodes(n, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].as_var().unwrap().varattno, 1);
+        assert_eq!(out[1].as_var().unwrap().varattno, 2);
+    }
+
+    #[test]
+    fn field_store_yields_arg_and_newval_vars() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let arg = Node::mk_var(mcx, 1, 1, 2249, -1, 0, 0).unwrap();
+        let newval = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let n = Node::mk(
+            mcx,
+            types_nodes::primnodes::FieldStore {
+                arg,
+                newvals: NodeList::make1(mcx, newval).unwrap(),
+                fieldnums: types_nodes::list::IntList::make1(mcx, 1).unwrap(),
+                resulttype: 2249,
+            },
+        )
+        .unwrap();
+        let mut out: PgVec<'_, Node<'_>> = PgVec::new_in(mcx);
+        pull_var_nodes(n, &mut out);
+        assert_eq!(out.len(), 2);
+    }
+}

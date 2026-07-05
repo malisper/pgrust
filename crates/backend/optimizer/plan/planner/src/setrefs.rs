@@ -1532,6 +1532,23 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().unwrap();
+            let arg = fix_upper_expr(run, f.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
+            let mut newvals = NodeList::nil();
+            for v in &f.newvals {
+                newvals.lappend(mcx, fix_upper_expr(run, v, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldStore {
+                    arg,
+                    newvals,
+                    fieldnums: f.fieldnums.clone_in(mcx)?,
+                    resulttype: f.resulttype,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().expect("RelabelType");
             let arg = fix_upper_expr(run, r.arg, subplan_tlist, rtoffset, newvarno, num_exec)?;
@@ -2314,6 +2331,23 @@ fn fix_scan_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().unwrap();
+            let arg = fix_scan_expr_mutator(run, f.arg, rtoffset, num_exec)?;
+            let mut newvals = NodeList::nil();
+            for v in &f.newvals {
+                newvals.lappend(mcx, fix_scan_expr_mutator(run, v, rtoffset, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldStore {
+                    arg,
+                    newvals,
+                    fieldnums: f.fieldnums.clone_in(mcx)?,
+                    resulttype: f.resulttype,
+                },
+            )
+        }
         NodeTag::T_RelabelType => {
             let r = node.as_relabel_type().unwrap();
             let arg = fix_scan_expr_mutator(run, r.arg, rtoffset, num_exec)?;
@@ -2863,6 +2897,14 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         }
         NodeTag::T_FieldSelect => {
             fix_scan_expr_walker(run, node.as_field_select().unwrap().arg)
+        }
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().unwrap();
+            fix_scan_expr_walker(run, f.arg)?;
+            for v in &f.newvals {
+                fix_scan_expr_walker(run, v)?;
+            }
+            Ok(())
         }
         NodeTag::T_CoerceToDomain => {
             fix_scan_expr_walker(run, node.as_coerce_to_domain().unwrap().arg)
@@ -3557,6 +3599,23 @@ fn fix_join_expr_mutator<'mcx>(
                     resulttype: f.resulttype,
                     resulttypmod: f.resulttypmod,
                     resultcollid: f.resultcollid,
+                },
+            )
+        }
+        NodeTag::T_FieldStore => {
+            let f = node.as_field_store().unwrap();
+            let arg = fix_join_expr_mutator(run, f.arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            let mut newvals = NodeList::nil();
+            for v in &f.newvals {
+                newvals.lappend(mcx, fix_join_expr_mutator(run, v, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::FieldStore {
+                    arg,
+                    newvals,
+                    fieldnums: f.fieldnums.clone_in(mcx)?,
+                    resulttype: f.resulttype,
                 },
             )
         }

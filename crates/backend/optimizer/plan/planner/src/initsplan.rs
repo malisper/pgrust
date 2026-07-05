@@ -110,6 +110,18 @@ pub(crate) fn pull_var_nodes<'mcx>(node: Node<'mcx>, out: &mut PgVec<'mcx, Node<
                 pull_var_nodes(a, out);
             }
         }
+        NodeTag::T_NullIfExpr => {
+            for a in &node.as_null_if_expr().unwrap().args {
+                pull_var_nodes(a, out);
+            }
+        }
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            pull_var_nodes(fs.arg, out);
+            for a in &fs.newvals {
+                pull_var_nodes(a, out);
+            }
+        }
         NodeTag::T_RowExpr => {
             for a in &node.as_row_expr().unwrap().args {
                 pull_var_nodes(a, out);
