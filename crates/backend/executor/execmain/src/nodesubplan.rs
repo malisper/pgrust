@@ -1,9 +1,9 @@
 //! nodeSubplan.c: initplans (ExecInitSubPlan + ExecSetParamPlan for
-//! uncorrelated EXISTS/EXPR/ARRAY/ROWCOMPARE) plus regular SubPlan execution
-//! — ExecSubPlan's scan lane (EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE with
-//! per-call rescan + parParam binding) and the HASHED ANY lane
-//! (buildSubPlanHash/findPartialMatch, C's three-valued NULL semantics).
-//! Correlated MULTIEXPR and CTE expression arms are loud.
+//! uncorrelated EXISTS/EXPR/ARRAY/ROWCOMPARE/MULTIEXPR) plus regular SubPlan
+//! execution — ExecSubPlan's scan lane (EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE/
+//! correlated-MULTIEXPR with per-call rescan + parParam binding) and the
+//! HASHED ANY lane (buildSubPlanHash/findPartialMatch, C's three-valued NULL
+//! semantics). CTE expression arms are loud.
 
 use core::ptr::NonNull;
 use std::rc::Rc;
@@ -293,32 +293,8 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -
     if p.is_null() {
         return Ok(Datum::null());
     }
-    let size = match attlen {
-        -1 => {
-            // SAFETY: non-null by-ref varlena datum, readable through its header.
-            unsafe {
-                assert!(
-                    !::types_tuple::varatt::varatt_is_external_expanded(p),
-                    "ExecSetParamPlan (nodeSubplan.c): expanded varlena initplan \
-                     result — expanded-object flatten arm has no producers"
-                );
-                ::types_tuple::varatt::varsize_any(p)
-            }
-        }
-        -2 => {
-            let mut n = 0usize;
-            // SAFETY: non-null NUL-terminated cstring datum.
-            while unsafe { *p.add(n) } != 0 {
-                n += 1;
-            }
-            n + 1
-        }
-        l => {
-            debug_assert!(l > 0);
-            l as usize
-        }
-    };
-    // SAFETY: `size` bytes readable per the arms above.
+    let size = datum_image_size(value, attlen);
+    // SAFETY: `size` bytes readable per datum_image_size's arms.
     let src = unsafe { core::slice::from_raw_parts(p, size) };
     let out = ::mcx::slice_in(mcx, src)?;
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))
@@ -346,6 +322,8 @@ pub(crate) struct SubPlanExprState<'mcx> {
     first_col_type: ::types_core::Oid,
     par_param: PgVec<'mcx, i32>,
     param_ids: PgVec<'mcx, i32>,
+    /// MULTIEXPR output params (C subplan->setParam); nil otherwise.
+    set_param: PgVec<'mcx, i32>,
     plan: Node<'mcx>,
     ps_cell: NonNull<Option<PlanStateNode<'mcx>>>,
     testexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -408,8 +386,10 @@ fn exec_init_sub_plan_expr<'mcx>(
     agg: Option<::execexpr::AggBind>,
 ) -> PgResult<NonNull<()>> {
     let mcx = estate.es_query_cxt;
+    // C ExecSubPlan's sanity check: only a MULTIEXPR SubPlan may carry
+    // setParams into the expression lane.
     assert!(
-        subplan.setParam.is_nil(),
+        subplan.setParam.is_nil() || subplan.subLinkType == SubLinkType::MULTIEXPR_SUBLINK,
         "cannot set parent params from subquery"
     );
     let cell = estate
@@ -433,6 +413,7 @@ fn exec_init_sub_plan_expr<'mcx>(
             | SubLinkType::ALL_SUBLINK
             | SubLinkType::ARRAY_SUBLINK
             | SubLinkType::ROWCOMPARE_SUBLINK
+            | SubLinkType::MULTIEXPR_SUBLINK
     ) {
         panic!(
             "ExecInitSubPlan (nodeSubplan.c): {:?} expression SubPlan not ported",
@@ -468,6 +449,8 @@ fn exec_init_sub_plan_expr<'mcx>(
     par_param.extend(subplan.parParam.iter());
     let mut param_ids: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     param_ids.extend(subplan.paramIds.iter());
+    let mut set_param: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    set_param.extend(subplan.setParam.iter());
 
     let hashed = if subplan.useHashTable {
         Some(init_hashed_state(subplan, estate, params, agg)?)
@@ -487,6 +470,7 @@ fn exec_init_sub_plan_expr<'mcx>(
             first_col_type: subplan.firstColType,
             par_param,
             param_ids,
+            set_param,
             plan,
             ps_cell: cell.cast(),
             testexpr,
@@ -740,6 +724,13 @@ fn scan_sub_plan_loop<'mcx>(
                 found = true;
                 result = store_expr_result(sstate, estate, slot_id)?;
             }
+            SubLinkType::MULTIEXPR_SUBLINK => {
+                if found {
+                    return Err(too_many_rows());
+                }
+                found = true;
+                store_multiexpr_params(sstate, estate, slot_id)?;
+            }
             SubLinkType::ROWCOMPARE_SUBLINK => {
                 if found {
                     return Err(too_many_rows());
@@ -787,7 +778,124 @@ fn scan_sub_plan_loop<'mcx>(
     {
         result = NullableDatum::null();
     }
+    if !found && link == SubLinkType::MULTIEXPR_SUBLINK {
+        // C: the dummy result doesn't matter, but the setParams become NULL.
+        for &pid in sstate.set_param.iter() {
+            let prm = &mut estate.es_param_exec_vals[pid as usize];
+            debug_assert!(!prm.exec_plan);
+            prm.value = Datum::null();
+            prm.isnull = true;
+        }
+    }
     Ok(result)
+}
+
+// The MULTIEXPR leg of ExecScanSubPlan: push the single result row's columns
+// out to the setParams. C copies the tuple (node->curTuple, freed on the next
+// run) so pass-by-ref outputs stay valid until the next evaluation; cur_buf
+// is the same boundary.
+fn store_multiexpr_params<'mcx>(
+    sstate: &mut SubPlanExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ::executils::ExecSlotId,
+) -> PgResult<()> {
+    let ncols = sstate.set_param.len();
+    let mut total = 0usize;
+    for col in 0..ncols {
+        let slot = estate.slot_mut(slot_id);
+        let (attlen, attbyval) = attr_len_byval(slot, col);
+        let mut isnull = false;
+        let v = exectuples::slot_getattr(slot, col as i32 + 1, &mut isnull);
+        if !isnull && !attbyval {
+            total = align8(total) + datum_image_size(v, attlen);
+        }
+    }
+    sstate.cur_buf.clear();
+    sstate
+        .cur_buf
+        .try_reserve(total)
+        .map_err(|_| estate.es_query_cxt.oom(total))?;
+    let mut off = 0usize;
+    for col in 0..ncols {
+        let (v, isnull, attlen, attbyval) = {
+            let slot = estate.slot_mut(slot_id);
+            let (attlen, attbyval) = attr_len_byval(slot, col);
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(slot, col as i32 + 1, &mut isnull);
+            (v, isnull, attlen, attbyval)
+        };
+        let value = if isnull || attbyval {
+            v
+        } else {
+            let size = datum_image_size(v, attlen);
+            off = align8(off);
+            debug_assert!(off + size <= total);
+            // SAFETY: capacity reserved above; source is a live by-ref datum
+            // readable for `size` bytes (datum_image_size's arms).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    v.as_usize() as *const u8,
+                    sstate.cur_buf.as_mut_ptr().add(off),
+                    size,
+                );
+            }
+            let out = Datum::from_usize(sstate.cur_buf.as_ptr() as usize + off);
+            off += size;
+            out
+        };
+        let prm = &mut estate.es_param_exec_vals[sstate.set_param[col] as usize];
+        debug_assert!(!prm.exec_plan);
+        prm.value = value;
+        prm.isnull = isnull;
+    }
+    // SAFETY: the first `off` bytes were written above (off == total unless
+    // trailing columns were null/byval).
+    unsafe { sstate.cur_buf.set_len(off) };
+    Ok(())
+}
+
+fn attr_len_byval(slot: &SlotData<'_>, col: usize) -> (i16, bool) {
+    let desc = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .expect("subplan result slot has a descriptor");
+    (desc.attrs[col].attlen, desc.attrs[col].attbyval)
+}
+
+fn align8(n: usize) -> usize {
+    (n + 7) & !7
+}
+
+// datumGetSize (datum.c) for a non-null by-ref datum.
+fn datum_image_size(value: Datum_crate::Datum, attlen: i16) -> usize {
+    let p = value.as_usize() as *const u8;
+    debug_assert!(!p.is_null());
+    match attlen {
+        -1 => {
+            // SAFETY: non-null by-ref varlena datum, readable through its header.
+            unsafe {
+                assert!(
+                    !::types_tuple::varatt::varatt_is_external_expanded(p),
+                    "nodeSubplan.c: expanded varlena subplan result — \
+                     expanded-object flatten arm has no producers"
+                );
+                ::types_tuple::varatt::varsize_any(p)
+            }
+        }
+        -2 => {
+            let mut n = 0usize;
+            // SAFETY: non-null NUL-terminated cstring datum.
+            while unsafe { *p.add(n) } != 0 {
+                n += 1;
+            }
+            n + 1
+        }
+        l => {
+            debug_assert!(l > 0);
+            l as usize
+        }
+    }
 }
 
 // The ARRAY_SUBLINK leg of ExecScanSubPlan: accumulate first-column values in

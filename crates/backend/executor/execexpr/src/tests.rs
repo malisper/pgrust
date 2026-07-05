@@ -3052,3 +3052,93 @@ fn exec_type_set_col_names_skips_empty_and_dropped() {
         assert_eq!(desc.attrs[2].attname.name_str(), before2.name_str());
     });
 }
+
+#[test]
+fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
+    use ::types_nodes::primnodes::{ParamKind, SubLinkType, SubPlan};
+    use ::types_portal::params::ParamExecData;
+    use core::ptr::NonNull;
+
+    // C ExecInitSubPlanExpr's stand-in: the token flows into the SubPlan step.
+    unsafe fn stub_init(
+        _estate: NonNull<()>,
+        _node: Node<'_>,
+        _agg: Option<crate::compile::AggBind>,
+    ) -> ::types_error::PgResult<NonNull<()>> {
+        Ok(NonNull::<u8>::dangling().cast())
+    }
+
+    with_mcx(|mcx| {
+        let mut vals = [ParamExecData::EMPTY, ParamExecData::EMPTY];
+        let base = vals.as_mut_ptr();
+        let bind = ParamBind {
+            extern_params: None,
+            exec_vals: core::ptr::NonNull::new(base),
+            n_exec: 2,
+        };
+        let env = crate::compile::SubplanCompileEnv {
+            estate: NonNull::<u8>::dangling().cast(),
+            init: stub_init,
+            agg: None,
+            rtable: None,
+            parent_subplan_tlist: None,
+        };
+        // Correlated MULTIEXPR shape: parParam [0] fed by Const 42,
+        // setParam [1] written by the (suspended) subplan run.
+        let subplan = Node::mk(
+            mcx,
+            SubPlan {
+                subLinkType: SubLinkType::MULTIEXPR_SUBLINK,
+                testexpr: None,
+                paramIds: ::types_nodes::list::IntList::nil(),
+                plan_id: 1,
+                plan_name: Some("SubPlan 1"),
+                firstColType: INT4OID,
+                firstColTypmod: -1,
+                firstColCollation: 0,
+                useHashTable: false,
+                unknownEqFalse: false,
+                parallel_safe: false,
+                setParam: ::types_nodes::list::IntList::make1(mcx, 1).unwrap(),
+                parParam: ::types_nodes::list::IntList::make1(mcx, 0).unwrap(),
+                args: NodeList::make1(mcx, mk_int4_const(mcx, Some(42))).unwrap(),
+                startup_cost: 0.0,
+                per_call_cost: 0.0,
+            },
+        )
+        .unwrap();
+        let mut state = crate::compile::exec_init_expr_subplans(mcx, Some(subplan), bind, Some(env))
+            .unwrap()
+            .unwrap();
+        // Program shape: setup steps run the SubPlan (arg eval + PARAM_SET +
+        // SUBPLAN) before the body; the in-tree SubPlan is a dummy NULL const.
+        assert!(matches!(state.steps()[0], Step::Const { .. }));
+        assert!(matches!(state.steps()[1], Step::ParamSet { .. }));
+        assert!(matches!(state.steps()[2], Step::SubPlan { .. }));
+        assert!(
+            matches!(state.steps()[3], Step::Const { isnull: true, .. }),
+            "in-tree MULTIEXPR SubPlan is a dummy NULL"
+        );
+
+        let mut slots = EvalSlots::default();
+        let outcome = crate::interp::exec_eval_expr_outcome(&mut state, &mut slots, None).unwrap();
+        let crate::interp::EvalOutcome::Suspended(s) = outcome else {
+            panic!("MULTIEXPR setup must suspend on the SubPlan step");
+        };
+        // The arg eval + EEOP_PARAM_SET ran before the suspension.
+        assert_eq!(vals[0].value.as_i32(), 42);
+        assert!(!vals[0].isnull);
+        // The driver (nodeSubplan) would fill the setParams; the resumed
+        // program then reads them via the referencing PARAM_EXEC Params.
+        let outcome = crate::interp::exec_eval_expr_outcome(
+            &mut state,
+            &mut slots,
+            Some(s.resume_with(::datum::NullableDatum::null())),
+        )
+        .unwrap();
+        let crate::interp::EvalOutcome::Done(r) = outcome else {
+            panic!("resume must complete the program");
+        };
+        assert!(r.isnull, "in-tree MULTIEXPR SubPlan yields NULL::record");
+    });
+}

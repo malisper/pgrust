@@ -3,7 +3,7 @@
 //! and testexpr-bearing EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE sublinks,
 //! hashed-ANY selection, convert_VALUES_to_ANY, the convert_EXISTS_to_ANY
 //! AlternativeSubPlan lane, SS_replace_correlation_vars, and finalize's
-//! SubPlan legs. Correlated-MULTIEXPR and CTE-expression arms are loud.
+//! SubPlan legs. CTE-expression arms are loud.
 
 use clauses::NodeWalker;
 use mcx::Mcx;
@@ -1187,7 +1187,7 @@ fn contain_aggs_of_level(node: Node<'_>, level: i32) -> PgResult<bool> {
 
 
 
-// build_subplan (subselect.c). The correlated MULTIEXPR arm is loud.
+// build_subplan (subselect.c).
 #[allow(clippy::too_many_arguments)]
 fn build_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1337,11 +1337,10 @@ fn build_subplan<'mcx>(
                 },
             )?);
         } else {
-            panic!(
-                "build_subplan (subselect.c): correlated MULTIEXPR_SUBLINK \
-                 (per-row setParam SubPlan) not ported — nodeSubplan \
-                 pending-param lane"
-            );
+            // Correlated: the SubPlan node stays in the tree; the executor
+            // runs it per row via expression setup steps (execExpr.c
+            // ExecPushExprSetupSteps) and it fills the setParams itself.
+            is_init_plan = false;
         }
     } else {
         // Regular SubPlan: rewrite the testexpr's PARAM_SUBLINK Params into
