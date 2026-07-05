@@ -1830,17 +1830,18 @@ fn attach_partition_foreign_key<'mcx>(
     xact::CommandCounterIncrement()?;
 
     if queue_validation {
-        if let Some(wqueue) = wqueue {
-            let (part_form, _) = read_fk_constraint(mcx, part_constr_oid)?;
-            queue_fk_constraint_validation(
-                mcx,
-                wqueue,
-                partition,
-                part_form.confrelid,
-                &part_form,
-                types_rel::ShareUpdateExclusiveLock,
-            )?;
-        }
+        // C dereferences wqueue unconditionally here; a NULL wqueue caller
+        // (CREATE TABLE .. PARTITION OF) cannot own pre-validated FKs.
+        let wqueue = wqueue.expect("FK validation queueing without a work queue");
+        let (part_form, _) = read_fk_constraint(mcx, part_constr_oid)?;
+        queue_fk_constraint_validation(
+            mcx,
+            wqueue,
+            partition,
+            part_form.confrelid,
+            &part_form,
+            types_rel::ShareUpdateExclusiveLock,
+        )?;
     }
     Ok(())
 }
