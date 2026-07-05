@@ -1717,6 +1717,17 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             );
             if is_cursor {
                 let curvar = w.dno;
+                // C pl_gram.y: can't use an unbound cursor this way.
+                if matches!(
+                    &self.comp.datums[curvar as usize],
+                    PlDatum::Var(v) if v.cursor_explicit_expr.is_none()
+                ) {
+                    return Err(self.gram_err_pos(
+                        ERRCODE_SYNTAX_ERROR,
+                        "cursor FOR loop must use a bound cursor variable".to_string(),
+                        t.2,
+                    ));
+                }
                 let var = self.comp.build_rec(&name, var_lineno, true);
                 let argquery = self.read_cursor_args(curvar, K_LOOP)?;
                 let (body, end_label, end_loc) = self.parse_loop_body()?;
