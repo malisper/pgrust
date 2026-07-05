@@ -606,6 +606,11 @@ macro_rules! dispatch_cmp {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
                     $body
                 }
+                // Bool keys are cold catalog sorts; not worth a monomorph arm.
+                SortComparator::Bool => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
+                    $body
+                }
             },
         }
     }};
