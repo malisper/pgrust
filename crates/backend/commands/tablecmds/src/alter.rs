@@ -769,11 +769,18 @@ fn ATPrepCmd<'mcx>(
     };
     let pass = match cmd.subtype {
         AlterTableType::AT_AddColumn => {
-            // ATPrepAddColumn: typed-table/composite arms unreachable.
+            // ATPrepAddColumn: the composite-type recursion arm stays loud
+            // via ATSimplePermissions' allowed-targets gate.
+            if !recursing && rel_reloftype(rel.rd_id)? != InvalidOid {
+                return Err(typed_table_err("cannot add column to typed table"));
+            }
             set_recurse();
             AT_PASS_ADD_COL
         }
         AlterTableType::AT_DropColumn => {
+            if !recursing && rel_reloftype(rel.rd_id)? != InvalidOid {
+                return Err(typed_table_err("cannot drop column from typed table"));
+            }
             set_recurse();
             AT_PASS_DROP
         }
@@ -955,9 +962,11 @@ fn ATPrepCmd<'mcx>(
     Ok(())
 }
 
-// ATPrepAddInherit: typed tables are loud upstream, so only the partition
-// arms are live.
+// ATPrepAddInherit (tablecmds.c:17239).
 fn ATPrepAddInherit(rel: &Relation<'_>) -> PgResult<()> {
+    if rel_reloftype(rel.rd_id)? != InvalidOid {
+        return Err(typed_table_err("cannot change inheritance of typed table"));
+    }
     if rel.rd_rel.relispartition {
         return Err(Box::new(
             PgError::new(ERROR, "cannot change inheritance of a partition".to_string())
@@ -965,6 +974,22 @@ fn ATPrepAddInherit(rel: &Relation<'_>) -> PgResult<()> {
         ));
     }
     Ok(())
+}
+
+// pg_class.reloftype probe; C reads rd_rel->reloftype (the trimmed
+// FormData_pg_class here does not carry it).
+pub(crate) fn rel_reloftype(relid: Oid) -> PgResult<Oid> {
+    Ok(syscache_seams::pg_class_reloftype::call(relid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}")))
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn typed_table_err(msg: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, msg.to_string())
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+    )
 }
 
 fn ATRewriteCatalogs<'mcx>(
@@ -4620,12 +4645,17 @@ fn ATPrepAlterColumnType<'mcx>(
     let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
     let tn = def.typeName.expect("ColumnDef.typeName").as_variant::<TypeName>().expect("TypeName");
 
-    let reloftype = pg_class_read_attr(mcx, rel.rd_id, Anum_pg_class_reloftype)?.as_oid();
-    if reloftype != InvalidOid && !recursing {
-        return Err(Box::new(
-            PgError::new(ERROR, "cannot alter column type of typed table".to_string())
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
-        ));
+    if rel_reloftype(rel.rd_id)? != InvalidOid && !recursing {
+        let mut e = *typed_table_err("cannot alter column type of typed table");
+        let pos = parser_small1::parser_errposition_source(
+            Some(query_string.as_bytes()),
+            def.location,
+            mbutils::GetDatabaseEncoding(),
+        );
+        if pos > 0 {
+            e = e.with_cursor_position(pos);
+        }
+        return Err(Box::new(e));
     }
 
     let Some((attnum, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
@@ -6266,7 +6296,7 @@ fn ATExecReplicaIdentity<'mcx>(
 }
 
 // check_of_type (tablecmds.c:7143).
-fn check_of_type(mcx: Mcx<'_>, typeid: Oid) -> PgResult<()> {
+pub(crate) fn check_of_type(mcx: Mcx<'_>, typeid: Oid) -> PgResult<()> {
     const TYPTYPE_COMPOSITE: u8 = b'c';
     if lsyscache::get_typtype(typeid)? as u8 == TYPTYPE_COMPOSITE {
         let typrelid = lsyscache::get_typ_typrelid(typeid)?;

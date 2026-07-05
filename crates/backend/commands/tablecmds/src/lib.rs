@@ -35,6 +35,7 @@ pub fn init_seams() {
     tablecmds_seams::at_eosubxact_on_commit_actions::set(AtEOSubXact_on_commit_actions);
     tablecmds_seams::remove_on_commit_action::set(remove_on_commit_action);
     tablecmds_seams::set_relation_has_subclass::set(partition::SetRelationHasSubclass);
+    tablecmds_seams::check_of_type::set(alter::check_of_type);
 }
 
 use mcx::Mcx;
@@ -124,6 +125,17 @@ pub fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
         types_rel::RELKIND_FOREIGN_TABLE => OBJECT_FOREIGN_TABLE,
         _ => OBJECT_TABLE,
     }
+}
+
+// aclcheck_error_type (aclchk.c): arrays report their element type.
+fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
+    let element_type = lsyscache::get_element_type(type_oid)?;
+    let type_oid = if element_type != InvalidOid { element_type } else { type_oid };
+    aclchk::aclcheck_error(
+        aclerr,
+        types_nodes::parsenodes::ObjectType::OBJECT_TYPE,
+        &format_type::format_type_be(type_oid)?,
+    )
 }
 
 // GetColumnDefCollation (parse_type.c).
@@ -360,6 +372,30 @@ pub fn DefineRelation<'mcx>(
 
     let owner_id = if owner_id != InvalidOid { owner_id } else { miscinit::GetUserId() };
 
+    let of_type_id = match stmt.ofTypename {
+        Some(tn_node) => {
+            let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
+            // transformCreateStmt cached the resolved oid (C re-resolves the
+            // same names; identical outcome).
+            let of_type_id = if tn.typeOid != InvalidOid {
+                tn.typeOid
+            } else {
+                parse_utilcmd::typenameTypeIdAndModAllowComposite(mcx, None, tn)?.0
+            };
+            let aclresult = aclchk::object_aclcheck(
+                types_core::TYPE_RELATION_ID,
+                of_type_id,
+                miscinit::GetUserId(),
+                adt_acl::ACL_USAGE,
+            )?;
+            if aclresult != aclchk::ACLCHECK_OK {
+                aclcheck_error_type(aclresult, of_type_id)?;
+            }
+            of_type_id
+        }
+        None => InvalidOid,
+    };
+
     if partitioned && stmt.partbound.is_none() && !inherit_oids.is_empty() {
         return Err(Box::new(
             PgError::new(
@@ -379,22 +415,17 @@ pub fn DefineRelation<'mcx>(
             relpersistence as u8,
         )?)
     } else {
-        // MergeAttributes' duplicate-name scan runs even without parents
-        // (tablecmds.c:2612); the is_from_type merge leg stays with OF-typed
-        // tables downstream.
-        for (i, c) in stmt.tableElts.iter().enumerate() {
-            let Some(cd) = c.as_variant::<ColumnDef>() else { continue };
-            if cd.is_from_type {
-                continue;
-            }
-            for r in stmt.tableElts.iter().skip(i + 1) {
-                let Some(rd) = r.as_variant::<ColumnDef>() else { continue };
-                if cd.colname.is_some() && cd.colname == rd.colname {
-                    return Err(inheritance::duplicate_column(cd.colname.unwrap_or("")));
-                }
-            }
-        }
         None
+    };
+    // MergeAttributes' duplicate-name scan runs even without parents
+    // (tablecmds.c:2589): typed-table column options merge onto the column
+    // from the type; option entries without a type column are errors.
+    let merged_opts;
+    let table_elts: &types_nodes::NodeList<'mcx> = if merged.is_none() && parent_oid.is_none() {
+        merged_opts = inheritance::merge_column_options(mcx, &stmt.tableElts)?;
+        &merged_opts
+    } else {
+        &stmt.tableElts
     };
 
     let mut partition_notnulls: mcx::PgVec<'mcx, inheritance::InheritedNotNull<'mcx>> =
@@ -488,7 +519,7 @@ pub fn DefineRelation<'mcx>(
         }
         None => match &merged {
             Some(m) => BuildDescForRelation(mcx, &m.columns)?,
-            None => BuildDescForRelation(mcx, &stmt.tableElts)?,
+            None => BuildDescForRelation(mcx, table_elts)?,
         },
     };
 
@@ -502,6 +533,7 @@ pub fn DefineRelation<'mcx>(
             accessmtd: access_method_id,
             relkind,
             relpersistence,
+            reloftype: of_type_id,
             allow_system_table_mods: false,
             reloptions: reloptions.as_deref(),
         },
@@ -664,7 +696,7 @@ pub fn DefineRelation<'mcx>(
     // Merged columns re-number local attributes; raw defaults ride them.
     let raw_defaults = match &merged {
         Some(m) => constraints::collect_raw_defaults(mcx, &m.columns)?,
-        None => constraints::collect_raw_defaults(mcx, &stmt.tableElts)?,
+        None => constraints::collect_raw_defaults(mcx, table_elts)?,
     };
     let old_notnulls: &[inheritance::InheritedNotNull<'mcx>] = match &merged {
         Some(m) => &m.notnulls[..],

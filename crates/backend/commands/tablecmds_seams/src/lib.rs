@@ -50,3 +50,8 @@ seam_core::seam!(
         relhassubclass: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // check_of_type; seam because tablecmds depends on parse_utilcmd.
+    pub fn check_of_type<'mcx>(mcx: mcx::Mcx<'mcx>, typeid: types_core::Oid) -> PgResult<()>
+);

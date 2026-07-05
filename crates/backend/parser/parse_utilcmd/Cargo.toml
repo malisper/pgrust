@@ -47,5 +47,7 @@ nodes_core = { path = "../../nodes/nodes_core" }
 outfuncs = { path = "../../nodes/outfuncs" }
 relcache = { path = "../../utils/cache/relcache" }
 indexcmds_seams = { path = "../../commands/indexcmds_seams" }
+tablecmds_seams = { path = "../../commands/tablecmds_seams" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 regproc_seams = { path = "../../utils/adt/regproc_seams" }

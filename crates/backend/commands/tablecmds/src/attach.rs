@@ -144,8 +144,12 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
             ERRCODE_WRONG_OBJECT_TYPE,
         ));
     }
-    // Typed tables (reloftype) are unported repo-wide; the "cannot attach a
-    // typed table as partition" arm is unreachable.
+    if crate::alter::rel_reloftype(attachrel.rd_id)? != InvalidOid {
+        return Err(err(
+            "cannot attach a typed table as partition".into(),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
 
     let catalog = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
     {

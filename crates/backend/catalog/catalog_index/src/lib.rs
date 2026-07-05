@@ -599,6 +599,7 @@ pub fn index_create<'mcx>(
         &form,
         indexTupDesc.natts as i16,
         indexRelationId,
+        InvalidOid,
         None,
         extra.reloptions,
     )?;

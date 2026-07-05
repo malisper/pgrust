@@ -773,6 +773,7 @@ fn transformColumnDefinition<'mcx>(
     ixconstraints: &mut NodeList<'mcx>,
     fkconstraints: &mut NodeList<'mcx>,
     is_foreign: bool,
+    of_type: bool,
 ) -> PgResult<()> {
     let relname = relation.relname.unwrap_or("");
     if column.raw_default.is_some() || column.cooked_default.is_some() {
@@ -892,6 +893,15 @@ fn transformColumnDefinition<'mcx>(
                 saw_default = true;
             }
             ConstrType::CONSTR_IDENTITY => {
+                if of_type {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "identity columns are not supported on typed tables".to_string(),
+                        )
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
                 let tn = column
                     .typeName
                     .expect("ColumnDef.typeName")
@@ -945,6 +955,15 @@ fn transformColumnDefinition<'mcx>(
                 }
             }
             ConstrType::CONSTR_GENERATED => {
+                if of_type {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            "generated columns are not supported on typed tables".to_string(),
+                        )
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
                 if saw_generated {
                     return Err(column_syntax_error(
                         format_args!(
@@ -1099,14 +1118,12 @@ fn transformColumnDefinition<'mcx>(
         let colname = column.colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
-    if column.is_from_type {
-        unported("is_from_type columns (OF type / LIKE)");
-    }
-    let tn = column
-        .typeName
-        .expect("ColumnDef.typeName")
-        .as_variant::<TypeName>()
-        .expect("TypeName");
+    // Typed-table/partition column options carry no typeName; C skips
+    // transformColumnType for them (parse_utilcmd.c:1055).
+    let Some(tn_node) = column.typeName else {
+        return Ok(());
+    };
+    let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
     // transformColumnType: validate the type reference and any COLLATE spec.
     let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)?;
     if let Some(cc) = column.collClause {
@@ -1149,6 +1166,54 @@ fn position_on_src(
     )))
 }
 
+// transformOfType (parse_utilcmd.c:1638): derive is_from_type ColumnDefs from
+// the composite type's rowtype, prepended to the column list.
+fn transformOfType<'mcx>(
+    mcx: Mcx<'mcx>,
+    of_tn_node: Node<'mcx>,
+    columns: &mut NodeList<'mcx>,
+    src: Option<&str>,
+) -> PgResult<()> {
+    let tn = of_tn_node.as_variant::<TypeName>().expect("TypeName");
+    let (of_type_id, _typmod) = typenameTypeIdAndModAllowComposite(mcx, None, tn)
+        .map_err(|e| position_on_src(e, src, tn.location))?;
+    tablecmds_seams::check_of_type::call(mcx, of_type_id)?;
+    // SAFETY: parse tree is analyze-owned; no derived refs live.
+    unsafe {
+        of_tn_node.with_mut::<TypeName, _>(|t| t.typeOid = of_type_id).expect("TypeName");
+    }
+    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, of_type_id, -1)?;
+    for i in 0..tupdesc.natts as usize {
+        let attr = tupdesc.attr(i);
+        if attr.attisdropped {
+            continue;
+        }
+        let attname = {
+            let mut v: mcx::PgVec<'mcx, u8> =
+                mcx::vec_with_capacity_in(mcx, attr.attname.name_str().len())?;
+            mcx::vec_append_bytes(&mut v, attr.attname.name_str())?;
+            core::str::from_utf8(v.leak()).expect("attname UTF-8")
+        };
+        let coltn = TypeName {
+            typeOid: attr.atttypid,
+            typemod: attr.atttypmod,
+            location: -1,
+            ..TypeName::default()
+        };
+        let def = ColumnDef {
+            colname: Some(attname),
+            typeName: Some(Node::mk(mcx, coltn)?),
+            is_local: true,
+            is_from_type: true,
+            collOid: attr.attcollation,
+            location: -1,
+            ..ColumnDef::default()
+        };
+        columns.lappend(mcx, Node::mk(mcx, def)?)?;
+    }
+    Ok(())
+}
+
 pub fn transformCreateStmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt_node: Node<'mcx>,
@@ -1167,10 +1232,8 @@ pub fn transformCreateStmt<'mcx>(
     if stmt.partbound.is_some() && !stmt.tableElts.is_nil() {
         unported("PARTITION OF with a column/constraint list");
     }
-    if stmt.ofTypename.is_some() {
-        unported("typed tables (OF type)");
-    }
     debug_assert!(stmt.constraints.is_nil() && stmt.nnconstraints.is_nil());
+    debug_assert!(stmt.ofTypename.is_none() || stmt.inhRelations.is_nil());
 
     let relation = stmt.relation.expect("CreateStmt.relation");
     let relname = relation.relname.unwrap_or("");
@@ -1196,6 +1259,9 @@ pub fn transformCreateStmt<'mcx>(
         }
     }
     let mut columns = NodeList::nil();
+    if let Some(of_tn) = stmt.ofTypename {
+        transformOfType(mcx, of_tn, &mut columns, Some(query_string))?;
+    }
     let mut cxt = CreateStmtCxt { blist: NodeList::nil(), alist: NodeList::nil() };
     let mut ckconstraints = NodeList::nil();
     let mut nnconstraints = NodeList::nil();
@@ -1220,6 +1286,7 @@ pub fn transformCreateStmt<'mcx>(
                     &mut ixconstraints,
                     &mut fkconstraints,
                     is_foreign,
+                    stmt.ofTypename.is_some(),
                 )?;
                 columns.lappend(mcx, elt)?;
             }
@@ -2238,6 +2305,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 &mut nnconstraints,
                 &mut ixconstraints,
                 &mut fkconstraints,
+                false,
                 false,
             )?;
             if !ixconstraints.is_nil() || !fkconstraints.is_nil() {

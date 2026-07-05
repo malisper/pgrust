@@ -1,7 +1,7 @@
 // tablecmds.c traditional-inheritance slice: inheritOids lookup +
 // MergeAttributes (columns, defaults, NOT NULL, CHECK, generated,
-// compression) + StoreCatalogInheritance. Typed tables are loud;
-// partitions take the empty-column arm in lib.rs.
+// compression) + StoreCatalogInheritance. Partitions take the empty-column
+// arm in lib.rs.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERROR, NOTICE};
@@ -72,9 +72,92 @@ pub(crate) fn lookup_inherit_oids<'mcx>(
     Ok(inherit_oids)
 }
 
+// tablecmds.c:2589 duplicate-name scan, no-parents leg: typed-table column
+// options (typeName == NULL) merge onto the is_from_type column the type
+// contributed; leftover options and true duplicates are errors.
+pub(crate) fn merge_column_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    columns: &NodeList<'mcx>,
+) -> PgResult<NodeList<'mcx>> {
+    if columns.len() > MaxHeapAttributeNumber {
+        return Err(too_many_columns());
+    }
+    let mut elts: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    let mut removed: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    for n in columns.iter() {
+        elts.push(n);
+        removed.push(false);
+    }
+    for i in 0..elts.len() {
+        if removed[i] {
+            continue;
+        }
+        let (colname, has_typename) = {
+            let cd = elts[i].as_variant::<ColumnDef>().expect("ColumnDef");
+            (cd.colname.expect("ColumnDef.colname"), cd.typeName.is_some())
+        };
+        if !has_typename {
+            return Err(Box::new(
+                PgError::new(ERROR, format!("column \"{colname}\" does not exist"))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+            ));
+        }
+        for j in (i + 1)..elts.len() {
+            if removed[j] {
+                continue;
+            }
+            let matches = {
+                let rd = elts[j].as_variant::<ColumnDef>().expect("ColumnDef");
+                rd.colname == Some(colname)
+            };
+            if !matches {
+                continue;
+            }
+            let is_from_type =
+                elts[i].as_variant::<ColumnDef>().expect("ColumnDef").is_from_type;
+            if !is_from_type {
+                return Err(duplicate_column(colname));
+            }
+            // SAFETY (both blocks): parse tree is statement-owned; no derived
+            // refs live across the edits.
+            let (is_not_null, raw_default, cooked_default, constraints) = unsafe {
+                elts[j]
+                    .with_mut::<ColumnDef, _>(|c| {
+                        (
+                            c.is_not_null,
+                            c.raw_default,
+                            c.cooked_default,
+                            core::mem::take(&mut c.constraints),
+                        )
+                    })
+                    .expect("ColumnDef")
+            };
+            unsafe {
+                elts[i]
+                    .with_mut::<ColumnDef, _>(|c| {
+                        c.is_not_null = is_not_null;
+                        c.raw_default = raw_default;
+                        c.cooked_default = cooked_default;
+                        c.constraints = constraints;
+                        c.is_from_type = false;
+                    })
+                    .expect("ColumnDef");
+            }
+            removed[j] = true;
+        }
+    }
+    let mut out = NodeList::nil();
+    for (k, n) in elts.iter().enumerate() {
+        if !removed[k] {
+            out.lappend(mcx, *n)?;
+        }
+    }
+    Ok(out)
+}
+
 // MergeAttributes (tablecmds.c:2546), regular-inheritance leg. The partition
-// leg stays in lib.rs (descriptor copy). Typed-table merging is dead (OF type
-// loud upstream).
+// leg stays in lib.rs (descriptor copy). Typed-table merging never reaches
+// here: the grammar forbids OF plus INHERITS (parse_utilcmd.c:255).
 pub(crate) fn MergeAttributes<'mcx>(
     mcx: Mcx<'mcx>,
     columns: &NodeList<'mcx>,
@@ -91,7 +174,9 @@ pub(crate) fn MergeAttributes<'mcx>(
         for rest in columns.iter().skip(i + 1) {
             let restdef = rest.as_variant::<ColumnDef>().expect("ColumnDef");
             if restdef.colname == Some(colname) {
-                debug_assert!(!coldef.is_from_type, "typed tables loud upstream");
+                // Grammar forbids OF + INHERITS, so is_from_type merging
+                // cannot arise in this leg.
+                debug_assert!(!coldef.is_from_type);
                 return Err(duplicate_column(colname));
             }
         }
@@ -1630,4 +1715,62 @@ fn child_con_conflict(conname: &str, child_name: &str, kind: &str) -> Box<PgErro
         )
         .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> &'static mcx::MemoryContext {
+        Box::leak(Box::new(mcx::MemoryContext::new("merge-test")))
+    }
+
+    fn coldef<'m>(mcx: Mcx<'m>, name: &'m str, from_type: bool, not_null: bool) -> Node<'m> {
+        let mut def = Node::build::<ColumnDef>(mcx).unwrap();
+        def.colname = Some(name);
+        if from_type {
+            def.typeName = Some(Node::build::<TypeName>(mcx).unwrap().seal());
+            def.is_from_type = true;
+        }
+        def.is_not_null = not_null;
+        def.seal()
+    }
+
+    #[test]
+    fn column_option_merges_onto_type_column() {
+        let mcx = ctx().mcx();
+        let mut cols = NodeList::nil();
+        cols.lappend(mcx, coldef(mcx, "id", true, false)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "name", true, false)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "name", false, true)).unwrap();
+        let out = merge_column_options(mcx, &cols).unwrap();
+        assert_eq!(out.len(), 2);
+        let name = out.nth(1).as_variant::<ColumnDef>().unwrap();
+        assert_eq!(name.colname, Some("name"));
+        assert!(!name.is_from_type);
+        assert!(name.is_not_null);
+        let id = out.nth(0).as_variant::<ColumnDef>().unwrap();
+        assert!(id.is_from_type && !id.is_not_null);
+    }
+
+    #[test]
+    fn column_option_without_type_column_errors() {
+        let mcx = ctx().mcx();
+        let mut cols = NodeList::nil();
+        cols.lappend(mcx, coldef(mcx, "id", true, false)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "myname", false, true)).unwrap();
+        let e = merge_column_options(mcx, &cols).unwrap_err();
+        assert_eq!(e.message(), "column \"myname\" does not exist");
+    }
+
+    #[test]
+    fn duplicate_column_option_errors() {
+        let mcx = ctx().mcx();
+        let mut cols = NodeList::nil();
+        cols.lappend(mcx, coldef(mcx, "name", true, false)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "name", false, true)).unwrap();
+        cols.lappend(mcx, coldef(mcx, "name", false, false)).unwrap();
+        let e = merge_column_options(mcx, &cols).unwrap_err();
+        assert_eq!(e.message(), "column \"name\" specified more than once");
+    }
 }
