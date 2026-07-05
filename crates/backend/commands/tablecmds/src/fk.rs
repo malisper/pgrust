@@ -1442,7 +1442,7 @@ fn getattr(
 }
 
 // The Form_pg_constraint fields the FK partition machinery reads.
-struct FkConstraintForm {
+pub(crate) struct FkConstraintForm {
     oid: Oid,
     conname: [u8; 64],
     contype: u8,
@@ -1501,7 +1501,7 @@ fn decode_fk_constraint_form(
     }
 }
 
-fn read_fk_constraint<'mcx>(
+pub(crate) fn read_fk_constraint<'mcx>(
     mcx: Mcx<'mcx>,
     conoid: Oid,
 ) -> PgResult<(FkConstraintForm, pg_constraint::FkConstraintArrays)> {
@@ -1849,7 +1849,7 @@ fn attach_partition_foreign_key<'mcx>(
 // QueueFKConstraintValidation (tablecmds.c): queue Phase-3 verification for
 // an invalid FK constraint, recursing over child constraints, and flip
 // convalidated.
-fn queue_fk_constraint_validation<'mcx>(
+pub(crate) fn queue_fk_constraint_validation<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut crate::alter::Wqueue<'mcx>,
     fkrel: &Relation<'mcx>,

@@ -4335,9 +4335,8 @@ fn ATExecDropInherit<'mcx>(
     crate::inheritance::ATExecDropInherit(mcx, rel, prv)
 }
 
-// ATExecValidateConstraint + Queue{FK,Check,NN}ConstraintValidation
-// (tablecmds.c); the FK partitioned-recursion arm is unreachable (relkind
-// gated at ATPrepCmd).
+// ATExecValidateConstraint + Queue{Check,NN}ConstraintValidation
+// (tablecmds.c); the FK arm rides fk::queue_fk_constraint_validation.
 #[allow(clippy::too_many_arguments)]
 fn ATExecValidateConstraint<'mcx>(
     mcx: Mcx<'mcx>,
@@ -4384,13 +4383,15 @@ fn ATExecValidateConstraint<'mcx>(
     }
     match con.contype {
         pg_constraint::CONSTRAINT_FOREIGN => {
-            let tabidx = ATGetQueueEntry(mcx, wqueue, rel);
-            wqueue[tabidx].fk_checks.push(crate::fk::FkValidateItem {
-                conname: str_arena(mcx, con.name_str())?,
-                refrelid: con.confrelid,
-                refindid: con.conindid,
-                conid: con.oid,
-            });
+            let (form, _) = crate::fk::read_fk_constraint(mcx, con.oid)?;
+            return crate::fk::queue_fk_constraint_validation(
+                mcx,
+                wqueue,
+                rel,
+                con.confrelid,
+                &form,
+                lockmode,
+            );
         }
         pg_constraint::CONSTRAINT_CHECK => {
             validate_constraint_children(
