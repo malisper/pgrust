@@ -307,23 +307,23 @@ pub fn vacuum<'mcx>(
     if params.options & VACOPT_ONLY_DATABASE_STATS != 0 {
         unported("vacuum: ONLY_DATABASE_STATS");
     }
-    if relations.is_nil() {
-        unported("get_all_vacuum_rels (database-wide VACUUM)");
-    }
-
     let mut vacrels: ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>> = ::mcx::PgVec::new_in(mcx);
-    for vrel_node in relations.iter() {
-        let vrel = vrel_node
-            .as_vacuum_relation()
-            .expect("vacuum relation list holds VacuumRelation");
-        if !vrel.va_cols.is_nil() && params.options & VACOPT_ANALYZE == 0 {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_SYNTAX_ERROR)
-                .errmsg("ANALYZE option must be specified when column lists are provided")
-                .into_error()
-                .into());
+    if !relations.is_nil() {
+        for vrel_node in relations.iter() {
+            let vrel = vrel_node
+                .as_vacuum_relation()
+                .expect("vacuum relation list holds VacuumRelation");
+            if !vrel.va_cols.is_nil() && params.options & VACOPT_ANALYZE == 0 {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("ANALYZE option must be specified when column lists are provided")
+                    .into_error()
+                    .into());
+            }
+            expand_vacuum_rel(mcx, vrel, params.options, &mut vacrels)?;
         }
-        expand_vacuum_rel(mcx, vrel, params.options, &mut vacrels)?;
+    } else {
+        get_all_vacuum_rels(mcx, &mut vacrels)?;
     }
 
     if snapmgr::ActiveSnapshotSet() {
@@ -450,6 +450,30 @@ pub fn expand_vacuum_rel<'mcx>(
         }
     }
     lmgr_seams::unlock_relation_oid::call(relid, AccessShareLock)?;
+    Ok(())
+}
+
+/// get_all_vacuum_rels (vacuum.c): every vacuumable rel in the database.
+/// vacuum_is_permitted_for_relation is skipped (single-user milestone),
+/// matching expand_vacuum_rel.
+fn get_all_vacuum_rels<'mcx>(
+    mcx: Mcx<'mcx>,
+    vacrels: &mut ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>>,
+) -> PgResult<()> {
+    let nil_cols = ::mcx::alloc_leak_in(mcx, NodeList::nil())?;
+    let pgclass = table::table_open(mcx, RelationRelationId, AccessShareLock)?;
+    let desc = pgclass.descr();
+    let mut scan = genam::systable_beginscan(mcx, &pgclass, InvalidOid, false, None, &[])?;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let relkind = getattr(tup, Anum_pg_class_relkind, desc).as_u8();
+        if !matches!(relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_PARTITIONED_TABLE) {
+            continue;
+        }
+        let relid = getattr(tup, Anum_pg_class_oid, desc).as_oid();
+        vacrels.push(ExpandedVacRel { oid: relid, relname: None, va_cols: nil_cols });
+    }
+    genam::systable_endscan(mcx, scan)?;
+    table::table_close(pgclass, AccessShareLock)?;
     Ok(())
 }
 
