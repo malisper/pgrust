@@ -1677,3 +1677,329 @@ fn DropClonedTriggersFromPartition<'mcx>(mcx: Mcx<'mcx>, partition_id: Oid) -> P
     }
     tgrel.close(RowExclusiveLock)
 }
+
+// ATExecAttachPartitionIdx (tablecmds.c:21633): ALTER INDEX .. ATTACH
+// PARTITION.
+pub(crate) fn ATExecAttachPartitionIdx<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent_idx: &Relation<'mcx>,
+    name: &types_nodes::primnodes::RangeVar<'_>,
+) -> PgResult<()> {
+    // Lock the owning table before its index, and the partition's parent
+    // table too, to read its tuple descriptor without deadlock risk.
+    let parent_tbl_oid = parent_idx.rd_index.as_ref().expect("rd_index").indrelid;
+    let mut partition_oid = InvalidOid;
+    let mut locked_parent_tbl = false;
+    let rv = rel_vocab::RangeVar {
+        catalogname: name.catalogname,
+        schemaname: name.schemaname,
+        relname: name.relname.expect("RangeVar.relname"),
+        inh: name.inh,
+        relpersistence: name.relpersistence,
+        location: name.location,
+    };
+    let mut callback = |rv: &rel_vocab::RangeVar<'_>,
+                        rel_oid: Oid,
+                        old_rel_oid: Oid|
+     -> PgResult<()> {
+        if !locked_parent_tbl {
+            lmgr::LockRelationOid(parent_tbl_oid, AccessShareLock)?;
+            locked_parent_tbl = true;
+        }
+        // A prior lookup's heap lock is useless if the name now resolves
+        // elsewhere.
+        if rel_oid != old_rel_oid && partition_oid != InvalidOid {
+            lmgr::UnlockRelationOid(partition_oid, AccessShareLock)?;
+            partition_oid = InvalidOid;
+        }
+        if rel_oid == InvalidOid {
+            return Ok(());
+        }
+        let relkind = lsyscache::relation::get_rel_relkind(rel_oid)? as u8;
+        if relkind == 0 {
+            return Ok(());
+        }
+        if relkind != types_rel::RELKIND_PARTITIONED_INDEX
+            && relkind != types_rel::RELKIND_INDEX
+        {
+            return Err(err(
+                format!("\"{}\" is not an index", rv.relname),
+                ERRCODE_INVALID_OBJECT_DEFINITION,
+            ));
+        }
+        // The heap's tupledesc is all we examine; AccessShareLock suffices.
+        partition_oid = catalog_index::IndexGetRelation(mcx, rel_oid, false)?;
+        lmgr::LockRelationOid(partition_oid, AccessShareLock)
+    };
+    let part_idx_id = catalog_namespace::RangeVarGetRelidExtended(
+        &rv,
+        AccessExclusiveLock,
+        0,
+        Some(&mut callback),
+    )?;
+    if part_idx_id == InvalidOid {
+        return Err(err(
+            format!("index \"{}\" does not exist", rv.relname),
+            types_error::ERRCODE_UNDEFINED_OBJECT,
+        ));
+    }
+    let state_partition_oid = partition_oid;
+
+    let part_idx = indexam::index_open(mcx, part_idx_id, AccessExclusiveLock)?;
+    let parent_tbl = table::table_open(mcx, parent_tbl_oid, AccessShareLock)?;
+    let part_tbl = table::table_open(
+        mcx,
+        part_idx.rd_index.as_ref().expect("rd_index").indrelid,
+        NoLock,
+    )?;
+
+    let curr_parent = if part_idx.rd_rel.relispartition {
+        pg_inherits::get_partition_parent(mcx, part_idx_id, false)?
+    } else {
+        InvalidOid
+    };
+    if curr_parent != parent_idx.rd_id {
+        refuse_dupe_index_attach(mcx, parent_idx, &part_idx, &part_tbl)?;
+
+        if curr_parent != InvalidOid {
+            return Err(Box::new(
+                (*err(
+                    format!(
+                        "cannot attach index \"{}\" as a partition of index \"{}\"",
+                        part_idx.name(),
+                        parent_idx.name()
+                    ),
+                    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                ))
+                .with_detail(format!(
+                    "Index \"{}\" is already attached to another index.",
+                    part_idx.name()
+                )),
+            ));
+        }
+
+        let pd = partdesc::RelationGetPartitionDesc(&parent_tbl, true)?;
+        if !pd.oids.iter().any(|&o| o == state_partition_oid) {
+            return Err(Box::new(
+                (*err(
+                    format!(
+                        "cannot attach index \"{}\" as a partition of index \"{}\"",
+                        part_idx.name(),
+                        parent_idx.name()
+                    ),
+                    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                ))
+                .with_detail(format!(
+                    "Index \"{}\" is not an index on any partition of table \"{}\".",
+                    part_idx.name(),
+                    parent_tbl.name()
+                )),
+            ));
+        }
+
+        let child_info = execindexing::BuildIndexInfo(mcx, &part_idx)?;
+        let parent_info = execindexing::BuildIndexInfo(mcx, parent_idx)?;
+        let attmap = tupdesc::build_attrmap_by_name(mcx, part_tbl.descr(), parent_tbl.descr())?;
+        if !catalog_index::CompareIndexInfo(
+            mcx,
+            &child_info,
+            &parent_info,
+            &part_idx,
+            parent_idx,
+            &attmap,
+        )? {
+            return Err(Box::new(
+                (*err(
+                    format!(
+                        "cannot attach index \"{}\" as a partition of index \"{}\"",
+                        part_idx.name(),
+                        parent_idx.name()
+                    ),
+                    ERRCODE_INVALID_OBJECT_DEFINITION,
+                ))
+                .with_detail("The index definitions do not match.".to_string()),
+            ));
+        }
+
+        // A constraint in the parent requires one in the child too.
+        let constraint_oid =
+            pg_constraint::get_relation_idx_constraint_oid(mcx, parent_tbl.rd_id, parent_idx.rd_id)?;
+        let mut cld_constr_id = InvalidOid;
+        if constraint_oid != InvalidOid {
+            cld_constr_id =
+                pg_constraint::get_relation_idx_constraint_oid(mcx, part_tbl.rd_id, part_idx_id)?;
+            if cld_constr_id == InvalidOid {
+                return Err(Box::new(
+                    (*err(
+                        format!(
+                            "cannot attach index \"{}\" as a partition of index \"{}\"",
+                            part_idx.name(),
+                            parent_idx.name()
+                        ),
+                        ERRCODE_INVALID_OBJECT_DEFINITION,
+                    ))
+                    .with_detail(format!(
+                        "The index \"{}\" belongs to a constraint in table \"{}\" but no constraint exists for index \"{}\".",
+                        parent_idx.name(),
+                        parent_tbl.name(),
+                        part_idx.name()
+                    )),
+                ));
+            }
+        }
+
+        if parent_idx.rd_index.as_ref().expect("rd_index").indisprimary {
+            verify_partition_index_not_null(&child_info, &part_tbl)?;
+        }
+
+        indexcmds_seams::index_set_parent_index::call(mcx, &part_idx, parent_idx.rd_id)?;
+        if constraint_oid != InvalidOid {
+            pg_constraint::ConstraintSetParentConstraint(
+                mcx,
+                cld_constr_id,
+                constraint_oid,
+                part_tbl.rd_id,
+            )?;
+        }
+
+        validate_partitioned_index(mcx, parent_idx, &parent_tbl)?;
+    }
+
+    parent_tbl.close(AccessShareLock)?;
+    part_tbl.close(NoLock)?;
+    part_idx.close(NoLock)
+}
+
+// refuseDupeIndexAttach (tablecmds.c:21797).
+fn refuse_dupe_index_attach<'mcx>(
+    mcx: Mcx<'mcx>,
+    parent_idx: &Relation<'mcx>,
+    part_idx: &Relation<'mcx>,
+    partition_tbl: &Relation<'mcx>,
+) -> PgResult<()> {
+    let existing_idx =
+        pg_inherits::index_get_partition(mcx, partition_tbl.rd_id, parent_idx.rd_id)?;
+    if existing_idx != InvalidOid {
+        return Err(Box::new(
+            (*err(
+                format!(
+                    "cannot attach index \"{}\" as a partition of index \"{}\"",
+                    part_idx.name(),
+                    parent_idx.name()
+                ),
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ))
+            .with_detail(format!(
+                "Another index is already attached for partition \"{}\".",
+                partition_tbl.name()
+            )),
+        ));
+    }
+    Ok(())
+}
+
+// validatePartitionedIndex (tablecmds.c:21818): mark the parent index valid
+// once every partition has a valid attached index.
+fn validate_partitioned_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    parted_idx: &Relation<'mcx>,
+    parted_tbl: &Relation<'mcx>,
+) -> PgResult<()> {
+    const IndexRelationId: Oid = 2610;
+    const IndexRelidIndexId: Oid = 2679;
+    const Anum_pg_index_indisvalid: usize = 11;
+    debug_assert!(parted_idx.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX);
+
+    let mut tuples = 0usize;
+    {
+        let inherits_rel = table::table_open(mcx, InheritsRelationId, AccessShareLock)?;
+        let keys = [oid_scankey(
+            pg_inherits::Anum_pg_inherits_inhparent as usize,
+            parted_idx.rd_id,
+        )];
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &inherits_rel,
+            InheritsParentIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        let desc = inherits_rel.descr();
+        while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+            let inhrelid =
+                getattr(tup, desc, pg_inherits::Anum_pg_inherits_inhrelid as usize).0.as_oid();
+            if lsyscache::relation::get_index_isvalid(inhrelid)? {
+                tuples += 1;
+            }
+        }
+        genam::systable_endscan(mcx, scan)?;
+        inherits_rel.close(AccessShareLock)?;
+    }
+
+    let mut updated = false;
+    if tuples == partdesc::RelationGetPartitionDesc(parted_tbl, true)?.nparts {
+        let idx_rel = table::table_open(mcx, IndexRelationId, RowExclusiveLock)?;
+        let keys = [oid_scankey(1, parted_idx.rd_id)];
+        let mut scan =
+            genam::systable_beginscan(mcx, &idx_rel, IndexRelidIndexId, true, None, &keys)?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for index {}", parted_idx.rd_id));
+        let desc = idx_rel.descr();
+        let natts = desc.natts as usize;
+        let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, Datum::null());
+        nulls.resize(natts, false);
+        replace.resize(natts, false);
+        values[Anum_pg_index_indisvalid - 1] = Datum::from_bool(true);
+        replace[Anum_pg_index_indisvalid - 1] = true;
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+        let otid = tup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &idx_rel, &otid, &mut newtup)?;
+        updated = true;
+        idx_rel.close(RowExclusiveLock)?;
+    }
+
+    // Validating this index might complete a grandparent index too.
+    if updated && parted_idx.rd_rel.relispartition {
+        xact::CommandCounterIncrement()?;
+        let parent_idx_id = pg_inherits::get_partition_parent(mcx, parted_idx.rd_id, false)?;
+        let parent_tbl_id = pg_inherits::get_partition_parent(mcx, parted_tbl.rd_id, false)?;
+        let parent_idx = indexam::index_open(mcx, parent_idx_id, AccessExclusiveLock)?;
+        let parent_tbl = table::table_open(mcx, parent_tbl_id, AccessExclusiveLock)?;
+        debug_assert!(!parent_idx.rd_index.as_ref().expect("rd_index").indisvalid);
+        validate_partitioned_index(mcx, &parent_idx, &parent_tbl)?;
+        indexam::index_close(parent_idx, AccessExclusiveLock)?;
+        parent_tbl.close(AccessExclusiveLock)?;
+    }
+    Ok(())
+}
+
+// verifyPartitionIndexNotNull (tablecmds.c:21905): a primary key partition's
+// columns must all be NOT NULL.
+fn verify_partition_index_not_null<'mcx>(
+    iinfo: &execindexing::IndexInfo<'mcx>,
+    partition: &Relation<'mcx>,
+) -> PgResult<()> {
+    for i in 0..iinfo.ii_NumIndexKeyAttrs as usize {
+        let att = partition.descr().attr(iinfo.ii_IndexAttrNumbers[i] as usize - 1);
+        if !att.attnotnull {
+            let colname =
+                core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            return Err(Box::new(
+                (*err(
+                    "invalid primary key definition".to_string(),
+                    types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+                ))
+                .with_detail(format!(
+                    "Column \"{colname}\" of relation \"{}\" is not marked NOT NULL.",
+                    partition.name()
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
