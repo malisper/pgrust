@@ -3097,6 +3097,327 @@ mod join {
         let oscan = osort.plan.lefttree.unwrap().as_seq_scan().expect("Sort over SeqScan");
         assert_eq!(oscan.scan.scanrelid, 1);
     }
+
+    // from_collapse_limit / join_collapse_limit joinlist shaping
+    // (initsplan.c deconstruct_recurse).
+    fn mk_plain_rte<'mcx>(mcx: Mcx<'mcx>, relid: u32) -> Node<'mcx> {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = relid;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.inh = false;
+        rte.seal()
+    }
+
+    fn mk_int4eq_vars<'mcx>(mcx: Mcx<'mcx>, lvarno: i32, rvarno: i32) -> Node<'mcx> {
+        let l = Node::mk_var(mcx, lvarno, 1, 23, -1, 0, 0).unwrap();
+        let r = Node::mk_var(mcx, rvarno, 1, 23, -1, 0, 0).unwrap();
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, l, r).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    // n copies of jt1, comma-joined with a chain of equality quals.
+    fn many_comma_join_query<'mcx>(mcx: Mcx<'mcx>, n: usize) -> Query<'mcx> {
+        let mut rtable = NodeList::nil();
+        let mut fromlist = NodeList::nil();
+        for i in 0..n {
+            rtable.lappend(mcx, mk_plain_rte(mcx, JT1)).unwrap();
+            fromlist
+                .lappend(mcx, Node::mk_range_tbl_ref(mcx, i as i32 + 1).unwrap())
+                .unwrap();
+        }
+        let mut args = NodeList::nil();
+        for i in 1..n as i32 {
+            args.lappend(mcx, mk_int4eq_vars(mcx, i, i + 1)).unwrap();
+        }
+        let quals = Node::mk(
+            mcx,
+            types_nodes::primnodes::BoolExpr {
+                boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+                args,
+                location: -1,
+            },
+        )
+        .unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist, quals: Some(quals) }).unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 42,
+            ..Query::default()
+        }
+    }
+
+    fn mk_join_rte<'mcx>(mcx: Mcx<'mcx>, base_varnos: &[i32]) -> Node<'mcx> {
+        let mut joinaliasvars = NodeList::nil();
+        let mut colnames = NodeList::nil();
+        let mut leftcols = types_nodes::list::IntList::nil();
+        let mut rightcols = types_nodes::list::IntList::nil();
+        for (i, &varno) in base_varnos.iter().enumerate() {
+            for (attno, name) in [(1i16, "a"), (2, "pad")] {
+                joinaliasvars
+                    .lappend(mcx, Node::mk_var(mcx, varno, attno, 23, -1, 0, 0).unwrap())
+                    .unwrap();
+                colnames.lappend(mcx, Node::mk_string(mcx, name).unwrap()).unwrap();
+            }
+            if i + 1 < base_varnos.len() {
+                leftcols.lappend(mcx, 2 * i as i32 + 1).unwrap();
+                leftcols.lappend(mcx, 2 * i as i32 + 2).unwrap();
+            } else {
+                rightcols.lappend(mcx, 1).unwrap();
+                rightcols.lappend(mcx, 2).unwrap();
+            }
+        }
+        let eref = Node::mk_mut(
+            mcx,
+            types_nodes::Alias { aliasname: Some("unnamed_join"), colnames },
+        )
+        .unwrap()
+        .seal_ref();
+        let mut jrte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        jrte.rtekind = RTEKind::RTE_JOIN;
+        jrte.jointype = types_nodes::JoinType::JOIN_INNER;
+        jrte.joinaliasvars = joinaliasvars;
+        jrte.joinleftcols = leftcols;
+        jrte.joinrightcols = rightcols;
+        jrte.eref = Some(eref);
+        jrte.inFromCl = true;
+        jrte.seal()
+    }
+
+    fn mk_inner_join<'mcx>(
+        mcx: Mcx<'mcx>,
+        larg: Node<'mcx>,
+        rarg: Node<'mcx>,
+        quals: Node<'mcx>,
+        rtindex: i32,
+    ) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype: types_nodes::JoinType::JOIN_INNER,
+                isNatural: false,
+                larg,
+                rarg,
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: Some(quals),
+                alias: None,
+                rtindex,
+            },
+        )
+        .unwrap()
+    }
+
+    // rt1=jt3 (100 rows), rt2=jt4 (100 rows), rt3=jt1 (1 row):
+    // (jt3 JOIN jt4 ON jt3.a = jt4.a) JOIN jt1 ON jt4.a = jt1.a.
+    fn join_chain_query<'mcx>(mcx: Mcx<'mcx>) -> Query<'mcx> {
+        let mut rtable = NodeList::nil();
+        for relid in [JT3, JT4, JT1] {
+            rtable.lappend(mcx, mk_plain_rte(mcx, relid)).unwrap();
+        }
+        rtable.lappend(mcx, mk_join_rte(mcx, &[1, 2])).unwrap();
+        rtable.lappend(mcx, mk_join_rte(mcx, &[1, 2, 3])).unwrap();
+        let rtr = |i: i32| Node::mk_range_tbl_ref(mcx, i).unwrap();
+        let lower = mk_inner_join(mcx, rtr(1), rtr(2), mk_int4eq_vars(mcx, 1, 2), 4);
+        let upper = mk_inner_join(mcx, lower, rtr(3), mk_int4eq_vars(mcx, 2, 3), 5);
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr { fromlist: NodeList::make1(mcx, upper).unwrap(), quals: None },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 3, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 42,
+            ..Query::default()
+        }
+    }
+
+    // Skip past unary Hash/Material/Sort nodes.
+    fn descend(mut node: Node<'_>) -> Node<'_> {
+        loop {
+            if let Some(h) = node.as_hash() {
+                node = h.plan.lefttree.unwrap();
+            } else if let Some(m) = node.as_material() {
+                node = m.plan.lefttree.unwrap();
+            } else if let Some(s) = node.as_sort() {
+                node = s.plan.lefttree.unwrap();
+            } else {
+                return node;
+            }
+        }
+    }
+
+    fn join_children<'mcx>(node: Node<'mcx>) -> Option<(Node<'mcx>, Node<'mcx>)> {
+        let plan = if let Some(j) = node.as_nest_loop() {
+            &j.join.plan
+        } else if let Some(j) = node.as_hash_join() {
+            &j.join.plan
+        } else if let Some(j) = node.as_merge_join() {
+            &j.join.plan
+        } else {
+            return None;
+        };
+        Some((descend(plan.lefttree.unwrap()), descend(plan.righttree.unwrap())))
+    }
+
+    fn scan_relid(node: Node<'_>) -> Option<u32> {
+        node.as_seq_scan().map(|s| s.scan.scanrelid)
+    }
+
+    // Panicked before the collapse-limit port: 9 rels > join_collapse_limit.
+    #[test]
+    fn nine_way_comma_join_plans() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let stmt = planner(
+            mcx,
+            many_comma_join_query(mcx, 9),
+            "SELECT a1.a FROM jt1 a1, ..., jt1 a9 WHERE chained equijoins",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        assert_eq!(stmt.rtable.len(), 9);
+        assert_eq!(stmt.relationOids.len(), 9);
+        assert!(join_children(stmt.planTree.unwrap()).is_some());
+    }
+
+    // join_collapse_limit=1 forces the syntactic order: (jt3 JOIN jt4)
+    // planned as its own subproblem, jt1 joined on top. Live PG 18.3 with
+    // the default limit instead joins the 1-row jt1 below the top join.
+    #[test]
+    fn join_collapse_limit_one_forces_join_order() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+
+        let default_stmt = planner(
+            mcx,
+            join_chain_query(mcx),
+            "SELECT jt1.a FROM jt3 JOIN jt4 ON jt3.a = jt4.a JOIN jt1 ON jt4.a = jt1.a",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let (dl, dr) = join_children(default_stmt.planTree.unwrap()).expect("join root");
+        assert!(
+            scan_relid(dl) != Some(3) && scan_relid(dr) != Some(3),
+            "default limit joins the 1-row jt1 below the top join"
+        );
+
+        crate::gucs::set_join_collapse_limit(1);
+        let stmt = planner(
+            mcx,
+            join_chain_query(mcx),
+            "SET join_collapse_limit = 1; same query",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_join_collapse_limit(8);
+        let stmt = stmt.unwrap();
+        let (l, r) = join_children(stmt.planTree.unwrap()).expect("join root");
+        let (sub, scan3) = if scan_relid(r) == Some(3) { (l, r) } else { (r, l) };
+        assert_eq!(scan_relid(scan3), Some(3));
+        let (sl, sr) = join_children(sub).expect("forced (jt3 JOIN jt4) subproblem");
+        let mut rels = [scan_relid(sl).unwrap(), scan_relid(sr).unwrap()];
+        rels.sort_unstable();
+        assert_eq!(rels, [1, 2]);
+    }
+
+    // from_collapse_limit=2 keeps the JOIN subproblem as a nested joinlist
+    // item next to the third FROM entry; the search still yields a plan with
+    // the join pair grouped.
+    #[test]
+    fn from_collapse_limit_nests_join_subproblem() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        // FROM (jt3 JOIN jt4 ON jt3.a = jt4.a), jt1 WHERE jt4.a = jt1.a
+        let query = |mcx: Mcx<'_>| {
+            let mut rtable = NodeList::nil();
+            for relid in [JT3, JT4, JT1] {
+                rtable.lappend(mcx, mk_plain_rte(mcx, relid)).unwrap();
+            }
+            rtable.lappend(mcx, mk_join_rte(mcx, &[1, 2])).unwrap();
+            let rtr = |i: i32| Node::mk_range_tbl_ref(mcx, i).unwrap();
+            let join = mk_inner_join(mcx, rtr(1), rtr(2), mk_int4eq_vars(mcx, 1, 2), 4);
+            let jointree = alloc_leak_in(
+                mcx,
+                FromExpr {
+                    fromlist: NodeList::make2(mcx, join, rtr(3)).unwrap(),
+                    quals: Some(mk_int4eq_vars(mcx, 2, 3)),
+                },
+            )
+            .unwrap();
+            let v = Node::mk_var(mcx, 3, 1, 23, -1, 0, 0).unwrap();
+            let tle = Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                canSetTag: true,
+                jointree: Some(jointree),
+                rtable,
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                stmt_location: 0,
+                stmt_len: 42,
+                ..Query::default()
+            }
+        };
+        crate::gucs::set_from_collapse_limit(2);
+        let stmt = planner(
+            mcx,
+            query(mcx),
+            "SET from_collapse_limit = 2; SELECT ... FROM (jt3 JOIN jt4 ON ...), jt1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        );
+        crate::gucs::set_from_collapse_limit(8);
+        let stmt = stmt.unwrap();
+        let (l, r) = join_children(stmt.planTree.unwrap()).expect("join root");
+        let (sub, scan3) = if scan_relid(r) == Some(3) { (l, r) } else { (r, l) };
+        assert_eq!(scan_relid(scan3), Some(3));
+        let (sl, sr) = join_children(sub).expect("nested (jt3 JOIN jt4) subproblem");
+        let mut rels = [scan_relid(sl).unwrap(), scan_relid(sr).unwrap()];
+        rels.sort_unstable();
+        assert_eq!(rels, [1, 2]);
+    }
 }
 
 mod stats_arms {

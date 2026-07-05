@@ -635,18 +635,26 @@ pub fn deconstruct_jointree<'mcx>(
     let mut qualscope: types_pathnodes::Relids<'mcx> = None;
     let mut joinlist = PgVec::new_in(mcx);
     let mut items: PgVec<'mcx, JtItem<'mcx>> = PgVec::new_in(mcx);
+    // The top FromExpr goes through deconstruct_recurse's FromExpr arm in C,
+    // so from_collapse_limit governs collapsing here too.
+    let mut remaining = f.fromlist.len();
     for item in &f.fromlist {
         let (item_relids, _item_inner, item_joinlist) =
             deconstruct_recurse(run, item, 0, &mut items)?;
         qualscope = relids_union(mcx, &qualscope, &item_relids);
-        for jl in item_joinlist {
-            joinlist.push(jl);
+        remaining -= 1;
+        if item_joinlist.len() <= 1
+            || joinlist.len() + item_joinlist.len() + remaining
+                <= crate::gucs::from_collapse_limit() as usize
+        {
+            for jl in item_joinlist {
+                joinlist.push(jl);
+            }
+        } else {
+            joinlist.push(JoinlistNode::Sub(item_joinlist));
         }
     }
     debug_assert!(!joinlist.is_empty());
-    if joinlist.len() > crate::gucs::join_collapse_limit() as usize {
-        panic!("deconstruct_recurse (initsplan.c): joinlist beyond collapse limit; M2 join lane");
-    }
 
     run.root.all_baserels = relids_difference(mcx, &qualscope, &run.root.outer_join_rels);
     run.root.all_query_rels = relids_copy(mcx, &qualscope);
@@ -1169,6 +1177,32 @@ impl<'a, 'mcx> CloneCtl<'a, 'mcx> {
     }
 }
 
+// initsplan.c deconstruct_recurse joinlist output for non-FULL JoinExprs:
+// fold the two subproblems together when within join_collapse_limit, else
+// keep each side as one item (unwrapping useless 1-element sublists).
+fn combine_joinlists<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    l_list: PgVec<'mcx, JoinlistNode<'mcx>>,
+    r_list: PgVec<'mcx, JoinlistNode<'mcx>>,
+) -> PgVec<'mcx, JoinlistNode<'mcx>> {
+    if l_list.len() + r_list.len() <= crate::gucs::join_collapse_limit() as usize {
+        let mut joinlist = l_list;
+        for jl in r_list {
+            joinlist.push(jl);
+        }
+        joinlist
+    } else {
+        let mut joinlist = PgVec::new_in(mcx);
+        joinlist.push(joinlist_part(l_list));
+        joinlist.push(joinlist_part(r_list));
+        joinlist
+    }
+}
+
+fn joinlist_part<'mcx>(mut list: PgVec<'mcx, JoinlistNode<'mcx>>) -> JoinlistNode<'mcx> {
+    if list.len() == 1 { list.pop().unwrap() } else { JoinlistNode::Sub(list) }
+}
+
 fn deconstruct_recurse<'mcx>(
     run: &mut PlannerRun<'mcx>,
     item: Node<'mcx>,
@@ -1205,13 +1239,25 @@ fn deconstruct_recurse<'mcx>(
             let mut qualscope: types_pathnodes::Relids<'mcx> = None;
             let mut inner_join_rels: types_pathnodes::Relids<'mcx> = None;
             let mut joinlist = PgVec::new_in(mcx);
+            let mut remaining = f.fromlist.len();
             for child in &f.fromlist {
                 let (c_relids, c_inner, c_list) =
                     deconstruct_recurse(run, child, parent_domain, items)?;
                 qualscope = relids_union(mcx, &qualscope, &c_relids);
                 inner_join_rels = c_inner;
-                for jl in c_list {
-                    joinlist.push(jl);
+                remaining -= 1;
+                // initsplan.c deconstruct_recurse FromExpr arm: collapse the
+                // subproblem unless doing so would push the joinlist past
+                // from_collapse_limit; 1-element subproblems always collapse.
+                if c_list.len() <= 1
+                    || joinlist.len() + c_list.len() + remaining
+                        <= crate::gucs::from_collapse_limit() as usize
+                {
+                    for jl in c_list {
+                        joinlist.push(jl);
+                    }
+                } else {
+                    joinlist.push(JoinlistNode::Sub(c_list));
                 }
             }
             if f.fromlist.len() > 1 {
@@ -1239,11 +1285,7 @@ fn deconstruct_recurse<'mcx>(
                         qualscope: relids_copy(mcx, &scope),
                         jdomain: parent_domain,
                     });
-                    let mut joinlist = l_list;
-                    for jl in r_list {
-                        joinlist.push(jl);
-                    }
-                    Ok((relids_copy(mcx, &scope), scope, joinlist))
+                    Ok((relids_copy(mcx, &scope), scope, combine_joinlists(mcx, l_list, r_list)))
                 }
                 types_nodes::JoinType::JOIN_LEFT | types_nodes::JoinType::JOIN_ANTI => {
                     let child_domain = run.root.join_domains.len();
@@ -1293,11 +1335,7 @@ fn deconstruct_recurse<'mcx>(
                         inner_join_rels: relids_copy(mcx, &inner_join_rels),
                         rtindex: j.rtindex,
                     });
-                    let mut joinlist = l_list;
-                    for jl in r_list {
-                        joinlist.push(jl);
-                    }
-                    Ok((qualscope, inner_join_rels, joinlist))
+                    Ok((qualscope, inner_join_rels, combine_joinlists(mcx, l_list, r_list)))
                 }
                 types_nodes::JoinType::JOIN_SEMI => {
                     let (l_relids, l_inner, l_list) =
@@ -1317,11 +1355,7 @@ fn deconstruct_recurse<'mcx>(
                         inner_join_rels: relids_copy(mcx, &inner_join_rels),
                         rtindex: 0,
                     });
-                    let mut joinlist = l_list;
-                    for jl in r_list {
-                        joinlist.push(jl);
-                    }
-                    Ok((qualscope, inner_join_rels, joinlist))
+                    Ok((qualscope, inner_join_rels, combine_joinlists(mcx, l_list, r_list)))
                 }
                 types_nodes::JoinType::JOIN_FULL => {
                     // The FULL join's quals get their very own domain; each
