@@ -334,6 +334,8 @@ pub enum Step {
     NewVar { attnum: u16, vartype: Oid, out: OutRef },
     OldSysVar { attnum: i16, out: OutRef },
     NewSysVar { attnum: i16, out: OutRef },
+    AssignOldVar { attnum: u16, resultnum: u16 },
+    AssignNewVar { attnum: u16, resultnum: u16 },
     ReturningExprStep { nullflag: u8, jumpdone: u32, out: OutRef },
 }
 

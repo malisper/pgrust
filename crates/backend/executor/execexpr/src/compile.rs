@@ -369,7 +369,14 @@ fn build_projection_info<'mcx>(
                     VarReturningType::VAR_RETURNING_DEFAULT => {
                         Step::AssignScanVar { attnum, resultnum }
                     }
-                    _ => unported("EEOP_ASSIGN_OLD_VAR/EEOP_ASSIGN_NEW_VAR (RETURNING)"),
+                    VarReturningType::VAR_RETURNING_OLD => {
+                        state.flags |= crate::steps::EEO_FLAG_HAS_OLD;
+                        Step::AssignOldVar { attnum, resultnum }
+                    }
+                    VarReturningType::VAR_RETURNING_NEW => {
+                        state.flags |= crate::steps::EEO_FLAG_HAS_NEW;
+                        Step::AssignNewVar { attnum, resultnum }
+                    }
                 },
             };
             push_step(&mut state, mcx, step)?;
