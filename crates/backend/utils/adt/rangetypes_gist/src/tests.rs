@@ -1,5 +1,5 @@
 use super::*;
-use ::adt_rangetypes::{range_serialize, ElemInfo};
+use ::adt_rangetypes::{range_deserialize, range_serialize, ElemInfo};
 use ::mcx::MemoryContext;
 use ::types_fmgr::LocalFcinfo;
 
