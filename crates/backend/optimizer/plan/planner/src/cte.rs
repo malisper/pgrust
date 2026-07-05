@@ -71,7 +71,8 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
 
         run.glob.subplans.lappend(mcx, plan)?;
         let plan_id = run.glob.subplans.len() as i32;
-        debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+        // >= not ==: ancestors' parked subroots may be in flight (build_subplan).
+        debug_assert!(run.subroots.len() >= run.glob.subplans.len());
 
         let mut splan = SubPlan {
             subLinkType: SubLinkType::CTE_SUBLINK,

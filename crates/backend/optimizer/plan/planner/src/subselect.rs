@@ -1331,7 +1331,9 @@ fn build_subplan<'mcx>(
     }
     run.glob.subplans.lappend(mcx, plan)?;
     let plan_id = run.glob.subplans.len() as i32;
-    debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+    // Ancestors' parked subroots may still be in flight (nested build_subplan
+    // via the args loop); their rotations restore index alignment on return.
+    debug_assert!(run.subroots.len() >= run.glob.subplans.len());
     splan.plan_id = plan_id;
 
     if !is_init_plan && splan.parParam.is_nil() && !splan.useHashTable {
@@ -2262,7 +2264,8 @@ pub(crate) fn ss_make_initplan_from_plan<'mcx>(
     let mcx = run.mcx;
     run.glob.subplans.lappend(mcx, plan)?;
     run.subroots.push(subroot);
-    debug_assert_eq!(run.subroots.len(), run.glob.subplans.len());
+    // >= not ==: ancestors' parked subroots may be in flight (build_subplan).
+    debug_assert!(run.subroots.len() >= run.glob.subplans.len());
     let plan_id = run.glob.subplans.len() as i32;
 
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(plan);

@@ -614,11 +614,10 @@ pub fn exec_init_agg<'mcx>(
     }
     // tlist and qual Aggrefs can share aggnos (find_compatible_agg);
     // numaggs == 0 is C's hashed-DISTINCT shape.
+    // C: numaggs == 0 is not an error for any strategy — grouping-only Agg
+    // (hash-based grouping, or every Aggref lives in an outer level and rides
+    // in as a SubPlan arg / was optimized away).
     let numaggs = aggrefs.iter().map(|(_, a)| a.aggno + 1).max().unwrap_or(0) as usize;
-    assert!(
-        numaggs > 0 || node.aggstrategy == AGG_HASHED || has_grouping_sets,
-        "ExecInitAgg: Agg node without Aggrefs outside AGG_HASHED/grouping sets"
-    );
 
     let mut by_aggno: PgVec<'mcx, Option<(Node<'mcx>, &'mcx Aggref<'mcx>)>> =
         vec_with_capacity_in(mcx, numaggs)?;
