@@ -478,12 +478,15 @@ fn install_scan_fixtures() {
     indexcmds_seams::get_default_opclass::set(|_, _| Ok(0));
     syscache_seams::pg_type_base_shape::set(|typid| {
         Ok(match typid {
-            1007 => Some(syscache_seams::PgTypeBaseShape {
+            // True array types carry the array subscript handler; without it
+            // get_base_element_type (scalararraysel's C element-type probe)
+            // sees no array.
+            1007 | 1009 => Some(syscache_seams::PgTypeBaseShape {
                 typtype: b'b' as i8,
                 typbasetype: 0,
                 typtypmod: -1,
-                typelem: 23,
-                typsubscript: 0,
+                typelem: if typid == 1007 { 23 } else { 25 },
+                typsubscript: lsyscache::F_ARRAY_SUBSCRIPT_HANDLER,
             }),
             _ => Some(syscache_seams::PgTypeBaseShape {
                 typtype: b'b' as i8,
