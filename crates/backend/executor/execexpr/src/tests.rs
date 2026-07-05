@@ -3046,9 +3046,9 @@ fn exec_type_set_col_names_skips_empty_and_dropped() {
         names.lappend(mcx, Node::mk_string(mcx, "").unwrap()).unwrap();
         let before2 = desc.attrs[2].attname;
         crate::interp::exec_type_set_col_names(&mut desc, &names);
-        assert_eq!(desc.attrs[0].attname.name_str(), "a");
+        assert_eq!(desc.attrs[0].attname.name_str(), b"a");
         // Dropped column keeps its name; empty alias keeps the original.
-        assert_ne!(desc.attrs[1].attname.name_str(), "b");
+        assert_ne!(desc.attrs[1].attname.name_str(), b"b");
         assert_eq!(desc.attrs[2].attname.name_str(), before2.name_str());
     });
 }
