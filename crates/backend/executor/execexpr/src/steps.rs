@@ -568,6 +568,13 @@ impl<'mcx> FuncFrame<'mcx> {
     }
 }
 
+/// Emit-time address of a call's arg cell (kernel stencils bake it).
+pub(crate) fn call_arg_addr(call: &FuncCall, argno: usize) -> *mut NullableDatum {
+    debug_assert!(argno < call.nargs as usize);
+    // SAFETY: live fcinfo image with nargs args.
+    unsafe { arg_slot_of(call.fcinfo, argno) }.as_ptr()
+}
+
 /// # Safety
 /// `base` is a live fcinfo image with more than `argno` args.
 #[inline(always)]
@@ -864,6 +871,9 @@ pub struct ExprState<'mcx> {
     // compile-allocated cell the caller writes via set_case_test (JSON_TABLE).
     pub(crate) ext_case_test: Option<NonNull<NullableDatum>>,
     pub(crate) allow_ext_case_test: bool,
+    // Copy-and-patch kernel entry (jit.rs); the code block itself is owned by
+    // the executor session collector, which outlives this state.
+    pub(crate) jit: Option<crate::jit::JitHandle>,
 }
 
 impl<'mcx> ExprState<'mcx> {
@@ -896,6 +906,7 @@ impl<'mcx> ExprState<'mcx> {
                 escontext: None,
                 ext_case_test: None,
                 allow_ext_case_test: false,
+                jit: None,
             });
             Ok(::mcx::PgBox::from_raw_in(p.as_ptr(), mcx))
         }
@@ -969,6 +980,11 @@ impl<'mcx> ExprState<'mcx> {
     #[inline(always)]
     pub(crate) fn result_out(&self) -> OutRef {
         OutRef(self.resnd)
+    }
+
+    #[inline(always)]
+    pub(crate) fn result_addr(&self) -> *mut NullableDatum {
+        self.resnd.as_ptr()
     }
 
     #[inline(always)]

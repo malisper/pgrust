@@ -80,6 +80,16 @@ impl Suspension {
     pub fn resume_with(self, result: NullableDatum) -> Resume {
         Resume { step: self.step, regs: self.regs, result }
     }
+
+    pub(crate) fn new(sstate: core::ptr::NonNull<()>, step: u32, regs: NullableDatum) -> Suspension {
+        Suspension { sstate, step, regs }
+    }
+}
+
+impl Resume {
+    pub(crate) fn into_parts(self) -> (NullableDatum, NullableDatum, u32) {
+        (self.regs, self.result, self.step)
+    }
 }
 
 pub enum EvalOutcome {
@@ -226,6 +236,9 @@ fn eval<'mcx>(
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
     if let Kernel::Program = state.kernel {
+        if state.jit.is_some() {
+            return crate::jit::run_jit(state, slots, result_slot, resume);
+        }
         return run_program(state, slots, result_slot, resume);
     }
     debug_assert!(resume.is_none());
@@ -578,28 +591,7 @@ fn run_program<'mcx>(
                 write_out(*out, value, isnull);
             }
             Step::IoCoerce { calls, out } => {
-                // SAFETY: 'mcx-owned pair written once at compile.
-                let c = unsafe { calls.as_ref() };
-                let nd = read_out(*out);
-                let strv = if nd.isnull {
-                    NullableDatum { value: Datum::null(), isnull: true }
-                } else {
-                    // SAFETY: arg 0 of the outcall's live fcinfo image.
-                    unsafe {
-                        crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
-                            .write(NullableDatum { value: nd.value, isnull: false })
-                    };
-                    let (v, isnull) = invoke(&c.outcall)?;
-                    NullableDatum { value: v, isnull }
-                };
-                if strv.isnull && c.in_strict {
-                    write_out(*out, Datum::null(), true);
-                } else {
-                    // SAFETY: arg 0 of the incall's live fcinfo image.
-                    unsafe { crate::steps::arg_slot_of(c.incall.fcinfo, 0).write(strv) };
-                    let (v, isnull) = invoke(&c.incall)?;
-                    write_out(*out, v, isnull);
-                }
+                step_io_coerce(*calls, *out)?;
             }
             Step::IoCoerceSafe { calls, out } => {
                 // SAFETY: 'mcx-owned pair written once at compile.
@@ -749,85 +741,10 @@ fn run_program<'mcx>(
                 write_out(*out, value, isnull);
             }
             Step::MinMax { call, slots, nelems, least, out } => {
-                let mut value = Datum::null();
-                let mut isnull = true;
-                for off in 0..*nelems as usize {
-                    // SAFETY: off < nelems of the compile-allocated slot array.
-                    let nd = unsafe { slots.as_ptr().add(off).read() };
-                    if nd.isnull {
-                        continue;
-                    }
-                    if isnull {
-                        value = nd.value;
-                        isnull = false;
-                        continue;
-                    }
-                    // SAFETY: args 0/1 of the call's live 2-arg fcinfo image.
-                    unsafe {
-                        crate::steps::arg_slot_of(call.fcinfo, 0)
-                            .write(NullableDatum { value, isnull: false });
-                        crate::steps::arg_slot_of(call.fcinfo, 1)
-                            .write(NullableDatum { value: nd.value, isnull: false });
-                    }
-                    let (cmp, cmpnull) = invoke(call)?;
-                    if cmpnull {
-                        continue;
-                    }
-                    let cmp = cmp.as_i32();
-                    if (cmp > 0 && *least) || (cmp < 0 && !*least) {
-                        value = nd.value;
-                    }
-                }
-                write_out(*out, value, isnull);
+                step_min_max(call, *slots, *nelems, *least, *out)?;
             }
             Step::SqlValueFunction { op, typmod, scratch, out } => {
-                use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
-                let value = match op {
-                    Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()),
-                    Op::SVFOP_CURRENT_TIME | Op::SVFOP_CURRENT_TIME_N => {
-                        let t = adt_date::GetSQLCurrentTime(*typmod);
-                        // SAFETY: compile-allocated 12-byte 8-aligned image
-                        // slot owned by this step (steps.rs note).
-                        unsafe {
-                            scratch.as_ptr().cast::<i64>().write(t.time);
-                            scratch.as_ptr().add(8).cast::<i32>().write(t.zone);
-                        }
-                        Datum::from_usize(scratch.as_ptr() as usize)
-                    }
-                    Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
-                        Datum::from_i64(adt_timestamp::GetSQLCurrentTimestamp(*typmod))
-                    }
-                    Op::SVFOP_LOCALTIME | Op::SVFOP_LOCALTIME_N => {
-                        Datum::from_i64(adt_date::GetSQLLocalTime(*typmod))
-                    }
-                    Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
-                        Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(*typmod)?)
-                    }
-                    Op::SVFOP_CURRENT_ROLE | Op::SVFOP_CURRENT_USER | Op::SVFOP_USER
-                    | Op::SVFOP_SESSION_USER => {
-                        let roleid = if matches!(op, Op::SVFOP_SESSION_USER) {
-                            miscinit_seams::get_session_user_id::call()
-                        } else {
-                            miscinit_seams::get_user_id::call()
-                        };
-                        let shape = syscache_seams::lookup_authid_session_by_oid::call(roleid)?
-                            .ok_or_else(|| invalid_role_oid(roleid))?;
-                        // SAFETY: compile-allocated NameData-sized image slot
-                        // owned by this step (steps.rs note).
-                        unsafe {
-                            scratch
-                                .as_ptr()
-                                .cast::<::types_tuple::NameData>()
-                                .write(shape.rolname);
-                        }
-                        Datum::from_usize(scratch.as_ptr() as usize)
-                    }
-                    other => panic!(
-                        "execexpr EEOP_SQLVALUEFUNCTION: op {other:?} unported \
-                         (CURRENT_CATALOG/CURRENT_SCHEMA — dbcommands/namespace lanes)"
-                    ),
-                };
-                write_out(*out, value, false);
+                step_sql_value_function(*op, *typmod, *scratch, *out)?;
             }
             Step::Jump { jumpdone } => {
                 // SAFETY: jump targets validated < steps.len() at ready.
@@ -1119,25 +1036,7 @@ fn run_program<'mcx>(
                 write_out(*out, v, n);
             }
             Step::GroupingFuncEval { cols, ncols, current, out } => {
-                let mut result: i64 = 0;
-                if let Some(cell) = current {
-                    // SAFETY: once-allocated AggState arrays, repointed
-                    // before projection.
-                    let (grouped, cols) = unsafe {
-                        let c = cell.read();
-                        (
-                            core::slice::from_raw_parts(c.ptr, c.len),
-                            core::slice::from_raw_parts(cols.as_ptr(), *ncols as usize),
-                        )
-                    };
-                    for &attno in cols {
-                        result <<= 1;
-                        if !grouped.contains(&(attno as i16)) {
-                            result |= 1;
-                        }
-                    }
-                }
-                write_out(*out, Datum::from_i32(result as i32), false);
+                step_grouping_func(*cols, *ncols, *current, *out);
             }
             Step::AggSetCurrent { agg, aggref, shared } => {
                 // SAFETY: the caller's query-lifetime AggStateNode; no &mut
@@ -1159,99 +1058,32 @@ fn run_program<'mcx>(
             }
             Step::AggPlainTransByVal { call, pergroup } => {
                 // SAFETY: once-allocated stable pergroup; sole access here.
-                unsafe {
-                    let pg = pergroup.as_ptr();
-                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
-                        value: (*pg).trans_value,
-                        isnull: (*pg).trans_value_is_null,
-                    });
-                    let (value, isnull) = invoke(call)?;
-                    (*pg).trans_value = value;
-                    (*pg).trans_value_is_null = isnull;
-                }
+                unsafe { agg_trans_byval(call, pergroup.as_ptr())? }
             }
             Step::AggPlainTransStrictByVal { call, pergroup } => {
                 // SAFETY: as AggPlainTransByVal.
-                unsafe {
-                    let pg = pergroup.as_ptr();
-                    if !(*pg).trans_value_is_null {
-                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
-                            value: (*pg).trans_value,
-                            isnull: false,
-                        });
-                        let (value, isnull) = invoke(call)?;
-                        (*pg).trans_value = value;
-                        (*pg).trans_value_is_null = isnull;
-                    }
-                }
+                unsafe { agg_trans_strict_byval(call, pergroup.as_ptr())? }
             }
             Step::AggPlainTransInitStrictByVal { call, pergroup } => {
-                unsafe {
-                    let pg = pergroup.as_ptr();
-                    if (*pg).no_trans_value {
-                        let a1 = crate::steps::arg_slot_of(call.fcinfo, 1).read();
-                        (*pg).trans_value = a1.value;
-                        (*pg).trans_value_is_null = false;
-                        (*pg).no_trans_value = false;
-                    } else if !(*pg).trans_value_is_null {
-                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
-                            value: (*pg).trans_value,
-                            isnull: false,
-                        });
-                        let (value, isnull) = invoke(call)?;
-                        (*pg).trans_value = value;
-                        (*pg).trans_value_is_null = isnull;
-                    }
-                }
+                // SAFETY: as AggPlainTransByVal.
+                unsafe { agg_trans_init_strict_byval(call, pergroup.as_ptr())? }
             }
             Step::AggTransInitStrictByValIndirect { call, base, transno } => {
                 // SAFETY: as AggTransByValIndirect.
                 unsafe {
-                    let pg = base.read().as_ptr().add(*transno as usize);
-                    if (*pg).no_trans_value {
-                        let a1 = crate::steps::arg_slot_of(call.fcinfo, 1).read();
-                        (*pg).trans_value = a1.value;
-                        (*pg).trans_value_is_null = false;
-                        (*pg).no_trans_value = false;
-                    } else if !(*pg).trans_value_is_null {
-                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
-                            value: (*pg).trans_value,
-                            isnull: false,
-                        });
-                        let (value, isnull) = invoke(call)?;
-                        (*pg).trans_value = value;
-                        (*pg).trans_value_is_null = isnull;
-                    }
+                    agg_trans_init_strict_byval(call, base.read().as_ptr().add(*transno as usize))?
                 }
             }
             Step::AggTransByValIndirect { call, base, transno } => {
                 // SAFETY: base is a live cell nodeAgg repoints at the current
                 // group's once-allocated pergroup array before evaluation;
                 // transno < that array's length (build invariant).
-                unsafe {
-                    let pg = base.read().as_ptr().add(*transno as usize);
-                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
-                        value: (*pg).trans_value,
-                        isnull: (*pg).trans_value_is_null,
-                    });
-                    let (value, isnull) = invoke(call)?;
-                    (*pg).trans_value = value;
-                    (*pg).trans_value_is_null = isnull;
-                }
+                unsafe { agg_trans_byval(call, base.read().as_ptr().add(*transno as usize))? }
             }
             Step::AggTransStrictByValIndirect { call, base, transno } => {
                 // SAFETY: as AggTransByValIndirect.
                 unsafe {
-                    let pg = base.read().as_ptr().add(*transno as usize);
-                    if !(*pg).trans_value_is_null {
-                        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
-                            value: (*pg).trans_value,
-                            isnull: false,
-                        });
-                        let (value, isnull) = invoke(call)?;
-                        (*pg).trans_value = value;
-                        (*pg).trans_value_is_null = isnull;
-                    }
+                    agg_trans_strict_byval(call, base.read().as_ptr().add(*transno as usize))?
                 }
             }
             Step::AggPlainTransInitStrictByRef { call, pergroup, byref } => {
@@ -1309,23 +1141,10 @@ fn run_program<'mcx>(
                 write_out(*out, *init_value, false);
             }
             Step::HashDatumFirst { call, out } => {
-                // SAFETY: arg 0 of the call's live fcinfo image; hash fns
-                // never return NULL (C reads fn_addr's Datum directly).
-                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
-                let v = if a0.isnull { Datum::null() } else { invoke(call)?.0 };
-                write_out(*out, v, false);
+                step_hash_datum_first(call, *out)?;
             }
             Step::HashDatumNext32 { call, iresult, out } => {
-                // SAFETY: iresult is a build-owned once-allocated slot; arg 0
-                // as HashDatumFirst.
-                let existing = unsafe { iresult.read() }.value.as_u32().rotate_left(1);
-                let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
-                let combined = if a0.isnull {
-                    existing
-                } else {
-                    existing ^ invoke(call)?.0.as_u32()
-                };
-                write_out(*out, Datum::from_u32(combined), false);
+                step_hash_datum_next32(call, *iresult, *out)?;
             }
             Step::BoolTestIsTrue { out } => {
                 let r = read_out(*out);
@@ -1348,21 +1167,7 @@ fn run_program<'mcx>(
                 write_out(*out, Datum::from_bool(v), false);
             }
             Step::Distinct { call, out } => {
-                // SAFETY: args 0/1 of the call's live fcinfo image.
-                let (a0, a1) = unsafe {
-                    (
-                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
-                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
-                    )
-                };
-                if a0.isnull && a1.isnull {
-                    write_out(*out, Datum::from_bool(false), false);
-                } else if a0.isnull || a1.isnull {
-                    write_out(*out, Datum::from_bool(true), false);
-                } else {
-                    let (value, isnull) = invoke(call)?;
-                    write_out(*out, Datum::from_bool(!value.as_bool()), isnull);
-                }
+                step_distinct(call, *out)?;
             }
             Step::NullIf { call, out } => {
                 // SAFETY: args 0/1 of the call's live fcinfo image.
@@ -1607,21 +1412,7 @@ fn run_program<'mcx>(
                 }
             }
             Step::NotDistinct { call, out } => {
-                // SAFETY: args 0/1 of the call's live fcinfo image.
-                let (a0, a1) = unsafe {
-                    (
-                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
-                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
-                    )
-                };
-                if a0.isnull && a1.isnull {
-                    write_out(*out, Datum::from_bool(true), false);
-                } else if a0.isnull || a1.isnull {
-                    write_out(*out, Datum::from_bool(false), false);
-                } else {
-                    let (value, isnull) = invoke(call)?;
-                    write_out(*out, value, isnull);
-                }
+                step_not_distinct(call, *out)?;
             }
         }
         // SAFETY: Done-termination validated; +1 stays in bounds.
@@ -2916,7 +2707,7 @@ fn strict2_thin_eval(call: &crate::steps::CallThin) -> PgResult<NullableDatum> {
 // ExecEvalFuncExprFusage: an erroring call unwinds past end_function_usage,
 // exactly as C's ereport does.
 #[cold]
-fn invoke_fusage(call: &FuncCall) -> PgResult<(Datum, bool)> {
+pub(crate) fn invoke_fusage(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo.
     let fn_oid = unsafe { call.flinfo.as_ref() }.fn_oid;
     let fcu = ::pgstat::function::pgstat_init_function_usage(fn_oid)?;
@@ -2925,7 +2716,7 @@ fn invoke_fusage(call: &FuncCall) -> PgResult<(Datum, bool)> {
     Ok(r)
 }
 
-fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
+pub(crate) fn invoke(call: &FuncCall) -> PgResult<(Datum, bool)> {
     // SAFETY: 'mcx-live mcx-boxed FmgrInfo + fcinfo image; sole references
     // during the call.
     let flinfo = unsafe { &mut *call.flinfo.as_ptr() };
@@ -3350,5 +3141,945 @@ fn eval_row_compare_final(cmptype: i32, cmpresult: i32) -> bool {
         4 => cmpresult >= 0,
         5 => cmpresult > 0,
         other => unreachable!("RowCompareFinal cmptype {other}"),
+    }
+}
+
+// ---- Shared step bodies (run_program arm + exec_one_step arm) ----
+//
+// #[inline(always)] keeps run_program's codegen identical to the previous
+// inline form (the interpreter is instruction-count-gated).
+
+#[inline(always)]
+fn step_io_coerce(calls: core::ptr::NonNull<crate::steps::IoCoerceCalls>, out: OutRef) -> PgResult<()> {
+    // SAFETY: 'mcx-owned pair written once at compile.
+    let c = unsafe { calls.as_ref() };
+    let nd = read_out(out);
+    let strv = if nd.isnull {
+        NullableDatum { value: Datum::null(), isnull: true }
+    } else {
+        // SAFETY: arg 0 of the outcall's live fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(c.outcall.fcinfo, 0)
+                .write(NullableDatum { value: nd.value, isnull: false })
+        };
+        let (v, isnull) = invoke(&c.outcall)?;
+        NullableDatum { value: v, isnull }
+    };
+    if strv.isnull && c.in_strict {
+        write_out(out, Datum::null(), true);
+    } else {
+        // SAFETY: arg 0 of the incall's live fcinfo image.
+        unsafe { crate::steps::arg_slot_of(c.incall.fcinfo, 0).write(strv) };
+        let (v, isnull) = invoke(&c.incall)?;
+        write_out(out, v, isnull);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn step_min_max(
+    call: &FuncCall,
+    slots: core::ptr::NonNull<NullableDatum>,
+    nelems: u16,
+    least: bool,
+    out: OutRef,
+) -> PgResult<()> {
+    let mut value = Datum::null();
+    let mut isnull = true;
+    for off in 0..nelems as usize {
+        // SAFETY: off < nelems of the compile-allocated slot array.
+        let nd = unsafe { slots.as_ptr().add(off).read() };
+        if nd.isnull {
+            continue;
+        }
+        if isnull {
+            value = nd.value;
+            isnull = false;
+            continue;
+        }
+        // SAFETY: args 0/1 of the call's live 2-arg fcinfo image.
+        unsafe {
+            crate::steps::arg_slot_of(call.fcinfo, 0)
+                .write(NullableDatum { value, isnull: false });
+            crate::steps::arg_slot_of(call.fcinfo, 1)
+                .write(NullableDatum { value: nd.value, isnull: false });
+        }
+        let (cmp, cmpnull) = invoke(call)?;
+        if cmpnull {
+            continue;
+        }
+        let cmp = cmp.as_i32();
+        if (cmp > 0 && least) || (cmp < 0 && !least) {
+            value = nd.value;
+        }
+    }
+    write_out(out, value, isnull);
+    Ok(())
+}
+
+#[inline(always)]
+fn step_sql_value_function(
+    op: ::types_nodes::primnodes::SQLValueFunctionOp,
+    typmod: i32,
+    scratch: core::ptr::NonNull<u8>,
+    out: OutRef,
+) -> PgResult<()> {
+    use ::types_nodes::primnodes::SQLValueFunctionOp as Op;
+    let value = match op {
+        Op::SVFOP_CURRENT_DATE => Datum::from_i32(adt_date::GetSQLCurrentDate()),
+        Op::SVFOP_CURRENT_TIME | Op::SVFOP_CURRENT_TIME_N => {
+            let t = adt_date::GetSQLCurrentTime(typmod);
+            // SAFETY: compile-allocated 12-byte 8-aligned image
+            // slot owned by this step (steps.rs note).
+            unsafe {
+                scratch.as_ptr().cast::<i64>().write(t.time);
+                scratch.as_ptr().add(8).cast::<i32>().write(t.zone);
+            }
+            Datum::from_usize(scratch.as_ptr() as usize)
+        }
+        Op::SVFOP_CURRENT_TIMESTAMP | Op::SVFOP_CURRENT_TIMESTAMP_N => {
+            Datum::from_i64(adt_timestamp::GetSQLCurrentTimestamp(typmod))
+        }
+        Op::SVFOP_LOCALTIME | Op::SVFOP_LOCALTIME_N => {
+            Datum::from_i64(adt_date::GetSQLLocalTime(typmod))
+        }
+        Op::SVFOP_LOCALTIMESTAMP | Op::SVFOP_LOCALTIMESTAMP_N => {
+            Datum::from_i64(adt_timestamp::GetSQLLocalTimestamp(typmod)?)
+        }
+        Op::SVFOP_CURRENT_ROLE | Op::SVFOP_CURRENT_USER | Op::SVFOP_USER
+        | Op::SVFOP_SESSION_USER => {
+            let roleid = if matches!(op, Op::SVFOP_SESSION_USER) {
+                miscinit_seams::get_session_user_id::call()
+            } else {
+                miscinit_seams::get_user_id::call()
+            };
+            let shape = syscache_seams::lookup_authid_session_by_oid::call(roleid)?
+                .ok_or_else(|| invalid_role_oid(roleid))?;
+            // SAFETY: compile-allocated NameData-sized image slot
+            // owned by this step (steps.rs note).
+            unsafe {
+                scratch
+                    .as_ptr()
+                    .cast::<::types_tuple::NameData>()
+                    .write(shape.rolname);
+            }
+            Datum::from_usize(scratch.as_ptr() as usize)
+        }
+        other => panic!(
+            "execexpr EEOP_SQLVALUEFUNCTION: op {other:?} unported \
+             (CURRENT_CATALOG/CURRENT_SCHEMA — dbcommands/namespace lanes)"
+        ),
+    };
+    write_out(out, value, false);
+    Ok(())
+}
+
+#[inline(always)]
+fn step_grouping_func(
+    cols: core::ptr::NonNull<i32>,
+    ncols: u16,
+    current: Option<core::ptr::NonNull<crate::steps::GroupedColsCell>>,
+    out: OutRef,
+) {
+    let mut result: i64 = 0;
+    if let Some(cell) = current {
+        // SAFETY: once-allocated AggState arrays, repointed
+        // before projection.
+        let (grouped, cols) = unsafe {
+            let c = cell.read();
+            (
+                core::slice::from_raw_parts(c.ptr, c.len),
+                core::slice::from_raw_parts(cols.as_ptr(), ncols as usize),
+            )
+        };
+        for &attno in cols {
+            result <<= 1;
+            if !grouped.contains(&(attno as i16)) {
+                result |= 1;
+            }
+        }
+    }
+    write_out(out, Datum::from_i32(result as i32), false);
+}
+
+#[inline(always)]
+fn step_distinct(call: &FuncCall, out: OutRef) -> PgResult<()> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull && a1.isnull {
+        write_out(out, Datum::from_bool(false), false);
+    } else if a0.isnull || a1.isnull {
+        write_out(out, Datum::from_bool(true), false);
+    } else {
+        let (value, isnull) = invoke(call)?;
+        write_out(out, Datum::from_bool(!value.as_bool()), isnull);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn step_not_distinct(call: &FuncCall, out: OutRef) -> PgResult<()> {
+    // SAFETY: args 0/1 of the call's live fcinfo image.
+    let (a0, a1) = unsafe {
+        (
+            crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+            crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+        )
+    };
+    if a0.isnull && a1.isnull {
+        write_out(out, Datum::from_bool(true), false);
+    } else if a0.isnull || a1.isnull {
+        write_out(out, Datum::from_bool(false), false);
+    } else {
+        let (value, isnull) = invoke(call)?;
+        write_out(out, value, isnull);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn step_hash_datum_first(call: &FuncCall, out: OutRef) -> PgResult<()> {
+    // SAFETY: arg 0 of the call's live fcinfo image; hash fns
+    // never return NULL (C reads fn_addr's Datum directly).
+    let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+    let v = if a0.isnull { Datum::null() } else { invoke(call)?.0 };
+    write_out(out, v, false);
+    Ok(())
+}
+
+#[inline(always)]
+fn step_hash_datum_next32(
+    call: &FuncCall,
+    iresult: core::ptr::NonNull<NullableDatum>,
+    out: OutRef,
+) -> PgResult<()> {
+    // SAFETY: iresult is a build-owned once-allocated slot; arg 0
+    // as HashDatumFirst.
+    let existing = unsafe { iresult.read() }.value.as_u32().rotate_left(1);
+    let a0 = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
+    let combined = if a0.isnull {
+        existing
+    } else {
+        existing ^ invoke(call)?.0.as_u32()
+    };
+    write_out(out, Datum::from_u32(combined), false);
+    Ok(())
+}
+
+// SAFETY contract: live fcinfo image; `pg` the sole live pergroup pointer.
+#[inline(always)]
+unsafe fn agg_trans_byval(call: &FuncCall, pg: *mut crate::steps::AggPerGroup) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+            value: (*pg).trans_value,
+            isnull: (*pg).trans_value_is_null,
+        });
+        let (value, isnull) = invoke(call)?;
+        (*pg).trans_value = value;
+        (*pg).trans_value_is_null = isnull;
+    }
+    Ok(())
+}
+
+// SAFETY contract: as agg_trans_byval.
+#[inline(always)]
+unsafe fn agg_trans_strict_byval(
+    call: &FuncCall,
+    pg: *mut crate::steps::AggPerGroup,
+) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if !(*pg).trans_value_is_null {
+            crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                value: (*pg).trans_value,
+                isnull: false,
+            });
+            let (value, isnull) = invoke(call)?;
+            (*pg).trans_value = value;
+            (*pg).trans_value_is_null = isnull;
+        }
+    }
+    Ok(())
+}
+
+// SAFETY contract: as agg_trans_byval.
+#[inline(always)]
+unsafe fn agg_trans_init_strict_byval(
+    call: &FuncCall,
+    pg: *mut crate::steps::AggPerGroup,
+) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if (*pg).no_trans_value {
+            let a1 = crate::steps::arg_slot_of(call.fcinfo, 1).read();
+            (*pg).trans_value = a1.value;
+            (*pg).trans_value_is_null = false;
+            (*pg).no_trans_value = false;
+        } else if !(*pg).trans_value_is_null {
+            crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum {
+                value: (*pg).trans_value,
+                isnull: false,
+            });
+            let (value, isnull) = invoke(call)?;
+            (*pg).trans_value = value;
+            (*pg).trans_value_is_null = isnull;
+        }
+    }
+    Ok(())
+}
+
+// ---- Single-step execution for the copy-and-patch JIT (jit.rs) ----
+//
+// C llvm_compile_expr's external-function tier: kernel code calls
+// jitq_step(env, ix), which executes exactly one interpreter step and
+// reports the control flow. Every arm here MUST match run_program's arm for
+// the same step byte-for-byte in effect; nontrivial bodies are shared
+// helper functions, and this match carries no wildcard so a new Step variant
+// fails compilation until both sites are updated. Steps open-coded as
+// stencils by the emitter never reach here (their arms panic).
+
+pub(crate) enum StepFlow {
+    Next,
+    Jump(u32),
+    Suspend(core::ptr::NonNull<()>),
+}
+
+pub(crate) fn exec_one_step<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    mut result_slot: Option<&mut SlotData<'mcx>>,
+    ix: u32,
+) -> PgResult<StepFlow> {
+    let ExprState { steps, frames, resnd, saop_tables, .. } = state;
+    let res = *resnd;
+    let step = steps[ix as usize];
+    match step {
+        // Open-coded by the emitter (jit.rs step_stencilable).
+        Step::DoneReturn
+        | Step::DoneNoReturn
+        | Step::ScanVar { .. }
+        | Step::InnerVar { .. }
+        | Step::OuterVar { .. }
+        | Step::Const { .. }
+        | Step::CaseTestVal { .. }
+        | Step::Qual { .. }
+        | Step::Jump { .. }
+        | Step::JumpIfNotTrue { .. }
+        | Step::JumpIfNotNull { .. }
+        | Step::JumpIfNull { .. }
+        | Step::BoolAndStepFirst { .. }
+        | Step::BoolAndStep { .. }
+        | Step::BoolAndStepLast { .. }
+        | Step::BoolOrStepFirst { .. }
+        | Step::BoolOrStep { .. }
+        | Step::BoolOrStepLast { .. }
+        | Step::BoolNotStep { .. }
+        | Step::NullTestIsNull { .. }
+        | Step::NullTestIsNotNull { .. }
+        | Step::BoolTestIsTrue { .. }
+        | Step::BoolTestIsNotTrue { .. }
+        | Step::BoolTestIsFalse { .. }
+        | Step::BoolTestIsNotFalse { .. }
+        | Step::FuncExpr { .. }
+        | Step::FuncExprStrict1 { .. }
+        | Step::FuncExprStrict2 { .. }
+        | Step::FuncExprStrict { .. }
+        | Step::FuncExprFusage { .. }
+        | Step::FuncExprStrictFusage { .. } => {
+            unreachable!("stenciled step never routed to the helper")
+        }
+        // JIT compiles before fuse_program and skips fusion on success
+        // (ready_expr), so fused/thinned steps never appear in a jitted
+        // program.
+        Step::ScanVarFuncStrict2 { .. }
+        | Step::FuncFuncStrict2 { .. }
+        | Step::FuncStrict2Qual { .. }
+        | Step::OuterVarNotDistinct { .. }
+        | Step::NotDistinctQual { .. }
+        | Step::OuterVarAggTransByValIndirect { .. }
+        | Step::AssignScanVar2 { .. }
+        | Step::FuncExprStrict1Thin { .. }
+        | Step::FuncExprStrict2Thin { .. }
+        | Step::ScanVarFuncStrict2Thin { .. }
+        | Step::FuncFuncStrict2Thin { .. }
+        | Step::FuncStrict2QualThin { .. }
+        | Step::OuterVarNotDistinctThin { .. }
+        | Step::NotDistinctQualThin { .. }
+        | Step::AggTransStrictByValIndirectThin { .. } => {
+            unreachable!("fused steps are not jit-compiled")
+        }
+        Step::ScanFetchSome { last_var } => {
+            exectuples::slot_getsomeattrs(slots.get(SlotSrc::Scan), last_var as i32);
+        }
+        Step::InnerFetchSome { last_var } => {
+            exectuples::slot_getsomeattrs(slots.get(SlotSrc::Inner), last_var as i32);
+        }
+        Step::OuterFetchSome { last_var } => {
+            exectuples::slot_getsomeattrs(slots.get(SlotSrc::Outer), last_var as i32);
+        }
+        Step::AssignScanVar { attnum, resultnum } => {
+            let nd = read_var(slots.get(SlotSrc::Scan), attnum);
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            assign_to_result(rslot, resultnum, nd.value, nd.isnull);
+        }
+        Step::AssignInnerVar { attnum, resultnum } => {
+            let nd = read_var(slots.get(SlotSrc::Inner), attnum);
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            assign_to_result(rslot, resultnum, nd.value, nd.isnull);
+        }
+        Step::AssignOuterVar { attnum, resultnum } => {
+            let nd = read_var(slots.get(SlotSrc::Outer), attnum);
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            assign_to_result(rslot, resultnum, nd.value, nd.isnull);
+        }
+        Step::AssignTmp { resultnum } => {
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            // SAFETY: res is the state's live result cell.
+            let r = unsafe { res.read() };
+            assign_to_result(rslot, resultnum, r.value, r.isnull);
+        }
+        Step::AssignTmpMakeRo { resultnum } => {
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            // SAFETY: live result cell; non-null by-ref datum = live varlena.
+            let r = unsafe { res.read() };
+            let value = if !r.isnull {
+                unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
+            } else {
+                r.value
+            };
+            assign_to_result(rslot, resultnum, value, r.isnull);
+        }
+        Step::ScanSysVar { attnum, out } => {
+            let mut isnull = false;
+            let d = exectuples::slot_getsysattr(slots.get(SlotSrc::Scan), attnum as i32, &mut isnull)?;
+            write_out(out, d, isnull);
+        }
+        Step::InnerSysVar { attnum, out } => {
+            let mut isnull = false;
+            let d =
+                exectuples::slot_getsysattr(slots.get(SlotSrc::Inner), attnum as i32, &mut isnull)?;
+            write_out(out, d, isnull);
+        }
+        Step::OuterSysVar { attnum, out } => {
+            let mut isnull = false;
+            let d =
+                exectuples::slot_getsysattr(slots.get(SlotSrc::Outer), attnum as i32, &mut isnull)?;
+            write_out(out, d, isnull);
+        }
+        Step::ParamExtern { prm, out } => {
+            // SAFETY: compile-resolved pointer, portal-lived (steps.rs note).
+            let p = unsafe { prm.read() };
+            write_out(out, p.value, p.isnull);
+        }
+        Step::ParamExec { prm, out } => {
+            // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
+            let p = unsafe { prm.read() };
+            if p.exec_plan {
+                param_exec_plan_pending();
+            }
+            write_out(out, p.value, p.isnull);
+        }
+        Step::ParamSet { prm, out } => {
+            let r = read_out(out);
+            // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
+            unsafe {
+                let p = prm.as_ptr();
+                (*p).value = r.value;
+                (*p).isnull = r.isnull;
+                (*p).exec_plan = false;
+            }
+        }
+        Step::SubPlan { sstate, out: _ } => return Ok(StepFlow::Suspend(sstate)),
+        Step::MakeReadonly { slot } => {
+            // SAFETY: compile-allocated workspace holding a live datum.
+            unsafe {
+                let nd = slot.read();
+                if !nd.isnull {
+                    slot.write(NullableDatum {
+                        value: datum::expandeddatum::make_expanded_object_read_only_internal(
+                            nd.value,
+                        ),
+                        isnull: false,
+                    });
+                }
+            }
+        }
+        Step::MakeReadonlyOut { src, out } => {
+            let r = read_out(src);
+            let value = if r.isnull {
+                r.value
+            } else {
+                // SAFETY: non-null by-ref datum = live varlena.
+                unsafe { datum::expandeddatum::make_expanded_object_read_only_internal(r.value) }
+            };
+            write_out(out, value, r.isnull);
+        }
+        Step::NextValueExpr { seqid, seqtypid, out } => {
+            let newval = sequence_seams::nextval_internal::call(seqid, false)?;
+            let d = match seqtypid {
+                types_core::INT2OID => Datum::from_i16(newval as i16),
+                types_core::INT4OID => Datum::from_i32(newval as i32),
+                types_core::INT8OID => Datum::from_i64(newval),
+                other => panic!("unsupported sequence type {other}"),
+            };
+            write_out(out, d, false);
+        }
+        Step::WholeRow { src, wr, frame, out } => {
+            let slot = slots.get(src);
+            let (value, isnull) = eval_whole_row(frames, slot, wr, frame)?;
+            write_out(out, value, isnull);
+        }
+        Step::IoCoerce { calls, out } => {
+            step_io_coerce(calls, out)?;
+        }
+        Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out } => {
+            let arr = read_out(out);
+            let (value, isnull) =
+                eval_scalar_array_op(&call, use_or, strict, typlen, typbyval, typalign, arr)?;
+            write_out(out, value, isnull);
+        }
+        Step::HashedScalarArrayOp { call, inclause, typlen, typbyval, typalign, table, out } => {
+            let arr = read_out(out);
+            let (value, isnull) = eval_hashed_scalar_array_op(
+                &mut saop_tables[table as usize],
+                &call,
+                inclause,
+                typlen,
+                typbyval,
+                typalign,
+                arr,
+            )?;
+            write_out(out, value, isnull);
+        }
+        Step::ArrayExprStep { elems, nelems, frame, elmtype, elmlen, elmbyval, elmalign, out } => {
+            let (value, isnull) =
+                eval_array_expr(frames, elems, nelems, frame, elmtype, elmlen, elmbyval, elmalign)?;
+            write_out(out, value, isnull);
+        }
+        Step::RowExprStep { elems, nelems, frame, desc, out } => {
+            let (value, isnull) = eval_row_expr(frames, elems, nelems, frame, desc)?;
+            write_out(out, value, isnull);
+        }
+        Step::JsonConstructor { jcstate, frame, out } => {
+            eval_json_constructor_step(frames, jcstate, frame, out)?;
+        }
+        Step::IsJson { exprtype, item_type, unique_keys, frame, out } => {
+            eval_is_json_step(frames, exprtype, item_type, unique_keys, frame, out)?;
+        }
+        Step::XmlExprEval { state: xs, out } => {
+            // SAFETY: compile-allocated state, live for the program.
+            let st = unsafe { xs.as_ref() };
+            let (value, isnull) = crate::xmlops::eval_xml_expr(st)?;
+            write_out(out, value, isnull);
+        }
+        Step::MinMax { call, slots: vals, nelems, least, out } => {
+            step_min_max(&call, vals, nelems, least, out)?;
+        }
+        Step::SqlValueFunction { op, typmod, scratch, out } => {
+            step_sql_value_function(op, typmod, scratch, out)?;
+        }
+        Step::NullTestRowIsNull { rn, frame, out } => {
+            let r = read_out(out);
+            let b = eval_row_null(frames, rn, frame, r, true)?;
+            write_out(out, Datum::from_bool(b), false);
+        }
+        Step::NullTestRowIsNotNull { rn, frame, out } => {
+            let r = read_out(out);
+            let b = eval_row_null(frames, rn, frame, r, false)?;
+            write_out(out, Datum::from_bool(b), false);
+        }
+        Step::FieldSelect { fieldnum, resulttype, frame, out } => {
+            let r = read_out(out);
+            if !r.isnull {
+                let (value, isnull) =
+                    eval_field_select(frames, fieldnum, resulttype, frame, r.value)?;
+                write_out(out, value, isnull);
+            }
+        }
+        Step::ArrayCoerce { state: acs, out } => {
+            let r = read_out(out);
+            if !r.isnull {
+                // SAFETY: compile-allocated state, sole live access.
+                let st = unsafe { &mut *acs.as_ptr() };
+                let nd = crate::arrayops::eval_array_coerce(st, r.value)?;
+                write_out(out, nd.value, nd.isnull);
+            }
+        }
+        Step::ConvertRowtype { state: crs, frame, out } => {
+            let r = read_out(out);
+            if !r.isnull {
+                // SAFETY: compile-allocated state, sole live access.
+                let st = unsafe { crs.as_ref() };
+                let v = eval_convert_rowtype(frames, st, frame, r.value)?;
+                write_out(out, v, false);
+            }
+        }
+        Step::FieldStoreDeForm { fs, frame, out } => {
+            let r = read_out(out);
+            // SAFETY: compile-allocated state, sole live access.
+            let st = unsafe { fs.as_ref() };
+            eval_field_store_deform(frames, st, frame, r)?;
+        }
+        Step::FieldStoreForm { fs, frame, out } => {
+            // SAFETY: compile-allocated state, sole live access.
+            let st = unsafe { fs.as_ref() };
+            let v = eval_field_store_form(frames, st, frame)?;
+            write_out(out, v, false);
+        }
+        Step::DomainTestval { src, out } => {
+            let r = read_out(src);
+            write_out(out, r.value, r.isnull);
+        }
+        Step::DomainNotNull { resulttype, out } => {
+            if read_out(out).isnull {
+                return Err(domain_not_null_violation(resulttype));
+            }
+        }
+        Step::DomainCheck { resulttype, name, check } => {
+            // SAFETY: compile-allocated scratch, live for 'mcx.
+            let r = unsafe { check.read() };
+            if !r.isnull && !r.value.as_bool() {
+                // SAFETY: name is a compile-copied &'mcx str.
+                return Err(domain_check_violation(resulttype, unsafe { name.as_ref() }));
+            }
+        }
+        Step::ArrayExprEval { state: aes, out } => {
+            // SAFETY: compile-allocated state, live for 'mcx, sole access.
+            let st = unsafe { &mut *aes.as_ptr() };
+            let r = crate::arrayops::eval_array_expr(st)?;
+            write_out(out, r.value, r.isnull);
+        }
+        Step::SbsrefSubscripts { state: sref, jumpdone, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            if !crate::arrayops::sbsref_check_subscripts(st)? {
+                write_out(out, Datum::null(), true);
+                return Ok(StepFlow::Jump(jumpdone));
+            }
+        }
+        Step::SbsrefFetch { state: sref, slice, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            let r = if slice {
+                crate::arrayops::sbsref_fetch_slice(st, cur)?
+            } else {
+                crate::arrayops::sbsref_fetch(st, cur)?
+            };
+            write_out(out, r.value, r.isnull);
+        }
+        Step::SbsrefOld { state: sref, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            crate::arrayops::sbsref_fetch_old(st, cur)?;
+        }
+        Step::SbsrefAssign { state: sref, slice, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            let r = if slice {
+                crate::arrayops::sbsref_assign_slice(st, cur)?
+            } else {
+                crate::arrayops::sbsref_assign(st, cur)?
+            };
+            write_out(out, r.value, r.isnull);
+        }
+        Step::JsonbSbsrefSubscripts { state: sref, jumpdone, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            if !crate::jsonbsubs::check_subscripts(st)? {
+                write_out(out, Datum::null(), true);
+                return Ok(StepFlow::Jump(jumpdone));
+            }
+        }
+        Step::JsonbSbsrefFetch { state: sref, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            let r = crate::jsonbsubs::fetch(st, cur)?;
+            write_out(out, r.value, r.isnull);
+        }
+        Step::JsonbSbsrefAssign { state: sref, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            let r = crate::jsonbsubs::assign(st, cur)?;
+            write_out(out, r.value, r.isnull);
+        }
+        Step::Distinct { call, out } => {
+            step_distinct(&call, out)?;
+        }
+        Step::NotDistinct { call, out } => {
+            step_not_distinct(&call, out)?;
+        }
+        Step::AggrefEval { value, null, out } => {
+            // SAFETY: pointers into once-allocated AggState arrays (steps.rs note).
+            let (v, n) = unsafe { (value.read(), null.read()) };
+            write_out(out, v, n);
+        }
+        Step::GroupingFuncEval { cols, ncols, current, out } => {
+            step_grouping_func(cols, ncols, current, out);
+        }
+        Step::AggSetCurrent { agg, aggref, shared } => {
+            // SAFETY: the caller's query-lifetime AggStateNode; no &mut
+            // is live across expression evaluation.
+            unsafe { agg.as_ref() }.set_current_agg(aggref, shared);
+        }
+        Step::AggStrictInputCheck { args, nargs, jumpnull } => {
+            // SAFETY: args[0..nargs] live fcinfo slots; jumps ready-checked.
+            let anynull =
+                (0..nargs as usize).any(|i| unsafe { args.as_ptr().add(i).read().isnull });
+            if anynull {
+                return Ok(StepFlow::Jump(jumpnull));
+            }
+        }
+        Step::AggStrictInputCheck1 { arg, jumpnull } => {
+            // SAFETY: as AggStrictInputCheck.
+            if unsafe { arg.read().isnull } {
+                return Ok(StepFlow::Jump(jumpnull));
+            }
+        }
+        Step::AggOrderedMark { flag } => {
+            // SAFETY: nodeagg-owned once-allocated flag slot.
+            unsafe { flag.write(true) };
+        }
+        Step::AggPlainTransByVal { call, pergroup } => {
+            // SAFETY: once-allocated stable pergroup; sole access here.
+            unsafe { agg_trans_byval(&call, pergroup.as_ptr())? }
+        }
+        Step::AggPlainTransStrictByVal { call, pergroup } => {
+            // SAFETY: as AggPlainTransByVal.
+            unsafe { agg_trans_strict_byval(&call, pergroup.as_ptr())? }
+        }
+        Step::AggPlainTransInitStrictByVal { call, pergroup } => {
+            // SAFETY: as AggPlainTransByVal.
+            unsafe { agg_trans_init_strict_byval(&call, pergroup.as_ptr())? }
+        }
+        Step::AggTransByValIndirect { call, base, transno } => {
+            // SAFETY: live repointed pergroup cell (run_program contract).
+            unsafe { agg_trans_byval(&call, base.read().as_ptr().add(transno as usize))? }
+        }
+        Step::AggTransStrictByValIndirect { call, base, transno } => {
+            // SAFETY: as AggTransByValIndirect.
+            unsafe { agg_trans_strict_byval(&call, base.read().as_ptr().add(transno as usize))? }
+        }
+        Step::AggTransInitStrictByValIndirect { call, base, transno } => {
+            // SAFETY: as AggTransByValIndirect.
+            unsafe {
+                agg_trans_init_strict_byval(&call, base.read().as_ptr().add(transno as usize))?
+            }
+        }
+        Step::AggPlainTransInitStrictByRef { call, pergroup, byref } => {
+            // SAFETY: once-allocated stable pergroup, sole access here.
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if (*pg).no_trans_value {
+                    agg_init_group(&call, pg, byref)?;
+                } else if !(*pg).trans_value_is_null {
+                    agg_plain_trans_byref(&call, pg, byref)?;
+                }
+            }
+        }
+        Step::AggPlainTransStrictByRef { call, pergroup, byref } => {
+            // SAFETY: as AggPlainTransInitStrictByRef.
+            unsafe {
+                let pg = pergroup.as_ptr();
+                if !(*pg).trans_value_is_null {
+                    agg_plain_trans_byref(&call, pg, byref)?;
+                }
+            }
+        }
+        Step::AggPlainTransByRef { call, pergroup, byref } => {
+            // SAFETY: as AggPlainTransInitStrictByRef.
+            unsafe { agg_plain_trans_byref(&call, pergroup.as_ptr(), byref)? }
+        }
+        Step::AggTransInitStrictByRefIndirect { call, base, transno, byref } => {
+            // SAFETY: as AggTransByValIndirect + AggPlainTransByRef.
+            unsafe {
+                let pg = base.read().as_ptr().add(transno as usize);
+                if (*pg).no_trans_value {
+                    agg_init_group(&call, pg, byref)?;
+                } else if !(*pg).trans_value_is_null {
+                    agg_plain_trans_byref(&call, pg, byref)?;
+                }
+            }
+        }
+        Step::AggTransStrictByRefIndirect { call, base, transno, byref } => {
+            // SAFETY: as AggTransInitStrictByRefIndirect.
+            unsafe {
+                let pg = base.read().as_ptr().add(transno as usize);
+                if !(*pg).trans_value_is_null {
+                    agg_plain_trans_byref(&call, pg, byref)?;
+                }
+            }
+        }
+        Step::AggTransByRefIndirect { call, base, transno, byref } => {
+            // SAFETY: as AggTransInitStrictByRefIndirect.
+            unsafe {
+                agg_plain_trans_byref(&call, base.read().as_ptr().add(transno as usize), byref)?
+            }
+        }
+        Step::HashDatumSetInitVal { init_value, out } => {
+            write_out(out, init_value, false);
+        }
+        Step::HashDatumFirst { call, out } => {
+            step_hash_datum_first(&call, out)?;
+        }
+        Step::HashDatumNext32 { call, iresult, out } => {
+            step_hash_datum_next32(&call, iresult, out)?;
+        }
+        Step::RowCompareStep { call, strict, jumpnull, jumpdone, out } => {
+            match eval_row_compare_step(&call, strict)? {
+                None => {
+                    write_out(out, Datum::null(), true);
+                    return Ok(StepFlow::Jump(jumpnull));
+                }
+                Some(v) => {
+                    write_out(out, Datum::from_i32(v), false);
+                    if v != 0 {
+                        return Ok(StepFlow::Jump(jumpdone));
+                    }
+                }
+            }
+        }
+        Step::RowCompareFinal { cmptype, out } => {
+            let v = eval_row_compare_final(cmptype, read_out(out).value.as_i32());
+            write_out(out, Datum::from_bool(v), false);
+        }
+    }
+    Ok(StepFlow::Next)
+}
+
+/// Steps exec_one_step executes: every variant that is neither open-coded by
+/// the emitter nor a ready-time fused/thinned form (which never appear in
+/// jitted programs). Exhaustive on purpose: a new Step variant must be
+/// classified here and in exec_one_step before it compiles.
+pub(crate) fn step_has_helper(step: &Step) -> bool {
+    match step {
+        Step::DoneReturn
+        | Step::DoneNoReturn
+        | Step::ScanVar { .. }
+        | Step::InnerVar { .. }
+        | Step::OuterVar { .. }
+        | Step::Const { .. }
+        | Step::CaseTestVal { .. }
+        | Step::Qual { .. }
+        | Step::Jump { .. }
+        | Step::JumpIfNotTrue { .. }
+        | Step::JumpIfNotNull { .. }
+        | Step::JumpIfNull { .. }
+        | Step::BoolAndStepFirst { .. }
+        | Step::BoolAndStep { .. }
+        | Step::BoolAndStepLast { .. }
+        | Step::BoolOrStepFirst { .. }
+        | Step::BoolOrStep { .. }
+        | Step::BoolOrStepLast { .. }
+        | Step::BoolNotStep { .. }
+        | Step::NullTestIsNull { .. }
+        | Step::NullTestIsNotNull { .. }
+        | Step::BoolTestIsTrue { .. }
+        | Step::BoolTestIsNotTrue { .. }
+        | Step::BoolTestIsFalse { .. }
+        | Step::BoolTestIsNotFalse { .. }
+        | Step::FuncExpr { .. }
+        | Step::FuncExprStrict1 { .. }
+        | Step::FuncExprStrict2 { .. }
+        | Step::FuncExprStrict { .. }
+        | Step::FuncExprFusage { .. }
+        | Step::FuncExprStrictFusage { .. } => false,
+        Step::ScanVarFuncStrict2 { .. }
+        | Step::FuncFuncStrict2 { .. }
+        | Step::FuncStrict2Qual { .. }
+        | Step::OuterVarNotDistinct { .. }
+        | Step::NotDistinctQual { .. }
+        | Step::OuterVarAggTransByValIndirect { .. }
+        | Step::AssignScanVar2 { .. }
+        | Step::FuncExprStrict1Thin { .. }
+        | Step::FuncExprStrict2Thin { .. }
+        | Step::ScanVarFuncStrict2Thin { .. }
+        | Step::FuncFuncStrict2Thin { .. }
+        | Step::FuncStrict2QualThin { .. }
+        | Step::OuterVarNotDistinctThin { .. }
+        | Step::NotDistinctQualThin { .. }
+        | Step::AggTransStrictByValIndirectThin { .. } => false,
+        Step::ScanFetchSome { .. }
+        | Step::InnerFetchSome { .. }
+        | Step::OuterFetchSome { .. }
+        | Step::ScanSysVar { .. }
+        | Step::InnerSysVar { .. }
+        | Step::OuterSysVar { .. }
+        | Step::AssignScanVar { .. }
+        | Step::AssignInnerVar { .. }
+        | Step::AssignOuterVar { .. }
+        | Step::AssignTmp { .. }
+        | Step::AssignTmpMakeRo { .. }
+        | Step::ParamExtern { .. }
+        | Step::ParamExec { .. }
+        | Step::ParamSet { .. }
+        | Step::SubPlan { .. }
+        | Step::MakeReadonly { .. }
+        | Step::MakeReadonlyOut { .. }
+        | Step::NextValueExpr { .. }
+        | Step::WholeRow { .. }
+        | Step::IoCoerce { .. }
+        | Step::ScalarArrayOp { .. }
+        | Step::HashedScalarArrayOp { .. }
+        | Step::ArrayExprStep { .. }
+        | Step::RowExprStep { .. }
+        | Step::JsonConstructor { .. }
+        | Step::IsJson { .. }
+        | Step::XmlExprEval { .. }
+        | Step::MinMax { .. }
+        | Step::SqlValueFunction { .. }
+        | Step::NullTestRowIsNull { .. }
+        | Step::NullTestRowIsNotNull { .. }
+        | Step::FieldSelect { .. }
+        | Step::ArrayCoerce { .. }
+        | Step::ConvertRowtype { .. }
+        | Step::FieldStoreDeForm { .. }
+        | Step::FieldStoreForm { .. }
+        | Step::DomainTestval { .. }
+        | Step::DomainNotNull { .. }
+        | Step::DomainCheck { .. }
+        | Step::ArrayExprEval { .. }
+        | Step::SbsrefSubscripts { .. }
+        | Step::SbsrefFetch { .. }
+        | Step::SbsrefOld { .. }
+        | Step::SbsrefAssign { .. }
+        | Step::JsonbSbsrefSubscripts { .. }
+        | Step::JsonbSbsrefFetch { .. }
+        | Step::JsonbSbsrefAssign { .. }
+        | Step::Distinct { .. }
+        | Step::NotDistinct { .. }
+        | Step::AggrefEval { .. }
+        | Step::GroupingFuncEval { .. }
+        | Step::AggSetCurrent { .. }
+        | Step::AggStrictInputCheck { .. }
+        | Step::AggStrictInputCheck1 { .. }
+        | Step::AggOrderedMark { .. }
+        | Step::AggPlainTransByVal { .. }
+        | Step::AggPlainTransStrictByVal { .. }
+        | Step::AggPlainTransInitStrictByVal { .. }
+        | Step::AggTransByValIndirect { .. }
+        | Step::AggTransStrictByValIndirect { .. }
+        | Step::AggTransInitStrictByValIndirect { .. }
+        | Step::AggPlainTransInitStrictByRef { .. }
+        | Step::AggPlainTransStrictByRef { .. }
+        | Step::AggPlainTransByRef { .. }
+        | Step::AggTransInitStrictByRefIndirect { .. }
+        | Step::AggTransStrictByRefIndirect { .. }
+        | Step::AggTransByRefIndirect { .. }
+        | Step::HashDatumSetInitVal { .. }
+        | Step::HashDatumFirst { .. }
+        | Step::HashDatumNext32 { .. }
+        | Step::RowCompareStep { .. }
+        | Step::RowCompareFinal { .. } => true,
     }
 }

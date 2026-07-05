@@ -2358,3 +2358,257 @@ mod json {
         });
     }
 }
+// jit-qual cross-check: drives an unfused program through
+// interp::exec_one_step, emulating the emitter's stenciled opcodes (the
+// helper refuses those by contract) and following StepFlow for the rest.
+fn run_stepwise<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    mut result_slot: Option<&mut SlotData<'mcx>>,
+) -> ::types_error::PgResult<::datum::NullableDatum> {
+    use ::datum::NullableDatum;
+    use crate::interp::StepFlow;
+    let res = state.resnd;
+    let mut ix: u32 = 0;
+    loop {
+        let step = state.steps.as_slice()[ix as usize];
+        match step {
+            Step::DoneReturn => return Ok(unsafe { res.read() }),
+            Step::DoneNoReturn => return Ok(NullableDatum::null()),
+            Step::Const { value, isnull, out } => unsafe {
+                out.0.write(NullableDatum { value, isnull });
+            },
+            Step::ScanVar { attnum, out, .. } => {
+                let base = slots.scan.as_deref_mut().unwrap().base();
+                let nd = NullableDatum {
+                    value: base.tts_values[attnum as usize],
+                    isnull: base.tts_isnull[attnum as usize],
+                };
+                unsafe { out.0.write(nd) };
+            }
+            Step::CaseTestVal { slot, out } => unsafe { out.0.write(slot.read()) },
+            Step::FuncExprStrict2 { call, out } => {
+                let (a0, a1) = unsafe {
+                    (
+                        crate::steps::arg_slot_of(call.fcinfo, 0).read(),
+                        crate::steps::arg_slot_of(call.fcinfo, 1).read(),
+                    )
+                };
+                let nd = if a0.isnull || a1.isnull {
+                    NullableDatum::null()
+                } else {
+                    let (v, isnull) = crate::interp::invoke(&call)?;
+                    NullableDatum { value: v, isnull }
+                };
+                unsafe { out.0.write(nd) };
+            }
+            Step::Qual { jumpdone } => {
+                let r = unsafe { res.read() };
+                if r.isnull || !r.value.as_bool() {
+                    unsafe {
+                        res.write(NullableDatum { value: Datum::from_bool(false), isnull: false })
+                    };
+                    ix = jumpdone;
+                    continue;
+                }
+            }
+            Step::Jump { jumpdone } => {
+                ix = jumpdone;
+                continue;
+            }
+            Step::JumpIfNull { jumpdone, out } => {
+                if unsafe { out.0.read() }.isnull {
+                    ix = jumpdone;
+                    continue;
+                }
+            }
+            Step::JumpIfNotNull { jumpdone, out } => {
+                if !unsafe { out.0.read() }.isnull {
+                    ix = jumpdone;
+                    continue;
+                }
+            }
+            Step::JumpIfNotTrue { jumpdone, out } => {
+                let r = unsafe { out.0.read() };
+                if r.isnull || !r.value.as_bool() {
+                    ix = jumpdone;
+                    continue;
+                }
+            }
+            other => {
+                assert!(
+                    crate::interp::step_has_helper(&other),
+                    "stencil {other:?} not emulated by the test driver"
+                );
+                match crate::interp::exec_one_step(state, slots, result_slot.as_deref_mut(), ix)? {
+                    StepFlow::Next => {}
+                    StepFlow::Jump(t) => {
+                        ix = t;
+                        continue;
+                    }
+                    StepFlow::Suspend(_) => panic!("unexpected SubPlan suspension"),
+                }
+            }
+        }
+        ix += 1;
+    }
+}
+
+#[test]
+fn jit_single_step_matches_run_program() {
+    with_mcx(|mcx| {
+        crate::compile::SKIP_FUSE_FOR_TESTS.with(|c| c.set(true));
+
+        // Qual: ScanFetchSome via the helper, var/cmp/qual as stencils.
+        for vals in [Some(7), Some(8), Some(-7), None] {
+            let mk_state = || {
+                let args = NodeList::make2(
+                    mcx,
+                    mk_scan_var(mcx, 1, INT4OID),
+                    mk_int4_const(mcx, Some(7)),
+                )
+                .unwrap();
+                let mut s = qual_state(mcx, mk_opexpr(mcx, 147, BOOLOID, args));
+                s.force_program_kernel();
+                s
+            };
+            let expected = run_qual(mcx, &mut mk_state(), &[vals]);
+            let mut slot = virtual_slot(mcx, &[vals]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = run_stepwise(&mut mk_state(), &mut slots, None).unwrap();
+            assert!(!r.isnull);
+            assert_eq!(r.value.as_bool(), expected, "qual {vals:?}");
+        }
+
+        // MinMax helper arm.
+        for (least, vals, want) in [
+            (true, &[Some(3), Some(1), Some(2)][..], Some(1)),
+            (false, &[None, Some(-5), None, Some(4)][..], Some(4)),
+            (true, &[None, None][..], None),
+        ] {
+            let mk_state = || {
+                let mut s = exec_init_expr(mcx, Some(mk_minmax(mcx, least, vals)), ParamBind::NONE)
+                    .unwrap()
+                    .unwrap();
+                s.arm_result_mcx(mcx);
+                s.force_program_kernel();
+                s
+            };
+            let expected = exec_eval_expr(&mut mk_state(), &mut EvalSlots::default()).unwrap();
+            let r = run_stepwise(&mut mk_state(), &mut EvalSlots::default(), None).unwrap();
+            assert_eq!(r.isnull, expected.isnull, "minmax {least} {vals:?}");
+            assert_eq!(r.isnull, want.is_none());
+            if let Some(w) = want {
+                assert_eq!(expected.value.as_i32(), w);
+                assert_eq!(r.value.as_i32(), w);
+            }
+        }
+
+        // ScalarArrayOp helper arm (found / not found / null element).
+        for (scalar, elems) in [
+            (Some(2), &[Some(1), Some(2)][..]),
+            (Some(5), &[Some(1), Some(2)][..]),
+            (Some(2), &[Some(1), None][..]),
+            (None, &[Some(1)][..]),
+        ] {
+            let mk_state = || {
+                let node = mk_saop(
+                    mcx,
+                    true,
+                    mk_int4_const(mcx, scalar),
+                    mk_int4_array_const(mcx, elems),
+                );
+                let mut s =
+                    exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+                s.arm_result_mcx(mcx);
+                s.force_program_kernel();
+                s
+            };
+            let expected = exec_eval_expr(&mut mk_state(), &mut EvalSlots::default()).unwrap();
+            let r = run_stepwise(&mut mk_state(), &mut EvalSlots::default(), None).unwrap();
+            assert_eq!(r.isnull, expected.isnull, "saop {scalar:?} {elems:?}");
+            if !r.isnull {
+                assert_eq!(r.value.as_bool(), expected.value.as_bool());
+            }
+        }
+
+        // Domain family: DomainTestval/DomainNotNull/DomainCheck incl errors.
+        for v in [Some(5), Some(0), None] {
+            let mk_state = || {
+                let mut s =
+                    exec_init_expr(mcx, Some(mk_domain_coercion(mcx, v)), ParamBind::NONE)
+                        .unwrap()
+                        .unwrap();
+                s.arm_result_mcx(mcx);
+                s.force_program_kernel();
+                s
+            };
+            let expected = exec_eval_expr(&mut mk_state(), &mut EvalSlots::default());
+            let got = run_stepwise(&mut mk_state(), &mut EvalSlots::default(), None);
+            match (expected, got) {
+                (Ok(e), Ok(g)) => {
+                    assert_eq!(e.isnull, g.isnull, "domain {v:?}");
+                    if !e.isnull {
+                        assert_eq!(e.value.as_i32(), g.value.as_i32());
+                    }
+                }
+                (Err(e), Err(g)) => assert_eq!(e.sqlstate(), g.sqlstate(), "domain {v:?}"),
+                (e, g) => panic!(
+                    "domain {v:?} outcome mismatch: {:?} vs {:?}",
+                    e.map(|n| n.isnull),
+                    g.map(|n| n.isnull)
+                ),
+            }
+        }
+
+        // Projection: FetchSome + AssignScanVar helpers + DoneNoReturn.
+        {
+            let desc = desc_int4(mcx, 2);
+            let mk_state = || {
+                let tle1 =
+                    Node::mk_target_entry(mcx, mk_scan_var(mcx, 2, INT4OID), 1, None, false)
+                        .unwrap();
+                let tle2 =
+                    Node::mk_target_entry(mcx, mk_scan_var(mcx, 1, INT4OID), 2, None, false)
+                        .unwrap();
+                let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+                tlist.lappend(mcx, tle2).unwrap();
+                let mut s = exec_build_projection_info(mcx, &tlist, Some(&desc), ParamBind::NONE)
+                    .unwrap();
+                s.force_program_kernel();
+                s
+            };
+            let mut scan = heap_slot(mcx, &[Some(3), Some(4)]);
+            let mut result_a = exectuples::make_tuple_table_slot(
+                mcx,
+                TupleSlotKind::Virtual,
+                Some(desc_int4(mcx, 2)),
+            );
+            {
+                let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+                exec_project(&mut mk_state(), &mut slots, &mut result_a, mcx).unwrap();
+            }
+            let mut scan2 = heap_slot(mcx, &[Some(3), Some(4)]);
+            let mut result_b = exectuples::make_tuple_table_slot(
+                mcx,
+                TupleSlotKind::Virtual,
+                Some(desc_int4(mcx, 2)),
+            );
+            {
+                let mut slots = EvalSlots { scan: Some(&mut scan2), inner: None, outer: None };
+                let r = run_stepwise(&mut mk_state(), &mut slots, Some(&mut result_b)).unwrap();
+                assert!(r.isnull);
+            }
+            for i in 0..2 {
+                assert_eq!(
+                    result_a.base().tts_values[i].as_i32(),
+                    result_b.base().tts_values[i].as_i32(),
+                    "projection col {i}"
+                );
+                assert!(!result_b.base().tts_isnull[i]);
+            }
+        }
+
+        crate::compile::SKIP_FUSE_FOR_TESTS.with(|c| c.set(false));
+    });
+}

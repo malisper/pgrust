@@ -256,6 +256,21 @@ pub(crate) fn query_desc_es_processed_seam(h: QueryDescHandle) -> u64 {
     })
 }
 
+pub(crate) fn query_desc_jit_instr_seam(h: QueryDescHandle) -> (i32, i32, u64) {
+    with_qd(h, |qd| {
+        qd.exec
+            .as_ref()
+            .expect("query_desc_jit_instr before ExecutorStart")
+            .with(|d| {
+                (
+                    d.estate.es_jit_flags,
+                    d.estate.es_jit_instr.created_functions,
+                    d.estate.es_jit_instr.generation_nanos,
+                )
+            })
+    })
+}
+
 pub(crate) fn query_desc_snapshot_seam(h: QueryDescHandle) -> Option<Snapshot> {
     with_qd(h, |qd| qd.snapshot.clone())
 }

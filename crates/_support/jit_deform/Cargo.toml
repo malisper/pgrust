@@ -6,8 +6,6 @@ publish.workspace = true
 
 [dependencies]
 datum = { path = "../types/datum" }
+mcx = { path = "../mcx" }
 types_tuple = { path = "../types/types_tuple" }
 libc = "0.2"
-
-[dev-dependencies]
-mcx = { path = "../mcx" }

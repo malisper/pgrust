@@ -449,6 +449,10 @@ fn ExplainOnePlanRef<'mcx>(
         ExplainCloseGroup("Triggers", Some("Triggers"), false, es);
     }
 
+    if es.costs {
+        ExplainPrintJITSummary(es, qd);
+    }
+
     // ExplainPrintJITSummary: C prints a JIT block only when a loaded JIT
     // provider actually compiled functions (ExplainPrintJIT returns on
     // created_functions == 0; without the llvmjit provider es_jit stays NULL
@@ -489,6 +493,71 @@ fn elapsed_time(starttime: &types_core::instrument::instr_time) -> f64 {
 // explain.c BYTES_TO_KILOBYTES.
 fn bytes_to_kilobytes(b: u64) -> u64 {
     (b + 1023) / 1024
+}
+
+// jit.h pins; the planner lane keeps its own private copies.
+const PGJIT_PERFORM: i32 = 1 << 0;
+const PGJIT_OPT3: i32 = 1 << 1;
+const PGJIT_INLINE: i32 = 1 << 2;
+const PGJIT_EXPR: i32 = 1 << 3;
+const PGJIT_DEFORM: i32 = 1 << 4;
+
+// explain.c ExplainPrintJITSummary. The worker-instr merge is absent: jit
+// runs leader-only, so the leader's counters are the total.
+fn ExplainPrintJITSummary(es: &mut ExplainState<'_>, qd: types_portal::QueryDescHandle) {
+    let (jit_flags, created_functions, generation_nanos) =
+        execmain_seams::query_desc_jit_instr::call(qd);
+    if jit_flags & PGJIT_PERFORM == 0 {
+        return;
+    }
+    ExplainPrintJIT(es, jit_flags, created_functions, generation_nanos);
+}
+
+// explain.c ExplainPrintJIT.
+fn ExplainPrintJIT(
+    es: &mut ExplainState<'_>,
+    jit_flags: i32,
+    created_functions: i32,
+    generation_nanos: u64,
+) {
+    if created_functions == 0 {
+        return;
+    }
+    // Copy-and-patch has no inlining/optimization/emission phases and no
+    // separate deform counter; those print 0.000 and Total == Generation.
+    let generation_ms = 1000.0 * (generation_nanos as f64 / 1e9);
+    let onoff = |set: bool| if set { "true" } else { "false" };
+
+    ExplainOpenGroup("JIT", Some("JIT"), true, es);
+
+    ExplainIndentText(es);
+    es.str.append_str("JIT:\n").expect("explain output append");
+    es.indent += 1;
+
+    ExplainPropertyInteger("Functions", None, created_functions as i64, es);
+
+    ExplainIndentText(es);
+    append!(
+        es,
+        "Options: Inlining {}, Optimization {}, Expressions {}, Deforming {}\n",
+        onoff(jit_flags & PGJIT_INLINE != 0),
+        onoff(jit_flags & PGJIT_OPT3 != 0),
+        onoff(jit_flags & PGJIT_EXPR != 0),
+        onoff(jit_flags & PGJIT_DEFORM != 0),
+    );
+
+    if es.analyze && es.timing {
+        ExplainIndentText(es);
+        append!(
+            es,
+            "Timing: Generation {generation_ms:.3} ms (Deform 0.000 ms), \
+             Inlining 0.000 ms, Optimization 0.000 ms, Emission 0.000 ms, \
+             Total {generation_ms:.3} ms\n",
+        );
+    }
+
+    es.indent -= 1;
+    ExplainCloseGroup("JIT", Some("JIT"), true, es);
 }
 
 // explain.c ExplainPrintSerialize.
