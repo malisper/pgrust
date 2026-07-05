@@ -12,8 +12,6 @@
 //   buffer. Loops (the hot case) reuse within the invocation.
 // - Old var values are not freed on reassignment; they live until the
 //   invocation's datum context is dropped at function exit (C pfrees).
-// - RAISE below ERROR carries no context line (psql's SHOW_CONTEXT=errors
-//   hides server-sent context for notices; wire images differ).
 //
 // Std collections justified as in ast.rs (invocation-lifetime bookkeeping,
 // never per row on a steady path).
@@ -235,24 +233,40 @@ std::thread_local! {
         const { core::cell::RefCell::new(Vec::new()) };
 }
 
-pub struct FrameGuard;
+pub struct FrameGuard(u64);
 
 impl FrameGuard {
     pub fn push_pl(estate: &Estate<'_>) -> FrameGuard {
         let f = estate.frame.clone();
+        // C's errfinish walks error_context_stack for every elevel: notices
+        // and warnings emitted while this frame is live carry its context
+        // line on the wire (the ERROR path attaches on propagation instead).
+        let cb = {
+            let f = f.clone();
+            elog::push_emit_context_callback(Box::new(move |e| {
+                e.add_context_line(frame_context_line_of(&f));
+            }))
+        };
         CONTEXT_FRAMES.with(|s| s.borrow_mut().push(CtxFrame::Pl(f)));
-        FrameGuard
+        FrameGuard(cb)
     }
 
     fn push_spi(query: &str, mode: parser_seams::RawParseMode) -> FrameGuard {
-        CONTEXT_FRAMES
-            .with(|s| s.borrow_mut().push(CtxFrame::Spi(spi_context_line(query, mode))));
-        FrameGuard
+        let line = spi_context_line(query, mode);
+        let cb = {
+            let line = line.clone();
+            elog::push_emit_context_callback(Box::new(move |e| {
+                e.add_context_line(line.clone());
+            }))
+        };
+        CONTEXT_FRAMES.with(|s| s.borrow_mut().push(CtxFrame::Spi(line)));
+        FrameGuard(cb)
     }
 }
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.0);
         CONTEXT_FRAMES.with(|s| {
             s.borrow_mut().pop();
         });
