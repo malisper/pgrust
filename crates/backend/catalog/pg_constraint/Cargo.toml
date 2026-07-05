@@ -28,3 +28,4 @@ pg_depend = { path = "../pg_depend" }
 nodes_core = { path = "../../nodes/nodes_core" }
 format_type = { path = "../../utils/adt/format_type" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+amapi = { path = "../../access/index/amapi" }

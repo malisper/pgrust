@@ -23,6 +23,7 @@ catalog_heap = { path = "../../catalog/catalog_heap" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+amapi = { path = "../../access/index/amapi" }
 xact = { path = "../../access/transam/xact" }
 datum = { path = "../../../_support/types/datum" }
 types_scan = { path = "../../../_support/types/types_scan" }

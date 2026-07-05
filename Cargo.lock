@@ -9530,6 +9530,7 @@ dependencies = [
 name = "pg_constraint"
 version = "0.1.0"
 dependencies = [
+ "amapi",
  "catalog",
  "catalog_indexing",
  "datum",
@@ -14293,6 +14294,7 @@ dependencies = [
  "aclchk",
  "aclchk_seams",
  "adt_acl",
+ "amapi",
  "bufmgr_seams",
  "cache_syscache",
  "catalog",
