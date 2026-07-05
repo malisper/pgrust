@@ -1099,6 +1099,7 @@ fn seam_perform_multiple_deletions(
 
 pub fn init_seams() {
     dependency_seams::perform_deletion::set(seam_perform_deletion);
+    dependency_seams::record_dependency_on_expr::set(recordDependencyOnExpr);
     pg_shdepend::acquire_deletion_lock::set(seam_acquire_deletion_lock);
     pg_shdepend::release_deletion_lock::set(seam_release_deletion_lock);
     pg_shdepend::perform_multiple_deletions::set(seam_perform_multiple_deletions);
