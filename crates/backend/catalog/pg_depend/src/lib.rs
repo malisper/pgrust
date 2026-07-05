@@ -164,6 +164,7 @@ const DEFAULT_COLLATION_OID: Oid = 100;
 // duplicates arms of catalog_dependency's full walker by constraint:
 // catalog_dependency depends on this crate, so delegating would cycle.
 struct FindExprRefs<'a, 'mcx> {
+    mcx: Mcx<'mcx>,
     rel_id: Oid,
     addrs: &'a mut mcx::PgVec<'mcx, ObjectAddress>,
 }
@@ -192,12 +193,70 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                 if c.constcollid != 0 && c.constcollid != DEFAULT_COLLATION_OID {
                     addrs.push(ObjectAddress::set(COLL_CLASS, c.constcollid));
                 }
-                const REG_TYPES: [Oid; 11] =
-                    [24, 2202, 2203, 2204, 2205, 2206, 4191, 3734, 3769, 4089, 4096];
-                assert!(
-                    !REG_TYPES.contains(&c.consttype),
-                    "find_expr_references_walker (dependency.c): reg* literal; unported lane"
-                );
+                // OID-alias literals referring to an existing object add a
+                // reference to that object (dependency.c Const arm).
+                if !c.constisnull {
+                    const REGPROC: Oid = 24;
+                    const REGPROCEDURE: Oid = 2202;
+                    const REGOPER: Oid = 2203;
+                    const REGOPERATOR: Oid = 2204;
+                    const REGCLASS: Oid = 2205;
+                    const REGTYPE: Oid = 2206;
+                    const REGCOLLATION: Oid = 4191;
+                    const REGCONFIG: Oid = 3734;
+                    const REGDICTIONARY: Oid = 3769;
+                    const REGNAMESPACE: Oid = 4089;
+                    const REGROLE: Oid = 4096;
+                    const NAMESPACE_CLASS: Oid = 2615;
+                    let objoid = c.constvalue.as_oid();
+                    match c.consttype {
+                        REGPROC | REGPROCEDURE => {
+                            if lsyscache::function::get_func_name(self.mcx, objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(PROC_CLASS, objoid));
+                            }
+                        }
+                        REGOPER | REGOPERATOR => {
+                            if lsyscache::operator::get_opname(self.mcx, objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(OPER_CLASS, objoid));
+                            }
+                        }
+                        REGCLASS => {
+                            if lsyscache::relation::get_rel_name(self.mcx, objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(RELATION_CLASS, objoid));
+                            }
+                        }
+                        REGTYPE => {
+                            if syscache_seams::lookup_pg_type_shape::call(objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(TYPE_CLASS, objoid));
+                            }
+                        }
+                        REGCOLLATION => {
+                            if lsyscache::misc::get_collation_name(self.mcx, objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(COLL_CLASS, objoid));
+                            }
+                        }
+                        REGNAMESPACE => {
+                            if lsyscache::misc::get_namespace_name(self.mcx, objoid)?.is_some() {
+                                addrs.push(ObjectAddress::set(NAMESPACE_CLASS, objoid));
+                            }
+                        }
+                        REGCONFIG | REGDICTIONARY => panic!(
+                            "find_expr_references_walker (dependency.c): regconfig/\
+                             regdictionary literal; tsearch catalogs unported lane"
+                        ),
+                        REGROLE => {
+                            return Err(Box::new(
+                                types_error::PgError::new(
+                                    types_error::ERROR,
+                                    "constant of the type regrole cannot be used here"
+                                        .to_string(),
+                                )
+                                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 return Ok(false);
             }
             T_Param => {
@@ -338,7 +397,7 @@ pub fn recordDependencyOnSingleRelExpr<'mcx>(
     self_behavior: DependencyType,
 ) -> PgResult<()> {
     let mut addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
-    nodes_core::NodeWalker::visit(&mut FindExprRefs { rel_id, addrs: &mut addrs }, expr)?;
+    nodes_core::NodeWalker::visit(&mut FindExprRefs { mcx, rel_id, addrs: &mut addrs }, expr)?;
     eliminate_duplicate_dependencies(&mut addrs);
 
     if behavior != self_behavior && !addrs.is_empty() {
