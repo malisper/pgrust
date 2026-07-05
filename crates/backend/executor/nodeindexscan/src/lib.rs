@@ -503,12 +503,14 @@ pub fn exec_end_index_scan(node: &mut IndexScanState<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// Executor-skeleton park: release everything per-run (scan descriptor,
-/// relation pins, runtime-key readiness); compiled expressions, scan keys and
-/// slots stay armed. Pairs with `skeleton_rebind`.
+/// Executor-skeleton park: release everything per-run (pins/heap fetch/
+/// snapshot via index_parkscan, relation pins, runtime-key readiness); the
+/// scan descriptor and its AM workspace stay allocated — per-run
+/// index_beginscan would grow the parked bump arena without bound. Pairs
+/// with `skeleton_rebind`.
 pub fn skeleton_park(node: &mut IndexScanState<'_>) -> PgResult<()> {
-    if let Some(scandesc) = node.iss_ScanDesc.take() {
-        index_endscan(PgBox::into_inner(scandesc))?;
+    if let Some(scandesc) = node.iss_ScanDesc.as_deref_mut() {
+        ::indexam::index_parkscan(scandesc)?;
     }
     if let Some(index_rel) = node.iss_RelationDesc.take() {
         index_close(index_rel, NoLock)?;
@@ -520,20 +522,29 @@ pub fn skeleton_park(node: &mut IndexScanState<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// Executor-skeleton re-arm: re-pin both relations for a new execution, as
-/// C's ExecInitIndexScan does per ExecutorStart (locks are already held by
-/// the cached-plan path's AcquireExecutorLocks, as on the fresh init path).
+/// Executor-skeleton re-arm: re-pin both relations and re-arm the parked
+/// scan descriptor for a new execution (fresh snapshot; the exec_re_scan
+/// pass that follows runs index_rescan before any fetch). Locks are already
+/// held by the cached-plan path's AcquireExecutorLocks, as on fresh init.
 pub fn skeleton_rebind<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    debug_assert!(node.iss_ScanDesc.is_none() && node.iss_RelationDesc.is_none());
+    debug_assert!(node.iss_RelationDesc.is_none());
     let mcx = estate.es_query_cxt;
     let rel = estate
         .exec_get_range_table_relation(node.ss.scanrelid, false)?
         .alias();
+    let index_rel = indexam::index_open(mcx, node.iss_IndexOid, NoLock)?;
+    if let Some(scandesc) = node.iss_ScanDesc.as_deref_mut() {
+        let snapshot = estate
+            .es_snapshot
+            .clone()
+            .expect("skeleton reuse registered a snapshot");
+        ::indexam::index_rearmscan(scandesc, &rel, &index_rel, snapshot)?;
+    }
     node.ss.ss_currentRelation = Some(rel);
-    node.iss_RelationDesc = Some(indexam::index_open(mcx, node.iss_IndexOid, NoLock)?);
+    node.iss_RelationDesc = Some(index_rel);
     Ok(())
 }
 

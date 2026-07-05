@@ -522,13 +522,15 @@ fn orderby_unported() -> ! {
     panic!("nodeindexonlyscan: indexorderby (amcanorderbyop lane) not ported")
 }
 
-/// Executor-skeleton park: release everything per-run (VM buffer, scan
-/// descriptor, relation pins, runtime-key readiness); compiled expressions,
-/// scan keys and slots stay armed. Pairs with `skeleton_rebind`.
+/// Executor-skeleton park: release everything per-run (VM buffer, pins/heap
+/// fetch/snapshot via index_parkscan, relation pins, runtime-key readiness);
+/// the scan descriptor and its AM workspace stay allocated — per-run
+/// index_beginscan would grow the parked bump arena without bound. Pairs
+/// with `skeleton_rebind`.
 pub fn skeleton_park(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
     node.ioss_VMBuffer.release();
-    if let Some(scandesc) = node.ioss_ScanDesc.take() {
-        index_endscan(PgBox::into_inner(scandesc))?;
+    if let Some(scandesc) = node.ioss_ScanDesc.as_deref_mut() {
+        ::indexam::index_parkscan(scandesc)?;
     }
     if let Some(index_rel) = node.ioss_RelationDesc.take() {
         index_close(index_rel, NoLock)?;
@@ -540,19 +542,28 @@ pub fn skeleton_park(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// Executor-skeleton re-arm: re-pin both relations for a new execution, as
-/// C's ExecInitIndexOnlyScan does per ExecutorStart.
+/// Executor-skeleton re-arm: re-pin both relations and re-arm the parked
+/// scan descriptor for a new execution (fresh snapshot; the exec_re_scan
+/// pass that follows runs index_rescan before any fetch).
 pub fn skeleton_rebind<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    debug_assert!(node.ioss_ScanDesc.is_none() && node.ioss_RelationDesc.is_none());
+    debug_assert!(node.ioss_RelationDesc.is_none());
     let mcx = estate.es_query_cxt;
     let rel = estate
         .exec_get_range_table_relation(node.ss.scanrelid, false)?
         .alias();
+    let index_rel = indexam::index_open(mcx, node.ioss_IndexOid, NoLock)?;
+    if let Some(scandesc) = node.ioss_ScanDesc.as_deref_mut() {
+        let snapshot = estate
+            .es_snapshot
+            .clone()
+            .expect("skeleton reuse registered a snapshot");
+        ::indexam::index_rearmscan(scandesc, &rel, &index_rel, snapshot)?;
+    }
     node.ss.ss_currentRelation = Some(rel);
-    node.ioss_RelationDesc = Some(indexam::index_open(mcx, node.ioss_IndexOid, NoLock)?);
+    node.ioss_RelationDesc = Some(index_rel);
     Ok(())
 }
 

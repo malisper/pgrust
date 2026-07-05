@@ -113,6 +113,10 @@ mod exec_skeleton {
     }
 }
 
+// pg_am.dat btree (transcribed like execexpr's ACL_EXECUTE): index_parkscan
+// keeps the parked scan descriptor's AM workspace, btree-only.
+const BTREE_AM_OID: ::types_core::Oid = 403;
+
 // Skeleton walk whitelist: every node type here can be fully disarmed at
 // park (no per-run state survives) and re-armed at reuse. Anything else
 // takes the normal teardown path.
@@ -121,7 +125,12 @@ fn skeleton_parkable(node: &PlanStateNode<'_>) -> bool {
         PlanStateNode::Result(rs) => rs.outer.as_deref().is_none_or(skeleton_parkable),
         PlanStateNode::Limit(l) => skeleton_parkable(&l.outer),
         PlanStateNode::SeqScan(ss) => ::nodeseqscan::skeleton_parkable(ss),
-        PlanStateNode::IndexScan(_) | PlanStateNode::IndexOnlyScan(_) => true,
+        PlanStateNode::IndexScan(is) => {
+            is.iss_RelationDesc.as_ref().is_some_and(|r| r.rd_rel.relam == BTREE_AM_OID)
+        }
+        PlanStateNode::IndexOnlyScan(ios) => {
+            ios.ioss_RelationDesc.as_ref().is_some_and(|r| r.rd_rel.relam == BTREE_AM_OID)
+        }
         _ => false,
     }
 }
@@ -466,6 +475,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
                 estate.es_snapshot = es_snapshot;
                 estate.es_sourceText = Some(source_text);
                 estate.es_processed = 0;
+                estate.es_total_processed = 0;
                 estate.es_finished = false;
                 let ps = planstate.as_mut().expect("skeleton holds a plan state");
                 skeleton_rebind_tree(ps, estate)?;
