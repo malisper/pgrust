@@ -1598,19 +1598,27 @@ fn init_whole_row_junk<'mcx>(
         ::types_slot::TupleSlotKind::Virtual,
         Some(alloc::rc::Rc::new(desc)),
     );
-    let slot_ref: &'mcx mut ::types_slot::SlotData<'mcx> = ::mcx::alloc_leak_in(mcx, slot)?;
-    let junk = crate::steps::WholeRowJunk {
-        clean_map: NonNull::from(::mcx::slice_borrow_in(mcx, &clean_map)?),
-        // SAFETY: plan-mcx slot behind a plan-lived state; the 'static
-        // restamp never escapes it.
-        slot: unsafe {
-            core::mem::transmute::<
+    let slot_layout = core::alloc::Layout::new::<::types_slot::SlotData<'mcx>>();
+    let slot_ptr: NonNull<::types_slot::SlotData<'mcx>> =
+        mcx.allocate(slot_layout).map_err(|_| mcx.oom(slot_layout.size()))?.cast();
+    // SAFETY: fresh exact-layout allocation; plan-mcx slot behind a
+    // plan-lived state, so the 'static restamp never escapes it.
+    let junk = unsafe {
+        slot_ptr.as_ptr().write(slot);
+        crate::steps::WholeRowJunk {
+            clean_map: NonNull::from(::mcx::slice_borrow_in(mcx, &clean_map)?),
+            slot: core::mem::transmute::<
                 NonNull<::types_slot::SlotData<'mcx>>,
                 NonNull<::types_slot::SlotData<'static>>,
-            >(NonNull::from(slot_ref))
-        },
+            >(slot_ptr),
+        }
     };
-    Ok(Some(NonNull::from(::mcx::alloc_leak_in(mcx, junk)?)))
+    let junk_layout = core::alloc::Layout::new::<crate::steps::WholeRowJunk>();
+    let junk_ptr: NonNull<crate::steps::WholeRowJunk> =
+        mcx.allocate(junk_layout).map_err(|_| mcx.oom(junk_layout.size()))?.cast();
+    // SAFETY: fresh exact-layout allocation.
+    unsafe { junk_ptr.as_ptr().write(junk) };
+    Ok(Some(junk_ptr))
 }
 
 // C ExecInitExprRec over the ported families.

@@ -2996,3 +2996,59 @@ fn returning_expr_step_null_flag_short_circuits() {
         assert!(r.isnull);
     });
 }
+
+#[test]
+fn whole_row_record_var_blesses_slot_descriptor() {
+    with_mcx(|mcx| {
+        // Whole-row Var of RECORD type over the scan slot (subquery shape).
+        let var = Node::mk_var(mcx, 1, 0, ::types_core::catalog::RECORDOID, -1, 0, 0).unwrap();
+        let mut state = exec_init_expr(mcx, Some(var), ParamBind::NONE).unwrap().unwrap();
+        assert!(state.steps().iter().any(|s| matches!(s, Step::WholeRow { .. })));
+        state.arm_result_mcx(mcx);
+
+        let mut scan = virtual_slot(mcx, &[Some(7), Some(8)]);
+        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(!r.isnull);
+        // SAFETY: the eval returns a flattened in-memory composite datum.
+        let td = unsafe { &*(r.value.as_usize() as *const ::types_tuple::HeapTupleHeaderData) };
+        assert_eq!(td.type_id(), ::types_core::catalog::RECORDOID);
+        let typmod = td.typmod();
+        assert!(typmod >= 0, "RECORD whole-row output must carry a blessed typmod");
+        // The blessed typmod resolves back to the slot's shape.
+        let desc = ::typcache::lookup_rowtype_tupdesc_copy(
+            mcx,
+            ::types_core::catalog::RECORDOID,
+            typmod,
+        )
+        .unwrap();
+        assert_eq!(desc.natts, 2);
+        assert_eq!(desc.attrs[0].atttypid, INT4OID);
+
+        // Second eval reuses the blessed descriptor (first-eval split).
+        let mut slots = EvalSlots { scan: Some(&mut scan), inner: None, outer: None };
+        let r2 = exec_eval_expr(&mut state, &mut slots).unwrap();
+        // SAFETY: as above.
+        let td2 = unsafe { &*(r2.value.as_usize() as *const ::types_tuple::HeapTupleHeaderData) };
+        assert_eq!(td2.typmod(), typmod);
+    });
+}
+
+#[test]
+fn exec_type_set_col_names_skips_empty_and_dropped() {
+    with_mcx(|mcx| {
+        let rc = desc_int4(mcx, 3);
+        let mut desc = ::tupdesc::CreateTupleDescCopy(mcx, rc.as_ref()).unwrap();
+        desc.attr_mut(1).attisdropped = true;
+        let mut names = NodeList::nil();
+        names.lappend(mcx, Node::mk_string(mcx, "a").unwrap()).unwrap();
+        names.lappend(mcx, Node::mk_string(mcx, "b").unwrap()).unwrap();
+        names.lappend(mcx, Node::mk_string(mcx, "").unwrap()).unwrap();
+        let before2 = desc.attrs[2].attname;
+        crate::interp::exec_type_set_col_names(&mut desc, &names);
+        assert_eq!(desc.attrs[0].attname.name_str(), "a");
+        // Dropped column keeps its name; empty alias keeps the original.
+        assert_ne!(desc.attrs[1].attname.name_str(), "b");
+        assert_eq!(desc.attrs[2].attname.name_str(), before2.name_str());
+    });
+}

@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::format;
 
 use ::datum::{Datum, NullableDatum};
+use ::mcx::Allocator;
 use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
 use ::types_slot::SlotData;
 
@@ -3232,7 +3233,7 @@ fn eval_whole_row(
 
 // C ExecTypeSetColNames (execTuples.c): overwrite attribute names from the
 // alias list; empty aliases and dropped columns keep their names.
-fn exec_type_set_col_names(
+pub(crate) fn exec_type_set_col_names(
     desc: &mut ::types_tuple::TupleDescData<'_>,
     colnames: &::types_nodes::list::NodeList<'_>,
 ) {
