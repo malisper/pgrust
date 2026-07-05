@@ -22,6 +22,33 @@ pub struct ExecData<'mcx> {
 
 ::mcx::forget_safe_struct!(ExecData<'_> { estate, planstate });
 
+// Abort-path release of the mem::forgotten arena registries. This Drop runs
+// ONLY on the error/panic unwind (standard_executor_end drains both registries
+// explicitly and then free_recycle-forgets the bundle): field drop glue never
+// reaches the subplan PlanStateNodes behind SubplanStateCell raw pointers or
+// the SubPlan ExprState dropper pairs, so without this walk their droppy
+// owners (relation refs, tuplesorts, Rc'd descriptors) leak past the query.
+impl Drop for ExecData<'_> {
+    fn drop(&mut self) {
+        for i in 0..self.estate.es_subplanstates.len() {
+            let cell = self.estate.es_subplanstates[i];
+            // SAFETY: init_plan created this arena cell; the cell (and the
+            // whole arena) outlives this drop — McxOwned frees the context
+            // only after the state's drop_in_place returns. The take-out
+            // protocol guarantees no aliasing &mut: an unwound consumer's
+            // taken node was dropped with its stack frame, leaving None.
+            let slot = unsafe {
+                &mut *cell.0.cast::<Option<PlanStateNode<'_>>>().as_ptr()
+            };
+            drop(slot.take());
+        }
+        while let Some((p, dropper)) = self.estate.es_subplan_expr_states.pop() {
+            // SAFETY: registered by exec_init_sub_plan_expr; dropped once here.
+            unsafe { dropper(p) };
+        }
+    }
+}
+
 /// The C `EState*` + root PlanState: the "ExecutorState" context bundle.
 pub type ExecutorHandle = McxOwned<ExecTy>;
 
