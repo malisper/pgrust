@@ -75,6 +75,16 @@ pub(crate) fn read() {
 }
 
 #[inline]
+pub(crate) fn read_n(n: u64) {
+    SHARED_BLKS_READ.with(|c| c.set(c.get() + n));
+    if globals::VacuumCostActive() {
+        globals::SetVacuumCostBalance(
+            globals::VacuumCostBalance() + n as i32 * globals::VacuumCostPageMiss(),
+        );
+    }
+}
+
+#[inline]
 pub(crate) fn dirtied() {
     SHARED_BLKS_DIRTIED.with(|c| c.set(c.get() + 1));
 }

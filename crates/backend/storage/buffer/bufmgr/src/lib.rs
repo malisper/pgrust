@@ -158,6 +158,33 @@ pub fn ReadBufferExtended(
     )
 }
 
+/// Sequential-batch ReadBuffer (StartReadBuffers collapsed): see
+/// read::ReadBuffer_batched. Hit path is identical to ReadBuffer.
+pub fn ReadBufferBatched(
+    rel: &RelationData<'_>,
+    block_num: BlockNumber,
+    nblocks_hint: BlockNumber,
+    strategy: BufferAccessStrategy,
+) -> PgResult<Buffer> {
+    if rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP && !rel.rd_islocaltemp {
+        return Err(Box::new(
+            types_error::PgError::new(
+                ERROR,
+                "cannot access temporary tables of other sessions",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_error_location(ErrorLocation::new("bufmgr.c", 0, "ReadBufferExtended")),
+        ));
+    }
+    read::ReadBuffer_batched(
+        rel_locator_backend(rel),
+        rel.rd_rel.relpersistence,
+        block_num,
+        nblocks_hint,
+        strategy,
+    )
+}
+
 /// Same-block fastpath keeps the pin (heapam's re-read path).
 pub fn ReleaseAndReadBuffer(
     buffer: Buffer,
@@ -384,6 +411,7 @@ pub fn init_seams() {
             strategy,
         )
     });
+    bufmgr_seams::read_buffer_batched::set(ReadBufferBatched);
     bufmgr_seams::read_buffer_extended::set(ReadBufferExtended);
     bufmgr_seams::relation_smgr_locator::set(rel_locator_backend);
     bufmgr_seams::buffer_get_block_number::set(ops::BufferGetBlockNumber);
