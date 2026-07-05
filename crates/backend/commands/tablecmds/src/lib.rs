@@ -101,6 +101,17 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: tablecmds {what}")
 }
 
+// makeObjectName/namestrcpy truncation: silent, multibyte-aware.
+pub(crate) fn truncate_name<'a, 'mcx>(mcx: Mcx<'mcx>, name: &'a str) -> PgResult<&'a str> {
+    if name.len() < NAMEDATALEN as usize {
+        return Ok(name);
+    }
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, name.len())?;
+    mcx::vec_append_bytes(&mut buf, name.as_bytes())?;
+    parser_small1::truncate_identifier(&mut buf, false, mbutils::GetDatabaseEncoding())?;
+    Ok(&name[..buf.len()])
+}
+
 // get_relkind_objtype (objectaddress.c)
 pub fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
     use types_nodes::parsenodes::ObjectType::*;
@@ -187,10 +198,7 @@ pub fn BuildDescForRelation<'mcx>(
     for (i, elt) in table_elts.iter().enumerate() {
         let entry = elt.as_variant::<ColumnDef>().expect("ColumnDef");
         let attnum = (i + 1) as AttrNumber;
-        let colname = entry.colname.expect("ColumnDef.colname");
-        if colname.len() >= NAMEDATALEN as usize {
-            unported("overlength column name truncation");
-        }
+        let colname = truncate_name(mcx, entry.colname.expect("ColumnDef.colname"))?;
         let tn = entry
             .typeName
             .expect("ColumnDef.typeName")
@@ -210,8 +218,8 @@ pub fn BuildDescForRelation<'mcx>(
         att.attcompression = GetAttributeCompression(atttypid, entry.compression)?;
         if entry.storage != 0 {
             att.attstorage = entry.storage as i8;
-        } else if entry.storage_name.is_some() {
-            unported("GetAttributeStorage (STORAGE by name)");
+        } else if let Some(storage_name) = entry.storage_name {
+            att.attstorage = alter::get_attribute_storage(atttypid, storage_name)? as i8;
         }
         tupdesc::populate_compact_attribute(&mut desc, attnum as usize - 1);
     }
@@ -236,10 +244,7 @@ pub fn DefineRelation<'mcx>(
     let partitioned = stmt.partspec.is_some();
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");
-    let relname = rv.relname.expect("RangeVar.relname");
-    if relname.len() >= NAMEDATALEN as usize {
-        unported("overlength relation name truncation");
-    }
+    let relname = truncate_name(mcx, rv.relname.expect("RangeVar.relname"))?;
     let reloptions = reloptions::transformRelOptions(
         mcx,
         None,
