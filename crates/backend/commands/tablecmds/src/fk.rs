@@ -56,6 +56,7 @@ pub(crate) struct FkValidateItem<'mcx> {
     pub refrelid: Oid,
     pub refindid: Oid,
     pub conid: Oid,
+    pub hasperiod: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -767,6 +768,7 @@ fn add_fk_recurse_referencing<'mcx>(
                     refrelid: pkrel.rd_id,
                     refindid: index_oid,
                     conid: parent_constr,
+                    hasperiod: with_period,
                 });
             }
         }
@@ -928,7 +930,8 @@ pub(crate) fn validate_foreign_key_constraint<'mcx>(
         tgnewtable: None,
     };
 
-    if ri_triggers_seams::ri_initial_check::call(mcx, &trig, rel, &pkrel)? {
+    // C: no LEFT JOIN shortcut for temporal FKs (no temporal left joins yet).
+    if !item.hasperiod && ri_triggers_seams::ri_initial_check::call(mcx, &trig, rel, &pkrel)? {
         return pkrel.close(types_rel::NoLock);
     }
 
@@ -2015,6 +2018,7 @@ pub(crate) fn queue_fk_constraint_validation<'mcx>(
             refrelid: con.confrelid,
             refindid: con.conindid,
             conid: con.oid,
+            hasperiod: con.conperiod,
         });
     }
 
@@ -2484,6 +2488,7 @@ fn clone_fk_referencing<'mcx>(
             types_rel::AccessExclusiveLock,
             insert_trigger_oid,
             update_trigger_oid,
+            form.conperiod,
         )?;
         pkrel.close(NoLock)?;
     }
@@ -2568,6 +2573,7 @@ pub(crate) fn detach_partition_finalize_fks<'mcx>(
             true,
             InvalidOid,
             InvalidOid,
+            form.conperiod,
         )?;
         refd_rel.close(NoLock)?;
     }
@@ -2909,6 +2915,7 @@ fn alter_constr_enforceability<'mcx>(
                 refrelid: con.confrelid,
                 refindid: con.conindid,
                 conid: con.oid,
+                hasperiod: con.conperiod,
             });
         }
         if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
