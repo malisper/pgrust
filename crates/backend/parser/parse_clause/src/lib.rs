@@ -2093,6 +2093,19 @@ fn contains_aggref(node: Node<'_>) -> bool {
             node.as_distinct_expr().unwrap().args.iter().any(contains_aggref)
         }
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().args.iter().any(contains_aggref),
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.as_case_expr().unwrap();
+            case_expr.arg.is_some_and(contains_aggref)
+                || case_expr.args.iter().any(|w| {
+                    let when = w.as_case_when().unwrap();
+                    when.expr.is_some_and(contains_aggref) || when.result.is_some_and(contains_aggref)
+                })
+                || case_expr.defresult.is_some_and(contains_aggref)
+        }
+        NodeTag::T_CoalesceExpr => {
+            node.as_coalesce_expr().unwrap().args.iter().any(contains_aggref)
+        }
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().args.iter().any(contains_aggref),
         tag => panic!(
             "contain_aggs_of_level (rewriteManip.c): node family {tag:?} unported — \
              unit backend-parser-clause"

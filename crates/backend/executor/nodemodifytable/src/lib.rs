@@ -96,6 +96,10 @@ pub struct ModifyTableState<'mcx> {
     leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>>,
     leaf_checks: Vec<Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
     leaf_virtual_nn: Vec<Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
+    // ri_PartitionTupleSlot per remapped leaf (estate slot, leaf layout) and
+    // the leaf's ri_PartitionCheckExpr.
+    leaf_slots: Vec<Option<ExecSlotId>>,
+    leaf_partition_check: Vec<Option<PgBox<'mcx, ExprState<'mcx>>>>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -539,6 +543,8 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_indexes: Vec::new(),
         leaf_checks: Vec::new(),
         leaf_virtual_nn: Vec::new(),
+        leaf_slots: Vec::new(),
+        leaf_partition_check: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
@@ -1565,6 +1571,8 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     }
     mt.leaf_indexes.clear();
     mt.leaf_checks.clear();
+    mt.leaf_slots.clear();
+    mt.leaf_partition_check.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -2844,6 +2852,8 @@ fn exec_insert<'mcx>(
                 mt.leaf_indexes.push(None);
                 mt.leaf_checks.push(None);
                 mt.leaf_virtual_nn.push(None);
+                mt.leaf_slots.push(None);
+                mt.leaf_partition_check.push(None);
             }
             Some(idx)
         } else {
@@ -2851,17 +2861,46 @@ fn exec_insert<'mcx>(
         }
     };
 
+    // ExecPrepareTupleRouting: an attno-remapped leaf takes the tuple
+    // converted into its own layout in a dedicated estate slot BEFORE any
+    // leaf trigger sees it (C ri_RootToPartitionMap + ri_PartitionTupleSlot).
+    let mut work_slot = slot_id;
+    if let Some(idx) = leaf_idx {
+        if mt.router.as_ref().unwrap().leaf_attrmap(idx).is_some() {
+            if mt.leaf_slots[idx].is_none() {
+                let (kind, desc) = {
+                    let leaf = mt.router.as_ref().unwrap().leaf_rel(idx);
+                    (tableam::table_slot_callbacks(leaf), leaf.rd_att.clone())
+                };
+                mt.leaf_slots[idx] =
+                    Some(estate.exec_init_extra_tuple_slot(Some(desc), kind));
+            }
+            let lsid = mt.leaf_slots[idx].expect("just built");
+            let map = mt.router.as_ref().unwrap().leaf_attrmap(idx).expect("checked");
+            let EStateData { es_tupleTable, .. } = &mut *estate;
+            let (s, e) = (slot_id.0 as usize, lsid.0 as usize);
+            assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
+            let base = es_tupleTable.as_mut_ptr();
+            // SAFETY: distinct in-bounds indices of one live slice.
+            let (in_slot, out) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
+            exectuples::execute_attr_map_slot(map, in_slot, out, mcx);
+            work_slot = lsid;
+        }
+    }
+
     // C fires BR INSERT on the routed leaf's ResultRelInfo (cloned triggers).
+    let mut leaf_has_br_insert = false;
     if let Some(idx) = leaf_idx {
         let td = resolve_leaf_trigdesc(mt, idx)?;
-        if td.is_some_and(|t| t.trig_insert_before_row)
+        leaf_has_br_insert = td.as_ref().is_some_and(|t| t.trig_insert_before_row);
+        if leaf_has_br_insert
             && !br_row_triggers(
                 mt,
                 estate,
                 types_trigger::TRIGGER_TYPE_INSERT,
                 types_trigger::TRIGGER_EVENT_INSERT,
                 None,
-                Some(slot_id),
+                Some(work_slot),
                 Some(idx),
             )?
         {
@@ -2871,42 +2910,26 @@ fn exec_insert<'mcx>(
 
     {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let in_slot = &mut es_tupleTable[slot_id.0 as usize];
-        // ExecPrepareTupleRouting: an attno-remapped leaf takes the tuple
-        // converted into its own layout via the router's leaf slot.
-        let (rel, conv_slot, indexes, check_exprs, virtual_nn_exprs) = match leaf_idx {
-            Some(idx) => {
-                let (rel, conv) = mt
-                    .router
-                    .as_mut()
-                    .unwrap()
-                    .leaf_rel_and_converted_slot(idx, &mut *in_slot);
-                (
-                    rel,
-                    conv,
-                    &mut mt.leaf_indexes[idx],
-                    &mut mt.leaf_checks[idx],
-                    &mut mt.leaf_virtual_nn[idx],
-                )
-            }
+        let (rel, indexes, check_exprs, virtual_nn_exprs, pcheck) = match leaf_idx {
+            Some(idx) => (
+                mt.router.as_ref().unwrap().leaf_rel(idx),
+                &mut mt.leaf_indexes[idx],
+                &mut mt.leaf_checks[idx],
+                &mut mt.leaf_virtual_nn[idx],
+                &mut mt.leaf_partition_check[idx],
+            ),
             None => (
                 es_relations[(mt.result_rti - 1) as usize]
                     .as_ref()
                     .expect("result relation opened"),
-                None,
                 &mut mt.indexes,
                 &mut mt.check_exprs,
                 &mut mt.virtual_nn_exprs,
+                &mut mt.partition_check,
             ),
         };
-        if leaf_idx.is_some() && rel.rd_hastriggers {
-            panic!("ExecInsert: row triggers on a routed-into partition not ported");
-        }
-        let remapped = conv_slot.is_some();
-        let slot: &mut SlotData<'mcx> = match conv_slot {
-            Some(s) => s,
-            None => &mut *in_slot,
-        };
+        let remapped = work_slot != slot_id;
+        let slot = &mut es_tupleTable[work_slot.0 as usize];
 
         slot.base_mut().tts_tableOid = rel.rd_id;
         if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
@@ -2940,19 +2963,18 @@ fn exec_insert<'mcx>(
 
         exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot)?;
 
-        // ExecInsert (nodeModifyTable.c): a direct INSERT into a partition
-        // checks the partition constraint here; routed tuples skip it (the
-        // router placed them and leaf BR triggers are loud above).
-        if leaf_idx.is_none() && rel.rd_rel.relispartition {
-            if !execpartition::exec_partition_check(mcx, &mut mt.partition_check, rel, slot)? {
+        // ExecInsert (nodeModifyTable.c): direct INSERTs into a partition
+        // check the partition constraint; routed tuples re-check only when a
+        // leaf BR trigger could have changed the row.
+        if rel.rd_rel.relispartition && (leaf_idx.is_none() || leaf_has_br_insert) {
+            if !execpartition::exec_partition_check(mcx, pcheck, rel, slot)? {
                 return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
             }
         }
 
-        // RETURNING/transition capture read the root-format slot; carry the
-        // leaf's tableoid onto it.
+        // RETURNING reads the root-format slot; carry the leaf's tableoid.
         if remapped {
-            in_slot.base_mut().tts_tableOid = rel.rd_id;
+            es_tupleTable[slot_id.0 as usize].base_mut().tts_tableOid = rel.rd_id;
         }
     }
 
@@ -3045,24 +3067,19 @@ fn exec_insert<'mcx>(
         }
     } else {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let in_slot = &mut es_tupleTable[slot_id.0 as usize];
-        let (rel, conv_slot, indexes) = match leaf_idx {
-            Some(idx) => {
-                let (rel, conv) = mt.router.as_mut().unwrap().leaf_rel_and_slot(idx);
-                (rel, conv, &mut mt.leaf_indexes[idx])
-            }
+        let (rel, indexes) = match leaf_idx {
+            Some(idx) => (
+                mt.router.as_ref().unwrap().leaf_rel(idx),
+                &mut mt.leaf_indexes[idx],
+            ),
             None => (
                 es_relations[(mt.result_rti - 1) as usize]
                     .as_ref()
                     .expect("result relation opened"),
-                None,
                 &mut mt.indexes,
             ),
         };
-        let slot: &mut SlotData<'mcx> = match conv_slot {
-            Some(s) => s,
-            None => &mut *in_slot,
-        };
+        let slot = &mut es_tupleTable[work_slot.0 as usize];
 
         tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
 
@@ -3082,8 +3099,14 @@ fn exec_insert<'mcx>(
         }
     }
 
+    if work_slot != slot_id && mt.transition_capture.is_some() {
+        panic!(
+            "ExecInsert: transition capture on an attno-remapped partition \
+             (child-to-root map) not ported"
+        );
+    }
     let ar_leaf = leaf_idx;
-    ar_insert_triggers(mt, estate, slot_id, &recheck_indexes, ar_leaf)?;
+    ar_insert_triggers(mt, estate, work_slot, &recheck_indexes, ar_leaf)?;
 
     // Parent-view CHECK OPTIONs are checked after inserting (the qual must see
     // the actual row, post defaults/triggers).
@@ -3918,6 +3941,7 @@ mcx::forget_safe_struct!(
         operation, indexes, snapshot_any, project_returning, on_conflict,
         check_exprs, partition_check, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
         virtual_nn_exprs, router, leaf_indexes, leaf_checks, leaf_virtual_nn,
+        leaf_slots, leaf_partition_check,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when, trig_when,
         transition_capture, oc_transition_capture, all_updated_cols,
         index_eval_cx, wco_exprs, merge },

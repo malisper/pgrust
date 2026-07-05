@@ -105,6 +105,7 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_Var => node.as_var().unwrap().vartype,
         NodeTag::T_Const => node.as_const().unwrap().consttype,
         NodeTag::T_Param => node.as_param().unwrap().paramtype,
+        NodeTag::T_SubscriptingRef => node.as_subscripting_ref().unwrap().refrestype,
         NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
         NodeTag::T_OpExpr => node.as_op_expr().unwrap().opresulttype,
         NodeTag::T_Aggref => node.as_aggref().unwrap().aggtype,
@@ -124,6 +125,7 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         }
         NodeTag::T_JsonIsPredicate => types_core::catalog::BOOLOID,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
+        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         tag => panic!("funcapi exprType: node family {tag:?} not ported"),
     }
 }
