@@ -561,10 +561,14 @@ fn build_agg_trans<'mcx>(
         // serves — from_node_ref's contract; the carrier stays drop-free.
         let argtypes: &'static [Oid] = unsafe { core::mem::transmute(spec.arg_types) };
         // C build_aggregate_transfn_expr: the fake FuncExpr returns the
-        // transition type (carrier slot 0).
+        // transition type (carrier slot 0). Unit rigs pass an empty slice;
+        // InvalidOid keeps polymorphic resolution declining as before.
         let agg_argtypes = ::mcx::alloc_leak_in(
             mcx,
-            ::types_core::fmgr::AggFnArgTypes { rettype: argtypes[0], argtypes },
+            ::types_core::fmgr::AggFnArgTypes {
+                rettype: argtypes.first().copied().unwrap_or(::types_core::InvalidOid),
+                argtypes,
+            },
         )?;
         // SAFETY: agg_argtypes is arena-backed for the query, see above.
         flinfo.fn_expr = Some(unsafe { FnExprErased::from_node_ref(agg_argtypes) });
