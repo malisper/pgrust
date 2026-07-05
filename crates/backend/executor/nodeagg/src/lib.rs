@@ -1536,9 +1536,8 @@ fn hashagg_memdebug_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("PGRUST_HASHAGG_MEMDEBUG").is_some())
 }
 
-#[cold]
-#[inline(never)]
-fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem: usize) {
+// (vmrss, anon, shmem, hwm) in kB from /proc/self/status; zeros off-Linux.
+fn hashagg_vm_kb() -> (u64, u64, u64, u64) {
     let mut rss = 0u64;
     let mut hwm = 0u64;
     let mut anon = 0u64;
@@ -1557,6 +1556,28 @@ fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem
             }
         }
     }
+    (rss, anon, shmem, hwm)
+}
+
+// release_retained + proof-of-execution prints under PGRUST_HASHAGG_MEMDEBUG:
+// installed?, and anon RSS before/after the collect.
+fn hashagg_release_retained(tag: &str) {
+    if !hashagg_memdebug_enabled() {
+        ::mcx::release_retained();
+        return;
+    }
+    let (rb, ab, ..) = hashagg_vm_kb();
+    let installed = ::mcx::release_retained();
+    let (ra, aa, ..) = hashagg_vm_kb();
+    eprintln!(
+        "HASHAGG_MEMDEBUG release_retained {tag}: installed={installed} rss_kb {rb}->{ra} anon_kb {ab}->{aa}"
+    );
+}
+
+#[cold]
+#[inline(never)]
+fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem: usize) {
+    let (rss, anon, shmem, hwm) = hashagg_vm_kb();
     let meta = ph.hashtable.meta_mem();
     let entry = ph.table_ctx.subtree_used();
     eprintln!(
@@ -1624,7 +1645,7 @@ fn hash_agg_check_limits<'mcx>(
         // and the spill pass's grow/free churn would otherwise hold
         // batch-sized RSS to query end. The pass is disk-bound; the collect
         // cost hides.
-        ::mcx::release_retained();
+        hashagg_release_retained("enter_spill");
         if hashagg_memdebug_enabled() {
             hashagg_memdebug("enter_spill_mode", ph, tval_mem, 0);
         }
@@ -1884,7 +1905,7 @@ fn hashagg_reset_spill_state(ph: &mut PerHashData<'_>, input_card: f64) {
     if ph.spill.ever_spilled {
         // A finished spill pass leaves batch-sized freed segments retained
         // by mimalloc; release them so post-query RSS returns to baseline.
-        ::mcx::release_retained();
+        hashagg_release_retained("spill_teardown");
     }
 }
 
@@ -1928,7 +1949,7 @@ fn agg_refill_hash_table<'mcx>(
     // Batch boundary just freed up to a full hash_mem of table memory;
     // release mimalloc's retained segments before the next fill (disk-bound
     // here, so the collect cost hides).
-    ::mcx::release_retained();
+    hashagg_release_retained("refill_batch");
 
     loop {
         let advance = {
