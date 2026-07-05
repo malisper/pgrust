@@ -1500,7 +1500,13 @@ fn ATRewriteTableOne<'mcx>(
             persistence,
         )?;
         if tab.chg_persistence {
-            unported("SET LOGGED/UNLOGGED owned-sequence SequenceChangePersistence");
+            for &seq_relid in pg_depend::getOwnedSequences(mcx, tab.relid)?.iter() {
+                sequence_seams::sequence_change_persistence::call(
+                    mcx,
+                    seq_relid,
+                    tab.newrelpersistence,
+                )?;
+            }
         }
     } else {
         if !tab.constraints.is_empty()

@@ -464,13 +464,7 @@ pub fn DefineRelation<'mcx>(
                 if parent_att.attisdropped {
                     continue;
                 }
-                if parent_att.attidentity != 0 {
-                    unported("identity columns on partitions");
-                }
                 if parent_att.atthasdef {
-                    if parent_att.attgenerated == 0 {
-                        unported("inherited column defaults on partitions");
-                    }
                     let adbin =
                         pg_attrdef::GetAttrDefaultBin(mcx, parent_oid, (i + 1) as AttrNumber)?
                             .unwrap_or_else(|| {
@@ -482,6 +476,9 @@ pub fn DefineRelation<'mcx>(
                 let att = desc.attr_mut(i);
                 att.attnotnull = parent_att.attnotnull;
                 att.attgenerated = parent_att.attgenerated;
+                // Partitions are an integral part of the parent and inherit
+                // identity columns (MergeAttributes' is_partition leg).
+                att.attidentity = parent_att.attidentity;
                 att.attislocal = false;
                 att.attinhcount = 1;
                 tupdesc::populate_compact_attribute(&mut desc, i);
@@ -523,14 +520,6 @@ pub fn DefineRelation<'mcx>(
             }
             table::table_close(rel, types_rel::NoLock)?;
         }
-    }
-    if !partition_gendefs.is_empty() {
-        xact::CommandCounterIncrement()?;
-        let rel = table::table_open(mcx, relation_id, types_rel::NoLock)?;
-        for &(attnum, expr) in partition_gendefs.iter() {
-            pg_attrdef::StoreAttrDefault(mcx, &rel, attnum, expr)?;
-        }
-        table::table_close(rel, types_rel::NoLock)?;
     }
     if !partition_checks.is_empty() {
         inheritance::store_inherited_checks(mcx, relation_id, &partition_checks)?;
