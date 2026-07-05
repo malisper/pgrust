@@ -2212,6 +2212,69 @@ mod from_where {
     }
 
     #[test]
+    fn returning_with_old_new_aliases_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "UPDATE t SET y = 'b' RETURNING WITH (OLD AS o, NEW AS n) o.y, n.y",
+        )
+        .unwrap();
+        assert_eq!(q.returningOldAlias, Some("o"));
+        assert_eq!(q.returningNewAlias, Some("n"));
+        use types_nodes::primnodes::VarReturningType;
+        let v0 = q.returningList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!(v0.varreturningtype, VarReturningType::VAR_RETURNING_OLD);
+        let v1 = q.returningList.nth(1).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!(v1.varreturningtype, VarReturningType::VAR_RETURNING_NEW);
+    }
+
+    #[test]
+    fn returning_with_repeated_option_is_syntax_error() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "UPDATE t SET y = 'b' RETURNING WITH (old AS a, new AS b, old AS c) *",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_SYNTAX_ERROR);
+        assert_eq!(err.message(), "OLD cannot be specified multiple times");
+
+        let err = analyze_sql(
+            mcx,
+            "UPDATE t SET y = 'b' RETURNING WITH (new AS a, new AS b) *",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.message(), "NEW cannot be specified multiple times");
+    }
+
+    #[test]
+    fn returning_with_alias_conflict_is_42712() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "UPDATE t SET y = 'b' RETURNING WITH (new AS t) *")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DUPLICATE_ALIAS);
+        assert_eq!(err.message(), "table name \"t\" specified more than once");
+
+        let err = analyze_sql(mcx, "UPDATE t SET y = 'b' RETURNING WITH (old AS x, new AS x) *")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_DUPLICATE_ALIAS);
+        assert_eq!(err.message(), "table name \"x\" specified more than once");
+    }
+
+    #[test]
     fn missing_table_is_42p01_with_position() {
         install();
         let ctx = MemoryContext::new("t");
