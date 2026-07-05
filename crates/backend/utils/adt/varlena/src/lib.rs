@@ -689,6 +689,40 @@ pub fn textpos(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {
     text_position(t1, t2, collid)
 }
 
+// replace_text (varlena.c): replace all occurrences of from_sub with to_sub.
+pub fn replace_text<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: &[u8],
+    from_sub: &[u8],
+    to_sub: &[u8],
+    collid: Oid,
+) -> PgResult<Varlena<'mcx>> {
+    if src.is_empty() || from_sub.is_empty() {
+        return cstring_to_text(mcx, src);
+    }
+
+    let mut state = text_position_setup(src, from_sub, collid)?;
+    if !text_position_next(&mut state)? {
+        return cstring_to_text(mcx, src);
+    }
+    let mut curr_ptr = text_position_get_match_off(&state);
+    let mut start_ptr = 0usize;
+    let mut str: Vec<u8> = Vec::new();
+
+    loop {
+        str.extend_from_slice(&src[start_ptr..curr_ptr]);
+        str.extend_from_slice(to_sub);
+        start_ptr = curr_ptr + state.last_match_len;
+        if !text_position_next(&mut state)? {
+            break;
+        }
+        curr_ptr = text_position_get_match_off(&state);
+    }
+    str.extend_from_slice(&src[start_ptr..]);
+
+    cstring_to_text(mcx, &str)
+}
+
 pub fn split_part<'mcx>(
     mcx: Mcx<'mcx>,
     inputstring: &[u8],

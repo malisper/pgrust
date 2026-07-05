@@ -442,6 +442,25 @@ pub fn fc_textpos(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 }
 
 
+pub fn fc_replace_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog args are non-null text varlenas (strict fn).
+    let (src, from_sub, to_sub) = unsafe {
+        (
+            fcinfo.arg_varlena_packed(0)?,
+            fcinfo.arg_varlena_packed(1)?,
+            fcinfo.arg_varlena_packed(2)?,
+        )
+    };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::replace_text(
+        mcx,
+        src.data(),
+        from_sub.data(),
+        to_sub.data(),
+        fcinfo.get_collation(),
+    )?))
+}
+
 pub fn fc_split_part(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args 0/1 are non-null text varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
@@ -707,6 +726,7 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(3059, "text_concat_ws", 2, crate::concat_format::fc_text_concat_ws),
     b(3539, "text_format", 2, crate::concat_format::fc_text_format),
     b(3540, "text_format_nv", 1, crate::concat_format::fc_text_format),
+    b(2087, "replace_text", 3, fc_replace_text),
     b(2088, "split_part", 3, fc_split_part),
     b(3255, "bttextsortsupport", 1, fc_bttextsortsupport),
     n(3535, "string_agg_transfn", 3, fc_string_agg_transfn),

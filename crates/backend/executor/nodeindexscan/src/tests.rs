@@ -823,7 +823,7 @@ fn index_lockmode_is_rte_rellockmode() {
                 mcx,
                 ::types_nodes::parsenodes::RangeTblEntry {
                     rtekind: ::types_nodes::parsenodes::RTEKind::RTE_RELATION,
-                    relid: Oid(4242),
+                    relid: 4242,
                     relkind: RELKIND_RELATION,
                     rellockmode: ::types_rel::RowExclusiveLock,
                     ..Default::default()
