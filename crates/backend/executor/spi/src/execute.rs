@@ -21,7 +21,7 @@ use crate::{
     TuptabHandle, _SPI_begin_call, _SPI_end_call, SPI_ERROR_ARGUMENT, SPI_ERROR_COPY,
     SPI_ERROR_OPUNKNOWN, SPI_ERROR_PARAM, SPI_ERROR_TRANSACTION, SPI_OK_DELETE,
     SPI_OK_DELETE_RETURNING, SPI_OK_INSERT, SPI_OK_INSERT_RETURNING, SPI_OK_MERGE,
-    SPI_OK_MERGE_RETURNING, SPI_OK_REWRITTEN, SPI_OK_SELECT, SPI_OK_UPDATE,
+    SPI_OK_MERGE_RETURNING, SPI_OK_REWRITTEN, SPI_OK_SELECT, SPI_OK_SELINTO, SPI_OK_UPDATE,
     SPI_OK_UPDATE_RETURNING, SPI_OK_UTILITY,
 };
 
@@ -407,18 +407,41 @@ pub(crate) fn _SPI_execute_plan(
                         }
                     });
 
+                    let mut ures = SPI_OK_UTILITY;
                     let ustmt = stmt.utilityStmt.expect("utility arm");
                     match ustmt.node_tag() {
-                        NodeTag::T_CreateTableAsStmt => panic!(
-                            "_SPI_execute_plan (spi.c): CREATE TABLE AS / SELECT INTO \
-                             completion arm not ported"
-                        ),
+                        NodeTag::T_CreateTableAsStmt => {
+                            let ctastmt = ustmt
+                                .as_variant::<types_nodes::rawnodes::CreateTableAsStmt>()
+                                .expect("tag-checked");
+                            if qc.commandTag == CMDTAG_SELECT {
+                                with_current(|c| c.processed = qc.nprocessed);
+                            } else {
+                                // Must be an IF NOT EXISTS that did nothing, or a
+                                // CREATE ... WITH NO DATA.
+                                debug_assert!(
+                                    ctastmt.if_not_exists
+                                        || ctastmt
+                                            .into
+                                            .and_then(|n| {
+                                                n.as_variant::<types_nodes::rawnodes::IntoClause>()
+                                            })
+                                            .is_some_and(|ic| ic.skipData)
+                                );
+                                with_current(|c| c.processed = 0);
+                            }
+                            // For historical reasons, CREATE TABLE AS spelled as
+                            // SELECT INTO returns a special return code.
+                            if ctastmt.is_select_into {
+                                ures = SPI_OK_SELINTO;
+                            }
+                        }
                         NodeTag::T_CopyStmt => {
                             with_current(|c| c.processed = qc.nprocessed);
                         }
                         _ => {}
                     }
-                    SPI_OK_UTILITY
+                    ures
                 };
 
                 if can_set_tag {
