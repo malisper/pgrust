@@ -428,6 +428,18 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             node.as_variant::<types_nodes::parsenodes::GroupingSet>().expect("GroupingSet"),
         )?,
         NodeTag::T_Aggref => out_aggref(out, node.as_variant::<Aggref>().expect("Aggref"))?,
+        NodeTag::T_GroupingFunc => {
+            let g = node
+                .as_variant::<types_nodes::primnodes::GroupingFunc>()
+                .expect("GroupingFunc");
+            w!(out, "{{GROUPINGFUNC :args ");
+            out_list(out, &g.args)?;
+            w!(out, " :refs ");
+            out_int_list(out, &g.refs);
+            w!(out, " :cols ");
+            out_int_list(out, &g.cols);
+            w!(out, " :agglevelsup {} :location -1}}", g.agglevelsup);
+        }
         NodeTag::T_SubLink => out_sub_link(out, node.as_variant::<SubLink>().expect("SubLink"))?,
         NodeTag::T_Param => {
             let p = node.as_variant::<types_nodes::primnodes::Param>().expect("Param");
