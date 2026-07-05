@@ -811,6 +811,11 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_DROP
         }
         // Recursion occurs during execution.
+        AlterTableType::AT_AlterConstraint => {
+            set_recurse();
+            AT_PASS_MISC
+        }
+        // Recursion occurs during execution.
         AlterTableType::AT_ValidateConstraint => {
             set_recurse();
             AT_PASS_MISC
@@ -1137,6 +1142,16 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_DropConstraint => {
                     ATExecDropConstraint(mcx, &rel, cmd, lockmode)?;
+                }
+                AlterTableType::AT_AlterConstraint => {
+                    let cmdcon = cmd
+                        .def
+                        .expect("AT_AlterConstraint def")
+                        .as_variant::<types_nodes::parsenodes::ATAlterConstraint>()
+                        .expect("ATAlterConstraint");
+                    crate::fk::ATExecAlterConstraint(
+                        mcx, wqueue, &rel, cmdcon, cmd.recurse, lockmode,
+                    )?;
                 }
                 AlterTableType::AT_ValidateConstraint => {
                     let name = cmd.name.expect("AT_ValidateConstraint name");
@@ -3375,8 +3390,13 @@ fn nn_con_shape(con: &pg_constraint::NotNullConTup) -> pg_constraint::ConShape {
         coninhcount: con.coninhcount,
         connoinherit: con.connoinherit,
         conislocal: con.conislocal,
+        condeferrable: false,
+        condeferred: false,
         conenforced: true,
         convalidated: con.convalidated,
+        // NotNullConTup does not carry conparentid; callers of this shape do
+        // not read it.
+        conparentid: InvalidOid,
         conindid: InvalidOid,
         confrelid: InvalidOid,
         notnull_attnum: con.attnum,
@@ -3384,7 +3404,7 @@ fn nn_con_shape(con: &pg_constraint::NotNullConTup) -> pg_constraint::ConShape {
 }
 
 // findNotNullConstraint (pg_constraint.c): by-column-name variant.
-fn find_notnull_constraint_by_colname<'mcx>(
+pub(crate) fn find_notnull_constraint_by_colname<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     colname: &str,
@@ -3487,7 +3507,7 @@ fn pg_index_shape_full<'mcx>(
 
 // ATExecSetNotNull (tablecmds.c): exec-time recursion, one level at a time.
 #[allow(clippy::too_many_arguments)]
-fn ATExecSetNotNull<'mcx>(
+pub(crate) fn ATExecSetNotNull<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
     rel: &Relation<'mcx>,

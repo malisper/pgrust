@@ -47,6 +47,7 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_index = { path = "../../catalog/catalog_index" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
 varlena = { path = "../../utils/adt/varlena" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }

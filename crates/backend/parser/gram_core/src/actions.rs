@@ -105,6 +105,8 @@ const CAS_ENFORCED: i32 = 0x80;
 // Which pointers C's processCASbits caller passes (NULL target + bit = error).
 // not_valid_exec: the executor path for this production handles NOT VALID
 // (domain constraints); the table lanes stay loud until notvalid lands.
+// enforced_exec: the executor path handles NOT ENFORCED (only ALTER TABLE ..
+// ALTER CONSTRAINT); constraint creation with NOT ENFORCED stays loud.
 #[derive(Default)]
 struct CasTargets {
     deferrable: bool,
@@ -113,6 +115,7 @@ struct CasTargets {
     not_valid: bool,
     no_inherit: bool,
     not_valid_exec: bool,
+    enforced_exec: bool,
 }
 
 struct CasBits {
@@ -5861,6 +5864,21 @@ impl<'mcx> Parser<'mcx> {
                 n.objtype = ObjectType::OBJECT_INDEX;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // AlterTableStmt: ALTER SEQUENCE [IF_P EXISTS] qualified_name
+            // alter_table_cmds
+            286 | 287 => {
+                let (rv, cmds) = if rule == 286 {
+                    (view.v(3), view.v(4))
+                } else {
+                    (view.v(5), view.v(6))
+                };
+                let mut n = Node::build::<AlterTableStmt>(mcx)?;
+                n.relation = rv.node().expect("qualified_name").as_variant::<RangeVar>();
+                n.cmds = cmds.list();
+                n.objtype = ObjectType::OBJECT_SEQUENCE;
+                n.missing_ok = rule == 287;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             // AlterTableStmt: ALTER VIEW [IF_P EXISTS] qualified_name alter_table_cmds
             288 | 289 => {
                 let (rv, cmds) = if rule == 288 {
@@ -5937,6 +5955,67 @@ impl<'mcx> Parser<'mcx> {
                 n.subtype = AlterTableType::AT_AddColumn;
                 n.def = def.node();
                 n.missing_ok = rule == 303 || rule == 305;
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: ALTER CONSTRAINT name ConstraintAttributeSpec
+            327 => {
+                let mut c = Node::build::<parsenodes::ATAlterConstraint>(mcx)?;
+                c.conname = Some(view.v(3).str_val());
+                let bits = view.v(4).ival();
+                if bits & (CAS_NOT_ENFORCED | CAS_ENFORCED) != 0 {
+                    c.alterEnforceability = true;
+                }
+                if bits
+                    & (CAS_DEFERRABLE
+                        | CAS_NOT_DEFERRABLE
+                        | CAS_INITIALLY_DEFERRED
+                        | CAS_INITIALLY_IMMEDIATE)
+                    != 0
+                {
+                    c.alterDeferrability = true;
+                }
+                if bits & CAS_NO_INHERIT != 0 {
+                    c.alterInheritability = true;
+                }
+                // C raises this before processCASbits.
+                if bits & CAS_NOT_VALID != 0 {
+                    return Err(self.errposition_error_code(
+                        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "constraints cannot be altered to be NOT VALID".to_string(),
+                        view.l(4),
+                    ));
+                }
+                let cas = self.process_cas_bits(
+                    bits,
+                    view.l(4),
+                    "FOREIGN KEY",
+                    CasTargets {
+                        deferrable: true,
+                        initdeferred: true,
+                        is_enforced: true,
+                        no_inherit: true,
+                        enforced_exec: true,
+                        ..Default::default()
+                    },
+                )?;
+                c.deferrable = cas.deferrable;
+                c.initdeferred = cas.initdeferred;
+                c.is_enforced = cas.is_enforced;
+                c.noinherit = cas.no_inherit;
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AlterConstraint;
+                n.def = Some(c.seal());
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // alter_table_cmd: ALTER CONSTRAINT name INHERIT
+            328 => {
+                let mut c = Node::build::<parsenodes::ATAlterConstraint>(mcx)?;
+                c.conname = Some(view.v(3).str_val());
+                c.alterInheritability = true;
+                c.noinherit = false;
+                let mut n = Node::build::<AlterTableCmd>(mcx)?;
+                n.subtype = AlterTableType::AT_AlterConstraint;
+                n.def = Some(c.seal());
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             // AlterCompositeTypeStmt: ALTER TYPE_P any_name alter_type_cmds
@@ -10732,7 +10811,7 @@ impl<'mcx> Parser<'mcx> {
         if out.not_valid && !t.not_valid_exec {
             panic!("gram_core: NOT VALID {constr_type} constraints unported");
         }
-        if !out.is_enforced {
+        if !out.is_enforced && !t.enforced_exec {
             panic!("gram_core: NOT ENFORCED {constr_type} constraints unported");
         }
         Ok(out)

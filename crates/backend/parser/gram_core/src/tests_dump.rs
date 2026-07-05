@@ -949,6 +949,17 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "objtype", a.objtype as i32);
         bool_field(out, "missing_ok", a.missing_ok);
         out.push('}');
+    } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::ATAlterConstraint>() {
+        out.push_str("{ATALTERCONSTRAINT");
+        string_field(out, "conname", c.conname);
+        bool_field(out, "alterEnforceability", c.alterEnforceability);
+        bool_field(out, "is_enforced", c.is_enforced);
+        bool_field(out, "alterDeferrability", c.alterDeferrability);
+        bool_field(out, "deferrable", c.deferrable);
+        bool_field(out, "initdeferred", c.initdeferred);
+        bool_field(out, "alterInheritability", c.alterInheritability);
+        bool_field(out, "noinherit", c.noinherit);
+        out.push('}');
     } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::AlterTableCmd>() {
         out.push_str("{ALTERTABLECMD");
         int_field(out, "subtype", c.subtype as i32);

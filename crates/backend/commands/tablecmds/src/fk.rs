@@ -2495,3 +2495,594 @@ pub(crate) fn partition_remove_check<'mcx>(
     ri_triggers_seams::ri_partition_remove_check::call(mcx, &trig, &rel, partition)?;
     rel.close(NoLock)
 }
+
+// ALTER TABLE .. ALTER CONSTRAINT (tablecmds.c:12198-12920):
+// ATExecAlterConstraint + the enforceability/deferrability/inheritability
+// legs and their conparentid-driven recursion.
+
+const Anum_pg_trigger_tgdeferrable: usize = 12;
+const Anum_pg_trigger_tginitdeferred: usize = 13;
+
+pub(crate) fn ATExecAlterConstraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    recurse: bool,
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<()> {
+    let relname = rel.name().to_string();
+    // Altering ONLY a partitioned table would desynchronize the children.
+    if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE && !recurse {
+        return Err(Box::new(
+            PgError::new(ERROR, "constraint must be altered in child tables too".to_string())
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+                .with_hint("Do not specify the ONLY keyword.".to_string()),
+        ));
+    }
+    let conname = cmdcon.conname.expect("ATAlterConstraint conname");
+    let Some(con) = pg_constraint::findConstraintByName(mcx, rel.rd_id, conname)? else {
+        return Err(err(
+            format!("constraint \"{conname}\" of relation \"{relname}\" does not exist"),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    };
+    if cmdcon.alterDeferrability && con.contype != pg_constraint::CONSTRAINT_FOREIGN {
+        return Err(err(
+            format!(
+                "constraint \"{conname}\" of relation \"{relname}\" is not a foreign key \
+                 constraint"
+            ),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+    if cmdcon.alterEnforceability && con.contype != pg_constraint::CONSTRAINT_FOREIGN {
+        return Err(err(
+            format!(
+                "cannot alter enforceability of constraint \"{conname}\" of relation \
+                 \"{relname}\""
+            ),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+    if cmdcon.alterInheritability && con.contype != pg_constraint::CONSTRAINT_NOTNULL {
+        return Err(err(
+            format!(
+                "constraint \"{conname}\" of relation \"{relname}\" is not a not-null constraint"
+            ),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+    // Refuse to modify inheritability of inherited constraints.
+    if cmdcon.alterInheritability && cmdcon.noinherit && con.coninhcount > 0 {
+        return Err(err(
+            format!(
+                "cannot alter inherited constraint \"{}\" on relation \"{relname}\"",
+                con.name_str()
+            ),
+            types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        ));
+    }
+    // Non-topmost constraints leave triggers untouched and confuse pg_dump;
+    // tell the user to alter the topmost ancestor instead.
+    if con.conparentid != InvalidOid {
+        let mut parent = con.conparentid;
+        let mut ancestor = Option::None;
+        loop {
+            let Some((grandparent, name, conrelid)) = constraint_parent_probe(mcx, parent)? else {
+                break;
+            };
+            if grandparent == InvalidOid {
+                let table = lsyscache::relation::get_rel_name(mcx, conrelid)?
+                    .map(|s| s.as_str().to_string());
+                ancestor = table.map(|t| (name, t));
+                break;
+            }
+            parent = grandparent;
+        }
+        let mut e = PgError::new(
+            ERROR,
+            format!("cannot alter constraint \"{conname}\" on relation \"{relname}\""),
+        )
+        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_hint("You may alter the constraint it derives from instead.".to_string());
+        if let Some((aname, atable)) = ancestor {
+            e = e.with_detail(format!(
+                "Constraint \"{conname}\" is derived from constraint \"{aname}\" of relation \
+                 \"{atable}\"."
+            ));
+        }
+        return Err(Box::new(e));
+    }
+
+    // ATExecAlterConstraintInternal: enforceability change re-creates or
+    // drops triggers (adjusting deferrability on the way); an explicit
+    // deferrability change patches the existing triggers instead.
+    let mut otherrelids: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    if cmdcon.alterEnforceability {
+        let (form, _) = read_fk_constraint(mcx, con.oid)?;
+        alter_constr_enforceability(
+            mcx,
+            wqueue,
+            cmdcon,
+            form.conrelid,
+            form.confrelid,
+            &form,
+            lockmode,
+            InvalidOid,
+            InvalidOid,
+            InvalidOid,
+            InvalidOid,
+        )?;
+    } else if cmdcon.alterDeferrability {
+        let (form, _) = read_fk_constraint(mcx, con.oid)?;
+        if alter_constr_deferrability(
+            mcx,
+            wqueue,
+            cmdcon,
+            rel,
+            &form,
+            recurse,
+            &mut otherrelids,
+            lockmode,
+        )? {
+            // Relations owning affected triggers also need a relcache flush.
+            for &relid in otherrelids.iter() {
+                inval::invalidate::CacheInvalidateRelcacheByRelid(relid)?;
+            }
+        }
+    }
+    if cmdcon.alterInheritability {
+        alter_constr_inheritability(mcx, wqueue, cmdcon, rel, &con, lockmode)?;
+    }
+    Ok(())
+}
+
+// The topmost-ancestor walk of ATExecAlterConstraint: (conparentid, conname,
+// conrelid) for one constraint OID.
+fn constraint_parent_probe<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<Option<(Oid, String, Oid)>> {
+    let con_rel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::AccessShareLock,
+    )?;
+    let keys = [crate::alter::oid_scankey(pg_constraint::Anum_pg_constraint_oid as usize, conoid)];
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        types_core::CONSTRAINT_OID_INDEX_ID,
+        true,
+        None,
+        &keys,
+    )?;
+    let desc = con_rel.descr();
+    let found = genam::systable_getnext(mcx, &mut scan)?.map(|tup| {
+        let form = decode_fk_constraint_form(tup, desc);
+        (form.conparentid, form.name_str().to_string(), form.conrelid)
+    });
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::AccessShareLock)?;
+    Ok(found)
+}
+
+// ATExecAlterConstrEnforceability (tablecmds.c): flip conenforced and create
+// or drop the constraint's RI triggers, recursing over child constraints.
+#[allow(clippy::too_many_arguments)]
+fn alter_constr_enforceability<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    fkrelid: Oid,
+    pkrelid: Oid,
+    con: &FkConstraintForm,
+    lockmode: types_rel::LOCKMODE,
+    referenced_parent_del_trigger: Oid,
+    referenced_parent_upd_trigger: Oid,
+    referencing_parent_ins_trigger: Oid,
+    referencing_parent_upd_trigger: Oid,
+) -> PgResult<bool> {
+    stack_depth::check_stack_depth()?;
+    debug_assert!(cmdcon.alterEnforceability);
+    debug_assert!(con.contype == pg_constraint::CONSTRAINT_FOREIGN);
+    let rel = table::table_open(mcx, con.conrelid, lockmode)?;
+
+    let mut changed = false;
+    if con.conenforced != cmdcon.is_enforced {
+        alter_constr_update_constraint_entry(mcx, cmdcon, con.oid, con.conrelid)?;
+        changed = true;
+    }
+    if !cmdcon.is_enforced {
+        // Children first: their triggers depend on the parent's.
+        if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
+            || lsyscache::relation::get_rel_relkind(con.confrelid)? as u8
+                == RELKIND_PARTITIONED_TABLE
+        {
+            alter_constr_enforceability_recurse(
+                mcx,
+                wqueue,
+                cmdcon,
+                fkrelid,
+                pkrelid,
+                con,
+                lockmode,
+                InvalidOid,
+                InvalidOid,
+                InvalidOid,
+                InvalidOid,
+            )?;
+        }
+        drop_foreign_key_constraint_triggers(mcx, con.oid, InvalidOid, InvalidOid)?;
+    } else if changed {
+        // Minimal Constraint node carrying what trigger creation reads.
+        let fkconstraint = Constraint {
+            contype: types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN,
+            conname: Some(str_in(mcx, con.name_str())?),
+            fk_matchtype: con.confmatchtype,
+            fk_upd_action: con.confupdtype,
+            fk_del_action: con.confdeltype,
+            deferrable: con.condeferrable,
+            initdeferred: con.condeferred,
+            location: -1,
+            ..Default::default()
+        };
+        let mut referenced_del_trigger = InvalidOid;
+        let mut referenced_upd_trigger = InvalidOid;
+        let mut referencing_ins_trigger = InvalidOid;
+        let mut referencing_upd_trigger = InvalidOid;
+        if con.conrelid == fkrelid {
+            (referenced_del_trigger, referenced_upd_trigger) =
+                create_foreign_key_action_triggers(
+                    mcx,
+                    con.conrelid,
+                    con.confrelid,
+                    &fkconstraint,
+                    con.oid,
+                    con.conindid,
+                    referenced_parent_del_trigger,
+                    referenced_parent_upd_trigger,
+                )?;
+        }
+        if con.confrelid == pkrelid {
+            (referencing_ins_trigger, referencing_upd_trigger) =
+                create_foreign_key_check_triggers(
+                    mcx,
+                    con.conrelid,
+                    pkrelid,
+                    &fkconstraint,
+                    con.oid,
+                    con.conindid,
+                    referencing_parent_ins_trigger,
+                    referencing_parent_upd_trigger,
+                )?;
+        }
+        // Phase 3 must verify existing rows; leaf partitions only, and only
+        // for the row that is not an action-trigger support row.
+        if rel.rd_rel.relkind == RELKIND_RELATION && con.confrelid == pkrelid {
+            let tabidx = crate::alter::ATGetQueueEntry(mcx, wqueue, &rel);
+            wqueue[tabidx].fk_checks.push(FkValidateItem {
+                conname: str_in(mcx, con.name_str())?,
+                refrelid: con.confrelid,
+                refindid: con.conindid,
+                conid: con.oid,
+            });
+        }
+        if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
+            || lsyscache::relation::get_rel_relkind(con.confrelid)? as u8
+                == RELKIND_PARTITIONED_TABLE
+        {
+            alter_constr_enforceability_recurse(
+                mcx,
+                wqueue,
+                cmdcon,
+                fkrelid,
+                pkrelid,
+                con,
+                lockmode,
+                referenced_del_trigger,
+                referenced_upd_trigger,
+                referencing_ins_trigger,
+                referencing_upd_trigger,
+            )?;
+        }
+    }
+    rel.close(NoLock)?;
+    Ok(changed)
+}
+
+// ATExecAlterConstrDeferrability (tablecmds.c): flip condeferrable/
+// condeferred and patch the constraint's triggers; recurse even when this
+// level already matched so locally-altered descendants get fixed.
+#[allow(clippy::too_many_arguments)]
+fn alter_constr_deferrability<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    rel: &Relation<'mcx>,
+    con: &FkConstraintForm,
+    recurse: bool,
+    otherrelids: &mut mcx::PgVec<'mcx, Oid>,
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<bool> {
+    stack_depth::check_stack_depth()?;
+    debug_assert!(cmdcon.alterDeferrability);
+    debug_assert!(con.contype == pg_constraint::CONSTRAINT_FOREIGN);
+    let mut changed = false;
+    if con.condeferrable != cmdcon.deferrable || con.condeferred != cmdcon.initdeferred {
+        alter_constr_update_constraint_entry(mcx, cmdcon, con.oid, con.conrelid)?;
+        changed = true;
+        alter_constr_trigger_deferrability(
+            mcx,
+            con.oid,
+            rel,
+            cmdcon.deferrable,
+            cmdcon.initdeferred,
+            otherrelids,
+        )?;
+    }
+    if recurse
+        && changed
+        && (rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
+            || lsyscache::relation::get_rel_relkind(con.confrelid)? as u8
+                == RELKIND_PARTITIONED_TABLE)
+    {
+        alter_constr_deferrability_recurse(
+            mcx, wqueue, cmdcon, con, recurse, otherrelids, lockmode,
+        )?;
+    }
+    Ok(changed)
+}
+
+// ATExecAlterConstrInheritability (tablecmds.c): flip connoinherit on a
+// not-null constraint and adjust the immediate children only.
+fn alter_constr_inheritability<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    rel: &Relation<'mcx>,
+    con: &pg_constraint::ConShape,
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<bool> {
+    debug_assert!(cmdcon.alterInheritability);
+    debug_assert!(con.contype == pg_constraint::CONSTRAINT_NOTNULL);
+    if cmdcon.noinherit == con.connoinherit {
+        return Ok(false);
+    }
+    alter_constr_update_constraint_entry(mcx, cmdcon, con.oid, rel.rd_id)?;
+    xact::CommandCounterIncrement()?;
+
+    let col_name = lsyscache::attribute::get_attname(mcx, rel.rd_id, con.notnull_attnum, false)?
+        .expect("not-null constraint column")
+        .as_str()
+        .to_string();
+    let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+    for &childoid in children.iter() {
+        if cmdcon.noinherit {
+            let childcon = crate::alter::find_notnull_constraint_by_colname(
+                mcx, childoid, &col_name,
+            )?
+            .unwrap_or_else(|| {
+                panic!(
+                    "cache lookup failed for not-null constraint on column \"{col_name}\" of \
+                     relation {childoid}"
+                )
+            });
+            debug_assert!(childcon.coninhcount > 0);
+            pg_constraint::update_constraint_fields(
+                mcx,
+                childcon.oid,
+                &[
+                    (
+                        pg_constraint::Anum_pg_constraint_coninhcount,
+                        datum::Datum::from_i16(childcon.coninhcount - 1),
+                    ),
+                    (
+                        pg_constraint::Anum_pg_constraint_conislocal,
+                        datum::Datum::from_bool(true),
+                    ),
+                ],
+            )?;
+        } else {
+            let childrel = table::table_open(mcx, childoid, NoLock)?;
+            // DIVERGENCE: C only CCIs when SetNotNull reports a change; the
+            // port's ATExecSetNotNull has no address result, so CCI always.
+            crate::alter::ATExecSetNotNull(
+                mcx,
+                wqueue,
+                &childrel,
+                Some(con.name_str()),
+                &col_name,
+                true,
+                true,
+                lockmode,
+            )?;
+            xact::CommandCounterIncrement()?;
+            childrel.close(NoLock)?;
+        }
+    }
+    Ok(true)
+}
+
+// AlterConstrTriggerDeferrability (tablecmds.c): patch tgdeferrable/
+// tginitdeferred on the RI_FKey_noaction_{del,upd} / RI_FKey_check_{ins,upd}
+// triggers of one constraint.
+fn alter_constr_trigger_deferrability<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+    rel: &Relation<'mcx>,
+    deferrable: bool,
+    initdeferred: bool,
+    otherrelids: &mut mcx::PgVec<'mcx, Oid>,
+) -> PgResult<()> {
+    use mcx::PgVec;
+    let trig_rel = table::table_open(mcx, TriggerRelationId, types_rel::RowExclusiveLock)?;
+    let keys = [crate::alter::oid_scankey(Anum_pg_trigger_tgconstraint, conoid)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &trig_rel, TriggerConstraintIndexId, true, None, &keys)?;
+    let desc = trig_rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let tgrelid = getattr(tup, desc, Anum_pg_trigger_tgrelid).as_oid();
+        // Conservatively force a relcache inval on every other rel involved.
+        if tgrelid != rel.rd_id && !otherrelids.contains(&tgrelid) {
+            otherrelids.push(tgrelid);
+        }
+        // Only the deferrable trigger flavors change; see
+        // createForeignKeyActionTriggers / CreateFKCheckTrigger.
+        let tgfoid = getattr(tup, desc, Anum_pg_trigger_tgfoid).as_oid();
+        if tgfoid != F_RI_FKEY_NOACTION_DEL
+            && tgfoid != F_RI_FKEY_NOACTION_UPD
+            && tgfoid != F_RI_FKEY_CHECK_INS
+            && tgfoid != F_RI_FKEY_CHECK_UPD
+        {
+            continue;
+        }
+        let natts = desc.natts as usize;
+        let mut values: PgVec<'_, datum::Datum> =
+            mcx::vec_from_elem_in(mcx, datum::Datum::null(), natts);
+        let nulls: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, false, natts);
+        let mut replace: PgVec<'_, bool> = mcx::vec_from_elem_in(mcx, false, natts);
+        values[Anum_pg_trigger_tgdeferrable - 1] = datum::Datum::from_bool(deferrable);
+        replace[Anum_pg_trigger_tgdeferrable - 1] = true;
+        values[Anum_pg_trigger_tginitdeferred - 1] = datum::Datum::from_bool(initdeferred);
+        replace[Anum_pg_trigger_tginitdeferred - 1] = true;
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+        let otid = tup.t_self;
+        catalog_indexing::CatalogTupleUpdate(mcx, &trig_rel, &otid, &mut newtup)?;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    trig_rel.close(types_rel::RowExclusiveLock)
+}
+
+// AlterConstrEnforceabilityRecurse (tablecmds.c): children via conparentid.
+#[allow(clippy::too_many_arguments)]
+fn alter_constr_enforceability_recurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    fkrelid: Oid,
+    pkrelid: Oid,
+    con: &FkConstraintForm,
+    lockmode: types_rel::LOCKMODE,
+    referenced_parent_del_trigger: Oid,
+    referenced_parent_upd_trigger: Oid,
+    referencing_parent_ins_trigger: Oid,
+    referencing_parent_upd_trigger: Oid,
+) -> PgResult<()> {
+    for childcon in constraint_children(mcx, con.oid)?.iter() {
+        alter_constr_enforceability(
+            mcx,
+            wqueue,
+            cmdcon,
+            fkrelid,
+            pkrelid,
+            childcon,
+            lockmode,
+            referenced_parent_del_trigger,
+            referenced_parent_upd_trigger,
+            referencing_parent_ins_trigger,
+            referencing_parent_upd_trigger,
+        )?;
+    }
+    Ok(())
+}
+
+// AlterConstrDeferrabilityRecurse (tablecmds.c): children via conparentid.
+#[allow(clippy::too_many_arguments)]
+fn alter_constr_deferrability_recurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    con: &FkConstraintForm,
+    recurse: bool,
+    otherrelids: &mut mcx::PgVec<'mcx, Oid>,
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<()> {
+    for childcon in constraint_children(mcx, con.oid)?.iter() {
+        let childrel = table::table_open(mcx, childcon.conrelid, lockmode)?;
+        alter_constr_deferrability(
+            mcx, wqueue, cmdcon, &childrel, childcon, recurse, otherrelids, lockmode,
+        )?;
+        childrel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+// The conparentid scan both Recurse helpers share; decoded before recursing
+// so no scan stays open across the child work.
+fn constraint_children<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<mcx::PgVec<'mcx, FkConstraintForm>> {
+    let con_rel = table::table_open(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        types_rel::RowExclusiveLock,
+    )?;
+    let keys = [crate::alter::oid_scankey(
+        pg_constraint::Anum_pg_constraint_conparentid as usize,
+        conoid,
+    )];
+    let mut scan =
+        genam::systable_beginscan(mcx, &con_rel, ConstraintParentIndexId, true, None, &keys)?;
+    let desc = con_rel.descr();
+    let mut children: mcx::PgVec<'mcx, FkConstraintForm> = mcx::PgVec::new_in(mcx);
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        children.push(decode_fk_constraint_form(tup, desc));
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(types_rel::RowExclusiveLock)?;
+    Ok(children)
+}
+
+// AlterConstrUpdateConstraintEntry (tablecmds.c): apply the requested flag
+// changes to the pg_constraint row and flush the owning rel's relcache.
+fn alter_constr_update_constraint_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    cmdcon: &types_nodes::parsenodes::ATAlterConstraint<'_>,
+    conoid: Oid,
+    conrelid: Oid,
+) -> PgResult<()> {
+    debug_assert!(
+        cmdcon.alterEnforceability || cmdcon.alterDeferrability || cmdcon.alterInheritability
+    );
+    let mut fields: [(types_core::AttrNumber, datum::Datum); 5] =
+        [(0, datum::Datum::null()); 5];
+    let mut n = 0;
+    let mut push = |anum, v| {
+        fields[n] = (anum, v);
+        n += 1;
+    };
+    if cmdcon.alterEnforceability {
+        push(
+            pg_constraint::Anum_pg_constraint_conenforced,
+            datum::Datum::from_bool(cmdcon.is_enforced),
+        );
+        // convalidated tracks enforcement: NOT ENFORCED rows read as not
+        // validated, re-ENFORCED rows are validated by the Phase-3 recheck.
+        push(
+            pg_constraint::Anum_pg_constraint_convalidated,
+            datum::Datum::from_bool(cmdcon.is_enforced),
+        );
+    }
+    if cmdcon.alterDeferrability {
+        push(
+            pg_constraint::Anum_pg_constraint_condeferrable,
+            datum::Datum::from_bool(cmdcon.deferrable),
+        );
+        push(
+            pg_constraint::Anum_pg_constraint_condeferred,
+            datum::Datum::from_bool(cmdcon.initdeferred),
+        );
+    }
+    if cmdcon.alterInheritability {
+        push(
+            pg_constraint::Anum_pg_constraint_connoinherit,
+            datum::Datum::from_bool(cmdcon.noinherit),
+        );
+    }
+    let n_final = n;
+    pg_constraint::update_constraint_fields(mcx, conoid, &fields[..n_final])?;
+    inval::invalidate::CacheInvalidateRelcacheByRelid(conrelid)
+}

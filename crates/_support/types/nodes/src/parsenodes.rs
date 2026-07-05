@@ -1125,6 +1125,19 @@ pub struct AlterTableCmd<'mcx> {
     pub recurse: bool,
 }
 
+// C ATAlterConstraint (parsenodes.h): payload of AT_AlterConstraint.
+#[derive(Default)]
+pub struct ATAlterConstraint<'mcx> {
+    pub conname: Option<&'mcx str>,
+    pub alterEnforceability: bool,
+    pub is_enforced: bool,
+    pub alterDeferrability: bool,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub alterInheritability: bool,
+    pub noinherit: bool,
+}
+
 // pg_class.h REPLICA_IDENTITY_* chars.
 pub const REPLICA_IDENTITY_DEFAULT: u8 = b'd';
 pub const REPLICA_IDENTITY_NOTHING: u8 = b'n';
@@ -1661,6 +1674,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterTableCmd<'mcx> {
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for RenameStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_RenameStmt;
+}
+unsafe impl<'mcx> NodeVariant<'mcx> for ATAlterConstraint<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ATAlterConstraint;
 }
 unsafe impl<'mcx> NodeVariant<'mcx> for ReplicaIdentityStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_ReplicaIdentityStmt;
