@@ -2043,6 +2043,24 @@ pub(crate) fn copy_expr<'mcx>(
                 },
             )
         }
+        // Disjoint from batch-mechanical-1's expression_returns_set
+        // T_NullIfExpr arm (clauses walker) — this is the copyObject arm.
+        NodeTag::T_NullIfExpr => {
+            let n = node.as_null_if_expr().expect("NullIfExpr");
+            Node::mk(
+                mcx,
+                pn::NullIfExpr {
+                    opno: n.opno,
+                    opfuncid: n.opfuncid,
+                    opresulttype: n.opresulttype,
+                    opretset: n.opretset,
+                    opcollid: n.opcollid,
+                    inputcollid: n.inputcollid,
+                    args: copy_list(mcx, &n.args)?,
+                    location: n.location,
+                },
+            )
+        }
         NodeTag::T_FuncExpr => {
             let f = node.as_func_expr().expect("FuncExpr");
             Node::mk(

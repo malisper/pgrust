@@ -203,6 +203,22 @@ pub(crate) fn get_rule_expr<'mcx>(
                 get_coercion_expr(convert.arg, ctx, convert.resulttype, -1, node)
             }
         }
+        NodeTag::T_CoerceToDomain => {
+            let ctest = node.as_coerce_to_domain().unwrap();
+            if ctest.coercionformat == CoercionForm::COERCE_IMPLICIT_CAST && !showimplicit {
+                get_rule_expr(ctest.arg, ctx, false)
+            } else {
+                get_coercion_expr(ctest.arg, ctx, ctest.resulttype, ctest.resulttypmod, node)
+            }
+        }
+        NodeTag::T_CoerceToDomainValue => {
+            ctx.buf.push_str("VALUE");
+            Ok(())
+        }
+        NodeTag::T_SetToDefault => {
+            ctx.buf.push_str("DEFAULT");
+            Ok(())
+        }
         NodeTag::T_CurrentOfExpr => {
             let cexpr = node.as_current_of_expr().unwrap();
             match cexpr.cursor_name {

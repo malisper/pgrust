@@ -85,6 +85,19 @@ pub fn fc_pg_convert_to(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     convert_common(fcinfo, 0, crate::GetDatabaseEncoding(), dest_encoding)
 }
 
+// pg_encoding_max_length_sql (mbutils.c): NULL for an invalid encoding number.
+pub fn fc_pg_encoding_max_length(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let encoding = fcinfo.arg_i32(0);
+    if wchar::pg_valid_encoding(encoding) {
+        Ok(Datum::from_i32(wchar::pg_encoding_max_length(encoding)))
+    } else {
+        Ok(fcinfo.return_null())
+    }
+}
+
 // pg_proc.dat rows (all proisstrict, none retset), OID-ascending.
 pub const MBUTILS_BUILTINS: &[FmgrBuiltin] = &[
     FmgrBuiltin {
@@ -118,5 +131,13 @@ pub const MBUTILS_BUILTINS: &[FmgrBuiltin] = &[
         strict: true,
         retset: false,
         func: fc_pg_convert,
+    },
+    FmgrBuiltin {
+        foid: 2319,
+        name: "pg_encoding_max_length",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_pg_encoding_max_length,
     },
 ];
