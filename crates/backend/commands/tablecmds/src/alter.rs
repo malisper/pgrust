@@ -1368,7 +1368,15 @@ fn ATRewriteCatalogs<'mcx>(
                     ATExecSetIdentity(mcx, &rel, cmd)?;
                 }
                 AlterTableType::AT_DropIdentity => {
-                    ATExecDropIdentity(mcx, &rel, cmd)?;
+                    ATExecDropIdentity(
+                        mcx,
+                        &rel,
+                        cmd.name.expect("AT_DropIdentity name"),
+                        cmd.missing_ok,
+                        lockmode,
+                        cmd.recurse,
+                        false,
+                    )?;
                 }
                 AlterTableType::AT_ClusterOn => {
                     ATExecClusterOn(mcx, &rel, cmd, lockmode)?;
@@ -3016,14 +3024,28 @@ fn ATExecSetIdentity<'mcx>(
     Ok(())
 }
 
-fn ATExecDropIdentity<'mcx>(
+pub(crate) fn ATExecDropIdentity<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    cmd: &AlterTableCmd<'mcx>,
+    col_name: &str,
+    missing_ok: bool,
+    lockmode: LOCKMODE,
+    recurse: bool,
+    recursing: bool,
 ) -> PgResult<()> {
-    let col_name = cmd.name.expect("AT_DropIdentity name");
     let relname = rel.name().to_string();
-    if rel.rd_rel.relispartition {
+    let ispartitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    if ispartitioned && !recurse {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot drop identity from a column of only the partitioned table".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+            .with_hint("Do not specify the ONLY keyword."),
+        ));
+    }
+    if rel.rd_rel.relispartition && !recursing {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -3039,7 +3061,7 @@ fn ATExecDropIdentity<'mcx>(
         return Err(cannot_alter_system_column(col_name));
     }
     if rel.rd_att.attr(attnum as usize - 1).attidentity == 0 {
-        if !cmd.missing_ok {
+        if !missing_ok {
             return Err(not_an_identity_column(col_name, &relname));
         }
         elog_seams::ereport_msg::call(
@@ -3059,22 +3081,36 @@ fn ATExecDropIdentity<'mcx>(
         &[(Anum_pg_attribute_attidentity, Datum::from_i8(0))],
     )?;
 
-    let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attnum as i32, false)?;
-    pg_depend::deleteDependencyRecordsForClass(
-        mcx,
-        RELATION_RELATION_ID,
-        seqid,
-        RELATION_RELATION_ID,
-        pg_depend::DependencyType::Internal,
-    )?;
-    xact::CommandCounterIncrement()?;
-    let seqaddress = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, seqid);
-    catalog_dependency::performDeletion(
-        mcx,
-        &seqaddress,
-        types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
-        catalog_dependency::PERFORM_DELETION_INTERNAL,
-    )
+    // Identity is not inherited in regular inheritance children; recurse to
+    // partitions only.
+    if recurse && ispartitioned {
+        let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+        for &childoid in children.iter() {
+            let childrel = table::table_open(mcx, childoid, NoLock)?;
+            ATExecDropIdentity(mcx, &childrel, col_name, false, lockmode, recurse, true)?;
+            childrel.close(NoLock)?;
+        }
+    }
+
+    if !recursing {
+        let seqid = pg_depend::getIdentitySequence(mcx, rel.rd_id, attnum as i32, false)?;
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            RELATION_RELATION_ID,
+            seqid,
+            RELATION_RELATION_ID,
+            pg_depend::DependencyType::Internal,
+        )?;
+        xact::CommandCounterIncrement()?;
+        let seqaddress = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, seqid);
+        catalog_dependency::performDeletion(
+            mcx,
+            &seqaddress,
+            types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
+            catalog_dependency::PERFORM_DELETION_INTERNAL,
+        )?;
+    }
+    Ok(())
 }
 
 #[cold]

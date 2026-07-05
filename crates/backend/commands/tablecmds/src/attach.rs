@@ -486,8 +486,6 @@ fn MergeAttributesIntoExisting<'mcx>(
                 parent_att.attgenerated == 0 && child_att.attgenerated == 0,
                 "generated columns unported"
             );
-            assert!(parent_att.attidentity == 0, "identity columns unported");
-
             let (inhcount, _) = getattr(tup, desc, Anum_pg_attribute_attinhcount);
             let inhcount = inhcount.as_i16();
             if inhcount == i16::MAX {
@@ -508,6 +506,11 @@ fn MergeAttributesIntoExisting<'mcx>(
             replace[Anum_pg_attribute_attinhcount - 1] = true;
             values[Anum_pg_attribute_attislocal - 1] = Datum::from_bool(false);
             replace[Anum_pg_attribute_attislocal - 1] = true;
+            // tablecmds.c:17579-17583: partitions inherit the parent's
+            // identity property.
+            values[Anum_pg_attribute_attidentity - 1] =
+                Datum::from_i8(parent_att.attidentity);
+            replace[Anum_pg_attribute_attidentity - 1] = true;
             let mut newtup =
                 heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
             let otid = tup.t_self;
@@ -1596,10 +1599,18 @@ fn DetachPartitionFinalize<'mcx>(
 
     for i in 0..part_rel.descr().natts as usize {
         let att = part_rel.descr().attr(i);
-        assert!(
-            att.attisdropped || att.attidentity == 0,
-            "unported: DetachPartitionFinalize ATExecDropIdentity (identity lane)"
-        );
+        if !att.attisdropped && att.attidentity != 0 {
+            let attname = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            crate::alter::ATExecDropIdentity(
+                mcx,
+                part_rel,
+                attname,
+                false,
+                AccessExclusiveLock,
+                true,
+                true,
+            )?;
+        }
     }
 
     if default_part_oid != InvalidOid {
