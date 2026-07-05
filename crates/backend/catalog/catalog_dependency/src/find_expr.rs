@@ -346,9 +346,6 @@ fn walker<'w, 'mcx: 'w>(
             walk_opt(setop.larg, context)?;
             walk_opt(setop.rarg, context)
         }
-        NodeTag::T_TableSampleClause => {
-            walker_unported("TableSampleClause (node struct not defined in types_nodes)")
-        }
         NodeTag::T_Aggref => {
             let aggref = node.as_aggref().unwrap();
             context.add(types_core::PROCEDURE_RELATION_ID, aggref.aggfnoid, 0);

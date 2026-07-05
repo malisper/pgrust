@@ -393,16 +393,6 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out,
             node.as_variant::<SortGroupClause>().expect("SortGroupClause"),
         ),
-        NodeTag::T_TableSampleClause => {
-            let t = node
-                .as_variant::<types_nodes::parsenodes::TableSampleClause>()
-                .expect("TableSampleClause");
-            w!(out, "{{TABLESAMPLECLAUSE :tsmhandler {} :args ", t.tsmhandler);
-            out_list(out, &t.args)?;
-            w!(out, " :repeatable ");
-            out_opt_node(out, t.repeatable)?;
-            w!(out, "}}");
-        }
         NodeTag::T_GroupingSet => out_grouping_set(
             out,
             node.as_variant::<types_nodes::parsenodes::GroupingSet>().expect("GroupingSet"),

@@ -90,7 +90,6 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_FromExpr => cmp!(as_from_expr),
         NodeTag::T_Query => cmp!(as_query),
         NodeTag::T_RangeTblEntry => cmp!(as_range_tbl_entry),
-        NodeTag::T_TableSampleClause => cmp!(as_table_sample_clause),
         NodeTag::T_RangeTableSample => cmp!(as_range_table_sample),
         NodeTag::T_WithClause => cmp!(as_with_clause),
         NodeTag::T_WithCheckOption => cmp!(as_with_check_option),
@@ -774,14 +773,6 @@ impl NodeEqual for Query<'_> {
             && equal_opt(self.setOperations, b.setOperations)
             && self.constraintDeps.node_equal(&b.constraintDeps)
             && self.withCheckOptions.node_equal(&b.withCheckOptions)
-    }
-}
-
-impl NodeEqual for crate::parsenodes::TableSampleClause<'_> {
-    fn node_equal(&self, b: &Self) -> bool {
-        self.tsmhandler == b.tsmhandler
-            && self.args.node_equal(&b.args)
-            && equal_opt(self.repeatable, b.repeatable)
     }
 }
 
