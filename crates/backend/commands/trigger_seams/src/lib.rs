@@ -23,3 +23,7 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn after_trigger_pending_on_rel(relid: types_core::Oid) -> bool
 );
+
+seam_core::seam!(
+    pub fn my_trigger_depth() -> i32
+);

@@ -1,5 +1,6 @@
 // ExecCallTriggerFunc + TriggerEnabled (trigger.c), including the WHEN-qual
 // compile-once cache (C ri_TrigWhenExprs) and the tgattr/modifiedCols gate.
+use core::cell::Cell;
 use core::ptr::NonNull;
 
 use mcx::{Mcx, PgBox};
@@ -337,6 +338,32 @@ pub fn ExecBSTruncateTriggers<'mcx>(
     Ok(())
 }
 
+thread_local! {
+    static TRIGGER_DEPTH: Cell<i32> = const { Cell::new(0) };
+}
+
+pub fn trigger_depth() -> i32 {
+    TRIGGER_DEPTH.with(|c| c.get())
+}
+
+// C: MyTriggerDepth++ / MyTriggerDepth-- around FunctionCallInvoke, the
+// latter in PG_FINALLY so it runs even when the call errors; Drop gives the
+// same guarantee across both the `?` early-return and the panic-unwind path.
+struct TriggerDepthGuard;
+
+impl TriggerDepthGuard {
+    fn enter() -> Self {
+        TRIGGER_DEPTH.with(|c| c.set(c.get() + 1));
+        TriggerDepthGuard
+    }
+}
+
+impl Drop for TriggerDepthGuard {
+    fn drop(&mut self) {
+        TRIGGER_DEPTH.with(|c| c.set(c.get() - 1));
+    }
+}
+
 // The returned pointer's image lives in per_tuple_mcx: the 'a in the return
 // type overstates validity — it dies at the per-tuple reset, and callers must
 // consume or copy it before then (C: SPI trigger returns palloc'd in the
@@ -360,7 +387,9 @@ pub fn ExecCallTriggerFunc<'a, 'mcx>(
     } else {
         None
     };
+    let depth_guard = TriggerDepthGuard::enter();
     let result = finfo.invoke(&mut fcinfo)?;
+    drop(depth_guard);
     if let Some(fcu) = &fcu {
         ::pgstat::function::pgstat_end_function_usage(fcu, true);
     }

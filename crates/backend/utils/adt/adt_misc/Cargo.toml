@@ -27,6 +27,7 @@ types_scan = { path = "../../../../_support/types/types_scan" }
 genam_seams = { path = "../../../access/index/genam_seams" }
 table = { path = "../../../access/table/table" }
 dbcommands = { path = "../../../commands/dbcommands" }
+trigger_seams = { path = "../../../commands/trigger_seams" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
