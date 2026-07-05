@@ -2146,9 +2146,13 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_BooleanTest => {
             node.as_boolean_test().unwrap().arg.is_some_and(expression_returns_set)
         }
-        // C's walker recurses DistinctExpr generically (no opretset probe).
+        // C's walker recurses DistinctExpr/NullIfExpr generically (no
+        // opretset probe).
         NodeTag::T_DistinctExpr => {
             node.as_distinct_expr().unwrap().args.iter().any(expression_returns_set)
+        }
+        NodeTag::T_NullIfExpr => {
+            node.as_null_if_expr().unwrap().args.iter().any(expression_returns_set)
         }
         NodeTag::T_RowExpr => {
             node.as_row_expr().unwrap().args.iter().any(expression_returns_set)
