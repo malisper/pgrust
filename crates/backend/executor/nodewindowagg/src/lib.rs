@@ -414,6 +414,9 @@ fn collect_window_funcs<'mcx>(
         NodeTag::T_RelabelType => {
             collect_window_funcs(node.as_relabel_type().unwrap().arg, out)
         }
+        NodeTag::T_CoerceToDomain => {
+            collect_window_funcs(node.as_coerce_to_domain().unwrap().arg, out)
+        }
         tag => panic!(
             "ExecInitWindowAgg (nodeWindowAgg.c): WindowAgg tlist node family {tag:?} \
              not ported"
@@ -466,6 +469,11 @@ fn contain_volatile_functions(node: Node<'_>) -> PgResult<bool> {
                 return Ok(true);
             }
             contain_volatile_functions(c.arg)
+        }
+        // check_functions_in_node (nodeFuncs.c) carries no function of its
+        // own for CoerceToDomain; volatility is the argument's.
+        NodeTag::T_CoerceToDomain => {
+            contain_volatile_functions(node.as_coerce_to_domain().unwrap().arg)
         }
         tag => panic!(
             "contain_volatile_functions (clauses.c): node family {tag:?} not ported \
