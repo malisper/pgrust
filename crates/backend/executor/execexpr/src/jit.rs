@@ -78,6 +78,10 @@ struct HelperEnv {
 #[derive(Clone, Copy)]
 pub struct JitHandle {
     entry: KernelFn,
+    // Head FETCHSOME bounds hoisted out of the kernel (scan/inner/outer
+    // last_var; 0 = none): one direct slot_getsomeattrs per call replaces a
+    // per-row helper round trip.
+    fetch: [u16; 3],
 }
 
 pub use ::jit_deform::JitInstrumentation as JitInstr;
@@ -165,7 +169,7 @@ pub(crate) fn try_compile(state: &mut ExprState<'_>) {
         return;
     }
     let t0 = std::time::Instant::now();
-    let Some(words) = emit::emit_program(state) else {
+    let Some((words, fetch)) = emit::emit_program(state) else {
         note_refusal(state);
         return;
     };
@@ -187,7 +191,7 @@ pub(crate) fn try_compile(state: &mut ExprState<'_>) {
         cur.instr.created_functions += 1;
         cur.instr.generation_nanos += nanos;
     });
-    state.jit = Some(JitHandle { entry });
+    state.jit = Some(JitHandle { entry, fetch });
 }
 
 // Coverage accounting (journal evidence; PGRUST_JITQ_LOG=1 additionally logs
@@ -198,6 +202,7 @@ pub struct JitStats {
     pub compiled: core::sync::atomic::AtomicU64,
     pub refused: core::sync::atomic::AtomicU64,
     pub arena_full: core::sync::atomic::AtomicU64,
+    pub runs: core::sync::atomic::AtomicU64,
 }
 
 pub fn stats() -> &'static JitStats {
@@ -245,6 +250,12 @@ pub(crate) fn run_jit<'mcx>(
     resume: Option<Resume>,
 ) -> PgResult<EvalOutcome> {
     let handle = state.jit.expect("run_jit without a kernel");
+    if log_enabled() {
+        let n = stats().runs.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            eprintln!("jitq runs: {n}");
+        }
+    }
     let res = state.resnd;
     let mut start = 0u32;
     if let Some(r) = resume {
@@ -257,6 +268,24 @@ pub(crate) fn run_jit<'mcx>(
         // SAFETY: out cells are 'mcx-live (compile-time invariant).
         unsafe { out.0.write(result) };
         start = step + 1;
+    }
+    if handle.fetch[0] > 0 {
+        exectuples::slot_getsomeattrs(
+            slots.scan.as_deref_mut().expect("scan fetch without slot"),
+            handle.fetch[0] as i32,
+        );
+    }
+    if handle.fetch[1] > 0 {
+        exectuples::slot_getsomeattrs(
+            slots.inner.as_deref_mut().expect("inner fetch without slot"),
+            handle.fetch[1] as i32,
+        );
+    }
+    if handle.fetch[2] > 0 {
+        exectuples::slot_getsomeattrs(
+            slots.outer.as_deref_mut().expect("outer fetch without slot"),
+            handle.fetch[2] as i32,
+        );
     }
     let (scan_v, scan_n) = slot_arrays(slots.scan.as_deref_mut());
     let (inner_v, inner_n) = slot_arrays(slots.inner.as_deref_mut());
@@ -739,6 +768,74 @@ mod emit {
         step_stencilable(step) || helper_supported(step)
     }
 
+    // Straight-line register cache over the caller-saved x2..x7 pairs: cell
+    // (value, isnull) copies live in registers between adjacent stencils.
+    // Cells stay store-coherent (every write still hits memory) so helper
+    // steps and the interpreter contract see current state; the cache only
+    // elides reloads. Flushed at every jump target and after any bl.
+    struct RegCache {
+        entries: Vec<(u64, u32, u32)>,
+        next: usize,
+    }
+
+    const CACHE_PAIRS: [(u32, u32); 3] = [(2, 3), (4, 5), (6, 7)];
+
+    impl RegCache {
+        fn new() -> RegCache {
+            RegCache { entries: Vec::with_capacity(3), next: 0 }
+        }
+
+        fn lookup(&self, addr: u64) -> Option<(u32, u32)> {
+            self.entries.iter().find(|(a, _, _)| *a == addr).map(|(_, v, n)| (*v, *n))
+        }
+
+        fn alloc(&mut self, addr: u64) -> (u32, u32) {
+            let (v, n) = CACHE_PAIRS[self.next];
+            self.next = (self.next + 1) % CACHE_PAIRS.len();
+            self.entries.retain(|(a, ev, _)| *a != addr && *ev != v);
+            self.entries.push((addr, v, n));
+            (v, n)
+        }
+
+        fn invalidate(&mut self, addr: u64) {
+            self.entries.retain(|(a, _, _)| *a != addr);
+        }
+
+        fn flush(&mut self) {
+            self.entries.clear();
+            self.next = 0;
+        }
+    }
+
+    // Every index reachable by an emitted or helper-returned jump; the cache
+    // must be empty at these (dispatch can land mid-stream).
+    fn jump_targets(steps: &[Step]) -> Vec<bool> {
+        let mut t = vec![false; steps.len()];
+        for s in steps {
+            match s {
+                Step::Qual { jumpdone }
+                | Step::Jump { jumpdone }
+                | Step::JumpIfNotTrue { jumpdone, .. }
+                | Step::JumpIfNotNull { jumpdone, .. }
+                | Step::JumpIfNull { jumpdone, .. }
+                | Step::BoolAndStepFirst { jumpdone, .. }
+                | Step::BoolAndStep { jumpdone, .. }
+                | Step::BoolOrStepFirst { jumpdone, .. }
+                | Step::BoolOrStep { jumpdone, .. }
+                | Step::SbsrefSubscripts { jumpdone, .. }
+                | Step::JsonbSbsrefSubscripts { jumpdone, .. } => t[*jumpdone as usize] = true,
+                Step::AggStrictInputCheck { jumpnull, .. }
+                | Step::AggStrictInputCheck1 { jumpnull, .. } => t[*jumpnull as usize] = true,
+                Step::RowCompareStep { jumpnull, jumpdone, .. } => {
+                    t[*jumpnull as usize] = true;
+                    t[*jumpdone as usize] = true;
+                }
+                _ => {}
+            }
+        }
+        t
+    }
+
     fn emit_write_out_const(e: &mut Emitter, out: u64, value: Datum, isnull: bool) {
         e.ldr_lit(9, out);
         if value.as_usize() == 0 {
@@ -760,6 +857,25 @@ mod emit {
         e.ldr_lit(ar, addr);
         e.ldr_x(vr, ar, ND_VALUE);
         e.ldrb(nr, ar, ND_ISNULL);
+    }
+
+    // Cache-aware read: registers holding the cell if cached, else a load
+    // into the provided scratch pair.
+    fn read_cell_cached(
+        e: &mut Emitter,
+        cache: &RegCache,
+        addr: u64,
+        ar: u32,
+        vr: u32,
+        nr: u32,
+    ) -> (u32, u32) {
+        match cache.lookup(addr) {
+            Some(rn) => rn,
+            None => {
+                emit_read_cell(e, addr, ar, vr, nr);
+                (vr, nr)
+            }
+        }
     }
 
     fn emit_helper_call(e: &mut Emitter, ix: u32, nsteps: u32) {
@@ -805,49 +921,71 @@ mod emit {
     }
 
     // Strict-2 inline body; args are the call's fcinfo arg cells (stable
-    // addresses the producing steps already stored to).
-    fn emit_inline_strict2(e: &mut Emitter, call: &FuncCall, out: u64, op: InlineOp) {
+    // addresses the producing steps already stored to). Datum int words are
+    // canonical (from_i32/fetch_att sign-extend), so mixed-width compares
+    // sign-extend into scratch without mutating cached registers.
+    fn emit_inline_strict2(
+        e: &mut Emitter,
+        cache: &mut RegCache,
+        call: &FuncCall,
+        out: u64,
+        op: InlineOp,
+    ) {
         let a0 = crate::steps::call_arg_addr(call, 0) as u64;
         let a1 = crate::steps::call_arg_addr(call, 1) as u64;
         let done = e.new_local();
         let nullout = e.new_local();
-        emit_read_cell(e, a0, 8, 10, 12);
-        emit_read_cell(e, a1, 9, 11, 13);
-        e.orr_w(14, 12, 13);
+        let (v0, n0) = read_cell_cached(e, cache, a0, 8, 10, 12);
+        let (v1, n1) = read_cell_cached(e, cache, a1, 9, 11, 13);
+        e.orr_w(14, n0, n1);
         e.cbnz_w(14, nullout);
         match op {
             InlineOp::Cmp(c) => {
                 let (wide, cond) = cmp_cond(c);
                 let (sxa, sxb) = cmp_extends(c);
+                let (mut lv, mut rv) = (v0, v1);
                 if sxa {
-                    e.sxtw(10, 10);
+                    e.sxtw(15, v0);
+                    lv = 15;
                 }
                 if sxb {
-                    e.sxtw(11, 11);
+                    e.sxtw(16, v1);
+                    rv = 16;
                 }
                 if wide {
-                    e.cmp_x_x(10, 11);
+                    e.cmp_x_x(lv, rv);
                 } else {
-                    e.cmp_w_w(10, 11);
+                    e.cmp_w_w(lv, rv);
                 }
-                e.cset_x(15, cond);
+                let (ov, on) = cache.alloc(out);
+                e.cset_x(ov, cond);
+                e.movz_w(on, 0);
                 e.ldr_lit(9, out);
-                e.str_x(15, 9, ND_VALUE);
-                e.strb(31, 9, ND_ISNULL);
+                e.str_x(ov, 9, ND_VALUE);
+                e.strb(on, 9, ND_ISNULL);
+                e.b(done);
+                bind_local(e, nullout);
+                e.mov_x(ov, 31);
+                e.movz_w(on, 1);
+                e.ldr_lit(9, out);
+                e.str_x(ov, 9, ND_VALUE);
+                e.strb(on, 9, ND_ISNULL);
+                bind_local(e, done);
+                return;
             }
             InlineOp::Int4Pl | InlineOp::Int4Mi | InlineOp::Int4Mul => {
                 let ovf = e.new_local();
                 match op {
                     InlineOp::Int4Pl => {
-                        e.adds_w(15, 10, 11);
+                        e.adds_w(15, v0, v1);
                         e.b_cond(Cond::Vs, ovf);
                     }
                     InlineOp::Int4Mi => {
-                        e.subs_w(15, 10, 11);
+                        e.subs_w(15, v0, v1);
                         e.b_cond(Cond::Vs, ovf);
                     }
                     _ => {
-                        e.smull(15, 10, 11);
+                        e.smull(15, v0, v1);
                         e.cmp_x_w_sxtw(15, 15);
                         e.b_cond(Cond::Ne, ovf);
                     }
@@ -865,16 +1003,16 @@ mod emit {
                 let ovf = e.new_local();
                 match op {
                     InlineOp::Int8Pl => {
-                        e.adds_x(15, 10, 11);
+                        e.adds_x(15, v0, v1);
                         e.b_cond(Cond::Vs, ovf);
                     }
                     InlineOp::Int8Mi => {
-                        e.subs_x(15, 10, 11);
+                        e.subs_x(15, v0, v1);
                         e.b_cond(Cond::Vs, ovf);
                     }
                     _ => {
-                        e.mul_x(15, 10, 11);
-                        e.smulh(16, 10, 11);
+                        e.mul_x(15, v0, v1);
+                        e.smulh(16, v0, v1);
                         e.asr63(17, 15);
                         e.cmp_x_x(16, 17);
                         e.b_cond(Cond::Ne, ovf);
@@ -895,6 +1033,8 @@ mod emit {
         e.movz_w(10, 1);
         e.strb(10, 9, ND_ISNULL);
         bind_local(e, done);
+        // Arith arms carry a call on the overflow path: registers are gone.
+        cache.flush();
     }
 
     // Local (intra-step) label binding: rewrite pending fixups to a resolved
@@ -930,8 +1070,9 @@ mod emit {
     }
 
     /// Emits the whole program; None = a step outside the supported set (the
-    /// caller falls open to the interpreter).
-    pub(super) fn emit_program(state: &ExprState<'_>) -> Option<Vec<u32>> {
+    /// caller falls open to the interpreter). Also returns the hoisted head
+    /// FETCHSOME bounds the driver applies per call.
+    pub(super) fn emit_program(state: &ExprState<'_>) -> Option<(Vec<u32>, [u16; 3])> {
         let steps = state.steps();
         let nsteps = steps.len() as u32;
         if nsteps > 0xFFFF {
@@ -942,6 +1083,23 @@ mod emit {
             if !step_stencilable(s) && !helper_supported(s) {
                 return None;
             }
+        }
+        let targets = jump_targets(steps);
+        // Head FETCHSOME runs hoist into the driver (one direct call per
+        // evaluation instead of a per-row helper round trip).
+        let mut fetch = [0u16; 3];
+        let mut hoisted = vec![false; steps.len()];
+        for (ix, step) in steps.iter().enumerate() {
+            if targets[ix] {
+                break;
+            }
+            match step {
+                Step::ScanFetchSome { last_var } => fetch[0] = fetch[0].max(*last_var),
+                Step::InnerFetchSome { last_var } => fetch[1] = fetch[1].max(*last_var),
+                Step::OuterFetchSome { last_var } => fetch[2] = fetch[2].max(*last_var),
+                _ => break,
+            }
+            hoisted[ix] = true;
         }
         let mut e = Emitter::new();
         // Prologue: save fp/lr + x19/x20, bind ctx/base, resume dispatch.
@@ -955,9 +1113,16 @@ mod emit {
         e.b(Target::Dispatch);
 
         let mut step_offsets = vec![0u32; steps.len()];
+        let mut cache = RegCache::new();
         for (ix, step) in steps.iter().enumerate() {
             step_offsets[ix] = e.code.len() as u32;
-            emit_step(&mut e, state, steps, ix as u32, step, nsteps);
+            if hoisted[ix] {
+                continue;
+            }
+            if targets[ix] {
+                cache.flush();
+            }
+            emit_step(&mut e, state, &mut cache, ix as u32, step, nsteps);
         }
 
         // Shared blocks.
@@ -1035,7 +1200,7 @@ mod emit {
             };
             patch_branch(&mut e.code, pos, target);
         }
-        Some(e.code)
+        Some((e.code, fetch))
     }
 
     fn step_stencilable(step: &Step) -> bool {
@@ -1078,7 +1243,7 @@ mod emit {
     fn emit_step(
         e: &mut Emitter,
         state: &ExprState<'_>,
-        _steps: &[Step],
+        cache: &mut RegCache,
         ix: u32,
         step: &Step,
         nsteps: u32,
@@ -1090,33 +1255,41 @@ mod emit {
             | Step::InnerVar { attnum, out, .. }
             | Step::OuterVar { attnum, out, .. } => {
                 let (voff, noff) = slot_ctx_offsets(step).expect("var step");
+                let out = out_addr(out);
+                let (cv, cn) = cache.alloc(out);
                 e.ldr_x(8, CTX, voff);
                 e.ldr_x(9, CTX, noff);
                 let a = *attnum as u32;
-                e.ldr_x(10, 8, a * 8);
-                e.ldrb(11, 9, a);
-                e.ldr_lit(12, out_addr(out));
-                e.str_x(10, 12, ND_VALUE);
-                e.strb(11, 12, ND_ISNULL);
+                e.ldr_x(cv, 8, a * 8);
+                e.ldrb(cn, 9, a);
+                e.ldr_lit(12, out);
+                e.str_x(cv, 12, ND_VALUE);
+                e.strb(cn, 12, ND_ISNULL);
             }
             Step::Const { value, isnull, out } => {
+                cache.invalidate(out_addr(out));
                 emit_write_out_const(e, out_addr(out), *value, *isnull);
             }
             Step::CaseTestVal { slot, out } => {
-                emit_read_cell(e, slot.as_ptr() as u64, 8, 10, 11);
-                e.ldr_lit(12, out_addr(out));
-                e.str_x(10, 12, ND_VALUE);
-                e.strb(11, 12, ND_ISNULL);
+                let out = out_addr(out);
+                let (cv, cn) = cache.alloc(out);
+                e.ldr_lit(8, slot.as_ptr() as u64);
+                e.ldr_x(cv, 8, ND_VALUE);
+                e.ldrb(cn, 8, ND_ISNULL);
+                e.ldr_lit(12, out);
+                e.str_x(cv, 12, ND_VALUE);
+                e.strb(cn, 12, ND_ISNULL);
             }
             Step::Qual { jumpdone } => {
                 let fail = e.new_local();
                 let next = e.new_local();
                 let res = state.result_addr() as u64;
-                emit_read_cell(e, res, 8, 10, 11);
-                e.cbnz_w(11, fail);
-                e.cbz_x(10, fail);
+                let (v, n) = read_cell_cached(e, cache, res, 8, 10, 11);
+                e.cbnz_w(n, fail);
+                e.cbz_x(v, fail);
                 e.b(next);
                 bind_local(e, fail);
+                e.ldr_lit(8, res);
                 e.str_x(31, 8, ND_VALUE);
                 e.strb(31, 8, ND_ISNULL);
                 e.b(Target::Step(*jumpdone));
@@ -1124,19 +1297,17 @@ mod emit {
             }
             Step::Jump { jumpdone } => e.b(Target::Step(*jumpdone)),
             Step::JumpIfNotTrue { jumpdone, out } => {
-                emit_read_cell(e, out_addr(out), 8, 10, 11);
-                e.cbnz_w(11, Target::Step(*jumpdone));
-                e.cbz_x(10, Target::Step(*jumpdone));
+                let (v, n) = read_cell_cached(e, cache, out_addr(out), 8, 10, 11);
+                e.cbnz_w(n, Target::Step(*jumpdone));
+                e.cbz_x(v, Target::Step(*jumpdone));
             }
             Step::JumpIfNotNull { jumpdone, out } => {
-                e.ldr_lit(8, out_addr(out));
-                e.ldrb(11, 8, ND_ISNULL);
-                e.cbz_w(11, Target::Step(*jumpdone));
+                let (_, n) = read_cell_cached(e, cache, out_addr(out), 8, 10, 11);
+                e.cbz_w(n, Target::Step(*jumpdone));
             }
             Step::JumpIfNull { jumpdone, out } => {
-                e.ldr_lit(8, out_addr(out));
-                e.ldrb(11, 8, ND_ISNULL);
-                e.cbnz_w(11, Target::Step(*jumpdone));
+                let (_, n) = read_cell_cached(e, cache, out_addr(out), 8, 10, 11);
+                e.cbnz_w(n, Target::Step(*jumpdone));
             }
             Step::BoolAndStepFirst { anynull, jumpdone, out }
             | Step::BoolAndStep { anynull, jumpdone, out } => {
@@ -1147,9 +1318,9 @@ mod emit {
                 }
                 let next = e.new_local();
                 let isnull = e.new_local();
-                emit_read_cell(e, out_addr(out), 8, 10, 11);
-                e.cbnz_w(11, isnull);
-                e.cbz_x(10, Target::Step(*jumpdone));
+                let (v, n) = read_cell_cached(e, cache, out_addr(out), 8, 10, 11);
+                e.cbnz_w(n, isnull);
+                e.cbz_x(v, Target::Step(*jumpdone));
                 e.b(next);
                 bind_local(e, isnull);
                 e.ldr_lit(9, an);
@@ -1159,7 +1330,9 @@ mod emit {
             }
             Step::BoolAndStepLast { anynull, out } => {
                 let next = e.new_local();
-                emit_read_cell(e, out_addr(out), 8, 10, 11);
+                let out = out_addr(out);
+                cache.invalidate(out);
+                emit_read_cell(e, out, 8, 10, 11);
                 e.cbnz_w(11, next);
                 e.cbz_x(10, next);
                 e.ldr_lit(9, anynull.as_ptr() as u64);
@@ -1179,9 +1352,9 @@ mod emit {
                 }
                 let next = e.new_local();
                 let isnull = e.new_local();
-                emit_read_cell(e, out_addr(out), 8, 10, 11);
-                e.cbnz_w(11, isnull);
-                e.cbnz_x(10, Target::Step(*jumpdone));
+                let (v, n) = read_cell_cached(e, cache, out_addr(out), 8, 10, 11);
+                e.cbnz_w(n, isnull);
+                e.cbnz_x(v, Target::Step(*jumpdone));
                 e.b(next);
                 bind_local(e, isnull);
                 e.ldr_lit(9, an);
@@ -1191,7 +1364,9 @@ mod emit {
             }
             Step::BoolOrStepLast { anynull, out } => {
                 let next = e.new_local();
-                emit_read_cell(e, out_addr(out), 8, 10, 11);
+                let out = out_addr(out);
+                cache.invalidate(out);
+                emit_read_cell(e, out, 8, 10, 11);
                 e.cbnz_w(11, next);
                 e.cbnz_x(10, next);
                 e.ldr_lit(9, anynull.as_ptr() as u64);
@@ -1204,6 +1379,7 @@ mod emit {
             }
             Step::BoolNotStep { out } => {
                 // NULL rides through; the datum still flips (C parity).
+                cache.invalidate(out_addr(out));
                 e.ldr_lit(8, out_addr(out));
                 e.ldr_x(10, 8, ND_VALUE);
                 e.cmp_x_x(10, 31);
@@ -1211,12 +1387,14 @@ mod emit {
                 e.str_x(11, 8, ND_VALUE);
             }
             Step::NullTestIsNull { out } => {
+                cache.invalidate(out_addr(out));
                 e.ldr_lit(8, out_addr(out));
                 e.ldrb(10, 8, ND_ISNULL);
                 e.str_x(10, 8, ND_VALUE);
                 e.strb(31, 8, ND_ISNULL);
             }
             Step::NullTestIsNotNull { out } => {
+                cache.invalidate(out_addr(out));
                 e.ldr_lit(8, out_addr(out));
                 e.ldrb(10, 8, ND_ISNULL);
                 e.cmp_w_imm(10, 0);
@@ -1230,6 +1408,7 @@ mod emit {
             | Step::BoolTestIsNotFalse { out } => {
                 // result = f(isnull, value); all four are branchless forms.
                 let a = out_addr(out);
+                cache.invalidate(a);
                 e.ldr_lit(8, a);
                 e.ldr_x(10, 8, ND_VALUE);
                 e.ldrb(11, 8, ND_ISNULL);
@@ -1273,25 +1452,33 @@ mod emit {
                 // SAFETY (emit-time read): live mcx-boxed FmgrInfo.
                 let oid = unsafe { call.flinfo.as_ref() }.fn_oid;
                 match inline_op(oid) {
-                    Some(op) => emit_inline_strict2(e, call, out_addr(out), op),
-                    None => emit_func_call(e, call, out_addr(out), true, false),
+                    Some(op) => emit_inline_strict2(e, cache, call, out_addr(out), op),
+                    None => {
+                        emit_func_call(e, call, out_addr(out), true, false);
+                        cache.flush();
+                    }
                 }
             }
             Step::FuncExprStrict1 { call, out } | Step::FuncExprStrict { call, out } => {
                 emit_func_call(e, call, out_addr(out), true, false);
+                cache.flush();
             }
             Step::FuncExpr { call, out } => {
                 emit_func_call(e, call, out_addr(out), false, false);
+                cache.flush();
             }
             Step::FuncExprFusage { call, out } => {
                 emit_func_call(e, call, out_addr(out), false, true);
+                cache.flush();
             }
             Step::FuncExprStrictFusage { call, out } => {
                 emit_func_call(e, call, out_addr(out), true, true);
+                cache.flush();
             }
             other => {
                 debug_assert!(helper_supported(other), "emit pre-pass admitted {other:?}");
                 emit_helper_call(e, ix, nsteps);
+                cache.flush();
             }
         }
     }
@@ -1301,7 +1488,7 @@ mod emit {
 mod emit {
     use super::*;
 
-    pub(super) fn emit_program(_state: &ExprState<'_>) -> Option<Vec<u32>> {
+    pub(super) fn emit_program(_state: &ExprState<'_>) -> Option<(Vec<u32>, [u16; 3])> {
         None
     }
 
