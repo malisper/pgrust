@@ -1,9 +1,8 @@
 // ATExecAddConstraint FK slice (tablecmds.c): ATAddForeignKeyConstraint +
 // addFkConstraint/addFkRecurseReferenced/addFkRecurseReferencing +
 // createForeignKey{Action,Check}Triggers + validateForeignKeyConstraint,
-// plain-table MATCH SIMPLE lane, all ON DELETE/UPDATE actions. LOUD:
-// MATCH FULL/PARTIAL, PERIOD, partitioned rels, NOT ENFORCED,
-// DEFERRABLE/INITIALLY DEFERRED, old_conpfeqop re-add lane.
+// plain-table lane, all MATCH types and ON DELETE/UPDATE actions. LOUD:
+// PERIOD, partitioned rels, NOT ENFORCED, old_conpfeqop re-add lane.
 
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, INDEX_MAX_KEYS};
@@ -14,7 +13,7 @@ use types_error::{
 };
 use types_nodes::rawnodes::{
     Constraint, FKCONSTR_ACTION_CASCADE, FKCONSTR_ACTION_NOACTION, FKCONSTR_ACTION_RESTRICT,
-    FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL, FKCONSTR_MATCH_SIMPLE,
+    FKCONSTR_ACTION_SETDEFAULT, FKCONSTR_ACTION_SETNULL,
 };
 use types_nodes::NodeList;
 use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED};
@@ -110,9 +109,6 @@ fn at_add_foreign_key_constraint<'mcx>(
     }
     if fkconstraint.fk_with_period || fkconstraint.pk_with_period {
         unported("PERIOD (temporal FK)");
-    }
-    if fkconstraint.fk_matchtype != FKCONSTR_MATCH_SIMPLE {
-        unported("MATCH FULL/PARTIAL (fk_matchtype beyond simple)");
     }
     if !fkconstraint.is_enforced {
         unported("NOT ENFORCED");
