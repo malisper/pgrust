@@ -1,21 +1,21 @@
 [package]
-name = "shmem"
+name = "pg_config"
 version = "0.0.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "shmem"
+name = "pg_config"
 path = "src/lib.rs"
 
 [dependencies]
-s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 datum = { path = "../../../../_support/types/datum" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
-elog = { path = "../../../utils/error/elog" }
-shmem_seams = { path = "../shmem_seams" }
+funcapi = { path = "../../fmgr/funcapi" }
+varlena = { path = "../../adt/varlena" }
+init_small = { path = "../../init/init_small" }
+pg_path = { path = "../../../../port/pg_path" }
 
 [dev-dependencies]
-s_lock = { path = "../../lmgr/s_lock" }
-waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+types_core = { path = "../../../../_support/types/types_core" }

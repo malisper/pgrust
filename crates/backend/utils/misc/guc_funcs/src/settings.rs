@@ -150,6 +150,52 @@ pub fn fc_show_all_settings(
     Ok(srf.finish(fcinfo))
 }
 
+// C: show_all_file_settings — re-scans the config files (apply_settings
+// false) and reports every parsed item, ignored duplicates included.
+pub fn fc_show_all_file_settings(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    const NUM_PG_FILE_SETTINGS_ATTS: usize = 7;
+
+    let flinfo = flinfo.expect("show_all_file_settings: resolved FmgrInfo required");
+    let (_, conf) = guc::process_config::process_config_file_internal_list(
+        types_guc::PGC_SIGHUP,
+        false,
+        types_error::DEBUG3,
+    )?;
+
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+
+    for (seqno, item) in conf.iter().enumerate() {
+        let mut values = [Datum::null(); NUM_PG_FILE_SETTINGS_ATTS];
+        let mut nulls = [false; NUM_PG_FILE_SETTINGS_ATTS];
+
+        // sourceline is not meaningful without a sourcefile.
+        match &item.filename {
+            Some(f) => {
+                values[0] = text_datum(mcx, &f.to_string_lossy())?;
+                values[1] = Datum::from_i32(item.sourceline);
+            }
+            None => {
+                nulls[0] = true;
+                nulls[1] = true;
+            }
+        }
+        values[2] = Datum::from_i32(seqno as i32 + 1);
+        opt_text_datum(mcx, item.name.as_deref(), &mut values, &mut nulls, 3)?;
+        opt_text_datum(mcx, item.value.as_deref(), &mut values, &mut nulls, 4)?;
+        values[5] = Datum::from_bool(item.applied);
+        opt_text_datum(mcx, item.errmsg.as_deref(), &mut values, &mut nulls, 6)?;
+
+        srf.putvalues(&values, &nulls)?;
+    }
+
+    Ok(srf.finish(fcinfo))
+}
+
 fn config_by_name(fcinfo: &mut Fcinfo, missing_ok: bool) -> PgResult<Datum> {
     // SAFETY: strict fn — arg 0 is a non-null text varlena.
     let name = unsafe { fcinfo.arg_varlena_packed(0)? };
@@ -279,6 +325,7 @@ const fn b(
 
 pub const GUC_FUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(2084, "show_all_settings", 0, true, true, fc_show_all_settings),
+    b(3329, "show_all_file_settings", 0, true, true, fc_show_all_file_settings),
     b(2077, "show_config_by_name", 1, true, false, fc_show_config_by_name),
     b(3294, "show_config_by_name_missing_ok", 2, true, false, fc_show_config_by_name_missing_ok),
     b(2078, "set_config_by_name", 3, false, false, fc_set_config_by_name),
