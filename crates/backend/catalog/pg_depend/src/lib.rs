@@ -1000,24 +1000,33 @@ pub fn sequenceIsOwned<'mcx>(
     Ok(result)
 }
 
-// getIdentitySequence (pg_depend.c) over getOwnedSequences_internal: the
-// INTERNAL pg_depend edge from the sequence to (relid, attnum). DIVERGENCE:
-// C also probes get_rel_relkind == RELKIND_SEQUENCE; INTERNAL deps of a
-// column from pg_class are only identity sequences in every ported lane.
-pub fn getIdentitySequence<'mcx>(
+const RELKIND_SEQUENCE: i8 = b'S' as i8;
+
+fn getOwnedSequences_internal<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     attnum: i32,
-    missing_ok: bool,
-) -> PgResult<Oid> {
+    deptype: Option<DependencyType>,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    let mut result: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
     let rel = table::table_open(mcx, DependRelationId, types_rel::AccessShareLock)?;
-    let keys = [
-        oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
-        oid_key(Anum_pg_depend_refobjid, relid),
-        int4_key(Anum_pg_depend_refobjsubid, attnum),
-    ];
-    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, &keys)?;
-    let mut result = types_core::InvalidOid;
+    let keys3;
+    let keys2;
+    let keys: &[types_scan::scankey::ScanKeyData] = if attnum != 0 {
+        keys3 = [
+            oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
+            oid_key(Anum_pg_depend_refobjid, relid),
+            int4_key(Anum_pg_depend_refobjsubid, attnum),
+        ];
+        &keys3
+    } else {
+        keys2 = [
+            oid_key(Anum_pg_depend_refclassid, types_core::RELATION_RELATION_ID),
+            oid_key(Anum_pg_depend_refobjid, relid),
+        ];
+        &keys2
+    };
+    let mut scan = genam::systable_beginscan(mcx, &rel, DependReferenceIndexId, true, None, keys)?;
     let desc = rel.descr();
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         // SAFETY: aliases the slot-held image for this iteration's reads only.
@@ -1029,23 +1038,23 @@ pub fn getIdentitySequence<'mcx>(
                 tup.t_tableOid,
             )
         };
+        let dep_deptype = dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8();
+        let objid = dep_attr(&view, Anum_pg_depend_objid, desc).as_oid();
         if dep_attr(&view, Anum_pg_depend_classid, desc).as_oid()
             == types_core::RELATION_RELATION_ID
             && dep_attr(&view, Anum_pg_depend_objsubid, desc).as_i32() == 0
-            && dep_attr(&view, Anum_pg_depend_deptype, desc).as_i8()
-                == DependencyType::Internal.as_char()
+            && dep_attr(&view, Anum_pg_depend_refobjsubid, desc).as_i32() != 0
+            && (dep_deptype == DependencyType::Auto.as_char()
+                || dep_deptype == DependencyType::Internal.as_char())
+            && lsyscache::relation::get_rel_relkind(objid)? == RELKIND_SEQUENCE
         {
-            if result != types_core::InvalidOid {
-                panic!("more than one owned sequence found for column {relid}.{attnum}");
+            if deptype.is_none_or(|d| d.as_char() == dep_deptype) {
+                result.push(objid);
             }
-            result = dep_attr(&view, Anum_pg_depend_objid, desc).as_oid();
         }
     }
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
-    if result == types_core::InvalidOid && !missing_ok {
-        panic!("no owned sequence found for identity column {relid}.{attnum}");
-    }
     Ok(result)
 }
 
@@ -1090,6 +1099,31 @@ pub fn get_serial_sequence_candidates<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     rel.close(types_rel::AccessShareLock)?;
     Ok(out)
+}
+
+pub fn getOwnedSequences<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    getOwnedSequences_internal(mcx, relid, 0, None)
+}
+
+// getIdentitySequence (pg_depend.c); C's partition-ancestor hop is unported
+// (callers pass the topmost relid).
+pub fn getIdentitySequence<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: i32,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    let seqlist = getOwnedSequences_internal(mcx, relid, attnum, Some(DependencyType::Internal))?;
+    if seqlist.len() > 1 {
+        panic!("more than one owned sequence found for column {relid}.{attnum}");
+    }
+    let Some(&seq) = seqlist.first() else {
+        if missing_ok {
+            return Ok(types_core::InvalidOid);
+        }
+        panic!("no owned sequence found for identity column {relid}.{attnum}");
+    };
+    Ok(seq)
 }
 
 pub fn deleteDependencyRecordsForClass<'mcx>(
