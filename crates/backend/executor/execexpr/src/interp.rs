@@ -300,9 +300,7 @@ fn eval<'mcx>(
 ) -> PgResult<EvalOutcome> {
     if let Kernel::Program = state.kernel {
         if state.jit.is_some() {
-            // RETURNING OLD/NEW + RETURNINGEXPR steps are jit-refused, so a
-            // jit-compiled program never contains them (no ret threading here).
-            return crate::jit::run_jit(state, slots, result_slot, resume);
+            return crate::jit::run_jit(state, slots, ret, result_slot, resume);
         }
         return run_program(state, slots, ret, result_slot, resume);
     }
@@ -3789,15 +3787,48 @@ pub(crate) enum StepFlow {
     Suspend(core::ptr::NonNull<()>),
 }
 
+// exec_one_step's OLD/NEW resolution; borrows the scan Option directly so
+// the reborrow outlives the consuming statement (run_program's macros bind
+// named locals instead).
+fn ret_slot<'r, 'a, 'b, 'mcx>(
+    which: &'r mut RetSlot<'a, 'mcx>,
+    scan: &'r mut Option<&'b mut SlotData<'mcx>>,
+    src: SlotSrc,
+) -> &'r mut SlotData<'mcx> {
+    match which {
+        RetSlot::Scan => match scan {
+            Some(s) => s,
+            None => missing_slot(src),
+        },
+        RetSlot::Slot(s) => s,
+        RetSlot::None => missing_slot(src),
+    }
+}
+
 pub(crate) fn exec_one_step<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
     mut result_slot: Option<&mut SlotData<'mcx>>,
     ix: u32,
 ) -> PgResult<StepFlow> {
+    // OLD/NEW-is-null bits are rewritten per row by the RETURNING driver:
+    // read at every step, exactly like run_program's per-call read.
+    let flags = state.flags;
     let ExprState { steps, frames, resnd, saop_tables, .. } = state;
     let res = *resnd;
     let step = steps[ix as usize];
+    // run_program's OLD/NEW resolution (RetSlot::Scan aliases the scan slot).
+    macro_rules! old_slot {
+        () => {
+            ret_slot(&mut ret.old, &mut slots.scan, SlotSrc::Old)
+        };
+    }
+    macro_rules! new_slot {
+        () => {
+            ret_slot(&mut ret.new, &mut slots.scan, SlotSrc::New)
+        };
+    }
     match step {
         // Open-coded by the emitter (jit.rs step_stencilable).
         Step::DoneReturn
@@ -3850,17 +3881,58 @@ pub(crate) fn exec_one_step<'mcx>(
         | Step::FuncStrict2QualThin { .. }
         | Step::OuterVarNotDistinctThin { .. }
         | Step::NotDistinctQualThin { .. }
-        | Step::AggTransStrictByValIndirectThin { .. }
-        | Step::OldFetchSome { .. }
-        | Step::NewFetchSome { .. }
-        | Step::OldVar { .. }
-        | Step::NewVar { .. }
-        | Step::OldSysVar { .. }
-        | Step::NewSysVar { .. }
-        | Step::AssignOldVar { .. }
-        | Step::AssignNewVar { .. }
-        | Step::ReturningExprStep { .. } => {
+        | Step::AggTransStrictByValIndirectThin { .. } => {
             unreachable!("step refused by the emitter; never in jitted programs")
+        }
+        Step::OldFetchSome { last_var } => {
+            exectuples::slot_getsomeattrs(old_slot!(), last_var as i32);
+        }
+        Step::NewFetchSome { last_var } => {
+            exectuples::slot_getsomeattrs(new_slot!(), last_var as i32);
+        }
+        Step::OldVar { attnum, out, .. } => {
+            let nd = read_var(old_slot!(), attnum);
+            write_out(out, nd.value, nd.isnull);
+        }
+        Step::NewVar { attnum, out, .. } => {
+            let nd = read_var(new_slot!(), attnum);
+            write_out(out, nd.value, nd.isnull);
+        }
+        Step::OldSysVar { attnum, out } => {
+            // C ExecEvalSysVar: OLD system attribute is NULL when the OLD
+            // row doesn't exist.
+            if flags & crate::steps::EEO_FLAG_OLD_IS_NULL != 0 {
+                write_out(out, Datum::null(), true);
+            } else {
+                let mut isnull = false;
+                let d = exectuples::slot_getsysattr(old_slot!(), attnum as i32, &mut isnull)?;
+                write_out(out, d, isnull);
+            }
+        }
+        Step::NewSysVar { attnum, out } => {
+            if flags & crate::steps::EEO_FLAG_NEW_IS_NULL != 0 {
+                write_out(out, Datum::null(), true);
+            } else {
+                let mut isnull = false;
+                let d = exectuples::slot_getsysattr(new_slot!(), attnum as i32, &mut isnull)?;
+                write_out(out, d, isnull);
+            }
+        }
+        Step::AssignOldVar { attnum, resultnum } => {
+            let nd = read_var(old_slot!(), attnum);
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            assign_to_result(rslot, resultnum, nd.value, nd.isnull);
+        }
+        Step::AssignNewVar { attnum, resultnum } => {
+            let nd = read_var(new_slot!(), attnum);
+            let rslot = result_slot.as_deref_mut().unwrap_or_else(|| no_result_slot());
+            assign_to_result(rslot, resultnum, nd.value, nd.isnull);
+        }
+        Step::ReturningExprStep { nullflag, jumpdone, out } => {
+            if flags & nullflag != 0 {
+                write_out(out, Datum::null(), true);
+                return Ok(StepFlow::Jump(jumpdone));
+            }
         }
         Step::NullIf { call, out } => {
             step_nullif(&call, out)?;
@@ -4012,9 +4084,22 @@ pub(crate) fn exec_one_step<'mcx>(
             write_out(out, d, false);
         }
         Step::WholeRow { src, wr, frame, out } => {
-            let slot = slots.get(src);
-            let (value, isnull) = eval_whole_row(frames, slot, wr, frame)?;
-            write_out(out, value, isnull);
+            // C ExecEvalWholeRowVar: OLD/NEW whole-row is NULL when that
+            // row doesn't exist (run_program parity).
+            if (matches!(src, SlotSrc::Old) && flags & crate::steps::EEO_FLAG_OLD_IS_NULL != 0)
+                || (matches!(src, SlotSrc::New)
+                    && flags & crate::steps::EEO_FLAG_NEW_IS_NULL != 0)
+            {
+                write_out(out, Datum::null(), true);
+            } else {
+                let slot = match src {
+                    SlotSrc::Old => old_slot!(),
+                    SlotSrc::New => new_slot!(),
+                    other => slots.get(other),
+                };
+                let (value, isnull) = eval_whole_row(frames, slot, wr, frame)?;
+                write_out(out, value, isnull);
+            }
         }
         Step::IoCoerce { calls, out } => {
             step_io_coerce(calls, out)?;
@@ -4407,7 +4492,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::NewSysVar { .. }
         | Step::AssignOldVar { .. }
         | Step::AssignNewVar { .. }
-        | Step::ReturningExprStep { .. } => false,
+        | Step::ReturningExprStep { .. } => true,
         Step::ScanFetchSome { .. }
         | Step::InnerFetchSome { .. }
         | Step::OuterFetchSome { .. }
