@@ -786,7 +786,7 @@ pub fn parseCheckAggregates<'mcx>(
             .unwrap();
         let mut expr = tle.expr;
         if has_join_rtes {
-            expr = vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, expr)?;
+            expr = vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, None, expr)?;
         }
         if expr.as_var().is_none() {
             hnvg = true;
@@ -801,7 +801,7 @@ pub fn parseCheckAggregates<'mcx>(
     }
     for tle in &qry.targetList {
         let clause = if has_join_rtes {
-            vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, tle)?
+            vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, None, tle)?
         } else {
             tle
         };
@@ -810,7 +810,7 @@ pub fn parseCheckAggregates<'mcx>(
     if let Some(having) = qry.havingQual {
         finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, having)?;
         let clause = if has_join_rtes {
-            vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, having)?
+            vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, None, having)?
         } else {
             having
         };
@@ -1040,7 +1040,7 @@ fn finalize_grouping_exprs<'mcx>(
                     // query level; no functional dependencies or outer
                     // references.
                     let expr = if has_join_rtes {
-                        vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, expr)?
+                        vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, None, expr)?
                     } else {
                         expr
                     };

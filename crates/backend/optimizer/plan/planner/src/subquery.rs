@@ -399,6 +399,24 @@ pub fn subquery_planner<'mcx>(
     }
     // Per-RTE expression preprocessing: expression-bearing RTEs panicked above.
 
+    // planner.c:1069: joinaliasvars no longer match the preprocessed
+    // expressions; get rid of them so later tree scans (including the
+    // post-seal sweep) don't walk stale alias lists.
+    if run.root.hasJoinRTEs {
+        for rte_node in &parse.rtable {
+            let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+            if !rte.joinaliasvars.is_nil() {
+                // SAFETY: parse tree is planner-owned; no derived refs live.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.joinaliasvars = NodeList::nil()
+                    })
+                }
+                .expect("RangeTblEntry");
+            }
+        }
+    }
+
     if parse.hasGroupRTE {
         panic!("flatten_group_exprs (var.c): M2 grouping lane");
     }
@@ -507,7 +525,17 @@ pub fn preprocess_expression<'mcx>(
     // C skips flattening only for RTFUNC/VALUES/TABLESAMPLE/TABLEFUNC kinds
     // (the last two have no EXPRKIND here yet).
     if run.root.hasJoinRTEs && kind != EXPRKIND_RTFUNC && kind != EXPRKIND_VALUES {
-        expr = vars::flatten_join_alias_vars(run.mcx, rtable, jointree, expr)?;
+        // root != NULL in C: pulled-up joinaliasvars entries may need a
+        // PlaceHolderVar wrapper, whose phid comes from glob.last_ph_id.
+        let last_ph_id = core::cell::Cell::new(run.glob.last_ph_id);
+        expr = vars::flatten_join_alias_vars(
+            run.mcx,
+            rtable,
+            jointree,
+            Some(&vars::FjavRoot { last_ph_id: &last_ph_id }),
+            expr,
+        )?;
+        run.glob.last_ph_id = last_ph_id.get();
     }
     if kind != EXPRKIND_RTFUNC {
         expr = clauses::eval_const_expressions_with_params(
