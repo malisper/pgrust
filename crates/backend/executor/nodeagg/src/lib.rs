@@ -1541,6 +1541,8 @@ fn hashagg_memdebug_enabled() -> bool {
 fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem: usize) {
     let mut rss = 0u64;
     let mut hwm = 0u64;
+    let mut anon = 0u64;
+    let mut shmem = 0u64;
     if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
         for l in s.lines() {
             let kb = |v: &str| v.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
@@ -1548,13 +1550,17 @@ fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem
                 rss = kb(v);
             } else if let Some(v) = l.strip_prefix("VmHWM:") {
                 hwm = kb(v);
+            } else if let Some(v) = l.strip_prefix("RssAnon:") {
+                anon = kb(v);
+            } else if let Some(v) = l.strip_prefix("RssShmem:") {
+                shmem = kb(v);
             }
         }
     }
     let meta = ph.hashtable.meta_mem();
     let entry = ph.table_ctx.subtree_used();
     eprintln!(
-        "HASHAGG_MEMDEBUG {tag}: ngroups={} meta_kb={} table_ctx_kb={} aggctx_kb={} bufs_kb={} accounted_kb={} vmrss_kb={rss} vmhwm_kb={hwm} nbatches_pending={} limit_kb={}",
+        "HASHAGG_MEMDEBUG {tag}: ngroups={} meta_kb={} table_ctx_kb={} aggctx_kb={} bufs_kb={} accounted_kb={} vmrss_kb={rss} anon_kb={anon} shmem_kb={shmem} vmhwm_kb={hwm} nbatches_pending={} limit_kb={}",
         ph.hash_ngroups_current,
         meta / 1024,
         entry / 1024,
@@ -1564,6 +1570,34 @@ fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem
         ph.spill.batches.len(),
         ph.hash_mem_limit / 1024,
     );
+    static NCALL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let n = NCALL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 4 || n % 16 == 0 {
+        let mut total = 0usize;
+        for t in ::mcxt_stats::backend_context_forest() {
+            hashagg_memdebug_tree(&t, 1, &mut total);
+        }
+        eprintln!("HASHAGG_MEMDEBUG forest_total_foot_kb={}", total / 1024);
+    }
+}
+
+fn hashagg_memdebug_tree(t: &::mcx::TreeStats, level: usize, total: &mut usize) {
+    *total += t.arena_footprint;
+    if t.subtree_used >= 256 * 1024 || t.arena_footprint >= 256 * 1024 {
+        eprintln!(
+            "HASHAGG_MEMDEBUG ctx l{level} {}{} [{}] used_kb={} foot_kb={} subtree_used_kb={} nblocks={}",
+            t.name,
+            t.ident.as_deref().map(|i| format!(": {i}")).unwrap_or_default(),
+            t.kind,
+            t.used / 1024,
+            t.arena_footprint / 1024,
+            t.subtree_used / 1024,
+            t.nblocks,
+        );
+    }
+    for c in &t.children {
+        hashagg_memdebug_tree(c, level + 1, total);
+    }
 }
 
 // hash_agg_check_limits + hash_agg_enter_spill_mode (nodeAgg.c). Divergence:
