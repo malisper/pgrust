@@ -827,6 +827,7 @@ fn ATPrepCmd<'mcx>(
             let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
             run_seq_stmts(mcx, &cxt.blist)?;
             debug_assert!(cxt.alist.is_nil());
+            debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
             ATPrepAlterColumnType(
                 mcx,
                 wqueue,
@@ -1385,6 +1386,7 @@ fn ATRewriteCatalogs<'mcx>(
                     let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
                     run_seq_stmts(mcx, &cxt.blist)?;
                     debug_assert!(cxt.alist.is_nil());
+                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
                     ATExecAddIdentity(mcx, &rel, cmd)?;
                 }
@@ -1393,6 +1395,7 @@ fn ATRewriteCatalogs<'mcx>(
                     let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
                     run_seq_stmts(mcx, &cxt.blist)?;
                     debug_assert!(cxt.alist.is_nil());
+                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
                     ATExecSetIdentity(mcx, &rel, cmd)?;
                 }
@@ -2058,7 +2061,25 @@ fn ATExecAddColumn<'mcx>(
     }
 
     if !recursing && cmd.subtype != AlterTableType::AT_AddColumnToView {
-        parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
+        let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
+        debug_assert!(cxt.blist.is_nil() && cxt.alist.is_nil());
+        // ATParseTransformCmd: generated AT_AddConstraint subcommands are
+        // scheduled into later passes of the same wqueue entry.
+        for def in cxt.ckconstraints.iter().chain(cxt.nnconstraints.iter()) {
+            let constr = def.as_variant::<Constraint>().expect("Constraint");
+            let target_pass = match constr.contype {
+                ConstrType::CONSTR_NOTNULL => AT_PASS_COL_ATTRS,
+                ConstrType::CONSTR_PRIMARY
+                | ConstrType::CONSTR_UNIQUE
+                | ConstrType::CONSTR_EXCLUSION => AT_PASS_ADD_INDEXCONSTR,
+                _ => AT_PASS_ADD_OTHERCONSTR,
+            };
+            let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+            newcmd.subtype = AlterTableType::AT_AddConstraint;
+            newcmd.recurse = recurse;
+            newcmd.def = Some(def);
+            wqueue[tabidx].subcmds[target_pass].lappend(mcx, newcmd.seal())?;
+        }
     }
     let col_def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
 
