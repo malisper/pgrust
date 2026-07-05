@@ -2647,6 +2647,17 @@ pub trait AggBatchSource<'mcx> {
     fn storeless_ok(&self) -> bool {
         !self.has_qual()
     }
+    /// Batched qual census over the staged batch: VISIBLE rows passing the
+    /// qual, any per-row-only rows resolved inside. None = the per-row drain
+    /// owns the batch. Only sources whose census preserves per-row qual
+    /// semantics (non-erroring kernel quals) may return Some.
+    fn qualifying_count(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _n: u32,
+    ) -> PgResult<Option<u32>> {
+        Ok(None)
+    }
 }
 
 /// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
@@ -2701,19 +2712,24 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
         );
     // count(*) advances once per page batch; a refused advance re-runs the
     // batch through the per-row kernel so overflow ereports at exactly C's
-    // row. The per-row resets are no-ops here (the transition allocates
-    // nothing), so one reset per batch is state-identical.
-    let count_star =
-        if storeless { node.evaltrans.as_deref().unwrap().agg_count_star() } else { None };
+    // row. The per-row resets are no-ops here (the transition and the kernel
+    // qual allocate nothing), so one reset per batch is state-identical.
+    let count_star = node.evaltrans.as_deref().unwrap().agg_count_star();
     loop {
         let n = src.next_batch(estate)?;
         if n == 0 {
             break;
         }
         if let Some((pergroup, strict)) = count_star {
-            if ::execexpr::agg_count_star_advance(pergroup, strict, n) {
-                estate.reset_expr_context(node.tmpcontext);
-                continue;
+            // Qual'd count(*): the source's bitmap census replaces the
+            // per-row fetch+transition walk; a None census or refused
+            // advance falls to the per-row drain below.
+            let c = if storeless { Some(n) } else { src.qualifying_count(estate, n)? };
+            if let Some(c) = c {
+                if ::execexpr::agg_count_star_advance(pergroup, strict, c) {
+                    estate.reset_expr_context(node.tmpcontext);
+                    continue;
+                }
             }
         }
         if storeless {
