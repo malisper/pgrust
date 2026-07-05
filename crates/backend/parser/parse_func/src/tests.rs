@@ -194,7 +194,7 @@ fn count_star_builds_aggref() {
     assert_eq!(agg.aggsplit, types_nodes::primnodes::AGGSPLIT_SIMPLE);
     assert_eq!((agg.aggno, agg.aggtransno), (-1, -1));
     assert_eq!(agg.location, 7);
-    assert!(pstate.p_hasAggs);
+    assert!(pstate.p_hasAggs.get());
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn sum_of_int4_var_builds_aggref() {
     assert_eq!(tle.expr.as_var().unwrap().vartype, INT4OID);
     assert_eq!(agg.aggargtypes.len(), 1);
     assert_eq!(agg.aggargtypes.nth(0), INT4OID);
-    assert!(pstate.p_hasAggs);
+    assert!(pstate.p_hasAggs.get());
 }
 
 #[test]

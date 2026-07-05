@@ -865,7 +865,7 @@ fn transformPLAssignStmt<'mcx>(
     qry.hasSubLinks = pstate.p_hasSubLinks;
     qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
     qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
-    qry.hasAggs = pstate.p_hasAggs;
+    qry.hasAggs = pstate.p_hasAggs.get();
 
     for lc_node in &sstmt.lockingClause {
         let lc = lc_node.as_locking_clause().expect("lockingClause cell");
@@ -874,7 +874,7 @@ fn transformPLAssignStmt<'mcx>(
 
     assign_query_collations(mcx, pstate, &qry)?;
 
-    if pstate.p_hasAggs
+    if pstate.p_hasAggs.get()
         || !qry.groupClause.is_nil()
         || !qry.groupingSets.is_nil()
         || qry.havingQual.is_some()
@@ -1015,7 +1015,7 @@ fn transformSelectStmt<'mcx>(
     qry.hasSubLinks = pstate.p_hasSubLinks;
     qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
     qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
-    qry.hasAggs = pstate.p_hasAggs;
+    qry.hasAggs = pstate.p_hasAggs.get();
 
     for lc_node in &stmt.lockingClause {
         let lc = lc_node.as_locking_clause().expect("lockingClause cell");
@@ -1024,7 +1024,7 @@ fn transformSelectStmt<'mcx>(
 
     assign_query_collations(mcx, pstate, &qry)?;
 
-    if pstate.p_hasAggs
+    if pstate.p_hasAggs.get()
         || !qry.groupClause.is_nil()
         || !qry.groupingSets.is_nil()
         || qry.havingQual.is_some()
@@ -1683,11 +1683,11 @@ fn transformDeleteStmt<'mcx>(
     qry.hasSubLinks = pstate.p_hasSubLinks;
     qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
     qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
-    qry.hasAggs = pstate.p_hasAggs;
+    qry.hasAggs = pstate.p_hasAggs.get();
 
     assign_query_collations(mcx, pstate, &qry)?;
 
-    if pstate.p_hasAggs {
+    if pstate.p_hasAggs.get() {
         parse_agg::parseCheckAggregates(mcx, pstate, &mut qry)?;
     }
     Ok(qry)

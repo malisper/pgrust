@@ -673,7 +673,7 @@ fn group_by_aggregate_rejected_42803() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
     let aggref = Node::mk(
         mcx,
         types_nodes::primnodes::Aggref {
