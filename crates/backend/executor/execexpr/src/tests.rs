@@ -333,6 +333,28 @@ fn mk_opexpr<'mcx>(
     .unwrap()
 }
 
+fn mk_null_if_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    opfuncid: u32,
+    resulttype: u32,
+    args: NodeList<'mcx>,
+) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        ::types_nodes::NullIfExpr {
+            opno: 0,
+            opfuncid,
+            opresulttype: resulttype,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
 fn qual_state<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgBox<'mcx, ExprState<'mcx>> {
     let qual = NodeList::make1(mcx, expr).unwrap();
     exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap()
@@ -504,6 +526,55 @@ fn just_func_kernel_const_args() {
         let r = exec_eval_expr(&mut state, &mut slots).unwrap();
         assert_eq!(r.value.as_i32(), 42);
         assert!(!r.isnull);
+    });
+}
+
+#[test]
+fn nullif_equal_args_returns_null() {
+    with_mcx(|mcx| {
+        let args =
+            NodeList::make2(mcx, mk_int4_const(mcx, Some(1)), mk_int4_const(mcx, Some(1)))
+                .unwrap();
+        let mut state =
+            exec_init_expr(mcx, Some(mk_null_if_expr(mcx, 65, INT4OID, args)), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(state.steps()[0], Step::NullIf { .. }));
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(r.isnull);
+    });
+}
+
+#[test]
+fn nullif_unequal_args_returns_first() {
+    with_mcx(|mcx| {
+        let args =
+            NodeList::make2(mcx, mk_int4_const(mcx, Some(1)), mk_int4_const(mcx, Some(2)))
+                .unwrap();
+        let mut state =
+            exec_init_expr(mcx, Some(mk_null_if_expr(mcx, 65, INT4OID, args)), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(!r.isnull);
+        assert_eq!(r.value.as_i32(), 1);
+    });
+}
+
+#[test]
+fn nullif_null_arg_returns_first_unevaluated() {
+    with_mcx(|mcx| {
+        let args =
+            NodeList::make2(mcx, mk_int4_const(mcx, None), mk_int4_const(mcx, Some(2))).unwrap();
+        let mut state =
+            exec_init_expr(mcx, Some(mk_null_if_expr(mcx, 65, INT4OID, args)), ParamBind::NONE)
+                .unwrap()
+                .unwrap();
+        let mut slots = EvalSlots::default();
+        let r = exec_eval_expr(&mut state, &mut slots).unwrap();
+        assert!(r.isnull);
     });
 }
 
