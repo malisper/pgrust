@@ -536,7 +536,6 @@ fn ATCheckPartitionsNotInUse<'mcx>(
     Ok(())
 }
 
-// ATPrepCmd: the statement arena is single-use, so the subcommand is
 const ATT_TABLE: i32 = 0x0001;
 const ATT_VIEW: i32 = 0x0002;
 const ATT_MATVIEW: i32 = 0x0004;
@@ -731,7 +730,6 @@ fn ATSimplePermissions(
     Ok(())
 }
 
-// scribbled on in place instead of C's copyObject.
 fn ATPrepCmd<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut Wqueue<'mcx>,
@@ -742,6 +740,9 @@ fn ATPrepCmd<'mcx>(
     lockmode: LOCKMODE,
     query_string: &str,
 ) -> PgResult<()> {
+    // C copyObject boundary (tablecmds.c:4934): each table scribbles on its
+    // own copy of the subcommand.
+    let cnode = copyfuncs::copy_object(mcx, cnode)?;
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
     if let Some(allowed) = at_allowed_targets(cmd.subtype) {
         ATSimplePermissions(cmd.subtype, rel, allowed)?;
@@ -1469,9 +1470,15 @@ fn ATRewriteTableOne<'mcx>(
     tab: &mut AlteredTableInfo<'mcx>,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    // find_composite_type_dependencies: composite-type columns are unported,
-    // so no dependent rowtype uses can exist.
-    if tab.rewrite > 0 {
+    if !types_rel::RELKIND_HAS_STORAGE(tab.relkind) {
+        return Ok(());
+    }
+    if tab.has_newvals || tab.rewrite > 0 {
+        let rel = table::table_open(mcx, tab.relid, NoLock)?;
+        find_composite_type_dependencies_rel(mcx, rel.rd_rel.reltype, &rel)?;
+        rel.close(NoLock)?;
+    }
+    if tab.rewrite > 0 && tab.relkind != types_rel::RELKIND_SEQUENCE {
         if tab.rewrite & AT_REWRITE_ACCESS_METHOD != 0 {
             unported("ATRewriteTable rewrite (SET ACCESS METHOD; only heap exists)");
         }
@@ -1482,6 +1489,28 @@ fn ATRewriteTableOne<'mcx>(
             unported("ATRewriteTable rewrite flags");
         }
         let old_heap = table::table_open(mcx, tab.relid, NoLock)?;
+        if catalog::IsSystemRelation(&old_heap) {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("cannot rewrite system relation \"{}\"", old_heap.name()),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        if old_heap.rd_options.as_ref().and_then(|o| o.std()).is_some_and(|o| o.user_catalog_table)
+        {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!(
+                        "cannot rewrite table \"{}\" used as a catalog table",
+                        old_heap.name()
+                    ),
+                )
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
         let persistence = if tab.chg_persistence {
             tab.newrelpersistence
         } else {
@@ -1508,14 +1537,13 @@ fn ATRewriteTableOne<'mcx>(
             multixact::ReadNextMultiXactId()?,
             persistence,
         )?;
+    } else if tab.rewrite > 0 {
         if tab.chg_persistence {
-            for &seq_relid in pg_depend::getOwnedSequences(mcx, tab.relid)?.iter() {
-                sequence_seams::sequence_change_persistence::call(
-                    mcx,
-                    seq_relid,
-                    tab.newrelpersistence,
-                )?;
-            }
+            sequence_seams::sequence_change_persistence::call(
+                mcx,
+                tab.relid,
+                tab.newrelpersistence,
+            )?;
         }
     } else {
         if !tab.constraints.is_empty()
@@ -1528,7 +1556,15 @@ fn ATRewriteTableOne<'mcx>(
             ATExecSetTableSpace(mcx, tab.relid, tab.new_tablespace, lockmode)?;
         }
     }
-    let _ = tab.has_newvals;
+    if tab.chg_persistence {
+        for &seq_relid in pg_depend::getOwnedSequences(mcx, tab.relid)?.iter() {
+            sequence_seams::sequence_change_persistence::call(
+                mcx,
+                seq_relid,
+                tab.newrelpersistence,
+            )?;
+        }
+    }
 
     // C's final pass: FK constraints are checked after all rewrites.
     if !tab.fk_checks.is_empty() {
@@ -4517,6 +4553,14 @@ fn ATPrepAlterColumnType<'mcx>(
     let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
     let tn = def.typeName.expect("ColumnDef.typeName").as_variant::<TypeName>().expect("TypeName");
 
+    let reloftype = pg_class_read_attr(mcx, rel.rd_id, Anum_pg_class_reloftype)?.as_oid();
+    if reloftype != InvalidOid && !recursing {
+        return Err(Box::new(
+            PgError::new(ERROR, "cannot alter column type of typed table".to_string())
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+
     let Some((attnum, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
         return Err(undefined_column(col_name, &relname));
     };
@@ -4582,7 +4626,11 @@ fn ATPrepAlterColumnType<'mcx>(
 
     // C builds no transform for virtual generated columns: no newval, no
     // rewrite of the column itself.
-    if att.attgenerated != b'v' as i8 {
+    let tab_relkind = wqueue[tabidx].relkind;
+    if att.attgenerated != b'v' as i8
+        && (tab_relkind == RELKIND_RELATION
+            || tab_relkind == types_rel::RELKIND_PARTITIONED_TABLE)
+    {
     let mut pstate = parser_small1::make_parsestate(mcx, None);
     pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
     let using = match (def.raw_default, def.cooked_default) {
@@ -4676,6 +4724,19 @@ fn ATPrepAlterColumnType<'mcx>(
         wqueue[tabidx].rewrite |= AT_REWRITE_COLUMN_REWRITE;
     }
     parser_small1::free_parsestate(pstate)?;
+    } else if att.attgenerated != b'v' as i8
+        && (def.raw_default.is_some() || def.cooked_default.is_some())
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("\"{relname}\" is not a table"))
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+
+    // tablecmds.c:14548: storage-less relations and virtual columns check
+    // composite-type uses now; stored ones check at rewrite time.
+    if !types_rel::RELKIND_HAS_STORAGE(tab_relkind) || att.attgenerated == b'v' as i8 {
+        find_composite_type_dependencies_rel(mcx, rel.rd_rel.reltype, rel)?;
     }
 
     // Manual recursion: attribute numbers in the USING expression must be
@@ -4770,6 +4831,37 @@ fn ATPrepAlterColumnType<'mcx>(
             )
             .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
         ));
+    }
+
+    if tab_relkind == types_rel::RELKIND_COMPOSITE_TYPE {
+        ATTypedTableRecursion(mcx, wqueue, rel, cnode, cmd.behavior, lockmode, query_string)?;
+    }
+    Ok(())
+}
+
+// ATTypedTableRecursion (tablecmds.c): propagate ALTER TYPE operations to
+// the typed tables of that type, honoring RESTRICT/CASCADE.
+fn ATTypedTableRecursion<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    rel: &Relation<'mcx>,
+    cnode: Node<'mcx>,
+    behavior: types_nodes::parsenodes::DropBehavior,
+    lockmode: LOCKMODE,
+    query_string: &str,
+) -> PgResult<()> {
+    debug_assert!(rel.rd_rel.relkind == types_rel::RELKIND_COMPOSITE_TYPE);
+    let children = crate::rename::find_typed_table_dependencies(
+        mcx,
+        rel.rd_rel.reltype,
+        rel.name(),
+        behavior,
+    )?;
+    for &childrelid in children.iter() {
+        let childrel = relation_seams::relation_open::call(mcx, childrelid, lockmode)?;
+        catalog_heap::CheckTableNotInUse(&childrel, "ALTER TABLE")?;
+        ATPrepCmd(mcx, wqueue, &childrel, cnode, true, true, lockmode, query_string)?;
+        childrel.close(NoLock)?;
     }
     Ok(())
 }
@@ -6595,12 +6687,43 @@ fn drop_parent_dependency_on_class<'mcx>(
     }
     dep_rel.close(types_rel::RowExclusiveLock)
 }
-// find_composite_type_dependencies (tablecmds.c): origTypeName form only —
-// the origRelation error arms belong to ALTER TABLE OF/composite lanes.
+// find_composite_type_dependencies (tablecmds.c).
+pub(crate) enum CompositeDepOrigin {
+    TypeName(String),
+    Relation { relname: String, relkind: u8 },
+}
+
 pub fn find_composite_type_dependencies<'mcx>(
     mcx: Mcx<'mcx>,
     type_oid: Oid,
     orig_type_name: &str,
+) -> PgResult<()> {
+    find_composite_type_dependencies_impl(
+        mcx,
+        type_oid,
+        &CompositeDepOrigin::TypeName(orig_type_name.to_string()),
+    )
+}
+
+pub(crate) fn find_composite_type_dependencies_rel<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    orig_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    find_composite_type_dependencies_impl(
+        mcx,
+        type_oid,
+        &CompositeDepOrigin::Relation {
+            relname: orig_rel.name().to_string(),
+            relkind: orig_rel.rd_rel.relkind,
+        },
+    )
+}
+
+fn find_composite_type_dependencies_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    origin: &CompositeDepOrigin,
 ) -> PgResult<()> {
     let dep_rel = table::table_open(mcx, pg_depend::DependRelationId, types_rel::AccessShareLock)?;
     const Anum_pg_depend_classid: usize = 1;
@@ -6631,7 +6754,7 @@ pub fn find_composite_type_dependencies<'mcx>(
         let objid = get(Anum_pg_depend_objid).as_oid();
         let objsubid = get(Anum_pg_depend_objsubid).as_i32();
         if classid == TYPE_RELATION_ID {
-            find_composite_type_dependencies(mcx, objid, orig_type_name)?;
+            find_composite_type_dependencies_impl(mcx, objid, origin)?;
             continue;
         }
         if classid != RELATION_RELATION_ID {
@@ -6666,16 +6789,31 @@ pub fn find_composite_type_dependencies<'mcx>(
         {
             let relname = rel.name().to_string();
             let colname = attname.expect("column resolved above");
-            return Err(Box::new(
-                PgError::new(
-                    ERROR,
-                    format!(
-                        "cannot alter type \"{orig_type_name}\" because column \
+            let msg = match origin {
+                CompositeDepOrigin::TypeName(name) => format!(
+                    "cannot alter type \"{name}\" because column \
+                     \"{relname}.{colname}\" uses it"
+                ),
+                CompositeDepOrigin::Relation { relname: origname, relkind } => match *relkind {
+                    types_rel::RELKIND_COMPOSITE_TYPE => format!(
+                        "cannot alter type \"{origname}\" because column \
                          \"{relname}.{colname}\" uses it"
                     ),
-                )
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    types_rel::RELKIND_FOREIGN_TABLE => format!(
+                        "cannot alter foreign table \"{origname}\" because column \
+                         \"{relname}.{colname}\" uses its row type"
+                    ),
+                    _ => format!(
+                        "cannot alter table \"{origname}\" because column \
+                         \"{relname}.{colname}\" uses its row type"
+                    ),
+                },
+            };
+            return Err(Box::new(
+                PgError::new(ERROR, msg).with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
+        } else if rel.rd_rel.reltype != InvalidOid {
+            find_composite_type_dependencies_impl(mcx, rel.rd_rel.reltype, origin)?;
         }
         rel.close(types_rel::AccessShareLock)?;
     }
