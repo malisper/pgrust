@@ -40,7 +40,7 @@ pub use compile::{
 };
 pub use interp::{
     agg_datum_copy, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_prearmed, exec_project_outcome,
-    exec_project_returning, exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome,
+    exec_project_returning, exec_project_returning_outcome, exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome,
     Resume, RetSlot, RetSlots, Suspension,
 };
 pub use steps::{

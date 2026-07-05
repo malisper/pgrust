@@ -174,6 +174,16 @@ pub fn with_ecxt_eval_slots<'mcx, R>(
 
 #[cold]
 #[inline(never)]
+/// Public driver entry for owning nodes whose eval slots aren't ecxt-shaped
+/// (nodeModifyTable's RETURNING projection): run one suspended SubPlan.
+pub fn run_subplan_eval<'mcx>(
+    sstate: core::ptr::NonNull<()>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<::datum::NullableDatum> {
+    run_subplan_eval_hook(sstate, estate, ecxt)
+}
+
 fn run_subplan_eval_hook<'mcx>(
     sstate: core::ptr::NonNull<()>,
     estate: &mut EStateData<'mcx>,

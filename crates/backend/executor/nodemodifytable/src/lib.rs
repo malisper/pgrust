@@ -121,6 +121,9 @@ pub struct ModifyTableState<'mcx> {
     // The shared RETURNING result slot (C ps_ResultTupleSlot): all result
     // rels project into one slot over the node targetlist's descriptor.
     returning_slot: Option<ExecSlotId>,
+    // C ps_ExprContext: SubPlan args in RETURNING evaluate against it (scan =
+    // returned tuple, outer = plan tuple); reset per projected row.
+    returning_ecxt: Option<executils::EcxtId>,
     on_conflict: Option<OnConflictState<'mcx>>,
     // ON CONFLICT DO UPDATE's locked pre-update row, carried to the INSERT
     // arm's RETURNING (C processes it inside ExecUpdate instead).
@@ -412,10 +415,12 @@ pub fn exec_init_modify_table<'mcx>(
     // The shared RETURNING result slot, virtual over the caller-built
     // descriptor (C ExecInitResultTupleSlotTL over the node targetlist).
     let mut returning_slot = None;
+    let mut returning_ecxt = None;
     if !node.returningLists.is_nil() {
         let desc = returning_desc.expect("caller passes the RETURNING result descriptor");
         returning_slot =
             Some(estate.exec_init_extra_tuple_slot(Some(desc), TupleSlotKind::Virtual));
+        returning_ecxt = Some(estate.create_expr_context());
     }
     let rti = rels[0].rti;
 
@@ -511,6 +516,7 @@ pub fn exec_init_modify_table<'mcx>(
         index_eval_cx: Some(mcx::MemoryContext::new_bump("IndexEvalPerTuple")),
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
         returning_slot,
+        returning_ecxt,
         on_conflict,
         oc_old_slot: None,
         transition_capture,
@@ -600,11 +606,22 @@ fn init_result_rel<'mcx>(
                 .as_list()
                 .expect("returningLists cell is a List");
             let params = estate.param_bind();
-            let rel = estate.es_relations[(rti - 1) as usize]
+            let desc = estate.es_relations[(rti - 1) as usize]
                 .as_ref()
-                .expect("result relation opened");
-            project_returning =
-                Some(exec_build_projection_info(mcx, rlist, Some(&rel.rd_att), params)?);
+                .expect("result relation opened")
+                .rd_att
+                .clone();
+            // SubPlans in RETURNING compile against the estate's init hook and
+            // run through the node's suspension driver (exec_process_returning).
+            project_returning = Some(executils::with_subplan_compile_env(estate, |env| {
+                execexpr::exec_build_projection_info_subplans(
+                    mcx,
+                    rlist,
+                    Some(&desc),
+                    params,
+                    env,
+                )
+            })?);
         }
     }
 
@@ -3054,16 +3071,19 @@ fn row_triggers_common<'mcx>(
                 // constraint of the partition the row was routed to.
                 if trigger.tgisclone && event_op == types_trigger::TRIGGER_EVENT_INSERT {
                     let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                    let ModifyTableState { rels, cur, router, leaf_partition_check, .. } =
+                        &mut *mt;
+                    let r = &mut rels[*cur];
                     let (rel, pcheck) = match leaf {
                         Some(ix) => (
-                            mt.router.as_ref().expect("routed insert has a router").leaf_rel(ix),
-                            &mut mt.leaf_partition_check[ix],
+                            router.as_ref().expect("routed insert has a router").leaf_rel(ix),
+                            &mut leaf_partition_check[ix],
                         ),
                         None => (
-                            es_relations[(mt.result_rti - 1) as usize]
+                            es_relations[(r.rti - 1) as usize]
                                 .as_ref()
                                 .expect("result relation opened"),
-                            &mut mt.partition_check,
+                            &mut r.partition_check,
                         ),
                     };
                     let slot = &mut es_tupleTable[slot_id.0 as usize];
@@ -3223,47 +3243,84 @@ fn exec_process_returning<'mcx>(
         CmdType::CMD_DELETE => old_id.expect("returned old tuple"),
         other => panic!("ExecProcessReturning (nodeModifyTable.c): unrecognized commandType: {other:?}"),
     };
-    let state =
-        mt.rel_mut().project_returning.as_deref_mut().expect("RETURNING projection built");
-    state.set_old_new_null(old_id.is_none(), new_id.is_none());
+    // The node econtext for SubPlan evaluation inside RETURNING (C
+    // ps_ExprContext): scan = returned tuple, outer = plan tuple; reset per
+    // projected row (C ResetExprContext in the ExecModifyTable loop).
+    let ec = mt.returning_ecxt.expect("RETURNING ecxt created at init");
+    estate.reset_expr_context(ec);
     let mcx = estate.es_query_cxt;
-    let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
-    let tlen = table.len();
     let (t, p, r) = (tuple_slot.0 as usize, plan_slot.0 as usize, result_id.0 as usize);
     let (o, n) = (old_src.map(|x| x.0 as usize), new_src.map(|x| x.0 as usize));
-    assert!(t < tlen && p < tlen && r < tlen);
-    assert!(r != t && r != p);
-    for i in [o, n].into_iter().flatten() {
-        assert!(i < tlen && i != r && (i == t || i != p));
+    {
+        let e = estate.ecxt_mut(ec);
+        e.ecxt_scantuple = Some(tuple_slot);
+        e.ecxt_innertuple = None;
+        e.ecxt_outertuple = if p != t { Some(plan_slot) } else { None };
     }
-    if let (Some(o), Some(n)) = (o, n) {
-        assert!(o == t || n == t || o != n);
+    exectuples::exec_clear_tuple(&mut estate.es_tupleTable[r], mcx);
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let suspended = {
+            let state = mt
+                .rels[mt.cur]
+                .project_returning
+                .as_deref_mut()
+                .expect("RETURNING projection built");
+            state.set_old_new_null(old_id.is_none(), new_id.is_none());
+            state.arm_result_mcx(mcx);
+            let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
+            let tlen = table.len();
+            assert!(t < tlen && p < tlen && r < tlen);
+            assert!(r != t && r != p);
+            for i in [o, n].into_iter().flatten() {
+                assert!(i < tlen && i != r && (i == t || i != p));
+            }
+            if let (Some(o), Some(n)) = (o, n) {
+                assert!(o == t || n == t || o != n);
+            }
+            let base = table.as_mut_ptr();
+            // SAFETY: bounds-checked, result distinct from both inputs; when
+            // the plan slot IS the tuple slot (INSERT without slot coercion)
+            // only one &mut is derived and OUTER_VAR references panic loudly
+            // in the interpreter.
+            let scan = unsafe { &mut *base.add(t) };
+            // SAFETY: as above; p != t makes the borrows disjoint.
+            let outer = if p != t { Some(unsafe { &mut *base.add(p) }) } else { None };
+            // SAFETY: as above; r is distinct from t and p.
+            let result = unsafe { &mut *base.add(r) };
+            let old = match o {
+                None => execexpr::RetSlot::None,
+                Some(i) if i == t => execexpr::RetSlot::Scan,
+                // SAFETY: bounds/distinctness asserted above (not in {t,p,r,n}).
+                Some(i) => execexpr::RetSlot::Slot(unsafe { &mut *base.add(i) }),
+            };
+            let new = match n {
+                None => execexpr::RetSlot::None,
+                Some(i) if i == t => execexpr::RetSlot::Scan,
+                // SAFETY: as above (not in {t, p, r, o}).
+                Some(i) => execexpr::RetSlot::Slot(unsafe { &mut *base.add(i) }),
+            };
+            let mut ret = execexpr::RetSlots { old, new };
+            let mut slots = EvalSlots { scan: Some(scan), inner: None, outer };
+            execexpr::exec_project_returning_outcome(
+                state,
+                &mut slots,
+                &mut ret,
+                result,
+                resume.take(),
+            )?
+        };
+        match suspended {
+            None => {
+                exectuples::exec_store_virtual_tuple(&mut estate.es_tupleTable[r]);
+                return Ok(result_id);
+            }
+            Some(sus) => {
+                let d = executils::run_subplan_eval(sus.sstate, estate, ec)?;
+                resume = Some(sus.resume_with(d));
+            }
+        }
     }
-    let base = table.as_mut_ptr();
-    // SAFETY: bounds-checked, result distinct from both inputs; when the plan
-    // slot IS the tuple slot (INSERT without slot coercion) only one &mut is
-    // derived and OUTER_VAR references panic loudly in the interpreter.
-    let scan = unsafe { &mut *base.add(t) };
-    // SAFETY: as above; p != t makes the borrows disjoint.
-    let outer = if p != t { Some(unsafe { &mut *base.add(p) }) } else { None };
-    // SAFETY: as above; r is distinct from t and p.
-    let result = unsafe { &mut *base.add(r) };
-    let old = match o {
-        None => execexpr::RetSlot::None,
-        Some(i) if i == t => execexpr::RetSlot::Scan,
-        // SAFETY: bounds/distinctness asserted above (i not in {t, p, r, n}).
-        Some(i) => execexpr::RetSlot::Slot(unsafe { &mut *base.add(i) }),
-    };
-    let new = match n {
-        None => execexpr::RetSlot::None,
-        Some(i) if i == t => execexpr::RetSlot::Scan,
-        // SAFETY: as above (i not in {t, p, r, o}).
-        Some(i) => execexpr::RetSlot::Slot(unsafe { &mut *base.add(i) }),
-    };
-    let mut ret = execexpr::RetSlots { old, new };
-    let mut slots = EvalSlots { scan: Some(scan), inner: None, outer };
-    execexpr::exec_project_returning(state, &mut slots, &mut ret, result, mcx)?;
-    Ok(result_id)
 }
 
 // ExecGetAllNullSlot (execUtils.c): lazily-built all-NULL virtual slot in the
@@ -4621,7 +4678,7 @@ mcx::forget_safe_struct!(
         virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
-        oc_old_slot;
+        returning_ecxt, oc_old_slot;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check,

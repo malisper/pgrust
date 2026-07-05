@@ -254,6 +254,23 @@ pub fn exec_project_prearmed<'mcx>(
 
 /// [`exec_project`] with RETURNING OLD/NEW sources (C ExecProject through
 /// ExecProcessReturning's econtext old/new slots).
+/// [`exec_project_returning`] outcome form for owning-node subplan drivers:
+/// no clear/store (the driver clears before its resume loop and stores on
+/// Done), suspension surfaces instead of panicking.
+pub fn exec_project_returning_outcome<'mcx>(
+    state: &mut ExprState<'mcx>,
+    slots: &mut EvalSlots<'_, 'mcx>,
+    ret: &mut RetSlots<'_, 'mcx>,
+    result_slot: &mut SlotData<'mcx>,
+    resume: Option<Resume>,
+) -> PgResult<Option<Suspension>> {
+    check_still_valid_ret(state, slots, ret)?;
+    Ok(match eval(state, slots, ret, Some(result_slot), resume)? {
+        EvalOutcome::Done(_) => None,
+        EvalOutcome::Suspended(s) => Some(s),
+    })
+}
+
 pub fn exec_project_returning<'mcx>(
     state: &mut ExprState<'mcx>,
     slots: &mut EvalSlots<'_, 'mcx>,
