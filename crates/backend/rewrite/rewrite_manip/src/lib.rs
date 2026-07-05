@@ -1426,15 +1426,54 @@ fn rv_query_inplace<'mcx>(
 fn ReplaceVarFromTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     var: &Var<'mcx>,
-    _target_rte: &RangeTblEntry<'mcx>,
+    target_rte: &RangeTblEntry<'mcx>,
     targetlist: &NodeList<'mcx>,
     result_relation: i32,
     nomatch_option: ReplaceVarsNoMatchOption,
 ) -> PgResult<Node<'mcx>> {
     if var.varattno == 0 {
-        panic!(
-            "ReplaceVarFromTargetList (rewriteManip.c): whole-row Var expansion \
-             (expandRTE/RowExpr) unported"
+        // Whole-tuple reference: expand to RowExpr. Named rowtype (plain
+        // relation RTE) includes dummy items for dropped columns; RECORD
+        // (JOIN) omits them and carries colnames instead. Expansion is
+        // generated with varlevelsup = 0; the caller re-adjusts.
+        let (colnames, fields) = parse_relation::expandRTE(
+            mcx,
+            target_rte,
+            var.varno,
+            0,
+            var.varreturningtype,
+            var.location,
+            var.vartype != types_core::catalog::RECORDOID,
+        )?;
+        let mut args = NodeList::nil();
+        for field in fields.iter() {
+            let field = if field.node_tag() == NodeTag::T_Var {
+                ReplaceVarFromTargetList(
+                    mcx,
+                    field.as_var().expect("Var"),
+                    target_rte,
+                    targetlist,
+                    result_relation,
+                    nomatch_option,
+                )?
+            } else {
+                field
+            };
+            args.lappend(mcx, field)?;
+        }
+        return Node::mk(
+            mcx,
+            types_nodes::RowExpr {
+                args,
+                row_typeid: var.vartype,
+                row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                colnames: if var.vartype == types_core::catalog::RECORDOID {
+                    colnames
+                } else {
+                    NodeList::nil()
+                },
+                location: var.location,
+            },
         );
     }
     let tle = targetlist

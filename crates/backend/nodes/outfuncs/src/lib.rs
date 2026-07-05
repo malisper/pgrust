@@ -589,6 +589,21 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, r.pushedDown);
             w!(out, "}}");
         }
+        NodeTag::T_WithCheckOption => {
+            let w = node
+                .as_variant::<types_nodes::parsenodes::WithCheckOption>()
+                .expect("WithCheckOption");
+            w!(out, "{{WITHCHECKOPTION :kind {}", w.kind as u32);
+            w!(out, " :relname ");
+            out_str(out, w.relname);
+            w!(out, " :polname ");
+            out_str(out, w.polname);
+            w!(out, " :qual ");
+            out_opt_node(out, w.qual)?;
+            w!(out, " :cascaded ");
+            out_bool(out, w.cascaded);
+            w!(out, "}}");
+        }
         other => panic!(
             "outNode (outfuncs.c): {other:?} write arm unported (DEFAULT/CHECK + view \
              SELECT-rule sets)"

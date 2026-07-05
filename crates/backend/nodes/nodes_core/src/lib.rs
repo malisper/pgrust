@@ -1922,6 +1922,16 @@ where
                 },
             )?))
         }
+        NodeTag::T_AlternativeSubPlan => {
+            let asp = node.as_alternative_sub_plan().unwrap();
+            match mutate_list(mcx, &asp.subplans, m)? {
+                None => Ok(None),
+                Some(subplans) => Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::AlternativeSubPlan { subplans },
+                )?)),
+            }
+        }
         other => deferred("expression_tree_mutator", other),
     }
 }
