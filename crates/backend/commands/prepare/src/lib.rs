@@ -445,11 +445,11 @@ pub fn FetchPreparedStatementResultDesc(
     plancache::CachedPlanResultDesc(stmt.plansource)
 }
 
-pub fn FetchPreparedStatementTargetList(_stmt: &PreparedStatement) -> ! {
-    panic!(
-        "FetchPreparedStatementTargetList (prepare.c): CachedPlanGetTargetList is the \
-         protocol Describe lane"
-    );
+pub fn FetchPreparedStatementTargetList<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &PreparedStatement,
+) -> PgResult<mcx::PgVec<'mcx, pquery::TargetEntrySummary>> {
+    plancache::CachedPlanGetTargetList(mcx, stmt.plansource, QueryEnvHandle::NULL)
 }
 
 pub fn DeallocateQuery(stmt: &DeallocateStmt<'_>) -> PgResult<()> {

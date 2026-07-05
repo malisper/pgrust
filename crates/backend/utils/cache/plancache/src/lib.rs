@@ -1424,10 +1424,10 @@ pub fn CachedPlanGetTargetList<'mcx>(
         .find(|q| q.canSetTag)
         .expect("QueryListGetPrimaryStmt: fixed-result source has a canSetTag query");
     if primary.commandType == CmdType::CMD_UTILITY {
-        panic!(
-            "FetchStatementTargetList (pquery.c): utility statement targetlist \
-             (FETCH/EXECUTE recursion) is the portalcmds lane"
-        );
+        // FETCH/EXECUTE recursion needs pquery's portal registry and
+        // prepare's statement registry; plancache can't depend on either
+        // without a cycle back through this function, so it's a seam.
+        return pquery_seams::fetch_utility_statement_target_list::call(mcx, primary.utilityStmt);
     }
     out.try_reserve(primary.targetList.len())
         .map_err(|_| mcx.oom(primary.targetList.len()))?;

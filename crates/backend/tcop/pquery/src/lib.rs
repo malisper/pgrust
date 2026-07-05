@@ -41,6 +41,7 @@ pub use pquery_seams::TargetEntrySummary;
 
 pub fn init_seams() {
     pquery_seams::fetch_portal_target_list::set(FetchPortalTargetList);
+    pquery_seams::fetch_utility_statement_target_list::set(FetchUtilityStatementTargetList);
     pquery_seams::stmt_list_free::set(stmt_list::free);
     pquery_seams::ensure_portal_snapshot_exists::set(EnsurePortalSnapshotExists);
 }
@@ -273,36 +274,7 @@ pub fn FetchPortalTargetList<'a, 'mcx>(
         };
         let pstmt = &stmts[primary];
         if pstmt.commandType == CmdType::CMD_UTILITY {
-            let tag = pstmt.utilityStmt.map(Node::node_tag);
-            // C FetchStatementTargetList T_FetchStmt arm: MOVE returns NIL;
-            // FETCH recurses into the referenced portal's target list.
-            if tag == Some(NodeTag::T_FetchStmt) {
-                let fstmt = pstmt
-                    .utilityStmt
-                    .and_then(Node::as_fetch_stmt)
-                    .expect("utilityStmt is FetchStmt");
-                if !fstmt.ismove {
-                    let sub = portalmem::GetPortalByName(fstmt.portalname)
-                        .expect("PortalIsValid(subportal)");
-                    out = FetchPortalTargetList(mcx, &sub.borrow())?;
-                }
-                return Ok(());
-            }
-            // C FetchStatementTargetList T_ExecuteStmt arm:
-            // FetchPreparedStatementTargetList = CachedPlanGetTargetList(plansource, NULL).
-            if tag == Some(NodeTag::T_ExecuteStmt) {
-                let name = pstmt
-                    .utilityStmt
-                    .and_then(Node::as_execute_stmt)
-                    .expect("utilityStmt is ExecuteStmt")
-                    .name
-                    .expect("EXECUTE has a name");
-                if let Some(psrc) =
-                    prepare_seams::fetch_prepared_statement_plansource::call(name, false)?
-                {
-                    out = plancache::CachedPlanGetTargetList(mcx, psrc, QueryEnvHandle::NULL)?;
-                }
-            }
+            out = FetchUtilityStatementTargetList(mcx, pstmt.utilityStmt)?;
             return Ok(());
         }
         if pstmt.commandType == CmdType::CMD_SELECT || pstmt.hasReturning {
@@ -326,6 +298,38 @@ pub fn FetchPortalTargetList<'a, 'mcx>(
         Ok(())
     })?;
     Ok(out)
+}
+
+// C FetchStatementTargetList, utilityStmt tail: MOVE and anything besides
+// FETCH/EXECUTE return NIL (e.g. plain EXPLAIN, described via
+// ExplainResultDesc rather than a targetlist).
+pub fn FetchUtilityStatementTargetList<'mcx>(
+    mcx: Mcx<'mcx>,
+    utility_stmt: Option<Node<'mcx>>,
+) -> PgResult<PgVec<'mcx, TargetEntrySummary>> {
+    match utility_stmt.map(Node::node_tag) {
+        Some(NodeTag::T_FetchStmt) => {
+            let fstmt =
+                utility_stmt.and_then(Node::as_fetch_stmt).expect("utilityStmt is FetchStmt");
+            if fstmt.ismove {
+                return Ok(PgVec::new_in(mcx));
+            }
+            let sub =
+                portalmem::GetPortalByName(fstmt.portalname).expect("PortalIsValid(subportal)");
+            FetchPortalTargetList(mcx, &sub.borrow())
+        }
+        Some(NodeTag::T_ExecuteStmt) => {
+            let name = utility_stmt
+                .and_then(Node::as_execute_stmt)
+                .expect("utilityStmt is ExecuteStmt")
+                .name
+                .expect("EXECUTE has a name");
+            let psrc = prepare_seams::fetch_prepared_statement_plansource::call(name, true)?
+                .expect("throw_error=true never returns None");
+            plancache::CachedPlanGetTargetList(mcx, psrc, QueryEnvHandle::NULL)
+        }
+        _ => Ok(PgVec::new_in(mcx)),
+    }
 }
 
 pub fn PortalStart(
