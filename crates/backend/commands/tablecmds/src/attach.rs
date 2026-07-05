@@ -123,7 +123,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     let attachrel = open_by_rangevar(mcx, cmd.name.expect("PartitionCmd.name"), AccessExclusiveLock)?;
 
     match attachrel.rd_rel.relkind {
-        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => {}
+        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE | types_rel::RELKIND_FOREIGN_TABLE => {}
         other => unported(&format!("ATTACH PARTITION of relkind {}", other as char)),
     }
     if !aclchk::object_ownercheck(
@@ -812,6 +812,37 @@ fn AttachPartitionEnsureIndexes<'mcx>(
         let r = indexam::index_open(mcx, cld, AccessShareLock)?;
         attach_infos.push(execindexing::BuildIndexInfo(mcx, &r)?);
         attachrel_idx_rels.push(r);
+    }
+
+    // A foreign table can carry no constraint indexes: refuse if any parent
+    // index is unique/primary, otherwise nothing to ensure (C's goto out).
+    if attachrel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        for &idx in idxes.iter() {
+            let idx_rel = indexam::index_open(mcx, idx, AccessShareLock)?;
+            let ix = idx_rel.rd_index.as_ref().expect("rd_index");
+            if ix.indisunique || ix.indisprimary {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot attach foreign table \"{}\" as partition of partitioned table \"{}\"",
+                            attachrel.name(),
+                            rel.name()
+                        ),
+                    )
+                    .with_detail(format!(
+                        "Partitioned table \"{}\" contains unique indexes.",
+                        rel.name()
+                    ))
+                    .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
+            indexam::index_close(idx_rel, AccessShareLock)?;
+        }
+        for r in attachrel_idx_rels.into_iter() {
+            indexam::index_close(r, AccessShareLock)?;
+        }
+        return Ok(());
     }
 
     for &idx in idxes.iter() {
