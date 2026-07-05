@@ -791,8 +791,15 @@ fn bad_int8_transarray() -> Box<::types_error::PgError> {
 // when reached through the agg transvalue lane.
 unsafe fn int8_transarray(fcinfo: &Fcinfo, copy: bool) -> PgResult<*mut i64> {
     // SAFETY: forwarded caller contract.
+    unsafe { int8_transarray_at(fcinfo, 0, copy) }
+}
+
+// # Safety
+// As int8_transarray, for arg `i`.
+unsafe fn int8_transarray_at(fcinfo: &Fcinfo, i: usize, copy: bool) -> PgResult<*mut i64> {
+    // SAFETY: forwarded caller contract.
     let arr = unsafe {
-        let p = fcinfo.arg_ptr(0);
+        let p = fcinfo.arg_ptr(i);
         if !::types_tuple::varatt::varatt_is_4b_u(p) {
             panic!("int8 transarray: packed/toasted array datum (detoast unported)");
         }
@@ -866,6 +873,24 @@ macro_rules! fc_int_avg_accum_inv {
 fc_int_avg_accum_inv! {
     fc_int2_avg_accum_inv: as_i16;
     fc_int4_avg_accum_inv: as_i32;
+}
+
+// int4_avg_combine (numeric.c:6832): in-place combine over the int8[2]
+// {count,sum} transarray; shared by avg/sum(int2) and avg/sum(int4).
+pub fn fc_int4_avg_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: as numeric_combine_common.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    // SAFETY: strict fn — both args are non-null _int8 array transvalues;
+    // the agg lane hands aggcontext-lived, MAXALIGNed images.
+    unsafe {
+        let td1 = int8_transarray_at(fcinfo, 0, false)?;
+        let td2 = int8_transarray_at(fcinfo, 1, false)?;
+        *td1 += *td2;
+        *td1.add(1) += *td2.add(1);
+        Ok(Datum::from_usize(td1.cast::<u8>().sub(ARR_OVERHEAD_NONULLS_1) as usize))
+    }
 }
 
 pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -1190,6 +1215,7 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3339, "numeric_poly_serialize", 1, true, fc_numeric_poly_serialize),
     b(3340, "numeric_poly_deserialize", 2, true, fc_numeric_poly_deserialize),
     b(2785, "int8_avg_combine", 2, false, fc_int8_avg_combine),
+    b(3324, "int4_avg_combine", 2, true, fc_int4_avg_combine),
     b(2786, "int8_avg_serialize", 1, true, fc_int8_avg_serialize),
     b(2787, "int8_avg_deserialize", 2, true, fc_int8_avg_deserialize),
     b(2917, "numerictypmodin", 1, true, fc_numerictypmodin),
