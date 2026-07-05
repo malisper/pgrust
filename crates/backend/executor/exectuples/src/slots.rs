@@ -886,7 +886,7 @@ fn force_store_deformed<'mcx>(slot: &mut SlotData<'mcx>, img: TupleImage) {
         .expect("force store without descriptor")
         .natts;
     let mut off = 0u32;
-    crate::deform::slot_deform_heap_tuple(base, img, &mut off, natts, None);
+    crate::deform::slot_deform_heap_tuple(base, img, &mut off, natts);
     if (base.tts_nvalid as i32) < natts {
         slot_getmissingattrs(base, base.tts_nvalid as i32, natts);
     }
