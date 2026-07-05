@@ -87,6 +87,8 @@ pub type RdAmCacheBtree = BTMetaPageData;
 #[derive(Clone, Copy, Debug)]
 pub struct RdAmCacheGin {
     pub opclass: u8,
+    /// array_ops element comparator tag (gin's GinElemCmp mirror).
+    pub elem_cmp: u8,
     pub support_collation: Oid,
     pub can_partial_match: bool,
     pub key_byval: bool,

@@ -110,6 +110,7 @@ fn build_accumulator_dump_order_and_tids() {
     let mcx = ctx.mcx();
     let state = GinState {
         opclass: GinOpclass::JsonbOps,
+        elem_cmp: GinElemCmp::None,
         support_collation: 100,
         can_partial_match: false,
         key_byval: false,
@@ -160,6 +161,7 @@ fn build_accumulator_dump_order_and_tids() {
 fn compare_entries_category_order() {
     let state = GinState {
         opclass: GinOpclass::JsonbOps,
+        elem_cmp: GinElemCmp::None,
         support_collation: 100,
         can_partial_match: false,
         key_byval: false,

@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// initGinState. Closed set: single key column, jsonb_ops / jsonb_path_ops /
-/// tsvector_ops. Anything else panics loudly (multicol / array_ops / unknown).
+/// tsvector_ops / array_ops. Anything else panics loudly (multicol / unknown).
 pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let natts = rel.rd_att.natts;
     if natts != 1 {
@@ -33,8 +33,25 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
         opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
         opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
         opclass::F_GIN_EXTRACT_TSVECTOR => GinOpclass::TsvectorOps,
-        2743 => unported("array_ops GIN opclass (arrays lane)"),
+        opclass::F_GINARRAYEXTRACT => GinOpclass::ArrayOps,
         other => unported(&format!("GIN opclass with extractValue proc {other}")),
+    };
+    // array_ops has no GIN_COMPARE_PROC; C falls back to the index key
+    // type's default btree comparator via typcache. The index tupdesc attr
+    // is the element type (opckeytype anyelement, ConstructTupleDescriptor).
+    let elem_cmp = if opclass == GinOpclass::ArrayOps {
+        match rel.rd_att.attr(0).atttypid {
+            ::types_core::INT2OID => GinElemCmp::Int2,
+            ::types_core::INT4OID => GinElemCmp::Int4,
+            ::types_core::INT8OID => GinElemCmp::Int8,
+            ::types_core::OIDOID => GinElemCmp::Oid,
+            ::types_core::TEXTOID | ::types_core::VARCHAROID => GinElemCmp::Text,
+            other => unported(&format!(
+                "GIN array_ops element type {other} btree comparator (typcache cmp lane)"
+            )),
+        }
+    } else {
+        GinElemCmp::None
     };
     debug_assert!(
         lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
@@ -42,6 +59,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
                 GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
                 GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
                 GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
+                GinOpclass::ArrayOps => InvalidOid,
             }
     );
     let partial = lsyscache::get_opfamily_proc(
@@ -59,6 +77,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let attr = rel.rd_att.compact_attr(0);
     Ok(GinState {
         opclass,
+        elem_cmp,
         support_collation: if rel.rd_indcollation[0] != InvalidOid {
             rel.rd_indcollation[0]
         } else {
@@ -212,9 +231,9 @@ pub(crate) fn ginCompareEntries(
     opclass::compare(state, a, b)
 }
 
-/// ginExtractEntries: keys sorted + de-duplicated, with null categories. The
-/// closed opclass set produces no null keys, so nullFlags handling collapses
-/// to the placeholder arms.
+/// ginExtractEntries: keys sorted + de-duplicated, with null categories.
+/// Null keys (array_ops elements) sort after normal keys (cmpEntries) and
+/// dedup into one GIN_CAT_NULL_KEY entry.
 pub fn ginExtractEntries<'mcx>(
     mcx: Mcx<'mcx>,
     state: &GinState,
@@ -230,7 +249,7 @@ pub fn ginExtractEntries<'mcx>(
         return Ok((entries, categories));
     }
 
-    let mut entries = opclass::extract_value(mcx, state, value)?;
+    let (mut entries, null_flags) = opclass::extract_value(mcx, state, value)?;
 
     if entries.is_empty() {
         entries.try_reserve(1).map_err(|_| crate::oom(8))?;
@@ -240,11 +259,28 @@ pub fn ginExtractEntries<'mcx>(
         return Ok((entries, categories));
     }
 
+    categories = mcx::vec_with_capacity_in(mcx, entries.len())?;
+    if null_flags.is_empty() {
+        for _ in 0..entries.len() {
+            categories.push(GIN_CAT_NORM_KEY);
+        }
+    } else {
+        debug_assert!(null_flags.len() == entries.len());
+        for &f in null_flags.iter() {
+            categories.push(if f { GIN_CAT_NULL_KEY } else { GIN_CAT_NORM_KEY });
+        }
+    }
+
     if entries.len() > 1 {
-        // cmpEntries + qsort_arg + dedup. Keys are non-null here.
+        // cmpEntries + qsort_arg + dedup over (datum, category) pairs.
+        let mut keydata: PgVec<'mcx, (Datum, GinNullCategory)> =
+            mcx::vec_with_capacity_in(mcx, entries.len())?;
+        for i in 0..entries.len() {
+            keydata.push((entries[i], categories[i]));
+        }
         let mut have_dups = false;
-        entries.sort_by(|a, b| {
-            let r = opclass::compare(state, *a, *b);
+        keydata.sort_by(|a, b| {
+            let r = ginCompareEntries(state, a.0, a.1, b.0, b.1);
             if r == 0 {
                 have_dups = true;
             }
@@ -252,20 +288,24 @@ pub fn ginExtractEntries<'mcx>(
         });
         if have_dups {
             let mut j = 0usize;
-            for i in 1..entries.len() {
-                if opclass::compare(state, entries[j], entries[i]) != 0 {
+            for i in 1..keydata.len() {
+                if ginCompareEntries(state, keydata[j].0, keydata[j].1, keydata[i].0, keydata[i].1)
+                    != 0
+                {
                     j += 1;
-                    entries[j] = entries[i];
+                    keydata[j] = keydata[i];
                 }
             }
-            entries.truncate(j + 1);
+            keydata.truncate(j + 1);
+        }
+        entries.truncate(keydata.len());
+        categories.truncate(keydata.len());
+        for (i, (d, c)) in keydata.iter().enumerate() {
+            entries[i] = *d;
+            categories[i] = *c;
         }
     }
 
-    categories = mcx::vec_with_capacity_in(mcx, entries.len())?;
-    for _ in 0..entries.len() {
-        categories.push(GIN_CAT_NORM_KEY);
-    }
     Ok((entries, categories))
 }
 

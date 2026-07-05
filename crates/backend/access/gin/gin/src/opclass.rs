@@ -18,6 +18,14 @@ pub(crate) const F_GIN_EXTRACT_TSVECTOR: ::types_core::Oid = 3656;
 pub(crate) const F_GIN_EXTRACT_TSQUERY: ::types_core::Oid = 3657;
 pub(crate) const F_GIN_CMP_TSLEXEME: ::types_core::Oid = 3724;
 pub(crate) const F_GIN_CMP_PREFIX: ::types_core::Oid = 2700;
+pub(crate) const F_GINARRAYEXTRACT: ::types_core::Oid = 2743;
+pub(crate) const F_GINQUERYARRAYEXTRACT: ::types_core::Oid = 2774;
+
+// ginarrayproc.c strategy numbers.
+const GinOverlapStrategy: StrategyNumber = 1;
+const GinContainsStrategy: StrategyNumber = 2;
+const GinContainedStrategy: StrategyNumber = 3;
+const GinEqualStrategy: StrategyNumber = 4;
 
 /// Detoasted varlena payload of a datum (header stripped). External and
 /// compressed images take the detoast path; inline images are borrowed.
@@ -97,6 +105,49 @@ pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
         GinOpclass::TsvectorOps => {
             ::adt_tsginidx::gin_cmp_tslexeme(text_payload(a), text_payload(b))
         }
+        // Element-type default btree comparator (initGinState typcache
+        // fallback), closed set resolved to state.elem_cmp.
+        GinOpclass::ArrayOps => match state.elem_cmp {
+            GinElemCmp::Int2 => {
+                let (x, y) = (a.as_u64() as i16, b.as_u64() as i16);
+                if x < y {
+                    -1
+                } else {
+                    (x > y) as i32
+                }
+            }
+            GinElemCmp::Int4 => {
+                let (x, y) = (a.as_i32(), b.as_i32());
+                if x < y {
+                    -1
+                } else {
+                    (x > y) as i32
+                }
+            }
+            GinElemCmp::Int8 => {
+                let (x, y) = (a.as_i64(), b.as_i64());
+                if x < y {
+                    -1
+                } else {
+                    (x > y) as i32
+                }
+            }
+            GinElemCmp::Oid => {
+                let (x, y) = (a.as_oid(), b.as_oid());
+                if x < y {
+                    -1
+                } else {
+                    (x > y) as i32
+                }
+            }
+            GinElemCmp::Text => {
+                // bttextcmp; the collation is resolved by the time an index
+                // key is compared, so the PgResult never fires here.
+                ::varlena::varstr_cmp(text_payload(a), text_payload(b), state.support_collation)
+                    .expect("collation resolved for gin array_ops key compare")
+            }
+            GinElemCmp::None => unreachable!("array_ops compare without elem_cmp"),
+        },
     }
 }
 
@@ -115,38 +166,66 @@ pub(crate) fn compare_partial(
     }
 }
 
-/// extractValueFn.
+/// extractValueFn. The second vec is C's nullFlags out-param; empty means
+/// "extractValue left it NULL" (all keys non-null).
 pub(crate) fn extract_value<'m>(
     mcx: Mcx<'m>,
     state: &GinState,
     value: Datum,
-) -> PgResult<PgVec<'m, Datum>> {
+) -> PgResult<(PgVec<'m, Datum>, PgVec<'m, bool>)> {
+    let no_nulls = mcx::vec_new_in(mcx);
     match state.opclass {
         GinOpclass::JsonbOps => {
             let payload = detoast_payload(mcx, value)?;
-            ::adt_jsonb::gin::gin_extract_jsonb(mcx, payload)
+            Ok((::adt_jsonb::gin::gin_extract_jsonb(mcx, payload)?, no_nulls))
         }
         GinOpclass::JsonbPathOps => {
             let payload = detoast_payload(mcx, value)?;
-            ::adt_jsonb::gin::gin_extract_jsonb_path(mcx, payload)
+            Ok((::adt_jsonb::gin::gin_extract_jsonb_path(mcx, payload)?, no_nulls))
         }
         GinOpclass::TsvectorOps => {
             let payload = detoast_payload(mcx, value)?;
-            ::adt_tsginidx::gin_extract_tsvector(
-                mcx,
-                ::adt_tsvector_core::layout::TsVec { payload },
-            )
+            Ok((
+                ::adt_tsginidx::gin_extract_tsvector(
+                    mcx,
+                    ::adt_tsvector_core::layout::TsVec { payload },
+                )?,
+                no_nulls,
+            ))
         }
+        GinOpclass::ArrayOps => ginarrayextract(mcx, value),
     }
 }
 
+/// ginarrayextract (ginarrayproc.c): element datums + null flags. Elements
+/// borrow into the detoasted array image (mcx-lived, C's
+/// PG_GETARG_ARRAYTYPE_P_COPY lifetime).
+fn ginarrayextract<'m>(
+    mcx: Mcx<'m>,
+    array: Datum,
+) -> PgResult<(PgVec<'m, Datum>, PgVec<'m, bool>)> {
+    let image = detoast_image(mcx, array)?;
+    let elemtype = ::arrayfuncs::foundation::arr_elemtype(image);
+    let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
+    ::arrayfuncs::construct::deconstruct_array(
+        mcx,
+        image,
+        elmlen as i32,
+        elmbyval,
+        elmalign as u8,
+        true,
+    )
+}
+
 /// extractQueryFn outputs; C's per-opclass out-params and extra_data.
+/// `null_flags` empty means "extractQuery left nullFlags NULL".
 pub struct ExtractedQuery<'m> {
     pub entries: PgVec<'m, Datum>,
     pub search_mode: i32,
     pub jsp_ops: PgVec<'m, JspGinOp>,
     pub partial_match: PgVec<'m, bool>,
     pub map_item_operand: PgVec<'m, i32>,
+    pub null_flags: PgVec<'m, bool>,
 }
 
 pub(crate) fn extract_query<'m>(
@@ -170,6 +249,7 @@ pub(crate) fn extract_query<'m>(
                 jsp_ops,
                 partial_match: mcx::vec_new_in(mcx),
                 map_item_operand: mcx::vec_new_in(mcx),
+                null_flags: mcx::vec_new_in(mcx),
             })
         }
         GinOpclass::TsvectorOps => {
@@ -181,6 +261,49 @@ pub(crate) fn extract_query<'m>(
                 jsp_ops: mcx::vec_new_in(mcx),
                 partial_match: out.partial_match,
                 map_item_operand: out.map_item_operand,
+                null_flags: mcx::vec_new_in(mcx),
+            })
+        }
+        GinOpclass::ArrayOps => {
+            // ginqueryarrayextract: deconstruct + per-strategy search mode.
+            let elemtype = ::arrayfuncs::foundation::arr_elemtype(image);
+            let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(elemtype)?;
+            let (entries, null_flags) = ::arrayfuncs::construct::deconstruct_array(
+                mcx,
+                image,
+                elmlen as i32,
+                elmbyval,
+                elmalign as u8,
+                true,
+            )?;
+            let search_mode = match strategy {
+                GinOverlapStrategy => GIN_SEARCH_MODE_DEFAULT,
+                GinContainsStrategy => {
+                    if !entries.is_empty() {
+                        GIN_SEARCH_MODE_DEFAULT
+                    } else {
+                        // everything contains the empty set
+                        GIN_SEARCH_MODE_ALL
+                    }
+                }
+                // empty set is contained in everything
+                GinContainedStrategy => GIN_SEARCH_MODE_INCLUDE_EMPTY,
+                GinEqualStrategy => {
+                    if !entries.is_empty() {
+                        GIN_SEARCH_MODE_DEFAULT
+                    } else {
+                        GIN_SEARCH_MODE_INCLUDE_EMPTY
+                    }
+                }
+                other => panic!("ginqueryarrayextract: unknown strategy number: {other}"),
+            };
+            Ok(ExtractedQuery {
+                entries,
+                search_mode,
+                jsp_ops: mcx::vec_new_in(mcx),
+                partial_match: mcx::vec_new_in(mcx),
+                map_item_operand: mcx::vec_new_in(mcx),
+                null_flags,
             })
         }
     }
@@ -214,6 +337,31 @@ pub(crate) fn consistent(
             *recheck = rc;
             Ok(res)
         }
+        // ginarrayconsistent: C reads queryCategories as its bool *nullFlags
+        // (GIN_CAT_NULL_KEY == 1).
+        GinOpclass::ArrayOps => {
+            let null = |i: usize| _query_categories[i] == GIN_CAT_NULL_KEY;
+            let res = match strategy {
+                GinOverlapStrategy => {
+                    *recheck = false;
+                    (0..nkeys).any(|i| check[i] != GIN_FALSE && !null(i))
+                }
+                GinContainsStrategy => {
+                    *recheck = false;
+                    (0..nkeys).all(|i| check[i] != GIN_FALSE && !null(i))
+                }
+                GinContainedStrategy => {
+                    *recheck = true;
+                    true
+                }
+                GinEqualStrategy => {
+                    *recheck = true;
+                    (0..nkeys).all(|i| check[i] != GIN_FALSE)
+                }
+                other => panic!("ginarrayconsistent: unknown strategy number: {other}"),
+            };
+            Ok(res)
+        }
     }
 }
 
@@ -242,6 +390,52 @@ pub(crate) fn tri_consistent(
             let q = ::adt_tsvector_core::query::TsQueryRef { payload: &image[4..] };
             ::adt_tsginidx::gin_tsquery_triconsistent(mcx, check, q, map_item_operand)
         }
+        // ginarraytriconsistent; queryCategories double as C's nullFlags.
+        GinOpclass::ArrayOps => {
+            let null = |i: usize| _query_categories[i] == GIN_CAT_NULL_KEY;
+            let res = match strategy {
+                GinOverlapStrategy => {
+                    let mut res = GIN_FALSE;
+                    for i in 0..nkeys {
+                        if !null(i) {
+                            if check[i] == GIN_TRUE {
+                                res = GIN_TRUE;
+                                break;
+                            } else if check[i] == GIN_MAYBE && res == GIN_FALSE {
+                                res = GIN_MAYBE;
+                            }
+                        }
+                    }
+                    res
+                }
+                GinContainsStrategy => {
+                    let mut res = GIN_TRUE;
+                    for i in 0..nkeys {
+                        if check[i] == GIN_FALSE || null(i) {
+                            res = GIN_FALSE;
+                            break;
+                        }
+                        if check[i] == GIN_MAYBE {
+                            res = GIN_MAYBE;
+                        }
+                    }
+                    res
+                }
+                GinContainedStrategy => GIN_MAYBE,
+                GinEqualStrategy => {
+                    let mut res = GIN_MAYBE;
+                    for i in 0..nkeys {
+                        if check[i] == GIN_FALSE {
+                            res = GIN_FALSE;
+                            break;
+                        }
+                    }
+                    res
+                }
+                other => panic!("ginarrayconsistent: unknown strategy number: {other}"),
+            };
+            Ok(res)
+        }
     }
 }
 
@@ -267,10 +461,12 @@ pub fn gincost_extract_query(
         3483 => (GinOpclass::JsonbOps, false),
         3486 => (GinOpclass::JsonbPathOps, false),
         F_GIN_EXTRACT_TSQUERY => (GinOpclass::TsvectorOps, true),
+        F_GINQUERYARRAYEXTRACT => (GinOpclass::ArrayOps, false),
         other => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
     };
     let state = GinState {
         opclass,
+        elem_cmp: GinElemCmp::None,
         support_collation: ::types_core::catalog::DEFAULT_COLLATION_OID,
         can_partial_match: can_partial,
         key_byval: false,
