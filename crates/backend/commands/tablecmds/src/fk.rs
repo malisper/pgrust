@@ -2352,3 +2352,139 @@ fn char_scankey(attno: usize, value: u8) -> types_scan::scankey::ScanKeyData {
     key.sk_argument = datum::Datum::from_i8(value as i8);
     key
 }
+
+// The DetachPartitionFinalize FK slice (tablecmds.c:21122-21283): inherited
+// FKs on the detached partition become standalone constraints with their own
+// referenced-side action triggers.
+pub(crate) fn detach_partition_finalize_fks<'mcx>(
+    mcx: Mcx<'mcx>,
+    part_rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    let fks = rel_fk_constraint_list(mcx, part_rel.rd_id)?;
+
+    // A partition with an FK to a partitioned table carries one row per
+    // referenced partition; only the topmost row (whose parent is not also
+    // ours) detaches.
+    let mut fkoids: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    for fk in fks.iter() {
+        fkoids.push(fk.conoid);
+    }
+
+    for fk in fks.iter() {
+        let (form, arrays) = read_fk_constraint(mcx, fk.conoid)?;
+        if form.contype != pg_constraint::CONSTRAINT_FOREIGN
+            || form.conparentid == InvalidOid
+            || fkoids.contains(&form.conparentid)
+        {
+            continue;
+        }
+        if form.conperiod {
+            unported("DetachPartitionFinalize of a temporal (PERIOD) foreign key");
+        }
+
+        pg_constraint::ConstraintSetParentConstraint(mcx, fk.conoid, InvalidOid, InvalidOid)?;
+
+        if fk.conenforced {
+            let (insert_trigger_oid, update_trigger_oid) =
+                get_foreign_key_check_triggers(mcx, fk.conoid, fk.confrelid, fk.conrelid)?;
+            debug_assert!(insert_trigger_oid != InvalidOid);
+            trigger::TriggerSetParentTrigger(mcx, insert_trigger_oid, InvalidOid, part_rel.rd_id)?;
+            debug_assert!(update_trigger_oid != InvalidOid);
+            trigger::TriggerSetParentTrigger(mcx, update_trigger_oid, InvalidOid, part_rel.rd_id)?;
+        }
+
+        // The pg_constraint row already exists, so no addFkConstraint here;
+        // only the action triggers (recursing over referenced partitions).
+        let numfks = arrays.numfks;
+        let conname = str_in(mcx, form.name_str())?;
+        let fk_attrs = attnames_string_list(mcx, &part_rel.rd_att, &arrays.conkey[..numfks])?;
+        let fkconstraint = clone_constraint_node(&form, Some(conname), true, fk_attrs);
+
+        let refd_rel = table::table_open(mcx, fk.confrelid, ShareRowExclusiveLock)?;
+        add_fk_recurse_referenced(
+            mcx,
+            conname,
+            &fkconstraint,
+            part_rel,
+            &refd_rel,
+            form.conindid,
+            fk.conoid,
+            numfks,
+            &arrays.confkey,
+            &arrays.conkey,
+            &arrays.pf_eq_oprs,
+            &arrays.pp_eq_oprs,
+            &arrays.ff_eq_oprs,
+            &arrays.fk_del_set_cols[..arrays.num_fk_del_set_cols],
+            true,
+            InvalidOid,
+            InvalidOid,
+        )?;
+        refd_rel.close(NoLock)?;
+    }
+    Ok(())
+}
+
+// The DetachPartitionFinalize referenced-side cleanup (tablecmds.c:21285-21305)
+// for one parented inbound constraint: the partition leaves the constraint's
+// key space, so its sub-constraint row is dropped.
+pub(crate) fn detach_referenced_fk_sub_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    constr_oid: Oid,
+) -> PgResult<()> {
+    pg_constraint::ConstraintSetParentConstraint(mcx, constr_oid, InvalidOid, InvalidOid)?;
+    pg_depend::deleteDependencyRecordsForClass(
+        mcx,
+        types_core::CONSTRAINT_RELATION_ID,
+        constr_oid,
+        types_core::CONSTRAINT_RELATION_ID,
+        pg_depend::DependencyType::Internal,
+    )?;
+    xact::CommandCounterIncrement()?;
+    catalog_dependency::performDeletion(
+        mcx,
+        &pg_depend::ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, constr_oid),
+        catalog_dependency::DropBehavior::DROP_RESTRICT,
+        0,
+    )
+}
+
+// The ATDetachCheckNoForeignKeyRefs loop body (tablecmds.c:21995-22040): run
+// RI_PartitionRemove_Check for one inbound parented constraint.
+pub(crate) fn partition_remove_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    partition: &Relation<'mcx>,
+    constr_oid: Oid,
+) -> PgResult<()> {
+    let (form, _) = read_fk_constraint(mcx, constr_oid)?;
+    debug_assert!(form.conparentid != InvalidOid);
+    debug_assert!(form.confrelid == partition.rd_id);
+
+    // Prevent data changes into the referencing table until commit.
+    let rel = table::table_open(mcx, form.conrelid, types_rel::ShareLock)?;
+
+    let trig = types_trigger::Trigger {
+        tgoid: InvalidOid,
+        tgname: mcx::PgString::from_str_in(form.name_str(), mcx)?,
+        tgfoid: InvalidOid,
+        tgtype: 0,
+        tgenabled: types_trigger::TRIGGER_FIRES_ON_ORIGIN,
+        tgisinternal: true,
+        tgisclone: false,
+        tgconstrrelid: partition.rd_id,
+        tgconstrindid: form.conindid,
+        tgconstraint: form.oid,
+        tgdeferrable: false,
+        tginitdeferred: false,
+        tgnargs: 0,
+        tgnattr: 0,
+        tgattr: mcx::PgVec::new_in(mcx),
+        tgargs: mcx::PgVec::new_in(mcx),
+        tgqual: None,
+        tgoldtable: None,
+        tgnewtable: None,
+    };
+
+    ri_triggers_seams::ri_partition_remove_check::call(mcx, &trig, &rel, partition)?;
+    rel.close(NoLock)
+}

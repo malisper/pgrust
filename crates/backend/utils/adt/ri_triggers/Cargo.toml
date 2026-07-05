@@ -33,3 +33,4 @@ types_guc = { path = "../../../../_support/types/types_guc" }
 snapmgr = { path = "../../time/snapmgr" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
+ruleutils = { path = "../ruleutils" }

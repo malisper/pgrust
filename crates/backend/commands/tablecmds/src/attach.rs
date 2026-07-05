@@ -1512,11 +1512,8 @@ fn GetParentedForeignKeyRefs<'mcx>(
 
 fn ATDetachCheckNoForeignKeyRefs<'mcx>(mcx: Mcx<'mcx>, partition: &Relation<'mcx>) -> PgResult<()> {
     let refs = GetParentedForeignKeyRefs(mcx, partition)?;
-    if !refs.is_empty() {
-        unported(&format!(
-            "ATDetachCheckNoForeignKeyRefs RI_PartitionRemove_Check for constraint {} (fk lane)",
-            refs[0]
-        ));
+    for &constr_oid in refs.iter() {
+        crate::fk::partition_remove_check(mcx, partition, constr_oid)?;
     }
     Ok(())
 }
@@ -1535,7 +1532,11 @@ fn DetachPartitionFinalize<'mcx>(
 
     DropClonedTriggersFromPartition(mcx, part_rel.rd_id)?;
 
-    check_no_inherited_fks(mcx, part_rel)?;
+    crate::fk::detach_partition_finalize_fks(mcx, part_rel)?;
+
+    for &constr_oid in GetParentedForeignKeyRefs(mcx, part_rel)?.iter() {
+        crate::fk::detach_referenced_fk_sub_constraint(mcx, constr_oid)?;
+    }
 
     let indexes = relcache::RelationGetIndexList(mcx, part_rel.rd_id)?;
     for &idxid in indexes.iter() {
@@ -1621,41 +1622,6 @@ fn DetachPartitionFinalize<'mcx>(
     Ok(())
 }
 
-fn check_no_inherited_fks<'mcx>(mcx: Mcx<'mcx>, part_rel: &Relation<'mcx>) -> PgResult<()> {
-    use pg_constraint::*;
-    let conrel = table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, AccessShareLock)?;
-    let keys = [oid_scankey(Anum_pg_constraint_conrelid as usize, part_rel.rd_id)];
-    let mut scan = genam::systable_beginscan(
-        mcx,
-        &conrel,
-        pg_constraint::ConstraintRelidTypidNameIndexId,
-        true,
-        None,
-        &keys,
-    )?;
-    let desc = conrel.descr();
-    let mut bad: Option<String> = None;
-    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
-        let (contype, _) = getattr(tup, desc, Anum_pg_constraint_contype as usize);
-        if contype.as_i8() as u8 != CONSTRAINT_FOREIGN {
-            continue;
-        }
-        let (conparentid, _) = getattr(tup, desc, Anum_pg_constraint_conparentid as usize);
-        if conparentid.as_oid() == InvalidOid {
-            continue;
-        }
-        bad = Some(name_at(tup, desc, 2).to_string());
-        break;
-    }
-    genam::systable_endscan(mcx, scan)?;
-    conrel.close(AccessShareLock)?;
-    if let Some(name) = bad {
-        unported(&format!(
-            "DetachPartitionFinalize inherited-FK detach \"{name}\" (addFkRecurseReferenced, fk lane)"
-        ));
-    }
-    Ok(())
-}
 
 // DropClonedTriggersFromPartition (tablecmds.c:21506).
 fn DropClonedTriggersFromPartition<'mcx>(mcx: Mcx<'mcx>, partition_id: Oid) -> PgResult<()> {

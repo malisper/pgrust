@@ -1249,6 +1249,30 @@ const ANUM_PG_PARTITIONED_TABLE_PARTCLASS: i32 = 6;
 const ANUM_PG_PARTITIONED_TABLE_PARTCOLLATION: i32 = 7;
 const ANUM_PG_PARTITIONED_TABLE_PARTEXPRS: i32 = 8;
 
+// pg_get_partconstrdef_string (ruleutils.c): the partition constraint
+// deparsed with a table alias, for RI_PartitionRemove_Check.
+pub fn pg_get_partconstrdef_string<'mcx>(
+    mcx: Mcx<'mcx>,
+    partition_id: Oid,
+    aliasname: &str,
+) -> PgResult<Option<String>> {
+    let rel = table::table_open(mcx, partition_id, types_rel::AccessShareLock)?;
+    let mut quals: NodeList<'mcx> = NodeList::nil();
+    for q in partdesc::RelationGetPartitionQual(mcx, &rel)?.iter() {
+        quals.lappend(mcx, q)?;
+    }
+    rel.close(types_rel::AccessShareLock)?;
+    if quals.is_nil() {
+        return Ok(None);
+    }
+    let constr_expr = partbounds::make_ands_explicit(mcx, quals)?;
+    let mut ctx = deparse::DeparseContext::new(mcx, 0);
+    ctx.namespaces
+        .push(std::rc::Rc::new(query::deparse_context_for(mcx, aliasname, partition_id)?));
+    deparse::get_rule_expr(constr_expr, &mut ctx, true)?;
+    Ok(Some(ctx.buf))
+}
+
 pub fn pg_get_partkeydef_worker(
     mcx: Mcx<'_>,
     relid: Oid,
