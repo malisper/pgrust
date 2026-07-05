@@ -98,6 +98,9 @@ const TEXT_LT_OP: u32 = 664;
 const TEXT_GE_OP: u32 = 667;
 const TEXT_REGEXEQ_OP: u32 = 641;
 const TEXT_BTREE_FAM: u32 = 1994;
+// Not a real catalog OID: CREATE AGGREGATE first_val(anyelement) (sfunc=...,
+// stype=anyelement) for the polymorphic aggtranstype resolution test.
+const FIRST_VAL_ANYELEMENT: u32 = 9999;
 
 fn text_datum(mcx: Mcx<'_>, s: &str) -> Datum {
     let image = varlena::cstring_to_text(mcx, s.as_bytes()).unwrap().into_image();
@@ -148,6 +151,9 @@ fn install_scan_fixtures() {
             768 | 769 => Some(shape(23, 2, b'f', true)),
             // generate_series(int4,int4).
             1067 => Some(syscache_seams::PgProcShape { proretset: true, ..shape(23, 2, b'f', true) }),
+            // first_val_anyelement(anyelement) shell fn + its sfunc (agg::* lane).
+            FIRST_VAL_ANYELEMENT => Some(shape(2283, 1, b'a', false)),
+            9998 => Some(shape(2283, 2, b'f', false)),
             _ => None,
         })
     });
@@ -341,7 +347,7 @@ fn install_scan_fixtures() {
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
             INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 | 67 | 740 | 742
-            | 743 | 1254 | 177 => {
+            | 743 | 1254 | 177 | 9998 => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
             // generate_series(int4,int4): prosupport row estimation is not
@@ -405,13 +411,29 @@ fn install_scan_fixtures() {
                 aggcombinefn: 769,
                 ..shape(769)
             }),
+            // first_val_anyelement(anyelement): STYPE=anyelement, aggtranstype
+            // resolves against the call's actual arg type (resolve_aggregate_transtype).
+            FIRST_VAL_ANYELEMENT => Some(syscache_seams::PgAggregateShape {
+                aggtranstype: types_core::catalog::ANYELEMENTOID,
+                ..shape(9998)
+            }),
             _ => None,
         })
     });
     syscache_seams::pg_aggregate_agginitval::set(|mcx, aggfnoid| {
         Ok(match aggfnoid {
             2803 => Some(Some(mcx::PgString::from_str_in("0", mcx)?)),
-            2108 | 2116 | 2132 => Some(None),
+            2108 | 2116 | 2132 | FIRST_VAL_ANYELEMENT => Some(None),
+            _ => None,
+        })
+    });
+    syscache_seams::lookup_pg_proc_signature::set(|mcx, funcid| {
+        Ok(match funcid {
+            FIRST_VAL_ANYELEMENT => {
+                let mut declared = mcx::PgVec::new_in(mcx);
+                declared.push(types_core::catalog::ANYELEMENTOID);
+                Some((types_core::catalog::ANYELEMENTOID, declared))
+            }
             _ => None,
         })
     });
@@ -1422,6 +1444,24 @@ mod agg {
         .unwrap()
     }
 
+    fn first_val_aggref(mcx: Mcx<'_>) -> Node<'_> {
+        let var = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let arg = Node::mk_target_entry(mcx, var, 1, None, false).unwrap();
+        let mut aggargtypes = types_nodes::list::OidList::nil();
+        aggargtypes.lappend(mcx, 23).unwrap();
+        Node::mk(
+            mcx,
+            Aggref {
+                aggfnoid: FIRST_VAL_ANYELEMENT,
+                aggtype: 23,
+                aggargtypes,
+                args: NodeList::make1(mcx, arg).unwrap(),
+                ..Aggref::default()
+            },
+        )
+        .unwrap()
+    }
+
     fn agg_query<'mcx>(mcx: Mcx<'mcx>, aggs: &[(Node<'mcx>, &'mcx str)]) -> Query<'mcx> {
         let mut parse = table_query(mcx, None);
         let mut tlist = NodeList::nil();
@@ -1574,6 +1614,29 @@ mod agg {
         let a1 = agg.plan.targetlist.nth(1).as_target_entry().unwrap().expr.as_aggref().unwrap();
         assert_eq!((a0.aggno, a0.aggtransno), (0, 0));
         assert_eq!((a1.aggno, a1.aggtransno), (0, 0));
+    }
+
+    // resolve_aggregate_transtype (parse_agg.c): a polymorphic STYPE=anyelement
+    // aggregate resolves aggtranstype against the actual int4 argument, rather
+    // than panicking (crates/backend/optimizer/plan/planner/src/prepagg.rs).
+    #[test]
+    fn polymorphic_transtype_resolves_against_actual_arg_type() {
+        let cx = agg_cx();
+        let mcx = cx.mcx();
+        let parse = agg_query(mcx, &[(first_val_aggref(mcx), "first_val")]);
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT first_val(val) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let agg = stmt.planTree.unwrap().as_agg().unwrap();
+        let aggref =
+            agg.plan.targetlist.nth(0).as_target_entry().unwrap().expr.as_aggref().unwrap();
+        assert_eq!(aggref.aggtranstype, 23);
     }
 }
 

@@ -13,8 +13,31 @@ use crate::run::PlannerRun;
 const INT8OID: u32 = 20;
 const INTERNALOID: u32 = 2281;
 const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
-const POLYMORPHIC_TYPEOIDS: &[u32] =
-    &[2276, 2277, 2283, 2776, 3500, 3831, 4537, 4538, 5077, 5078, 5079, 5080];
+
+// resolve_aggregate_transtype (parse_agg.c): a polymorphic declared
+// transtype resolves against the aggregate call's actual input types
+// (get_aggregate_argtypes: aggref->aggargtypes, already recorded by the
+// parser). Shared with nodewindowagg's copy only in C's own header
+// declaration; each Rust caller carries its own port.
+fn resolve_aggregate_transtype<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    aggfuncid: u32,
+    aggtranstype: u32,
+    input_types: &[u32],
+) -> PgResult<u32> {
+    if !coerce::IsPolymorphicType(aggtranstype) {
+        return Ok(aggtranstype);
+    }
+    let (_rettype, mut declared) = lsyscache::get_func_signature(mcx, aggfuncid)?;
+    debug_assert!(declared.len() <= input_types.len());
+    let n = declared.len();
+    coerce::enforce_generic_type_consistency(
+        &input_types[..n],
+        &mut declared[..n],
+        aggtranstype,
+        false,
+    )
+}
 
 pub fn preprocess_aggrefs<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -259,14 +282,12 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
             panic!("cache lookup failed for aggregate {}", aggref.aggfnoid)
         });
 
-    if POLYMORPHIC_TYPEOIDS.contains(&shape.aggtranstype) {
-        panic!(
-            "resolve_aggregate_transtype (parse_agg.c): polymorphic transtype for \
-             aggregate {}; M3 polymorphic lane",
-            aggref.aggfnoid
-        );
-    }
-    let aggtranstype = shape.aggtranstype;
+    let aggtranstype = resolve_aggregate_transtype(
+        mcx,
+        aggref.aggfnoid,
+        shape.aggtranstype,
+        aggref.aggargtypes.as_slice(),
+    )?;
 
     let mut aggtranstypmod = -1;
     if !aggref.args.is_nil() {
