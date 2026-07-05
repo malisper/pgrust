@@ -42,6 +42,7 @@ pub fn init_seams() {
     matview_seams::matview_maintenance_is_enabled::set(MatViewIncrementalMaintenanceIsEnabled);
     matview_seams::exec_refresh_mat_view::set(ExecRefreshMatView);
     matview_seams::refresh_mat_view_by_oid::set(RefreshMatViewByOid);
+    matview_seams::set_mat_view_populated_state::set(SetMatViewPopulatedState);
 }
 
 thread_local! {

@@ -350,8 +350,9 @@ fn intorel_startup<'mcx>(
     let mcx = state.mcx;
     let into_node = state.into;
     let into = into_node.as_variant::<IntoClause>().expect("IntoClause");
-    // Matviews never reach the executor here (no-data create + refresh).
-    debug_assert!(into.viewQuery.is_none());
+    // ExecCreateTableAs handles matviews via no-data create + refresh; this
+    // path fires only for EXPLAIN ANALYZE CREATE MATERIALIZED VIEW.
+    let is_matview = into.viewQuery.is_some();
 
     let mut attr_list = NodeList::nil();
     let mut colnames = into.colNames.iter();
@@ -371,11 +372,28 @@ fn intorel_startup<'mcx>(
         return Err(too_many_column_names());
     }
 
-    let relid = create_ctas_internal(mcx, attr_list, into_node, None)?;
+    let relid = match into.viewQuery {
+        Some(vq_node) => {
+            // C: StoreViewQuery scribbles on the tree, so copyObject first.
+            let copy = copyfuncs::copy_object(mcx, vq_node)?;
+            // SAFETY: fresh copy; this call holds its only live access.
+            unsafe {
+                copy.with_mut::<Query, _>(|q| {
+                    create_ctas_internal(mcx, attr_list, into_node, Some(q))
+                })
+            }
+            .expect("viewQuery is an analyzed Query")?
+        }
+        None => create_ctas_internal(mcx, attr_list, into_node, None)?,
+    };
     let rel = table::table_open(mcx, relid, types_rel::AccessExclusiveLock)?;
 
     if rel.rd_rel.relrowsecurity {
         panic!("intorel_startup (createas.c): check_enable_rls unported (rls lane)");
+    }
+
+    if is_matview && !into.skipData {
+        matview_seams::set_mat_view_populated_state::call(mcx, &rel, true)?;
     }
 
     state.reladdr = relid;

@@ -217,17 +217,13 @@ fn ExplainOneUtility<'mcx>(
                 return Ok(());
             }
             let ctas_into = ctas.into;
-            // C copyObject(ctas->query) guards the plancache-held EXPLAIN
-            // EXECUTE case, which reaches ExplainOnePlan and never this arm;
-            // the tree here is per-statement, so the Query moves out
-            // (DECLARE CURSOR precedent below).
-            // SAFETY: this call holds the only live access to the
-            // CreateTableAsStmt tree.
-            let query_node =
-                unsafe { stmt.with_mut::<CreateTableAsStmt, _>(|c| c.query.take()) }
-                    .flatten()
-                    .expect("EXPLAIN CREATE TABLE AS without analyzed query");
-            // SAFETY: as above.
+            // C copyObject: for matviews into->viewQuery aliases ctas->query
+            // in this port, and intorel_startup still reads it under ANALYZE.
+            let query_node = copyfuncs::copy_object(
+                mcx,
+                ctas.query.expect("EXPLAIN CREATE TABLE AS without analyzed query"),
+            )?;
+            // SAFETY: fresh copy; this call holds its only live access.
             let mut query: Query<'mcx> =
                 unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
                     .expect("CTAS query is not an analyzed Query");

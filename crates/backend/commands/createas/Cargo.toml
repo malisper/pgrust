@@ -22,6 +22,7 @@ catalog_namespace = { path = "../../catalog/catalog_namespace" }
 matview_seams = { path = "../matview_seams" }
 commands_view = { path = "../view" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
 elog = { path = "../../utils/error/elog" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 execmain_seams = { path = "../../executor/execmain_seams" }

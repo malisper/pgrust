@@ -62,6 +62,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // SetMatViewPopulatedState for intorel_startup's matview arm (createas
+    // cannot dep commands_matview: it reaches explain via commands_cluster).
+    pub fn set_mat_view_populated_state<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        newstate: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn refresh_mat_view_by_oid<'mcx>(
         mcx: Mcx<'mcx>,
         matview_oid: Oid,
