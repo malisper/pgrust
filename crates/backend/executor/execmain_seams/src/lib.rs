@@ -193,6 +193,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // (worker number, heap-block stats) pairs
+    // (C BitmapHeapScanState.sinstrument).
+    pub fn query_desc_worker_bitmap_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<(i32, BitmapHeapScanInstrumentation)>>
+);
+
+seam_core::seam!(
     pub fn exec_clean_type_from_tl<'p, 'a>(
         pstmt: &'p PlannedStmt<'a>,
     ) -> PgResult<Rc<TupleDescData<'static>>>

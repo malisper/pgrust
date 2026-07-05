@@ -478,6 +478,32 @@ pub(crate) fn query_desc_worker_sort_instrument_seam(
     })
 }
 
+/// (worker number, bitmap heap scan stats) pairs for one plan node (C
+/// BitmapHeapScanState.sinstrument).
+pub(crate) fn query_desc_worker_bitmap_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<(i32, types_core::instrument::BitmapHeapScanInstrumentation)>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| {
+            let out: Vec<_> = d
+                .estate
+                .es_worker_instrument
+                .iter()
+                .enumerate()
+                .flat_map(|(n, w)| {
+                    w.bitmap
+                        .iter()
+                        .filter(|(id, _)| *id == plan_node_id)
+                        .map(move |(_, bi)| (n as i32, *bi))
+                })
+                .collect();
+            (!out.is_empty()).then_some(out)
+        })
+    })
+}
+
 pub(crate) fn query_desc_hash_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

@@ -46,6 +46,7 @@ pub(crate) struct WorkerInstrReport {
     agg: Vec<(i32, AggregateInstrumentation)>,
     hash: Vec<(i32, HashInstrumentation)>,
     index: Vec<(i32, u64)>,
+    bitmap: Vec<(i32, types_core::instrument::BitmapHeapScanInstrumentation)>,
 }
 
 struct SharedInstrumentation {
@@ -58,6 +59,7 @@ struct SharedInstrumentation {
 pub(crate) enum ParallelNodeShared {
     SeqScan(Arc<::tableam::ParallelTableScanDescShared>),
     IndexScan(Arc<::indexam::ParallelIndexScanDescShared>),
+    BitmapHeapScan(Arc<::nodebitmapheapscan::ParallelBitmapHeapState>),
 }
 
 pub(crate) struct ParallelExecShared {
@@ -94,11 +96,12 @@ fn walk_parallel_aware(node: Option<Node<'_>>) {
             ::types_nodes::NodeTag::T_SeqScan
                 | ::types_nodes::NodeTag::T_IndexScan
                 | ::types_nodes::NodeTag::T_IndexOnlyScan
+                | ::types_nodes::NodeTag::T_BitmapHeapScan
         )
     {
         panic!(
             "ExecParallelInitializeDSM (execParallel.c): parallel-aware {:?} — \
-             per-node DSM/worker arms land with the parallel bitmap/append \
+             per-node DSM/worker arms land with the parallel append \
              scan lanes",
             node.node_tag()
         );
@@ -117,6 +120,7 @@ pub(crate) enum ParallelScanMut<'x, 'mcx> {
     SeqScan(&'x mut ::nodeseqscan::SeqScanState<'mcx>),
     IndexScan(&'x mut ::nodeindexscan::IndexScanState<'mcx>),
     IndexOnlyScan(&'x mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
+    BitmapHeapScan(&'x mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>),
 }
 
 impl ParallelScanMut<'_, '_> {
@@ -125,6 +129,7 @@ impl ParallelScanMut<'_, '_> {
             ParallelScanMut::SeqScan(ss) => ss.plan_node_id(),
             ParallelScanMut::IndexScan(is) => is.iss_PlanNodeId,
             ParallelScanMut::IndexOnlyScan(ios) => ios.ioss_PlanNodeId,
+            ParallelScanMut::BitmapHeapScan(bhs) => bhs.plan_node_id,
         }
     }
 }
@@ -173,7 +178,13 @@ fn for_each_parallel_scan<'mcx>(
         N::WindowAgg(x) => for_each_parallel_scan(&mut x.outer, f)?,
         N::Gather(x) => for_each_parallel_scan(&mut x.outer, f)?,
         N::GatherMerge(x) => for_each_parallel_scan(&mut x.outer, f)?,
-        N::BitmapHeapScan(x) => for_each_parallel_scan(&mut x.bitmapqual, f)?,
+        N::BitmapHeapScan(x) => {
+            let x = &mut **x;
+            if x.scan.parallel_aware {
+                f(ParallelScanMut::BitmapHeapScan(&mut x.scan))?;
+            }
+            for_each_parallel_scan(&mut x.bitmapqual, f)?;
+        }
         N::ModifyTable(x) => for_each_parallel_scan(&mut x.subplan, f)?,
         N::SubqueryScan(x) => for_each_parallel_scan(&mut x.subplan, f)?,
         N::NestLoop(x) => {
@@ -374,6 +385,9 @@ pub fn exec_init_parallel_plan<'mcx>(
                     ::nodeindexonlyscan::exec_index_only_scan_initialize_dsm(ios, estate)?,
                 )
             }
+            ParallelScanMut::BitmapHeapScan(bhs) => ParallelNodeShared::BitmapHeapScan(
+                ::nodebitmapheapscan::exec_bitmap_heap_initialize_dsm(bhs),
+            ),
         };
         nodes.push((id, shared));
         Ok(())
@@ -457,6 +471,10 @@ pub fn exec_parallel_reinitialize<'mcx>(
         ParallelScanMut::IndexOnlyScan(ios) => {
             ::nodeindexonlyscan::exec_index_only_scan_reinitialize_dsm(ios)
         }
+        ParallelScanMut::BitmapHeapScan(bhs) => {
+            ::nodebitmapheapscan::exec_bitmap_heap_reinitialize_dsm(bhs);
+            Ok(())
+        }
     })
 }
 
@@ -524,6 +542,7 @@ fn retrieve_instrumentation(
             agg: PgVec::new_in(mcx),
             hash: PgVec::new_in(mcx),
             index: PgVec::new_in(mcx),
+            bitmap: PgVec::new_in(mcx),
         };
         wi.sort.try_reserve_exact(w.sort.len()).map_err(|_| mcx.oom(1))?;
         wi.sort.extend(w.sort.iter().copied());
@@ -535,6 +554,8 @@ fn retrieve_instrumentation(
         wi.hash.extend(w.hash.iter().copied());
         wi.index.try_reserve_exact(w.index.len()).map_err(|_| mcx.oom(1))?;
         wi.index.extend(w.index.iter().copied());
+        wi.bitmap.try_reserve_exact(w.bitmap.len()).map_err(|_| mcx.oom(1))?;
+        wi.bitmap.extend(w.bitmap.iter().copied());
         estate.es_worker_instrument.push(wi);
     }
     Ok(())
@@ -629,6 +650,15 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                                     ios, estate, p,
                                 )
                             }
+                            (
+                                ParallelScanMut::BitmapHeapScan(bhs),
+                                ParallelNodeShared::BitmapHeapScan(p),
+                            ) => {
+                                let p = Arc::clone(p);
+                                drop(nodes);
+                                ::nodebitmapheapscan::exec_bitmap_heap_initialize_worker(bhs, p);
+                                Ok(())
+                            }
                             _ => panic!(
                                 "ExecParallelInitializeWorker (execParallel.c): shared entry \
                                  kind mismatch for plan node {id}"
@@ -667,6 +697,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                         agg: es.es_agg_instrumentation.iter().copied().collect(),
                         hash: es.es_hash_instrumentation.iter().copied().collect(),
                         index: es.es_index_instrumentation.iter().copied().collect(),
+                        bitmap: es.es_bitmap_instrumentation.iter().copied().collect(),
                     }
                 })
             });

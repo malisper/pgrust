@@ -221,10 +221,10 @@ fn chunk_header_page_roundtrip() {
 type Drained = alloc::vec::Vec<(BlockNumber, bool, alloc::vec::Vec<OffsetNumber>)>;
 
 fn drain_shared(tbm: &mut TIDBitmap<'_>) -> Drained {
-    tbm.prepare_shared_iterate().unwrap();
-    let mut iter = tbm.attach_shared_iterate();
+    let st = tbm.prepare_shared_iterate().unwrap();
+    let mut iter = TbmSharedIterator::attach(st);
     let mut out = alloc::vec::Vec::new();
-    while let Some(res) = iter.next(tbm) {
+    while let Some(res) = iter.next() {
         let mut offs = alloc::vec::Vec::new();
         if !res.lossy {
             let mut buf = [0 as OffsetNumber; TBM_MAX_TUPLES_PER_PAGE];
@@ -307,12 +307,12 @@ fn shared_two_iterators_partition_the_scan() {
     let expected = drain_shared(&mut solo);
 
     let mut tbm = build(&ctx, 1024 * 1024, fill);
-    tbm.prepare_shared_iterate().unwrap();
-    let mut a = tbm.attach_shared_iterate();
-    let mut b = tbm.attach_shared_iterate();
+    let st = tbm.prepare_shared_iterate().unwrap();
+    let mut a = TbmSharedIterator::attach(st.clone());
+    let mut b = TbmSharedIterator::attach(st);
     let mut merged: Drained = alloc::vec::Vec::new();
     loop {
-        let res = if merged.len() % 2 == 0 { a.next(&tbm) } else { b.next(&tbm) };
+        let res = if merged.len() % 2 == 0 { a.next() } else { b.next() };
         let Some(res) = res else { break };
         let mut offs = alloc::vec::Vec::new();
         if !res.lossy {
@@ -322,8 +322,8 @@ fn shared_two_iterators_partition_the_scan() {
         }
         merged.push((res.blockno, res.lossy, offs));
     }
-    assert!(a.next(&tbm).is_none());
-    assert!(b.next(&tbm).is_none());
+    assert!(a.next().is_none());
+    assert!(b.next().is_none());
     assert_eq!(merged, expected);
 }
 
@@ -342,11 +342,11 @@ fn tbm_iterator_shared_arm() {
     let ctx = MemoryContext::new("t");
     let mut tbm = TIDBitmap::new(ctx.mcx(), 1024 * 1024);
     tbm.add_tuples(&[tid(4, 2)], false).unwrap();
-    tbm.prepare_shared_iterate().unwrap();
-    let mut it = TbmIterator::shared(tbm.attach_shared_iterate());
+    let st = tbm.prepare_shared_iterate().unwrap();
+    let mut it = TbmIterator::shared(TbmSharedIterator::attach(st));
     assert!(!it.exhausted());
-    assert_eq!(it.next(&tbm).unwrap().blockno, 4);
-    assert!(it.next(&tbm).is_none());
+    assert_eq!(it.next(None).unwrap().blockno, 4);
+    assert!(it.next(None).is_none());
     it.end_iterate();
     assert!(it.exhausted());
 }
@@ -360,8 +360,8 @@ fn tbm_iterator_wrapper() {
     assert!(it.exhausted());
     it = TbmIterator::private(tbm.begin_private_iterate().unwrap());
     assert!(!it.exhausted());
-    assert_eq!(it.next(&tbm).unwrap().blockno, 4);
-    assert!(it.next(&tbm).is_none());
+    assert_eq!(it.next(Some(&tbm)).unwrap().blockno, 4);
+    assert!(it.next(Some(&tbm)).is_none());
     it.end_iterate();
     assert!(it.exhausted());
 }

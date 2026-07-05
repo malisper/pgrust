@@ -40,9 +40,9 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
     _eflags: i32,
     index_rel: Relation<'mcx>,
 ) -> PgResult<BitmapIndexScanState<'mcx>> {
-    if node.isshared {
-        panic!("nodebitmapindexscan: isshared (parallel bitmap scan lane) not ported");
-    }
+    // C divergence: isshared only picks the dsa allocator for biss_result;
+    // thread-native builds a plain arena bitmap and freezes it at
+    // tbm_prepare_shared_iterate, so no arm is needed here.
     let (biss_ScanKeys, runtime_keys) =
         exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, estate.param_bind())?;
     let biss_Runtime = if runtime_keys.is_empty() {

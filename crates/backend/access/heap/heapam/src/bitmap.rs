@@ -21,7 +21,7 @@ use ::types_tuple::{FirstOffsetNumber, HeapTupleData, ItemPointerData};
 pub fn heap_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut HeapScanDescData<'mcx>,
-    tbm: &TIDBitmap<'_>,
+    tbm: Option<&TIDBitmap<'_>>,
     iterator: &mut TbmIterator,
     slot: &mut SlotData<'mcx>,
     recheck: &mut bool,
@@ -44,7 +44,7 @@ pub fn heap_scan_bitmap_next_tuple<'mcx>(
 /// staging); 0 = bitmap exhausted.
 pub fn heap_scan_bitmap_next_pagebatch<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
-    tbm: &TIDBitmap<'_>,
+    tbm: Option<&TIDBitmap<'_>>,
     iterator: &mut TbmIterator,
     recheck: &mut bool,
     lossy_pages: &mut u64,
@@ -90,7 +90,7 @@ pub fn heap_scan_bitmap_batch_store<'mcx>(
 
 fn bitmap_next_block(
     scan: &mut HeapScanDescData<'_>,
-    tbm: &TIDBitmap<'_>,
+    tbm: Option<&TIDBitmap<'_>>,
     iterator: &mut TbmIterator,
     recheck: &mut bool,
     lossy_pages: &mut u64,

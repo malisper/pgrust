@@ -626,7 +626,7 @@ mod heap {
     pub(super) fn scan_bitmap_next_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         scan: &mut HeapScanDescData<'mcx>,
-        tbm: &tidbitmap::TIDBitmap<'_>,
+        tbm: Option<&tidbitmap::TIDBitmap<'_>>,
         iterator: &mut tidbitmap::TbmIterator,
         slot: &mut SlotData<'mcx>,
         recheck: &mut bool,
@@ -974,7 +974,7 @@ pub fn table_scan_batch_store_slot<'mcx>(
 /// visible tuples (visibility resolved at staging); 0 = bitmap exhausted.
 pub fn table_scan_bitmap_next_pagebatch<'mcx>(
     scan: &mut TableScanDesc<'mcx>,
-    tbm: &tidbitmap::TIDBitmap<'_>,
+    tbm: Option<&tidbitmap::TIDBitmap<'_>>,
     iterator: &mut tidbitmap::TbmIterator,
     recheck: &mut bool,
     lossy_pages: &mut u64,
@@ -1555,7 +1555,7 @@ pub fn table_scan_analyze_next_tuple<'mcx>(
 pub fn table_scan_bitmap_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDesc<'mcx>,
-    tbm: &tidbitmap::TIDBitmap<'_>,
+    tbm: Option<&tidbitmap::TIDBitmap<'_>>,
     iterator: &mut tidbitmap::TbmIterator,
     slot: &mut SlotData<'mcx>,
     recheck: &mut bool,
