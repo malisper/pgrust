@@ -589,10 +589,27 @@ pub(crate) fn query_desc_hash_instrument_seam(
     with_qd(h, |qd| {
         let exec = qd.exec.as_ref()?;
         exec.with(|d| {
-            d.estate
+            // show_hash_info merges leader + every worker by maxima (each
+            // parallel-hash participant saw a different subset of batches).
+            let mut merged: Option<types_core::instrument::HashInstrumentation> = None;
+            let mut fold = |hi: &types_core::instrument::HashInstrumentation| match &mut merged {
+                Some(m) => m.accum(hi),
+                None => merged = Some(*hi),
+            };
+            if let Some((_, hi)) = d
+                .estate
                 .es_hash_instrumentation
                 .iter()
-                .find_map(|(id, hi)| (*id == plan_node_id).then_some(*hi))
+                .find(|(id, _)| *id == plan_node_id)
+            {
+                fold(hi);
+            }
+            for w in d.estate.es_worker_instrument.iter() {
+                if let Some((_, hi)) = w.hash.iter().find(|(id, _)| *id == plan_node_id) {
+                    fold(hi);
+                }
+            }
+            merged
         })
     })
 }

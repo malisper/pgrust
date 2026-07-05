@@ -60,6 +60,7 @@ pub(crate) enum ParallelNodeShared {
     SeqScan(Arc<::tableam::ParallelTableScanDescShared>),
     IndexScan(Arc<::indexam::ParallelIndexScanDescShared>),
     BitmapHeapScan(Arc<::nodebitmapheapscan::ParallelBitmapHeapState>),
+    HashJoin(Arc<::nodehash::parallel::ParallelHashJoinState>),
 }
 
 pub(crate) struct ParallelExecShared {
@@ -113,6 +114,8 @@ fn walk_parallel_aware(node: Option<Node<'_>>) {
                 | ::types_nodes::NodeTag::T_IndexScan
                 | ::types_nodes::NodeTag::T_IndexOnlyScan
                 | ::types_nodes::NodeTag::T_BitmapHeapScan
+                | ::types_nodes::NodeTag::T_HashJoin
+                | ::types_nodes::NodeTag::T_Hash
         )
     {
         panic!(
@@ -137,6 +140,9 @@ pub(crate) enum ParallelScanMut<'x, 'mcx> {
     IndexScan(&'x mut ::nodeindexscan::IndexScanState<'mcx>),
     IndexOnlyScan(&'x mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
     BitmapHeapScan(&'x mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>),
+    // A parallel-aware HashJoin (Parallel Hash): the whole node, because the
+    // shared state hangs off the inner Hash sub-node.
+    HashJoin(&'x mut crate::procnode::HashJoinNode<'mcx>),
 }
 
 impl ParallelScanMut<'_, '_> {
@@ -146,6 +152,7 @@ impl ParallelScanMut<'_, '_> {
             ParallelScanMut::IndexScan(is) => is.iss_PlanNodeId,
             ParallelScanMut::IndexOnlyScan(ios) => ios.ioss_PlanNodeId,
             ParallelScanMut::BitmapHeapScan(bhs) => bhs.plan_node_id,
+            ParallelScanMut::HashJoin(hj) => hj.state.plan.join.plan.plan_node_id,
         }
     }
 }
@@ -213,6 +220,9 @@ fn for_each_parallel_scan<'mcx>(
         }
         N::HashJoin(x) => {
             let x = &mut **x;
+            if x.state.plan.join.plan.parallel_aware {
+                f(ParallelScanMut::HashJoin(x))?;
+            }
             for_each_parallel_scan(&mut x.outer, f)?;
             for_each_parallel_scan(&mut x.hash.child, f)?;
         }
@@ -401,6 +411,14 @@ pub fn exec_init_parallel_plan<'mcx>(
             ParallelScanMut::BitmapHeapScan(bhs) => ParallelNodeShared::BitmapHeapScan(
                 ::nodebitmapheapscan::exec_bitmap_heap_initialize_dsm(bhs),
             ),
+            // ExecHashJoinInitializeDSM: nparticipants = nworkers + leader.
+            ParallelScanMut::HashJoin(hj) => {
+                let ps = Arc::new(::nodehash::parallel::ParallelHashJoinState::new(
+                    nworkers + 1,
+                )?);
+                hj.hash.state.set_parallel_state(Arc::clone(&ps));
+                ParallelNodeShared::HashJoin(ps)
+            }
         };
         nodes.push((id, shared));
         Ok(())
@@ -490,6 +508,20 @@ pub fn exec_parallel_reinitialize<'mcx>(
         ParallelScanMut::BitmapHeapScan(bhs) => {
             ::nodebitmapheapscan::exec_bitmap_heap_reinitialize_dsm(bhs);
             Ok(())
+        }
+        // ExecHashJoinReInitializeDSM: detach, clear shared files, reset the
+        // build barrier for the next scan.
+        ParallelScanMut::HashJoin(hj) => {
+            if let Some(t) = hj.hash.state.ptable.as_mut() {
+                ::nodehash::parallel::exec_hash_table_detach_batch(t)?;
+                ::nodehash::parallel::exec_hash_table_detach(t)?;
+            }
+            hj.hash.state.ptable = None;
+            hj.hash
+                .state
+                .parallel_state()
+                .expect("parallel hash join was initialized")
+                .reinitialize()
         }
     })
 }
@@ -696,6 +728,15 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                                 let p = Arc::clone(p);
                                 drop(nodes);
                                 ::nodebitmapheapscan::exec_bitmap_heap_initialize_worker(bhs, p);
+                                Ok(())
+                            }
+                            (
+                                ParallelScanMut::HashJoin(hj),
+                                ParallelNodeShared::HashJoin(p),
+                            ) => {
+                                let p = Arc::clone(p);
+                                drop(nodes);
+                                hj.hash.state.set_parallel_state(p);
                                 Ok(())
                             }
                             _ => panic!(

@@ -1,0 +1,19 @@
+[package]
+name = "sharedtuplestore"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sharedtuplestore"
+path = "src/lib.rs"
+
+[dependencies]
+elog = { path = "../../error/elog" }
+fd = { path = "../../../storage/file/fd" }
+init_small = { path = "../../init/init_small" }
+libc = "0.2"
+mcx = { path = "../../../../_support/mcx" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
