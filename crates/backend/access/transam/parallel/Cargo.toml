@@ -9,6 +9,7 @@ name = "parallel"
 path = "src/lib.rs"
 
 [dependencies]
+backend_progress = { path = "../../../utils/activity/backend_progress" }
 parallel_seams = { path = "../parallel_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
@@ -100,5 +101,4 @@ origin_seams = { path = "../../../replication/origin_seams" }
 commit_ts_seams = { path = "../commit_ts_seams" }
 backend_status_seams = { path = "../../../utils/activity/backend_status_seams" }
 backend_progress_seams = { path = "../../../utils/activity/backend_progress_seams" }
-backend_progress = { path = "../../../utils/activity/backend_progress" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
