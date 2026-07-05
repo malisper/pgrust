@@ -13,8 +13,8 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, WARNING,
 };
 use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use rel_vocab::RangeVar;
 use types_nodes::parsenodes::ObjectType;
-use types_nodes::primnodes::RangeVar;
 use types_rel::lock::{ShareUpdateExclusiveLock, LOCKMODE};
 
 pub const STATS_IMPORT_BUILTINS: &[FmgrBuiltin] = &[
@@ -381,7 +381,7 @@ fn RangeVarCallbackForStats(
             return Err(Box::new(
                 PgError::error(format!(
                     "index \"{}\" was concurrently dropped",
-                    relation.relname.unwrap_or_default()
+                    relation.relname
                 ))
                 .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
             ));
@@ -391,7 +391,7 @@ fn RangeVarCallbackForStats(
             return Err(Box::new(
                 PgError::error(format!(
                     "index \"{}\" was concurrently created",
-                    relation.relname.unwrap_or_default()
+                    relation.relname
                 ))
                 .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
             ));
@@ -463,15 +463,16 @@ fn cache_lookup_failed(oid: Oid) -> Box<PgError> {
 // ShareUpdateExclusiveLock, 0, RangeVarCallbackForStats, &locked_table).
 pub(crate) fn lookup_relation(mcx: Mcx<'_>, nspname: &str, relname: &str) -> PgResult<Oid> {
     let rv = RangeVar {
+        catalogname: None,
         schemaname: Some(nspname),
-        relname: Some(relname),
+        relname,
         inh: true,
         relpersistence: b'p',
-        ..Default::default()
+        location: -1,
     };
 
     let mut locked_oid = InvalidOid;
-    let mut callback = |rel: &RangeVar<'_>, rel_id: Oid, old_rel_id: Oid| -> PgResult<()> {
+    let mut callback = |rel: &RangeVar<'_>, rel_id: Oid, old_rel_id: Oid| {
         RangeVarCallbackForStats(mcx, rel, rel_id, old_rel_id, &mut locked_oid)
     };
 

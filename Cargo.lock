@@ -13558,6 +13558,7 @@ dependencies = [
  "miscinit",
  "nodes_core",
  "pg_class",
+ "rel_vocab",
  "relation_seams",
  "syscache_seams",
  "table",
