@@ -262,6 +262,15 @@ pub struct PgProcFmgrShape {
     pub proisstrict: bool,
     pub proretset: bool,
     pub prosecdef: bool,
+    pub proconfig_isnull: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PgProcSecdefShape {
+    pub proowner: Oid,
+    pub prosecdef: bool,
+    // "name=value" proconfig entries; None = NULL proconfig.
+    pub proconfig: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -627,6 +636,11 @@ seam_core::seam!(
 seam_core::seam!(
     // fmgr_info's non-builtin leg: the pg_proc fields FmgrInfo needs.
     pub fn lookup_pg_proc_fmgr(funcid: Oid) -> PgResult<Option<PgProcFmgrShape>>
+);
+
+seam_core::seam!(
+    // fmgr_security_definer's pg_proc fetch (fmgr.c:646-682).
+    pub fn lookup_pg_proc_secdef(funcid: Oid) -> PgResult<Option<PgProcSecdefShape>>
 );
 
 seam_core::seam!(

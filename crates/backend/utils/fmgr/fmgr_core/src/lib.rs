@@ -309,12 +309,22 @@ pub fn fmgr_info_from_builtin(fbp: &FmgrBuiltin, function_id: Oid) -> FmgrInfo {
 /// the 56B carrier through an sret and its droppy slots stop folding (bench).
 /// Non-builtin OIDs resolve through pg_proc (syscache seam): prolang internal
 /// dispatches by prosrc name, prolang sql through the registered SQL-language
-/// handler (resolved once here, never per row); other languages and secdef
-/// panic loudly. In-core C-language functions (C's fmgr_info_C_lang dlopen
+/// handler (resolved once here, never per row); other languages panic
+/// loudly. In-core C-language functions (C's fmgr_info_C_lang dlopen
 /// leg) resolve from NATIVE_CLANG instead of pg_proc — their FmgrBuiltin rows
 /// carry the pg_proc metadata.
 #[inline]
 pub fn fmgr_info_into(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
+    fmgr_info_into_security(function_id, finfo, false)
+}
+
+// fmgr_info_cxt_security's ignore_security knob: true bypasses the
+// fmgr_security_definer interposition (the wrapper's own inner lookup).
+fn fmgr_info_into_security(
+    function_id: Oid,
+    finfo: &mut FmgrInfo,
+    ignore_security: bool,
+) -> PgResult<()> {
     match fmgr_isbuiltin(function_id) {
         Some(fbp) => {
             fmgr_info_from_builtin_into(fbp, function_id, finfo);
@@ -325,7 +335,7 @@ pub fn fmgr_info_into(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
                 fmgr_info_from_builtin_into(fbp, function_id, finfo);
                 Ok(())
             }
-            None => fmgr_info_pg_proc(function_id, finfo),
+            None => fmgr_info_pg_proc(function_id, finfo, ignore_security),
         },
     }
 }
@@ -376,15 +386,29 @@ fn registered_c_lang_fn(prosrc: &str) -> Option<::fmgr::PGFunction> {
 
 #[cold]
 #[inline(never)]
-fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
+fn fmgr_info_pg_proc(
+    function_id: Oid,
+    finfo: &mut FmgrInfo,
+    ignore_security: bool,
+) -> PgResult<()> {
     use ::types_error::{PgError, ERRCODE_UNDEFINED_FUNCTION};
     let Some(row) = syscache_seams::lookup_pg_proc_fmgr::call(function_id)? else {
         return Err(alloc::boxed::Box::new(PgError::error(alloc::format!(
             "cache lookup failed for function {function_id}"
         ))));
     };
-    if row.prosecdef {
-        panic!("fmgr: fmgr_security_definer not ported (function {function_id})");
+    // fmgr_info_cxt_security: prosecdef or non-null proconfig routes through
+    // the fmgr_security_definer handler (FmgrHookIsNeeded: no hook surface).
+    if !ignore_security && (row.prosecdef || !row.proconfig_isnull) {
+        finfo.fn_addr = fmgr_security_definer;
+        finfo.fn_nargs = row.pronargs;
+        finfo.fn_strict = row.proisstrict;
+        finfo.fn_retset = row.proretset;
+        finfo.fn_stats = TRACK_FUNC_ALL;
+        finfo.fn_extra = None;
+        finfo.fn_expr = None;
+        finfo.fn_oid = function_id;
+        return Ok(());
     }
     let fn_addr = match row.prolang {
         INTERNAL_LANGUAGE_ID => {
@@ -483,6 +507,72 @@ fn fmgr_info_pg_proc(function_id: Oid, finfo: &mut FmgrInfo) -> PgResult<()> {
     finfo.fn_expr = None;
     finfo.fn_oid = function_id;
     Ok(())
+}
+
+// fmgr_security_definer_cache (fmgr.c:611): configHandles dropped — the
+// registry lookup inside set_config_option replaces the handle cache.
+struct SecurityDefinerCache {
+    flinfo: FmgrInfo,
+    // Userid to switch to; InvalidOid = proconfig-only wrapping.
+    userid: Oid,
+    proconfig: Option<alloc::vec::Vec<alloc::string::String>>,
+}
+
+/// fmgr_security_definer (fmgr.c:632): SECURITY DEFINER / proconfig call
+/// handler. GUC and userid state need no unwinding on error — the ensuing
+/// xact or subxact abort restores both (fmgr.c:717); C's PG_TRY only relinks
+/// fcinfo->flinfo, which does not exist in this ABI (flinfo travels as a
+/// parameter). Divergence: pgstat function tracking inside the wrapper
+/// (fmgr.c:733/741) is not wired — fmgr_core has no pgstat edge.
+pub fn fmgr_security_definer(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("fmgr_security_definer requires flinfo");
+    if flinfo.fn_extra.is_none() {
+        let mut inner = FmgrInfo::unresolved();
+        fmgr_info_into_security(flinfo.fn_oid, &mut inner, true)?;
+        inner.fn_expr = flinfo.fn_expr;
+        let row = syscache_seams::lookup_pg_proc_secdef::call(flinfo.fn_oid)?
+            .unwrap_or_else(|| panic!("cache lookup failed for function {}", flinfo.fn_oid));
+        let userid = if row.prosecdef { row.proowner } else { InvalidOid };
+        flinfo.fn_extra = Some(::fmgr::FnExtra::new(SecurityDefinerCache {
+            flinfo: inner,
+            userid,
+            proconfig: row.proconfig,
+        }));
+    }
+    let cache = flinfo
+        .fn_extra
+        .as_mut()
+        .expect("fn_extra filled above")
+        .downcast_mut::<SecurityDefinerCache>();
+
+    let (save_userid, save_sec_context) = miscinit_seams::get_user_id_and_sec_context::call();
+    let save_nestlevel = if cache.proconfig.is_some() {
+        guc_seams::new_guc_nest_level::call()
+    } else {
+        0
+    };
+    if cache.userid != InvalidOid {
+        miscinit_seams::set_user_id_and_sec_context::call(
+            cache.userid,
+            save_sec_context | ::types_core::SECURITY_LOCAL_USERID_CHANGE,
+        );
+    }
+    if let Some(cfg) = &cache.proconfig {
+        guc_seams::process_guc_array_secdef::call(cfg)?;
+    }
+
+    let result = cache.flinfo.invoke(fcinfo)?;
+
+    if cache.proconfig.is_some() {
+        guc_seams::at_eoxact_guc::call(true, save_nestlevel)?;
+    }
+    if cache.userid != InvalidOid {
+        miscinit_seams::set_user_id_and_sec_context::call(save_userid, save_sec_context);
+    }
+    Ok(result)
 }
 
 #[inline]

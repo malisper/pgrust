@@ -375,6 +375,16 @@ pub fn init_seams() {
         SetConfigOption(name, Some(value), PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)
     });
     s::set_config_option::set(SetConfigOption);
+    s::process_guc_array_secdef::set(|array| {
+        // fmgr.c:744: the secdef wrapper already switched to the owner, so
+        // superuser() reflects the function owner here.
+        let context = if superuser_seams::superuser::call()? {
+            GucContext::PGC_SUSET
+        } else {
+            GucContext::PGC_USERSET
+        };
+        ProcessGUCArray(array, context, PGC_S_SESSION, GUC_ACTION_SAVE)
+    });
     s::process_config_file_internal::set(|context, apply_settings, elevel| {
         process_config::process_config_file_internal(context, apply_settings, elevel).map(|_| ())
     });

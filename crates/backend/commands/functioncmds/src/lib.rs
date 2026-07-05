@@ -264,12 +264,7 @@ fn compute_function_attributes<'mcx>(
         language: language_item.map(defel_str),
         volatility: volatility_item.map_or(PROVOLATILE_VOLATILE, interpret_func_volatility),
         strict: strict_item.map(defel_bool).unwrap_or(false),
-        security: match security_item.map(defel_bool) {
-            // Accepting DEFINER here would silently run as the caller —
-            // fmgr_security_definer is unported.
-            Some(true) => unported("SECURITY DEFINER (fmgr_security_definer)"),
-            v => v.unwrap_or(false),
-        },
+        security: security_item.map(defel_bool).unwrap_or(false),
         leakproof: leakproof_item.map(defel_bool).unwrap_or(false),
         proconfig,
         procost,

@@ -530,3 +530,48 @@ fn seams_route_to_bodies() {
         .unwrap();
     assert_eq!(get_string("application_name"), Some(Some("seamtest".to_string())));
 }
+
+// GUCArrayAdd/Delete + the secdef proconfig seam (fmgr_security_definer's
+// GUC push/pop protocol).
+fn array_setup() {
+    setup();
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        superuser_seams::superuser::set(|| Ok(true));
+    });
+    miscinit::SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID, 0);
+}
+
+#[test]
+fn guc_array_add_replaces_in_place_and_deletes() {
+    array_setup();
+    let a = GUCArrayAdd(&[], "work_mem", "64MB").unwrap();
+    assert_eq!(a, vec!["work_mem=64MB".to_string()]);
+    let a = GUCArrayAdd(&a, "enable_seqscan", "off").unwrap();
+    assert_eq!(a.len(), 2);
+    let a = GUCArrayAdd(&a, "work_mem", "128MB").unwrap();
+    assert_eq!(a, vec!["work_mem=128MB".to_string(), "enable_seqscan=off".to_string()]);
+    let a = GUCArrayDelete(&a, "work_mem").unwrap().unwrap();
+    assert_eq!(a, vec!["enable_seqscan=off".to_string()]);
+    assert!(GUCArrayDelete(&a, "enable_seqscan").unwrap().is_none());
+}
+
+#[test]
+fn guc_array_add_validates_name_and_value() {
+    array_setup();
+    let e = GUCArrayAdd(&[], "no_such_setting", "x").unwrap_err();
+    assert!(e.message().contains("unrecognized configuration parameter"), "{}", e.message());
+    let e = GUCArrayAdd(&[], "work_mem", "banana").unwrap_err();
+    assert!(e.message().contains("invalid value for parameter"), "{}", e.message());
+}
+
+#[test]
+fn process_guc_array_secdef_pushes_and_nest_pop_restores() {
+    array_setup();
+    assert_eq!(get_int("work_mem"), Some(4096));
+    let nest = NewGUCNestLevel();
+    guc_seams::process_guc_array_secdef::call(&["work_mem=64MB".to_string()]).unwrap();
+    assert_eq!(get_int("work_mem"), Some(65536));
+    AtEOXact_GUC(true, nest);
+    assert_eq!(get_int("work_mem"), Some(4096));
+}
