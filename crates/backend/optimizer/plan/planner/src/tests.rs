@@ -4837,6 +4837,116 @@ mod setops {
         parse
     }
 
+    // The analyzer's output for `SELECT a.pk AS x FROM t a, t b WHERE a.pk = b.pk`.
+    fn two_rel_join_query(mcx: Mcx<'_>) -> Query<'_> {
+        let mut rtable = NodeList::nil();
+        for _ in 0..2 {
+            let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            rte.rtekind = RTEKind::RTE_RELATION;
+            rte.relid = TBL;
+            rte.relkind = b'r';
+            rte.rellockmode = 1;
+            rte.inh = false;
+            rtable.lappend(mcx, rte.seal()).unwrap();
+        }
+        let mut fromlist = NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 2).unwrap()).unwrap();
+        let a_pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let b_pk = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let quals = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, a_pk, b_pk).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist, quals: Some(quals) }).unwrap();
+        let x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, x, 1, Some("x"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 50,
+            ..Query::default()
+        }
+    }
+
+    // The analyzer's output for `SELECT x FROM (<two_rel_join_query>) s`.
+    fn wrapped_join_subquery_query(mcx: Mcx<'_>) -> Query<'_> {
+        let rtable = NodeList::make1(
+            mcx,
+            subquery_rte(mcx, two_rel_join_query(mcx), "s", &["x"]),
+        )
+        .unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals: None,
+            },
+        )
+        .unwrap();
+        let x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, x, 1, Some("x"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 60,
+            ..Query::default()
+        }
+    }
+
+    // info-schema lane r4/r5 e2e panic shape: after the recursive pull-up the
+    // UNION ALL member's jointree holds two rels + quals, so the
+    // post-recursion is_safe_append_member recheck must decline the pullup
+    // and the member plans as an ordinary subquery leaf.
+    #[test]
+    fn union_all_member_with_join_subquery_plans() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let parse = setop_query(
+            mcx,
+            SetOperation::SETOP_UNION,
+            true,
+            wrapped_join_subquery_query(mcx),
+            select_const_query(mcx, 99),
+            1,
+            &["x"],
+        );
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT x FROM (SELECT a.pk AS x FROM t a, t b WHERE a.pk = b.pk) s \
+             UNION ALL SELECT 99",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Append);
+        assert_eq!(plan.as_append().unwrap().appendplans.len(), 2);
+    }
+
     #[test]
     fn union_all_of_consts_plans_to_append_of_results() {
         let cx = cx();
