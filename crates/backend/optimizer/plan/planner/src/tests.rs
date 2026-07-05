@@ -347,7 +347,7 @@ fn install_scan_fixtures() {
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
             INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 | 67 | 740 | 742
-            | 743 | 1254 | 177 | 9998 => {
+            | 743 | 1254 | 177 | 9998 | 2803 => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
             // generate_series(int4,int4): prosupport row estimation is not
@@ -5624,7 +5624,7 @@ mod srf_split {
         let outer = gs_call(mcx, i32c(mcx, 1), inner);
         let tid = pathtarget_of(&mut run, &[(outer, 0)]);
 
-        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid).unwrap();
+        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid, None).unwrap();
         assert_eq!(flags.as_slice(), &[false, true, true]);
         assert_eq!(targets.len(), 3);
         assert_eq!(targets[2], tid);
@@ -5647,7 +5647,7 @@ mod srf_split {
         let plus = int4pl(mcx, srf, i32c(mcx, 1));
         let tid = pathtarget_of(&mut run, &[(plus, 0), (srf, 1)]);
 
-        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid).unwrap();
+        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid, None).unwrap();
         assert_eq!(flags.as_slice(), &[false, true, false]);
         assert_eq!(targets[2], tid);
         let t0 = run.root.pathtarget(targets[0]);
@@ -5672,7 +5672,7 @@ mod srf_split {
         let srf2 = gs_call(mcx, i32c(mcx, 3), srf3);
         let tid = pathtarget_of(&mut run, &[(srf1, 0), (srf2, 0)]);
 
-        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid).unwrap();
+        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid, None).unwrap();
         assert_eq!(flags.as_slice(), &[false, true, true]);
         let t0 = run.root.pathtarget(targets[0]);
         assert_eq!(t0.exprs.len(), 2);
@@ -5734,6 +5734,166 @@ mod srf_split {
         let bottom = psn.plan.lefttree.unwrap();
         assert_eq!(bottom.node_tag(), NodeTag::T_Result);
         assert!(bottom.as_result().unwrap().plan.targetlist.is_nil());
+    }
+
+    fn srf_tle<'mcx>(mcx: Mcx<'mcx>, resno: i16) -> Node<'mcx> {
+        let srf = gs_call(mcx, i32c(mcx, 1), i32c(mcx, 2));
+        Node::mk_target_entry(mcx, srf, resno, Some("generate_series"), false).unwrap()
+    }
+
+    fn sortgroup_val_tle(mcx: Mcx<'_>) -> Node<'_> {
+        let val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: val,
+                resno: 1,
+                resname: Some("val"),
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: false,
+            },
+        )
+        .unwrap()
+    }
+
+    fn val_sgc(mcx: Mcx<'_>) -> Node<'_> {
+        Node::mk(
+            mcx,
+            types_nodes::parsenodes::SortGroupClause {
+                tleSortGroupRef: 1,
+                eqop: INT4EQ_OP,
+                sortop: INT4_LT_OP,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: true,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn srf_with_group_by_plans_projectset_above_agg() {
+        // C: SELECT val, generate_series(1,2) FROM t GROUP BY val
+        //    -> ProjectSet -> HashAggregate -> Seq Scan.
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let mut tlist = NodeList::make1(mcx, sortgroup_val_tle(mcx)).unwrap();
+        tlist.lappend(mcx, srf_tle(mcx, 2)).unwrap();
+        parse.targetList = tlist;
+        parse.hasTargetSRFs = true;
+        parse.groupClause = NodeList::make1(mcx, val_sgc(mcx)).unwrap();
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val, generate_series(1,2) FROM t GROUP BY val",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        let ps = plan.as_project_set().expect("ProjectSet root");
+        assert_eq!(ps.plan.targetlist.len(), 2);
+        let srf = ps.plan.targetlist.nth(1).as_target_entry().unwrap();
+        assert!(srf.expr.as_func_expr().unwrap().funcretset);
+        let agg = ps.plan.lefttree.unwrap();
+        assert_eq!(agg.node_tag(), NodeTag::T_Agg);
+        assert_eq!(agg.as_agg().unwrap().numCols, 1);
+    }
+
+    #[test]
+    fn srf_with_window_plans_projectset_above_windowagg() {
+        // C: SELECT count(*) OVER (), generate_series(1,2) FROM t
+        //    -> ProjectSet -> WindowAgg -> Seq Scan.
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let wfunc = Node::mk(
+            mcx,
+            types_nodes::primnodes::WindowFunc {
+                winfnoid: 2803, // count(*)
+                wintype: 20,
+                winref: 1,
+                winstar: true,
+                winagg: true,
+                ..types_nodes::primnodes::WindowFunc::default()
+            },
+        )
+        .unwrap();
+        let tle1 = Node::mk_target_entry(mcx, wfunc, 1, Some("count"), false).unwrap();
+        let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+        tlist.lappend(mcx, srf_tle(mcx, 2)).unwrap();
+        parse.targetList = tlist;
+        parse.hasWindowFuncs = true;
+        parse.hasTargetSRFs = true;
+        let wc = Node::mk(
+            mcx,
+            types_nodes::parsenodes::WindowClause {
+                frameOptions: types_nodes::rawnodes::FRAMEOPTION_DEFAULTS,
+                winref: 1,
+                ..types_nodes::parsenodes::WindowClause::default()
+            },
+        )
+        .unwrap();
+        parse.windowClause = NodeList::make1(mcx, wc).unwrap();
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT count(*) OVER (), generate_series(1,2) FROM t",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        let ps = plan.as_project_set().expect("ProjectSet root");
+        assert_eq!(ps.plan.targetlist.len(), 2);
+        let srf = ps.plan.targetlist.nth(1).as_target_entry().unwrap();
+        assert!(srf.expr.as_func_expr().unwrap().funcretset);
+        let wagg = ps.plan.lefttree.unwrap();
+        assert_eq!(wagg.node_tag(), NodeTag::T_WindowAgg);
+    }
+
+    #[test]
+    fn srf_with_order_by_postpones_projectset_above_sort() {
+        // C: SELECT val, generate_series(1,2) FROM t ORDER BY val
+        //    -> ProjectSet -> Sort -> Seq Scan (SRF postponed past the sort
+        //    via make_sort_input_target, then split at sort_input_target).
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let mut tlist = NodeList::make1(mcx, sortgroup_val_tle(mcx)).unwrap();
+        tlist.lappend(mcx, srf_tle(mcx, 2)).unwrap();
+        parse.targetList = tlist;
+        parse.hasTargetSRFs = true;
+        parse.sortClause = NodeList::make1(mcx, val_sgc(mcx)).unwrap();
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT val, generate_series(1,2) FROM t ORDER BY val",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        let ps = plan.as_project_set().expect("ProjectSet root");
+        assert_eq!(ps.plan.targetlist.len(), 2);
+        let srf = ps.plan.targetlist.nth(1).as_target_entry().unwrap();
+        assert!(srf.expr.as_func_expr().unwrap().funcretset);
+        let sort = ps.plan.lefttree.unwrap();
+        assert_eq!(sort.node_tag(), NodeTag::T_Sort);
+        let sscan = sort.as_sort().unwrap().plan.lefttree.unwrap();
+        assert_eq!(sscan.node_tag(), NodeTag::T_SeqScan);
     }
 }
 
