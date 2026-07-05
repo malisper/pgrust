@@ -1476,11 +1476,15 @@ fn agg_arm<'mcx>(
             if seq_agg_fusible(agg, ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
             {
+                // Outer-read-free drains (count(*)) stage the qual column
+                // alone (scan-drive precedent): the census reads bits, not
+                // the prefix; fallback rows re-check off the stored tuple.
+                let qual_only = ::nodeagg::agg_batch_outer_prefix(agg) == Some(0);
                 ::nodeseqscan::seq_scan_batch_soa_prepare(
                     ss,
                     estate,
                     fused_soa_prefix(agg, ss).unwrap_or(0),
-                    false,
+                    qual_only,
                     false,
                 );
                 let outer_slot = ss.ss.ss_ScanTupleSlot;
