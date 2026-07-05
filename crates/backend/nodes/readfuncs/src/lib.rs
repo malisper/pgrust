@@ -401,6 +401,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"ROWMARKCLAUSE" => self.read_row_mark_clause(),
             b"SETOPERATIONSTMT" => self.read_set_operation_stmt(),
             b"AGGREF" => self.read_aggref(),
+            b"GROUPINGFUNC" => self.read_grouping_func(),
             b"CASEEXPR" => self.read_case_expr(),
             b"CASEWHEN" => self.read_case_when(),
             b"CASETESTEXPR" => self.read_case_test_expr(),
@@ -1386,6 +1387,17 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         a.aggtransno = self.read_i32("aggtransno");
         a.location = self.read_location("location");
         Ok(a.seal())
+    }
+
+    fn read_grouping_func(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut g = Node::build::<types_nodes::primnodes::GroupingFunc>(mcx)?;
+        g.args = self.read_node_list("args")?;
+        g.refs = self.read_int_list("refs")?;
+        g.cols = self.read_int_list("cols")?;
+        g.agglevelsup = self.read_u32("agglevelsup");
+        g.location = self.read_location("location");
+        Ok(g.seal())
     }
 
     fn read_case_expr(&mut self) -> PgResult<Node<'mcx>> {

@@ -217,6 +217,71 @@ pub fn exec_qual_with_subplans<'mcx>(
     }
 }
 
+/// [`exec_qual_with_subplans`] over an explicit outer slot living outside
+/// es_tupleTable (grouped Agg's node-local group slot).
+pub fn exec_qual_with_subplans_outer<'mcx>(
+    state: Option<&mut execexpr::ExprState<'mcx>>,
+    outer: &mut SlotData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+) -> PgResult<bool> {
+    let Some(state) = state else {
+        return Ok(true);
+    };
+    // SAFETY: the per-tuple context object outlives the plan (reset-only).
+    unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let mut slots =
+                execexpr::EvalSlots { scan: None, inner: None, outer: Some(&mut *outer) };
+            execexpr::exec_qual_outcome(state, &mut slots, r)?
+        };
+        match outcome {
+            execexpr::QualOutcome::Done(b) => return Ok(b),
+            execexpr::QualOutcome::Suspended(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
+/// [`exec_project_with_subplans`] over an explicit outer slot living outside
+/// es_tupleTable (grouped Agg's node-local group slot).
+pub fn exec_project_with_subplans_outer<'mcx>(
+    state: &mut execexpr::ExprState<'mcx>,
+    outer: &mut SlotData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    result: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    state.arm_result_mcx(mcx);
+    exectuples::exec_clear_tuple(estate.slot_mut(result), mcx);
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let suspended = {
+            let r = resume.take();
+            let result_slot = estate.slot_mut(result);
+            let mut slots =
+                execexpr::EvalSlots { scan: None, inner: None, outer: Some(&mut *outer) };
+            execexpr::exec_project_outcome(state, &mut slots, result_slot, r)?
+        };
+        match suspended {
+            None => {
+                exectuples::exec_store_virtual_tuple(estate.slot_mut(result));
+                return Ok(());
+            }
+            Some(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
 pub fn exec_eval_expr_with_subplans<'mcx>(
     state: &mut execexpr::ExprState<'mcx>,
     estate: &mut EStateData<'mcx>,

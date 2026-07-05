@@ -1189,6 +1189,22 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
                 collect_base_var_cols(e, out);
             }
         }
+        // C expression_tree_walker: SubPlan walks testexpr + args (args carry
+        // the per-row correlated exprs, e.g. an outer-level agg's Aggref).
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            if let Some(te) = sp.testexpr {
+                collect_base_var_cols(te, out);
+            }
+            for a in sp.args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            for sp in node.as_alternative_sub_plan().unwrap().subplans.iter() {
+                collect_base_var_cols(sp, out);
+            }
+        }
         tag => panic!("find_cols (nodeAgg.c): node family {tag:?} not ported"),
     }
 }
@@ -2606,6 +2622,28 @@ where
         process_ordered_aggregates(node, estate)?;
         finalize_aggregates(node, estate, node.pergroup_base)?;
 
+        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            let ecxt = node.ps_ExprContext;
+            let result = node.ps_ResultTupleSlot;
+            let AggStateData { persort, qual, proj, .. } = node;
+            let ps = persort.as_mut().expect("sorted Agg has persort");
+            if !::executils::exec_qual_with_subplans_outer(
+                qual.as_deref_mut(),
+                &mut ps.first_slot,
+                estate,
+                ecxt,
+            )? {
+                continue;
+            }
+            ::executils::exec_project_with_subplans_outer(
+                proj,
+                &mut ps.first_slot,
+                estate,
+                ecxt,
+                result,
+            )?;
+            return Ok(Some(result));
+        }
         {
             let AggStateData { persort, qual, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
@@ -2802,6 +2840,28 @@ fn agg_retrieve_hash_table<'mcx>(
         // empty.
         finalize_aggregates(node, estate, pergroup)?;
 
+        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            let ecxt = node.ps_ExprContext;
+            let result = node.ps_ResultTupleSlot;
+            let AggStateData { perhash, qual, proj, .. } = node;
+            let ph = perhash.as_mut().unwrap();
+            if !::executils::exec_qual_with_subplans_outer(
+                qual.as_deref_mut(),
+                &mut ph.first_slot,
+                estate,
+                ecxt,
+            )? {
+                continue;
+            }
+            ::executils::exec_project_with_subplans_outer(
+                proj,
+                &mut ph.first_slot,
+                estate,
+                ecxt,
+                result,
+            )?;
+            return Ok(Some(result));
+        }
         {
             let AggStateData { perhash, qual, .. } = node;
             let ph = perhash.as_mut().unwrap();
