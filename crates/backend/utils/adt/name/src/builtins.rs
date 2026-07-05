@@ -137,6 +137,13 @@ pub fn fc_name_text(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     Ok(types_fmgr::varlena_result(t))
 }
 
+pub fn fc_nameconcatoid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let nam = arg_name(fcinfo, 0);
+    let oid = fcinfo.arg(1).as_oid();
+    let n = crate::nameconcatoid(&nam, oid);
+    byref_result(fcinfo.result_mcx(), &n.data)
+}
+
 pub fn fc_current_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let n = crate::current_user(fcinfo.result_mcx())?;
     byref_result(fcinfo.result_mcx(), &n.data)
@@ -230,6 +237,7 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(251, "textgtname", 2, fc_textgtname),
     b(252, "textnename", 2, fc_textnename),
     b(253, "bttextnamecmp", 2, fc_bttextnamecmp),
+    b(266, "nameconcatoid", 2, fc_nameconcatoid),
     b(359, "btnamecmp", 2, fc_btnamecmp),
     b(406, "name_text", 1, fc_name_text),
     b(407, "text_name", 1, fc_text_name),
