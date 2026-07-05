@@ -2797,15 +2797,18 @@ fn create_gather_merge_plan<'mcx>(
         let subparent = run.root.path(subpath_id).base().parent;
         types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(subparent).relids)
     };
-    // create_gather_merge_path guaranteed the order; prepare only computes
-    // the sort-column info (the resjunk-injection leg stays loud inside).
-    let cols = prepare_sort_from_pathkeys(
-        run,
-        &subplan.as_plan().expect("plan node").targetlist,
-        &pathkeys,
-        &relids,
-        None,
-    )?;
+    let (subplan, cols) = {
+        let (new_lt, cols) = prepare_sort_from_pathkeys(
+            run,
+            Some(subplan),
+            &subplan.as_plan().expect("plan node").targetlist,
+            &pathkeys,
+            &relids,
+            None,
+            false,
+        )?;
+        (new_lt.expect("lefttree"), cols)
+    };
     plan.numCols = cols.sort_col_idx.len() as i32;
     plan.sortColIdx = mcx::slice_borrow_in(mcx, &cols.sort_col_idx)?;
     plan.sortOperators = mcx::slice_borrow_in(mcx, &cols.sort_operators)?;
@@ -2867,19 +2870,102 @@ struct SortColumns<'mcx> {
     nulls_first: mcx::PgVec<'mcx, bool>,
 }
 
-// prepare_sort_from_pathkeys (createplan.c): every pathkey must match an
-// existing tlist column (the resjunk-entry-injection leg is loud). req_col_idx
-// pins each key to the given column, as when building MergeAppend children.
+// find_computable_ec_member (equivclass.c) over a plan tlist; the allpaths
+// variant is pathtarget-shaped. require_parallel_safe is always false here.
+fn find_computable_ec_member_tlist<'mcx>(
+    run: &PlannerRun<'mcx>,
+    ec: types_pathnodes::EcId,
+    tlist: &NodeList<'mcx>,
+    relids: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<Option<types_pathnodes::EmId>> {
+    use types_pathnodes::relids::{relids_is_subset, relids_members};
+    use vars::{PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS, PVC_INCLUDE_WINDOWFUNCS};
+    let mcx = run.mcx;
+    let flags = PVC_INCLUDE_AGGREGATES | PVC_INCLUDE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS;
+
+    let mut exprvars: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        for v in &vars::pull_var_clause(mcx, tle.expr, flags)? {
+            exprvars.push(v);
+        }
+    }
+
+    let candidates = {
+        let e = run.root.ec(ec);
+        let mut out: mcx::PgVec<'mcx, types_pathnodes::EmId> = mcx::PgVec::new_in(mcx);
+        out.extend(e.ec_members.iter().copied());
+        if !e.ec_childmembers.is_empty() {
+            for r in relids_members(relids) {
+                if let Some(list) = e.ec_childmembers.get(r as usize) {
+                    out.extend(list.iter().copied());
+                }
+            }
+        }
+        out
+    };
+    'candidate: for &em_id in candidates.iter() {
+        let em = run.root.em(em_id);
+        if em.em_is_const {
+            continue;
+        }
+        if em.em_is_child && !relids_is_subset(&em.em_relids, relids) {
+            continue;
+        }
+        let em_expr = *run.root.expr_node(em.em_expr);
+        for emv in &vars::pull_var_clause(mcx, em_expr, flags)? {
+            if !exprvars.iter().any(|&x| types_nodes::equal(x, emv)) {
+                continue 'candidate;
+            }
+        }
+        return Ok(Some(em_id));
+    }
+    Ok(None)
+}
+
+// inject_projection_plan (createplan.c).
+fn inject_projection_plan<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    subplan: Node<'mcx>,
+    tlist: NodeList<'mcx>,
+    parallel_safe: bool,
+) -> PgResult<Node<'mcx>> {
+    let sub = subplan.as_plan().expect("plan node");
+    let mut result = Node::build::<ResultPlan>(mcx)?;
+    result.plan.targetlist = tlist;
+    result.plan.qual = NodeList::nil();
+    result.plan.lefttree = Some(subplan);
+    result.plan.disabled_nodes = sub.disabled_nodes;
+    result.plan.startup_cost = sub.startup_cost;
+    result.plan.total_cost = sub.total_cost;
+    result.plan.plan_rows = sub.plan_rows;
+    result.plan.plan_width = sub.plan_width;
+    result.plan.parallel_aware = false;
+    result.plan.parallel_safe = parallel_safe;
+    Ok(result.seal())
+}
+
+// prepare_sort_from_pathkeys (createplan.c). req_col_idx pins each key to the
+// given column, as when building MergeAppend children. lefttree is None for
+// the Append/MergeAppend node-level calls (C passes the node itself with
+// adjust_tlist_in_place=true); those callers read the adjusted tlist out of
+// SortColumns. A pathkey with no tlist match gets a resjunk entry appended,
+// injecting a Result when the lefttree can't project.
 fn prepare_sort_from_pathkeys<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    lefttree: Option<Node<'mcx>>,
     input_tlist: &NodeList<'mcx>,
     pathkeys: &[types_pathnodes::PathKey],
     relids: &types_pathnodes::Relids<'mcx>,
     req_col_idx: Option<&[i16]>,
-) -> PgResult<SortColumns<'mcx>> {
+    adjust_tlist_in_place: bool,
+) -> PgResult<(Option<Node<'mcx>>, SortColumns<'mcx>)> {
     let mcx = run.mcx;
+    let mut lefttree = lefttree;
+    let mut adjust_tlist_in_place = adjust_tlist_in_place;
     // C shares lefttree->targetlist by pointer; flat cell copy, shared nodes.
-    let tlist = NodeList::from_slice(mcx, input_tlist.as_slice())?;
+    let mut tlist = NodeList::from_slice(mcx, input_tlist.as_slice())?;
+    let mut tlist_changed = false;
     let mut sort_col_idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
     let mut sort_operators: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
     let mut collations: mcx::PgVec<'mcx, u32> = mcx::PgVec::new_in(mcx);
@@ -2913,11 +2999,28 @@ fn prepare_sort_from_pathkeys<'mcx>(
                 }
             }
         }
-        let Some((resno, pk_datatype)) = found else {
-            panic!(
-                "prepare_sort_from_pathkeys (createplan.c): resjunk sort-column injection; \
-                 M2 lane"
-            );
+        let (resno, pk_datatype) = match found {
+            Some(f) => f,
+            None => {
+                let em_id = find_computable_ec_member_tlist(run, ec, &tlist, relids)?
+                    .unwrap_or_else(|| panic!("could not find pathkey item to sort"));
+                let pk_datatype = run.root.em(em_id).em_datatype;
+                let em_expr = *run.root.expr_node(run.root.em(em_id).em_expr);
+                if !adjust_tlist_in_place {
+                    let lt = lefttree.expect("resjunk injection requires a lefttree");
+                    if !crate::pathnode::is_projection_capable_pathtype(lt.node_tag() as u16) {
+                        let ps = lt.as_plan().expect("plan node").parallel_safe;
+                        let copy = NodeList::from_slice(mcx, tlist.as_slice())?;
+                        lefttree = Some(inject_projection_plan(mcx, lt, copy, ps)?);
+                    }
+                }
+                adjust_tlist_in_place = true;
+                let resno = tlist.len() as i16 + 1;
+                // The TLE shares em_expr (C copyObject; planner arena nodes are shared).
+                tlist.lappend(mcx, Node::mk_target_entry(mcx, em_expr, resno, None, true)?)?;
+                tlist_changed = true;
+                (resno, pk_datatype)
+            }
         };
         let sortop = lsyscache::amop::get_opfamily_member_for_cmptype(
             pathkey.pk_opfamily,
@@ -2938,7 +3041,16 @@ fn prepare_sort_from_pathkeys<'mcx>(
         collations.push(run.root.ec(ec).ec_collation);
         nulls_first.push(pathkey.pk_nulls_first);
     }
-    Ok(SortColumns { tlist, sort_col_idx, sort_operators, collations, nulls_first })
+    if tlist_changed {
+        if let Some(lt) = lefttree {
+            let newt = NodeList::from_slice(mcx, tlist.as_slice())?;
+            // SAFETY: lt was freshly built by create_plan_recurse (or is the
+            // Result injected above); no reference derived from its tlist is
+            // live across this write.
+            unsafe { lt.with_plan_mut(|p| p.targetlist = newt) }.expect("plan node");
+        }
+    }
+    Ok((lefttree, SortColumns { tlist, sort_col_idx, sort_operators, collations, nulls_first }))
 }
 
 fn fill_sort_fields<'mcx>(
@@ -2967,13 +3079,18 @@ fn make_sort_from_pathkeys<'mcx>(
     pathkeys: &[types_pathnodes::PathKey],
     relids: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    let cols = prepare_sort_from_pathkeys(
-        run,
-        &lefttree.as_plan().expect("plan node").targetlist,
-        pathkeys,
-        relids,
-        None,
-    )?;
+    let (lefttree, cols) = {
+        let (new_lt, cols) = prepare_sort_from_pathkeys(
+            run,
+            Some(lefttree),
+            &lefttree.as_plan().expect("plan node").targetlist,
+            pathkeys,
+            relids,
+            None,
+            false,
+        )?;
+        (new_lt.expect("lefttree"), cols)
+    };
     let mut plan = Node::build::<types_nodes::plannodes::Sort>(run.mcx)?;
     fill_sort_fields(run, &mut plan, lefttree, cols)?;
     Ok(plan.seal())
@@ -2989,13 +3106,18 @@ fn make_incrementalsort_from_pathkeys<'mcx>(
     relids: &types_pathnodes::Relids<'mcx>,
     n_presorted_cols: i32,
 ) -> PgResult<Node<'mcx>> {
-    let cols = prepare_sort_from_pathkeys(
-        run,
-        &lefttree.as_plan().expect("plan node").targetlist,
-        pathkeys,
-        relids,
-        None,
-    )?;
+    let (lefttree, cols) = {
+        let (new_lt, cols) = prepare_sort_from_pathkeys(
+            run,
+            Some(lefttree),
+            &lefttree.as_plan().expect("plan node").targetlist,
+            pathkeys,
+            relids,
+            None,
+            false,
+        )?;
+        (new_lt.expect("lefttree"), cols)
+    };
     let mut plan = Node::build::<types_nodes::plannodes::IncrementalSort>(run.mcx)?;
     fill_sort_fields(run, &mut plan.sort, lefttree, cols)?;
     plan.sort.plan.disabled_nodes = 0;
@@ -3834,7 +3956,6 @@ fn create_append_plan<'mcx>(
     path_id: PathId,
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
-    let _ = flags;
     let mcx = run.mcx;
     let (rel_id, target_id, subpaths, first_partial, pathkeys, limit_tuples, has_param_info) =
         match run.root.path(path_id) {
@@ -3861,11 +3982,14 @@ fn create_append_plan<'mcx>(
         return Ok(plan.seal());
     }
 
+    let orig_tlist_len = tlist.len();
     let node_cols = if pathkeys.is_empty() {
         None
     } else {
         let relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel_id).relids);
-        Some(prepare_sort_from_pathkeys(run, &tlist, &pathkeys, &relids, None)?)
+        let (_, cols) =
+            prepare_sort_from_pathkeys(run, None, &tlist, &pathkeys, &relids, None, true)?;
+        Some(cols)
     };
 
     let mut appendplans = NodeList::nil();
@@ -3905,15 +4029,31 @@ fn create_append_plan<'mcx>(
         }
     }
 
+    let tlist_was_changed =
+        node_cols.as_ref().is_some_and(|c| c.tlist.len() != orig_tlist_len);
+    let node_tlist = match node_cols {
+        Some(c) => c.tlist,
+        None => tlist,
+    };
+
     let mut plan = Node::build::<Append<'mcx>>(mcx)?;
-    plan.plan.targetlist = tlist;
+    plan.plan.targetlist = node_tlist;
     plan.apprelids = apprelids;
     plan.appendplans = appendplans;
     plan.nasyncplans = 0;
     plan.first_partial_plan = first_partial;
     plan.part_prune_index = part_prune_index;
     copy_generic_path_info(run, &mut plan.plan, path_id);
-    Ok(plan.seal())
+    let plan = plan.seal();
+    // Strip prepare_sort_from_pathkeys' added sort columns when the caller
+    // asked for the exact or a narrow tlist (C tail of create_append_plan).
+    if tlist_was_changed && flags & (CP_EXACT_TLIST | CP_SMALL_TLIST) != 0 {
+        let p = plan.as_plan().expect("plan node");
+        let ps = p.parallel_safe;
+        let head = NodeList::from_slice(mcx, &p.targetlist.as_slice()[..orig_tlist_len])?;
+        return inject_projection_plan(mcx, plan, head, ps);
+    }
+    Ok(plan)
 }
 
 // Ordered Append/MergeAppend child (create_append_plan / create_merge_append_
@@ -3933,13 +4073,18 @@ fn prepare_ordered_append_child<'mcx>(
         let parent = run.root.path(subpath_id).base().parent;
         types_pathnodes::relids::relids_copy(mcx, &run.root.rel(parent).relids)
     };
-    let sub_cols = prepare_sort_from_pathkeys(
-        run,
-        &subplan.as_plan().expect("plan node").targetlist,
-        pathkeys,
-        &child_relids,
-        Some(&node_cols.sort_col_idx),
-    )?;
+    let (subplan, sub_cols) = {
+        let (new_sp, cols) = prepare_sort_from_pathkeys(
+            run,
+            Some(subplan),
+            &subplan.as_plan().expect("plan node").targetlist,
+            pathkeys,
+            &child_relids,
+            Some(&node_cols.sort_col_idx),
+            false,
+        )?;
+        (new_sp.expect("lefttree"), cols)
+    };
     debug_assert_eq!(sub_cols.sort_col_idx.len(), node_cols.sort_col_idx.len());
     assert!(
         sub_cols.sort_col_idx.as_slice() == node_cols.sort_col_idx.as_slice(),
@@ -3962,15 +4107,12 @@ fn prepare_ordered_append_child<'mcx>(
     Ok(sort)
 }
 
-// create_merge_append_plan (createplan.c). prepare_sort_from_pathkeys never
-// adds resjunk sort columns here (that leg is loud), so the tlist-was-changed
-// projection cleanup is dead.
+// create_merge_append_plan (createplan.c).
 fn create_merge_append_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
     flags: i32,
 ) -> PgResult<Node<'mcx>> {
-    let _ = flags;
     let mcx = run.mcx;
     let (rel_id, target_id, subpaths, pathkeys, limit_tuples, has_param_info) =
         match run.root.path(path_id) {
@@ -3985,8 +4127,10 @@ fn create_merge_append_plan<'mcx>(
             _ => unreachable!(),
         };
     let tlist = build_path_tlist(run, target_id, path_id)?;
+    let orig_tlist_len = tlist.len();
     let relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel_id).relids);
-    let node_cols = prepare_sort_from_pathkeys(run, &tlist, &pathkeys, &relids, None)?;
+    let (_, node_cols) =
+        prepare_sort_from_pathkeys(run, None, &tlist, &pathkeys, &relids, None, true)?;
 
     let mut mergeplans = NodeList::nil();
     for &sp in subpaths.iter() {
@@ -4020,8 +4164,10 @@ fn create_merge_append_plan<'mcx>(
         }
     }
 
+    let tlist_was_changed = node_cols.tlist.len() != orig_tlist_len;
+    let _ = tlist;
     let mut plan = Node::build::<types_nodes::plannodes::MergeAppend<'mcx>>(mcx)?;
-    plan.plan.targetlist = tlist;
+    plan.plan.targetlist = node_cols.tlist;
     plan.apprelids = apprelids;
     plan.mergeplans = mergeplans;
     plan.numCols = node_cols.sort_col_idx.len() as i32;
@@ -4031,7 +4177,16 @@ fn create_merge_append_plan<'mcx>(
     plan.nullsFirst = mcx::slice_borrow_in(mcx, &node_cols.nulls_first)?;
     plan.part_prune_index = part_prune_index;
     copy_generic_path_info(run, &mut plan.plan, path_id);
-    Ok(plan.seal())
+    let plan = plan.seal();
+    // Strip prepare_sort_from_pathkeys' added sort columns when the caller
+    // asked for the exact or a narrow tlist (C tail of create_merge_append_plan).
+    if tlist_was_changed && flags & (CP_EXACT_TLIST | CP_SMALL_TLIST) != 0 {
+        let p = plan.as_plan().expect("plan node");
+        let ps = p.parallel_safe;
+        let head = NodeList::from_slice(mcx, &p.targetlist.as_slice()[..orig_tlist_len])?;
+        return inject_projection_plan(mcx, plan, head, ps);
+    }
+    Ok(plan)
 }
 
 // create_setop_plan + make_setop (createplan.c).
