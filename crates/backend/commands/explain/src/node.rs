@@ -526,10 +526,6 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_LockRows => ("LockRows", "LockRows"),
         NodeTag::T_ModifyTable => {
             let mt = node.as_modify_table().expect("ModifyTable plan node");
-            assert!(
-                mt.onConflictAction == 0,
-                "ExplainNode (explain.c): ON CONFLICT display; upsert-explain lane"
-            );
             let p = match mt.operation {
                 types_nodes::CmdType::CMD_INSERT => "Insert",
                 types_nodes::CmdType::CMD_UPDATE => "Update",
@@ -1099,6 +1095,43 @@ pub fn ExplainNode<'mcx>(
                     append!(es, "{opname}");
                     ExplainTargetRel(rti as types_core::Index, es)?;
                     append!(es, "\n");
+                }
+            }
+            // ON CONFLICT stanza (show_modifytable_info, explain.c:4632).
+            if mt.onConflictAction != 0 {
+                let resolution = if mt.onConflictAction
+                    == types_nodes::OnConflictAction::ONCONFLICT_NOTHING as u32
+                {
+                    "NOTHING"
+                } else {
+                    "UPDATE"
+                };
+                ExplainPropertyText("Conflict Resolution", resolution, es);
+                let mcx = es.str.allocator();
+                let mut idx_names: Vec<std::string::String> = Vec::new();
+                for oid in mt.arbiterIndexes.iter() {
+                    let name = lsyscache::get_rel_name(mcx, oid)?
+                        .map(|n| n.as_str().to_string())
+                        .unwrap_or_default();
+                    idx_names.push(name);
+                }
+                if !idx_names.is_empty() {
+                    crate::format::ExplainPropertyList("Conflict Arbiter Indexes", &idx_names, es);
+                }
+                if let Some(w) = mt.onConflictWhere {
+                    let mut qual = NodeList::nil();
+                    qual.lappend(mcx, w)?;
+                    show_upper_qual(&qual, "Conflict Filter", node, ancestors, es)?;
+                    // C also prints "Rows Removed by Conflict Filter" under
+                    // ANALYZE; the executor doesn't count nfiltered there yet.
+                    filtered_count_gap(&qual, es);
+                }
+                if es.analyze {
+                    node_gap(
+                        "show_modifytable_info",
+                        "ON CONFLICT Tuples Inserted/Conflicting Tuples need ntuples2 \
+                         accounting (nodeModifyTable instrument)",
+                    );
                 }
             }
         }
