@@ -16,6 +16,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
+rel_vocab = { path = "../../../_support/types/rel_vocab" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 elog = { path = "../../utils/error/elog" }
