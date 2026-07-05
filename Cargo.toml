@@ -136,6 +136,7 @@ members = [
     "crates/backend/storage/ipc/pmsignal_seams",
     "crates/backend/storage/ipc/procarray_seams",
     "crates/backend/storage/ipc/procarray",
+    "crates/backend/storage/ipc/signalfuncs",
     "crates/backend/replication/syncrep_seams",
     "crates/backend/storage/lmgr/condition_variable",
     "crates/backend/storage/lmgr/condition_variable_seams",

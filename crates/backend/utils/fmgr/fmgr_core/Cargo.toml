@@ -78,6 +78,7 @@ adt_ascii = { path = "../../adt/adt_ascii" }
 adt_amutils = { path = "../../adt/adt_amutils" }
 adt_mcxtfuncs = { path = "../../adt/mcxtfuncs" }
 waitfuncs = { path = "../../adt/waitfuncs" }
+signalfuncs = { path = "../../../storage/ipc/signalfuncs" }
 lockfuncs = { path = "../../adt/lockfuncs" }
 pseudorandomfuncs = { path = "../../adt/pseudorandomfuncs" }
 trigfuncs = { path = "../../adt/trigfuncs" }

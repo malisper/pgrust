@@ -5255,6 +5255,7 @@ dependencies = [
  "portalmem",
  "pseudorandomfuncs",
  "sequence_seams",
+ "signalfuncs",
  "stringinfo",
  "syscache_seams",
  "to_tsany",
@@ -13303,6 +13304,29 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+]
+
+[[package]]
+name = "signalfuncs"
+version = "0.0.0"
+dependencies = [
+ "acl_seams",
+ "backend_status",
+ "datum",
+ "elog",
+ "init_small",
+ "latch",
+ "libc",
+ "lmgr_proc",
+ "miscinit_seams",
+ "postgres_seams",
+ "procarray",
+ "procsignal",
+ "superuser_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
 ]
 
 [[package]]
