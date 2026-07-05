@@ -1,6 +1,5 @@
-//! oid.c comparison slice + the pure xid.c surface (xid/xid8/cid I/O, cmp,
-//! hash; xid_age/mxid_age stay loud: they read xact/multixact state); the
-//! rest of the adt-scalar batch stays todo.
+//! oid.c comparison slice + the xid.c surface (xid/xid8/cid I/O, cmp, hash,
+//! xid_age, mxid_age); the rest of the adt-scalar batch stays todo.
 
 pub mod builtins;
 mod currtid;
@@ -13,7 +12,8 @@ pub use datum_ops::{
     datum_copy, datum_estimate_space, datum_get_size, datum_restore, datum_serialize,
 };
 
-use ::types_core::Oid;
+use ::types_core::{Oid, TransactionIdIsNormal};
+use ::types_error::PgResult;
 
 macro_rules! oid_cmp_ops {
     ($($name:ident: $op:tt;)*) => {$(
@@ -58,6 +58,25 @@ pub fn xideq(x1: u32, x2: u32) -> bool {
 #[inline]
 pub fn xidneq(x1: u32, x2: u32) -> bool {
     x1 != x2
+}
+
+/// `xid_age` (xid.c): age of `xid` relative to the latest stable XID.
+/// Permanent XIDs are infinitely old.
+pub fn xid_age(xid: u32) -> PgResult<i32> {
+    let now = xact_seams::get_stable_latest_transaction_id::call()?;
+    if !TransactionIdIsNormal(xid) {
+        return Ok(i32::MAX);
+    }
+    Ok(now.wrapping_sub(xid) as i32)
+}
+
+/// `mxid_age` (xid.c): age of `xid` relative to the next multixact ID.
+pub fn mxid_age(xid: u32) -> PgResult<i32> {
+    let now = ::multixact::ReadNextMultiXactId()?;
+    if !::multixact::MultiXactIdIsValid(xid) {
+        return Ok(i32::MAX);
+    }
+    Ok(now.wrapping_sub(xid) as i32)
 }
 
 /// xid8 carries a u64 with plain ordering (FullTransactionIdPrecedes).

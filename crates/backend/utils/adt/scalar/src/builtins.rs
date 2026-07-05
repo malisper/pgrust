@@ -53,6 +53,16 @@ fc_xid2! {
     fc_xidneq: xidneq;
 }
 
+pub fn fc_xid_age(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    Ok(Datum::from_i32(crate::xid_age(a.value.as_u32())?))
+}
+
+pub fn fc_mxid_age(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    Ok(Datum::from_i32(crate::mxid_age(a.value.as_u32())?))
+}
+
 pub fn fc_oidin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 of oidin is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
@@ -550,6 +560,8 @@ pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &[
     b(51, "xidout", 1, fc_xidout),
     b(68, "xideq", 2, fc_xideq),
     b(3308, "xidneq", 2, fc_xidneq),
+    b(1181, "xid_age", 1, fc_xid_age),
+    b(3939, "mxid_age", 1, fc_mxid_age),
     b(184, "oideq", 2, fc_oideq),
     b(185, "oidne", 2, fc_oidne),
     b(54, "oidvectorin", 1, fc_oidvectorin),
