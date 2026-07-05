@@ -73,7 +73,7 @@ pub fn ExplainPrintPlan<'mcx>(
         }
     }
     // debug_parallel_query=regress marks its top Gather invisible: skip it
-    // and hide per-worker detail below (explain.c:787-800).
+    // and hide per-worker detail below (explain.c).
     let mut root = root;
     if let Some(g) = root.as_gather() {
         if g.invisible {
@@ -428,105 +428,154 @@ pub fn ExplainNode<'mcx>(
     let plan = plan_of(node);
     let save_indent = es.indent;
 
-    let pname = match node.node_tag() {
-        NodeTag::T_Result => "Result",
-        NodeTag::T_ProjectSet => "ProjectSet",
-        NodeTag::T_Append => "Append",
-        NodeTag::T_MergeAppend => "Merge Append",
-        NodeTag::T_SubqueryScan => "Subquery Scan",
-        NodeTag::T_SetOp => match node.as_set_op().expect("SetOp plan node").strategy {
-            SETOP_SORTED => "SetOp",
-            SETOP_HASHED => "HashSetOp",
-            other => node_gap("ExplainNode", &format!("SetOp strategy {other} unrecognized")),
-        },
-        NodeTag::T_SeqScan => "Seq Scan",
-        NodeTag::T_SampleScan => "Sample Scan",
-        NodeTag::T_TidScan => "Tid Scan",
-        NodeTag::T_TidRangeScan => "Tid Range Scan",
-        NodeTag::T_IndexScan => "Index Scan",
-        NodeTag::T_IndexOnlyScan => "Index Only Scan",
-        NodeTag::T_BitmapIndexScan => "Bitmap Index Scan",
-        NodeTag::T_BitmapHeapScan => "Bitmap Heap Scan",
-        NodeTag::T_BitmapAnd => "BitmapAnd",
-        NodeTag::T_BitmapOr => "BitmapOr",
-        NodeTag::T_FunctionScan => "Function Scan",
-        NodeTag::T_TableFuncScan => "Table Function Scan",
-        NodeTag::T_ValuesScan => "Values Scan",
-        NodeTag::T_CteScan => "CTE Scan",
-        NodeTag::T_NamedTuplestoreScan => "Named Tuplestore Scan",
-        NodeTag::T_WorkTableScan => "WorkTable Scan",
-        NodeTag::T_RecursiveUnion => "Recursive Union",
-        // C interpolates the join type into the node name in TEXT format:
-        // "Hash"/"Merge" + " <Jointype> Join" (inner non-nestloop gets a bare
-        // " Join"); see the jointype append below.
-        NodeTag::T_NestLoop => "Nested Loop",
-        NodeTag::T_Gather => "Gather",
-        NodeTag::T_GatherMerge => "Gather Merge",
-        NodeTag::T_HashJoin => "Hash",
-        NodeTag::T_MergeJoin => "Merge",
-        NodeTag::T_Hash => "Hash",
-        NodeTag::T_Material => "Materialize",
-        NodeTag::T_Memoize => "Memoize",
+    let mut strategy: Option<&str> = None;
+    let mut partialmode: Option<&str> = None;
+    let mut operation: Option<&str> = None;
+    let (pname, sname): (&str, &str) = match node.node_tag() {
+        NodeTag::T_Result => ("Result", "Result"),
+        NodeTag::T_ProjectSet => ("ProjectSet", "ProjectSet"),
+        NodeTag::T_Append => ("Append", "Append"),
+        NodeTag::T_MergeAppend => ("Merge Append", "Merge Append"),
+        NodeTag::T_SubqueryScan => ("Subquery Scan", "Subquery Scan"),
+        NodeTag::T_SetOp => {
+            let p = match node.as_set_op().expect("SetOp plan node").strategy {
+                SETOP_SORTED => {
+                    strategy = Some("Sorted");
+                    "SetOp"
+                }
+                SETOP_HASHED => {
+                    strategy = Some("Hashed");
+                    "HashSetOp"
+                }
+                other => {
+                    node_gap("ExplainNode", &format!("SetOp strategy {other} unrecognized"))
+                }
+            };
+            (p, "SetOp")
+        }
+        NodeTag::T_SeqScan => ("Seq Scan", "Seq Scan"),
+        NodeTag::T_SampleScan => ("Sample Scan", "Sample Scan"),
+        NodeTag::T_TidScan => ("Tid Scan", "Tid Scan"),
+        NodeTag::T_TidRangeScan => ("Tid Range Scan", "Tid Range Scan"),
+        NodeTag::T_IndexScan => ("Index Scan", "Index Scan"),
+        NodeTag::T_IndexOnlyScan => ("Index Only Scan", "Index Only Scan"),
+        NodeTag::T_BitmapIndexScan => ("Bitmap Index Scan", "Bitmap Index Scan"),
+        NodeTag::T_BitmapHeapScan => ("Bitmap Heap Scan", "Bitmap Heap Scan"),
+        NodeTag::T_BitmapAnd => ("BitmapAnd", "BitmapAnd"),
+        NodeTag::T_BitmapOr => ("BitmapOr", "BitmapOr"),
+        NodeTag::T_FunctionScan => ("Function Scan", "Function Scan"),
+        NodeTag::T_TableFuncScan => ("Table Function Scan", "Table Function Scan"),
+        NodeTag::T_ValuesScan => ("Values Scan", "Values Scan"),
+        NodeTag::T_CteScan => ("CTE Scan", "CTE Scan"),
+        NodeTag::T_NamedTuplestoreScan => ("Named Tuplestore Scan", "Named Tuplestore Scan"),
+        NodeTag::T_WorkTableScan => ("WorkTable Scan", "WorkTable Scan"),
+        NodeTag::T_RecursiveUnion => ("Recursive Union", "Recursive Union"),
+        NodeTag::T_NestLoop => ("Nested Loop", "Nested Loop"),
+        NodeTag::T_Gather => ("Gather", "Gather"),
+        NodeTag::T_GatherMerge => ("Gather Merge", "Gather Merge"),
+        // C interpolates the join type into the TEXT node name: "Hash"/"Merge"
+        // + " <Jointype> Join" (inner non-nestloop gets a bare " Join").
+        NodeTag::T_HashJoin => ("Hash", "Hash Join"),
+        NodeTag::T_MergeJoin => ("Merge", "Merge Join"),
+        NodeTag::T_Hash => ("Hash", "Hash"),
+        NodeTag::T_Material => ("Materialize", "Materialize"),
+        NodeTag::T_Memoize => ("Memoize", "Memoize"),
         NodeTag::T_Agg => {
             let agg = node.as_agg().expect("Agg plan node");
             assert!(
                 agg.aggsplit == types_nodes::primnodes::AGGSPLIT_SIMPLE,
                 "ExplainNode (explain.c): partial/finalize Agg display; parallel-agg lane"
             );
-            match agg.aggstrategy {
-                0 => "Aggregate",
-                1 => "GroupAggregate",
-                2 => "HashAggregate",
-                3 => "MixedAggregate",
+            partialmode = Some("Simple");
+            let p = match agg.aggstrategy {
+                0 => {
+                    strategy = Some("Plain");
+                    "Aggregate"
+                }
+                1 => {
+                    strategy = Some("Sorted");
+                    "GroupAggregate"
+                }
+                2 => {
+                    strategy = Some("Hashed");
+                    "HashAggregate"
+                }
+                3 => {
+                    strategy = Some("Mixed");
+                    "MixedAggregate"
+                }
                 other => node_gap("ExplainNode", &format!("Agg strategy {other} unrecognized")),
-            }
+            };
+            (p, "Aggregate")
         }
-        NodeTag::T_Group => "Group",
-        NodeTag::T_Unique => "Unique",
-        NodeTag::T_Sort => "Sort",
-        NodeTag::T_IncrementalSort => "Incremental Sort",
-        NodeTag::T_WindowAgg => "WindowAgg",
-        NodeTag::T_Limit => "Limit",
-        NodeTag::T_LockRows => "LockRows",
+        NodeTag::T_Group => ("Group", "Group"),
+        NodeTag::T_Unique => ("Unique", "Unique"),
+        NodeTag::T_Sort => ("Sort", "Sort"),
+        NodeTag::T_IncrementalSort => ("Incremental Sort", "Incremental Sort"),
+        NodeTag::T_WindowAgg => ("WindowAgg", "WindowAgg"),
+        NodeTag::T_Limit => ("Limit", "Limit"),
+        NodeTag::T_LockRows => ("LockRows", "LockRows"),
         NodeTag::T_ModifyTable => {
             let mt = node.as_modify_table().expect("ModifyTable plan node");
             assert!(
                 mt.onConflictAction == 0,
                 "ExplainNode (explain.c): ON CONFLICT display; upsert-explain lane"
             );
-            match mt.operation {
+            let p = match mt.operation {
                 types_nodes::CmdType::CMD_INSERT => "Insert",
                 types_nodes::CmdType::CMD_UPDATE => "Update",
                 types_nodes::CmdType::CMD_DELETE => "Delete",
                 types_nodes::CmdType::CMD_MERGE => "Merge",
                 other => node_gap("ExplainNode", &format!("ModifyTable operation {other:?}")),
-            }
+            };
+            operation = Some(p);
+            (p, "ModifyTable")
         }
         t => node_gap("ExplainNode", &format!("{t:?} display arm unported (M2+ plan lanes)")),
     };
 
     ExplainOpenGroup("Plan", if relationship.is_some() { None } else { Some("Plan") }, true, es);
 
-    if es.format != EXPLAIN_FORMAT_TEXT {
-        crate::format::nontext_gap(es, "ExplainNode");
-    }
-    if let Some(name) = plan_name {
-        crate::format::ExplainIndentText(es);
-        append!(es, "{name}\n");
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        if let Some(name) = plan_name {
+            crate::format::ExplainIndentText(es);
+            append!(es, "{name}\n");
+            es.indent += 1;
+        }
+        if es.indent != 0 {
+            crate::format::ExplainIndentText(es);
+            append!(es, "->  ");
+            es.indent += 2;
+        }
+        if plan.parallel_aware {
+            append!(es, "Parallel ");
+        }
+        if plan.async_capable {
+            append!(es, "Async ");
+        }
+        append!(es, "{pname}");
         es.indent += 1;
+    } else {
+        ExplainPropertyText("Node Type", sname, es);
+        if let Some(s) = strategy {
+            ExplainPropertyText("Strategy", s, es);
+        }
+        if let Some(p) = partialmode {
+            ExplainPropertyText("Partial Mode", p, es);
+        }
+        if let Some(o) = operation {
+            ExplainPropertyText("Operation", o, es);
+        }
+        if let Some(r) = relationship {
+            ExplainPropertyText("Parent Relationship", r, es);
+        }
+        if let Some(name) = plan_name {
+            ExplainPropertyText("Subplan Name", name, es);
+        }
+        ExplainPropertyBool("Parallel Aware", plan.parallel_aware, es);
+        ExplainPropertyBool("Async Capable", plan.async_capable, es);
     }
-    if es.indent != 0 {
-        crate::format::ExplainIndentText(es);
-        append!(es, "->  ");
-        es.indent += 2;
-    }
-    if plan.parallel_aware {
-        append!(es, "Parallel ");
-    }
-    if plan.async_capable {
-        append!(es, "Async ");
-    }
-    append!(es, "{pname}");
+
     let join_type = match node.node_tag() {
         NodeTag::T_NestLoop => Some(node.as_nest_loop().unwrap().join.jointype),
         NodeTag::T_HashJoin => Some(node.as_hash_join().unwrap().join.jointype),
@@ -545,10 +594,14 @@ pub fn ExplainNode<'mcx>(
             types_nodes::JoinType::JOIN_RIGHT_ANTI => "Right Anti",
             other => panic!("unrecognized join type: {other:?}"),
         };
-        if jt != types_nodes::JoinType::JOIN_INNER {
-            append!(es, " {jtname} Join");
-        } else if node.node_tag() != NodeTag::T_NestLoop {
-            append!(es, " Join");
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            if jt != types_nodes::JoinType::JOIN_INNER {
+                append!(es, " {jtname} Join");
+            } else if node.node_tag() != NodeTag::T_NestLoop {
+                append!(es, " Join");
+            }
+        } else {
+            ExplainPropertyText("Join Type", jtname, es);
         }
     }
     if let Some(so) = node.as_set_op() {
@@ -559,9 +612,12 @@ pub fn ExplainNode<'mcx>(
             SETOPCMD_EXCEPT_ALL => "Except All",
             other => node_gap("ExplainNode", &format!("SetOp command {other} unrecognized")),
         };
-        append!(es, " {setopcmd}");
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            append!(es, " {setopcmd}");
+        } else {
+            ExplainPropertyText("Command", setopcmd, es);
+        }
     }
-    es.indent += 1;
 
     if node.node_tag() == NodeTag::T_SeqScan {
         ExplainScanTarget(node.as_seq_scan().unwrap().scan.scanrelid, es)?;
@@ -591,12 +647,16 @@ pub fn ExplainNode<'mcx>(
         ExplainScanTarget(bhs.scan.scanrelid, es)?;
     }
     if let Some(bis) = node.as_bitmap_index_scan() {
-        // ExplainTargetRel's T_BitmapIndexScan arm: index name only.
+        // explain_get_index_name arm: index name only.
         let mcx = es.str.allocator();
         let indexname = lsyscache::get_rel_name(mcx, bis.indexid)?
             .expect("explain_get_index_name: cache lookup failed");
         let indexname = str_in(mcx, indexname.as_str())?;
-        append!(es, " on {}", quote_identifier(indexname));
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            append!(es, " on {}", quote_identifier(indexname));
+        } else {
+            ExplainPropertyText("Index Name", indexname, es);
+        }
     }
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
@@ -621,14 +681,21 @@ pub fn ExplainNode<'mcx>(
     }
 
     if es.costs {
-        append!(
-            es,
-            "  (cost={:.2}..{:.2} rows={:.0} width={})",
-            plan.startup_cost,
-            plan.total_cost,
-            plan.plan_rows,
-            plan.plan_width
-        );
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            append!(
+                es,
+                "  (cost={:.2}..{:.2} rows={:.0} width={})",
+                plan.startup_cost,
+                plan.total_cost,
+                plan.plan_rows,
+                plan.plan_width
+            );
+        } else {
+            ExplainPropertyFloat("Startup Cost", None, plan.startup_cost, 2, es);
+            ExplainPropertyFloat("Total Cost", None, plan.total_cost, 2, es);
+            ExplainPropertyFloat("Plan Rows", None, plan.plan_rows, 0, es);
+            ExplainPropertyInteger("Plan Width", None, plan.plan_width as i64, es);
+        }
     }
 
     // C reads planstate->instrument; the walk here is over the sealed Plan
@@ -639,7 +706,6 @@ pub fn ExplainNode<'mcx>(
     } else {
         execmain_seams::query_desc_instrument::call(es.qd, plan.plan_node_id)
     };
-    // Per-worker set-aside buffers (explain.c:1371), text-only like the rest.
     let save_workers_state = es.workers_state.take();
     let worker_instrument = if es.analyze && !es.hide_workers && !es.qd.is_null() {
         execmain_seams::query_desc_worker_instrument::call(es.qd, plan.plan_node_id)
@@ -652,10 +718,13 @@ pub fn ExplainNode<'mcx>(
         worker_inited.resize(w.len(), false);
         let mut worker_str = ::mcx::PgVec::new_in(mcx);
         worker_str.resize_with(w.len(), || None);
+        let mut worker_state_save = ::mcx::PgVec::new_in(mcx);
+        worker_state_save.resize(w.len(), 0);
         es.workers_state = Some(crate::state::WorkersState {
             num_workers: w.len(),
             worker_inited,
             worker_str,
+            worker_state_save,
         });
     }
 
@@ -665,23 +734,46 @@ pub fn ExplainNode<'mcx>(
             let startup_ms = 1000.0 * i.startup / nloops;
             let total_ms = 1000.0 * i.total / nloops;
             let rows = i.ntuples / nloops;
-            append!(es, " (actual ");
-            if es.timing {
-                append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                append!(es, " (actual ");
+                if es.timing {
+                    append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
+                }
+                append!(es, "rows={rows:.2} loops={nloops:.0})");
+            } else {
+                if es.timing {
+                    ExplainPropertyFloat("Actual Startup Time", Some("ms"), startup_ms, 3, es);
+                    ExplainPropertyFloat("Actual Total Time", Some("ms"), total_ms, 3, es);
+                }
+                ExplainPropertyFloat("Actual Rows", None, rows, 2, es);
+                ExplainPropertyFloat("Actual Loops", None, nloops, 0, es);
             }
-            append!(es, "rows={rows:.2} loops={nloops:.0})");
         }
-        _ if es.analyze => append!(es, " (never executed)"),
+        _ if es.analyze => {
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                append!(es, " (never executed)");
+            } else {
+                if es.timing {
+                    ExplainPropertyFloat("Actual Startup Time", Some("ms"), 0.0, 3, es);
+                    ExplainPropertyFloat("Actual Total Time", Some("ms"), 0.0, 3, es);
+                }
+                ExplainPropertyFloat("Actual Rows", None, 0.0, 0, es);
+                ExplainPropertyFloat("Actual Loops", None, 0.0, 0, es);
+            }
+        }
         _ => {}
     }
-    append!(es, "\n");
+    // in text format, first line ends here
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        append!(es, "\n");
+    }
 
     let isdisabled = plan_is_disabled(node);
-    if isdisabled {
+    if es.format != EXPLAIN_FORMAT_TEXT || isdisabled {
         ExplainPropertyBool("Disabled", isdisabled, es);
     }
 
-    // Per-worker general execution details (explain.c:1885-1935, text arm).
+    // Per-worker general execution details.
     if es.workers_state.is_some() && es.verbose {
         let w = worker_instrument.as_ref().expect("workers_state implies worker data");
         for (n, i) in w.iter().enumerate() {
@@ -693,12 +785,21 @@ pub fn ExplainNode<'mcx>(
             let total_ms = 1000.0 * i.total / nloops;
             let rows = i.ntuples / nloops;
             explain_open_worker(n, es);
-            ExplainIndentText(es);
-            append!(es, "actual ");
-            if es.timing {
-                append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                ExplainIndentText(es);
+                append!(es, "actual ");
+                if es.timing {
+                    append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
+                }
+                append!(es, "rows={rows:.2} loops={nloops:.0}\n");
+            } else {
+                if es.timing {
+                    ExplainPropertyFloat("Actual Startup Time", Some("ms"), startup_ms, 3, es);
+                    ExplainPropertyFloat("Actual Total Time", Some("ms"), total_ms, 3, es);
+                }
+                ExplainPropertyFloat("Actual Rows", None, rows, 2, es);
+                ExplainPropertyFloat("Actual Loops", None, nloops, 0, es);
             }
-            append!(es, "rows={rows:.2} loops={nloops:.0}\n");
             explain_close_worker(n, es);
         }
     }
@@ -973,7 +1074,7 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
-    // Per-worker buffer usage (explain.c:2291-2310), then flush the worker
+    // Per-worker buffer usage, then flush the worker
     // sections and pop the set-aside state.
     if es.workers_state.is_some() && es.buffers && es.verbose {
         let w = worker_instrument.as_ref().expect("workers_state implies worker data");
@@ -1246,14 +1347,20 @@ fn show_sort_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
             if es.workers_state.is_some() {
                 explain_open_worker(n as usize, es);
             }
-            crate::format::ExplainIndentText(es);
-            append!(
-                es,
-                "Sort Method: {}  {}: {}kB\n",
-                si.sortMethod.name(),
-                si.spaceType.name(),
-                si.spaceUsed
-            );
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                crate::format::ExplainIndentText(es);
+                append!(
+                    es,
+                    "Sort Method: {}  {}: {}kB\n",
+                    si.sortMethod.name(),
+                    si.spaceType.name(),
+                    si.spaceUsed
+                );
+            } else {
+                ExplainPropertyText("Sort Method", si.sortMethod.name(), es);
+                ExplainPropertyInteger("Sort Space Used", Some("kB"), si.spaceUsed, es);
+                ExplainPropertyText("Sort Space Type", si.spaceType.name(), es);
+            }
             if es.workers_state.is_some() {
                 explain_close_worker(n as usize, es);
             }
@@ -1262,39 +1369,57 @@ fn show_sort_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
     Ok(())
 }
 
-// ExplainOpenWorker (explain.c), text arm: swap in this worker's set-aside
-// buffer; the slot holds the main buffer until the matching close.
+// ExplainOpenWorker (explain.c): swap in this worker's set-aside buffer; the
+// slot holds the main buffer until the matching close.
 fn explain_open_worker(n: usize, es: &mut ExplainState<'_>) {
-    debug_assert_eq!(es.format, EXPLAIN_FORMAT_TEXT);
     let mcx = es.str.allocator();
-    let mut buf = {
+    let (mut buf, first_time) = {
         let ws = es.workers_state.as_mut().expect("open_worker without workers_state");
-        if ws.worker_str[n].is_none() {
+        let first = ws.worker_str[n].is_none();
+        if first {
             ws.worker_str[n] =
                 Some(stringinfo::StringInfo::new_in(mcx).expect("explain output append"));
             ws.worker_inited[n] = true;
         }
-        ws.worker_str[n].take().expect("worker buffer present")
+        (ws.worker_str[n].take().expect("worker buffer present"), first)
     };
     core::mem::swap(&mut es.str, &mut buf);
     es.workers_state.as_mut().unwrap().worker_str[n] = Some(buf);
-    if es.str.is_empty() {
-        ExplainIndentText(es);
-        append!(es, "Worker {n}:  ");
+    if first_time {
+        // One extra nesting level: the group eventually nests in "Workers".
+        crate::format::ExplainOpenSetAsideGroup("Worker", None, true, 2, es);
+        if es.format != EXPLAIN_FORMAT_TEXT {
+            ExplainPropertyInteger("Worker Number", None, n as i64, es);
+        }
+    } else {
+        let saved =
+            es.workers_state.as_ref().expect("workers_state").worker_state_save[n];
+        crate::format::ExplainRestoreGroup(es, 2, &saved);
     }
-    es.indent += 1;
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        if es.str.is_empty() {
+            ExplainIndentText(es);
+            append!(es, "Worker {n}:  ");
+        }
+        es.indent += 1;
+    }
 }
 
-// ExplainCloseWorker (explain.c), text arm: drop an output-less "Worker N:"
-// prefix, restore the main buffer.
+// ExplainCloseWorker (explain.c): in text, drop an output-less "Worker N:"
+// prefix; restore the main buffer.
 fn explain_close_worker(n: usize, es: &mut ExplainState<'_>) {
-    let bytes = es.str.as_bytes();
-    let mut len = bytes.len();
-    while len > 0 && bytes[len - 1] != b'\n' {
-        len -= 1;
+    let mut saved = 0;
+    crate::format::ExplainSaveGroup(es, 2, &mut saved);
+    es.workers_state.as_mut().expect("workers_state").worker_state_save[n] = saved;
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        let bytes = es.str.as_bytes();
+        let mut len = bytes.len();
+        while len > 0 && bytes[len - 1] != b'\n' {
+            len -= 1;
+        }
+        es.str.truncate(len);
+        es.indent -= 1;
     }
-    es.str.truncate(len);
-    es.indent -= 1;
     let mut buf = {
         let ws = es.workers_state.as_mut().expect("close_worker without workers_state");
         ws.worker_str[n].take().expect("worker slot holds the main buffer")
@@ -1303,21 +1428,25 @@ fn explain_close_worker(n: usize, es: &mut ExplainState<'_>) {
     es.workers_state.as_mut().unwrap().worker_str[n] = Some(buf);
 }
 
-// ExplainFlushWorkersState (explain.c), text arm.
+// ExplainFlushWorkersState (explain.c).
 fn explain_flush_workers_state(es: &mut ExplainState<'_>) {
     let ws = es.workers_state.take().expect("flush without workers_state");
+    ExplainOpenGroup("Workers", Some("Workers"), false, es);
     for (inited, buf) in ws.worker_inited.iter().zip(ws.worker_str.iter()) {
         if *inited {
+            ExplainOpenGroup("Worker", None, true, es);
             if let Some(b) = buf {
                 es.str.append_bytes(b.as_bytes()).expect("explain output append");
             }
+            ExplainCloseGroup("Worker", None, true, es);
         }
     }
+    ExplainCloseGroup("Workers", Some("Workers"), false, es);
 }
 
-// show_incremental_sort_group_info (explain.c), text format (non-text gaps
-// upstream). Memory values inherit the sort-info divergence (arena vs palloc
-// accounting) — notes/sort-explain-lane.md.
+// show_incremental_sort_group_info (explain.c). Memory values inherit the
+// sort-info divergence (arena vs palloc accounting) —
+// notes/sort-explain-lane.md.
 fn show_incremental_sort_group_info(
     group_info: &types_core::instrument::IncrementalSortGroupInfo,
     group_label: &str,
@@ -1331,31 +1460,72 @@ fn show_incremental_sort_group_info(
         TuplesortMethod::ExternalSort,
         TuplesortMethod::ExternalMerge,
     ];
-    let nmethods = METHOD_BITS.iter().filter(|m| group_info.sortMethods & m.bit() != 0).count();
-    if indent {
-        for _ in 0..es.indent * 2 {
-            append!(es, " ");
+    let methods: Vec<&TuplesortMethod> =
+        METHOD_BITS.iter().filter(|m| group_info.sortMethods & m.bit() != 0).collect();
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        if indent {
+            es.str
+                .append_spaces(es.indent as usize * 2)
+                .expect("explain output append");
         }
-    }
-    append!(es, "{} Groups: {}  Sort Method", group_label, group_info.groupCount);
-    append!(es, "{}", if nmethods > 1 { "s: " } else { ": " });
-    let mut emitted = 0;
-    for m in METHOD_BITS.iter().filter(|m| group_info.sortMethods & m.bit() != 0) {
-        if emitted > 0 {
-            append!(es, ", ");
+        append!(es, "{} Groups: {}  Sort Method", group_label, group_info.groupCount);
+        append!(es, "{}", if methods.len() > 1 { "s: " } else { ": " });
+        for (i, m) in methods.iter().enumerate() {
+            if i > 0 {
+                append!(es, ", ");
+            }
+            append!(es, "{}", m.name());
         }
-        append!(es, "{}", m.name());
-        emitted += 1;
+        if group_info.maxMemorySpaceUsed > 0 {
+            let avg = group_info.totalMemorySpaceUsed / group_info.groupCount;
+            append!(
+                es,
+                "  Average Memory: {}kB  Peak Memory: {}kB",
+                avg,
+                group_info.maxMemorySpaceUsed
+            );
+        }
+        if group_info.maxDiskSpaceUsed > 0 {
+            let avg = group_info.totalDiskSpaceUsed / group_info.groupCount;
+            append!(
+                es,
+                "  Average Disk: {}kB  Peak Disk: {}kB",
+                avg,
+                group_info.maxDiskSpaceUsed
+            );
+        }
+    } else {
+        let group_name = format!("{group_label} Groups");
+        let method_names: Vec<&str> = methods.iter().map(|m| m.name()).collect();
+        ExplainOpenGroup("Incremental Sort Groups", Some(&group_name), true, es);
+        ExplainPropertyInteger("Group Count", None, group_info.groupCount, es);
+        ExplainPropertyList("Sort Methods Used", &method_names, es);
+        if group_info.maxMemorySpaceUsed > 0 {
+            let avg = group_info.totalMemorySpaceUsed / group_info.groupCount;
+            ExplainOpenGroup("Sort Space", Some("Sort Space Memory"), true, es);
+            ExplainPropertyInteger("Average Sort Space Used", Some("kB"), avg, es);
+            ExplainPropertyInteger(
+                "Peak Sort Space Used",
+                Some("kB"),
+                group_info.maxMemorySpaceUsed,
+                es,
+            );
+            ExplainCloseGroup("Sort Space", Some("Sort Space Memory"), true, es);
+        }
+        if group_info.maxDiskSpaceUsed > 0 {
+            let avg = group_info.totalDiskSpaceUsed / group_info.groupCount;
+            ExplainOpenGroup("Sort Space", Some("Sort Space Disk"), true, es);
+            ExplainPropertyInteger("Average Sort Space Used", Some("kB"), avg, es);
+            ExplainPropertyInteger(
+                "Peak Sort Space Used",
+                Some("kB"),
+                group_info.maxDiskSpaceUsed,
+                es,
+            );
+            ExplainCloseGroup("Sort Space", Some("Sort Space Disk"), true, es);
+        }
+        ExplainCloseGroup("Incremental Sort Groups", Some(&group_name), true, es);
     }
-    if group_info.maxMemorySpaceUsed > 0 {
-        let avg = group_info.totalMemorySpaceUsed / group_info.groupCount;
-        append!(es, "  Average Memory: {}kB  Peak Memory: {}kB", avg, group_info.maxMemorySpaceUsed);
-    }
-    if group_info.maxDiskSpaceUsed > 0 {
-        let avg = group_info.totalDiskSpaceUsed / group_info.groupCount;
-        append!(es, "  Average Disk: {}kB  Peak Disk: {}kB", avg, group_info.maxDiskSpaceUsed);
-    }
-    append!(es, "\n");
 }
 
 // show_incremental_sort_info (explain.c). The group-info helper carries the
@@ -1369,12 +1539,19 @@ fn show_incremental_sort_info<'mcx>(
         return Ok(());
     }
     let id = plan_of(node).plan_node_id;
-    if let Some(info) = execmain_seams::query_desc_incsort_instrument::call(es.qd, id) {
-        if info.fullsortGroupInfo.groupCount > 0 {
-            show_incremental_sort_group_info(&info.fullsortGroupInfo, "Full-sort", true, es);
-            if info.prefixsortGroupInfo.groupCount > 0 {
-                show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+    let Some(info) = execmain_seams::query_desc_incsort_instrument::call(es.qd, id) else {
+        return Ok(());
+    };
+    if info.fullsortGroupInfo.groupCount > 0 {
+        show_incremental_sort_group_info(&info.fullsortGroupInfo, "Full-sort", true, es);
+        if info.prefixsortGroupInfo.groupCount > 0 {
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                append!(es, "\n");
             }
+            show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+        }
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            append!(es, "\n");
         }
     }
     // The shared_info worker stanza; workers with no full-sort groups either
@@ -1395,7 +1572,13 @@ fn show_incremental_sort_info<'mcx>(
                 es,
             );
             if info.prefixsortGroupInfo.groupCount > 0 {
+                if es.format == EXPLAIN_FORMAT_TEXT {
+                    append!(es, "\n");
+                }
                 show_incremental_sort_group_info(&info.prefixsortGroupInfo, "Pre-sorted", true, es);
+            }
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                append!(es, "\n");
             }
             if es.workers_state.is_some() {
                 explain_close_worker(n as usize, es);
@@ -1453,8 +1636,8 @@ fn show_group_keys<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx
     Ok(())
 }
 
-// show_hash_info (explain.c), text arm; the shared_info (parallel) merge has
-// no parallel lane.
+// show_hash_info (explain.c); the shared_info (parallel) merge has no
+// parallel lane.
 fn show_hash_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     if !es.analyze || es.qd.is_null() {
         return Ok(());
@@ -1467,12 +1650,20 @@ fn show_hash_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
     if hi.nbatch <= 0 {
         return Ok(());
     }
-    if es.format != EXPLAIN_FORMAT_TEXT {
-        crate::format::nontext_gap(es, "show_hash_info");
-    }
     let space_peak_kb = hi.space_peak.div_ceil(1024);
-    crate::format::ExplainIndentText(es);
-    if hi.nbatch_original != hi.nbatch || hi.nbuckets_original != hi.nbuckets {
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        ExplainPropertyInteger("Hash Buckets", None, hi.nbuckets as i64, es);
+        ExplainPropertyInteger("Original Hash Buckets", None, hi.nbuckets_original as i64, es);
+        ExplainPropertyInteger("Hash Batches", None, hi.nbatch as i64, es);
+        ExplainPropertyInteger("Original Hash Batches", None, hi.nbatch_original as i64, es);
+        crate::format::ExplainPropertyUInteger(
+            "Peak Memory Usage",
+            Some("kB"),
+            space_peak_kb,
+            es,
+        );
+    } else if hi.nbatch_original != hi.nbatch || hi.nbuckets_original != hi.nbuckets {
+        crate::format::ExplainIndentText(es);
         append!(
             es,
             "Buckets: {} (originally {})  Batches: {} (originally {})  Memory Usage: {}kB\n",
@@ -1483,6 +1674,7 @@ fn show_hash_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResu
             space_peak_kb
         );
     } else {
+        crate::format::ExplainIndentText(es);
         append!(
             es,
             "Buckets: {}  Batches: {}  Memory Usage: {}kB\n",
@@ -1503,12 +1695,14 @@ fn show_grouping_sets<'mcx>(
     es: &mut ExplainState<'mcx>,
 ) -> PgResult<()> {
     let agg = node.as_agg().expect("Agg plan node");
+    ExplainOpenGroup("Grouping Sets", Some("Grouping Sets"), false, es);
     show_grouping_set_keys(node, agg, None, ancestors, es)?;
     for chain_node in agg.chain.iter() {
         let aggnode = chain_node.as_agg().expect("Agg.chain cell");
         let sortnode = aggnode.plan.lefttree.and_then(Node::as_sort);
         show_grouping_set_keys(node, aggnode, sortnode, ancestors, es)?;
     }
+    ExplainCloseGroup("Grouping Sets", Some("Grouping Sets"), false, es);
     Ok(())
 }
 
@@ -1525,8 +1719,13 @@ fn show_grouping_set_keys<'mcx>(
     // C's passthrough shape, and grpColIdx resnos address the child tlist.
     let child = node.as_agg().expect("Agg plan node").plan.lefttree.expect("Agg has an outer plan");
     let tlist = &plan_of(child).targetlist;
-    let keyname =
-        if aggnode.aggstrategy == 2 || aggnode.aggstrategy == 3 { "Hash Key" } else { "Group Key" };
+    let (keyname, keysetname) = if aggnode.aggstrategy == 2 || aggnode.aggstrategy == 3 {
+        ("Hash Key", "Hash Keys")
+    } else {
+        ("Group Key", "Group Keys")
+    };
+
+    ExplainOpenGroup("Grouping Set", None, true, es);
 
     if let Some(sort) = sortnode {
         let mut result: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
@@ -1547,8 +1746,12 @@ fn show_grouping_set_keys<'mcx>(
             result.push(buf);
         }
         ExplainPropertyList("Sort Key", &result, es);
-        es.indent += 1;
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            es.indent += 1;
+        }
     }
+
+    ExplainOpenGroup(keysetname, Some(keysetname), false, es);
 
     for set in aggnode.groupingSets.iter() {
         let set = set
@@ -1564,21 +1767,25 @@ fn show_grouping_set_keys<'mcx>(
             deparse_expr(es, node, ancestors, tle.expr, useprefix, true, &mut buf)?;
             result.push(buf);
         }
-        if result.is_empty() {
+        if result.is_empty() && es.format == EXPLAIN_FORMAT_TEXT {
             crate::format::ExplainPropertyText(keyname, "()", es);
         } else {
-            ExplainPropertyList(keyname, &result, es);
+            crate::format::ExplainPropertyListNested(keyname, &result, es);
         }
     }
 
-    if sortnode.is_some() {
+    ExplainCloseGroup(keysetname, Some(keysetname), false, es);
+
+    if sortnode.is_some() && es.format == EXPLAIN_FORMAT_TEXT {
         es.indent -= 1;
     }
+
+    ExplainCloseGroup("Grouping Set", None, true, es);
     Ok(())
 }
 
-// show_hashagg_info (explain.c), text arm; the parallel-worker display has no
-// parallel lane. AGG_HASHED/AGG_MIXED only.
+// show_hashagg_info (explain.c); the parallel-worker display has no parallel
+// lane. AGG_HASHED/AGG_MIXED only.
 fn show_hashagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgResult<()> {
     let agg = node.as_agg().expect("Agg plan node");
     if agg.aggstrategy != 2 && agg.aggstrategy != 3 {
@@ -1592,6 +1799,27 @@ fn show_hashagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) -> PgR
             None => return Ok(()),
         }
     };
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        if es.costs {
+            ExplainPropertyInteger(
+                "Planned Partitions",
+                None,
+                ai.hash_planned_partitions as i64,
+                es,
+            );
+        }
+        if es.analyze && ai.hash_mem_peak > 0 {
+            ExplainPropertyInteger("HashAgg Batches", None, ai.hash_batches_used as i64, es);
+            ExplainPropertyInteger(
+                "Peak Memory Usage",
+                Some("kB"),
+                ai.hash_mem_peak.div_ceil(1024) as i64,
+                es,
+            );
+            ExplainPropertyInteger("Disk Usage", Some("kB"), ai.hash_disk_used as i64, es);
+        }
+        return Ok(());
+    }
     let mut gotone = false;
     if es.costs && ai.hash_planned_partitions > 0 {
         crate::format::ExplainIndentText(es);
@@ -1873,7 +2101,7 @@ fn show_one_time_filter<'mcx>(
     Ok(())
 }
 
-// ExplainIndexScanDetails (explain.c), TEXT arm (nontext gapped upstream).
+// ExplainIndexScanDetails (explain.c).
 fn ExplainIndexScanDetails(
     indexid: types_core::Oid,
     indexorderdir: i32,
@@ -1882,10 +2110,20 @@ fn ExplainIndexScanDetails(
     let mcx = es.str.allocator();
     let indexname = lsyscache::get_rel_name(mcx, indexid)?
         .unwrap_or_else(|| panic!("cache lookup failed for index {indexid}"));
-    if indexorderdir < 0 {
-        append!(es, " Backward");
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        if indexorderdir < 0 {
+            append!(es, " Backward");
+        }
+        append!(es, " using {}", quote_identifier(indexname.as_str()));
+    } else {
+        let scandir = match indexorderdir {
+            d if d < 0 => "Backward",
+            d if d > 0 => "Forward",
+            _ => "???",
+        };
+        ExplainPropertyText("Scan Direction", scandir, es);
+        ExplainPropertyText("Index Name", indexname.as_str(), es);
     }
-    append!(es, " using {}", quote_identifier(indexname.as_str()));
     Ok(())
 }
 
@@ -1923,22 +2161,33 @@ fn show_indexsearches_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) 
     crate::format::ExplainPropertyUInteger("Index Searches", None, nsearches, es);
 }
 
+<<<<<<< HEAD
 // show_tidbitmap_info (explain.c), text arm.
+=======
+// show_tidbitmap_info (explain.c); parallel worker stats have no parallel
+// lane.
+>>>>>>> 9f5c5b5b0 (port(explain): JSON/XML/YAML format emitters + explain.c non-text arms)
 fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if !es.analyze {
         return;
     }
+<<<<<<< HEAD
     if es.format != EXPLAIN_FORMAT_TEXT {
         crate::format::nontext_gap(es, "show_tidbitmap_info");
     }
     let id = plan_of(node).plan_node_id;
+=======
+>>>>>>> 9f5c5b5b0 (port(explain): JSON/XML/YAML format emitters + explain.c non-text arms)
     let stats = if es.qd.is_null() {
         None
     } else {
         execmain_seams::query_desc_bitmap_instrument::call(es.qd, id)
     };
     let stats = stats.unwrap_or_default();
-    if stats.exact_pages > 0 || stats.lossy_pages > 0 {
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        crate::format::ExplainPropertyUInteger("Exact Heap Blocks", None, stats.exact_pages, es);
+        crate::format::ExplainPropertyUInteger("Lossy Heap Blocks", None, stats.lossy_pages, es);
+    } else if stats.exact_pages > 0 || stats.lossy_pages > 0 {
         crate::format::ExplainIndentText(es);
         append!(es, "Heap Blocks:");
         if stats.exact_pages > 0 {
@@ -1978,16 +2227,18 @@ fn show_tidbitmap_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     }
 }
 
-// show_storage_info (explain.c), text arm. maxSpace inherits the arena-vs-
-// palloc accounting caveat only through tuplestore's chunk_space mirror
-// (byte-exact vs C by construction; see tuplestore::chunk_space).
+// show_storage_info (explain.c). maxSpace inherits the arena-vs-palloc
+// accounting caveat only through tuplestore's chunk_space mirror (byte-exact
+// vs C by construction; see tuplestore::chunk_space).
 fn show_storage_info(stats: types_core::instrument::TuplestoreInstrumentation, es: &mut ExplainState<'_>) {
-    if es.format != EXPLAIN_FORMAT_TEXT {
-        crate::format::nontext_gap(es, "show_storage_info");
-    }
     let kb = (stats.max_space + 1023) / 1024;
-    crate::format::ExplainIndentText(es);
-    append!(es, "Storage: {}  Maximum Storage: {}kB\n", stats.space_type.name(), kb);
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        ExplainPropertyText("Storage", stats.space_type.name(), es);
+        ExplainPropertyInteger("Maximum Storage", Some("kB"), kb as i64, es);
+    } else {
+        crate::format::ExplainIndentText(es);
+        append!(es, "Storage: {}  Maximum Storage: {}kB\n", stats.space_type.name(), kb);
+    }
 }
 
 fn tuplestore_stats<'mcx>(
@@ -2276,9 +2527,14 @@ fn ExplainTableFuncTarget<'mcx>(
     let refname = es.rtable_names[rti as usize - 1]
         .or_else(|| rte.eref.expect("RTE without eref").aliasname)
         .expect("scan RTE has a refname");
-    append!(es, " on {}", quote_identifier(objectname));
-    if objectname != refname {
-        append!(es, " {}", quote_identifier(refname));
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        append!(es, " on {}", quote_identifier(objectname));
+        if objectname != refname {
+            append!(es, " {}", quote_identifier(refname));
+        }
+    } else {
+        ExplainPropertyText("Table Function Name", objectname, es);
+        ExplainPropertyText("Alias", refname, es);
     }
     Ok(())
 }
@@ -2323,15 +2579,25 @@ fn ExplainFunctionTarget<'mcx>(
     let refname = es.rtable_names[rti as usize - 1]
         .or_else(|| rte.eref.expect("RTE without eref").aliasname)
         .expect("scan RTE has a refname");
-    append!(es, " on");
-    if let Some(ns) = &namespace {
-        let obj = objectname.expect("namespace implies objectname");
-        append!(es, " {}.{}", quote_identifier(ns.as_str()), quote_identifier(obj));
-    } else if let Some(obj) = objectname {
-        append!(es, " {}", quote_identifier(obj));
-    }
-    if objectname != Some(refname) {
-        append!(es, " {}", quote_identifier(refname));
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        append!(es, " on");
+        if let Some(ns) = &namespace {
+            let obj = objectname.expect("namespace implies objectname");
+            append!(es, " {}.{}", quote_identifier(ns.as_str()), quote_identifier(obj));
+        } else if let Some(obj) = objectname {
+            append!(es, " {}", quote_identifier(obj));
+        }
+        if objectname != Some(refname) {
+            append!(es, " {}", quote_identifier(refname));
+        }
+    } else {
+        if let Some(obj) = objectname {
+            ExplainPropertyText("Function Name", obj, es);
+        }
+        if let Some(ns) = &namespace {
+            ExplainPropertyText("Schema", ns.as_str(), es);
+        }
+        ExplainPropertyText("Alias", refname, es);
     }
     Ok(())
 }
@@ -2345,14 +2611,14 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
         .as_range_tbl_entry()
         .expect("rtable holds RTEs");
     let relname;
-    let objectname = match rte.rtekind {
+    let (objectname, objecttag) = match rte.rtekind {
         RTEKind::RTE_RELATION => {
             relname = lsyscache::get_rel_name(mcx, rte.relid)?;
-            relname.as_ref().map(|s| s.as_str())
+            (relname.as_ref().map(|s| s.as_str()), Some("Relation Name"))
         }
-        RTEKind::RTE_CTE => rte.ctename,
-        RTEKind::RTE_NAMEDTUPLESTORE => rte.enrname,
-        RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => None,
+        RTEKind::RTE_CTE => (rte.ctename, Some("CTE Name")),
+        RTEKind::RTE_NAMEDTUPLESTORE => (rte.enrname, Some("Tuplestore Name")),
+        RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => (None, None),
         other => node_gap(
             "ExplainTargetRel",
             &format!("{other:?} target arm unported (M2+ plan lanes)"),
@@ -2366,15 +2632,25 @@ fn ExplainTargetRel<'mcx>(rti: types_core::Index, es: &mut ExplainState<'mcx>) -
     let refname = es.rtable_names[rti as usize - 1]
         .or_else(|| rte.eref.expect("RTE without eref").aliasname)
         .expect("scan RTE has a refname");
-    append!(es, " on");
-    if let Some(ns) = &namespace {
-        let obj = objectname.expect("namespace implies objectname");
-        append!(es, " {}.{}", quote_identifier(ns.as_str()), quote_identifier(obj));
-    } else if let Some(obj) = objectname {
-        append!(es, " {}", quote_identifier(obj));
-    }
-    if objectname != Some(refname) {
-        append!(es, " {}", quote_identifier(refname));
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        append!(es, " on");
+        if let Some(ns) = &namespace {
+            let obj = objectname.expect("namespace implies objectname");
+            append!(es, " {}.{}", quote_identifier(ns.as_str()), quote_identifier(obj));
+        } else if let Some(obj) = objectname {
+            append!(es, " {}", quote_identifier(obj));
+        }
+        if objectname != Some(refname) {
+            append!(es, " {}", quote_identifier(refname));
+        }
+    } else {
+        if let (Some(tag), Some(obj)) = (objecttag, objectname) {
+            ExplainPropertyText(tag, obj, es);
+        }
+        if let Some(ns) = &namespace {
+            ExplainPropertyText("Schema", ns.as_str(), es);
+        }
+        ExplainPropertyText("Alias", refname, es);
     }
     Ok(())
 }

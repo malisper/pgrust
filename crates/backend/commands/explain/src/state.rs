@@ -31,19 +31,18 @@ pub enum ExplainSerializeOption {
 pub use ExplainFormat::*;
 pub use ExplainSerializeOption::*;
 
-// Text-format ExplainWorkersState (explain.c): per-worker set-aside output
-// buffers, swapped in around per-worker detail writes and flushed as one
-// "Worker N:" section each. The non-text group bookkeeping is with the other
-// non-text arms: loud.
+// ExplainWorkersState (explain.c): per-worker set-aside output buffers,
+// swapped in around per-worker detail writes; the open slot holds the main
+// buffer until the matching close.
 pub struct WorkersState<'mcx> {
     pub num_workers: usize,
     pub worker_inited: PgVec<'mcx, bool>,
     pub worker_str: PgVec<'mcx, Option<stringinfo::StringInfo<'mcx>>>,
+    pub worker_state_save: PgVec<'mcx, i32>,
 }
 
-// Omitted vs C's ExplainState: grouping_stack (non-text formats are loud),
-// extension_state (no extension options registered in this build;
-// ApplyExtensionExplainOption always misses).
+// Omitted vs C's ExplainState: extension_state (no extension options
+// registered in this build; ApplyExtensionExplainOption always misses).
 pub struct ExplainState<'mcx> {
     pub str: StringInfo<'mcx>,
     pub verbose: bool,
@@ -59,6 +58,8 @@ pub struct ExplainState<'mcx> {
     pub serialize: ExplainSerializeOption,
     pub format: ExplainFormat,
     pub indent: i32,
+    /// JSON/YAML per-group emission state (C's integer list; head = last).
+    pub grouping_stack: PgVec<'mcx, i32>,
     // C's ExplainPrintPlan(es, queryDesc) argument: live while the plan walk
     // may read per-node Instrumentation, NULL otherwise.
     pub qd: types_portal::QueryDescHandle,
@@ -89,6 +90,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         serialize: EXPLAIN_SERIALIZE_NONE,
         format: EXPLAIN_FORMAT_TEXT,
         indent: 0,
+        grouping_stack: PgVec::new_in(mcx),
         qd: types_portal::QueryDescHandle::NULL,
         pstmt: None,
         printed_subplans: types_nodes::bitmapset::Bitmapset::empty(),
