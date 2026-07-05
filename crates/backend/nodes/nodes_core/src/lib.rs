@@ -333,6 +333,14 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_list(&tf.passingvalexprs, w)?)
         }
         NodeTag::T_InferenceElem => walk_opt(node.as_inference_elem().unwrap().expr, w),
+        NodeTag::T_OnConflictExpr => {
+            let oc = node.as_on_conflict_expr().unwrap();
+            Ok(walk_list(&oc.arbiterElems, w)?
+                || walk_opt(oc.arbiterWhere, w)?
+                || walk_list(&oc.onConflictSet, w)?
+                || walk_opt(oc.onConflictWhere, w)?
+                || walk_list(&oc.exclRelTlist, w)?)
+        }
         other => deferred("expression_tree_walker", other),
     }
 }
@@ -1869,6 +1877,39 @@ where
                     },
                 )?)),
             }
+        }
+        NodeTag::T_OnConflictExpr => {
+            let oc = node.as_on_conflict_expr().unwrap();
+            let arbiter_elems = mutate_list(mcx, &oc.arbiterElems, m)?;
+            let arbiter_where = mutate_opt(oc.arbiterWhere, m)?;
+            let on_conflict_set = mutate_list(mcx, &oc.onConflictSet, m)?;
+            let on_conflict_where = mutate_opt(oc.onConflictWhere, m)?;
+            let excl_rel_tlist = mutate_list(mcx, &oc.exclRelTlist, m)?;
+            if arbiter_elems.is_none()
+                && arbiter_where.is_none()
+                && on_conflict_set.is_none()
+                && on_conflict_where.is_none()
+                && excl_rel_tlist.is_none()
+            {
+                return Ok(None);
+            }
+            let unchanged = |new: Option<NodeList<'mcx>>, old: &NodeList<'mcx>| match new {
+                Some(l) => Ok(l),
+                None => old.clone_in(mcx),
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::OnConflictExpr {
+                    action: oc.action,
+                    arbiterElems: unchanged(arbiter_elems, &oc.arbiterElems)?,
+                    arbiterWhere: arbiter_where.or(oc.arbiterWhere),
+                    constraint: oc.constraint,
+                    onConflictSet: unchanged(on_conflict_set, &oc.onConflictSet)?,
+                    onConflictWhere: on_conflict_where.or(oc.onConflictWhere),
+                    exclRelIndex: oc.exclRelIndex,
+                    exclRelTlist: unchanged(excl_rel_tlist, &oc.exclRelTlist)?,
+                },
+            )?))
         }
         other => deferred("expression_tree_mutator", other),
     }

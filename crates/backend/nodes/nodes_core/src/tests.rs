@@ -535,3 +535,82 @@ fn make_whole_row_var_default_arms() {
     let v = makefuncs::make_whole_row_var(mcx, &rte, 1, 0, true).unwrap();
     assert_eq!(v.vartype, types_core::catalog::RECORDOID);
 }
+
+#[test]
+fn on_conflict_expr_walker_reaches_all_five_fields() {
+    use types_nodes::primnodes::{InferenceElem, OnConflictAction, OnConflictExpr};
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let mk_te = |id| {
+        Node::mk_target_entry(mcx, extern_param(mcx, id), 1, None, false).unwrap()
+    };
+    let ie = Node::mk(
+        mcx,
+        InferenceElem { expr: Some(extern_param(mcx, 1)), infercollid: 0, inferopclass: 0 },
+    )
+    .unwrap();
+    let oc = Node::mk(
+        mcx,
+        OnConflictExpr {
+            action: OnConflictAction::ONCONFLICT_UPDATE,
+            arbiterElems: NodeList::from_slice(mcx, &[ie]).unwrap(),
+            arbiterWhere: Some(extern_param(mcx, 2)),
+            constraint: 0,
+            onConflictSet: NodeList::from_slice(mcx, &[mk_te(3)]).unwrap(),
+            onConflictWhere: Some(extern_param(mcx, 4)),
+            exclRelIndex: 2,
+            exclRelTlist: NodeList::from_slice(mcx, &[mk_te(5)]).unwrap(),
+        },
+    )
+    .unwrap();
+
+    struct W(Vec<i32>);
+    impl<'mcx> NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(p) = node.as_param() {
+                self.0.push(p.paramid);
+                return Ok(false);
+            }
+            expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W(Vec::new());
+    assert!(!expression_tree_walker(oc, &mut w).unwrap());
+    assert_eq!(w.0, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn on_conflict_expr_mutator_identity_and_rebuild() {
+    use types_nodes::primnodes::{OnConflictAction, OnConflictExpr};
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let set_te =
+        Node::mk_target_entry(mcx, extern_param(mcx, 1), 1, None, false).unwrap();
+    let oc = Node::mk(
+        mcx,
+        OnConflictExpr {
+            action: OnConflictAction::ONCONFLICT_UPDATE,
+            arbiterElems: NodeList::nil(),
+            arbiterWhere: None,
+            constraint: 0,
+            onConflictSet: NodeList::from_slice(mcx, &[set_te]).unwrap(),
+            onConflictWhere: Some(extern_param(mcx, 7)),
+            exclRelIndex: 2,
+            exclRelTlist: NodeList::nil(),
+        },
+    )
+    .unwrap();
+
+    assert!(expression_tree_mutator(mcx, oc, &mut |_| Ok(None)).unwrap().is_none());
+
+    let replacement = extern_param(mcx, 9);
+    let out = expression_tree_mutator(mcx, oc, &mut |n| {
+        Ok((n.as_param().is_some_and(|p| p.paramid == 7)).then_some(replacement))
+    })
+    .unwrap()
+    .expect("changed onConflictWhere rebuilds the node");
+    let new_oc = out.as_on_conflict_expr().unwrap();
+    assert_eq!(new_oc.onConflictWhere.unwrap().as_param().unwrap().paramid, 9);
+    assert_eq!(new_oc.exclRelIndex, 2);
+    assert_eq!(new_oc.onConflictSet.len(), 1);
+}
