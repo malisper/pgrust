@@ -2332,13 +2332,10 @@ fn add_column_phase3_fill<'mcx>(
             mcx,
             types_nodes::primnodes::NextValueExpr { seqid, typeId: attribute.atttypid },
         )?)
-    } else if rel.rd_att.attr(attnum as usize - 1).atthasdef {
-        Some(
-            rewrite_handler::build_column_default(mcx, rel, attnum as usize)?
-                .expect("atthasdef column has a default"),
-        )
     } else {
-        None
+        // build_column_default falls back to the column type's own default
+        // (domains), so it runs regardless of atthasdef (tablecmds.c:7440).
+        rewrite_handler::build_column_default(mcx, rel, attnum as usize)?
     };
     if defval.is_none() && has_domain_constraints {
         // NULL::basetype through CoerceToDomain so phase 3 evaluates the
