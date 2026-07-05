@@ -2072,6 +2072,7 @@ mod hashspill {
     fn setup() {
         install_seams();
         SPILL_SETUP.call_once(|| {
+            guc_tables::init_seams();
             elog::init_seams();
             fd::init_seams();
             xact_seams::get_current_sub_transaction_id::set(|| 1);
@@ -2104,6 +2105,21 @@ mod hashspill {
         std::fs::read_dir(format!("{dir}/base/pgsql_tmp"))
             .map(|d| d.count())
             .unwrap_or(0)
+    }
+
+    // Spilled tuples reform small text as 1B short varlena; read either form.
+    fn text_any_str(d: Datum) -> String {
+        let p = d.as_usize() as *const u8;
+        // SAFETY: live in-memory text datum from the result slot.
+        unsafe {
+            let b0 = *p;
+            let (off, len) = if b0 & 0x01 == 1 {
+                (1usize, (b0 >> 1) as usize - 1)
+            } else {
+                (4usize, (p.cast::<u32>().read_unaligned() >> 2) as usize - 4)
+            };
+            String::from_utf8_lossy(std::slice::from_raw_parts(p.add(off), len)).into_owned()
+        }
     }
 
     const NGROUPS: i32 = 10_000;
@@ -2304,7 +2320,7 @@ mod hashspill {
             while let Some(slot_id) = exec_agg(&mut state, estate, &mut feed).unwrap() {
                 let base = estate.slot_mut(slot_id).base();
                 assert!(!base.tts_isnull[1]);
-                got.push((base.tts_values[0].as_i32(), text_datum_str(base.tts_values[1])));
+                got.push((base.tts_values[0].as_i32(), text_any_str(base.tts_values[1])));
             }
             got.sort_unstable();
             let expect: Vec<(i32, String)> = (0..N).map(|k| (k, format!("a{k:05}"))).collect();
