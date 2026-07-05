@@ -9,7 +9,7 @@ use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry, RowMarkClause};
 use types_nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, BoolTestType, BooleanTest, FromExpr, GroupingFunc,
-    PlaceHolderVar, TargetEntry, Var,
+    PlaceHolderVar, TargetEntry, Var, VarReturningType,
 };
 use types_nodes::{Node, NodeList, NodeTag};
 
@@ -1428,15 +1428,9 @@ fn ReplaceVarFromTargetList<'mcx>(
     var: &Var<'mcx>,
     _target_rte: &RangeTblEntry<'mcx>,
     targetlist: &NodeList<'mcx>,
-    _result_relation: i32,
+    result_relation: i32,
     nomatch_option: ReplaceVarsNoMatchOption,
 ) -> PgResult<Node<'mcx>> {
-    if var.varreturningtype != types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT {
-        panic!(
-            "ReplaceVarFromTargetList (rewriteManip.c): OLD/NEW RETURNING \
-             (varreturningtype) arm unported"
-        );
-    }
     if var.varattno == 0 {
         panic!(
             "ReplaceVarFromTargetList (rewriteManip.c): whole-row Var expansion \
@@ -1482,9 +1476,82 @@ fn ReplaceVarFromTargetList<'mcx>(
                     "NEW variables in ON UPDATE rules cannot reference columns that are part of a multiple assignment in the subject UPDATE command",
                 ));
             }
+            if var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
+                if result_relation == 0 {
+                    return Err(internal(
+                        "variable returning old/new found outside RETURNING list",
+                    ));
+                }
+                SetVarReturningType(newnode, result_relation, 0, var.varreturningtype)?;
+                let wrap = match newnode.as_var() {
+                    Some(v) => v.varno != result_relation || v.varlevelsup != 0,
+                    None => true,
+                };
+                if wrap {
+                    return Node::mk(
+                        mcx,
+                        types_nodes::primnodes::ReturningExpr {
+                            retlevelsup: 0,
+                            retold: var.varreturningtype
+                                == VarReturningType::VAR_RETURNING_OLD,
+                            retexpr: newnode,
+                        },
+                    );
+                }
+            }
             Ok(newnode)
         }
     }
+}
+
+struct SetVarReturningTypeWalker {
+    result_relation: i32,
+    sublevels_up: u32,
+    returning_type: VarReturningType,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for SetVarReturningTypeWalker {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Var => {
+                let v = node.as_var().expect("Var");
+                if v.varno == self.result_relation && v.varlevelsup == self.sublevels_up {
+                    // SAFETY: exclusive freshly-copied tree (caller copies
+                    // before calling, per C's copyObject-then-modify shape).
+                    unsafe {
+                        node.with_mut::<Var, _>(|vm| {
+                            vm.varreturningtype = self.returning_type
+                        })
+                    }
+                    .expect("Var");
+                }
+                Ok(false)
+            }
+            NodeTag::T_Query => {
+                self.sublevels_up += 1;
+                let r =
+                    nodes_core::query_tree_walker(node.as_query().expect("Query"), self, 0)?;
+                self.sublevels_up -= 1;
+                Ok(r)
+            }
+            _ => nodes_core::expression_tree_walker(node, self),
+        }
+    }
+}
+
+// SetVarReturningType (rewriteManip.c); mutates Vars in place — the given
+// tree must be a fresh copy.
+#[allow(non_snake_case)]
+fn SetVarReturningType(
+    node: Node<'_>,
+    result_relation: i32,
+    sublevels_up: u32,
+    returning_type: VarReturningType,
+) -> PgResult<()> {
+    let mut w = SetVarReturningTypeWalker { result_relation, sublevels_up, returning_type };
+    use nodes_core::NodeWalker as _;
+    w.visit(node)?;
+    Ok(())
 }
 
 fn tle_expr_node<'mcx>(tle: &TargetEntry<'mcx>) -> Node<'mcx> {
