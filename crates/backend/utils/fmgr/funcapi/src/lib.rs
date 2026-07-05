@@ -130,11 +130,16 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
     }
 }
 
-fn call_expr_node(flinfo: &FmgrInfo) -> Option<Node<'static>> {
+pub fn call_expr_node(flinfo: &FmgrInfo) -> Option<Node<'static>> {
     flinfo.fn_expr.as_ref().map(|e| {
         *e.downcast_ref::<Node<'static>>()
             .expect("funcapi: fn_expr does not carry a Node")
     })
+}
+
+/// C: exprType over a call expression node (get_fn_expr_rettype's core).
+pub fn get_call_expr_rettype(node: Node<'_>) -> Oid {
+    expr_type(Some(node))
 }
 
 /// C: get_fn_expr_rettype (fmgr.c); InvalidOid mirrors the NULL-fn_expr case.
@@ -520,6 +525,293 @@ pub fn resolve_polymorphic_tupdesc(
     // The remaining leg extracts actuals from the call expression's argument
     // list (get_call_expr_argtype) and rewrites the polymorphic columns.
     panic!("funcapi resolve_polymorphic_tupdesc: polymorphic OUT-column resolution not ported");
+}
+
+#[derive(Default)]
+struct PolymorphicActuals {
+    anyelement_type: Oid,
+    anyarray_type: Oid,
+    anyrange_type: Oid,
+    anymultirange_type: Oid,
+}
+
+fn poly_err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
+    Box::new(PgError::error(msg).with_sqlstate(sqlstate))
+}
+
+fn resolve_anyelement_from_others(a: &mut PolymorphicActuals) -> PgResult<()> {
+    if a.anyarray_type != InvalidOid {
+        let base = lsyscache::getBaseType(a.anyarray_type)?;
+        let elem = lsyscache::get_element_type(base)?;
+        if elem == InvalidOid {
+            return Err(poly_err(
+                ERRCODE_DATATYPE_MISMATCH,
+                format!(
+                    "argument declared anyarray is not an array but type {}",
+                    format_type::format_type_be(base)?
+                ),
+            ));
+        }
+        a.anyelement_type = elem;
+    } else if a.anyrange_type != InvalidOid {
+        let base = lsyscache::getBaseType(a.anyrange_type)?;
+        let sub = lsyscache::get_range_subtype(base)?;
+        if sub == InvalidOid {
+            return Err(poly_err(
+                ERRCODE_DATATYPE_MISMATCH,
+                format!(
+                    "argument declared anyrange is not a range type but type {}",
+                    format_type::format_type_be(base)?
+                ),
+            ));
+        }
+        a.anyelement_type = sub;
+    } else if a.anymultirange_type != InvalidOid {
+        let mr_base = lsyscache::getBaseType(a.anymultirange_type)?;
+        let mr_range = lsyscache::get_multirange_range(mr_base)?;
+        if mr_range == InvalidOid {
+            return Err(poly_err(
+                ERRCODE_DATATYPE_MISMATCH,
+                format!(
+                    "argument declared anymultirange is not a multirange type but type {}",
+                    format_type::format_type_be(mr_base)?
+                ),
+            ));
+        }
+        let r_base = lsyscache::getBaseType(mr_range)?;
+        let sub = lsyscache::get_range_subtype(r_base)?;
+        if sub == InvalidOid {
+            return Err(poly_err(
+                ERRCODE_DATATYPE_MISMATCH,
+                format!(
+                    "argument declared anymultirange does not contain a range type but type {}",
+                    format_type::format_type_be(r_base)?
+                ),
+            ));
+        }
+        a.anyelement_type = sub;
+    } else {
+        return Err(Box::new(PgError::error(
+            "could not determine polymorphic type".to_string(),
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_anyarray_from_others(a: &mut PolymorphicActuals) -> PgResult<()> {
+    if a.anyelement_type == InvalidOid {
+        resolve_anyelement_from_others(a)?;
+    }
+    if a.anyelement_type != InvalidOid {
+        let arr = lsyscache::get_array_type(a.anyelement_type)?;
+        if arr == InvalidOid {
+            return Err(poly_err(
+                types_error::ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "could not find array type for data type {}",
+                    format_type::format_type_be(a.anyelement_type)?
+                ),
+            ));
+        }
+        a.anyarray_type = arr;
+        Ok(())
+    } else {
+        Err(Box::new(PgError::error("could not determine polymorphic type".to_string())))
+    }
+}
+
+fn resolve_anyrange_from_others(a: &mut PolymorphicActuals) -> PgResult<()> {
+    // A range type is not deducible from array/base actuals (subtypes are
+    // not unique across range types), only from a multirange actual.
+    if a.anymultirange_type != InvalidOid {
+        let mr_base = lsyscache::getBaseType(a.anymultirange_type)?;
+        let mr_range = lsyscache::get_multirange_range(mr_base)?;
+        if mr_range == InvalidOid {
+            return Err(poly_err(
+                ERRCODE_DATATYPE_MISMATCH,
+                format!(
+                    "argument declared anymultirange is not a multirange type but type {}",
+                    format_type::format_type_be(mr_base)?
+                ),
+            ));
+        }
+        a.anyrange_type = mr_range;
+        Ok(())
+    } else {
+        Err(Box::new(PgError::error("could not determine polymorphic type".to_string())))
+    }
+}
+
+fn resolve_anymultirange_from_others(a: &mut PolymorphicActuals) -> PgResult<()> {
+    if a.anyrange_type != InvalidOid {
+        let r_base = lsyscache::getBaseType(a.anyrange_type)?;
+        let mr = lsyscache::get_range_multirange(r_base)?;
+        if mr == InvalidOid {
+            return Err(poly_err(
+                types_error::ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "could not find multirange type for data type {}",
+                    format_type::format_type_be(a.anyrange_type)?
+                ),
+            ));
+        }
+        a.anymultirange_type = mr;
+        Ok(())
+    } else {
+        Err(Box::new(PgError::error("could not determine polymorphic type".to_string())))
+    }
+}
+
+// C: resolve_polymorphic_argtypes (funcapi.c). `argmodes` empty means all IN.
+// Ok(false) is C's `return false`: an input's actual type was unavailable.
+pub fn resolve_polymorphic_argtypes(
+    argtypes: &mut [Oid],
+    argmodes: &[i8],
+    call_expr: Option<Node<'_>>,
+) -> PgResult<bool> {
+    let mut poly = PolymorphicActuals::default();
+    let mut anyc = PolymorphicActuals::default();
+    let mut have_result = [false; 8];
+    const R_ELEM: usize = 0;
+    const R_ARRAY: usize = 1;
+    const R_RANGE: usize = 2;
+    const R_MULTI: usize = 3;
+    const R_C_ELEM: usize = 4;
+    const R_C_ARRAY: usize = 5;
+    const R_C_RANGE: usize = 6;
+    const R_C_MULTI: usize = 7;
+
+    let mut inargno = 0usize;
+    for i in 0..argtypes.len() {
+        let argmode = argmodes.get(i).copied().unwrap_or(PROARGMODE_IN);
+        let is_out = argmode == PROARGMODE_OUT || argmode == PROARGMODE_TABLE;
+        let slot = match argtypes[i] {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {
+                Some((R_ELEM, &mut poly.anyelement_type))
+            }
+            ANYARRAYOID => Some((R_ARRAY, &mut poly.anyarray_type)),
+            ANYRANGEOID => Some((R_RANGE, &mut poly.anyrange_type)),
+            ANYMULTIRANGEOID => Some((R_MULTI, &mut poly.anymultirange_type)),
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+                Some((R_C_ELEM, &mut anyc.anyelement_type))
+            }
+            ANYCOMPATIBLEARRAYOID => Some((R_C_ARRAY, &mut anyc.anyarray_type)),
+            ANYCOMPATIBLERANGEOID => Some((R_C_RANGE, &mut anyc.anyrange_type)),
+            ANYCOMPATIBLEMULTIRANGEOID => Some((R_C_MULTI, &mut anyc.anymultirange_type)),
+            _ => None,
+        };
+        if let Some((ridx, actual)) = slot {
+            if is_out {
+                have_result[ridx] = true;
+            } else {
+                if *actual == InvalidOid {
+                    *actual =
+                        call_expr.map_or(InvalidOid, |n| get_call_expr_argtype(n, inargno));
+                    if *actual == InvalidOid {
+                        return Ok(false);
+                    }
+                }
+                argtypes[i] = *actual;
+            }
+        }
+        if !is_out {
+            inargno += 1;
+        }
+    }
+
+    if !have_result.iter().any(|&b| b) {
+        return Ok(true);
+    }
+
+    if have_result[R_ELEM] && poly.anyelement_type == InvalidOid {
+        resolve_anyelement_from_others(&mut poly)?;
+    }
+    if have_result[R_ARRAY] && poly.anyarray_type == InvalidOid {
+        resolve_anyarray_from_others(&mut poly)?;
+    }
+    if have_result[R_RANGE] && poly.anyrange_type == InvalidOid {
+        resolve_anyrange_from_others(&mut poly)?;
+    }
+    if have_result[R_MULTI] && poly.anymultirange_type == InvalidOid {
+        resolve_anymultirange_from_others(&mut poly)?;
+    }
+    if have_result[R_C_ELEM] && anyc.anyelement_type == InvalidOid {
+        resolve_anyelement_from_others(&mut anyc)?;
+    }
+    if have_result[R_C_ARRAY] && anyc.anyarray_type == InvalidOid {
+        resolve_anyarray_from_others(&mut anyc)?;
+    }
+    if have_result[R_C_RANGE] && anyc.anyrange_type == InvalidOid {
+        resolve_anyrange_from_others(&mut anyc)?;
+    }
+    if have_result[R_C_MULTI] && anyc.anymultirange_type == InvalidOid {
+        resolve_anymultirange_from_others(&mut anyc)?;
+    }
+
+    for t in argtypes.iter_mut() {
+        *t = match *t {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => poly.anyelement_type,
+            ANYARRAYOID => poly.anyarray_type,
+            ANYRANGEOID => poly.anyrange_type,
+            ANYMULTIRANGEOID => poly.anymultirange_type,
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => anyc.anyelement_type,
+            ANYCOMPATIBLEARRAYOID => anyc.anyarray_type,
+            ANYCOMPATIBLERANGEOID => anyc.anyrange_type,
+            ANYCOMPATIBLEMULTIRANGEOID => anyc.anymultirange_type,
+            other => other,
+        };
+    }
+    Ok(true)
+}
+
+// C: cfunc_resolve_polymorphic_argtypes (funccache.c).
+pub fn cfunc_resolve_polymorphic_argtypes(
+    argtypes: &mut [Oid],
+    argmodes: &[i8],
+    call_expr: Option<Node<'_>>,
+    for_validator: bool,
+    proname: &str,
+) -> PgResult<()> {
+    const INT4ARRAYOID: Oid = 1007;
+    const INT4RANGEOID: Oid = 3904;
+    const INT4MULTIRANGEOID: Oid = 4451;
+    if !for_validator {
+        if !resolve_polymorphic_argtypes(argtypes, argmodes, call_expr)? {
+            return Err(poly_err(
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "could not determine actual argument type for polymorphic function \"{proname}\""
+                ),
+            ));
+        }
+        let mut inargno = 0usize;
+        for i in 0..argtypes.len() {
+            let argmode = argmodes.get(i).copied().unwrap_or(PROARGMODE_IN);
+            if argmode == PROARGMODE_OUT || argmode == PROARGMODE_TABLE {
+                continue;
+            }
+            if argtypes[i] == RECORDOID || argtypes[i] == types_core::RECORDARRAYOID {
+                let resolved =
+                    call_expr.map_or(InvalidOid, |n| get_call_expr_argtype(n, inargno));
+                if resolved != InvalidOid {
+                    argtypes[i] = resolved;
+                }
+            }
+            inargno += 1;
+        }
+    } else {
+        for t in argtypes.iter_mut() {
+            *t = match *t {
+                ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID | ANYCOMPATIBLEOID
+                | ANYCOMPATIBLENONARRAYOID => types_core::INT4OID,
+                ANYARRAYOID | ANYCOMPATIBLEARRAYOID => INT4ARRAYOID,
+                ANYRANGEOID | ANYCOMPATIBLERANGEOID => INT4RANGEOID,
+                ANYMULTIRANGEOID => INT4MULTIRANGEOID,
+                other => other,
+            };
+        }
+    }
+    Ok(())
 }
 
 pub fn get_type_func_class(typid: Oid) -> PgResult<(TypeFuncClass, Oid)> {

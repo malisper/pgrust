@@ -161,6 +161,16 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         -1
     }
 
+    // READ_FLOAT_FIELD: C atof.
+    fn read_f64(&mut self, name: &str) -> f64 {
+        self.label(name);
+        let t = self.token(name);
+        core::str::from_utf8(t)
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    }
+
     fn read_char(&mut self, name: &str) -> u8 {
         self.label(name);
         let t = self.token(name);
@@ -395,6 +405,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"CASEWHEN" => self.read_case_when(),
             b"CASETESTEXPR" => self.read_case_test_expr(),
             b"COALESCEEXPR" => self.read_coalesce_expr(),
+            b"CURRENTOFEXPR" => self.read_current_of_expr(),
             b"MINMAXEXPR" => self.read_min_max_expr(),
             b"SCALARARRAYOPEXPR" => self.read_scalar_array_op_expr(),
             b"SUBLINK" => self.read_sub_link(),
@@ -882,6 +893,14 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
                 rte.coltypes = self.read_oid_list("coltypes")?;
                 rte.coltypmods = self.read_int_list("coltypmods")?;
                 rte.colcollations = self.read_oid_list("colcollations")?;
+            }
+            RTEKind::RTE_NAMEDTUPLESTORE => {
+                rte.enrname = self.read_str("enrname")?;
+                rte.enrtuples = self.read_f64("enrtuples");
+                rte.coltypes = self.read_oid_list("coltypes")?;
+                rte.coltypmods = self.read_int_list("coltypmods")?;
+                rte.colcollations = self.read_oid_list("colcollations")?;
+                rte.relid = self.read_u32("relid");
             }
             other => panic!(
                 "_readRangeTblEntry (readfuncs.c): {other:?} arm unported (view SELECT-rule set)"
@@ -1403,6 +1422,15 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         c.coalescecollid = self.read_u32("coalescecollid");
         c.args = self.read_node_list("args")?;
         c.location = self.read_location("location");
+        Ok(c.seal())
+    }
+
+    fn read_current_of_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut c = Node::build::<types_nodes::primnodes::CurrentOfExpr>(mcx)?;
+        c.cvarno = self.read_u32("cvarno");
+        c.cursor_name = self.read_str("cursor_name")?;
+        c.cursor_param = self.read_i32("cursor_param");
         Ok(c.seal())
     }
 

@@ -530,13 +530,71 @@ pub fn ProcedureCreate<'mcx>(
                     )),
             ));
         }
+        // RECORD returns: the OUT-parameter row type must not change
+        // (pg_proc.c:412-441).
         if a.returnType == RECORDOID {
-            unported("ProcedureCreate: RECORD-return tupdesc replace compare");
+            let arrays = syscache_seams::pg_proc_result_arrays::call(mcx, old_oid)?
+                .expect("pg_proc row visible above");
+            let olddesc = match (&arrays.proallargtypes, &arrays.proargmodes) {
+                (Some(ts), Some(ms)) => funcapi::build_function_result_tupdesc_d(
+                    mcx,
+                    a.prokind,
+                    ts,
+                    ms,
+                    arrays.proargnames.as_deref(),
+                )?,
+                _ => None,
+            };
+            let newdesc = match (a.allParameterTypes, a.parameterModes) {
+                (Some(ts), Some(ms)) => {
+                    let names = match a.parameterNames {
+                        None => None,
+                        Some(ns) => {
+                            let mut v: mcx::PgVec<'mcx, mcx::PgString<'mcx>> =
+                                mcx::PgVec::new_in(mcx);
+                            v.try_reserve_exact(ns.len()).map_err(|_| mcx.oom(ns.len()))?;
+                            for n in ns {
+                                v.push(mcx::PgString::from_str_in(n, mcx)?);
+                            }
+                            Some(v)
+                        }
+                    };
+                    funcapi::build_function_result_tupdesc_d(
+                        mcx,
+                        a.prokind,
+                        ts,
+                        ms,
+                        names.as_deref(),
+                    )?
+                }
+                _ => None,
+            };
+            let same = match (&olddesc, &newdesc) {
+                (None, None) => true,
+                (Some(o), Some(n)) => tupdesc::equalRowTypes(o, n),
+                _ => false,
+            };
+            if !same {
+                let dropcmd = match a.prokind {
+                    PROKIND_PROCEDURE => "DROP PROCEDURE",
+                    PROKIND_AGGREGATE => "DROP AGGREGATE",
+                    _ => "DROP FUNCTION",
+                };
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot change return type of existing function".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+                    .with_detail("Row type defined by OUT parameters is different.".to_string())
+                    .with_hint(format!(
+                        "Use {dropcmd} {} first.",
+                        format_procedure_lite(a.procedureName, a.parameterTypes)?
+                    )),
+                ));
+            }
         }
         if !old_argnames_null {
-            if !getattr(Anum_pg_proc_proargmodes).1 {
-                unported("ProcedureCreate: replace of a function with proargmodes set");
-            }
             let (d, _) = getattr(Anum_pg_proc_proargnames);
             // pg_detoast_datum: catalog arrays are inline, but may carry a
             // short (1-byte) header — expand to the plain image shape.
@@ -564,22 +622,49 @@ pub fn ProcedureCreate<'mcx>(
                 }
             };
             let olds = datum::array_build::deconstruct_array_image(mcx, image, -1, false, b'i')?;
-            for (j, od) in olds.iter().enumerate() {
-                // SAFETY: element datums point at text images inside `image`.
-                let ob = unsafe {
-                    let p = od.as_usize() as *const u8;
-                    if types_tuple::varatt::varatt_is_1b(p) {
-                        let raw = types_tuple::varatt::varsize_1b(p);
-                        core::slice::from_raw_parts(p.add(1), raw - 1)
-                    } else {
-                        let raw = types_tuple::varatt::varsize_4b(p);
-                        core::slice::from_raw_parts(p.add(4), raw - 4)
+            // get_func_input_arg_names (funcapi.c): both sides compare in
+            // input-argument order, OUT/TABLE positions dropped.
+            let old_arrays = syscache_seams::pg_proc_result_arrays::call(mcx, old_oid)?
+                .expect("pg_proc row visible above");
+            let old_modes = old_arrays.proargmodes.as_deref();
+            let is_input = |m: Option<i8>| {
+                !matches!(m, Some(m) if m == b'o' as i8 || m == b't' as i8)
+            };
+            let old_input: Vec<&[u8]> = olds
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| is_input(old_modes.and_then(|ms| ms.get(*j).copied())))
+                .map(|(_, od)| {
+                    // SAFETY: element datums point at text images inside
+                    // `image`.
+                    unsafe {
+                        let p = od.as_usize() as *const u8;
+                        if types_tuple::varatt::varatt_is_1b(p) {
+                            let raw = types_tuple::varatt::varsize_1b(p);
+                            core::slice::from_raw_parts(p.add(1), raw - 1)
+                        } else {
+                            let raw = types_tuple::varatt::varsize_4b(p);
+                            core::slice::from_raw_parts(p.add(4), raw - 4)
+                        }
                     }
-                };
+                })
+                .collect();
+            let new_input: Vec<&str> = match a.parameterNames {
+                None => Vec::new(),
+                Some(ns) => ns
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| {
+                        is_input(a.parameterModes.and_then(|ms| ms.get(*j).copied()))
+                    })
+                    .map(|(_, &n)| n)
+                    .collect(),
+            };
+            for (j, ob) in old_input.iter().copied().enumerate() {
                 if ob.is_empty() {
                     continue;
                 }
-                let newname = a.parameterNames.and_then(|ns| ns.get(j).copied()).unwrap_or("");
+                let newname = new_input.get(j).copied().unwrap_or("");
                 if newname.as_bytes() != ob {
                     let dropcmd = match a.prokind {
                         PROKIND_PROCEDURE => "DROP PROCEDURE",

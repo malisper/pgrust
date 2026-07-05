@@ -529,6 +529,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &s.groupClauses)?;
             w!(out, "}}");
         }
+        NodeTag::T_CurrentOfExpr => {
+            let c = node
+                .as_variant::<types_nodes::primnodes::CurrentOfExpr>()
+                .expect("CurrentOfExpr");
+            w!(out, "{{CURRENTOFEXPR :cvarno {} :cursor_name ", c.cvarno);
+            out_str(out, c.cursor_name);
+            w!(out, " :cursor_param {}}}", c.cursor_param);
+        }
         NodeTag::T_RowMarkClause => {
             let r = node
                 .as_variant::<types_nodes::parsenodes::RowMarkClause>()
@@ -1232,6 +1240,17 @@ fn out_range_tbl_entry(out: &mut PgString<'_>, r: &RangeTblEntry<'_>) -> PgResul
             out_int_list(out, &r.coltypmods);
             w!(out, " :colcollations ");
             out_oid_list(out, &r.colcollations);
+        }
+        RTEKind::RTE_NAMEDTUPLESTORE => {
+            w!(out, " :enrname ");
+            out_str(out, r.enrname);
+            w!(out, " :enrtuples {} :coltypes ", r.enrtuples);
+            out_oid_list(out, &r.coltypes);
+            w!(out, " :coltypmods ");
+            out_int_list(out, &r.coltypmods);
+            w!(out, " :colcollations ");
+            out_oid_list(out, &r.colcollations);
+            w!(out, " :relid {}", r.relid);
         }
         RTEKind::RTE_GROUP => {
             w!(out, " :groupexprs ");
