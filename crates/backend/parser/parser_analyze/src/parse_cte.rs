@@ -42,12 +42,16 @@ pub fn transformWithClause<'mcx>(
                     ));
                 }
             }
-            if cte.ctequery.expect("CTE has no query").node_tag() != NodeTag::T_SelectStmt {
-                panic!(
-                    "transformWithClause (parse_cte.c): data-modifying CTE \"{}\"; \
-                     DML WITH lane",
-                    cte.ctename.unwrap_or("")
-                );
+            let qtag = cte.ctequery.expect("CTE has no query").node_tag();
+            if qtag != NodeTag::T_SelectStmt {
+                debug_assert!(matches!(
+                    qtag,
+                    NodeTag::T_InsertStmt
+                        | NodeTag::T_UpdateStmt
+                        | NodeTag::T_DeleteStmt
+                        | NodeTag::T_MergeStmt
+                ));
+                pstate.p_hasModifyingCTE = true;
             }
         }
         // SAFETY: parser-owned tree under analysis; no live derived refs.
@@ -145,11 +149,15 @@ fn analyzeCTE<'mcx>(
     unsafe { cte_node.with_mut::<CommonTableExpr, _>(|c| c.ctequery = Some(query_node)) };
 
     let q = query_node.as_query().expect("just built");
-    // GetCTETargetList's returningList arm is dead (DML CTEs are loud).
-    debug_assert!(q.commandType == CmdType::CMD_SELECT);
 
     if !cterecursive {
-        analyzeCTETargetList(mcx, pstate, cte_node, &q.targetList)?;
+        // GetCTETargetList: a DML CTE's output columns come from RETURNING.
+        let tlist = if q.commandType == CmdType::CMD_SELECT {
+            &q.targetList
+        } else {
+            &q.returningList
+        };
+        analyzeCTETargetList(mcx, pstate, cte_node, tlist)?;
     } else {
         // The output columns were set from the non-recursive term
         // (determineRecursiveColTypes); the whole query must agree.
@@ -574,8 +582,8 @@ struct DependencyGraphWalker<'a, 'mcx> {
 impl<'a, 'mcx> DependencyGraphWalker<'a, 'mcx> {
     fn walk_inner_with(
         &mut self,
-        stmt: &'mcx SelectStmt<'mcx>,
         wc: &'mcx WithClause<'mcx>,
+        walk_body: impl FnOnce(&mut Self) -> PgResult<()>,
     ) -> PgResult<()> {
         if wc.recursive {
             self.innerwiths.push(wc.ctes.clone_in(self.mcx)?);
@@ -587,7 +595,7 @@ impl<'a, 'mcx> DependencyGraphWalker<'a, 'mcx> {
                     .expect("CTE has no query");
                 self.visit(q)?;
             }
-            nodes_core::walk_select_stmt(stmt, self)?;
+            walk_body(self)?;
             self.innerwiths.pop();
         } else {
             self.innerwiths.push(NodeList::nil());
@@ -602,7 +610,7 @@ impl<'a, 'mcx> DependencyGraphWalker<'a, 'mcx> {
                 let top = self.innerwiths.len() - 1;
                 self.innerwiths[top].lappend(mcx, cte_node)?;
             }
-            nodes_core::walk_select_stmt(stmt, self)?;
+            walk_body(self)?;
             self.innerwiths.pop();
         }
         Ok(())
@@ -649,6 +657,16 @@ impl<'a, 'mcx> NodeWalker<'mcx> for DependencyGraphWalker<'a, 'mcx> {
             NodeTag::T_SelectStmt => {
                 self.visit_select_stmt_ref(node.as_select_stmt().expect("tag checked"))
             }
+            NodeTag::T_InsertStmt
+            | NodeTag::T_UpdateStmt
+            | NodeTag::T_DeleteStmt
+            | NodeTag::T_MergeStmt => match raw_stmt_with_clause(node) {
+                Some(wc) => {
+                    self.walk_inner_with(wc, |w| walk_raw(node, w).map(|_| ()))?;
+                    Ok(false)
+                }
+                None => walk_raw(node, self),
+            },
             NodeTag::T_WithClause => Ok(false),
             _ => walk_raw(node, self),
         }
@@ -657,7 +675,7 @@ impl<'a, 'mcx> NodeWalker<'mcx> for DependencyGraphWalker<'a, 'mcx> {
     fn visit_select_stmt_ref(&mut self, s: &'mcx SelectStmt<'mcx>) -> PgResult<bool> {
         match s.withClause.and_then(|n| n.as_with_clause()) {
             Some(wc) => {
-                self.walk_inner_with(s, wc)?;
+                self.walk_inner_with(wc, |w| nodes_core::walk_select_stmt(s, w).map(|_| ()))?;
                 Ok(false)
             }
             None => nodes_core::walk_select_stmt(s, self),
@@ -703,8 +721,74 @@ fn walk_raw<'mcx, W: NodeWalker<'mcx> + ?Sized>(node: Node<'mcx>, w: &mut W) -> 
         NodeTag::T_LockingClause => {
             nodes_core::walk_list(&node.as_locking_clause().expect("tag checked").lockedRels, w)
         }
+        NodeTag::T_InsertStmt => {
+            let s = node.as_insert_stmt().expect("tag checked");
+            Ok(nodes_core::walk_opt(s.relation, w)?
+                || nodes_core::walk_list(&s.cols, w)?
+                || nodes_core::walk_opt(s.selectStmt, w)?
+                || nodes_core::walk_opt(s.onConflictClause, w)?
+                || nodes_core::walk_opt(s.returningClause, w)?
+                || nodes_core::walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_UpdateStmt => {
+            let s = node.as_update_stmt().expect("tag checked");
+            Ok(nodes_core::walk_opt(s.relation, w)?
+                || nodes_core::walk_list(&s.targetList, w)?
+                || nodes_core::walk_opt(s.whereClause, w)?
+                || nodes_core::walk_list(&s.fromClause, w)?
+                || nodes_core::walk_opt(s.returningClause, w)?
+                || nodes_core::walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_DeleteStmt => {
+            let s = node.as_delete_stmt().expect("tag checked");
+            Ok(nodes_core::walk_opt(s.relation, w)?
+                || nodes_core::walk_list(&s.usingClause, w)?
+                || nodes_core::walk_opt(s.whereClause, w)?
+                || nodes_core::walk_opt(s.returningClause, w)?
+                || nodes_core::walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_MergeStmt => {
+            let s = node.as_merge_stmt().expect("tag checked");
+            Ok(nodes_core::walk_opt(s.relation, w)?
+                || nodes_core::walk_opt(s.sourceRelation, w)?
+                || nodes_core::walk_opt(s.joinCondition, w)?
+                || nodes_core::walk_list(&s.mergeWhenClauses, w)?
+                || nodes_core::walk_opt(s.returningClause, w)?
+                || nodes_core::walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_ReturningClause => {
+            let s = node.as_returning_clause().expect("tag checked");
+            Ok(nodes_core::walk_list(&s.options, w)? || nodes_core::walk_list(&s.exprs, w)?)
+        }
+        NodeTag::T_OnConflictClause => {
+            let s = node.as_on_conflict_clause().expect("tag checked");
+            Ok(nodes_core::walk_opt(s.infer, w)?
+                || nodes_core::walk_list(&s.targetList, w)?
+                || nodes_core::walk_opt(s.whereClause, w)?)
+        }
+        NodeTag::T_InferClause => {
+            let s = node.as_infer_clause().expect("tag checked");
+            Ok(nodes_core::walk_list(&s.indexElems, w)? || nodes_core::walk_opt(s.whereClause, w)?)
+        }
+        NodeTag::T_MergeWhenClause => {
+            let s = node.as_merge_when_clause().expect("tag checked");
+            Ok(nodes_core::walk_opt(s.condition, w)?
+                || nodes_core::walk_list(&s.targetList, w)?
+                || nodes_core::walk_list(&s.values, w)?)
+        }
         _ => nodes_core::raw_expression_tree_walker(node, w),
     }
+}
+
+fn raw_stmt_with_clause<'mcx>(node: Node<'mcx>) -> Option<&'mcx WithClause<'mcx>> {
+    let wc = match node.node_tag() {
+        NodeTag::T_InsertStmt => node.as_insert_stmt().unwrap().withClause,
+        NodeTag::T_UpdateStmt => node.as_update_stmt().unwrap().withClause,
+        NodeTag::T_DeleteStmt => node.as_delete_stmt().unwrap().withClause,
+        NodeTag::T_MergeStmt => node.as_merge_stmt().unwrap().withClause,
+        _ => None,
+    };
+    wc.and_then(|n| n.as_with_clause())
 }
 
 fn TopologicalSort<'mcx>(

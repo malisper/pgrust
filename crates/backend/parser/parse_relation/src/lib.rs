@@ -1316,6 +1316,23 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
 
 #[cold]
 #[inline(never)]
+fn cte_without_returning(
+    pstate: &ParseState<'_, '_>,
+    ctename: &str,
+    location: ParseLoc,
+) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("WITH query \"{ctename}\" does not have a RETURNING clause"))
+            .errposition(errpos(pstate, location))
+            .into_error()
+            .with_error_location(loc("addRangeTableEntryForCTE")),
+    )
+}
+
+#[cold]
+#[inline(never)]
 fn too_many_tablefunc_columns(
     pstate: &ParseState<'_, '_>,
     location: ParseLoc,
@@ -1489,12 +1506,15 @@ pub fn addRangeTableEntryForCTE<'mcx>(
 ) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
     let cte = cte_node.as_common_table_expr().expect("CTE reference");
 
-    // Self-reference iff the CTE's analysis isn't completed yet. The C
-    // no-RETURNING check is dead: DML CTEs are loud upstream.
+    // Self-reference iff the CTE's analysis isn't completed yet.
     let self_reference = cte.ctequery.expect("CTE has query").as_query().is_none();
     debug_assert!(cte.cterecursive || !self_reference);
     if let Some(q) = cte.ctequery.unwrap().as_query() {
-        debug_assert_eq!(q.commandType, types_nodes::nodes_enums::CmdType::CMD_SELECT);
+        if q.commandType != types_nodes::nodes_enums::CmdType::CMD_SELECT
+            && q.returningList.is_nil()
+        {
+            return Err(cte_without_returning(pstate, cte.ctename.unwrap_or(""), rv.location));
+        }
     }
 
     let alias = rv.alias;

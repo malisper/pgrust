@@ -26,7 +26,7 @@ use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{Query, QuerySource};
-use types_nodes::primnodes::FromExpr;
+use types_nodes::primnodes::{FromExpr, VarReturningType};
 use types_nodes::rawnodes::{RawStmt, SelectStmt};
 use types_nodes::{Node, NodeTag};
 use types_portal::QueryEnvHandle;
@@ -1053,11 +1053,10 @@ fn transformValuesClause<'mcx>(
     debug_assert!(stmt.windowClause.is_nil());
     debug_assert!(stmt.op == types_nodes::parsenodes::SetOperation::SETOP_NONE);
 
-    if stmt.withClause.is_some() {
-        panic!(
-            "transformValuesClause (analyze.c): transformWithClause (parse_cte.c) \
-             unported — unit backend-parser-medium1"
-        );
+    if let Some(with) = stmt.withClause {
+        qry.hasRecursive = with.as_with_clause().expect("withClause").recursive;
+        qry.cteList = parse_cte::transformWithClause(mcx, pstate, with)?;
+        qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
     let mut colexprs: mcx::PgVec<'mcx, types_nodes::NodeList<'mcx>> = mcx::PgVec::new_in(mcx);
@@ -1224,11 +1223,10 @@ fn transformInsertStmt<'mcx>(
     qry.commandType = CmdType::CMD_INSERT;
     pstate.p_is_insert = true;
 
-    if stmt.withClause.is_some() {
-        panic!(
-            "transformInsertStmt (analyze.c): transformWithClause (parse_cte.c) \
-             unported — unit backend-parser-medium1"
-        );
+    if let Some(with) = stmt.withClause {
+        qry.hasRecursive = with.as_with_clause().expect("withClause").recursive;
+        qry.cteList = parse_cte::transformWithClause(mcx, pstate, with)?;
+        qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
     qry.r#override = stmt.r#override;
 
@@ -1635,11 +1633,10 @@ fn transformDeleteStmt<'mcx>(
     let mut qry = Query::default();
     qry.commandType = CmdType::CMD_DELETE;
 
-    if stmt.withClause.is_some() {
-        panic!(
-            "transformDeleteStmt (analyze.c): transformWithClause (parse_cte.c) \
-             unported — unit backend-parser-medium1"
-        );
+    if let Some(with) = stmt.withClause {
+        qry.hasRecursive = with.as_with_clause().expect("withClause").recursive;
+        qry.cteList = parse_cte::transformWithClause(mcx, pstate, with)?;
+        qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
     let relation = stmt
@@ -1649,15 +1646,16 @@ fn transformDeleteStmt<'mcx>(
         .expect("relation_expr_opt_alias is a RangeVar");
     qry.resultRelation =
         parse_clause::setTargetTable(mcx, pstate, relation, relation.inh, true, ACL_DELETE)?;
+    let nsitem = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
 
-    // C toggles p_lateral_only around the USING transform; the nsitem is
-    // shared immutably here, so a USING list is loud until that lane lands.
-    if !stmt.usingClause.is_nil() {
-        panic!(
-            "transformDeleteStmt (analyze.c): USING list (p_lateral_only toggle + \
-             join planning) unported — M2 join lane"
-        );
-    }
+    // Subqueries in USING cannot access the result relation.
+    nsitem.p_lateral_only.set(true);
+    nsitem.p_lateral_ok.set(false);
+
+    transformFromClause(mcx, pstate, &stmt.usingClause)?;
+
+    nsitem.p_lateral_only.set(false);
+    nsitem.p_lateral_ok.set(true);
 
     let qual = transformWhereClause(
         mcx,
@@ -1706,11 +1704,10 @@ fn transformUpdateStmt<'mcx>(
     qry.commandType = CmdType::CMD_UPDATE;
     pstate.p_is_insert = false;
 
-    if stmt.withClause.is_some() {
-        panic!(
-            "transformUpdateStmt (analyze.c): transformWithClause (parse_cte.c) \
-             unported — unit backend-parser-medium1"
-        );
+    if let Some(with) = stmt.withClause {
+        qry.hasRecursive = with.as_with_clause().expect("withClause").recursive;
+        qry.cteList = parse_cte::transformWithClause(mcx, pstate, with)?;
+        qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
     let relation = stmt
@@ -1720,15 +1717,16 @@ fn transformUpdateStmt<'mcx>(
         .expect("relation_expr_opt_alias is a RangeVar");
     qry.resultRelation =
         parse_clause::setTargetTable(mcx, pstate, relation, relation.inh, true, ACL_UPDATE)?;
+    let nsitem = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
 
-    // C toggles p_lateral_only around the FROM transform; the nsitem is
-    // shared immutably here, so a FROM list is loud until that lane lands.
-    if !stmt.fromClause.is_nil() {
-        panic!(
-            "transformUpdateStmt (analyze.c): FROM list (p_lateral_only toggle + \
-             join planning) unported — M2 join lane"
-        );
-    }
+    // Subqueries in FROM cannot access the result relation.
+    nsitem.p_lateral_only.set(true);
+    nsitem.p_lateral_ok.set(false);
+
+    transformFromClause(mcx, pstate, &stmt.fromClause)?;
+
+    nsitem.p_lateral_only.set(false);
+    nsitem.p_lateral_ok.set(true);
 
     let qual = transformWhereClause(
         mcx,
@@ -1984,21 +1982,22 @@ pub(crate) fn transformReturningClause<'mcx>(
     let Some(rc_node) = returning_clause else {
         return Ok(());
     };
+    let save_nslen = pstate.p_namespace.len();
     let rc = rc_node.as_returning_clause().expect("grammar builds ReturningClause");
     if !rc.options.is_nil() {
         panic!(
             "transformReturningClause (analyze.c): RETURNING WITH (OLD/NEW AS ...) \
-             — PG18 OLD/NEW alias lane unported (addNSItemForReturning)"
+             — gram returning_option arms unported"
         );
     }
 
     if parse_relation::refnameNamespaceItem(pstate, None, "old", -1, None)?.is_none() {
-        check_no_old_new_columnref(&rc.exprs, "old")?;
         qry.returningOldAlias = Some("old");
+        addNSItemForReturning(mcx, pstate, "old", VarReturningType::VAR_RETURNING_OLD)?;
     }
     if parse_relation::refnameNamespaceItem(pstate, None, "new", -1, None)?.is_none() {
-        check_no_old_new_columnref(&rc.exprs, "new")?;
         qry.returningNewAlias = Some("new");
+        addNSItemForReturning(mcx, pstate, "new", VarReturningType::VAR_RETURNING_NEW)?;
     }
 
     let save_next_resno = pstate.p_next_resno;
@@ -2015,39 +2014,51 @@ pub(crate) fn transformReturningClause<'mcx>(
         resolveTargetListUnknowns(mcx, pstate, &qry.returningList)?;
     }
 
+    pstate.p_namespace.truncate(save_nslen);
     pstate.p_next_resno = save_next_resno;
     Ok(())
 }
 
-// The loud stand-in for C's implicit addNSItemForReturning("old"/"new"): any
-// ColumnRef whose leading field is the (unmasked) alias would have resolved
-// through the OLD/NEW namespace item in C.
-fn check_no_old_new_columnref<'mcx>(
-    exprs: &types_nodes::NodeList<'mcx>,
-    alias: &'static str,
+fn addNSItemForReturning<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    aliasname: &'mcx str,
+    returning_type: VarReturningType,
 ) -> PgResult<()> {
-    struct W {
-        alias: &'static str,
+    use types_nodes::primnodes::Alias;
+
+    let target = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
+    let eref = target.p_rte.eref.expect("rte has eref");
+    let numattrs = eref.colnames.len();
+
+    let mut nscolumns: mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn> =
+        mcx::vec_with_capacity_in(mcx, numattrs)?;
+    for col in &target.p_nscolumns[..numattrs] {
+        let mut c = *col;
+        c.p_varreturningtype = returning_type;
+        nscolumns.push(c);
     }
-    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
-        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-            if let Some(cr) = node.as_column_ref() {
-                if let Some(s) = cr.fields.iter().next().and_then(|f| f.as_string()) {
-                    if s.sval == self.alias {
-                        panic!(
-                            "transformReturningClause (analyze.c): RETURNING {0}.* / \
-                             {0}.<col> — PG18 OLD/NEW alias lane unported",
-                            self.alias
-                        );
-                    }
-                }
-                return Ok(false);
-            }
-            nodes_core::raw_expression_tree_walker(node, self)
-        }
-    }
-    nodes_core::walk_list(exprs, &mut W { alias })?;
-    Ok(())
+
+    // C's makeAlias shares eref's colnames pointer; header-clone here.
+    let names = Node::mk_mut(
+        mcx,
+        Alias { aliasname: Some(aliasname), colnames: eref.colnames.clone_in(mcx)? },
+    )?
+    .seal_ref();
+    let nsitem = parser_small1::ParseNamespaceItem {
+        p_names: names,
+        p_rte: target.p_rte,
+        p_rtindex: target.p_rtindex,
+        p_perminfo: target.p_perminfo,
+        p_nscolumns: nscolumns.leak(),
+        p_rel_visible: true,
+        p_cols_visible: true,
+        p_lateral_only: core::cell::Cell::new(false),
+        p_lateral_ok: core::cell::Cell::new(true),
+        p_returning_type: returning_type,
+    };
+    let nsitem = mcx::leak_in(mcx::alloc_in(mcx, nsitem)?);
+    parse_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, false)
 }
 
 #[cold]

@@ -2071,6 +2071,143 @@ mod from_where {
     }
 
     #[test]
+    fn update_from_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "UPDATE t SET y = u.y FROM u WHERE t.x = u.x").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_UPDATE);
+        assert_eq!(q.resultRelation, 1);
+        assert_eq!(q.rtable.len(), 2);
+        let rte_u = q.rtable.nth(1).as_range_tbl_entry().unwrap();
+        assert_eq!(rte_u.relid, U_OID);
+        assert!(rte_u.inFromCl);
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 2);
+        assert_eq!(jt.fromlist.nth(0).as_range_tbl_ref().unwrap().rtindex, 1);
+        assert_eq!(jt.fromlist.nth(1).as_range_tbl_ref().unwrap().rtindex, 2);
+        assert!(jt.quals.is_some());
+
+        let te = q.targetList.nth(0).as_target_entry().unwrap();
+        assert_eq!((te.resno, te.resname), (2, Some("y")));
+        let v = te.expr.as_var().unwrap();
+        assert_eq!((v.varno, v.varattno), (2, 2));
+
+        let perm_u = q.rteperminfos.nth(1).as_rte_permission_info().unwrap();
+        assert_eq!(perm_u.requiredPerms, ACL_SELECT);
+        assert!(perm_u.selectedCols.is_member(2 - FirstLowInvalidHeapAttributeNumber));
+    }
+
+    #[test]
+    fn delete_using_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "DELETE FROM t USING u WHERE t.x = u.x").unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_DELETE);
+        assert_eq!(q.resultRelation, 1);
+        assert_eq!(q.rtable.len(), 2);
+        assert_eq!(q.rtable.nth(1).as_range_tbl_entry().unwrap().relid, U_OID);
+        let jt = q.jointree.unwrap();
+        assert_eq!(jt.fromlist.len(), 2);
+        assert!(jt.quals.is_some());
+    }
+
+    #[test]
+    fn with_select_cte_on_update_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(
+            mcx,
+            "WITH w AS (SELECT x FROM u) UPDATE t SET y = 'z' WHERE t.x IN (SELECT x FROM w)",
+        )
+        .unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_UPDATE);
+        assert_eq!(q.cteList.len(), 1);
+        assert!(!q.hasModifyingCTE && !q.hasRecursive);
+        assert!(q.hasSubLinks);
+    }
+
+    #[test]
+    fn with_dml_cte_returning_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q = analyze_sql(mcx, "WITH w AS (UPDATE t SET y = 'z' RETURNING x) SELECT x FROM w")
+            .unwrap();
+        assert_eq!(q.commandType, CmdType::CMD_SELECT);
+        assert!(q.hasModifyingCTE);
+        assert_eq!(q.cteList.len(), 1);
+        let cte = q.cteList.nth(0).as_common_table_expr().unwrap();
+        let cq = cte.ctequery.unwrap().as_query().unwrap();
+        assert_eq!(cq.commandType, CmdType::CMD_UPDATE);
+        assert!(!cq.canSetTag);
+        assert_eq!(cq.returningList.len(), 1);
+        assert_eq!(cte.ctecoltypes.len(), 1);
+        assert_eq!(cte.ctecoltypes.nth(0), INT4OID);
+        let rte = q.rtable.nth(0).as_range_tbl_entry().unwrap();
+        assert_eq!(rte.rtekind, RTEKind::RTE_CTE);
+    }
+
+    #[test]
+    fn with_dml_cte_without_returning_is_0a000() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(mcx, "WITH w AS (INSERT INTO t VALUES (1, 'a')) SELECT * FROM w")
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+        assert_eq!(err.message, "WITH query \"w\" does not have a RETURNING clause");
+    }
+
+    #[test]
+    fn recursive_dml_cte_is_invalid_recursion() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let err = analyze_sql(
+            mcx,
+            "WITH RECURSIVE w AS (UPDATE t SET y = 'z' \
+             WHERE x IN (SELECT x FROM w) RETURNING x) SELECT * FROM w",
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_RECURSION);
+        assert_eq!(
+            err.message,
+            "recursive query \"w\" must not contain data-modifying statements"
+        );
+    }
+
+    #[test]
+    fn returning_old_new_vars_end_to_end() {
+        install();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+
+        let q =
+            analyze_sql(mcx, "UPDATE t SET y = 'b' WHERE x = 1 RETURNING old.y, new.y").unwrap();
+        assert_eq!(q.returningOldAlias, Some("old"));
+        assert_eq!(q.returningNewAlias, Some("new"));
+        assert_eq!(q.returningList.len(), 2);
+        use types_nodes::primnodes::VarReturningType;
+        let v0 = q.returningList.nth(0).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!(v0.varreturningtype, VarReturningType::VAR_RETURNING_OLD);
+        assert_eq!((v0.varno, v0.varattno), (1, 2));
+        let v1 = q.returningList.nth(1).as_target_entry().unwrap().expr.as_var().unwrap();
+        assert_eq!(v1.varreturningtype, VarReturningType::VAR_RETURNING_NEW);
+        assert_eq!((v1.varno, v1.varattno), (1, 2));
+    }
+
+    #[test]
     fn missing_table_is_42p01_with_position() {
         install();
         let ctx = MemoryContext::new("t");
