@@ -56,12 +56,14 @@ pub trait TsParseEnv<'mcx> {
     ) -> PgResult<Option<PgVec<'mcx, TsLexeme<'mcx>>>>;
 }
 
+// ParsedLex coordinates (byte offsets into the parsetext input).
 #[derive(Clone, Copy)]
-struct PLex {
-    typ: i32,
-    off: u32,
-    len: u32,
+pub struct ParsePlex {
+    pub typ: i32,
+    pub off: u32,
+    pub len: u32,
 }
+use ParsePlex as PLex;
 
 pub struct LexizeData<'mcx> {
     cur_dict: Oid,
@@ -109,6 +111,19 @@ impl<'mcx> LexizeData<'mcx> {
         self.cur_sub = stop + 1;
     }
 
+    // Headline consumers read which queue entries a lexize_exec call retired.
+    pub(crate) fn head(&self) -> usize {
+        self.head
+    }
+
+    pub(crate) fn consumed_since(&self, prev_head: usize) -> Vec<PLex> {
+        self.queue[prev_head..self.head].to_vec()
+    }
+
+    pub(crate) fn add_lemm_pub(&mut self, typ: i32, off: u32, len: u32) {
+        self.add_lemm(typ, off, len)
+    }
+
     fn take_tmp(&mut self, lex_at: usize, res: Option<PgVec<'mcx, TsLexeme<'mcx>>>) {
         if let Some(res) = res {
             self.tmp_res = Some(res);
@@ -117,7 +132,7 @@ impl<'mcx> LexizeData<'mcx> {
     }
 }
 
-fn lexize_exec<'mcx, E: TsParseEnv<'mcx>>(
+pub(crate) fn lexize_exec<'mcx, E: TsParseEnv<'mcx>>(
     ld: &mut LexizeData<'mcx>,
     env: &mut E,
     buf: &[u8],
@@ -285,7 +300,7 @@ pub fn parsetext<'mcx, E: TsParseEnv<'mcx>>(
 }
 
 #[cold]
-fn elog_notice_word_too_long() -> PgResult<()> {
+pub(crate) fn elog_notice_word_too_long() -> PgResult<()> {
     ::elog_seams::ereport::call(
         PgError::notice("word is too long to be indexed")
             .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)

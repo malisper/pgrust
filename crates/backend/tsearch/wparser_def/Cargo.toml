@@ -19,4 +19,8 @@ tupdesc = { path = "../../access/common/tupdesc" }
 heaptuple = { path = "../../access/common/heaptuple" }
 varlena = { path = "../../utils/adt/varlena" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
+adt_tsvector_core = { path = "../../utils/adt/tsvector_core" }
+ts_parse = { path = "../ts_parse" }
+ts_cache = { path = "../../utils/cache/ts_cache" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 libc = "0.2"
