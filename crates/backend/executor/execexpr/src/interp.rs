@@ -3695,7 +3695,16 @@ pub(crate) fn exec_one_step<'mcx>(
         | Step::NotDistinctQualThin { .. }
         | Step::AggTransStrictByValIndirectThin { .. }
         | Step::AggDeserialize { .. }
-        | Step::AggStrictDeserialize { .. } => {
+        | Step::AggStrictDeserialize { .. }
+        | Step::OldFetchSome { .. }
+        | Step::NewFetchSome { .. }
+        | Step::OldVar { .. }
+        | Step::NewVar { .. }
+        | Step::OldSysVar { .. }
+        | Step::NewSysVar { .. }
+        | Step::AssignOldVar { .. }
+        | Step::AssignNewVar { .. }
+        | Step::ReturningExprStep { .. } => {
             unreachable!("step refused by the emitter; never in jitted programs")
         }
         Step::NullIf { call, out } => {
@@ -4213,7 +4222,16 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::JsonCoercion { .. }
         | Step::JsonCoercionFinish { .. }
         | Step::IoCoerceSafe { .. } => true,
-        Step::AggDeserialize { .. } | Step::AggStrictDeserialize { .. } => false,
+        Step::AggDeserialize { .. } | Step::AggStrictDeserialize { .. }
+        | Step::OldFetchSome { .. }
+        | Step::NewFetchSome { .. }
+        | Step::OldVar { .. }
+        | Step::NewVar { .. }
+        | Step::OldSysVar { .. }
+        | Step::NewSysVar { .. }
+        | Step::AssignOldVar { .. }
+        | Step::AssignNewVar { .. }
+        | Step::ReturningExprStep { .. } => false,
         Step::ScanFetchSome { .. }
         | Step::InnerFetchSome { .. }
         | Step::OuterFetchSome { .. }
