@@ -15,6 +15,8 @@ pub enum CmdType {
     CMD_NOTHING = 7,
 }
 
+mcx::forget_safe_nodrop!(CmdType);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum LimitOption {
