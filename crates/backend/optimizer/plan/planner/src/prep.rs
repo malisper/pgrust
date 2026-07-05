@@ -457,14 +457,30 @@ fn add_rowmark_junk_columns<'mcx>(
         }
         if rc.allMarkTypes & (1 << RowMarkType::ROW_MARK_COPY as i32) != 0 {
             // makeWholeRowVar (makefuncs.c): named composite for relations
-            // and view-expanded subqueries, RECORD otherwise; the SRF-
-            // expanded-subquery arm stays loud.
+            // and view-expanded subqueries; for single-function RTEs (and
+            // subqueries expanded from one) the function's composite result
+            // type; RECORD otherwise. allowScalar is always false on this
+            // planner path (C preptlist.c passes false).
             let rte = run
                 .parse()
                 .rtable
                 .nth(rc.rti as usize - 1)
                 .as_range_tbl_entry()
                 .expect("rtable cell");
+            let func_rowtype = |functions: &NodeList<'mcx>| -> PgResult<types_core::Oid> {
+                let fexpr = functions
+                    .nth(0)
+                    .as_range_tbl_function()
+                    .expect("RangeTblFunction")
+                    .funcexpr
+                    .expect("RangeTblFunction.funcexpr");
+                let toid = nodes_core::expr_type(fexpr);
+                Ok(if lsyscache::typ::type_is_rowtype(toid)? {
+                    toid
+                } else {
+                    types_core::catalog::RECORDOID
+                })
+            };
             let vartype = match rte.rtekind {
                 RTEKind::RTE_RELATION => {
                     let toid = lsyscache::get_rel_type_id(rte.relid)?;
@@ -476,10 +492,15 @@ fn add_rowmark_junk_columns<'mcx>(
                     assert!(toid != 0, "relation without a composite type");
                     toid
                 }
-                RTEKind::RTE_FUNCTION => panic!(
-                    "makeWholeRowVar (makefuncs.c): RTE_FUNCTION wholerow rowmark; \
-                     SRF rowmark lane"
-                ),
+                // Subquery expanded from a single set-returning function.
+                RTEKind::RTE_SUBQUERY if !rte.functions.is_nil() => func_rowtype(&rte.functions)?,
+                RTEKind::RTE_FUNCTION => {
+                    if rte.funcordinality || rte.functions.len() != 1 {
+                        types_core::catalog::RECORDOID
+                    } else {
+                        func_rowtype(&rte.functions)?
+                    }
+                }
                 _ => types_core::catalog::RECORDOID,
             };
             let var = Node::mk_var(mcx, rc.rti as i32, 0, vartype, -1, 0, 0)?;
