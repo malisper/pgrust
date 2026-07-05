@@ -2407,7 +2407,7 @@ fn make_sort_input_target<'mcx>(
             postpone = true;
             have_volatile = true;
         } else {
-            let cost = crate::costsize::cost_qual_eval_node(expr)?;
+            let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), expr)?;
             if cost.per_tuple > 10.0 * crate::gucs::cpu_operator_cost() {
                 postpone = true;
                 have_expensive = true;
@@ -2463,7 +2463,7 @@ fn make_sort_input_target<'mcx>(
     for i in 0..input.exprs.len() {
         let expr = *run.root.expr_node(input.exprs[i]);
         if expr.node_tag() != types_nodes::NodeTag::T_Var {
-            let cost = crate::costsize::cost_qual_eval_node(expr)?;
+            let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), expr)?;
             input.cost.startup += cost.startup;
             input.cost.per_tuple += cost.per_tuple;
         }

@@ -36,7 +36,7 @@ pub fn create_pathtarget<'mcx>(
             .as_target_entry()
             .expect("targetList cell is a TargetEntry");
         if tle.expr.node_tag() != NodeTag::T_Var {
-            let cost = cost_qual_eval_node(tle.expr)?;
+            let cost = cost_qual_eval_node(Some(&mut *run), tle.expr)?;
             target.cost.startup += cost.startup;
             target.cost.per_tuple += cost.per_tuple;
         }
@@ -68,7 +68,8 @@ pub fn create_group_result_path<'mcx>(
 ) -> PgResult<PathNode<'mcx>> {
     let mut qual_cost = 0.0f64;
     for &id in havingqual.iter() {
-        let qc = costsize::cost_qual_eval_node(*run.root.expr_node(id))?;
+        let node = *run.root.expr_node(id);
+        let qc = costsize::cost_qual_eval_node(Some(&mut *run), node)?;
         qual_cost += qc.startup + qc.per_tuple;
     }
     let target = run.root.pathtarget(target_id);
@@ -2909,7 +2910,8 @@ pub fn create_minmaxagg_path<'mcx>(
     if !quals.is_empty() {
         let mut qual_cost = types_pathnodes::QualCost::default();
         for &qid in quals.iter() {
-            let c = costsize::cost_qual_eval_node(*run.root.expr_node(qid))?;
+            let node = *run.root.expr_node(qid);
+            let c = costsize::cost_qual_eval_node(Some(&mut *run), node)?;
             qual_cost.startup += c.startup;
             qual_cost.per_tuple += c.per_tuple;
         }

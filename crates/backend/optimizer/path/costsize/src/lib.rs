@@ -59,7 +59,7 @@ pub fn cost_qual_eval(run: &mut PlannerRun<'_>, quals: &[RinfoId]) -> PgResult<Q
             }
             let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
             let mut cost = QualCost::default();
-            cost_qual_eval_walker(clause, &mut cost)?;
+            cost_qual_eval_walker(Some(run), clause, &mut cost)?;
             if run.root.rinfo(rid).pseudoconstant {
                 cost.startup += cost.per_tuple;
                 cost.per_tuple = 0.0;
@@ -72,13 +72,20 @@ pub fn cost_qual_eval(run: &mut PlannerRun<'_>, quals: &[RinfoId]) -> PgResult<Q
     }
     Ok(total)
 }
-pub fn cost_qual_eval_node(node: Node<'_>) -> PgResult<QualCost> {
+pub fn cost_qual_eval_node<'mcx>(
+    run: Option<&mut PlannerRun<'mcx>>,
+    node: Node<'mcx>,
+) -> PgResult<QualCost> {
     let mut cost = QualCost::default();
-    cost_qual_eval_walker(node, &mut cost)?;
+    cost_qual_eval_walker(run, node, &mut cost)?;
     Ok(cost)
 }
 
-fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
+fn cost_qual_eval_walker<'mcx>(
+    mut run: Option<&mut PlannerRun<'mcx>>,
+    node: Node<'mcx>,
+    cost: &mut QualCost,
+) -> PgResult<()> {
     match node.node_tag() {
         // SQLValueFunction: no explicit C case; childless leaf, no charge.
         NodeTag::T_Var
@@ -98,7 +105,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             let f = node.as_func_expr().unwrap();
             planner_seams::add_function_cost::call(f.funcid, cost)?;
             for arg in &f.args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
@@ -112,14 +119,14 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             };
             planner_seams::add_function_cost::call(opfuncid, cost)?;
             for arg in &o.args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
-        NodeTag::T_RelabelType => cost_qual_eval_walker(node.as_relabel_type().unwrap().arg, cost),
+        NodeTag::T_RelabelType => cost_qual_eval_walker(run.as_deref_mut(), node.as_relabel_type().unwrap().arg, cost),
         // C: no charge for FieldSelect itself.
         NodeTag::T_FieldSelect => {
-            cost_qual_eval_walker(node.as_field_select().unwrap().arg, cost)
+            cost_qual_eval_walker(run.as_deref_mut(), node.as_field_select().unwrap().arg, cost)
         }
         // C charges both I/O functions of the coercion.
         NodeTag::T_CoerceViaIO => {
@@ -128,39 +135,39 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             planner_seams::add_function_cost::call(infunc, cost)?;
             let (outfunc, _) = lsyscache::getTypeOutputInfo(expr_type_typmod(c.arg).0)?;
             planner_seams::add_function_cost::call(outfunc, cost)?;
-            cost_qual_eval_walker(c.arg, cost)
+            cost_qual_eval_walker(run.as_deref_mut(), c.arg, cost)
         }
         NodeTag::T_CoerceToDomain => {
-            cost_qual_eval_walker(node.as_coerce_to_domain().unwrap().arg, cost)
+            cost_qual_eval_walker(run.as_deref_mut(), node.as_coerce_to_domain().unwrap().arg, cost)
         }
         // C charges the per-element expression once per estimated element,
         // then its fall-through walks both children generically as well.
         NodeTag::T_ArrayCoerceExpr => {
             let a = node.as_array_coerce_expr().unwrap();
             if let Some(elemexpr) = a.elemexpr {
-                let perelem = cost_qual_eval_node(elemexpr)?;
+                let perelem = cost_qual_eval_node(run.as_deref_mut(), elemexpr)?;
                 cost.startup += perelem.startup;
                 if perelem.per_tuple > 0.0 {
-                    cost.per_tuple +=
-                        perelem.per_tuple * planner_seams::estimate_array_length::call(a.arg);
+                    cost.per_tuple += perelem.per_tuple
+                        * planner_seams::estimate_array_length::call(run.as_deref_mut(), a.arg)?;
                 }
-                cost_qual_eval_walker(elemexpr, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), elemexpr, cost)?;
             }
-            cost_qual_eval_walker(a.arg, cost)
+            cost_qual_eval_walker(run.as_deref_mut(), a.arg, cost)
         }
         NodeTag::T_ConvertRowtypeExpr => {
-            cost_qual_eval_walker(node.as_convert_rowtype_expr().unwrap().arg, cost)
+            cost_qual_eval_walker(run.as_deref_mut(), node.as_convert_rowtype_expr().unwrap().arg, cost)
         }
         // Boolean connectives are free in C; NullTest is "cheap" (no charge).
         NodeTag::T_BoolExpr => {
             for arg in &node.as_bool_expr().unwrap().args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
         NodeTag::T_List => {
             for arg in node.as_list().unwrap() {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
@@ -183,24 +190,26 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
                 let mut hcosts = QualCost { startup: 0.0, per_tuple: 0.0 };
                 planner_seams::add_function_cost::call(sa.hashfuncid, &mut hcosts)?;
                 cost.startup += sacosts.startup + hcosts.startup;
-                cost.startup +=
-                    planner_seams::estimate_array_length::call(arraynode) * hcosts.per_tuple;
+                cost.startup += planner_seams::estimate_array_length::call(
+                    run.as_deref_mut(),
+                    arraynode,
+                )? * hcosts.per_tuple;
                 cost.per_tuple += hcosts.per_tuple + sacosts.per_tuple;
             } else {
                 // C: the operator runs against about half the array elements.
                 cost.startup += sacosts.startup;
                 cost.per_tuple += sacosts.per_tuple
-                    * planner_seams::estimate_array_length::call(arraynode)
+                    * planner_seams::estimate_array_length::call(run.as_deref_mut(), arraynode)?
                     * 0.5;
             }
             for arg in sa.args.iter() {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
         NodeTag::T_ArrayExpr => {
             for e in node.as_array_expr().unwrap().elements.iter() {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             Ok(())
         }
@@ -208,21 +217,21 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_SubscriptingRef => {
             let sr = node.as_subscripting_ref().unwrap();
             for e in sr.refupperindexpr.iter().flatten() {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             for e in sr.reflowerindexpr.iter().flatten() {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             if let Some(e) = sr.refexpr {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             if let Some(e) = sr.refassgnexpr {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             Ok(())
         }
         NodeTag::T_NullTest => match node.as_null_test().unwrap().arg {
-            Some(arg) => cost_qual_eval_walker(arg, cost),
+            Some(arg) => cost_qual_eval_walker(run.as_deref_mut(), arg, cost),
             None => Ok(()),
         },
         // C charges DistinctExpr like OpExpr; BooleanTest itself is free.
@@ -235,7 +244,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             };
             planner_seams::add_function_cost::call(opfuncid, cost)?;
             for arg in &d.args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
@@ -249,33 +258,33 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             };
             planner_seams::add_function_cost::call(opfuncid, cost)?;
             for arg in &d.args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
         NodeTag::T_BooleanTest => match node.as_boolean_test().unwrap().arg {
-            Some(arg) => cost_qual_eval_walker(arg, cost),
+            Some(arg) => cost_qual_eval_walker(run.as_deref_mut(), arg, cost),
             None => Ok(()),
         },
         // No C case: falls to C's expression_tree_walker default.
         NodeTag::T_FieldStore => {
             let fs = node.as_field_store().unwrap();
-            cost_qual_eval_walker(fs.arg, cost)?;
+            cost_qual_eval_walker(run.as_deref_mut(), fs.arg, cost)?;
             for a in &fs.newvals {
-                cost_qual_eval_walker(a, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), a, cost)?;
             }
             Ok(())
         }
         NodeTag::T_RowExpr => {
             for arg in &node.as_row_expr().unwrap().args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
         // C arbitrarily uses the first alternative's cost.
         NodeTag::T_AlternativeSubPlan => {
             let asp = node.as_alternative_sub_plan().unwrap();
-            cost_qual_eval_walker(asp.subplans.first().expect("alternatives"), cost)
+            cost_qual_eval_walker(run.as_deref_mut(), asp.subplans.first().expect("alternatives"), cost)
         }
         // The SubPlan's own costs, precomputed by cost_subplan; C does not
         // descend into the testexpr (already included) or args.
@@ -290,15 +299,15 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
-                cost_qual_eval_walker(a, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), a, cost)?;
             }
             for w in &c.args {
                 let cw = w.as_case_when().expect("CaseWhen");
-                cost_qual_eval_walker(cw.expr.expect("CaseWhen.expr"), cost)?;
-                cost_qual_eval_walker(cw.result.expect("CaseWhen.result"), cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), cw.expr.expect("CaseWhen.expr"), cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), cw.result.expect("CaseWhen.result"), cost)?;
             }
             match c.defresult {
-                Some(d) => cost_qual_eval_walker(d, cost),
+                Some(d) => cost_qual_eval_walker(run.as_deref_mut(), d, cost),
                 None => Ok(()),
             }
         }
@@ -308,7 +317,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         // C's default arm: COALESCE/GREATEST/LEAST are free, children charged.
         NodeTag::T_CoalesceExpr => {
             for arg in &node.as_coalesce_expr().unwrap().args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
@@ -319,7 +328,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
                 planner_seams::add_function_cost::call(lsyscache::get_opcode(opno)?, cost)?;
             }
             for arg in rc.largs.iter().chain(rc.rargs.iter()) {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
@@ -327,7 +336,7 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
         NodeTag::T_MinMaxExpr => {
             cost.per_tuple += gucs::cpu_operator_cost();
             for arg in &node.as_min_max_expr().unwrap().args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             Ok(())
         }
@@ -340,45 +349,45 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
                 .into_iter()
                 .flatten()
             {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             for v in &j.passing_values {
-                cost_qual_eval_walker(v, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), v, cost)?;
             }
             Ok(())
         }
         NodeTag::T_JsonValueExpr => {
             let j = node.as_json_value_expr().unwrap();
             for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             Ok(())
         }
         NodeTag::T_JsonConstructorExpr => {
             let c = node.as_json_constructor_expr().unwrap();
             for arg in &c.args {
-                cost_qual_eval_walker(arg, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), arg, cost)?;
             }
             for e in [c.func, c.coercion].into_iter().flatten() {
-                cost_qual_eval_walker(e, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), e, cost)?;
             }
             Ok(())
         }
         NodeTag::T_JsonIsPredicate => {
             match node.as_json_is_predicate().unwrap().expr {
-                Some(e) => cost_qual_eval_walker(e, cost),
+                Some(e) => cost_qual_eval_walker(run.as_deref_mut(), e, cost),
                 None => Ok(()),
             }
         }
         NodeTag::T_JsonBehavior => match node.as_json_behavior().unwrap().expr {
-            Some(e) => cost_qual_eval_walker(e, cost),
+            Some(e) => cost_qual_eval_walker(run.as_deref_mut(), e, cost),
             None => Ok(()),
         },
         // No C case: both fall to C's expression_tree_walker default.
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().unwrap();
             for a in x.named_args.iter().chain(x.args.iter()) {
-                cost_qual_eval_walker(a, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), a, cost)?;
             }
             Ok(())
         }
@@ -386,22 +395,22 @@ fn cost_qual_eval_walker(node: Node<'_>, cost: &mut QualCost) -> PgResult<()> {
             let tf = node.as_table_func().unwrap();
             for a in tf.ns_uris.iter().chain(tf.colvalexprs.iter().flatten()).chain(tf.passingvalexprs.iter())
             {
-                cost_qual_eval_walker(a, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), a, cost)?;
             }
             for a in tf.colexprs.iter().chain(tf.coldefexprs.iter()).flatten() {
-                cost_qual_eval_walker(a, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), a, cost)?;
             }
             if let Some(d) = tf.docexpr {
-                cost_qual_eval_walker(d, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), d, cost)?;
             }
             if let Some(r) = tf.rowexpr {
-                cost_qual_eval_walker(r, cost)?;
+                cost_qual_eval_walker(run.as_deref_mut(), r, cost)?;
             }
             Ok(())
         }
         // No C case: falls to C's expression_tree_walker default.
         NodeTag::T_PlaceHolderVar => {
-            cost_qual_eval_walker(node.as_place_holder_var().unwrap().phexpr, cost)
+            cost_qual_eval_walker(run.as_deref_mut(), node.as_place_holder_var().unwrap().phexpr, cost)
         }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
@@ -658,11 +667,14 @@ pub fn cost_functionscan(
 
     let mut startup_cost = 0.0;
     let mut exprcost = QualCost::default();
-    for rtfunc_node in &run.rte(relid as usize).functions {
-        let rtfunc = rtfunc_node.as_range_tbl_function().expect("functions cell");
-        if let Some(fexpr) = rtfunc.funcexpr {
-            cost_qual_eval_walker(fexpr, &mut exprcost)?;
-        }
+    let fexprs: Vec<_> = run
+        .rte(relid as usize)
+        .functions
+        .iter()
+        .filter_map(|n| n.as_range_tbl_function().expect("functions cell").funcexpr)
+        .collect();
+    for fexpr in fexprs {
+        cost_qual_eval_walker(Some(&mut *run), fexpr, &mut exprcost)?;
     }
     startup_cost += exprcost.startup + exprcost.per_tuple;
 
@@ -856,8 +868,9 @@ pub fn cost_tablefuncscan(
 
     let mut startup_cost = 0.0;
     let mut exprcost = QualCost::default();
-    if let Some(tf) = run.rte(relid as usize).tablefunc {
-        cost_qual_eval_walker(tf, &mut exprcost)?;
+    let tf = run.rte(relid as usize).tablefunc;
+    if let Some(tf) = tf {
+        cost_qual_eval_walker(Some(&mut *run), tf, &mut exprcost)?;
     }
     startup_cost += exprcost.startup + exprcost.per_tuple;
 
@@ -1453,7 +1466,8 @@ pub fn cost_tidscan(
         let qual = *run.root.expr_node(run.root.rinfo(rid).clause);
         debug_assert!(gucs::enable_tidscan() || qual.node_tag() == NodeTag::T_CurrentOfExpr);
         if let Some(saop) = qual.as_scalar_array_op_expr() {
-            ntuples += planner_seams::estimate_array_length::call(saop.args.nth(1));
+            ntuples +=
+                planner_seams::estimate_array_length::call(Some(&mut *run), saop.args.nth(1))?;
         } else if qual.node_tag() == NodeTag::T_CurrentOfExpr {
             ntuples += 1.0;
         } else {
@@ -1686,7 +1700,8 @@ pub fn cost_agg_shape(
             per_tuple: 0.0,
         };
         for &q in quals {
-            let c = cost_qual_eval_node(*run.root.expr_node(q))?;
+            let node = *run.root.expr_node(q);
+            let c = cost_qual_eval_node(Some(&mut *run), node)?;
             qual_cost.startup += c.startup;
             qual_cost.per_tuple += c.per_tuple;
         }
@@ -1740,7 +1755,8 @@ pub fn cost_group(
     if !quals.is_empty() {
         let mut qual_cost = QualCost { startup: 0.0, per_tuple: 0.0 };
         for &q in quals {
-            let c = cost_qual_eval_node(*run.root.expr_node(q))?;
+            let node = *run.root.expr_node(q);
+            let c = cost_qual_eval_node(Some(&mut *run), node)?;
             qual_cost.startup += c.startup;
             qual_cost.per_tuple += c.per_tuple;
         }
@@ -2073,7 +2089,7 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
             let item_width = lsyscache::get_typavgwidth(typid, typmod)?;
             debug_assert!(item_width > 0);
             tuple_width += item_width as i64;
-            let cost = cost_qual_eval_node(node)?;
+            let cost = cost_qual_eval_node(Some(&mut *run), node)?;
             let rt = run.root.rel_reltarget_mut(rel);
             rt.cost.startup += cost.startup;
             rt.cost.per_tuple += cost.per_tuple;
@@ -2337,14 +2353,14 @@ pub fn cost_windowagg<'mcx>(
         let mut wfunccost = argcosts.per_tuple;
         let mut argcosts = QualCost::default();
         for arg in &wf.args {
-            let c = cost_qual_eval_node(arg)?;
+            let c = cost_qual_eval_node(Some(&mut *run), arg)?;
             argcosts.startup += c.startup;
             argcosts.per_tuple += c.per_tuple;
         }
         startup_cost += argcosts.startup;
         wfunccost += argcosts.per_tuple;
         if let Some(f) = wf.aggfilter {
-            let c = cost_qual_eval_node(f)?;
+            let c = cost_qual_eval_node(Some(&mut *run), f)?;
             startup_cost += c.startup;
             wfunccost += c.per_tuple;
         }
@@ -2935,11 +2951,14 @@ pub fn final_cost_nestloop(
     let restrict_qual_cost = crate::cost_qual_eval(run, &quals)?;
     startup_cost += restrict_qual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + restrict_qual_cost.per_tuple;
-    run_cost += cpu_per_tuple * ntuples;
+    // mul_add mirrors the C referee's fmadd (GCC fp-contract fuses
+    // `cost += expr * rows`); a x.xx5 display boundary in a consumer node
+    // exposes the one-ulp difference.
+    run_cost = cpu_per_tuple.mul_add(ntuples, run_cost);
 
     let target = run.root.pathtarget(path.jpath.path.pathtarget_id.unwrap());
     startup_cost += target.cost.startup;
-    run_cost += target.cost.per_tuple * path.jpath.path.rows;
+    run_cost = target.cost.per_tuple.mul_add(path.jpath.path.rows, run_cost);
 
     path.jpath.path.startup_cost = startup_cost;
     path.jpath.path.total_cost = startup_cost + run_cost;

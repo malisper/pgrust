@@ -257,7 +257,7 @@ fn build_level_pathtarget<'mcx>(
     let mut any_sgref = false;
     for &(node, sgref) in items.iter() {
         if node.node_tag() != NodeTag::T_Var {
-            let cost = crate::costsize::cost_qual_eval_node(node)?;
+            let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), node)?;
             t.cost.startup += cost.startup;
             t.cost.per_tuple += cost.per_tuple;
         }

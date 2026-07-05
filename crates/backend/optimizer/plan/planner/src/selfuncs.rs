@@ -23,6 +23,7 @@ const TABLE_OID_ATTRIBUTE_NUMBER: i16 = -6;
 
 pub const STATISTIC_KIND_MCV: i16 = 1;
 pub const STATISTIC_KIND_HISTOGRAM: i16 = 2;
+pub const STATISTIC_KIND_DECHIST: i16 = 5;
 pub const STATISTIC_KIND_CORRELATION: i16 = 3;
 
 pub(crate) fn clamp_probability(p: f64) -> f64 {
@@ -2036,7 +2037,7 @@ fn index_other_operands_eval_cost(
             other => panic!("index_other_operands_eval_cost (selfuncs.c): {other:?}; M2 lane"),
         };
         if let Some(op) = other_operand {
-            let cost = crate::costsize::cost_qual_eval_node(op)?;
+            let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), op)?;
             qual_arg_cost += cost.startup + cost.per_tuple;
         }
     }
@@ -2316,7 +2317,7 @@ fn btcostestimate(
                 NodeTag::T_OpExpr => clause.as_op_expr().unwrap().opno,
                 NodeTag::T_ScalarArrayOpExpr => {
                     let saop = clause.as_scalar_array_op_expr().unwrap();
-                    let alength = estimate_array_length(saop.args.nth(1));
+                    let alength = estimate_array_length(Some(run), saop.args.nth(1))?;
                     found_array = true;
                     if alength > 1.0 {
                         num_sa_scans *= alength;
@@ -3760,13 +3761,16 @@ fn expr_collation(node: Node<'_>) -> Oid {
 }
 
 
-// estimate_array_length (selfuncs.c); the pg_statistic DECHIST leg (array
-// variables) is unreachable while scalararraysel's array-column arm is loud.
-pub fn estimate_array_length(node: Node<'_>) -> f64 {
+// estimate_array_length (selfuncs.c); run=None mirrors C's NULL root and
+// skips the stats arm.
+pub fn estimate_array_length<'mcx>(
+    run: Option<&mut PlannerRun<'mcx>>,
+    node: Node<'mcx>,
+) -> PgResult<f64> {
     let node = strip_array_coercion(node);
     if let Some(c) = node.as_const() {
         if c.constisnull {
-            return 0.0;
+            return Ok(0.0);
         }
         // Header-relative reads work for 1B and 4B images alike (bound-param
         // array consts can be short-form).
@@ -3780,12 +3784,31 @@ pub fn estimate_array_length(node: Node<'_>) -> f64 {
         if ndim == 0 {
             n = 0.0;
         }
-        return n;
+        return Ok(n);
     }
     if let Some(a) = node.as_array_expr().filter(|a| !a.multidims) {
-        return a.elements.len() as f64;
+        return Ok(a.elements.len() as f64);
     }
-    10.0
+    if let Some(run) = run {
+        // The DECHIST slot's last stanumber is the average distinct element
+        // count.
+        let node_id = run.intern_expr(node);
+        let vardata = examine_variable(run, node_id, node, 0)?;
+        if vardata.stats.is_some() {
+            if let Some(slot) = vardata.slot(STATISTIC_KIND_DECHIST, 0) {
+                let numbers = slot.numbers()?;
+                if !numbers.is_empty() {
+                    let nelem =
+                        crate::costsize::clamp_row_est(numbers[numbers.len() - 1] as f64);
+                    if nelem > 0.0 {
+                        return Ok(nelem);
+                    }
+                }
+            }
+        }
+    }
+    // Default guess; must match scalararraysel.
+    Ok(10.0)
 }
 
 // generic_restriction_selectivity (selfuncs.c).
@@ -3935,13 +3958,14 @@ fn gincost_pattern(
 
 // gincost_scalararrayopexpr (selfuncs.c).
 fn gincost_scalararrayopexpr<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     opfamily: Oid,
     opcintype: Oid,
     clause: Node<'mcx>,
     num_index_entries: f64,
     counts: &mut GinQualCounts,
 ) -> PgResult<bool> {
+    let mcx = run.mcx;
     let saop = clause.as_scalar_array_op_expr().expect("ScalarArrayOpExpr");
     debug_assert!(saop.useOr);
     let clause_op = saop.opno;
@@ -3952,7 +3976,7 @@ fn gincost_scalararrayopexpr<'mcx>(
     let Some(c) = rightop.as_const() else {
         counts.exact_entries += 1.0;
         counts.search_entries += 1.0;
-        counts.array_scans *= estimate_array_length(rightop);
+        counts.array_scans *= estimate_array_length(Some(run), rightop)?;
         return Ok(true);
     };
     if c.constisnull {
@@ -4108,7 +4132,7 @@ fn gincostestimate(
                     }
                     NodeTag::T_ScalarArrayOpExpr => {
                         if !gincost_scalararrayopexpr(
-                            run.mcx,
+                            run,
                             opfamily0,
                             opcintype0,
                             clause,

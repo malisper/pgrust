@@ -297,7 +297,7 @@ pub fn add_placeholders_to_joinrel<'mcx>(
         if needed_above && !in_outer && !in_inner {
             let phv_node = ph_var_node(run, id)?;
             let phexpr = phv_node.as_place_holder_var().unwrap().phexpr;
-            let cost = crate::costsize::cost_qual_eval_node(phexpr)?;
+            let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), phexpr)?;
             let expr_id = run.intern_expr(phv_node);
             let target = run.root.rel_reltarget_mut(joinrel);
             target.exprs.push(expr_id);
