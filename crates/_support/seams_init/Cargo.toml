@@ -265,4 +265,5 @@ ruleutils = { path = "../../backend/utils/adt/ruleutils" }
 adt_regproc = { path = "../../backend/utils/adt/regproc" }
 ts_cache = { path = "../../backend/utils/cache/ts_cache" }
 statistics = { path = "../../backend/statistics/statistics" }
+stats_import = { path = "../../backend/statistics/stats_import" }
 typecmds = { path = "../../backend/commands/typecmds" }

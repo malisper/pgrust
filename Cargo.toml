@@ -282,6 +282,7 @@ members = [
     "crates/backend/commands/analyze",
     "crates/backend/commands/statscmds",
     "crates/backend/statistics/statistics",
+    "crates/backend/statistics/stats_import",
     "crates/backend/commands/commands_analyze_seams",
     "crates/backend/commands/vacuum_seams",
     "crates/backend/commands/constraint_cmd",
