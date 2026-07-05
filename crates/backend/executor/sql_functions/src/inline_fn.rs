@@ -51,19 +51,19 @@ fn read_inline_proc_row<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<InlinePro
     let prosrc = varlena_str(mcx, prosrc_d)?;
     let (sqlbody_d, sqlbody_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROSQLBODY)?;
     let prosqlbody = if sqlbody_null { None } else { Some(varlena_str(mcx, sqlbody_d)?) };
-    let (_, modes_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGMODES)?;
-    if !modes_null {
-        panic!("inline_function: OUT/INOUT/VARIADIC parameters unported (function {funcid})");
-    }
+    // proargtypes holds input args only (pronargs), so OUT params affect
+    // nothing here; proargmodes only filters proargnames down to input names
+    // (prepare_sql_fn_parse_info -> get_func_input_arg_names).
     let (argv, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGTYPES)?;
     let argtypes = read_oidvector_attr(mcx, argv)?;
     let (argnames_d, argnames_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGNAMES)?;
+    let (modes_d, modes_null) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROARGMODES)?;
     let argnames = crate::cache::read_input_argnames(
         mcx,
         argnames_d,
         argnames_null,
-        Datum::null(),
-        true,
+        modes_d,
+        modes_null,
         argtypes.len(),
     )?;
     let (provolatile, _) = SysCacheGetAttr(PROCOID, &tup, ANUM_PG_PROC_PROVOLATILE)?;
