@@ -33,6 +33,20 @@ fn pg_collation_for_no_argtype_is_null() {
 }
 
 fn run(mcx: Mcx<'_>, input: &str, strict: bool) -> PgResult<Vec<String>> {
+    // construct_array resolves the element type shape through the syscache
+    // seam on current main (varlena tests' install_text_type_shape pattern).
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_type_shape::set(|typid| {
+            Ok((typid == TEXTOID).then_some(types_tuple::tupdesc::PgTypeShape {
+                typlen: -1,
+                typbyval: false,
+                typalign: b'i' as i8,
+                typstorage: b'x' as i8,
+                typcollation: 100,
+            }))
+        });
+    });
     let mut fcinfo = LocalFcinfo::<2>::new(0);
     // SAFETY: mcx outlives the call.
     unsafe { fcinfo.set_result_mcx(mcx) };
