@@ -2885,6 +2885,14 @@ pub unsafe fn agg_datum_copy(
                 ::types_tuple::varatt::varsize_any(p)
             }
             n if n > 0 => n as usize,
+            // cstring (datumGetSize's -2 arm): strlen + terminator.
+            -2 => {
+                let mut len = 0usize;
+                while *p.add(len) != 0 {
+                    len += 1;
+                }
+                len + 1
+            }
             n => panic!("datumCopy (datum.c): by-ref transtype with typlen {n} not ported"),
         }
     };

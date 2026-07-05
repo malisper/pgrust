@@ -27,6 +27,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
 cmdtag = { path = "../../tcop/cmdtag" }
 exectuples = { path = "../exectuples" }
+execmain = { path = "../execmain" }
 execmain_seams = { path = "../execmain_seams" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 heaptuple = { path = "../../access/common/heaptuple" }
@@ -68,7 +69,6 @@ condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams
 controldata_utils = { path = "../../../common/controldata_utils" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 deadlock_seams = { path = "../../storage/lmgr/deadlock_seams" }
-execmain = { path = "../execmain" }
 fd = { path = "../../storage/file/fd" }
 freespace_seams = { path = "../../storage/freespace/freespace_seams" }
 guc = { path = "../../utils/misc/guc" }
