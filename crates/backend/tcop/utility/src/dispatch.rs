@@ -1703,7 +1703,15 @@ fn slow_switch<'mcx>(
             Ok(None)
         }
 
-        T_AlterFunctionStmt => handler_gap("AlterFunction (functioncmds lane)"),
+        T_AlterFunctionStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::parsenodes::AlterFunctionStmt>()
+                .expect("AlterFunctionStmt");
+            let address = functioncmds::AlterFunction(mcx, stmt, source_text)?;
+            Ok(Some(address))
+        }
         T_AlterOwnerStmt => {
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::AlterOwnerStmt>()

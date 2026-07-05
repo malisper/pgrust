@@ -63,3 +63,6 @@ parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 analyze_seams = { path = "../../parser/analyze_seams" }
 utility_seams = { path = "../../tcop/utility_seams" }
 cmdtag = { path = "../../tcop/cmdtag" }
+guc = { path = "../../utils/misc/guc" }
+guc_funcs = { path = "../../utils/misc/guc_funcs" }
+varlena = { path = "../../utils/adt/varlena" }

@@ -1,7 +1,7 @@
 // functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
-// WINDOW/TRANSFORM/SUPPORT/SET options, languages beyond sql+internal+C+plpgsql,
-// %TYPE / typmod TypeNames, ALTER/DROP FUNCTION, DO.
+// WINDOW/TRANSFORM/SUPPORT options, languages beyond sql+internal+C+plpgsql,
+// %TYPE / typmod TypeNames, DROP FUNCTION, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -25,8 +25,8 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_nodes::parsenodes::{
-    CreateFunctionStmt, DefElem, FunctionParameter, FunctionParameterMode, ObjectType,
-    ACL_EXECUTE,
+    AlterFunctionStmt, CreateFunctionStmt, DefElem, FunctionParameter, FunctionParameterMode,
+    ObjectType, VariableSetKind, VariableSetStmt, ACL_EXECUTE,
 };
 use types_nodes::rawnodes::{CallStmt, TypeName};
 use types_nodes::Node;
@@ -79,6 +79,7 @@ struct FunctionAttrs<'mcx> {
     strict: bool,
     security: bool,
     leakproof: bool,
+    proconfig: Option<Vec<String>>,
     procost: f32,
     prorows: f32,
     parallel: i8,
@@ -141,6 +142,34 @@ fn interpret_func_parallel(defel: &DefElem<'_>) -> PgResult<i8> {
     }
 }
 
+// update_proconfig_value (functioncmds.c:660): None <=> C's NULL array.
+fn update_proconfig_value(
+    mut a: Option<Vec<String>>,
+    set_items: &[&VariableSetStmt<'_>],
+) -> PgResult<Option<Vec<String>>> {
+    for sstmt in set_items {
+        if sstmt.kind == VariableSetKind::VAR_RESET_ALL {
+            a = None;
+        } else {
+            let name = sstmt.name.unwrap_or("");
+            a = match guc_funcs::ExtractSetVariableArgs(sstmt)? {
+                Some(value) => {
+                    Some(guc::GUCArrayAdd(a.as_deref().unwrap_or(&[]), name, &value)?)
+                }
+                None => guc::GUCArrayDelete(a.as_deref().unwrap_or(&[]), name)?,
+            };
+        }
+    }
+    Ok(a)
+}
+
+fn set_item_of<'mcx>(defel: &DefElem<'mcx>) -> &'mcx VariableSetStmt<'mcx> {
+    defel
+        .arg
+        .and_then(|n| n.as_variant::<VariableSetStmt>())
+        .expect("SET option holds a VariableSetStmt")
+}
+
 // compute_function_attributes + compute_common_attribute (functioncmds.c).
 fn compute_function_attributes<'mcx>(
     stmt: &CreateFunctionStmt<'mcx>,
@@ -155,6 +184,7 @@ fn compute_function_attributes<'mcx>(
     let mut cost_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut rows_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut parallel_item: Option<&'mcx DefElem<'mcx>> = None;
+    let mut set_items: Vec<&VariableSetStmt<'_>> = Vec::new();
 
     let is_procedure = stmt.is_procedure;
     for option in stmt.options.iter() {
@@ -170,6 +200,11 @@ fn compute_function_attributes<'mcx>(
         {
             return Err(invalid_procedure_attribute(source_text, defel.location));
         }
+        // C appends SET items; multiple SET clauses never conflict.
+        if name == "set" {
+            set_items.push(set_item_of(defel));
+            continue;
+        }
         let slot: &mut Option<&'mcx DefElem<'mcx>> = match name {
             "as" => &mut as_item,
             "language" => &mut language_item,
@@ -179,7 +214,6 @@ fn compute_function_attributes<'mcx>(
             "strict" => &mut strict_item,
             "security" => &mut security_item,
             "leakproof" => &mut leakproof_item,
-            "set" => unported("SET option (proconfig)"),
             "cost" => &mut cost_item,
             "rows" => &mut rows_item,
             "support" => unported("SUPPORT option"),
@@ -219,6 +253,12 @@ fn compute_function_attributes<'mcx>(
         None => -1.0,
     };
 
+    let proconfig = if set_items.is_empty() {
+        None
+    } else {
+        update_proconfig_value(None, &set_items)?
+    };
+
     Ok(FunctionAttrs {
         as_clause: as_item,
         language: language_item.map(defel_str),
@@ -231,6 +271,7 @@ fn compute_function_attributes<'mcx>(
             v => v.unwrap_or(false),
         },
         leakproof: leakproof_item.map(defel_bool).unwrap_or(false),
+        proconfig,
         procost,
         prorows,
         parallel: match parallel_item {
@@ -950,10 +991,260 @@ pub fn CreateFunction<'mcx>(
                 None
             },
             parameterNames: if params.have_names { Some(&params.names) } else { None },
+            proconfig: attrs.proconfig.as_deref(),
             procost,
             prorows,
         },
     )
+}
+
+// proconfig text[] image -> owned "name=value" entries (pg_db_role_setting
+// setconfig_entries precedent).
+fn proconfig_entries(mcx: Mcx<'_>, d: datum::Datum) -> PgResult<Vec<String>> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null varlena attr datum addresses in-tuple bytes; the
+    // length is read from its own header before slicing.
+    let raw = unsafe {
+        let len = types_tuple::varatt::varsize_any(p);
+        core::slice::from_raw_parts(p, len)
+    };
+    let image = detoast_seams::detoast_attr::call(mcx, raw)?;
+    let elems = datum::array_build::deconstruct_array_image(mcx, &image, -1, false, b'i')?;
+    let mut out = Vec::with_capacity(elems.len());
+    for e in elems.iter() {
+        let ep = e.as_usize() as *const u8;
+        // SAFETY: by-ref text element datum inside the detoasted image.
+        let text =
+            unsafe { core::slice::from_raw_parts(ep, types_tuple::varatt::varsize_any(ep)) };
+        let payload = varlena::open_image(mcx, text)?;
+        out.push(String::from_utf8_lossy(payload.as_bytes()).into_owned());
+    }
+    Ok(out)
+}
+
+fn entries_to_text_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    entries: &[String],
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let mut texts = Vec::with_capacity(entries.len());
+    let mut elems: mcx::PgVec<'mcx, datum::Datum> = mcx::vec_with_capacity_in(mcx, entries.len())?;
+    for e in entries {
+        texts.push(varlena::cstring_to_text(mcx, e.as_bytes())?);
+    }
+    for t in texts.iter() {
+        elems.push(datum::Datum::from_usize(t.as_bytes().as_ptr() as usize));
+    }
+    datum::array_build::construct_array_image(mcx, &elems, types_core::TEXTOID, -1, false, b'i')
+}
+
+// AlterFunction (functioncmds.c:1361). SUPPORT stays loud
+// (interpret_func_support + dependency swap).
+pub fn AlterFunction<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &AlterFunctionStmt<'mcx>,
+    source_text: &str,
+) -> PgResult<ObjectAddress> {
+    use pg_proc::{
+        Anum_pg_proc_procost, Anum_pg_proc_proconfig, Anum_pg_proc_proisstrict,
+        Anum_pg_proc_prokind, Anum_pg_proc_proleakproof, Anum_pg_proc_proparallel,
+        Anum_pg_proc_proretset, Anum_pg_proc_prorows, Anum_pg_proc_prosecdef,
+        Anum_pg_proc_provolatile, Natts_pg_proc, PROKIND_AGGREGATE,
+    };
+
+    let func = stmt.func.expect("AlterFunctionStmt.func");
+    let rel = table::table_open(mcx, PROCEDURE_RELATION_ID, types_rel::RowExclusiveLock)?;
+    let funcOid = parse_func::LookupFuncWithArgs(stmt.objtype, func, false)?;
+    let address = ObjectAddress::set(PROCEDURE_RELATION_ID, funcOid);
+
+    let tup = cache_syscache::SearchSysCacheCopy(
+        mcx,
+        cache_syscache::cacheinfo::PROCOID,
+        cache_syscache::SysCacheKey::Value(datum::Datum::from_oid(funcOid)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?
+    .unwrap_or_else(|| panic!("cache lookup failed for function {funcOid}"));
+    let t = tup.as_tuple();
+    let desc = rel.descr();
+    let getattr = |attnum: usize| -> (datum::Datum, bool) {
+        let mut isnull = false;
+        // SAFETY: attnum is a valid pg_proc column under the relation's
+        // descriptor; `t` is a heap-copied tuple owned by this call.
+        let d = unsafe { types_tuple::heap_getattr(t, attnum as i32, desc, &mut isnull) };
+        (d, isnull)
+    };
+
+    if !aclchk::object_ownercheck(PROCEDURE_RELATION_ID, funcOid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            stmt.objtype,
+            &catalog_objectaddress::NameListToString(&func.objname),
+        )?;
+    }
+
+    let prokind = getattr(Anum_pg_proc_prokind).0.as_i8();
+    if prokind == PROKIND_AGGREGATE {
+        return Err(err(
+            format!(
+                "\"{}\" is an aggregate function",
+                catalog_objectaddress::NameListToString(&func.objname)
+            ),
+            types_error::ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+    let is_procedure = prokind == PROKIND_PROCEDURE;
+
+    let mut volatility_item: Option<&DefElem<'mcx>> = None;
+    let mut strict_item: Option<&DefElem<'mcx>> = None;
+    let mut security_def_item: Option<&DefElem<'mcx>> = None;
+    let mut leakproof_item: Option<&DefElem<'mcx>> = None;
+    let mut cost_item: Option<&DefElem<'mcx>> = None;
+    let mut rows_item: Option<&DefElem<'mcx>> = None;
+    let mut parallel_item: Option<&DefElem<'mcx>> = None;
+    let mut set_items: Vec<&VariableSetStmt<'_>> = Vec::new();
+
+    for action in stmt.actions.iter() {
+        let defel = action.as_def_elem().expect("alterfunc_opt_list holds DefElems");
+        let name = defel.defname.unwrap_or("");
+        // compute_common_attribute rejects these before the conflict check.
+        if is_procedure
+            && matches!(
+                name,
+                "volatility" | "strict" | "leakproof" | "cost" | "rows" | "support" | "parallel"
+            )
+        {
+            return Err(invalid_procedure_attribute(source_text, defel.location));
+        }
+        if name == "set" {
+            set_items.push(set_item_of(defel));
+            continue;
+        }
+        let slot: &mut Option<&DefElem<'mcx>> = match name {
+            "volatility" => &mut volatility_item,
+            "strict" => &mut strict_item,
+            "security" => &mut security_def_item,
+            "leakproof" => &mut leakproof_item,
+            "cost" => &mut cost_item,
+            "rows" => &mut rows_item,
+            "support" => unported("ALTER FUNCTION SUPPORT (interpret_func_support)"),
+            "parallel" => &mut parallel_item,
+            other => panic!("option \"{other}\" not recognized"),
+        };
+        if slot.is_some() {
+            return Err(conflicting_options());
+        }
+        *slot = Some(defel);
+    }
+
+    let mut values = [datum::Datum::null(); Natts_pg_proc];
+    let mut repl_null = [false; Natts_pg_proc];
+    let mut repl_repl = [false; Natts_pg_proc];
+    let set = |values: &mut [datum::Datum],
+               repl_repl: &mut [bool],
+               attnum: usize,
+               d: datum::Datum| {
+        values[attnum - 1] = d;
+        repl_repl[attnum - 1] = true;
+    };
+
+    if let Some(d) = volatility_item {
+        set(
+            &mut values,
+            &mut repl_repl,
+            Anum_pg_proc_provolatile,
+            datum::Datum::from_char(interpret_func_volatility(d)),
+        );
+    }
+    if let Some(d) = strict_item {
+        set(
+            &mut values,
+            &mut repl_repl,
+            Anum_pg_proc_proisstrict,
+            datum::Datum::from_bool(defel_bool(d)),
+        );
+    }
+    if let Some(d) = security_def_item {
+        set(
+            &mut values,
+            &mut repl_repl,
+            Anum_pg_proc_prosecdef,
+            datum::Datum::from_bool(defel_bool(d)),
+        );
+    }
+    if let Some(d) = leakproof_item {
+        let v = defel_bool(d);
+        if v && !superuser::superuser()? {
+            return Err(err(
+                "only superuser can define a leakproof function".to_string(),
+                ERRCODE_INSUFFICIENT_PRIVILEGE,
+            ));
+        }
+        set(
+            &mut values,
+            &mut repl_repl,
+            Anum_pg_proc_proleakproof,
+            datum::Datum::from_bool(v),
+        );
+    }
+    if let Some(d) = cost_item {
+        let v = defel_numeric(d)?;
+        if v <= 0.0 {
+            return Err(err(
+                "COST must be positive".to_string(),
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        set(&mut values, &mut repl_repl, Anum_pg_proc_procost, datum::Datum::from_f32(v));
+    }
+    if let Some(d) = rows_item {
+        let v = defel_numeric(d)?;
+        if v <= 0.0 {
+            return Err(err(
+                "ROWS must be positive".to_string(),
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        if !getattr(Anum_pg_proc_proretset).0.as_bool() {
+            return Err(err(
+                "ROWS is not applicable when function does not return a set".to_string(),
+                ERRCODE_INVALID_PARAMETER_VALUE,
+            ));
+        }
+        set(&mut values, &mut repl_repl, Anum_pg_proc_prorows, datum::Datum::from_f32(v));
+    }
+    if let Some(d) = parallel_item {
+        set(
+            &mut values,
+            &mut repl_repl,
+            Anum_pg_proc_proparallel,
+            datum::Datum::from_char(interpret_func_parallel(d)?),
+        );
+    }
+    let proconfig_image;
+    if !set_items.is_empty() {
+        let (d, isnull) = getattr(Anum_pg_proc_proconfig);
+        let old = if isnull { None } else { Some(proconfig_entries(mcx, d)?) };
+        let new = update_proconfig_value(old, &set_items)?;
+        repl_repl[Anum_pg_proc_proconfig - 1] = true;
+        match new {
+            Some(entries) => {
+                proconfig_image = entries_to_text_array(mcx, &entries)?;
+                values[Anum_pg_proc_proconfig - 1] =
+                    datum::Datum::from_usize(proconfig_image.as_ptr() as usize);
+            }
+            None => repl_null[Anum_pg_proc_proconfig - 1] = true,
+        }
+    }
+
+    let mut newtup = heaptuple::heap_modify_tuple(mcx, t, desc, &values, &repl_null, &repl_repl)?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &t.t_self, &mut newtup)?;
+
+    // C: InvokeObjectPostAlterHook — object_access_hook surface is absent by
+    // design in this port.
+    rel.close(types_rel::NoLock)?;
+
+    Ok(address)
 }
 
 // Guts of function deletion (functioncmds.c RemoveFunctionById); aggregates
