@@ -20,7 +20,6 @@ allpaths = { path = "../allpaths" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
-allpaths = { path = "../allpaths" }
 table = { path = "../../../access/table/table" }
 tablesample = { path = "../../../access/tablesample/tablesample" }
 tidbitmap = { path = "../../../nodes/tidbitmap" }
