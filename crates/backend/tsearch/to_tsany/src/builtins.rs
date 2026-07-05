@@ -199,9 +199,12 @@ fn ts_headline_common(fcinfo: &mut Fcinfo, cfg: Option<Oid>, has_opts: bool) -> 
         None => Datum::from_usize(0),
     };
     let mut fi = ::fmgr_seams::fmgr_info::call(prsentry.headline_oid)?;
-    ::types_fmgr::function_call3_coll(
+    // The parser's headline proc (prsd_headline) builds by-ref results
+    // through its frame's result mcx; thread the outer call's context.
+    ::types_fmgr::function_call3_coll_in(
         &mut fi,
         InvalidOid,
+        mcx,
         Datum::from_usize(core::ptr::from_mut(&mut prs) as usize),
         opts_datum,
         Datum::from_usize(qimage.as_ptr() as usize),
