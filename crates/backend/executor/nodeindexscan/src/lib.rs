@@ -2,7 +2,7 @@
 // runtime keys (indexkey op expression, incl. SK_SEARCHARRAY arrays)
 // re-evaluate into the same ScanKeys at rescan. Non-amsearcharray array keys,
 // RowCompare, and ORDER BY (reorder-queue) arms loud-panic pending their
-// lanes. EPQ/parallel arms loud-panic pending EPQState and DSM/shm_toc.
+// lanes. EPQ arms loud-panic pending EPQState.
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -55,6 +55,7 @@ pub struct IndexScanState<'mcx> {
     pub iss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub iss_OrderDir: ScanDirection,
     pub iss_PlanNodeId: i32,
+    pub iss_ParallelAware: bool,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
@@ -294,6 +295,7 @@ pub fn exec_init_index_scan_rel<'mcx>(
         iss_Runtime,
         iss_OrderDir: order_dir(node.indexorderdir),
         iss_PlanNodeId: node.scan.plan.plan_node_id,
+        iss_ParallelAware: node.scan.plan.parallel_aware,
     })
 }
 
@@ -598,31 +600,87 @@ pub fn exec_index_advance_array_keys() -> ! {
     panic!("nodeindexscan: ExecIndexAdvanceArrayKeys unreachable (planner emits saop index quals only on amsearcharray AMs)")
 }
 
-pub fn exec_index_scan_estimate(_node: &mut IndexScanState<'_>) -> ! {
-    panic!("nodeindexscan: ExecIndexScanEstimate pending parallel DSM/shm_toc")
+/// `ExecIndexScanEstimate`: no DSM thread-native; the instrument-only arm is
+/// covered by execParallel's collapsed per-worker retrieval.
+pub fn exec_index_scan_estimate(_node: &mut IndexScanState<'_>) {}
+
+/// `ExecIndexScanInitializeDSM` (the leader participates too).
+pub fn exec_index_scan_initialize_dsm<'mcx>(
+    node: &mut IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<std::sync::Arc<::indexam::ParallelIndexScanDescShared>> {
+    let mcx = estate.es_query_cxt;
+    let heap = node
+        .ss
+        .ss_currentRelation
+        .as_ref()
+        .expect("indexscan has a relation");
+    let index = node.iss_RelationDesc.as_ref().expect("index relation open");
+    let snapshot = estate
+        .es_snapshot
+        .as_ref()
+        .expect("parallel index scan requires es_snapshot");
+    let pscan = ::indexam::index_parallelscan_initialize(heap, index, snapshot)?;
+
+    let mut scandesc = ::indexam::index_beginscan_parallel(
+        mcx,
+        heap,
+        index,
+        node.iss_ScanKeys.len() as i32,
+        0,
+        std::sync::Arc::clone(&pscan),
+    )?;
+    if node.iss_Runtime.as_deref().is_none_or(|r| r.ready) {
+        index_rescan(&mut scandesc, Some(&node.iss_ScanKeys), None)?;
+    }
+    debug_assert!(node.iss_ScanDesc.is_none());
+    node.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+    Ok(pscan)
 }
 
-pub fn exec_index_scan_initialize_dsm(_node: &mut IndexScanState<'_>) -> ! {
-    panic!("nodeindexscan: ExecIndexScanInitializeDSM pending parallel DSM/shm_toc")
+/// `ExecIndexScanReInitializeDSM`.
+pub fn exec_index_scan_reinitialize_dsm(node: &mut IndexScanState<'_>) -> PgResult<()> {
+    ::indexam::index_parallelrescan(
+        node.iss_ScanDesc
+            .as_deref_mut()
+            .expect("parallel indexscan was initialized"),
+    )
 }
 
-pub fn exec_index_scan_reinitialize_dsm(_node: &mut IndexScanState<'_>) -> ! {
-    panic!("nodeindexscan: ExecIndexScanReInitializeDSM pending parallel DSM/shm_toc")
-}
-
-pub fn exec_index_scan_initialize_worker(_node: &mut IndexScanState<'_>) -> ! {
-    panic!("nodeindexscan: ExecIndexScanInitializeWorker pending parallel DSM/shm_toc")
-}
-
-pub fn exec_index_scan_retrieve_instrumentation(_node: &mut IndexScanState<'_>) -> ! {
-    panic!("nodeindexscan: ExecIndexScanRetrieveInstrumentation pending parallel DSM/shm_toc")
+/// `ExecIndexScanInitializeWorker`.
+pub fn exec_index_scan_initialize_worker<'mcx>(
+    node: &mut IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pscan: std::sync::Arc<::indexam::ParallelIndexScanDescShared>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let heap = node
+        .ss
+        .ss_currentRelation
+        .as_ref()
+        .expect("indexscan has a relation");
+    let index = node.iss_RelationDesc.as_ref().expect("index relation open");
+    let mut scandesc = ::indexam::index_beginscan_parallel(
+        mcx,
+        heap,
+        index,
+        node.iss_ScanKeys.len() as i32,
+        0,
+        pscan,
+    )?;
+    if node.iss_Runtime.as_deref().is_none_or(|r| r.ready) {
+        index_rescan(&mut scandesc, Some(&node.iss_ScanKeys), None)?;
+    }
+    debug_assert!(node.iss_ScanDesc.is_none());
+    node.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
+    Ok(())
 }
 
 // Exempt: droppy owners, all released in exec_end_index_scan; ScanDirection
 // is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexScanState<'_> { ss, iss_PlanNodeId;
+    IndexScanState<'_> { ss, iss_PlanNodeId, iss_ParallelAware;
         indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_Runtime,
         iss_OrderDir },
 );

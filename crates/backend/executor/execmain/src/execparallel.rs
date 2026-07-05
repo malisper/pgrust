@@ -53,9 +53,11 @@ struct SharedInstrumentation {
     workers: Mutex<Vec<Option<WorkerInstrReport>>>,
 }
 
-// C's per-node shm_toc entries, typed and keyed by plan_node_id.
+// C's per-node shm_toc entries, typed and keyed by plan_node_id. IndexScan
+// covers IndexOnlyScan too (same shared descriptor shape).
 pub(crate) enum ParallelNodeShared {
     SeqScan(Arc<::tableam::ParallelTableScanDescShared>),
+    IndexScan(Arc<::indexam::ParallelIndexScanDescShared>),
 }
 
 pub(crate) struct ParallelExecShared {
@@ -86,10 +88,17 @@ pub struct ParallelExecutorInfo {
 fn walk_parallel_aware(node: Option<Node<'_>>) {
     let Some(node) = node else { return };
     let plan = plan_of_node(node);
-    if plan.parallel_aware && node.node_tag() != ::types_nodes::NodeTag::T_SeqScan {
+    if plan.parallel_aware
+        && !matches!(
+            node.node_tag(),
+            ::types_nodes::NodeTag::T_SeqScan
+                | ::types_nodes::NodeTag::T_IndexScan
+                | ::types_nodes::NodeTag::T_IndexOnlyScan
+        )
+    {
         panic!(
             "ExecParallelInitializeDSM (execParallel.c): parallel-aware {:?} — \
-             per-node DSM/worker arms land with the parallel index/bitmap/append \
+             per-node DSM/worker arms land with the parallel bitmap/append \
              scan lanes",
             node.node_tag()
         );
@@ -103,77 +112,104 @@ fn walk_parallel_aware(node: Option<Node<'_>>) {
     }
 }
 
-// planstate_tree_walker for the ExecParallel* walks (execParallel.c);
-// non-SeqScan parallel-aware nodes are rejected loud by walk_parallel_aware.
+// The parallel-aware scan states the ExecParallel* walks act on.
+pub(crate) enum ParallelScanMut<'x, 'mcx> {
+    SeqScan(&'x mut ::nodeseqscan::SeqScanState<'mcx>),
+    IndexScan(&'x mut ::nodeindexscan::IndexScanState<'mcx>),
+    IndexOnlyScan(&'x mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>),
+}
+
+impl ParallelScanMut<'_, '_> {
+    fn plan_node_id(&self) -> i32 {
+        match self {
+            ParallelScanMut::SeqScan(ss) => ss.plan_node_id(),
+            ParallelScanMut::IndexScan(is) => is.iss_PlanNodeId,
+            ParallelScanMut::IndexOnlyScan(ios) => ios.ioss_PlanNodeId,
+        }
+    }
+}
+
+// planstate_tree_walker for the ExecParallel* walks (execParallel.c); other
+// parallel-aware nodes are rejected loud by walk_parallel_aware.
 // Divergence: initPlan/subPlan planstates are not walked — subplans are
 // parallel_safe, never parallel_aware, so those arms are no-ops in C too.
-fn for_each_parallel_seqscan<'mcx>(
+fn for_each_parallel_scan<'mcx>(
     ps: &mut crate::procnode::PlanStateNode<'mcx>,
-    f: &mut dyn FnMut(&mut ::nodeseqscan::SeqScanState<'mcx>) -> PgResult<()>,
+    f: &mut dyn FnMut(ParallelScanMut<'_, 'mcx>) -> PgResult<()>,
 ) -> PgResult<()> {
     use crate::procnode::PlanStateNode as N;
     match ps {
-        N::Instrumented(w) => for_each_parallel_seqscan(&mut w.inner, f)?,
+        N::Instrumented(w) => for_each_parallel_scan(&mut w.inner, f)?,
         N::SeqScan(ss) => {
             if ss.parallel_aware() {
-                f(ss)?;
+                f(ParallelScanMut::SeqScan(ss))?;
+            }
+        }
+        N::IndexScan(is) => {
+            if is.iss_ParallelAware {
+                f(ParallelScanMut::IndexScan(is))?;
+            }
+        }
+        N::IndexOnlyScan(ios) => {
+            if ios.ioss_ParallelAware {
+                f(ParallelScanMut::IndexOnlyScan(&mut **ios))?;
             }
         }
         N::Result(rs) => {
             if let Some(outer) = rs.outer.as_deref_mut() {
-                for_each_parallel_seqscan(outer, f)?;
+                for_each_parallel_scan(outer, f)?;
             }
         }
-        N::ProjectSet(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Agg(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Group(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Sort(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::IncrementalSort(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Material(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Memoize(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Unique(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Limit(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::LockRows(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::WindowAgg(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::Gather(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::GatherMerge(x) => for_each_parallel_seqscan(&mut x.outer, f)?,
-        N::BitmapHeapScan(x) => for_each_parallel_seqscan(&mut x.bitmapqual, f)?,
-        N::ModifyTable(x) => for_each_parallel_seqscan(&mut x.subplan, f)?,
-        N::SubqueryScan(x) => for_each_parallel_seqscan(&mut x.subplan, f)?,
+        N::ProjectSet(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Agg(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Group(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Sort(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::IncrementalSort(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Material(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Memoize(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Unique(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Limit(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::LockRows(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::WindowAgg(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::Gather(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::GatherMerge(x) => for_each_parallel_scan(&mut x.outer, f)?,
+        N::BitmapHeapScan(x) => for_each_parallel_scan(&mut x.bitmapqual, f)?,
+        N::ModifyTable(x) => for_each_parallel_scan(&mut x.subplan, f)?,
+        N::SubqueryScan(x) => for_each_parallel_scan(&mut x.subplan, f)?,
         N::NestLoop(x) => {
-            for_each_parallel_seqscan(&mut x.outer, f)?;
-            for_each_parallel_seqscan(&mut x.inner, f)?;
+            for_each_parallel_scan(&mut x.outer, f)?;
+            for_each_parallel_scan(&mut x.inner, f)?;
         }
         N::MergeJoin(x) => {
-            for_each_parallel_seqscan(&mut x.outer, f)?;
-            for_each_parallel_seqscan(&mut x.inner, f)?;
+            for_each_parallel_scan(&mut x.outer, f)?;
+            for_each_parallel_scan(&mut x.inner, f)?;
         }
         N::HashJoin(x) => {
             let x = &mut **x;
-            for_each_parallel_seqscan(&mut x.outer, f)?;
-            for_each_parallel_seqscan(&mut x.hash.child, f)?;
+            for_each_parallel_scan(&mut x.outer, f)?;
+            for_each_parallel_scan(&mut x.hash.child, f)?;
         }
         N::SetOp(x) => {
-            for_each_parallel_seqscan(&mut x.outer, f)?;
-            for_each_parallel_seqscan(&mut x.inner, f)?;
+            for_each_parallel_scan(&mut x.outer, f)?;
+            for_each_parallel_scan(&mut x.inner, f)?;
         }
         N::RecursiveUnion(x) => {
-            for_each_parallel_seqscan(&mut x.outer, f)?;
-            for_each_parallel_seqscan(&mut x.inner, f)?;
+            for_each_parallel_scan(&mut x.outer, f)?;
+            for_each_parallel_scan(&mut x.inner, f)?;
         }
         N::Append(x) => {
             for sub in x.substates.iter_mut() {
-                for_each_parallel_seqscan(sub, f)?;
+                for_each_parallel_scan(sub, f)?;
             }
         }
         N::MergeAppend(x) => {
             for sub in x.substates.iter_mut() {
-                for_each_parallel_seqscan(sub, f)?;
+                for_each_parallel_scan(sub, f)?;
             }
         }
         N::BitmapAnd(x) | N::BitmapOr(x) => {
             for sub in x.substates.iter_mut() {
-                for_each_parallel_seqscan(sub, f)?;
+                for_each_parallel_scan(sub, f)?;
             }
         }
         N::SampleScan(_)
@@ -181,10 +217,8 @@ fn for_each_parallel_seqscan<'mcx>(
         | N::ValuesScan(_)
         | N::TableFuncScan(_)
         | N::CteScan(_)
-        | N::IndexScan(_)
         | N::TidScan(_)
         | N::TidRangeScan(_)
-        | N::IndexOnlyScan(_)
         | N::BitmapIndexScan(_)
         | N::WorkTableScan(_)
         | N::NamedTuplestoreScan(_) => {}
@@ -319,10 +353,29 @@ pub fn exec_init_parallel_plan<'mcx>(
     // ExecParallelEstimate + ExecParallelInitializeDSM: before workers launch
     // and before the leader executes (its parallel scan descs install here).
     let mut nodes = Vec::new();
-    for_each_parallel_seqscan(planstate, &mut |ss| {
-        ::nodeseqscan::exec_seq_scan_estimate(ss);
-        let pscan = ::nodeseqscan::exec_seq_scan_initialize_dsm(ss, estate)?;
-        nodes.push((ss.plan_node_id(), ParallelNodeShared::SeqScan(pscan)));
+    for_each_parallel_scan(planstate, &mut |node| {
+        let id = node.plan_node_id();
+        let shared = match node {
+            ParallelScanMut::SeqScan(ss) => {
+                ::nodeseqscan::exec_seq_scan_estimate(ss);
+                ParallelNodeShared::SeqScan(::nodeseqscan::exec_seq_scan_initialize_dsm(
+                    ss, estate,
+                )?)
+            }
+            ParallelScanMut::IndexScan(is) => {
+                ::nodeindexscan::exec_index_scan_estimate(is);
+                ParallelNodeShared::IndexScan(::nodeindexscan::exec_index_scan_initialize_dsm(
+                    is, estate,
+                )?)
+            }
+            ParallelScanMut::IndexOnlyScan(ios) => {
+                ::nodeindexonlyscan::exec_index_only_scan_estimate(ios);
+                ParallelNodeShared::IndexScan(
+                    ::nodeindexonlyscan::exec_index_only_scan_initialize_dsm(ios, estate)?,
+                )
+            }
+        };
+        nodes.push((id, shared));
         Ok(())
     })?;
 
@@ -395,9 +448,15 @@ pub fn exec_parallel_reinitialize<'mcx>(
         }
     }
     // ExecParallelReInitializeDSM walk.
-    for_each_parallel_seqscan(planstate, &mut |ss| {
-        ::nodeseqscan::exec_seq_scan_reinitialize_dsm(ss);
-        Ok(())
+    for_each_parallel_scan(planstate, &mut |node| match node {
+        ParallelScanMut::SeqScan(ss) => {
+            ::nodeseqscan::exec_seq_scan_reinitialize_dsm(ss);
+            Ok(())
+        }
+        ParallelScanMut::IndexScan(is) => ::nodeindexscan::exec_index_scan_reinitialize_dsm(is),
+        ParallelScanMut::IndexOnlyScan(ios) => {
+            ::nodeindexonlyscan::exec_index_only_scan_reinitialize_dsm(ios)
+        }
     })
 }
 
@@ -536,22 +595,45 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                 // ExecParallelInitializeWorker, then the tuple bound (C order).
                 let estate = &mut d.estate;
                 if let Some(ps) = d.planstate.as_mut() {
-                    for_each_parallel_seqscan(ps, &mut |ss| {
+                    for_each_parallel_scan(ps, &mut |node| {
+                        let id = node.plan_node_id();
                         let nodes = exec.nodes.lock().unwrap_or_else(|e| e.into_inner());
-                        let entry = nodes
-                            .iter()
-                            .find(|(id, _)| *id == ss.plan_node_id())
-                            .unwrap_or_else(|| {
+                        let entry =
+                            nodes.iter().find(|(nid, _)| *nid == id).unwrap_or_else(|| {
                                 panic!(
                                     "ExecParallelInitializeWorker (execParallel.c): no shared \
-                                     entry for plan node {}",
-                                    ss.plan_node_id()
+                                     entry for plan node {id}"
                                 )
                             });
-                        let ParallelNodeShared::SeqScan(pscan) = &entry.1;
-                        let pscan = Arc::clone(pscan);
-                        drop(nodes);
-                        ::nodeseqscan::exec_seq_scan_initialize_worker(ss, estate, pscan)
+                        match (node, &entry.1) {
+                            (ParallelScanMut::SeqScan(ss), ParallelNodeShared::SeqScan(p)) => {
+                                let p = Arc::clone(p);
+                                drop(nodes);
+                                ::nodeseqscan::exec_seq_scan_initialize_worker(ss, estate, p)
+                            }
+                            (
+                                ParallelScanMut::IndexScan(is),
+                                ParallelNodeShared::IndexScan(p),
+                            ) => {
+                                let p = Arc::clone(p);
+                                drop(nodes);
+                                ::nodeindexscan::exec_index_scan_initialize_worker(is, estate, p)
+                            }
+                            (
+                                ParallelScanMut::IndexOnlyScan(ios),
+                                ParallelNodeShared::IndexScan(p),
+                            ) => {
+                                let p = Arc::clone(p);
+                                drop(nodes);
+                                ::nodeindexonlyscan::exec_index_only_scan_initialize_worker(
+                                    ios, estate, p,
+                                )
+                            }
+                            _ => panic!(
+                                "ExecParallelInitializeWorker (execParallel.c): shared entry \
+                                 kind mismatch for plan node {id}"
+                            ),
+                        }
                     })?;
                     crate::procnode::exec_set_tuple_bound(exec.tuples_needed, ps);
                 }

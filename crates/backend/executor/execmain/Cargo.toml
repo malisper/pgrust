@@ -47,6 +47,7 @@ nodeworktablescan = { path = "../nodeworktablescan" }
 nodeseqscan = { path = "../nodeseqscan" }
 nodesamplescan = { path = "../nodesamplescan" }
 nodeindexscan = { path = "../nodeindexscan" }
+indexam = { path = "../../access/index/indexam" }
 nodetidscan = { path = "../nodetidscan" }
 nodetidrangescan = { path = "../nodetidrangescan" }
 portalmem = { path = "../../utils/mmgr/portalmem" }

@@ -3863,6 +3863,7 @@ dependencies = [
 name = "costsize"
 version = "0.1.0"
 dependencies = [
+ "allpaths",
  "guc_tables",
  "init_small",
  "lsyscache",
@@ -4518,6 +4519,7 @@ dependencies = [
  "hashfn",
  "heapam_visibility",
  "heapam_visibility_seams",
+ "indexam",
  "init_small",
  "instrument",
  "inval",
@@ -6293,6 +6295,7 @@ dependencies = [
  "nbtree",
  "predicate",
  "relation_seams",
+ "snapmgr",
  "spgist",
  "tableam",
  "tidbitmap",
@@ -15392,8 +15395,10 @@ dependencies = [
 name = "types_relscan"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "gin_vocab",
  "mcx",
+ "snapmgr",
  "tableam",
  "types_brin",
  "types_core",
@@ -15405,6 +15410,7 @@ dependencies = [
  "types_scan",
  "types_snapshot",
  "types_spgist",
+ "types_storage",
  "types_tuple",
 ]
 

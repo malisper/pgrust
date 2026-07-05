@@ -310,6 +310,71 @@ pub fn index_beginscan_bitmap<'mcx>(
     Ok(scan)
 }
 
+/// `index_parallelscan_estimate` + `index_parallelscan_initialize`,
+/// thread-native: DSM sizing/offsets collapse to typed Arc construction; the
+/// shared-instrumentation arm rides execParallel's collapsed retrieval.
+pub fn index_parallelscan_initialize<'mcx>(
+    heapRelation: &Relation<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    snapshot: &::snapmgr::Snapshot,
+) -> PgResult<std::sync::Arc<ParallelIndexScanDescShared>> {
+    relation_checks(indexRelation)?;
+    let am = match IndexAmKind::from_relam(indexRelation.rd_rel.relam) {
+        IndexAmKind::Btree => ParallelIndexAmShared::Btree(BTParallelScanShared::new()),
+        other => panic!(
+            "index_parallelscan_initialize (indexam.c): {other:?} aminitparallelscan unported"
+        ),
+    };
+    Ok(std::sync::Arc::new(ParallelIndexScanDescShared {
+        ps_locator: heapRelation.rd_locator.get(),
+        ps_indexlocator: indexRelation.rd_locator.get(),
+        snapshot: ::snapmgr::SerializeSnapshot(snapshot),
+        am,
+    }))
+}
+
+/// `index_parallelrescan`.
+pub fn index_parallelrescan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    if let Some(heapfetch) = scan.xs_heapfetch.as_mut() {
+        fetch::reset(heapfetch);
+    }
+    let pscan = scan
+        .parallel_scan
+        .as_deref()
+        .expect("index_parallelrescan without parallel_scan");
+    match &pscan.am {
+        ParallelIndexAmShared::Btree(shared) => nbtree::btparallelrescan(shared),
+    }
+    Ok(())
+}
+
+/// `index_beginscan_parallel`.
+pub fn index_beginscan_parallel<'mcx>(
+    mcx: Mcx<'mcx>,
+    heaprel: &Relation<'mcx>,
+    indexrel: &Relation<'mcx>,
+    nkeys: i32,
+    norderbys: i32,
+    pscan: std::sync::Arc<ParallelIndexScanDescShared>,
+) -> PgResult<IndexScanDescData<'mcx>> {
+    debug_assert!(heaprel.rd_locator.get() == pscan.ps_locator);
+    debug_assert!(indexrel.rd_locator.get() == pscan.ps_indexlocator);
+
+    let snapshot = ::snapmgr::RestoreSnapshot(&pscan.snapshot);
+    let snapshot = ::snapmgr::RegisterSnapshot(Some(&snapshot))?.expect("registered a snapshot");
+
+    let mut scan =
+        index_beginscan_internal(mcx, indexrel, nkeys, norderbys, true, Some(&snapshot))?;
+    scan.parallel_scan = Some(pscan);
+    scan.heapRelation = Some(heaprel.alias());
+    scan.xs_snapshot = Some(snapshot.clone());
+    scan.xs_temp_snapshot = Some(snapshot);
+
+    scan.xs_heapfetch = Some(fetch::begin(heaprel));
+
+    Ok(scan)
+}
+
 /// `index_getbitmap`: drop all matching TIDs into the bitmap; returns ntids.
 pub fn index_getbitmap<'mcx>(
     scan: &mut IndexScanDescData<'mcx>,
@@ -395,7 +460,7 @@ pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
     am_endscan(&mut scan)?;
 
     if scan.xs_temp_snap {
-        unported("snapmgr UnregisterSnapshot (backend/utils/time/snapmgr)");
+        ::snapmgr::UnregisterSnapshot(scan.xs_temp_snapshot.take().as_ref());
     }
 
     // RelationDecrementReferenceCount + IndexScanEnd: the drop of the scan value.
@@ -1045,10 +1110,12 @@ mod mock {
             numberOfOrderBys: norderbys,
             keyData: PgVec::new_in(mcx),
             orderByData: PgVec::new_in(mcx),
+            parallel_scan: None,
             xs_want_itup: false,
             xs_itup: None,
             xs_itupdesc: None,
             xs_temp_snap: false,
+            xs_temp_snapshot: None,
             kill_prior_tuple: false,
             ignore_killed_tuples: true,
             xactStartedInRecovery: false,

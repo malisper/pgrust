@@ -102,6 +102,7 @@ pub fn plan_cluster_use_sort<'mcx>(
         false,
         &None,
         1.0,
+        false,
     )?;
     let index_total = match run.root.path(index_path_id) {
         PathNode::IndexPath(ip) => ip.path.total_cost,

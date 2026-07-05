@@ -562,11 +562,19 @@ unsafe fn bt_tuple_before_array_skeys(
 }
 
 /// _bt_start_prim_scan: true when another primitive index scan was scheduled.
-pub(crate) fn bt_start_prim_scan(so: &mut BTScanOpaqueData<'_>) -> bool {
+pub(crate) fn bt_start_prim_scan(
+    so: &mut BTScanOpaqueData<'_>,
+    parallel: Option<&::types_relscan::BTParallelScanShared>,
+) -> bool {
     debug_assert!(so.numArrayKeys > 0);
     so.scanBehind = false;
     so.oppositeDirCheck = false;
-    so.needPrimScan
+    if so.needPrimScan {
+        return true;
+    }
+    // The top-level index scan ran out of tuples in this scan direction.
+    crate::parallel::bt_parallel_done(so, parallel);
+    false
 }
 
 /// _bt_advance_array_keys. `pstate` is Some iff `sktrig_required`.

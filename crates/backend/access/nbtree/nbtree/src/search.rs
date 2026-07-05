@@ -6,7 +6,10 @@ use core::mem::MaybeUninit;
 
 use bufmgr_seams::{self as bufmgr, BufferPin};
 use mcx::vec_with_capacity_in;
-use types_core::{BlockNumber, Buffer, InvalidBuffer, OffsetNumber, Oid, BLCKSZ, INDEX_MAX_KEYS};
+use types_core::{
+    BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber, Oid, BLCKSZ,
+    INDEX_MAX_KEYS,
+};
 use types_error::{PgError, PgResult};
 use types_fmgr::FmgrInfo;
 use types_nbtree::{
@@ -72,6 +75,7 @@ pub(crate) struct ScanCtx<'a, 'mcx> {
     pub xs_itup: &'a mut Option<core::ptr::NonNull<u8>>,
     pub xs_pgstat_index_scans: &'a mut u64,
     pub xs_nsearches: &'a mut u64,
+    pub parallel: Option<&'a ::types_relscan::BTParallelScanShared>,
     pub frame: OrderProcFrame,
 }
 
@@ -414,11 +418,38 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
 
     if !ctx.so.qual_ok {
         debug_assert!(!ctx.so.needPrimScan);
+        crate::parallel::bt_parallel_done(ctx.so, ctx.parallel);
         return Ok(false);
+    }
+
+    // Parallel scans must seize the scan; _bt_readfirstpage (via _bt_readpage)
+    // usually releases it later on.
+    let mut seized_blkno = InvalidBlockNumber;
+    let mut seized_lastcurrblkno = InvalidBlockNumber;
+    if let Some(shared) = ctx.parallel {
+        let (status, next, last) = crate::parallel::bt_parallel_seize(ctx.so, shared, true)?;
+        if !status {
+            return Ok(false);
+        }
+        seized_blkno = next;
+        seized_lastcurrblkno = last;
     }
 
     if ctx.so.numArrayKeys != 0 && !ctx.so.needPrimScan {
         crate::utils::bt_start_array_keys(ctx.so, dir);
+    }
+
+    if seized_blkno != InvalidBlockNumber {
+        // Anticipated calling _bt_search, but another worker beat us to it.
+        // _bt_readnextpage releases the scan (not _bt_readfirstpage).
+        debug_assert!(!ctx.so.needPrimScan);
+        debug_assert!(seized_blkno != P_NONE);
+
+        if !bt_readnextpage(ctx, seized_blkno, seized_lastcurrblkno, dir, true)? {
+            return Ok(false);
+        }
+        bt_returnitem(ctx);
+        return Ok(true);
     }
 
     if rel.pgstat_enabled.get() {
@@ -663,6 +694,7 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
             leaf = bt_search(rel, &mut inskey, &mut ctx.frame)?;
         }
         if leaf.is_none() {
+            crate::parallel::bt_parallel_done(ctx.so, ctx.parallel);
             return Ok(false);
         }
     }
@@ -752,6 +784,15 @@ fn bt_readpage(
     debug_assert!(BTScanPosIsPinned(&so.currPos));
     debug_assert!(!so.needPrimScan);
 
+    if let Some(shared) = ctx.parallel {
+        // Let the next/prev page be read by another worker without delay.
+        if ScanDirectionIsForward(dir) {
+            crate::parallel::bt_parallel_release(shared, so.currPos.nextPage, so.currPos.currPage);
+        } else {
+            crate::parallel::bt_parallel_release(shared, so.currPos.prevPage, so.currPos.currPage);
+        }
+    }
+
     if let Some(snap) = ctx.snapshot {
         predicate_seams::predicate_lock_page::call(rel, so.currPos.currPage, snap)?;
     }
@@ -792,6 +833,13 @@ fn bt_readpage(
                     // Schedule another primitive index scan after all.
                     so.currPos.moreRight = false;
                     so.needPrimScan = true;
+                    if let Some(shared) = ctx.parallel {
+                        crate::parallel::bt_parallel_primscan_schedule(
+                            so,
+                            shared,
+                            so.currPos.currPage,
+                        );
+                    }
                     return Ok(false);
                 }
             }
@@ -902,6 +950,13 @@ fn bt_readpage(
                     // Schedule another primitive index scan after all.
                     so.currPos.moreLeft = false;
                     so.needPrimScan = true;
+                    if let Some(shared) = ctx.parallel {
+                        crate::parallel::bt_parallel_primscan_schedule(
+                            so,
+                            shared,
+                            so.currPos.currPage,
+                        );
+                    }
                     return Ok(false);
                 }
             }
@@ -1003,6 +1058,16 @@ fn bt_readpage(
     }
 
     debug_assert!(!pstate.forcenonrequired);
+
+    // _bt_advance_array_keys' schedule call, hoisted (needPrimScan was false
+    // on entry, so any true here was set by this page's _bt_checkkeys; the
+    // shared-state currency check makes the delayed call equivalent).
+    if so.needPrimScan {
+        if let Some(shared) = ctx.parallel {
+            crate::parallel::bt_parallel_primscan_schedule(so, shared, so.currPos.currPage);
+        }
+    }
+
     Ok(so.currPos.firstItem <= so.currPos.lastItem)
 }
 
@@ -1176,6 +1241,9 @@ fn bt_steppage(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
                 so.markPos.moreLeft = true;
             }
         }
+
+        // mark/restore not supported by parallel scans.
+        debug_assert!(ctx.parallel.is_none());
     }
 
     pos_unpin_if_pinned(&mut so.currPos)?;
@@ -1191,7 +1259,7 @@ fn bt_steppage(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
         so.needPrimScan = false;
     }
 
-    bt_readnextpage(ctx, blkno, lastcurrblkno, dir)
+    bt_readnextpage(ctx, blkno, lastcurrblkno, dir, false)
 }
 
 // C's offsetof-bounded markPos memcpy: header fields + live items prefix.
@@ -1283,16 +1351,18 @@ fn bt_readfirstpage(
     bt_steppage(ctx, dir)
 }
 
-/// _bt_readnextpage (serial arm: `seized` parallel handoff is phase 2).
+/// _bt_readnextpage.
 fn bt_readnextpage(
     ctx: &mut ScanCtx<'_, '_>,
     mut blkno: BlockNumber,
     mut lastcurrblkno: BlockNumber,
     dir: ScanDirection,
+    mut seized: bool,
 ) -> PgResult<bool> {
     let rel = ctx.rel;
 
-    debug_assert!(ctx.so.currPos.currPage == lastcurrblkno);
+    debug_assert!(ctx.so.currPos.currPage == lastcurrblkno || seized);
+    debug_assert!(!(blkno == P_NONE && seized));
     debug_assert!(!BTScanPosIsPinned(&ctx.so.currPos));
 
     if ScanDirectionIsForward(dir) {
@@ -1309,12 +1379,29 @@ fn bt_readnextpage(
                 !ctx.so.currPos.moreLeft
             })
         {
-            debug_assert!(ctx.so.currPos.currPage == lastcurrblkno);
+            // Most recent _bt_readpage call (for lastcurrblkno) ended the scan.
+            debug_assert!(ctx.so.currPos.currPage == lastcurrblkno && !seized);
             BTScanPosInvalidate(&mut ctx.so.currPos);
+            crate::parallel::bt_parallel_done(ctx.so, ctx.parallel); // iff !needPrimScan
             return Ok(false);
         }
 
         debug_assert!(!ctx.so.needPrimScan);
+
+        // A parallel scan must never actually visit the so->currPos blkno.
+        if !seized {
+            if let Some(shared) = ctx.parallel {
+                let (status, next, last) =
+                    crate::parallel::bt_parallel_seize(ctx.so, shared, false)?;
+                if !status {
+                    // Whole scan done (or another primitive scan required).
+                    BTScanPosInvalidate(&mut ctx.so.currPos);
+                    return Ok(false);
+                }
+                blkno = next;
+                lastcurrblkno = last;
+            }
+        }
 
         if ScanDirectionIsForward(dir) {
             check_for_interrupts()?;
@@ -1323,7 +1410,9 @@ fn bt_readnextpage(
             match bt_lock_and_validate_left(rel, &mut blkno, lastcurrblkno)? {
                 Some(pin) => ctx.so.currPos.buf = pin.into_buffer(),
                 None => {
+                    // Concurrent deletion of the leftmost page.
                     BTScanPosInvalidate(&mut ctx.so.currPos);
+                    crate::parallel::bt_parallel_done(ctx.so, ctx.parallel);
                     return Ok(false);
                 }
             }
@@ -1347,27 +1436,32 @@ fn bt_readnextpage(
                     let page = unsafe { buf_page(ctx.so.currPos.buf) };
                     P_FIRSTDATAKEY(&page_opaque(&page))
                 };
-                if bt_readpage(ctx, dir, start, false)? {
+                if bt_readpage(ctx, dir, start, seized)? {
                     break;
                 }
                 blkno = ctx.so.currPos.nextPage;
             } else {
-                if bt_readpage(ctx, dir, maxoff, false)? {
+                if bt_readpage(ctx, dir, maxoff, seized)? {
                     break;
                 }
                 blkno = ctx.so.currPos.prevPage;
             }
         } else {
+            // _bt_readpage not called: release the parallel scan ourselves.
             blkno = if ScanDirectionIsForward(dir) {
                 opq_next
             } else {
                 opq_prev
             };
+            if let Some(shared) = ctx.parallel {
+                crate::parallel::bt_parallel_release(shared, blkno, lastcurrblkno);
+            }
         }
 
         let pin = BufferPin::adopt(ctx.so.currPos.buf).expect("pinned above");
         ctx.so.currPos.buf = InvalidBuffer;
         bt_relbuf(rel, pin)?;
+        seized = false; // released by _bt_readpage (or by us)
     }
 
     debug_assert!(ctx.so.currPos.currPage == blkno);
@@ -1503,9 +1597,11 @@ fn bt_endpoint(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResult<bool> 
     debug_assert!(!ctx.so.needPrimScan);
 
     let Some(pin) = bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir))? else {
+        // Empty index: lock the whole relation (nothing finer exists).
         if let Some(snap) = ctx.snapshot {
             predicate_seams::predicate_lock_relation::call(rel, snap)?;
         }
+        crate::parallel::bt_parallel_done(ctx.so, ctx.parallel);
         return Ok(false);
     };
 

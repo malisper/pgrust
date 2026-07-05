@@ -16,6 +16,7 @@ types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 planner_seams = { path = "../../plan/planner_seams" }
+allpaths = { path = "../allpaths" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
