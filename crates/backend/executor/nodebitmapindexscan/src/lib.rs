@@ -29,7 +29,14 @@ pub fn exec_init_bitmap_index_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<BitmapIndexScanState<'mcx>> {
-    let index_rel = indexam::index_open(mcx, node.indexid, NoLock)?;
+    // C nodeBitmapIndexscan.c:276: rellockmode unconditionally — a reused
+    // generic plan gets no planner locks and AcquireExecutorLocks covers
+    // tables only.
+    let index_rel = indexam::index_open(
+        mcx,
+        node.indexid,
+        ::nodeindexscan::index_lockmode(estate, node.scan.scanrelid),
+    )?;
     exec_init_bitmap_index_scan_rel(mcx, node, estate, eflags, index_rel)
 }
 

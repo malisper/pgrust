@@ -393,12 +393,12 @@ pub fn exec_init_index_only_scan<'mcx>(
     let rel = estate
         .exec_get_range_table_relation(node.scan.scanrelid, false)?
         .alias();
-    // A parallel worker takes its own index lock (C uses rellockmode
-    // unconditionally); the leader relies on the planner already holding it.
+    // C nodeIndexonlyscan.c:608: rellockmode unconditionally — a reused generic
+    // plan gets no planner locks and AcquireExecutorLocks covers tables only.
     let index_rel = indexam::index_open(
         mcx,
         node.indexid,
-        ::nodeindexscan::worker_index_lockmode(estate, node.scan.scanrelid),
+        ::nodeindexscan::index_lockmode(estate, node.scan.scanrelid),
     )?;
     exec_init_index_only_scan_rel(mcx, node, estate, rel, index_rel)
 }

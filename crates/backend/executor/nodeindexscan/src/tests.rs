@@ -810,3 +810,30 @@ fn saop_runtime_array_qual_builds_deferred_search_array_key() {
         assert_eq!(keys[0].sk_strategy, BTEqualStrategyNumber);
     });
 }
+
+// A reused generic plan reaches the executor with no planner locks and
+// AcquireExecutorLocks covers tables only, so the scan-index open must carry
+// the RTE's rellockmode (C nodeIndexscan.c:977) — NoLock here trips the
+// relation_open lock assertion (pg_regress plpgsql WSlot trigger, exec 6).
+#[test]
+fn index_lockmode_is_rte_rellockmode() {
+    with_mcx(|mcx| {
+        let rte: &::types_nodes::parsenodes::RangeTblEntry = &*::mcx::leak_in(
+            ::mcx::alloc_in(
+                mcx,
+                ::types_nodes::parsenodes::RangeTblEntry {
+                    rtekind: ::types_nodes::parsenodes::RTEKind::RTE_RELATION,
+                    relid: Oid(4242),
+                    relkind: RELKIND_RELATION,
+                    rellockmode: ::types_rel::RowExclusiveLock,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let mut estate = EStateData::new_in(mcx);
+        estate.es_range_table.push(rte);
+        estate.es_range_table_size = 1;
+        assert_eq!(index_lockmode(&estate, 1), ::types_rel::RowExclusiveLock);
+    });
+}
