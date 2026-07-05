@@ -466,6 +466,229 @@ pub fn fc_int8_accum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_usize(state as usize))
 }
 
+// numeric_combine/numeric_avg_combine (numeric.c): NULL state2 passes state1
+// through (possibly NULL); NULL state1 copies state2 into the agg context.
+fn numeric_combine_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::NumericAggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    // SAFETY: context, if set, is the live AggStateNode (agg_state_arg note).
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    if b.isnull {
+        if a.isnull {
+            fcinfo.return_null();
+        }
+        return Ok(a.value);
+    }
+    // SAFETY: non-null state args are live states from this combine lane's
+    // transfn/deserialfn (arg1 lives in the per-tuple mcx); distinct
+    // allocations, sole references during the call.
+    let state2 = unsafe { &mut *(b.value.as_usize() as *mut NumericAggState) };
+    let (state1, agg_mcx) = agg_state_arg(fcinfo, a, || NumericAggState::new(with_sum_x2))?;
+    // SAFETY: as state2.
+    unsafe {
+        if a.isnull {
+            crate::aggregates::numeric_agg_copy(&mut *state1, state2, agg_mcx, with_sum_x2)?;
+        } else {
+            crate::aggregates::numeric_agg_combine(&mut *state1, state2, agg_mcx, with_sum_x2)?;
+        }
+    }
+    Ok(Datum::from_usize(state1 as usize))
+}
+
+pub fn fc_numeric_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    numeric_combine_common(fcinfo, true)
+}
+
+pub fn fc_numeric_avg_combine(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    numeric_combine_common(fcinfo, false)
+}
+
+// numeric_poly_combine/int8_avg_combine (numeric.c), HAVE_INT128 arm.
+fn poly_combine_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::Int128AggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    // SAFETY: as numeric_combine_common.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    if b.isnull {
+        if a.isnull {
+            fcinfo.return_null();
+        }
+        return Ok(a.value);
+    }
+    // SAFETY: as numeric_combine_common; state2 read-only here.
+    let state2 = unsafe { &*(b.value.as_usize() as *const Int128AggState) };
+    let (state1, _) = agg_state_arg(fcinfo, a, || Int128AggState::new(with_sum_x2))?;
+    // SAFETY: as numeric_combine_common.
+    unsafe {
+        if a.isnull {
+            (*state1).n = state2.n;
+            (*state1).sum_x = state2.sum_x;
+            if with_sum_x2 {
+                (*state1).sum_x2 = state2.sum_x2;
+            }
+        } else if state2.n > 0 {
+            (*state1).n += state2.n;
+            (*state1).sum_x += state2.sum_x;
+            if with_sum_x2 {
+                (*state1).sum_x2 += state2.sum_x2;
+            }
+        }
+    }
+    Ok(Datum::from_usize(state1 as usize))
+}
+
+pub fn fc_numeric_poly_combine(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    poly_combine_common(fcinfo, true)
+}
+
+pub fn fc_int8_avg_combine(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    poly_combine_common(fcinfo, false)
+}
+
+// numeric_serialize/numeric_avg_serialize (numeric.c).
+fn numeric_serialize_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::NumericAggState;
+    // SAFETY: as numeric_combine_common.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    let a = fcinfo.args_n::<1>()[0];
+    // SAFETY: strict fn — arg 0 is the aggcontext-lived state (transfn
+    // contract); finalize's lazy carry is the only mutation.
+    let state = unsafe { &mut *(a.value.as_usize() as *mut NumericAggState) };
+    let mut buf = ::pqformat::pq_begintypsend(fcinfo.result_mcx())?;
+    crate::aggregates::numeric_agg_state_serialize(state, with_sum_x2, &mut buf)?;
+    Ok(varlena_result(::pqformat::pq_endtypsend(buf)))
+}
+
+pub fn fc_numeric_serialize(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    numeric_serialize_common(fcinfo, true)
+}
+
+pub fn fc_numeric_avg_serialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    numeric_serialize_common(fcinfo, false)
+}
+
+// C reads the bytea in place (initReadOnlyStringInfo over VARDATA_ANY); the
+// copy into a cursor buffer is observationally identical.
+fn deserialize_buf<'a>(fcinfo: &'a Fcinfo) -> PgResult<::stringinfo::StringInfo<'a>> {
+    // SAFETY: strict fn — arg 0 is a non-null bytea varlena.
+    let sstate = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let data = sstate.data();
+    let mut buf =
+        ::stringinfo::StringInfo::with_capacity_in(fcinfo.result_mcx(), data.len() + 1)?;
+    buf.append_bytes(data)?;
+    Ok(buf)
+}
+
+// numeric_deserialize/numeric_avg_deserialize (numeric.c): the state lands in
+// CurrentMemoryContext (the per-tuple result mcx here); the combine step
+// copies it into the agg context.
+fn numeric_deserialize_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::NumericAggState;
+    // SAFETY: as numeric_combine_common.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    let mcx = fcinfo.result_mcx();
+    let mut buf = deserialize_buf(fcinfo)?;
+    let state = crate::aggregates::numeric_agg_state_deserialize(&mut buf, mcx, with_sum_x2)?;
+    let layout = core::alloc::Layout::new::<NumericAggState>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p = raw.cast::<NumericAggState>().as_ptr();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(state) };
+    Ok(Datum::from_usize(p as usize))
+}
+
+pub fn fc_numeric_deserialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    numeric_deserialize_common(fcinfo, true)
+}
+
+pub fn fc_numeric_avg_deserialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    numeric_deserialize_common(fcinfo, false)
+}
+
+// numeric_poly_serialize/int8_avg_serialize (numeric.c), HAVE_INT128 arm.
+fn poly_serialize_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::Int128AggState;
+    // SAFETY: as numeric_combine_common.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    let a = fcinfo.args_n::<1>()[0];
+    // SAFETY: strict fn — arg 0 is the aggcontext-lived state; read-only.
+    let state = unsafe { &*(a.value.as_usize() as *const Int128AggState) };
+    let mut buf = ::pqformat::pq_begintypsend(fcinfo.result_mcx())?;
+    crate::aggregates::int128_agg_state_serialize(state, with_sum_x2, &mut buf)?;
+    Ok(varlena_result(::pqformat::pq_endtypsend(buf)))
+}
+
+pub fn fc_numeric_poly_serialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    poly_serialize_common(fcinfo, true)
+}
+
+pub fn fc_int8_avg_serialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    poly_serialize_common(fcinfo, false)
+}
+
+// numeric_poly_deserialize/int8_avg_deserialize (numeric.c), HAVE_INT128 arm.
+fn poly_deserialize_common(fcinfo: &mut Fcinfo, with_sum_x2: bool) -> PgResult<Datum> {
+    use crate::aggregates::Int128AggState;
+    // SAFETY: as numeric_combine_common.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context());
+    }
+    let mut buf = deserialize_buf(fcinfo)?;
+    let state = crate::aggregates::int128_agg_state_deserialize(&mut buf, with_sum_x2)?;
+    let mcx = fcinfo.result_mcx();
+    let layout = core::alloc::Layout::new::<Int128AggState>();
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p = raw.cast::<Int128AggState>().as_ptr();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(state) };
+    Ok(Datum::from_usize(p as usize))
+}
+
+pub fn fc_numeric_poly_deserialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    poly_deserialize_common(fcinfo, true)
+}
+
+pub fn fc_int8_avg_deserialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    poly_deserialize_common(fcinfo, false)
+}
+
 macro_rules! fc_poly_final {
     ($($fc:ident: $core:ident;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -957,6 +1180,18 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(3570, "int2_avg_accum_inv", 2, true, fc_int2_avg_accum_inv),
     b(3571, "int4_avg_accum_inv", 2, true, fc_int4_avg_accum_inv),
     b(2858, "numeric_avg_accum", 2, false, fc_numeric_avg_accum),
+    b(3341, "numeric_combine", 2, false, fc_numeric_combine),
+    b(3337, "numeric_avg_combine", 2, false, fc_numeric_avg_combine),
+    b(2740, "numeric_avg_serialize", 1, true, fc_numeric_avg_serialize),
+    b(2741, "numeric_avg_deserialize", 2, true, fc_numeric_avg_deserialize),
+    b(3335, "numeric_serialize", 1, true, fc_numeric_serialize),
+    b(3336, "numeric_deserialize", 2, true, fc_numeric_deserialize),
+    b(3338, "numeric_poly_combine", 2, false, fc_numeric_poly_combine),
+    b(3339, "numeric_poly_serialize", 1, true, fc_numeric_poly_serialize),
+    b(3340, "numeric_poly_deserialize", 2, true, fc_numeric_poly_deserialize),
+    b(2785, "int8_avg_combine", 2, false, fc_int8_avg_combine),
+    b(2786, "int8_avg_serialize", 1, true, fc_int8_avg_serialize),
+    b(2787, "int8_avg_deserialize", 2, true, fc_int8_avg_deserialize),
     b(2917, "numerictypmodin", 1, true, fc_numerictypmodin),
     b(3178, "numeric_sum", 1, false, fc_numeric_sum),
     b(3388, "numeric_poly_sum", 1, false, fc_numeric_poly_sum),
