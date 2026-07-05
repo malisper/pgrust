@@ -1278,7 +1278,7 @@ pub struct PopulateRecordCache {
     // arena; `c` is declared first so it drops before `own`, and `own` is
     // boxed so its arena address survives moves of this struct.
     c: Option<ColumnIoData<'static>>,
-    // std Box justified: rides FmgrInfo.fn_extra (Box<dyn Any>), written once
+    // std Box justified: rides FmgrInfo.fn_extra (FnExtra slot), written once
     // per resolved FmgrInfo.
     own: alloc::boxed::Box<MemoryContext>,
 }
@@ -1380,15 +1380,11 @@ fn get_record_type_from_query(
     Ok(())
 }
 
-fn take_cache(flinfo: &mut FmgrInfo) -> Option<alloc::boxed::Box<PopulateRecordCache>> {
-    let any = flinfo.fn_extra.take()?;
-    match any.downcast::<PopulateRecordCache>() {
-        Ok(c) => Some(c),
-        Err(other) => {
-            flinfo.fn_extra = Some(other);
-            panic!("populate worker: fn_extra holds a foreign payload");
-        }
-    }
+// Take the cache out of the fn_extra slot as an opaque handle (C keeps it in
+// fn_mcxt across errors; callers must restore it). The memo type is statically
+// bound to the resolved function per the FnExtra wiring contract.
+fn take_cache(flinfo: &mut FmgrInfo) -> Option<types_fmgr::FnExtra> {
+    flinfo.fn_extra.take()
 }
 
 // C PG_GETARG_HEAPTUPLEHEADER: detoasted composite arg image.
@@ -1415,10 +1411,10 @@ fn populate_record_worker(
     // SAFETY: the armed result mcx outlives this call frame (never re-armed).
     let mcx = unsafe { fcinfo.result_mcx_detached() };
 
-    let mut cache = match take_cache(flinfo) {
+    let mut cache_extra = match take_cache(flinfo) {
         Some(c) => c,
         None => {
-            let mut cache = alloc::boxed::Box::new(PopulateRecordCache::new());
+            let mut cache = PopulateRecordCache::new();
             let r = if have_record_arg {
                 get_record_type_from_argument(flinfo, funcname, &mut cache)
             } else {
@@ -1427,9 +1423,10 @@ fn populate_record_worker(
             if let Err(e) = r {
                 return Err(e);
             }
-            cache
+            types_fmgr::FnExtra::new(cache)
         }
     };
+    let cache = cache_extra.downcast_mut::<PopulateRecordCache>();
 
     let mut rec_holder: Option<PgVec<'_, u8>> = None;
     // C keeps the cache in fn_mcxt across errors; restore before `?`.
@@ -1482,7 +1479,7 @@ fn populate_record_worker(
         debug_assert!(!isnull || soft_occurred(&escontext));
         Ok(Some(rettuple))
     })();
-    flinfo.fn_extra = Some(cache);
+    flinfo.fn_extra = Some(cache_extra);
     match result? {
         Some(d) => {
             // The result may point into the detoasted record arg; leak it
@@ -1700,10 +1697,10 @@ fn populate_recordset_worker(
     // as Materialize-with-no-store (empty set), not value-per-call.
     fcinfo.rsinfo_mut().expect("checked above").returnMode = SetFunctionReturnMode::Materialize;
 
-    let mut cache = match take_cache(flinfo) {
+    let mut cache_extra = match take_cache(flinfo) {
         Some(c) => c,
         None => {
-            let mut cache = alloc::boxed::Box::new(PopulateRecordCache::new());
+            let mut cache = PopulateRecordCache::new();
             let r = if have_record_arg {
                 get_record_type_from_argument(flinfo, funcname, &mut cache)
             } else {
@@ -1712,9 +1709,10 @@ fn populate_recordset_worker(
             if let Err(e) = r {
                 return Err(e);
             }
-            cache
+            types_fmgr::FnExtra::new(cache)
         }
     };
+    let cache = cache_extra.downcast_mut::<PopulateRecordCache>();
 
     let mut rec_holder: Option<PgVec<'_, u8>> = None;
     if have_record_arg && !fcinfo.argisnull(0) {
@@ -1733,7 +1731,7 @@ fn populate_recordset_worker(
 
     // C: null json sends back an empty set.
     if fcinfo.argisnull(json_arg_num) {
-        flinfo.fn_extra = Some(cache);
+        flinfo.fn_extra = Some(cache_extra);
         return Ok(fcinfo.return_null());
     }
 
@@ -1822,7 +1820,7 @@ fn populate_recordset_worker(
         Ok(())
     };
     let r = run();
-    flinfo.fn_extra = Some(cache);
+    flinfo.fn_extra = Some(cache_extra);
     r?;
 
     let rsi = fcinfo.rsinfo_mut().expect("checked above");
