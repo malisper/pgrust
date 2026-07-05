@@ -385,6 +385,7 @@ fn install_relation_seams() {
         },
     );
     relcache_seams::relation_get_stat_ext_list::set(|mcx, _relid| Ok(mcx::PgVec::new_in(mcx)));
+    relcache_seams::relation_get_fkey_list::set(|_relid| Ok(std::rc::Rc::from(Vec::new())));
     relcache_build_seams::scan_pg_rewrite::set(|mcx, ev_class| {
         let mut rows = mcx::vec_with_capacity_in(mcx, 1)?;
         if ev_class == V_OID {
