@@ -163,6 +163,9 @@ pub fn init_seams() {
     planner_seams::generate_join_implied_equalities_for_ecs::set(
         crate::equivclass::generate_join_implied_equalities_for_ecs,
     );
+    planner_seams::find_derived_clause_for_ec_member::set(
+        crate::equivclass::find_derived_clause_for_ec_member,
+    );
     planner_seams::distribute_restrictinfo_to_rels::set(
         crate::initsplan::distribute_restrictinfo_to_rels,
     );

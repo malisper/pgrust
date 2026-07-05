@@ -194,6 +194,14 @@ seam_core::seam!(
     ) -> PgResult<mcx::PgVec<'mcx, RinfoId>>
 );
 
+seam_core::seam!(
+    pub fn find_derived_clause_for_ec_member<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        ec: EcId,
+        em: types_pathnodes::EmId,
+    ) -> Option<RinfoId>
+);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PatternType {
     Like,

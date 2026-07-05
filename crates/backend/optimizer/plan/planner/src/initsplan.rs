@@ -2578,3 +2578,113 @@ fn get_sortgroupclause_tle<'mcx>(
         })
         .expect("ORDER/GROUP BY expression not found in targetlist")
 }
+
+// match_foreign_keys_to_quals (initsplan.c): annotate root.fkey_list entries
+// with matched eclasses / loose join quals; drop entries not fully matched.
+pub fn match_foreign_keys_to_quals(run: &mut PlannerRun<'_>) -> PgResult<()> {
+    let mcx = run.mcx;
+    let mut newlist: PgVec<'_, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let fkeys = {
+        let mut v: PgVec<'_, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+        v.extend(run.root.fkey_list.iter().copied());
+        v
+    };
+    for &fkid in fkeys.iter() {
+        let (con_relid, ref_relid, nkeys) = {
+            let fk = run.root.foreign_key(fkid);
+            (fk.con_relid, fk.ref_relid, fk.nkeys as usize)
+        };
+        // Either relid might be in the rtable but not the jointree, or
+        // removed by join removal; such FKs have no RelOptInfo and are
+        // ignored (hence no find_base_rel here).
+        if con_relid as i32 >= run.root.simple_rel_array_size
+            || ref_relid as i32 >= run.root.simple_rel_array_size
+        {
+            continue;
+        }
+        let Some(con_rel) = run.root.simple_rel_array[con_relid as usize] else { continue };
+        let Some(ref_rel) = run.root.simple_rel_array[ref_relid as usize] else { continue };
+        // FKs linking to inheritance child rels (otherrels) are useless here.
+        if run.root.rel(con_rel).reloptkind != types_pathnodes::RELOPT_BASEREL
+            || run.root.rel(ref_rel).reloptkind != types_pathnodes::RELOPT_BASEREL
+        {
+            continue;
+        }
+        for colno in 0..nkeys {
+            // For simple inner joins any match is in an eclass; "loose"
+            // syntactic matches were rejected for EC status (outer-join
+            // quals or similar) but still count as matching the FK.
+            if let Some(ec) = crate::equivclass::match_eclasses_to_foreign_key_col(run, fkid, colno)? {
+                let has_const = run.root.ec(ec).ec_has_const;
+                let fk = run.root.foreign_key_mut(fkid);
+                fk.nmatched_ec += 1;
+                if has_const {
+                    fk.nconst_ec += 1;
+                }
+                continue;
+            }
+            let (con_attno, ref_attno) = {
+                let fk = run.root.foreign_key(fkid);
+                (fk.conkey[colno], fk.confkey[colno])
+            };
+            let mut fpeqop: Option<types_core::Oid> = None;
+            let joininfo = {
+                let mut v: PgVec<'_, RinfoId> = PgVec::new_in(mcx);
+                v.extend(run.root.rel(con_rel).joininfo.iter().copied());
+                v
+            };
+            for &rid in joininfo.iter() {
+                let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+                let Some(op) = clause.as_op_expr() else { continue };
+                if op.args.len() != 2 {
+                    continue;
+                }
+                let strip = |mut n: Node<'_>| {
+                    while n.node_tag() == NodeTag::T_RelabelType {
+                        n = n.as_relabel_type().unwrap().arg;
+                    }
+                    n
+                };
+                let Some(leftvar) = strip(op.args.nth(0)).as_var() else { continue };
+                let Some(rightvar) = strip(op.args.nth(1)).as_var() else { continue };
+                let conpfeqop = run.root.foreign_key(fkid).conpfeqop[colno];
+                if ref_relid as i32 == leftvar.varno
+                    && ref_attno == leftvar.varattno
+                    && con_relid as i32 == rightvar.varno
+                    && con_attno == rightvar.varattno
+                {
+                    if op.opno == conpfeqop {
+                        let fk = run.root.foreign_key_mut(fkid);
+                        fk.rinfos[colno].push(rid);
+                        fk.nmatched_ri += 1;
+                    }
+                } else if ref_relid as i32 == rightvar.varno
+                    && ref_attno == rightvar.varattno
+                    && con_relid as i32 == leftvar.varno
+                    && con_attno == leftvar.varattno
+                {
+                    // Reverse match: check the commutator (looked up at most
+                    // once per column in practice).
+                    if fpeqop.is_none() {
+                        fpeqop = Some(lsyscache::get_commutator(conpfeqop)?);
+                    }
+                    if op.opno == fpeqop.unwrap() {
+                        let fk = run.root.foreign_key_mut(fkid);
+                        fk.rinfos[colno].push(rid);
+                        fk.nmatched_ri += 1;
+                    }
+                }
+            }
+            if !run.root.foreign_key(fkid).rinfos[colno].is_empty() {
+                run.root.foreign_key_mut(fkid).nmatched_rcols += 1;
+            }
+        }
+        // Multicolumn FKs not fully matched to the query are dropped.
+        let fk = run.root.foreign_key(fkid);
+        if (fk.nmatched_ec + fk.nmatched_rcols) as usize == nkeys {
+            newlist.push(fkid);
+        }
+    }
+    run.root.fkey_list = newlist;
+    Ok(())
+}

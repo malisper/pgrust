@@ -1703,7 +1703,9 @@ pub struct PlannerInfo<'mcx> {
     pub outer_join_rels: Relids<'mcx>,
     pub all_query_rels: Relids<'mcx>,
     pub join_rel_list: PgVec<'mcx, RelId>,
-    pub join_rel_hash: Option<PgBox<'mcx, HTAB>>,
+    // C's join_rel_hash HTAB; keyed by the relids word slice, built lazily
+    // by find_join_rel once join_rel_list outgrows the linear probe.
+    pub join_rel_hash: Option<mcx::PgFxHashMap<'mcx, mcx::PgVec<'mcx, u64>, RelId>>,
     pub join_rel_level: PgVec<'mcx, PgVec<'mcx, RelId>>,
     pub join_cur_level: i32,
     pub init_plans: PgVec<'mcx, NodeId>,

@@ -480,8 +480,8 @@ CREATE TABLE pj_b (id int, v int);
 INSERT INTO pj_a SELECT i, i % 500 FROM generate_series(1, 30000) i;
 INSERT INTO pj_b SELECT i, i % 500 FROM generate_series(1, 30000) i;
 ANALYZE pj_a; ANALYZE pj_b;
--- default-on shape (C: Parallel Hash Join) is blocked on the plan-side
--- create_hashjoin_plan parallel_aware hunk; see notes/optpath-joinpath-lane.md
+-- default-on shape: Parallel Hash Join (shared table from a partial inner)
+EXPLAIN SELECT a.id, b.id FROM pj_a a JOIN pj_b b ON a.v = b.v;
 SET enable_parallel_hash = off;
 EXPLAIN SELECT a.id, b.id FROM pj_a a JOIN pj_b b ON a.v = b.v;
 RESET enable_parallel_hash;
@@ -494,3 +494,34 @@ RESET parallel_setup_cost;
 RESET max_parallel_workers_per_gather;
 DROP TABLE pj_a;
 DROP TABLE pj_b;
+
+-- FK-based join selectivity (get_relation_foreign_keys ->
+-- match_foreign_keys_to_quals -> get_foreign_key_join_selectivity): matched
+-- FK clauses drop out of the restrictlist and estimate as 1/ref_tuples.
+CREATE TABLE fk_ref (id int PRIMARY KEY, grp int);
+CREATE TABLE fk_con (id int, ref_id int REFERENCES fk_ref(id), filler int);
+INSERT INTO fk_ref SELECT i, i % 10 FROM generate_series(1, 1000) i;
+INSERT INTO fk_con SELECT i, (i % 1000) + 1, i % 3 FROM generate_series(1, 5000) i;
+ANALYZE fk_ref; ANALYZE fk_con;
+EXPLAIN SELECT * FROM fk_con c JOIN fk_ref r ON c.ref_id = r.id;
+EXPLAIN SELECT * FROM fk_con c JOIN fk_ref r ON c.ref_id = r.id WHERE r.grp = 3;
+EXPLAIN SELECT * FROM fk_con c LEFT JOIN fk_ref r ON c.ref_id = r.id;
+-- semi/anti: referenced rel exactly the inside -> rows/tuples leg
+EXPLAIN SELECT * FROM fk_con c WHERE EXISTS (SELECT 1 FROM fk_ref r WHERE r.id = c.ref_id);
+EXPLAIN SELECT * FROM fk_con c WHERE NOT EXISTS (SELECT 1 FROM fk_ref r WHERE r.id = c.ref_id);
+EXPLAIN SELECT * FROM fk_con c WHERE EXISTS (SELECT 1 FROM fk_ref r WHERE r.id = c.ref_id AND r.grp < 4);
+-- const-EC leg: "var = const" restriction divided back out of fkselec
+EXPLAIN SELECT * FROM fk_con c JOIN fk_ref r ON c.ref_id = r.id WHERE r.id = 42;
+-- multi-column FK: independent-clause selectivity replaced by FK semantics
+CREATE TABLE fk_ref2 (a int, b int, PRIMARY KEY (a, b));
+CREATE TABLE fk_con2 (a int, b int, v int, FOREIGN KEY (a, b) REFERENCES fk_ref2 (a, b));
+INSERT INTO fk_ref2 SELECT i / 10, i % 10 FROM generate_series(0, 999) i;
+INSERT INTO fk_con2 SELECT (i % 1000) / 10, i % 10, i FROM generate_series(0, 4999) i;
+ANALYZE fk_ref2; ANALYZE fk_con2;
+EXPLAIN SELECT * FROM fk_con2 c JOIN fk_ref2 r ON c.a = r.a AND c.b = r.b;
+-- partially-matched multicolumn FK is dropped by match_foreign_keys_to_quals
+EXPLAIN SELECT * FROM fk_con2 c JOIN fk_ref2 r ON c.a = r.a;
+-- two FKs matched to one EC: second FK punts (shared EC-derived clause)
+EXPLAIN SELECT * FROM fk_con c1 JOIN fk_con c2 ON c1.ref_id = c2.ref_id JOIN fk_ref r ON r.id = c1.ref_id;
+DROP TABLE fk_con2; DROP TABLE fk_ref2;
+DROP TABLE fk_con; DROP TABLE fk_ref;

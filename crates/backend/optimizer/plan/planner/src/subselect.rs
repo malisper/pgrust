@@ -1686,9 +1686,10 @@ pub(crate) fn query_cells_copy<'mcx>(mcx: Mcx<'mcx>, q: &Query<'mcx>) -> PgResul
     })
 }
 
-/// SS_replace_correlation_vars (subselect.c): uplevel Vars become PARAM_EXEC
-/// Params, parked on the owning ancestor's plan_params. Uplevel PHV/Aggref/
-/// GroupingFunc/MergeSupport/Returning replacement legs are loud.
+/// SS_replace_correlation_vars (subselect.c): uplevel Vars/PHVs/Aggrefs/
+/// GroupingFuncs become PARAM_EXEC Params, parked on the owning ancestor's
+/// plan_params. MergeSupportFunc/ReturningExpr nodes don't exist in this
+/// tree.
 pub fn ss_replace_correlation_vars<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
@@ -1706,9 +1707,19 @@ fn replace_correlation_vars_mutator<'mcx>(
         }
         return Ok(None);
     }
+    if let Some(phv) = node.as_place_holder_var() {
+        if phv.phlevelsup > 0 {
+            return Ok(Some(crate::paramassign::replace_outer_placeholdervar(run, phv, node)?));
+        }
+    }
     if let Some(a) = node.as_aggref() {
         if a.agglevelsup > 0 {
-            panic!("replace_outer_agg (paramassign.c): uplevel Aggref not ported");
+            return Ok(Some(crate::paramassign::replace_outer_agg(run, a, node)?));
+        }
+    }
+    if let Some(g) = node.as_grouping_func() {
+        if g.agglevelsup > 0 {
+            return Ok(Some(crate::paramassign::replace_outer_grouping(run, g, node)?));
         }
     }
     clauses::expression_tree_mutator(run.mcx, node, &mut |n| {

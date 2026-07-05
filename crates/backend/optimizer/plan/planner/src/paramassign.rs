@@ -120,7 +120,6 @@ fn assign_param_for_placeholdervar<'mcx>(
 }
 
 /// replace_outer_placeholdervar (paramassign.c).
-#[allow(dead_code)]
 pub(crate) fn replace_outer_placeholdervar<'mcx>(
     run: &mut PlannerRun<'mcx>,
     phv: &PlaceHolderVar<'mcx>,
@@ -142,7 +141,6 @@ pub(crate) fn replace_outer_placeholdervar<'mcx>(
 }
 
 /// replace_outer_agg (paramassign.c): no dedupe — a new slot per reference.
-#[allow(dead_code)]
 pub(crate) fn replace_outer_agg<'mcx>(
     run: &mut PlannerRun<'mcx>,
     agg: &Aggref<'mcx>,
@@ -183,7 +181,6 @@ pub(crate) fn replace_outer_agg<'mcx>(
 }
 
 /// replace_outer_grouping (paramassign.c): no dedupe, as replace_outer_agg.
-#[allow(dead_code)]
 pub(crate) fn replace_outer_grouping<'mcx>(
     run: &mut PlannerRun<'mcx>,
     grp: &GroupingFunc<'mcx>,
