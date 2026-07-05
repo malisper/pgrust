@@ -828,7 +828,8 @@ mod emit {
                 | Step::SbsrefSubscripts { jumpdone, .. }
                 | Step::JsonbSbsrefSubscripts { jumpdone, .. } => t[*jumpdone as usize] = true,
                 Step::AggStrictInputCheck { jumpnull, .. }
-                | Step::AggStrictInputCheck1 { jumpnull, .. } => t[*jumpnull as usize] = true,
+                | Step::AggStrictInputCheck1 { jumpnull, .. }
+                | Step::AggStrictDeserialize { jumpnull, .. } => t[*jumpnull as usize] = true,
                 Step::RowCompareStep { jumpnull, jumpdone, .. } => {
                     t[*jumpnull as usize] = true;
                     t[*jumpdone as usize] = true;
