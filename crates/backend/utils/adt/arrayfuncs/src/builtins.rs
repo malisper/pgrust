@@ -851,6 +851,8 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(744, "array_eq", 2, fc_array_eq),
     b(750, "array_in", 3, fc_array_in),
     b(751, "array_out", 1, fc_array_out),
+    // anyarray_out (pseudotypes.c) is `return array_out(fcinfo)`.
+    b(2297, "anyarray_out", 1, fc_array_out),
     b(395, "array_to_text", 2, fc_array_to_text),
     nb(384, "array_to_text_null", 3, fc_array_to_text_null),
     b(2176, "array_length", 2, fc_array_length),
