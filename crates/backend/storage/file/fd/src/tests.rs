@@ -541,4 +541,63 @@ fn parse_filename_for_nontemp_relation_shapes() {
     assert_eq!(parse("t5_16384"), None);
     assert_eq!(parse("pg_filenode.map"), None);
     assert_eq!(parse("99999999999999999999"), None);
+
+// Worker FATAL mid-sort ordering (ClickBench Q19 P2): proc_exit's abort
+// cleanup frees the spill VFDs, then the ProcExitThread unwind drops the
+// Tuplesort, whose tapeset close reaches BufFile::close with a dirty buffer.
+// The close must be a no-op, never a write through dead Files.
+#[test]
+fn buffile_close_after_proc_exit_cleanup_is_inert() {
+    setup();
+    resowner::init_seams();
+    ipc_seams::on_shmem_exit::set(|_cb, _arg| {});
+    let owner = resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "p2s-test")
+        .unwrap();
+    resowner_seams::set_current_resource_owner::call(owner);
+    let dir = scratch_dir("procexitclose");
+    let _cwd = enter_datadir(&dir);
+    with_fd(|fd| fd.temporary_files_allowed = true);
+
+    let ctx = mcx::MemoryContext::new("procexitclose");
+    let mut bf = crate::buffile::BufFileCreateTemp(ctx.mcx(), false).unwrap();
+    bf.write(&[0x5A; 4096]).unwrap(); // dirty write buffer, never flushed
+
+    // The abort resowner release closes and frees the temp-file VFDs while
+    // the BufFile still references them.
+    let files: Vec<::types_storage::File> =
+        with_fd(|fd| {
+            (1..fd.size_vfd_cache() as i32)
+                .filter(|&i| fd.vfd_cache[i as usize].file_name.is_some())
+                .map(::types_storage::File)
+                .collect()
+        });
+    assert!(!files.is_empty());
+    for f in &files {
+        crate::io::FileClose(*f).unwrap();
+    }
+
+    ::elog::config::set_proc_exit_inprogress(true);
+    let closed = bf.close();
+    ::elog::config::set_proc_exit_inprogress(false);
+    closed.unwrap();
+}
+
+// Double FileClose must not push a slot onto the freelist twice — aliased
+// slots hand the same VFD to two files (silent cross-file corruption).
+#[test]
+fn file_close_is_idempotent_no_freelist_aliasing() {
+    setup();
+    let dir = scratch_dir("dblclose");
+    let _cwd = enter_datadir(&dir);
+    with_fd(|fd| fd.temporary_files_allowed = true);
+
+    let f = crate::temp::OpenTemporaryFile(true).unwrap();
+    crate::io::FileClose(f).unwrap();
+    crate::io::FileClose(f).unwrap();
+
+    let a = crate::temp::OpenTemporaryFile(true).unwrap();
+    let b = crate::temp::OpenTemporaryFile(true).unwrap();
+    assert_ne!(a.0, b.0, "freelist aliased two live files onto one VFD slot");
+    crate::io::FileClose(a).unwrap();
+    crate::io::FileClose(b).unwrap();
 }
