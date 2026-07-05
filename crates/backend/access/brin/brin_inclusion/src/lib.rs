@@ -6,8 +6,9 @@
 use ::datum::Datum;
 use ::fmgr::FmgrInfo;
 use ::mcx::Mcx;
+use ::adt_scalar::datum_ops::datum_copy;
 use ::types_brin::{
-    datum_copy, BrinColInfo, BrinDesc, BrinOpcKind, BrinValues, InclusionOpaque, MinmaxOpaque,
+    BrinColInfo, BrinDesc, BrinOpcKind, BrinValues, InclusionOpaque, MinmaxOpaque,
     INCLUSION_MAX_PROCNUMS, RT_MAX_STRATEGY,
 };
 use ::types_core::{Oid, BOOLOID};
