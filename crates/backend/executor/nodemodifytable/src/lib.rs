@@ -1549,6 +1549,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.project_returning = None;
     mt.on_conflict = None;
     mt.check_exprs = None;
+    mt.partition_check = None;
     mt.wco_exprs.clear();
     mt.trigdesc = None;
     mt.trig_fmgr = ::trigger::TriggerFmgrCache::default();
@@ -3915,7 +3916,7 @@ mcx::forget_safe_struct!(
         ri_newTupleSlot, ri_oldTupleSlot, ri_ReturningSlot,
         ri_projectNewInfoValid, ri_RowIdAttNo, update_cols, returning_slot;
         operation, indexes, snapshot_any, project_returning, on_conflict,
-        check_exprs, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
+        check_exprs, partition_check, trigdesc, trig_fmgr, trig_old_slot, generated_exprs,
         virtual_nn_exprs, router, leaf_indexes, leaf_checks, leaf_virtual_nn,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when, trig_when,
         transition_capture, oc_transition_capture, all_updated_cols,

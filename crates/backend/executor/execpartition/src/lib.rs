@@ -157,6 +157,13 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         (&self.leaves[idx], conv)
     }
 
+    // ri_RootToPartitionMap accessor (COPY's multi-insert buffers convert
+    // into their own leaf-descriptor slots).
+    #[inline]
+    pub fn leaf_attrmap(&self, idx: usize) -> Option<&[i16]> {
+        self.leaf_maps[idx].as_deref()
+    }
+
     // Re-access after leaf_rel_and_converted_slot without re-converting.
     pub fn leaf_rel_and_slot(
         &mut self,
