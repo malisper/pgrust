@@ -59,6 +59,10 @@ pg_depend = { path = "../../catalog/pg_depend" }
 catalog_objectaddress = { path = "../../catalog/objectaddress" }
 adt_acl = { path = "../../utils/adt/acl" }
 coerce = { path = "../../parser/coerce" }
+parse_expr = { path = "../../parser/parse_expr" }
+parse_collate = { path = "../../parser/parse_collate" }
+var_seams = { path = "../../optimizer/util/var_seams" }
+outfuncs = { path = "../../nodes/outfuncs" }
 parse_func = { path = "../../parser/parse_func" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
 analyze_seams = { path = "../../parser/analyze_seams" }
