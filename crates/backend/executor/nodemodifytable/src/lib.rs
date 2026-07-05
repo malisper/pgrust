@@ -3706,8 +3706,11 @@ fn exec_rel_check<'mcx>(
                 // execMain.c:1818 expand_generated_columns_in_expr.
                 node = expand_generated_columns_in_expr(mcx, node, rel, 1)?.unwrap_or(node);
             }
-            let state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
+            let mut state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
                 .expect("check constraint expr");
+            // Whole-row/composite steps return by-ref datums (C evaluates in
+            // the per-tuple context).
+            state.arm_result_mcx(mcx);
             compiled.push(CheckExpr { name, state: Some(state) });
         }
         *check_exprs = Some(compiled);
