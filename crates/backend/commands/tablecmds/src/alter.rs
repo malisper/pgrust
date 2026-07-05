@@ -2959,15 +2959,35 @@ fn ATExecDropExpression<'mcx>(
 // sequence_seams.
 fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
     for s in stmts.iter() {
-        if let Some(cs) = s.as_variant::<types_nodes::rawnodes::CreateSeqStmt>() {
-            sequence_seams::define_sequence::call(mcx, cs)?;
+        // ProcessUtilityForAlterTable: the enclosing ALTER TABLE package
+        // closes before each sub-statement collects and reopens after
+        // (utility.c:1959-1989).
+        let saved = event_trigger::EventTriggerAlterTableSuspend();
+        let (seqoid, tag) = if let Some(cs) = s.as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
+        {
+            (
+                sequence_seams::define_sequence::call(mcx, cs)?,
+                types_core::CommandTag::CREATE_SEQUENCE,
+            )
         } else if let Some(alt) = s.as_variant::<types_nodes::AlterSeqStmt>() {
-            sequence_seams::alter_sequence::call(mcx, alt)?;
+            (
+                sequence_seams::alter_sequence::call(mcx, alt)?,
+                types_core::CommandTag::ALTER_SEQUENCE,
+            )
         } else {
             unported(&format!(
                 "ATParseTransformCmd queued statement {:?}",
                 s.node_tag()
             ));
+        };
+        event_trigger::EventTriggerCollectSimpleCommand(
+            pg_depend::ObjectAddress::set(RELATION_RELATION_ID, seqoid),
+            pg_depend::ObjectAddress::set(InvalidOid, InvalidOid),
+            tag,
+        );
+        if let Some((t, relid)) = saved {
+            event_trigger::EventTriggerAlterTableStart(t);
+            event_trigger::EventTriggerAlterTableRelid(relid);
         }
         xact::CommandCounterIncrement()?;
     }

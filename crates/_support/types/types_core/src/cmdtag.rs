@@ -6,6 +6,8 @@ pub struct CommandTag(pub i32);
 
 impl CommandTag {
     pub const UNKNOWN: CommandTag = CommandTag(0);
+    pub const ALTER_SEQUENCE: CommandTag = CommandTag(29);
+    pub const CREATE_SEQUENCE: CommandTag = CommandTag(84);
     pub const REFRESH_MATERIALIZED_VIEW: CommandTag = CommandTag(169);
     pub const SELECT: CommandTag = CommandTag(179);
 }

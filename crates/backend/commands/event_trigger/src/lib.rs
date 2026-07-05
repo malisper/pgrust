@@ -431,6 +431,27 @@ pub fn EventTriggerCollectAlterTableSubcmd(_address: ObjectAddress) {
     });
 }
 
+// ProcessUtilityForAlterTable's close half (utility.c:1959-1989): append the
+// in-progress ALTER TABLE package before a sub-statement collects, so command
+// order matches execution order; the caller reopens with Start+Relid.
+pub fn EventTriggerAlterTableSuspend() -> Option<(CommandTag, Oid)> {
+    if !collecting() {
+        return None;
+    }
+    let saved = CURRENT_STATE.with(|s| {
+        s.borrow().last().and_then(|st| {
+            st.current_command.last().and_then(|cur| match cur.data {
+                CollectedCommandData::AlterTable { object_id, .. } => Some((cur.tag, object_id)),
+                _ => None,
+            })
+        })
+    });
+    if saved.is_some() {
+        EventTriggerAlterTableEnd();
+    }
+    saved
+}
+
 pub fn EventTriggerAlterTableEnd() {
     if !collecting() {
         return;
