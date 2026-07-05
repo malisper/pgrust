@@ -1168,6 +1168,37 @@ pub fn expr_type(node: Node<'_>) -> Oid {
         NodeTag::T_JsonIsPredicate => ::types_core::catalog::BOOLOID,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
         NodeTag::T_ReturningExpr => expr_type(node.as_returning_expr().unwrap().retexpr),
+        NodeTag::T_SubLink => {
+            use ::types_nodes::primnodes::SubLinkType;
+            let sl = node.as_sub_link().unwrap();
+            match sl.subLinkType {
+                SubLinkType::EXPR_SUBLINK | SubLinkType::ARRAY_SUBLINK => {
+                    let tent = sl
+                        .subselect
+                        .as_query()
+                        .unwrap_or_else(|| panic!("cannot get type for untransformed sublink"))
+                        .targetList
+                        .first()
+                        .expect("sublink target list")
+                        .as_target_entry()
+                        .expect("tlist entry");
+                    let ty = expr_type(tent.expr);
+                    if sl.subLinkType == SubLinkType::ARRAY_SUBLINK {
+                        let arraytype = ::lsyscache::get_promoted_array_type(ty)
+                            .unwrap_or_else(|e| panic!("get_promoted_array_type({ty}): {e}"));
+                        assert!(
+                            arraytype != ::types_core::InvalidOid,
+                            "could not find array type for data type {ty}"
+                        );
+                        arraytype
+                    } else {
+                        ty
+                    }
+                }
+                SubLinkType::MULTIEXPR_SUBLINK => ::types_core::catalog::RECORDOID,
+                _ => 16,
+            }
+        }
         tag => panic!("execexpr exprType: node family {tag:?} not ported"),
     }
 }

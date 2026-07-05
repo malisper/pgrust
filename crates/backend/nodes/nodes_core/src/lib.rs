@@ -342,6 +342,17 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
                 || walk_opt(oc.onConflictWhere, w)?
                 || walk_list(&oc.exclRelTlist, w)?)
         }
+        NodeTag::T_PartitionBoundSpec => {
+            let pbs = node.as_variant::<types_nodes::rawnodes::PartitionBoundSpec>().unwrap();
+            Ok(walk_list(&pbs.listdatums, w)?
+                || walk_list(&pbs.lowerdatums, w)?
+                || walk_list(&pbs.upperdatums, w)?)
+        }
+        // Range-bound list elements: MINVALUE/MAXVALUE carry no value node.
+        NodeTag::T_PartitionRangeDatum => {
+            let prd = node.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>().unwrap();
+            walk_opt(prd.value, w)
+        }
         other => deferred("expression_tree_walker", other),
     }
 }
@@ -1931,6 +1942,47 @@ where
                     types_nodes::primnodes::AlternativeSubPlan { subplans },
                 )?)),
             }
+        }
+        NodeTag::T_PartitionBoundSpec => {
+            let pbs = node.as_variant::<types_nodes::rawnodes::PartitionBoundSpec>().unwrap();
+            let listdatums = mutate_list(mcx, &pbs.listdatums, m)?;
+            let lowerdatums = mutate_list(mcx, &pbs.lowerdatums, m)?;
+            let upperdatums = mutate_list(mcx, &pbs.upperdatums, m)?;
+            if listdatums.is_none() && lowerdatums.is_none() && upperdatums.is_none() {
+                return Ok(None);
+            }
+            let unchanged = |new: Option<NodeList<'mcx>>, old: &NodeList<'mcx>| match new {
+                Some(l) => Ok(l),
+                None => old.clone_in(mcx),
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::rawnodes::PartitionBoundSpec {
+                    strategy: pbs.strategy,
+                    is_default: pbs.is_default,
+                    modulus: pbs.modulus,
+                    remainder: pbs.remainder,
+                    listdatums: unchanged(listdatums, &pbs.listdatums)?,
+                    lowerdatums: unchanged(lowerdatums, &pbs.lowerdatums)?,
+                    upperdatums: unchanged(upperdatums, &pbs.upperdatums)?,
+                    location: pbs.location,
+                },
+            )?))
+        }
+        // Range-bound list elements: MINVALUE/MAXVALUE carry no value node.
+        NodeTag::T_PartitionRangeDatum => {
+            let prd = node.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>().unwrap();
+            let Some(value) = mutate_opt(prd.value, m)? else {
+                return Ok(None);
+            };
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::rawnodes::PartitionRangeDatum {
+                    kind: prd.kind,
+                    value: Some(value),
+                    location: prd.location,
+                },
+            )?))
         }
         other => deferred("expression_tree_mutator", other),
     }
