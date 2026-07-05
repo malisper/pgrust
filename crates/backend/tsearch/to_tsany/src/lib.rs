@@ -1,6 +1,7 @@
 pub mod builtins;
 pub mod cache_bind;
 pub mod env;
+pub mod json;
 pub mod query;
 pub mod query_bind;
 pub mod vector;

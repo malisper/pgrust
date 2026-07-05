@@ -26,9 +26,34 @@ fn to_tsvector_image<'mcx>(mcx: Mcx<'mcx>, cfg: Oid, data: &[u8]) -> PgResult<Da
     Ok(varlena_result(Varlena::from_image(img)))
 }
 
-fn text_data(fcinfo: &Fcinfo, i: usize) -> PgResult<&[u8]> {
+pub(crate) fn text_data(fcinfo: &Fcinfo, i: usize) -> PgResult<&[u8]> {
     // SAFETY: catalog arg type of every registered fn at index `i` is text.
     Ok(unsafe { fcinfo.arg_varlena_packed(i) }?.data())
+}
+
+// The tsquery arg re-framed as its 4-byte-header varlena image.
+pub(crate) fn tsquery_image<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &Fcinfo,
+    i: usize,
+) -> PgResult<&'mcx [u8]> {
+    // SAFETY: strict fn: the tsquery arg is a non-null live varlena.
+    let packed = unsafe { fcinfo.arg_varlena_packed(i) }?;
+    if packed.is_short() {
+        let data = packed.data();
+        let mut img = ::mcx::vec_with_capacity_in(mcx, 4 + data.len())?;
+        ::mcx::vec_append_bytes(&mut img, &::datum::varlena::set_varsize_4b(4 + data.len()))?;
+        ::mcx::vec_append_bytes(&mut img, data)?;
+        Ok(img.leak())
+    } else {
+        // SAFETY: 4B-header varlena spanning its varsize.
+        Ok(unsafe {
+            core::slice::from_raw_parts(
+                packed.as_ptr(),
+                ::types_tuple::varatt::varsize_any(packed.as_ptr()),
+            )
+        })
+    }
 }
 
 pub fn fc_to_tsvector_byid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -145,20 +170,7 @@ fn ts_headline_common(fcinfo: &mut Fcinfo, cfg: Option<Oid>, has_opts: bool) -> 
     let text = text_data(fcinfo, base)?;
 
     // The tsquery rides to prsd_headline as its 4-byte-header varlena image.
-    // SAFETY: strict fn: the tsquery arg is a non-null live varlena.
-    let packed = unsafe { fcinfo.arg_varlena_packed(base + 1) }?;
-    let qimage: &[u8] = if packed.is_short() {
-        let data = packed.data();
-        let mut img = ::mcx::vec_with_capacity_in(mcx, 4 + data.len())?;
-        ::mcx::vec_append_bytes(&mut img, &::datum::varlena::set_varsize_4b(4 + data.len()))?;
-        ::mcx::vec_append_bytes(&mut img, data)?;
-        img.leak()
-    } else {
-        // SAFETY: 4B-header varlena spanning its varsize.
-        unsafe {
-            core::slice::from_raw_parts(packed.as_ptr(), ::types_tuple::varatt::varsize_any(packed.as_ptr()))
-        }
-    };
+    let qimage = tsquery_image(mcx, fcinfo, base + 1)?;
     let query = ::adt_tsvector_core::query::TsQueryRef { payload: &qimage[4..] };
 
     let opts = if has_opts {
@@ -241,4 +253,20 @@ pub const TO_TSANY_BUILTINS: &[FmgrBuiltin] = &[
     b(3744, "ts_headline_byid", 3, fc_ts_headline_byid),
     b(3754, "ts_headline_opt", 3, fc_ts_headline_opt),
     b(3755, "ts_headline", 2, fc_ts_headline),
+    b(4201, "ts_headline_jsonb_byid_opt", 4, crate::json::fc_ts_headline_jsonb_byid_opt),
+    b(4202, "ts_headline_jsonb_byid", 3, crate::json::fc_ts_headline_jsonb_byid),
+    b(4203, "ts_headline_jsonb_opt", 3, crate::json::fc_ts_headline_jsonb_opt),
+    b(4204, "ts_headline_jsonb", 2, crate::json::fc_ts_headline_jsonb),
+    b(4205, "ts_headline_json_byid_opt", 4, crate::json::fc_ts_headline_json_byid_opt),
+    b(4206, "ts_headline_json_byid", 3, crate::json::fc_ts_headline_json_byid),
+    b(4207, "ts_headline_json_opt", 3, crate::json::fc_ts_headline_json_opt),
+    b(4208, "ts_headline_json", 2, crate::json::fc_ts_headline_json),
+    b(4209, "jsonb_string_to_tsvector", 1, crate::json::fc_jsonb_string_to_tsvector),
+    b(4210, "json_string_to_tsvector", 1, crate::json::fc_json_string_to_tsvector),
+    b(4211, "jsonb_string_to_tsvector_byid", 2, crate::json::fc_jsonb_string_to_tsvector_byid),
+    b(4212, "json_string_to_tsvector_byid", 2, crate::json::fc_json_string_to_tsvector_byid),
+    b(4213, "jsonb_to_tsvector", 2, crate::json::fc_jsonb_to_tsvector),
+    b(4214, "jsonb_to_tsvector_byid", 3, crate::json::fc_jsonb_to_tsvector_byid),
+    b(4215, "json_to_tsvector", 2, crate::json::fc_json_to_tsvector),
+    b(4216, "json_to_tsvector_byid", 3, crate::json::fc_json_to_tsvector_byid),
 ];

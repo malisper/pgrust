@@ -870,3 +870,143 @@ mod populate {
         assert_eq!(err.message(), "malformed JSON array");
     }
 }
+
+mod iterate_tests {
+    use super::{jsonb_image, setup};
+    use crate::iterate::*;
+    use mcx::MemoryContext;
+    use types_error::PgResult;
+
+    fn collect(doc: &[u8], flags: u32) -> Vec<String> {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let img = jsonb_image(mcx, doc);
+        let mut out = Vec::new();
+        iterate_jsonb_values(mcx, &img[4..], flags, &mut |e| {
+            out.push(String::from_utf8_lossy(e).into_owned());
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    fn collect_json(doc: &[u8], flags: u32) -> Vec<String> {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut out = Vec::new();
+        iterate_json_values(mcx, doc, flags, &mut |e| {
+            out.push(String::from_utf8_lossy(e).into_owned());
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    const DOC: &[u8] = br#"{"a": "x", "b": [1, true, "y"], "c": {"d": null}}"#;
+
+    #[test]
+    fn jsonb_iterate_flags_select_lanes() {
+        assert_eq!(collect(DOC, JTI_STRING), vec!["x", "y"]);
+        assert_eq!(collect(DOC, JTI_NUMERIC), vec!["1"]);
+        assert_eq!(collect(DOC, JTI_BOOL), vec!["true"]);
+        assert_eq!(collect(DOC, JTI_KEY), vec!["a", "b", "c", "d"]);
+        assert_eq!(
+            collect(DOC, JTI_ALL),
+            vec!["a", "x", "b", "1", "true", "y", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn json_iterate_flags_select_lanes() {
+        assert_eq!(collect_json(DOC, JTI_STRING), vec!["x", "y"]);
+        assert_eq!(collect_json(DOC, JTI_NUMERIC), vec!["1"]);
+        assert_eq!(collect_json(DOC, JTI_BOOL), vec!["true"]);
+        assert_eq!(collect_json(DOC, JTI_KEY), vec!["a", "b", "c", "d"]);
+    }
+
+    fn flags_of(doc: &[u8]) -> PgResult<u32> {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let img = jsonb_image(mcx, doc);
+        parse_jsonb_index_flags(mcx, &img[4..])
+    }
+
+    #[test]
+    fn parse_index_flags_values_and_errors() {
+        assert_eq!(flags_of(br#"["string"]"#).unwrap(), JTI_STRING);
+        assert_eq!(flags_of(br#""all""#).unwrap(), JTI_ALL);
+        assert_eq!(
+            flags_of(br#"["key", "NUMERIC", "boolean"]"#).unwrap(),
+            JTI_KEY | JTI_NUMERIC | JTI_BOOL
+        );
+        assert_eq!(
+            flags_of(br#"{"a": 1}"#).unwrap_err().message(),
+            "wrong flag type, only arrays and scalars are allowed"
+        );
+        assert_eq!(
+            flags_of(br#"[1]"#).unwrap_err().message(),
+            "flag array element is not a string"
+        );
+        assert_eq!(
+            flags_of(br#"["strings"]"#).unwrap_err().message(),
+            "wrong flag in flag array: \"strings\""
+        );
+    }
+
+    #[test]
+    fn transform_jsonb_rewrites_string_values_only() {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let img = jsonb_image(mcx, br#"{"a": "x", "b": [1, "y"], "c": true}"#);
+        let payload: &[u8] = mcx::slice_in(mcx, &img[4..]).unwrap().leak();
+        let out = transform_jsonb_string_values(mcx, payload, &mut |s| {
+            let mut v = mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
+            mcx::vec_append_bytes(&mut v, b"<")?;
+            mcx::vec_append_bytes(&mut v, s)?;
+            Ok(v.leak())
+        })
+        .unwrap();
+        let expect = jsonb_image(mcx, br#"{"a": "<x", "b": [1, "<y"], "c": true}"#);
+        assert_eq!(&out[..], &expect[..]);
+    }
+
+    #[test]
+    fn transform_jsonb_raw_scalar_round_trip() {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let img = jsonb_image(mcx, br#""s""#);
+        let payload: &[u8] = mcx::slice_in(mcx, &img[4..]).unwrap().leak();
+        let out = transform_jsonb_string_values(mcx, payload, &mut |s| {
+            Ok(mcx::slice_in(mcx, s).unwrap().leak())
+        })
+        .unwrap();
+        assert_eq!(&out[..], &img[..]);
+    }
+
+    #[test]
+    fn transform_json_reescapes_and_preserves_layout() {
+        setup();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let out = transform_json_string_values(
+            mcx,
+            br#"{"a": "x", "b": [1, "y", null], "c": false}"#,
+            &mut |s| {
+                let mut v = mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
+                mcx::vec_append_bytes(&mut v, b"<")?;
+                mcx::vec_append_bytes(&mut v, s)?;
+                Ok(v)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            r#"{"a":"<x","b":[1,"<y",null],"c":false}"#
+        );
+    }
+}

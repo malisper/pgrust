@@ -20,6 +20,9 @@ pub struct TriggerData<'a, 'mcx> {
     // TuplestoreHandle.0 for REFERENCING transition tables; 0 = C NULL.
     pub tg_oldtable: u64,
     pub tg_newtable: u64,
+    // *const types_nodes::Bitmapset (attnums offset by
+    // FirstLowInvalidHeapAttributeNumber); 0 = C NULL.
+    pub tg_updatedcols: usize,
 }
 
 impl<'a, 'mcx> TriggerData<'a, 'mcx> {
@@ -39,6 +42,7 @@ impl<'a, 'mcx> TriggerData<'a, 'mcx> {
             tg_trigger,
             tg_oldtable: 0,
             tg_newtable: 0,
+            tg_updatedcols: 0,
         }
     }
 
@@ -58,6 +62,7 @@ impl<'a, 'mcx> TriggerData<'a, 'mcx> {
             tg_trigger,
             tg_oldtable: 0,
             tg_newtable: 0,
+            tg_updatedcols: 0,
         }
     }
 

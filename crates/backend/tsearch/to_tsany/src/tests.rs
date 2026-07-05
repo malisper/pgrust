@@ -182,3 +182,69 @@ fn morph_variants_or_together() {
     let pushes = morph(ctx.mcx(), "dual", OP_PHRASE);
     assert_eq!(render(&pushes), ["V:dual", "V:duo", "OR"]);
 }
+
+mod json_workers {
+    use super::MorphEnv;
+    use crate::json::{json_to_tsvector_worker, jsonb_to_tsvector_worker};
+    use ::adt_jsonb::iterate::{JTI_ALL, JTI_STRING};
+    use ::adt_tsvector_core::layout::TsVec;
+    use ::mcx::{Mcx, MemoryContext};
+
+    fn setup() {
+        let _ = mbutils::SetDatabaseEncoding(wchar::PG_UTF8);
+        mbutils::init_seams();
+    }
+
+    fn jsonb_payload<'m>(mcx: Mcx<'m>, doc: &[u8]) -> Vec<u8> {
+        ::adt_jsonb::io::jsonb_in(mcx, doc, None)
+            .unwrap()
+            .expect("hard path returns Some")[..]
+            .to_vec()
+    }
+
+    fn words(img: &[u8]) -> Vec<(String, Vec<u16>)> {
+        let v = TsVec { payload: &img[4..] };
+        (0..v.size())
+            .map(|i| {
+                let e = v.entry(i);
+                (
+                    String::from_utf8(v.lexeme(e).to_vec()).unwrap(),
+                    v.positions(e).to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    const DOC: &[u8] = br#"{"a": "fat cats", "b": {"c": "dogs"}, "n": 7}"#;
+
+    #[test]
+    fn jsonb_worker_breaks_positions_between_elements() {
+        setup();
+        let ctx = MemoryContext::new("to-tsany-test");
+        let mcx = ctx.mcx();
+        let jb = jsonb_payload(mcx, DOC);
+        let mut env = MorphEnv::new(mcx);
+        let img = jsonb_to_tsvector_worker(mcx, &mut env, &jb[4..], JTI_STRING).unwrap();
+        assert_eq!(
+            words(&img),
+            vec![
+                ("cat".to_string(), vec![2]),
+                ("dog".to_string(), vec![4]),
+                ("fat".to_string(), vec![1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn json_worker_matches_jsonb_worker() {
+        setup();
+        let ctx = MemoryContext::new("to-tsany-test");
+        let mcx = ctx.mcx();
+        let jb = jsonb_payload(mcx, DOC);
+        let mut env1 = MorphEnv::new(mcx);
+        let a = jsonb_to_tsvector_worker(mcx, &mut env1, &jb[4..], JTI_ALL).unwrap();
+        let mut env2 = MorphEnv::new(mcx);
+        let b = json_to_tsvector_worker(mcx, &mut env2, DOC, JTI_ALL).unwrap();
+        assert_eq!(&a[..], &b[..]);
+    }
+}

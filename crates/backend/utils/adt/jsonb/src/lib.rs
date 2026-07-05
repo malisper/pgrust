@@ -13,6 +13,7 @@ pub mod getfield;
 pub mod gin;
 pub mod io;
 pub mod iter;
+pub mod iterate;
 pub mod mutate;
 pub mod ops;
 pub mod populate;

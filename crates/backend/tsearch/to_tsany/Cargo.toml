@@ -14,6 +14,11 @@ mcx = { path = "../../../_support/mcx" }
 ts_locale = { path = "../ts_locale" }
 ts_parse = { path = "../ts_parse" }
 adt_tsvector_core = { path = "../../utils/adt/tsvector_core" }
+adt_jsonb = { path = "../../utils/adt/jsonb" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 ts_cache = { path = "../../utils/cache/ts_cache" }
 adt_tsquery_core = { path = "../../utils/adt/tsquery_core" }
+
+[dev-dependencies]
+mbutils = { path = "../../utils/mb/mbutils" }
+wchar = { path = "../../../common/wchar" }
