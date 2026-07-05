@@ -396,8 +396,12 @@ fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
         ObjectType::OBJECT_SCHEMA => exec_grant_common(mcx, istmt, &CLASS_NAMESPACE, None),
         ObjectType::OBJECT_TABLESPACE => exec_grant_common(mcx, istmt, &CLASS_TABLESPACE, None),
         ObjectType::OBJECT_PARAMETER_ACL => exec_grant_parameter(mcx, istmt),
+        ObjectType::OBJECT_FDW => exec_grant_common(mcx, istmt, &CLASS_FDW, None),
+        ObjectType::OBJECT_FOREIGN_SERVER => {
+            exec_grant_common(mcx, istmt, &CLASS_FOREIGN_SERVER, None)
+        }
         other => panic!(
-            "ExecGrantStmt_oids (aclchk.c): objtype {} unported (fdw lanes)",
+            "ExecGrantStmt_oids (aclchk.c): objtype {} unported",
             other as i32
         ),
     }
@@ -529,8 +533,34 @@ fn object_names_to_oids<'mcx>(
                 }
             }
         }
+        ObjectType::OBJECT_FDW => {
+            for cell in objnames.iter() {
+                let name = cell.as_string().expect("foreign-data wrapper name").sval;
+                let oid = foreigncmds_seams::get_foreign_data_wrapper_oid::call(name, false)?;
+                lmgr::LockDatabaseObject(
+                    types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
+                    oid,
+                    0,
+                    AccessShareLock,
+                )?;
+                objects.push(oid);
+            }
+        }
+        ObjectType::OBJECT_FOREIGN_SERVER => {
+            for cell in objnames.iter() {
+                let name = cell.as_string().expect("foreign server name").sval;
+                let oid = foreigncmds_seams::get_foreign_server_oid::call(name, false)?;
+                lmgr::LockDatabaseObject(
+                    types_core::FOREIGN_SERVER_RELATION_ID,
+                    oid,
+                    0,
+                    AccessShareLock,
+                )?;
+                objects.push(oid);
+            }
+        }
         other => panic!(
-            "objectNamesToOids (aclchk.c): objtype {} unported (fdw lanes)",
+            "objectNamesToOids (aclchk.c): objtype {} unported",
             other as i32
         ),
     }
@@ -1091,6 +1121,30 @@ const CLASS_NAMESPACE: GrantClass = GrantClass {
     acl_objtype: AclObjectType::Schema,
     default_privs: adt_acl::ACL_ALL_RIGHTS_SCHEMA,
     descr: "schema",
+};
+
+const CLASS_FDW: GrantClass = GrantClass {
+    classid: types_core::FOREIGN_DATA_WRAPPER_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::FOREIGNDATAWRAPPEROID,
+    owner_attnum: 3,
+    acl_attnum: 6,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_FDW,
+    acl_objtype: AclObjectType::Fdw,
+    default_privs: ACL_ALL_RIGHTS_FDW,
+    descr: "foreign-data wrapper",
+};
+
+const CLASS_FOREIGN_SERVER: GrantClass = GrantClass {
+    classid: types_core::FOREIGN_SERVER_RELATION_ID,
+    cacheid: cache_syscache::cacheinfo::FOREIGNSERVEROID,
+    owner_attnum: 3,
+    acl_attnum: 7,
+    name_attnum: 2,
+    objtype: ObjectType::OBJECT_FOREIGN_SERVER,
+    acl_objtype: AclObjectType::ForeignServer,
+    default_privs: ACL_ALL_RIGHTS_FOREIGN_SERVER,
+    descr: "foreign server",
 };
 
 // RemoveRoleFromObjectACL (aclchk.c).
