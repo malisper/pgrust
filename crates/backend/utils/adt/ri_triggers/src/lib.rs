@@ -175,7 +175,8 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
         None => {
             let mut querybuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
-            debug_assert!(pk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            let pk_only =
+                if pk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
             use core::fmt::Write;
             // Temporal FKs check containment against the aggregated matching
             // PK ranges: SELECT 1 FROM (SELECT pkperiodatt AS r FROM ONLY pk
@@ -186,13 +187,17 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
                     quote_one_name(att_name(&pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]));
                 write!(
                     querybuf,
-                    "SELECT 1 FROM (SELECT {periodatt} AS r FROM ONLY {} x",
+                    "SELECT 1 FROM (SELECT {periodatt} AS r FROM {pk_only}{} x",
                     quote_relation_name(mcx, &pk_rel)?
                 )
                 .expect("PgString write");
             } else {
-                write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, &pk_rel)?)
-                    .expect("PgString write");
+                write!(
+                    querybuf,
+                    "SELECT 1 FROM {pk_only}{} x",
+                    quote_relation_name(mcx, &pk_rel)?
+                )
+                .expect("PgString write");
             }
             let mut querysep = "WHERE";
             for i in 0..riinfo.nkeys {
@@ -280,9 +285,10 @@ fn ri_restrict<'mcx>(
         None => {
             let mut querybuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
-            debug_assert!(fk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
+            let fk_only =
+                if fk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
             use core::fmt::Write;
-            write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, &fk_rel)?)
+            write!(querybuf, "SELECT 1 FROM {fk_only}{} x", quote_relation_name(mcx, &fk_rel)?)
                 .expect("PgString write");
             let mut querysep = "WHERE";
             for i in 0..riinfo.nkeys {
@@ -330,9 +336,14 @@ fn ri_restrict<'mcx>(
                 replacementsbuf.try_push_str("(SELECT pg_catalog.range_agg(r) FROM ")?;
                 let periodattname =
                     quote_one_name(att_name(pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]));
+                let pk_only = if pk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+                    ""
+                } else {
+                    "ONLY "
+                };
                 write!(
                     replacementsbuf,
-                    "(SELECT y.{periodattname} r FROM ONLY {} y",
+                    "(SELECT y.{periodattname} r FROM {pk_only}{} y",
                     quote_relation_name(mcx, pk_rel)?
                 )
                 .expect("PgString write");
@@ -633,19 +644,25 @@ fn ri_Check_Pk_Match<'mcx>(
         None => {
             let mut querybuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
+            let pk_only =
+                if pk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE { "" } else { "ONLY " };
             use core::fmt::Write;
             if riinfo.hasperiod {
                 let periodatt =
                     quote_one_name(att_name(pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]));
                 write!(
                     querybuf,
-                    "SELECT 1 FROM (SELECT {periodatt} AS r FROM ONLY {} x",
+                    "SELECT 1 FROM (SELECT {periodatt} AS r FROM {pk_only}{} x",
                     quote_relation_name(mcx, pk_rel)?
                 )
                 .expect("PgString write");
             } else {
-                write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, pk_rel)?)
-                    .expect("PgString write");
+                write!(
+                    querybuf,
+                    "SELECT 1 FROM {pk_only}{} x",
+                    quote_relation_name(mcx, pk_rel)?
+                )
+                .expect("PgString write");
             }
             let mut querysep = "WHERE";
             for i in 0..riinfo.nkeys {
@@ -1603,6 +1620,10 @@ fn ri_KeysEqual(
             }
             let mut finfo = fmgr_seams::fmgr_info::call(opcode)?;
             let mut fcinfo = types_fmgr::LocalFcinfo::<2>::fresh(att.attcollation);
+            // range/multirange operators detoast through the result mcx.
+            let scratch = mcx::MemoryContext::new("ri-keys-cmp");
+            // SAFETY: scratch outlives this call.
+            unsafe { fcinfo.set_result_mcx(scratch.mcx()) };
             fcinfo.set_arg(0, newvalue);
             fcinfo.set_arg(1, oldvalue);
             if !finfo.invoke(&mut fcinfo)?.as_bool() {
