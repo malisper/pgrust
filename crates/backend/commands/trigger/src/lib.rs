@@ -9,7 +9,7 @@ mod state;
 pub use catalog::{map_partition_qual, CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs, TriggerSetParentTrigger};
 pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, EnableDisableTrigger, RemoveTriggerById};
 pub use exec::{
-    ExecBSTruncateTriggers, ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache,
+    trigger_depth, ExecBSTruncateTriggers, ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache,
     TriggerWhenCache, TriggerWhenEval,
 };
 pub use queue::{
@@ -29,6 +29,7 @@ pub fn init_seams() {
     trigger_seams::after_trigger_begin_sub_xact::set(AfterTriggerBeginSubXact);
     trigger_seams::after_trigger_end_sub_xact::set(AfterTriggerEndSubXact);
     trigger_seams::after_trigger_pending_on_rel::set(AfterTriggerPendingOnRel);
+    trigger_seams::my_trigger_depth::set(trigger_depth);
 }
 
 #[cfg(test)]

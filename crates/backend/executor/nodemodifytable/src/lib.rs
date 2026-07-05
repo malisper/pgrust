@@ -2407,6 +2407,36 @@ fn serialization_conflict(kind: &str) -> Box<PgError> {
     )
 }
 
+// ExecBRInsertTriggers (trigger.c): tgisclone replacement tuple failed the
+// partition constraint re-verify.
+#[cold]
+#[inline(never)]
+fn moved_row_before_trigger<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    trigger: &types_trigger::Trigger<'static>,
+    rel: &Relation<'mcx>,
+) -> Box<PgError> {
+    let nspname = lsyscache::misc::get_namespace_name(mcx, rel.rd_rel.relnamespace)
+        .ok()
+        .flatten()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+    Box::new(
+        PgError::error(
+            "moving row to another partition during a BEFORE FOR EACH ROW trigger is not \
+             supported"
+                .to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_detail(format!(
+            "Before executing trigger \"{}\", the row was to be in partition \"{}.{}\".",
+            trigger.tgname.as_str(),
+            nspname,
+            rel.name()
+        )),
+    )
+}
+
 // ExecCrossPartitionUpdate (nodeModifyTable.c): ON CONFLICT DO UPDATE may
 // not move a row to another partition.
 #[cold]
@@ -2623,12 +2653,6 @@ fn row_triggers_common<'mcx>(
                 // ExecBR{Insert,Update}Triggers replacement-tuple arm:
                 // ExecForceStoreHeapTuple into the new slot, subsequent
                 // triggers and the DML proper see the replaced row.
-                if trigger.tgisclone {
-                    panic!(
-                        "ExecBRInsertTriggers (trigger.c): replacement tuple in a \
-                         partition (ExecPartitionCheck re-verify) unported"
-                    );
-                }
                 let slot_id = new_slot.expect("insert/update BR has a new slot");
                 // SAFETY: p is the trigger's returned tuple, live in the
                 // per-call context; copied into the slot before reuse.
@@ -2654,6 +2678,28 @@ fn row_triggers_common<'mcx>(
                     &mut estate.es_tupleTable[slot_id.0 as usize],
                     mcx,
                 )?;
+                // ExecBRInsertTriggers (trigger.c): a cloned trigger's
+                // replacement tuple may no longer satisfy the partition
+                // constraint of the partition the row was routed to.
+                if trigger.tgisclone && event_op == types_trigger::TRIGGER_EVENT_INSERT {
+                    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                    let (rel, pcheck) = match leaf {
+                        Some(ix) => (
+                            mt.router.as_ref().expect("routed insert has a router").leaf_rel(ix),
+                            &mut mt.leaf_partition_check[ix],
+                        ),
+                        None => (
+                            es_relations[(mt.result_rti - 1) as usize]
+                                .as_ref()
+                                .expect("result relation opened"),
+                            &mut mt.partition_check,
+                        ),
+                    };
+                    let slot = &mut es_tupleTable[slot_id.0 as usize];
+                    if !execpartition::exec_partition_check(mcx, pcheck, rel, slot)? {
+                        return Err(moved_row_before_trigger(mcx, trigger, rel));
+                    }
+                }
                 raw_new = Some(slot_raw_tuple(estate, slot_id)?);
             }
         }

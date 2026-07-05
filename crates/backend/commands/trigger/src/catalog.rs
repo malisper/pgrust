@@ -1,16 +1,13 @@
 // CreateTriggerFiringOn (trigger.c): user CREATE [CONSTRAINT] TRIGGER (incl.
 // OR REPLACE, UPDATE OF columns, WHEN, trigger args, transition-table names,
 // partitioned-table recursion with tgparentid clones) and the internal RI
-// constraint-trigger callers. LOUD: non-superuser ACL walks, non-pinned
-// functions in WHEN expressions, non-identity partition attribute maps.
+// constraint-trigger callers. LOUD: non-superuser ACL walks, non-identity
+// partition attribute maps.
 use datum::Datum;
 use mcx::{Mcx, PgVec};
-use nodes_core::{expression_tree_walker, NodeWalker};
 use pg_depend::{DependencyType, ObjectAddress};
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-use types_core::{
-    AttrNumber, FirstUnpinnedObjectId, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID,
-};
+use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -19,7 +16,7 @@ use types_error::{
 };
 use types_nodes::primnodes::{Alias, Var};
 use types_nodes::rawnodes::CreateTrigStmt;
-use types_nodes::{Node, NodeList, NodeTag};
+use types_nodes::{Node, NodeList};
 use types_rel::{
     AccessShareLock, NoLock, Relation, RowExclusiveLock, ShareRowExclusiveLock,
     RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -298,13 +295,13 @@ pub fn CreateTriggerFiringOn<'mcx>(
 
     let (oldtablename, newtablename) = validate_transition_rels(mcx, stmt, &rel, tgtype)?;
 
-    let (when_node, qual, when_vars) = match when_clause {
+    let (when_node, qual, when_rtable) = match when_clause {
         Some(w) => (Some(w), Some(outfuncs::nodeToString(mcx, w)?), NodeList::nil()),
         None => match stmt.whenClause {
             Some(when) => {
-                let (node, qual, vars) =
+                let (node, qual, rtable) =
                     transform_when_clause(mcx, &rel, when, tgtype, query_string)?;
-                (Some(node), Some(qual), vars)
+                (Some(node), Some(qual), rtable)
             }
             None => (None, None, NodeList::nil()),
         },
@@ -553,7 +550,15 @@ pub fn CreateTriggerFiringOn<'mcx>(
         )?;
     }
 
-    record_when_dependencies(mcx, &myself, rel.rd_id, &when_vars)?;
+    if !when_rtable.is_nil() {
+        dependency_seams::record_dependency_on_expr::call(
+            mcx,
+            &myself,
+            when_node.expect("WHEN clause parsed here"),
+            &when_rtable,
+            DependencyType::Normal,
+        )?;
+    }
 
     if partition_recurse {
         let partdesc = partdesc::RelationGetPartitionDesc(&rel, true)?;
@@ -748,45 +753,6 @@ fn validate_transition_rels<'mcx>(
     Ok((oldtablename, newtablename))
 }
 
-struct WhenFuncGuard;
-
-impl<'mcx> NodeWalker<'mcx> for WhenFuncGuard {
-    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        let check = |oid: Oid| {
-            if oid >= FirstUnpinnedObjectId {
-                unported("recordDependencyOnExpr on non-pinned WHEN function/operator");
-            }
-        };
-        match node.node_tag() {
-            NodeTag::T_OpExpr => {
-                let op = node.as_variant::<types_nodes::primnodes::OpExpr>().expect("OpExpr");
-                check(op.opno);
-            }
-            NodeTag::T_DistinctExpr => {
-                let op = node
-                    .as_variant::<types_nodes::primnodes::DistinctExpr>()
-                    .expect("DistinctExpr");
-                check(op.opno);
-            }
-            NodeTag::T_NullIfExpr => {
-                panic!("WhenFuncGuard: T_NullIfExpr node shape unported (no constructor exists)")
-            }
-            NodeTag::T_ScalarArrayOpExpr => {
-                let op = node
-                    .as_variant::<types_nodes::primnodes::ScalarArrayOpExpr>()
-                    .expect("ScalarArrayOpExpr");
-                check(op.opno);
-            }
-            NodeTag::T_FuncExpr => {
-                let f = node.as_variant::<types_nodes::primnodes::FuncExpr>().expect("FuncExpr");
-                check(f.funcid);
-            }
-            _ => {}
-        }
-        expression_tree_walker(node, self)
-    }
-}
-
 fn transform_when_clause<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -846,10 +812,9 @@ fn transform_when_clause<'mcx>(
         check_when_var(&pstate, rel, var, tgtype)?;
     }
 
-    WhenFuncGuard.visit(when_clause)?;
-
     let qual = outfuncs::nodeToString(mcx, when_clause)?;
-    Ok((when_clause, qual, vars))
+    // C keeps pstate->p_rtable for recordDependencyOnExpr.
+    Ok((when_clause, qual, pstate.p_rtable))
 }
 
 #[cold]
@@ -961,33 +926,6 @@ fn check_when_var(
             }
         }
         _ => panic!("trigger WHEN condition cannot contain references to other relations"),
-    }
-    Ok(())
-}
-
-// recordDependencyOnExpr slice for WHEN clauses: both RTEs are the trigger's
-// rel, so expression deps reduce to column refs; pinned functions/operators
-// are skipped as C does, non-pinned ones are loud (WhenFuncGuard).
-fn record_when_dependencies<'mcx>(
-    mcx: Mcx<'mcx>,
-    myself: &ObjectAddress,
-    relid: Oid,
-    when_vars: &NodeList<'mcx>,
-) -> PgResult<()> {
-    let mut seen: PgVec<'mcx, i32> = PgVec::new_in(mcx);
-    for v in when_vars.iter() {
-        let var = v.as_variant::<Var>().expect("Var");
-        let subid = var.varattno as i32;
-        if seen.iter().any(|&s| s == subid) {
-            continue;
-        }
-        seen.push(subid);
-        pg_depend::recordDependencyOn(
-            mcx,
-            myself,
-            &ObjectAddress::sub_set(RELATION_RELATION_ID, relid, subid),
-            DependencyType::Normal,
-        )?;
     }
     Ok(())
 }

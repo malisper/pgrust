@@ -503,6 +503,11 @@ fn fc_pg_is_other_temp_schema(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_bool(catalog_namespace::isOtherTempNamespace(oid)?))
 }
 
+fn fc_pg_trigger_depth(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let _ = fcinfo;
+    Ok(Datum::from_i32(trigger_seams::my_trigger_depth::call()))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -675,6 +680,7 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(89, "pgsql_version", 0, fc_version),
     b(2855, "pg_is_other_temp_schema", 1, fc_pg_is_other_temp_schema),
     b(2854, "pg_my_temp_schema", 0, fc_pg_my_temp_schema),
+    b(3163, "pg_trigger_depth", 0, fc_pg_trigger_depth),
     b(3778, "pg_tablespace_location", 1, fc_pg_tablespace_location),
     b(2918, "numerictypmodout", 1, fc_numerictypmodout),
     b(861, "current_database", 0, fc_current_database),
