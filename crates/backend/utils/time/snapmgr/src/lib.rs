@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, UnsafeCell};
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
@@ -112,7 +112,11 @@ impl SnapMgrState {
 
 thread_local! {
     // ManuallyDrop keeps the TLS payload !needs_drop (fabled-lessons §8).
-    static STATE: RefCell<Option<ManuallyDrop<SnapMgrState>>> = const { RefCell::new(None) };
+    // UnsafeCell, not RefCell (rule 10): every with_state closure is a leaf
+    // (procarray/xact/resowner callees never re-enter this module);
+    // STATE_BUSY enforces in debug.
+    static STATE: UnsafeCell<Option<ManuallyDrop<SnapMgrState>>> = const { UnsafeCell::new(None) };
+    static STATE_BUSY: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(debug_assertions)]
@@ -130,31 +134,44 @@ fn new_static_snapshot(mcx: Mcx<'static>) -> Snapshot {
     Rc::new(SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_MVCC))
 }
 
+#[cold]
+#[inline(never)]
+fn init_state(slot: &mut Option<ManuallyDrop<SnapMgrState>>) {
+    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("SnapMgr")));
+    let mcx = cx.mcx();
+    *slot = Some(ManuallyDrop::new(SnapMgrState {
+        mcx,
+        current_data: new_static_snapshot(mcx),
+        secondary_data: new_static_snapshot(mcx),
+        catalog_data: new_static_snapshot(mcx),
+        current: None,
+        secondary: None,
+        catalog_valid: false,
+        historic: None,
+        historic_tuplecids: None,
+        first_snapshot_set: false,
+        first_xact_snapshot: None,
+        active: Vec::new(),
+        registered: Vec::new(),
+        copy_freelist: Vec::new(),
+    }));
+}
+
 fn with_state<R>(f: impl FnOnce(&mut SnapMgrState) -> R) -> R {
-    STATE.with(|cell| {
-        let mut slot = cell.borrow_mut();
+    debug_assert!(!STATE_BUSY.replace(true), "with_state re-entered");
+    // SAFETY: closures are leaves (no re-entry into this module); guarded in
+    // debug builds by STATE_BUSY.
+    let r = STATE.with(|cell| unsafe {
+        let slot = &mut *cell.get();
         if slot.is_none() {
-            let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("SnapMgr")));
-            let mcx = cx.mcx();
-            *slot = Some(ManuallyDrop::new(SnapMgrState {
-                mcx,
-                current_data: new_static_snapshot(mcx),
-                secondary_data: new_static_snapshot(mcx),
-                catalog_data: new_static_snapshot(mcx),
-                current: None,
-                secondary: None,
-                catalog_valid: false,
-                historic: None,
-                historic_tuplecids: None,
-                first_snapshot_set: false,
-                first_xact_snapshot: None,
-                active: Vec::new(),
-                registered: Vec::new(),
-                copy_freelist: Vec::new(),
-            }));
+            init_state(slot);
         }
         f(slot.as_mut().unwrap())
-    })
+    });
+    if cfg!(debug_assertions) {
+        STATE_BUSY.set(false);
+    }
+    r
 }
 
 fn my_proc_xmin() -> TransactionId {
