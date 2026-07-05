@@ -232,8 +232,7 @@ pub(crate) fn replace_outer_merge_support<'mcx>(
     let idx = (0..run.suspended_roots.len())
         .rev()
         .find(|&i| {
-            let r = &run.suspended_roots[i].root;
-            run.queries[r.parse.0 as usize].commandType == types_nodes::CmdType::CMD_MERGE
+            run.suspended_roots[i].root.command_type == types_nodes::CmdType::CMD_MERGE
         })
         .unwrap_or_else(|| {
             panic!("replace_outer_merge_support (paramassign.c): MergeSupportFunc found outside MERGE")

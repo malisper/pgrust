@@ -1702,6 +1702,9 @@ pub struct CteScanParam {
 pub struct PlannerInfo<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub parse: QueryId,
+    // C root->parse->commandType; run.queries is interned lazily (post-
+    // preprocess), so the level's command type is carried directly.
+    pub command_type: ::types_nodes::nodes_enums::CmdType,
     pub glob: Option<PgBox<'mcx, PlannerGlobal<'mcx>>>,
     pub query_level: Index,
     pub parent_root: Option<PgBox<'mcx, PlannerInfo<'mcx>>>,
@@ -1813,6 +1816,7 @@ impl<'mcx> PlannerInfo<'mcx> {
         PlannerInfo {
             mcx,
             parse: QueryId::default(),
+            command_type: ::types_nodes::nodes_enums::CmdType::CMD_UNKNOWN,
             glob: None,
             query_level: 0,
             parent_root: None,
@@ -1908,6 +1912,7 @@ impl<'mcx> PlannerInfo<'mcx> {
 
     pub fn make_minmax_subroot(&self) -> PlannerInfo<'mcx> {
         let mut sub = PlannerInfo::new(self.mcx);
+        sub.command_type = self.command_type;
         sub.query_level = self.query_level + 1;
         sub.tuple_fraction = self.tuple_fraction;
         sub.limit_tuples = self.limit_tuples;

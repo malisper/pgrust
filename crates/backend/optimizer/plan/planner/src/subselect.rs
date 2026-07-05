@@ -1731,7 +1731,9 @@ fn replace_correlation_vars_mutator<'mcx>(
         }
     }
     if let Some(m) = node.as_merge_support_func() {
-        if run.parse().commandType != types_nodes::CmdType::CMD_MERGE {
+        // C: root->parse->commandType != CMD_MERGE; the level's command type
+        // is carried on the root (queries interns lazily, post-preprocess).
+        if run.root.command_type != types_nodes::CmdType::CMD_MERGE {
             return Ok(Some(crate::paramassign::replace_outer_merge_support(run, m, node)?));
         }
         return Ok(None);
