@@ -1673,8 +1673,9 @@ fn ATRewriteTable<'mcx>(
         needscan = true;
         // ExecPrepareExpr: expression_planner + init.
         let planned = clauses::eval_const_expressions(mcx, con.qual)?;
-        let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
+        let mut state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
             .expect("check constraint expr");
+        state.arm_result_mcx(mcx);
         con_states.push((i, state));
     }
     let mut newval_states: PgVec<
@@ -1694,10 +1695,13 @@ fn ATRewriteTable<'mcx>(
         Some(q) => {
             needscan = true;
             let planned = clauses::eval_const_expressions(mcx, q)?;
-            Some(
+            let mut state =
                 execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
-                    .expect("partition constraint expr"),
-            )
+                    .expect("partition constraint expr");
+            // Expression partition keys call by-ref-returning functions
+            // (same statement-arena caveat as the transform states above).
+            state.arm_result_mcx(mcx);
+            Some(state)
         }
         None => None,
     };
@@ -1743,8 +1747,9 @@ fn ATRewriteTable<'mcx>(
             },
         )?;
         let planned = clauses::eval_const_expressions(mcx, nulltest)?;
-        let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
+        let mut state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
             .expect("virtual not-null test expr");
+        state.arm_result_mcx(mcx);
         nn_virtual_states.push((attnum, state));
     }
 
