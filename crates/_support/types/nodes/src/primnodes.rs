@@ -220,9 +220,13 @@ pub struct Param {
 
 // C: nodes.h AggSplit; AGGSPLITOP_* bit values.
 pub type AggSplit = u32;
+pub const AGGSPLITOP_COMBINE: AggSplit = 0x01;
+pub const AGGSPLITOP_SKIPFINAL: AggSplit = 0x02;
+pub const AGGSPLITOP_SERIALIZE: AggSplit = 0x04;
+pub const AGGSPLITOP_DESERIALIZE: AggSplit = 0x08;
 pub const AGGSPLIT_SIMPLE: AggSplit = 0;
-pub const AGGSPLIT_INITIAL_SERIAL: AggSplit = 0x02 | 0x04;
-pub const AGGSPLIT_FINAL_DESERIAL: AggSplit = 0x01 | 0x08;
+pub const AGGSPLIT_INITIAL_SERIAL: AggSplit = AGGSPLITOP_SKIPFINAL | AGGSPLITOP_SERIALIZE;
+pub const AGGSPLIT_FINAL_DESERIAL: AggSplit = AGGSPLITOP_COMBINE | AGGSPLITOP_DESERIALIZE;
 
 pub const AGGKIND_NORMAL: i8 = b'n' as i8;
 pub const AGGKIND_ORDERED_SET: i8 = b'o' as i8;

@@ -1830,8 +1830,34 @@ fn get_func_sql_syntax<'mcx>(
 }
 
 fn get_agg_expr<'mcx>(aggref: &'mcx Aggref<'mcx>, ctx: &mut DeparseContext<'mcx>) -> PgResult<()> {
-    if aggref.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE {
-        gap("get_agg_expr", "partial/combining aggregate deparse");
+    get_agg_expr_original(aggref, ctx, aggref)
+}
+
+// get_agg_expr_helper's combine/PARTIAL arms: a combining Aggref deparses the
+// child partial Aggref it consumes; PARTIAL prefix keys off original_aggref.
+fn get_agg_expr_original<'mcx>(
+    aggref: &'mcx Aggref<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    original_aggref: &'mcx Aggref<'mcx>,
+) -> PgResult<()> {
+    if aggref.aggsplit & types_nodes::primnodes::AGGSPLITOP_COMBINE != 0 {
+        assert!(aggref.args.len() == 1, "combining Aggref has one argument");
+        let tle = aggref
+            .args
+            .iter()
+            .next()
+            .unwrap()
+            .as_target_entry()
+            .expect("Aggref args are TargetEntries");
+        return crate::plan::resolve_special_varno(tle.expr, ctx, &mut |node, ctx| {
+            let child = node
+                .as_aggref()
+                .expect("combining Aggref does not point to an Aggref");
+            get_agg_expr_original(child, ctx, original_aggref)
+        });
+    }
+    if original_aggref.aggsplit & types_nodes::primnodes::AGGSPLITOP_SKIPFINAL != 0 {
+        ctx.buf.push_str("PARTIAL ");
     }
     let ordered_set = matches!(aggref.aggkind, AGGKIND_ORDERED_SET | AGGKIND_HYPOTHETICAL);
     if aggref.aggkind != types_nodes::primnodes::AGGKIND_NORMAL && !ordered_set {

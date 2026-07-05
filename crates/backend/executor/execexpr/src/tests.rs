@@ -788,6 +788,8 @@ fn agg_trans_and_aggref_eval_steps() {
         let specs = [
             // count(*): int8inc (1219), strict, non-null init, 0 inputs.
             AggTransSpec {
+                combine: false,
+                deserialfn_oid: 0,
                 arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
@@ -802,6 +804,8 @@ fn agg_trans_and_aggref_eval_steps() {
             },
             // sum(int4): int4_sum (1841), non-strict, null init, 1 input.
             AggTransSpec {
+                combine: false,
+                deserialfn_oid: 0,
                 arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
@@ -895,6 +899,8 @@ fn agg_trans_strict_input_check_skips_nulls() {
         let specs = [
             // count(a): int8inc_any (2804), strict, 1 input, non-null init.
             AggTransSpec {
+                combine: false,
+                deserialfn_oid: 0,
                 arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
@@ -909,6 +915,8 @@ fn agg_trans_strict_input_check_skips_nulls() {
             },
             // sum(int4): int4_sum (1841), non-strict, null init.
             AggTransSpec {
+                combine: false,
+                deserialfn_oid: 0,
                 arg_types: &[],
                 transtype_byval: true,
                 transtype_len: 8,
@@ -1726,6 +1734,8 @@ fn thin_agg_count_star_kernel() {
         let base = NonNull::new(pergroup.as_mut_ptr()).unwrap();
         let empty_args = NodeList::nil();
         let specs = [AggTransSpec {
+            combine: false,
+            deserialfn_oid: 0,
             arg_types: &[],
             transtype_byval: true,
             transtype_len: 8,

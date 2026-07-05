@@ -603,6 +603,24 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 let c = chain_node.as_agg().expect("chain cell is an Agg");
                 debug_assert!(c.plan.targetlist.is_nil() && c.plan.qual.is_nil());
             }
+            if a.aggsplit & types_pathnodes::AGGSPLITOP_COMBINE != 0 {
+                let mut new_tlist = NodeList::nil();
+                for t in &a.plan.targetlist {
+                    new_tlist.lappend(run.mcx, convert_combining_aggrefs(run, t)?)?;
+                }
+                let mut new_qual = NodeList::nil();
+                for q in &a.plan.qual {
+                    new_qual.lappend(run.mcx, convert_combining_aggrefs(run, q)?)?;
+                }
+                // SAFETY: exclusive plan-tree ownership (C rewrites in place).
+                unsafe {
+                    plan.with_plan_mut(|p| {
+                        p.targetlist = new_tlist;
+                        p.qual = new_qual;
+                    })
+                }
+                .expect("plan node");
+            }
             set_upper_references(run, plan, rtoffset)?;
         }
         NodeTag::T_WindowAgg => {
@@ -1013,6 +1031,46 @@ fn set_param_references<'mcx>(run: &PlannerRun<'mcx>, plan: Node<'mcx>) -> PgRes
     }
     .expect("Gather node");
     Ok(())
+}
+
+// convert_combining_aggrefs (setrefs.c): split each Aggref of a combining
+// Agg into a child (AGGSPLIT_INITIAL_SERIAL, keeps args/filter) consumed by a
+// parent (AGGSPLIT_FINAL_DESERIAL, single-TLE arg, no filter); the following
+// set_upper_references resolves the child against the subplan tlist.
+fn convert_combining_aggrefs<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    if node.node_tag() == NodeTag::T_Aggref {
+        let a = node.as_aggref().expect("Aggref");
+        assert!(
+            a.aggorder.is_nil() && a.aggdistinct.is_nil(),
+            "convert_combining_aggrefs: ordered/distinct agg cannot be partialized"
+        );
+        let child_args = a.args.clone_in(mcx)?;
+        let child = crate::grouping::make_marked_aggref(
+            run,
+            a,
+            types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+            child_args,
+            a.aggfilter,
+        )?;
+        let mut parent_args = NodeList::nil();
+        parent_args
+            .lappend(mcx, Node::mk_target_entry(mcx, child, 1, None, false)?)?;
+        return crate::grouping::make_marked_aggref(
+            run,
+            a,
+            types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+            parent_args,
+            None,
+        );
+    }
+    Ok(nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+        convert_combining_aggrefs(run, n).map(Some)
+    })?
+    .unwrap_or(node))
 }
 
 fn set_upper_references<'mcx>(

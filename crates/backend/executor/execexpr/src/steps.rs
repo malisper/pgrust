@@ -166,6 +166,10 @@ pub enum Step {
         shared: bool,
     },
     AggStrictInputCheck1 { arg: NonNull<NullableDatum>, jumpnull: u32 },
+    // C EEOP_AGG_[STRICT_]DESERIALIZE: args[0] holds the serialized input;
+    // the result lands in the combine fcinfo's args[1] slot (`out`).
+    AggDeserialize { call: FuncCall, out: OutRef },
+    AggStrictDeserialize { call: FuncCall, out: OutRef, jumpnull: u32 },
     AggPlainTransByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     AggPlainTransStrictByVal { call: FuncCall, pergroup: NonNull<AggPerGroup> },
     // C EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]BYREF.

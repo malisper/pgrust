@@ -34,6 +34,10 @@ pub struct AggBind {
 
 pub struct AggTransSpec<'a, 'mcx> {
     pub transfn_oid: Oid,
+    // DO_AGGSPLIT_COMBINE: transfn_oid holds the combinefn; the single arg is
+    // a transition value, deserialized first when deserialfn_oid != 0.
+    pub combine: bool,
+    pub deserialfn_oid: Oid,
     pub inputcollid: Oid,
     pub init_value_is_null: bool,
     // C build_aggregate_transfn_expr's arg types: [transtype, input types..].
@@ -514,7 +518,11 @@ fn build_agg_trans<'mcx>(
             .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
         state.frames.push(frame);
         let mut filter_jump: Option<usize> = None;
-        if let Some(f) = spec.aggfilter {
+        // When combining, all necessary filtering was done by the partial
+        // stage (convert_combining_aggrefs drops the parent's filter).
+        if spec.combine {
+            debug_assert!(spec.aggfilter.is_none());
+        } else if let Some(f) = spec.aggfilter {
             let rout = state.result_out();
             init_expr_rec(f, &mut state, mcx, rout, None, params, None)?;
             filter_jump = Some(state.steps.len());
@@ -524,17 +532,65 @@ fn build_agg_trans<'mcx>(
                 Step::JumpIfNotTrue { jumpdone: u32::MAX, out: rout },
             )?;
         }
-        for (argno, tle_node) in spec.args.iter().enumerate() {
-            let tle = tle_node.as_target_entry().unwrap_or_else(|| {
-                panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
-            });
-            if tle.resjunk {
-                continue;
+        let mut ds_bailout: Option<usize> = None;
+        if spec.combine && spec.deserialfn_oid != 0 {
+            let ds_flinfo = fmgr_core::fmgr_info(spec.deserialfn_oid)?;
+            let ds_strict = ds_flinfo.fn_strict;
+            let ds_frame = FuncFrame::new_in(mcx, ds_flinfo, 2, 0)?;
+            // SAFETY: fresh frame image; agg_node outlives the program.
+            unsafe { crate::steps::fcinfo_mut(ds_frame.fcinfo, 2).context = agg_node };
+            let ds_ix = state.frames.len() as u32;
+            let ds_call = FuncCall {
+                fcinfo: ds_frame.fcinfo,
+                flinfo: ds_frame.flinfo,
+                frame: ds_ix,
+                nargs: 2,
+            };
+            state
+                .frames
+                .try_reserve(1)
+                .map_err(|_| mcx.oom(core::mem::size_of::<FuncFrame<'_>>()))?;
+            state.frames.push(ds_frame);
+            let tle = spec
+                .args
+                .iter()
+                .next()
+                .expect("combining Aggref has one argument")
+                .as_target_entry()
+                .expect("Aggref.args cell is a TargetEntry");
+            // SAFETY: slots 0/1 of the 2-arg ds fcinfo image; slot 1 is C's
+            // type-safety dummy, written once at build time.
+            let ds_arg0 = OutRef(unsafe { crate::steps::arg_slot_of(ds_call.fcinfo, 0) });
+            unsafe {
+                crate::steps::arg_slot_of(ds_call.fcinfo, 1)
+                    .write(::datum::NullableDatum { value: ::datum::Datum::null(), isnull: false })
+            };
+            init_expr_rec(tle.expr, &mut state, mcx, ds_arg0, None, params, None)?;
+            // SAFETY: slot 1 of the nargs >= 2 trans fcinfo image.
+            let trans_arg1 = OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, 1) });
+            if ds_strict {
+                ds_bailout = Some(state.steps.len());
+                push_step(
+                    &mut state,
+                    mcx,
+                    Step::AggStrictDeserialize { call: ds_call, out: trans_arg1, jumpnull: u32::MAX },
+                )?;
+            } else {
+                push_step(&mut state, mcx, Step::AggDeserialize { call: ds_call, out: trans_arg1 })?;
             }
-            // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
-            let arg_out =
-                OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
-            init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, None)?;
+        } else {
+            for (argno, tle_node) in spec.args.iter().enumerate() {
+                let tle = tle_node.as_target_entry().unwrap_or_else(|| {
+                    panic!("Aggref.args cell: expected TargetEntry, got {:?}", tle_node.node_tag())
+                });
+                if tle.resjunk {
+                    continue;
+                }
+                // SAFETY: argno + 1 <= num_trans_inputs < nargs of `call.fcinfo`.
+                let arg_out =
+                    OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, argno + 1) });
+                init_expr_rec(tle.expr, &mut state, mcx, arg_out, None, params, None)?;
+            }
         }
         let mut bailout: Option<usize> = None;
         if fn_strict && num_trans_inputs > 0 {
@@ -650,6 +706,12 @@ fn build_agg_trans<'mcx>(
             match &mut state.steps[ix] {
                 Step::AggStrictInputCheck { jumpnull, .. }
                 | Step::AggStrictInputCheck1 { jumpnull, .. } => *jumpnull = target,
+                _ => unreachable!(),
+            }
+        }
+        if let Some(ix) = ds_bailout {
+            match &mut state.steps[ix] {
+                Step::AggStrictDeserialize { jumpnull, .. } => *jumpnull = target,
                 _ => unreachable!(),
             }
         }
@@ -3784,7 +3846,8 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
                 assert!((*jumpdone as usize) < len, "boolexpr jump target out of range");
             }
             Step::AggStrictInputCheck { jumpnull, .. }
-            | Step::AggStrictInputCheck1 { jumpnull, .. } => {
+            | Step::AggStrictInputCheck1 { jumpnull, .. }
+            | Step::AggStrictDeserialize { jumpnull, .. } => {
                 assert!((*jumpnull as usize) < len, "strict-input jump target out of range");
             }
             Step::Jump { jumpdone }
@@ -3864,7 +3927,8 @@ fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
         | Step::NotDistinctQual { jumpdone, .. }
         | Step::NotDistinctQualThin { jumpdone, .. } => Some(jumpdone),
         Step::AggStrictInputCheck { jumpnull, .. }
-        | Step::AggStrictInputCheck1 { jumpnull, .. } => Some(jumpnull),
+        | Step::AggStrictInputCheck1 { jumpnull, .. }
+        | Step::AggStrictDeserialize { jumpnull, .. } => Some(jumpnull),
         _ => None,
     }
 }

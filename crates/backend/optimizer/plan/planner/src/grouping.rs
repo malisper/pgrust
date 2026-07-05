@@ -987,6 +987,9 @@ struct GroupPathExtra<'mcx> {
     having_qual: Option<types_nodes::Node<'mcx>>,
     target_list: &'mcx types_nodes::list::NodeList<'mcx>,
     patype: PartitionwiseAggregateType,
+    agg_partial_costs: types_pathnodes::AggClauseCosts,
+    agg_final_costs: types_pathnodes::AggClauseCosts,
+    partial_costs_set: bool,
 }
 
 // make_grouping_rel (planner.c).
@@ -1062,10 +1065,6 @@ fn create_grouping_paths<'mcx>(
     )?;
     let grouped_rel =
         make_grouping_rel(run, input_rel, grouping_target, target_parallel_safe, parse.havingQual)?;
-    // DIVERGENCE: partial aggregation (create_partial_grouping_paths /
-    // Finalize+Partial Aggregate shapes) is a follow-up lane; the input
-    // rel's partial paths are ignored here, matching C's can_partial_agg
-    // = false arm. C plans that pick partial agg will diverge.
 
     // is_degenerate_grouping: HAVING with no aggs and no GROUP BY.
     if (run.root.hasHavingQual || !parse.groupingSets.is_nil())
@@ -1086,7 +1085,7 @@ fn create_grouping_paths<'mcx>(
             Some(gd) => gd.any_hashable,
             None => grouping_is_hashable(run, &run.root.processed_groupClause),
         };
-    let extra = GroupPathExtra {
+    let mut extra = GroupPathExtra {
         can_sort,
         can_hash,
         can_partial_agg: can_partial_agg(run),
@@ -1098,21 +1097,24 @@ fn create_grouping_paths<'mcx>(
         } else {
             PartitionwiseAggregateType::None
         },
+        agg_partial_costs: types_pathnodes::AggClauseCosts::default(),
+        agg_final_costs: types_pathnodes::AggClauseCosts::default(),
+        partial_costs_set: false,
     };
 
-    create_ordinary_grouping_paths(run, input_rel, grouped_rel, &agg_costs, &extra)?;
+    create_ordinary_grouping_paths(run, input_rel, grouped_rel, &agg_costs, &mut extra)?;
     crate::pathnode::set_cheapest(run, grouped_rel)?;
     Ok(grouped_rel)
 }
 
-// create_ordinary_grouping_paths (planner.c); partially grouped rels only
-// materialize under partitionwise PARTIAL, which stays loud below.
+// create_ordinary_grouping_paths (planner.c); partitionwise PARTIAL stays
+// loud (child partial-agg rels + parent finalize over Append unported).
 fn create_ordinary_grouping_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     input_rel: RelId,
     grouped_rel: RelId,
     agg_costs: &types_pathnodes::AggClauseCosts,
-    extra: &GroupPathExtra<'mcx>,
+    extra: &mut GroupPathExtra<'mcx>,
 ) -> PgResult<()> {
     let mut patype = PartitionwiseAggregateType::None;
     if extra.patype != PartitionwiseAggregateType::None
@@ -1132,15 +1134,40 @@ fn create_ordinary_grouping_paths<'mcx>(
         patype != PartitionwiseAggregateType::Partial
             && extra.patype != PartitionwiseAggregateType::Partial,
         "create_partial_grouping_paths (planner.c): partitionwise partial aggregation \
-         (AGGSPLIT_INITIAL_SERIAL/AGGSPLIT_FINAL_DESERIAL executor) unported; partial-agg lane"
+         (per-child partial agg + finalize over Append) unported; partitionwise lane"
     );
+
+    let partially_grouped_rel = if extra.can_partial_agg {
+        create_partial_grouping_paths(run, grouped_rel, input_rel, extra)?
+    } else {
+        None
+    };
 
     if patype == PartitionwiseAggregateType::Full {
         create_partitionwise_grouping_paths(run, input_rel, grouped_rel, agg_costs, extra)?;
     }
 
-    let num_groups = get_number_of_groups(run, input_rel, extra.target_list)?;
-    add_paths_to_grouping_rel(run, input_rel, grouped_rel, agg_costs, num_groups, extra)?;
+    if let Some(pgr) = partially_grouped_rel {
+        if !run.root.rel(pgr).partial_pathlist.is_empty() {
+            gather_grouping_paths(run, pgr)?;
+            crate::pathnode::set_cheapest(run, pgr)?;
+        }
+    }
+
+    let cheapest_rows = {
+        let cheapest = run.root.rel(input_rel).cheapest_total_path.unwrap();
+        run.root.path(cheapest).base().rows
+    };
+    let num_groups = get_number_of_groups(run, cheapest_rows, extra.target_list)?;
+    add_paths_to_grouping_rel(
+        run,
+        input_rel,
+        grouped_rel,
+        partially_grouped_rel,
+        agg_costs,
+        num_groups,
+        extra,
+    )?;
 
     if run.root.rel(grouped_rel).pathlist.is_empty() {
         return Err(could_not_implement("GROUP BY"));
@@ -1148,11 +1175,436 @@ fn create_ordinary_grouping_paths<'mcx>(
     Ok(())
 }
 
-// add_paths_to_grouping_rel (planner.c), no partially grouped input.
+// make_partial_grouping_target (planner.c): grouping columns as-is, then the
+// Vars/Aggrefs of non-group columns + HAVING, with top-level Aggrefs flat-
+// copied into AGGSPLIT_INITIAL_SERIAL mode.
+fn make_partial_grouping_target<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    grouping_target: types_pathnodes::PtId,
+    having_qual: Option<types_nodes::Node<'mcx>>,
+) -> PgResult<types_pathnodes::PtId> {
+    let mcx = run.mcx;
+    let mut tlist = types_nodes::list::NodeList::nil();
+    let mut kept_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut non_group_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let n = run.root.pathtarget(grouping_target).exprs.len();
+    for i in 0..n {
+        let gt = run.root.pathtarget(grouping_target);
+        let expr = *run.root.expr_node(gt.exprs[i]);
+        let sgref = gt.sortgrouprefs.get(i).copied().unwrap_or(0);
+        let in_group = sgref != 0
+            && run.root.processed_groupClause.iter().any(|&id| {
+                run.root.expr_node(id).as_sort_group_clause().expect("groupClause cell").tleSortGroupRef
+                    == sgref
+            });
+        if in_group {
+            let tle = types_nodes::Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr,
+                    resno: (tlist.len() + 1) as i16,
+                    resname: None,
+                    ressortgroupref: sgref,
+                    resorigtbl: 0,
+                    resorigcol: 0,
+                    resjunk: false,
+                },
+            )?;
+            tlist.lappend(mcx, tle)?;
+            kept_exprs.push(expr);
+        } else {
+            pull_partial_input_exprs(expr, &mut non_group_exprs);
+        }
+    }
+    if let Some(h) = having_qual {
+        pull_partial_input_exprs(h, &mut non_group_exprs);
+    }
+
+    // add_new_columns_to_pathtarget: dedupe by equal().
+    let mut uniq: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    for &v in non_group_exprs.iter() {
+        if kept_exprs.iter().chain(uniq.iter()).any(|&u| types_nodes::equal(u, v)) {
+            continue;
+        }
+        uniq.push(v);
+        let tle =
+            types_nodes::Node::mk_target_entry(mcx, v, (tlist.len() + 1) as i16, None, false)?;
+        tlist.lappend(mcx, tle)?;
+    }
+
+    // Adjust top-level Aggrefs into partial mode (flat copy per C).
+    let mut marked = types_nodes::list::NodeList::nil();
+    for tle_node in &tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let new_expr = if tle.expr.node_tag() == types_nodes::NodeTag::T_Aggref {
+            mark_partial_aggref_copy(run, tle.expr, types_pathnodes::AGGSPLIT_INITIAL_SERIAL)?
+        } else {
+            tle.expr
+        };
+        let new_tle = types_nodes::Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: new_expr,
+                resno: tle.resno,
+                resname: tle.resname,
+                ressortgroupref: tle.ressortgroupref,
+                resorigtbl: tle.resorigtbl,
+                resorigcol: tle.resorigcol,
+                resjunk: tle.resjunk,
+            },
+        )?;
+        marked.lappend(mcx, new_tle)?;
+    }
+    crate::pathnode::create_pathtarget(run, &marked)
+}
+
+// pull_var_clause PVC_INCLUDE_AGGREGATES|PVC_RECURSE_WINDOWFUNCS|
+// PVC_INCLUDE_PLACEHOLDERS over the agg-lane shapes.
+fn pull_partial_input_exprs<'mcx>(
+    node: types_nodes::Node<'mcx>,
+    out: &mut mcx::PgVec<'_, types_nodes::Node<'mcx>>,
+) {
+    use types_nodes::NodeTag;
+    match node.node_tag() {
+        NodeTag::T_Var | NodeTag::T_Aggref | NodeTag::T_PlaceHolderVar => out.push(node),
+        NodeTag::T_TargetEntry => {
+            pull_partial_input_exprs(node.as_target_entry().unwrap().expr, out)
+        }
+        NodeTag::T_OpExpr => {
+            for a in &node.as_op_expr().unwrap().args {
+                pull_partial_input_exprs(a, out);
+            }
+        }
+        NodeTag::T_FuncExpr => {
+            for a in &node.as_func_expr().unwrap().args {
+                pull_partial_input_exprs(a, out);
+            }
+        }
+        NodeTag::T_BoolExpr => {
+            for a in &node.as_bool_expr().unwrap().args {
+                pull_partial_input_exprs(a, out);
+            }
+        }
+        NodeTag::T_RelabelType => {
+            pull_partial_input_exprs(node.as_relabel_type().unwrap().arg, out)
+        }
+        NodeTag::T_CoerceViaIO => {
+            pull_partial_input_exprs(node.as_coerce_via_io().unwrap().arg, out)
+        }
+        NodeTag::T_Const | NodeTag::T_Param => {}
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if let Some(arg) = c.arg {
+                pull_partial_input_exprs(arg, out);
+            }
+            for w in &c.args {
+                let cw = w.as_case_when().expect("CaseWhen");
+                pull_partial_input_exprs(cw.expr, out);
+                pull_partial_input_exprs(cw.result, out);
+            }
+            if let Some(d) = c.defresult {
+                pull_partial_input_exprs(d, out);
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            for a in &node.as_coalesce_expr().unwrap().args {
+                pull_partial_input_exprs(a, out);
+            }
+        }
+        NodeTag::T_NullTest => {
+            pull_partial_input_exprs(node.as_null_test().unwrap().arg, out)
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            for a in &node.as_scalar_array_op_expr().unwrap().args {
+                pull_partial_input_exprs(a, out);
+            }
+        }
+        other => panic!(
+            "pull_var_clause (var.c): {other:?} with PVC_INCLUDE_AGGREGATES; partial-agg lane"
+        ),
+    }
+}
+
+// mark_partial_aggref (planner.c) on a flat copy of the Aggref.
+fn mark_partial_aggref_copy<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    node: types_nodes::Node<'mcx>,
+    aggsplit: types_pathnodes::AggSplit,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    let a = node.as_aggref().expect("Aggref");
+    let args = a.args.clone_in(run.mcx)?;
+    make_marked_aggref(run, a, aggsplit, args, a.aggfilter)
+}
+
+// Flat-copy + mark_partial_aggref, with args/aggfilter overridable
+// (convert_combining_aggrefs builds the parent Aggref this way).
+pub(crate) fn make_marked_aggref<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    a: &types_nodes::primnodes::Aggref<'mcx>,
+    aggsplit: types_pathnodes::AggSplit,
+    args: types_nodes::list::NodeList<'mcx>,
+    aggfilter: Option<types_nodes::Node<'mcx>>,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    const INTERNALOID: u32 = 2281;
+    const BYTEAOID: u32 = 17;
+    let mcx = run.mcx;
+    assert!(a.aggtranstype != 0, "mark_partial_aggref: aggtranstype unresolved");
+    assert!(
+        a.aggsplit == types_pathnodes::AGGSPLIT_SIMPLE,
+        "mark_partial_aggref: aggsplit already set"
+    );
+    let skip_final = aggsplit & types_pathnodes::AGGSPLITOP_SKIPFINAL != 0;
+    let serialize = aggsplit & types_pathnodes::AGGSPLITOP_SERIALIZE != 0;
+    let aggtype = if skip_final {
+        if a.aggtranstype == INTERNALOID && serialize { BYTEAOID } else { a.aggtranstype }
+    } else {
+        a.aggtype
+    };
+    types_nodes::Node::mk(
+        mcx,
+        types_nodes::primnodes::Aggref {
+            aggfnoid: a.aggfnoid,
+            aggtype,
+            aggcollid: a.aggcollid,
+            inputcollid: a.inputcollid,
+            aggtranstype: a.aggtranstype,
+            aggargtypes: a.aggargtypes.clone_in(mcx)?,
+            aggdirectargs: a.aggdirectargs.clone_in(mcx)?,
+            args,
+            aggorder: a.aggorder.clone_in(mcx)?,
+            aggdistinct: a.aggdistinct.clone_in(mcx)?,
+            aggfilter,
+            aggstar: a.aggstar,
+            aggvariadic: a.aggvariadic,
+            aggkind: a.aggkind,
+            aggpresorted: a.aggpresorted,
+            agglevelsup: a.agglevelsup,
+            aggsplit,
+            aggno: a.aggno,
+            aggtransno: a.aggtransno,
+            location: a.location,
+        },
+    )
+}
+
+// create_partial_grouping_paths (planner.c), parallel (partial-input) legs
+// only: the non-partial leg exists solely under partitionwise PARTIAL, which
+// is loud in create_ordinary_grouping_paths, so force_rel_creation never
+// arises and NULL returns stand in for both gates.
+fn create_partial_grouping_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    grouped_rel: RelId,
+    input_rel: RelId,
+    extra: &mut GroupPathExtra<'mcx>,
+) -> PgResult<Option<RelId>> {
+    let parse = run.parse();
+    debug_assert!(extra.patype != PartitionwiseAggregateType::Partial);
+
+    let cheapest_partial_path = if run.root.rel(grouped_rel).consider_parallel
+        && !run.root.rel(input_rel).partial_pathlist.is_empty()
+    {
+        run.root.rel(input_rel).partial_pathlist[0]
+    } else {
+        return Ok(None);
+    };
+
+    let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(grouped_rel).relids);
+    let partially_grouped_rel = crate::relnode::fetch_upper_rel_with_relids(
+        &mut run.root,
+        types_pathnodes::UPPERREL_PARTIAL_GROUP_AGG,
+        relids,
+    );
+    {
+        let (cp, rk, sid, uid, uidc, fdw) = {
+            let g = run.root.rel(grouped_rel);
+            (
+                g.consider_parallel,
+                g.reloptkind,
+                g.serverid,
+                g.userid,
+                g.useridiscurrent,
+                g.has_fdwroutine,
+            )
+        };
+        let p = run.root.rel_mut(partially_grouped_rel);
+        p.consider_parallel = cp;
+        p.reloptkind = rk;
+        p.serverid = sid;
+        p.userid = uid;
+        p.useridiscurrent = uidc;
+        p.has_fdwroutine = fdw;
+    }
+    let grouping_target =
+        run.root.rel(grouped_rel).pathtarget_id.expect("grouped rel has a target");
+    let partial_target = make_partial_grouping_target(run, grouping_target, extra.having_qual)?;
+    run.root.rel_mut(partially_grouped_rel).pathtarget_id = Some(partial_target);
+
+    if !extra.partial_costs_set {
+        extra.agg_partial_costs = types_pathnodes::AggClauseCosts::default();
+        extra.agg_final_costs = types_pathnodes::AggClauseCosts::default();
+        if parse.hasAggs {
+            crate::prepagg::get_agg_clause_costs(
+                run,
+                types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+                &mut extra.agg_partial_costs,
+            )?;
+            crate::prepagg::get_agg_clause_costs(
+                run,
+                types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+                &mut extra.agg_final_costs,
+            )?;
+        }
+        extra.partial_costs_set = true;
+    }
+
+    let partial_rows = run.root.path(cheapest_partial_path).base().rows;
+    let num_partial_partial_groups = get_number_of_groups(run, partial_rows, extra.target_list)?;
+
+    if extra.can_sort {
+        let paths =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(input_rel).partial_pathlist);
+        for &path_id in paths.iter() {
+            let path_keys = crate::relnode::pgvec_clone_shallow(
+                run.mcx,
+                &run.root.path(path_id).base().pathkeys,
+            );
+            let orderings = crate::pathkeys::get_useful_group_keys_orderings(run, &path_keys);
+            for info in orderings {
+                let Some(sorted) = make_ordered_path(
+                    run,
+                    partially_grouped_rel,
+                    path_id,
+                    cheapest_partial_path,
+                    &info.pathkeys,
+                    -1.0,
+                )?
+                else {
+                    continue;
+                };
+                if parse.hasAggs {
+                    let strategy = if parse.groupClause.is_nil() {
+                        types_pathnodes::AGG_PLAIN
+                    } else {
+                        types_pathnodes::AGG_SORTED
+                    };
+                    let agg_costs_partial = extra.agg_partial_costs;
+                    let agg_path = crate::pathnode::create_agg_path(
+                        run,
+                        partially_grouped_rel,
+                        sorted,
+                        partial_target,
+                        strategy,
+                        types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+                        info.clauses,
+                        mcx::PgVec::new_in(run.mcx),
+                        &agg_costs_partial,
+                        num_partial_partial_groups,
+                    )?;
+                    crate::pathnode::add_partial_path(run, partially_grouped_rel, agg_path);
+                } else {
+                    let group_path = crate::pathnode::create_group_path(
+                        run,
+                        partially_grouped_rel,
+                        sorted,
+                        info.clauses,
+                        mcx::PgVec::new_in(run.mcx),
+                        num_partial_partial_groups,
+                    )?;
+                    crate::pathnode::add_partial_path(run, partially_grouped_rel, group_path);
+                }
+            }
+        }
+    }
+
+    if extra.can_hash {
+        let group_clause =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let agg_costs_partial = extra.agg_partial_costs;
+        let agg_path = crate::pathnode::create_agg_path(
+            run,
+            partially_grouped_rel,
+            cheapest_partial_path,
+            partial_target,
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+            group_clause,
+            mcx::PgVec::new_in(run.mcx),
+            &agg_costs_partial,
+            num_partial_partial_groups,
+        )?;
+        crate::pathnode::add_partial_path(run, partially_grouped_rel, agg_path);
+    }
+
+    Ok(Some(partially_grouped_rel))
+}
+
+// gather_grouping_paths (planner.c).
+fn gather_grouping_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
+    let groupby_pathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey> = {
+        let n = run.root.num_groupby_pathkeys as usize;
+        let take = if run.root.group_pathkeys.len() > n { n } else { run.root.group_pathkeys.len() };
+        let mut keys = mcx::PgVec::new_in(run.mcx);
+        keys.extend(run.root.group_pathkeys.iter().take(take).copied());
+        keys
+    };
+
+    crate::allpaths::generate_useful_gather_paths(run, rel, true)?;
+
+    let cheapest_partial_path = run.root.rel(rel).partial_pathlist[0];
+    let target = run.rel_reltarget_id(rel);
+    let paths = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).partial_pathlist);
+    for &path_id in paths.iter() {
+        let (is_sorted, presorted_keys) = crate::pathkeys::pathkeys_count_contained_in(
+            &groupby_pathkeys,
+            &run.root.path(path_id).base().pathkeys,
+        );
+        if is_sorted {
+            continue;
+        }
+        let use_full_sort = presorted_keys == 0 || !crate::gucs::enable_incremental_sort();
+        if path_id != cheapest_partial_path && use_full_sort {
+            continue;
+        }
+        let keys = crate::relnode::pgvec_clone_shallow(run.mcx, &groupby_pathkeys);
+        let sorted = if use_full_sort {
+            crate::pathnode::create_sort_path(run, rel, path_id, keys, -1.0)
+        } else {
+            crate::pathnode::create_incremental_sort_path(
+                run,
+                rel,
+                path_id,
+                keys,
+                presorted_keys,
+                -1.0,
+            )?
+        };
+        let (total_groups, gm_keys) = {
+            let sb = run.root.path(sorted).base();
+            (
+                ::costsize::compute_gather_rows(sb.rows, sb.parallel_workers),
+                crate::relnode::pgvec_clone_shallow(run.mcx, &sb.pathkeys),
+            )
+        };
+        let gm = crate::pathnode::create_gather_merge_path(
+            run,
+            rel,
+            sorted,
+            Some(target),
+            gm_keys,
+            Some(total_groups),
+        );
+        crate::pathnode::add_path(run, rel, gm);
+    }
+    Ok(())
+}
+
+// add_paths_to_grouping_rel (planner.c).
+#[allow(clippy::too_many_arguments)]
 fn add_paths_to_grouping_rel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     input_rel: RelId,
     grouped_rel: RelId,
+    partially_grouped_rel: Option<RelId>,
     agg_costs: &types_pathnodes::AggClauseCosts,
     num_groups: f64,
     extra: &GroupPathExtra<'mcx>,
@@ -1239,6 +1691,66 @@ fn add_paths_to_grouping_rel<'mcx>(
                 crate::pathnode::add_path(run, grouped_rel, agg_path);
             }
         }
+
+        // Finalize partially aggregated paths (sorted flavor).
+        if let Some(pgr) = partially_grouped_rel.filter(|&p| !run.root.rel(p).pathlist.is_empty())
+        {
+            let pgr_cheapest =
+                run.root.rel(pgr).cheapest_total_path.expect("partially grouped rel has paths");
+            let paths =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(pgr).pathlist);
+            for &path_id in paths.iter() {
+                let path_keys = crate::relnode::pgvec_clone_shallow(
+                    run.mcx,
+                    &run.root.path(path_id).base().pathkeys,
+                );
+                let orderings = crate::pathkeys::get_useful_group_keys_orderings(run, &path_keys);
+                for info in orderings {
+                    let Some(sorted) = make_ordered_path(
+                        run,
+                        grouped_rel,
+                        path_id,
+                        pgr_cheapest,
+                        &info.pathkeys,
+                        -1.0,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if parse.hasAggs {
+                        let strategy = if parse.groupClause.is_nil() {
+                            types_pathnodes::AGG_PLAIN
+                        } else {
+                            types_pathnodes::AGG_SORTED
+                        };
+                        let final_costs = extra.agg_final_costs;
+                        let agg_path = crate::pathnode::create_agg_path(
+                            run,
+                            grouped_rel,
+                            sorted,
+                            grouping_target,
+                            strategy,
+                            types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+                            info.clauses,
+                            crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+                            &final_costs,
+                            num_groups,
+                        )?;
+                        crate::pathnode::add_path(run, grouped_rel, agg_path);
+                    } else {
+                        let group_path = crate::pathnode::create_group_path(
+                            run,
+                            grouped_rel,
+                            sorted,
+                            info.clauses,
+                            crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+                            num_groups,
+                        )?;
+                        crate::pathnode::add_path(run, grouped_rel, group_path);
+                    }
+                }
+            }
+        }
     }
 
     if can_hash {
@@ -1270,6 +1782,40 @@ fn add_paths_to_grouping_rel<'mcx>(
             )?;
             crate::pathnode::add_path(run, grouped_rel, agg_path);
         }
+
+        // Finalize HashAgg atop the cheapest partially grouped path.
+        if let Some(pgr) = partially_grouped_rel {
+            if !run.root.rel(pgr).pathlist.is_empty() {
+                let path = run
+                    .root
+                    .rel(pgr)
+                    .cheapest_total_path
+                    .expect("partially grouped rel has a cheapest path");
+                let group_clause =
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+                let final_costs = extra.agg_final_costs;
+                let agg_path = crate::pathnode::create_agg_path(
+                    run,
+                    grouped_rel,
+                    path,
+                    grouping_target,
+                    types_pathnodes::AGG_HASHED,
+                    types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+                    group_clause,
+                    crate::relnode::pgvec_clone_shallow(run.mcx, &having_qual),
+                    &final_costs,
+                    num_groups,
+                )?;
+                crate::pathnode::add_path(run, grouped_rel, agg_path);
+            }
+        }
+    }
+
+    // Partitionwise aggregation can leave fully aggregated partial paths
+    // (Parallel Append of per-child paths); unreachable while partitionwise
+    // PARTIAL stays loud, but the C tail is one gather call.
+    if !run.root.rel(grouped_rel).partial_pathlist.is_empty() {
+        gather_grouping_paths(run, grouped_rel)?;
     }
 
     Ok(())
@@ -1325,7 +1871,7 @@ fn create_partitionwise_grouping_paths<'mcx>(
         let child_tlist = crate::inherit::adjust_appendrel_attrs_multi(run, tl_node, &appinfos)?
             .as_list()
             .expect("translated targetlist is a list");
-        let child_extra = GroupPathExtra {
+        let mut child_extra = GroupPathExtra {
             can_sort: extra.can_sort,
             can_hash: extra.can_hash,
             can_partial_agg: extra.can_partial_agg,
@@ -1333,6 +1879,9 @@ fn create_partitionwise_grouping_paths<'mcx>(
             having_qual: child_having,
             target_list: child_tlist,
             patype: PartitionwiseAggregateType::Full,
+            agg_partial_costs: extra.agg_partial_costs,
+            agg_final_costs: extra.agg_final_costs,
+            partial_costs_set: extra.partial_costs_set,
         };
 
         let child_grouped_rel = make_grouping_rel(
@@ -1342,7 +1891,13 @@ fn create_partitionwise_grouping_paths<'mcx>(
             extra.target_parallel_safe,
             child_having,
         )?;
-        create_ordinary_grouping_paths(run, child_input, child_grouped_rel, agg_costs, &child_extra)?;
+        create_ordinary_grouping_paths(
+            run,
+            child_input,
+            child_grouped_rel,
+            agg_costs,
+            &mut child_extra,
+        )?;
         crate::pathnode::set_cheapest(run, child_grouped_rel)?;
         live_children.push(child_grouped_rel);
     }
@@ -1412,14 +1967,10 @@ pub(crate) fn could_not_implement(what: &str) -> Box<types_error::PgError> {
 // get_number_of_groups (planner.c).
 fn get_number_of_groups<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    input_rel: RelId,
+    path_rows: f64,
     target_list: &'mcx types_nodes::list::NodeList<'mcx>,
 ) -> PgResult<f64> {
     let parse = run.parse();
-    let path_rows = {
-        let cheapest = run.root.rel(input_rel).cheapest_total_path.unwrap();
-        run.root.path(cheapest).base().rows
-    };
     if !parse.groupClause.is_nil() {
         if !parse.groupingSets.is_nil() {
             let mut gd = run.gset_data.take().expect("grouping sets preprocessed");

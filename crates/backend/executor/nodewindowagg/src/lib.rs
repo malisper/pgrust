@@ -678,6 +678,8 @@ pub fn exec_init_window_agg<'mcx>(
             // SAFETY: aggno < numaggs elements of the once-allocated pergroup.
             let pg = unsafe { NonNull::new_unchecked(pergroup_base.as_ptr().add(aggno)) };
             specs.push(AggTransSpec {
+                combine: false,
+                deserialfn_oid: 0,
                 transfn_oid: trans_fnoid[aggno],
                 inputcollid: trans_collid[aggno],
                 init_value_is_null: trans_init[aggno].isnull,
