@@ -900,6 +900,38 @@ fn pull_up_simple_subquery<'mcx>(
                 replace_var_expr(mcx, n, varno, &off_tlist, lateral, Some(&phc))
             })?;
         }
+
+        // perform_pullup_replace_vars tail (prepjointree.c:2492): join RTEs'
+        // joinaliasvars and the group RTE's groupexprs reference the
+        // pulled-up rel (NATURAL/USING merged columns, grouped exprs).
+        for rte_node in &parse.rtable {
+            let orte = rte_node.as_range_tbl_entry().expect("rtable cell");
+            match orte.rtekind {
+                RTEKind::RTE_JOIN => {
+                    if let Some(l) =
+                        clauses::walker::mutate_list(mcx, &orte.joinaliasvars, &mut |n| {
+                            replace_var_expr(mcx, n, varno, &off_tlist, lateral, Some(&phc))
+                        })?
+                    {
+                        // SAFETY: pre-seal tree owned by this planner
+                        // invocation (MergeAction precedent above).
+                        unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = l) };
+                    }
+                }
+                RTEKind::RTE_GROUP => {
+                    if let Some(l) =
+                        clauses::walker::mutate_list(mcx, &orte.groupexprs, &mut |n| {
+                            replace_var_expr(mcx, n, varno, &off_tlist, lateral, Some(&phc))
+                        })?
+                    {
+                        // SAFETY: pre-seal tree owned by this planner
+                        // invocation.
+                        unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = l) };
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     // CombineRangeTables (rewriteManip.c): append rtable + rteperminfos,
@@ -3621,6 +3653,38 @@ pub fn expand_virtual_generated_columns<'mcx>(
             mcx,
             FromExpr { fromlist: new_fromlist, quals: new_quals },
         )?);
+
+        // C runs pullup_replace_vars over the whole Query here, which also
+        // rewrites join RTEs' joinaliasvars and the group RTE's groupexprs
+        // (range_table_mutator legs); the piecemeal form needs them spelled.
+        for rte_node2 in &parse.rtable {
+            let orte = rte_node2.as_range_tbl_entry().expect("rtable cell");
+            match orte.rtekind {
+                RTEKind::RTE_JOIN => {
+                    if let Some(l) =
+                        clauses::walker::mutate_list(mcx, &orte.joinaliasvars, &mut |n| {
+                            replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
+                        })?
+                    {
+                        // SAFETY: pre-seal tree owned by this planner
+                        // invocation.
+                        unsafe { rte_node2.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = l) };
+                    }
+                }
+                RTEKind::RTE_GROUP => {
+                    if let Some(l) =
+                        clauses::walker::mutate_list(mcx, &orte.groupexprs, &mut |n| {
+                            replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
+                        })?
+                    {
+                        // SAFETY: pre-seal tree owned by this planner
+                        // invocation.
+                        unsafe { rte_node2.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = l) };
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     run.glob.last_ph_id = last_ph_id.get();
     Ok(())

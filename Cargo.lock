@@ -16141,6 +16141,7 @@ dependencies = [
 name = "vars"
 version = "0.1.0"
 dependencies = [
+ "copyfuncs",
  "mcx",
  "nodes_core",
  "types_core",

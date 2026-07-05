@@ -1,5 +1,5 @@
 use nodes_core::{
-    deferred, expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
+    expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
     NodeWalker,
 };
 use mcx::Mcx;
@@ -464,24 +464,32 @@ pub fn pull_var_clause<'mcx>(
     Ok(cx.varlist)
 }
 
-// flatten_join_alias_vars (var.c), root == NULL shape: join alias Vars are
-// replaced by copies of the joinaliasvars expression (whole-row by a RowExpr
-// over them); nullingrels transfer via the standard-expression adjustment.
-// The PlaceHolderVar fallback (root != NULL) and IncrementVarSublevelsUp for
-// aliases carried into subqueries stay loud.
+/// C's PlannerInfo as flatten_join_alias_vars needs it: only
+/// make_placeholder_expr's phid allocation (root->glob->lastPHId).
+pub struct FjavRoot<'a> {
+    pub last_ph_id: &'a core::cell::Cell<u32>,
+}
+
+// flatten_join_alias_vars (var.c): join alias Vars are replaced by copies of
+// the joinaliasvars expression (whole-row by a RowExpr over them);
+// nullingrels transfer via the standard-expression adjustment or, with root
+// (planner path), a PlaceHolderVar wrapper. IncrementVarSublevelsUp for
+// aliases carried into subqueries stays loud.
 pub fn flatten_join_alias_vars<'mcx>(
     mcx: Mcx<'mcx>,
     rtable: &NodeList<'mcx>,
     jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
+    root: Option<&FjavRoot<'_>>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    Ok(fjav_mutate(mcx, rtable, jointree, node)?.unwrap_or(node))
+    Ok(fjav_mutate(mcx, rtable, jointree, root, node)?.unwrap_or(node))
 }
 
 fn fjav_mutate<'mcx>(
     mcx: Mcx<'mcx>,
     rtable: &NodeList<'mcx>,
     jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
+    root: Option<&FjavRoot<'_>>,
     node: Node<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
@@ -512,7 +520,7 @@ fn fjav_mutate<'mcx>(
                                 .unwrap();
                         }
                     }
-                    let newvar = fjav_mutate(mcx, rtable, jointree, newvar)?.unwrap_or(newvar);
+                    let newvar = fjav_mutate(mcx, rtable, jointree, root, newvar)?.unwrap_or(newvar);
                     fields.lappend(mcx, newvar)?;
                     colnames.lappend(mcx, cn)?;
                 }
@@ -526,7 +534,7 @@ fn fjav_mutate<'mcx>(
                         location: v.location,
                     },
                 )?;
-                return Ok(Some(add_nullingrels_if_needed(mcx, rowexpr, v)?));
+                return Ok(Some(add_nullingrels_if_needed(mcx, jointree, root, rowexpr, v)?));
             }
             debug_assert!(v.varattno > 0);
             let aliasvar = rte.joinaliasvars.nth(v.varattno as usize - 1);
@@ -539,12 +547,12 @@ fn fjav_mutate<'mcx>(
                         .unwrap();
                 }
             }
-            let newvar = fjav_mutate(mcx, rtable, jointree, newvar)?.unwrap_or(newvar);
-            Ok(Some(add_nullingrels_if_needed(mcx, newvar, v)?))
+            let newvar = fjav_mutate(mcx, rtable, jointree, root, newvar)?.unwrap_or(newvar);
+            Ok(Some(add_nullingrels_if_needed(mcx, jointree, root, newvar, v)?))
         }
         NodeTag::T_PlaceHolderVar => {
             let phv = node.as_place_holder_var().unwrap();
-            let new_expr = fjav_mutate(mcx, rtable, jointree, phv.phexpr)?.unwrap_or(phv.phexpr);
+            let new_expr = fjav_mutate(mcx, rtable, jointree, root, phv.phexpr)?.unwrap_or(phv.phexpr);
             // sublevels_up is pinned at 0 here (Query descent is loud below),
             // so C's phlevelsup == sublevels_up test is phlevelsup == 0.
             let phrels = if phv.phlevelsup == 0 {
@@ -571,7 +579,9 @@ fn fjav_mutate<'mcx>(
             assert_subquery_free_of_upper_join_vars(rtable, q)?;
             Ok(None)
         }
-        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fjav_mutate(mcx, rtable, jointree, n)),
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+            fjav_mutate(mcx, rtable, jointree, root, n)
+        }),
     }
 }
 
@@ -824,28 +834,75 @@ fn fjav_copy<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
                 },
             )
         }
-        t => deferred("fjav_copy: joinaliasvars entry", t),
+        // Subquery pull-up rewrites joinaliasvars into arbitrary expressions
+        // (var.c header comment); C copyObject covers them all.
+        _ => copyfuncs::copy_object(mcx, node),
     }
 }
 
-// add_nullingrels_if_needed (var.c); the make_placeholder_expr fallback for
-// non-standard expressions is unported and loud.
+// add_nullingrels_if_needed (var.c). With root (planner path) a non-standard
+// expression gets a PlaceHolderVar wrapper carrying the nullingrels; without
+// root (parser path) C reaches elog "unsupported join alias expression",
+// unreachable because the parser only builds standard alias expressions.
 fn add_nullingrels_if_needed<'mcx>(
     mcx: Mcx<'mcx>,
+    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
+    root: Option<&FjavRoot<'_>>,
     newnode: Node<'mcx>,
     oldvar: &types_nodes::Var<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     if oldvar.varnullingrels.is_empty() {
         return Ok(newnode);
     }
-    if !is_standard_join_alias_expression(newnode, oldvar) {
+    if is_standard_join_alias_expression(newnode, oldvar) {
+        adjust_standard_join_alias_expression(mcx, newnode, oldvar)?;
+        return Ok(newnode);
+    }
+    let Some(root) = root else {
         panic!(
             "add_nullingrels_if_needed (var.c): non-standard join alias expression \
-             (make_placeholder_expr leg) — join-using residue"
+             on the root == NULL path — C elog 'unsupported join alias expression'"
         );
+    };
+    // sublevels_up is pinned at 0 (fjav_mutate's Var guard), so C's levelsup
+    // is 0 and its levelsup != 0 error leg is unreachable.
+    debug_assert_eq!(oldvar.varlevelsup, 0);
+    let mut phrels = pull_varnos_of_level(mcx, newnode, 0)?;
+    if phrels.is_empty() {
+        // Variable-free: evaluate below the join oldvar is an alias for
+        // (get_relids_for_join minus the join relid itself).
+        let jt = jointree.unwrap_or_else(|| {
+            panic!(
+                "add_nullingrels_if_needed (var.c): get_relids_for_join on a \
+                 caller without the query jointree"
+            )
+        });
+        let mut jtnode = None;
+        for child in &jt.fromlist {
+            jtnode = find_jointree_node_for_rel(child, oldvar.varno);
+            if jtnode.is_some() {
+                break;
+            }
+        }
+        let jtnode =
+            jtnode.unwrap_or_else(|| panic!("could not find join node {}", oldvar.varno));
+        join_relids_no_inner(mcx, jtnode, &mut phrels)?;
+        phrels.del_member(oldvar.varno);
+        assert!(!phrels.is_empty());
     }
-    adjust_standard_join_alias_expression(mcx, newnode, oldvar)?;
-    Ok(newnode)
+    // make_placeholder_expr (placeholder.c): phid = ++lastPHId; phlevelsup
+    // and phnullingrels fixed up by this caller.
+    root.last_ph_id.set(root.last_ph_id.get() + 1);
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::PlaceHolderVar {
+            phexpr: newnode,
+            phrels,
+            phnullingrels: oldvar.varnullingrels.clone_in(mcx)?,
+            phid: root.last_ph_id.get(),
+            phlevelsup: oldvar.varlevelsup,
+        },
+    )
 }
 
 fn is_standard_join_alias_expression(newnode: Node<'_>, oldvar: &types_nodes::Var<'_>) -> bool {
