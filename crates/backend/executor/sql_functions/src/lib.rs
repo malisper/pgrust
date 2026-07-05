@@ -827,7 +827,7 @@ fn init_execution_state<'mcx>(
     } else {
         state.error_query_index += 1;
     }
-    let psrc = entry.owned.with(|s| s.plansources.borrow()[state.next_query_index]);
+    let psrc = cache::revalidate_query(entry, state.next_query_index)?;
     state.next_query_index += 1;
 
     state.cplan = plancache::GetCachedPlan(psrc, state.params_h, None, QueryEnvHandle::NULL)?;

@@ -327,6 +327,68 @@ fn invalidated_source_replan_arm_is_loud() {
     let _ = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL);
 }
 
+thread_local! {
+    static REANALYZE_CALLS: Cell<u32> = const { Cell::new(0) };
+}
+
+fn stub_reanalyze(
+    qmcx: mcx::Mcx<'static>,
+    _query_string: &'static str,
+    _param_types: &'static [Oid],
+    arg: i32,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    assert_eq!(arg, 7);
+    REANALYZE_CALLS.with(|c| c.set(c.get() + 1));
+    let mut v = PgVec::new_in(qmcx);
+    v.push(select_query(qmcx, false));
+    Ok(v)
+}
+
+// Sinval flushes the querytree; the next fetch re-analyzes via the installed
+// hook, rebuilds deps/search_path, and replans.
+#[test]
+fn invalidated_source_reanalyzes_via_installed_hook() {
+    install();
+    push_snapshot();
+    REANALYZE_CALLS.with(|c| c.set(0));
+    let h = make_saved_source(false);
+    SetCachedPlanReanalyze(h, stub_reanalyze, 7);
+
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(REANALYZE_CALLS.with(Cell::get), 0);
+    ReleaseCachedPlan(p1);
+
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    assert!(!CachedPlanIsValid(h));
+
+    let planner_before = PLANNER_CALLS.with(Cell::get);
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(REANALYZE_CALLS.with(Cell::get), 1);
+    assert!(CachedPlanIsValid(h));
+    assert_eq!(PLANNER_CALLS.with(Cell::get), planner_before + 1);
+    assert_eq!(CachedPlanStmtList(p2).len(), 1);
+    assert_eq!(SourceQueryList(h).len(), 1);
+    ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+}
+
+#[test]
+fn requires_reanalysis_probe_tracks_invalidation() {
+    install();
+    push_snapshot();
+    let h = make_saved_source(false);
+    assert!(!CachedPlanSourceRequiresReanalysis(h).unwrap());
+    ResetPlanCache();
+    assert!(CachedPlanSourceRequiresReanalysis(h).unwrap());
+    DropCachedPlan(h);
+
+    let h_txn = CreateCachedPlan(None, "", types_portal::CMDTAG_UNKNOWN).unwrap();
+    let qmcx = SourceQueryMcx(h_txn);
+    CompleteCachedPlan(h_txn, PgVec::new_in(qmcx), &[], 0, false).unwrap();
+    assert!(!CachedPlanSourceRequiresReanalysis(h_txn).unwrap());
+    DropCachedPlan(h_txn);
+}
+
 #[test]
 fn release_to_zero_frees_and_stale_handle_is_loud() {
     install();

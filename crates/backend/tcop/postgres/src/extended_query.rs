@@ -29,8 +29,8 @@ use ::types_portal::{
 };
 
 use crate::simple_query::{
-    check_log_duration, finish_xact_command, pg_parse_query, pg_rewrite_query,
-    start_xact_command, IsTransactionExitStmt,
+    check_log_duration, finish_xact_command, pg_analyze_and_rewrite_fixedparams, pg_parse_query,
+    pg_rewrite_query, start_xact_command, IsTransactionExitStmt,
 };
 use crate::{check_for_interrupts, loc, ResetUsage, ShowUsage};
 
@@ -180,6 +180,7 @@ pub fn exec_parse_message<'mcx>(
             plancache::DropCachedPlan(psrc);
             return Err(e);
         }
+        plancache::SetCachedPlanReanalyze(psrc, reanalyze_parse_message, 0);
         psrc
     } else {
         /* Empty input string.  This is legal. */
@@ -239,6 +240,24 @@ pub fn exec_parse_message<'mcx>(
     }
 
     Ok(())
+}
+
+// C revalidates a parserSetup-less plansource with the resolved param types
+// via pg_analyze_and_rewrite_fixedparams (plancache.c:810-814); the retained
+// query_string re-parses to the same single statement.
+fn reanalyze_parse_message(
+    qmcx: Mcx<'static>,
+    query_string: &'static str,
+    param_types: &'static [Oid],
+    _arg: i32,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    let raw_list = parser_seams::raw_parser::call(
+        qmcx,
+        query_string,
+        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
+    )?;
+    let raw = raw_list.first().expect("re-parse reproduces the statement");
+    pg_analyze_and_rewrite_fixedparams(qmcx, raw, query_string, param_types, QueryEnvHandle::NULL)
 }
 
 fn fill_parse_plansource(

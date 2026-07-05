@@ -384,6 +384,38 @@ pub(crate) fn prepare_next_query(entry: &SqlFnEntry) -> PgResult<()> {
     entry.owned.with(|s| {
         let qindex = s.plansources.borrow().len();
         assert!(qindex < s.num_queries, "prepare_next_query past end");
+        let psrc = build_query_plansource(s, qindex)?;
+        s.plansources.borrow_mut().push(psrc);
+        Ok(())
+    })
+}
+
+// RevalidateCachedQuery's re-analysis arm for SQL-function plans: C retains
+// the raw tree + sql_fn_parser_setup (functions.c/plancache.c:793-814); here
+// the source rebuilds from retained text under the same parse hooks. The old
+// source drops only after the rebuild succeeds (an analysis error leaves it
+// invalid and retried, as C's longjmp does).
+pub(crate) fn revalidate_query(
+    entry: &SqlFnEntry,
+    qindex: usize,
+) -> PgResult<plancache::CachedPlanSourceHandle> {
+    entry.owned.with(|s| {
+        let old = s.plansources.borrow()[qindex];
+        if !plancache::CachedPlanSourceRequiresReanalysis(old)? {
+            return Ok(old);
+        }
+        let new = build_query_plansource(s, qindex)?;
+        s.plansources.borrow_mut()[qindex] = new;
+        plancache::DropCachedPlan(old);
+        Ok(new)
+    })
+}
+
+fn build_query_plansource(
+    s: &SqlFnEntryState<'_>,
+    qindex: usize,
+) -> PgResult<plancache::CachedPlanSourceHandle> {
+    {
         let islast = qindex + 1 >= s.num_queries;
 
         let psrc;
@@ -517,7 +549,6 @@ pub(crate) fn prepare_next_query(entry: &SqlFnEntry) -> PgResult<()> {
                 return Err(e);
             }
         }
-        s.plansources.borrow_mut().push(psrc);
-        Ok(())
-    })
+        Ok(psrc)
+    }
 }
