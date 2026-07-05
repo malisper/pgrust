@@ -215,7 +215,9 @@ pub fn create_index_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgRes
         let bpath =
             pathnode::create_bitmap_heap_path(run, rel, bitmapqual, &lateral_relids, 1.0)?;
         add_path(run, rel, bpath);
-        debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+        // Parallel bitmap heap scan (partial paths): unported; the rel's
+        // partial seqscan paths from the parallel-p3 landing already live in
+        // partial_pathlist.
     }
 
     if !bitjoinpaths.is_empty() {
@@ -1285,8 +1287,9 @@ fn build_index_paths<'mcx>(
             loop_count,
         )?;
         result.push(ipath);
-        // Parallel index scan (partial paths): M3 lane.
-        debug_assert!(run.root.rel(rel).partial_pathlist.is_empty());
+        // Parallel index scan (partial paths): unported; the rel's partial
+        // seqscan paths from the parallel-p3 landing already live in
+        // partial_pathlist.
     }
 
     if backward_arm {

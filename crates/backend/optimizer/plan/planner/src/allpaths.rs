@@ -637,7 +637,9 @@ pub(crate) fn add_paths_to_append_rel(
     let mut all_child_pathkeys: mcx::PgVec<'_, mcx::PgVec<'_, PathKey>> =
         mcx::PgVec::new_in(mcx);
     for &childrel in live_childrels {
-        debug_assert!(run.root.rel(childrel).partial_pathlist.is_empty());
+        // Child partial paths exist since the parallel-p3 landing (C builds
+        // partial/parallel Append from them); until the parallel-append lane
+        // lands they are dropped here and the Append stays serial.
         let cheapest_total = run.root.rel(childrel).cheapest_total_path;
         match cheapest_total {
             Some(p) if run.root.path(p).base().param_info.is_none() => {
