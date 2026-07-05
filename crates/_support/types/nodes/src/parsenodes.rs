@@ -690,6 +690,23 @@ impl Default for CommonTableExpr<'_> {
     }
 }
 
+impl<'mcx> CommonTableExpr<'mcx> {
+    /// C `GetCTETargetList` (parsenodes.h): a DML CTE's output columns come
+    /// from its RETURNING list. Requires an analyzed CTE (ctequery is a Query).
+    pub fn cte_target_list(&self) -> &'mcx NodeList<'mcx> {
+        let q = self
+            .ctequery
+            .expect("GetCTETargetList requires analyzed CTE")
+            .as_query()
+            .expect("GetCTETargetList requires analyzed CTE");
+        if q.commandType == CmdType::CMD_SELECT {
+            &q.targetList
+        } else {
+            &q.returningList
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct VacuumStmt<'mcx> {
     pub options: NodeList<'mcx>,

@@ -508,12 +508,7 @@ fn markTargetListOrigin<'mcx>(
             if attnum != 0 && !rte.self_reference {
                 let cte_node = parse_relation::GetCTEForRTE(pstate, rte, netlevelsup);
                 let cte = cte_node.as_common_table_expr().expect("ctenamespace cell");
-                let tl = &cte
-                    .ctequery
-                    .expect("analyzed CTE")
-                    .as_query()
-                    .expect("analyzed CTE is a Query")
-                    .targetList;
+                let tl = cte.cte_target_list();
                 // The RTE carries the search/cycle columns but the subquery
                 // does not yet; skip origin lookups for those.
                 let mut extra_cols: i16 = 0;
