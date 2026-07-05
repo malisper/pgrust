@@ -47,8 +47,38 @@ unsafe fn arg_text_str(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
 
 /* ======================== interpt_pp(path, path) ========================= */
 
-fn fc_interpt_pp(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("regress: interpt_pp requires lseg_intersect/lseg_interpt (geo_ops.c segment arms unported)");
+// SAFETY: strict fn; catalog arg i is a non-null path varlena, live for the call.
+unsafe fn arg_path<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<::adt_geo::PathRef<'a>> {
+    Ok(::adt_geo::PathRef::from_payload(unsafe { fcinfo.arg_varlena_packed(i) }?.data()))
+}
+
+fn fc_interpt_pp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::adt_geo::lseg::{lseg_interpt, lseg_intersect, statlseg_construct};
+    use ::adt_geo::Pts;
+
+    // SAFETY: strict fn; catalog args are non-null path varlenas.
+    let p1 = unsafe { arg_path(fcinfo, 0) }?;
+    let p2 = unsafe { arg_path(fcinfo, 1) }?;
+
+    let mut found = None;
+    'outer: for i in 0..p1.n().saturating_sub(1) {
+        let seg1 = statlseg_construct(&p1.pt(i), &p1.pt(i + 1));
+        for j in 0..p2.n().saturating_sub(1) {
+            let seg2 = statlseg_construct(&p2.pt(j), &p2.pt(j + 1));
+            if lseg_intersect(&seg1, &seg2)? {
+                found = Some((seg1, seg2));
+                break 'outer;
+            }
+        }
+    }
+
+    let Some((seg1, seg2)) = found else {
+        return Ok(fcinfo.return_null());
+    };
+
+    // The two segments are known to intersect, so lseg_interpt cannot return None.
+    let pt = lseg_interpt(&seg1, &seg2)?.expect("intersecting segments always yield a point");
+    byref_result(fcinfo.result_mcx(), &pt.to_datum_bytes())
 }
 
 /* ============================ overpaid(emp) ============================== */
