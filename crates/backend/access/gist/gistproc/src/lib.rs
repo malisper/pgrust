@@ -1,20 +1,20 @@
 //! gistproc.c: GiST support procs for 2-D objects. Live: box_ops
-//! (consistent/union/penalty/picksplit/same) + point_ops compress/fetch/
-//! consistent (point group and box group). LOUD: distance procs (KNN lane),
-//! sortsupport (sorted-build lane), poly/circle opclasses (geo_ops
-//! POLYGON/CIRCLE lanes), poly/circle strategy groups of point_consistent.
+//! (consistent/union/penalty/picksplit/same), point_ops compress/fetch/
+//! consistent (all strategy groups), poly_ops and circle_ops
+//! compress/consistent. LOUD: distance procs (KNN lane), sortsupport
+//! (sorted-build lane).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
 mod qsort;
 
 use ::adt_float::float8_cmp_internal;
-use ::adt_geo::{adjust_box, box_contain_box, box_ov, point_eq_point, rt_box_union, FPeq, FPge, FPgt, FPle, FPlt};
+use ::adt_geo::{adjust_box, box_contain_box, box_ov, point_eq_point, rt_box_union, FPeq, FPge, FPgt, FPle, FPlt, PolyRef};
 use ::datum::Datum;
-use ::types_core::geo::{Point, BOX};
+use ::types_core::geo::{Point, BOX, CIRCLE};
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult};
-use ::types_fmgr::{byref_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
+use ::types_fmgr::{byref_result, datum_varlena_packed, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 use ::types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
 
 use qsort::pg_qsort;
@@ -58,6 +58,36 @@ unsafe fn point_at(d: Datum) -> Option<Point> {
         return None;
     }
     Some(Point::from_datum_bytes(core::slice::from_raw_parts(p, 16)))
+}
+
+unsafe fn circle_at(d: Datum) -> Option<CIRCLE> {
+    let p = d.as_usize() as *const u8;
+    if p.is_null() {
+        return None;
+    }
+    Some(CIRCLE::from_datum_bytes(core::slice::from_raw_parts(p, 24)))
+}
+
+// Polygon datums are varlena: external/compressed images detoast into the
+// armed result mcx (C's DatumGetPolygonP).
+unsafe fn poly_at<'a>(d: Datum, fcinfo: &'a Fcinfo) -> PgResult<Option<PolyRef<'a>>> {
+    if d.as_usize() == 0 {
+        return Ok(None);
+    }
+    let v = unsafe { datum_varlena_packed(d, fcinfo.result_mcx()) }?;
+    Ok(Some(PolyRef::from_payload(v.data())))
+}
+
+// C evaluation (and error) order: high.x, low.x, high.y, low.y.
+fn circle_bbox(c: &CIRCLE) -> PgResult<BOX> {
+    let high_x = ::adt_float::float8_pl(c.center.x, c.radius)?;
+    let low_x = ::adt_float::float8_mi(c.center.x, c.radius)?;
+    let high_y = ::adt_float::float8_pl(c.center.y, c.radius)?;
+    let low_y = ::adt_float::float8_mi(c.center.y, c.radius)?;
+    Ok(BOX {
+        high: Point { x: high_x, y: high_y },
+        low: Point { x: low_x, y: low_y },
+    })
 }
 
 fn box_result(fcinfo: &Fcinfo, b: &BOX) -> PgResult<Datum> {
@@ -638,8 +668,52 @@ fn fc_gist_point_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
                 && key.high.y >= query.low.y
                 && key.low.y <= query.high.y
         }
-        2 => panic!("unported: gist_point_consistent polygon strategy group (geo_ops polygon lane)"),
-        3 => panic!("unported: gist_point_consistent circle strategy group (geo_ops circle lane)"),
+        2 => {
+            // point op polygon rides gist_poly_consistent at RTOverlap; on a
+            // leaf hit the exact poly_contain_pt test replaces the recheck
+            // (leaf keys are degenerate boxes: high == low == the point).
+            // SAFETY: recheck out-param live in the caller frame.
+            unsafe { *recheck = true };
+            let key = unsafe { box_at(entry.key) };
+            // SAFETY: query arg is a polygon varlena datum.
+            let query = unsafe { poly_at(fcinfo.arg(1), fcinfo) }?;
+            match (key, query) {
+                (Some(key), Some(query)) => {
+                    let mut r = rtree_internal_consistent(&key, &query.boundbox, RTOverlap)?;
+                    if entry.page_is_leaf && r {
+                        debug_assert!(key.high.x == key.low.x && key.high.y == key.low.y);
+                        r = ::adt_geo::poly::poly_contain_pt(&query, &key.high)?;
+                        // SAFETY: as above.
+                        unsafe { *recheck = false };
+                    }
+                    r
+                }
+                _ => false,
+            }
+        }
+        3 => {
+            // point op circle rides gist_circle_consistent at RTOverlap; on a
+            // leaf hit the exact circle_contain_pt test replaces the recheck.
+            // SAFETY: recheck out-param live in the caller frame.
+            unsafe { *recheck = true };
+            let key = unsafe { box_at(entry.key) };
+            // SAFETY: query arg is a circle datum (fixed 24 bytes).
+            let query = unsafe { circle_at(fcinfo.arg(1)) };
+            match (key, query) {
+                (Some(key), Some(query)) => {
+                    let bbox = circle_bbox(&query)?;
+                    let mut r = rtree_internal_consistent(&key, &bbox, RTOverlap)?;
+                    if entry.page_is_leaf && r {
+                        debug_assert!(key.high.x == key.low.x && key.high.y == key.low.y);
+                        r = ::adt_geo::circle::circle_contain_pt(&query, &key.high)?;
+                        // SAFETY: as above.
+                        unsafe { *recheck = false };
+                    }
+                    r
+                }
+                _ => false,
+            }
+        }
         _ => return Err(unrecognized_strategy(strategy)),
     };
     Ok(Datum::from_bool(result))
@@ -665,24 +739,78 @@ fn fc_gist_point_sortsupport(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) ->
     )
 }
 
-fn fc_gist_poly_compress(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_poly_compress (geo_ops polygon lane)")
+// gist_poly_compress: represent a polygon by its bounding box.
+fn fc_gist_poly_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    if entry.leafkey {
+        // SAFETY: leaf key is a polygon varlena datum.
+        let poly = unsafe { poly_at(entry.key, fcinfo) }?.expect("poly key");
+        let key = box_result(fcinfo, &poly.boundbox)?;
+        let retval = GISTENTRY::init(key, entry.offset, false, entry.page_is_leaf);
+        return entry_result(fcinfo, &retval);
+    }
+    Ok(fcinfo.arg(0))
 }
 
-fn fc_gist_poly_consistent(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_poly_consistent (geo_ops polygon lane)")
+// gist_poly_consistent: index entries are bounding boxes, so leaf and
+// internal pages both use rtree_internal_consistent; always inexact.
+fn fc_gist_poly_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    let strategy = fcinfo.arg(2).as_u16();
+    let recheck = fcinfo.arg(4).as_usize() as *mut bool;
+    // SAFETY: recheck out-param is a live &mut bool in the caller frame.
+    unsafe { *recheck = true };
+
+    let key = unsafe { box_at(entry.key) };
+    // SAFETY: query arg is a polygon varlena datum.
+    let query = unsafe { poly_at(fcinfo.arg(1), fcinfo) }?;
+    let (Some(key), Some(query)) = (key, query) else {
+        return Ok(Datum::from_bool(false));
+    };
+    let r = rtree_internal_consistent(&key, &query.boundbox, strategy)?;
+    Ok(Datum::from_bool(r))
 }
 
 fn fc_gist_poly_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     panic!("unported: gist_poly_distance (geo_ops polygon lane)")
 }
 
-fn fc_gist_circle_compress(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_circle_compress (geo_ops circle lane)")
+// gist_circle_compress: represent a circle by its bounding box.
+fn fc_gist_circle_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    if entry.leafkey {
+        // SAFETY: leaf key is a circle datum (fixed 24 bytes).
+        let circle = unsafe { circle_at(entry.key) }.expect("circle key");
+        let b = circle_bbox(&circle)?;
+        let key = box_result(fcinfo, &b)?;
+        let retval = GISTENTRY::init(key, entry.offset, false, entry.page_is_leaf);
+        return entry_result(fcinfo, &retval);
+    }
+    Ok(fcinfo.arg(0))
 }
 
-fn fc_gist_circle_consistent(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_circle_consistent (geo_ops circle lane)")
+// gist_circle_consistent: index entries are bounding boxes, so leaf and
+// internal pages both use rtree_internal_consistent; always inexact.
+fn fc_gist_circle_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    let strategy = fcinfo.arg(2).as_u16();
+    let recheck = fcinfo.arg(4).as_usize() as *mut bool;
+    // SAFETY: recheck out-param is a live &mut bool in the caller frame.
+    unsafe { *recheck = true };
+
+    let key = unsafe { box_at(entry.key) };
+    // SAFETY: query arg is a circle datum (fixed 24 bytes).
+    let query = unsafe { circle_at(fcinfo.arg(1)) };
+    let (Some(key), Some(query)) = (key, query) else {
+        return Ok(Datum::from_bool(false));
+    };
+    let bbox = circle_bbox(&query)?;
+    let r = rtree_internal_consistent(&key, &bbox, strategy)?;
+    Ok(Datum::from_bool(r))
 }
 
 fn fc_gist_circle_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
