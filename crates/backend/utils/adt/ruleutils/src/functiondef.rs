@@ -454,6 +454,9 @@ fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> P
             let mut ctx =
                 crate::deparse::DeparseContext::new(mcx, crate::PRETTYFLAG_INDENT);
             ctx.namespaces.push(dpns.clone());
+            // C passes WRAP_COLUMN_DEFAULT: pretty-indent wraps each target on
+            // its own line.
+            ctx.wrap_column = crate::viewdef::WRAP_COLUMN_DEFAULT;
             ctx.indent_level = 1;
             crate::query::get_query_def(query, &mut ctx, None, false)?;
             buf.push_str(&ctx.buf);
@@ -465,6 +468,7 @@ fn print_function_sqlbody(mcx: Mcx<'_>, buf: &mut String, proc: &PgProcRow) -> P
         let query = n.as_query().expect("prosqlbody is a Query");
         let mut ctx = crate::deparse::DeparseContext::new(mcx, 0);
         ctx.namespaces.push(dpns);
+        ctx.wrap_column = crate::viewdef::WRAP_COLUMN_DEFAULT;
         crate::query::get_query_def(query, &mut ctx, None, false)?;
         buf.push_str(&ctx.buf);
     }
