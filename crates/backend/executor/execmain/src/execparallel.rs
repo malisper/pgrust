@@ -613,6 +613,15 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         if inject.contains("pgrust:worker-panic-run") {
             panic!("injected parallel worker panic (run)");
         }
+        // FATAL flavor, via the SIGTERM/ProcDiePending path the register's
+        // numeric-suite kill took: proc_exit runs the exit callbacks (incl.
+        // ProcKill), THEN the ProcExitThread unwind drops this frame's
+        // tqueue handle with the proc identity already released.
+        if inject.contains("pgrust:worker-panic-fatal") {
+            init_small::globals::SetProcDiePending(true);
+            init_small::globals::SetInterruptPending(true);
+            postgres_seams::check_for_interrupts::call()?;
+        }
 
         querydesc::with_qd(qd, |q| {
             let x = q.exec.as_mut().expect("worker ExecutorStart left no exec");
