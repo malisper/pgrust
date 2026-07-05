@@ -385,7 +385,12 @@ fn grouping_planner_tail<'mcx>(
             );
         }
         if parse.commandType != CmdType::CMD_SELECT {
-            debug_assert!(run.root.rowMarks.is_empty());
+            // Non-locking auto-marks (preprocess_rowmarks) may exist; C hands
+            // them to ModifyTable for EPQ mark fetches — this lane's EPQ
+            // rescans instead (divergence note in preprocess_rowmarks).
+            debug_assert!(run.root.rowMarks.iter().all(|&id| {
+                run.rowmark(id).strength == types_nodes::LockClauseStrength::LCS_NONE
+            }));
             let mcx = run.mcx;
             let onconflict = parse.onConflict.map(|oc| run.root.alloc_expr_node(oc));
             let mut root_relation: u32 = 0;
