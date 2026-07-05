@@ -486,6 +486,28 @@ fn notify_root_observer(acct: &AcctRc) {
     }
 }
 
+// Allocator-retention release hook (mimalloc mi_collect shape); installed by
+// the binary that owns the global allocator, no-op when unset. Call sites are
+// alloc-churn boundaries where freed-but-retained segments would otherwise
+// hold RSS (hashagg spill batch resets).
+static ALLOC_RELEASE: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+pub fn set_allocator_release(f: fn()) {
+    ALLOC_RELEASE.store(f as *mut (), core::sync::atomic::Ordering::Release);
+}
+
+#[cold]
+#[inline(never)]
+pub fn release_retained() {
+    let p = ALLOC_RELEASE.load(core::sync::atomic::Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: only set_allocator_release stores here, always from fn().
+        let f: fn() = unsafe { core::mem::transmute(p) };
+        f();
+    }
+}
+
 pub struct MemoryContext {
     acct: AcctRc,
     backend: Backend,

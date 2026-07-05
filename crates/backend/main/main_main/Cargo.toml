@@ -15,6 +15,7 @@ path = "src/bin/postgres.rs"
 [dependencies]
 libc = "0.2"
 mimalloc = "0.1"
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 elog = { path = "../../utils/error/elog" }
