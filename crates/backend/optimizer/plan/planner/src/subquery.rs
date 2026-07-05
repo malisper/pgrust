@@ -263,6 +263,17 @@ pub fn subquery_planner<'mcx>(
         // relation-level object_aclcheck arm covers relkind 'v'.
     }
 
+    if parse.resultRelation != 0 {
+        let rte = parse
+            .rtable
+            .nth(parse.resultRelation as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell");
+        if !rte.inh {
+            run.root.leaf_result_relids = relids_singleton(mcx, parse.resultRelation as u32);
+        }
+    }
+
     preprocess_rowmarks(run, &parse)?;
     run.root.hasHavingQual = parse.havingQual.is_some();
 

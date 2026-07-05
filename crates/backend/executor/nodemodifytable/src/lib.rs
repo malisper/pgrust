@@ -186,8 +186,21 @@ pub fn exec_init_modify_table<'mcx>(
     if !node.fdwPrivLists.is_nil() {
         panic!("ExecInitModifyTable (nodeModifyTable.c): FDW lists not ported");
     }
-    assert_eq!(node.resultRelations.len(), 1);
-    debug_assert!(node.rootRelation == 0 && node.rowMarks.is_nil());
+    if node.resultRelations.len() != 1 || node.rootRelation != 0 {
+        // Regression guard, not a port: the planner now emits multi-result-rel
+        // ModifyTable (inherited/partitioned targets); until the executor half
+        // lands (crash-update-partmt lane) fail as a caught ERROR, never a
+        // server-killing panic.
+        return Err(Box::new(
+            PgError::error(
+                "ExecInitModifyTable (nodeModifyTable.c): multiple result relations \
+                 (inherited/partitioned target) not ported; crash-update-partmt lane"
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    debug_assert!(node.rowMarks.is_nil());
     let rti = node.resultRelations.nth(0) as u32;
     debug_assert!(estate.es_unpruned_relids.is_member(rti as i32));
 

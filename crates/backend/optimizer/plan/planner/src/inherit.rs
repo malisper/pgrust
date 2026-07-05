@@ -1,13 +1,14 @@
 //! inherit.c + appendinfo.c slice: expand inheritance/partition parents into
-//! appendrel children. RowMarks and inherited-target DML are loud; the
-//! ROWID_VAR/RowIdentityVarInfo machinery is structurally absent (M4 lane).
+//! appendrel children, including inherited-target DML row identity
+//! (ROWID_VAR/RowIdentityVarInfo). Inherited RowMarks are loud.
 
 use mcx::{alloc_leak_in, Mcx, PgVec};
 use types_error::PgResult;
+use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
-use types_nodes::primnodes::{Alias, Var};
+use types_nodes::primnodes::{Alias, Var, ROWID_VAR};
 use types_nodes::{Node, NodeList, NodeTag};
-use types_pathnodes::{AppendRelInfo, NodeId, RelId, RELOPT_BASEREL};
+use types_pathnodes::{AppendRelInfo, NodeId, RelId, RowIdentityVarInfo, RELOPT_BASEREL};
 
 use crate::run::PlannerRun;
 
@@ -77,16 +78,22 @@ fn expand_inherited_rtentry<'mcx>(
             panic!("expand_inherited_rtentry (inherit.c): inherited PlanRowMark; FOR UPDATE lane");
         }
     }
-    if run.parse().resultRelation == rti as i32 {
-        panic!(
-            "expand_inherited_rtentry (inherit.c): inherited target relation; \
-             inherited-target ModifyTable lane"
-        );
-    }
+    let perminfoindex = rte.perminfoindex;
 
     let oldrelation = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
     if oldrelation.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        expand_partitioned_rtentry(run, rel, rti, &oldrelation, lockmode)?;
+        let updated_cols = {
+            let parse = run.parse();
+            debug_assert!(perminfoindex > 0);
+            parse
+                .rteperminfos
+                .nth(perminfoindex as usize - 1)
+                .as_rte_permission_info()
+                .expect("rteperminfos cell")
+                .updatedCols
+                .clone_in(mcx)?
+        };
+        expand_partitioned_rtentry(run, rel, rti, &oldrelation, &updated_cols, lockmode)?;
     } else {
         let inh_oids = pg_inherits::find_all_inheritors(mcx, parent_oid, lockmode)?;
         debug_assert!(inh_oids.first() == Some(&parent_oid));
@@ -121,10 +128,14 @@ fn expand_partitioned_rtentry<'mcx>(
     relinfo: RelId,
     parent_rti: usize,
     parentrel: &types_rel::Relation<'mcx>,
+    parent_updated_cols: &types_nodes::Bitmapset<'mcx>,
     lockmode: i32,
 ) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(run.rte(parent_rti).inh);
+    if !run.root.partColsUpdated {
+        run.root.partColsUpdated = has_partition_attrs(mcx, parentrel, parent_updated_cols)?;
+    }
     let pdesc = partdesc::RelationGetPartitionDesc(parentrel, true)?;
     let live_parts = crate::partprune::prune_append_rel_partitions(run, relinfo)?;
     let oids = {
@@ -165,7 +176,18 @@ fn expand_partitioned_rtentry<'mcx>(
                 crate::relnode::relids_union(mcx, &cur, &child_relids);
         }
         if childrel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-            expand_partitioned_rtentry(run, childrelinfo, child_rti as usize, &childrel, lockmode)?;
+            let appinfo = run.root.append_rel_array[child_rti as usize]
+                .clone()
+                .expect("child AppendRelInfo");
+            let child_updated_cols = translate_col_privs(run, parent_updated_cols, &appinfo)?;
+            expand_partitioned_rtentry(
+                run,
+                childrelinfo,
+                child_rti as usize,
+                &childrel,
+                &child_updated_cols,
+                lockmode,
+            )?;
         }
         childrel.close(types_rel::NoLock)?;
         i = live_parts.next_member(i);
@@ -257,6 +279,27 @@ fn expand_single_inheritance_child<'mcx>(
     appinfo.child_relid = child_rti;
     run.root.append_rel_array[child_rti as usize] = Some(appinfo.clone());
     run.root.append_rel_list.push(appinfo);
+
+    if crate::relnode::relids_is_member(parent_rti as i32, &run.root.all_result_relids) {
+        let cur = run.root.all_result_relids.take();
+        run.root.all_result_relids = crate::relnode::relids_add_member(mcx, &cur, child_rti);
+        // Non-leaf partitions need no row identity info.
+        if child_relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+            let cur = run.root.leaf_result_relids.take();
+            run.root.leaf_result_relids =
+                crate::relnode::relids_add_member(mcx, &cur, child_rti);
+            let rrvar = mk_var(
+                mcx,
+                child_rti,
+                types_tuple::htup::TableOidAttributeNumber as i16,
+                types_core::catalog::OIDOID,
+                -1,
+                0,
+            )?;
+            add_row_identity_var(run, rrvar, child_rti, "tableoid")?;
+            add_row_identity_columns(run, child_rti, child_relkind)?;
+        }
+    }
     Ok(child_rti)
 }
 
@@ -375,6 +418,51 @@ struct AppinfoMap<'mcx> {
     parent_colnames: Option<NodeList<'mcx>>,
 }
 
+// ROWID_VAR resolution state, snapshotted so the mutator needn't re-enter run.
+struct RowidSnap<'mcx> {
+    leaf_result_relids: types_pathnodes::Relids<'mcx>,
+    // (rowidvar Var, rowidrels) per RowIdentityVarInfo, 1-based by varattno.
+    rowids: PgVec<'mcx, (Node<'mcx>, types_pathnodes::Relids<'mcx>)>,
+}
+
+fn copy_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>) -> PgResult<Var<'mcx>> {
+    Ok(Var {
+        varno: v.varno,
+        varattno: v.varattno,
+        vartype: v.vartype,
+        vartypmod: v.vartypmod,
+        varcollid: v.varcollid,
+        varnullingrels: v.varnullingrels.clone_in(mcx)?,
+        varlevelsup: v.varlevelsup,
+        varreturningtype: v.varreturningtype,
+        varnosyn: v.varnosyn,
+        varattnosyn: v.varattnosyn,
+        location: v.location,
+    })
+}
+
+pub(crate) fn make_null_const<'mcx>(
+    mcx: Mcx<'mcx>,
+    typ: types_core::Oid,
+    typmod: i32,
+    collid: types_core::Oid,
+) -> PgResult<Node<'mcx>> {
+    let (typlen, typbyval) = lsyscache::get_typlenbyval(typ)?;
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::Const {
+            consttype: typ,
+            consttypmod: typmod,
+            constcollid: collid,
+            constlen: typlen as i32,
+            constvalue: datum::Datum::null(),
+            constisnull: true,
+            constbyval: typbyval,
+            location: -1,
+        },
+    )
+}
+
 pub fn adjust_appendrel_attrs_multi<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
@@ -408,25 +496,25 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
             parent_colnames,
         });
     }
-    fn copy_var<'mcx>(mcx: Mcx<'mcx>, v: &Var<'mcx>) -> PgResult<Var<'mcx>> {
-        Ok(Var {
-            varno: v.varno,
-            varattno: v.varattno,
-            vartype: v.vartype,
-            vartypmod: v.vartypmod,
-            varcollid: v.varcollid,
-            varnullingrels: v.varnullingrels.clone_in(mcx)?,
-            varlevelsup: v.varlevelsup,
-            varreturningtype: v.varreturningtype,
-            varnosyn: v.varnosyn,
-            varattnosyn: v.varattnosyn,
-            location: v.location,
-        })
-    }
+    let snap = RowidSnap {
+        leaf_result_relids: crate::relnode::relids_copy(mcx, &run.root.leaf_result_relids),
+        rowids: {
+            let mut v: PgVec<'mcx, (Node<'mcx>, types_pathnodes::Relids<'mcx>)> =
+                PgVec::new_in(mcx);
+            for ri in run.root.row_identity_vars.iter() {
+                v.push((
+                    *run.root.expr_node(ri.rowidvar),
+                    crate::relnode::relids_copy(mcx, &ri.rowidrels),
+                ));
+            }
+            v
+        },
+    };
     fn mutate<'mcx>(
         mcx: Mcx<'mcx>,
         node: Node<'mcx>,
         maps: &[AppinfoMap<'mcx>],
+        snap: &RowidSnap<'mcx>,
     ) -> PgResult<Option<Node<'mcx>>> {
         match node.node_tag() {
             NodeTag::T_Var => {
@@ -437,6 +525,43 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                     None
                 };
                 let Some(map) = map else {
+                    if v.varlevelsup == 0 && v.varno == ROWID_VAR {
+                        // At a leaf target rel the placeholder resolves to a
+                        // concrete Var (or NULL if this leaf can't produce
+                        // it); at non-leaf levels it passes through.
+                        let mut leaf_relid: u32 = 0;
+                        for m in maps {
+                            if crate::relnode::relids_is_member(
+                                m.child_relid as i32,
+                                &snap.leaf_result_relids,
+                            ) {
+                                assert!(
+                                    leaf_relid == 0,
+                                    "cannot translate to multiple leaf relids"
+                                );
+                                leaf_relid = m.child_relid;
+                            }
+                        }
+                        if leaf_relid != 0 {
+                            let (rv, rowidrels) = &snap.rowids[v.varattno as usize - 1];
+                            if crate::relnode::relids_is_member(leaf_relid as i32, rowidrels)
+                            {
+                                let mut newvar =
+                                    copy_var(mcx, rv.as_var().expect("rowidvar"))?;
+                                newvar.varno = leaf_relid as i32;
+                                debug_assert!(newvar.varnullingrels.is_empty());
+                                newvar.varnosyn = 0;
+                                newvar.varattnosyn = 0;
+                                return Ok(Some(Node::mk(mcx, newvar)?));
+                            }
+                            return Ok(Some(make_null_const(
+                                mcx,
+                                v.vartype,
+                                v.vartypmod,
+                                v.varcollid,
+                            )?));
+                        }
+                    }
                     return Ok(Some(Node::mk(mcx, copy_var(mcx, v)?)?));
                 };
                 if v.varattno > 0 {
@@ -536,7 +661,7 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
             NodeTag::T_Param => Ok(Some(Node::mk(mcx, *node.as_param().expect("Param"))?)),
             NodeTag::T_PlaceHolderVar => {
                 let phv = node.as_place_holder_var().expect("PlaceHolderVar");
-                let new_expr = mutate(mcx, phv.phexpr, maps)?.unwrap_or(phv.phexpr);
+                let new_expr = mutate(mcx, phv.phexpr, maps, snap)?.unwrap_or(phv.phexpr);
                 let phrels = if phv.phlevelsup == 0 {
                     // adjust_child_relids over phrels; phnullingrels needn't
                     // change (C appendinfo.c).
@@ -577,10 +702,12 @@ pub fn adjust_appendrel_attrs_multi<'mcx>(
                     },
                 )?))
             }
-            _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n, maps)),
+            _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+                mutate(mcx, n, maps, snap)
+            }),
         }
     }
-    Ok(mutate(mcx, node, &maps)?.unwrap_or(node))
+    Ok(mutate(mcx, node, &maps, &snap)?.unwrap_or(node))
 }
 
 // find_appinfos_by_relids (appendinfo.c); clones since schemes hand these to
@@ -664,7 +791,6 @@ pub fn adjust_child_relids_multilevel<'mcx>(
 }
 
 // adjust_inherited_attnums (appendinfo.c).
-#[allow(dead_code)]
 pub fn adjust_inherited_attnums<'mcx>(
     run: &PlannerRun<'mcx>,
     attnums: &[i16],
@@ -689,7 +815,6 @@ pub fn adjust_inherited_attnums<'mcx>(
 }
 
 // adjust_inherited_attnums_multilevel (appendinfo.c).
-#[allow(dead_code)]
 pub fn adjust_inherited_attnums_multilevel<'mcx>(
     run: &PlannerRun<'mcx>,
     attnums: &[i16],
@@ -889,4 +1014,255 @@ pub fn adjust_child_expr_multilevel<'mcx>(
     let e = *run.root.expr_node(id);
     let tr = adjust_appendrel_attrs_multilevel(run, e, childrel, parentrel)?;
     Ok(run.intern_expr(tr))
+}
+
+// The expand_single_inheritance_child / distribute_row_identity_vars callers
+// only run for DML, where preprocess_targetlist installed a planner-private
+// tlist copy.
+fn processed_tlist_append<'mcx>(run: &mut PlannerRun<'mcx>, tle: Node<'mcx>) -> PgResult<()> {
+    let tl = run.processed_tlist.expect("processed_tlist set");
+    // SAFETY: exclusively planner-owned (see above); regrowth never
+    // invalidates previously handed-out cell nodes.
+    let tl = tl as *const NodeList<'mcx> as *mut NodeList<'mcx>;
+    unsafe { (*tl).lappend(run.mcx, tle)? };
+    Ok(())
+}
+
+// add_row_identity_var (appendinfo.c).
+pub fn add_row_identity_var<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    orig_var: Node<'mcx>,
+    rtindex: u32,
+    rowid_name: &'mcx str,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    let v = orig_var.as_var().expect("Var");
+    debug_assert_eq!(v.varno, rtindex as i32);
+    debug_assert_eq!(v.varlevelsup, 0);
+    debug_assert!(v.varnullingrels.is_empty());
+    let (vartype, vartypmod) = (v.vartype, v.vartypmod);
+
+    if rtindex as i32 == run.parse().resultRelation {
+        let resno = run.processed_tlist.expect("processed_tlist set").len() as i16 + 1;
+        let tle = Node::mk_target_entry(mcx, orig_var, resno, Some(rowid_name), true)?;
+        return processed_tlist_append(run, tle);
+    }
+
+    debug_assert!(crate::relnode::relids_is_member(
+        rtindex as i32,
+        &run.root.leaf_result_relids
+    ));
+    debug_assert!(run.root.append_rel_array[rtindex as usize].is_some());
+
+    let mut rowid_var = copy_var(mcx, v)?;
+    rowid_var.varno = ROWID_VAR;
+    let rowid_node = Node::mk(mcx, rowid_var)?;
+
+    for i in 0..run.root.row_identity_vars.len() {
+        let (name, var_id) = {
+            let ri = &run.root.row_identity_vars[i];
+            (ri.rowidname, ri.rowidvar)
+        };
+        if name != rowid_name {
+            continue;
+        }
+        if types_nodes::equal(*run.root.expr_node(var_id), rowid_node) {
+            let cur = run.root.row_identity_vars[i].rowidrels.take();
+            run.root.row_identity_vars[i].rowidrels =
+                crate::relnode::relids_add_member(mcx, &cur, rtindex);
+            return Ok(());
+        }
+        panic!("conflicting uses of row-identity name \"{rowid_name}\"");
+    }
+
+    let rowidvar = run.intern_expr(rowid_node);
+    run.root.row_identity_vars.push(RowIdentityVarInfo {
+        rowidvar,
+        rowidwidth: lsyscache::get_typavgwidth(vartype, vartypmod)?,
+        rowidname: rowid_name,
+        rowidrels: crate::relnode::relids_singleton(mcx, rtindex),
+    });
+
+    let v = orig_var.as_var().expect("Var");
+    let mut refvar = copy_var(mcx, v)?;
+    refvar.varno = ROWID_VAR;
+    refvar.varattno = run.root.row_identity_vars.len() as i16;
+    let resno = run.processed_tlist.expect("processed_tlist set").len() as i16 + 1;
+    let tle = Node::mk_target_entry(mcx, Node::mk(mcx, refvar)?, resno, Some(rowid_name), true)?;
+    processed_tlist_append(run, tle)
+}
+
+// add_row_identity_columns (appendinfo.c); the FDW wholerow leg stays loud.
+pub fn add_row_identity_columns<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rtindex: u32,
+    relkind: u8,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    debug_assert!(matches!(
+        run.parse().commandType,
+        CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
+    ));
+    if relkind == types_rel::RELKIND_RELATION
+        || relkind == types_rel::RELKIND_MATVIEW
+        || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        let var = mk_var(
+            mcx,
+            rtindex,
+            types_tuple::htup::SelfItemPointerAttributeNumber as i16,
+            types_core::catalog::TIDOID,
+            -1,
+            0,
+        )?;
+        add_row_identity_var(run, var, rtindex, "ctid")?;
+    } else if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        panic!("add_row_identity_columns (appendinfo.c): FDW row identity; FDW lane");
+    }
+    Ok(())
+}
+
+// distribute_row_identity_vars (appendinfo.c).
+pub fn distribute_row_identity_vars<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
+    let mcx = run.mcx;
+    let parse = run.parse();
+    if !matches!(
+        parse.commandType,
+        CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
+    ) {
+        debug_assert!(run.root.row_identity_vars.is_empty());
+        return Ok(());
+    }
+    let result_relation = parse.resultRelation;
+    let target_rte = parse
+        .rtable
+        .nth(result_relation as usize - 1)
+        .as_range_tbl_entry()
+        .expect("rtable cell");
+    if !target_rte.inh {
+        debug_assert!(run.root.row_identity_vars.is_empty());
+        return Ok(());
+    }
+
+    if run.root.row_identity_vars.is_empty() {
+        // Every leaf was excluded: fall back to the top rel's own identity
+        // columns so the (never-executed) plan still carries junk columns.
+        let rel = table::table_open(mcx, target_rte.relid, types_rel::NoLock)?;
+        let relkind = rel.rd_rel.relkind;
+        rel.close(types_rel::NoLock)?;
+        add_row_identity_columns(run, result_relation as u32, relkind)?;
+        crate::initsplan::build_base_rel_tlists(run)?;
+        return Ok(());
+    }
+
+    let target_rel = run.root.simple_rel_array[result_relation as usize]
+        .expect("target rel built");
+    let tlist = run.processed_tlist.expect("processed_tlist set");
+    let mut rowid_refs: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("tlist cell");
+        if let Some(var) = tle.expr.as_var() {
+            if var.varno == ROWID_VAR {
+                rowid_refs.push(Node::mk(mcx, copy_var(mcx, var)?)?);
+            }
+        }
+    }
+    for var in rowid_refs.iter() {
+        let id = run.intern_expr(*var);
+        run.root.rel_reltarget_mut(target_rel).exprs.push(id);
+    }
+    Ok(())
+}
+
+// translate_col_privs (inherit.c): attnums offset by
+// FirstLowInvalidHeapAttributeNumber, whole-row expands to all inherited cols.
+fn translate_col_privs<'mcx>(
+    run: &PlannerRun<'mcx>,
+    parent_privs: &types_nodes::Bitmapset<'mcx>,
+    appinfo: &AppendRelInfo<'mcx>,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let mcx = run.mcx;
+    const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let mut child_privs = types_nodes::Bitmapset::empty();
+    for attno in (FLIHAN + 1)..0 {
+        if parent_privs.is_member(attno - FLIHAN) {
+            child_privs.add_member(mcx, attno - FLIHAN)?;
+        }
+    }
+    let whole_row = parent_privs.is_member(0 - FLIHAN);
+    for (i, &tid) in appinfo.translated_vars.iter().enumerate() {
+        let attno = i as i32 + 1;
+        if tid == NodeId::default() {
+            continue;
+        }
+        if whole_row || parent_privs.is_member(attno - FLIHAN) {
+            let var = run.root.expr_node(tid).as_var().expect("translated var");
+            child_privs.add_member(mcx, var.varattno as i32 - FLIHAN)?;
+        }
+    }
+    Ok(child_privs)
+}
+
+// has_partition_attrs (catalog/partition.c), the planner-side copy (the
+// tablecmds one is crate-private and the dep direction is wrong).
+fn has_partition_attrs<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attnums: &types_nodes::Bitmapset<'mcx>,
+) -> PgResult<bool> {
+    if attnums.is_empty() || rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+        return Ok(false);
+    }
+    const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let key = partcache::RelationGetPartitionKey(rel)?;
+    let mut partexprs_it = key.partexprs.iter();
+    for i in 0..key.partnatts as usize {
+        let partattno = key.partattrs[i];
+        if partattno != 0 {
+            if attnums.is_member(partattno as i32 - FLIHAN) {
+                return Ok(true);
+            }
+        } else {
+            let expr = partexprs_it.next().expect("partition key expression");
+            let mut expr_attrs = types_nodes::Bitmapset::empty();
+            vars::pull_varattnos(mcx, expr, 1, &mut expr_attrs)?;
+            if attnums.overlap(&expr_attrs) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+// get_translated_update_targetlist (appendinfo.c); FDW deparse consumer, kept
+// for the executor lane's contract.
+#[allow(dead_code)]
+pub fn get_translated_update_targetlist<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    relid: u32,
+) -> PgResult<(NodeList<'mcx>, PgVec<'mcx, i16>)> {
+    let mcx = run.mcx;
+    debug_assert!(run.parse().commandType == CmdType::CMD_UPDATE);
+    let result_relation = run.parse().resultRelation as u32;
+    if relid == result_relation {
+        let tl = run.processed_tlist.expect("processed_tlist set").clone_in(mcx)?;
+        let colnos = crate::relnode::pgvec_clone_shallow(mcx, &run.root.update_colnos);
+        return Ok((tl, colnos));
+    }
+    debug_assert!(crate::relnode::relids_is_member(
+        relid as i32,
+        &run.root.all_result_relids
+    ));
+    let childrel = run.root.simple_rel_array[relid as usize].expect("child rel built");
+    let toprel =
+        run.root.simple_rel_array[result_relation as usize].expect("target rel built");
+    let src = run.processed_tlist.expect("processed_tlist set").clone_in(mcx)?;
+    let mut tl = NodeList::nil();
+    for tle in &src {
+        tl.lappend(mcx, adjust_appendrel_attrs_multilevel(run, tle, childrel, toprel)?)?;
+    }
+    let colnos_src = crate::relnode::pgvec_clone_shallow(mcx, &run.root.update_colnos);
+    let colnos =
+        adjust_inherited_attnums_multilevel(run, colnos_src.as_slice(), relid, result_relation);
+    Ok((tl, colnos))
 }

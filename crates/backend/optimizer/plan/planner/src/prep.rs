@@ -569,7 +569,14 @@ pub fn preprocess_targetlist<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
                 run.root.update_colnos =
                     extract_update_targetlist_colnos(mcx, &parse.targetList);
             }
-            add_row_identity_columns(mcx, run, &parse.targetList, parse.resultRelation, &rel)?
+            if rte.inh {
+                // Inherited target: row identity is registered per leaf by
+                // expand_single_inheritance_child, or by
+                // distribute_row_identity_vars when every leaf is excluded.
+                parse.targetList.clone_in(mcx)?
+            } else {
+                add_row_identity_columns(mcx, run, &parse.targetList, parse.resultRelation, &rel)?
+            }
         }
     };
     if command_type == CmdType::CMD_MERGE {
