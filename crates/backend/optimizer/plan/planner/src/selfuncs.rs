@@ -1131,16 +1131,22 @@ pub fn examine_variable<'mcx>(
         acl_ok: false,
     };
 
-    // strip_all_phvs_deep is the identity here: PHV creation is loud
-    // upstream (prepjointree), so glob.last_ph_id is always 0 and C takes
-    // the same fast path.
-    debug_assert!(run.glob.last_ph_id == 0);
+    let (node, node_id) = if run.glob.last_ph_id != 0 && contain_placeholder(node) {
+        let stripped = strip_all_phvs_mutator(run.mcx, node)?;
+        (stripped, run.intern_expr(stripped))
+    } else {
+        (node, node_id)
+    };
 
     // C: look inside any binary-compatible relabeling (vartype stays the
-    // exposed type; the Var is returned without relabeling).
-    let (basenode, node_id) = match node.as_relabel_type() {
-        Some(r) => (r.arg, run.intern_expr(r.arg)),
-        None => (node, node_id),
+    // exposed type; the Var is returned without relabeling). Nested
+    // RelabelTypes can be adjacent after PHV stripping.
+    let (basenode, node_id) = {
+        let mut b = node;
+        while let Some(r) = b.as_relabel_type() {
+            b = r.arg;
+        }
+        if b.ptr_eq(node) { (node, node_id) } else { (b, run.intern_expr(b)) }
     };
     let node = basenode;
 
@@ -4227,4 +4233,42 @@ fn gincostestimate(
         index_correlation: 0.0,
         index_pages: data_pages_fetched,
     })
+}
+
+// strip_all_phvs_deep / contain_placeholder_walker / strip_all_phvs_mutator
+// (selfuncs.c): PHVs are transparent for statistics lookup.
+fn contain_placeholder(node: types_nodes::Node<'_>) -> bool {
+    struct W {
+        found: bool,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == types_nodes::NodeTag::T_PlaceHolderVar {
+                self.found = true;
+                return Ok(true);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { found: false };
+    use nodes_core::NodeWalker as _;
+    let _ = w.visit(node);
+    w.found
+}
+
+fn strip_all_phvs_mutator<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: types_nodes::Node<'mcx>,
+) -> PgResult<types_nodes::Node<'mcx>> {
+    fn mutate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: types_nodes::Node<'mcx>,
+    ) -> PgResult<Option<types_nodes::Node<'mcx>>> {
+        if let Some(phv) = node.as_place_holder_var() {
+            let inner = mutate(mcx, phv.phexpr)?.unwrap_or(phv.phexpr);
+            return Ok(Some(inner));
+        }
+        clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n))
+    }
+    Ok(mutate(mcx, node)?.unwrap_or(node))
 }

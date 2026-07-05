@@ -440,3 +440,28 @@ DROP TABLE ec_pe;
 EXPLAIN SELECT * FROM XMLTABLE('/r/e' PASSING '<r><e><n>1</n></e><e><n>2</n></e></r>'::xml COLUMNS n int PATH 'n') xt WHERE n = 1;
 EXPLAIN SELECT * FROM XMLTABLE('/r/e' PASSING '<r><e><n>1</n></e><e><n>2</n></e></r>'::xml COLUMNS n int PATH 'n') xt WHERE n > 1 AND n IS NOT NULL;
 EXPLAIN SELECT * FROM ec_small s JOIN XMLTABLE('/r/e' PASSING '<r><e><n>1</n></e><e><n>2</n></e></r>'::xml COLUMNS n int PATH 'n') xt ON s.x = xt.n;
+-- self-join elimination (analyzejoins.c remove_useless_self_joins)
+CREATE TABLE ec_sj (a int UNIQUE NOT NULL, b int, c int NOT NULL);
+CREATE UNIQUE INDEX ec_sj_bc ON ec_sj (b, c) NULLS NOT DISTINCT;
+INSERT INTO ec_sj SELECT i, i % 17, i % 23 FROM generate_series(0, 499) i;
+ANALYZE ec_sj;
+EXPLAIN SELECT * FROM ec_sj t1, ec_sj t2 WHERE t1.a = t2.a;
+EXPLAIN SELECT t1.b FROM ec_sj t1 JOIN ec_sj t2 ON t1.a = t2.a WHERE t2.c > 3;
+EXPLAIN SELECT * FROM ec_sj t1, ec_sj t2 WHERE t1.b = t2.b AND t1.c = t2.c;
+EXPLAIN SELECT * FROM ec_sj t1, ec_sj t2, ec_sj t3 WHERE t1.a = t2.a AND t2.a = t3.a;
+EXPLAIN SELECT * FROM ec_sj t1, ec_sj t2 WHERE t1.a = t2.b;
+EXPLAIN SELECT t1.a, (SELECT a FROM ec_sj WHERE a = t2.a AND a = t1.a) FROM ec_sj t1, ec_sj t2 WHERE t1.a = t2.a;
+EXPLAIN SELECT * FROM ec_sj t1 JOIN ec_sj t2 ON t1.a = t2.a FOR UPDATE OF t1;
+SET enable_self_join_elimination = off;
+EXPLAIN SELECT * FROM ec_sj t1, ec_sj t2 WHERE t1.a = t2.a;
+RESET enable_self_join_elimination;
+-- redundant GROUP BY columns (initsplan.c remove_useless_groupby_columns)
+CREATE TABLE ec_gb (pk int PRIMARY KEY, x int NOT NULL, y int, z int);
+CREATE UNIQUE INDEX ec_gb_x ON ec_gb (x);
+INSERT INTO ec_gb SELECT i, i, i % 7, i % 11 FROM generate_series(0, 499) i;
+ANALYZE ec_gb;
+EXPLAIN SELECT pk, y, count(*) FROM ec_gb GROUP BY pk, y, z;
+EXPLAIN SELECT x, y, count(*) FROM ec_gb GROUP BY x, y;
+EXPLAIN SELECT y, z, count(*) FROM ec_gb GROUP BY y, z;
+DROP TABLE ec_gb;
+DROP TABLE ec_sj;

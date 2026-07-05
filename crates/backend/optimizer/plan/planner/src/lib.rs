@@ -124,6 +124,7 @@ pub mod gucs {
     int_guc!(DEBUG_PARALLEL_QUERY, debug_parallel_query, set_debug_parallel_query, guc_tables::consts::DEBUG_PARALLEL_OFF);
     int_guc!(MAX_PARALLEL_WORKERS_PER_GATHER, max_parallel_workers_per_gather, set_max_parallel_workers_per_gather, 2);
     bool_guc!(JIT_ENABLED, jit_enabled, set_jit_enabled, true);
+    bool_guc!(ENABLE_SELF_JOIN_ELIMINATION, enable_self_join_elimination, set_enable_self_join_elimination, true);
     bool_guc!(JIT_EXPRESSIONS, jit_expressions, set_jit_expressions, true);
     bool_guc!(JIT_TUPLE_DEFORMING, jit_tuple_deforming, set_jit_tuple_deforming, true);
 }
@@ -225,6 +226,10 @@ pub fn init_seams() {
     guc_tables::vars::jit_tuple_deforming.install(GucVarAccessors {
         get: gucs::jit_tuple_deforming,
         set: gucs::set_jit_tuple_deforming,
+    });
+    guc_tables::vars::enable_self_join_elimination.install(GucVarAccessors {
+        get: gucs::enable_self_join_elimination,
+        set: gucs::set_enable_self_join_elimination,
     });
 }
 

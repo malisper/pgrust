@@ -659,6 +659,14 @@ fn convert_exists_sublink_to_join<'mcx>(
                 let r = jnode.as_range_tbl_ref().expect("RangeTblRef");
                 off_fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)?)?;
             }
+            NodeTag::T_JoinExpr => {
+                // Copy before the in-place walkers: the jointree nodes are
+                // shared with the plancache'd parse tree.
+                let copy = rewrite_manip::copy_node(mcx, jnode)?;
+                rewrite_manip::OffsetVarNodes(mcx, copy, rtoffset, 0)?;
+                rewrite_manip::IncrementVarSublevelsUp(copy, -1, 1)?;
+                off_fromlist.lappend(mcx, copy)?;
+            }
             other => panic!(
                 "OffsetVarNodes (rewriteManip.c): {other:?} EXISTS jointree arm; join lane"
             ),
@@ -684,7 +692,10 @@ fn convert_exists_sublink_to_join<'mcx>(
     for srte_node in &subselect.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
         assert!(
-            matches!(srte.rtekind, RTEKind::RTE_RELATION | RTEKind::RTE_SUBQUERY),
+            matches!(
+                srte.rtekind,
+                RTEKind::RTE_RELATION | RTEKind::RTE_SUBQUERY | RTEKind::RTE_JOIN
+            ),
             "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
             srte.rtekind
         );
@@ -694,6 +705,21 @@ fn convert_exists_sublink_to_join<'mcx>(
             srte.perminfoindex
         };
         let copy = crate::prepjointree::rte_copy_with_perminfoindex(mcx, srte, new_index)?;
+        if srte.rtekind == RTEKind::RTE_JOIN {
+            // OffsetVarNodes/IncrementVarSublevelsUp over the whole subselect
+            // reach joinaliasvars through the rangetable walk in C; the copy
+            // keeps the shared list unwritten.
+            let mut aliasvars = NodeList::nil();
+            for av in &srte.joinaliasvars {
+                aliasvars.lappend(mcx, offset_and_pull_down(mcx, av, rtoffset)?)?;
+            }
+            // SAFETY: exclusive pre-seal fixup of the fresh copy.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.joinaliasvars = aliasvars
+                })
+            };
+        }
         if srte.rtekind == RTEKind::RTE_SUBQUERY {
             // The C OffsetVarNodes/IncrementVarSublevelsUp pair over the whole
             // subselect reaches this RTE's body one level down; adjustment is

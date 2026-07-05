@@ -2101,6 +2101,9 @@ pub fn commute_restrictinfo<'mcx>(
 
 // check_mergejoinable (initsplan.c).
 fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()> {
+    if run.root.rinfo(rinfo).pseudoconstant {
+        return Ok(());
+    }
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
     let Some(o) = clause.as_op_expr().filter(|o| o.args.len() == 2) else {
         return Ok(());
@@ -2418,4 +2421,160 @@ fn get_join_domain_min_rels<'mcx>(
         }
     }
     result
+}
+
+// remove_useless_groupby_columns (initsplan.c): drop GROUP BY items
+// functionally dependent on other same-relation items via a NOT NULL (or
+// NULLS NOT DISTINCT) unique index.
+pub fn remove_useless_groupby_columns<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
+    use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let mcx = run.mcx;
+    let parse = run.parse();
+    if run.root.processed_groupClause.len() < 2 {
+        return Ok(());
+    }
+    if !parse.groupingSets.is_nil() {
+        return Ok(());
+    }
+
+    let nrtes = parse.rtable.len() + 1;
+    let mut groupbyattnos: PgVec<'mcx, types_pathnodes::Relids<'mcx>> = PgVec::new_in(mcx);
+    for _ in 0..nrtes {
+        groupbyattnos.push(None);
+    }
+    let mut tryremove = false;
+    let group_clause = crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause);
+    for &sgc_id in group_clause.iter() {
+        let sgref = run
+            .root
+            .expr_node(sgc_id)
+            .as_sort_group_clause()
+            .expect("SortGroupClause cell")
+            .tleSortGroupRef;
+        let tle = get_sortgroupclause_tle(sgref, &parse.targetList);
+        let Some(var) = tle.expr.as_var() else { continue };
+        if var.varlevelsup > 0 {
+            continue;
+        }
+        let relid = var.varno as usize;
+        debug_assert!(relid < nrtes);
+        tryremove |= !relids_is_empty(&groupbyattnos[relid]);
+        groupbyattnos[relid] = relids_add_member(
+            mcx,
+            &groupbyattnos[relid],
+            (var.varattno as i32 - FirstLowInvalidHeapAttributeNumber) as u32,
+        );
+    }
+    if !tryremove {
+        return Ok(());
+    }
+
+    let mut surplusvars: Option<PgVec<'mcx, types_pathnodes::Relids<'mcx>>> = None;
+    for relid in 1..nrtes {
+        let rte = parse
+            .rtable
+            .nth(relid - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell");
+        if rte.rtekind != types_nodes::parsenodes::RTEKind::RTE_RELATION {
+            continue;
+        }
+        // Traditional-inheritance parents may produce duplicate child rows.
+        if rte.inh && rte.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+            continue;
+        }
+        let relattnos = relids_copy(mcx, &groupbyattnos[relid]);
+        if relids_num_members(&relattnos) <= 1 {
+            continue;
+        }
+        let rel = find_base_rel(&run.root, relid as i32);
+        let mut best_keycolumns: types_pathnodes::Relids<'mcx> = None;
+        let mut best_nkeycolumns = i32::MAX;
+        for index in run.root.rel(rel).indexlist.iter() {
+            if !index.unique || !index.immediate || !index.indpred.is_empty() {
+                continue;
+            }
+            if !index.indexprs.is_empty() {
+                continue;
+            }
+            let mut ind_attnos: types_pathnodes::Relids<'mcx> = None;
+            let mut nulls_check_ok = true;
+            for i in 0..index.nkeycolumns as usize {
+                if !index.nullsnotdistinct
+                    && !relids_is_member(index.indexkeys[i], &run.root.rel(rel).notnullattnums)
+                {
+                    nulls_check_ok = false;
+                    break;
+                }
+                ind_attnos = relids_add_member(
+                    mcx,
+                    &ind_attnos,
+                    (index.indexkeys[i] - FirstLowInvalidHeapAttributeNumber) as u32,
+                );
+            }
+            if !nulls_check_ok {
+                continue;
+            }
+            if crate::relnode::relids_subset_compare(&ind_attnos, &relattnos)
+                != types_pathnodes::relids::SubsetCmp::Subset1
+            {
+                continue;
+            }
+            if index.nkeycolumns < best_nkeycolumns {
+                best_keycolumns = ind_attnos;
+                best_nkeycolumns = index.nkeycolumns;
+            }
+        }
+        if !relids_is_empty(&best_keycolumns) {
+            let sv = surplusvars.get_or_insert_with(|| {
+                let mut v = PgVec::new_in(mcx);
+                for _ in 0..nrtes {
+                    v.push(None);
+                }
+                v
+            });
+            sv[relid] = relids_difference(mcx, &relattnos, &best_keycolumns);
+        }
+    }
+
+    if let Some(surplusvars) = surplusvars {
+        let mut new_groupby: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+        for &sgc_id in group_clause.iter() {
+            let sgref = run
+                .root
+                .expr_node(sgc_id)
+                .as_sort_group_clause()
+                .expect("SortGroupClause cell")
+                .tleSortGroupRef;
+            let tle = get_sortgroupclause_tle(sgref, &parse.targetList);
+            let keep = match tle.expr.as_var() {
+                None => true,
+                Some(var) => {
+                    var.varlevelsup > 0
+                        || !relids_is_member(
+                            var.varattno as i32 - FirstLowInvalidHeapAttributeNumber,
+                            &surplusvars[var.varno as usize],
+                        )
+                }
+            };
+            if keep {
+                new_groupby.push(sgc_id);
+            }
+        }
+        run.root.processed_groupClause = new_groupby;
+    }
+    Ok(())
+}
+
+fn get_sortgroupclause_tle<'mcx>(
+    sortgroupref: types_core::Index,
+    tlist: &types_nodes::NodeList<'mcx>,
+) -> &'mcx types_nodes::primnodes::TargetEntry<'mcx> {
+    tlist
+        .iter()
+        .find_map(|n| {
+            let t = n.as_target_entry().expect("tlist cell");
+            (t.ressortgroupref == sortgroupref).then_some(t)
+        })
+        .expect("ORDER/GROUP BY expression not found in targetlist")
 }

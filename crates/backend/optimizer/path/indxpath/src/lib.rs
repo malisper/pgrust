@@ -1859,3 +1859,119 @@ fn bitmap_and_cost_est<'mcx>(
     let apath = pathnode::create_bitmap_and_path(run, rel, quals)?;
     bitmap_scan_cost_est(run, rel, apath)
 }
+
+// relation_has_unique_index_ext (indxpath.c): join clauses (outer_is_left
+// pre-set by the caller) plus the rel's mergejoinable var-op-pseudoconstant
+// baserestrictinfo clauses plus expr/operator pairs. extra_clauses receives
+// the baserestrictinfo clauses the proof used (SJE's uclauses).
+pub fn relation_has_unique_index_ext<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    restrictlist: &[RinfoId],
+    exprlist: &[Node<'mcx>],
+    oprlist: &[u32],
+    mut extra_clauses: Option<&mut PgVec<'mcx, RinfoId>>,
+) -> PgResult<bool> {
+    debug_assert!(exprlist.len() == oprlist.len());
+    if run.root.rel(rel).indexlist.is_empty() {
+        return Ok(false);
+    }
+    let mut rids: PgVec<'_, RinfoId> = PgVec::new_in(run.mcx);
+    rids.extend(restrictlist.iter().copied());
+    for i in 0..run.root.rel(rel).baserestrictinfo.len() {
+        let rid = run.root.rel(rel).baserestrictinfo[i];
+        {
+            let ri = run.root.rinfo(rid);
+            if ri.mergeopfamilies.is_empty() {
+                continue;
+            }
+        }
+        let (left_empty, right_empty) = {
+            let ri = run.root.rinfo(rid);
+            (
+                types_pathnodes::relids::relids_is_empty(&ri.left_relids),
+                types_pathnodes::relids::relids_is_empty(&ri.right_relids),
+            )
+        };
+        if left_empty {
+            run.root.rinfo_mut(rid).outer_is_left = true;
+        } else if right_empty {
+            run.root.rinfo_mut(rid).outer_is_left = false;
+        } else {
+            continue;
+        }
+        rids.push(rid);
+    }
+    if rids.is_empty() && exprlist.is_empty() {
+        return Ok(false);
+    }
+
+    let n_indexes = run.root.rel(rel).indexlist.len();
+    for i in 0..n_indexes {
+        let ind = run.root.rel(rel).indexlist[i];
+        if !ind.unique || !ind.immediate || !ind.indpred.is_empty() {
+            continue;
+        }
+        let mut exprs: PgVec<'mcx, RinfoId> = PgVec::new_in(run.mcx);
+        let mut all_matched = true;
+        for c in 0..ind.nkeycolumns as usize {
+            let mut matched = false;
+            for &rid in rids.iter() {
+                {
+                    let ri = run.root.rinfo(rid);
+                    if !ri.mergeopfamilies.iter().any(|&f| f == ind.opfamily[c]) {
+                        continue;
+                    }
+                }
+                let (clause_id, outer_is_left) = {
+                    let ri = run.root.rinfo(rid);
+                    (ri.clause, ri.outer_is_left)
+                };
+                let clause = *run.root.expr_node(clause_id);
+                let o = clause.as_op_expr().expect("mergejoinable clause is an OpExpr");
+                let rexpr = if outer_is_left { o.args.nth(1) } else { o.args.nth(0) };
+                if match_index_to_operand(run, rexpr, c, ind) {
+                    matched = true;
+                    if extra_clauses.is_some()
+                        && types_pathnodes::relids::relids_num_members(
+                            &run.root.rinfo(rid).clause_relids,
+                        ) == 1
+                    {
+                        debug_assert!(
+                            types_pathnodes::relids::relids_is_empty(
+                                &run.root.rinfo(rid).left_relids
+                            ) || types_pathnodes::relids::relids_is_empty(
+                                &run.root.rinfo(rid).right_relids
+                            )
+                        );
+                        exprs.push(rid);
+                    }
+                    break;
+                }
+            }
+            if !matched {
+                for (j, &expr) in exprlist.iter().enumerate() {
+                    if !match_index_to_operand(run, expr, c, ind) {
+                        continue;
+                    }
+                    if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {
+                        continue;
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                all_matched = false;
+                break;
+            }
+        }
+        if all_matched {
+            if let Some(out) = extra_clauses.as_deref_mut() {
+                *out = exprs;
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

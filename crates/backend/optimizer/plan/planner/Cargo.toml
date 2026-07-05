@@ -50,6 +50,7 @@ postgres_seams = { path = "../../../tcop/postgres_seams" }
 readfuncs = { path = "../../../nodes/readfuncs" }
 outfuncs = { path = "../../../nodes/outfuncs" }
 rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }

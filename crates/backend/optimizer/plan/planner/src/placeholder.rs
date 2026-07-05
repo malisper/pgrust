@@ -183,6 +183,25 @@ pub fn fix_placeholder_input_needed_levels<'mcx>(run: &mut PlannerRun<'mcx>) -> 
     Ok(())
 }
 
+pub fn rebuild_placeholder_attr_needed<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
+    for i in 0..run.root.placeholder_list.len() {
+        let id = run.root.placeholder_list[i];
+        let phexpr = *run.root.expr_node(run.root.phinfo(id).ph_var_phexpr);
+        let eval_at = relids_copy(run.mcx, &run.root.phinfo(id).ph_eval_at);
+        let vars = vars::pull_var_clause(
+            run.mcx,
+            phexpr,
+            vars::PVC_RECURSE_AGGREGATES
+                | vars::PVC_RECURSE_WINDOWFUNCS
+                | vars::PVC_INCLUDE_PLACEHOLDERS,
+        )?;
+        let mut v: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(run.mcx);
+        v.extend(vars.iter());
+        crate::initsplan::add_vars_to_attr_needed(run, &v, &eval_at);
+    }
+    Ok(())
+}
+
 // add_vars_to_targetlist (initsplan.c), PlaceHolderVar-bearing lists: Vars
 // delegate to the initsplan leg, PHVs get ph_needed grown.
 pub fn add_vars_to_targetlist_incl_phvs<'mcx>(

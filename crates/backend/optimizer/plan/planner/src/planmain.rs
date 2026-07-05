@@ -62,7 +62,8 @@ pub fn query_planner<'mcx>(
         add_base_rels_to_query(run, item)?;
     }
 
-    // remove_useless_groupby_columns: no GROUP BY on this spine.
+    crate::initsplan::remove_useless_groupby_columns(run)?;
+
     crate::initsplan::build_base_rel_tlists(run)?;
 
     crate::placeholder::find_placeholders_in_jointree(run)?;
@@ -83,13 +84,14 @@ pub fn query_planner<'mcx>(
 
     crate::analyzejoins::reduce_unique_semijoins(run)?;
 
+    let joinlist = crate::analyzejoins::remove_useless_self_joins(run, joinlist)?;
+
     crate::placeholder::add_placeholders_to_base_rels(run)?;
 
     crate::initsplan::create_lateral_join_info(run)?;
 
-    // self-join removal / match_foreign_keys_to_quals /
-    // extract_restriction_or_clauses / row identity vars: all no-ops with
-    // no fkeys and no OR clauses.
+    // match_foreign_keys_to_quals / extract_restriction_or_clauses /
+    // row identity vars: all no-ops with no fkeys and no OR clauses.
     debug_assert!(run.root.fkey_list.is_empty());
 
     crate::inherit::add_other_rels_to_query(run)?;
