@@ -589,6 +589,25 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_bool(out, r.pushedDown);
             w!(out, "}}");
         }
+        NodeTag::T_MergeAction => {
+            let m = node
+                .as_variant::<types_nodes::primnodes::MergeAction>()
+                .expect("MergeAction");
+            w!(
+                out,
+                "{{MERGEACTION :matchKind {} :commandType {} :override {}",
+                m.matchKind as u32,
+                m.commandType as u32,
+                m.r#override as u32
+            );
+            w!(out, " :qual ");
+            out_opt_node(out, m.qual)?;
+            w!(out, " :targetList ");
+            out_list(out, &m.targetList)?;
+            w!(out, " :updateColnos ");
+            out_int_list(out, &m.updateColnos);
+            w!(out, "}}");
+        }
         NodeTag::T_WithCheckOption => {
             let w = node
                 .as_variant::<types_nodes::parsenodes::WithCheckOption>()
