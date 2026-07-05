@@ -17,7 +17,7 @@ use types_nodes::rawnodes::{
 };
 use types_nodes::NodeList;
 use types_core::catalog::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED};
-use types_rel::{NoLock, Relation, ShareRowExclusiveLock, RELKIND_RELATION};
+use types_rel::{NoLock, Relation, ShareRowExclusiveLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 use types_trigger::{TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_ROW,
     TRIGGER_TYPE_UPDATE};
 
@@ -59,10 +59,12 @@ pub(crate) struct FkValidateItem<'mcx> {
 
 pub(crate) fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
     rel: &Relation<'mcx>,
     constraint: &Constraint<'mcx>,
     old_desc: &types_tuple::TupleDescData<'mcx>,
-) -> PgResult<Option<FkValidateItem<'mcx>>> {
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<()> {
     use types_nodes::rawnodes::ConstrType;
     match constraint.contype {
         ConstrType::CONSTR_FOREIGN => {}
@@ -95,17 +97,20 @@ pub(crate) fn ATExecAddConstraint<'mcx>(
         }
     };
 
-    at_add_foreign_key_constraint(mcx, rel, constraint, conname, old_desc)
+    at_add_foreign_key_constraint(mcx, wqueue, rel, constraint, conname, old_desc, lockmode)
 }
 
 // ATAddForeignKeyConstraint (tablecmds.c).
+#[allow(clippy::too_many_arguments)]
 fn at_add_foreign_key_constraint<'mcx>(
     mcx: Mcx<'mcx>,
+    wqueue: &mut crate::alter::Wqueue<'mcx>,
     rel: &Relation<'mcx>,
     fkconstraint: &Constraint<'mcx>,
     conname: &str,
     old_desc: &types_tuple::TupleDescData<'mcx>,
-) -> PgResult<Option<FkValidateItem<'mcx>>> {
+    lockmode: types_rel::LOCKMODE,
+) -> PgResult<()> {
     if fkconstraint.fk_with_period || fkconstraint.pk_with_period {
         unported("PERIOD (temporal FK)");
     }
@@ -422,11 +427,13 @@ fn at_add_foreign_key_constraint<'mcx>(
 
     let constr_oid = add_fk_constraint(
         mcx,
+        AddFkSide::BothSides,
         conname,
         fkconstraint,
         rel,
         &pkrel,
         index_oid,
+        InvalidOid,
         numfks,
         &pkattnum,
         &fkattnum,
@@ -434,27 +441,183 @@ fn at_add_foreign_key_constraint<'mcx>(
         &ppeqoperators,
         &ffeqoperators,
         &fkdelsetcols[..numfkdelsetcols],
+        false,
     )?;
 
+    add_fk_recurse_referenced(
+        mcx,
+        conname,
+        fkconstraint,
+        rel,
+        &pkrel,
+        index_oid,
+        constr_oid,
+        numfks,
+        &pkattnum,
+        &fkattnum,
+        &pfeqoperators,
+        &ppeqoperators,
+        &ffeqoperators,
+        &fkdelsetcols[..numfkdelsetcols],
+        old_check_ok,
+        InvalidOid,
+        InvalidOid,
+    )?;
+
+    add_fk_recurse_referencing(
+        mcx,
+        Some(wqueue),
+        conname,
+        fkconstraint,
+        rel,
+        &pkrel,
+        index_oid,
+        constr_oid,
+        numfks,
+        &pkattnum,
+        &fkattnum,
+        &pfeqoperators,
+        &ppeqoperators,
+        &ffeqoperators,
+        &fkdelsetcols[..numfkdelsetcols],
+        old_check_ok,
+        lockmode,
+        InvalidOid,
+        InvalidOid,
+    )?;
+
+    pkrel.close(NoLock)
+}
+
+// addFkRecurseReferenced (tablecmds.c): action triggers on the referenced
+// side, recursing to referenced-side partitions.
+#[allow(clippy::too_many_arguments)]
+fn add_fk_recurse_referenced<'mcx>(
+    mcx: Mcx<'mcx>,
+    conname: &str,
+    fkconstraint: &Constraint<'mcx>,
+    rel: &Relation<'mcx>,
+    pkrel: &Relation<'mcx>,
+    index_oid: Oid,
+    parent_constr: Oid,
+    numfks: usize,
+    pkattnum: &[i16],
+    fkattnum: &[i16],
+    pfeqoperators: &[Oid],
+    ppeqoperators: &[Oid],
+    ffeqoperators: &[Oid],
+    fkdelsetcols: &[i16],
+    old_check_ok: bool,
+    parent_del_trigger: Oid,
+    parent_upd_trigger: Oid,
+) -> PgResult<()> {
+    let _ = (conname, old_check_ok);
+    let (mut delete_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
     if fkconstraint.is_enforced {
-        create_foreign_key_action_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
-        create_foreign_key_check_triggers(mcx, rel.rd_id, pkrel.rd_id, fkconstraint, constr_oid, index_oid)?;
+        (delete_trigger_oid, update_trigger_oid) = create_foreign_key_action_triggers(
+            mcx,
+            rel.rd_id,
+            pkrel.rd_id,
+            fkconstraint,
+            parent_constr,
+            index_oid,
+            parent_del_trigger,
+            parent_upd_trigger,
+        )?;
+    }
+    let _ = (
+        delete_trigger_oid,
+        update_trigger_oid,
+        numfks,
+        pkattnum,
+        fkattnum,
+        pfeqoperators,
+        ppeqoperators,
+        ffeqoperators,
+        fkdelsetcols,
+    );
+    if pkrel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        unported("addFkRecurseReferenced onto referenced-side partitions");
+    }
+    Ok(())
+}
+
+// addFkRecurseReferencing (tablecmds.c): check triggers and Phase-3 queueing
+// on the referencing side, recursing to referencing-side partitions.
+#[allow(clippy::too_many_arguments)]
+fn add_fk_recurse_referencing<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: Option<&mut crate::alter::Wqueue<'mcx>>,
+    conname: &str,
+    fkconstraint: &Constraint<'mcx>,
+    rel: &Relation<'mcx>,
+    pkrel: &Relation<'mcx>,
+    index_oid: Oid,
+    parent_constr: Oid,
+    numfks: usize,
+    pkattnum: &[i16],
+    fkattnum: &[i16],
+    pfeqoperators: &[Oid],
+    ppeqoperators: &[Oid],
+    ffeqoperators: &[Oid],
+    fkdelsetcols: &[i16],
+    old_check_ok: bool,
+    lockmode: types_rel::LOCKMODE,
+    parent_ins_trigger: Oid,
+    parent_upd_trigger: Oid,
+) -> PgResult<()> {
+    debug_assert!(parent_constr != InvalidOid);
+    let _ = (conname, lockmode);
+    if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        return Err(err(
+            "foreign key constraints are not supported on foreign tables".into(),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
     }
 
-    let validate = if !old_check_ok && !fkconstraint.skip_validation && fkconstraint.is_enforced {
-        debug_assert!(rel.rd_rel.relkind == RELKIND_RELATION);
-        Some(FkValidateItem {
-            conname: str_in(mcx, conname)?,
-            refrelid: pkrel.rd_id,
-            refindid: index_oid,
-            conid: constr_oid,
-        })
-    } else {
-        None
-    };
+    let (mut insert_trigger_oid, mut update_trigger_oid) = (InvalidOid, InvalidOid);
+    if fkconstraint.is_enforced {
+        (insert_trigger_oid, update_trigger_oid) = create_foreign_key_check_triggers(
+            mcx,
+            rel.rd_id,
+            pkrel.rd_id,
+            fkconstraint,
+            parent_constr,
+            index_oid,
+            parent_ins_trigger,
+            parent_upd_trigger,
+        )?;
+    }
+    let _ = (
+        insert_trigger_oid,
+        update_trigger_oid,
+        numfks,
+        pkattnum,
+        fkattnum,
+        pfeqoperators,
+        ppeqoperators,
+        ffeqoperators,
+        fkdelsetcols,
+    );
 
-    pkrel.close(NoLock)?;
-    Ok(validate)
+    if rel.rd_rel.relkind == RELKIND_RELATION {
+        if let Some(wqueue) = wqueue {
+            if !old_check_ok && !fkconstraint.skip_validation && fkconstraint.is_enforced {
+                let name = lsyscache::get_constraint_name(mcx, parent_constr)?
+                    .unwrap_or_else(|| panic!("cache lookup failed for constraint {parent_constr}"));
+                let tabidx = crate::alter::ATGetQueueEntry(mcx, wqueue, rel);
+                wqueue[tabidx].fk_checks.push(FkValidateItem {
+                    conname: str_in(mcx, name.as_str())?,
+                    refrelid: pkrel.rd_id,
+                    refindid: index_oid,
+                    conid: parent_constr,
+                });
+            }
+        }
+    } else if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        unported("addFkRecurseReferencing onto referencing-side partitions");
+    }
+    Ok(())
 }
 
 // findFkeyCast (tablecmds.c); a previously-relied-upon cast must still exist.
@@ -790,15 +953,25 @@ fn transform_fkey_check_attrs<'mcx>(
     ))
 }
 
-// addFkConstraint (tablecmds.c), addFkBothSides top-level arm.
+// addFkConstraintSides (tablecmds.c).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddFkSide {
+    ReferencedSide,
+    ReferencingSide,
+    BothSides,
+}
+
+// addFkConstraint (tablecmds.c).
 #[allow(clippy::too_many_arguments)]
 fn add_fk_constraint<'mcx>(
     mcx: Mcx<'mcx>,
-    conname: &str,
+    fkside: AddFkSide,
+    constraintname: &str,
     fkconstraint: &Constraint<'mcx>,
     rel: &Relation<'mcx>,
     pkrel: &Relation<'mcx>,
     index_oid: Oid,
+    parent_constr: Oid,
     numfks: usize,
     pkattnum: &[i16],
     fkattnum: &[i16],
@@ -806,14 +979,41 @@ fn add_fk_constraint<'mcx>(
     ppeqoperators: &[Oid],
     ffeqoperators: &[Oid],
     fkdelsetcols: &[i16],
+    // C forwards is_internal to the object-access hooks, which do not exist
+    // here.
+    _is_internal: bool,
 ) -> PgResult<Oid> {
+    // Redundant at the top level; needed when recursing to referenced
+    // partitions.
+    if pkrel.rd_rel.relkind != RELKIND_RELATION
+        && pkrel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
+    {
+        return Err(err(
+            format!("referenced relation \"{}\" is not a table", pkrel.name()),
+            ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+
     let conname_storage;
-    let conname = if constraint_name_is_used(mcx, rel.rd_id, conname)? {
-        conname_storage =
-            pg_constraint::ChooseConstraintName(mcx, conname, None, "", rel.rd_rel.relnamespace, &[])?;
+    let conname = if constraint_name_is_used(mcx, rel.rd_id, constraintname)? {
+        conname_storage = pg_constraint::ChooseConstraintName(
+            mcx,
+            constraintname,
+            None,
+            "",
+            rel.rd_rel.relnamespace,
+            &[],
+        )?;
         conname_storage.as_str()
     } else {
-        conname
+        constraintname
+    };
+
+    let (conislocal, coninhcount, connoinherit) = if parent_constr != InvalidOid {
+        (false, 1, false)
+    } else {
+        // always inherit for partitioned tables, never for legacy inheritance
+        (true, 0, rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE)
     };
 
     let mut entry = pg_constraint::ConstraintEntry::base(
@@ -826,6 +1026,7 @@ fn add_fk_constraint<'mcx>(
     entry.deferred = fkconstraint.initdeferred;
     entry.is_enforced = fkconstraint.is_enforced;
     entry.is_validated = fkconstraint.initially_valid;
+    entry.parent_constr_id = parent_constr;
     entry.conkey = &fkattnum[..numfks];
     entry.n_keys = numfks;
     entry.index_relid = index_oid;
@@ -838,16 +1039,45 @@ fn add_fk_constraint<'mcx>(
     entry.fk_upd_type = fkconstraint.fk_upd_action;
     entry.fk_del_type = fkconstraint.fk_del_action;
     entry.fk_match_type = fkconstraint.fk_matchtype;
-    entry.is_local = true;
-    entry.inhcount = 0;
-    entry.is_no_inherit = true;
+    entry.is_local = conislocal;
+    entry.inhcount = coninhcount;
+    entry.is_no_inherit = connoinherit;
     let constr_oid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
+
+    // Subsidiary rows in partitions hang off the parent constraint: an
+    // internal dependency on the referenced side, partition-primary/secondary
+    // dependencies on the referencing side.
+    if parent_constr != InvalidOid {
+        use pg_depend::{DependencyType, ObjectAddress};
+        let address = ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, constr_oid);
+        let referenced = ObjectAddress::set(types_core::CONSTRAINT_RELATION_ID, parent_constr);
+        debug_assert!(fkside != AddFkSide::BothSides);
+        if fkside == AddFkSide::ReferencedSide {
+            pg_depend::recordDependencyOn(mcx, &address, &referenced, DependencyType::Internal)?;
+        } else {
+            pg_depend::recordDependencyOn(
+                mcx,
+                &address,
+                &referenced,
+                DependencyType::PartitionPri,
+            )?;
+            let referenced = ObjectAddress::set(types_core::RELATION_RELATION_ID, rel.rd_id);
+            pg_depend::recordDependencyOn(
+                mcx,
+                &address,
+                &referenced,
+                DependencyType::PartitionSec,
+            )?;
+        }
+    }
+
     xact::CommandCounterIncrement()?;
     Ok(constr_oid)
 }
 
 // createForeignKeyActionTriggers (tablecmds.c): AFTER DELETE + AFTER UPDATE
 // row triggers on the referenced rel.
+#[allow(clippy::too_many_arguments)]
 fn create_foreign_key_action_triggers<'mcx>(
     mcx: Mcx<'mcx>,
     my_rel_oid: Oid,
@@ -855,7 +1085,9 @@ fn create_foreign_key_action_triggers<'mcx>(
     fkconstraint: &Constraint<'_>,
     constraint_oid: Oid,
     index_oid: Oid,
-) -> PgResult<()> {
+    parent_del_trigger: Oid,
+    parent_upd_trigger: Oid,
+) -> PgResult<(Oid, Oid)> {
     let del_func = match fkconstraint.fk_del_action {
         FKCONSTR_ACTION_NOACTION => F_RI_FKEY_NOACTION_DEL,
         FKCONSTR_ACTION_RESTRICT => F_RI_FKEY_RESTRICT_DEL,
@@ -864,7 +1096,7 @@ fn create_foreign_key_action_triggers<'mcx>(
         FKCONSTR_ACTION_SETDEFAULT => F_RI_FKEY_SETDEFAULT_DEL,
         other => panic!("unrecognized FK action type: {other:?}"),
     };
-    trigger::CreateTriggerInternal(
+    let delete_trig_oid = trigger::CreateTriggerInternal(
         mcx,
         &trigger::InternalTriggerArgs {
             trigname_base: "RI_ConstraintTrigger_a",
@@ -878,6 +1110,7 @@ fn create_foreign_key_action_triggers<'mcx>(
                 && fkconstraint.fk_del_action == FKCONSTR_ACTION_NOACTION,
             initdeferred: fkconstraint.initdeferred
                 && fkconstraint.fk_del_action == FKCONSTR_ACTION_NOACTION,
+            parent_trigger_oid: parent_del_trigger,
         },
     )?;
     xact::CommandCounterIncrement()?;
@@ -889,7 +1122,7 @@ fn create_foreign_key_action_triggers<'mcx>(
         FKCONSTR_ACTION_SETDEFAULT => F_RI_FKEY_SETDEFAULT_UPD,
         other => panic!("unrecognized FK action type: {other:?}"),
     };
-    trigger::CreateTriggerInternal(
+    let update_trig_oid = trigger::CreateTriggerInternal(
         mcx,
         &trigger::InternalTriggerArgs {
             trigname_base: "RI_ConstraintTrigger_a",
@@ -903,13 +1136,15 @@ fn create_foreign_key_action_triggers<'mcx>(
                 && fkconstraint.fk_upd_action == FKCONSTR_ACTION_NOACTION,
             initdeferred: fkconstraint.initdeferred
                 && fkconstraint.fk_upd_action == FKCONSTR_ACTION_NOACTION,
+            parent_trigger_oid: parent_upd_trigger,
         },
     )?;
-    Ok(())
+    Ok((delete_trig_oid, update_trig_oid))
 }
 
 // createForeignKeyCheckTriggers / CreateFKCheckTrigger (tablecmds.c): AFTER
 // INSERT + AFTER UPDATE row triggers on the referencing rel.
+#[allow(clippy::too_many_arguments)]
 fn create_foreign_key_check_triggers<'mcx>(
     mcx: Mcx<'mcx>,
     my_rel_oid: Oid,
@@ -917,8 +1152,10 @@ fn create_foreign_key_check_triggers<'mcx>(
     fkconstraint: &Constraint<'_>,
     constraint_oid: Oid,
     index_oid: Oid,
-) -> PgResult<()> {
-    trigger::CreateTriggerInternal(
+    parent_ins_trigger: Oid,
+    parent_upd_trigger: Oid,
+) -> PgResult<(Oid, Oid)> {
+    let insert_trig_oid = trigger::CreateTriggerInternal(
         mcx,
         &trigger::InternalTriggerArgs {
             trigname_base: "RI_ConstraintTrigger_c",
@@ -930,10 +1167,11 @@ fn create_foreign_key_check_triggers<'mcx>(
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_INSERT,
             deferrable: fkconstraint.deferrable,
             initdeferred: fkconstraint.initdeferred,
+            parent_trigger_oid: parent_ins_trigger,
         },
     )?;
     xact::CommandCounterIncrement()?;
-    trigger::CreateTriggerInternal(
+    let update_trig_oid = trigger::CreateTriggerInternal(
         mcx,
         &trigger::InternalTriggerArgs {
             trigname_base: "RI_ConstraintTrigger_c",
@@ -945,10 +1183,11 @@ fn create_foreign_key_check_triggers<'mcx>(
             tgtype: TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
             deferrable: fkconstraint.deferrable,
             initdeferred: fkconstraint.initdeferred,
+            parent_trigger_oid: parent_upd_trigger,
         },
     )?;
     xact::CommandCounterIncrement()?;
-    Ok(())
+    Ok((insert_trig_oid, update_trig_oid))
 }
 
 // ConstraintNameIsUsed (pg_constraint.c), CONSTRAINT_RELATION arm.

@@ -394,7 +394,7 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     verify_new_notnull: bool,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
     constraints: PgVec<'mcx, NewConstraint<'mcx>>,
-    fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
+    pub(crate) fk_checks: PgVec<'mcx, crate::fk::FkValidateItem<'mcx>>,
     pub(crate) partition_constraint: Option<Node<'mcx>>,
     pub(crate) validate_default: bool,
     changed_constraints: Vec<(Oid, String)>,
@@ -433,7 +433,7 @@ impl<'mcx> AlteredTableInfo<'mcx> {
     }
 }
 
-type Wqueue<'mcx> = PgVec<'mcx, AlteredTableInfo<'mcx>>;
+pub(crate) type Wqueue<'mcx> = PgVec<'mcx, AlteredTableInfo<'mcx>>;
 
 pub(crate) fn ATGetQueueEntry<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1097,7 +1097,15 @@ fn ATRewriteCatalogs<'mcx>(
                                 query_string,
                             )?;
                         }
-                        _ => ATExecAddConstraint(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?,
+                        _ => ATExecAddConstraint(
+                            mcx,
+                            wqueue,
+                            tabidx,
+                            &rel,
+                            cmd,
+                            query_string,
+                            lockmode,
+                        )?,
                     }
                 }
                 AlterTableType::AT_DropConstraint => {
@@ -1146,7 +1154,15 @@ fn ATRewriteCatalogs<'mcx>(
                                 query_string,
                             )?;
                         }
-                        _ => ATExecAddConstraint(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?,
+                        _ => ATExecAddConstraint(
+                            mcx,
+                            wqueue,
+                            tabidx,
+                            &rel,
+                            cmd,
+                            query_string,
+                            lockmode,
+                        )?,
                     }
                 }
                 AlterTableType::AT_ReAddDomainConstraint => {
@@ -4136,19 +4152,19 @@ fn pg_index_all_keys<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<PgVec<'mcx
 // ATExecAddConstraint residue: FK only (CHECK/NN ride ATAddCheckNNConstraint).
 fn ATExecAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
-    tab: &mut AlteredTableInfo<'mcx>,
+    wqueue: &mut Wqueue<'mcx>,
+    tabidx: usize,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
     query_string: &str,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    let _ = (query_string, &tab.relid);
+    let _ = query_string;
     let defnode = cmd.def.expect("AT_AddConstraint Constraint");
     let constr = defnode.as_variant::<Constraint>().expect("Constraint");
     if constr.contype == ConstrType::CONSTR_FOREIGN {
-        if let Some(item) = crate::fk::ATExecAddConstraint(mcx, rel, constr, &tab.old_desc)? {
-            tab.fk_checks.push(item);
-        }
-        return Ok(());
+        let old_desc = wqueue[tabidx].old_desc.clone();
+        return crate::fk::ATExecAddConstraint(mcx, wqueue, rel, constr, &old_desc, lockmode);
     }
     unported(&format!("ATExecAddConstraint {:?}", constr.contype));
 }
