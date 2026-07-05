@@ -2612,3 +2612,253 @@ fn jit_single_step_matches_run_program() {
         crate::compile::SKIP_FUSE_FOR_TESTS.with(|c| c.set(false));
     });
 }
+
+// ---- Copy-and-patch JIT parity fuzz (jit.rs) ----
+//
+// Random expression programs from the census distribution (bool trees, int
+// cmp/arith with overflow, NULL mixes, CASE/COALESCE jumps, null/bool
+// tests), JIT vs interpreter byte-compared on (value, isnull) and on error
+// (message + sqlstate). Off-aarch64 the JIT never engages and the test
+// degrades to interpreter self-comparison.
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 11
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+const FUZZ_COLS: usize = 3;
+
+fn fuzz_i32(rng: &mut Lcg) -> i32 {
+    match rng.below(8) {
+        0 => i32::MAX,
+        1 => i32::MIN,
+        2 => 0,
+        3 => 7,
+        4 => -500_000,
+        5 => 500_000,
+        6 => 0x4000_0000,
+        _ => rng.next() as i32,
+    }
+}
+
+fn fuzz_int_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> {
+    match if depth == 0 { rng.below(2) } else { rng.below(6) } {
+        0 => mk_scan_var(mcx, (rng.below(FUZZ_COLS as u64) + 1) as i16, INT4OID),
+        1 => mk_int4_const(mcx, (rng.below(5) != 0).then(|| fuzz_i32(rng))),
+        // int4pl/int4mi/int4mul: the emitter's inline-arith stencils with
+        // overflow falling into the real fmgr call.
+        2 | 3 => {
+            let f = [177u32, 181, 141][rng.below(3) as usize];
+            let mut args = NodeList::nil();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
+            mk_opexpr(mcx, f, INT4OID, args)
+        }
+        // CASE WHEN b THEN x ELSE y (JumpIfNotTrue/Jump skeleton).
+        4 => {
+            let when = ::types_nodes::primnodes::CaseWhen {
+                expr: Some(fuzz_bool_expr(mcx, rng, depth - 1)),
+                result: Some(fuzz_int_expr(mcx, rng, depth - 1)),
+                location: -1,
+            };
+            let mut args = NodeList::nil();
+            args.lappend(mcx, Node::mk(mcx, when).unwrap()).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::CaseExpr {
+                    casetype: INT4OID,
+                    casecollid: 0,
+                    arg: None,
+                    args,
+                    defresult: Some(fuzz_int_expr(mcx, rng, depth - 1)),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        }
+        // COALESCE(x, y) (JumpIfNotNull skeleton).
+        _ => {
+            let mut args = NodeList::nil();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth - 1)).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::CoalesceExpr {
+                    coalescetype: INT4OID,
+                    coalescecollid: 0,
+                    args,
+                    location: -1,
+                },
+            )
+            .unwrap()
+        }
+    }
+}
+
+fn fuzz_bool_expr<'mcx>(mcx: Mcx<'mcx>, rng: &mut Lcg, depth: u32) -> Node<'mcx> {
+    use ::types_nodes::primnodes::BoolExprType::{AND_EXPR, NOT_EXPR, OR_EXPR};
+    match if depth == 0 { rng.below(2) } else { rng.below(6) } {
+        // int4 cmp over int subtrees (CmpOp inline stencils).
+        0 | 1 => {
+            let f = [65u32, 144, 66, 149, 147, 150][rng.below(6) as usize];
+            let mut args = NodeList::nil();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth.saturating_sub(1))).unwrap();
+            args.lappend(mcx, fuzz_int_expr(mcx, rng, depth.saturating_sub(1))).unwrap();
+            mk_opexpr(mcx, f, BOOLOID, args)
+        }
+        2 => {
+            let op = [AND_EXPR, OR_EXPR][rng.below(2) as usize];
+            let mut args = NodeList::nil();
+            for _ in 0..2 + rng.below(2) {
+                args.lappend(mcx, fuzz_bool_expr(mcx, rng, depth - 1)).unwrap();
+            }
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::BoolExpr { boolop: op, args, location: -1 },
+            )
+            .unwrap()
+        }
+        3 => {
+            let mut args = NodeList::nil();
+            args.lappend(mcx, fuzz_bool_expr(mcx, rng, depth - 1)).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::BoolExpr { boolop: NOT_EXPR, args, location: -1 },
+            )
+            .unwrap()
+        }
+        4 => Node::mk(
+            mcx,
+            ::types_nodes::primnodes::NullTest {
+                arg: Some(fuzz_int_expr(mcx, rng, depth - 1)),
+                nulltesttype: if rng.below(2) == 0 {
+                    ::types_nodes::primnodes::NullTestType::IS_NULL
+                } else {
+                    ::types_nodes::primnodes::NullTestType::IS_NOT_NULL
+                },
+                argisrow: false,
+                location: -1,
+            },
+        )
+        .unwrap(),
+        _ => Node::mk(
+            mcx,
+            ::types_nodes::primnodes::BooleanTest {
+                arg: Some(fuzz_bool_expr(mcx, rng, depth - 1)),
+                booltesttype: match rng.below(4) {
+                    0 => ::types_nodes::primnodes::BoolTestType::IS_TRUE,
+                    1 => ::types_nodes::primnodes::BoolTestType::IS_NOT_TRUE,
+                    2 => ::types_nodes::primnodes::BoolTestType::IS_FALSE,
+                    _ => ::types_nodes::primnodes::BoolTestType::IS_NOT_FALSE,
+                },
+                location: -1,
+            },
+        )
+        .unwrap(),
+    }
+}
+
+type FuzzOutcome = Result<(bool, usize), (String, String)>;
+
+fn fuzz_eval<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut ExprState<'mcx>,
+    row: &[Option<i32>],
+) -> FuzzOutcome {
+    let mut slot = virtual_slot(mcx, row);
+    let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+    match exec_eval_expr(state, &mut slots) {
+        Ok(nd) => Ok((nd.isnull, if nd.isnull { 0 } else { nd.value.as_usize() })),
+        Err(e) => Err((e.message.clone(), format!("{:?}", e.sqlstate))),
+    }
+}
+
+#[test]
+fn jit_parity_fuzz() {
+    with_mcx(|mcx| {
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+        let mut jitted = 0usize;
+        for tree in 0..300u32 {
+            let expr = fuzz_bool_expr(mcx, &mut rng, 3);
+            let mut interp =
+                exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            interp.arm_result_mcx(mcx);
+            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
+            let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            jit.arm_result_mcx(mcx);
+            // Kernels stay alive for the eval loop (estate-collector analog).
+            let col = crate::jit::session_end();
+            #[cfg(target_arch = "aarch64")]
+            if matches!(jit.kernel(), Kernel::Program) {
+                assert!(jit.jit.is_some(), "tree {tree}: Program shape refused by the emitter");
+            }
+            if jit.jit.is_some() {
+                jitted += 1;
+            }
+            for _row in 0..64u32 {
+                let row: alloc::vec::Vec<Option<i32>> = (0..FUZZ_COLS)
+                    .map(|_| (rng.below(5) != 0).then(|| fuzz_i32(&mut rng)))
+                    .collect();
+                let want = fuzz_eval(mcx, &mut interp, &row);
+                let got = fuzz_eval(mcx, &mut jit, &row);
+                assert_eq!(want, got, "tree {tree} row {row:?}");
+            }
+            drop(col);
+        }
+        #[cfg(target_arch = "aarch64")]
+        assert!(jitted > 0, "no jitted programs in the whole fuzz corpus");
+        let _ = jitted;
+    });
+}
+
+#[test]
+fn jit_parity_qual_lists() {
+    // Multi-clause qual programs: the Qual stencil's jumpdone legs, false-on-
+    // NULL semantics, and the heap-slot FETCHSOME helper path.
+    with_mcx(|mcx| {
+        let mut rng = Lcg(0xC0FF_EE00_D15E_A5E5);
+        for tree in 0..150u32 {
+            let mut qual = NodeList::nil();
+            for _ in 0..1 + rng.below(3) {
+                qual.lappend(mcx, fuzz_bool_expr(mcx, &mut rng, 2)).unwrap();
+            }
+            let mut interp = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
+            let mut jit = exec_init_qual(mcx, &qual, ParamBind::NONE).unwrap().unwrap();
+            let col = crate::jit::session_end();
+            for _row in 0..32u32 {
+                let row: alloc::vec::Vec<Option<i32>> = (0..FUZZ_COLS)
+                    .map(|_| (rng.below(5) != 0).then(|| fuzz_i32(&mut rng)))
+                    .collect();
+                let heap = rng.below(2) == 0;
+                fn run_one<'mcx>(
+                    mcx: Mcx<'mcx>,
+                    heap: bool,
+                    row: &[Option<i32>],
+                    state: &mut ExprState<'mcx>,
+                ) -> Result<bool, (String, String)> {
+                    let mut slot =
+                        if heap { heap_slot(mcx, row) } else { virtual_slot(mcx, row) };
+                    let mut slots =
+                        EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+                    match exec_qual(Some(state), &mut slots) {
+                        Ok(b) => Ok(b),
+                        Err(e) => Err((e.message.clone(), format!("{:?}", e.sqlstate))),
+                    }
+                }
+                let want = run_one(mcx, heap, &row, &mut interp);
+                let got = run_one(mcx, heap, &row, &mut jit);
+                assert_eq!(want, got, "tree {tree} row {row:?} heap={heap}");
+            }
+            drop(col);
+        }
+    });
+}

@@ -150,11 +150,14 @@ pub(crate) fn try_compile(state: &mut ExprState<'_>) {
     }
     let t0 = std::time::Instant::now();
     let Some(words) = emit::emit_program(state) else {
+        note_refusal(state);
         return;
     };
     let Some(block) = ::jit_deform::install_code(&words) else {
+        stats().arena_full.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
     };
+    stats().compiled.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // SAFETY: block holds a complete kernel starting at base, RX-mapped.
     let entry: KernelFn = unsafe { core::mem::transmute(block.base()) };
     let nanos = t0.elapsed().as_nanos() as u64;
@@ -166,6 +169,38 @@ pub(crate) fn try_compile(state: &mut ExprState<'_>) {
         cur.instr.generation_nanos += nanos;
     });
     state.jit = Some(JitHandle { entry });
+}
+
+// Coverage accounting (journal evidence; PGRUST_JITQ_LOG=1 additionally logs
+// each refusal's first unsupported step to stderr). Zero refusals on the
+// regress corpus with JIT forced is the landing bar.
+#[derive(Default)]
+pub struct JitStats {
+    pub compiled: core::sync::atomic::AtomicU64,
+    pub refused: core::sync::atomic::AtomicU64,
+    pub arena_full: core::sync::atomic::AtomicU64,
+}
+
+pub fn stats() -> &'static JitStats {
+    static STATS: std::sync::OnceLock<JitStats> = std::sync::OnceLock::new();
+    STATS.get_or_init(JitStats::default)
+}
+
+fn note_refusal(state: &ExprState<'_>) {
+    stats().refused.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *LOG.get_or_init(|| {
+        matches!(std::env::var("PGRUST_JITQ_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0")
+    }) {
+        for s in state.steps() {
+            if !emit::step_supported(s) {
+                let d = format!("{s:?}");
+                let name = d.split([' ', '{']).next().unwrap_or(&d);
+                eprintln!("jitq refuse: {name} (program {} steps)", state.steps().len());
+                break;
+            }
+        }
+    }
 }
 
 fn slot_arrays(slot: Option<&mut SlotData<'_>>) -> (*const Datum, *const bool) {
@@ -655,6 +690,10 @@ mod emit {
     // refusal set must reach zero on the regress corpus).
     fn helper_supported(step: &Step) -> bool {
         crate::interp::step_has_helper(step)
+    }
+
+    pub(super) fn step_supported(step: &Step) -> bool {
+        step_stencilable(step) || helper_supported(step)
     }
 
     fn emit_write_out_const(e: &mut Emitter, out: u64, value: Datum, isnull: bool) {
@@ -1221,5 +1260,9 @@ mod emit {
 
     pub(super) fn emit_program(_state: &ExprState<'_>) -> Option<Vec<u32>> {
         None
+    }
+
+    pub(super) fn step_supported(_step: &Step) -> bool {
+        false
     }
 }
