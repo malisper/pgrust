@@ -721,7 +721,7 @@ pub fn exec_init_window_agg<'mcx>(
         node.partOperators,
         node.partCollations,
     )?;
-    let ord_eq = build_eq(
+    let mut ord_eq = build_eq(
         mcx,
         outer_desc,
         node.ordNumCols,
@@ -729,6 +729,15 @@ pub fn exec_init_window_agg<'mcx>(
         node.ordOperators,
         node.ordCollations,
     )?;
+    let mut part_eq = part_eq;
+    for eq in [part_eq.as_mut(), ord_eq.as_mut()].into_iter().flatten() {
+        // Boundary/peer eqs detoast compressed by-ref keys through the
+        // frame's result mcx; C runs both in tmpcontext per-tuple memory
+        // (ExecQualAndReset).
+        // SAFETY: the tmpcontext ExprContext outlives the programs (same
+        // estate).
+        unsafe { eq.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+    }
 
     let mk_slot = || {
         exectuples::make_tuple_table_slot(
