@@ -457,6 +457,36 @@ pub fn bytea_set_bit<'mcx>(
 
 #[cold]
 #[inline(never)]
+fn integer_out_of_range() -> PgError {
+    PgError::error("integer out of range")
+        .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+}
+
+// C: byteaoverlay (SQL standard OVERLAY() as substring + concatenation).
+pub fn bytea_overlay<'mcx>(
+    mcx: Mcx<'mcx>,
+    t1: &[u8],
+    t2: &[u8],
+    sp: i32,
+    sl: i32,
+) -> PgResult<Varlena<'mcx>> {
+    if sp <= 0 {
+        return Err(negative_substring().into());
+    }
+    let sp_pl_sl = sp.checked_add(sl).ok_or_else(integer_out_of_range)?;
+    let s1 = bytea_substring(mcx, t1, 1, sp - 1, false)?;
+    let s2 = bytea_substring(mcx, t1, sp_pl_sl, -1, true)?;
+    let result = bytea_catenate(mcx, s1.data(), t2)?;
+    bytea_catenate(mcx, result.data(), s2.data())
+}
+
+// C: bytea_bit_count.
+pub fn bytea_bit_count(v: &[u8]) -> i64 {
+    ::pg_bitutils::pg_popcount(v) as i64
+}
+
+#[cold]
+#[inline(never)]
 fn int_out_of_range(type_name: &str) -> Box<PgError> {
     Box::new(
         PgError::error(format!("{type_name} out of range"))

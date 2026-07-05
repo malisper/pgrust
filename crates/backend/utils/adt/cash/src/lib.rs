@@ -1,12 +1,12 @@
 //! cash.c: the money type over a 64-bit integer of lc_monetary fractional
 //! units. Locale symbols come from pg_locale::pglc_localeconv (C-locale arm
-//! live, non-C loud there). Deferred loud: cash_numeric / numeric_cash
-//! (need adt_numeric public div/mul/round and a cash→numeric dep edge).
+//! live, non-C loud there).
 
 pub mod builtins;
 #[cfg(test)]
 mod tests;
 
+use adt_numeric::{Num, NumericImage};
 use datum::{Bytea, Varlena};
 use mcx::{Mcx, PgVec};
 use pg_locale::{pglc_localeconv, PgLconv};
@@ -592,10 +592,27 @@ pub fn cash_words<'mcx>(mcx: Mcx<'mcx>, value: Cash) -> PgResult<Varlena<'mcx>> 
     varlena::cstring_to_text(mcx, &buf)
 }
 
-pub fn cash_numeric(_money: Cash) -> ! {
-    panic!("cash_numeric: needs adt_numeric public div/mul/round + cash→numeric dep edge")
+pub fn cash_numeric(money: Cash) -> PgResult<NumericImage> {
+    let fpoint = clamp_fpoint(pglc_localeconv());
+    let mut result = adt_numeric::int64_to_numeric(money);
+
+    if fpoint > 0 {
+        // select_div_scale() can pick a zero result scale for near-INT64_MAX
+        // inputs; rounding the scale operand's dscale up to fpoint forces an
+        // exact quotient, then the explicit round trims it to fpoint.
+        let scale = adt_numeric::numeric_round_common(
+            adt_numeric::int64_to_numeric(scale_factor()).num(),
+            fpoint,
+        )?;
+        let quotient = adt_numeric::numeric_div_common(result.num(), scale.num())?;
+        result = adt_numeric::numeric_round_common(quotient.num(), fpoint)?;
+    }
+
+    Ok(result)
 }
 
-pub fn numeric_cash() -> ! {
-    panic!("numeric_cash: needs adt_numeric public div/mul/round + cash→numeric dep edge")
+pub fn numeric_cash(amount: Num<'_>) -> PgResult<Cash> {
+    let scale = adt_numeric::int64_to_numeric(scale_factor());
+    let scaled = adt_numeric::numeric_mul_common(amount, scale.num())?;
+    adt_numeric::numeric_int8(scaled.num())
 }

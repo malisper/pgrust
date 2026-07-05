@@ -3,6 +3,9 @@
 pub mod builtins;
 pub mod introspect;
 
+#[cfg(test)]
+mod tests;
+
 extern crate alloc;
 
 use alloc::boxed::Box;

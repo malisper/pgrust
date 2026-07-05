@@ -103,6 +103,80 @@ fn catenate_and_lengths() {
 }
 
 #[test]
+fn replace_text_cases() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(
+        replace_text(mcx, b"foobarbaz", b"bar", b"XX", C).unwrap().data(),
+        b"fooXXbaz"
+    );
+    assert_eq!(
+        replace_text(mcx, b"aaaa", b"a", b"bb", C).unwrap().data(),
+        b"bbbbbbbb"
+    );
+    // empty source or empty pattern: unmodified copy.
+    assert_eq!(replace_text(mcx, b"", b"a", b"b", C).unwrap().data(), b"");
+    assert_eq!(replace_text(mcx, b"abc", b"", b"x", C).unwrap().data(), b"abc");
+    // pattern not found: unmodified copy.
+    assert_eq!(replace_text(mcx, b"abc", b"z", b"x", C).unwrap().data(), b"abc");
+}
+
+#[test]
+fn text_overlay_cases() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    // overlay('Txxxxas' placing 'hom' from 2 for 4) = 'Thomas'.
+    assert_eq!(
+        text_overlay(mcx, b"Txxxxas", b"hom", 2, 4).unwrap().data(),
+        b"Thomas"
+    );
+    // no_len defaults sl to length(t2); C caller path exercised via fc_textoverlay_no_len.
+    assert_eq!(
+        text_overlay(mcx, b"Txxxas", b"hom", 2, 3).unwrap().data(),
+        b"Thomas"
+    );
+    let err = text_overlay(mcx, b"abc", b"x", 0, 1).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
+    let err = text_overlay(mcx, b"abc", b"x", i32::MAX, 1).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+}
+
+#[test]
+fn bytea_overlay_and_bit_count() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(
+        bytea::bytea_overlay(mcx, b"Txxxxas", b"hom", 2, 4).unwrap().data(),
+        b"Thomas"
+    );
+    let err = bytea::bytea_overlay(mcx, b"abc", b"x", 0, 1).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_SUBSTRING_ERROR);
+
+    assert_eq!(bytea::bytea_bit_count(b""), 0);
+    assert_eq!(bytea::bytea_bit_count(&[0xffu8]), 8);
+    assert_eq!(bytea::bytea_bit_count(&[0x01u8, 0x03]), 3);
+}
+
+#[test]
+fn convert_to_base_cases() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert_eq!(convert_to_base(mcx, 0, 2).unwrap().data(), b"0");
+    assert_eq!(convert_to_base(mcx, 5, 2).unwrap().data(), b"101");
+    assert_eq!(convert_to_base(mcx, 8, 8).unwrap().data(), b"10");
+    assert_eq!(convert_to_base(mcx, 255, 16).unwrap().data(), b"ff");
+    // negative ints print as their unsigned bit pattern (C casts before conversion).
+    assert_eq!(
+        convert_to_base(mcx, (-1i32 as u32) as u64, 16).unwrap().data(),
+        b"ffffffff"
+    );
+    assert_eq!(
+        convert_to_base(mcx, -1i64 as u64, 16).unwrap().data(),
+        b"ffffffffffffffff"
+    );
+}
+
+#[test]
 fn wire_io_round_trips() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -303,12 +377,13 @@ fn fc_wrappers_dispatch() {
 
 #[test]
 fn builtin_table_matches_declared_arity() {
-    let non_strict = [3535u32, 3536, 3543, 3544, 6299, 394, 376];
+    let non_strict = [3535u32, 3536, 3543, 3544, 6299, 394, 376, 6160, 6161];
+    let retset = [6160u32, 6161];
     for row in crate::builtins::VARLENA_BUILTINS {
         assert_eq!(row.strict, !non_strict.contains(&row.foid), "{}", row.name);
-        assert!(!row.retset);
+        assert_eq!(row.retset, retset.contains(&row.foid), "{}", row.name);
         // unicode_version/icu_unicode_version are 0-arg catalog functions.
-        assert!((0..=3).contains(&row.nargs), "{}", row.name);
+        assert!((0..=4).contains(&row.nargs), "{}", row.name);
     }
 }
 
@@ -417,7 +492,10 @@ fn levenshtein_untrusted_length_cap_is_22023() {
 mod fc_results {
     use datum::{Datum, VarlenaRef};
     use mcx::MemoryContext;
-    use types_fmgr::{direct_function_call1_coll_in, direct_function_call2_coll_in};
+    use types_fmgr::{
+        direct_function_call1_coll_in, direct_function_call2_coll_in,
+        direct_function_call3_coll_in, LocalFcinfo,
+    };
 
     use crate::builtins::*;
 
@@ -499,6 +577,158 @@ mod fc_results {
             Datum::from_usize(a.as_ptr() as usize),
             Datum::from_usize(a.as_ptr() as usize),
         );
+    }
+
+    #[test]
+    fn replace_text_wrapper() {
+        let ctx = MemoryContext::new_bump("t");
+        let src = text_image(b"foobarbaz");
+        let from = text_image(b"bar");
+        let to = text_image(b"XX");
+        let d = direct_function_call3_coll_in(
+            fc_replace_text,
+            0,
+            ctx.mcx(),
+            Datum::from_usize(src.as_ptr() as usize),
+            Datum::from_usize(from.as_ptr() as usize),
+            Datum::from_usize(to.as_ptr() as usize),
+        )
+        .unwrap();
+        assert_eq!(text_of(d), b"fooXXbaz");
+    }
+
+    #[test]
+    fn overlay_wrappers() {
+        let ctx = MemoryContext::new_bump("t");
+        let t1 = text_image(b"Txxxxas");
+        let t2 = text_image(b"hom");
+
+        let mut fcinfo = LocalFcinfo::<4>::new(0);
+        // SAFETY: ctx outlives this call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        fcinfo.set_arg(0, Datum::from_usize(t1.as_ptr() as usize));
+        fcinfo.set_arg(1, Datum::from_usize(t2.as_ptr() as usize));
+        fcinfo.set_arg(2, Datum::from_i32(2));
+        fcinfo.set_arg(3, Datum::from_i32(4));
+        let d = fc_textoverlay(None, &mut fcinfo).unwrap();
+        assert_eq!(text_of(d), b"Thomas");
+
+        let d = fc_byteaoverlay(None, &mut fcinfo).unwrap();
+        assert_eq!(text_of(d), b"Thomas");
+
+        // no_len defaults sl to length(t2) = 3: overlay('Txxxas' placing
+        // 'hom' from 2) = 'Thomas'.
+        let t1_short = text_image(b"Txxxas");
+        let mut fcinfo3 = LocalFcinfo::<3>::new(0);
+        // SAFETY: ctx outlives this call.
+        unsafe { fcinfo3.set_result_mcx(ctx.mcx()) };
+        fcinfo3.set_arg(0, Datum::from_usize(t1_short.as_ptr() as usize));
+        fcinfo3.set_arg(1, Datum::from_usize(t2.as_ptr() as usize));
+        fcinfo3.set_arg(2, Datum::from_i32(2));
+        let d = fc_textoverlay_no_len(None, &mut fcinfo3).unwrap();
+        assert_eq!(text_of(d), b"Thomas");
+    }
+
+    #[test]
+    fn bytea_bit_count_wrapper() {
+        let img = text_image(&[0xffu8, 0x01]);
+        let mut fcinfo = LocalFcinfo::<1>::new(0);
+        fcinfo.set_arg(0, Datum::from_usize(img.as_ptr() as usize));
+        assert_eq!(fc_bytea_bit_count(None, &mut fcinfo).unwrap().as_i64(), 9);
+    }
+
+    #[test]
+    fn convert_to_base_wrappers() {
+        let ctx = MemoryContext::new_bump("t");
+        let d = direct_function_call1_coll_in(fc_to_hex32, 0, ctx.mcx(), Datum::from_i32(255))
+            .unwrap();
+        assert_eq!(text_of(d), b"ff");
+        let d = direct_function_call1_coll_in(fc_to_bin64, 0, ctx.mcx(), Datum::from_i64(5))
+            .unwrap();
+        assert_eq!(text_of(d), b"101");
+        let d = direct_function_call1_coll_in(fc_to_oct32, 0, ctx.mcx(), Datum::from_i32(8))
+            .unwrap();
+        assert_eq!(text_of(d), b"10");
+    }
+
+    #[test]
+    fn text_to_table_srf_value_per_call() {
+        use types_fmgr::{ExprDoneCond, FmgrInfo, ReturnSetInfo, SFRM_ValuePerCall};
+
+        let ctx = MemoryContext::new_bump("t");
+        let input = text_image(b"a,,b");
+        let sep = text_image(b",");
+
+        let mut flinfo = FmgrInfo::new(crate::split_text::fc_text_to_table, 6160, 2, false, true);
+        let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
+        let mut fci = LocalFcinfo::<2>::new(0);
+        fci.resultinfo = rsinfo.as_fmnode_ptr();
+        // SAFETY: ctx outlives the call loop.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_usize(sep.as_ptr() as usize));
+
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        loop {
+            fci.isnull = false;
+            rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+            let d = flinfo.invoke(&mut fci).unwrap();
+            if rsinfo.isDone == ExprDoneCond::ExprEndResult {
+                assert!(fci.isnull);
+                break;
+            }
+            assert_eq!(rsinfo.isDone, ExprDoneCond::ExprMultipleResult);
+            assert!(!fci.isnull);
+            out.push(text_of(d).to_vec());
+        }
+        assert_eq!(out, vec![b"a".to_vec(), b"".to_vec(), b"b".to_vec()]);
+        assert!(!flinfo.has_fn_extra(), "SRF_RETURN_DONE tears down the multi-call frame");
+
+        // NULL input string: split_text's early-false return, zero rows.
+        let mut flinfo2 = FmgrInfo::new(crate::split_text::fc_text_to_table, 6160, 2, false, true);
+        let mut fci2 = LocalFcinfo::<2>::new(0);
+        fci2.resultinfo = rsinfo.as_fmnode_ptr();
+        // SAFETY: ctx outlives this call.
+        unsafe { fci2.set_result_mcx(ctx.mcx()) };
+        fci2.set_arg_null(0);
+        fci2.set_arg_null(1);
+        rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+        fci2.isnull = false;
+        let _ = flinfo2.invoke(&mut fci2).unwrap();
+        assert_eq!(rsinfo.isDone, ExprDoneCond::ExprEndResult);
+    }
+
+    #[test]
+    fn text_to_table_null_string() {
+        use types_fmgr::{ExprDoneCond, FmgrInfo, ReturnSetInfo, SFRM_ValuePerCall};
+
+        let ctx = MemoryContext::new_bump("t");
+        let input = text_image(b"a,N,b");
+        let sep = text_image(b",");
+        let nullstr = text_image(b"N");
+
+        let mut flinfo =
+            FmgrInfo::new(crate::split_text::fc_text_to_table, 6161, 3, false, true);
+        let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
+        let mut fci = LocalFcinfo::<3>::new(0);
+        fci.resultinfo = rsinfo.as_fmnode_ptr();
+        // SAFETY: ctx outlives the call loop.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
+        fci.set_arg(1, Datum::from_usize(sep.as_ptr() as usize));
+        fci.set_arg(2, Datum::from_usize(nullstr.as_ptr() as usize));
+
+        let mut out: Vec<Option<Vec<u8>>> = Vec::new();
+        loop {
+            fci.isnull = false;
+            rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+            let d = flinfo.invoke(&mut fci).unwrap();
+            if rsinfo.isDone == ExprDoneCond::ExprEndResult {
+                break;
+            }
+            out.push(if fci.isnull { None } else { Some(text_of(d).to_vec()) });
+        }
+        assert_eq!(out, vec![Some(b"a".to_vec()), None, Some(b"b".to_vec())]);
     }
 }
 

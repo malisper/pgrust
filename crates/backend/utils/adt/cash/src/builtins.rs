@@ -1,15 +1,17 @@
 //! fmgr wrappers (`fc_*`) + `CASH_BUILTINS` for fmgr-core. cash_recv/cash_send
 //! (2492/2493) need the wire convention at the frame, cash_words (935) the
 //! text-result convention (the varlena textin precedent); their value cores
-//! live in the crate root. cash_numeric/numeric_cash (3823/3824) stay loud
-//! until adt_numeric exposes div/mul/round and cash gains the dep edge.
+//! live in the crate root.
 
 use std::borrow::Cow;
 
 use ::datum::Datum;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use ::types_fmgr::{
+    byref_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
+};
 
 fn in_arg<'a>(fcinfo: &'a Fcinfo) -> Cow<'a, str> {
     // SAFETY: catalog arg 0 of cash_in is cstring (typlen -2).
@@ -205,6 +207,24 @@ pub fn fc_int8_cash(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     Ok(Datum::from_i64(crate::int8_cash(a.value.as_i64())?))
 }
 
+pub fn fc_cash_words(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let text = crate::cash_words(fcinfo.result_mcx(), a.value.as_i64())?;
+    Ok(varlena_result(text))
+}
+
+pub fn fc_cash_numeric(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let img = crate::cash_numeric(a.value.as_i64())?;
+    byref_result(fcinfo.result_mcx(), img.as_bytes())
+}
+
+pub fn fc_numeric_cash(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of numeric_cash is a non-null numeric varlena (strict fn).
+    let num = unsafe { adt_numeric::builtins::num_arg(fcinfo, 0) }?;
+    Ok(Datum::from_i64(crate::numeric_cash(num)?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -243,10 +263,13 @@ pub const CASH_BUILTINS: &[FmgrBuiltin] = &[
     b(898, "cashlarger", 2, fc_cashlarger),
     b(899, "cashsmaller", 2, fc_cashsmaller),
     b(919, "flt8_mul_cash", 2, fc_flt8_mul_cash),
+    b(935, "cash_words", 1, fc_cash_words),
     b(3344, "cash_mul_int8", 2, fc_cash_mul_int8),
     b(3345, "cash_div_int8", 2, fc_cash_div_int8),
     b(3399, "int8_mul_cash", 2, fc_int8_mul_cash),
     b(3811, "int4_cash", 1, fc_int4_cash),
     b(3812, "int8_cash", 1, fc_int8_cash),
     b(3822, "cash_div_cash", 2, fc_cash_div_cash),
+    b(3823, "cash_numeric", 1, fc_cash_numeric),
+    b(3824, "numeric_cash", 1, fc_numeric_cash),
 ];

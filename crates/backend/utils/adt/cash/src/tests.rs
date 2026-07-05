@@ -320,8 +320,46 @@ fn live_pg_arithmetic_corpus() {
     );
 }
 
+fn numeric_str(v: Cash) -> String {
+    let img = cash_numeric(v).unwrap();
+    let mut out = Vec::new();
+    adt_numeric::numeric_out_into(img.num(), &mut out);
+    String::from_utf8(out).unwrap()
+}
+
+fn parse_numeric(s: &str) -> adt_numeric::NumericImage {
+    adt_numeric::numeric_in(s, -1, None).unwrap().unwrap()
+}
+
 #[test]
-#[should_panic(expected = "adt_numeric")]
-fn cash_numeric_stays_loud() {
-    cash_numeric(12345);
+fn cash_numeric_matches_c() {
+    assert_eq!(numeric_str(0), "0.00");
+    assert_eq!(numeric_str(12345), "123.45");
+    assert_eq!(numeric_str(-12345), "-123.45");
+    assert_eq!(numeric_str(100), "1.00");
+    assert_eq!(numeric_str(5), "0.05");
+    assert_eq!(numeric_str(i64::MAX), "92233720368547758.07");
+    assert_eq!(numeric_str(i64::MIN), "-92233720368547758.08");
+}
+
+#[test]
+fn numeric_cash_matches_c() {
+    assert_eq!(numeric_cash(parse_numeric("0").num()).unwrap(), 0);
+    assert_eq!(numeric_cash(parse_numeric("123.45").num()).unwrap(), 12345);
+    assert_eq!(numeric_cash(parse_numeric("-123.45").num()).unwrap(), -12345);
+    // numeric_int8 rounds to the nearest integer after scaling.
+    assert_eq!(numeric_cash(parse_numeric("1.005").num()).unwrap(), 101);
+    assert_eq!(numeric_cash(parse_numeric("1.004").num()).unwrap(), 100);
+
+    let err = numeric_cash(parse_numeric("999999999999999999").num()).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+    assert_eq!(err.message(), "bigint out of range");
+}
+
+#[test]
+fn cash_numeric_numeric_cash_roundtrip() {
+    for v in [0i64, 1, -1, 12345, -12345, 100, i64::MAX, i64::MIN] {
+        let img = cash_numeric(v).unwrap();
+        assert_eq!(numeric_cash(img.num()).unwrap(), v);
+    }
 }

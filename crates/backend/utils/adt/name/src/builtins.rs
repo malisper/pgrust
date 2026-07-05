@@ -243,6 +243,9 @@ pub const NAME_BUILTINS: &[FmgrBuiltin] = &[
     b(710, "current_user", 0, fc_current_user),
     b(745, "current_user", 0, fc_current_user),
     b(746, "session_user", 0, fc_session_user),
+    // varchar(name) rides the same varlena bytes as name_text (text and
+    // varchar share representation); prorettype differs only at the catalog.
+    b(1401, "name_text", 1, fc_name_text),
     b(1402, "current_schema", 0, fc_current_schema),
     b(1403, "current_schemas", 1, fc_current_schemas),
     b(2422, "namerecv", 1, fc_namerecv),

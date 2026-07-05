@@ -26,7 +26,7 @@ use types_tuple::TupleDescData;
 pub use guc::registry::show_guc_option as ShowGUCOption;
 
 mod settings;
-pub use settings::{fc_show_all_settings, GUC_FUNCS_BUILTINS};
+pub use settings::{fc_pg_settings_get_flags, fc_show_all_settings, GUC_FUNCS_BUILTINS};
 
 #[cfg(test)]
 mod tests;

@@ -1,12 +1,12 @@
 //! varlena.c, boot+SELECT-spine lane: text/bytea/unknown I/O, eq/cmp
 //! collation core (C-collation memcmp fast path, seam-free), length,
-//! catenate, C-collation sort comparator cores. Carrier: detoasted payload
-//! bytes in, full 4B-header [`Varlena`] images out (one allocation). Output
-//! is direct-to-wire (no per-row UTF-8 revalidation). Deferred to their
-//! catalog rows: position/substring/overlay/replace, split/format/concat/
-//! string_agg, name<->text + pattern ops, sortsupport abbreviation, regex
-//! tails, misc encoding. External/compressed images and non-C collations go
-//! through detoast_seams / pg_locale_seams.
+//! catenate, position/substring/overlay/replace, to_hex/to_bin/to_oct,
+//! C-collation sort comparator cores. Carrier: detoasted payload bytes in,
+//! full 4B-header [`Varlena`] images out (one allocation). Output is
+//! direct-to-wire (no per-row UTF-8 revalidation). Deferred to their catalog
+//! rows: split/format/concat/string_agg, name<->text + pattern ops,
+//! sortsupport abbreviation, regex tails, misc encoding. External/compressed
+//! images and non-C collations go through detoast_seams / pg_locale_seams.
 
 pub mod builtins;
 pub mod abbrev;
@@ -399,6 +399,80 @@ pub fn text_catenate<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8]) -> PgResult<Var
     mcx::vec_append_bytes(&mut image, t1)?;
     mcx::vec_append_bytes(&mut image, t2)?;
     Ok(Varlena::from_image(image))
+}
+
+#[cold]
+#[inline(never)]
+fn integer_out_of_range() -> PgError {
+    PgError::error("integer out of range")
+        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+}
+
+// C: text_overlay (SQL standard OVERLAY() as substring + concatenation).
+pub fn text_overlay<'mcx>(
+    mcx: Mcx<'mcx>,
+    t1: &[u8],
+    t2: &[u8],
+    sp: i32,
+    sl: i32,
+) -> PgResult<Varlena<'mcx>> {
+    if sp <= 0 {
+        return Err(negative_substring_len().into());
+    }
+    let sp_pl_sl = sp.checked_add(sl).ok_or_else(integer_out_of_range)?;
+    let s1 = text_substring(mcx, t1, 1, sp - 1, false)?;
+    let s2 = text_substring(mcx, t1, sp_pl_sl, -1, true)?;
+    let result = text_catenate(mcx, s1.data(), t2)?;
+    text_catenate(mcx, result.data(), s2.data())
+}
+
+// C: replace_text — non-overlapping replacement of every occurrence of
+// `from` in `src`; C returns the original varlena when `src`/`from` is
+// empty or `from` is never found (we produce an equal-valued copy instead).
+pub fn replace_text<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: &[u8],
+    from: &[u8],
+    to: &[u8],
+    collid: Oid,
+) -> PgResult<Varlena<'mcx>> {
+    if src.is_empty() || from.is_empty() {
+        return cstring_to_text(mcx, src);
+    }
+    let mut state = text_position_setup(src, from, collid)?;
+    if !text_position_next(&mut state)? {
+        return cstring_to_text(mcx, src);
+    }
+    let mut image = image_with_header(mcx, src.len())?;
+    let mut start = 0usize;
+    loop {
+        let off = text_position_get_match_off(&state);
+        mcx::vec_append_bytes(&mut image, &src[start..off])?;
+        mcx::vec_append_bytes(&mut image, to)?;
+        start = off + text_position_get_match_len(&state);
+        if !text_position_next(&mut state)? {
+            break;
+        }
+    }
+    mcx::vec_append_bytes(&mut image, &src[start..])?;
+    Ok(Varlena::from_image(image))
+}
+
+// C: convert_to_base (workhorse for to_bin/to_oct/to_hex); base in 2..=16.
+pub fn convert_to_base<'mcx>(mcx: Mcx<'mcx>, mut value: u64, base: u64) -> PgResult<Varlena<'mcx>> {
+    debug_assert!(base > 1 && base <= 16);
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; u64::BITS as usize];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = DIGITS[(value % base) as usize];
+        value /= base;
+        if i == 0 || value == 0 {
+            break;
+        }
+    }
+    cstring_to_text(mcx, &buf[i..])
 }
 
 pub fn textin<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<Varlena<'mcx>> {

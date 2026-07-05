@@ -33,6 +33,8 @@ arrayfuncs = { path = "../arrayfuncs" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 format_type = { path = "../format_type" }
 numutils = { path = "../numutils" }
+pg_bitutils = { path = "../../../../port/pg_bitutils" }
+funcapi_srf = { path = "../../fmgr/funcapi_srf" }
 
 [dev-dependencies]
 detoast = { path = "../../../access/common/detoast" }
