@@ -960,6 +960,43 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     Ok(())
 }
 
+/// Executor-skeleton park gate: EPQ and parallel scans never park.
+pub fn skeleton_parkable(node: &SeqScanState<'_>) -> bool {
+    !matches!(node.variant, SeqScanVariant::Epq) && !node.parallel_aware && node.parallel.is_none()
+}
+
+/// Executor-skeleton park: release everything per-run (scan descriptor,
+/// relation pin, pushed filters, staged batches); compiled expressions and
+/// slots stay armed. Pairs with `skeleton_rebind`.
+pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
+    node.bloom = None;
+    node.batch_soa = None;
+    node.scan_batch = ScanBatchMode::Unknown;
+    if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
+        table_endscan(scandesc)?;
+    }
+    node.ss.ss_currentRelation = None;
+    Ok(())
+}
+
+/// Executor-skeleton re-arm: re-pin the scan relation for a new execution,
+/// with C ExecOpenScanRelation's per-run relispopulated probe.
+pub fn skeleton_rebind<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(node.ss.ss_currentScanDesc.is_none());
+    let eflags = estate.es_top_eflags;
+    let rel = estate.exec_get_range_table_relation(node.ss.scanrelid, false)?;
+    if eflags & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA) == 0
+        && !rel.rd_rel.relispopulated
+    {
+        return Err(unpopulated_matview(rel));
+    }
+    node.ss.ss_currentRelation = Some(rel.alias());
+    Ok(())
+}
+
 /// `ExecReScanSeqScan`.
 pub fn exec_rescan_seq_scan<'mcx>(
     node: &mut SeqScanState<'mcx>,

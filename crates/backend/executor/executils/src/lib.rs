@@ -537,6 +537,10 @@ impl<'mcx> ExprContextData<'mcx> {
     }
 }
 
+/// Estate-owned extern-param buffer (ptr, len); arena-backed, no drop.
+#[derive(Clone, Copy)]
+pub struct ParamStable(pub core::ptr::NonNull<ParamExternData>, pub u32);
+
 pub struct EStateData<'mcx> {
     pub es_query_cxt: Mcx<'mcx>,
     pub es_direction: ScanDirection,
@@ -561,6 +565,10 @@ pub struct EStateData<'mcx> {
     pub es_insert_pending_result_relations: PgVec<'mcx, ResultRelInfo>,
     pub es_insert_pending_modifytables: PgVec<'mcx, ModifyTableP3>,
     pub es_param_list_info: Option<&'mcx [ParamExternData]>,
+    // Executor-skeleton stable extern-param images (no C counterpart):
+    // compiled ParamExtern steps resolve into this estate-owned buffer
+    // instead of the portal's per-EXECUTE array; restamped on skeleton reuse.
+    pub es_param_stable: Option<ParamStable>,
     pub es_param_exec_vals: PgVec<'mcx, ParamExecData>,
     pub es_queryEnv: Option<&'mcx QueryEnvironment<'mcx>>,
     pub es_tupleTable: PgVec<'mcx, SlotData<'mcx>>,
@@ -696,6 +704,7 @@ impl<'mcx> EStateData<'mcx> {
             es_insert_pending_result_relations: PgVec::new_in(mcx),
             es_insert_pending_modifytables: PgVec::new_in(mcx),
             es_param_list_info: None,
+            es_param_stable: None,
             es_param_exec_vals: PgVec::new_in(mcx),
             es_queryEnv: None,
             es_tupleTable: PgVec::new_in(mcx),
@@ -779,6 +788,58 @@ impl<'mcx> EStateData<'mcx> {
             extern_params: self.es_param_list_info,
             exec_vals: core::ptr::NonNull::new(self.es_param_exec_vals.as_mut_ptr()),
             n_exec: self.es_param_exec_vals.len() as u32,
+        }
+    }
+
+    /// Copy the portal's extern params into an estate-owned buffer so
+    /// compiled ParamExtern steps survive the portal (executor skeleton);
+    /// the returned slice is what es_param_list_info must hold.
+    pub fn param_stable_install(
+        &mut self,
+        src: &[ParamExternData],
+    ) -> PgResult<&'mcx [ParamExternData]> {
+        use ::mcx::Allocator;
+        let n = src.len();
+        if n == 0 {
+            self.es_param_stable = Some(ParamStable(core::ptr::NonNull::dangling(), 0));
+            return Ok(&[]);
+        }
+        let layout = core::alloc::Layout::array::<ParamExternData>(n)
+            .expect("param array layout");
+        let p: core::ptr::NonNull<ParamExternData> = self
+            .es_query_cxt
+            .allocate(layout)
+            .map_err(|_| self.es_query_cxt.oom(layout.size()))?
+            .cast();
+        // SAFETY: fresh exclusive allocation of n elements.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), p.as_ptr(), n) };
+        self.es_param_stable = Some(ParamStable(p, n as u32));
+        // SAFETY: arena-backed; lives until the ExecutorState context dies.
+        Ok(unsafe { core::slice::from_raw_parts(p.as_ptr(), n) })
+    }
+
+    /// Skeleton reuse: restamp the stable buffer from this EXECUTE's params.
+    /// False = shape/type mismatch — the caller must rebuild instead (the
+    /// fresh compile re-runs C's per-execution param checks and errors).
+    pub fn param_stable_restamp(&mut self, new: Option<&[ParamExternData]>) -> bool {
+        match (self.es_param_stable, new) {
+            (None, None) => true,
+            (Some(ParamStable(_, n)), None) => n == 0,
+            (Some(ParamStable(p, n)), Some(new)) if new.len() == n as usize => {
+                for (i, prm) in new.iter().enumerate() {
+                    // SAFETY: i < n, the buffer's installed length.
+                    if prm.ptype == 0 || unsafe { (*p.as_ptr().add(i)).ptype } != prm.ptype {
+                        return false;
+                    }
+                }
+                for (i, prm) in new.iter().enumerate() {
+                    // SAFETY: same bounds; compiled steps read these cells
+                    // only during evaluation, never concurrently with this.
+                    unsafe { p.as_ptr().add(i).write(*prm) };
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1124,7 +1185,7 @@ impl<'mcx> EStateData<'mcx> {
 }
 
 mcx::forget_safe_nodrop!(
-    SubplanStateCell, ResultRelInfo, EcxtId, ExecSlotId, ExecRowMark,
+    SubplanStateCell, ResultRelInfo, EcxtId, ExecSlotId, ExecRowMark, ParamStable,
 );
 
 // Exempt groups: [1] droppy owners, all released before the exec bundle is
@@ -1153,7 +1214,8 @@ mcx::forget_safe_struct!(
         es_unpruned_relids, es_output_cid, es_result_relations,
         es_opened_result_relations, es_tuple_routing_result_relations,
         es_trig_target_relations, es_insert_pending_result_relations,
-        es_param_list_info, es_queryEnv, es_processed, es_total_processed,
+        es_param_list_info, es_param_stable, es_queryEnv, es_processed,
+        es_total_processed,
         es_top_eflags, es_instrument, es_finished, es_subplanstates,
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,

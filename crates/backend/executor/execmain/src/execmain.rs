@@ -15,7 +15,9 @@ use ::types_slot::{
 };
 use ::types_tuple::TupleDescData;
 
-use crate::procnode::{exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node};
+use crate::procnode::{
+    exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateNode,
+};
 use crate::querydesc::{self, ExecData, ExecTy, QueryDescData};
 
 // One parked ExecutorState context (C's context_freelists): raw pointer keeps
@@ -44,10 +46,12 @@ mod exec_ctx_pool {
 }
 
 // One parked executor skeleton for a cached plan (no C counterpart: C
-// rebuilds the whole executor state per EXECUTE). v1 scope: SELECT plans
-// with an empty range table, no params, no initplans/subplans, no
-// instrumentation — the estate + planstate + compiled expressions are kept
-// wired and rebound per run (fresh snapshot, counters, rescan). The parked
+// rebuilds the whole executor state per EXECUTE). v2 scope: SELECT plans
+// over Result/Limit/SeqScan/IndexScan/IndexOnlyScan trees, extern params
+// allowed; no initplans/subplans, no instrumentation. The estate + planstate
+// + compiled expressions stay wired; everything per-run is redone on reuse:
+// permission checks, snapshot registration, relation pins, scan descriptors,
+// param values (restamped into the estate-stable buffer), rescan. The parked
 // entry pins its plan with a plancache refcount; a key mismatch discards it.
 mod exec_skeleton {
     use std::rc::Rc;
@@ -106,6 +110,55 @@ mod exec_skeleton {
             plancache_portal_seams::release_cached_plan::call(old.cplan);
             drop(old);
         }
+    }
+}
+
+// Skeleton walk whitelist: every node type here can be fully disarmed at
+// park (no per-run state survives) and re-armed at reuse. Anything else
+// takes the normal teardown path.
+fn skeleton_parkable(node: &PlanStateNode<'_>) -> bool {
+    match node {
+        PlanStateNode::Result(rs) => rs.outer.as_deref().is_none_or(skeleton_parkable),
+        PlanStateNode::Limit(l) => skeleton_parkable(&l.outer),
+        PlanStateNode::SeqScan(ss) => ::nodeseqscan::skeleton_parkable(ss),
+        PlanStateNode::IndexScan(_) | PlanStateNode::IndexOnlyScan(_) => true,
+        _ => false,
+    }
+}
+
+// Park-side disarm: close scan descriptors and node-held relation pins;
+// runs only after skeleton_parkable admitted the whole tree.
+fn skeleton_park_tree(node: &mut PlanStateNode<'_>) -> PgResult<()> {
+    match node {
+        PlanStateNode::Result(rs) => match rs.outer.as_deref_mut() {
+            Some(outer) => skeleton_park_tree(outer),
+            None => Ok(()),
+        },
+        PlanStateNode::Limit(l) => skeleton_park_tree(&mut l.outer),
+        PlanStateNode::SeqScan(ss) => ::nodeseqscan::skeleton_park(ss),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::skeleton_park(is),
+        PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::skeleton_park(ios),
+        _ => unreachable!("skeleton_park_tree on a non-parkable node"),
+    }
+}
+
+// Reuse-side re-arm: re-pin relations per execution (C re-runs the
+// ExecInit* open paths); scan descriptors re-open lazily with the fresh
+// snapshot; the exec_re_scan pass after this re-evaluates runtime keys.
+fn skeleton_rebind_tree<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    match node {
+        PlanStateNode::Result(rs) => match rs.outer.as_deref_mut() {
+            Some(outer) => skeleton_rebind_tree(outer, estate),
+            None => Ok(()),
+        },
+        PlanStateNode::Limit(l) => skeleton_rebind_tree(&mut l.outer, estate),
+        PlanStateNode::SeqScan(ss) => ::nodeseqscan::skeleton_rebind(ss, estate),
+        PlanStateNode::IndexScan(is) => ::nodeindexscan::skeleton_rebind(is, estate),
+        PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::skeleton_rebind(ios, estate),
+        _ => unreachable!("skeleton_rebind_tree on a non-parkable node"),
     }
 }
 
@@ -383,31 +436,50 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         other => return Err(unrecognized_operation(other)),
     }
 
-    if !qd.cplan.is_null()
+    let skeleton_candidate = !qd.cplan.is_null()
         && qd.operation == CmdType::CMD_SELECT
         && qd.instrument_options == 0
-        && qd.params.is_null()
         && query_env.is_null()
-        && qd.crosscheck_snapshot.is_none()
-    {
+        && qd.crosscheck_snapshot.is_none();
+
+    if skeleton_candidate {
         if let Some(sk) =
             exec_skeleton::take_if_match(qd.plannedstmt() as *const _ as *const (), qd.cplan, eflags)
         {
-            let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
+            // P1: C's InitPlan runs ExecCheckPermissions on every cached-plan
+            // execution — reuse must too (REVOKE/SET ROLE between EXECUTEs).
+            exec_check_permissions(pstmt)?;
             let source_text = qd.source_text();
+            // SAFETY: the registered params live in the portal context, which
+            // outlives this execution (values are copied out below).
+            let new_params =
+                (!qd.params.is_null()).then(|| unsafe { types_portal::params::resolve(qd.params) });
             let mut exec = sk.exec;
-            exec.with_mut(|data| -> PgResult<()> {
+            let reused = exec.with_mut(|data| -> PgResult<bool> {
                 let ExecData { estate, planstate } = data;
+                // Param shape/type re-checks per EXECUTE; a mismatch falls
+                // back to a fresh build, whose compile re-runs C's checks.
+                if !estate.param_stable_restamp(new_params) {
+                    return Ok(false);
+                }
+                let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
                 estate.es_snapshot = es_snapshot;
                 estate.es_sourceText = Some(source_text);
                 estate.es_processed = 0;
                 estate.es_finished = false;
                 let ps = planstate.as_mut().expect("skeleton holds a plan state");
-                crate::execami::exec_re_scan(ps, estate)
+                skeleton_rebind_tree(ps, estate)?;
+                crate::execami::exec_re_scan(ps, estate)?;
+                Ok(true)
             })?;
-            qd.tup_desc = Some(sk.tup_desc);
-            qd.exec = Some(exec);
-            return Ok(());
+            if reused {
+                qd.tup_desc = Some(sk.tup_desc);
+                qd.exec = Some(exec);
+                return Ok(());
+            }
+            // Param mismatch: discard the skeleton (displacement path) and
+            // build fresh.
+            drop(exec);
         }
     }
 
@@ -447,8 +519,18 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         // SAFETY: the registered params live in the portal context, which
         // outlives this executor state (PortalDrop frees the handle after
         // PortalCleanup's ExecutorEnd).
-        es.es_param_list_info =
-            (!params.is_null()).then(|| unsafe { types_portal::params::resolve(params) });
+        es.es_param_list_info = if params.is_null() {
+            None
+        } else {
+            let src = unsafe { types_portal::params::resolve(params) };
+            if skeleton_candidate {
+                // Skeleton candidates compile ParamExtern steps against an
+                // estate-owned copy, not the portal's per-EXECUTE array.
+                Some(es.param_stable_install(src)?)
+            } else {
+                Some(src)
+            }
+        };
         let n_exec = pstmt.paramExecTypes.len();
         if n_exec > 0 {
             es.es_param_exec_vals
@@ -816,33 +898,37 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
 pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
     let mut exec = qd.exec.take().expect("ExecutorEnd before ExecutorStart");
 
-    // Executor-skeleton park (v1 gates mirror the reuse gates in
-    // standard_executor_start; anything droppy per-run is released here).
+    // Executor-skeleton park (v2 gates mirror the reuse gates in
+    // standard_executor_start; everything per-run — scan descriptors,
+    // relation pins, snapshot, source text — is released here).
     if !qd.cplan.is_null()
         && qd.operation == CmdType::CMD_SELECT
         && qd.instrument_options == 0
-        && qd.params.is_null()
         && qd.query_env.is_null()
         && qd.crosscheck_snapshot.is_none()
     {
-        let parked_eflags = exec.with_mut(|data| {
+        let parked_eflags = exec.with_mut(|data| -> PgResult<Option<i32>> {
             let ExecData { estate, planstate } = data;
-            // SELECT with no FROM still carries an RTE_RESULT range-table
-            // entry; the real "nothing to close" probe is no OPEN relations.
             let eligible = planstate.is_some()
-                && estate.es_relations.iter().all(Option::is_none)
                 && estate.es_subplanstates.is_empty()
                 && estate.es_subplan_expr_states.is_empty()
                 && estate.es_param_exec_vals.is_empty()
                 && estate.es_result_relations.is_empty()
                 && estate.es_rowmarks.is_empty()
+                && estate.es_part_prune_results.is_empty()
+                && estate.es_epq.is_none()
                 && estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
                 && estate.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS != 0
                 && estate.es_instrument == 0
-                && estate.es_crosscheck_snapshot.is_none();
+                && estate.es_crosscheck_snapshot.is_none()
+                && skeleton_parkable(planstate.as_ref().expect("probed above"));
             if !eligible {
-                return None;
+                return Ok(None);
             }
+            skeleton_park_tree(planstate.as_mut().expect("probed above"))?;
+            // Relations close per run, exactly as C's ExecutorEnd (locks are
+            // kept; the next EXECUTE re-acquires via AcquireExecutorLocks).
+            estate.exec_close_range_table_relations()?;
             let mcx = estate.es_query_cxt;
             for slot in estate.es_tupleTable.iter_mut() {
                 ::exectuples::exec_clear_tuple(slot, mcx);
@@ -851,8 +937,8 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
             // The source text lives in the portal, freed before the skeleton
             // is reused; never hold it across the park.
             estate.es_sourceText = None;
-            Some(estate.es_top_eflags)
-        });
+            Ok(Some(estate.es_top_eflags))
+        })?;
         if let Some(eflags) = parked_eflags {
             let tup_desc = qd.tup_desc.take().expect("finished query has a tupdesc");
             exec_skeleton::park(exec_skeleton::Skeleton {
