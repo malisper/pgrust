@@ -3,7 +3,7 @@
 //! — ExecSubPlan's scan lane (EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE with
 //! per-call rescan + parParam binding) and the HASHED ANY lane
 //! (buildSubPlanHash/findPartialMatch, C's three-valued NULL semantics).
-//! MULTIEXPR and CTE expression arms are loud.
+//! Correlated MULTIEXPR and CTE expression arms are loud.
 
 use core::ptr::NonNull;
 use std::rc::Rc;
@@ -64,6 +64,7 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
             | SubLinkType::EXPR_SUBLINK
             | SubLinkType::ARRAY_SUBLINK
             | SubLinkType::ROWCOMPARE_SUBLINK
+            | SubLinkType::MULTIEXPR_SUBLINK
     ) {
         panic!(
             "ExecInitSubPlan (nodeSubplan.c): {:?} initplan not ported",
@@ -88,7 +89,11 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
         set_param.push(id);
     }
     debug_assert!(
-        set_param.len() == 1 || subplan.subLinkType == SubLinkType::ROWCOMPARE_SUBLINK
+        set_param.len() == 1
+            || matches!(
+                subplan.subLinkType,
+                SubLinkType::ROWCOMPARE_SUBLINK | SubLinkType::MULTIEXPR_SUBLINK
+            )
     );
 
     let mut boxed = ::mcx::alloc_in(
@@ -209,7 +214,9 @@ fn run_subplan<'mcx>(
                     sstate.first_col_type,
                 )?);
             }
-            SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK => {
+            SubLinkType::EXPR_SUBLINK
+            | SubLinkType::ROWCOMPARE_SUBLINK
+            | SubLinkType::MULTIEXPR_SUBLINK => {
                 if found {
                     return Err(too_many_rows());
                 }
@@ -250,7 +257,9 @@ fn run_subplan<'mcx>(
             prm.value = Datum::from_usize(bytes.leak().as_ptr() as usize);
             prm.isnull = false;
         }
-        SubLinkType::EXPR_SUBLINK | SubLinkType::ROWCOMPARE_SUBLINK => {
+        SubLinkType::EXPR_SUBLINK
+        | SubLinkType::ROWCOMPARE_SUBLINK
+        | SubLinkType::MULTIEXPR_SUBLINK => {
             for (i, &pid) in sstate.set_param.iter().enumerate() {
                 let prm = &mut estate.es_param_exec_vals[pid as usize];
                 prm.exec_plan = false;

@@ -3,11 +3,12 @@
 //! and testexpr-bearing EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE sublinks,
 //! hashed-ANY selection, convert_VALUES_to_ANY, the convert_EXISTS_to_ANY
 //! AlternativeSubPlan lane, SS_replace_correlation_vars, and finalize's
-//! SubPlan legs. MULTIEXPR and CTE-expression arms are loud.
+//! SubPlan legs. Correlated-MULTIEXPR and CTE-expression arms are loud.
 
 use clauses::NodeWalker;
 use mcx::Mcx;
 use types_core::catalog::{BOOLOID, VOIDOID};
+use types_core::RECORDOID;
 use types_error::PgResult;
 use types_nodes::list::{IntList, NodeList};
 use types_nodes::parsenodes::{Query, RTEKind, RangeTblEntry};
@@ -930,6 +931,7 @@ fn make_subplan<'mcx>(
         plan,
         plan_params,
         sublink.subLinkType,
+        sublink.subLinkId,
         testexpr,
         IntList::nil(),
         is_top_qual,
@@ -966,6 +968,7 @@ fn make_subplan<'mcx>(
                     plan,
                     plan_params,
                     SubLinkType::ANY_SUBLINK,
+                    0,
                     Some(newtestexpr),
                     param_ids,
                     true,
@@ -1184,12 +1187,14 @@ fn contain_aggs_of_level(node: Node<'_>, level: i32) -> PgResult<bool> {
 
 
 
-// build_subplan (subselect.c). The MULTIEXPR arm is loud.
+// build_subplan (subselect.c). The correlated MULTIEXPR arm is loud.
+#[allow(clippy::too_many_arguments)]
 fn build_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     mut plan: Node<'mcx>,
     plan_params: mcx::PgVec<'mcx, types_pathnodes::NodeId>,
     sub_link_type: SubLinkType,
+    sub_link_id: i32,
     testexpr: Option<Node<'mcx>>,
     testexpr_paramids: IntList<'mcx>,
     unknown_eq_false: bool,
@@ -1296,7 +1301,48 @@ fn build_subplan<'mcx>(
         splan.paramIds = param_ids;
         is_init_plan = true;
     } else if sub_link_type == SubLinkType::MULTIEXPR_SUBLINK {
-        panic!("build_subplan (subselect.c): MULTIEXPR_SUBLINK not ported");
+        // Whether initplan or not, one PARAM_EXEC output Param per column.
+        debug_assert!(testexpr.is_none());
+        let (params, param_ids) =
+            generate_subquery_params(run, &plan.as_plan().unwrap().targetlist)?;
+        splan.setParam = param_ids;
+        // Save the replacement Params in the subLinkId'th cell of
+        // root.multiexpr_params; setrefs replaces PARAM_MULTIEXPR from it.
+        debug_assert!(sub_link_id >= 1);
+        let slot = (sub_link_id - 1) as usize;
+        let mut ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
+        for p in params.iter() {
+            ids.push(run.root.alloc_expr_node(*p));
+        }
+        while run.root.multiexpr_params.len() <= slot {
+            run.root.multiexpr_params.push(mcx::PgVec::new_in(mcx));
+        }
+        debug_assert!(run.root.multiexpr_params[slot].is_empty());
+        run.root.multiexpr_params[slot] = ids;
+        if splan.parParam.is_nil() {
+            is_init_plan = true;
+            // C makeNullConst(RECORDOID, -1, InvalidOid): the SubPlan's
+            // dummy in-tree result; the real outputs are the setParams.
+            result = Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::Const {
+                    consttype: RECORDOID,
+                    consttypmod: -1,
+                    constcollid: 0,
+                    constlen: -1,
+                    constvalue: ::datum::Datum::from_usize(0),
+                    constisnull: true,
+                    constbyval: false,
+                    location: -1,
+                },
+            )?);
+        } else {
+            panic!(
+                "build_subplan (subselect.c): correlated MULTIEXPR_SUBLINK \
+                 (per-row setParam SubPlan) not ported — nodeSubplan \
+                 pending-param lane"
+            );
+        }
     } else {
         // Regular SubPlan: rewrite the testexpr's PARAM_SUBLINK Params into
         // fresh PARAM_EXEC output params.

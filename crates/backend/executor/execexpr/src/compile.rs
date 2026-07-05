@@ -1212,9 +1212,8 @@ pub fn expr_type(node: Node<'_>) -> Oid {
                 SubLinkType::EXPR_SUBLINK => sp.firstColType,
                 SubLinkType::ARRAY_SUBLINK => ::lsyscache::get_promoted_array_type(sp.firstColType)
                     .expect("array type resolved at plan time"),
-                SubLinkType::MULTIEXPR_SUBLINK => {
-                    panic!("exprType (nodeFuncs.c): MULTIEXPR SubPlan not ported")
-                }
+                // C: a MULTIEXPR SubPlan returns a dummy NULL::record.
+                SubLinkType::MULTIEXPR_SUBLINK => ::types_core::RECORDOID,
                 _ => 16,
             }
         }

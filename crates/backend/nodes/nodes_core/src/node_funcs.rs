@@ -73,7 +73,9 @@ pub fn expr_type(node: Node<'_>) -> Oid {
             let sp = node.as_sub_plan().unwrap();
             match sp.subLinkType {
                 types_nodes::SubLinkType::EXPR_SUBLINK
-                | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColType,
+                => sp.firstColType,
+                // C: MULTIEXPR SubPlans return a dummy NULL::record.
+                types_nodes::SubLinkType::MULTIEXPR_SUBLINK => types_core::RECORDOID,
                 types_nodes::SubLinkType::ARRAY_SUBLINK => {
                     promoted_array_type(sp.firstColType)
                 }
@@ -328,7 +330,9 @@ pub fn expr_collation(node: Node<'_>) -> Oid {
             match sp.subLinkType {
                 types_nodes::SubLinkType::EXPR_SUBLINK
                 | types_nodes::SubLinkType::ARRAY_SUBLINK
-                | types_nodes::SubLinkType::MULTIEXPR_SUBLINK => sp.firstColCollation,
+                => sp.firstColCollation,
+                // C: the MULTIEXPR dummy RECORD result is uncollatable.
+                types_nodes::SubLinkType::MULTIEXPR_SUBLINK => types_core::InvalidOid,
                 _ => 0,
             }
         }
