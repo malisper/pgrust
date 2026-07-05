@@ -16,6 +16,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_rel = { path = "../../../_support/types/rel" }
 table = { path = "../../access/table/table" }
 rewrite_handler_seams = { path = "../rewrite_handler_seams" }
+foreigncmds_seams = { path = "../../commands/foreigncmds_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
 rewrite_manip = { path = "../rewrite_manip" }

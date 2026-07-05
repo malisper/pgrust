@@ -1921,10 +1921,11 @@ pub fn relation_is_updatable<'mcx>(
     }
 
     if rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
-        panic!(
-            "relation_is_updatable (rewriteHandler.c): foreign-table updatability \
-             (GetFdwRoutineForRelation) not ported"
-        );
+        // C derives events from GetFdwRoutineForRelation; no FDW handler is
+        // invocable yet, so the live surface is the no-handler error
+        // (plancat.rs precedent) and an installed handler stays loud.
+        foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, rel.rd_id)?;
+        unreachable!("get_fdw_routine_by_rel_id returned");
     }
 
     if rel.rd_rel.relkind == RELKIND_VIEW {

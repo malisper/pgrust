@@ -388,40 +388,31 @@ fn datum_copy<'mcx>(mcx: ::mcx::Mcx<'mcx>, value: Datum, typlen: i16) -> PgResul
     unsafe { ::execexpr::agg_datum_copy(mcx, value, typlen) }
 }
 
+// C discovers WindowFuncs during the generic ExecInitExprRec recursion over
+// the tlist (execExpr.c T_WindowFunc arm), so this walks with the generic
+// expression_tree_walker rather than enumerating families. Post-planner
+// trees carry no nested window functions, so a hit does not recurse
+// (find_window_functions' shape).
+struct CollectWindowFuncs<'a, 'mcx> {
+    out: &'a mut PgVec<'mcx, (Node<'mcx>, &'mcx WindowFunc<'mcx>)>,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for CollectWindowFuncs<'_, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if node.node_tag() == NodeTag::T_WindowFunc {
+            self.out.push((node, node.as_window_func().unwrap()));
+            return Ok(false);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+}
+
 fn collect_window_funcs<'mcx>(
     node: Node<'mcx>,
     out: &mut PgVec<'mcx, (Node<'mcx>, &'mcx WindowFunc<'mcx>)>,
-) {
-    match node.node_tag() {
-        NodeTag::T_WindowFunc => out.push((node, node.as_window_func().unwrap())),
-        NodeTag::T_TargetEntry => {
-            collect_window_funcs(node.as_target_entry().unwrap().expr, out)
-        }
-        NodeTag::T_Var | NodeTag::T_Const => {}
-        NodeTag::T_FuncExpr => {
-            for a in node.as_func_expr().unwrap().args.iter() {
-                collect_window_funcs(a, out);
-            }
-        }
-        NodeTag::T_OpExpr => {
-            for a in node.as_op_expr().unwrap().args.iter() {
-                collect_window_funcs(a, out);
-            }
-        }
-        NodeTag::T_CoerceViaIO => {
-            collect_window_funcs(node.as_coerce_via_io().unwrap().arg, out)
-        }
-        NodeTag::T_RelabelType => {
-            collect_window_funcs(node.as_relabel_type().unwrap().arg, out)
-        }
-        NodeTag::T_CoerceToDomain => {
-            collect_window_funcs(node.as_coerce_to_domain().unwrap().arg, out)
-        }
-        tag => panic!(
-            "ExecInitWindowAgg (nodeWindowAgg.c): WindowAgg tlist node family {tag:?} \
-             not ported"
-        ),
-    }
+) -> PgResult<()> {
+    use nodes_core::NodeWalker as _;
+    CollectWindowFuncs { out }.visit(node).map(|_| ())
 }
 
 // contain_volatile_functions (clauses.c) over the arg shapes this lane
@@ -529,7 +520,7 @@ pub fn exec_init_window_agg<'mcx>(
 
     let mut wfuncs: PgVec<'mcx, (Node<'mcx>, &'mcx WindowFunc<'mcx>)> = PgVec::new_in(mcx);
     for tle in node.plan.targetlist.iter() {
-        collect_window_funcs(tle, &mut wfuncs);
+        collect_window_funcs(tle, &mut wfuncs)?;
     }
     // C dedups equal() non-volatile wfuncs onto one wfuncno; equal() has no
     // WindowFunc arm yet, so duplicates each get their own slot (results
