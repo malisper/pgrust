@@ -827,8 +827,10 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
     {
         let parked_eflags = exec.with_mut(|data| {
             let ExecData { estate, planstate } = data;
+            // SELECT with no FROM still carries an RTE_RESULT range-table
+            // entry; the real "nothing to close" probe is no OPEN relations.
             let eligible = planstate.is_some()
-                && estate.es_range_table_size == 0
+                && estate.es_relations.iter().all(Option::is_none)
                 && estate.es_subplanstates.is_empty()
                 && estate.es_subplan_expr_states.is_empty()
                 && estate.es_param_exec_vals.is_empty()
