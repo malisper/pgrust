@@ -1099,24 +1099,39 @@ pub fn cost_index(
         (max_io_cost, min_io_cost, rand_heap_pages)
     };
 
+    // Partial-leg-only; outlined so the serial costing path stays lean.
+    // Returns false when workers are unassignable: the caller rejects the
+    // path, so the rest of the costing is skipped.
+    #[cold]
+    #[inline(never)]
+    fn cost_index_partial_leg(
+        run: &mut PlannerRun<'_>,
+        path_id: types_pathnodes::PathId,
+        baserel_id: types_pathnodes::RelId,
+        rand_heap_pages: f64,
+        index_pages: f64,
+    ) -> bool {
+        let parallel_workers = ::allpaths::compute_parallel_worker(
+            run.root.rel(baserel_id),
+            rand_heap_pages,
+            index_pages,
+            guc_tables::vars::max_parallel_workers_per_gather.read(),
+        );
+        let p = run.root.path_mut(path_id).base_mut();
+        p.parallel_workers = parallel_workers;
+        if parallel_workers <= 0 {
+            return false;
+        }
+        p.parallel_aware = true;
+        true
+    }
     if partial_path {
         // Index-only scans size workers by index pages: heap fetches can be
         // few enough to spuriously rule out parallelism.
         let rand_heap_pages = if indexonly { -1.0 } else { rand_heap_pages };
-        let parallel_workers = ::allpaths::compute_parallel_worker(
-            run.root.rel(baserel_id),
-            rand_heap_pages,
-            am.index_pages,
-            guc_tables::vars::max_parallel_workers_per_gather.read(),
-        );
-        // Workers unassignable: the caller rejects the path; skip the rest.
-        if parallel_workers <= 0 {
-            run.root.path_mut(path_id).base_mut().parallel_workers = parallel_workers;
+        if !cost_index_partial_leg(run, path_id, baserel_id, rand_heap_pages, am.index_pages) {
             return Ok(());
         }
-        let p = run.root.path_mut(path_id).base_mut();
-        p.parallel_workers = parallel_workers;
-        p.parallel_aware = true;
     }
 
     let csquared = am.index_correlation * am.index_correlation;
