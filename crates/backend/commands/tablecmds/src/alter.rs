@@ -4088,7 +4088,7 @@ fn ATExecSetOptions<'mcx>(
 }
 
 // GetAttributeStorage (tablecmds.c).
-fn get_attribute_storage(atttypid: Oid, storagemode: &str) -> PgResult<u8> {
+pub(crate) fn get_attribute_storage(atttypid: Oid, storagemode: &str) -> PgResult<u8> {
     let shape = || {
         syscache_seams::lookup_pg_type_shape::call(atttypid)
             .map(|s| s.expect("pg_type row vanished"))

@@ -743,7 +743,7 @@ fn merge_with_existing_constraint<'mcx>(
     let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
     let con_rel = table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
     let namebuf = {
-        assert!(ccname.len() < 64, "makeObjectName truncation unported: {ccname:?}");
+        let ccname = crate::truncate_name(mcx, ccname)?;
         let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 64)?;
         mcx::vec_append_bytes(&mut buf, ccname.as_bytes())?;
         mcx::vec_append_bytes(&mut buf, &[0u8; 64][..64 - ccname.len()])?;

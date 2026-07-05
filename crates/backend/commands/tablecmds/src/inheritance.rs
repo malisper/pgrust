@@ -401,6 +401,16 @@ fn clone_column_def<'mcx>(mcx: Mcx<'mcx>, d: &ColumnDef<'mcx>) -> PgResult<Colum
     })
 }
 
+fn storage_name(c: u8) -> &'static str {
+    match c {
+        b'p' => "PLAIN",
+        b'e' => "EXTERNAL",
+        b'x' => "EXTENDED",
+        b'm' => "MAIN",
+        _ => "???",
+    }
+}
+
 fn coldef_type(def: &ColumnDef<'_>) -> (Oid, i32) {
     let tn = def
         .typeName
@@ -468,7 +478,16 @@ fn merge_inherited_attribute<'mcx>(
     if prevdef.storage == 0 {
         prevdef.storage = newdef.storage;
     } else if prevdef.storage != newdef.storage {
-        unported("inherited storage parameter conflicts (storage_name deparse)");
+        return Err(column_conflict(
+            "inherited column \"{}\" has a storage parameter conflict",
+            attname,
+            format!(
+                "{} versus {}",
+                storage_name(prevdef.storage),
+                storage_name(newdef.storage)
+            ),
+            types_error::ERRCODE_DATATYPE_MISMATCH,
+        ));
     }
     debug_assert!(prevdef.compression.is_none() && newdef.compression.is_none());
     if prevdef.generated != newdef.generated {
@@ -530,7 +549,16 @@ fn merge_child_attribute<'mcx>(
     if inhdef.storage == 0 {
         inhdef.storage = newdef.storage;
     } else if newdef.storage != 0 && inhdef.storage != newdef.storage {
-        unported("inherited storage parameter conflicts (storage_name deparse)");
+        return Err(column_conflict(
+            "column \"{}\" has a storage parameter conflict",
+            attname,
+            format!(
+                "{} versus {}",
+                storage_name(inhdef.storage),
+                storage_name(newdef.storage)
+            ),
+            types_error::ERRCODE_DATATYPE_MISMATCH,
+        ));
     }
     debug_assert!(inhdef.compression.is_none());
     inhdef.compression = newdef.compression;

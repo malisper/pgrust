@@ -576,7 +576,7 @@ fn get_index_constraint<'mcx>(mcx: Mcx<'mcx>, index_id: Oid) -> PgResult<Oid> {
 }
 
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    assert!(s.len() < 64, "identifier truncation unported: {s:?}");
+    let s = crate::truncate_name(mcx, s)?;
     let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 64)?;
     mcx::vec_append_bytes(&mut buf, s.as_bytes())?;
     mcx::vec_append_bytes(&mut buf, &[0u8; 64][..64 - s.len()])?;
