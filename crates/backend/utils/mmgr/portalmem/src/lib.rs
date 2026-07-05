@@ -743,6 +743,18 @@ fn at_subcommit_inner(
 ) {
     for i in 0..table_len() {
         let Some(portal) = portal_at(i) else { break };
+        // A portal mid-ProcessQuery holds its RefCell borrow across the whole
+        // execution (pquery with_source_text); it was created and activated
+        // before this subxact existed, so it never matches mySubid. Read-check
+        // before mutating (same shape as at_subabort_inner) or a plpgsql
+        // exception-block subcommit under a running DML double-borrows.
+        let needs_update = {
+            let p = portal.borrow();
+            p.createSubid == mySubid || p.activeSubid == mySubid
+        };
+        if !needs_update {
+            continue;
+        }
         let reparent = {
             let mut p = portal.borrow_mut();
             let mine = p.createSubid == mySubid;
