@@ -402,6 +402,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"GROUPINGSET" => self.read_grouping_set(),
             b"TABLESAMPLECLAUSE" => self.read_table_sample_clause(),
             b"ROWMARKCLAUSE" => self.read_row_mark_clause(),
+            b"WITHCHECKOPTION" => self.read_with_check_option(),
             b"SETOPERATIONSTMT" => self.read_set_operation_stmt(),
             b"AGGREF" => self.read_aggref(),
             b"GROUPINGFUNC" => self.read_grouping_func(),
@@ -1328,6 +1329,25 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             hashable: self.read_bool("hashable"),
         };
         Node::mk(self.mcx, s)
+    }
+
+    fn read_with_check_option(&mut self) -> PgResult<Node<'mcx>> {
+        let w = types_nodes::parsenodes::WithCheckOption {
+            kind: match self.read_u32("kind") {
+                0 => types_nodes::parsenodes::WCOKind::WCO_VIEW_CHECK,
+                1 => types_nodes::parsenodes::WCOKind::WCO_RLS_INSERT_CHECK,
+                2 => types_nodes::parsenodes::WCOKind::WCO_RLS_UPDATE_CHECK,
+                3 => types_nodes::parsenodes::WCOKind::WCO_RLS_CONFLICT_CHECK,
+                4 => types_nodes::parsenodes::WCOKind::WCO_RLS_MERGE_UPDATE_CHECK,
+                5 => types_nodes::parsenodes::WCOKind::WCO_RLS_MERGE_DELETE_CHECK,
+                other => panic!("readfuncs.c: bad WCOKind {other}"),
+            },
+            relname: self.read_str("relname")?,
+            polname: self.read_str("polname")?,
+            qual: self.read_node("qual")?,
+            cascaded: self.read_bool("cascaded"),
+        };
+        Node::mk(self.mcx, w)
     }
 
     fn read_row_mark_clause(&mut self) -> PgResult<Node<'mcx>> {
