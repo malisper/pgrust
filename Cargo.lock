@@ -961,6 +961,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_tsquery_rewrite"
+version = "0.1.0"
+dependencies = [
+ "adt_tsquery_core",
+ "adt_tsvector_core",
+ "datum",
+ "detoast",
+ "elog",
+ "mcx",
+ "postgres_seams",
+ "spi",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "adt_tsrank"
 version = "0.1.0"
 dependencies = [
@@ -12624,6 +12643,7 @@ dependencies = [
  "adt_timestamp",
  "adt_tsginidx",
  "adt_tsgistidx",
+ "adt_tsquery_rewrite",
  "adt_xml",
  "aio_config",
  "aio_uring",

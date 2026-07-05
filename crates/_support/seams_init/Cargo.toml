@@ -192,6 +192,7 @@ brin_minmax_multi = { path = "../../backend/access/brin/brin_minmax_multi" }
 brin_bloom = { path = "../../backend/access/brin/brin_bloom" }
 adt_acl = { path = "../../backend/utils/adt/acl" }
 adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+adt_tsquery_rewrite = { path = "../../backend/utils/adt/tsquery_rewrite" }
 orderedsetaggs = { path = "../../backend/utils/adt/orderedsetaggs" }
 partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
 genfile = { path = "../../backend/utils/adt/genfile" }

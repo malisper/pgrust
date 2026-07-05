@@ -8,8 +8,13 @@ pub struct QtNode<'mcx> {
     pub item: Item,
     pub word: PgVec<'mcx, u8>,
     pub sign: u32,
+    pub flags: u32,
     pub children: PgVec<'mcx, QtNode<'mcx>>,
 }
+
+// QTN_NOCHANGE (ts_utils.h): findsubquery must not recurse into a
+// just-substituted node.
+pub const QTN_NOCHANGE: u32 = 0x01;
 
 // QT2QTN over a flat query payload.
 pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<QtNode<'mcx>> {
@@ -27,6 +32,7 @@ pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<Q
                 item: Item::Opr(opr),
                 word: PgVec::new_in(mcx),
                 sign,
+                flags: 0,
                 children,
             })
         }
@@ -37,6 +43,7 @@ pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<Q
                 item: Item::Val(op),
                 word,
                 sign: 1u32 << ((op.valcrc as u32) % 32),
+                flags: 0,
                 children: PgVec::new_in(mcx),
             })
         }
@@ -44,6 +51,7 @@ pub fn qt2qtn<'mcx>(mcx: Mcx<'mcx>, q: TsQueryRef<'_>, idx: usize) -> PgResult<Q
             item: Item::ValStop,
             word: PgVec::new_in(mcx),
             sign: 0,
+            flags: 0,
             children: PgVec::new_in(mcx),
         }),
     }
@@ -156,6 +164,7 @@ pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) {
             item: Item::ValStop,
             word: PgVec::new_in(mcx),
             sign: 0,
+            flags: 0,
             children: PgVec::new_in(mcx),
         };
         let c0 = core::mem::replace(&mut n.children[0], dummy());
@@ -169,11 +178,32 @@ pub fn qtn_binary<'mcx>(mcx: Mcx<'mcx>, n: &mut QtNode<'mcx>) {
             item: Item::Opr(Operator { oper: opr.oper, distance: 0, left: 0 }),
             word: PgVec::new_in(mcx),
             sign,
+            flags: 0,
             children: sub,
         };
         let last = n.children.pop().expect("len > 2");
         n.children[1] = last;
         n.children[0] = nn;
+    }
+}
+
+// QTNCopy.
+pub fn qtn_copy<'mcx>(mcx: Mcx<'mcx>, n: &QtNode<'_>) -> PgResult<QtNode<'mcx>> {
+    let mut word = vec_with_capacity_in(mcx, n.word.len())?;
+    word.extend_from_slice(&n.word);
+    let mut children: PgVec<'mcx, QtNode<'mcx>> = PgVec::new_in(mcx);
+    children.try_reserve_exact(n.children.len()).map_err(|_| mcx.oom(n.children.len()))?;
+    for c in n.children.iter() {
+        children.push(qtn_copy(mcx, c)?);
+    }
+    Ok(QtNode { item: n.item, word, sign: n.sign, flags: n.flags, children })
+}
+
+// QTNClearFlags.
+pub fn qtn_clear_flags(n: &mut QtNode<'_>, flags: u32) {
+    n.flags &= !flags;
+    for c in n.children.iter_mut() {
+        qtn_clear_flags(c, flags);
     }
 }
 

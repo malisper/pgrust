@@ -91,6 +91,7 @@ fn join_tsqueries<'mcx>(
         }),
         word: PgVec::new_in(mcx),
         sign: children[0].sign | children[1].sign,
+        flags: 0,
         children,
     };
     qtn2qt(mcx, &res)
@@ -150,6 +151,7 @@ pub fn fc_tsquery_not(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
         item: Item::Opr(Operator { oper: OP_NOT, distance: 0, left: 0 }),
         word: PgVec::new_in(mcx),
         sign: children[0].sign,
+        flags: 0,
         children,
     };
     Ok(image_result(qtn2qt(mcx, &res)?))
