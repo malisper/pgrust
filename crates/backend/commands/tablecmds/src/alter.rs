@@ -1073,6 +1073,18 @@ fn ATRewriteCatalogs<'mcx>(
                         _ => ATExecAddConstraint(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?,
                     }
                 }
+                AlterTableType::AT_ReAddDomainConstraint => {
+                    let stmt = cmd
+                        .def
+                        .expect("AT_ReAddDomainConstraint AlterDomainStmt")
+                        .as_variant::<types_nodes::parsenodes::AlterDomainStmt>()
+                        .expect("AlterDomainStmt");
+                    typecmds_seams::alter_domain_add_constraint::call(
+                        mcx,
+                        &stmt.typeName,
+                        stmt.def.expect("ALTER DOMAIN ADD CONSTRAINT def"),
+                    )?;
+                }
                 AlterTableType::AT_ReAddComment => {
                     let stmt = cmd
                         .def
@@ -4983,20 +4995,27 @@ fn ATPostAlterTypeCleanup<'mcx>(
     let changed_statistics = std::mem::take(&mut wqueue[tabidx].changed_statistics);
     let mut objects = catalog_dependency::ObjectAddresses::new();
     for (conoid, def) in &changed_constraints {
-        let (conrelid, confrelid, conislocal) = constraint_rebuild_shape(mcx, *conoid)?;
+        let (conrelid, contypid, confrelid, conislocal) = constraint_rebuild_shape(mcx, *conoid)?;
         objects
             .add_exact_object_address(pg_depend::ObjectAddress::set(ConstraintRelationId, *conoid));
         if !conislocal {
             continue;
         }
-        if conrelid == InvalidOid {
-            unported("ATPostAlterTypeCleanup domain constraint rebuild");
-        }
+        let relid = if conrelid != InvalidOid {
+            conrelid
+        } else {
+            // must be a domain constraint
+            let relid = lsyscache::get_typ_typrelid(lsyscache::getBaseType(contypid)?)?;
+            if relid == InvalidOid {
+                panic!("could not identify relation associated with constraint {conoid}");
+            }
+            relid
+        };
         // AccessExclusiveLock: the DROP CONSTRAINT below needs it anyway.
-        if conrelid != tab_relid {
-            lmgr::LockRelationOid(conrelid, AccessExclusiveLock)?;
+        if relid != tab_relid {
+            lmgr::LockRelationOid(relid, AccessExclusiveLock)?;
         }
-        ATPostAlterTypeParse(mcx, wqueue, *conoid, conrelid, confrelid, def, tab_rewrite)?;
+        ATPostAlterTypeParse(mcx, wqueue, *conoid, relid, confrelid, def, tab_rewrite)?;
     }
     for (indoid, def) in &changed_indexes {
         let relid = catalog_index::IndexGetRelation(mcx, *indoid, false)?;
@@ -5044,7 +5063,7 @@ fn ATPostAlterTypeCleanup<'mcx>(
     )
 }
 
-fn constraint_rebuild_shape(mcx: Mcx<'_>, conoid: Oid) -> PgResult<(Oid, Oid, bool)> {
+fn constraint_rebuild_shape(mcx: Mcx<'_>, conoid: Oid) -> PgResult<(Oid, Oid, Oid, bool)> {
     let con_rel = table::table_open(mcx, ConstraintRelationId, types_rel::AccessShareLock)?;
     let keys = [oid_scankey(1, conoid)];
     let mut scan =
@@ -5058,11 +5077,12 @@ fn constraint_rebuild_shape(mcx: Mcx<'_>, conoid: Oid) -> PgResult<(Oid, Oid, bo
         unsafe { types_tuple::heap_getattr(tup, anum as i32, desc, &mut isnull) }
     };
     let conrelid = get(pg_constraint::Anum_pg_constraint_conrelid).as_oid();
+    let contypid = get(pg_constraint::Anum_pg_constraint_contypid).as_oid();
     let confrelid = get(pg_constraint::Anum_pg_constraint_confrelid).as_oid();
     let conislocal = get(pg_constraint::Anum_pg_constraint_conislocal).as_bool();
     genam::systable_endscan(mcx, scan)?;
     con_rel.close(types_rel::AccessShareLock)?;
-    Ok((conrelid, confrelid, conislocal))
+    Ok((conrelid, contypid, confrelid, conislocal))
 }
 
 fn ATPostAlterTypeParse<'mcx>(
@@ -5193,6 +5213,28 @@ fn ATPostAlterTypeParse<'mcx>(
                     other => panic!("unexpected constraint type: {other:?}"),
                 }
             }
+        } else if let Some(adstmt) = stmt.as_variant::<types_nodes::parsenodes::AlterDomainStmt>() {
+            if adstmt.subtype != b'C' {
+                panic!("unexpected statement subtype: {}", adstmt.subtype);
+            }
+            let con = adstmt
+                .def
+                .expect("ALTER DOMAIN ADD CONSTRAINT def")
+                .as_variant::<Constraint>()
+                .expect("Constraint");
+            let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+            newcmd.subtype = AlterTableType::AT_ReAddDomainConstraint;
+            newcmd.def = Some(stmt);
+            tab.subcmds[AT_PASS_OLD_CONSTR].lappend(mcx, newcmd.seal())?;
+            RebuildConstraintComment(
+                mcx,
+                tab,
+                AT_PASS_OLD_CONSTR,
+                old_id,
+                None,
+                Some(&adstmt.typeName),
+                con.conname.expect("deparsed domain constraint has a name"),
+            )?;
         } else if stmt.as_variant::<types_nodes::rawnodes::CreateStatsStmt>().is_some() {
             parse_clause::transformStatsStmt(mcx, rel_id, stmt, def)?;
             // keep the statistics object's comment
