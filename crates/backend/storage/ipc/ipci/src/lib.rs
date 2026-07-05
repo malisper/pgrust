@@ -75,6 +75,7 @@ pub fn CalculateShmemSize(cfg: &ProcGlobalConfig) -> PgResult<(usize, i32)> {
     size = shmem::add_size(size, procsignal::ProcSignalShmemSize()?)?;
     size = shmem::add_size(size, syncscan::SyncScanShmemSize())?;
     size = shmem::add_size(size, commands_async::AsyncShmemSize())?;
+    size = shmem::add_size(size, waitevent::custom::WaitEventCustomShmemSize())?;
     size = shmem::add_size(size, checkpointer::CheckpointerShmemSize(g::NBuffers()))?;
     size = shmem::add_size(size, slot::ReplicationSlotsShmemSize())?;
     size = shmem::add_size(size, walsummarizer::WalSummarizerShmemSize())?;
@@ -148,6 +149,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     pgarch::PgArchShmemInit();
     syncscan::SyncScanShmemInit();
     commands_async::AsyncShmemInit()?;
+    waitevent::custom::WaitEventCustomShmemInit()?;
 
     Ok(())
 }
@@ -195,6 +197,7 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
     pgarch::PgArchShmemResetAfterCrash();
     syncscan::SyncScanShmemResetAfterCrash();
     commands_async::AsyncShmemResetAfterCrash()?;
+    waitevent::custom::WaitEventCustomShmemResetAfterCrash();
 
     dsm_core::dsm::dsm_postmaster_startup_after_crash()
 }

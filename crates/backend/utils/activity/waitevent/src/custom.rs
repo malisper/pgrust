@@ -130,6 +130,20 @@ pub fn WaitEventCustomShmemInit() -> PgResult<()> {
     Ok(())
 }
 
+// Crash-cycle reset: back to the post-ShmemInit boot image (C recreates the
+// whole segment; extensions re-register on next load).
+pub fn WaitEventCustomShmemResetAfterCrash() {
+    let Some(t) = CUSTOM.get() else { return };
+    // SAFETY: crash choreography — children dead, postmaster thread only;
+    // both tables are shared + fixed-size (asserted by the callee).
+    unsafe {
+        dynahash::hash_reset_after_crash(t.by_info);
+        dynahash::hash_reset_after_crash(t.by_name);
+    }
+    t.counter.next_id.set(WAIT_EVENT_CUSTOM_INITIAL_ID);
+    t.counter.mutex.unlock();
+}
+
 pub fn WaitEventExtensionNew(wait_event_name: &str) -> PgResult<u32> {
     WaitEventCustomNew(crate::PG_WAIT_EXTENSION, wait_event_name)
 }

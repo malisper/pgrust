@@ -41,6 +41,7 @@ slot = { path = "../../../replication/slot" }
 pgarch = { path = "../../../postmaster/pgarch" }
 walsummarizer = { path = "../../../postmaster/walsummarizer" }
 syncscan = { path = "../../../access/common/syncscan" }
+waitevent = { path = "../../../utils/activity/waitevent" }
 procarray = { path = "../procarray" }
 ipci_seams = { path = "../ipci_seams" }
 pmchild_seams = { path = "../../../postmaster/pmchild_seams" }
