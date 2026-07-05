@@ -5,7 +5,10 @@ use types_fmgr::{
     varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 
-use crate::{convert_and_check_filename, io_error, log_directory, time_t_to_timestamptz, XLOGDIR};
+use crate::{
+    convert_and_check_filename, io_error, log_directory, time_t_to_timestamptz, tmpdir_path,
+    PG_LOGICAL_MAPPINGS_DIR, PG_LOGICAL_SNAPSHOTS_DIR, XLOGDIR,
+};
 
 fn arg_filename(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
     // SAFETY: these builtins are strict; arg i is a non-null text datum.
@@ -327,6 +330,54 @@ pub fn fc_pg_ls_summariesdir(
     ls_dir_files(flinfo, fcinfo, "pg_wal/summaries", true)
 }
 
+pub fn fc_pg_ls_tmpdir_noargs(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let dir = tmpdir_path(fd::temp::DEFAULTTABLESPACE_OID)?;
+    ls_dir_files(flinfo, fcinfo, &dir, true)
+}
+
+pub fn fc_pg_ls_tmpdir_1arg(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let tblspc = fcinfo.arg(0).as_oid();
+    let dir = tmpdir_path(tblspc)?;
+    ls_dir_files(flinfo, fcinfo, &dir, true)
+}
+
+pub fn fc_pg_ls_logicalsnapdir(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    ls_dir_files(flinfo, fcinfo, PG_LOGICAL_SNAPSHOTS_DIR, false)
+}
+
+pub fn fc_pg_ls_logicalmapdir(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    ls_dir_files(flinfo, fcinfo, PG_LOGICAL_MAPPINGS_DIR, false)
+}
+
+pub fn fc_pg_ls_replslotdir(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let slotname = arg_filename(fcinfo, 0)?;
+    if slot::SearchNamedReplicationSlot(&slotname, true)?.is_none() {
+        return Err(Box::new(
+            elog::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("replication slot \"{slotname}\" does not exist"))
+                .into_error(),
+        ));
+    }
+    let dir = format!("{}/{slotname}", slot::PG_REPLSLOT_DIR);
+    ls_dir_files(flinfo, fcinfo, &dir, false)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -349,8 +400,13 @@ pub const GENFILE_BUILTINS: &[FmgrBuiltin] = &[
     b(3826, "pg_read_file_all", 1, fc_pg_read_file_all),
     b(3827, "pg_read_binary_file_off_len", 3, fc_pg_read_binary_file_off_len),
     b(3828, "pg_read_binary_file_all", 1, fc_pg_read_binary_file_all),
+    srf(5029, "pg_ls_tmpdir_noargs", 0, fc_pg_ls_tmpdir_noargs),
+    srf(5030, "pg_ls_tmpdir_1arg", 1, fc_pg_ls_tmpdir_1arg),
     srf(5031, "pg_ls_archive_statusdir", 0, fc_pg_ls_archive_statusdir),
     b(6208, "pg_read_file_all_missing", 2, fc_pg_read_file_all_missing),
     b(6209, "pg_read_binary_file_all_missing", 2, fc_pg_read_binary_file_all_missing),
+    srf(6270, "pg_ls_logicalsnapdir", 0, fc_pg_ls_logicalsnapdir),
+    srf(6271, "pg_ls_logicalmapdir", 0, fc_pg_ls_logicalmapdir),
+    srf(6272, "pg_ls_replslotdir", 1, fc_pg_ls_replslotdir),
     srf(6400, "pg_ls_summariesdir", 0, fc_pg_ls_summariesdir),
 ];

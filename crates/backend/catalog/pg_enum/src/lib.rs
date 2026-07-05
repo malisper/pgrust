@@ -1,12 +1,12 @@
-// pg_enum.c. LOUD divergences: binary-upgrade OID override (pg_upgrade
-// unsupported), parallel-DSM serialize/restore of the uncommitted tables.
+// pg_enum.c. LOUD divergence: parallel-DSM serialize/restore of the
+// uncommitted tables.
 #![allow(non_snake_case, non_upper_case_globals)]
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use datum::Datum;
 use mcx::{Mcx, PgVec};
-use types_core::{AttrNumber, Oid, NAMEDATALEN, TYPE_RELATION_ID};
+use types_core::{AttrNumber, InvalidOid, Oid, OidIsValid, NAMEDATALEN, TYPE_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_NAME,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR, NOTICE,
@@ -242,10 +242,6 @@ pub fn AddEnumLabel<'mcx>(
         return Err(invalid_label(newVal));
     }
 
-    if init_small::globals::IsBinaryUpgrade() {
-        panic!("pg_enum: binary-upgrade OID override (pg_enum.c:458-477) unported");
-    }
-
     // Held until commit: serializes concurrent modifications of one enum.
     lmgr::LockDatabaseObject(TYPE_RELATION_ID, enumTypeOid, 0, ExclusiveLock)?;
 
@@ -310,32 +306,40 @@ pub fn AddEnumLabel<'mcx>(
             }
         };
 
-        // Prefer an even OID when it sorts correctly against existing even
-        // OIDs; otherwise the value must carry an odd OID.
-        let newOid = loop {
-            let candidate =
-                catalog::GetNewOidWithIndex(mcx, &pg_enum, EnumOidIndexId, Anum_pg_enum_oid)?;
-            let mut sorts_ok = true;
-            for m in existing.iter() {
-                if m.oid & 1 != 0 {
-                    continue;
-                }
-                if m.enumsortorder < newelemorder {
-                    if m.oid >= candidate {
+        let newOid = if init_small::globals::IsBinaryUpgrade() {
+            let oid = take_next_pg_enum_oid().ok_or_else(oid_not_set)?;
+            if neighbor.is_some() {
+                return Err(binary_upgrade_incompatible_neighbor());
+            }
+            oid
+        } else {
+            // Prefer an even OID when it sorts correctly against existing even
+            // OIDs; otherwise the value must carry an odd OID.
+            loop {
+                let candidate =
+                    catalog::GetNewOidWithIndex(mcx, &pg_enum, EnumOidIndexId, Anum_pg_enum_oid)?;
+                let mut sorts_ok = true;
+                for m in existing.iter() {
+                    if m.oid & 1 != 0 {
+                        continue;
+                    }
+                    if m.enumsortorder < newelemorder {
+                        if m.oid >= candidate {
+                            sorts_ok = false;
+                            break;
+                        }
+                    } else if m.oid <= candidate {
                         sorts_ok = false;
                         break;
                     }
-                } else if m.oid <= candidate {
-                    sorts_ok = false;
-                    break;
                 }
-            }
-            if sorts_ok {
-                if candidate & 1 == 0 {
+                if sorts_ok {
+                    if candidate & 1 == 0 {
+                        break candidate;
+                    }
+                } else if candidate & 1 != 0 {
                     break candidate;
                 }
-            } else if candidate & 1 != 0 {
-                break candidate;
             }
         };
 
@@ -501,6 +505,43 @@ pub fn scan_enum_members<'mcx>(
     Ok(out)
 }
 
+// binary_upgrade_next_pg_enum_oid (pg_upgrade_support.c): set-once,
+// consume-once override for AddEnumLabel's OID search (pg_enum.c:458-477).
+thread_local! {
+    static NEXT_PG_ENUM_OID: Cell<Oid> = const { Cell::new(InvalidOid) };
+}
+
+pub fn SetNextPgEnumOid(oid: Oid) {
+    NEXT_PG_ENUM_OID.set(oid);
+}
+
+fn take_next_pg_enum_oid() -> Option<Oid> {
+    let oid = NEXT_PG_ENUM_OID.get();
+    if OidIsValid(oid) {
+        NEXT_PG_ENUM_OID.set(InvalidOid);
+        Some(oid)
+    } else {
+        None
+    }
+}
+
+fn oid_not_set() -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, "pg_enum OID value not set when in binary upgrade mode".to_string())
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
+fn binary_upgrade_incompatible_neighbor() -> Box<PgError> {
+    Box::new(
+        PgError::new(
+            ERROR,
+            "ALTER TYPE ADD BEFORE/AFTER is incompatible with binary upgrade".to_string(),
+        )
+        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+    )
+}
+
 #[cold]
 #[inline(never)]
 fn label_exists(label: &str) -> Box<PgError> {
@@ -597,5 +638,13 @@ mod tests {
             assert_eq!(m.enumsortorder, 2.5);
             assert_eq!(label_str(&m.enumlabel), label);
         }
+    }
+
+    #[test]
+    fn next_pg_enum_oid_set_take_once() {
+        assert_eq!(take_next_pg_enum_oid(), None);
+        SetNextPgEnumOid(123456);
+        assert_eq!(take_next_pg_enum_oid(), Some(123456));
+        assert_eq!(take_next_pg_enum_oid(), None);
     }
 }

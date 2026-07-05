@@ -29,7 +29,7 @@ use types_startup::{AuthToken, HbaLine, Port};
 pub use check::check_hba;
 pub use parse_hba::parse_hba_line;
 pub use parse_ident::{check_ident_usermap, parse_ident_line, IdentLine};
-pub use token::pg_isblank;
+pub use token::{free_auth_file, open_auth_file, pg_isblank, FileHandle};
 pub use tokenize::tokenize_auth_file;
 
 pub const CONF_FILE_START_DEPTH: i32 = 0;
@@ -297,11 +297,11 @@ pub fn check_usermap(
     Ok(if found_entry { STATUS_OK } else { STATUS_ERROR })
 }
 
-pub(crate) fn hba_file_name() -> String {
+pub fn hba_file_name() -> String {
     guc_tables::vars::HbaFileName.read().unwrap_or_default()
 }
 
-pub(crate) fn ident_file_name() -> String {
+pub fn ident_file_name() -> String {
     guc_tables::vars::IdentFileName.read().unwrap_or_default()
 }
 

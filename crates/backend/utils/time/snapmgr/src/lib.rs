@@ -888,4 +888,5 @@ pub fn init_seams() {
     });
     snapmgr_portal_seams::active_snapshot_set::set(ActiveSnapshotSet);
     snapmgr_portal_seams::pop_active_snapshot::set(PopActiveSnapshot);
+    snapmgr_seams::get_latest_snapshot::set(GetLatestSnapshot);
 }

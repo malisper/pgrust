@@ -435,6 +435,20 @@ pub fn fc_hashoidvectorextended(
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(b, seed)))
 }
 
+pub fn fc_currtid_byrelname(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of currtid_byrelname is a non-null text (strict fn).
+    let payload = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let relname = String::from_utf8_lossy(payload.data()).into_owned();
+    let tid = arg_tid(fcinfo, 1);
+    let mcx = fcinfo.result_mcx();
+    let ip = ::types_tuple::ItemPointerData::new(tid.block, tid.offset);
+    let result = crate::currtid_byrelname(mcx, &relname, ip)?;
+    tid_result(fcinfo, Tid { block: ::types_tuple::ItemPointerGetBlockNumberNoCheck(&result), offset: result.ip_posid })
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -511,4 +525,5 @@ pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &[
     b(2794, "bttidcmp", 2, fc_bttidcmp),
     b(2795, "tidlarger", 2, fc_tidlarger),
     b(2796, "tidsmaller", 2, fc_tidsmaller),
+    b(1294, "currtid_byrelname", 2, fc_currtid_byrelname),
 ];

@@ -2537,3 +2537,88 @@ pub fn PostPrepare_PredicateLocks(_xid: TransactionId) -> PgResult<()> {
     }
     panic!("predicate.c PostPrepare_PredicateLocks: 2PC predicate-lock transfer not ported");
 }
+
+pub struct PredicateLockStatusEntry {
+    pub tag: PREDICATELOCKTARGETTAG,
+    pub vxid: VirtualTransactionId,
+    pub pid: i32,
+}
+
+pub fn GetPredicateLockStatusData() -> PgResult<Vec<PredicateLockStatusEntry>> {
+    let procno = my_procno();
+    // Consistency: all partition locks ascending, then SerializableXactHashLock.
+    for i in 0..NUM_PREDICATELOCK_PARTITIONS {
+        LWLockAcquire(PredicateLockHashPartitionLockByIndex(i), LW_SHARED, procno)?;
+    }
+    LWLockAcquire(SerializableXactHashLock(), LW_SHARED, procno)?;
+
+    let els = dynahash::hash_get_num_entries(shared().lock_hash) as usize;
+    let mut entries = Vec::with_capacity(els);
+
+    let mut seqstat = HASH_SEQ_STATUS::new();
+    hash_seq_init(&mut seqstat, shared().lock_hash)?;
+    loop {
+        let predlock = hash_seq_search(&mut seqstat)? as *mut PREDICATELOCK;
+        if predlock.is_null() {
+            break;
+        }
+        // SAFETY: partition + SerializableXactHashLock held; target and sxact
+        // entries referenced by a live PREDICATELOCK are pinned.
+        unsafe {
+            let sxact = (*predlock).tag.myXact;
+            entries.push(PredicateLockStatusEntry {
+                tag: (*(*predlock).tag.myTarget).tag,
+                vxid: (*sxact).vxid,
+                pid: (*sxact).pid,
+            });
+        }
+    }
+    debug_assert_eq!(entries.len(), els);
+
+    LWLockRelease(SerializableXactHashLock())?;
+    for i in (0..NUM_PREDICATELOCK_PARTITIONS).rev() {
+        LWLockRelease(PredicateLockHashPartitionLockByIndex(i))?;
+    }
+    Ok(entries)
+}
+
+pub fn GetSafeSnapshotBlockingPids(blocked_pid: i32, output_size: usize) -> PgResult<Vec<i32>> {
+    let procno = my_procno();
+    let mut pids = Vec::new();
+    LWLockAcquire(SerializableXactHashLock(), LW_SHARED, procno)?;
+
+    // SAFETY: SerializableXactHashLock held shared pins the active list and
+    // each sxact's possibleUnsafeConflicts.
+    unsafe {
+        let px = shared().pred_xact;
+        let head = &raw const (*px).activeList;
+        let mut cur = (*head).head.next;
+        let mut blocking_sxact: *mut SERIALIZABLEXACT = ptr::null_mut();
+        while cur != (&raw const (*head).head) as *mut dlist_node {
+            let sxact = dlist_container!(SERIALIZABLEXACT, xactLink, cur);
+            if (*sxact).pid == blocked_pid {
+                blocking_sxact = sxact;
+                break;
+            }
+            cur = (*cur).next;
+        }
+
+        if !blocking_sxact.is_null()
+            && (*blocking_sxact).flags & SXACT_FLAG_DEFERRABLE_WAITING != 0
+        {
+            let head = &raw const (*blocking_sxact).possibleUnsafeConflicts;
+            let mut cur = (*head).head.next;
+            while cur != (&raw const (*head).head) as *mut dlist_node {
+                let conflict = dlist_container!(RWConflictData, inLink, cur);
+                pids.push((*(*conflict).sxactOut).pid);
+                if pids.len() >= output_size {
+                    break;
+                }
+                cur = (*cur).next;
+            }
+        }
+    }
+
+    LWLockRelease(SerializableXactHashLock())?;
+    Ok(pids)
+}

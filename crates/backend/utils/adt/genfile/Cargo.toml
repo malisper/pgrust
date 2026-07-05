@@ -20,3 +20,6 @@ init_small = { path = "../../init/init_small" }
 elog = { path = "../../error/elog" }
 guc_tables = { path = "../../misc/guc_tables" }
 pg_path = { path = "../../../../port/pg_path" }
+cache_syscache = { path = "../../cache/cache_syscache" }
+fd = { path = "../../../storage/file/fd" }
+slot = { path = "../../../replication/slot" }

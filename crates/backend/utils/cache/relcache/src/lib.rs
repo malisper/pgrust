@@ -177,4 +177,5 @@ pub fn init_seams() {
     );
     relcache_seams::at_eoxact_relation_cache::set(invalidate::AtEOXact_RelationCache);
     relcache_seams::at_eosubxact_relation_cache::set(invalidate::AtEOSubXact_RelationCache);
+    relcache_seams::relation_get_rules::set(rules::RelationGetRulesShapes);
 }

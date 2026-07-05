@@ -304,6 +304,11 @@ pub const ROWTYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(2986, "record_ge", 2, fc_record_ge),
     b(2987, "btrecordcmp", 2, fc_btrecordcmp),
     b(3181, "record_image_eq", 2, fc_record_image_eq),
+    b(3182, "record_image_ne", 2, fc_record_image_ne),
+    b(3183, "record_image_lt", 2, fc_record_image_lt),
+    b(3184, "record_image_gt", 2, fc_record_image_gt),
+    b(3185, "record_image_le", 2, fc_record_image_le),
+    b(3186, "record_image_ge", 2, fc_record_image_ge),
     b(3187, "btrecordimagecmp", 2, fc_btrecordimagecmp),
     b(6192, "hash_record", 1, fc_hash_record),
     b(6193, "hash_record_extended", 2, fc_hash_record_extended),
@@ -865,6 +870,41 @@ fn datum_image_eq<'mcx>(
     Ok(cstring_bytes(a) == cstring_bytes(b))
 }
 
+pub fn fc_record_image_ne(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_bool(!fc_record_image_eq(flinfo, fcinfo)?.as_bool()))
+}
+
+pub fn fc_record_image_lt(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_bool(fc_btrecordimagecmp(flinfo, fcinfo)?.as_i32() < 0))
+}
+
+pub fn fc_record_image_gt(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_bool(fc_btrecordimagecmp(flinfo, fcinfo)?.as_i32() > 0))
+}
+
+pub fn fc_record_image_le(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_bool(fc_btrecordimagecmp(flinfo, fcinfo)?.as_i32() <= 0))
+}
+
+pub fn fc_record_image_ge(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_bool(fc_btrecordimagecmp(flinfo, fcinfo)?.as_i32() >= 0))
+}
+
 fn varlena_payload(rec: &[u8]) -> &[u8] {
     if rec[0] & 0x01 != 0 {
         &rec[1..]
@@ -1321,4 +1361,57 @@ pub fn fc_record_send(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         ::pqformat::pq_sendbytes(&mut buf, payload)?;
     }
     Ok(::types_fmgr::varlena_result(::pqformat::pq_endtypsend(buf)))
+}
+
+#[cfg(test)]
+mod image_cmp_tests {
+    use super::*;
+    extern crate std;
+    use ::mcx::MemoryContext;
+
+    // datum_image_cmp/datum_image_eq underlie record_image_{ne,lt,gt,le,ge};
+    // C's byval branch compares the full stored word (rowtypes.c datum.c
+    // datum_image_eq/datum_image_cmp).
+    #[test]
+    fn byval_int4_cmp_and_eq() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let a = Datum::from_i32(5);
+        let b = Datum::from_i32(7);
+        assert_eq!(datum_image_cmp(mcx, a, a, true, 4).unwrap(), 0);
+        assert_eq!(datum_image_cmp(mcx, a, b, true, 4).unwrap(), -1);
+        assert_eq!(datum_image_cmp(mcx, b, a, true, 4).unwrap(), 1);
+        assert!(datum_image_eq(mcx, a, a, true, 4).unwrap());
+        assert!(!datum_image_eq(mcx, a, b, true, 4).unwrap());
+    }
+
+    #[test]
+    fn byval_masks_to_attlen() {
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        // Same low byte, differing high bytes: attlen=1 must ignore them
+        // (C's DatumGetChar/Int16/Int32 masking in datum_image_eq).
+        let a = Datum::from_u32(0x0100_0007);
+        let b = Datum::from_u32(0x0200_0007);
+        assert!(datum_image_eq(mcx, a, b, true, 1).unwrap());
+        assert!(!datum_image_eq(mcx, a, b, true, 4).unwrap());
+    }
+
+    #[test]
+    fn image_ne_lt_gt_le_ge_are_cmp_derived() {
+        // record_image_ne/lt/gt/le/ge (tid.c-style thin wrappers) reduce to
+        // sign checks on record_image_cmp; verified directly on the shared
+        // datum_image_cmp core rather than the full record fmgr path.
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let lo = Datum::from_i32(1);
+        let hi = Datum::from_i32(2);
+        let cmp_lt = datum_image_cmp(mcx, lo, hi, true, 4).unwrap();
+        let cmp_gt = datum_image_cmp(mcx, hi, lo, true, 4).unwrap();
+        let cmp_eq = datum_image_cmp(mcx, lo, lo, true, 4).unwrap();
+        assert!(cmp_lt < 0 && !(cmp_lt <= 0 && cmp_lt >= 0));
+        assert!(cmp_gt > 0);
+        assert_eq!(cmp_eq, 0);
+        assert!(!datum_image_eq(mcx, lo, hi, true, 4).unwrap());
+    }
 }

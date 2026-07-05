@@ -21,6 +21,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_jsonpath_exec::builtins::JSONPATH_EXEC_BUILTINS,
     ::adt_like::builtins::LIKE_BUILTINS,
     ::adt_regexp::builtins::REGEXP_BUILTINS,
+    ::hbafuncs::HBAFUNCS_BUILTINS,
     ::adt_mac::builtins::MAC_BUILTINS,
     ::adt_mac8::builtins::MAC8_BUILTINS,
     ::adt_pg_lsn::builtins::PG_LSN_BUILTINS,
@@ -65,6 +66,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_amutils::AMUTILS_BUILTINS,
     ::adt_mcxtfuncs::MCXTFUNCS_BUILTINS,
     ::waitfuncs::WAITFUNCS_BUILTINS,
+    ::lockfuncs::LOCKFUNCS_BUILTINS,
     ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
     ::trigfuncs::TRIGFUNCS_BUILTINS,
 ];

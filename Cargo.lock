@@ -268,6 +268,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "adt_expandedrecord"
+version = "0.1.0"
+dependencies = [
+ "adt_domains",
+ "adt_scalar",
+ "catalog_heap",
+ "datum",
+ "detoast",
+ "format_type",
+ "heaptoast",
+ "heaptuple",
+ "mcx",
+ "tupdesc",
+ "typcache",
+ "typcache_seams",
+ "types_core",
+ "types_error",
+ "types_tuple",
+]
+
+[[package]]
 name = "adt_float"
 version = "0.1.0"
 dependencies = [
@@ -816,16 +837,28 @@ dependencies = [
 name = "adt_scalar"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "datum",
  "hashfn",
  "mcx",
+ "miscinit_seams",
+ "namespace_seams",
  "numutils",
  "pqformat",
+ "readfuncs",
+ "rel_vocab",
+ "relcache_seams",
+ "snapmgr_seams",
  "stringinfo",
+ "syscache_seams",
+ "table",
+ "tableam_seams",
  "types_array",
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
+ "types_rel",
  "types_tuple",
 ]
 
@@ -4873,6 +4906,8 @@ dependencies = [
  "extension_seams",
  "fmgr_seams",
  "foreigncmds_seams",
+ "hbafuncs",
+ "lockfuncs",
  "mcx",
  "name",
  "nbt_compare",
@@ -5244,8 +5279,10 @@ version = "0.1.0"
 dependencies = [
  "acl_seams",
  "adt_datetime",
+ "cache_syscache",
  "datum",
  "elog",
+ "fd",
  "funcapi",
  "guc_tables",
  "heaptuple",
@@ -5253,6 +5290,7 @@ dependencies = [
  "mbutils",
  "miscinit",
  "pg_path",
+ "slot",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -5662,6 +5700,24 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
+]
+
+[[package]]
+name = "hbafuncs"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "funcapi",
+ "hba",
+ "ip",
+ "libc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_startup",
+ "varlena",
 ]
 
 [[package]]
@@ -6654,6 +6710,23 @@ dependencies = [
  "types_rel",
  "types_storage",
  "xact",
+]
+
+[[package]]
+name = "lockfuncs"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "funcapi",
+ "init_small",
+ "lock",
+ "mcx",
+ "predicate",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varlena",
 ]
 
 [[package]]
@@ -9686,6 +9759,7 @@ dependencies = [
  "catalog",
  "catalog_indexing",
  "datum",
+ "elog",
  "fmgr_seams",
  "genam",
  "heaptuple",
@@ -9705,6 +9779,32 @@ dependencies = [
  "types_scan",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "pg_upgrade_support"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "catalog_namespace",
+ "commands_tablespace",
+ "datum",
+ "elog",
+ "extension",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_enum",
+ "pg_subscription",
+ "pg_type",
+ "relation",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
@@ -12306,6 +12406,7 @@ dependencies = [
  "pg_sema",
  "pg_string",
  "pg_subscription",
+ "pg_upgrade_support",
  "pgarch",
  "pgstat",
  "pgtz",
@@ -13593,6 +13694,7 @@ dependencies = [
  "procarray",
  "smgr",
  "snapmgr",
+ "tableam_seams",
  "tableam_vocab",
  "tidbitmap",
  "types_core",
@@ -13616,7 +13718,9 @@ dependencies = [
  "tableam_vocab",
  "types_error",
  "types_rel",
+ "types_snapshot",
  "types_storage",
+ "types_tuple",
 ]
 
 [[package]]
@@ -15410,6 +15514,8 @@ name = "waitfuncs"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "lockfuncs",
+ "predicate",
  "procarray",
  "types_core",
  "types_error",

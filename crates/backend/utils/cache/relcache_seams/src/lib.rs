@@ -88,3 +88,17 @@ seam_core::seam!(
         relid: Oid,
     ) -> PgResult<Rc<IndexAttrBitmaps>>
 );
+
+// RewriteRuleMeta marshal shape (relcache::rules), owned copies for the seam
+// boundary (cold path: currtid_for_view).
+pub struct RuleShape {
+    pub event: i32,
+    pub is_instead: bool,
+    pub action_src: String,
+}
+
+seam_core::seam!(
+    // RelationGetRules (relcache.c rd_rules), SELECT-event rules only need
+    // this shape; empty Vec == rd_rules == NULL.
+    pub fn relation_get_rules(relid: Oid) -> PgResult<Vec<RuleShape>>
+);

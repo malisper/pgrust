@@ -316,6 +316,8 @@ pub(crate) struct TypCacheState {
     pub(crate) callbacks_registered: bool,
     // C's RecordCacheArray: anonymous rowtypes registered by typmod index.
     pub(crate) record_types: Vec<types_tuple::TupleDescData<'static>>,
+    pub(crate) record_ids: Vec<u64>,
+    pub(crate) tupledesc_id_counter: u64,
 }
 
 thread_local! {
@@ -337,6 +339,8 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut TypCacheState) -> R) -> R {
                 in_progress: PgVec::new_in(mcx),
                 callbacks_registered: false,
                 record_types: Vec::new(),
+                record_ids: Vec::new(),
+                tupledesc_id_counter: 0,
             })
         });
         f(st)
@@ -1083,7 +1087,28 @@ pub fn assign_record_type_typmod(tupdesc: &mut types_tuple::TupleDescData<'_>) -
         copy.tdtypmod = st.record_types.len() as i32;
         tupdesc.tdtypmod = copy.tdtypmod;
         st.record_types.push(copy);
+        st.tupledesc_id_counter += 1;
+        st.record_ids.push(st.tupledesc_id_counter);
         Ok(())
+    })
+}
+
+pub const INVALID_TUPLEDESC_IDENTIFIER: u64 = 0;
+
+/// C: assign_record_type_identifier (typcache.c). C divergence: named
+/// composites get a fresh identifier per call — this typcache keeps no
+/// composite tupdesc cache to pin a stable identifier to. Equal ids still
+/// imply the same tupdesc; consumers only lose cache hits, never correctness.
+pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64> {
+    with_state(|st| {
+        if type_id != types_core::catalog::RECORDOID {
+            st.tupledesc_id_counter += 1;
+            return Ok(st.tupledesc_id_counter);
+        }
+        match usize::try_from(typmod).ok().and_then(|i| st.record_ids.get(i)) {
+            Some(&id) => Ok(id),
+            None => Err(record_type_not_registered()),
+        }
     })
 }
 

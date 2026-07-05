@@ -60,3 +60,9 @@ seam_core::seam!(
     // ImportSnapshot (snapmgr.c): SET TRANSACTION SNAPSHOT 'id'.
     pub fn import_snapshot(idstr: &str) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // GetLatestSnapshot (snapmgr.c): the currtid family's snapshot source.
+    pub fn get_latest_snapshot(
+    ) -> types_error::PgResult<std::rc::Rc<types_snapshot::SnapshotData<'static>>>
+);

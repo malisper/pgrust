@@ -462,6 +462,19 @@ fn regtypein_name_arm() {
 }
 
 #[test]
+fn to_regtypemod_soft_fail() {
+    with_mcx(|mcx| {
+        assert_eq!(to_regtypemod(mcx, "integer", None).unwrap(), Some(-1));
+        assert_eq!(to_regtypemod(mcx, "text", None).unwrap(), Some(-1));
+        let err = to_regtypemod(mcx, "no_such_type", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_OBJECT);
+        let mut soft = SoftErrorContext::new(false);
+        assert_eq!(to_regtypemod(mcx, "no_such_type", Some(&mut soft)).unwrap(), None);
+        assert!(soft.error_occurred());
+    });
+}
+
+#[test]
 fn regtypeout_formats() {
     with_mcx(|mcx| {
         assert_eq!(out_str(&regtypeout(mcx, InvalidOid).unwrap()), "-");
@@ -575,6 +588,7 @@ fn builtins_table_matches_pg_proc() {
         (4195, "to_regcollation", 1),
         (4196, "regcollationrecv", 1),
         (4197, "regcollationsend", 1),
+        (6317, "to_regtypemod", 1),
     ];
     assert_eq!(builtins::REGPROC_BUILTINS.len(), expected.len());
     for (b, (oid, name, nargs)) in builtins::REGPROC_BUILTINS.iter().zip(expected) {

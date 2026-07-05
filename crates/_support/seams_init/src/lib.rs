@@ -208,6 +208,7 @@ pub fn init_all() {
     foreigncmds::init_seams();
     fmgr_core::register_late_builtins(adt_misc::MISC_BUILTINS);
     fmgr_core::register_late_builtins(genfile::GENFILE_BUILTINS);
+    fmgr_core::register_late_builtins(pg_upgrade_support::PG_UPGRADE_SUPPORT_BUILTINS);
     fmgr_core::register_late_builtins(guc_funcs::GUC_FUNCS_BUILTINS);
     fmgr_core::register_late_builtins(prepare::PREPARE_BUILTINS);
     fmgr_core::register_late_builtins(mbutils::builtins::MBUTILS_BUILTINS);

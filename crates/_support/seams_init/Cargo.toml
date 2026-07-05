@@ -183,6 +183,7 @@ adt_misc = { path = "../../backend/utils/adt/adt_misc" }
 orderedsetaggs = { path = "../../backend/utils/adt/orderedsetaggs" }
 partitionfuncs = { path = "../../backend/utils/adt/partitionfuncs" }
 genfile = { path = "../../backend/utils/adt/genfile" }
+pg_upgrade_support = { path = "../../backend/utils/adt/pg_upgrade_support" }
 adt_rowtypes = { path = "../../backend/utils/adt/rowtypes" }
 partbounds = { path = "../../backend/partitioning/partbounds" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }

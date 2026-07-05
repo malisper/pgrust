@@ -3,14 +3,17 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+use std::cell::Cell;
+
 use datum::Datum;
 use elog::ereport;
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN};
+use types_core::{AttrNumber, InvalidOid, Oid, OidIsValid, NAMEDATALEN};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_NAME, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_IN_USE,
+    ERRCODE_INVALID_NAME, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_OBJECT_IN_USE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_FILE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, LOG, NOTICE, WARNING,
 };
@@ -54,6 +57,26 @@ const FORKNAMECHARS: usize = 4;
 
 fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("tablespace.c", 0, funcname)
+}
+
+// binary_upgrade_next_pg_tablespace_oid (pg_upgrade_support.c): set-once,
+// consume-once override for CreateTableSpace's OID assignment.
+thread_local! {
+    static NEXT_PG_TABLESPACE_OID: Cell<Oid> = const { Cell::new(InvalidOid) };
+}
+
+pub fn SetNextPgTablespaceOid(oid: Oid) {
+    NEXT_PG_TABLESPACE_OID.set(oid);
+}
+
+fn take_next_pg_tablespace_oid() -> Option<Oid> {
+    let oid = NEXT_PG_TABLESPACE_OID.get();
+    if OidIsValid(oid) {
+        NEXT_PG_TABLESPACE_OID.set(InvalidOid);
+        Some(oid)
+    } else {
+        None
+    }
 }
 
 fn in_place_allowed() -> bool {
@@ -190,15 +213,24 @@ pub fn CreateTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateTableSpaceStmt<'mcx>)
 
     let rel = table::table_open(mcx, TableSpaceRelationId, RowExclusiveLock)?;
 
-    if init_small::globals::IsBinaryUpgrade() {
-        panic!("CreateTableSpace: binary_upgrade_next_pg_tablespace_oid unported (pg_upgrade lane)");
-    }
-    let tablespaceoid = catalog::GetNewOidWithIndex(
-        mcx,
-        &rel,
-        TablespaceOidIndexId,
-        Anum_pg_tablespace_oid as AttrNumber,
-    )?;
+    let tablespaceoid = if init_small::globals::IsBinaryUpgrade() {
+        take_next_pg_tablespace_oid().ok_or_else(|| {
+            Box::new(
+                ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg("pg_tablespace OID value not set when in binary upgrade mode")
+                    .into_error()
+                    .with_error_location(loc("CreateTableSpace")),
+            )
+        })?
+    } else {
+        catalog::GetNewOidWithIndex(
+            mcx,
+            &rel,
+            TablespaceOidIndexId,
+            Anum_pg_tablespace_oid as AttrNumber,
+        )?
+    };
 
     let mut spcname = NameData::default();
     spcname.namestrcpy(tablespacename);
@@ -1222,4 +1254,17 @@ pub fn init_seams() {
     guc_tables::hooks::check_default_tablespace.install(check_default_tablespace);
     guc_tables::hooks::check_temp_tablespaces.install(check_temp_tablespaces);
     guc_tables::hooks::assign_temp_tablespaces.install(assign_temp_tablespaces);
+}
+
+#[cfg(test)]
+mod pg_upgrade_oid_tests {
+    use super::*;
+
+    #[test]
+    fn next_pg_tablespace_oid_set_take_once() {
+        assert_eq!(take_next_pg_tablespace_oid(), None);
+        SetNextPgTablespaceOid(200);
+        assert_eq!(take_next_pg_tablespace_oid(), Some(200));
+        assert_eq!(take_next_pg_tablespace_oid(), None);
+    }
 }
