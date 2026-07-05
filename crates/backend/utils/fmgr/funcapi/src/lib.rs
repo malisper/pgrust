@@ -117,6 +117,7 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_CaseExpr => node.as_case_expr().unwrap().casetype,
         NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
         NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
         NodeTag::T_JsonValueExpr => {
             expr_type(node.as_json_value_expr().unwrap().formatted_expr)
         }
@@ -429,7 +430,7 @@ fn internal_get_result_type<'mcx>(
     if let Some(mut tupdesc) = build_function_result_tupdesc_t(mcx, funcid, &procform)? {
         let (_, declared_args) = syscache_seams::lookup_pg_proc_signature::call(mcx, funcid)?
             .ok_or_else(|| function_lookup_failed(funcid))?;
-        if resolve_polymorphic_tupdesc(&mut tupdesc, &declared_args, call_expr) {
+        if resolve_polymorphic_tupdesc(&mut tupdesc, &declared_args, call_expr)? {
             if tupdesc.tdtypeid == RECORDOID && tupdesc.tdtypmod < 0 {
                 typcache_seams::assign_record_type_typmod::call(&mut tupdesc)?;
             }
@@ -505,26 +506,154 @@ pub fn get_expr_result_tupdesc<'mcx>(
     Ok(None)
 }
 
+// C: resolve_polymorphic_tupdesc (funcapi.c:743). Ok(false) is C's `return
+// false`: call_expr missing or an input's actual type unidentifiable.
 pub fn resolve_polymorphic_tupdesc(
     tupdesc: &mut TupleDescData<'_>,
-    _declared_args: &[Oid],
+    declared_args: &[Oid],
     call_expr: Option<Node<'_>>,
-) -> bool {
+) -> PgResult<bool> {
     let mut have_polymorphic_result = false;
+    let mut have_result = [false; 8];
+    const R_ELEM: usize = 0;
+    const R_ARRAY: usize = 1;
+    const R_RANGE: usize = 2;
+    const R_MULTI: usize = 3;
+    const R_C_ELEM: usize = 4;
+    const R_C_ARRAY: usize = 5;
+    const R_C_RANGE: usize = 6;
+    const R_C_MULTI: usize = 7;
     for i in 0..tupdesc.natts as usize {
-        if is_polymorphic_type(tupdesc.attr(i).atttypid) {
+        let slot = match tupdesc.attr(i).atttypid {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => Some(R_ELEM),
+            ANYARRAYOID => Some(R_ARRAY),
+            ANYRANGEOID => Some(R_RANGE),
+            ANYMULTIRANGEOID => Some(R_MULTI),
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => Some(R_C_ELEM),
+            ANYCOMPATIBLEARRAYOID => Some(R_C_ARRAY),
+            ANYCOMPATIBLERANGEOID => Some(R_C_RANGE),
+            ANYCOMPATIBLEMULTIRANGEOID => Some(R_C_MULTI),
+            _ => None,
+        };
+        if let Some(s) = slot {
             have_polymorphic_result = true;
+            have_result[s] = true;
         }
     }
     if !have_polymorphic_result {
-        return true;
+        return Ok(true);
     }
-    if call_expr.is_none() {
-        return false;
+
+    let Some(call_expr) = call_expr else {
+        return Ok(false);
+    };
+
+    let mut poly = PolymorphicActuals::default();
+    let mut anyc = PolymorphicActuals::default();
+    for (i, &argtype) in declared_args.iter().enumerate() {
+        let actual = match argtype {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => &mut poly.anyelement_type,
+            ANYARRAYOID => &mut poly.anyarray_type,
+            ANYRANGEOID => &mut poly.anyrange_type,
+            ANYMULTIRANGEOID => &mut poly.anymultirange_type,
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => &mut anyc.anyelement_type,
+            ANYCOMPATIBLEARRAYOID => &mut anyc.anyarray_type,
+            ANYCOMPATIBLERANGEOID => &mut anyc.anyrange_type,
+            ANYCOMPATIBLEMULTIRANGEOID => &mut anyc.anymultirange_type,
+            _ => continue,
+        };
+        if *actual == InvalidOid {
+            *actual = get_call_expr_argtype(call_expr, i);
+            if *actual == InvalidOid {
+                return Ok(false);
+            }
+        }
     }
-    // The remaining leg extracts actuals from the call expression's argument
-    // list (get_call_expr_argtype) and rewrites the polymorphic columns.
-    panic!("funcapi resolve_polymorphic_tupdesc: polymorphic OUT-column resolution not ported");
+
+    if have_result[R_ELEM] && poly.anyelement_type == InvalidOid {
+        resolve_anyelement_from_others(&mut poly)?;
+    }
+    if have_result[R_ARRAY] && poly.anyarray_type == InvalidOid {
+        resolve_anyarray_from_others(&mut poly)?;
+    }
+    if have_result[R_RANGE] && poly.anyrange_type == InvalidOid {
+        resolve_anyrange_from_others(&mut poly)?;
+    }
+    if have_result[R_MULTI] && poly.anymultirange_type == InvalidOid {
+        resolve_anymultirange_from_others(&mut poly)?;
+    }
+    if have_result[R_C_ELEM] && anyc.anyelement_type == InvalidOid {
+        resolve_anyelement_from_others(&mut anyc)?;
+    }
+    if have_result[R_C_ARRAY] && anyc.anyarray_type == InvalidOid {
+        resolve_anyarray_from_others(&mut anyc)?;
+    }
+    if have_result[R_C_RANGE] && anyc.anyrange_type == InvalidOid {
+        resolve_anyrange_from_others(&mut anyc)?;
+    }
+    if have_result[R_C_MULTI] && anyc.anymultirange_type == InvalidOid {
+        resolve_anymultirange_from_others(&mut anyc)?;
+    }
+
+    let mut anycollation = InvalidOid;
+    let mut anycompatcollation = InvalidOid;
+    if poly.anyelement_type != InvalidOid {
+        anycollation = lsyscache::get_typcollation(poly.anyelement_type)?;
+    } else if poly.anyarray_type != InvalidOid {
+        anycollation = lsyscache::get_typcollation(poly.anyarray_type)?;
+    }
+    if anyc.anyelement_type != InvalidOid {
+        anycompatcollation = lsyscache::get_typcollation(anyc.anyelement_type)?;
+    } else if anyc.anyarray_type != InvalidOid {
+        anycompatcollation = lsyscache::get_typcollation(anyc.anyarray_type)?;
+    }
+    if anycollation != InvalidOid || anycompatcollation != InvalidOid {
+        let inputcollation = expr_input_collation(call_expr);
+        if inputcollation != InvalidOid {
+            if anycollation != InvalidOid {
+                anycollation = inputcollation;
+            }
+            if anycompatcollation != InvalidOid {
+                anycompatcollation = inputcollation;
+            }
+        }
+    }
+
+    for i in 0..tupdesc.natts as usize {
+        let att = tupdesc.attr(i);
+        let atttypid = att.atttypid;
+        let (newtype, coll) = match atttypid {
+            ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {
+                (poly.anyelement_type, Some(anycollation))
+            }
+            ANYARRAYOID => (poly.anyarray_type, Some(anycollation)),
+            ANYRANGEOID => (poly.anyrange_type, None),
+            ANYMULTIRANGEOID => (poly.anymultirange_type, None),
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+                (anyc.anyelement_type, Some(anycompatcollation))
+            }
+            ANYCOMPATIBLEARRAYOID => (anyc.anyarray_type, Some(anycompatcollation)),
+            ANYCOMPATIBLERANGEOID => (anyc.anyrange_type, None),
+            ANYCOMPATIBLEMULTIRANGEOID => (anyc.anymultirange_type, None),
+            _ => continue,
+        };
+        let attname = att.attname;
+        let name = core::str::from_utf8(attname.name_str()).expect("attname is text");
+        tupdesc::TupleDescInitEntry(tupdesc, (i + 1) as AttrNumber, Some(name), newtype, -1, 0)?;
+        if let Some(c) = coll {
+            tupdesc::TupleDescInitEntryCollation(tupdesc, (i + 1) as AttrNumber, c);
+        }
+    }
+    Ok(true)
+}
+
+// C: exprInputCollation (nodeFuncs.c) over the call-expression families.
+fn expr_input_collation(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().inputcollid,
+        NodeTag::T_OpExpr => node.as_op_expr().unwrap().inputcollid,
+        _ => InvalidOid,
+    }
 }
 
 #[derive(Default)]
