@@ -282,3 +282,68 @@ EXPLAIN SELECT count(*) FROM selgrp WHERE ctid >= '(8,40)';
 EXPLAIN SELECT count(*) FROM selgrp WHERE '(3,0)' > ctid;
 RESET enable_tidscan;
 DROP TABLE selgrp, selgrp2;
+
+-- arraycontsel/arraycontjoinsel + scalararraysel_containment
+-- (array_selfuncs.c): MCELEM/DECHIST estimates, pre and post ANALYZE.
+CREATE TABLE selarr(ia int4[], ta text[]);
+INSERT INTO selarr
+  SELECT ARRAY[g % 10, g % 23, g % 61, 1000 + g % 5],
+         ARRAY['w' || (g % 15)::text, 'w' || (g % 40)::text]
+  FROM generate_series(1, 2000) g;
+INSERT INTO selarr
+  SELECT ARRAY[g % 7, NULL, g % 13], ARRAY['x' || (g % 9)::text, NULL]
+  FROM generate_series(1, 60) g;
+INSERT INTO selarr VALUES ('{}', '{}');
+INSERT INTO selarr VALUES (NULL, NULL);
+
+EXPLAIN SELECT * FROM selarr WHERE ia @> ARRAY[3];
+EXPLAIN SELECT * FROM selarr WHERE ia && ARRAY[3, 1002];
+EXPLAIN SELECT * FROM selarr WHERE ia <@ ARRAY[0, 1, 2, 3, 23, 46, 1000, 1001];
+EXPLAIN SELECT * FROM selarr WHERE ARRAY[3] <@ ia;
+EXPLAIN SELECT * FROM selarr WHERE ARRAY[0, 1, 2, 3] @> ia;
+EXPLAIN SELECT * FROM selarr WHERE ia @> '{3,NULL}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia && '{NULL,7}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia @> NULL;
+EXPLAIN SELECT * FROM selarr WHERE 3 = ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE 3 <> ALL (ia);
+EXPLAIN SELECT * FROM selarr WHERE 3 = ALL (ia);
+EXPLAIN SELECT * FROM selarr WHERE 3 <> ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE ta @> ARRAY['w3'];
+EXPLAIN SELECT * FROM selarr WHERE ta && ARRAY['w3', 'zzz'];
+EXPLAIN SELECT * FROM selarr WHERE 'w3' = ANY (ta);
+
+ANALYZE selarr;
+
+EXPLAIN SELECT * FROM selarr WHERE ia @> ARRAY[3];
+EXPLAIN SELECT * FROM selarr WHERE ia @> ARRAY[3, 3, 16, 1002];
+EXPLAIN SELECT * FROM selarr WHERE ia && ARRAY[3, 1002];
+EXPLAIN SELECT * FROM selarr WHERE ia && ARRAY[999999];
+EXPLAIN SELECT * FROM selarr WHERE ia <@ ARRAY[0, 1, 2, 3, 23, 46, 1000, 1001];
+EXPLAIN SELECT * FROM selarr WHERE ia <@ (SELECT array_agg(g) FROM generate_series(0, 70) g);
+EXPLAIN SELECT * FROM selarr WHERE ARRAY[3] <@ ia;
+EXPLAIN SELECT * FROM selarr WHERE ARRAY[0, 1, 2, 3] @> ia;
+EXPLAIN SELECT * FROM selarr WHERE ia @> '{3,NULL}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia && '{NULL,7}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia <@ '{NULL,0,1,2,3}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia @> '{}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia && '{}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE ia <@ '{}'::int4[];
+EXPLAIN SELECT * FROM selarr WHERE 3 = ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE 1002 = ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE 999999 = ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE 3 <> ALL (ia);
+EXPLAIN SELECT * FROM selarr WHERE 3 = ALL (ia);
+EXPLAIN SELECT * FROM selarr WHERE 3 <> ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE NULL::int4 = ANY (ia);
+EXPLAIN SELECT * FROM selarr WHERE ta @> ARRAY['w3'];
+EXPLAIN SELECT * FROM selarr WHERE ta && ARRAY['w3', 'zzz'];
+EXPLAIN SELECT * FROM selarr WHERE ta <@ ARRAY['w0','w1','w2','w3','w4','x1','x2'];
+EXPLAIN SELECT * FROM selarr WHERE 'w3' = ANY (ta);
+EXPLAIN SELECT * FROM selarr WHERE 'w3' <> ALL (ta);
+-- join oprjoin stub (arraycontjoinsel)
+CREATE TABLE selarr2(ia int4[]);
+INSERT INTO selarr2 SELECT ARRAY[g % 10, g % 4] FROM generate_series(1, 500) g;
+ANALYZE selarr2;
+EXPLAIN SELECT count(*) FROM selarr a JOIN selarr2 b ON a.ia @> b.ia;
+EXPLAIN SELECT count(*) FROM selarr a JOIN selarr2 b ON a.ia && b.ia;
+DROP TABLE selarr, selarr2;

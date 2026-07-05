@@ -28,6 +28,7 @@ pub mod partprune;
 pub mod like_support;
 pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;
+pub mod array_selfuncs;
 pub mod rangetypes_selfuncs;
 pub mod selfuncs;
 pub mod ts_selfuncs;

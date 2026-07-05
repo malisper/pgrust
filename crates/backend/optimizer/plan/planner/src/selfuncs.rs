@@ -3478,12 +3478,9 @@ pub(crate) fn varlena_image_any<'a>(mcx: mcx::Mcx<'a>, value: Datum) -> PgResult
 }
 
 
-// scalararraysel_containment (array_selfuncs.c): only the early-exit legs;
-// where C would proceed to the MCELEM estimate this is loud.
-// scalararraysel (selfuncs.c). The typcache eq_opr probe only gates
-// scalararraysel_containment, whose live precondition (an array-typed
-// variable operand) is the loud arm below; the isEquality/isInequality
-// flags key off the estimator oid exactly as C's second-chance test does.
+// scalararraysel (selfuncs.c). The typcache eq_opr probe gates the
+// scalararraysel_containment try; below that, isEquality/isInequality are
+// re-derived from the estimator oid exactly as C's second-chance test does.
 pub fn scalararraysel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
@@ -3501,19 +3498,44 @@ pub fn scalararraysel<'mcx>(
     let operator = clause.opno;
     let use_or = clause.useOr;
     debug_assert!(clause.args.len() == 2);
-    let leftop = clause.args.nth(0);
-    let rightop = clause.args.nth(1);
+    // C aggressively reduces both sides to constants.
+    let leftop = clauses::estimate_expression_value(run.mcx, clause.args.nth(0))?;
+    let rightop = clauses::estimate_expression_value(run.mcx, clause.args.nth(1))?;
 
     let (rightop_type, _) = crate::costsize::expr_type_typmod(rightop);
-    let nominal_element_type = lsyscache::get_element_type(rightop_type)?;
+    let nominal_element_type = lsyscache::get_base_element_type(rightop_type)?;
     if nominal_element_type == 0 {
         return Ok(0.5);
     }
     let nominal_element_collation = expr_collation(rightop);
     let rightop = strip_array_coercion(rightop);
 
-    if rightop.node_tag() == NodeTag::T_Var {
-        panic!("scalararraysel_containment (array_selfuncs.c): array-column operand; M2 lane");
+    // Containment only believes the element type's default btree equality
+    // operator (or its negator) — those are what array containment uses.
+    let mut is_equality = false;
+    let mut is_inequality = false;
+    let eq_opr =
+        typcache::lookup_type_cache(nominal_element_type, typcache::TYPECACHE_EQ_OPR)?.eq_opr();
+    if eq_opr != 0 {
+        if operator == eq_opr {
+            is_equality = true;
+        } else if lsyscache::get_negator(operator)? == eq_opr {
+            is_inequality = true;
+        }
+    }
+    if (is_equality || is_inequality) && !is_join_clause {
+        let s1 = crate::array_selfuncs::scalararraysel_containment(
+            run,
+            leftop,
+            rightop,
+            nominal_element_type,
+            is_equality,
+            use_or,
+            varrelid,
+        )?;
+        if s1 >= 0.0 {
+            return Ok(s1);
+        }
     }
 
     let oprsel = if is_join_clause {
@@ -3688,26 +3710,6 @@ pub fn scalararraysel<'mcx>(
     }
 
     Ok(clamp_probability(s1))
-}
-
-fn scalararraysel_containment<'mcx>(
-    leftop: Node<'mcx>,
-    rightop: Node<'mcx>,
-    varrelid: i32,
-) -> f64 {
-    let rightop_is_rel_var = rightop
-        .as_var()
-        .is_some_and(|v| v.varlevelsup == 0 && (varrelid == 0 || varrelid == v.varno));
-    if !rightop_is_rel_var {
-        return -1.0;
-    }
-    let Some(lc) = leftop.as_const() else {
-        return -1.0;
-    };
-    if lc.constisnull {
-        return 0.0;
-    }
-    panic!("scalararraysel_containment (array_selfuncs.c): MCELEM containment lane");
 }
 
 fn strip_array_coercion<'mcx>(mut node: Node<'mcx>) -> Node<'mcx> {
