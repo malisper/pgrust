@@ -514,6 +514,10 @@ fn write_opaque(page: &mut PageMut<'_>, opaque: &BTPageOpaqueData) {
 
 // _bt_allequalimage (nbtutils.c), sans the DEBUG1 message.
 fn bt_allequalimage(rel: &Relation<'_>) -> PgResult<bool> {
+    // INCLUDE indexes can never support deduplication (nbtutils.c:4264).
+    if rel.indnatts() != rel.indnkeyatts() {
+        return Ok(false);
+    }
     for i in 0..rel.indnkeyatts() as usize {
         let opfamily = rel.rd_opfamily[i];
         let opcintype = rel.rd_opcintype[i];
