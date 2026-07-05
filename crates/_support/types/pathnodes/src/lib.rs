@@ -122,6 +122,8 @@ pub const COMPARE_EQ: CompareType = 3;
 pub const COMPARE_GE: CompareType = 4;
 pub const COMPARE_GT: CompareType = 5;
 pub const COMPARE_NE: CompareType = 6;
+pub const COMPARE_OVERLAP: CompareType = 7;
+pub const COMPARE_CONTAINED_BY: CompareType = 8;
 
 pub type VolatileFunctionStatus = u32;
 pub const VOLATILITY_UNKNOWN: VolatileFunctionStatus = 0;

@@ -56,6 +56,7 @@ pub struct IndexInfo<'mcx> {
     pub ii_ExclusionOps: [Oid; INDEX_MAX_KEYS as usize],
     pub ii_ExclusionProcs: [Oid; INDEX_MAX_KEYS as usize],
     pub ii_ExclusionStrats: [u16; INDEX_MAX_KEYS as usize],
+    pub ii_WithoutOverlaps: bool,
 }
 
 // C rd_indexprs/rd_indpred: processed trees cached per index relid, deep-copied
@@ -276,6 +277,7 @@ pub fn BuildDummyIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResu
         ii_ExclusionOps: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionProcs: [0; INDEX_MAX_KEYS as usize],
         ii_ExclusionStrats: [0; INDEX_MAX_KEYS as usize],
+        ii_WithoutOverlaps: false,
     })
 }
 
@@ -319,6 +321,7 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         ii_ExclusionOps: excl_ops,
         ii_ExclusionProcs: excl_procs,
         ii_ExclusionStrats: excl_strats,
+        ii_WithoutOverlaps: indexstruct.indisexclusion && indexstruct.indisunique,
     })
 }
 
@@ -391,7 +394,12 @@ pub fn ExecOpenIndices<'mcx>(
     for &indexOid in indexoidlist.iter() {
         let indexDesc = indexam::index_open(mcx, indexOid, RowExclusiveLock)?;
         let mut ii = BuildIndexInfo(mcx, &indexDesc)?;
-        if speculative && ii.ii_Unique {
+        // C skips indisexclusion here (temporal unique gist has no btree
+        // equality strategy; the exclusion recheck arbitrates instead).
+        if speculative
+            && ii.ii_Unique
+            && !indexDesc.rd_index.as_ref().expect("index relation").indisexclusion
+        {
             BuildSpeculativeIndexInfo(&indexDesc, &mut ii)?;
         }
         state.descs.push(indexDesc);
@@ -705,6 +713,21 @@ fn check_exclusion_or_unique_constraint<'mcx>(
     } else {
         (index_info.ii_UniqueProcs, index_info.ii_UniqueStrats)
     };
+
+    // C: WITHOUT OVERLAPS also forbids empty ranges/multiranges, before the
+    // NULL check (a UNIQUE constraint could otherwise insert an empty range
+    // alongside a NULL scalar part).
+    if index_info.ii_WithoutOverlaps && !isnull[indnkeyatts - 1] {
+        let attno = index_info.ii_IndexAttrNumbers[indnkeyatts - 1];
+        let att = heap_relation.rd_att.attr(attno as usize - 1);
+        exec_without_overlaps_not_empty(
+            mcx,
+            heap_relation,
+            &att.attname,
+            values[indnkeyatts - 1],
+            lsyscache::get_typtype(att.atttypid)?,
+        )?;
+    }
 
     if !index_info.ii_NullsNotDistinct {
         for &null in &isnull[..indnkeyatts] {
@@ -1042,6 +1065,55 @@ fn exclusion_violation(
     }
     Box::new(e)
 }
+
+// ExecWithoutOverlapsNotEmpty (execIndexing.c): CHECK_VIOLATION on an empty
+// range/multirange in the WITHOUT OVERLAPS column.
+fn exec_without_overlaps_not_empty(
+    mcx: Mcx<'_>,
+    heap: &Relation<'_>,
+    attname: &::types_tuple::tupdesc::NameData,
+    attval: Datum,
+    typtype: i8,
+) -> PgResult<()> {
+    // PG_DETOAST_DATUM: values come from FormIndexDatum, possibly toasted.
+    // SAFETY: non-null by-ref range/multirange varlena datum (caller checked
+    // isnull); readable through its full VARSIZE_ANY.
+    let raw = unsafe {
+        let p = attval.as_usize() as *const u8;
+        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+    };
+    let flat;
+    let bytes: &[u8] = if raw[0] & 0x03 == 0 {
+        raw
+    } else {
+        flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+        &flat
+    };
+    let name = String::from_utf8_lossy(attname.name_str()).into_owned();
+    let isempty = match typtype {
+        TYPTYPE_RANGE => ::adt_rangetypes::range_is_empty(bytes),
+        TYPTYPE_MULTIRANGE => ::adt_multirangetypes::multirange_is_empty(bytes),
+        _ => {
+            return Err(Box::new(PgError::error(format!(
+                "WITHOUT OVERLAPS column \"{name}\" is not a range or multirange"
+            ))))
+        }
+    };
+    if isempty {
+        return Err(Box::new(
+            PgError::error(format!(
+                "empty WITHOUT OVERLAPS value found in column \"{name}\" in relation \"{}\"",
+                heap.name()
+            ))
+            .with_sqlstate(types_error::ERRCODE_CHECK_VIOLATION),
+        ));
+    }
+    Ok(())
+}
+
+// pg_type.h
+const TYPTYPE_RANGE: i8 = b'r' as i8;
+const TYPTYPE_MULTIRANGE: i8 = b'm' as i8;
 
 #[cold]
 #[inline(never)]

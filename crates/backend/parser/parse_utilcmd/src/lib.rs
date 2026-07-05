@@ -1507,13 +1507,6 @@ fn transform_index_constraints<'mcx>(
         if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
             unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
         }
-        if constraint.without_overlaps {
-            // NARROWED: WITHOUT OVERLAPS parses; the temporal (WITHOUT
-            // OVERLAPS / PERIOD) index+constraint machinery belongs to the
-            // exclusion/temporal-constraints lane.
-            unported("transformIndexConstraint: WITHOUT OVERLAPS (temporal constraints)");
-        }
-
         let mut index = Node::build::<IndexStmt>(mcx)?;
         index.unique = !is_exclusion;
         index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
@@ -1524,6 +1517,7 @@ fn transform_index_constraints<'mcx>(
         }
         index.nulls_not_distinct = constraint.nulls_not_distinct;
         index.isconstraint = true;
+        index.iswithoutoverlaps = constraint.without_overlaps;
         index.deferrable = constraint.deferrable;
         index.initdeferred = constraint.initdeferred;
         index.idxname = constraint.conname;
@@ -1556,15 +1550,18 @@ fn transform_index_constraints<'mcx>(
 
         let is_primary = index.primary;
         let mut index_params = NodeList::nil();
-        for keynode in constraint.keys.iter() {
+        let nkeys = constraint.keys.len();
+        for (keyidx, keynode) in constraint.keys.iter().enumerate() {
             let key = keynode.as_string().expect("constraint keys").sval;
             let mut found = false;
+            let mut found_column: Option<Node<'mcx>> = None;
             for cn in columns.iter() {
                 let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
                 if cd.colname != Some(key) {
                     continue;
                 }
                 found = true;
+                found_column = Some(cn);
                 if is_primary {
                     if cd.is_not_null {
                         for nn in nnconstraints.iter() {
@@ -1596,11 +1593,56 @@ fn transform_index_constraints<'mcx>(
                     return Err(duplicate_key_column(key, is_primary, constraint.location));
                 }
             }
+            // C: the WITHOUT OVERLAPS part must be a range or multirange type.
+            if constraint.without_overlaps && keyidx == nkeys - 1 {
+                if let Some(cn) = found_column {
+                    let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
+                    let typid = if let Some(tn) = cd.typeName {
+                        typenameTypeIdAndMod(mcx, None, tn)?.0
+                    } else {
+                        InvalidOid
+                    };
+                    if typid == InvalidOid
+                        || !(lsyscache::type_is_range(typid)?
+                            || lsyscache::type_is_multirange(typid)?)
+                    {
+                        return Err(cursor_at(
+                            Box::new(
+                                PgError::new(
+                                    ERROR,
+                                    format!(
+                                        "column \"{key}\" in WITHOUT OVERLAPS is not a range or multirange type"
+                                    ),
+                                )
+                                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                            ),
+                            Some(src.as_bytes()),
+                            constraint.location,
+                        ));
+                    }
+                }
+            }
             let mut iparam = Node::build::<IndexElem>(mcx)?;
             iparam.name = Some(key);
             iparam.ordering = SortByDir::SORTBY_DEFAULT;
             iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
             index_params.lappend(mcx, iparam.seal())?;
+        }
+        if constraint.without_overlaps {
+            // Per SQL standard: at least one equality column besides the
+            // WITHOUT OVERLAPS column.
+            if constraint.keys.len() < 2 {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "constraint using WITHOUT OVERLAPS needs at least two columns"
+                            .to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+                ));
+            }
+            // WITHOUT OVERLAPS requires a GiST index.
+            index.accessMethod = Some("gist");
         }
         let index_node = {
             index.indexParams = index_params;
@@ -1689,10 +1731,6 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
         unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
     }
-    if constraint.without_overlaps {
-        // NARROWED: as the CREATE lane — temporal-constraints lane owns this.
-        unported("transformIndexConstraint: WITHOUT OVERLAPS (temporal constraints)");
-    }
     if !constraint.including.is_nil() {
         unported("transformIndexConstraint: INCLUDE columns");
     }
@@ -1701,6 +1739,7 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     index.primary = constraint.contype == ConstrType::CONSTR_PRIMARY;
     index.nulls_not_distinct = constraint.nulls_not_distinct;
     index.isconstraint = true;
+    index.iswithoutoverlaps = constraint.without_overlaps;
     index.deferrable = constraint.deferrable;
     index.initdeferred = constraint.initdeferred;
     index.idxname = constraint.conname;
@@ -1728,7 +1767,8 @@ pub fn transformIndexConstraintForAlter<'mcx>(
 
     let is_primary = index.primary;
     let mut index_params = NodeList::nil();
-    for keynode in constraint.keys.iter() {
+    let nkeys = constraint.keys.len();
+    for (keyidx, keynode) in constraint.keys.iter().enumerate() {
         let key = keynode.as_string().expect("constraint keys").sval;
         for ip in index_params.iter() {
             let iparam = ip.as_variant::<IndexElem>().expect("IndexElem");
@@ -1736,11 +1776,56 @@ pub fn transformIndexConstraintForAlter<'mcx>(
                 return Err(duplicate_key_column(key, is_primary, constraint.location));
             }
         }
+        // C isalter: resolve the WITHOUT OVERLAPS column's type on the
+        // existing table; if absent, DefineIndex complains later.
+        if constraint.without_overlaps && keyidx == nkeys - 1 {
+            let desc = rel.descr();
+            for i in 0..desc.natts as usize {
+                let att = desc.attr(i);
+                if att.attisdropped {
+                    break;
+                }
+                if att.attname.name_str() == key.as_bytes() {
+                    let typid = att.atttypid;
+                    if typid == InvalidOid
+                        || !(lsyscache::type_is_range(typid)?
+                            || lsyscache::type_is_multirange(typid)?)
+                    {
+                        return Err(cursor_at(
+                            Box::new(
+                                PgError::new(
+                                    ERROR,
+                                    format!(
+                                        "column \"{key}\" in WITHOUT OVERLAPS is not a range or multirange type"
+                                    ),
+                                )
+                                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                            ),
+                            Some(query_string.as_bytes()),
+                            constraint.location,
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
         let mut iparam = Node::build::<IndexElem>(mcx)?;
         iparam.name = Some(key);
         iparam.ordering = SortByDir::SORTBY_DEFAULT;
         iparam.nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
         index_params.lappend(mcx, iparam.seal())?;
+    }
+    if constraint.without_overlaps {
+        if constraint.keys.len() < 2 {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "constraint using WITHOUT OVERLAPS needs at least two columns".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+            ));
+        }
+        index.accessMethod = Some("gist");
     }
     index.indexParams = index_params;
     Ok((index.seal(), NodeList::nil()))

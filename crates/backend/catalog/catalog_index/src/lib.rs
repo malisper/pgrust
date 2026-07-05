@@ -458,11 +458,8 @@ pub fn index_create<'mcx>(
         "constr_flags without INDEX_CREATE_ADD_CONSTRAINT"
     );
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_INDEX } else { RELKIND_INDEX };
-    if extra.constr_flags
-        & (INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS | INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS)
-        != 0
-    {
-        unported("index_create: existing-index/temporal constraint flags");
+    if extra.constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS != 0 {
+        unported("index_create: existing-index constraint flag");
     }
     if accessMethodId != BTREE_AM_OID
         && accessMethodId != HASH_AM_OID
@@ -812,9 +809,7 @@ pub fn index_constraint_create<'mcx>(
     allow_system_table_mods: bool,
 ) -> PgResult<Oid> {
     let namespaceId = heapRelation.rd_rel.relnamespace;
-    if constr_flags & INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS != 0 {
-        unported("index_constraint_create: temporal (WITHOUT OVERLAPS) constraint flag");
-    }
+    let is_without_overlaps = constr_flags & INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS != 0;
     let deferrable = constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE != 0;
     let initdeferred = constr_flags & INDEX_CONSTR_CREATE_INIT_DEFERRED != 0;
     debug_assert!(!initdeferred || deferrable);
@@ -856,6 +851,7 @@ pub fn index_constraint_create<'mcx>(
     if indexInfo.ii_HasExclusion {
         entry.excl_op = &indexInfo.ii_ExclusionOps[..indexInfo.ii_NumIndexKeyAttrs as usize];
     }
+    entry.con_period = is_without_overlaps;
     if parentConstraintId != InvalidOid {
         entry.parent_constr_id = parentConstraintId;
         entry.is_local = false;

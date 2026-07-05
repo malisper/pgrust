@@ -28,8 +28,8 @@ pub use typ::*;
 
 use types_core::Oid;
 pub use types_pathnodes::{
-    CompareType, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID, COMPARE_LE, COMPARE_LT,
-    COMPARE_NE,
+    CompareType, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID,
+    COMPARE_LE, COMPARE_LT, COMPARE_NE, COMPARE_OVERLAP,
 };
 
 pub type StrategyNumber = u16;
