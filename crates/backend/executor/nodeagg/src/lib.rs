@@ -1528,6 +1528,44 @@ pub fn hash_agg_set_limits(
 
 const HASHAGG_HLL_BIT_WIDTH: u8 = 5;
 
+// PGRUST_HASHAGG_MEMDEBUG diagnostics: accounted components vs kernel RSS at
+// spill-mode entry and every batch boundary. Off (one cached env probe) on
+// production paths.
+fn hashagg_memdebug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PGRUST_HASHAGG_MEMDEBUG").is_some())
+}
+
+#[cold]
+#[inline(never)]
+fn hashagg_memdebug(tag: &str, ph: &PerHashData<'_>, tval_mem: usize, buffer_mem: usize) {
+    let mut rss = 0u64;
+    let mut hwm = 0u64;
+    if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+        for l in s.lines() {
+            let kb = |v: &str| v.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+            if let Some(v) = l.strip_prefix("VmRSS:") {
+                rss = kb(v);
+            } else if let Some(v) = l.strip_prefix("VmHWM:") {
+                hwm = kb(v);
+            }
+        }
+    }
+    let meta = ph.hashtable.meta_mem();
+    let entry = ph.table_ctx.subtree_used();
+    eprintln!(
+        "HASHAGG_MEMDEBUG {tag}: ngroups={} meta_kb={} table_ctx_kb={} aggctx_kb={} bufs_kb={} accounted_kb={} vmrss_kb={rss} vmhwm_kb={hwm} nbatches_pending={} limit_kb={}",
+        ph.hash_ngroups_current,
+        meta / 1024,
+        entry / 1024,
+        tval_mem / 1024,
+        buffer_mem / 1024,
+        (meta + entry + tval_mem + buffer_mem) / 1024,
+        ph.spill.batches.len(),
+        ph.hash_mem_limit / 1024,
+    );
+}
+
 // hash_agg_check_limits + hash_agg_enter_spill_mode (nodeAgg.c). Divergence:
 // no nullcheck recompile — on a spill-mode miss the caller skips the whole
 // transition program for the row (single-set equivalent). C's eager spill
@@ -1547,6 +1585,9 @@ fn hash_agg_check_limits<'mcx>(
         if !ph.spill.ever_spilled {
             ph.spill.ever_spilled = true;
             ph.spill.tapeset = Some(LogicalTapeSet::create(mcx, true)?);
+        }
+        if hashagg_memdebug_enabled() {
+            hashagg_memdebug("enter_spill_mode", ph, tval_mem, 0);
         }
     }
     Ok(())
@@ -2990,6 +3031,10 @@ fn hash_agg_update_metrics(
     if ph.hash_ngroups_current > 0 {
         // 16 = C TupleHashEntrySize().
         ph.spill.hashentrysize = 16.0 + hashkey_mem as f64 / ph.hash_ngroups_current as f64;
+    }
+    if hashagg_memdebug_enabled() {
+        let tag = if from_tape { "batch_done" } else { "initial_fill_done" };
+        hashagg_memdebug(tag, ph, hashkey_mem as usize, buffer_mem as usize);
     }
 }
 
