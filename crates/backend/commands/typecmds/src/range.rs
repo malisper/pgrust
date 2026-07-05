@@ -471,6 +471,8 @@ fn makeRangeConstructors<'mcx>(
                 proconfig: None,
                 procost: 1.0,
                 prorows: 0.0,
+                parameterDefaults: None,
+                numDefaults: 0,
             },
         )?;
         // C: constructors are internally dependent on the range type so they
@@ -517,6 +519,8 @@ fn makeMultirangeConstructors<'mcx>(
             proconfig: None,
             procost: 1.0,
             prorows: 0.0,
+            parameterDefaults: None,
+            numDefaults: 0,
         },
     )?;
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Internal)?;
@@ -548,6 +552,8 @@ fn makeMultirangeConstructors<'mcx>(
             proconfig: None,
             procost: 1.0,
             prorows: 0.0,
+            parameterDefaults: None,
+            numDefaults: 0,
         },
     )?;
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Internal)?;
@@ -580,6 +586,8 @@ fn makeMultirangeConstructors<'mcx>(
             proconfig: None,
             procost: 1.0,
             prorows: 0.0,
+            parameterDefaults: None,
+            numDefaults: 0,
         },
     )?;
     pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Internal)?;

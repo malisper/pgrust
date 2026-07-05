@@ -524,13 +524,14 @@ pub struct ParameterList<'mcx> {
     pub have_out_or_variadic: bool,
     pub variadic_arg_type: Oid,
     pub required_result_type: Oid,
+    pub parameter_defaults: types_nodes::NodeList<'mcx>,
 }
 
 // interpret_function_parameter_list (functioncmds.c); shared with
-// aggregatecmds exactly as in C. DEFAULT expressions are loud.
+// aggregatecmds exactly as in C.
 pub fn interpret_function_parameter_list<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &parser_small1::ParseState<'_, 'mcx>,
+    pstate: &mut parser_small1::ParseState<'_, 'mcx>,
     parameters: &types_nodes::NodeList<'mcx>,
     languageOid: Oid,
     objtype: ObjectType,
@@ -547,6 +548,8 @@ pub fn interpret_function_parameter_list<'mcx>(
     let mut var_count = 0usize;
     let mut variadic_arg_type = InvalidOid;
     let mut required_result_type = InvalidOid;
+    let mut parameter_defaults = types_nodes::NodeList::nil();
+    let mut have_defaults = false;
 
     for p in parameters.iter() {
         let fp: &FunctionParameter<'mcx> = p
@@ -638,8 +641,55 @@ pub fn interpret_function_parameter_list<'mcx>(
         }
         names.push(name);
 
-        if fp.defexpr.is_some() {
-            unported("parameter DEFAULT expressions");
+        // functioncmds.c:409-467: cook input-parameter defaults; later
+        // input (and, for procedures, OUT) parameters must keep having them.
+        let isinput = matches!(fpmode, FUNC_PARAM_IN | FUNC_PARAM_INOUT | FUNC_PARAM_VARIADIC);
+        if let Some(defexpr) = fp.defexpr {
+            if !isinput {
+                return Err(err(
+                    "only input parameters can have default values".to_string(),
+                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                ));
+            }
+            let def = parse_expr::transformExpr(
+                mcx,
+                pstate,
+                defexpr,
+                parser_small1::ParseExprKind::EXPR_KIND_FUNCTION_DEFAULT,
+            )?;
+            let def = coerce::coerce_to_specific_type(
+                mcx,
+                pstate,
+                def,
+                parse_expr::expr_type(def),
+                nodes_core::node_funcs::expr_location(def),
+                toid,
+                "DEFAULT",
+            )?;
+            parse_collate::assign_expr_collations(mcx, pstate, def)?;
+            if !pstate.p_rtable.is_nil() || var_seams::contain_var_clause::call(def) {
+                return Err(err(
+                    "cannot use table references in parameter default value".to_string(),
+                    types_error::ERRCODE_INVALID_COLUMN_REFERENCE,
+                ));
+            }
+            parameter_defaults.lappend(mcx, def)?;
+            have_defaults = true;
+        } else {
+            if isinput && have_defaults {
+                return Err(err(
+                    "input parameters after one with a default value must also have defaults"
+                        .to_string(),
+                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                ));
+            }
+            if is_procedure && have_defaults {
+                return Err(err(
+                    "procedure OUT parameters cannot appear after one with a default value"
+                        .to_string(),
+                    ERRCODE_INVALID_FUNCTION_DEFINITION,
+                ));
+            }
         }
     }
 
@@ -656,6 +706,7 @@ pub fn interpret_function_parameter_list<'mcx>(
         have_out_or_variadic,
         variadic_arg_type,
         required_result_type,
+        parameter_defaults,
     })
 }
 
@@ -839,7 +890,7 @@ fn qualified_name_get_creation_namespace<'mcx>(
 // CreateFunction (functioncmds.c).
 pub fn CreateFunction<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &parser_small1::ParseState<'_, 'mcx>,
+    pstate: &mut parser_small1::ParseState<'_, 'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
     source_text: &str,
 ) -> PgResult<ObjectAddress> {
@@ -1013,6 +1064,17 @@ pub fn CreateFunction<'mcx>(
         attrs.prorows
     };
 
+    // pg_proc.proargdefaults stores the nodeToString image of the cooked
+    // defaults List (functioncmds.c passes the List; serialization happens
+    // here because pg_proc sits below outfuncs).
+    let argdefaults_str = if params.parameter_defaults.is_nil() {
+        None
+    } else {
+        Some(outfuncs::nodeToString(
+            mcx,
+            types_nodes::Node::mk_list(mcx, params.parameter_defaults.clone_in(mcx)?)?,
+        )?)
+    };
     pg_proc::ProcedureCreate(
         mcx,
         &ProcedureCreateArgs {
@@ -1048,6 +1110,8 @@ pub fn CreateFunction<'mcx>(
             proconfig: attrs.proconfig.as_deref(),
             procost,
             prorows,
+            parameterDefaults: argdefaults_str.as_deref(),
+            numDefaults: params.parameter_defaults.len() as i16,
         },
     )
 }

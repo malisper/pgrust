@@ -535,6 +535,8 @@ pub fn AggregateCreate<'mcx>(
             proconfig: None,
             procost: 1.0,
             prorows: 0.0,
+            parameterDefaults: None,
+            numDefaults: 0,
         },
     )?;
     let procOid = myself.objectId;

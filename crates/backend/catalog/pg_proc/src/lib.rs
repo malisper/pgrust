@@ -125,6 +125,11 @@ pub struct ProcedureCreateArgs<'a> {
     pub proconfig: Option<&'a [String]>,
     pub procost: f32,
     pub prorows: f32,
+    // nodeToString image of the input-parameter defaults List and its length
+    // (pg_proc.proargdefaults / pronargdefaults); caller serializes because
+    // pg_proc sits below outfuncs.
+    pub parameterDefaults: Option<&'a str>,
+    pub numDefaults: i16,
 }
 
 // IsPolymorphicTypeFamily1/2 (pg_type.h).
@@ -356,7 +361,7 @@ pub fn ProcedureCreate<'mcx>(
     set(&mut values, Anum_pg_proc_provolatile, Datum::from_char(a.volatility));
     set(&mut values, Anum_pg_proc_proparallel, Datum::from_char(a.parallel));
     set(&mut values, Anum_pg_proc_pronargs, Datum::from_i16(parameterCount as i16));
-    set(&mut values, Anum_pg_proc_pronargdefaults, Datum::from_i16(0));
+    set(&mut values, Anum_pg_proc_pronargdefaults, Datum::from_i16(a.numDefaults));
     set(&mut values, Anum_pg_proc_prorettype, Datum::from_oid(a.returnType));
     set(
         &mut values,
@@ -430,7 +435,15 @@ pub fn ProcedureCreate<'mcx>(
         ),
         None => nulls[Anum_pg_proc_proargnames - 1] = true,
     }
-    nulls[Anum_pg_proc_proargdefaults - 1] = true;
+    let argdefaults_text = match a.parameterDefaults {
+        Some(d) => Some(varlena::cstring_to_text(mcx, d.as_bytes())?),
+        None => None,
+    };
+    match &argdefaults_text {
+        Some(t) => values[Anum_pg_proc_proargdefaults - 1] =
+            Datum::from_usize(t.as_bytes().as_ptr() as usize),
+        None => nulls[Anum_pg_proc_proargdefaults - 1] = true,
+    }
     nulls[Anum_pg_proc_protrftypes - 1] = true;
     set(
         &mut values,
