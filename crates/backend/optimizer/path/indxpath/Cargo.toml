@@ -23,3 +23,5 @@ syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 adt_network = { path = "../../../utils/adt/network" }
 planner_seams = { path = "../../plan/planner_seams" }
 clauses = { path = "../../util/clauses" }
+allpaths = { path = "../allpaths" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }

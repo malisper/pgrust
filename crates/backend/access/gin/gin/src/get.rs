@@ -1,6 +1,6 @@
-//! ginget.c: gingetbitmap and the entry/key item-stream machinery. Partial
-//! match is loud (closed opclass set produces none); the EMPTY_QUERY /
-//! SEARCH_MODE_ALL bitmap collection lanes are live.
+//! ginget.c: gingetbitmap and the entry/key item-stream machinery, including
+//! the partial-match and EMPTY_QUERY / SEARCH_MODE_ALL bitmap collection
+//! lanes.
 
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
@@ -118,10 +118,6 @@ fn collect_match_bitmap(
         init_small::globals::work_mem() as usize * 1024,
     ));
 
-    if entry.isPartialMatch {
-        unported("GIN partial-match bitmap collection");
-    }
-
     predicate_lock_page(rel, bm::buffer_get_block_number::call(stack.top().buffer), snapshot)?;
 
     loop {
@@ -141,7 +137,20 @@ fn collect_match_bitmap(
         // SAFETY: live tuple under the lock.
         let idatum = unsafe { gintuple_get_key(rel, itup, &mut icategory) };
 
-        if entry.searchMode == GIN_SEARCH_MODE_ALL && icategory == GIN_CAT_NULL_ITEM {
+        if entry.isPartialMatch {
+            // Partial matches stop at any null (including placeholders).
+            if icategory != GIN_CAT_NORM_KEY {
+                return Ok(true);
+            }
+            let cmp =
+                crate::opclass::compare_partial(state, entry.queryKey, idatum, entry.strategy);
+            if cmp > 0 {
+                return Ok(true);
+            } else if cmp < 0 {
+                stack.top_mut().off += 1;
+                continue;
+            }
+        } else if entry.searchMode == GIN_SEARCH_MODE_ALL && icategory == GIN_CAT_NULL_ITEM {
             return Ok(true);
         }
 
@@ -368,7 +377,7 @@ fn start_scan_key(state: &GinState, work: &mut GinScanWork, key_idx: usize) -> P
         let mut last_required = nentries - 1;
         for pos in 0..nentries - 1 {
             work.keys[key_idx].entryRes[idx[pos]] = GIN_FALSE;
-            let res = tri_consistent(state, &mut work.keys[key_idx]);
+            let res = tri_consistent(&mut work.temp_ctx, state, &mut work.keys[key_idx])?;
             if res == GIN_FALSE {
                 last_required = pos;
                 break;
@@ -758,7 +767,7 @@ fn key_get_item(
     }
 
     if have_lossy_entry {
-        let res = tri_consistent(state, &mut work.keys[key_idx]);
+        let res = tri_consistent(&mut work.temp_ctx, state, &mut work.keys[key_idx])?;
         if res == GIN_TRUE || res == GIN_MAYBE {
             let key = &mut work.keys[key_idx];
             key.curItem = cur_page_lossy;
@@ -782,7 +791,7 @@ fn key_get_item(
         work.keys[key_idx].entryRes[i] = res;
     }
 
-    let res = tri_consistent(state, &mut work.keys[key_idx]);
+    let res = tri_consistent(&mut work.temp_ctx, state, &mut work.keys[key_idx])?;
     let key = &mut work.keys[key_idx];
     match res {
         GIN_TRUE => {
@@ -936,6 +945,53 @@ fn scan_get_candidate(rel: &Relation<'_>, pos: &mut PendingPosition) -> PgResult
     }
 }
 
+/// matchPartialInPendingList.
+#[allow(clippy::too_many_arguments)]
+fn match_partial_in_pending_list(
+    state: &GinState,
+    rel: &Relation<'_>,
+    buffer: Buffer,
+    mut off: OffsetNumber,
+    maxoff: OffsetNumber,
+    entry: &GinScanEntryData,
+    datum: &mut [Datum],
+    category: &mut [GinNullCategory],
+    extracted: &mut [bool],
+) -> bool {
+    // Partial match to a null is not possible.
+    if entry.queryCategory != GIN_CAT_NORM_KEY {
+        return false;
+    }
+    while off < maxoff {
+        // SAFETY: pin + share lock held by the caller.
+        let itup = {
+            let page = unsafe { page_ref(buffer) };
+            let id = page.item_id(off);
+            page.item_raw(id).0
+        };
+        let mi = off as usize - 1;
+        if !extracted[mi] {
+            let mut cat = GIN_CAT_NORM_KEY;
+            // SAFETY: live tuple under the lock.
+            datum[mi] = unsafe { gintuple_get_key(rel, itup, &mut cat) };
+            category[mi] = cat;
+            extracted[mi] = true;
+        }
+        // Once we hit nulls, no further match is possible.
+        if category[mi] != GIN_CAT_NORM_KEY {
+            return false;
+        }
+        let cmp = crate::opclass::compare_partial(state, entry.queryKey, datum[mi], entry.strategy);
+        if cmp == 0 {
+            return true;
+        } else if cmp > 0 {
+            return false;
+        }
+        off += 1;
+    }
+    false
+}
+
 /// collectMatchesForHeapRow.
 fn collect_matches_for_heap_row(
     rel: &Relation<'_>,
@@ -975,18 +1031,18 @@ fn collect_matches_for_heap_row(
                 }
                 let eid = work.keys[ki].scanEntry[j] as usize;
                 let entry = &work.entries[eid];
-                if entry.isPartialMatch {
-                    unported("GIN partial match in pending list");
-                }
 
                 let mut stop_low = pos.first_offset;
                 let mut stop_high = pos.last_offset;
-                // SAFETY: pin + share lock held.
-                let page = unsafe { page_ref(pos.pending_buffer) };
+                let mut found_eq = false;
                 while stop_low < stop_high {
                     let stop_middle = stop_low + ((stop_high - stop_low) >> 1);
-                    let id = page.item_id(stop_middle);
-                    let itup = page.item_raw(id).0;
+                    // SAFETY: pin + share lock held.
+                    let itup = {
+                        let page = unsafe { page_ref(pos.pending_buffer) };
+                        let id = page.item_id(stop_middle);
+                        page.item_raw(id).0
+                    };
                     let mi = stop_middle as usize - 1;
                     if !extracted[mi] {
                         let mut cat = GIN_CAT_NORM_KEY;
@@ -1017,13 +1073,52 @@ fn collect_matches_for_heap_row(
                     };
 
                     if res == 0 {
-                        work.keys[ki].entryRes[j] = GIN_TRUE;
+                        work.keys[ki].entryRes[j] = if entry.isPartialMatch {
+                            if match_partial_in_pending_list(
+                                state,
+                                rel,
+                                pos.pending_buffer,
+                                stop_middle,
+                                pos.last_offset,
+                                entry,
+                                &mut datum,
+                                &mut category,
+                                &mut extracted,
+                            ) {
+                                GIN_TRUE
+                            } else {
+                                GIN_FALSE
+                            }
+                        } else {
+                            GIN_TRUE
+                        };
+                        found_eq = true;
                         break;
                     } else if res < 0 {
                         stop_high = stop_middle;
                     } else {
                         stop_low = stop_middle + 1;
                     }
+                }
+
+                if !found_eq && entry.isPartialMatch {
+                    // No exact match: scan forward from the first tuple
+                    // greater than the target value.
+                    work.keys[ki].entryRes[j] = if match_partial_in_pending_list(
+                        state,
+                        rel,
+                        pos.pending_buffer,
+                        stop_high,
+                        pos.last_offset,
+                        entry,
+                        &mut datum,
+                        &mut category,
+                        &mut extracted,
+                    ) {
+                        GIN_TRUE
+                    } else {
+                        GIN_FALSE
+                    };
                 }
 
                 if work.keys[ki].entryRes[j] == GIN_TRUE {
@@ -1092,7 +1187,7 @@ fn scan_pending_insert(
         let mut recheck = false;
         let mut matches = true;
         for i in 0..work.keys.len() {
-            if !bool_consistent(state, &mut work.keys[i]) {
+            if !bool_consistent(&mut work.temp_ctx, state, &mut work.keys[i])? {
                 matches = false;
                 break;
             }

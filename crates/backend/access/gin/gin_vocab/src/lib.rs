@@ -214,6 +214,7 @@ pub const fn size_of_gin_posting_list(nbytes: usize) -> usize {
 pub enum GinOpclass {
     JsonbOps,
     JsonbPathOps,
+    TsvectorOps,
 }
 
 pub const JSP_GIN_OR: u8 = 0;
@@ -251,6 +252,8 @@ pub struct GinScanKeyData {
     pub queryValues: PgVec<'static, Datum>,
     pub queryCategories: PgVec<'static, GinNullCategory>,
     pub jspOps: PgVec<'static, JspGinOp>,
+    // tsvector_ops extra_data[0]: QueryItem index -> operand (entry) number.
+    pub mapItemOperand: PgVec<'static, i32>,
     pub strategy: StrategyNumber,
     pub searchMode: i32,
     pub attnum: OffsetNumber,
@@ -327,6 +330,8 @@ pub struct GinScanWork {
     pub keys: PgVec<'static, GinScanKeyData>,
     pub entries: PgVec<'static, PgBox<'static, GinScanEntryData>>,
     pub key_ctx: Box<mcx::MemoryContext>,
+    // C so->tempCtx: consistent-fn scratch, reset after each call.
+    pub temp_ctx: Box<mcx::MemoryContext>,
 }
 
 impl GinScanWork {
@@ -349,6 +354,7 @@ impl GinScanWork {
             keys,
             entries,
             key_ctx,
+            temp_ctx: Box::new(mcx::MemoryContext::new_bump("Gin scan temporary context")),
         }
     }
 

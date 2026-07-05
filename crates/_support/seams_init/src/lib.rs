@@ -228,6 +228,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(rangetypes_gist::RANGETYPES_GIST_BUILTINS);
     fmgr_core::register_late_builtins(rangetypes_spgist::RANGETYPES_SPGIST_BUILTINS);
     fmgr_core::register_late_builtins(network_gist::NETWORK_GIST_BUILTINS);
+    fmgr_core::register_late_builtins(adt_tsginidx::builtins::TSGINIDX_BUILTINS);
+    fmgr_core::register_late_builtins(adt_tsgistidx::TSGISTIDX_BUILTINS);
     fmgr_core::register_late_builtins(network_spgist::NETWORK_SPGIST_BUILTINS);
     fmgr_core::register_late_builtins(brin_minmax_multi::MINMAX_MULTI_BUILTINS);
     fmgr_core::register_late_builtins(partitionfuncs::PARTITIONFUNCS_BUILTINS);

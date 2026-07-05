@@ -13,7 +13,8 @@ use crate::database::PgStat_StatDBEntry;
 use crate::pending::{
     PgStat_HashKey, PgStat_Kind, PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BACKEND, PGSTAT_KIND_BGWRITER,
     PGSTAT_KIND_CHECKPOINTER, PGSTAT_KIND_DATABASE, PGSTAT_KIND_FUNCTION, PGSTAT_KIND_IO,
-    PGSTAT_KIND_RELATION, PGSTAT_KIND_SLRU, PGSTAT_KIND_WAL,
+    PGSTAT_KIND_RELATION, PGSTAT_KIND_REPLSLOT, PGSTAT_KIND_SLRU, PGSTAT_KIND_SUBSCRIPTION,
+    PGSTAT_KIND_WAL,
 };
 use crate::relation::PgStat_TableCounts;
 use crate::{
@@ -61,6 +62,8 @@ pub enum SharedEntry {
     Database(PgStat_StatDBEntry),
     Function(crate::function::PgStat_StatFuncEntry),
     Backend(crate::backend::PgStat_Backend),
+    ReplSlot(crate::replslot::PgStat_StatReplSlotEntry),
+    Subscription(crate::subscription::PgStat_StatSubEntry),
 }
 
 type Store = HashMap<PgStat_HashKey, SharedEntry, FxBuildHasher>;
@@ -357,6 +360,14 @@ fn reset_entry_contents(entry: &mut SharedEntry, ts: TimestampTz) {
             *b = Default::default();
             b.stat_reset_timestamp = ts;
         }
+        SharedEntry::ReplSlot(r) => {
+            *r = Default::default();
+            r.stat_reset_timestamp = ts;
+        }
+        SharedEntry::Subscription(s) => {
+            *s = Default::default();
+            s.stat_reset_timestamp = ts;
+        }
     }
 }
 
@@ -387,8 +398,13 @@ pub fn pgstat_reset(kind: PgStat_Kind, dboid: types_core::Oid, objid: u64) {
     if let Some(entry) = store.get_mut(&PgStat_HashKey { kind, dboid, objid }) {
         reset_entry_contents(entry, ts);
     }
-    // DATABASE and BACKEND are the accessed_across_databases kinds here.
-    if kind != PGSTAT_KIND_DATABASE && kind != PGSTAT_KIND_BACKEND {
+    // accessed_across_databases kinds (pgstat.c kind infos): DATABASE,
+    // REPLSLOT, SUBSCRIPTION, BACKEND.
+    if kind != PGSTAT_KIND_DATABASE
+        && kind != PGSTAT_KIND_BACKEND
+        && kind != PGSTAT_KIND_REPLSLOT
+        && kind != PGSTAT_KIND_SUBSCRIPTION
+    {
         reset_database_timestamp(&mut store, dboid, ts);
     }
 }
@@ -397,7 +413,8 @@ pub fn pgstat_reset_of_kind(kind: PgStat_Kind) {
     let ts = timestamp_seams::get_current_timestamp::call();
     match kind {
         PGSTAT_KIND_DATABASE | PGSTAT_KIND_RELATION | PGSTAT_KIND_FUNCTION
-        | PGSTAT_KIND_BACKEND => {
+        | PGSTAT_KIND_BACKEND | PGSTAT_KIND_REPLSLOT
+        | PGSTAT_KIND_SUBSCRIPTION => {
             let mut store = SHARED_STATS.lock().unwrap();
             for (key, entry) in store.iter_mut() {
                 if key.kind == kind {

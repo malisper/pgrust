@@ -744,7 +744,7 @@ pub fn range_add_value(
         return Ok(modified);
     }
 
-    let newval = ::types_brin::datum_copy(mcx, newval, attbyval, attlen)?;
+    let newval = ::adt_scalar::datum_ops::datum_copy(mcx, newval, attbyval, attlen)?;
 
     ranges.values[(2 * ranges.nranges + ranges.nvalues) as usize] = newval;
     ranges.nvalues += 1;

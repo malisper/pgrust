@@ -3909,14 +3909,14 @@ fn gincost_pattern(
     let _strategy = lsyscache::amop::get_op_opfamily_strategy(clause_op, opfamily)?;
     let strategy = _strategy as u16;
 
-    let (nentries, search_mode) =
+    let (nentries, npartial, search_mode) =
         gin::gincost_extract_query(opfamily, opcintype, query, strategy)?;
 
     if nentries <= 0 && search_mode == GIN_SEARCH_MODE_DEFAULT {
         return Ok(false);
     }
-    // The closed opclass set has no partial matches.
-    counts.exact_entries += nentries as f64;
+    counts.partial_entries += npartial as f64;
+    counts.exact_entries += (nentries - npartial) as f64;
     counts.search_entries += nentries as f64;
 
     if search_mode == GIN_SEARCH_MODE_DEFAULT {

@@ -396,8 +396,28 @@ pub fn ts_match_vq_core<'mcx>(mcx: Mcx<'mcx>, v: TsVec<'_>, q: TsQueryRef<'_>) -
     if q.size() == 0 {
         return Ok(false);
     }
-    let mut chk = |val: &Operand, data: Option<&mut ExecPhraseData<'mcx>>| {
+    let mut chk = |_idx: usize, val: &Operand, data: Option<&mut ExecPhraseData<'mcx>>| {
         Ok(checkcondition_str(mcx, v, q, val, data))
     };
     crate::execute::ts_execute(mcx, q, crate::execute::TS_EXEC_EMPTY, &mut chk)
+}
+
+pub fn tsquery_requires_match(q: TsQueryRef<'_>, idx: usize) -> bool {
+    use crate::query::{Item, OP_AND, OP_NOT, OP_OR, OP_PHRASE};
+    match q.item(idx) {
+        Item::Val(_) => true,
+        Item::ValStop => panic!("tsquery_requires_match: QI_VALSTOP in stored tsquery"),
+        Item::Opr(opr) => match opr.oper {
+            OP_NOT => false,
+            OP_PHRASE | OP_AND => {
+                tsquery_requires_match(q, idx + opr.left as usize)
+                    || tsquery_requires_match(q, idx + 1)
+            }
+            OP_OR => {
+                tsquery_requires_match(q, idx + opr.left as usize)
+                    && tsquery_requires_match(q, idx + 1)
+            }
+            other => panic!("unrecognized operator: {other}"),
+        },
+    }
 }

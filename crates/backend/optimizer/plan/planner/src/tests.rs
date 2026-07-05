@@ -972,7 +972,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     };
     let baserel = run.root.path(ipath).base().parent;
     let bpath =
-        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, &None, 1.0).unwrap();
+        crate::pathnode::create_bitmap_heap_path(&mut run, baserel, ipath, &None, 1.0, 0).unwrap();
 
     // Exact C arithmetic over the fixture (100 pages / 10000 tuples, one
     // matching row): tree cost = indextotalcost + 0.1*cpu_operator_cost*1;
@@ -3244,7 +3244,13 @@ mod pattern_saop_arms {
     #[test]
     fn function_selectivity_defaults_to_one_third() {
         install_fixtures();
-        assert_eq!(crate::plancat::function_selectivity(65).unwrap(), 0.3333333);
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        assert_eq!(
+            crate::plancat::function_selectivity(&mut run, 65, &[], 0, false, 0).unwrap(),
+            0.3333333
+        );
     }
 }
 

@@ -1,6 +1,7 @@
 // backend-utils-activity-pgstat — pgstat.c's per-backend half: the pending-entry
-// model, pgstat_report_stat batching, the counting layers for every kind but
-// replslot/subscription, the shared store the flush paths apply into plus its
+// model, pgstat_report_stat batching, the counting layers (replslot and
+// subscription carry only the read/reset half until logical decoding lands),
+// the shared store the flush paths apply into plus its
 // fetch/snapshot readers and reset machinery, and the statsfile persistence
 // half (write on clean shutdown, restore/discard at startup).
 #![allow(non_snake_case)]
@@ -19,8 +20,10 @@ pub mod function;
 pub mod io;
 pub mod pending;
 pub mod relation;
+pub mod replslot;
 pub mod shmem;
 pub mod slru;
+pub mod subscription;
 pub mod wal;
 pub mod xact;
 

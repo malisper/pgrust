@@ -52,6 +52,7 @@ fc_textcmp! {
     fc_text_gt: text_gt -> from_bool;
     fc_text_ge: text_ge -> from_bool;
     fc_bttextcmp: bttextcmp -> from_i32;
+    fc_text_starts_with: text_starts_with -> from_bool;
 }
 
 // hashtext/hashtextextended (hashfunc.c); nondeterministic collations hash
@@ -89,6 +90,26 @@ fn hashtext_nondeterministic(
         return Ok(None);
     }
     pg_locale_seams::varstr_nondeterministic_hash::call(collid, data, seed)
+}
+
+macro_rules! fc_text_pattern {
+    ($($fname:ident: $core:ident -> $conv:ident;)*) => {$(
+        pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: catalog args are non-null text varlenas (strict fn).
+            let (a, b) = unsafe {
+                (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?)
+            };
+            Ok(Datum::$conv(crate::$core(a.data(), b.data())))
+        }
+    )*};
+}
+
+fc_text_pattern! {
+    fc_text_pattern_lt: text_pattern_lt -> from_bool;
+    fc_text_pattern_le: text_pattern_le -> from_bool;
+    fc_text_pattern_ge: text_pattern_ge -> from_bool;
+    fc_text_pattern_gt: text_pattern_gt -> from_bool;
+    fc_bttext_pattern_cmp: bttext_pattern_cmp -> from_i32;
 }
 
 macro_rules! fc_byteacmp {
@@ -554,6 +575,12 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(2414, "textrecv", 1, fc_textrecv),
     b(2415, "textsend", 1, fc_textsend),
     b(67, "texteq", 2, fc_texteq),
+    b(3696, "text_starts_with", 2, fc_text_starts_with),
+    b(2160, "text_pattern_lt", 2, fc_text_pattern_lt),
+    b(2161, "text_pattern_le", 2, fc_text_pattern_le),
+    b(2163, "text_pattern_ge", 2, fc_text_pattern_ge),
+    b(2164, "text_pattern_gt", 2, fc_text_pattern_gt),
+    b(2166, "bttext_pattern_cmp", 2, fc_bttext_pattern_cmp),
     b(400, "hashtext", 1, fc_hashtext),
     b(448, "hashtextextended", 2, fc_hashtextextended),
     b(109, "unknownin", 1, fc_unknownin),

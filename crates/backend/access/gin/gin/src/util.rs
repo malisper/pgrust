@@ -17,8 +17,8 @@ use crate::{
     write_meta_to, write_opaque_to, RM_GIN,
 };
 
-/// initGinState. Closed set: single key column, jsonb_ops. Anything else
-/// panics loudly (multicol / array_ops / unknown opclass).
+/// initGinState. Closed set: single key column, jsonb_ops / jsonb_path_ops /
+/// tsvector_ops. Anything else panics loudly (multicol / array_ops / unknown).
 pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let natts = rel.rd_att.natts;
     if natts != 1 {
@@ -32,6 +32,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let opclass = match extract {
         opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
         opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
+        opclass::F_GIN_EXTRACT_TSVECTOR => GinOpclass::TsvectorOps,
         2743 => unported("array_ops GIN opclass (arrays lane)"),
         other => unported(&format!("GIN opclass with extractValue proc {other}")),
     };
@@ -40,6 +41,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
             == match opclass {
                 GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
                 GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
+                GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
             }
     );
     let partial = lsyscache::get_opfamily_proc(
@@ -48,9 +50,11 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
         opcintype,
         GIN_COMPARE_PARTIAL_PROC as i16,
     )?;
-    if partial != InvalidOid {
-        unported("GIN comparePartialFn (partial-match lane)");
-    }
+    let can_partial_match = match partial {
+        InvalidOid => false,
+        opclass::F_GIN_CMP_PREFIX if opclass == GinOpclass::TsvectorOps => true,
+        other => unported(&format!("GIN comparePartialFn {other}")),
+    };
 
     let attr = rel.rd_att.compact_attr(0);
     Ok(GinState {
@@ -60,7 +64,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
         } else {
             ::types_core::catalog::DEFAULT_COLLATION_OID
         },
-        can_partial_match: false,
+        can_partial_match,
         key_byval: attr.attbyval,
         key_len: attr.attlen,
     })

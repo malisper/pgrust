@@ -7,7 +7,8 @@ use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PG
 
 use pgstat::pending::{
     PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER, PGSTAT_KIND_FUNCTION,
-    PGSTAT_KIND_IO, PGSTAT_KIND_RELATION, PGSTAT_KIND_SLRU, PGSTAT_KIND_WAL,
+    PGSTAT_KIND_IO, PGSTAT_KIND_RELATION, PGSTAT_KIND_REPLSLOT, PGSTAT_KIND_SLRU,
+    PGSTAT_KIND_SUBSCRIPTION, PGSTAT_KIND_WAL,
 };
 
 mod activity;
@@ -312,6 +313,77 @@ xact_func_f8_ms! {
     fc_pg_stat_get_xact_function_self_time self_time;
 }
 
+macro_rules! ckpt_i64 {
+    ($($fc:ident $field:ident;)*) => {$(
+        pub fn $fc(_fl: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            Ok(Datum::from_i64(pgstat::checkpointer::pgstat_fetch_stat_checkpointer().$field))
+        }
+    )*};
+}
+
+ckpt_i64! {
+    fc_pg_stat_get_checkpointer_num_timed num_timed;
+    fc_pg_stat_get_checkpointer_num_requested num_requested;
+    fc_pg_stat_get_checkpointer_num_performed num_performed;
+    fc_pg_stat_get_checkpointer_restartpoints_timed restartpoints_timed;
+    fc_pg_stat_get_checkpointer_restartpoints_requested restartpoints_requested;
+    fc_pg_stat_get_checkpointer_restartpoints_performed restartpoints_performed;
+    fc_pg_stat_get_checkpointer_buffers_written buffers_written;
+    fc_pg_stat_get_checkpointer_slru_written slru_written;
+}
+
+// C: time stored in msec, converted to double for presentation.
+pub fn fc_pg_stat_get_checkpointer_write_time(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_f64(pgstat::checkpointer::pgstat_fetch_stat_checkpointer().write_time as f64))
+}
+
+pub fn fc_pg_stat_get_checkpointer_sync_time(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_f64(pgstat::checkpointer::pgstat_fetch_stat_checkpointer().sync_time as f64))
+}
+
+pub fn fc_pg_stat_get_checkpointer_stat_reset_time(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(
+        pgstat::checkpointer::pgstat_fetch_stat_checkpointer().stat_reset_timestamp,
+    ))
+}
+
+pub fn fc_pg_stat_get_bgwriter_buf_written_clean(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(pgstat::bgwriter::pgstat_fetch_stat_bgwriter().buf_written_clean))
+}
+
+pub fn fc_pg_stat_get_bgwriter_maxwritten_clean(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(pgstat::bgwriter::pgstat_fetch_stat_bgwriter().maxwritten_clean))
+}
+
+pub fn fc_pg_stat_get_bgwriter_stat_reset_time(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(pgstat::bgwriter::pgstat_fetch_stat_bgwriter().stat_reset_timestamp))
+}
+
+pub fn fc_pg_stat_get_buf_alloc(
+    _fl: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    Ok(Datum::from_i64(pgstat::bgwriter::pgstat_fetch_stat_bgwriter().buf_alloc))
+}
+
 pub fn fc_pg_stat_get_snapshot_timestamp(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -402,6 +474,47 @@ pub fn fc_pg_stat_reset_slru(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     } else {
         pgstat::slru::pgstat_reset_slru(arg_text_str(fcinfo, 0)?);
     }
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_replication_slot(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) {
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_REPLSLOT);
+        return Ok(Datum::from_usize(0));
+    }
+    let target = arg_text_str(fcinfo, 0)?;
+    // pgstat_reset_replslot (pgstat_replslot.c:41).
+    let Some(slot) = slot::SearchNamedReplicationSlot(target, true)? else {
+        return Err(Box::new(
+            PgError::error(format!("replication slot \"{target}\" does not exist"))
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    };
+    if slot::SlotIsLogical(slot) {
+        pgstat::replslot::pgstat_reset_replslot_by_index(slot::ReplicationSlotIndex(slot));
+    }
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_subscription_stats(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) {
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SUBSCRIPTION);
+        return Ok(Datum::from_usize(0));
+    }
+    let subid = fcinfo.args_n::<1>()[0].value.as_oid();
+    if subid == types_core::InvalidOid {
+        return Err(Box::new(
+            PgError::error(format!("invalid subscription OID {subid}"))
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
+    }
+    pgstat::pgstat_reset(PGSTAT_KIND_SUBSCRIPTION, types_core::InvalidOid, subid as u64);
     Ok(Datum::from_usize(0))
 }
 
@@ -595,6 +708,68 @@ pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     ),
     nonstrict(2307, "pg_stat_reset_slru", 1, fc_pg_stat_reset_slru),
     b(6387, "pg_stat_reset_backend_stats", 1, fc_pg_stat_reset_backend_stats),
+    b(2769, "pg_stat_get_checkpointer_num_timed", 0, fc_pg_stat_get_checkpointer_num_timed),
+    b(
+        2770,
+        "pg_stat_get_checkpointer_num_requested",
+        0,
+        fc_pg_stat_get_checkpointer_num_requested,
+    ),
+    b(
+        6377,
+        "pg_stat_get_checkpointer_num_performed",
+        0,
+        fc_pg_stat_get_checkpointer_num_performed,
+    ),
+    b(
+        6327,
+        "pg_stat_get_checkpointer_restartpoints_timed",
+        0,
+        fc_pg_stat_get_checkpointer_restartpoints_timed,
+    ),
+    b(
+        6328,
+        "pg_stat_get_checkpointer_restartpoints_requested",
+        0,
+        fc_pg_stat_get_checkpointer_restartpoints_requested,
+    ),
+    b(
+        6329,
+        "pg_stat_get_checkpointer_restartpoints_performed",
+        0,
+        fc_pg_stat_get_checkpointer_restartpoints_performed,
+    ),
+    b(
+        2771,
+        "pg_stat_get_checkpointer_buffers_written",
+        0,
+        fc_pg_stat_get_checkpointer_buffers_written,
+    ),
+    b(
+        6366,
+        "pg_stat_get_checkpointer_slru_written",
+        0,
+        fc_pg_stat_get_checkpointer_slru_written,
+    ),
+    b(3160, "pg_stat_get_checkpointer_write_time", 0, fc_pg_stat_get_checkpointer_write_time),
+    b(3161, "pg_stat_get_checkpointer_sync_time", 0, fc_pg_stat_get_checkpointer_sync_time),
+    b(
+        6314,
+        "pg_stat_get_checkpointer_stat_reset_time",
+        0,
+        fc_pg_stat_get_checkpointer_stat_reset_time,
+    ),
+    b(2772, "pg_stat_get_bgwriter_buf_written_clean", 0, fc_pg_stat_get_bgwriter_buf_written_clean),
+    b(2773, "pg_stat_get_bgwriter_maxwritten_clean", 0, fc_pg_stat_get_bgwriter_maxwritten_clean),
+    b(3075, "pg_stat_get_bgwriter_stat_reset_time", 0, fc_pg_stat_get_bgwriter_stat_reset_time),
+    b(2859, "pg_stat_get_buf_alloc", 0, fc_pg_stat_get_buf_alloc),
+    srf(3318, "pg_stat_get_progress_info", 1, stats::fc_pg_stat_get_progress_info),
+    b(6107, "pg_stat_get_backend_subxact", 1, stats::fc_pg_stat_get_backend_subxact),
+    nonstrict(3195, "pg_stat_get_archiver", 0, stats::fc_pg_stat_get_archiver),
+    b(6169, "pg_stat_get_replication_slot", 1, stats::fc_pg_stat_get_replication_slot),
+    b(6231, "pg_stat_get_subscription_stats", 1, stats::fc_pg_stat_get_subscription_stats),
+    nonstrict(6170, "pg_stat_reset_replication_slot", 1, fc_pg_stat_reset_replication_slot),
+    nonstrict(6232, "pg_stat_reset_subscription_stats", 1, fc_pg_stat_reset_subscription_stats),
     srf(6214, "pg_stat_get_io", 0, stats::fc_pg_stat_get_io),
     srf(6386, "pg_stat_get_backend_io", 1, stats::fc_pg_stat_get_backend_io),
     nonstrict(1136, "pg_stat_get_wal", 0, stats::fc_pg_stat_get_wal),

@@ -10,7 +10,9 @@ use datum::expandeddatum::{datum_get_eohp, eoh_flatten_into, eoh_get_flat_size};
 use datum::Datum;
 use mcx::{check_alloc_size, vec_append_bytes, Allocator, Mcx, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
-use types_tuple::varatt::{varatt_is_external_expanded, varsize_any};
+use types_tuple::varatt::{
+    varatt_is_1b_e, varatt_is_external_expanded, varsize_any, vartag_external, VARTAG_EXPANDED_RW,
+};
 
 #[cold]
 #[inline(never)]
@@ -92,6 +94,45 @@ pub fn datum_copy<'mcx>(
     // SAFETY: src live for sz bytes (datum_get_size read it); dst fresh.
     unsafe { core::ptr::copy_nonoverlapping(p, dst.as_ptr(), sz) };
     Ok(Datum::from_usize(dst.as_ptr() as usize))
+}
+
+/// `datumTransfer` of a non-NULL datum; a read-write expanded object is
+/// reparented, everything else is `datum_copy`.
+pub fn datum_transfer<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: Datum,
+    typbyval: bool,
+    typlen: i16,
+) -> PgResult<Datum> {
+    if !typbyval && typlen == -1 {
+        let p = value.as_usize() as *const u8;
+        // SAFETY: by-ref datum is live per caller contract.
+        if unsafe { varatt_is_1b_e(p) && vartag_external(p) == VARTAG_EXPANDED_RW } {
+            datum::expandeddatum::transfer_expanded_object(value)
+        }
+    }
+    datum_copy(mcx, value, typbyval, typlen)
+}
+
+/// `datumIsEqual`: raw image compare, no detoasting (toasted inputs give
+/// false negatives by design).
+pub fn datum_is_equal(v1: Datum, v2: Datum, typbyval: bool, typlen: i16) -> PgResult<bool> {
+    if typbyval {
+        return Ok(v1 == v2);
+    }
+    let size1 = datum_get_size(v1, typbyval, typlen)?;
+    let size2 = datum_get_size(v2, typbyval, typlen)?;
+    if size1 != size2 {
+        return Ok(false);
+    }
+    // SAFETY: by-ref datums live for their datum_get_size bytes.
+    let (s1, s2) = unsafe {
+        (
+            core::slice::from_raw_parts(v1.as_usize() as *const u8, size1),
+            core::slice::from_raw_parts(v2.as_usize() as *const u8, size2),
+        )
+    };
+    Ok(s1 == s2)
 }
 
 /// `datumEstimateSpace`: bytes `datum_serialize` will append.

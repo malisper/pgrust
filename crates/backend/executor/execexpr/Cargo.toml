@@ -34,6 +34,7 @@ exectuples = { path = "../exectuples" }
 heaptoast = { path = "../../access/heap/heaptoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
+adt_scalar = { path = "../../utils/adt/scalar" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

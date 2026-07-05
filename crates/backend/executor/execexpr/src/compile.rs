@@ -2156,9 +2156,6 @@ fn init_subscripting_ref<'mcx>(
     push_step(state, mcx, Step::SbsrefSubscripts { state: stp, jumpdone: u32::MAX, out })?;
 
     if is_assignment {
-        if is_slice {
-            unported("EEOP_SBSREF_ASSIGN slice (array_set_slice lane)");
-        }
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
             unported("EEOP_SBSREF_OLD (nested-assignment CaseTestExpr passing)");
@@ -2167,7 +2164,7 @@ fn init_subscripting_ref<'mcx>(
             NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
         };
         init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
-        push_step(state, mcx, Step::SbsrefAssign { state: stp, out })?;
+        push_step(state, mcx, Step::SbsrefAssign { state: stp, slice: is_slice, out })?;
     } else {
         push_step(state, mcx, Step::SbsrefFetch { state: stp, slice: is_slice, out })?;
     }

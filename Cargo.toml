@@ -490,6 +490,8 @@ members = [
     "crates/backend/utils/adt/tsvector_core",
     "crates/backend/utils/adt/tsquery_core",
     "crates/backend/utils/adt/tsrank",
+    "crates/backend/utils/adt/tsginidx",
+    "crates/backend/utils/adt/tsgistidx",
     "crates/backend/tsearch/ts_locale",
     "crates/backend/tsearch/wparser_def",
     "crates/backend/tsearch/ts_parse",

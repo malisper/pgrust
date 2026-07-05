@@ -419,6 +419,415 @@ fn extract_slice(
     let _ = dest_offset;
 }
 
+#[cold]
+fn fixed_length_slice_update() -> Box<PgError> {
+    Box::new(
+        PgError::error("updates on slices of fixed-length arrays not implemented")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
+#[cold]
+fn slice_bounds_missing() -> Box<PgError> {
+    Box::new(
+        PgError::error("array slice subscript must provide both boundaries")
+            .with_detail(
+                "When assigning to a slice of an empty array value, slice boundaries must be \
+                 fully specified.",
+            )
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+    )
+}
+
+#[cold]
+fn source_array_too_small() -> Box<PgError> {
+    Box::new(
+        PgError::error("source array too small").with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+    )
+}
+
+#[cold]
+fn upper_lt_lower() -> Box<PgError> {
+    Box::new(
+        PgError::error("upper bound cannot be less than lower bound")
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+    )
+}
+
+// array_set_slice over detoasted flat images (varlena arrays only; C keeps
+// fixed-length slice updates unimplemented). Scribbles on upper/lower like C.
+// The NULL-source no-op lives at the caller (it returns the input datum).
+#[allow(clippy::too_many_arguments)]
+pub fn array_set_slice<'mcx>(
+    mcx: Mcx<'mcx>,
+    array: &[u8],
+    n_subscripts: i32,
+    upper: &mut [i32],
+    lower: &mut [i32],
+    upper_provided: &[bool],
+    lower_provided: &[bool],
+    src_array: &[u8],
+    arraytyplen: i32,
+    elmlen: i32,
+    elmbyval: bool,
+    elmalign: u8,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if arraytyplen > 0 {
+        return Err(fixed_length_slice_update());
+    }
+
+    let (ndim, mut dims, mut lbs) = read_dims_lbounds(array);
+    let elemtype: Oid = arr_elemtype(array);
+
+    if ndim == 0 {
+        let (dvalues, dnulls) =
+            crate::construct::deconstruct_array(mcx, src_array, elmlen, elmbyval, elmalign, true)?;
+        let mut dim = [0i32; MAXDIM];
+        let mut lb = [0i32; MAXDIM];
+        for i in 0..n_subscripts as usize {
+            if !upper_provided[i] || !lower_provided[i] {
+                return Err(slice_bounds_missing());
+            }
+            let (d, o1) = upper[i].overflowing_sub(lower[i]);
+            let (d, o2) = d.overflowing_add(1);
+            if o1 || o2 {
+                return Err(array_size_exceeded());
+            }
+            dim[i] = d;
+            lb[i] = lower[i];
+        }
+        if (dvalues.len() as i32) < array_get_n_items(n_subscripts, &dim)? {
+            return Err(source_array_too_small());
+        }
+        return construct_md_array(
+            mcx,
+            &dvalues,
+            Some(&dnulls),
+            n_subscripts,
+            &dim,
+            &lb,
+            elemtype,
+            elmlen,
+            elmbyval,
+            elmalign,
+        );
+    }
+
+    if ndim < n_subscripts || ndim <= 0 || ndim as usize > MAXDIM {
+        return Err(wrong_subscripts());
+    }
+
+    let bitmap_off = arr_nullbitmap_off(array);
+    let src_bitmap_off = arr_nullbitmap_off(src_array);
+    let src_data_off = arr_data_offset(src_array);
+    let mut newhasnulls = bitmap_off.is_some() || src_bitmap_off.is_some();
+    let mut addedbefore = 0i32;
+    let mut addedafter = 0i32;
+
+    if ndim == 1 {
+        debug_assert!(n_subscripts == 1);
+        if !lower_provided[0] {
+            lower[0] = lbs[0];
+        }
+        if !upper_provided[0] {
+            upper[0] = dims[0] + lbs[0] - 1;
+        }
+        if lower[0] > upper[0] {
+            return Err(upper_lt_lower());
+        }
+        if lower[0] < lbs[0] {
+            let (ab, o1) = lbs[0].overflowing_sub(lower[0]);
+            let (nd, o2) = dims[0].overflowing_add(ab);
+            if o1 || o2 {
+                return Err(array_size_exceeded());
+            }
+            addedbefore = ab;
+            dims[0] = nd;
+            lbs[0] = lower[0];
+            if addedbefore > 1 {
+                newhasnulls = true;
+            }
+        }
+        if upper[0] >= dims[0] + lbs[0] {
+            let (aa, o1) = upper[0].overflowing_sub(dims[0] + lbs[0]);
+            let (aa, o2) = aa.overflowing_add(1);
+            let (nd, o3) = dims[0].overflowing_add(aa);
+            if o1 || o2 || o3 {
+                return Err(array_size_exceeded());
+            }
+            addedafter = aa;
+            dims[0] = nd;
+            if addedafter > 1 {
+                newhasnulls = true;
+            }
+        }
+    } else {
+        for i in 0..n_subscripts as usize {
+            if !lower_provided[i] {
+                lower[i] = lbs[i];
+            }
+            if !upper_provided[i] {
+                upper[i] = dims[i] + lbs[i] - 1;
+            }
+            if lower[i] > upper[i] {
+                return Err(upper_lt_lower());
+            }
+            if lower[i] < lbs[i] || upper[i] >= dims[i] + lbs[i] {
+                return Err(subscript_out_of_range());
+            }
+        }
+        for i in n_subscripts as usize..ndim as usize {
+            lower[i] = lbs[i];
+            upper[i] = dims[i] + lbs[i] - 1;
+            if lower[i] > upper[i] {
+                return Err(upper_lt_lower());
+            }
+        }
+    }
+
+    let nitems = array_get_n_items(ndim, &dims)?;
+    array_check_bounds(ndim, &dims, &lbs)?;
+
+    let mut span = [0i32; MAXDIM];
+    mda_get_range(ndim, &mut span, lower, upper);
+    let nsrcitems = array_get_n_items(ndim, &span)?;
+    let (src_ndim, src_dims, _src_lbs) = read_dims_lbounds(src_array);
+    if nsrcitems > array_get_n_items(src_ndim, &src_dims)? {
+        return Err(source_array_too_small());
+    }
+
+    let overheadlen = if newhasnulls {
+        arr_overhead_withnulls(ndim, nitems)
+    } else {
+        arr_overhead_nonulls(ndim)
+    };
+    let newitemsize = nelems_size(
+        src_array, src_data_off, 0, src_bitmap_off, nsrcitems, elmlen, elmalign,
+    );
+    let oldoverheadlen = arr_data_offset(array);
+    let olddatasize = arr_size(array) - oldoverheadlen;
+
+    let (olditemsize, lenbefore, lenafter, itemsbefore, itemsafter, nolditems);
+    if ndim > 1 {
+        olditemsize = slice_size(
+            array,
+            oldoverheadlen,
+            bitmap_off,
+            ndim,
+            &dims,
+            &lbs,
+            lower,
+            upper,
+            elmlen,
+            elmalign,
+        )?;
+        lenbefore = 0;
+        lenafter = 0;
+        itemsbefore = 0;
+        itemsafter = 0;
+        nolditems = 0;
+    } else {
+        let (old_ndim, old_dims, old_lbs) = read_dims_lbounds(array);
+        debug_assert!(old_ndim == 1);
+        let oldlb = old_lbs[0];
+        let oldub = oldlb + old_dims[0] - 1;
+        let slicelb = oldlb.max(lower[0]);
+        let sliceub = oldub.min(upper[0]);
+        itemsbefore = slicelb.min(oldub + 1) - oldlb;
+        lenbefore = nelems_size(
+            array, oldoverheadlen, 0, bitmap_off, itemsbefore, elmlen, elmalign,
+        );
+        if slicelb > sliceub {
+            nolditems = 0;
+            olditemsize = 0;
+        } else {
+            nolditems = sliceub - slicelb + 1;
+            olditemsize = nelems_size(
+                array,
+                oldoverheadlen + lenbefore,
+                itemsbefore,
+                bitmap_off,
+                nolditems,
+                elmlen,
+                elmalign,
+            );
+        }
+        itemsafter = oldub + 1 - (sliceub + 1).max(oldlb);
+        lenafter = olddatasize - lenbefore - olditemsize;
+    }
+
+    let newsize = overheadlen + olddatasize - olditemsize + newitemsize;
+
+    let mut out: PgVec<u8> = vec_with_capacity_in(mcx, newsize)?;
+    out.resize(newsize, 0);
+    out[0..4].copy_from_slice(&set_varsize_4b(newsize));
+    out[4..8].copy_from_slice(&ndim.to_ne_bytes());
+    out[8..12].copy_from_slice(&(if newhasnulls { overheadlen as i32 } else { 0 }).to_ne_bytes());
+    out[12..16].copy_from_slice(&(elemtype as u32).to_ne_bytes());
+    let mut off = ARRAYTYPE_HDRSZ;
+    for i in 0..ndim as usize {
+        out[off..off + 4].copy_from_slice(&dims[i].to_ne_bytes());
+        off += 4;
+    }
+    for i in 0..ndim as usize {
+        out[off..off + 4].copy_from_slice(&lbs[i].to_ne_bytes());
+        off += 4;
+    }
+
+    if ndim > 1 {
+        insert_slice(
+            &mut out, array, src_array, ndim, &dims, &lbs, lower, upper, elmlen, elmalign,
+        )?;
+    } else {
+        out[overheadlen..overheadlen + lenbefore]
+            .copy_from_slice(&array[oldoverheadlen..oldoverheadlen + lenbefore]);
+        out[overheadlen + lenbefore..overheadlen + lenbefore + newitemsize]
+            .copy_from_slice(&src_array[src_data_off..src_data_off + newitemsize]);
+        out[overheadlen + lenbefore + newitemsize
+            ..overheadlen + lenbefore + newitemsize + lenafter]
+            .copy_from_slice(
+                &array[oldoverheadlen + lenbefore + olditemsize
+                    ..oldoverheadlen + lenbefore + olditemsize + lenafter],
+            );
+        if newhasnulls {
+            let new_bo = ARRAYTYPE_HDRSZ + 2 * 4 * ndim as usize;
+            // resize(0-fill) above already marked inserted positions as nulls.
+            array_bitmap_copy(
+                &mut out,
+                new_bo,
+                addedbefore,
+                bitmap_off.map(|bo| (array, bo)),
+                0,
+                itemsbefore,
+            );
+            array_bitmap_copy(
+                &mut out,
+                new_bo,
+                lower[0] - lbs[0],
+                src_bitmap_off.map(|bo| (src_array, bo)),
+                0,
+                nsrcitems,
+            );
+            array_bitmap_copy(
+                &mut out,
+                new_bo,
+                addedbefore + itemsbefore + nolditems,
+                bitmap_off.map(|bo| (array, bo)),
+                itemsbefore + nolditems,
+                itemsafter,
+            );
+        }
+    }
+    Ok(out)
+}
+
+// array_insert_slice: dest header (dims/lbs of the original array) already
+// written; slice volume elements come serially from src, the rest from orig.
+#[allow(clippy::too_many_arguments)]
+fn insert_slice(
+    dest: &mut [u8],
+    orig: &[u8],
+    src: &[u8],
+    ndim: i32,
+    dims: &[i32],
+    lbs: &[i32],
+    st: &[i32],
+    endp: &[i32],
+    elmlen: i32,
+    elmalign: u8,
+) -> PgResult<()> {
+    let dest_bitmap_off = arr_nullbitmap_off(dest);
+    let orig_bitmap_off = arr_nullbitmap_off(orig);
+    let src_bitmap_off = arr_nullbitmap_off(src);
+    let orig_data_off = arr_data_offset(orig);
+    let src_data_off = arr_data_offset(src);
+    let (orig_ndim, orig_dims, _) = read_dims_lbounds(orig);
+    let orignitems = array_get_n_items(orig_ndim, &orig_dims)?;
+
+    let mut dest_pos = arr_data_offset(dest);
+    let mut orig_pos = orig_data_off;
+    let mut src_pos = src_data_off;
+
+    let mut dest_offset = array_get_offset(ndim, dims, lbs, st);
+    let mut inc = nelems_size(orig, orig_pos, 0, orig_bitmap_off, dest_offset, elmlen, elmalign);
+    dest[dest_pos..dest_pos + inc].copy_from_slice(&orig[orig_pos..orig_pos + inc]);
+    dest_pos += inc;
+    orig_pos += inc;
+    if let Some(dbo) = dest_bitmap_off {
+        array_bitmap_copy(dest, dbo, 0, orig_bitmap_off.map(|bo| (orig, bo)), 0, dest_offset);
+    }
+    let mut orig_offset = dest_offset;
+
+    let mut prod = [0i32; MAXDIM];
+    let mut span = [0i32; MAXDIM];
+    let mut dist = [0i32; MAXDIM];
+    let mut indx = [0i32; MAXDIM];
+    mda_get_prod(ndim, dims, &mut prod);
+    mda_get_range(ndim, &mut span, st, endp);
+    mda_get_offset_values(ndim, &mut dist, &prod, &span);
+    let mut src_offset = 0i32;
+    let mut j = ndim - 1;
+    loop {
+        let ju = j as usize;
+        if dist[ju] != 0 {
+            inc = nelems_size(orig, orig_pos, orig_offset, orig_bitmap_off, dist[ju], elmlen, elmalign);
+            dest[dest_pos..dest_pos + inc].copy_from_slice(&orig[orig_pos..orig_pos + inc]);
+            dest_pos += inc;
+            orig_pos += inc;
+            if let Some(dbo) = dest_bitmap_off {
+                array_bitmap_copy(
+                    dest,
+                    dbo,
+                    dest_offset,
+                    orig_bitmap_off.map(|bo| (orig, bo)),
+                    orig_offset,
+                    dist[ju],
+                );
+            }
+            dest_offset += dist[ju];
+            orig_offset += dist[ju];
+        }
+        inc = nelems_size(src, src_pos, src_offset, src_bitmap_off, 1, elmlen, elmalign);
+        dest[dest_pos..dest_pos + inc].copy_from_slice(&src[src_pos..src_pos + inc]);
+        if let Some(dbo) = dest_bitmap_off {
+            array_bitmap_copy(
+                dest,
+                dbo,
+                dest_offset,
+                src_bitmap_off.map(|bo| (src, bo)),
+                src_offset,
+                1,
+            );
+        }
+        dest_pos += inc;
+        src_pos += inc;
+        dest_offset += 1;
+        src_offset += 1;
+        orig_pos = seek(orig, orig_pos, orig_offset, orig_bitmap_off, 1, elmlen, elmalign);
+        orig_offset += 1;
+        j = mda_next_tuple(ndim, &mut indx, &span);
+        if j == -1 {
+            break;
+        }
+    }
+
+    inc = nelems_size(
+        orig, orig_pos, orig_offset, orig_bitmap_off, orignitems - orig_offset, elmlen, elmalign,
+    );
+    dest[dest_pos..dest_pos + inc].copy_from_slice(&orig[orig_pos..orig_pos + inc]);
+    if let Some(dbo) = dest_bitmap_off {
+        array_bitmap_copy(
+            dest,
+            dbo,
+            dest_offset,
+            orig_bitmap_off.map(|bo| (orig, bo)),
+            orig_offset,
+            orignitems - orig_offset,
+        );
+    }
+    Ok(())
+}
+
 // array_set_element over a detoasted flat image; the replacement datum (if
 // by-ref) must already be detoasted. Returns a new image (C never updates the
 // source in the flat-array case).

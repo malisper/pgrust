@@ -32,7 +32,7 @@ fn alloc_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx [u8]> {
     Ok(v.leak())
 }
 
-pub use ::types_brin::datum_copy;
+pub use ::adt_scalar::datum_ops::datum_copy;
 
 // SAFETY: p is a live non-external varlena.
 unsafe fn varlena_image<'a>(p: *const u8) -> &'a [u8] {

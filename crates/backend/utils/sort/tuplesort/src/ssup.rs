@@ -14,6 +14,8 @@ const F_BTINT8SORTSUPPORT: Oid = 3131;
 const F_DATE_SORTSUPPORT: Oid = 3136;
 const F_TIMESTAMP_SORTSUPPORT: Oid = 3137;
 const F_BTTEXTSORTSUPPORT: Oid = 3255;
+const F_BTTEXT_PATTERN_SORTSUPPORT: Oid = 3332;
+const F_BTBPCHAR_PATTERN_SORTSUPPORT: Oid = 3333;
 const F_UUID_SORTSUPPORT: Oid = 3300;
 const F_NETWORK_SORTSUPPORT: Oid = 5033;
 const F_RANGE_SORTSUPPORT: Oid = 6391;
@@ -492,6 +494,8 @@ pub fn comparator_for_opfamily(
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             varstr_comparator(sort_support_function == F_BPCHAR_SORTSUPPORT, collation)?
         }
+        F_BTTEXT_PATTERN_SORTSUPPORT => SortComparator::TextC,
+        F_BTBPCHAR_PATTERN_SORTSUPPORT => SortComparator::BpcharC,
         F_BTNAMESORTSUPPORT => SortComparator::NameC,
         // bytea_sortsupport forces the C collation (byteas carry NULs).
         F_BYTEA_SORTSUPPORT => SortComparator::TextC,
@@ -566,6 +570,9 @@ pub fn comparator_for_index_col(
         F_BTTEXTSORTSUPPORT | F_BPCHAR_SORTSUPPORT => {
             varstr_comparator(ssup_proc == F_BPCHAR_SORTSUPPORT, collation)?
         }
+        // C forces the "C" collation for the *_pattern_ops sortsupports.
+        F_BTTEXT_PATTERN_SORTSUPPORT => SortComparator::TextC,
+        F_BTBPCHAR_PATTERN_SORTSUPPORT => SortComparator::BpcharC,
         F_BYTEA_SORTSUPPORT => SortComparator::TextC,
         F_UUID_SORTSUPPORT => SortComparator::Uuid,
         F_NETWORK_SORTSUPPORT => SortComparator::Network,

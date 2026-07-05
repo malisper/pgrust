@@ -143,9 +143,10 @@ pub fn fc_like_escape_bytea(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
 }
 
 // like_regex_support (like_support.c) handles only Selectivity and
-// IndexCondition; every other request returns NULL so callers fall back.
-// The two handled arms are the index-opt lane and stay loud.
-macro_rules! fc_like_support_unported {
+// IndexCondition; the planner's closed-set dispatch owns both legs
+// (plancat::function_selectivity, indxpath::get_index_clause_from_support),
+// so an fmgr arrival of either is a bug. Every other tag is C's NULL return.
+macro_rules! fc_like_support {
     ($($fname:ident: $cname:literal;)*) => {$(
         pub fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             let [a] = fcinfo.args_n::<1>();
@@ -157,7 +158,7 @@ macro_rules! fc_like_support_unported {
                 types_nodes::NodeTag::T_SupportRequestSelectivity
                 | types_nodes::NodeTag::T_SupportRequestIndexCondition => panic!(concat!(
                     $cname,
-                    ": like_support.c planner support unported (selfuncs/index-opt lane)"
+                    ": Selectivity/IndexCondition must ride the planner closed set"
                 )),
                 _ => Ok(Datum::from_usize(0)),
             }
@@ -165,7 +166,7 @@ macro_rules! fc_like_support_unported {
     )*};
 }
 
-fc_like_support_unported! {
+fc_like_support! {
     fc_textlike_support: "textlike_support";
     fc_texticlike_support: "texticlike_support";
     fc_textregexeq_support: "textregexeq_support";

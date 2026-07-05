@@ -200,7 +200,7 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
 
-// pg_proc.dat rows for xml.c (schema-mapping family + xmlagg not ported).
+// pg_proc.dat rows for xml.c (schema-mapping family lives in the xmlmap crate).
 pub const XML_BUILTINS: &[FmgrBuiltin] = &[
     b(2614, "xmlexists", 2, fc_xmlexists),
     b(2893, "xml_in", 1, fc_xml_in),

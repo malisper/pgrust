@@ -1247,8 +1247,14 @@ pub fn cost_bitmap_heap_scan(
         .expect("unparameterized path has no param clauses");
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
-    let cpu_run_cost = cpu_per_tuple * tuples_fetched;
-    debug_assert!(run.root.path(path_id).base().parallel_workers == 0);
+    let mut cpu_run_cost = cpu_per_tuple * tuples_fetched;
+    let parallel_workers = run.root.path(path_id).base().parallel_workers;
+    let mut rows = rows;
+    if parallel_workers > 0 {
+        let parallel_divisor = get_parallel_divisor(parallel_workers);
+        rows = clamp_row_est(rows / parallel_divisor);
+        cpu_run_cost /= parallel_divisor;
+    }
     run_cost += cpu_run_cost;
 
     let target = run.root.path_pathtarget(path_id);

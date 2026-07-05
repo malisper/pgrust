@@ -420,9 +420,59 @@ pub fn sbsref_assign(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<Nulla
     Ok(NullableDatum { value: Datum::from_usize(img.leak().as_ptr() as usize), isnull: false })
 }
 
+pub fn sbsref_assign_slice(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<NullableDatum> {
+    let mcx = res_mcx(&st.resmcx);
+
+    if st.refattrlength > 0 && (cur.isnull || st.replace.isnull) {
+        // Fixed-length arrays: punt and return the original (C shape).
+        return Ok(cur);
+    }
+
+    let arr: &[u8] = if cur.isnull {
+        arrayfuncs::construct_empty_array(mcx, st.refelemtype)?.leak()
+    } else if st.refattrlength > 0 {
+        let p = cur.value.as_usize() as *const u8;
+        // SAFETY: fixed-length by-ref datum addresses refattrlength bytes.
+        unsafe { core::slice::from_raw_parts(p, st.refattrlength as usize) }
+    } else {
+        datum_array_image(cur.value, &st.resmcx)?
+    };
+
+    // array_set_slice: NULL-source no-op returns the (possibly empty-substituted) input.
+    if st.replace.isnull {
+        if cur.isnull {
+            return Ok(NullableDatum {
+                value: Datum::from_usize(arr.as_ptr() as usize),
+                isnull: false,
+            });
+        }
+        return Ok(cur);
+    }
+
+    let src = datum_array_image(st.replace.value, &st.resmcx)?;
+    let img = arrayfuncs::array_set_slice(
+        mcx,
+        arr,
+        st.numupper as i32,
+        &mut st.upperidx,
+        &mut st.loweridx,
+        &st.upperprovided,
+        &st.lowerprovided,
+        src,
+        st.refattrlength,
+        st.refelemlength,
+        st.refelembyval,
+        st.refelemalign,
+    )?;
+    Ok(NullableDatum { value: Datum::from_usize(img.leak().as_ptr() as usize), isnull: false })
+}
+
 pub fn sbsref_fetch_old(st: &mut SbsRefState, cur: NullableDatum) -> PgResult<()> {
     if cur.isnull {
         st.prev = NullableDatum { value: Datum::null(), isnull: true };
+    } else if st.numlower != 0 {
+        // Slices of non-null arrays are never null.
+        st.prev = sbsref_fetch_slice(st, cur)?;
     } else {
         st.prev = sbsref_fetch(st, cur)?;
     }

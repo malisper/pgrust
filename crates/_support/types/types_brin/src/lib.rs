@@ -8,9 +8,7 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::fmgr::FmgrInfo;
-use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
-use ::types_error::PgResult;
-use ::types_tuple::varatt::varsize_any;
+use ::mcx::MemoryContext;
 use ::types_core::{BlockNumber, Buffer, InvalidBlockNumber, Oid, BLCKSZ};
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use ::types_tuple::itemptr::ItemPointerData;
@@ -378,33 +376,6 @@ pub struct BrinColInfo {
     pub oi_typids: [Oid; BRIN_MAX_NSTORED],
     pub minmax: MinmaxOpaque,
     pub distance_procinfo: RefCell<Option<FmgrInfo>>,
-}
-
-/// datumCopy; by-ref copies land in `mcx`.
-pub fn datum_copy<'mcx>(
-    mcx: Mcx<'mcx>,
-    value: Datum,
-    typbyval: bool,
-    typlen: i16,
-) -> PgResult<Datum> {
-    if typbyval {
-        return Ok(value);
-    }
-    let p = value.as_usize() as *const u8;
-    // SAFETY: by-ref datum is live per caller contract; size from its varlena
-    // header or the fixed typlen.
-    let sz = unsafe {
-        if typlen == -1 {
-            varsize_any(p)
-        } else {
-            debug_assert!(typlen > 0);
-            typlen as usize
-        }
-    };
-    let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, sz)?;
-    // SAFETY: as above.
-    vec_append_bytes(&mut v, unsafe { core::slice::from_raw_parts(p, sz) })?;
-    Ok(Datum::from_usize(v.leak().as_ptr() as usize))
 }
 
 pub struct MinMaxMultiRanges {
