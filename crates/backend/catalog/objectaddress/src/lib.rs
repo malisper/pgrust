@@ -182,10 +182,11 @@ pub fn NameListToString(names: &NodeList<'_>) -> String {
     out
 }
 
-// TypeNameToString (parse_type.c), plain-names slice.
+// TypeNameToString/appendTypeNameToBuffer (parse_type.c); C renders %TYPE
+// and [] decorations but never SETOF.
 pub fn TypeNameToString(tn: &TypeName<'_>) -> String {
-    if tn.pct_type || tn.setof || !tn.arrayBounds.is_nil() {
-        unported("TypeNameToString %TYPE/SETOF/array rendering");
+    if tn.names.is_nil() {
+        unported("TypeNameToString pre-resolved typeOid rendering");
     }
     let mut out = String::new();
     for (i, node) in tn.names.iter().enumerate() {
@@ -193,6 +194,12 @@ pub fn TypeNameToString(tn: &TypeName<'_>) -> String {
             out.push('.');
         }
         out.push_str(node.as_string().expect("TypeName names").sval);
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_nil() {
+        out.push_str("[]");
     }
     out
 }
