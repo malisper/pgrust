@@ -3262,6 +3262,7 @@ dependencies = [
  "types_rel",
  "types_slot",
  "types_snapshot",
+ "types_nbtree",
  "types_trigger",
  "types_trigger_call",
  "types_tuple",
