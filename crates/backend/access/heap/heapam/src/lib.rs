@@ -636,11 +636,35 @@ fn heap_fetch_next_buffer(scan: &mut HeapScanDescData<'_>, dir: ScanDirection) -
         return Ok(());
     }
 
-    let buf = bufmgr_seams::read_buffer_strategy::call(
-        &scan.rs_base.rs_rd,
-        next,
-        scan.rs_strategy.clone(),
-    )?;
+    // Forward scans read the miss run ahead in one combined smgrreadv
+    // (read_stream's combining without its pin handoff); the hint never runs
+    // past relation end or the wrapped serial scan's logical end
+    // (rs_startblock), and bufmgr caps it by io_combine_limit and the md
+    // segment boundary. Parallel chunk boundaries are not capped: an over-read
+    // lands valid in the pool and becomes another worker's hit.
+    let nblocks_ahead = if ScanDirectionIsForward(dir) && next < scan.rs_nblocks {
+        if scan.rs_base.rs_parallel.is_some() || next >= scan.rs_startblock {
+            scan.rs_nblocks - next
+        } else {
+            scan.rs_startblock - next
+        }
+    } else {
+        1
+    };
+    let buf = if nblocks_ahead > 1 && bufmgr_seams::read_buffer_batched::is_installed() {
+        bufmgr_seams::read_buffer_batched::call(
+            &scan.rs_base.rs_rd,
+            next,
+            nblocks_ahead,
+            scan.rs_strategy.clone(),
+        )?
+    } else {
+        bufmgr_seams::read_buffer_strategy::call(
+            &scan.rs_base.rs_rd,
+            next,
+            scan.rs_strategy.clone(),
+        )?
+    };
     scan.rs_cbuf = BufferPin::adopt(buf);
     if let Some(pin) = scan.rs_cbuf.as_ref() {
         scan.rs_cblock = pin.block_number();

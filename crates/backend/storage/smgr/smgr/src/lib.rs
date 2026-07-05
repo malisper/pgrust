@@ -915,6 +915,11 @@ pub fn init_seams() {
             }
         })?
     });
+    smgr_seams::smgr_readv::set(|rlocator, forknum, blocknum, buffers| {
+        opened(rlocator, |r| match r.which {
+            SmgrKind::Md => md::mdreadv(rlocator, &mut r.md, forknum, blocknum, buffers),
+        })?
+    });
     smgr_seams::smgr_write::set(|rlocator, forknum, blocknum, buffer, skip_fsync| {
         opened(rlocator, |r| match r.which {
             SmgrKind::Md => {

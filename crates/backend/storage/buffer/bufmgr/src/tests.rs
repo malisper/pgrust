@@ -14,6 +14,7 @@ use super::*;
 
 static SMGR_READS: AtomicU64 = AtomicU64::new(0);
 static REL_READS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+static READV_SIZES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 // Widens the BM_IO_IN_PROGRESS window so a second reader lands in WaitIO.
 const SLOW_READ_REL: u32 = 9400;
 
@@ -102,6 +103,16 @@ fn setup_once() {
             Ok(())
         });
 
+        smgr_seams::smgr_readv::set(|rlb, _, blocknum, buffers| {
+            SMGR_READS.fetch_add(1, Ordering::Relaxed);
+            REL_READS.lock().unwrap().push(rlb.locator.relNumber);
+            READV_SIZES.lock().unwrap().push(buffers.len());
+            for (i, b) in buffers.iter_mut().enumerate() {
+                valid_page_into(b, blocknum + i as u32);
+            }
+            Ok(())
+        });
+
         setup_write_seams();
 
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
@@ -170,6 +181,65 @@ fn header_kernel() {
     assert!(desc.state.load(Ordering::Relaxed) & BM_LOCKED == 0);
     assert_eq!(BUFFERDESC_PAD_TO_SIZE, 64);
     assert!(core::mem::size_of::<BufferDesc>() <= 64);
+}
+
+#[test]
+fn batched_read_lands_run_and_stops_at_resident() {
+    let _g = setup();
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(9450),
+        backend: INVALID_PROC_NUMBER,
+    };
+    // Make block 6 resident first: the batch run from 0 must stop before it.
+    let pre = read_blk(9450, 6);
+    ReleaseBuffer(pre).unwrap();
+
+    let before = SMGR_READS.load(Ordering::Relaxed);
+    let b0 = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 0, 32, None).unwrap();
+    assert!(b0 > 0);
+    assert_eq!(GetPrivateRefCount(b0), 1);
+    assert_eq!(
+        SMGR_READS.load(Ordering::Relaxed) - before,
+        1,
+        "one vectored read for the whole run"
+    );
+    assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 6, "run 0..=5 stops at resident 6");
+
+    // Extras are valid, resident, and unpinned; re-reading them is a pure hit.
+    for blk in 1..6u32 {
+        let b = read_blk(9450, blk);
+        assert_eq!(
+            SMGR_READS.load(Ordering::Relaxed) - before,
+            1,
+            "block {blk} must hit"
+        );
+        assert_eq!(GetPrivateRefCount(b), 1, "our fresh pin is the only local ref");
+        let page = buffer_page_ref(b);
+        assert!(!page.is_new());
+        ReleaseBuffer(b).unwrap();
+    }
+    ReleaseBuffer(b0).unwrap();
+}
+
+#[test]
+fn batched_read_caps_by_hint_and_combine_limit() {
+    let _g = setup();
+    let smgr = RelFileLocatorBackend {
+        locator: rloc(9451),
+        backend: INVALID_PROC_NUMBER,
+    };
+    // hint 3 caps the run.
+    let b = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 10, 3, None).unwrap();
+    assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 3);
+    ReleaseBuffer(b).unwrap();
+    // io_combine_limit (default 16) caps a large hint.
+    let b = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 100, 10_000, None).unwrap();
+    assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 16);
+    ReleaseBuffer(b).unwrap();
+    // hint 1 degrades to a single-block vectored read.
+    let b = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 200, 1, None).unwrap();
+    assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 1);
+    ReleaseBuffer(b).unwrap();
 }
 
 #[test]

@@ -113,6 +113,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // StartReadBuffers/WaitReadBuffers (bufmgr.c) collapsed to the synchronous
+    // sequential-batch case: reads block_num and opportunistically completes
+    // up to min(nblocks_hint, io_combine_limit) - 1 following blocks of the
+    // MAIN fork in one smgrreadv; extras land valid-and-unpinned so the scan's
+    // next requests hit. nblocks_hint must not run past relation end.
+    pub fn read_buffer_batched<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        block_num: BlockNumber,
+        nblocks_hint: BlockNumber,
+        strategy: BufferAccessStrategy,
+    ) -> PgResult<Buffer>
+);
+
+seam_core::seam!(
     // ReadBufferExtended(reln, forkNum, blockNum, mode, strategy).
     pub fn read_buffer_extended<'a, 'mcx>(
         rel: &'a types_rel::RelationData<'mcx>,

@@ -545,6 +545,155 @@ fn complete_read_sync(
     Ok(())
 }
 
+// Stack-array bound for one batched read; io_combine_limit is clamped into it
+// (C's MAX_IO_COMBINE_LIMIT analog; must stay <= PG_IOV_MAX = 128).
+const MAX_READ_BATCH: usize = 64;
+
+/// StartReadBuffers + WaitReadBuffers (bufmgr.c) collapsed to the synchronous
+/// sequential-batch case: read `blkno`, and while the following blocks also
+/// miss, complete up to min(nblocks_hint, io_combine_limit) blocks of the MAIN
+/// fork in ONE smgrreadv. Extras end valid-and-unpinned, so the scan's next
+/// fetches take the hit path. Callers guarantee blkno + nblocks_hint <=
+/// relation end; the md segment boundary is capped here (mdreadv refuses to
+/// cross RELSEG_SIZE).
+pub(crate) fn ReadBuffer_batched(
+    smgr: RelFileLocatorBackend,
+    persistence: u8,
+    blkno: BlockNumber,
+    nblocks_hint: BlockNumber,
+    strategy: BufferAccessStrategy,
+) -> PgResult<Buffer> {
+    let forknum = ForkNumber::MAIN_FORKNUM;
+    if persistence == RELPERSISTENCE_TEMP {
+        // Local buffers keep the single-block path.
+        return ReadBuffer_common(
+            smgr,
+            persistence,
+            forknum,
+            blkno,
+            ReadBufferMode::Normal,
+            strategy,
+        );
+    }
+    let io_context = IOContextForStrategy(&strategy);
+    let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
+    if found {
+        return Ok(buffer);
+    }
+    if !StartBufferIO(GetBufferDescriptor(buffer - 1), true, false, true)? {
+        // Another backend completed the read (C WaitReadBuffers' already-valid arm).
+        counters::hit();
+        pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
+        return Ok(buffer);
+    }
+    let seg_left = (types_storage::smgr::RELSEG_SIZE - (blkno % types_storage::smgr::RELSEG_SIZE))
+        as usize;
+    let cap = (crate::gucs::io_combine_limit().clamp(1, MAX_READ_BATCH as i32) as usize)
+        .min(nblocks_hint.max(1) as usize)
+        .min(seg_left);
+    let mut bufs: [Buffer; MAX_READ_BATCH] = [InvalidBuffer; MAX_READ_BATCH];
+    bufs[0] = buffer;
+    let mut n = 1usize;
+    while n < cap {
+        let (buf_i, found_i) = BufferAlloc(
+            smgr,
+            persistence,
+            forknum,
+            blkno + n as BlockNumber,
+            &strategy,
+            io_context,
+        )?;
+        if found_i {
+            // Contiguous miss run ends at a resident block.
+            UnpinBuffer(GetBufferDescriptor(buf_i - 1));
+            break;
+        }
+        // nowait: a concurrent reader owning this block ends the run.
+        if !StartBufferIO(GetBufferDescriptor(buf_i - 1), true, true, true)? {
+            UnpinBuffer(GetBufferDescriptor(buf_i - 1));
+            break;
+        }
+        bufs[n] = buf_i;
+        n += 1;
+    }
+
+    let fail_batch = |from: usize| {
+        // Blocks before `from` were already terminated; the rest carry our
+        // BM_IO_IN_PROGRESS and (for extras) our pin. The first buffer stays
+        // pinned, as in the single-block error path (resowner reclaims it).
+        for j in from..n {
+            TerminateBufferIO(GetBufferDescriptor(bufs[j] - 1), false, BM_IO_ERROR, true);
+        }
+        for j in 1..n {
+            UnpinBuffer(GetBufferDescriptor(bufs[j] - 1));
+        }
+    };
+
+    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
+    {
+        // SAFETY: each buffer is pinned with BM_IO_IN_PROGRESS held by us: we
+        // own the (not yet valid) page images for the duration of the read.
+        let mut pages: [core::mem::MaybeUninit<&mut [u8]>; MAX_READ_BATCH] =
+            [const { core::mem::MaybeUninit::uninit() }; MAX_READ_BATCH];
+        for (i, page) in pages.iter_mut().enumerate().take(n) {
+            *page = core::mem::MaybeUninit::new(unsafe {
+                core::slice::from_raw_parts_mut(BufferGetBlockPtr(bufs[i]), BLCKSZ)
+            });
+        }
+        // SAFETY: the first n entries were just initialized; &mut [u8] has no Drop.
+        let pages_init = unsafe {
+            core::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<&mut [u8]>(), n)
+        };
+        if let Err(e) = smgr_seams::smgr_readv::call(smgr, forknum, blkno, pages_init) {
+            fail_batch(0);
+            return Err(e);
+        }
+    }
+    pgstat_count_io_op_time(
+        IOObject::Relation,
+        io_context,
+        IOOp::Read,
+        io_start,
+        1,
+        (n * BLCKSZ) as u64,
+    );
+    counters::read_n(n as u64);
+
+    let zero_on_error = crate::gucs::zero_damaged_pages();
+    for i in 0..n {
+        let blk = BufferGetBlockPtr(bufs[i]);
+        if !page_is_verified(blk) {
+            let b = blkno + i as BlockNumber;
+            if zero_on_error {
+                let _ = elog::elog(
+                    WARNING,
+                    format!(
+                        "invalid page in block {b} of relation {}; zeroing out page",
+                        relpath_desc(smgr.locator, forknum)
+                    ),
+                );
+                // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
+                unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
+            } else {
+                fail_batch(i);
+                ereport(ERROR)
+                    .errcode(ERRCODE_DATA_CORRUPTED)
+                    .errmsg(format!(
+                        "invalid page in block {b} of relation {}",
+                        relpath_desc(smgr.locator, forknum)
+                    ))
+                    .finish(loc("WaitReadBuffers"))?;
+                unreachable!("ERROR reported");
+            }
+        }
+        TerminateBufferIO(GetBufferDescriptor(bufs[i] - 1), false, BM_VALID, true);
+    }
+    for i in 1..n {
+        UnpinBuffer(GetBufferDescriptor(bufs[i] - 1));
+    }
+    Ok(buffer)
+}
+
 /// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends
 /// ControlFile (tracked divergence: checksum-enabled clusters unverified).
 pub fn page_is_verified(page: *const u8) -> bool {

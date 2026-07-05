@@ -93,6 +93,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // smgrreadv(smgropen(rlocator), forknum, blocknum, n iovs) (smgr.c); each
+    // buffer is exactly BLCKSZ and the run must not cross a RELSEG_SIZE
+    // segment boundary (mdreadv ereports otherwise — callers cap like C's
+    // smgrmaxcombine).
+    pub fn smgr_readv(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        buffers: &mut [&mut [u8]],
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     // ProcessBarrierSmgrRelease() (smgr.c); barrier processors may ereport.
     pub fn process_barrier_smgr_release() -> PgResult<bool>
 );
