@@ -20,7 +20,8 @@ pub use classify::{
     find_forced_null_var, find_forced_null_vars, find_nonnullable_rels, find_nonnullable_vars,
     find_window_functions, is_andclause, is_notclause, is_orclause, is_parallel_safe,
     is_pseudo_constant_clause, is_pseudo_constant_clause_relids, make_andclause,
-    make_ands_explicit, make_ands_implicit, make_notclause, make_orclause, max_parallel_hazard,
+    make_ands_explicit, make_ands_implicit, make_notclause, make_orclause, make_saop_expr,
+    max_parallel_hazard,
     mbms_add_member, mbms_add_members, mbms_overlap_sets, num_relids, pull_paramids,
     MultiBitmapset,
 };

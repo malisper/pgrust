@@ -1259,6 +1259,87 @@ pub fn make_orclause<'mcx>(
     )
 }
 
+// make_SAOP_expr (clauses.c). None iff coltype has no array type.
+pub fn make_saop_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    oper: Oid,
+    leftexpr: Node<'mcx>,
+    coltype: Oid,
+    arraycollid: Oid,
+    inputcollid: Oid,
+    exprs: types_nodes::NodeList<'mcx>,
+    have_non_const: bool,
+) -> PgResult<Option<Node<'mcx>>> {
+    let arraytype = lsyscache::get_array_type(coltype)?;
+    if arraytype == 0 {
+        return Ok(None);
+    }
+    let array_node = if have_non_const {
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::ArrayExpr {
+                array_typeid: arraytype,
+                array_collid: 0,
+                element_typeid: coltype,
+                elements: exprs,
+                multidims: false,
+                list_start: 0,
+                list_end: 0,
+                location: -1,
+            },
+        )?
+    } else {
+        let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(coltype)?;
+        let mut elems: mcx::PgVec<'mcx, datum::Datum> = mcx::PgVec::new_in(mcx);
+        let mut nulls: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+        for e in &exprs {
+            let c = e.as_const().expect("have_non_const covers non-Const elements");
+            elems.push(c.constvalue);
+            nulls.push(c.constisnull);
+        }
+        let dims = [elems.len() as i32];
+        let lbs = [1i32];
+        let arr = arrayfuncs::construct::construct_md_array(
+            mcx,
+            &elems,
+            Some(&nulls),
+            1,
+            &dims,
+            &lbs,
+            coltype,
+            typlen as i32,
+            typbyval,
+            typalign as u8,
+        )?;
+        Node::mk(
+            mcx,
+            types_nodes::primnodes::Const {
+                consttype: arraytype,
+                consttypmod: -1,
+                constcollid: arraycollid,
+                constlen: -1,
+                constvalue: datum::Datum::from_usize(arr.leak().as_ptr() as usize),
+                constisnull: false,
+                constbyval: false,
+                location: -1,
+            },
+        )?
+    };
+    Ok(Some(Node::mk(
+        mcx,
+        ScalarArrayOpExpr {
+            opno: oper,
+            opfuncid: lsyscache::get_opcode(oper)?,
+            hashfuncid: 0,
+            negfuncid: 0,
+            useOr: true,
+            inputcollid,
+            args: types_nodes::NodeList::make2(mcx, leftexpr, array_node)?,
+            location: -1,
+        },
+    )?))
+}
+
 pub fn make_notclause<'mcx>(mcx: mcx::Mcx<'mcx>, arg: Node<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk(
         mcx,
