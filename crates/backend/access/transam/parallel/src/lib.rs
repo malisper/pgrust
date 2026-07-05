@@ -718,8 +718,11 @@ fn process_parallel_messages_guts() -> PgResult<()> {
                                 append_parallel_worker_context(&mut e);
                                 elog::emit_error_report_for(&e);
                             }
-                            WorkerMessage::Progress { .. } => {
-                                panic!("ProcessParallelMessages: PqMsg_Progress needs pgstat_progress_incr_param (utils/activity/backend_progress.c) — unported");
+                            WorkerMessage::Progress { index, incr } => {
+                                backend_progress::pgstat_progress_incr_param(
+                                    index as usize,
+                                    incr,
+                                );
                             }
                             WorkerMessage::Terminate => {
                                 with_pcxt(id, |p| p.workers[i].error_receiver = None);
@@ -760,6 +763,36 @@ pub fn ParallelWorkerReportLastRecEnd(last_rec_end: XLogRecPtr) -> PgResult<()> 
     Ok(())
 }
 
+thread_local! {
+    static MY_PROGRESS_SENDER: RefCell<Option<SyncSender<WorkerMessage>>> =
+        const { RefCell::new(None) };
+}
+
+// pgstat_progress_parallel_incr_param's worker leg (C sends PqMsg_Progress on
+// the redirected pq channel; the error mq is that channel here).
+pub fn parallel_worker_report_progress(index: i32, incr: i64) {
+    let sent = MY_PROGRESS_SENDER.with(|c| {
+        let slot = c.borrow();
+        let Some(sender) = slot.as_ref() else {
+            return None;
+        };
+        let _ = sender.send(WorkerMessage::Progress { index, incr });
+        MY_WORKER_SHARED.with(|s| {
+            s.borrow().as_ref().map(|sh| {
+                (sh.parallel_leader_pid, sh.parallel_leader_proc_number)
+            })
+        })
+    });
+    let Some((leader_pid, leader_proc)) = sent else {
+        panic!("parallel_worker_report_progress outside a parallel worker");
+    };
+    procsignal::SendProcSignal(
+        leader_pid,
+        types_storage::storage::ProcSignalReason::PROCSIG_PARALLEL_MESSAGE,
+        leader_proc,
+    );
+}
+
 fn take_my_error_sender(shared: &ParallelShared, worker_number: i32) -> SyncSender<WorkerMessage> {
     let mut slot = shared.error_senders[worker_number as usize]
         .lock()
@@ -794,6 +827,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     MY_WORKER_SHARED.with(|s| *s.borrow_mut() = Some(Arc::clone(&shared)));
 
     let sender = take_my_error_sender(&shared, worker_number);
+    MY_PROGRESS_SENDER.with(|c| *c.borrow_mut() = Some(sender.clone()));
     shared.worker_attached[worker_number as usize].store(true, SeqCst);
     // C shm_mq_set_sender wakes the leader's attach wait.
     latch::SetLatch(types_storage::latch::LatchHandle::proc(
@@ -851,6 +885,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
             Err(e)
         }
     };
+    MY_PROGRESS_SENDER.with(|c| *c.borrow_mut() = None);
     drop(sender);
     procsignal::SendProcSignal(
         shared.parallel_leader_pid,
@@ -940,5 +975,6 @@ pub fn init_seams() {
     parallel_seams::at_eosubxact_parallel::set(AtEOSubXact_Parallel);
     parallel_seams::parallel_worker_report_last_rec_end::set(ParallelWorkerReportLastRecEnd);
     parallel_seams::handle_parallel_message_interrupt::set(HandleParallelMessageInterrupt);
+    parallel_seams::parallel_worker_report_progress::set(parallel_worker_report_progress);
     parallel_seams::process_parallel_messages::set(ProcessParallelMessages);
 }

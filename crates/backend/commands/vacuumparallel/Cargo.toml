@@ -26,5 +26,6 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 autovacuum_seams = { path = "../../postmaster/autovacuum_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+backend_progress = { path = "../../utils/activity/backend_progress" }
 init_small = { path = "../../utils/init/init_small" }
 elog = { path = "../../utils/error/elog" }

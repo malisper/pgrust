@@ -19,6 +19,7 @@ cache_evtcache = { path = "../../utils/cache/cache_evtcache" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 cmdtag = { path = "../../tcop/cmdtag" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+pgstat = { path = "../../utils/activity/pgstat" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 varlena = { path = "../../utils/adt/varlena" }
 arrayfuncs = { path = "../../utils/adt/arrayfuncs" }

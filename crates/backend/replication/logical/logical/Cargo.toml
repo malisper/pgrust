@@ -26,6 +26,7 @@ xact = { path = "../../../access/transam/xact" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
 xlogreader = { path = "../../../access/transam/xlogreader" }
 slot = { path = "../../slot" }
+pgstat = { path = "../../../utils/activity/pgstat" }
 logical_seams = { path = "../../logical_seams" }
 reorderbuffer = { path = "../reorderbuffer" }
 snapbuild = { path = "../snapbuild" }

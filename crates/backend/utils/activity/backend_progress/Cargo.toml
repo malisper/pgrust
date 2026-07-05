@@ -1,0 +1,15 @@
+[package]
+name = "backend_progress"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_progress"
+path = "src/lib.rs"
+
+[dependencies]
+backend_status = { path = "../backend_status" }
+backend_progress_seams = { path = "../backend_progress_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
+types_core = { path = "../../../../_support/types/types_core" }

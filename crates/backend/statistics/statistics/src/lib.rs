@@ -10,6 +10,11 @@ pub mod sortitem;
 
 pub use expression::{ExprStatsCompute, ExprStatsRow};
 
+use backend_progress::progress::{
+    PROGRESS_ANALYZE_EXT_STATS_COMPUTED, PROGRESS_ANALYZE_EXT_STATS_TOTAL, PROGRESS_ANALYZE_PHASE,
+    PROGRESS_ANALYZE_PHASE_COMPUTE_EXT_STATS,
+};
+use backend_progress::{pgstat_progress_update_multi_param, pgstat_progress_update_param};
 use datum::Datum;
 use mcx::{Mcx, PgVec};
 use types_core::fmgr::F_OIDEQ;
@@ -264,6 +269,17 @@ pub fn BuildRelationExtStatistics<'mcx, F: ExprStatsCompute<'mcx>>(
     let pg_stext = table::table_open(mcx, StatisticExtRelationId, ROW_EXCLUSIVE_LOCK)?;
     let statslist = fetch_statentries_for_relation(mcx, &pg_stext, onerel.rd_id)?;
 
+    if !statslist.is_empty() {
+        pgstat_progress_update_multi_param(
+            &[PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_EXT_STATS_TOTAL],
+            &[
+                PROGRESS_ANALYZE_PHASE_COMPUTE_EXT_STATS,
+                statslist.len() as i64,
+            ],
+        );
+    }
+
+    let mut ext_cnt: i64 = 0;
     for stat in statslist.iter() {
         let bcx = mcx::MemoryContext::new("BuildRelationExtStatistics");
         let bmcx = bcx.mcx();
@@ -325,6 +341,9 @@ pub fn BuildRelationExtStatistics<'mcx, F: ExprStatsCompute<'mcx>>(
             mcv_ser.as_deref(),
             exprstats.as_deref(),
         )?;
+
+        ext_cnt += 1;
+        pgstat_progress_update_param(PROGRESS_ANALYZE_EXT_STATS_COMPUTED, ext_cnt);
     }
 
     table::table_close(pg_stext, ROW_EXCLUSIVE_LOCK)?;

@@ -365,6 +365,7 @@ members = [
     "crates/backend/utils/activity/backend_status_seams",
     "crates/backend/utils/activity/backend_status",
     "crates/backend/utils/activity/backend_progress_seams",
+    "crates/backend/utils/activity/backend_progress",
     "crates/backend/utils/resowner/resowner_seams",
     "crates/port/pg_prng_seams",
     "crates/backend/storage/ipc/shmem",

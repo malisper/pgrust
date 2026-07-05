@@ -8,6 +8,8 @@
 
 use std::cell::Cell;
 
+use ::backend_progress::progress::{PROGRESS_ANALYZE_DELAY_TIME, PROGRESS_VACUUM_DELAY_TIME};
+use ::backend_progress::{pgstat_progress_incr_param, pgstat_progress_parallel_incr_param};
 use ::elog::ereport;
 use ::mcx::Mcx;
 use ::tableam_vocab::{
@@ -60,6 +62,17 @@ thread_local! {
     // VacuumUpdateCosts writes these, never the GUC vars.
     static VACUUM_COST_DELAY: Cell<f64> = const { Cell::new(0.0) };
     static VACUUM_COST_LIMIT: Cell<i32> = const { Cell::new(200) };
+    static PARALLEL_VACUUM_WORKER_DELAY_NS: Cell<i64> = const { Cell::new(0) };
+    // C's zero-initialized static last_report_time: None forces an immediate
+    // first report.
+    static LAST_DELAY_REPORT: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+const PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS: i64 = 1_000_000_000;
+
+// vacuumparallel.c's worker-exit flush reads C's vacuum.c global.
+pub fn parallel_vacuum_worker_delay_ns() -> i64 {
+    PARALLEL_VACUUM_WORKER_DELAY_NS.get()
 }
 
 pub fn vacuum_cost_delay() -> f64 {
@@ -1256,7 +1269,7 @@ pub fn vac_cleanup_one_index<'mcx>(
     indexam::index_vacuum_cleanup(mcx, ivinfo, istat)
 }
 
-pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {
+pub fn vacuum_delay_point(is_analyze: bool) -> PgResult<()> {
     use init_small::globals as g;
 
     postgres_seams::check_for_interrupts::call()?;
@@ -1288,8 +1301,31 @@ pub fn vacuum_delay_point(_is_analyze: bool) -> PgResult<()> {
         if msec > vacuum_cost_delay() * 4.0 {
             msec = vacuum_cost_delay() * 4.0;
         }
-        // track_cost_delay_timing progress increments: progress-reporting lane.
+        let delay_start = guc_tables::vars::track_cost_delay_timing
+            .read()
+            .then(std::time::Instant::now);
         std::thread::sleep(std::time::Duration::from_micros((msec * 1000.0) as u64));
+        if let Some(delay_start) = delay_start {
+            let delay_end = std::time::Instant::now();
+            let delay_ns = delay_end.duration_since(delay_start).as_nanos() as i64;
+            if parallel_seams::is_parallel_worker::call() {
+                debug_assert!(!is_analyze);
+                let accum = PARALLEL_VACUUM_WORKER_DELAY_NS.get() + delay_ns;
+                PARALLEL_VACUUM_WORKER_DELAY_NS.set(accum);
+                let since_last_report = LAST_DELAY_REPORT
+                    .get()
+                    .map_or(i64::MAX, |t| delay_end.duration_since(t).as_nanos() as i64);
+                if since_last_report >= PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS {
+                    pgstat_progress_parallel_incr_param(PROGRESS_VACUUM_DELAY_TIME, accum);
+                    LAST_DELAY_REPORT.set(Some(delay_end));
+                    PARALLEL_VACUUM_WORKER_DELAY_NS.set(0);
+                }
+            } else if is_analyze {
+                pgstat_progress_incr_param(PROGRESS_ANALYZE_DELAY_TIME, delay_ns);
+            } else {
+                pgstat_progress_incr_param(PROGRESS_VACUUM_DELAY_TIME, delay_ns);
+            }
+        }
         g::SetVacuumCostBalance(0);
         autovacuum_seams::auto_vacuum_update_cost_limit::call()?;
         postgres_seams::check_for_interrupts::call()?;

@@ -474,8 +474,10 @@ fn parallel_vacuum_process_one_index(
         }
         s.status = PvIndVacStatus::Completed;
     }
-    // pgstat_progress_parallel_incr_param(PROGRESS_VACUUM_INDEXES_PROCESSED):
-    // progress reporting elided repo-wide for vacuum.
+    backend_progress::pgstat_progress_parallel_incr_param(
+        backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
+        1,
+    );
     Ok(())
 }
 
@@ -528,6 +530,13 @@ fn parallel_vacuum_main(pshared: &parallel::ParallelShared) -> PgResult<()> {
 
     let result =
         parallel_vacuum_process_safe_indexes(&shared, mcx, &rel, &indrels, &bstrategy, true);
+
+    if guc_tables::vars::track_cost_delay_timing.read() {
+        backend_progress::pgstat_progress_parallel_incr_param(
+            backend_progress::progress::PROGRESS_VACUUM_DELAY_TIME,
+            ::commands_vacuum::parallel_vacuum_worker_delay_ns(),
+        );
+    }
 
     set_vacuum_shared_cost(None);
     bufmgr_seams::free_access_strategy::call(bstrategy);

@@ -685,6 +685,8 @@ pub fn CreateSubscription<'mcx>(
 
     rel.close(RowExclusiveLock)?;
 
+    pgstat::subscription::pgstat_create_subscription(subid);
+
     Ok(ObjectAddress::set(SubscriptionRelationId, subid))
 }
 
@@ -1170,6 +1172,8 @@ pub fn DropSubscription<'mcx>(
 
     let originname = origin::ReplicationOriginNameForLogicalRep(subid, InvalidOid);
     origin::replorigin_drop_by_name(mcx, &originname, true)?;
+
+    pgstat::subscription::pgstat_drop_subscription(subid);
 
     if slotname.is_none() && rstates.is_empty() {
         return rel.close(NoLock);

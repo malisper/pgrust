@@ -168,6 +168,7 @@ commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
 utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }
+backend_progress = { path = "../../backend/utils/activity/backend_progress" }
 waitevent = { path = "../../backend/utils/activity/waitevent" }
 mcxt_stats = { path = "../../backend/utils/mmgr/mcxt_stats" }
 pgstat = { path = "../../backend/utils/activity/pgstat" }

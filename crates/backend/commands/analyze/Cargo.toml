@@ -59,6 +59,7 @@ exectuples = { path = "../../executor/exectuples" }
 nodes_core = { path = "../../nodes/nodes_core" }
 pgstat = { path = "../../utils/activity/pgstat" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+backend_progress = { path = "../../utils/activity/backend_progress" }
 
 [dev-dependencies]
 heapam = { path = "../../access/heap/heapam" }

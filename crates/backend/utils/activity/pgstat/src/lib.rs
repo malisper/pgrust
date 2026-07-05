@@ -1,9 +1,8 @@
 // backend-utils-activity-pgstat — pgstat.c's per-backend half: the pending-entry
-// model, pgstat_report_stat batching, the counting layers (replslot and
-// subscription carry only the read/reset half until logical decoding lands),
-// the shared store the flush paths apply into plus its
-// fetch/snapshot readers and reset machinery, and the statsfile persistence
-// half (write on clean shutdown, restore/discard at startup).
+// model, pgstat_report_stat batching, the counting layers for every kind, the
+// shared store the flush paths apply into plus its fetch/snapshot readers and
+// reset machinery, and the statsfile persistence half (write on clean
+// shutdown, restore/discard at startup).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -34,10 +33,12 @@ pub use relation::{
     pgstat_fetch_stat_tabentry, pgstat_fetch_stat_tabentry_ext, pgstat_report_analyze,
     pgstat_report_vacuum,
 };
+pub use replslot::pgstat_fetch_replslot;
 pub use shmem::{
     pgstat_get_stat_snapshot_timestamp, pgstat_have_entry, pgstat_reset, pgstat_reset_counters,
     pgstat_reset_of_kind, PgStat_StatTabEntry,
 };
+pub use subscription::pgstat_fetch_stat_subscription;
 
 pub type PgStat_Counter = i64;
 

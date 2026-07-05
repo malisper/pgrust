@@ -16,7 +16,7 @@ mod backend;
 mod stats;
 pub use activity::fc_pg_stat_get_activity;
 
-fn arg_text_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
+pub(crate) fn arg_text_str<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a str> {
     // SAFETY: catalog arg type text — non-null varlena (null-checked by caller
     // for non-strict functions).
     let v = unsafe { fcinfo.arg_varlena_packed(i) }?;
@@ -477,47 +477,6 @@ pub fn fc_pg_stat_reset_slru(_fl: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_usize(0))
 }
 
-pub fn fc_pg_stat_reset_replication_slot(
-    _fl: Option<&mut FmgrInfo>,
-    fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
-    if fcinfo.argisnull(0) {
-        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_REPLSLOT);
-        return Ok(Datum::from_usize(0));
-    }
-    let target = arg_text_str(fcinfo, 0)?;
-    // pgstat_reset_replslot (pgstat_replslot.c:41).
-    let Some(slot) = slot::SearchNamedReplicationSlot(target, true)? else {
-        return Err(Box::new(
-            PgError::error(format!("replication slot \"{target}\" does not exist"))
-                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
-        ));
-    };
-    if slot::SlotIsLogical(slot) {
-        pgstat::replslot::pgstat_reset_replslot_by_index(slot::ReplicationSlotIndex(slot));
-    }
-    Ok(Datum::from_usize(0))
-}
-
-pub fn fc_pg_stat_reset_subscription_stats(
-    _fl: Option<&mut FmgrInfo>,
-    fcinfo: &mut Fcinfo,
-) -> PgResult<Datum> {
-    if fcinfo.argisnull(0) {
-        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SUBSCRIPTION);
-        return Ok(Datum::from_usize(0));
-    }
-    let subid = fcinfo.args_n::<1>()[0].value.as_oid();
-    if subid == types_core::InvalidOid {
-        return Err(Box::new(
-            PgError::error(format!("invalid subscription OID {subid}"))
-                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
-        ));
-    }
-    pgstat::pgstat_reset(PGSTAT_KIND_SUBSCRIPTION, types_core::InvalidOid, subid as u64);
-    Ok(Datum::from_usize(0))
-}
-
 pub fn fc_pg_stat_reset_backend_stats(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -533,6 +492,37 @@ pub fn fc_pg_stat_reset_backend_stats(
         return Ok(Datum::from_usize(0));
     }
     pgstat::backend::pgstat_reset_backend(proc_number);
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_replication_slot(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) {
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_REPLSLOT);
+    } else {
+        pgstat::replslot::pgstat_reset_replslot(arg_text_str(fcinfo, 0)?)?;
+    }
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_pg_stat_reset_subscription_stats(
+    _fl: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if fcinfo.argisnull(0) {
+        pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SUBSCRIPTION);
+    } else {
+        let subid = fcinfo.args_n::<1>()[0].value.as_oid();
+        if subid == ::types_core::InvalidOid {
+            return Err(Box::new(
+                PgError::error(format!("invalid subscription OID {subid}"))
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+            ));
+        }
+        pgstat::pgstat_reset(PGSTAT_KIND_SUBSCRIPTION, ::types_core::InvalidOid, subid as u64);
+    }
     Ok(Datum::from_usize(0))
 }
 

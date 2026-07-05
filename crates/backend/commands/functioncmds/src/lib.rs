@@ -1048,8 +1048,7 @@ pub fn ExecuteCallStmt<'mcx>(
         ));
     }
 
-    // InvokeFunctionExecuteHook / pgstat_init_function_usage: no hook or
-    // per-function stats surface exists (repo-wide).
+    // InvokeFunctionExecuteHook: no hook surface exists (repo-wide).
     let mut flinfo = fmgr_seams::fmgr_info::call(fexpr.funcid)?;
     // C fmgr_info_set_expr(fexpr): sql_functions resolves RECORD result
     // shapes through fn_expr.
@@ -1097,7 +1096,19 @@ pub fn ExecuteCallStmt<'mcx>(
         snapmgr::PopActiveSnapshot()?;
     }
 
+    // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
+    // early-out, hoisted to the caller as the crate's API requires.
+    let fcu = if flinfo.fn_stats < types_fmgr::TRACK_FUNC_ALL
+        && pgstat::function::pgstat_track_functions() > flinfo.fn_stats as i32
+    {
+        Some(pgstat::function::pgstat_init_function_usage(flinfo.fn_oid)?)
+    } else {
+        None
+    };
     let retval = flinfo.invoke(&mut fcinfo)?;
+    if let Some(fcu) = &fcu {
+        pgstat::function::pgstat_end_function_usage(fcu, true);
+    }
 
     if fexpr.funcresulttype == VOIDOID {
     } else if fexpr.funcresulttype == RECORDOID {

@@ -24,6 +24,7 @@ init_small = { path = "../../init/init_small" }
 miscinit = { path = "../../init/miscinit" }
 datum = { path = "../../../../_support/types/datum" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+slot_seams = { path = "../../../replication/slot_seams" }
 pgstat_seams = { path = "../pgstat_seams" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
