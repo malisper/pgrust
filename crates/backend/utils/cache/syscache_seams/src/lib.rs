@@ -788,6 +788,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pg_am.amhandler by AMOID (RelationInitTableAccessMethod's lookup);
+    // None mirrors !HeapTupleIsValid.
+    pub fn pg_am_amhandler(amoid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_publication_oid(pubname: &str) -> PgResult<Oid>
 );
 

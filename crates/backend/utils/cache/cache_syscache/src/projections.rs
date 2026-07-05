@@ -321,6 +321,18 @@ fn pg_am_amtype_lookup(amoid: Oid) -> PgResult<Option<i8>> {
     Ok(Some(amtype))
 }
 
+fn pg_am_amhandler_lookup(amoid: Oid) -> PgResult<Option<Oid>> {
+    const ANUM_PG_AM_AMHANDLER: i32 = 3;
+    let Some(tuple) = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let amhandler = getattr(&t, AMOID, ANUM_PG_AM_AMHANDLER).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(amhandler))
+}
+
 fn pg_constraint_fk_target(tuple: &HeapTupleData<'_>) -> Option<Oid> {
     if getattr(tuple, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPE).as_i8() != CONSTRAINT_FOREIGN {
         return None;
@@ -2685,6 +2697,7 @@ pub(crate) fn install() {
     syscache_seams::pg_index_indclass_element::set(pg_index_indclass_element);
     syscache_seams::pg_index_indoption_element::set(pg_index_indoption_element);
     syscache_seams::pg_am_amtype::set(pg_am_amtype_lookup);
+    syscache_seams::pg_am_amhandler::set(pg_am_amhandler_lookup);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);

@@ -47,8 +47,6 @@ use types_nodes::rawnodes::{ColumnDef, CreateStmt, OnCommitAction, TypeName};
 use types_rel::{RELKIND_RELATION, RELKIND_SEQUENCE};
 use types_tuple::TupleDescData;
 
-const HEAP_TABLE_AM_OID: Oid = 2;
-
 // RangeVarCallbackMaintainsTable (tablecmds.c); shared by CLUSTER and
 // REINDEX TABLE lookups.
 pub fn RangeVarCallbackMaintainsTable(
@@ -288,14 +286,30 @@ pub fn DefineRelation<'mcx>(
     } else {
         None
     };
-    // C: accessMethodId is InvalidOid unless RELKIND_HAS_TABLE_AM;
-    // partitions inherit the parent's relam and the parent USING is loud,
-    // so heap is the only reachable AM.
-    let access_method_id = match stmt.accessMethod {
-        None if !types_rel::RELKIND_HAS_TABLE_AM(relkind) => InvalidOid,
-        None => HEAP_TABLE_AM_OID, // default_table_access_method = "heap"
-        Some("heap") => HEAP_TABLE_AM_OID,
-        Some(_) => unported("get_table_am_oid (non-heap USING)"),
+    // C: explicit USING, else a partition inherits the parent's relam, else
+    // default_table_access_method; InvalidOid for relkinds without table AM.
+    let access_method_id = if let Some(amname) = stmt.accessMethod {
+        debug_assert!(
+            types_rel::RELKIND_HAS_TABLE_AM(relkind)
+                || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        );
+        commands_amcmds::get_table_am_oid(amname, false)?
+    } else if types_rel::RELKIND_HAS_TABLE_AM(relkind)
+        || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+    {
+        let mut amoid = InvalidOid;
+        if stmt.partbound.is_some() {
+            amoid = lsyscache::get_rel_relam(inherit_oids[0])?;
+        }
+        if types_rel::RELKIND_HAS_TABLE_AM(relkind) && amoid == InvalidOid {
+            amoid = commands_amcmds::get_table_am_oid(
+                &tableam::default_table_access_method(),
+                false,
+            )?;
+        }
+        amoid
+    } else {
+        InvalidOid
     };
 
     // RangeVarGetAndCheckCreationNamespace resolve-only: CREATE ACL check and

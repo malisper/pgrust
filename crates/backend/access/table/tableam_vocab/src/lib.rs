@@ -194,9 +194,38 @@ impl TableAm {
             // RelationInitTableAccessMethod (relcache.c): sequences always
             // ride the heap AM despite relam = 0.
             _ if relation.rd_rel.relkind == types_rel::RELKIND_SEQUENCE => Some(TableAm::Heap),
-            _ => None,
+            relam => {
+                if relam != 0 && is_registered_heap_am(relam) {
+                    Some(TableAm::Heap)
+                } else {
+                    None
+                }
+            }
         }
     }
+}
+
+thread_local! {
+    // Non-builtin pg_am oids whose amhandler is heap_tableam_handler,
+    // registered by relcache at entry build (where C resolves the handler
+    // into rd_tableam). pg_am.amhandler is immutable (no ALTER ACCESS
+    // METHOD ... HANDLER), so entries never invalidate.
+    static HEAP_HANDLER_AMS: std::cell::RefCell<Vec<Oid>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cold]
+fn is_registered_heap_am(relam: Oid) -> bool {
+    HEAP_HANDLER_AMS.with(|v| v.borrow().contains(&relam))
+}
+
+pub fn register_heap_table_am(relam: Oid) {
+    HEAP_HANDLER_AMS.with(|v| {
+        let mut v = v.borrow_mut();
+        if !v.contains(&relam) {
+            v.push(relam);
+        }
+    });
 }
 
 thread_local! {

@@ -12,7 +12,7 @@ use types_error::PgResult;
 use types_rel::{FormData_pg_class, RelationData, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_NOTHING};
 use types_tuple::{NameData, TupleConstr, TupleDescData};
 
-use crate::build::RelationInitPhysicalAddr;
+use crate::build::{RelationInitPhysicalAddr, RelationInitTableAccessMethod};
 use crate::{cache_mcx, store};
 
 // reltype is a build-time parameter (C's AddNewRelationTuple pokes it into
@@ -151,6 +151,7 @@ pub fn RelationBuildLocalRelation(
             rd_hastriggers: false, rd_hasrules: false,
     };
     RelationInitPhysicalAddr(&data)?;
+    RelationInitTableAccessMethod(relkind, accessmtd)?;
 
     let rel = Rc::new(data);
     store::insert(Rc::clone(&rel), false, false)?;

@@ -29,6 +29,33 @@ fn invalid_relpersistence(c: u8) -> Box<PgError> {
     )
 }
 
+// RelationInitTableAccessMethod (relcache.c), closed-AM form: C resolves
+// pg_am.amhandler into rd_tableam per entry; here heap-handler AMs are
+// recorded in tableam_vocab's registry so TableAm::of maps non-builtin
+// relam values. Handler proc oid 3 = heap_tableam_handler (pg_proc.dat).
+pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult<()> {
+    const F_HEAP_TABLEAM_HANDLER: Oid = 3;
+    if !types_rel::RELKIND_HAS_TABLE_AM(relkind)
+        || relam == InvalidOid
+        || relam == HEAP_TABLE_AM_OID
+    {
+        return Ok(());
+    }
+    match syscache_seams::pg_am_amhandler::call(relam)? {
+        Some(F_HEAP_TABLEAM_HANDLER) => {
+            tableam_vocab::register_heap_table_am(relam);
+            Ok(())
+        }
+        Some(other) => panic!(
+            "unported: table AM handler function {other} (relam {relam}); \
+             only heap_tableam_handler is carried"
+        ),
+        None => Err(Box::new(PgError::error(format!(
+            "cache lookup failed for access method {relam}"
+        )))),
+    }
+}
+
 // Steady-state arms only: the historic-snapshot (logical decoding) refresh and
 // the parallel-worker rd_firstRelfilelocatorSubid restore are unported.
 pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> {
@@ -106,6 +133,7 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
 
         let mcx = cache_mcx();
         let (rd_backend, rd_islocaltemp) = resolve_backend(&scanned.form)?;
+        RelationInitTableAccessMethod(scanned.form.relkind, scanned.form.relam)?;
         let rd_att =
             relcache_build_seams::relation_build_tuple_desc::call(
                 mcx,
