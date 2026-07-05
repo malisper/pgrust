@@ -1383,6 +1383,7 @@ pub fn transformCreateStmt<'mcx>(
         relname,
         relation,
         &columns,
+        &stmt.inhRelations,
         &mut nnconstraints,
         &ixconstraints,
         &mut alist,
@@ -1470,6 +1471,65 @@ pub fn transformCreateStmt<'mcx>(
     Ok(result)
 }
 
+fn key_found_in_inh_relations<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &str,
+    is_primary: bool,
+    inh_relations: &NodeList<'mcx>,
+    nnconstraints: &mut NodeList<'mcx>,
+) -> PgResult<bool> {
+    for inode in inh_relations.iter() {
+        let prv = inode.as_variant::<RangeVar>().expect("inhRelations RangeVar");
+        let relname = prv.relname.expect("RangeVar.relname");
+        let rv = rel_vocab::RangeVar {
+            catalogname: prv.catalogname,
+            schemaname: prv.schemaname,
+            relname,
+            inh: prv.inh,
+            relpersistence: prv.relpersistence,
+            location: prv.location,
+        };
+        let relid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::AccessShareLock, false)?;
+        let rel = table::table_open(mcx, relid, types_rel::NoLock)?;
+        if rel.rd_rel.relkind != types_rel::RELKIND_RELATION
+            && rel.rd_rel.relkind != types_rel::RELKIND_FOREIGN_TABLE
+            && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
+        {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("inherited relation \"{relname}\" is not a table or foreign table"),
+                )
+                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+            ));
+        }
+        let mut found = false;
+        for i in 0..rel.rd_att.natts as usize {
+            let att = rel.rd_att.attr(i);
+            if att.attisdropped {
+                continue;
+            }
+            if att.attname.name_str() == key.as_bytes() {
+                found = true;
+                if is_primary {
+                    let inhname = {
+                        let mut s = PgString::new_in(mcx);
+                        s.try_push_str(key)?;
+                        leak_str(s)
+                    };
+                    nnconstraints.lappend(mcx, make_not_null_constraint(mcx, inhname)?)?;
+                }
+                break;
+            }
+        }
+        rel.close(types_rel::NoLock)?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &'mcx str) -> PgResult<Node<'mcx>> {
     let mut n = Node::build::<Constraint>(mcx)?;
     n.contype = ConstrType::CONSTR_NOTNULL;
@@ -1488,6 +1548,7 @@ fn transform_index_constraints<'mcx>(
     relname: &str,
     relation: &'mcx types_nodes::RangeVar<'mcx>,
     columns: &NodeList<'mcx>,
+    inh_relations: &NodeList<'mcx>,
     nnconstraints: &mut NodeList<'mcx>,
     ixconstraints: &NodeList<'mcx>,
     alist: &mut NodeList<'mcx>,
