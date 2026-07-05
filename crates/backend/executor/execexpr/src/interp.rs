@@ -3851,8 +3851,6 @@ pub(crate) fn exec_one_step<'mcx>(
         | Step::OuterVarNotDistinctThin { .. }
         | Step::NotDistinctQualThin { .. }
         | Step::AggTransStrictByValIndirectThin { .. }
-        | Step::AggDeserialize { .. }
-        | Step::AggStrictDeserialize { .. }
         | Step::OldFetchSome { .. }
         | Step::NewFetchSome { .. }
         | Step::OldVar { .. }
@@ -3878,6 +3876,21 @@ pub(crate) fn exec_one_step<'mcx>(
         }
         Step::JsonCoercionFinish { jsestate, out } => {
             eval_json_coercion_finish(jsestate, out)?;
+        }
+        // Combine-phase deserialize (EEOP_AGG_DESERIALIZE): leader-side
+        // consumption of worker transstates; same fcinfo/out contract as the
+        // interpreter arms.
+        Step::AggDeserialize { call, out } => {
+            let (value, isnull) = invoke(&call)?;
+            write_out(out, value, isnull);
+        }
+        Step::AggStrictDeserialize { call, out, jumpnull } => {
+            // SAFETY: slot 0 of the live 2-arg ds fcinfo image.
+            if unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read().isnull } {
+                return Ok(StepFlow::Jump(jumpnull));
+            }
+            let (value, isnull) = invoke(&call)?;
+            write_out(out, value, isnull);
         }
         Step::ScanFetchSome { last_var } => {
             exectuples::slot_getsomeattrs(slots.get(SlotSrc::Scan), last_var as i32);
@@ -4385,8 +4398,8 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::JsonCoercion { .. }
         | Step::JsonCoercionFinish { .. }
         | Step::IoCoerceSafe { .. } => true,
-        Step::AggDeserialize { .. } | Step::AggStrictDeserialize { .. }
-        | Step::OldFetchSome { .. }
+        Step::AggDeserialize { .. } | Step::AggStrictDeserialize { .. } => true,
+        Step::OldFetchSome { .. }
         | Step::NewFetchSome { .. }
         | Step::OldVar { .. }
         | Step::NewVar { .. }
