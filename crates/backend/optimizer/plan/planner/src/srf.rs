@@ -1,6 +1,5 @@
-//! split_pathtarget_at_srfs (tlist.c) + adjust_paths_for_srfs (planner.c).
-//! The input_target/is_grouping_target legs are unreached: the sole caller
-//! (grouping_planner scan/join arm) passes C's NULL input_target.
+//! split_pathtarget_at_srfs / split_pathtarget_at_srfs_grouping (tlist.c) +
+//! adjust_paths_for_srfs (planner.c).
 
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
@@ -24,6 +23,7 @@ type SpItem<'mcx> = (Node<'mcx>, u32);
 
 struct SplitContext<'mcx> {
     mcx: Mcx<'mcx>,
+    input_target_exprs: PgVec<'mcx, Node<'mcx>>,
     level_srfs: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
     level_input_vars: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
     level_input_srfs: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
@@ -35,6 +35,12 @@ struct SplitContext<'mcx> {
 
 impl<'mcx> nodes_core::NodeWalker<'mcx> for SplitContext<'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        // An expression already computed in input_target acts like a Var
+        // (setrefs replaces it with one); ignore its substructure.
+        if self.input_target_exprs.iter().any(|&e| types_nodes::equal(e, node)) {
+            self.current_input_vars.push((node, self.current_sgref));
+            return Ok(false);
+        }
         match node.node_tag() {
             NodeTag::T_Var
             | NodeTag::T_PlaceHolderVar
@@ -79,12 +85,57 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for SplitContext<'mcx> {
 pub fn split_pathtarget_at_srfs<'mcx>(
     run: &mut PlannerRun<'mcx>,
     target: PtId,
+    input_target: Option<PtId>,
+) -> PgResult<(PgVec<'mcx, PtId>, PgVec<'mcx, bool>)> {
+    split_pathtarget_at_srfs_extended(run, target, input_target, false)
+}
+
+// Variant for targets crossing the grouping boundary: C strips the grouping
+// nulling bit before matching input_target, which only applies when
+// parse.hasGroupRTE (loud upstream: flatten_group_exprs unported).
+pub fn split_pathtarget_at_srfs_grouping<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    target: PtId,
+    input_target: Option<PtId>,
+) -> PgResult<(PgVec<'mcx, PtId>, PgVec<'mcx, bool>)> {
+    split_pathtarget_at_srfs_extended(run, target, input_target, true)
+}
+
+fn split_pathtarget_at_srfs_extended<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    target: PtId,
+    input_target: Option<PtId>,
+    is_grouping_target: bool,
 ) -> PgResult<(PgVec<'mcx, PtId>, PgVec<'mcx, bool>)> {
     use nodes_core::NodeWalker;
 
     let mcx = run.mcx;
+    if input_target == Some(target) {
+        let mut targets = PgVec::new_in(mcx);
+        targets.push(target);
+        let mut contain_srfs = PgVec::new_in(mcx);
+        contain_srfs.push(false);
+        return Ok((targets, contain_srfs));
+    }
+    if is_grouping_target
+        && run.parse().hasGroupRTE
+        && !run.parse().groupingSets.is_nil()
+    {
+        panic!(
+            "split_pathtarget_walker (tlist.c): remove_nulling_relids over group_rtindex \
+             requires hasGroupRTE, unported"
+        );
+    }
+    let mut input_target_exprs: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    if let Some(it) = input_target {
+        for i in 0..run.root.pathtarget(it).exprs.len() {
+            let eid = run.root.pathtarget(it).exprs[i];
+            input_target_exprs.push(*run.root.expr_node(eid));
+        }
+    }
     let mut ctx = SplitContext {
         mcx,
+        input_target_exprs,
         level_srfs: PgVec::new_in(mcx),
         level_input_vars: PgVec::new_in(mcx),
         level_input_srfs: PgVec::new_in(mcx),

@@ -54,11 +54,15 @@ pub fn grouping_planner<'mcx>(
             &parse.sortClause,
             run.processed_tlist(),
         )?;
+        // The setop result tlist couldn't contain any SRFs (C planner.c:1500).
         return grouping_planner_tail(
             run,
             current_rel,
             final_target,
             final_target_parallel_safe,
+            &mcx::PgVec::new_in(run.mcx),
+            &mcx::PgVec::new_in(run.mcx),
+            false,
             limit_tuples,
             offset_est,
             count_est,
@@ -129,8 +133,10 @@ pub fn grouping_planner<'mcx>(
     let final_target = create_pathtarget(run, run.processed_tlist())?;
     let final_target_parallel_safe = is_parallel_safe_exprs(run, final_target)?;
 
+    let mut have_postponed_srfs = false;
     let (sort_input_target, sort_input_target_parallel_safe) = if !parse.sortClause.is_nil() {
-        let t = make_sort_input_target(run, final_target)?;
+        let (t, postponed) = make_sort_input_target(run, final_target)?;
+        have_postponed_srfs = postponed;
         let safe = if t == final_target {
             final_target_parallel_safe
         } else {
@@ -151,29 +157,78 @@ pub fn grouping_planner<'mcx>(
         || !parse.groupClause.is_nil()
         || !parse.groupingSets.is_nil()
         || run.root.hasHavingQual;
-    let scanjoin_target = if have_grouping {
-        make_group_input_target(run, final_target)?
+    let (scanjoin_target, scanjoin_target_parallel_safe) = if have_grouping {
+        let t = make_group_input_target(run, final_target)?;
+        (t, is_parallel_safe_exprs(run, t)?)
     } else {
-        grouping_target
+        (grouping_target, grouping_target_parallel_safe)
     };
 
-    let (scanjoin_targets, scanjoin_targets_contain_srfs) = if parse.hasTargetSRFs {
-        if have_grouping || !run.active_windows.is_empty() {
-            panic!(
-                "grouping_planner (planner.c): targetlist SRFs above grouping/window \
-                 levels (split_pathtarget_at_srfs_grouping) unported"
-            );
-        }
-        debug_assert!(scanjoin_target == grouping_target && grouping_target == sort_input_target);
-        crate::srf::split_pathtarget_at_srfs(run, scanjoin_target)?
+    // Split each level's target into SRF-computing and SRF-free versions;
+    // each split treats the next-lower target's exprs as already computed.
+    let (
+        final_target,
+        final_targets,
+        final_targets_contain_srfs,
+        sort_input_target,
+        sort_input_targets,
+        sort_input_targets_contain_srfs,
+        grouping_target,
+        grouping_targets,
+        grouping_targets_contain_srfs,
+        scanjoin_target,
+        scanjoin_targets,
+        scanjoin_targets_contain_srfs,
+    ) = if parse.hasTargetSRFs {
+        let (final_targets, final_contain) =
+            crate::srf::split_pathtarget_at_srfs(run, final_target, Some(sort_input_target))?;
+        debug_assert!(!final_contain[0]);
+        let (sort_input_targets, sort_input_contain) =
+            crate::srf::split_pathtarget_at_srfs(run, sort_input_target, Some(grouping_target))?;
+        debug_assert!(!sort_input_contain[0]);
+        let (grouping_targets, grouping_contain) = crate::srf::split_pathtarget_at_srfs_grouping(
+            run,
+            grouping_target,
+            Some(scanjoin_target),
+        )?;
+        debug_assert!(!grouping_contain[0]);
+        let (scanjoin_targets, scanjoin_contain) =
+            crate::srf::split_pathtarget_at_srfs(run, scanjoin_target, None)?;
+        debug_assert!(!scanjoin_contain[0]);
+        (
+            final_targets[0],
+            final_targets,
+            final_contain,
+            sort_input_targets[0],
+            sort_input_targets,
+            sort_input_contain,
+            grouping_targets[0],
+            grouping_targets,
+            grouping_contain,
+            scanjoin_targets[0],
+            scanjoin_targets,
+            scanjoin_contain,
+        )
     } else {
         let mut ts = mcx::PgVec::new_in(run.mcx);
         ts.push(scanjoin_target);
         let mut cs = mcx::PgVec::new_in(run.mcx);
         cs.push(false);
-        (ts, cs)
+        (
+            final_target,
+            mcx::PgVec::new_in(run.mcx),
+            mcx::PgVec::new_in(run.mcx),
+            sort_input_target,
+            mcx::PgVec::new_in(run.mcx),
+            mcx::PgVec::new_in(run.mcx),
+            grouping_target,
+            mcx::PgVec::new_in(run.mcx),
+            mcx::PgVec::new_in(run.mcx),
+            scanjoin_target,
+            ts,
+            cs,
+        )
     };
-    let scanjoin_target = scanjoin_targets[0];
     let reltarget = run.rel_reltarget_id(current_rel);
     let same_exprs = scanjoin_targets.len() == 1
         && crate::pathnode::exprs_same(
@@ -186,7 +241,7 @@ pub fn grouping_planner<'mcx>(
         current_rel,
         &scanjoin_targets,
         &scanjoin_targets_contain_srfs,
-        final_target_parallel_safe,
+        scanjoin_target_parallel_safe,
         same_exprs,
     )?;
 
@@ -197,11 +252,23 @@ pub fn grouping_planner<'mcx>(
     run.root.upper_targets[UPPERREL_WINDOW as usize] = Some(sort_input_target);
     run.root.upper_targets[UPPERREL_GROUP_AGG as usize] = Some(grouping_target);
 
-    let mut current_rel = if have_grouping {
-        create_grouping_paths(run, current_rel, grouping_target, grouping_target_parallel_safe)?
-    } else {
-        current_rel
-    };
+    let mut current_rel = current_rel;
+    if have_grouping {
+        current_rel = create_grouping_paths(
+            run,
+            current_rel,
+            grouping_target,
+            grouping_target_parallel_safe,
+        )?;
+        if parse.hasTargetSRFs {
+            crate::srf::adjust_paths_for_srfs(
+                run,
+                current_rel,
+                &grouping_targets,
+                &grouping_targets_contain_srfs,
+            )?;
+        }
+    }
 
     if let Some(wfl) = &wflists {
         if !run.active_windows.is_empty() {
@@ -213,6 +280,14 @@ pub fn grouping_planner<'mcx>(
                 sort_input_target_parallel_safe,
                 wfl,
             )?;
+            if parse.hasTargetSRFs {
+                crate::srf::adjust_paths_for_srfs(
+                    run,
+                    current_rel,
+                    &sort_input_targets,
+                    &sort_input_targets_contain_srfs,
+                )?;
+            }
         }
     }
 
@@ -225,6 +300,9 @@ pub fn grouping_planner<'mcx>(
         current_rel,
         final_target,
         final_target_parallel_safe,
+        &final_targets,
+        &final_targets_contain_srfs,
+        have_postponed_srfs,
         limit_tuples,
         offset_est,
         count_est,
@@ -237,6 +315,9 @@ fn grouping_planner_tail<'mcx>(
     current_rel: RelId,
     final_target: types_pathnodes::PtId,
     final_target_parallel_safe: bool,
+    final_targets: &mcx::PgVec<'mcx, types_pathnodes::PtId>,
+    final_targets_contain_srfs: &mcx::PgVec<'mcx, bool>,
+    have_postponed_srfs: bool,
     limit_tuples: f64,
     offset_est: i64,
     count_est: i64,
@@ -249,8 +330,16 @@ fn grouping_planner_tail<'mcx>(
             current_rel,
             final_target,
             final_target_parallel_safe,
-            limit_tuples,
+            if have_postponed_srfs { -1.0 } else { limit_tuples },
         )?;
+        if parse.hasTargetSRFs {
+            crate::srf::adjust_paths_for_srfs(
+                run,
+                current_rel,
+                final_targets,
+                final_targets_contain_srfs,
+            )?;
+        }
     }
 
     let final_rel = fetch_final_rel(run);
@@ -2344,11 +2433,11 @@ fn preprocess_limit<'mcx>(
     Ok(tuple_fraction)
 }
 
-// make_sort_input_target (planner.c); the SRF-postponement leg is loud.
+// make_sort_input_target (planner.c); returns (target, have_postponed_srfs).
 fn make_sort_input_target<'mcx>(
     run: &mut PlannerRun<'mcx>,
     final_target: types_pathnodes::PtId,
-) -> PgResult<types_pathnodes::PtId> {
+) -> PgResult<(types_pathnodes::PtId, bool)> {
     let mcx = run.mcx;
     let parse = run.parse();
     debug_assert!(!parse.sortClause.is_nil());
@@ -2357,11 +2446,13 @@ fn make_sort_input_target<'mcx>(
     let mut have_volatile = false;
     let mut have_expensive = false;
     let n = run.root.pathtarget(final_target).exprs.len();
+    let mut col_is_srf: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
     let mut postpone_col: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
     for i in 0..n {
         let ft = run.root.pathtarget(final_target);
         let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
         let expr = *run.root.expr_node(ft.exprs[i]);
+        let mut is_srf = false;
         let mut postpone = false;
         if sgref != 0 {
             if !have_srf_sortcols
@@ -2371,6 +2462,7 @@ fn make_sort_input_target<'mcx>(
                 have_srf_sortcols = true;
             }
         } else if parse.hasTargetSRFs && coerce::expression_returns_set(expr) {
+            is_srf = true;
             have_srf = true;
         } else if clauses::contain_volatile_functions(expr)? {
             postpone = true;
@@ -2382,19 +2474,17 @@ fn make_sort_input_target<'mcx>(
                 have_expensive = true;
             }
         }
+        col_is_srf.push(is_srf);
         postpone_col.push(postpone);
     }
+    // SRFs are postponable only when none appear in sortgroupref columns.
     let postpone_srfs = have_srf && !have_srf_sortcols;
     if !(postpone_srfs
         || have_volatile
         || (have_expensive && (parse.limitCount.is_some() || run.root.tuple_fraction > 0.0)))
     {
-        return Ok(final_target);
+        return Ok((final_target, false));
     }
-    assert!(
-        !postpone_srfs,
-        "make_sort_input_target (planner.c): SRF postponement; M2 sort lane"
-    );
 
     let mut input = types_pathnodes::PathTarget::new(mcx);
     let mut postponable = types_nodes::list::NodeList::nil();
@@ -2402,7 +2492,7 @@ fn make_sort_input_target<'mcx>(
         let ft = run.root.pathtarget(final_target);
         let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
         let eid = ft.exprs[i];
-        if postpone_col[i] {
+        if postpone_col[i] || (postpone_srfs && col_is_srf[i]) {
             postponable.lappend(mcx, *run.root.expr_node(eid))?;
         } else {
             input.exprs.push(eid);
@@ -2446,7 +2536,7 @@ fn make_sort_input_target<'mcx>(
         tuple_width += crate::costsize::get_expr_width(run, expr)? as i64;
     }
     run.root.pathtarget_mut(id).width = crate::costsize::clamp_width_est(tuple_width);
-    Ok(id)
+    Ok((id, postpone_srfs))
 }
 
 // Incremental sort and partial paths are loud/absent.
