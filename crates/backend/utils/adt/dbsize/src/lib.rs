@@ -1,5 +1,7 @@
 //! dbsize.c: pg_size_bytes, pg_size_pretty (int8/numeric), pg_relation_size,
-//! pg_database_size (name/oid).
+//! pg_database_size (name/oid), pg_tablespace_size (name/oid), pg_table_size,
+//! pg_indexes_size, pg_total_relation_size, pg_relation_filenode,
+//! pg_filenode_relation, pg_relation_filepath.
 
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 

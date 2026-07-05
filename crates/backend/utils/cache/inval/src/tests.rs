@@ -52,7 +52,15 @@ fn install() {
             Ok(())
         });
         syscache_seams::lookup_pg_class_by_relid::set(|relid| {
-            Ok(Some(PgClassShape { oid: relid, relisshared: relid == SHARED_REL }))
+            Ok(Some(PgClassShape {
+                oid: relid,
+                relnamespace: 0,
+                relfilenode: relid,
+                reltablespace: 0,
+                relisshared: relid == SHARED_REL,
+                relpersistence: b'p' as i8,
+                relkind: b'r' as i8,
+            }))
         });
         catcache_seams::catalog_cache_flush_catalog::set(|cat| {
             log(format!("flush_catalog({cat})"));

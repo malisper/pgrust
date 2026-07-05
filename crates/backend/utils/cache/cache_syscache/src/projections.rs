@@ -20,6 +20,7 @@ use crate::{
 use crate::cacheinfo::{AMOID, COLLNAMEENCNSP, COLLOID, AGGFNOID, AMOPOPID, AMOPSTRATEGY, AMPROCNUM, ATTNUM, CLAAMNAMENSP, OPFAMILYAMNAMENSP, CLAOID, OPFAMILYOID, PROCNAMEARGSNSP, AUTHNAME, ENUMOID, ENUMTYPOIDNAME, AUTHOID, CASTSOURCETARGET, CONSTROID, INDEXRELID, NAMESPACENAME, NAMESPACEOID, OPERNAMENSP, TSCONFIGNAMENSP, TSCONFIGOID, TSDICTNAMENSP, TSDICTOID, TYPENAMENSP, ATTNAME, OPEROID, PROCOID, RANGEMULTIRANGE, RANGETYPE, RELNAMENSP, RELOID, SEQRELID, STATEXTDATASTXOID, STATEXTOID, STATRELATTINH, TYPEOID};
 
 const ANUM_PG_CLASS_OID: i32 = 1;
+const ANUM_PG_CLASS_RELFILENODE: i32 = 8;
 const ANUM_PG_CLASS_RELISSHARED: i32 = 16;
 const ANUM_PG_TYPE_OID: i32 = 1;
 const ANUM_PG_TYPE_TYPNAME: i32 = 2;
@@ -225,7 +226,12 @@ fn getattr(tuple: &HeapTupleData<'_>, cache_id: i32, attnum: i32) -> Datum {
 fn pg_class_shape(tuple: &HeapTupleData<'_>) -> PgClassShape {
     PgClassShape {
         oid: getattr(tuple, RELOID, ANUM_PG_CLASS_OID).as_oid(),
+        relnamespace: getattr(tuple, RELOID, ANUM_PG_CLASS_RELNAMESPACE).as_oid(),
+        relfilenode: getattr(tuple, RELOID, ANUM_PG_CLASS_RELFILENODE).as_oid(),
+        reltablespace: getattr(tuple, RELOID, ANUM_PG_CLASS_RELTABLESPACE).as_oid(),
         relisshared: getattr(tuple, RELOID, ANUM_PG_CLASS_RELISSHARED).as_bool(),
+        relpersistence: getattr(tuple, RELOID, ANUM_PG_CLASS_RELPERSISTENCE).as_i8(),
+        relkind: getattr(tuple, RELOID, ANUM_PG_CLASS_RELKIND).as_i8(),
     }
 }
 
@@ -714,6 +720,16 @@ fn search_syscache_exists_databaseoid(dboid: Oid) -> PgResult<bool> {
     SearchSysCacheExists(
         crate::cacheinfo::DATABASEOID,
         SysCacheKey::Value(Datum::from_oid(dboid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )
+}
+
+fn search_syscache_exists_tablespaceoid(tblspcoid: Oid) -> PgResult<bool> {
+    SearchSysCacheExists(
+        crate::cacheinfo::TABLESPACEOID,
+        SysCacheKey::Value(Datum::from_oid(tblspcoid)),
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
         SysCacheKey::UNUSED,
@@ -2605,6 +2621,7 @@ pub(crate) fn install() {
     syscache_seams::search_syscache_exists_procoid::set(search_syscache_exists_procoid);
     syscache_seams::search_syscache_exists_attnum::set(search_syscache_exists_attnum);
     syscache_seams::search_syscache_exists_databaseoid::set(search_syscache_exists_databaseoid);
+    syscache_seams::search_syscache_exists_tablespaceoid::set(search_syscache_exists_tablespaceoid);
     syscache_seams::sys_cache_invalidate::set(sys_cache_invalidate);
     syscache_seams::relation_invalidates_snapshots_only::set(crate::RelationInvalidatesSnapshotsOnly);
     syscache_seams::lookup_pg_class_by_relid::set(lookup_pg_class_by_relid);

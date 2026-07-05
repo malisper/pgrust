@@ -1248,6 +1248,7 @@ pub fn init_seams() {
     });
     tablespace_seams::tablespace_create_dbspace::set(TablespaceCreateDbspace);
     tablespace_seams::get_tablespace_oid::set(get_tablespace_oid);
+    tablespace_seams::get_tablespace_name::set(get_tablespace_name);
     tablespace_seams::tblspc_redo::set(tblspc_redo);
     tablespace_seams::prepare_temp_tablespaces::set(prepare_temp_tablespaces_seam);
     guc_tables::hooks::check_default_tablespace.install(check_default_tablespace);

@@ -17,6 +17,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // get_tablespace_name (tablespace.c) — dbsize's aclcheck_error name (a
+    // direct dbsize -> commands_tablespace dep would cycle through fmgr).
+    pub fn get_tablespace_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        spc_oid: Oid,
+    ) -> PgResult<Option<types_tuple::NameData>>
+);
+
+seam_core::seam!(
     // PrepareTempTablespaces (tablespace.c) — fd's configured-list arm (a
     // direct fd -> commands_tablespace dep would cycle).
     pub fn prepare_temp_tablespaces() -> PgResult<()>

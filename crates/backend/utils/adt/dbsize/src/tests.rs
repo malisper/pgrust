@@ -19,6 +19,16 @@ fn sizes() {
 }
 
 #[test]
+fn tablespace_dir_paths() {
+    assert_eq!(builtins::tablespace_dir_path(1663), "base");
+    assert_eq!(builtins::tablespace_dir_path(1664), "global");
+    assert_eq!(
+        builtins::tablespace_dir_path(16385),
+        format!("pg_tblspc/16385/{}", types_storage::TABLESPACE_VERSION_DIRECTORY)
+    );
+}
+
+#[test]
 fn errors() {
     assert!(pg_size_bytes("").is_err());
     assert!(pg_size_bytes("kB").is_err());
