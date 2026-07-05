@@ -950,6 +950,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_gist",
+ "types_scan",
  "types_storage",
  "types_tuple",
 ]
