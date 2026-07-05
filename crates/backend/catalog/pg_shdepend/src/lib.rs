@@ -839,10 +839,12 @@ pub fn shdepLockAndCheckObject<'mcx>(mcx: Mcx<'mcx>, classId: Oid, objectId: Oid
             ));
         }
     } else if classId == TABLE_SPACE_RELATION_ID {
-        panic!(
-            "shdepLockAndCheckObject (pg_shdepend.c): get_tablespace_name unported \
-             (tablespace {objectId})"
-        );
+        if tablespace_seams::get_tablespace_name::call(mcx, objectId)?.is_none() {
+            return Err(Box::new(
+                PgError::error(format!("tablespace {objectId} was concurrently dropped"))
+                    .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+            ));
+        }
     } else if classId == DATABASE_RELATION_ID {
         if dbcommands_seams::get_database_name::call(objectId)?.is_none() {
             return Err(Box::new(

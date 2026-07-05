@@ -10193,6 +10193,7 @@ dependencies = [
  "seam_core",
  "syscache_seams",
  "table",
+ "tablespace_seams",
  "types_core",
  "types_error",
  "types_nodes",
