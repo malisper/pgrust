@@ -146,6 +146,8 @@ fn install_scan_fixtures() {
             // max(int4)/min(int4) + int4larger/int4smaller (minmax lane).
             2116 | 2132 => Some(shape(23, 1, b'a', false)),
             768 | 769 => Some(shape(23, 2, b'f', true)),
+            // generate_series(int4,int4).
+            1067 => Some(syscache_seams::PgProcShape { proretset: true, ..shape(23, 2, b'f', true) }),
             _ => None,
         })
     });
@@ -339,9 +341,16 @@ fn install_scan_fixtures() {
     syscache_seams::pg_proc_cost_shape::set(|funcid| {
         Ok(match funcid {
             INT4EQ_PROC | 66 | 1219 | 1841 | 470 | 2108 | 768 | 769 | 147 | 67 | 740 | 742
-            | 743 | 1254 => {
+            | 743 | 1254 | 177 => {
                 Some(syscache_seams::PgProcCostShape { procost: 1.0, prorows: 0.0, prosupport: 0 })
             }
+            // generate_series(int4,int4): prosupport row estimation is not
+            // exercised (Const-args support fn lives in adt).
+            1067 => Some(syscache_seams::PgProcCostShape {
+                procost: 1.0,
+                prorows: 1000.0,
+                prosupport: 0,
+            }),
             // row_number/rank/dense_rank carry live prosupport rows; the
             // support fns return NULL for SupportRequestCost (adt_windowfuncs).
             3100 => Some(syscache_seams::PgProcCostShape {
@@ -5157,5 +5166,189 @@ mod short_varlena {
         let p = out.as_usize() as *const u8;
         let copied = unsafe { core::slice::from_raw_parts(p, s.len()) };
         assert_eq!(copied, &s[..]);
+    }
+}
+
+mod srf_split {
+    use super::*;
+    use types_nodes::primnodes::{CoercionForm, FuncExpr, OpExpr};
+
+    fn i32c(mcx: Mcx<'_>, v: i32) -> Node<'_> {
+        Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
+    }
+
+    fn gs_call<'mcx>(mcx: Mcx<'mcx>, a: Node<'mcx>, b: Node<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            FuncExpr {
+                funcid: 1067,
+                funcresulttype: 23,
+                funcretset: true,
+                funcvariadic: false,
+                funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+                funccollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, a, b).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn int4pl<'mcx>(mcx: Mcx<'mcx>, a: Node<'mcx>, b: Node<'mcx>) -> Node<'mcx> {
+        Node::mk(
+            mcx,
+            OpExpr {
+                opno: 551,
+                opfuncid: 177,
+                opresulttype: 23,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, a, b).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap()
+    }
+
+    fn pathtarget_of<'mcx>(
+        run: &mut crate::run::PlannerRun<'mcx>,
+        items: &[(Node<'mcx>, u32)],
+    ) -> types_pathnodes::PtId {
+        let mut t = types_pathnodes::PathTarget::new(run.mcx);
+        let mut any = false;
+        for &(node, sgref) in items {
+            let id = run.intern_expr(node);
+            t.exprs.push(id);
+            t.sortgrouprefs.push(sgref);
+            any |= sgref != 0;
+        }
+        if !any {
+            t.sortgrouprefs.clear();
+        }
+        run.root.alloc_pathtarget(t)
+    }
+
+    #[test]
+    fn nested_srf_splits_into_level_chain() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let inner = gs_call(mcx, i32c(mcx, 1), var);
+        let outer = gs_call(mcx, i32c(mcx, 1), inner);
+        let tid = pathtarget_of(&mut run, &[(outer, 0)]);
+
+        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid).unwrap();
+        assert_eq!(flags.as_slice(), &[false, true, true]);
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[2], tid);
+        let t0 = run.root.pathtarget(targets[0]);
+        assert_eq!(t0.exprs.len(), 1);
+        assert!(types_nodes::equal(*run.root.expr_node(t0.exprs[0]), var));
+        let t1 = run.root.pathtarget(targets[1]);
+        assert_eq!(t1.exprs.len(), 1);
+        assert!(types_nodes::equal(*run.root.expr_node(t1.exprs[0]), inner));
+        assert_eq!(run.root.pathtarget(targets[1]).width, 4);
+    }
+
+    #[test]
+    fn srf_below_top_gets_extra_projection_level_and_merged_sortgroupref() {
+        // tsrf.sql: select generate_series(1,3)+1 order by generate_series(1,3);
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let srf = gs_call(mcx, i32c(mcx, 1), i32c(mcx, 3));
+        let plus = int4pl(mcx, srf, i32c(mcx, 1));
+        let tid = pathtarget_of(&mut run, &[(plus, 0), (srf, 1)]);
+
+        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid).unwrap();
+        assert_eq!(flags.as_slice(), &[false, true, false]);
+        assert_eq!(targets[2], tid);
+        let t0 = run.root.pathtarget(targets[0]);
+        assert!(t0.exprs.is_empty());
+        let t1 = run.root.pathtarget(targets[1]);
+        assert_eq!(t1.exprs.len(), 1);
+        assert!(types_nodes::equal(*run.root.expr_node(t1.exprs[0]), srf));
+        assert_eq!(t1.sortgrouprefs.as_slice(), &[1u32]);
+    }
+
+    #[test]
+    fn top_and_nested_srfs_share_levels() {
+        // tlist.c example: srf1(x), srf2(srf3(y)) — level 1 evaluates
+        // srf1 and srf3, level 2 the original target.
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let y = Node::mk_var(mcx, 1, 2, 23, -1, 0, 0).unwrap();
+        let srf1 = gs_call(mcx, i32c(mcx, 1), x);
+        let srf3 = gs_call(mcx, i32c(mcx, 2), y);
+        let srf2 = gs_call(mcx, i32c(mcx, 3), srf3);
+        let tid = pathtarget_of(&mut run, &[(srf1, 0), (srf2, 0)]);
+
+        let (targets, flags) = crate::srf::split_pathtarget_at_srfs(&mut run, tid).unwrap();
+        assert_eq!(flags.as_slice(), &[false, true, true]);
+        let t0 = run.root.pathtarget(targets[0]);
+        assert_eq!(t0.exprs.len(), 2);
+        assert!(types_nodes::equal(*run.root.expr_node(t0.exprs[0]), x));
+        assert!(types_nodes::equal(*run.root.expr_node(t0.exprs[1]), y));
+        let t1 = run.root.pathtarget(targets[1]);
+        assert_eq!(t1.exprs.len(), 2);
+        assert!(types_nodes::equal(*run.root.expr_node(t1.exprs[0]), srf1));
+        assert!(types_nodes::equal(*run.root.expr_node(t1.exprs[1]), srf3));
+    }
+
+    #[test]
+    fn srf_below_top_plans_result_over_projectset() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let srf = gs_call(mcx, i32c(mcx, 1), i32c(mcx, 3));
+        let plus = int4pl(mcx, srf, i32c(mcx, 1));
+        let tle = Node::mk_target_entry(mcx, plus, 1, Some("?column?"), false).unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            hasTargetSRFs: true,
+            jointree: Some(jointree),
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 30,
+            ..Query::default()
+        };
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT generate_series(1,3)+1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        assert_eq!(plan.node_tag(), NodeTag::T_Result);
+        let top = plan.as_result().unwrap();
+        assert_eq!(top.plan.targetlist.len(), 1);
+        let tle0 = top.plan.targetlist.nth(0).as_target_entry().unwrap();
+        let op = tle0.expr.as_op_expr().unwrap();
+        let v = op.args.nth(0).as_var().unwrap();
+        assert_eq!(v.varno, types_nodes::primnodes::OUTER_VAR);
+        assert_eq!(v.varattno, 1);
+
+        let ps = top.plan.lefttree.unwrap();
+        assert_eq!(ps.node_tag(), NodeTag::T_ProjectSet);
+        let psn = ps.as_project_set().unwrap();
+        assert_eq!(psn.plan.plan_rows, 1000.0);
+        assert_eq!(psn.plan.targetlist.len(), 1);
+        let ps_tle = psn.plan.targetlist.nth(0).as_target_entry().unwrap();
+        let fe = ps_tle.expr.as_func_expr().unwrap();
+        assert!(fe.funcretset);
+
+        let bottom = psn.plan.lefttree.unwrap();
+        assert_eq!(bottom.node_tag(), NodeTag::T_Result);
+        assert!(bottom.as_result().unwrap().plan.targetlist.is_nil());
     }
 }
