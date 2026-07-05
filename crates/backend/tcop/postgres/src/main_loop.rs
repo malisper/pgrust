@@ -157,8 +157,17 @@ pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<(
 
     xact::AbortCurrentTransaction()?;
 
+    /* am_walsender WalSndErrorCleanup: walsender unported. */
 
     portalmem::PortalErrorCleanup()?;
+
+    // Slots can't be released inside AbortTransaction (C keeps them across
+    // sub-xacts); top-level error recovery is the C release point
+    // (postgres.c:4457).
+    if slot::MyReplicationSlot().is_some() {
+        slot::ReplicationSlotRelease()?;
+    }
+    slot::ReplicationSlotCleanup(false)?;
 
 
     elog::FlushErrorState();
