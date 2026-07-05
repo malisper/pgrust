@@ -501,10 +501,7 @@ pub fn cook_default<'mcx>(
     )?;
     if attgenerated != 0 {
         check_nested_generated(pstate, rel.expect("generated default cooks with its relation"), expr)?;
-        // DIVERGENCE: C runs contain_mutable_functions_after_planning
-        // (expression_planner inlines SQL functions first); this checks the
-        // un-inlined tree.
-        if clauses::contain_mutable_functions(expr)? {
+        if clauses::contain_mutable_functions_after_planning(mcx, expr)? {
             return Err(Box::new(
                 PgError::new(
                     types_error::ERROR,

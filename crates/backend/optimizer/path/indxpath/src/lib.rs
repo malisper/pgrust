@@ -2117,19 +2117,34 @@ pub fn choose_bitmap_and<'mcx>(
         let mut curpaths: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
         curpaths.push(infos[i].path);
         let mut costsofar = bitmap_scan_cost_est(run, rel, infos[i].path)?;
+        let mut qualsofar: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+        qualsofar.extend(infos[i].quals.iter().copied());
+        qualsofar.extend(infos[i].preds.iter().copied());
         let mut clauseidsofar = types_nodes::bitmapset::Bitmapset::empty();
         clauseidsofar.add_members(mcx, &infos[i].clauseids)?;
         for j in i + 1..infos.len() {
             if infos[j].clauseids.overlap(&clauseidsofar) {
                 continue;
             }
-            // The preds redundancy check (predicate_implied_by) is dead:
-            // partial indexes are loud upstream.
-            debug_assert!(infos[j].preds.is_empty());
+            // A partial index's predicate implied by quals already enforced
+            // means it adds no selectivity (choose_bitmap_and preds check).
+            let mut redundant = false;
+            for k in 0..infos[j].preds.len() {
+                let np = infos[j].preds[k];
+                if planner_seams::predicate_implied_by::call(mcx, &[np], &qualsofar, false)? {
+                    redundant = true;
+                    break;
+                }
+            }
+            if redundant {
+                continue;
+            }
             curpaths.push(infos[j].path);
             let newcost = bitmap_and_cost_est(run, rel, &curpaths)?;
             if newcost < costsofar {
                 costsofar = newcost;
+                qualsofar.extend(infos[j].quals.iter().copied());
+                qualsofar.extend(infos[j].preds.iter().copied());
                 clauseidsofar.add_members(mcx, &infos[j].clauseids)?;
             } else {
                 curpaths.pop();
