@@ -1,11 +1,11 @@
-//! split_pathtarget_at_srfs (tlist.c) + adjust_paths_for_srfs (planner.c),
-//! depth-1 slice: [SRF-free input target, original target]; nested SRFs and
-//! SRF-under-expression levels are loud.
+//! split_pathtarget_at_srfs (tlist.c) + adjust_paths_for_srfs (planner.c).
+//! The input_target/is_grouping_target legs are unreached: the sole caller
+//! (grouping_planner scan/join arm) passes C's NULL input_target.
 
-use mcx::PgVec;
+use mcx::{Mcx, PgVec};
 use types_error::PgResult;
 use types_nodes::{Node, NodeTag};
-use types_pathnodes::{PathTarget, PtId, RelId};
+use types_pathnodes::{NodeId, PathTarget, PtId, RelId};
 
 use crate::run::PlannerRun;
 
@@ -19,132 +19,212 @@ pub fn is_srf_call(node: Node<'_>) -> bool {
     false
 }
 
+// split_pathtarget_item: (expr, sortgroupref).
+type SpItem<'mcx> = (Node<'mcx>, u32);
+
+struct SplitContext<'mcx> {
+    mcx: Mcx<'mcx>,
+    level_srfs: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
+    level_input_vars: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
+    level_input_srfs: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
+    current_input_vars: PgVec<'mcx, SpItem<'mcx>>,
+    current_input_srfs: PgVec<'mcx, SpItem<'mcx>>,
+    current_depth: usize,
+    current_sgref: u32,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for SplitContext<'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Var
+            | NodeTag::T_PlaceHolderVar
+            | NodeTag::T_Aggref
+            | NodeTag::T_GroupingFunc
+            | NodeTag::T_WindowFunc => {
+                self.current_input_vars.push((node, self.current_sgref));
+                return Ok(false);
+            }
+            _ => {}
+        }
+        if is_srf_call(node) {
+            let item = (node, self.current_sgref);
+            let save_vars =
+                core::mem::replace(&mut self.current_input_vars, PgVec::new_in(self.mcx));
+            let save_srfs =
+                core::mem::replace(&mut self.current_input_srfs, PgVec::new_in(self.mcx));
+            let save_depth = self.current_depth;
+            self.current_depth = 0;
+            self.current_sgref = 0;
+            nodes_core::expression_tree_walker(node, self)?;
+            let srf_depth = self.current_depth + 1;
+            while srf_depth >= self.level_srfs.len() {
+                self.level_srfs.push(PgVec::new_in(self.mcx));
+                self.level_input_vars.push(PgVec::new_in(self.mcx));
+                self.level_input_srfs.push(PgVec::new_in(self.mcx));
+            }
+            self.level_srfs[srf_depth].push(item);
+            let civ = core::mem::replace(&mut self.current_input_vars, save_vars);
+            let cis = core::mem::replace(&mut self.current_input_srfs, save_srfs);
+            self.level_input_vars[srf_depth].extend(civ.iter().copied());
+            self.level_input_srfs[srf_depth].extend(cis.iter().copied());
+            self.current_input_srfs.push(item);
+            self.current_depth = save_depth.max(srf_depth);
+            return Ok(false);
+        }
+        self.current_sgref = 0;
+        nodes_core::expression_tree_walker(node, self)
+    }
+}
+
 pub fn split_pathtarget_at_srfs<'mcx>(
     run: &mut PlannerRun<'mcx>,
     target: PtId,
 ) -> PgResult<(PgVec<'mcx, PtId>, PgVec<'mcx, bool>)> {
+    use nodes_core::NodeWalker;
+
     let mcx = run.mcx;
+    let mut ctx = SplitContext {
+        mcx,
+        level_srfs: PgVec::new_in(mcx),
+        level_input_vars: PgVec::new_in(mcx),
+        level_input_srfs: PgVec::new_in(mcx),
+        current_input_vars: PgVec::new_in(mcx),
+        current_input_srfs: PgVec::new_in(mcx),
+        current_depth: 0,
+        current_sgref: 0,
+    };
+    ctx.level_srfs.push(PgVec::new_in(mcx));
+    ctx.level_input_vars.push(PgVec::new_in(mcx));
+    ctx.level_input_srfs.push(PgVec::new_in(mcx));
+
+    let mut max_depth = 0usize;
+    let mut need_extra_projection = false;
     let n = run.root.pathtarget(target).exprs.len();
-    let mut found_srf = false;
-    // (expr, sortgroupref) items the SRF-free input level must emit; SRF-arg
-    // vars precede top-level vars (C's level_input_vars ++ current_input_vars).
-    let mut srf_items: PgVec<'mcx, (types_pathnodes::NodeId, u32)> = PgVec::new_in(mcx);
-    let mut top_items: PgVec<'mcx, (types_pathnodes::NodeId, u32)> = PgVec::new_in(mcx);
     for i in 0..n {
         let t = run.root.pathtarget(target);
         let sgref = t.sortgrouprefs.get(i).copied().unwrap_or(0);
-        let id = t.exprs[i];
-        let node = *run.root.expr_node(id);
-        if is_srf_call(node) {
-            found_srf = true;
-            let args = match node.as_func_expr() {
-                Some(fe) => &fe.args,
-                None => &node.as_op_expr().unwrap().args,
-            };
-            for arg in args {
-                if coerce::expression_returns_set(arg) {
-                    panic!(
-                        "split_pathtarget_at_srfs (tlist.c): nested SRF — multi-level \
-                         ProjectSet lane unported"
-                    );
-                }
-                collect_input_items(run, arg, 0, &mut srf_items)?;
-            }
-        } else {
-            if coerce::expression_returns_set(node) {
-                panic!(
-                    "split_pathtarget_at_srfs (tlist.c): SRF below the top level of a \
-                     tlist expression — extra-Result projection lane unported"
-                );
-            }
-            collect_input_items(run, node, sgref, &mut top_items)?;
+        let node = *run.root.expr_node(t.exprs[i]);
+        ctx.current_sgref = sgref;
+        ctx.current_depth = 0;
+        ctx.visit(node)?;
+        if ctx.current_depth == 0 {
+            continue;
+        }
+        if max_depth < ctx.current_depth {
+            max_depth = ctx.current_depth;
+            need_extra_projection = false;
+        }
+        // A maximum-depth SRF below the top of its expression forces an extra
+        // Result level for the enclosing scalar expression.
+        if max_depth == ctx.current_depth && !is_srf_call(node) {
+            need_extra_projection = true;
         }
     }
 
     let mut targets: PgVec<'mcx, PtId> = PgVec::new_in(mcx);
     let mut contain_srfs: PgVec<'mcx, bool> = PgVec::new_in(mcx);
-    if !found_srf {
+    if max_depth == 0 {
         targets.push(target);
         contain_srfs.push(false);
         return Ok((targets, contain_srfs));
     }
 
-    let mut items = srf_items;
-    for &(id, sgref) in top_items.iter() {
-        merge_item(run, id, sgref, &mut items);
+    if need_extra_projection {
+        ctx.level_srfs.push(PgVec::new_in(mcx));
+        let civ = core::mem::replace(&mut ctx.current_input_vars, PgVec::new_in(mcx));
+        let cis = core::mem::replace(&mut ctx.current_input_srfs, PgVec::new_in(mcx));
+        ctx.level_input_vars.push(civ);
+        ctx.level_input_srfs.push(cis);
+    } else {
+        let civ = core::mem::replace(&mut ctx.current_input_vars, PgVec::new_in(mcx));
+        let cis = core::mem::replace(&mut ctx.current_input_srfs, PgVec::new_in(mcx));
+        ctx.level_input_vars[max_depth].extend(civ.iter().copied());
+        ctx.level_input_srfs[max_depth].extend(cis.iter().copied());
     }
-    let mut input = PathTarget::new(mcx);
-    let mut any_sgref = false;
-    for &(id, sgref) in items.iter() {
-        let node = *run.root.expr_node(id);
-        if node.node_tag() != NodeTag::T_Var {
-            let cost = crate::costsize::cost_qual_eval_node(node)?;
-            input.cost.startup += cost.startup;
-            input.cost.per_tuple += cost.per_tuple;
-        }
-        input.exprs.push(id);
-        input.sortgrouprefs.push(sgref);
-        any_sgref |= sgref != 0;
-    }
-    if !any_sgref {
-        input.sortgrouprefs.clear();
-    }
-    let input_id = run.root.alloc_pathtarget(input);
-    let mut tuple_width: i64 = 0;
-    for i in 0..run.root.pathtarget(input_id).exprs.len() {
-        let expr = run.root.pathtarget(input_id).exprs[i];
-        tuple_width += crate::costsize::get_expr_width(run, expr)? as i64;
-    }
-    run.root.pathtarget_mut(input_id).width = crate::costsize::clamp_width_est(tuple_width);
 
-    targets.push(input_id);
-    targets.push(target);
-    contain_srfs.push(false);
-    contain_srfs.push(true);
+    let nlevels = ctx.level_srfs.len();
+    let mut prev_level_exprs: PgVec<'mcx, NodeId> = PgVec::new_in(mcx);
+    for lvl in 0..nlevels {
+        let has_srfs = !ctx.level_srfs[lvl].is_empty();
+        let tid = if lvl == nlevels - 1 {
+            target
+        } else {
+            let mut items: PgVec<'mcx, SpItem<'mcx>> = PgVec::new_in(mcx);
+            for &it in ctx.level_srfs[lvl].iter() {
+                add_sp_item(&mut items, it);
+            }
+            for j in (lvl + 1)..nlevels {
+                for &it in ctx.level_input_vars[j].iter() {
+                    add_sp_item(&mut items, it);
+                }
+            }
+            // SRFs computed at earlier levels and needed later propagate only
+            // if the previous level actually emitted them.
+            for j in (lvl + 1)..nlevels {
+                for &it in ctx.level_input_srfs[j].iter() {
+                    let member = prev_level_exprs
+                        .iter()
+                        .any(|&id| types_nodes::equal(*run.root.expr_node(id), it.0));
+                    if member {
+                        add_sp_item(&mut items, it);
+                    }
+                }
+            }
+            build_level_pathtarget(run, &items)?
+        };
+        prev_level_exprs =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.pathtarget(tid).exprs);
+        targets.push(tid);
+        contain_srfs.push(has_srfs);
+    }
     Ok((targets, contain_srfs))
 }
 
-// add_sp_item_to_pathtarget dedup: equal() merges, zero sortgroupref
-// acquires a nonzero one, conflicting nonzero refs stay separate.
-fn collect_input_items<'mcx>(
-    run: &mut PlannerRun<'mcx>,
-    node: Node<'mcx>,
-    sgref: u32,
-    items: &mut PgVec<'mcx, (types_pathnodes::NodeId, u32)>,
-) -> PgResult<()> {
-    let vars = vars::pull_var_clause(
-        run.mcx,
-        node,
-        vars::PVC_INCLUDE_AGGREGATES | vars::PVC_INCLUDE_WINDOWFUNCS | vars::PVC_INCLUDE_PLACEHOLDERS,
-    )?;
-    let whole_is_var = node.node_tag() == NodeTag::T_Var;
-    for v in &vars {
-        let item_sgref = if whole_is_var { sgref } else { 0 };
-        let id = run.intern_expr(v);
-        merge_item(run, id, item_sgref, items);
+// add_sp_item_to_pathtarget (tlist.c) dedup: equal() merges unless both
+// sortgrouprefs are nonzero and differ; a merge acquires a nonzero ref.
+fn add_sp_item<'mcx>(items: &mut PgVec<'mcx, SpItem<'mcx>>, item: SpItem<'mcx>) {
+    for existing in items.iter_mut() {
+        if (item.1 == existing.1 || item.1 == 0 || existing.1 == 0)
+            && types_nodes::equal(existing.0, item.0)
+        {
+            if item.1 != 0 {
+                existing.1 = item.1;
+            }
+            return;
+        }
     }
-    Ok(())
+    items.push(item);
 }
 
-fn merge_item<'mcx>(
-    run: &PlannerRun<'mcx>,
-    id: types_pathnodes::NodeId,
-    sgref: u32,
-    items: &mut PgVec<'mcx, (types_pathnodes::NodeId, u32)>,
-) {
-    for existing in items.iter_mut() {
-        if !types_nodes::equal(*run.root.expr_node(existing.0), *run.root.expr_node(id)) {
-            continue;
+// set_pathtarget_cost_width (costsize.c), as create_pathtarget.
+fn build_level_pathtarget<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    items: &PgVec<'mcx, SpItem<'mcx>>,
+) -> PgResult<PtId> {
+    let mcx = run.mcx;
+    let mut t = PathTarget::new(mcx);
+    let mut any_sgref = false;
+    for &(node, sgref) in items.iter() {
+        if node.node_tag() != NodeTag::T_Var {
+            let cost = crate::costsize::cost_qual_eval_node(node)?;
+            t.cost.startup += cost.startup;
+            t.cost.per_tuple += cost.per_tuple;
         }
-        if existing.1 == 0 {
-            existing.1 = sgref;
-            return;
-        }
-        if sgref == 0 || sgref == existing.1 {
-            return;
-        }
+        t.exprs.push(run.intern_expr(node));
+        t.sortgrouprefs.push(sgref);
+        any_sgref |= sgref != 0;
     }
-    items.push((id, sgref));
+    if !any_sgref {
+        t.sortgrouprefs.clear();
+    }
+    let id = run.root.alloc_pathtarget(t);
+    let mut tuple_width: i64 = 0;
+    for i in 0..run.root.pathtarget(id).exprs.len() {
+        let expr = run.root.pathtarget(id).exprs[i];
+        tuple_width += crate::costsize::get_expr_width(run, expr)? as i64;
+    }
+    run.root.pathtarget_mut(id).width = crate::costsize::clamp_width_est(tuple_width);
+    Ok(id)
 }
 
 // adjust_paths_for_srfs (planner.c); cheapest pointers refreshed by the
@@ -164,33 +244,31 @@ pub fn adjust_paths_for_srfs<'mcx>(
     for (i, path_id) in paths.iter().enumerate() {
         debug_assert!(run.root.path(*path_id).base().param_info.is_none());
         let mut newpath = *path_id;
-        for (lvl, &target) in targets.iter().enumerate().skip(1) {
+        for (lvl, &target) in targets.iter().enumerate() {
             newpath = if targets_contain_srfs[lvl] {
                 let p = crate::pathnode::create_set_projection_path(run, rel_id, newpath, target)?;
                 run.root.alloc_path(p)
             } else {
-                panic!(
-                    "adjust_paths_for_srfs (planner.c): SRF-free upper level \
-                     (apply_projection_to_path leg) unreachable on the depth-1 slice"
-                );
+                crate::pathnode::apply_projection_to_path(run, rel_id, newpath, target)?
             };
         }
         run.root.rel_mut(rel_id).pathlist[i] = newpath;
     }
-    // Likewise for partial paths (C's second loop; same treatment).
+    // Likewise for partial paths (C's second loop); the SRF-free levels avoid
+    // apply_projection_to_path in case of multiple refs, as C.
     let partials =
         crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel_id).partial_pathlist);
     for (i, path_id) in partials.iter().enumerate() {
         let mut newpath = *path_id;
-        for (lvl, &target) in targets.iter().enumerate().skip(1) {
+        for (lvl, &target) in targets.iter().enumerate() {
             newpath = if targets_contain_srfs[lvl] {
                 let p = crate::pathnode::create_set_projection_path(run, rel_id, newpath, target)?;
                 run.root.alloc_path(p)
             } else {
-                panic!(
-                    "adjust_paths_for_srfs (planner.c): SRF-free upper level \
-                     (apply_projection_to_path leg) unreachable on the depth-1 slice"
-                );
+                let safe = crate::is_parallel_safe_exprs(run, target)?;
+                let p =
+                    crate::pathnode::create_projection_path(run, rel_id, newpath, target, safe);
+                run.root.alloc_path(p)
             };
         }
         run.root.rel_mut(rel_id).partial_pathlist[i] = newpath;
