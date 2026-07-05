@@ -862,7 +862,10 @@ fn match_clause_to_indexcol<'mcx>(
             match_saopclause_to_indexcol(run, rinfo, indexcol, index)
         }
         NodeTag::T_ScalarArrayOpExpr => Ok(None),
-        // RowCompare/NullTest/OR can't be built by the live qual lane.
+        NodeTag::T_BoolExpr if clauses::is_orclause(clause) => {
+            match_orclause_to_indexcol(run, rinfo, indexcol, index)
+        }
+        // RowCompare can't be built by the live qual lane.
         _ => Ok(None),
     }
 }
@@ -980,6 +983,125 @@ fn match_saopclause_to_indexcol<'mcx>(
         }));
     }
     Ok(None)
+}
+
+// match_orclause_to_indexcol (indxpath.c): an OR of "indexkey op constant"
+// arms sharing one operator/collation folds to a non-lossy SAOP indexqual.
+fn match_orclause_to_indexcol<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    indexcol: usize,
+    index: &IndexOptInfo<'mcx>,
+) -> PgResult<Option<IndexClause<'mcx>>> {
+    use nodes_core::node_funcs::expr_type;
+    use types_core::catalog::RECORDOID;
+    let mcx = run.mcx;
+    if !index.amsearcharray {
+        return Ok(None);
+    }
+    let index_relid = run.root.rel(index.rel.expect("index rel set")).relid as i32;
+    let orclause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+
+    let mut consts = types_nodes::NodeList::nil();
+    let mut index_expr: Option<Node<'mcx>> = None;
+    let mut match_opno = 0;
+    let mut consttype = 0;
+    let mut inputcollid = 0;
+    let mut first_time = true;
+    let mut have_non_const = false;
+    let mut complete = true;
+    for arg in &orclause.as_bool_expr().expect("OR clause").args {
+        let Some(sub) = arg.as_op_expr() else {
+            complete = false;
+            break;
+        };
+        let mut opno = sub.opno;
+        if sub.args.len() != 2 {
+            complete = false;
+            break;
+        }
+        let leftop = sub.args.nth(0);
+        let rightop = sub.args.nth(1);
+        let const_expr;
+        if match_index_to_operand(run, leftop, indexcol, index)
+            && !vars::pull_varnos(mcx, rightop)?.is_member(index_relid)
+            && !clauses::contain_volatile_functions(rightop)?
+        {
+            index_expr = Some(leftop);
+            const_expr = rightop;
+        } else if match_index_to_operand(run, rightop, indexcol, index)
+            && !vars::pull_varnos(mcx, leftop)?.is_member(index_relid)
+            && !clauses::contain_volatile_functions(leftop)?
+        {
+            opno = lsyscache::get_commutator(opno)?;
+            if opno == 0 {
+                complete = false;
+                break;
+            }
+            index_expr = Some(rightop);
+            const_expr = leftop;
+        } else {
+            complete = false;
+            break;
+        }
+
+        if first_time {
+            match_opno = opno;
+            consttype = expr_type(const_expr);
+            let arraytype = lsyscache::get_array_type(consttype)?;
+            inputcollid = sub.inputcollid;
+            if !index_coll_matches_expr_coll(index.indexcollations[indexcol], inputcollid)
+                || !lsyscache::op_in_opfamily(match_opno, index.opfamily[indexcol])?
+                || arraytype == 0
+                || consttype == RECORDOID
+                || expr_type(index_expr.unwrap()) == RECORDOID
+            {
+                complete = false;
+                break;
+            }
+            first_time = false;
+        } else if match_opno != opno
+            || inputcollid != sub.inputcollid
+            || consttype != expr_type(const_expr)
+        {
+            complete = false;
+            break;
+        }
+
+        if const_expr.as_const().is_none() {
+            have_non_const = true;
+        }
+        consts.lappend(mcx, const_expr)?;
+    }
+    if !complete {
+        return Ok(None);
+    }
+    let Some(index_expr) = index_expr else {
+        return Ok(None);
+    };
+
+    let saop = clauses::make_saop_expr(
+        mcx,
+        match_opno,
+        index_expr,
+        consttype,
+        inputcollid,
+        inputcollid,
+        consts,
+        have_non_const,
+    )?
+    .expect("array type verified on the first arm");
+    let mut indexquals = PgVec::new_in(mcx);
+    indexquals.push(planner_seams::make_restrictinfo::call(
+        run, saop, true, false, false, false, 0, None, None, None,
+    )?);
+    Ok(Some(IndexClause {
+        rinfo: Some(rinfo),
+        indexquals,
+        lossy: false,
+        indexcol: indexcol as i16,
+        indexcols: PgVec::new_in(mcx),
+    }))
 }
 
 // get_index_clause_from_support (indxpath.c): closed-set dispatch on the
@@ -1574,31 +1696,58 @@ pub fn or_arm_rinfo<'mcx>(
     )
 }
 
-// group_similar_or_args (indxpath.c): only the ungrouped outcome is live —
-// two similar arms (same indexable column/operator/collation) would be fused
-// into an SAOP-matchable sub-rinfo, which is the OR-to-SAOP lane.
-fn assert_no_similar_or_groups<'mcx>(
+enum OrArm<'mcx> {
+    Simple(RinfoId),
+    And(PgVec<'mcx, RinfoId>),
+    Group {
+        rinfo: RinfoId,
+        arm_rids: PgVec<'mcx, RinfoId>,
+    },
+}
+
+// group_similar_or_args (indxpath.c) over pre-built arm rinfos; the bool is
+// C's "some arm matched an index" (groupedArgs != orargs), which gates the
+// caller's inner_other_clauses rebuild.
+fn group_similar_or_args<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
-    arm_rinfos: &[RinfoId],
-) -> PgResult<()> {
-    #[derive(Clone, Copy, PartialEq)]
-    struct Key {
-        indexnum: usize,
-        colnum: usize,
+    parent: RinfoId,
+    mut arms: PgVec<'mcx, Option<OrArm<'mcx>>>,
+) -> PgResult<(PgVec<'mcx, OrArm<'mcx>>, bool)> {
+    let mcx = run.mcx;
+    let relid = run.root.rel(rel).relid as i32;
+    let n = arms.len();
+
+    #[derive(Clone, Copy)]
+    struct OrArgIndexMatch {
+        indexnum: i32,
+        colnum: i32,
         opno: u32,
         inputcollid: u32,
+        argindex: i32,
+        groupindex: i32,
     }
-    let relid = run.root.rel(rel).relid as i32;
-    let mut keys: PgVec<'mcx, Option<Key>> = PgVec::new_in(run.mcx);
-    for &rid in arm_rinfos {
+    let mut matches: PgVec<'mcx, OrArgIndexMatch> = PgVec::new_in(mcx);
+    let mut matched = false;
+    for i in 0..n {
+        let mut m = OrArgIndexMatch {
+            indexnum: -1,
+            colnum: -1,
+            opno: 0,
+            inputcollid: 0,
+            argindex: i as i32,
+            groupindex: i as i32,
+        };
+        matches.push(m);
+        let Some(OrArm::Simple(rid)) = &arms[i] else {
+            continue;
+        };
+        let rid = *rid;
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         let Some(op) = clause.as_op_expr() else {
-            keys.push(None);
             continue;
         };
         if op.args.len() != 2 {
-            keys.push(None);
             continue;
         }
         let strip = |mut n: Node<'mcx>| {
@@ -1620,17 +1769,14 @@ fn assert_no_similar_or_groups<'mcx>(
             if in_right && !in_left && !clauses::contain_volatile_functions(leftop)? {
                 let comm = lsyscache::get_commutator(op.opno)?;
                 if comm == 0 {
-                    keys.push(None);
                     continue;
                 }
                 (comm, rightop)
             } else if in_left && !in_right && !clauses::contain_volatile_functions(rightop)? {
                 (op.opno, leftop)
             } else {
-                keys.push(None);
                 continue;
             };
-        let mut key = None;
         let nindexes = run.root.rel(rel).indexlist.len();
         'indexes: for indexnum in 0..nindexes {
             let index = run.root.rel(rel).indexlist[indexnum];
@@ -1639,30 +1785,125 @@ fn assert_no_similar_or_groups<'mcx>(
             }
             for colnum in 0..index.nkeycolumns as usize {
                 if match_index_to_operand(run, nonconst, colnum, index) {
-                    key = Some(Key {
-                        indexnum,
-                        colnum,
-                        opno,
-                        inputcollid: op.inputcollid,
-                    });
+                    m.indexnum = indexnum as i32;
+                    m.colnum = colnum as i32;
+                    m.opno = opno;
+                    m.inputcollid = op.inputcollid;
+                    matched = true;
                     break 'indexes;
                 }
             }
         }
-        keys.push(key);
+        matches[i] = m;
     }
-    for i in 0..keys.len() {
-        let Some(k) = keys[i] else { continue };
-        for j in i + 1..keys.len() {
-            if keys[j] == Some(k) {
-                panic!(
-                    "group_similar_or_args (indxpath.c): similar OR arms; \
-                     M2 OR-to-SAOP lane (match_orclause_to_indexcol)"
-                );
-            }
+
+    if !matched {
+        let mut result: PgVec<'mcx, OrArm<'mcx>> = PgVec::new_in(mcx);
+        for slot in arms.iter_mut() {
+            result.push(slot.take().expect("arm present"));
+        }
+        return Ok((result, false));
+    }
+
+    // C's index-only loop counts indexnum over amhasgetbitmap+amsearcharray
+    // indexes only when none matched earlier; the numbering above counts all
+    // indexes, which is an equally consistent grouping key.
+    matches.sort_unstable_by_key(|m| (m.indexnum, m.colnum, m.opno, m.inputcollid, m.argindex));
+    for i in 1..n {
+        if matches[i].indexnum == matches[i - 1].indexnum
+            && matches[i].colnum == matches[i - 1].colnum
+            && matches[i].opno == matches[i - 1].opno
+            && matches[i].inputcollid == matches[i - 1].inputcollid
+            && matches[i].indexnum != -1
+        {
+            let g = matches[i - 1].groupindex;
+            matches[i].groupindex = g;
         }
     }
-    Ok(())
+    matches.sort_unstable_by_key(|m| (m.groupindex, m.argindex));
+
+    let mut result: PgVec<'mcx, OrArm<'mcx>> = PgVec::new_in(mcx);
+    let mut group_start = 0usize;
+    for i in 1..=n {
+        let boundary = i == n
+            || matches[i].indexnum != matches[group_start].indexnum
+            || matches[i].colnum != matches[group_start].colnum
+            || matches[i].opno != matches[group_start].opno
+            || matches[i].inputcollid != matches[group_start].inputcollid
+            || matches[i].indexnum == -1;
+        if !boundary {
+            continue;
+        }
+        if i - group_start == 1 {
+            let arm = arms[matches[group_start].argindex as usize]
+                .take()
+                .expect("arm consumed once");
+            result.push(arm);
+        } else {
+            let mut or_args = types_nodes::NodeList::nil();
+            let mut arm_rids: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+            for j in group_start..i {
+                let arm = arms[matches[j].argindex as usize]
+                    .take()
+                    .expect("arm consumed once");
+                let OrArm::Simple(arid) = arm else {
+                    unreachable!("grouped arms are simple op arms")
+                };
+                or_args.lappend(mcx, *run.root.expr_node(run.root.rinfo(arid).clause))?;
+                arm_rids.push(arid);
+            }
+            let or_node = clauses::make_orclause(mcx, or_args)?;
+            let sub = or_arm_rinfo(run, parent, or_node)?;
+            result.push(OrArm::Group {
+                rinfo: sub,
+                arm_rids,
+            });
+        }
+        group_start = i;
+    }
+    Ok((result, true))
+}
+
+// make_bitmap_paths_for_or_group (indxpath.c).
+fn make_bitmap_paths_for_or_group<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    ri: RinfoId,
+    arm_rids: &[RinfoId],
+    other_clauses: &[RinfoId],
+) -> PgResult<PgVec<'mcx, PathId>> {
+    let mcx = run.mcx;
+    let mut jointlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut jointcost = 0.0f64;
+    let indlist = build_paths_for_or(run, rel, core::slice::from_ref(&ri), other_clauses)?;
+    if !indlist.is_empty() {
+        let bq = choose_bitmap_and(run, rel, &indlist)?;
+        jointcost = run.root.path(bq).base().total_cost;
+        jointlist.push(bq);
+    }
+    if !jointlist.is_empty() && other_clauses.is_empty() {
+        return Ok(jointlist);
+    }
+    let mut splitlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut splitcost = 0.0f64;
+    let mut split_ok = true;
+    for &arid in arm_rids {
+        let indlist = build_paths_for_or(run, rel, core::slice::from_ref(&arid), other_clauses)?;
+        if indlist.is_empty() {
+            split_ok = false;
+            break;
+        }
+        let bq = choose_bitmap_and(run, rel, &indlist)?;
+        splitcost += run.root.path(bq).base().total_cost;
+        splitlist.push(bq);
+    }
+    if !split_ok || splitlist.is_empty() {
+        Ok(jointlist)
+    } else if !jointlist.is_empty() && jointcost < splitcost {
+        Ok(jointlist)
+    } else {
+        Ok(splitlist)
+    }
 }
 
 // build_paths_for_OR (indxpath.c).
@@ -1747,12 +1988,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
             continue;
         }
 
-        enum Arm<'mcx> {
-            Simple(RinfoId),
-            And(PgVec<'mcx, RinfoId>),
-        }
-        let mut arms: PgVec<'mcx, Arm<'mcx>> = PgVec::new_in(mcx);
-        let mut simple_rids: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+        let mut prearms: PgVec<'mcx, Option<OrArm<'mcx>>> = PgVec::new_in(mcx);
         for arg in &clause.as_bool_expr().expect("OR clause").args {
             if clauses::is_andclause(arg) {
                 let mut andargs: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
@@ -1760,27 +1996,46 @@ pub fn generate_bitmap_or_paths<'mcx>(
                     debug_assert!(!clauses::is_andclause(a), "unflattened AND");
                     andargs.push(or_arm_rinfo(run, rid, a)?);
                 }
-                arms.push(Arm::And(andargs));
+                prearms.push(Some(OrArm::And(andargs)));
             } else {
-                let arid = or_arm_rinfo(run, rid, arg)?;
-                simple_rids.push(arid);
-                arms.push(Arm::Simple(arid));
+                prearms.push(Some(OrArm::Simple(or_arm_rinfo(run, rid, arg)?)));
             }
         }
-        assert_no_similar_or_groups(run, rel, &simple_rids)?;
+        let (arms, grouped) = group_similar_or_args(run, rel, rid, prearms)?;
+        // Grouped sub-rinfos duplicate rinfo; drop it from the context list so
+        // match_clauses_to_index doesn't build de-facto duplicate iclauses.
+        let mut inner_other_clauses: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+        if grouped {
+            inner_other_clauses.extend(all_clauses.iter().copied().filter(|&x| x != rid));
+        }
 
         let mut pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
         let mut matched_all = true;
         for arm in arms.iter() {
             let indlist = match arm {
-                Arm::And(andargs) => {
+                OrArm::And(andargs) => {
                     let mut il = build_paths_for_or(run, rel, andargs, &all_clauses)?;
                     let sub = generate_bitmap_or_paths(run, rel, andargs, &all_clauses)?;
                     il.extend(sub.iter().copied());
                     il
                 }
-                Arm::Simple(arid) => {
+                OrArm::Simple(arid) => {
                     build_paths_for_or(run, rel, core::slice::from_ref(arid), &all_clauses)?
+                }
+                OrArm::Group { rinfo, arm_rids } => {
+                    let indlist = make_bitmap_paths_for_or_group(
+                        run,
+                        rel,
+                        *rinfo,
+                        arm_rids,
+                        &inner_other_clauses,
+                    )?;
+                    if indlist.is_empty() {
+                        matched_all = false;
+                        break;
+                    }
+                    pathlist.extend(indlist.iter().copied());
+                    continue;
                 }
             };
             if indlist.is_empty() {
