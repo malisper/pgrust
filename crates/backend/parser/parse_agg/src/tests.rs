@@ -616,7 +616,7 @@ fn ungrouped_outer_var_in_sublink_is_42803() {
     assert_eq!(
         err.message(),
         "subquery uses ungrouped column \"t.x\" from outer query"
-
+    );
     assert!(
         err.message().contains("subquery uses ungrouped column \"t.x\" from outer query"),
         "{}",
