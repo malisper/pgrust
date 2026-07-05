@@ -37,7 +37,7 @@ pub use compile::{
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{
-    agg_datum_copy, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_outcome,
+    agg_datum_copy, exec_eval_expr, exec_eval_expr_outcome, exec_project, exec_project_prearmed, exec_project_outcome,
     exec_qual, exec_qual_outcome, EvalOutcome, EvalSlots, QualOutcome, Resume, Suspension,
 };
 pub use steps::{
