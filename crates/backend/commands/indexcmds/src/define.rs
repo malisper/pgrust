@@ -734,6 +734,16 @@ pub fn DefineIndex<'mcx>(
     let root_save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
+    if let Some(comment) = stmt.idxcomment {
+        commands_comment::CreateComments(
+            mcx,
+            indexRelationId,
+            RELATION_RELATION_ID,
+            0,
+            Some(comment),
+        )?;
+    }
+
     if partitioned {
         let recurse = stmt.relation.map(|rv| rv.inh).unwrap_or(true);
         let partdesc = partdesc::RelationGetPartitionDesc(&rel, true)?;

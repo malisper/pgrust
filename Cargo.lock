@@ -6337,6 +6337,7 @@ dependencies = [
  "catalog_storage",
  "clauses",
  "coerce",
+ "commands_comment",
  "commands_tablespace",
  "datum",
  "dbcommands_seams",
