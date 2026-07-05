@@ -376,8 +376,11 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
                 let c = node.as_convert_rowtype_expr().expect("ConvertRowtypeExpr");
                 addrs.push(ObjectAddress::set(TYPE_CLASS, c.resulttype));
             }
+            // C has no SQLValueFunction case: expression_tree_walker leaf,
+            // built-in pinned result types, no dependency recorded.
             T_BoolExpr | T_NullTest | T_BooleanTest | T_CaseExpr | T_CaseWhen
-            | T_CaseTestExpr | T_CoalesceExpr | T_MinMaxExpr | T_ArrayExpr | T_List => {}
+            | T_CaseTestExpr | T_CoalesceExpr | T_MinMaxExpr | T_ArrayExpr | T_List
+            | T_SQLValueFunction => {}
             other => panic!(
                 "find_expr_references_walker (dependency.c): {other:?}; unported lane"
             ),
