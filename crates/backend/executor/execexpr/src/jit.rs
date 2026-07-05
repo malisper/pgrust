@@ -65,6 +65,11 @@ struct HelperEnv {
     slots: *mut (),
     result_slot: *mut (),
     err: Option<Box<PgError>>,
+    // Panic payload caught at the extern "C" boundary: unwinding through a
+    // kernel frame (no unwind info) is a guaranteed abort, so helpers catch
+    // and the driver resumes the unwind on the Rust side (interpreter-
+    // identical panic semantics).
+    panic: Option<Box<dyn core::any::Any + Send>>,
     suspend: Option<(NonNull<()>, u32)>,
 }
 
@@ -254,6 +259,7 @@ pub(crate) fn run_jit<'mcx>(
             None => core::ptr::null_mut(),
         },
         err: None,
+        panic: None,
         suspend: None,
     };
     let mut ctx = JitCtx {
@@ -274,7 +280,12 @@ pub(crate) fn run_jit<'mcx>(
             Ok(EvalOutcome::Done(unsafe { res.read() }))
         }
         RET_DONE_NORETURN => Ok(EvalOutcome::Done(NullableDatum::null())),
-        RET_ERR => Err(env.err.take().expect("jit kernel error without a stashed PgError")),
+        RET_ERR => {
+            if let Some(p) = env.panic.take() {
+                std::panic::resume_unwind(p);
+            }
+            Err(env.err.take().expect("jit kernel error without a stashed PgError"))
+        }
         RET_SUSPEND => {
             let (sstate, step) = env.suspend.take().expect("jit suspend without state");
             // SAFETY: res is the state's live result cell.
@@ -300,15 +311,22 @@ unsafe extern "C" fn jitq_step(env: *mut HelperEnv, ix: u32) -> i64 {
     } else {
         Some(unsafe { &mut *(env.result_slot as *mut SlotData<'static>) })
     };
-    match crate::interp::exec_one_step(state, slots, result_slot, ix) {
-        Ok(crate::interp::StepFlow::Next) => ix as i64 + 1,
-        Ok(crate::interp::StepFlow::Jump(t)) => t as i64,
-        Ok(crate::interp::StepFlow::Suspend(sstate)) => {
+    let r = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        crate::interp::exec_one_step(state, slots, result_slot, ix)
+    }));
+    match r {
+        Ok(Ok(crate::interp::StepFlow::Next)) => ix as i64 + 1,
+        Ok(Ok(crate::interp::StepFlow::Jump(t))) => t as i64,
+        Ok(Ok(crate::interp::StepFlow::Suspend(sstate))) => {
             env.suspend = Some((sstate, ix));
             STEP_SUSPEND
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             env.err = Some(e);
+            STEP_ERR
+        }
+        Err(p) => {
+            env.panic = Some(p);
             STEP_ERR
         }
     }
@@ -350,20 +368,27 @@ unsafe extern "C" fn jitq_call(
         frame: u32::MAX,
         nargs,
     };
-    let r = if fusage {
-        crate::interp::invoke_fusage(&call)
-    } else {
-        crate::interp::invoke(&call)
-    };
+    let r = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        if fusage {
+            crate::interp::invoke_fusage(&call)
+        } else {
+            crate::interp::invoke(&call)
+        }
+    }));
     match r {
-        Ok((value, isnull)) => {
+        Ok(Ok((value, isnull))) => {
             // SAFETY: live out cell.
             unsafe { out.write(NullableDatum { value, isnull }) };
             0
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             // SAFETY: driver-owned env, live for the kernel call.
             unsafe { (*env).err = Some(e) };
+            STEP_ERR
+        }
+        Err(p) => {
+            // SAFETY: as above.
+            unsafe { (*env).panic = Some(p) };
             STEP_ERR
         }
     }
