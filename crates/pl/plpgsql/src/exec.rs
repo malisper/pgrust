@@ -1219,6 +1219,84 @@ impl<'a> Estate<'a> {
         };
         Ok(s.to_string_lossy().into_owned())
     }
+
+    // appendStringInfoStringQuoted(-1) (stringinfo_mb.c): single-quote the
+    // whole value, doubling embedded quotes.
+    fn append_quoted(out: &mut String, s: &str) {
+        out.push('\'');
+        for ch in s.chars() {
+            if ch == '\'' {
+                out.push('\'');
+            }
+            out.push(ch);
+        }
+        out.push('\'');
+    }
+
+    // format_expr_params (pl_exec.c); None when the expr takes no parameters.
+    fn format_expr_params(&mut self, expr: &PlExpr) -> PgResult<Option<String>> {
+        if !self.func.print_strict_params {
+            return Ok(None);
+        }
+        let (paramnos, argtypes) = EXPR_PLANS.with(|t| {
+            let t = t.borrow();
+            let e = t.get(&expr.expr_id).expect("plan ensured");
+            (e.paramnos.clone(), e.argtypes.clone())
+        });
+        if paramnos.is_empty() {
+            return Ok(None);
+        }
+        let mut out = String::new();
+        for (i, &dno) in paramnos.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let refname = match &self.func.datums[dno as usize] {
+                PlDatum::Var(v) => v.refname.clone(),
+                PlDatum::Row(r) => r.refname.clone(),
+                PlDatum::Rec(r) => r.refname.clone(),
+                // C reads ->refname through a PLpgSQL_var cast; a recfield's
+                // same-offset member is its fieldname.
+                PlDatum::RecField(f) => f.fieldname.clone(),
+            };
+            out.push_str(&refname);
+            out.push_str(" = ");
+            let (v, isnull) = self.datum_as_param(dno)?;
+            if isnull {
+                out.push_str("NULL");
+            } else {
+                let sv = self.convert_value_to_string(v, argtypes[dno as usize])?;
+                Self::append_quoted(&mut out, &sv);
+            }
+        }
+        Ok(Some(out))
+    }
+
+    // format_preparedparamsdata (pl_exec.c) over EXECUTE USING values.
+    fn format_prepared_params(
+        &mut self,
+        ptypes: &[Oid],
+        pvalues: &[Datum],
+        pnulls: &[bool],
+    ) -> PgResult<Option<String>> {
+        if !self.func.print_strict_params || ptypes.is_empty() {
+            return Ok(None);
+        }
+        let mut out = String::new();
+        for i in 0..ptypes.len() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("${} = ", i + 1));
+            if pnulls[i] {
+                out.push_str("NULL");
+            } else {
+                let sv = self.convert_value_to_string(pvalues[i], ptypes[i])?;
+                Self::append_quoted(&mut out, &sv);
+            }
+        }
+        Ok(Some(out))
+    }
 }
 
 // exec_simple_check_plan's Result-node test on the built plan; returns the
@@ -2684,6 +2762,14 @@ impl<'a> Estate<'a> {
     }
 
     fn exec_stmt_assert(&mut self, cond: &PlExpr, message: Option<&PlExpr>) -> PgResult<i32> {
+        // plpgsql_check_asserts: DefineCustomBoolVariable is the extension-GUC
+        // lane; the SET-created placeholder carries the session value and an
+        // unset name means C's default (true).
+        let enabled = guc::GetConfigOption("plpgsql.check_asserts", true, false)?
+            .map_or(true, |v| !matches!(v.as_str(), "off" | "false" | "no" | "0" | "f" | "n"));
+        if !enabled {
+            return Ok(RC_OK);
+        }
         let (value, isnull) = self.exec_eval_boolean(cond)?;
         self.exec_eval_cleanup();
         if isnull || !value {
@@ -2787,25 +2873,27 @@ impl<'a> Estate<'a> {
             if n == 0 {
                 if strict {
                     let _ = spi::SPI_freetuptable(tuptab);
-                    return Err(Box::new(
-                        elog::ereport(ERROR)
-                            .errcode(types_error::ERRCODE_NO_DATA_FOUND)
-                            .errmsg("query returned no rows")
-                            .into_error(),
-                    ));
+                    let mut b = elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_NO_DATA_FOUND)
+                        .errmsg("query returned no rows");
+                    if let Some(d) = self.format_expr_params(expr)? {
+                        b = b.errdetail_internal(format!("parameters: {d}"));
+                    }
+                    return Err(Box::new(b.into_error()));
                 }
                 self.move_row_null(target, tuptab)?;
                 let _ = spi::SPI_freetuptable(tuptab);
             } else {
                 if n > 1 && (strict || mod_stmt) {
                     let _ = spi::SPI_freetuptable(tuptab);
-                    return Err(Box::new(
-                        elog::ereport(ERROR)
-                            .errcode(types_error::ERRCODE_TOO_MANY_ROWS)
-                            .errmsg("query returned more than one row")
-                            .errhint("Make sure the query returns a single row, or use LIMIT 1.")
-                            .into_error(),
-                    ));
+                    let mut b = elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_TOO_MANY_ROWS)
+                        .errmsg("query returned more than one row")
+                        .errhint("Make sure the query returns a single row, or use LIMIT 1.");
+                    if let Some(d) = self.format_expr_params(expr)? {
+                        b = b.errdetail_internal(format!("parameters: {d}"));
+                    }
+                    return Err(Box::new(b.into_error()));
                 }
                 self.move_row_from_tuptable(target, tuptab, 0)?;
                 let _ = spi::SPI_freetuptable(tuptab);
@@ -3176,24 +3264,26 @@ impl<'a> Estate<'a> {
             if n == 0 {
                 if strict {
                     let _ = spi::SPI_freetuptable(tuptab);
-                    return Err(Box::new(
-                        elog::ereport(ERROR)
-                            .errcode(types_error::ERRCODE_NO_DATA_FOUND)
-                            .errmsg("query returned no rows")
-                            .into_error(),
-                    ));
+                    let mut b = elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_NO_DATA_FOUND)
+                        .errmsg("query returned no rows");
+                    if let Some(d) = self.format_prepared_params(&ptypes, &pvalues, &pnulls)? {
+                        b = b.errdetail_internal(format!("parameters: {d}"));
+                    }
+                    return Err(Box::new(b.into_error()));
                 }
                 self.move_row_null(target, tuptab)?;
                 let _ = spi::SPI_freetuptable(tuptab);
             } else {
                 if n > 1 && strict {
                     let _ = spi::SPI_freetuptable(tuptab);
-                    return Err(Box::new(
-                        elog::ereport(ERROR)
-                            .errcode(types_error::ERRCODE_TOO_MANY_ROWS)
-                            .errmsg("query returned more than one row")
-                            .into_error(),
-                    ));
+                    let mut b = elog::ereport(ERROR)
+                        .errcode(types_error::ERRCODE_TOO_MANY_ROWS)
+                        .errmsg("query returned more than one row");
+                    if let Some(d) = self.format_prepared_params(&ptypes, &pvalues, &pnulls)? {
+                        b = b.errdetail_internal(format!("parameters: {d}"));
+                    }
+                    return Err(Box::new(b.into_error()));
                 }
                 self.move_row_from_tuptable(target, tuptab, 0)?;
                 let _ = spi::SPI_freetuptable(tuptab);

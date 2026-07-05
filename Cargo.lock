@@ -10536,6 +10536,7 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "funcapi",
+ "guc",
  "guc_tables",
  "heaptuple",
  "init_small",

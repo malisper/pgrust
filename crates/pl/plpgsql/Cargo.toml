@@ -27,6 +27,7 @@ fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 format_type = { path = "../../backend/utils/adt/format_type" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
+guc = { path = "../../backend/utils/misc/guc" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 mcx = { path = "../../_support/mcx" }
