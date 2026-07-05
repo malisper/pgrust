@@ -66,13 +66,9 @@ impl<'mcx> Parser<'mcx> {
                 || t == tokens::NOT
                 || t == tokens::NULLS_P
                 || t == tokens::WITH
-                || t == tokens::WITHOUT => {}
-            t if t == tokens::UIDENT || t == tokens::USCONST => {
-                panic!(
-                    "gram_core: UIDENT/USCONST merge (parser.c base_yylex UESCAPE \
-                     + str_udeescape) not ported"
-                )
-            }
+                || t == tokens::WITHOUT
+                || t == tokens::UIDENT
+                || t == tokens::USCONST => {}
             _ => return Ok(cur_tok),
         }
 
@@ -106,9 +102,67 @@ impl<'mcx> Parser<'mcx> {
                 tokens::WITH_LA
             }
             t if t == tokens::WITHOUT && next_tok == tokens::TIME => tokens::WITHOUT_LA,
+            t if t == tokens::UIDENT || t == tokens::USCONST => {
+                let escape = if next_tok == tokens::UESCAPE {
+                    let mut esc_val = YYSTYPE::None;
+                    let mut esc_loc = 0;
+                    let esc_tok = self.next_token(&mut esc_val, &mut esc_loc)?;
+                    if esc_tok != tokens::SCONST {
+                        return Err(self.syntax_error(
+                            "UESCAPE must be followed by a simple string literal",
+                            esc_loc,
+                        ));
+                    }
+                    let escstr = esc_val.str_val().as_bytes();
+                    if escstr.len() != 1
+                        || !parser_small1::udeescape::check_uescapechar(escstr[0])
+                    {
+                        return Err(
+                            self.syntax_error("invalid Unicode escape character", esc_loc)
+                        );
+                    }
+                    // All three tokens consumed (C clears have_lookahead).
+                    self.have_lookahead = false;
+                    escstr[0]
+                } else {
+                    b'\\'
+                };
+                let raw = mem::take(lvalp).str_val();
+                let mut decoded = parser_small1::udeescape::str_udeescape(
+                    self.mcx,
+                    raw.as_bytes(),
+                    escape,
+                    *llocp,
+                    self.settings.encoding,
+                )
+                .map_err(|e| self.udeescape_error(e))?;
+                let out_tok = if t == tokens::UIDENT {
+                    parser_small1::truncate_identifier(
+                        &mut decoded,
+                        true,
+                        self.settings.encoding,
+                    )?;
+                    tokens::IDENT
+                } else {
+                    tokens::SCONST
+                };
+                let s = mcx::vec_borrow_in(self.mcx, decoded)?;
+                // SAFETY: str_udeescape emits server-encoding (UTF-8) bytes.
+                *lvalp = YYSTYPE::Str(unsafe { core::str::from_utf8_unchecked(s) });
+                out_tok
+            }
             t => t,
         };
         Ok(merged)
+    }
+
+    #[cold]
+    fn udeescape_error(&self, e: parser_small1::udeescape::UdeescapeError) -> Box<PgError> {
+        let err = self.errposition_error(e.message.to_string(), e.location);
+        match e.hint {
+            Some(h) => Box::new((*err).with_hint(h)),
+            None => err,
+        }
     }
 
     // gram.y parser_yyerror: scanner_yyerror at the current token.
