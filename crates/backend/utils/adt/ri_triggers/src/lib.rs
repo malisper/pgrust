@@ -65,6 +65,7 @@ const CONSTRAINT_FOREIGN: i8 = b'f' as i8;
 #[derive(Clone)]
 struct RiConstraintInfo {
     constraint_id: Oid,
+    constraint_root_id: Oid,
     conname: NameData,
     pk_relid: Oid,
     fk_relid: Oid,
@@ -168,7 +169,7 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
 
     spi::SPI_connect()?;
 
-    let qkey = (riinfo.constraint_id, RI_PLAN_CHECK_LOOKUPPK);
+    let qkey = ri_build_query_key(&riinfo, RI_PLAN_CHECK_LOOKUPPK);
     let qplan = match ri_FetchPreparedPlan(&qkey) {
         Some(p) => p,
         None => {
@@ -273,7 +274,7 @@ fn ri_restrict<'mcx>(
     spi::SPI_connect()?;
 
     let queryno = if is_no_action { RI_PLAN_NO_ACTION } else { RI_PLAN_RESTRICT };
-    let qkey = (riinfo.constraint_id, queryno);
+    let qkey = ri_build_query_key(&riinfo, queryno);
     let qplan = match ri_FetchPreparedPlan(&qkey) {
         Some(p) => p,
         None => {
@@ -399,7 +400,7 @@ fn RI_FKey_cascade_del<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -
 
     spi::SPI_connect()?;
 
-    let qkey = (riinfo.constraint_id, RI_PLAN_CASCADE_ONDELETE);
+    let qkey = ri_build_query_key(&riinfo, RI_PLAN_CASCADE_ONDELETE);
     let qplan = match ri_FetchPreparedPlan(&qkey) {
         Some(p) => p,
         None => {
@@ -461,7 +462,7 @@ fn RI_FKey_cascade_upd<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -
 
     spi::SPI_connect()?;
 
-    let qkey = (riinfo.constraint_id, RI_PLAN_CASCADE_ONUPDATE);
+    let qkey = ri_build_query_key(&riinfo, RI_PLAN_CASCADE_ONUPDATE);
     let qplan = match ri_FetchPreparedPlan(&qkey) {
         Some(p) => p,
         None => {
@@ -541,7 +542,7 @@ fn ri_set<'mcx>(
         (RI_TRIGTYPE_DELETE, false) => RI_PLAN_SETDEFAULT_ONDELETE,
         _ => panic!("invalid tgkind passed to ri_set"),
     };
-    let qkey = (riinfo.constraint_id, queryno);
+    let qkey = ri_build_query_key(&riinfo, queryno);
     let qplan = match ri_FetchPreparedPlan(&qkey) {
         Some(p) => p,
         None => {
@@ -626,7 +627,7 @@ fn ri_Check_Pk_Match<'mcx>(
 
     spi::SPI_connect()?;
 
-    let qkey = (riinfo.constraint_id, RI_PLAN_CHECK_LOOKUPPK_FROM_PK);
+    let qkey = ri_build_query_key(&riinfo, RI_PLAN_CHECK_LOOKUPPK_FROM_PK);
     let qplan = match ri_FetchPreparedPlan(&qkey) {
         Some(p) => p,
         None => {
@@ -1098,12 +1099,15 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
         req(Anum_contype)?.as_i8() == CONSTRAINT_FOREIGN,
         "constraint {constraint_oid} is not a foreign key constraint"
     );
-    if req(Anum_conparentid)?.as_oid() != InvalidOid {
-        unported("partitioned FK constraint root walk");
-    }
 
+    let conparentid = req(Anum_conparentid)?.as_oid();
     let mut info = RiConstraintInfo {
         constraint_id: constraint_oid,
+        constraint_root_id: if conparentid != InvalidOid {
+            get_ri_constraint_root(conparentid)?
+        } else {
+            constraint_oid
+        },
         // SAFETY: conname is a by-ref NAME column of the held syscache tuple.
         conname: unsafe { *(req(Anum_conname)?.as_usize() as *const NameData) },
         pk_relid: req(Anum_confrelid)?.as_oid(),
@@ -1481,15 +1485,46 @@ fn ri_ReportViolation<'mcx>(
     }
 }
 
-fn datum_output_text<'mcx>(_mcx: Mcx<'mcx>, typid: Oid, d: Datum) -> PgResult<String> {
+fn datum_output_text<'mcx>(mcx: Mcx<'mcx>, typid: Oid, d: Datum) -> PgResult<String> {
     let (typoutput, _typisvarlena) = lsyscache::typ::getTypeOutputInfo(typid)?;
     let mut finfo = fmgr_seams::fmgr_info::call(typoutput)?;
     let mut fcinfo = types_fmgr::LocalFcinfo::<1>::fresh(InvalidOid);
+    // range/multirange output fns build the text through the result mcx.
+    // SAFETY: mcx outlives this call.
+    unsafe { fcinfo.set_result_mcx(mcx) };
     fcinfo.set_arg(0, d);
     let out = finfo.invoke(&mut fcinfo)?;
     // SAFETY: type output functions return a NUL-terminated cstring datum.
     let cs = unsafe { core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char) };
     Ok(core::str::from_utf8(cs.to_bytes()).expect("server encoding").to_string())
+}
+
+// get_ri_constraint_root (ri_triggers.c): walk conparentid to the topmost
+// constraint.
+fn get_ri_constraint_root(mut constr_oid: Oid) -> PgResult<Oid> {
+    use cache_syscache::{SearchSysCache1, SysCacheGetAttr, SysCacheKey, CONSTROID};
+    loop {
+        let tup = SearchSysCache1(CONSTROID, SysCacheKey::Value(Datum::from_oid(constr_oid)))?
+            .unwrap_or_else(|| panic!("cache lookup failed for constraint {constr_oid}"));
+        let (d, isnull) = SysCacheGetAttr(CONSTROID, &tup, 12)?;
+        assert!(!isnull, "null conparentid");
+        let parent = d.as_oid();
+        if parent == InvalidOid {
+            return Ok(constr_oid);
+        }
+        constr_oid = parent;
+    }
+}
+
+// ri_BuildQueryKey (ri_triggers.c): inherited constraints share plans via the
+// root constraint OID, except LOOKUPPK_FROM_PK (which queries the fired-on
+// table itself).
+fn ri_build_query_key(riinfo: &RiConstraintInfo, queryno: i32) -> (Oid, i32) {
+    if queryno != RI_PLAN_CHECK_LOOKUPPK_FROM_PK {
+        (riinfo.constraint_root_id, queryno)
+    } else {
+        (riinfo.constraint_id, queryno)
+    }
 }
 
 fn ri_NullCheck(
