@@ -198,11 +198,13 @@ impl<'mcx> ModifyTableState<'mcx> {
 }
 
 // ExecInitMerge's per-statement state: ri_MergeActions split by match kind
-// (NOT MATCHED BY SOURCE is loud in the planner, so two lists) and a NULL
-// ri_MergeJoinCondition (non-NULL only with BY SOURCE actions).
+// plus ri_MergeJoinCondition (non-NULL only with BY SOURCE actions; rechecked
+// above the join to split MATCHED from NOT MATCHED BY SOURCE).
 struct MergeState<'mcx> {
     matched_actions: mcx::PgVec<'mcx, MergeActionExec<'mcx>>,
     not_matched_actions: mcx::PgVec<'mcx, MergeActionExec<'mcx>>,
+    not_matched_by_source_actions: mcx::PgVec<'mcx, MergeActionExec<'mcx>>,
+    join_condition: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 // MergeActionState: INSERT carries a full-tuple projection; UPDATE the
@@ -680,11 +682,11 @@ fn init_result_rel<'mcx>(
                 .nth(i)
                 .as_list()
                 .expect("mergeJoinConditions cell is a List");
-            assert!(
-                jc.is_nil(),
-                "ExecInitMerge (nodeModifyTable.c): non-NULL merge join condition \
-                 (NOT MATCHED BY SOURCE) not ported"
-            );
+            let join_condition = if jc.is_nil() {
+                None
+            } else {
+                execexpr::exec_init_qual(mcx, jc, estate.param_bind())?
+            };
             let (kind, desc) = {
                 let rel = estate.es_relations[(rti - 1) as usize]
                     .as_ref()
@@ -704,6 +706,8 @@ fn init_result_rel<'mcx>(
             let mut matched_actions: mcx::PgVec<'mcx, MergeActionExec<'mcx>> =
                 mcx::PgVec::new_in(mcx);
             let mut not_matched_actions: mcx::PgVec<'mcx, MergeActionExec<'mcx>> =
+                mcx::PgVec::new_in(mcx);
+            let mut not_matched_by_source_actions: mcx::PgVec<'mcx, MergeActionExec<'mcx>> =
                 mcx::PgVec::new_in(mcx);
             let mal = node
                 .mergeActionLists
@@ -786,13 +790,17 @@ fn init_result_rel<'mcx>(
                 match action.matchKind {
                     MERGE_WHEN_MATCHED => matched_actions.push(exec_action),
                     MERGE_WHEN_NOT_MATCHED_BY_TARGET => not_matched_actions.push(exec_action),
-                    MERGE_WHEN_NOT_MATCHED_BY_SOURCE => panic!(
-                        "ExecInitMerge (nodeModifyTable.c): NOT MATCHED BY SOURCE \
-                         action not ported"
-                    ),
+                    MERGE_WHEN_NOT_MATCHED_BY_SOURCE => {
+                        not_matched_by_source_actions.push(exec_action)
+                    }
                 }
             }
-            merge = Some(MergeState { matched_actions, not_matched_actions });
+            merge = Some(MergeState {
+                matched_actions,
+                not_matched_actions,
+                not_matched_by_source_actions,
+                join_condition,
+            });
         }
     }
 
@@ -1336,7 +1344,12 @@ fn stmt_trigger_ops(mt: &ModifyTableState<'_>, _before: bool) -> (bool, bool, bo
         CmdType::CMD_MERGE => {
             let mut ops = (false, false, false);
             if let Some(m) = &mt.rels[0].merge {
-                for a in m.matched_actions.iter().chain(m.not_matched_actions.iter()) {
+                for a in m
+                    .matched_actions
+                    .iter()
+                    .chain(m.not_matched_actions.iter())
+                    .chain(m.not_matched_by_source_actions.iter())
+                {
                     match a.command_type {
                         CmdType::CMD_INSERT => ops.0 = true,
                         CmdType::CMD_UPDATE => ops.1 = true,
@@ -1506,8 +1519,11 @@ fn exec_merge_matched<'mcx>(
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     debug_assert!(*matched);
-    if mt.rel().merge.as_ref().expect("merge state").matched_actions.is_empty() {
-        return Ok(None);
+    {
+        let m = mt.rel().merge.as_ref().expect("merge state");
+        if m.matched_actions.is_empty() && m.not_matched_by_source_actions.is_empty() {
+            return Ok(None);
+        }
     }
     fetch_old_row_version(mt, estate, tupleid)?;
 
@@ -1537,12 +1553,45 @@ fn exec_merge_matched_scan<'mcx>(
     let old_id = mt.rel().ri_oldTupleSlot.expect("ExecInitMergeTupleSlots ran");
     let new_id = mt.rel().ri_newTupleSlot.expect("ExecInitMergeTupleSlots ran");
 
-    let n_actions = mt.rel().merge.as_ref().expect("merge state").matched_actions.len();
+    // With BY SOURCE actions the retained join condition is rechecked above
+    // the join: satisfied = MATCHED list, else NOT MATCHED BY SOURCE list
+    // (C 3128-3139). A NULL condition means only MATCHED actions exist.
+    let use_by_source = {
+        let ModifyTableState { rels, cur, .. } = &mut *mt;
+        let merge = rels[*cur].merge.as_mut().expect("merge state");
+        match merge.join_condition.as_deref_mut() {
+            None => false,
+            Some(jc) => {
+                let EStateData { es_tupleTable, .. } = &mut *estate;
+                let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
+                assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
+                let base = es_tupleTable.as_mut_ptr();
+                // SAFETY: distinct in-bounds indices of one live slice.
+                let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
+                let mut slots =
+                    EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
+                !execexpr::exec_qual(Some(jc), &mut slots)?
+            }
+        }
+    };
+
+    let n_actions = {
+        let m = mt.rel().merge.as_ref().expect("merge state");
+        if use_by_source {
+            m.not_matched_by_source_actions.len()
+        } else {
+            m.matched_actions.len()
+        }
+    };
     for ai in 0..n_actions {
         // WHEN [MATCHED] AND qual: scan = old target tuple, inner = plan row.
         let (command_type, pass) = {
             let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-            let action = &mut merge.matched_actions[ai];
+            let action = if use_by_source {
+                &mut merge.not_matched_by_source_actions[ai]
+            } else {
+                &mut merge.matched_actions[ai]
+            };
             let EStateData { es_tupleTable, .. } = &mut *estate;
             let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
             assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
@@ -1576,7 +1625,7 @@ fn exec_merge_matched_scan<'mcx>(
         let mut tmfd = TM_FailureData::default();
         let result = match command_type {
             CmdType::CMD_UPDATE => {
-                merge_project_update(mt, estate, ai, plan_slot)?;
+                merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
                 merge_update_act(mt, estate, tupleid, new_id, &mut tmfd)?
             }
             CmdType::CMD_DELETE => merge_delete_act(mt, estate, tupleid, &mut tmfd)?,
@@ -1696,13 +1745,18 @@ fn merge_project_update<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     action_idx: usize,
+    by_source: bool,
     plan_slot: ExecSlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     let old_id = mt.rel().ri_oldTupleSlot.expect("merge slots");
     let new_id = mt.rel().ri_newTupleSlot.expect("merge slots");
     let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-    let action = &mut merge.matched_actions[action_idx];
+    let action = if by_source {
+        &mut merge.not_matched_by_source_actions[action_idx]
+    } else {
+        &mut merge.matched_actions[action_idx]
+    };
     let setvals_id = action.setvals_slot.expect("UPDATE action state");
 
     {

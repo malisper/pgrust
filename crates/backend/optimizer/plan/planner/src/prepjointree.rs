@@ -3047,19 +3047,14 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
             have_action[action.matchKind as usize] = true;
         }
     }
-    if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as usize] {
-        panic!(
-            "transform_MERGE_to_join (prepjointree.c): WHEN NOT MATCHED BY SOURCE \
-             (outer-target join + add_nulling_relids + executor join-condition \
-             recheck) unported — MERGE by-source lane"
-        );
-    }
-    let jointype =
-        if have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize] {
-            JoinType::JOIN_RIGHT
-        } else {
-            JoinType::JOIN_INNER
-        };
+    let by_source = have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as usize];
+    let by_target = have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize];
+    let jointype = match (by_source, by_target) {
+        (true, true) => JoinType::JOIN_FULL,
+        (true, false) => JoinType::JOIN_LEFT,
+        (false, true) => JoinType::JOIN_RIGHT,
+        (false, false) => JoinType::JOIN_INNER,
+    };
 
     let eref = mcx::leak_in(mcx::alloc_in(
         mcx,
@@ -3118,10 +3113,157 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     // upstream in the rewriter.
     debug_assert!(parse.targetList.is_nil());
 
-    // Without BY SOURCE actions the executor never rechecks the join
-    // condition; C drops it to save planning/execution cycles.
-    parse.mergeJoinCondition = None;
+    // With the source on the join's nullable side, its Vars above the join —
+    // in the retained join condition, the actions, and RETURNING — carry the
+    // join's nulling bit; the copies leave the in-join condition untouched
+    // (C prepjointree.c:325-357).
+    if matches!(jointype, JoinType::JOIN_LEFT | JoinType::JOIN_FULL) {
+        let sourcerti = match source.node_tag() {
+            NodeTag::T_RangeTblRef => source.as_range_tbl_ref().expect("RangeTblRef").rtindex,
+            NodeTag::T_JoinExpr => source.as_join_expr().expect("JoinExpr").rtindex,
+            other => panic!("unrecognized source node type: {other:?}"),
+        };
+        let null_source = |node: Node<'mcx>| -> PgResult<Node<'mcx>> {
+            let copy = copyfuncs::copy_object(mcx, node)?;
+            add_source_nulling(mcx, copy, sourcerti, joinrti)?;
+            Ok(copy)
+        };
+        if let Some(jc) = parse.mergeJoinCondition {
+            parse.mergeJoinCondition = Some(null_source(jc)?);
+        }
+        for action_node in &parse.mergeActionList {
+            let action = action_node.as_merge_action().expect("mergeActionList cell");
+            let new_qual = match action.qual {
+                None => None,
+                Some(q) => Some(null_source(q)?),
+            };
+            let new_tlist = null_source(Node::mk_list(mcx, action.targetList.clone_in(mcx)?)?)?
+                .as_list()
+                .expect("List")
+                .clone_in(mcx)?;
+            // SAFETY: parse tree is planner-owned; no derived refs live.
+            unsafe {
+                action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                    a.qual = new_qual;
+                    a.targetList = new_tlist;
+                })
+            }
+            .expect("MergeAction");
+        }
+        if !parse.returningList.is_nil() {
+            parse.returningList =
+                null_source(Node::mk_list(mcx, parse.returningList.clone_in(mcx)?)?)?
+                    .as_list()
+                    .expect("List")
+                    .clone_in(mcx)?;
+        }
+    }
+
+    if by_source {
+        // Guard the above-join recheck against non-strict join conditions:
+        // AND in "source wholerow IS NOT NULL" (C prepjointree.c:358-390).
+        let sourcerti = match source.node_tag() {
+            NodeTag::T_RangeTblRef => source.as_range_tbl_ref().expect("RangeTblRef").rtindex,
+            NodeTag::T_JoinExpr => source.as_join_expr().expect("JoinExpr").rtindex,
+            other => panic!("unrecognized source node type: {other:?}"),
+        };
+        let srte = parse
+            .rtable
+            .nth(sourcerti as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell");
+        let vartype = if srte.rtekind == RTEKind::RTE_RELATION {
+            match lsyscache::get_rel_type_id(srte.relid) {
+                Ok(t) if t != 0 => t,
+                _ => types_core::catalog::RECORDOID,
+            }
+        } else {
+            types_core::catalog::RECORDOID
+        };
+        let mut wrv = types_nodes::primnodes::Var::default();
+        wrv.varno = sourcerti;
+        wrv.varattno = 0;
+        wrv.vartype = vartype;
+        wrv.vartypmod = -1;
+        wrv.varnullingrels
+            .add_member(mcx, joinrti)?;
+        wrv.varnosyn = sourcerti as u32;
+        wrv.varattnosyn = 0;
+        wrv.location = -1;
+        let ntest = Node::mk(
+            mcx,
+            types_nodes::primnodes::NullTest {
+                arg: Some(Node::mk(mcx, wrv)?),
+                nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+                argisrow: false,
+                location: -1,
+            },
+        )?;
+        parse.mergeJoinCondition = Some(match parse.mergeJoinCondition {
+            None => ntest,
+            Some(jc) => Node::mk(
+                mcx,
+                types_nodes::primnodes::BoolExpr {
+                    boolop: types_nodes::primnodes::BoolExprType::AND_EXPR,
+                    args: {
+                        let mut l = NodeList::nil();
+                        l.lappend(mcx, ntest)?;
+                        l.lappend(mcx, jc)?;
+                        l
+                    },
+                    location: -1,
+                },
+            )?,
+        });
+    } else {
+        // Without BY SOURCE actions the executor never rechecks the join
+        // condition (C drops it).
+        parse.mergeJoinCondition = None;
+    }
     Ok(())
+}
+
+// add_nulling_relids (rewriteManip.c), target_relids = {source_rti} form over
+// a fresh copy: only source-relation Vars gain the join's nulling bit.
+fn add_source_nulling<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    source_rti: i32,
+    join_rti: i32,
+) -> PgResult<()> {
+    struct W<'x> {
+        mcx: Mcx<'x>,
+        source_rti: i32,
+        join_rti: i32,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == NodeTag::T_Var {
+                let v = node.as_var().expect("Var");
+                if v.varlevelsup == 0 && v.varno == self.source_rti {
+                    let (mcx, jrti) = (self.mcx, self.join_rti);
+                    // SAFETY: exclusive fresh copy (caller contract).
+                    unsafe {
+                        node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
+                            v.varnullingrels.add_member(mcx, jrti)
+                        })
+                    }
+                    .expect("Var")?;
+                }
+                return Ok(false);
+            }
+            debug_assert!(
+                node.node_tag() != NodeTag::T_Query,
+                "add_nulling_relids: sublevels_up walk (Query recursion) not needed here"
+            );
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { mcx, source_rti, join_rti };
+    use nodes_core::NodeWalker;
+    w.visit(node)?;
+    Ok(())
+    // (visit recurses via expression_tree_walker above)
 }
 
 // expand_virtual_generated_columns (prepjointree.c:969). Replaces every Var
