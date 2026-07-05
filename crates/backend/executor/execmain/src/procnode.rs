@@ -1572,18 +1572,29 @@ fn seq_agg_fusible<'mcx>(
     {
         return false;
     }
+    // Only allocation-free kernel quals run under the fused drive.
+    let kernel_qual = || match ss.ss.qual.as_deref().map(|q| q.kernel()) {
+        Some(Kernel::QualScanVarCmpConst { .. }) => true,
+        Some(Kernel::QualVarCmpVar { a_src, b_src, .. }) => {
+            a_src == SlotSrc::Scan && b_src == SlotSrc::Scan
+        }
+        _ => false,
+    };
+    // Projected scans (CP_SMALL_TLIST — the qual'd count(*) plan shape) fuse
+    // only for outer-read-free drains: the drain skips the projection, which
+    // is unobservable exactly when the agg reads no outer column and the
+    // tlist carries no subplan/param (Var-only projections evaluate nothing).
+    let outer_read_free = || {
+        ::nodeagg::agg_batch_outer_prefix(agg) == Some(0)
+            && ss.ss.ps_ProjInfo.as_ref().is_some_and(|p| {
+                !p.pi_state.has_subplan() && p.pi_state.param_exec_deps().is_empty()
+            })
+    };
     match ss.variant() {
         ::nodeseqscan::SeqScanVariant::Plain => true,
-        ::nodeseqscan::SeqScanVariant::WithQual => {
-            // Only allocation-free kernel quals run under the fused drive.
-            match ss.ss.qual.as_deref().map(|q| q.kernel()) {
-                Some(Kernel::QualScanVarCmpConst { .. }) => true,
-                Some(Kernel::QualVarCmpVar { a_src, b_src, .. }) => {
-                    a_src == SlotSrc::Scan && b_src == SlotSrc::Scan
-                }
-                _ => false,
-            }
-        }
+        ::nodeseqscan::SeqScanVariant::WithQual => kernel_qual(),
+        ::nodeseqscan::SeqScanVariant::WithProject => outer_read_free(),
+        ::nodeseqscan::SeqScanVariant::WithQualProject => outer_read_free() && kernel_qual(),
         _ => false,
     }
 }
