@@ -20,3 +20,4 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_storage = { path = "../../../_support/types/types_storage" }
 xact = { path = "../../access/transam/xact" }
+sequence = { path = "../sequence" }

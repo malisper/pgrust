@@ -29,6 +29,7 @@ xloginsert_seams = { path = "../../access/transam/xloginsert_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 xact = { path = "../../access/transam/xact" }
 aclchk = { path = "../../catalog/aclchk" }
+catalog = { path = "../../catalog/catalog" }
 adt_acl = { path = "../../utils/adt/acl" }
 namespace_seams = { path = "../../catalog/namespace_seams" }
 miscinit = { path = "../../utils/init/miscinit" }

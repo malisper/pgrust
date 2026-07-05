@@ -105,6 +105,18 @@ fn with_elm<R>(relid: Oid, f: impl FnOnce(&mut SeqTableData) -> R) -> R {
     with_state(|s| f(s.tab.get_mut(&relid).expect("SeqTable entry exists")))
 }
 
+/// C `ResetSequenceCaches` (sequence.c:1944-1954): C hash_destroys the table;
+/// the port clears in place because the map's arena is the leaked backing
+/// context (entries are inline PODs, so clear() forgets everything C frees).
+pub fn ResetSequenceCaches() {
+    STATE.with(|cell| {
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            s.tab.clear();
+            s.last_used = None;
+        }
+    });
+}
+
 // FormData_pg_sequence_data on-page layout: int8 @0, int8 @8, bool @16.
 // data points into the buffer page: valid only while the read_seq_tuple
 // buffer stays pinned + exclusively locked.
@@ -710,13 +722,50 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
     Ok(seqoid)
 }
 
+// RangeVarCallbackOwnsRelation (tablecmds.c:19554-19579).
+fn range_var_callback_owns_relation(rv: &rel_vocab::RangeVar<'_>, relid: Oid) -> PgResult<()> {
+    if relid == types_core::InvalidOid {
+        return Ok(());
+    }
+    if !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, miscinit::GetUserId())? {
+        let relkind = lsyscache::get_rel_relkind(relid)? as u8;
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            get_relkind_objtype(relkind),
+            rv.relname,
+        )?;
+    }
+    let relnamespace = lsyscache::get_rel_namespace(relid)?;
+    let is_system =
+        catalog::IsCatalogRelationOid(relid) || catalog::IsToastNamespace(relnamespace);
+    if is_system && !init_small::globals::allowSystemTableMods() {
+        return Err(err(
+            format!("permission denied: \"{}\" is a system catalog", rv.relname),
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+        ));
+    }
+    Ok(())
+}
+
+// get_relkind_objtype (objectaddress.c).
+fn get_relkind_objtype(relkind: u8) -> types_nodes::parsenodes::ObjectType {
+    use types_nodes::parsenodes::ObjectType::*;
+    match relkind {
+        RELKIND_RELATION | RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,
+        types_rel::RELKIND_INDEX | types_rel::RELKIND_PARTITIONED_INDEX => OBJECT_INDEX,
+        RELKIND_SEQUENCE => OBJECT_SEQUENCE,
+        RELKIND_VIEW => OBJECT_VIEW,
+        types_rel::RELKIND_MATVIEW => OBJECT_MATVIEW,
+        RELKIND_FOREIGN_TABLE => OBJECT_FOREIGN_TABLE,
+        _ => OBJECT_TABLE,
+    }
+}
+
 pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResult<()> {
     if stmt.missing_ok {
         unported("ALTER SEQUENCE IF EXISTS");
     }
     let rv = stmt.sequence.expect("AlterSeqStmt.sequence");
-    // C: RangeVarGetRelidExtended + RangeVarCallbackOwnsRelation; the
-    // ownership callback is unported (owner mismatch undetected here).
     let v = rel_vocab::RangeVar {
         catalogname: rv.catalogname,
         schemaname: rv.schemaname,
@@ -726,6 +775,10 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
         location: rv.location,
     };
     let relid = namespace_seams::range_var_get_relid::call(mcx, &v, ShareRowExclusiveLock, false)?;
+    // C: RangeVarCallbackOwnsRelation inside RangeVarGetRelidExtended
+    // (sequence.c:454-458, tablecmds.c:19554-19579); the lookup seam has no
+    // callback hook, so it runs post-lookup under the already-taken lock.
+    range_var_callback_owns_relation(&v, relid)?;
 
     let seqrel = init_sequence(mcx, relid)?;
 

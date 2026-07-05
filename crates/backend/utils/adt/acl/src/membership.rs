@@ -71,15 +71,29 @@ pub fn RoleMembershipCacheCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
     CACHE.with(|c| c.borrow_mut().role = [InvalidOid; 3]);
 }
 
-fn roles_list_append(roles_list: &mut Vec<Oid>, role: Oid) {
-    if roles_list.contains(&role) {
+// C roles_list_append (acl.c:5093-5131): the 1024 threshold only cuts over to
+// a Bloom-filter membership accelerator; the list stays correct at any size.
+// The accelerator here is an exact HashSet, so accept/reject decisions match
+// C's bloom-or-linear-search combination exactly.
+fn roles_list_append(
+    roles_list: &mut Vec<Oid>,
+    seen: &mut Option<std::collections::HashSet<Oid>>,
+    role: Oid,
+) {
+    let present = match seen {
+        Some(set) => set.contains(&role),
+        None => roles_list.contains(&role),
+    };
+    if present {
         return;
     }
-    assert!(
-        roles_list.len() <= ROLES_LIST_BLOOM_THRESHOLD,
-        "roles_list_append: Bloom-filter fastpath unported past {ROLES_LIST_BLOOM_THRESHOLD} roles"
-    );
+    if seen.is_none() && roles_list.len() > ROLES_LIST_BLOOM_THRESHOLD {
+        *seen = Some(roles_list.iter().copied().collect());
+    }
     roles_list.push(role);
+    if let Some(set) = seen {
+        set.insert(role);
+    }
 }
 
 fn getattr(tuple: &HeapTupleData<'_>, attnum: i32) -> Datum {
@@ -152,6 +166,7 @@ fn roles_is_member_of_walk(
 
     // Breadth-first: the list is both the found-set and the agenda.
     let mut roles_list: Vec<Oid> = Vec::with_capacity(8);
+    let mut seen: Option<std::collections::HashSet<Oid>> = None;
     roles_list.push(roleid);
     let mut i = 0;
     while i < roles_list.len() {
@@ -179,12 +194,12 @@ fn roles_is_member_of_walk(
             {
                 continue;
             }
-            roles_list_append(&mut roles_list, otherid);
+            roles_list_append(&mut roles_list, &mut seen, otherid);
         }
         ReleaseSysCacheList(memlist);
 
         if memberid == dba && dba != InvalidOid {
-            roles_list_append(&mut roles_list, ROLE_PG_DATABASE_OWNER);
+            roles_list_append(&mut roles_list, &mut seen, ROLE_PG_DATABASE_OWNER);
         }
         i += 1;
     }
@@ -337,4 +352,26 @@ pub(crate) fn cached_role(rtype_idx: usize) -> Oid {
 #[cfg(test)]
 pub(crate) fn seed_db_hash(h: u32) {
     CACHED_DB_HASH.set(h);
+}
+
+#[cfg(test)]
+mod bloom_cutover_tests {
+    use super::*;
+
+    #[test]
+    fn roles_list_append_dedups_past_bloom_threshold() {
+        let mut list: Vec<Oid> = Vec::new();
+        let mut seen = None;
+        let n = ROLES_LIST_BLOOM_THRESHOLD * 3;
+        for pass in 0..2 {
+            for i in 0..n {
+                roles_list_append(&mut list, &mut seen, Oid::from((i + 1) as u32));
+            }
+            assert_eq!(list.len(), n, "pass {pass}");
+        }
+        assert!(seen.is_some());
+        for i in 0..n {
+            assert_eq!(list[i], Oid::from((i + 1) as u32));
+        }
+    }
 }

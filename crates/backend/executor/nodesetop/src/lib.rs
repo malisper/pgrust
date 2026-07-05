@@ -52,6 +52,11 @@ enum StrategyState<'mcx> {
 
 struct HashedState<'mcx> {
     hashtable: TupleHashTable<'mcx>,
+    // C setopstate->tableContext (nodeSetOp.c:453-456): entry tuple images
+    // live here so the chgParam rescan can free them wholesale
+    // (nodeSetOp.c:724-730). Destructor rides the query context's reset
+    // callback (docs/no-drop.md guard rule).
+    table_ctx: core::ptr::NonNull<::mcx::MemoryContext>,
     table_filled: bool,
     hashiter: usize,
 }
@@ -108,9 +113,7 @@ pub fn exec_init_set_op<'mcx>(
             debug_assert!(node.numGroups > 0);
             let (eqfuncoids, hashfunctions) =
                 ::execgrouping::exec_tuples_hash_prepare(mcx, node.cmpOperators)?;
-            // C divergence: entries live in the query context, not a private
-            // tableContext — rescan re-walks the table and never rebuilds it
-            // (chgParam is always NULL until the Param lanes land).
+            let table_ctx = make_table_context(mcx)?;
             let hashtable = ::execgrouping::build_tuple_hash_table(
                 mcx,
                 outer_desc,
@@ -122,7 +125,12 @@ pub fn exec_init_set_op<'mcx>(
                 core::mem::size_of::<SetOpPerGroup>(),
                 false,
             )?;
-            StrategyState::Hashed(HashedState { hashtable, table_filled: false, hashiter: 0 })
+            StrategyState::Hashed(HashedState {
+                hashtable,
+                table_ctx,
+                table_filled: false,
+                hashiter: 0,
+            })
         }
         SETOP_SORTED => {
             let mut sort_keys: PgVec<'mcx, SortSupport> = vec_with_capacity_in(mcx, num_cols)?;
@@ -382,6 +390,21 @@ fn pergroup(hashtable: &TupleHashTable<'_>, ix: u32) -> core::ptr::NonNull<SetOp
 
 // setop_fill_hash_table (nodeSetOp.c): count outer dups per group, then count
 // inner matches against existing groups only.
+// nodeagg make_agg_state_node precedent: a droppy MemoryContext inside the
+// no-drop query arena gets its destructor from the arena's reset callback.
+fn make_table_context(mcx: ::mcx::Mcx<'_>) -> PgResult<core::ptr::NonNull<::mcx::MemoryContext>> {
+    use ::mcx::Allocator;
+    let layout = core::alloc::Layout::new::<::mcx::MemoryContext>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: core::ptr::NonNull<::mcx::MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(mcx.context().new_child_bump("SetOp hash table")) };
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
+}
+
 fn setop_fill_hash_table<'mcx, FO, FI>(
     node: &mut SetOpState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -402,7 +425,9 @@ where
             let StrategyState::Hashed(hs) = &mut node.strategy else { unreachable!() };
             let outer_slot = estate.slot_mut(outer_id);
             let hash = hs.hashtable.hash_slot(outer_slot)?;
-            let (ix, isnew) = hs.hashtable.lookup(outer_slot, hash, Some(mcx), mcx)?;
+            // SAFETY: table_ctx lives until the query context resets.
+            let table_mcx = unsafe { hs.table_ctx.as_ref() }.mcx();
+            let (ix, isnew) = hs.hashtable.lookup(outer_slot, hash, Some(table_mcx), mcx)?;
             let ix = ix.expect("creating lookup always yields an entry");
             let pg = pergroup(&hs.hashtable, ix);
             // SAFETY: the additional block is maxaligned and sized for
@@ -532,10 +557,13 @@ pub fn exec_rescan_set_op_chg<'mcx>(node: &mut SetOpState<'mcx>, estate: &mut ES
     match &mut node.strategy {
         StrategyState::Hashed(hs) => {
             hs.hashiter = 0;
-            if hs.table_filled {
-                hs.hashtable.reset();
-                hs.table_filled = false;
-            }
+            // C nodeSetOp.c:724-730: MemoryContextReset(tableContext) +
+            // ResetTupleHashTable, freeing the prior generation's entries.
+            // SAFETY: table_ctx lives until the query context resets; no
+            // entry image is reachable once the table is reset.
+            unsafe { hs.table_ctx.as_mut() }.reset();
+            hs.hashtable.reset();
+            hs.table_filled = false;
         }
         StrategyState::Sorted(st) => st.need_init = true,
     }
