@@ -75,7 +75,7 @@ pub fn subquery_planner<'mcx>(
         let r = n.as_range_tbl_entry().expect("rtable cell");
         r.rtekind == RTEKind::RTE_RELATION && matches!(r.relkind, b'r' | b'p')
     }) {
-        crate::prepjointree::expand_virtual_generated_columns(mcx, &mut parse)?;
+        crate::prepjointree::expand_virtual_generated_columns(run, &mut parse)?;
     }
 
     let mut has_outer_joins = false;
