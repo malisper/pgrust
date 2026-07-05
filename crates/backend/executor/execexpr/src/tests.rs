@@ -2842,7 +2842,8 @@ fn jit_parity_fuzz() {
         #[cfg(target_arch = "aarch64")]
         assert!(jitted > 0, "no jitted programs in the whole fuzz corpus");
         let _ = jitted;
-
+    });
+}
 
 #[test]
 fn old_new_var_projection_reads_ret_slots() {
@@ -2933,7 +2934,10 @@ fn jit_parity_qual_lists() {
             }
             drop(col);
         }
+    });
+}
 
+#[test]
 fn old_var_reads_all_null_substitute() {
     use ::types_nodes::primnodes::VarReturningType;
     with_mcx(|mcx| {
