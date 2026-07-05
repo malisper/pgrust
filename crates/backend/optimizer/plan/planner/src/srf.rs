@@ -278,8 +278,8 @@ fn build_level_pathtarget<'mcx>(
     Ok(id)
 }
 
-// adjust_paths_for_srfs (planner.c); cheapest pointers refreshed by the
-// caller's set_cheapest instead of C's in-place swap (same outcome).
+// adjust_paths_for_srfs (planner.c); like C, no set_cheapest rerun — the
+// cheapest-startup/total pointers are swapped to the rebuilt paths in place.
 pub fn adjust_paths_for_srfs<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -303,7 +303,14 @@ pub fn adjust_paths_for_srfs<'mcx>(
                 crate::pathnode::apply_projection_to_path(run, rel_id, newpath, target)?
             };
         }
-        run.root.rel_mut(rel_id).pathlist[i] = newpath;
+        let rel = run.root.rel_mut(rel_id);
+        rel.pathlist[i] = newpath;
+        if rel.cheapest_startup_path == Some(*path_id) {
+            rel.cheapest_startup_path = Some(newpath);
+        }
+        if rel.cheapest_total_path == Some(*path_id) {
+            rel.cheapest_total_path = Some(newpath);
+        }
     }
     // Likewise for partial paths (C's second loop); the SRF-free levels avoid
     // apply_projection_to_path in case of multiple refs, as C.
