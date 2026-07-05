@@ -12609,6 +12609,7 @@ dependencies = [
  "stack_depth",
  "standby",
  "statistics",
+ "stats_import",
  "subtrans",
  "superuser",
  "sync",
@@ -13529,6 +13530,48 @@ dependencies = [
  "types_slot",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "stats_import"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "arrayfuncs",
+ "cache_syscache",
+ "catalog_index",
+ "catalog_indexing",
+ "catalog_namespace",
+ "datum",
+ "detoast_seams",
+ "elog",
+ "execindexing",
+ "fmgr_seams",
+ "format_type",
+ "funcapi",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "lmgr",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "nodes_core",
+ "pg_class",
+ "relation_seams",
+ "syscache_seams",
+ "table",
+ "transam_xlog",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "xact",
 ]
 
 [[package]]
