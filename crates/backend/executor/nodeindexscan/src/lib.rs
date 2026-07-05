@@ -227,20 +227,16 @@ pub fn exec_init_index_scan<'mcx>(
     let rel = estate
         .exec_get_range_table_relation(node.scan.scanrelid, false)?
         .alias();
-    // A parallel worker takes its own index lock (C uses rellockmode
-    // unconditionally); the leader relies on the planner already holding it.
-    let index_rel = indexam::index_open(mcx, node.indexid, worker_index_lockmode(estate, node.scan.scanrelid))?;
+    let index_rel = indexam::index_open(mcx, node.indexid, index_lockmode(estate, node.scan.scanrelid))?;
     exec_init_index_scan_rel(mcx, node, estate, rel, index_rel)
 }
 
-pub fn worker_index_lockmode(estate: &EStateData<'_>, scanrelid: u32) -> types_rel::LOCKMODE {
-    let in_worker = parallel_seams::is_parallel_worker::is_installed()
-        && parallel_seams::is_parallel_worker::call();
-    if in_worker {
-        estate.exec_rt_fetch(scanrelid).rellockmode
-    } else {
-        NoLock
-    }
+// C opens scan indexes with the RTE's rellockmode unconditionally
+// (nodeIndexscan.c:977): a reused generic plan reaches the executor with no
+// planner invocation, and plancache's AcquireExecutorLocks locks tables only,
+// so this open is the index's only lock.
+pub fn index_lockmode(estate: &EStateData<'_>, scanrelid: u32) -> types_rel::LOCKMODE {
+    estate.exec_rt_fetch(scanrelid).rellockmode
 }
 
 /// C divergence: init over caller-opened relations, splitting
