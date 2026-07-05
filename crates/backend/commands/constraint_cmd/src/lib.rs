@@ -112,6 +112,10 @@ pub fn fc_unique_key_recheck(
         )?;
     }
 
+    // C's ExecDropSingleTupleTableSlot (constraint.c:193): the fetched-tuple
+    // slot pins a heap buffer; the success path must release it.
+    exectuples::exec_clear_tuple(&mut slot, mcx);
+
     indexam::index_close(index_rel, ::types_rel::RowShareLock)?;
     Ok(Datum::from_usize(0))
 }

@@ -463,6 +463,10 @@ pub struct CreateStmtCxt<'mcx> {
     pub alist: NodeList<'mcx>,
     pub ckconstraints: NodeList<'mcx>,
     pub nnconstraints: NodeList<'mcx>,
+    // ALTER path only: IndexStmts from transformIndexConstraints (C folds
+    // them into AT_AddIndex[Constraint] cmds, parse_utilcmd.c:3817-3838) and
+    // FK Constraints for AT_AddConstraint cmds (parse_utilcmd.c:3857-3863).
+    pub ixstmts: NodeList<'mcx>,
     pub fkconstraints: NodeList<'mcx>,
 }
 
@@ -473,6 +477,7 @@ impl<'mcx> CreateStmtCxt<'mcx> {
             alist: NodeList::nil(),
             ckconstraints: NodeList::nil(),
             nnconstraints: NodeList::nil(),
+            ixstmts: NodeList::nil(),
             fkconstraints: NodeList::nil(),
         }
     }
@@ -777,6 +782,8 @@ fn transformColumnDefinition<'mcx>(
     column_node: Node<'mcx>,
     column: &ColumnDef<'mcx>,
     relation: &RangeVar<'mcx>,
+    // C cxt->rel: set only on the ALTER path; serial/identity sequences take
+    // namespace/persistence/owner from the existing table.
     rel: Option<&types_rel::Relation<'_>>,
     src: Option<&str>,
     cxt: &mut CreateStmtCxt<'mcx>,
@@ -787,6 +794,8 @@ fn transformColumnDefinition<'mcx>(
     is_foreign: bool,
     of_type: bool,
     partbound: bool,
+    // C cxt->ispartitioned: CREATE ... PARTITION BY / ALTER on a
+    // partitioned table.
     ispartitioned: bool,
 ) -> PgResult<()> {
     let relname = relation.relname.unwrap_or("");
@@ -827,6 +836,7 @@ fn transformColumnDefinition<'mcx>(
     }
 
     let mut need_notnull = false;
+    let mut disallow_noinherit_notnull = false;
     if is_serial_oid != InvalidOid {
         let (snamespace, sname) = generateSerialExtraStmts(
             mcx,
@@ -877,6 +887,7 @@ fn transformColumnDefinition<'mcx>(
                 .expect("ColumnDef")?;
         }
         need_notnull = true;
+        disallow_noinherit_notnull = true;
     }
 
     // SERIAL implies a not-null that must not be NO INHERIT; PRIMARY KEY and
@@ -1042,7 +1053,15 @@ fn transformColumnDefinition<'mcx>(
                     ));
                 }
                 if saw_nullable && !col_not_null {
-                    return Err(conflicting_null_decls(colname, relname));
+                    // C attaches parser_errposition at every conflicting-
+                    // declarations site (parse_utilcmd.c:747,765,873,906).
+                    return Err(column_syntax_error(
+                        format_args!(
+                            "conflicting NULL/NOT NULL declarations for column \"{colname}\" of table \"{relname}\""
+                        ),
+                        src,
+                        constraint.location,
+                    ));
                 }
                 if disallow_noinherit_notnull && constraint.is_no_inherit {
                     return Err(Box::new(
@@ -1108,12 +1127,38 @@ fn transformColumnDefinition<'mcx>(
                     }
                 }
             }
+            ConstrType::CONSTR_NULL => {
+                if (saw_nullable && col_not_null) || need_notnull {
+                    return Err(column_syntax_error(
+                        format_args!(
+                            "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
+                            column.colname.unwrap_or(""),
+                            relname
+                        ),
+                        src,
+                        constraint.location,
+                    ));
+                }
+                col_not_null = false;
+                saw_nullable = true;
+                // SAFETY: parse tree is analyze-owned; no derived refs.
+                unsafe {
+                    column_node
+                        .with_mut::<ColumnDef, _>(|c| c.is_not_null = false)
+                        .expect("ColumnDef");
+                }
+            }
             ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
                 if constraint.contype == ConstrType::CONSTR_PRIMARY {
                     if saw_nullable && !col_not_null {
-                        return Err(conflicting_null_decls(
-                            column.colname.unwrap_or(""),
-                            relname,
+                        return Err(column_syntax_error(
+                            format_args!(
+                                "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
+                                column.colname.unwrap_or(""),
+                                relname
+                            ),
+                            src,
+                            constraint.location,
                         ));
                     }
                     need_notnull = true;
@@ -1168,10 +1213,7 @@ fn transformColumnDefinition<'mcx>(
             | ConstrType::CONSTR_ATTR_NOT_ENFORCED => {
                 // transformConstraintAttrs took care of these
             }
-            other => unported(match other {
-                ConstrType::CONSTR_NULL => "NULL column constraints",
-                _ => "unexpected column constraint type",
-            }),
+            _ => unported("unexpected column constraint type"),
         }
         if saw_default && saw_identity {
             return Err(column_syntax_error(
@@ -1423,7 +1465,20 @@ pub fn transformCreateStmt<'mcx>(
                         ixconstraints.lappend(mcx, elt)?
                     }
                     ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, elt)?,
-                    ConstrType::CONSTR_NOTNULL => nnconstraints.lappend(mcx, elt)?,
+                    ConstrType::CONSTR_NOTNULL => {
+                        // transformTableConstraint (parse_utilcmd.c:1074-1078).
+                        if stmt.partspec.is_some() && c.is_no_inherit {
+                            return Err(Box::new(
+                                PgError::new(
+                                    ERROR,
+                                    "not-null constraints on partitioned tables cannot be NO INHERIT"
+                                        .to_string(),
+                                )
+                                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                            ));
+                        }
+                        nnconstraints.lappend(mcx, elt)?
+                    }
                     ConstrType::CONSTR_FOREIGN => {
                         if is_foreign {
                             return Err(not_supported_on_foreign_tables(
@@ -1463,13 +1518,14 @@ pub fn transformCreateStmt<'mcx>(
     transform_index_constraints(
         mcx,
         relname,
-        relation,
+        Some(relation),
         &columns,
         &stmt.inhRelations,
         &mut nnconstraints,
         &ixconstraints,
         &mut alist,
         query_string,
+        false,
     )?;
 
     // transformFKConstraints(skipValidation=true, isAddConstraint=false).
@@ -1538,16 +1594,18 @@ pub fn transformCreateStmt<'mcx>(
         }
     }
 
-    // C: result = blist ++ [stmt] ++ likeclauses ++ alist ++ save_alist
-    // (serial's OWNED BY precedes index stmts).
+    // C: result = blist ++ [stmt] ++ likeclauses ++ indexes/fk ++ save_alist;
+    // C's save_alist captured the element-loop alist (serial OWNED BY + LIKE
+    // statements) before transformIndexConstraints (parse_utilcmd.c:390-395,
+    // 465-471).
     let mut result = cxt.blist;
     result.lappend(mcx, stmt_node)?;
     result.concat(mcx, &likeclauses)?;
-    for n in cxt.alist.iter() {
-        result.lappend(mcx, n)?;
-    }
     for a in alist.iter() {
         result.lappend(mcx, a)?;
+    }
+    for n in cxt.alist.iter() {
+        result.lappend(mcx, n)?;
     }
     result.concat(mcx, &save_alist)?;
     Ok(result)
@@ -1623,18 +1681,22 @@ fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &'mcx str) -> PgResul
     Ok(n.seal())
 }
 
-// transformIndexConstraints + transformIndexConstraint (CREATE TABLE lane;
-// isalter/EXCLUSION/USING INDEX are loud).
+// transformIndexConstraints + transformIndexConstraint (CREATE TABLE +
+// ALTER ADD COLUMN lanes; USING INDEX is loud). isalter: keys absent from
+// `columns` are left for DefineIndex, and PK not-null forcing is skipped
+// (ATPrepAddPrimaryKey / transformColumnDefinition already handled it,
+// parse_utilcmd.c:2634-2668,2727-2733).
 fn transform_index_constraints<'mcx>(
     mcx: Mcx<'mcx>,
     relname: &str,
-    relation: &'mcx types_nodes::RangeVar<'mcx>,
+    relation: Option<&'mcx types_nodes::RangeVar<'mcx>>,
     columns: &NodeList<'mcx>,
     inh_relations: &NodeList<'mcx>,
     nnconstraints: &mut NodeList<'mcx>,
     ixconstraints: &NodeList<'mcx>,
     alist: &mut NodeList<'mcx>,
     src: &str,
+    isalter: bool,
 ) -> PgResult<()> {
     let mut indexlist = NodeList::nil();
     let mut pkey: Option<Node<'mcx>> = None;
@@ -1674,7 +1736,7 @@ fn transform_index_constraints<'mcx>(
         index.deferrable = constraint.deferrable;
         index.initdeferred = constraint.initdeferred;
         index.idxname = constraint.conname;
-        index.relation = Some(relation);
+        index.relation = relation;
         index.accessMethod = Some(constraint.access_method.unwrap_or("btree"));
         index.whereClause = constraint.where_clause;
         // SAFETY: parse tree is analyze-owned; the constraint node's options
@@ -1731,7 +1793,9 @@ fn transform_index_constraints<'mcx>(
                 }
                 found = true;
                 found_column = Some(cn);
-                if is_primary {
+                // C: ALTER never needs the PK not-null forcing here
+                // (parse_utilcmd.c:2634-2643).
+                if is_primary && !isalter {
                     if cd.is_not_null {
                         for nn in nnconstraints.iter() {
                             let nnc = nn.as_variant::<Constraint>().expect("Constraint");
@@ -1753,7 +1817,9 @@ fn transform_index_constraints<'mcx>(
                 }
                 break;
             }
-            if !found {
+            // C: on the ALTER path missing keys may exist in the table
+            // already; DefineIndex complains if not (parse_utilcmd.c:2734).
+            if !found && !isalter {
                 return Err(cursor_at(
                     key_column_missing(key, constraint.location),
                     Some(src.as_bytes()),
@@ -1902,9 +1968,6 @@ pub fn transformIndexConstraintForAlter<'mcx>(
     let is_exclusion = constraint.contype == ConstrType::CONSTR_EXCLUSION;
     if constraint.indexname.is_some() {
         return transform_existing_index_constraint(mcx, rel, cnode, query_string);
-    }
-    if (constraint.deferrable || constraint.initdeferred) && !is_exclusion {
-        unported("transformIndexConstraint: DEFERRABLE unique/pk constraint indexes");
     }
     let mut index = Node::build::<IndexStmt>(mcx)?;
     index.unique = !is_exclusion;
@@ -2540,14 +2603,16 @@ pub fn quote_qualified_identifier<'mcx>(
 // transformAlterTableStmt's per-subcommand slice (ATParseTransformCmd's
 // working half): reuses the CREATE-lane transformColumnDefinition. The
 // subcommand is transformed in place (C rebuilds an equal newcmds list);
-// generated CHECK/NOT NULL/FK constraints come back in cxt for the caller
-// to schedule as AT_AddConstraint subcommands (C's newcmds tail); index
-// column constraints are unported ALTER lanes.
+// generated CHECK/NOT NULL constraints, IndexStmts and FK constraints come
+// back in cxt for the caller to schedule as AT_AddIndex[Constraint]/
+// AT_AddConstraint subcommands; blist/alist carry the serial/identity
+// sequence statements (C beforeStmts/afterStmts).
 pub fn transformAlterTableCmd<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'_>,
     relname: &str,
     cnode: Node<'mcx>,
+    query_string: &str,
 ) -> PgResult<CreateStmtCxt<'mcx>> {
     use types_nodes::parsenodes::{AlterTableCmd, AlterTableType};
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
@@ -2576,7 +2641,7 @@ pub fn transformAlterTableCmd<'mcx>(
                 cd,
                 &rv,
                 Some(rel),
-                None,
+                Some(query_string),
                 &mut cxt,
                 &mut ckconstraints,
                 &mut nnconstraints,
@@ -2587,8 +2652,25 @@ pub fn transformAlterTableCmd<'mcx>(
                 false,
                 rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE,
             )?;
+            // transformIndexConstraints (parse_utilcmd.c:3806): the isalter
+            // lane resolves keys against the single new column and leaves
+            // absent columns to DefineIndex.
             if !ixconstraints.is_nil() {
-                unported("ALTER TABLE ADD COLUMN with PRIMARY KEY/UNIQUE");
+                let columns = NodeList::make1(mcx, defnode)?;
+                // C: cxt.inhRelations = NIL on the ALTER path
+                // (parse_utilcmd.c:3570).
+                transform_index_constraints(
+                    mcx,
+                    relname,
+                    None,
+                    &columns,
+                    &NodeList::nil(),
+                    &mut nnconstraints,
+                    &ixconstraints,
+                    &mut cxt.ixstmts,
+                    query_string,
+                    true,
+                )?;
             }
             // transformFKConstraints(skipValidation = no non-null default,
             // isAddConstraint = true): the new column has no rows to check.
@@ -2815,19 +2897,6 @@ fn alter_undefined_column(colname: &str, relname: &str) -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
-fn conflicting_null_decls(colname: &str, relname: &str) -> Box<PgError> {
-    Box::new(
-        PgError::new(
-            ERROR,
-            format!(
-                "conflicting NULL/NOT NULL declarations for column \"{colname}\" of \
-                 table \"{relname}\""
-            ),
-        )
-        .with_sqlstate(ERRCODE_SYNTAX_ERROR),
-    )
-}
-
 #[cold]
 #[inline(never)]
 fn cursor_at(mut e: Box<PgError>, src: Option<&[u8]>, location: i32) -> Box<PgError> {
@@ -3045,13 +3114,14 @@ mod tests {
         transform_index_constraints(
             mcx,
             "t",
-            relation,
+            Some(relation),
             columns,
             &NodeList::nil(),
             &mut nnconstraints,
             ixconstraints,
             &mut alist,
             "",
+            false,
         )?;
         Ok(alist)
     }
