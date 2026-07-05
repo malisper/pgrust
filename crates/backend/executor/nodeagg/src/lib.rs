@@ -1377,7 +1377,9 @@ fn hash_agg_check_limits<'mcx>(
 }
 
 // initialize_hash_entry (nodeAgg.c): count the group, maybe enter spill
-// mode, then seed the entry's pergroup array.
+// mode, then seed the entry's pergroup array. Per new group, off the per-row
+// path — outlined to keep lookup_hash_entry's fill loop lean.
+#[inline(never)]
 fn initialize_hash_entry<'mcx>(
     ph: &mut PerHashData<'mcx>,
     trans_init: &[NullableDatum],
@@ -1423,6 +1425,8 @@ fn initialize_hash_entry<'mcx>(
 }
 
 // hashagg_spill_init (nodeAgg.c).
+#[cold]
+#[inline(never)]
 fn hashagg_spill_init<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     tapeset: &mut LogicalTapeSet<'mcx>,
@@ -1451,6 +1455,9 @@ fn hashagg_spill_init<'mcx>(
 }
 
 // hashagg_spill_tuple (nodeAgg.c); `input` None = the batch rslot (refill).
+// Cold from the in-memory fill's view; the spill passes are IO-bound.
+#[cold]
+#[inline(never)]
 fn hashagg_spill_tuple<'mcx>(
     ss: &mut HashSpillState<'mcx>,
     input: Option<&mut SlotData<'mcx>>,
@@ -2518,6 +2525,7 @@ fn hash_agg_update_metrics(
 }
 
 // prepare_hash_slot (nodeAgg.c).
+#[inline(always)]
 fn prepare_hash_slot<'mcx>(
     hashslot: &mut SlotData<'mcx>,
     hash_grp_col_idx_input: &[i16],
