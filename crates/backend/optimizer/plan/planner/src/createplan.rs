@@ -1140,7 +1140,6 @@ fn create_bitmap_scan_plan<'mcx>(
         let PathNode::BitmapHeapPath(p) = run.root.path(best_path) else {
             panic!("create_bitmap_scan_plan: not a BitmapHeapPath")
         };
-        debug_assert!(!p.path.parallel_aware);
         (p.path.parent, p.bitmapqual.expect("BitmapHeapPath bitmapqual"))
     };
     let scan_relid = run.root.rel(baserelid).relid;
