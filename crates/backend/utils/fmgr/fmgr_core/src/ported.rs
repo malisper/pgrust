@@ -66,6 +66,7 @@ const TABLES: &[&[FmgrBuiltin]] = &[
     ::adt_amutils::AMUTILS_BUILTINS,
     ::adt_mcxtfuncs::MCXTFUNCS_BUILTINS,
     ::waitfuncs::WAITFUNCS_BUILTINS,
+    ::signalfuncs::SIGNALFUNCS_BUILTINS,
     ::lockfuncs::LOCKFUNCS_BUILTINS,
     ::pseudorandomfuncs::builtins::PSEUDORANDOM_BUILTINS,
     ::trigfuncs::TRIGFUNCS_BUILTINS,
