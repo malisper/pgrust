@@ -552,3 +552,101 @@ fn build_query_plansource(
         Ok(psrc)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datum::{array_build::construct_array_image, set_varsize_4b, VARHDRSZ};
+
+    const TEXTOID: Oid = 25;
+    const CHAROID: Oid = 18;
+
+    fn text_image<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgVec<'mcx, u8> {
+        let mut img: PgVec<'_, u8> = PgVec::new_in(mcx);
+        img.extend_from_slice(&set_varsize_4b(VARHDRSZ + s.len()));
+        img.extend_from_slice(s.as_bytes());
+        img
+    }
+
+    // get_func_input_arg_names: with proargmodes, only i/b/v entries are
+    // parameter names — o/t entries are skipped, not blanked.
+    #[test]
+    fn input_argnames_filter_out_and_table_modes() {
+        let ctx = MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let names = ["a", "sum", "b", "cols"];
+        let imgs: Vec<PgVec<'_, u8>> = names.iter().map(|s| text_image(mcx, s)).collect();
+        let elems: Vec<Datum> =
+            imgs.iter().map(|i| Datum::from_usize(i.as_ptr() as usize)).collect();
+        let names_img =
+            construct_array_image(mcx, &elems, TEXTOID, -1, false, b'i').expect("names array");
+        // modes {i, o, b, t}: inputs are a (i) and b (b).
+        let modes: Vec<Datum> =
+            [b'i', b'o', b'b', b't'].iter().map(|&m| Datum::from_char(m as i8)).collect();
+        let modes_img =
+            construct_array_image(mcx, &modes, CHAROID, 1, true, b'c').expect("modes array");
+        let out = read_input_argnames(
+            mcx,
+            Datum::from_usize(names_img.as_ptr() as usize),
+            false,
+            Datum::from_usize(modes_img.as_ptr() as usize),
+            false,
+            2,
+        )
+        .expect("read_input_argnames");
+        let got: Vec<&str> = out.iter().map(|s| s.as_str()).collect();
+        assert_eq!(got, ["a", "b"]);
+    }
+
+    // Without proargmodes every listed name is an input name (all-IN
+    // signatures store no modes array); short lists pad with "".
+    #[test]
+    fn input_argnames_no_modes_pads_short_list() {
+        let ctx = MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let imgs = [text_image(mcx, "x")];
+        let elems = [Datum::from_usize(imgs[0].as_ptr() as usize)];
+        let names_img =
+            construct_array_image(mcx, &elems, TEXTOID, -1, false, b'i').expect("names array");
+        let out = read_input_argnames(
+            mcx,
+            Datum::from_usize(names_img.as_ptr() as usize),
+            false,
+            Datum::null(),
+            true,
+            2,
+        )
+        .expect("read_input_argnames");
+        let got: Vec<&str> = out.iter().map(|s| s.as_str()).collect();
+        assert_eq!(got, ["x", ""]);
+    }
+
+    // VARIADIC ("v") mode entries are input parameters (the inline path now
+    // reads rows with non-null proargmodes; the panic seam is retired).
+    #[test]
+    fn input_argnames_variadic_is_input() {
+        let ctx = MemoryContext::new("test");
+        let mcx = ctx.mcx();
+        let names = ["fmt", "rest"];
+        let imgs: Vec<PgVec<'_, u8>> = names.iter().map(|s| text_image(mcx, s)).collect();
+        let elems: Vec<Datum> =
+            imgs.iter().map(|i| Datum::from_usize(i.as_ptr() as usize)).collect();
+        let names_img =
+            construct_array_image(mcx, &elems, TEXTOID, -1, false, b'i').expect("names array");
+        let modes: Vec<Datum> =
+            [b'i', b'v'].iter().map(|&m| Datum::from_char(m as i8)).collect();
+        let modes_img =
+            construct_array_image(mcx, &modes, CHAROID, 1, true, b'c').expect("modes array");
+        let out = read_input_argnames(
+            mcx,
+            Datum::from_usize(names_img.as_ptr() as usize),
+            false,
+            Datum::from_usize(modes_img.as_ptr() as usize),
+            false,
+            2,
+        )
+        .expect("read_input_argnames");
+        let got: Vec<&str> = out.iter().map(|s| s.as_str()).collect();
+        assert_eq!(got, ["fmt", "rest"]);
+    }
+}
