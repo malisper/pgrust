@@ -223,16 +223,29 @@ impl<'mcx> SeqScanState<'mcx> {
         Ok(())
     }
 
-    // Rung 1 (per-row lazy path): arm the scan slot with the full-fixed-prefix
-    // kernel; slot deform then runs it for fresh null-free tuples and resumes
-    // the interpreted walk past the prefix. Fallback rows and hasnulls tuples
-    // are untouched by construction.
+    // Rung 1 (per-row lazy path): arm the scan slot with a kernel sized to
+    // what the scan actually fetches (qual + projection max_fetch; whole row
+    // when absent or shape-unknown), clamped to the fixed prefix; 1-2-column
+    // fetches stay on the interpreter (JIT_DEFORM_ROW_MIN_COLS).
     fn arm_slot_jit_deform(&mut self, estate: &mut EStateData<'mcx>) {
         let scandesc = self.ss.ss_currentScanDesc.as_ref().expect("armed after beginscan");
         let nblocks = ::tableam::table_scan_nblocks(scandesc);
         let rel = self.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+        let natts = rel.rd_att.natts;
+        let mut need = 0i32;
+        match self.ss.ps_ProjInfo.as_ref() {
+            Some(p) => need = need.max(p.pi_state.max_fetch(::execexpr::SlotSrc::Scan).unwrap_or(natts)),
+            None => need = natts,
+        }
+        if let Some(q) = self.ss.qual.as_deref() {
+            need = need.max(q.max_fetch(::execexpr::SlotSrc::Scan).unwrap_or(natts));
+        }
         let prefix = ::jit_deform::fixed_prefix(&rel.rd_att.compact_attrs);
-        let Some(k) = jit_deform_kernel(rel, prefix, nblocks, JIT_DEFORM_ROW_MIN_PAGES) else {
+        let ncols = prefix.min(need.max(0) as usize);
+        if ncols < JIT_DEFORM_ROW_MIN_COLS {
+            return;
+        }
+        let Some(k) = jit_deform_kernel(rel, ncols, nblocks, JIT_DEFORM_ROW_MIN_PAGES) else {
             return;
         };
         match estate.slot_mut(self.ss.ss_ScanTupleSlot) {
@@ -251,6 +264,14 @@ impl<'mcx> SeqScanState<'mcx> {
 // compiles. C's jit + jit_tuple_deforming GUCs stay the kill switches.
 const JIT_DEFORM_ROW_MIN_PAGES: u32 = 4;
 const JIT_DEFORM_BATCH_MIN_PAGES: u32 = 48;
+// Kernel + double-call overhead vs the warm inline walk crosses between 2
+// and 3 fetched columns (v2 train: sort_limit need-3 -3.2%, distinct
+// need-2 +1.3%).
+const JIT_DEFORM_ROW_MIN_COLS: usize = 3;
+// The AOT batch column loops beat the per-row kernel call below 4 columns
+// (v2: group_agg c=3 +0.58%, joins c=5 -2..3%). Only meaningful while the
+// AOT pass exists (rung 3 removes both it and this floor).
+const JIT_DEFORM_BATCH_MIN_COLS: usize = 4;
 
 fn jit_deform_kernel(
     rel: &Relation<'_>,
@@ -328,15 +349,17 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
         // column loops on dense full-prefix deforms; col-only passes and
         // mixed batches keep the AOT/interpreted paths.
         let mut plan = plan;
-        if let Some(sd) = node.ss.ss_currentScanDesc.as_ref() {
-            let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
-            if let Some(k) = jit_deform_kernel(
-                rel,
-                plan.ncols() as usize,
-                ::tableam::table_scan_nblocks(sd),
-                JIT_DEFORM_BATCH_MIN_PAGES,
-            ) {
-                plan.arm_jit(k);
+        if plan.ncols() as usize >= JIT_DEFORM_BATCH_MIN_COLS {
+            if let Some(sd) = node.ss.ss_currentScanDesc.as_ref() {
+                let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+                if let Some(k) = jit_deform_kernel(
+                    rel,
+                    plan.ncols() as usize,
+                    ::tableam::table_scan_nblocks(sd),
+                    JIT_DEFORM_BATCH_MIN_PAGES,
+                ) {
+                    plan.arm_jit(k);
+                }
             }
         }
         ::mcx::PgBox::new_in(
