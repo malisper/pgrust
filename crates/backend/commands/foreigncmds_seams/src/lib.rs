@@ -23,9 +23,25 @@ seam_core::seam!(
     pub fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oid>
 );
 
+seam_core::seam!(
+    // pg_options_to_table (foreign.c) — fmgr builtin 2289 marshals here; the
+    // materialized-SRF body lives with the DDL stack (funcapi dep).
+    pub fn pg_options_to_table(
+        flinfo: Option<&mut types_fmgr::FmgrInfo>,
+        fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+    ) -> PgResult<Datum>
+);
+
 pub mod builtins {
     use super::*;
     use types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+
+    fn fc_pg_options_to_table(
+        flinfo: Option<&mut FmgrInfo>,
+        fcinfo: &mut Fcinfo,
+    ) -> PgResult<Datum> {
+        pg_options_to_table::call(flinfo, fcinfo)
+    }
 
     fn fc_postgresql_fdw_validator(
         _flinfo: Option<&mut FmgrInfo>,
@@ -40,6 +56,12 @@ pub mod builtins {
         FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
     }
 
-    pub const FOREIGN_BUILTINS: &[FmgrBuiltin] =
-        &[b(2316, "postgresql_fdw_validator", 2, fc_postgresql_fdw_validator)];
+    const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+        FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
+    }
+
+    pub const FOREIGN_BUILTINS: &[FmgrBuiltin] = &[
+        b(2316, "postgresql_fdw_validator", 2, fc_postgresql_fdw_validator),
+        srf(2289, "pg_options_to_table", 1, fc_pg_options_to_table),
+    ];
 }

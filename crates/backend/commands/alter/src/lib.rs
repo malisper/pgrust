@@ -640,6 +640,22 @@ pub fn ExecAlterOwnerStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOwnerStmt<'mcx>) -> 
                 objectSubId: 0,
             })
         }
+        ObjectType::OBJECT_FDW => {
+            let name = stmt
+                .object
+                .and_then(|o| o.as_string())
+                .expect("ALTER FOREIGN DATA WRAPPER OWNER object is a String")
+                .sval;
+            foreigncmds::AlterForeignDataWrapperOwner(mcx, name, newowner)
+        }
+        ObjectType::OBJECT_FOREIGN_SERVER => {
+            let name = stmt
+                .object
+                .and_then(|o| o.as_string())
+                .expect("ALTER SERVER OWNER object is a String")
+                .sval;
+            foreigncmds::AlterForeignServerOwner(mcx, name, newowner)
+        }
         ObjectType::OBJECT_AGGREGATE
         | ObjectType::OBJECT_COLLATION
         | ObjectType::OBJECT_CONVERSION

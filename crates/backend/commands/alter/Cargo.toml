@@ -30,6 +30,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }
 init_small = { path = "../../utils/init/init_small" }
 dbcommands = { path = "../dbcommands" }
+foreigncmds = { path = "../foreigncmds" }
 pg_publication = { path = "../../catalog/pg_publication" }
 pg_subscription = { path = "../../catalog/pg_subscription" }
 commands_publicationcmds = { path = "../publicationcmds" }

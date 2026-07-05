@@ -66,6 +66,51 @@ pub(crate) fn untransform_options<'mcx>(
     Ok(result)
 }
 
+// pg_options_to_table (foreign.c): expand a text[] of "name=value" options
+// into (option_name, option_value) rows; a record without '=' yields a null
+// value (untransformRelOptions' NULL-arg DefElem).
+pub fn pg_options_to_table(
+    flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_options_to_table: resolved FmgrInfo required");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let array = fcinfo.arg(0);
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, funcapi::MAT_SRF_BLESS)?;
+
+    let image = detoast::detoast_attr(mcx, varlena_image(array))?;
+    let (elems, elem_nulls) =
+        arrayfuncs::construct::deconstruct_array_builtin(mcx, &image, TEXTOID, false)?;
+    debug_assert!(!elem_nulls.iter().any(|&n| n));
+    for elem in elems.iter() {
+        let body = text_body(varlena_image(*elem));
+        let mut values = [Datum::null(); 2];
+        let mut nulls = [false; 2];
+        match body.iter().position(|&b| b == b'=') {
+            Some(pos) => {
+                values[0] = text_datum(mcx, &body[..pos])?;
+                values[1] = text_datum(mcx, &body[pos + 1..])?;
+            }
+            None => {
+                values[0] = text_datum(mcx, body)?;
+                nulls[1] = true;
+            }
+        }
+        srf.putvalues(&values, &nulls)?;
+    }
+    Ok(srf.finish(fcinfo))
+}
+
+fn text_datum(mcx: Mcx<'_>, body: &[u8]) -> PgResult<Datum> {
+    let total = types_tuple::varatt::VARHDRSZ + body.len();
+    let mut buf: PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    mcx::vec_append_bytes(&mut buf, &datum::varlena::set_varsize_4b(total))?;
+    mcx::vec_append_bytes(&mut buf, body)?;
+    // Leaked: the datum is materialized into the SRF tuplestore by putvalues.
+    Ok(Datum::from_usize(buf.leak().as_ptr() as usize))
+}
+
 /// optionListToArray (foreigncmds.c): text[] image, or None for an empty list.
 fn option_list_to_array<'mcx>(
     mcx: Mcx<'mcx>,

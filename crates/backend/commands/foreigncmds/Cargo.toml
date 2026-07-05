@@ -26,6 +26,7 @@ catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }
 catalog_dependency = { path = "../../catalog/catalog_dependency" }
 pg_depend = { path = "../../catalog/pg_depend" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }
 parse_func = { path = "../../parser/parse_func" }
 parser_small1 = { path = "../../parser/parser_small1" }
 commands_define = { path = "../commands_define" }
@@ -38,6 +39,7 @@ mbutils = { path = "../../utils/mb/mbutils" }
 miscinit = { path = "../../utils/init/miscinit" }
 superuser = { path = "../../utils/misc/superuser" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
+funcapi = { path = "../../utils/fmgr/funcapi" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 detoast = { path = "../../access/common/detoast" }
 xact = { path = "../../access/transam/xact" }
