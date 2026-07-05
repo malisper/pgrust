@@ -512,7 +512,7 @@ fn AlterDomainDropConstraint<'mcx>(
     cache_inval_type_tuple(mcx, domainoid)
 }
 
-fn AlterDomainAddConstraint<'mcx>(
+pub(crate) fn AlterDomainAddConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     names: &NodeList<'mcx>,
     new_constraint: Node<'mcx>,

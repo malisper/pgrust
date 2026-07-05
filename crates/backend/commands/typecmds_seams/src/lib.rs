@@ -9,3 +9,13 @@ seam_core::seam!(
         new_owner_id: Oid,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // AlterDomainAddConstraint (typecmds.c) for tablecmds'
+    // AT_ReAddDomainConstraint; seam because typecmds depends on tablecmds.
+    pub fn alter_domain_add_constraint<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        names: &types_nodes::NodeList<'mcx>,
+        new_constraint: types_nodes::Node<'mcx>,
+    ) -> PgResult<()>
+);
