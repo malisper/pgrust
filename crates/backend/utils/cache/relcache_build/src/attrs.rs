@@ -359,7 +359,7 @@ pub(crate) fn scan_pg_constraint_fkeys<'mcx>(
 fn fk_array_elems<'s>(
     smcx: Mcx<'s>,
     d: Datum,
-    elmlen: i32,
+    elmlen: i16,
     elmalign: u8,
 ) -> PgResult<PgVec<'s, Datum>> {
     let p = d.as_usize() as *const u8;
