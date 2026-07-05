@@ -1,6 +1,7 @@
-use types_core::TransactionId;
+use types_core::{FullTransactionId, Oid, TransactionId};
 use types_error::PgResult;
-use types_storage::SharedInvalidationMessage;
+use types_storage::lock::LOCKTAG;
+use types_storage::{RelFileLocator, SharedInvalidationMessage};
 
 seam_core::seam!(
     // LogStandbyInvalidations(nmsgs, msgs, relcacheInitFileInval) (standby.c).
@@ -11,7 +12,10 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn standby_release_lock_tree<'a>(xid: TransactionId, subxids: &'a [TransactionId])
+    pub fn standby_release_lock_tree<'a>(
+        xid: TransactionId,
+        subxids: &'a [TransactionId],
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -32,4 +36,57 @@ seam_core::seam!(
 seam_core::seam!(
     // ShutdownRecoveryTransactionEnvironment() (standby.c).
     pub fn shutdown_recovery_transaction_environment() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // InitRecoveryTransactionEnvironment() (standby.c).
+    pub fn init_recovery_transaction_environment() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // StandbyAcquireAccessExclusiveLock(xid, dbOid, relOid) (standby.c);
+    // lock.c's twophase standby recovery is the cyclic caller.
+    pub fn standby_acquire_access_exclusive_lock(
+        xid: TransactionId,
+        db_oid: Oid,
+        rel_oid: Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ResolveRecoveryConflictWithLock(locktag, logging_conflict) (standby.c);
+    // proc.c's ProcSleep InHotStandby arm is the cyclic caller.
+    pub fn resolve_recovery_conflict_with_lock(
+        locktag: LOCKTAG,
+        logging_conflict: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ResolveRecoveryConflictWithBufferPin() (standby.c); bufmgr's
+    // LockBufferForCleanup InHotStandby arm is the cyclic caller.
+    pub fn resolve_recovery_conflict_with_buffer_pin() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // CheckRecoveryConflictDeadlock() (standby.c); proc.c ProcSleep caller.
+    pub fn check_recovery_conflict_deadlock() -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ResolveRecoveryConflictWithSnapshot (standby.c).
+    pub fn resolve_recovery_conflict_with_snapshot(
+        snapshot_conflict_horizon: TransactionId,
+        is_catalog_rel: bool,
+        locator: RelFileLocator,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // ResolveRecoveryConflictWithSnapshotFullXid (standby.c).
+    pub fn resolve_recovery_conflict_with_snapshot_full_xid(
+        snapshot_conflict_horizon: FullTransactionId,
+        is_catalog_rel: bool,
+        locator: RelFileLocator,
+    ) -> PgResult<()>
 );

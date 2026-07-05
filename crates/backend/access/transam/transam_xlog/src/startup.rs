@@ -864,6 +864,8 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
 
     init_small::globals::EndCriticalSection();
 
+    walsummarizer_seams::wakeup_wal_summarizer::call();
+
     sync_seams::sync_post_checkpoint::call()?;
 
     if prior_redo_ptr != InvalidXLogRecPtr {
@@ -875,7 +877,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // slot's horizon is pushed forward by max_slot_wal_keep_size — removing
     // that WAL without invalidating the slot breaks the slot contract, so
     // that combination must be loud, never a silent removal.
-    if crate::removal::KeepLogSeg(recptr, &mut log_seg_no) {
+    if crate::removal::KeepLogSeg(recptr, &mut log_seg_no)? {
         panic!(
             "max_slot_wal_keep_size would invalidate a replication slot: \
              InvalidateObsoleteReplicationSlots not ported"

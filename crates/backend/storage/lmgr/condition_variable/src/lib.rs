@@ -319,7 +319,7 @@ fn checkpointer_cv(cv: condition_variable_seams::CheckpointerCv) -> &'static Con
 // Crash-cycle re-init (ConditionVariableInit image): a backend killed while
 // parked leaves its procno in wakeup, and ProcGlobalReset zeroes the
 // cvWaitLink side; both must clear together. Postmaster only, children dead.
-fn cv_reset_after_crash(cv: &ConditionVariable) {
+pub fn cv_reset_after_crash(cv: &ConditionVariable) {
     cv.mutex.unlock();
     cv.wakeup.set(proclist_head {
         head: INVALID_PROC_NUMBER,

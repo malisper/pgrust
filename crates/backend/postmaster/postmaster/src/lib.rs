@@ -286,6 +286,9 @@ pub fn process_pm_reload_request() -> PgResult<()> {
             libc::SIGHUP,
             btmask_all_except(&[BackendType::DeadEndBackend]),
         );
+        if with_pm(|pm| pm.syslogger.is_some()) {
+            syslogger::collector_kill(libc::SIGHUP);
+        }
 
         if !auth_seams::load_hba::call() {
             report(LOG, "pg_hba.conf was not reloaded".into(), 2010, "process_pm_reload_request");
@@ -365,13 +368,14 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         with_pm(|pm| pm.start_worker_needed = true);
     }
 
-    let syslogger = with_pm(|pm| pm.syslogger);
-    if let Some(syslogger) = syslogger {
+    // signal_child(SIGUSR1) has no route to the slotless logger thread;
+    // direct poke (see syslogger::collector_kill).
+    if with_pm(|pm| pm.syslogger.is_some()) {
         if syslogger_seams::check_logrotate_signal::call() {
-            statemachine::signal_child(&syslogger, libc::SIGUSR1);
+            syslogger::collector_kill(libc::SIGUSR1);
             syslogger_seams::remove_logrotate_signal_files::call();
         } else if pmsignal::CheckPostmasterSignal(PMSIGNAL_ROTATE_LOGFILE) {
-            statemachine::signal_child(&syslogger, libc::SIGUSR1);
+            syslogger::collector_kill(libc::SIGUSR1);
         }
     }
 
@@ -591,6 +595,15 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             continue;
         }
 
+        if with_pm(|pm| pm.walsummarizer.map(|c| c.pid)) == Some(pid) {
+            let ws = with_pm(|pm| pm.walsummarizer.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(ws.child_slot);
+            if !status0 {
+                handle_child_crash("WAL summarizer process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
         // C treats archiver exit status 0 or 1 as normal (FATAL exit = 1):
         // the main loop relaunches it to retry archiving remaining files.
         if with_pm(|pm| pm.pgarch.map(|c| c.pid)) == Some(pid) {
@@ -598,6 +611,19 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             pmchild_seams::release_postmaster_child_slot::call(pgarch_child.child_slot);
             if !(status0 || status1) {
                 handle_child_crash("archiver process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
+        if with_pm(|pm| pm.syslogger.map(|c| c.pid)) == Some(pid) {
+            let logger = with_pm(|pm| pm.syslogger.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(logger.child_slot);
+            // C: for safety's sake, launch new logger *first*.
+            if guc_tables::vars::Logging_collector.read() {
+                statemachine::StartSysLogger();
+            }
+            if !status0 {
+                log_child_exit("system logger process", pid, exitstatus);
             }
             continue;
         }

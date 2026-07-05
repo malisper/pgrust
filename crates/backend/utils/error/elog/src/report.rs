@@ -635,7 +635,13 @@ pub fn write_pipe_chunks(data: &[u8], dest: i32) {
     // Assert(len > 0)
     debug_assert!(!data.is_empty());
 
-    let pid = sink::backend_log_context().map_or_else(sink::current_pid, |c| c.process_id()) as i32;
+    // C MyProcPid: the chunk header pid keys per-source reassembly, so each
+    // backend THREAD needs its own (process id would garble interleaves).
+    let pid = if init_small_seams::my_proc_pid::is_installed() {
+        init_small_seams::my_proc_pid::call()
+    } else {
+        sink::backend_log_context().map_or_else(sink::current_pid, |c| c.process_id()) as i32
+    };
     let mut flags: u8 = 0;
     if dest == LOG_DESTINATION_STDERR {
         flags |= PIPE_PROTO_DEST_STDERR;

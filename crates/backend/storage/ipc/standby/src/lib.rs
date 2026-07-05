@@ -1,8 +1,20 @@
-//! standby.c primary snapshot half + AEL lock export; recovery half unported.
+//! standby.c: primary snapshot half + AEL lock export + the hot-standby
+//! recovery half (conflict resolution, recovery lock tables).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
+
+pub mod recovery;
+pub use recovery::{
+    CheckRecoveryConflictDeadlock, InitRecoveryTransactionEnvironment, LogRecoveryConflict,
+    ResolveRecoveryConflictWithBufferPin, ResolveRecoveryConflictWithDatabase,
+    ResolveRecoveryConflictWithLock, ResolveRecoveryConflictWithSnapshot,
+    ResolveRecoveryConflictWithSnapshotFullXid, ResolveRecoveryConflictWithTablespace,
+    ShutdownRecoveryTransactionEnvironment, StandbyAcquireAccessExclusiveLock,
+    StandbyDeadLockHandler, StandbyLockTimeoutHandler, StandbyReleaseAllLocks,
+    StandbyReleaseLockTree, StandbyReleaseOldLocks, StandbyTimeoutHandler,
+};
 
 use elog::elog;
 use types_core::{Oid, XLogRecPtr, XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK};
@@ -188,19 +200,50 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
     debug_assert!(decoded.max_block_id < 0);
     let info = decoded.xl_info & !XLR_INFO_MASK;
 
-    // C returns before every arm unless in hot standby (recovery half unported).
     if xlogutils::standby_state() == xlogutils::STANDBY_DISABLED {
         return Ok(());
     }
+    // SAFETY: points into the reader's decode buffer, valid for the redo call.
+    let data: &[u8] = unsafe { decoded.main_data_bytes() };
     match info {
         XLOG_STANDBY_LOCK => {
-            panic!("standby_redo: StandbyAcquireAccessExclusiveLock unported (hot standby)")
+            let nlocks = i32::from_ne_bytes(data[0..4].try_into().unwrap()) as usize;
+            for i in 0..nlocks {
+                let base = OFFSET_OF_XL_STANDBY_LOCKS_LOCKS + i * SIZE_OF_XL_STANDBY_LOCK;
+                let xid = u32::from_ne_bytes(data[base..base + 4].try_into().unwrap());
+                let dbOid = u32::from_ne_bytes(data[base + 4..base + 8].try_into().unwrap());
+                let relOid = u32::from_ne_bytes(data[base + 8..base + 12].try_into().unwrap());
+                StandbyAcquireAccessExclusiveLock(xid, dbOid, relOid)?;
+            }
+            Ok(())
         }
         XLOG_RUNNING_XACTS => {
-            panic!("standby_redo: ProcArrayApplyRecoveryInfo unported (hot standby)")
+            panic!(
+                "standby_redo: ProcArrayApplyRecoveryInfo unported \
+                 (procarray KnownAssignedXids, recovery phase 2)"
+            )
         }
         XLOG_INVALIDATIONS => {
-            panic!("standby_redo: ProcessCommittedInvalidationMessages unported (hot standby)")
+            let dbId = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+            let tsId = u32::from_ne_bytes(data[4..8].try_into().unwrap());
+            let relcacheInitFileInval = data[8] != 0;
+            let nmsgs = i32::from_ne_bytes(data[12..16].try_into().unwrap()) as usize;
+            let mut msgs = Vec::with_capacity(nmsgs);
+            for i in 0..nmsgs {
+                let base = MIN_SIZE_OF_INVALIDATIONS + i * SHARED_INVALIDATION_MESSAGE_SIZE;
+                msgs.push(
+                    SharedInvalidationMessage::from_wire_bytes(
+                        data[base..base + SHARED_INVALIDATION_MESSAGE_SIZE].try_into().unwrap(),
+                    )
+                    .expect("standby_redo: unrecognized sinval message id"),
+                );
+            }
+            inval::eoxact::ProcessCommittedInvalidationMessages(
+                &msgs,
+                relcacheInitFileInval,
+                dbId,
+                tsId,
+            )
         }
         _ => panic!("standby_redo: unknown op code {info}"),
     }
@@ -211,4 +254,22 @@ pub fn init_seams() {
     standby_seams::log_standby_invalidations::set(LogStandbyInvalidations);
     standby_seams::log_access_exclusive_lock::set(LogAccessExclusiveLock);
     standby_seams::log_access_exclusive_lock_prepare::set(LogAccessExclusiveLockPrepare);
+    standby_seams::standby_release_lock_tree::set(StandbyReleaseLockTree);
+    standby_seams::init_recovery_transaction_environment::set(InitRecoveryTransactionEnvironment);
+    standby_seams::shutdown_recovery_transaction_environment::set(
+        ShutdownRecoveryTransactionEnvironment,
+    );
+    standby_seams::standby_acquire_access_exclusive_lock::set(StandbyAcquireAccessExclusiveLock);
+    standby_seams::resolve_recovery_conflict_with_lock::set(ResolveRecoveryConflictWithLock);
+    standby_seams::resolve_recovery_conflict_with_buffer_pin::set(
+        ResolveRecoveryConflictWithBufferPin,
+    );
+    standby_seams::check_recovery_conflict_deadlock::set(CheckRecoveryConflictDeadlock);
+    standby_seams::resolve_recovery_conflict_with_snapshot::set(
+        ResolveRecoveryConflictWithSnapshot,
+    );
+    standby_seams::resolve_recovery_conflict_with_snapshot_full_xid::set(
+        ResolveRecoveryConflictWithSnapshotFullXid,
+    );
+    recovery::install_guc_backings();
 }

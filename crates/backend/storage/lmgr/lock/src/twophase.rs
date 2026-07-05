@@ -355,12 +355,16 @@ pub fn lock_twophase_postabort(xid: TransactionId, info: u16, recdata: &[u8]) ->
     lock_twophase_postcommit(xid, info, recdata)
 }
 
-pub fn lock_twophase_standby_recover(_xid: TransactionId, _info: u16, recdata: &[u8]) -> PgResult<()> {
+pub fn lock_twophase_standby_recover(xid: TransactionId, _info: u16, recdata: &[u8]) -> PgResult<()> {
     let (locktag, lockmode) = decode_lock_record(recdata);
     if lockmode == crate::AccessExclusiveLock
         && locktag.locktag_type == LOCKTAG_RELATION
     {
-        panic!("lock_twophase_standby_recover: StandbyAcquireAccessExclusiveLock unported (hot standby)");
+        standby_seams::standby_acquire_access_exclusive_lock::call(
+            xid,
+            locktag.locktag_field1,
+            locktag.locktag_field2,
+        )?;
     }
     Ok(())
 }

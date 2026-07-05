@@ -108,6 +108,7 @@ pub fn init_all() {
     bgwriter::init_seams();
     walwriter::init_seams();
     pgarch::init_seams();
+    walsummarizer::init_seams();
     postmaster_startup::init_seams();
     syslogger::init_seams();
     launcher::init_seams();

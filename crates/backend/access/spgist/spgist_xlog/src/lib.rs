@@ -659,7 +659,13 @@ fn spgRedoVacuumRedirect(record: &XLogReaderState) -> PgResult<()> {
     let item_to_placeholder = u16s_at(md, SizeOfSpgxlogVacuumRedirect, xldata.nToPlaceholder as usize);
 
     if xlogutils::InHotStandby() {
-        panic!("unported: spgist vacuum-redirect recovery conflicts (standby lane)");
+        let (rlocator, _, _, _) =
+            record.block_tag_extended(0).expect("spgRedoVacuumRedirect: no block 0");
+        standby::ResolveRecoveryConflictWithSnapshot(
+            xldata.snapshotConflictHorizon,
+            xldata.isCatalogRel,
+            rlocator,
+        )?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;

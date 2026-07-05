@@ -878,7 +878,13 @@ fn heap_xlog_prune_freeze(record: &mut XLogReaderState) -> PgResult<()> {
     );
 
     if flags & XLHP_HAS_CONFLICT_HORIZON != 0 && xlogutils::InHotStandby() {
-        panic!("heap_xlog_prune_freeze: ResolveRecoveryConflictWithSnapshot (standby lane)");
+        let md = main_data(record);
+        let horizon = u32::from_ne_bytes(md[2..6].try_into().unwrap());
+        standby::ResolveRecoveryConflictWithSnapshot(
+            horizon,
+            flags & XLHP_IS_CATALOG_REL != 0,
+            rlocator,
+        )?;
     }
 
     let (action, buffer) = xlogutils::XLogReadBufferForRedoExtended(
@@ -1004,7 +1010,11 @@ fn heap_xlog_visible(record: &mut XLogReaderState) -> PgResult<()> {
         .expect("heap_xlog_visible: no block 1");
 
     if xlogutils::InHotStandby() {
-        panic!("heap_xlog_visible: ResolveRecoveryConflictWithSnapshot (standby lane)");
+        standby::ResolveRecoveryConflictWithSnapshot(
+            conflict_horizon,
+            flags & VISIBILITYMAP_XLOG_CATALOG_REL != 0,
+            rlocator,
+        )?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 1)?;

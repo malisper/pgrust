@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 seam_core = { path = "../../../_support/seam_core" }
+types_startup = { path = "../../../_support/types/types_startup" }

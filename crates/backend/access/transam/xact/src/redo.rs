@@ -328,7 +328,7 @@ fn xact_redo_commit(
         )?;
 
         if (parsed.xinfo & XACT_XINFO_HAS_AE_LOCKS) != 0 {
-            standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts);
+            standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts)?;
         }
     }
 
@@ -389,7 +389,7 @@ fn xact_redo_abort(
 
 
         if (parsed.xinfo & XACT_XINFO_HAS_AE_LOCKS) != 0 {
-            standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts);
+            standby_seams::standby_release_lock_tree::call(xid, &parsed.subxacts)?;
         }
     }
 

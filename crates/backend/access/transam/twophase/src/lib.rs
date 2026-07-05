@@ -41,6 +41,7 @@ pub fn init_seams() {
     seams::post_prepare_twophase::set(PostPrepare_Twophase);
     seams::at_abort_twophase::set(AtAbort_Twophase);
     seams::two_phase_get_dummy_proc_number::set(TwoPhaseGetDummyProcNumber);
+    seams::standby_transaction_id_is_prepared::set(StandbyTransactionIdIsPrepared);
 
     // C's xact_redo holds TwoPhaseStateLock around these callees; the redo
     // arms here delegate the lock to the installed impl (redo.rs contract).

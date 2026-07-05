@@ -50,10 +50,21 @@ pub(crate) fn XLOGfileslop(lastredoptr: XLogRecPtr) -> XLogSegNo {
 
 // Returns true when the max_slot_wal_keep_size cap pushed the slot horizon
 // forward — C must then invalidate the affected slots.
-pub(crate) fn KeepLogSeg(recptr: XLogRecPtr, log_seg_no: &mut XLogSegNo) -> bool {
+pub(crate) fn KeepLogSeg(recptr: XLogRecPtr, log_seg_no: &mut XLogSegNo) -> PgResult<bool> {
     let ctl = XLogCtl();
     let keep = ctl.info_lck.with(|| ctl.replicationSlotMinLSN.load(Relaxed));
-    keep_log_seg_with(recptr, log_seg_no, keep)
+    let slot_horizon_capped = keep_log_seg_with(recptr, log_seg_no, keep);
+
+    // C applies this clamp between the slot cap and wal_keep_size; all three
+    // only lower segno, so applying it after keep_log_seg_with is equivalent.
+    let unsummarized = walsummarizer_seams::get_oldest_unsummarized_lsn::call()?;
+    if unsummarized != InvalidXLogRecPtr {
+        let seg = XLByteToSeg(unsummarized, wal_segment_size());
+        if seg < *log_seg_no {
+            *log_seg_no = seg;
+        }
+    }
+    Ok(slot_horizon_capped)
 }
 
 pub(crate) fn keep_log_seg_with(
@@ -108,6 +119,25 @@ pub(crate) fn XLogFromFileName(fname: &str, wal_segsz: i32) -> (TimeLineID, XLog
     let log = u64::from_str_radix(&fname[8..16], 16).unwrap_or(0);
     let seg = u64::from_str_radix(&fname[16..24], 16).unwrap_or(0);
     (tli, log * XLogSegmentsPerXLogId(wal_segsz) + seg)
+}
+
+pub fn XLogGetOldestSegno(tli: TimeLineID) -> PgResult<XLogSegNo> {
+    let mut oldest_segno: XLogSegNo = 0;
+    let xldir = fd::AllocateDir(XLOGDIR)?;
+    while let Some(xlde) = fd::ReadDir(xldir, XLOGDIR)? {
+        if !IsXLogFileName(&xlde.d_name) {
+            continue;
+        }
+        let (file_tli, file_segno) = XLogFromFileName(&xlde.d_name, wal_segment_size());
+        if tli != file_tli {
+            continue;
+        }
+        if oldest_segno == 0 || file_segno < oldest_segno {
+            oldest_segno = file_segno;
+        }
+    }
+    fd::FreeDir(xldir)?;
+    Ok(oldest_segno)
 }
 
 fn UpdateLastRemovedPtr(fname: &str) {

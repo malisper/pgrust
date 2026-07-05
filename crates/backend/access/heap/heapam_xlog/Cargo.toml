@@ -18,6 +18,8 @@ visibilitymap = { path = "../visibilitymap" }
 inval = { path = "../../../utils/cache/inval" }
 pruneheap_seams = { path = "../pruneheap_seams" }
 
+standby = { path = "../../../storage/ipc/standby" }
+
 [dev-dependencies]
 heapam = { path = "../heapam" }
 pruneheap = { path = "../pruneheap" }

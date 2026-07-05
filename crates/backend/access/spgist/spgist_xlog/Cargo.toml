@@ -14,3 +14,4 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 xlogutils = { path = "../../transam/xlogutils" }
+standby = { path = "../../../storage/ipc/standby" }

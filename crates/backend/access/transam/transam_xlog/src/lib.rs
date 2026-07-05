@@ -17,6 +17,7 @@ pub mod guc_vars;
 pub mod insert;
 pub mod redo;
 pub(crate) mod removal;
+pub use removal::XLogGetOldestSegno;
 pub mod startup;
 pub mod write;
 
@@ -29,7 +30,7 @@ pub use control_file::{
     LocalProcessControlFile, ReadControlFile,
     UpdateControlFile,
 };
-pub use ctl::{XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};
+pub use ctl::{GetWALInsertionTimeLineIfSet, XLOGShmemInit, XLOGShmemResetAfterCrash, XLOGShmemSize};
 pub use insert::{
     GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr, GetXLogInsertRecPtr,
     RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,

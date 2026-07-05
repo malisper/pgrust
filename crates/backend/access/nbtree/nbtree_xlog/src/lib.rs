@@ -764,7 +764,12 @@ fn btree_xlog_vacuum(record: &mut XLogReaderState) -> PgResult<()> {
 
 fn btree_xlog_delete(record: &mut XLogReaderState) -> PgResult<()> {
     if xlogutils::InHotStandby() {
-        panic!("btree_xlog_delete arm not ported: ResolveRecoveryConflictWithSnapshot (standby lane)");
+        let xlrec = main_data(record);
+        let horizon = u32::from_ne_bytes(xlrec[0..4].try_into().unwrap());
+        let is_catalog_rel = xlrec[8] != 0;
+        let (rlocator, _, _, _) =
+            record.block_tag_extended(0).expect("btree_xlog_delete: no block 0");
+        standby::ResolveRecoveryConflictWithSnapshot(horizon, is_catalog_rel, rlocator)?;
     }
     btree_xlog_vacuum_or_delete(record, false)
 }
@@ -1053,7 +1058,21 @@ pub fn btree_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_BTREE_REUSE_PAGE => {
             // Conflict point for hot standby only; nothing to replay.
             if xlogutils::InHotStandby() {
-                panic!("btree_xlog_reuse_page arm not ported: ResolveRecoveryConflictWithSnapshotFullXid (standby lane)");
+                let xlrec = main_data(record);
+                let locator = types_storage::RelFileLocator::new(
+                    u32::from_ne_bytes(xlrec[0..4].try_into().unwrap()),
+                    u32::from_ne_bytes(xlrec[4..8].try_into().unwrap()),
+                    u32::from_ne_bytes(xlrec[8..12].try_into().unwrap()),
+                );
+                let horizon = types_core::FullTransactionId::from_u64(u64::from_ne_bytes(
+                    xlrec[16..24].try_into().unwrap(),
+                ));
+                let is_catalog_rel = xlrec[24] != 0;
+                standby::ResolveRecoveryConflictWithSnapshotFullXid(
+                    horizon,
+                    is_catalog_rel,
+                    locator,
+                )?;
             }
             Ok(())
         }

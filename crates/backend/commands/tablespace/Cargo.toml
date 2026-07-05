@@ -49,3 +49,4 @@ checkpointer = { path = "../../postmaster/checkpointer" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 fd = { path = "../../storage/file/fd" }
+standby = { path = "../../storage/ipc/standby" }

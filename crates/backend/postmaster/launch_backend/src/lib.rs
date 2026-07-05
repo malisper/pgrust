@@ -104,7 +104,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "wal_summarizer",
-        main_fn: Main::Unported("WalSummarizerMain (backend-postmaster-walsummarizer)"),
+        main_fn: Main::Ported(walsummarizer::WalSummarizerMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -114,10 +114,16 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "syslogger",
-        main_fn: Main::Unported("SysLoggerMain (backend-postmaster-syslogger)"),
+        main_fn: Main::Ported(sys_logger_main),
         shmem_attach: false,
     },
 ];
+
+// Seam-shaped: a direct syslogger dep would cycle (syslogger calls
+// postmaster_child_launch).
+fn sys_logger_main(startup_data: &StartupData) -> ! {
+    syslogger_seams::sys_logger_main::call(startup_data)
+}
 
 /// PostmasterChildName (launch_backend.c).
 pub fn postmaster_child_name(child_type: BackendType) -> &'static str {

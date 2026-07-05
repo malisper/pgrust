@@ -3323,6 +3323,7 @@ dependencies = [
  "procsignal",
  "reloptions",
  "relpath",
+ "standby",
  "superuser",
  "table",
  "tablespace_seams",
@@ -3863,6 +3864,7 @@ dependencies = [
  "relpath",
  "smgr",
  "snapmgr",
+ "standby",
  "superuser",
  "table",
  "transam_xlog",
@@ -4055,6 +4057,18 @@ dependencies = [
  "types_core",
  "types_error",
  "types_guc",
+ "types_storage",
+]
+
+[[package]]
+name = "dsm_registry"
+version = "0.0.0"
+dependencies = [
+ "dsm_core",
+ "elog",
+ "init_small",
+ "lwlock",
+ "types_error",
  "types_storage",
 ]
 
@@ -5454,6 +5468,7 @@ version = "0.1.0"
 dependencies = [
  "bufmask",
  "bufmgr_seams",
+ "standby",
  "types_core",
  "types_error",
  "types_gist",
@@ -5675,6 +5690,7 @@ version = "0.1.0"
 dependencies = [
  "bufmask",
  "bufmgr_seams",
+ "standby",
  "types_core",
  "types_error",
  "types_hash",
@@ -5995,6 +6011,7 @@ dependencies = [
  "snapbuild_seams",
  "snapmgr",
  "spi_seams",
+ "standby",
  "subtrans",
  "subtrans_seams",
  "sync_seams",
@@ -6422,6 +6439,7 @@ dependencies = [
  "commit_ts",
  "condition_variable_seams",
  "dsm_core",
+ "dsm_registry",
  "elog",
  "file_seams",
  "guc",
@@ -6459,6 +6477,7 @@ dependencies = [
  "types_guc",
  "types_storage",
  "varsup",
+ "walsummarizer",
  "xact_seams",
  "xlogprefetcher",
 ]
@@ -6554,12 +6573,14 @@ dependencies = [
  "procsignal",
  "scalar_seams",
  "stack_depth",
+ "syslogger_seams",
  "timestamp_seams",
  "types_core",
  "types_guc",
  "types_startup",
  "types_storage",
  "waiteventset_seams",
+ "walsummarizer",
  "walwriter",
  "xact_seams",
 ]
@@ -6723,6 +6744,7 @@ dependencies = [
  "types_resowner",
  "types_storage",
  "waitevent_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]
@@ -7291,6 +7313,7 @@ dependencies = [
  "s_lock_seams",
  "shmem",
  "smgr_seams",
+ "standby",
  "syncrep_seams",
  "timeout_seams",
  "transam_xlog",
@@ -10667,6 +10690,7 @@ dependencies = [
  "s_lock_seams",
  "scalar_seams",
  "shmem",
+ "syslogger",
  "syslogger_seams",
  "timestamp_seams",
  "transam_xlog",
@@ -10706,6 +10730,7 @@ dependencies = [
  "miscinit",
  "procsignal",
  "procsignal_seams",
+ "standby",
  "standby_seams",
  "startup_seams",
  "timeout",
@@ -12548,6 +12573,7 @@ dependencies = [
  "waitevent",
  "waiteventset",
  "walsender_config",
+ "walsummarizer",
  "walwriter",
  "xact",
  "xlogarchive",
@@ -13097,6 +13123,7 @@ version = "0.1.0"
 dependencies = [
  "bufmask",
  "bufmgr_seams",
+ "standby",
  "types_core",
  "types_error",
  "types_spgist",
@@ -13331,30 +13358,44 @@ dependencies = [
 name = "standby"
 version = "0.0.0"
 dependencies = [
+ "adt_timestamp",
  "aio_seams",
+ "bufmgr",
  "controldata_utils",
  "elog",
  "fd",
  "guc_tables",
  "init_small",
+ "inval",
+ "lmgr_proc",
  "lock",
  "lwlock",
  "mcx",
  "origin_seams",
+ "postgres_seams",
  "procarray",
+ "ps_status",
  "rmgrdesc",
  "shmem",
+ "sinval",
+ "slot",
  "standby_seams",
  "stringinfo",
+ "timeout",
+ "transam",
  "transam_xlog",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "varsup",
+ "waitevent",
  "waitevent_seams",
  "xact_seams",
  "xloginsert",
  "xlogreader",
  "xlogreader_seams",
+ "xlogrecovery_seams",
  "xlogutils",
 ]
 
@@ -13687,8 +13728,28 @@ dependencies = [
 name = "syslogger"
 version = "0.0.0"
 dependencies = [
+ "elog",
+ "fd",
+ "guc_file",
  "guc_tables",
+ "init_small",
+ "ipc",
+ "latch",
+ "launch_backend",
+ "libc",
+ "localtime",
+ "miscinit",
+ "pgtz",
+ "ps_status",
+ "strftime",
  "syslogger_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "waiteventset",
 ]
 
 [[package]]
@@ -13696,6 +13757,7 @@ name = "syslogger_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_startup",
 ]
 
 [[package]]
@@ -14244,6 +14306,7 @@ dependencies = [
  "varsup",
  "varsup_seams",
  "waitevent_seams",
+ "walsummarizer_seams",
  "xact_seams",
  "xlogarchive_seams",
  "xloginsert_seams",
@@ -15592,6 +15655,63 @@ name = "walsender_config"
 version = "0.0.0"
 dependencies = [
  "guc_tables",
+]
+
+[[package]]
+name = "walsummarizer"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "auxprocess",
+ "blkreftable",
+ "condition_variable",
+ "controldata_utils",
+ "dynahash",
+ "elog",
+ "fd",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "mcxt_seams",
+ "miscinit",
+ "pgstat_seams",
+ "postgres_seams",
+ "procsignal",
+ "procsignal_seams",
+ "resowner",
+ "timeline",
+ "timeline_seams",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
+ "walsummarizer_seams",
+ "xact",
+ "xlogreader",
+ "xlogreader_seams",
+ "xlogrecovery",
+ "xlogutils",
+]
+
+[[package]]
+name = "walsummarizer_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]

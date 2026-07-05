@@ -47,3 +47,40 @@ fn standby_lock_body_matches_c_layout() {
     assert_eq!(u32::from_ne_bytes(body[12..16].try_into().unwrap()), 701);
     assert_eq!(u32::from_ne_bytes(body[20..24].try_into().unwrap()), 16385);
 }
+
+#[test]
+fn recovery_lock_table_bookkeeping_dedupes_and_chains() {
+    use crate::recovery::test_support as ts;
+    ts::init_lock_tables_only();
+
+    assert!(ts::insert_entry(700, 5, 16384));
+    // Checkpoints re-report held locks; the dedupe hash absorbs them.
+    assert!(!ts::insert_entry(700, 5, 16384));
+    assert!(ts::insert_entry(700, 5, 16385));
+    assert!(ts::insert_entry(701, 5, 16384));
+
+    assert_eq!(ts::recovery_lock_table_counts(), (3, 2));
+    assert_eq!(ts::chain(700), vec![(5, 16384), (5, 16385)]);
+    assert_eq!(ts::chain(701), vec![(5, 16384)]);
+    assert_eq!(ts::chain(702), vec![]);
+}
+
+static FROM_STREAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[test]
+fn standby_limit_time_matches_c_arithmetic() {
+    use crate::recovery::test_support as ts;
+    use std::sync::atomic::Ordering::Relaxed;
+    xlogrecovery_seams::get_xlog_receipt_time::set(|| (1_000_000, FROM_STREAM.load(Relaxed)));
+
+    ts::set_delay_gucs(7_000, 30_000);
+    assert_eq!(ts::standby_limit_time(), 1_000_000 + 30_000i64 * 1000);
+
+    // fromStream=false picks the archive delay.
+    FROM_STREAM.store(false, Relaxed);
+    assert_eq!(ts::standby_limit_time(), 1_000_000 + 7_000i64 * 1000);
+
+    // -1 = wait forever = 0 sentinel.
+    ts::set_delay_gucs(-1, -1);
+    assert_eq!(ts::standby_limit_time(), 0);
+}
