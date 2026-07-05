@@ -907,9 +907,11 @@ fn make_subplan<'mcx>(
             1.0
         }
         SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => 0.5,
+        // C's default arm covers EXPR/MULTIEXPR/ROWCOMPARE: whole result.
         SubLinkType::EXPR_SUBLINK
         | SubLinkType::ARRAY_SUBLINK
-        | SubLinkType::ROWCOMPARE_SUBLINK => 0.0,
+        | SubLinkType::ROWCOMPARE_SUBLINK
+        | SubLinkType::MULTIEXPR_SUBLINK => 0.0,
         other => panic!(
             "make_subplan (subselect.c): {other:?} sublink not ported"
         ),
