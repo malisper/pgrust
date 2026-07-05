@@ -78,6 +78,10 @@ pub enum SortComparator {
     /// `numeric_cmp_abbrev`: intentionally backwards signed compare — numeric
     /// abbreviations are negated so NaN (i64::MIN) sorts highest.
     NumericAbbrev,
+    /// `gist_bbox_zorder_cmp` (gist_point_sortsupport, gistproc.c:1681):
+    /// z-order over the leaf-key box's low corner; datums point at live
+    /// 32-byte BOX images.
+    GistPointZorder,
     /// `PrepareSortSupportComparisonShim`: the opfamily's BTORDER_PROC,
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
@@ -194,6 +198,19 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
             let (x, y) = (x.as_i64(), y.as_i64());
             (x < y) as i32 - (x > y) as i32
         }
+        // SAFETY: GistPointZorder contract (enum doc) — live 32-byte BOX
+        // images (gist_point_compress leaf keys).
+        SortComparator::GistPointZorder => unsafe {
+            let a = ::types_core::geo::BOX::from_datum_bytes(core::slice::from_raw_parts(
+                x.as_usize() as *const u8,
+                32,
+            ));
+            let b = ::types_core::geo::BOX::from_datum_bytes(core::slice::from_raw_parts(
+                y.as_usize() as *const u8,
+                32,
+            ));
+            ::types_core::geo::gist_bbox_zorder_cmp(&a, &b)
+        },
         SortComparator::Shim(shim) => panic!(
             "comparison shim (proc {}) reached an mcx-less comparator lane \
              (use apply_sort_comparator_in)",
@@ -567,12 +584,15 @@ pub fn comparator_for_opfamily(
 // gist.h GIST_SORTSUPPORT_PROC; pg_proc.dat range_cmp.
 const GIST_SORTSUPPORT_PROC_NUM: i16 = 11;
 const F_RANGE_CMP: Oid = 3870;
+const F_GIST_POINT_SORTSUPPORT: Oid = 3435;
 
 /// PrepareSortSupportFromGistIndexRel's comparator resolve over the closed
 /// proc-11 set. C DIVERGENCE (recorded): range_sortsupport's range_fast_cmp
 /// is order-identical to range_cmp (rangetypes.c: same empty-first +
-/// range_cmp_bounds logic), so it rides the shim; gist_point_sortsupport
-/// (z-order) has no btree-equivalent ordering and stays loud.
+/// range_cmp_bounds logic), so it rides the shim. C DIVERGENCE:
+/// gist_point_sortsupport's abbreviation (z-order Datum, ssup_datum_unsigned_cmp)
+/// is skipped like every index-build abbrev; gist_bbox_zorder_cmp is the
+/// abbrev arm's full tie-breaker, so the order is identical.
 pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<SortComparator> {
     let ssup_proc = lsyscache::get_opfamily_proc(
         opfamily,
@@ -581,6 +601,7 @@ pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<
         GIST_SORTSUPPORT_PROC_NUM,
     )?;
     match ssup_proc {
+        F_GIST_POINT_SORTSUPPORT => Ok(SortComparator::GistPointZorder),
         F_RANGE_SORTSUPPORT => {
             let flinfo = ::fmgr_seams::fmgr_info::call(F_RANGE_CMP)?;
             Ok(SortComparator::Shim(ShimCmp {

@@ -602,6 +602,12 @@ macro_rules! dispatch_cmp {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
                     $body
                 }
+                // Z-order interleave dominates; nothing to fold (C leaves
+                // gist_bbox_zorder_cmp on the generic qsort too).
+                SortComparator::GistPointZorder => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
+                    $body
+                }
                 // Shim'd comparisons are fmgr calls; nothing to fold.
                 SortComparator::Shim(_) => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
