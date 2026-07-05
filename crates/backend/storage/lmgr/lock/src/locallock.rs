@@ -5,7 +5,8 @@ use mcx::{Mcx, MemoryContext, PgFxHashMap, PgVec};
 use types_error::PgResult;
 use types_resowner::ResourceOwner;
 use types_storage::lock::{
-    LOCALLOCKTAG, LOCK, LOCKMODE, LOCKTAG, LOCKTAG_RELATION_EXTEND, MaxLockMode, PROCLOCK,
+    LOCALLOCKTAG, LOCK, LOCKBIT_ON, LOCKMETHODID, LOCKMODE, LOCKTAG, LOCKTAG_RELATION_EXTEND,
+    MaxLockMode, PROCLOCK,
 };
 
 use crate::fastpath::{decrement_strong_lock_count, FastPathStrongLockHashPartition};
@@ -210,6 +211,88 @@ pub(crate) fn GrantLockLocal(tag: &LOCALLOCKTAG, owner: ResourceOwner) {
         resowner::ResourceOwnerRememberLock(owner, *tag);
     }
     CheckAndSetLockHeld(tag, true);
+}
+
+// One LOCALLOCK swept out of the table by drain_release_all; the deferred
+// per-entry work (resowner forgets, strong-count decrement, fastpath ungrant
+// or proclock refind) runs after the with_local borrow ends.
+pub(crate) struct RemovedLock {
+    pub tag: LOCALLOCKTAG,
+    pub hashcode: u32,
+    pub holds_strong: bool,
+    pub owners: PgVec<'static, LOCALLOCKOWNER>,
+    pub fastpath: bool,
+}
+
+// LockReleaseAll's per-locallock phase in ONE table pass (C walks dynahash
+// once with direct entry pointers). Kept-session entries' transaction owners
+// are pushed onto `forget`; removed non-fastpath held entries have
+// releaseMask marked here (plain store, owning backend only, as C).
+pub(crate) fn drain_release_all(
+    lockmethodid: LOCKMETHODID,
+    all_locks: bool,
+    forget: &mut Vec<(ResourceOwner, LOCALLOCKTAG)>,
+) -> PgVec<'static, RemovedLock> {
+    with_local(|state| {
+        let mcx = state.mcx;
+        let mut removed: PgVec<'static, RemovedLock> = PgVec::new_in(mcx);
+        removed.reserve(state.table.len());
+        state.table.retain(|tag, ll| {
+            if ll.nLocks == 0 {
+                // An unused entry means something went wrong while acquiring.
+            } else if tag.lock.locktag_lockmethodid as LOCKMETHODID != lockmethodid {
+                return true;
+            } else if !all_locks {
+                // Keep session locks (at most one session owner per locallock).
+                let session = ll.lockOwners.iter().find(|o| o.owner.is_null()).copied();
+                if let Some(slot) = session {
+                    if slot.nLocks > 0 {
+                        for o in ll.lockOwners.iter() {
+                            if !o.owner.is_null() {
+                                forget.push((o.owner, *tag));
+                            }
+                        }
+                        ll.nLocks = slot.nLocks;
+                        ll.lockOwners.clear();
+                        ll.lockOwners.push(slot);
+                        return true;
+                    }
+                }
+            }
+            let fastpath = ll.nLocks > 0 && (ll.proclock.is_null() || ll.lock.is_null());
+            if ll.nLocks > 0 && !fastpath {
+                // SAFETY: releaseMask is only ever touched by the owning
+                // backend, so no partition lock is needed (C relies on the same).
+                unsafe {
+                    (*ll.proclock).releaseMask |= LOCKBIT_ON(tag.mode);
+                }
+            }
+            removed.push(RemovedLock {
+                tag: *tag,
+                hashcode: ll.hashcode,
+                holds_strong: ll.holdsStrongLockCount,
+                owners: std::mem::replace(&mut ll.lockOwners, PgVec::new_in(mcx)),
+                fastpath,
+            });
+            false
+        });
+        removed
+    })
+}
+
+// RemoveLocalLock's deferred half for a drained entry.
+pub(crate) fn finish_removed_lock(r: &mut RemovedLock) {
+    for o in r.owners.iter().rev() {
+        if !o.owner.is_null() {
+            resowner::ResourceOwnerForgetLock(o.owner, r.tag).expect("ResourceOwnerForgetLock");
+        }
+    }
+    r.owners.clear();
+    if r.holds_strong {
+        decrement_strong_lock_count(r.hashcode);
+        r.holds_strong = false;
+    }
+    CheckAndSetLockHeld(&r.tag, false);
 }
 
 pub(crate) fn RemoveLocalLock(tag: &LOCALLOCKTAG) {
