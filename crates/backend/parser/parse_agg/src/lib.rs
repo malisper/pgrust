@@ -179,7 +179,7 @@ where
 }
 
 fn check_agglevels_and_constraints<'mcx>(
-    pstate: &mut ParseState<'_, 'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
     directargs: &NodeList<'mcx>,
     args: &NodeList<'mcx>,
     filter: Option<Node<'mcx>>,
@@ -187,13 +187,16 @@ fn check_agglevels_and_constraints<'mcx>(
     is_agg: bool,
 ) -> PgResult<u32> {
     let min_varlevel = check_agg_arguments(pstate, directargs, args, filter, location)?;
-    if min_varlevel > 0 {
-        panic!(
-            "check_agglevels_and_constraints (parse_agg.c): outer-level aggregate \
-             (agglevelsup > 0) needs parentParseState hops — backend-parser-agg"
-        );
+    // C reassigns pstate up parentParseState min_varlevel times: p_hasAggs
+    // and the clause-context checks below apply to the level the aggregate
+    // semantically belongs to, not where it syntactically appears.
+    let mut pstate = pstate;
+    for _ in 0..min_varlevel {
+        pstate = pstate
+            .parentParseState
+            .expect("check_agg_arguments bounds the level by the parse chain");
     }
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     // C keeps two full string tables ("aggregate functions ..." vs "grouping
     // operations ...") for translation; the rendered text is identical to
@@ -720,7 +723,7 @@ pub fn parseCheckAggregates<'mcx>(
     qry: &mut Query<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(
-        pstate.p_hasAggs
+        pstate.p_hasAggs.get()
             || !qry.groupClause.is_nil()
             || qry.havingQual.is_some()
             || !qry.groupingSets.is_nil()
@@ -819,7 +822,7 @@ pub fn parseCheckAggregates<'mcx>(
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_CTE && rte.self_reference
     });
-    if pstate.p_hasAggs && has_self_ref_rtes {
+    if pstate.p_hasAggs.get() && has_self_ref_rtes {
         let location = locate_agg_of_level(qry, 0)?;
         return Err(agg_in_recursive_term(pstate, location));
     }

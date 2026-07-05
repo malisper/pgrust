@@ -139,7 +139,9 @@ pub struct ParseState<'p, 'mcx> {
     pub p_locked_from_parent: bool,
     pub p_resolve_unknowns: bool,
     pub p_queryEnv: Option<&'p QueryEnvironment<'mcx>>,
-    pub p_hasAggs: bool,
+    // Cell: check_agglevels_and_constraints marks an OUTER level (reached
+    // through the shared parentParseState chain) as having aggregates.
+    pub p_hasAggs: core::cell::Cell<bool>,
     pub p_hasWindowFuncs: bool,
     pub p_hasTargetSRFs: bool,
     pub p_hasSubLinks: bool,
@@ -187,7 +189,7 @@ pub fn make_parsestate<'p, 'mcx>(
         p_locked_from_parent: false,
         p_resolve_unknowns: true,
         p_queryEnv: None,
-        p_hasAggs: false,
+        p_hasAggs: core::cell::Cell::new(false),
         p_hasWindowFuncs: false,
         p_hasTargetSRFs: false,
         p_hasSubLinks: false,

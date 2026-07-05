@@ -820,9 +820,22 @@ fn process_sublinks_mutator<'mcx>(
         };
         return Ok(Some(make_subplan(run, sl, testexpr, is_top_qual)?));
     }
+    // Don't recurse into the arguments of an outer PHV, Aggref or
+    // GroupingFunc: any SubLinks there belong to the outer query level and
+    // are processed when build_subplan collects the node into subplan args.
+    if let Some(phv) = node.as_place_holder_var() {
+        if phv.phlevelsup > 0 {
+            return Ok(None);
+        }
+    }
     if let Some(a) = node.as_aggref() {
         if a.agglevelsup > 0 {
-            panic!("process_sublinks_mutator (subselect.c): uplevel Aggref; agg lane");
+            return Ok(None);
+        }
+    }
+    if let Some(g) = node.as_grouping_func() {
+        if g.agglevelsup > 0 {
+            return Ok(None);
         }
     }
     debug_assert!(!matches!(
@@ -1063,10 +1076,13 @@ fn convert_exists_to_any<'mcx>(
         }
     }
 
-    // IncrementVarSublevelsUp(-1, 1) over the pulled-up left args.
+    // IncrementVarSublevelsUp(-1, 1) over the pulled-up left args; the args
+    // are deep-copied first because the source testexpr nodes may be shared.
     let mut pulled: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
     for n in leftargs.iter() {
-        pulled.push(decrement_sublevels(mcx, *n)?);
+        let copy = rewrite_manip::copy_node(mcx, *n)?;
+        rewrite_manip::IncrementVarSublevelsUp(copy, -1, 1)?;
+        pulled.push(copy);
     }
 
     if !newwhere.is_nil() {
@@ -1147,31 +1163,6 @@ fn convert_exists_to_any<'mcx>(
     Ok(Some((subselect, testexpr, param_ids)))
 }
 
-fn decrement_sublevels<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
-    fn mutate<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Option<Node<'mcx>>> {
-        if let Some(v) = node.as_var() {
-            if v.varlevelsup >= 1 {
-                return Ok(Some(Node::mk(
-                    mcx,
-                    types_nodes::primnodes::Var {
-                        varlevelsup: v.varlevelsup - 1,
-                        varnullingrels: v.varnullingrels.clone_in(mcx)?,
-                        ..*v
-                    },
-                )?));
-            }
-            return Ok(None);
-        }
-        if let Some(a) = node.as_aggref() {
-            if a.agglevelsup >= 1 {
-                panic!("IncrementVarSublevelsUp (rewriteManip.c): uplevel Aggref not ported");
-            }
-        }
-        clauses::expression_tree_mutator(mcx, node, &mut |n| mutate(mcx, n))
-    }
-    Ok(mutate(mcx, node)?.unwrap_or(node))
-}
-
 struct ContainAggsOfLevel(i32, bool);
 impl<'mcx> clauses::NodeWalker<'mcx> for ContainAggsOfLevel {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
@@ -1212,9 +1203,16 @@ fn build_subplan<'mcx>(
     for &ppid in plan_params.iter() {
         let pitem = *run.root.planner_param_item(ppid);
         let arg = *run.root.expr_node(pitem.item);
-        // Vars only: replace_outer_var is the sole plan_params writer here
-        // (PHV/Aggref/GroupingFunc/Returning replacement legs are loud).
-        debug_assert!(arg.as_var().is_some());
+        // A PHV/Aggref/GroupingFunc arg may still hold unprocessed SubLinks
+        // (SS_replace_correlation_vars leaves their arguments alone).
+        let arg = if matches!(
+            arg.node_tag(),
+            NodeTag::T_PlaceHolderVar | NodeTag::T_Aggref | NodeTag::T_GroupingFunc
+        ) {
+            ss_process_sublinks(run, arg, false)?
+        } else {
+            arg
+        };
         par_param.lappend(mcx, pitem.paramId)?;
         args.lappend(mcx, arg)?;
     }

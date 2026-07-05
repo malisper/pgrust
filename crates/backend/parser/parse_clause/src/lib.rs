@@ -2343,7 +2343,7 @@ fn checkTargetlistEntrySQL92(
 ) -> PgResult<()> {
     match expr_kind {
         ParseExprKind::EXPR_KIND_GROUP_BY => {
-            if pstate.p_hasAggs && contains_aggref(tle_expr) {
+            if pstate.p_hasAggs.get() && contains_aggref(tle_expr) {
                 return Err(aggregate_in_group_by(pstate, expr_kind, tle_expr));
             }
             if pstate.p_hasWindowFuncs && parse_agg::contain_windowfuncs(tle_expr) {

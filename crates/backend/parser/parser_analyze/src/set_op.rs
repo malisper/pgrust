@@ -187,11 +187,11 @@ pub(crate) fn transformSetOperationStmt<'mcx>(
     qry.hasSubLinks = pstate.p_hasSubLinks;
     qry.hasWindowFuncs = pstate.p_hasWindowFuncs;
     qry.hasTargetSRFs = pstate.p_hasTargetSRFs;
-    qry.hasAggs = pstate.p_hasAggs;
+    qry.hasAggs = pstate.p_hasAggs.get();
 
     assign_query_collations(mcx, pstate, &qry)?;
 
-    if pstate.p_hasAggs
+    if pstate.p_hasAggs.get()
         || !qry.groupClause.is_nil()
         || !qry.groupingSets.is_nil()
         || qry.havingQual.is_some()

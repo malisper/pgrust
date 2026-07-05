@@ -1026,12 +1026,18 @@ fn fge_mutate<'mcx>(
             Ok(Some(rte.groupexprs.nth(var.varattno as usize - 1)))
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(None),
+        // C: a GroupingFunc of the original or higher level (always, with
+        // sublevels_up pinned at 0) holds no grouped Vars; not recursed into.
+        NodeTag::T_GroupingFunc => Ok(None),
         NodeTag::T_Aggref => {
             // C: at the agg's own level only aggdirectargs can hold grouped
             // Vars; args/order/filter are not recursed into.
             let a = node.as_aggref().unwrap();
+            // sublevels_up is pinned at 0 here, so nonzero agglevelsup means
+            // a higher-level agg: no grouped Vars of this level inside (C
+            // skips recursing into aggregates of higher levels).
             if a.agglevelsup != 0 {
-                fge_unported("outer-level aggregate");
+                return Ok(None);
             }
             match fge_list(mcx, query, &a.aggdirectargs)? {
                 None => Ok(None),

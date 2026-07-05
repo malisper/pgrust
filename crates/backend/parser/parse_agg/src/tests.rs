@@ -34,7 +34,7 @@ fn transform_count_star_sets_levels_and_has_aggs() {
     assert_eq!(agg.agglevelsup, 0);
     assert!(agg.args.is_nil());
     assert!(agg.aggargtypes.is_nil());
-    assert!(pstate.p_hasAggs);
+    assert!(pstate.p_hasAggs.get());
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn ungrouped_column_is_42803_with_column_name() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
@@ -196,7 +196,7 @@ fn grouped_column_passes_check() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
@@ -215,7 +215,7 @@ fn ungrouped_column_next_to_group_by_is_42803() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let colnames = NodeList::make2(
         mcx,
@@ -426,7 +426,7 @@ fn grouping_func_sets_hasaggs_and_levelsup() {
         ..Default::default()
     };
     let node = transformGroupingFunc(mcx, &mut pstate, &raw, |_, _, n| Ok(n)).unwrap();
-    assert!(pstate.p_hasAggs);
+    assert!(pstate.p_hasAggs.get());
     let grp = node.as_grouping_func().unwrap();
     assert_eq!((grp.agglevelsup, grp.location, grp.args.len()), (0, 9, 1));
     assert!(grp.refs.is_nil() && grp.cols.is_nil());
@@ -576,7 +576,7 @@ fn grouped_outer_var_in_sublink_passes_check() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let gvar = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap();
     let gtle = Node::mk_target_entry(mcx, gvar, 1, Some("x"), false).unwrap();
@@ -603,7 +603,7 @@ fn ungrouped_outer_var_in_sublink_is_42803() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_hasAggs = true;
+    pstate.p_hasAggs.set(true);
 
     let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
     let stle = Node::mk_target_entry(mcx, outer_var, 1, None, false).unwrap();
@@ -663,6 +663,18 @@ fn sublink_with_from_clause_in_agg_arg_walks_jointree() {
     let tle = Node::mk_target_entry(mcx, local_var, 1, None, false).unwrap();
     let sublink = sublink_with_from(mcx, NodeList::make1(mcx, tle).unwrap());
     let args = NodeList::make1(mcx, sublink).unwrap();
+
+#[test]
+fn outer_var_arg_hops_to_parent_level() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut parent = make_parsestate(mcx, None);
+    parent.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+    let mut pstate = make_parsestate(mcx, Some(&parent));
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let args = NodeList::make1(mcx, outer_var).unwrap();
     let mut agg = Node::build::<Aggref>(mcx).unwrap();
     agg.aggfnoid = 2108;
     agg.aggtype = INT8OID;
@@ -771,4 +783,34 @@ fn grouping_func_in_sublink_resolves_refs() {
     let grp = gf.as_grouping_func().unwrap();
     assert_eq!(grp.refs.len(), 1);
     assert_eq!(grp.refs.nth(0), 1);
+
+    assert_eq!(agg.agglevelsup, 1);
+    assert!(parent.p_hasAggs.get());
+    assert!(!pstate.p_hasAggs.get());
+}
+
+#[test]
+fn outer_agg_constraint_checked_against_parent_clause() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut parent = make_parsestate(mcx, None);
+    parent.p_expr_kind = ParseExprKind::EXPR_KIND_WHERE;
+    let mut pstate = make_parsestate(mcx, Some(&parent));
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+
+    let outer_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap();
+    let args = NodeList::make1(mcx, outer_var).unwrap();
+    let mut agg = Node::build::<Aggref>(mcx).unwrap();
+    agg.aggfnoid = 2108;
+    agg.aggtype = INT8OID;
+
+    let err =
+        transformAggregateCall(mcx, &mut pstate, &mut agg, &args, &[INT4OID], &NodeList::nil(), false)
+            .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
+    assert!(
+        err.message().contains("aggregate functions are not allowed in WHERE"),
+        "{}",
+        err.message()
+    );
 }
