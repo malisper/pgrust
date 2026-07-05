@@ -1,8 +1,8 @@
-// ri_triggers.c, MATCH SIMPLE lane: RI_FKey_check (check_ins/check_upd),
+// ri_triggers.c, MATCH SIMPLE/FULL lane: RI_FKey_check (check_ins/check_upd),
 // ri_restrict (noaction/restrict del/upd), RI_FKey_cascade_del/upd, ri_set
 // (setnull/setdefault del/upd), ri_Check_Pk_Match, RI_Initial_Check, the
 // constraint-info and prepared-plan caches, and the upd_check_required skip
-// tests. LOUD: MATCH FULL/PARTIAL, PERIOD, crosscheck snapshots under
+// tests. LOUD: PERIOD, crosscheck snapshots under
 // detectNewRows, cross-type comparison casts, cross-collation initial-check
 // quals. Divergences: constraint-info cache has no syscache invalidation
 // callback (constraint rows are immutable in the ported DDL surface; DROP
@@ -145,12 +145,14 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
     let fk_rel = tgdata.tg_relation;
     let pk_rel = table::table_open(mcx, riinfo.pk_relid, RowShareLock)?;
 
-    match ri_NullCheck(fk_rel, newtup, &riinfo, false) {
+    match ri_NullCheck(&fk_rel.rd_att, newtup, &riinfo, false) {
         RI_KEYS_ALL_NULL => {
             return pk_rel.close(RowShareLock);
         }
         RI_KEYS_SOME_NULL => match riinfo.confmatchtype {
-            FKCONSTR_MATCH_FULL => unported("MATCH FULL null-mixing violation"),
+            FKCONSTR_MATCH_FULL => {
+                return Err(match_full_mixing_error(mcx, fk_rel, &riinfo));
+            }
             _ => {
                 debug_assert_eq!(riinfo.confmatchtype, FKCONSTR_MATCH_SIMPLE);
                 return pk_rel.close(RowShareLock);
@@ -517,7 +519,7 @@ fn ri_Check_Pk_Match<'mcx>(
     oldtup: &HeapTupleData<'_>,
     riinfo: &RiConstraintInfo,
 ) -> PgResult<bool> {
-    debug_assert_eq!(ri_NullCheck(pk_rel, oldtup, riinfo, true), RI_KEYS_NONE_NULL);
+    debug_assert_eq!(ri_NullCheck(&pk_rel.rd_att, oldtup, riinfo, true), RI_KEYS_NONE_NULL);
 
     spi::SPI_connect()?;
 
@@ -635,8 +637,11 @@ pub fn RI_Initial_Check<'mcx>(
     for i in 0..riinfo.nkeys {
         let fkattname = quote_one_name(att_name(fk_rel, riinfo.fk_attnums[i]));
         write!(querybuf, "{sep}fk.{fkattname} IS NOT NULL").expect("PgString write");
-        debug_assert_eq!(riinfo.confmatchtype, FKCONSTR_MATCH_SIMPLE);
-        sep = " AND ";
+        sep = match riinfo.confmatchtype {
+            FKCONSTR_MATCH_SIMPLE => " AND ",
+            FKCONSTR_MATCH_FULL => " OR ",
+            _ => sep,
+        };
     }
     querybuf.try_push_str(")")?;
 
@@ -681,6 +686,13 @@ pub fn RI_Initial_Check<'mcx>(
             fake_riinfo.fk_attnums[i] = i as i16 + 1;
         }
         return Err(spi::tuptable_with(h, |t| {
+            // MATCH FULL disallows partially-null FK rows: complain about the
+            // null mixing rather than the lack of a match.
+            if fake_riinfo.confmatchtype == FKCONSTR_MATCH_FULL
+                && ri_NullCheck(&t.tupdesc, &t.vals[0], &fake_riinfo, false) != RI_KEYS_NONE_NULL
+            {
+                return match_full_mixing_error(mcx, fk_rel, &fake_riinfo);
+            }
             ri_ReportViolation(
                 mcx,
                 &fake_riinfo,
@@ -708,7 +720,7 @@ fn RI_FKey_pk_upd_check_required<'mcx>(
     new_tup: &HeapTupleData<'_>,
 ) -> PgResult<bool> {
     let riinfo = ri_FetchConstraintInfo(trigger, pk_rel, true)?;
-    if ri_NullCheck(pk_rel, old_tup, &riinfo, true) != RI_KEYS_NONE_NULL {
+    if ri_NullCheck(&pk_rel.rd_att, old_tup, &riinfo, true) != RI_KEYS_NONE_NULL {
         return Ok(false);
     }
     if ri_KeysEqual(pk_rel, old_tup, new_tup, &riinfo, true)? {
@@ -726,7 +738,7 @@ fn RI_FKey_fk_upd_check_required<'mcx>(
     new_tup: &HeapTupleData<'_>,
 ) -> PgResult<bool> {
     let riinfo = ri_FetchConstraintInfo(trigger, fk_rel, false)?;
-    match ri_NullCheck(fk_rel, new_tup, &riinfo, false) {
+    match ri_NullCheck(&fk_rel.rd_att, new_tup, &riinfo, false) {
         RI_KEYS_ALL_NULL => return Ok(false),
         RI_KEYS_SOME_NULL => match riinfo.confmatchtype {
             FKCONSTR_MATCH_SIMPLE => return Ok(false),
@@ -772,11 +784,17 @@ fn ri_FetchConstraintInfo<'mcx>(
             trigger.tgname.as_str()
         );
     }
-    if riinfo.confmatchtype == FKCONSTR_MATCH_PARTIAL {
-        unported("MATCH PARTIAL");
+    if riinfo.confmatchtype != FKCONSTR_MATCH_FULL
+        && riinfo.confmatchtype != FKCONSTR_MATCH_PARTIAL
+        && riinfo.confmatchtype != FKCONSTR_MATCH_SIMPLE
+    {
+        panic!("unrecognized confmatchtype: {}", riinfo.confmatchtype);
     }
-    if riinfo.confmatchtype == FKCONSTR_MATCH_FULL {
-        unported("MATCH FULL");
+    if riinfo.confmatchtype == FKCONSTR_MATCH_PARTIAL {
+        return Err(Box::new(
+            PgError::new(ERROR, "MATCH PARTIAL not yet implemented")
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     Ok(riinfo)
 }
@@ -1037,6 +1055,31 @@ fn ri_ExtractValues(
 
 #[cold]
 #[inline(never)]
+fn match_full_mixing_error<'mcx>(
+    mcx: Mcx<'mcx>,
+    fk_rel: &Relation<'mcx>,
+    riinfo: &RiConstraintInfo,
+) -> Box<PgError> {
+    let conname = conname_str(riinfo).to_string();
+    let mut e = PgError::new(
+        ERROR,
+        format!(
+            "insert or update on table \"{}\" violates foreign key constraint \"{conname}\"",
+            fk_rel.name()
+        ),
+    )
+    .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+    .with_detail("MATCH FULL does not allow mixing of null and nonnull key values.")
+    .with_table_name(fk_rel.name().to_owned())
+    .with_constraint_name(conname);
+    if let Ok(Some(nsp)) = lsyscache::get_namespace_name(mcx, fk_rel.rd_rel.relnamespace) {
+        e = e.with_schema_name(nsp.as_str().to_owned());
+    }
+    Box::new(e)
+}
+
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn ri_ReportViolation<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1144,7 +1187,7 @@ fn datum_output_text<'mcx>(_mcx: Mcx<'mcx>, typid: Oid, d: Datum) -> PgResult<St
 }
 
 fn ri_NullCheck(
-    rel: &Relation<'_>,
+    desc: &types_tuple::TupleDescData<'_>,
     tup: &HeapTupleData<'_>,
     riinfo: &RiConstraintInfo,
     rel_is_pk: bool,
@@ -1154,8 +1197,8 @@ fn ri_NullCheck(
     let mut nonenull = true;
     for i in 0..riinfo.nkeys {
         let mut isnull = false;
-        // SAFETY: live user column of rel's descriptor.
-        unsafe { types_tuple::heap_getattr(tup, attnums[i] as i32, &rel.rd_att, &mut isnull) };
+        // SAFETY: live user column of the tuple's descriptor.
+        unsafe { types_tuple::heap_getattr(tup, attnums[i] as i32, desc, &mut isnull) };
         if isnull {
             nonenull = false;
         } else {
