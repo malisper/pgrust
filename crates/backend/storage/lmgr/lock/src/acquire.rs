@@ -21,6 +21,7 @@ use crate::fastpath::{
     FastPathGrantRelationLock, FastPathStrongLockHashPartition, FastPathTransferRelationLocks,
     FastPathUnGrantRelationLock, eligible_for_relation_fast_path, VirtualXactLockTableCleanup,
 };
+use crate::locallock;
 use crate::locallock::{
     assert_no_relation_extension_lock_held, grant_locallock_after_fastpath,
     prepare_or_grant_locallock, warn_not_owned, with_local, AbortStrongLockAcquire,
@@ -434,12 +435,6 @@ pub fn LockRelease(locktag: &LOCKTAG, lockmode: LOCKMODE, sessionLock: bool) -> 
     Ok(true)
 }
 
-enum ReleaseAllAction {
-    Skip,
-    RemoveOnly,
-    Process,
-}
-
 pub fn LockReleaseAll(lockmethodid: LOCKMETHODID, allLocks: bool) -> PgResult<()> {
     let lockMethodTable = lock_method_by_id(lockmethodid)?;
     let numLockModes = lockMethodTable.numLockModes;
@@ -449,103 +444,44 @@ pub fn LockReleaseAll(lockmethodid: LOCKMETHODID, allLocks: bool) -> PgResult<()
         VirtualXactLockTableCleanup()?;
     }
 
-    let tags = snapshot_locallock_tags();
+    // ONE table pass (C's single dynahash walk): drain matching entries,
+    // then run the deferred per-entry work outside the with_local borrow.
+    let mut kept_forgets: Vec<(ResourceOwner, LOCALLOCKTAG)> = Vec::new();
+    let mut removed = locallock::drain_release_all(lockmethodid, allLocks, &mut kept_forgets);
+    for (owner, tag) in kept_forgets {
+        resowner::ResourceOwnerForgetLock(owner, tag).expect("ResourceOwnerForgetLock");
+    }
 
     let mut have_fast_path_lwlock = false;
     let my_proc = lmgr_proc::GetPGProcByNumber(my_procno());
-    for tag in &tags {
-        let action = with_local(|state| {
-            let Some(ll) = state.table.get_mut(tag) else {
-                return ReleaseAllAction::Skip;
-            };
-            // An unused entry means something went wrong while acquiring.
-            if ll.nLocks == 0 {
-                return ReleaseAllAction::RemoveOnly;
-            }
-            if tag.lock.locktag_lockmethodid as LOCKMETHODID != lockmethodid {
-                return ReleaseAllAction::Skip;
-            }
-            ReleaseAllAction::Process
-        });
-        match action {
-            ReleaseAllAction::Skip => continue,
-            ReleaseAllAction::RemoveOnly => {
-                RemoveLocalLock(tag);
-                continue;
-            }
-            _ => {}
-        }
-
-        if !allLocks {
-            // Keep session locks (at most one session owner per locallock);
-            // owner array moved out so seam calls run outside the borrow.
-            let (keep, old_owners) = with_local(|state| {
-                let mcx = state.mcx;
-                let ll = state.table.get_mut(tag).expect("missing LOCALLOCK");
-                let old = std::mem::replace(&mut ll.lockOwners, PgVec::new_in(mcx));
-                let session = old.iter().find(|o| o.owner.is_null()).copied();
-                match session {
-                    Some(slot) if slot.nLocks > 0 => {
-                        ll.nLocks = slot.nLocks;
-                        ll.lockOwners.push(slot);
-                        (true, old)
-                    }
-                    _ => (false, old),
-                }
-            });
-            for o in old_owners.iter() {
-                if !o.owner.is_null() {
-                    resowner::ResourceOwnerForgetLock(o.owner, *tag).expect("ResourceOwnerForgetLock");
-                }
-            }
-            drop(old_owners);
-            if keep {
-                continue;
-            }
-        }
-
-        // NULL lock/proclock pointers mean a (non-transferred) fast-path lock.
-        let (is_fastpath, proclock) = with_local(|state| {
-            let ll = state.table.get(tag).expect("missing LOCALLOCK");
-            (ll.proclock.is_null() || ll.lock.is_null(), ll.proclock)
-        });
-        if is_fastpath {
-            let lockmode = tag.mode;
+    for r in removed.iter_mut() {
+        if r.fastpath {
+            let lockmode = r.tag.mode;
             assert!(
-                eligible_for_relation_fast_path(&tag.lock, lockmode),
+                eligible_for_relation_fast_path(&r.tag.lock, lockmode),
                 "locallock table corrupted"
             );
             if !have_fast_path_lwlock {
                 lwlock::LWLockAcquire(fp_info_lock(my_proc), lwlock::LW_EXCLUSIVE, my_procno())?;
                 have_fast_path_lwlock = true;
             }
-            let relid = tag.lock.locktag_field2;
+            let relid = r.tag.lock.locktag_field2;
             // SAFETY: fpInfoLock held exclusive.
-            if unsafe { FastPathUnGrantRelationLock(relid, lockmode) } {
-                RemoveLocalLock(tag);
-                continue;
+            if unsafe { !FastPathUnGrantRelationLock(relid, lockmode) } {
+                // Transferred to the main table; drop the fast-path lock
+                // before the extra partition-lock cycle.
+                lwlock::LWLockRelease(fp_info_lock(my_proc))?;
+                have_fast_path_lwlock = false;
+                LockRefindAndRelease(lockMethodTable, my_procno(), &r.tag.lock, lockmode, false)?;
             }
-            // Transferred to the main table; drop the fast-path lock before
-            // the extra partition-lock cycle.
-            lwlock::LWLockRelease(fp_info_lock(my_proc))?;
-            have_fast_path_lwlock = false;
-            LockRefindAndRelease(lockMethodTable, my_procno(), &tag.lock, lockmode, false)?;
-            RemoveLocalLock(tag);
-            continue;
         }
-
-        // Mark the proclock; releaseMask is only ever touched by the owning
-        // backend, so no partition lock is needed (C relies on the same).
-        unsafe {
-            (*proclock).releaseMask |= LOCKBIT_ON(tag.mode);
-        }
-        RemoveLocalLock(tag);
+        locallock::finish_removed_lock(r);
     }
 
     if have_fast_path_lwlock {
         lwlock::LWLockRelease(fp_info_lock(my_proc))?;
     }
-    return_scratch(tags);
+    drop(removed);
 
     for partition in 0..NUM_LOCK_PARTITIONS as usize {
         let partition_lock = LockHashPartitionLockByIndex(partition);
