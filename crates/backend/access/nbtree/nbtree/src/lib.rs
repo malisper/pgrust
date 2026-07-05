@@ -261,6 +261,29 @@ pub fn btendscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     Ok(())
 }
 
+/// Executor-skeleton park (no C counterpart): btendscan's release work —
+/// killed-item flush, pin release — but the opaque (and its ~27KB workspace)
+/// stays allocated for reuse. Positions are invalidated and the kill count
+/// cleared so the eventual btrescan never replays a stale page.
+pub fn btparkscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    let IndexScanOpaque::Btree(so) = &mut scan.opaque else {
+        non_btree_opaque()
+    };
+
+    if BTScanPosIsValid(&so.currPos) {
+        if so.numKilled > 0 {
+            bt_killitems(&scan.indexRelation, so)?;
+        }
+        pos_unpin_if_pinned(&mut so.currPos)?;
+        BTScanPosInvalidate(&mut so.currPos);
+    }
+    so.numKilled = 0;
+    so.markItemIndex = -1;
+    pos_unpin_if_pinned(&mut so.markPos)?;
+    BTScanPosInvalidate(&mut so.markPos);
+    Ok(())
+}
+
 /// btmarkpos.
 pub fn btmarkpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     let IndexScanOpaque::Btree(so) = &mut scan.opaque else {

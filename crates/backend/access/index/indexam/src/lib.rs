@@ -455,6 +455,45 @@ pub fn index_rescan<'mcx>(
     am_rescan(scan, keys, orderbys)
 }
 
+/// Executor-skeleton park (no C counterpart): release everything per-run —
+/// heap fetch, pins/killed items, snapshot — but keep the descriptor and the
+/// AM opaque allocated for `index_rearmscan`. The parked relation aliases are
+/// stale until rearm restamps them; nothing dereferences them while parked.
+/// Btree-only (the skeleton whitelist gates on relam).
+pub fn index_parkscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
+    if let Some(heapfetch) = scan.xs_heapfetch.take() {
+        fetch::end(heapfetch);
+    }
+    match scan.opaque {
+        IndexScanOpaque::Btree(_) => nbtree::btparkscan(scan)?,
+        _ => unreachable!("index_parkscan on a non-btree scan"),
+    }
+    debug_assert!(!scan.xs_temp_snap);
+    scan.xs_snapshot = None;
+    Ok(())
+}
+
+/// Executor-skeleton re-arm: the per-execution slice of `index_beginscan`
+/// (relation checks, predicate lock, fresh relation aliases + heap fetch +
+/// snapshot). The caller must `index_rescan` before the next fetch.
+pub fn index_rearmscan<'mcx>(
+    scan: &mut IndexScanDescData<'mcx>,
+    heapRelation: &Relation<'mcx>,
+    indexRelation: &Relation<'mcx>,
+    snapshot: Rc<SnapshotData<'mcx>>,
+) -> PgResult<()> {
+    relation_checks(indexRelation)?;
+    let kind = IndexAmKind::from_relam(indexRelation.rd_rel.relam);
+    if !kind.ampredlocks() {
+        predicate::PredicateLockRelation(indexRelation, &snapshot)?;
+    }
+    scan.indexRelation = indexRelation.alias();
+    scan.heapRelation = Some(heapRelation.alias());
+    scan.xs_heapfetch = Some(fetch::begin(heapRelation));
+    scan.xs_snapshot = Some(snapshot);
+    Ok(())
+}
+
 pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
     // Drain of the per-scan batched pgstat counters (C counts per call via
     // the pgstat.h macros; increments gate on pgstat_enabled).
