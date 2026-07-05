@@ -77,6 +77,10 @@ struct RiConstraintInfo {
     pf_eq_oprs: [Oid; RI_MAX_NUMKEYS],
     pp_eq_oprs: [Oid; RI_MAX_NUMKEYS],
     ff_eq_oprs: [Oid; RI_MAX_NUMKEYS],
+    hasperiod: bool,
+    period_contained_by_oper: Oid,
+    agged_period_contained_by_oper: Oid,
+    period_intersect_oper: Oid,
 }
 
 fn cache_mcx() -> &'static MemoryContext {
@@ -172,8 +176,23 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
             debug_assert!(pk_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE);
             use core::fmt::Write;
-            write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, &pk_rel)?)
+            // Temporal FKs check containment against the aggregated matching
+            // PK ranges: SELECT 1 FROM (SELECT pkperiodatt AS r FROM ONLY pk
+            // x WHERE keys.. AND pkperiodatt && $n FOR KEY SHARE OF x) x1
+            // HAVING $n <@ range_agg(x1.r).
+            if riinfo.hasperiod {
+                let periodatt =
+                    quote_one_name(att_name(&pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]));
+                write!(
+                    querybuf,
+                    "SELECT 1 FROM (SELECT {periodatt} AS r FROM ONLY {} x",
+                    quote_relation_name(mcx, &pk_rel)?
+                )
                 .expect("PgString write");
+            } else {
+                write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, &pk_rel)?)
+                    .expect("PgString write");
+            }
             let mut querysep = "WHERE";
             for i in 0..riinfo.nkeys {
                 let pk_type = att_type(&pk_rel, riinfo.pk_attnums[i]);
@@ -193,6 +212,21 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
                 queryoids[i] = fk_type;
             }
             querybuf.try_push_str(" FOR KEY SHARE OF x")?;
+            if riinfo.hasperiod {
+                let fk_type = att_type(fk_rel, riinfo.fk_attnums[riinfo.nkeys - 1]);
+                querybuf.try_push_str(") x1 HAVING ")?;
+                let paramname = format!("${}", riinfo.nkeys);
+                ri_GenerateQual(
+                    &mut querybuf,
+                    "",
+                    &paramname,
+                    fk_type,
+                    riinfo.agged_period_contained_by_oper,
+                    "pg_catalog.range_agg",
+                    types_core::ANYMULTIRANGEOID,
+                )?;
+                querybuf.try_push_str("(x1.r)")?;
+            }
             ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
         }
     };
@@ -228,7 +262,11 @@ fn ri_restrict<'mcx>(
     let pk_rel = tgdata.tg_relation;
     let oldtup = tgdata.tg_trigtuple;
 
-    if is_no_action && ri_Check_Pk_Match(mcx, pk_rel, &fk_rel, oldtup, &riinfo)? {
+    // Temporal FKs fold replacement-row lookup into the main query below.
+    if is_no_action
+        && !riinfo.hasperiod
+        && ri_Check_Pk_Match(mcx, pk_rel, &fk_rel, oldtup, &riinfo)?
+    {
         return fk_rel.close(RowShareLock);
     }
 
@@ -262,6 +300,70 @@ fn ri_restrict<'mcx>(
                 )?;
                 querysep = "AND";
                 queryoids[i] = pk_type;
+            }
+            // Temporal NO ACTION: a reference is still valid if the remaining
+            // matching PK history covers the intersection of the FK range
+            // with the changed PK range (C's coalesce/range_agg subquery).
+            if riinfo.hasperiod && is_no_action {
+                let pk_period_type = att_type(pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]);
+                let fk_period_type = att_type(&fk_rel, riinfo.fk_attnums[riinfo.nkeys - 1]);
+                let attname = quote_one_name(att_name(&fk_rel, riinfo.fk_attnums[riinfo.nkeys - 1]));
+                let paramname = format!("${}", riinfo.nkeys);
+
+                querybuf.try_push_str(" AND NOT coalesce(")?;
+
+                let mut intersectbuf = PgString::new_in(mcx);
+                intersectbuf.try_push_str("(")?;
+                ri_GenerateQual(
+                    &mut intersectbuf,
+                    "",
+                    &attname,
+                    fk_period_type,
+                    riinfo.period_intersect_oper,
+                    &paramname,
+                    pk_period_type,
+                )?;
+                intersectbuf.try_push_str(")")?;
+
+                let mut replacementsbuf = PgString::new_in(mcx);
+                replacementsbuf.try_push_str("(SELECT pg_catalog.range_agg(r) FROM ")?;
+                let periodattname =
+                    quote_one_name(att_name(pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]));
+                write!(
+                    replacementsbuf,
+                    "(SELECT y.{periodattname} r FROM ONLY {} y",
+                    quote_relation_name(mcx, pk_rel)?
+                )
+                .expect("PgString write");
+                let mut querysep = "WHERE";
+                for i in 0..riinfo.nkeys {
+                    let pk_type = att_type(pk_rel, riinfo.pk_attnums[i]);
+                    let attname = quote_one_name(att_name(pk_rel, riinfo.pk_attnums[i]));
+                    let paramname = format!("${}", i + 1);
+                    ri_GenerateQual(
+                        &mut replacementsbuf,
+                        querysep,
+                        &paramname,
+                        pk_type,
+                        riinfo.pp_eq_oprs[i],
+                        &attname,
+                        pk_type,
+                    )?;
+                    querysep = "AND";
+                    queryoids[i] = pk_type;
+                }
+                replacementsbuf.try_push_str(" FOR KEY SHARE OF y) y2)")?;
+
+                ri_GenerateQual(
+                    &mut querybuf,
+                    "",
+                    intersectbuf.as_str(),
+                    fk_period_type,
+                    riinfo.agged_period_contained_by_oper,
+                    replacementsbuf.as_str(),
+                    types_core::ANYMULTIRANGEOID,
+                )?;
+                querybuf.try_push_str(", false)")?;
             }
             querybuf.try_push_str(" FOR KEY SHARE OF x")?;
             ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
@@ -531,8 +633,19 @@ fn ri_Check_Pk_Match<'mcx>(
             let mut querybuf = PgString::new_in(mcx);
             let mut queryoids = [InvalidOid; RI_MAX_NUMKEYS];
             use core::fmt::Write;
-            write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, pk_rel)?)
+            if riinfo.hasperiod {
+                let periodatt =
+                    quote_one_name(att_name(pk_rel, riinfo.pk_attnums[riinfo.nkeys - 1]));
+                write!(
+                    querybuf,
+                    "SELECT 1 FROM (SELECT {periodatt} AS r FROM ONLY {} x",
+                    quote_relation_name(mcx, pk_rel)?
+                )
                 .expect("PgString write");
+            } else {
+                write!(querybuf, "SELECT 1 FROM ONLY {} x", quote_relation_name(mcx, pk_rel)?)
+                    .expect("PgString write");
+            }
             let mut querysep = "WHERE";
             for i in 0..riinfo.nkeys {
                 let pk_type = att_type(pk_rel, riinfo.pk_attnums[i]);
@@ -551,6 +664,21 @@ fn ri_Check_Pk_Match<'mcx>(
                 queryoids[i] = pk_type;
             }
             querybuf.try_push_str(" FOR KEY SHARE OF x")?;
+            if riinfo.hasperiod {
+                let fk_type = att_type(fk_rel, riinfo.fk_attnums[riinfo.nkeys - 1]);
+                querybuf.try_push_str(") x1 HAVING ")?;
+                let paramname = format!("${}", riinfo.nkeys);
+                ri_GenerateQual(
+                    &mut querybuf,
+                    "",
+                    &paramname,
+                    fk_type,
+                    riinfo.agged_period_contained_by_oper,
+                    "pg_catalog.range_agg",
+                    types_core::ANYMULTIRANGEOID,
+                )?;
+                querybuf.try_push_str("(x1.r)")?;
+            }
             ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
         }
     };
@@ -952,6 +1080,8 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
     const Anum_confmatchtype: i32 = 16;
     const Anum_conkey: i32 = 21;
     const Anum_confkey: i32 = 22;
+    const Anum_conindid: i32 = 14;
+    const Anum_conperiod: i32 = 20;
     const Anum_conpfeqop: i32 = 23;
     const Anum_conppeqop: i32 = 24;
     const Anum_conffeqop: i32 = 25;
@@ -987,6 +1117,10 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
         pf_eq_oprs: [InvalidOid; RI_MAX_NUMKEYS],
         pp_eq_oprs: [InvalidOid; RI_MAX_NUMKEYS],
         ff_eq_oprs: [InvalidOid; RI_MAX_NUMKEYS],
+        hasperiod: req(Anum_conperiod)?.as_bool(),
+        period_contained_by_oper: InvalidOid,
+        agged_period_contained_by_oper: InvalidOid,
+        period_intersect_oper: InvalidOid,
     };
 
     // DeconstructFkConstraintRow (pg_constraint.c): 1-D no-null int2[]/oid[].
@@ -1033,6 +1167,19 @@ fn ri_LoadConstraintInfo(constraint_oid: Oid) -> PgResult<RiConstraintInfo> {
         if !dsc_null {
             info.ndelsetcols = i16_arr(dsc, &mut info.confdelsetcols)?;
         }
+    }
+
+    // Temporal FKs: the PK element's opclass supplies the containment and
+    // intersect operators (cached with the rest of the info).
+    if info.hasperiod {
+        let opclass = lsyscache::get_index_column_opclass(
+            req(Anum_conindid)?.as_oid(),
+            info.nkeys as i32,
+        )?;
+        let (contained_by, agged, intersect) = pg_constraint::FindFKPeriodOpers(opclass)?;
+        info.period_contained_by_oper = contained_by;
+        info.agged_period_contained_by_oper = agged;
+        info.period_intersect_oper = intersect;
     }
 
     RI_CONSTRAINT_CACHE.with(|c| {
@@ -1401,10 +1548,22 @@ fn ri_KeysEqual(
                 return Ok(false);
             }
         } else {
-            let eq_opr = riinfo.ff_eq_oprs[i];
+            // PERIOD column: skip the check whenever the referencing range
+            // stayed equal or shrank — contained-by instead of equality.
+            let eq_opr = if riinfo.hasperiod && i == riinfo.nkeys - 1 {
+                riinfo.period_contained_by_oper
+            } else {
+                riinfo.ff_eq_oprs[i]
+            };
             let opcode = lsyscache::operator::get_opcode(eq_opr)?;
             let (oprleft, _) = lsyscache::operator::op_input_types(eq_opr)?;
-            if oprleft != att.atttypid && lsyscache::typ::getBaseType(att.atttypid)? != oprleft {
+            // Polymorphic anyrange/anymultirange operands relabel without a
+            // cast function (C ri_HashCompareOp COERCION_PATH_RELABELTYPE).
+            if oprleft != att.atttypid
+                && lsyscache::typ::getBaseType(att.atttypid)? != oprleft
+                && oprleft != types_core::ANYRANGEOID
+                && oprleft != types_core::ANYMULTIRANGEOID
+            {
                 unported("ri_CompareWithCast cast lane (cross-type FK comparison)");
             }
             let mut finfo = fmgr_seams::fmgr_info::call(opcode)?;
@@ -1435,12 +1594,26 @@ fn ri_GenerateQual(
     use core::fmt::Write;
     write!(buf, " {sep} {leftop}").expect("PgString write");
     if leftoptype != shape.0 {
-        unported("ri_GenerateQual add_cast_to (cross-type FK query cast)");
+        add_cast_to(buf, shape.0)?;
     }
     write!(buf, " OPERATOR(pg_catalog.{}) {rightop}", shape.2.as_str()).expect("PgString write");
     if rightoptype != shape.1 {
-        unported("ri_GenerateQual add_cast_to (cross-type FK query cast)");
+        add_cast_to(buf, shape.1)?;
     }
+    Ok(())
+}
+
+// add_cast_to (ruleutils.c): "::nspname.typname".
+fn add_cast_to(buf: &mut PgString<'_>, typid: Oid) -> PgResult<()> {
+    let (typname, typnamespace) = syscache_seams::pg_type_name_namespace::call(typid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for type {typid}"));
+    let scratch = mcx::MemoryContext::new("ri-cast-nsp");
+    let nsp = lsyscache::get_namespace_name(scratch.mcx(), typnamespace)?
+        .unwrap_or_else(|| panic!("cache lookup failed for namespace {typnamespace}"));
+    let tn = String::from_utf8_lossy(typname.name_str()).into_owned();
+    use core::fmt::Write;
+    write!(buf, "::{}.{}", quote_one_name(nsp.as_str()), quote_one_name(&tn))
+        .expect("PgString write");
     Ok(())
 }
 
