@@ -324,19 +324,132 @@ pub fn fc_multirange_intersect_agg_transfn(
     mr_result(fcinfo, &img)
 }
 
-pub fn fc_range_agg_transfn(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("range_agg_transfn not ported (ArrayBuildState internal-transvalue agg lane)");
+// The internal transvalue is a raw pointer to an aggcontext-placed
+// ArrayBuildState (the fc_array_agg_array_transfn round-trip shape).
+fn agg_state_slot<'a>(
+    fcinfo: &Fcinfo,
+    aggmcx: Mcx<'a>,
+    element_type: Oid,
+) -> PgResult<*mut ::datum::array_build::ArrayBuildState<'a>> {
+    if fcinfo.argisnull(0) {
+        let st = ::arrayfuncs::init_array_result(aggmcx, element_type, false)?;
+        let layout = core::alloc::Layout::new::<::datum::array_build::ArrayBuildState<'a>>();
+        let raw = ::mcx::Allocator::allocate(&aggmcx, layout)
+            .map_err(|_| aggmcx.oom(layout.size()))?;
+        let p: *mut ::datum::array_build::ArrayBuildState<'a> = raw.cast().as_ptr();
+        // SAFETY: fresh aggcontext allocation of the exact layout; no drop
+        // glue runs (PgVec fields are arena-plain).
+        unsafe { p.write(st) };
+        Ok(p)
+    } else {
+        Ok(fcinfo.arg(0).as_usize() as *mut ::datum::array_build::ArrayBuildState<'a>)
+    }
 }
 
-pub fn fc_range_agg_finalfn(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("range_agg_finalfn not ported (ArrayBuildState internal-transvalue agg lane)");
+pub fn fc_range_agg_transfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: context, if set, is the executor's live AggStateNode.
+    let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
+        return Err(non_aggregate_context("range_agg_transfn"));
+    };
+    let flinfo = flinfo.expect("range_agg_transfn: NULL flinfo");
+    let rngtypoid = ::funcapi::get_fn_expr_argtype(Some(flinfo), 1);
+    if !::lsyscache::type_is_range(rngtypoid)? {
+        return Err(Box::new(PgError::error("range_agg must be called with a range")));
+    }
+    let stp = agg_state_slot(fcinfo, aggmcx, rngtypoid)?;
+    if !fcinfo.argisnull(1) {
+        // SAFETY: stp is the aggcontext-owned state; plain-data move in/out.
+        unsafe {
+            let st = stp.read();
+            let st =
+                ::arrayfuncs::accum_array_result(aggmcx, Some(st), fcinfo.arg(1), false, rngtypoid)?;
+            stp.write(st);
+        }
+    }
+    Ok(Datum::from_usize(stp as usize))
+}
+
+pub fn fc_range_agg_finalfn(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: context, if set, is the executor's live AggStateNode.
+    if unsafe { fcinfo.agg_context() }.is_none() {
+        return Err(non_aggregate_context("range_agg_finalfn"));
+    }
+    if fcinfo.argisnull(0) {
+        return Ok(fcinfo.return_null());
+    }
+    let stp = fcinfo.arg(0).as_usize() as *const ::datum::array_build::ArrayBuildState<'_>;
+    // SAFETY: transvalue points at the aggcontext-owned build state.
+    let st = unsafe { &*stp };
+    if st.nelems == 0 {
+        return Ok(fcinfo.return_null());
+    }
+    let flinfo = flinfo.expect("range_agg_finalfn: NULL flinfo");
+    let mltrngtypid = ::funcapi::get_fn_expr_rettype(flinfo);
+    let mcx = fcinfo.result_mcx();
+    let mi = cached_multirange_info(flinfo, mltrngtypid)?;
+    let mut ranges: PgVec<'_, &[u8]> = ::mcx::vec_with_capacity_in(mcx, st.nelems as usize)?;
+    for d in st.dvalues[..st.nelems as usize].iter() {
+        let rp = d.as_usize() as *const u8;
+        // Accumulated datums can be short-form; expand to the 4-byte form
+        // (C DatumGetRangeTypeP).
+        // SAFETY: live varlena copied into the agg state by accumArrayResult.
+        let expanded = if unsafe { *rp } & 0x03 != 0 {
+            let n = unsafe { ::types_tuple::varatt::varsize_any(rp) };
+            // SAFETY: live varlena of n bytes.
+            let raw = unsafe { core::slice::from_raw_parts(rp, n) };
+            leak_image(::detoast_seams::detoast_attr::call(mcx, raw)?)
+        } else {
+            let n = ::adt_rangetypes::varsize_4b(rp);
+            // SAFETY: live varlena of n bytes.
+            unsafe { core::slice::from_raw_parts(rp, n) }
+        };
+        ranges.push(expanded);
+    }
+    let img = make_multirange(mcx, mltrngtypid, &mut mi.rng, &mut ranges)?;
+    mr_result(fcinfo, &img)
 }
 
 pub fn fc_multirange_agg_transfn(
-    _f: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!("multirange_agg_transfn not ported (ArrayBuildState internal-transvalue agg lane)");
+    // SAFETY: context, if set, is the executor's live AggStateNode.
+    let Some(aggmcx) = (unsafe { fcinfo.agg_context() }) else {
+        return Err(non_aggregate_context("multirange_agg_transfn"));
+    };
+    let flinfo = flinfo.expect("multirange_agg_transfn: NULL flinfo");
+    let mltrngtypoid = ::funcapi::get_fn_expr_argtype(Some(flinfo), 1);
+    if !::lsyscache::type_is_multirange(mltrngtypoid)? {
+        return Err(Box::new(PgError::error("range_agg must be called with a multirange")));
+    }
+    let mi = cached_multirange_info(flinfo, mltrngtypoid)?;
+    let rngtypoid = mi.rng.rngtypid;
+    let stp = agg_state_slot(fcinfo, aggmcx, rngtypoid)?;
+    if !fcinfo.argisnull(1) {
+        let mcx = fcinfo.result_mcx();
+        let mr = arg_multirange(fcinfo, 1, mcx)?;
+        let mut accum = |d: Datum| -> PgResult<()> {
+            // SAFETY: stp is the aggcontext-owned state; plain-data move in/out.
+            unsafe {
+                let st = stp.read();
+                let st =
+                    ::arrayfuncs::accum_array_result(aggmcx, Some(st), d, false, rngtypoid)?;
+                stp.write(st);
+            }
+            Ok(())
+        };
+        if multirange_is_empty(&mr) {
+            // C adds an empty range so the result is empty, not null.
+            let empty = ::adt_rangetypes::make_empty_range(mcx, &mut mi.rng)?;
+            accum(Datum::from_usize(empty.as_ptr() as usize))?;
+        } else {
+            let ranges = multirange_deserialize(mcx, &mi.rng, &mr)?;
+            for r in ranges.iter() {
+                accum(Datum::from_usize(r.as_ptr() as usize))?;
+            }
+        }
+    }
+    Ok(Datum::from_usize(stp as usize))
 }
 
 pub fn fc_multirange_lower(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
