@@ -916,7 +916,18 @@ pub fn ChooseConstraintName<'mcx>(
 ) -> PgResult<mcx::PgString<'mcx>> {
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let mut pass = 0;
-    let mut modlabel = mcx::PgString::from_str_in(label, mcx)?;
+    // C tries the unmodified label first UNLESS it's empty; an empty label
+    // starts at "<label>1" (pg_constraint.c:867-871) — FK partition clones
+    // (label "") are named parent_1, parent_2, never "parent_".
+    let mut modlabel = if label.is_empty() {
+        pass += 1;
+        let mut m = mcx::PgString::from_str_in(label, mcx)?;
+        use core::fmt::Write;
+        write!(m, "{pass}").expect("label suffix");
+        m
+    } else {
+        mcx::PgString::from_str_in(label, mcx)?
+    };
     let conname = loop {
         let conname = make_object_name(mcx, name1, name2, modlabel.as_str())?;
         let mut found = others.iter().any(|&o| o == conname.as_str());

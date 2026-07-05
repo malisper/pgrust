@@ -73,9 +73,19 @@ fn expand_inherited_rtentry<'mcx>(
     let parent_oid = rte.relid;
     let lockmode = rte.rellockmode;
 
+    // get_plan_rowmark: a parent selected FOR UPDATE/SHARE keeps its mark as
+    // isParent and every child gets its own (inherit.c:124-136).
+    let mut oldrc: Option<types_pathnodes::PlanRowMarkId> = None;
+    let mut old_is_parent = false;
+    let mut old_all_mark_types = 0i32;
     for &rm in run.root.rowMarks.iter() {
         if run.rowmark(rm).rti == rti as u32 {
-            panic!("expand_inherited_rtentry (inherit.c): inherited PlanRowMark; FOR UPDATE lane");
+            oldrc = Some(rm);
+            let rc = run.rowmark_mut(rm);
+            old_is_parent = rc.isParent;
+            rc.isParent = true;
+            old_all_mark_types = rc.allMarkTypes;
+            break;
         }
     }
     let perminfoindex = rte.perminfoindex;
@@ -93,7 +103,7 @@ fn expand_inherited_rtentry<'mcx>(
                 .updatedCols
                 .clone_in(mcx)?
         };
-        expand_partitioned_rtentry(run, rel, rti, &oldrelation, &updated_cols, lockmode)?;
+        expand_partitioned_rtentry(run, rel, rti, &oldrelation, &updated_cols, oldrc, lockmode)?;
     } else {
         let inh_oids = pg_inherits::find_all_inheritors(mcx, parent_oid, lockmode)?;
         debug_assert!(inh_oids.first() == Some(&parent_oid));
@@ -110,12 +120,63 @@ fn expand_inherited_rtentry<'mcx>(
                         && !childrel.rd_islocaltemp),
                     "other-session temp children unreachable (temp lane is session-local)"
                 );
-                let child_rti = expand_single_inheritance_child(run, rti, &oldrelation, childrel)?;
+                let child_rti =
+                    expand_single_inheritance_child(run, rti, &oldrelation, childrel, oldrc)?;
                 crate::relnode::build_simple_rel_child(run, child_rti, rel)?;
             }
             if let Some(r) = newrelation {
                 r.close(types_rel::NoLock)?;
             }
+        }
+    }
+
+    // Children may have reported new mark types into the parent mark; add the
+    // junk columns preprocess_targetlist would have added for them, plus the
+    // dispatch tableoid (inherit.c:229-308).
+    if let Some(rm) = oldrc {
+        use types_nodes::plannodes::RowMarkType;
+        let rc = *run.rowmark(rm);
+        let new_all_mark_types = rc.allMarkTypes;
+        let copy_bit = 1 << RowMarkType::ROW_MARK_COPY as i32;
+        let mut newvars: Vec<Node<'mcx>> = Vec::new();
+        if new_all_mark_types & !copy_bit != 0 && old_all_mark_types & !copy_bit == 0 {
+            let var = mk_var(
+                mcx,
+                rc.rti,
+                types_tuple::htup::SelfItemPointerAttributeNumber as i16,
+                types_core::catalog::TIDOID,
+                -1,
+                0,
+            )?;
+            let resname = crate::prep::arena_str(mcx, &format!("ctid{}", rc.rowmarkId))?;
+            let resno = run.processed_tlist.expect("processed_tlist set").len() as i16 + 1;
+            let tle = Node::mk_target_entry(mcx, var, resno, Some(resname), true)?;
+            processed_tlist_append(run, tle)?;
+            newvars.push(var);
+        }
+        if new_all_mark_types & copy_bit != 0 && old_all_mark_types & copy_bit == 0 {
+            panic!(
+                "expand_inherited_rtentry (inherit.c): ROW_MARK_COPY wholerow junk var                  (makeWholeRowVar); non-relation rowmark lane"
+            );
+        }
+        if !old_is_parent {
+            let var = mk_var(
+                mcx,
+                rc.rti,
+                types_tuple::htup::TableOidAttributeNumber as i16,
+                types_core::catalog::OIDOID,
+                -1,
+                0,
+            )?;
+            let resname = crate::prep::arena_str(mcx, &format!("tableoid{}", rc.rowmarkId))?;
+            let resno = run.processed_tlist.expect("processed_tlist set").len() as i16 + 1;
+            let tle = Node::mk_target_entry(mcx, var, resno, Some(resname), true)?;
+            processed_tlist_append(run, tle)?;
+            newvars.push(var);
+        }
+        if !newvars.is_empty() {
+            let relids0 = crate::relnode::relids_singleton(mcx, 0);
+            crate::initsplan::add_vars_to_targetlist(run, &newvars, &relids0)?;
         }
     }
     oldrelation.close(types_rel::NoLock)
@@ -129,6 +190,9 @@ fn expand_partitioned_rtentry<'mcx>(
     parent_rti: usize,
     parentrel: &types_rel::Relation<'mcx>,
     parent_updated_cols: &types_nodes::Bitmapset<'mcx>,
+    // The TOP parent's rowmark (not the intermediate partitioned child's):
+    // every descendant mark shares its rowmarkId and junk columns.
+    top_parentrc: Option<types_pathnodes::PlanRowMarkId>,
     lockmode: i32,
 ) -> PgResult<()> {
     let mcx = run.mcx;
@@ -166,7 +230,8 @@ fn expand_partitioned_rtentry<'mcx>(
                 && !childrel.rd_islocaltemp),
             "temporary relation from another session found as partition"
         );
-        let child_rti = expand_single_inheritance_child(run, parent_rti, parentrel, &childrel)?;
+        let child_rti =
+            expand_single_inheritance_child(run, parent_rti, parentrel, &childrel, top_parentrc)?;
         let childrelinfo = crate::relnode::build_simple_rel_child(run, child_rti, relinfo)?;
         run.root.rel_mut(relinfo).part_rels[i as usize] = Some(childrelinfo);
         {
@@ -186,6 +251,7 @@ fn expand_partitioned_rtentry<'mcx>(
                 child_rti as usize,
                 &childrel,
                 &child_updated_cols,
+                top_parentrc,
                 lockmode,
             )?;
         }
@@ -201,6 +267,7 @@ fn expand_single_inheritance_child<'mcx>(
     parent_rti: usize,
     parentrel: &types_rel::Relation<'mcx>,
     childrel: &types_rel::Relation<'mcx>,
+    top_parentrc: Option<types_pathnodes::PlanRowMarkId>,
 ) -> PgResult<u32> {
     let mcx = run.mcx;
     let parentrte = run.rte(parent_rti);
@@ -279,6 +346,31 @@ fn expand_single_inheritance_child<'mcx>(
     appinfo.child_relid = child_rti;
     run.root.append_rel_array[child_rti as usize] = Some(appinfo.clone());
     run.root.append_rel_list.push(appinfo);
+
+    // Build the child's PlanRowMark if the parent is marked FOR UPDATE/SHARE
+    // (inherit.c:119-147). Partitioned children get isParent marks — the
+    // executor ignores them, but their existence locks the child.
+    if let Some(prc_id) = top_parentrc {
+        use types_nodes::plannodes::PlanRowMark;
+        let prc = *run.rowmark(prc_id);
+        let mark_type = {
+            let child_rte = run.rte(child_rti as usize);
+            crate::prep::select_rowmark_type(child_rte, prc.strength)
+        };
+        let child_mark = PlanRowMark {
+            rti: child_rti,
+            prti: prc.rti,
+            rowmarkId: prc.rowmarkId,
+            markType: mark_type,
+            allMarkTypes: 1 << mark_type as i32,
+            strength: prc.strength,
+            waitPolicy: prc.waitPolicy,
+            isParent: child_relkind == types_rel::RELKIND_PARTITIONED_TABLE,
+        };
+        run.rowmark_mut(prc_id).allMarkTypes |= 1 << mark_type as i32;
+        let id = run.add_rowmark(child_mark);
+        run.root.rowMarks.push(id);
+    }
 
     if crate::relnode::relids_is_member(parent_rti as i32, &run.root.all_result_relids) {
         let cur = run.root.all_result_relids.take();

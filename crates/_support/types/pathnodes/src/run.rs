@@ -163,6 +163,10 @@ impl<'mcx> PlannerRun<'mcx> {
         &self.rowmarks[id.0 as usize]
     }
 
+    pub fn rowmark_mut(&mut self, id: PlanRowMarkId) -> &mut PlanRowMark {
+        &mut self.rowmarks[id.0 as usize]
+    }
+
     /// Suspend the current level and make a fresh child root current
     /// (C: subquery_planner building a child PlannerInfo with parent_root).
     /// outer_params is materialized here instead of C's end-of-level
