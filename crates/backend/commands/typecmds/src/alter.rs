@@ -932,9 +932,18 @@ pub fn AlterTypeOwner_oid<'mcx>(
 ) -> PgResult<()> {
     let row = fetch_type_row(mcx, type_oid)?;
     if row.typtype == TYPTYPE_COMPOSITE {
-        unported("AlterTypeOwner_oid: composite type (ATExecChangeOwner)");
+        // ATExecChangeOwner fixes up the pg_class entry and calls back to
+        // AlterTypeOwnerInternal for the pg_type entry(s).
+        pg_shdepend::at_exec_change_owner::call(
+            mcx,
+            row.typrelid,
+            new_owner_id,
+            true,
+            types_rel::AccessExclusiveLock,
+        )?;
+    } else {
+        AlterTypeOwnerInternal(mcx, type_oid, new_owner_id)?;
     }
-    AlterTypeOwnerInternal(mcx, type_oid, new_owner_id)?;
     if has_depend_entry {
         pg_shdepend::changeDependencyOnOwner(mcx, TYPE_RELATION_ID, type_oid, new_owner_id)?;
     }
@@ -947,15 +956,45 @@ pub fn AlterTypeOwnerInternal<'mcx>(
     new_owner_id: Oid,
 ) -> PgResult<()> {
     let row = fetch_type_row(mcx, type_oid)?;
-    if !row.typacl_isnull {
-        unported("AlterTypeOwnerInternal: non-null typacl (aclnewowner)");
+    {
+        let rel = table::table_open(mcx, TYPE_RELATION_ID, RowExclusiveLock)?;
+        let keys = [oid_key(pg_type::Anum_pg_type_oid, type_oid)];
+        let mut scan = genam::systable_beginscan(mcx, &rel, TypeOidIndexId, true, None, &keys)?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?
+            .unwrap_or_else(|| panic!("cache lookup failed for type {type_oid}"));
+        let desc = rel.descr();
+        let n = desc.natts as usize;
+        let mut values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, n)?;
+        let mut nulls: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+        let mut replace: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, n)?;
+        values.resize(n, Datum::null());
+        nulls.resize(n, false);
+        replace.resize(n, false);
+        values[(Anum_pg_type_typowner - 1) as usize] = Datum::from_oid(new_owner_id);
+        replace[(Anum_pg_type_typowner - 1) as usize] = true;
+
+        let mut acl_null = false;
+        // SAFETY: typacl read under the open scan's held tuple.
+        let acl_datum = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_type_typacl as i32, desc, &mut acl_null)
+        };
+        let acl_img;
+        if !acl_null {
+            let new_acl = aclchk::with_acl_datum(acl_datum, |acl| {
+                adt_acl::aclnewowner(mcx, acl, row.typowner, new_owner_id)
+            })?;
+            acl_img = adt_acl::varlena::acl_image(mcx, &new_acl)?;
+            values[(Anum_pg_type_typacl - 1) as usize] =
+                Datum::from_usize(acl_img.as_ptr() as usize);
+            replace[(Anum_pg_type_typacl - 1) as usize] = true;
+        }
+
+        let mut newtup = heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &nulls, &replace)?;
+        let otid = tup.t_self;
+        genam::systable_endscan(mcx, scan)?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+        rel.close(RowExclusiveLock)?;
     }
-    update_type_row(mcx, type_oid, |values, _nulls, replace| {
-        let ix = (Anum_pg_type_typowner - 1) as usize;
-        values[ix] = Datum::from_oid(new_owner_id);
-        replace[ix] = true;
-        Ok(())
-    })?;
     if row.typarray != InvalidOid {
         AlterTypeOwnerInternal(mcx, row.typarray, new_owner_id)?;
     }
