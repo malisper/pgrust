@@ -25,7 +25,7 @@ use crate::{
     ANUM_PG_PROC_PROSRC, ANUM_PG_PROC_PROVOLATILE,
 };
 
-pub(crate) const MAX_SQL_FN_ARGS: usize = 16;
+pub(crate) const MAX_SQL_FN_ARGS: usize = types_core::FUNC_MAX_ARGS;
 
 pub(crate) struct SqlFnEntryState<'mcx> {
     pub fname: PgString<'mcx>,
@@ -63,12 +63,34 @@ impl Drop for SqlFnEntry {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct FnKey {
     fn_oid: Oid,
     collation: Oid,
     argtypes: [Oid; MAX_SQL_FN_ARGS],
     nargs: u8,
+}
+
+// Hash/eq the live argtype prefix only: the array is FUNC_MAX_ARGS wide and
+// keyed per call.
+impl PartialEq for FnKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.fn_oid == other.fn_oid
+            && self.collation == other.collation
+            && self.nargs == other.nargs
+            && self.argtypes[..self.nargs as usize] == other.argtypes[..other.nargs as usize]
+    }
+}
+
+impl Eq for FnKey {}
+
+impl core::hash::Hash for FnKey {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.fn_oid.hash(state);
+        self.collation.hash(state);
+        self.nargs.hash(state);
+        self.argtypes[..self.nargs as usize].hash(state);
+    }
 }
 
 thread_local! {
@@ -268,7 +290,7 @@ pub(crate) fn cached_sql_function(
         let a = read_oidvector_attr(scratch.mcx(), argv)?;
         ReleaseSysCache(tup);
         let n = a.len();
-        assert!(n <= MAX_SQL_FN_ARGS, "fmgr_sql: >{MAX_SQL_FN_ARGS} arguments unported");
+        assert!(n <= MAX_SQL_FN_ARGS, "fmgr_sql: >{MAX_SQL_FN_ARGS} arguments (FUNC_MAX_ARGS)");
         (a, n)
     };
     let argtypes = resolve_argtypes(&declared, flinfo)?;
@@ -648,5 +670,44 @@ mod tests {
         .expect("read_input_argnames");
         let got: Vec<&str> = out.iter().map(|s| s.as_str()).collect();
         assert_eq!(got, ["fmt", "rest"]);
+    }
+}
+
+#[cfg(test)]
+mod fnkey_tests {
+    use super::*;
+
+    fn key(nargs: u8, types: &[Oid]) -> FnKey {
+        let mut argtypes = [types_core::InvalidOid; MAX_SQL_FN_ARGS];
+        argtypes[..types.len()].copy_from_slice(types);
+        FnKey { fn_oid: 16384, collation: 100, argtypes, nargs }
+    }
+
+    fn fxhash(k: &FnKey) -> u64 {
+        use core::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        k.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn fnkey_matches_func_max_args_and_hashes_live_prefix() {
+        assert_eq!(MAX_SQL_FN_ARGS, 100);
+        let t20: Vec<Oid> = (1..=20u32).map(|i| 20 + i).collect();
+        let a = key(20, &t20);
+        let mut b = key(20, &t20);
+        b.argtypes[20] = 9999;
+        assert!(a == b);
+        assert_eq!(fxhash(&a), fxhash(&b));
+
+        let mut c = key(20, &t20);
+        c.argtypes[19] = 9999;
+        assert!(a != c);
+        assert!(a != key(19, &t20[..19]));
+
+        let t100: Vec<Oid> = (1..=100u32).collect();
+        let full = key(100, &t100);
+        assert_eq!(full.argtypes[99], 100);
+        assert!(full != a);
     }
 }
