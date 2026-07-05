@@ -1029,6 +1029,76 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
                 }
             }
         }
+        NodeTag::T_NullIfExpr => {
+            use types_nodes::NullIfExpr;
+            let e = node.as_null_if_expr().unwrap();
+            let new_args = mutate_list(cx.mcx, &e.args, &mut |n| ece_mutator(n, cx))?;
+            let eff_args = new_args.as_ref().unwrap_or(&e.args);
+
+            // A NULL input can't compare equal: NULLIF yields the first arg.
+            let mut has_nonconst_input = false;
+            for arg in eff_args.iter() {
+                match arg.as_const() {
+                    Some(c) if c.constisnull => return Ok(Some(eff_args.nth(0))),
+                    Some(_) => {}
+                    None => has_nonconst_input = true,
+                }
+            }
+            // set_opfuncid (nodeFuncs.c).
+            let opfuncid =
+                if e.opfuncid == 0 { lsyscache::get_opcode(e.opno)? } else { e.opfuncid };
+            // ece_evaluate_expr: exprTypmod(NullIfExpr) is the first arg's.
+            let first_typmod = nodes_core::node_funcs::expr_typmod(eff_args.nth(0));
+            if !has_nonconst_input && ece_function_is_safe(cx, opfuncid)? {
+                let args = match new_args {
+                    Some(a) => a,
+                    None => e.args.clone_in(cx.mcx)?,
+                };
+                let new_node = Node::mk(
+                    cx.mcx,
+                    NullIfExpr {
+                        opno: e.opno,
+                        opfuncid,
+                        opresulttype: e.opresulttype,
+                        opretset: e.opretset,
+                        opcollid: e.opcollid,
+                        inputcollid: e.inputcollid,
+                        args,
+                        location: e.location,
+                    },
+                )?;
+                return clauses_seams::evaluate_expr::call(
+                    cx.mcx,
+                    new_node,
+                    e.opresulttype,
+                    first_typmod,
+                    e.opcollid,
+                )
+                .map(Some);
+            }
+            match new_args {
+                None if opfuncid == e.opfuncid => Ok(None),
+                new_args => {
+                    let args = match new_args {
+                        Some(a) => a,
+                        None => e.args.clone_in(cx.mcx)?,
+                    };
+                    Ok(Some(Node::mk(
+                        cx.mcx,
+                        NullIfExpr {
+                            opno: e.opno,
+                            opfuncid,
+                            opresulttype: e.opresulttype,
+                            opretset: e.opretset,
+                            opcollid: e.opcollid,
+                            inputcollid: e.inputcollid,
+                            args,
+                            location: e.location,
+                        },
+                    )?))
+                }
+            }
+        }
         NodeTag::T_CoerceToDomainValue => Ok(None),
         NodeTag::T_Var
         | NodeTag::T_Const

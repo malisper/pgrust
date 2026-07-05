@@ -7,7 +7,7 @@ use mcx::{Mcx, MemoryContext};
 use syscache_seams::PgProcShape;
 use types_error::PgResult;
 use types_nodes::parsenodes::Query;
-use types_nodes::primnodes::{FromExpr, FuncExpr, OpExpr, ParamKind};
+use types_nodes::primnodes::{FromExpr, FuncExpr, NullIfExpr, OpExpr, ParamKind};
 use types_nodes::{Node, NodeList, NodeTag};
 use types_tuple::PgTypeShape;
 
@@ -849,4 +849,60 @@ fn mbms_add_member_negative_is_loud() {
     let mcx = ctx.mcx();
     let mut a: MultiBitmapset<'_> = mcx::PgVec::new_in(mcx);
     let _ = mbms_add_member(mcx, &mut a, -1, 1);
+}
+
+fn nullif<'mcx>(mcx: Mcx<'mcx>, args: &[Node<'mcx>]) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        NullIfExpr {
+            opno: 96,
+            opfuncid: F_INT4EQ,
+            opresulttype: 23,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::from_slice(mcx, args).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn eval_const_nullif_null_arg_yields_first_arg() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    // NULLIF(x, NULL): NULL compares equal to nothing; reduces to x.
+    let e = nullif(mcx, &[var, int4_const(mcx, None)]);
+    let folded = eval_const_expressions(mcx, e).unwrap();
+    let v = folded.as_var().expect("NULLIF(x, NULL) reduces to x");
+    assert_eq!(v.varno, 1);
+    // NULLIF(NULL, x): reduces to the first (null) argument.
+    let e = nullif(mcx, &[int4_const(mcx, None), var]);
+    let folded = eval_const_expressions(mcx, e).unwrap();
+    let c = folded.as_const().expect("NULLIF(NULL, x) reduces to the null const");
+    assert!(c.constisnull);
+    assert_eq!(c.consttype, 23);
+}
+
+#[test]
+#[should_panic(expected = "seam not installed")]
+fn eval_const_nullif_all_const_defers_to_evaluate_expr_seam() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let e = nullif(mcx, &[int4_const(mcx, Some(1)), int4_const(mcx, Some(2))]);
+    let _ = eval_const_expressions(mcx, e);
+}
+
+#[test]
+fn eval_const_nullif_nonconst_keeps_node() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+    let e = nullif(mcx, &[var, int4_const(mcx, Some(1))]);
+    let out = eval_const_expressions(mcx, e).unwrap();
+    let n = out.as_null_if_expr().expect("stays a NullIfExpr");
+    assert_eq!(n.opno, 96);
+    assert!(n.args.nth(0).as_var().is_some());
 }
