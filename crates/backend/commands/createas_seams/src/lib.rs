@@ -57,3 +57,12 @@ seam_core::seam!(
     // createas: createas deps prepare for ExecuteQuery).
     pub fn get_into_rel_eflags(skip_data: bool) -> i32
 );
+
+seam_core::seam!(
+    // CreateTableAsRelExists for EXPLAIN's CTAS arm (explain cannot dep
+    // createas: createas reaches explain via postgres/tablecmds).
+    pub fn create_table_as_rel_exists<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &types_nodes::rawnodes::CreateTableAsStmt<'mcx>,
+    ) -> PgResult<bool>
+);

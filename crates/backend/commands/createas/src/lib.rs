@@ -25,6 +25,7 @@ pub fn init_seams() {
     createas_seams::intorel_receive::set(intorel_receive);
     createas_seams::intorel_shutdown::set(intorel_shutdown);
     createas_seams::get_into_rel_eflags::set(into_rel_eflags);
+    createas_seams::create_table_as_rel_exists::set(CreateTableAsRelExists);
 }
 
 fn into_rel_eflags(skip_data: bool) -> i32 {
