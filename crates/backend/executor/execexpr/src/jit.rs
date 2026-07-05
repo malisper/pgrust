@@ -99,8 +99,15 @@ struct SessionState {
     instr: JitInstr,
 }
 
+// Process-wide open-window count: the compile hot path (every Program-shape
+// ready_expr, including below-cost queries) pre-gates on one Relaxed load
+// before touching the thread-local (TL reads cost ~40 instr; backing-atomic
+// doctrine).
+static OPEN_SESSIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// Opens a compile window (nestable: SPI executors inside InitPlan).
 pub fn session_begin(flags: i32) {
+    OPEN_SESSIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     SESSION.with(|s| {
         let prev = s.borrow_mut().take().map(Box::new);
         *s.borrow_mut() = Some(SessionState {
@@ -114,6 +121,7 @@ pub fn session_begin(flags: i32) {
 
 /// Closes the window, returning this window's kernels + counters.
 pub fn session_end() -> JitCollector {
+    OPEN_SESSIONS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     SESSION.with(|s| {
         let cur = s.borrow_mut().take().expect("jit session_end without begin");
         *s.borrow_mut() = cur.prev.map(|b| *b);
@@ -141,7 +149,7 @@ pub fn available() -> bool {
 /// ready_expr hook: compile the program if the session gate and the stencil
 /// coverage allow; refusal falls open to the interpreter.
 pub(crate) fn try_compile(state: &mut ExprState<'_>) {
-    if !available() {
+    if OPEN_SESSIONS.load(core::sync::atomic::Ordering::Relaxed) == 0 || !available() {
         return;
     }
     let flags = session_flags();
