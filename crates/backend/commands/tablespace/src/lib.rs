@@ -1194,8 +1194,7 @@ pub fn tblspc_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<(
         procsignal::WaitForProcSignalBarrier(gen)?;
 
         if !destroy_tablespace_directories(ts_id, true)? {
-            // C: ResolveRecoveryConflictWithTablespace — a no-op outside hot
-            // standby (no conflicting backends during crash recovery).
+            standby::ResolveRecoveryConflictWithTablespace(ts_id)?;
             if !destroy_tablespace_directories(ts_id, true)? {
                 ereport(LOG)
                     .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)

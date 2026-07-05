@@ -93,3 +93,9 @@ seam_core::seam!(
     // RemovePromoteSignalFiles (xlogrecovery.c).
     pub fn remove_promote_signal_files()
 );
+
+seam_core::seam!(
+    // GetXLogReceiptTime(&rtime, &fromStream) (xlogrecovery.c); receipt-time
+    // tracking is unported there, so this stays loud until that lane lands.
+    pub fn get_xlog_receipt_time() -> (types_core::TimestampTz, bool)
+);

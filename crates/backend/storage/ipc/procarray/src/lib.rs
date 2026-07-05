@@ -1615,3 +1615,134 @@ pub fn SetIndexsafeProcflags() -> PgResult<()> {
     LWLockRelease(ProcArrayLock())?;
     Ok(())
 }
+
+fn proc_vxid(proc: &PGPROC) -> types_core::VirtualTransactionId {
+    types_core::VirtualTransactionId {
+        procNumber: proc.vxid.procNumber.load(Relaxed),
+        localTransactionId: proc.vxid.lxid.load(Relaxed),
+    }
+}
+
+// C mallocs a permanent maxProcs+1 result array; cold path, plain Vec.
+pub fn GetConflictingVirtualXIDs(
+    limitXmin: TransactionId,
+    dbOid: types_core::Oid,
+) -> PgResult<Vec<types_core::VirtualTransactionId>> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let mut vxids = Vec::with_capacity(arrayP.maxProcs as usize);
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+
+        // Exclude prepared transactions.
+        if proc.pid.load(Relaxed) == 0 {
+            continue;
+        }
+
+        if dbOid == types_core::InvalidOid || proc.databaseId.load(Relaxed) == dbOid {
+            // An invalid pxmin means no snapshot; the share lock keeps new
+            // snapshots from conflicting with this test.
+            let pxmin = proc.xmin.read();
+            if !TransactionIdIsValid(limitXmin)
+                || (TransactionIdIsValid(pxmin)
+                    && !types_core::TransactionIdFollows(pxmin, limitXmin))
+            {
+                let vxid = proc_vxid(proc);
+                if vxid.is_valid() {
+                    vxids.push(vxid);
+                }
+            }
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+
+    Ok(vxids)
+}
+
+// Returns the pid of the process signaled, or 0 if not found.
+pub fn CancelVirtualTransaction(
+    vxid: types_core::VirtualTransactionId,
+    sigmode: types_storage::storage::ProcSignalReason,
+) -> PgResult<i32> {
+    SignalVirtualTransaction(vxid, sigmode, true)
+}
+
+pub fn SignalVirtualTransaction(
+    vxid: types_core::VirtualTransactionId,
+    sigmode: types_storage::storage::ProcSignalReason,
+    conflictPending: bool,
+) -> PgResult<i32> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let mut pid = 0;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+        let procvxid = proc_vxid(proc);
+
+        if procvxid.procNumber == vxid.procNumber
+            && procvxid.localTransactionId == vxid.localTransactionId
+        {
+            proc.recoveryConflictPending.store(conflictPending, Relaxed);
+            pid = proc.pid.load(Relaxed);
+            if pid != 0 {
+                // Kill the pid if it's still here; if not, that's what we
+                // wanted, so ignore any errors.
+                procsignal::SendProcSignal(pid, sigmode, procvxid.procNumber);
+            }
+            break;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+
+    Ok(pid)
+}
+
+pub fn CountDBBackends(databaseid: types_core::Oid) -> PgResult<i32> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let mut count = 0;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, init_small::globals::MyProcNumber())?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+        // Do not count prepared xacts.
+        if proc.pid.load(Relaxed) == 0 {
+            continue;
+        }
+        if databaseid == types_core::InvalidOid || proc.databaseId.load(Relaxed) == databaseid {
+            count += 1;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+
+    Ok(count)
+}
+
+pub fn CancelDBBackends(
+    databaseid: types_core::Oid,
+    sigmode: types_storage::storage::ProcSignalReason,
+    conflictPending: bool,
+) -> PgResult<()> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+        if databaseid == types_core::InvalidOid || proc.databaseId.load(Relaxed) == databaseid {
+            let procvxid = proc_vxid(proc);
+            proc.recoveryConflictPending.store(conflictPending, Relaxed);
+            let pid = proc.pid.load(Relaxed);
+            if pid != 0 {
+                procsignal::SendProcSignal(pid, sigmode, procvxid.procNumber);
+            }
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+
+    Ok(())
+}

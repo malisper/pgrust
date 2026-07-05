@@ -338,6 +338,7 @@ pub const XACT_TRUNCATION_LOCK: usize = 44;
 pub const WRAP_LIMITS_VACUUM_LOCK: usize = 46;
 pub const NOTIFY_QUEUE_TAIL_LOCK: usize = 47;
 pub const WAIT_EVENT_CUSTOM_LOCK: usize = 48;
+pub const WAL_SUMMARIZER_LOCK: usize = 49;
 pub const DSM_REGISTRY_LOCK: usize = 50;
 
 pub const SERIALIZABLE_XACT_HASH_LOCK: i32 = 28;

@@ -12,7 +12,7 @@ use pg_database_seams::PgDatabaseForm;
 use types_core::catalog::DATABASE_RELATION_ID;
 use types_core::{InvalidOid, Oid};
 use types_error::{ErrorLocation, PgResult, ERROR, PANIC, WARNING};
-use types_storage::lock::LOCKMODE;
+use types_storage::lock::{AccessExclusiveLock, LOCKMODE};
 use types_storage::storage::ProcSignalBarrierType;
 use xlogreader_seams::XLogReaderState;
 
@@ -353,9 +353,15 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
         let db_id = u32_at(0);
         let ntablespaces = i32::from_ne_bytes(data[4..8].try_into().expect("short drop record"));
 
-        // InHotStandby arms (session locks, recovery-conflict resolution) ride
-        // the standby lane. ReplicationSlotsDropDBSlots is unconditional in C
-        // (slot.c home): wire it as a named loud when the slot crate lands.
+        if xlogutils::InHotStandby() {
+            // Lock out InitPostgres re-connects (and walsenders on
+            // db-specific slots) while conflicts resolve.
+            lmgr::LockSharedObjectForSession(DATABASE_RELATION_ID, db_id, 0, AccessExclusiveLock)?;
+            standby::ResolveRecoveryConflictWithDatabase(db_id)?;
+        }
+
+        // ReplicationSlotsDropDBSlots is unconditional in C (slot.c home):
+        // wire it as a named loud when the slot crate lands.
         bufmgr::DropDatabaseBuffers(db_id)?;
         smgr::ForgetDatabaseSyncRequests(db_id)?;
         xlogutils::XLogDropDatabase(db_id)?;
@@ -376,6 +382,11 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
                     ))
                     .finish(loc("dbase_redo"))?;
             }
+        }
+
+        if xlogutils::InHotStandby() {
+            // Release prior to commit; the reconnect race window is small, as C.
+            lmgr::UnlockSharedObjectForSession(DATABASE_RELATION_ID, db_id, 0, AccessExclusiveLock)?;
         }
     } else {
         panic!("dbase_redo: unknown op code {info}");

@@ -1,0 +1,53 @@
+[package]
+name = "walsummarizer"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walsummarizer"
+path = "src/lib.rs"
+
+[dependencies]
+auxprocess = { path = "../auxprocess" }
+blkreftable = { path = "../../../common/blkreftable" }
+condition_variable = { path = "../../storage/lmgr/condition_variable" }
+controldata_utils = { path = "../../../common/controldata_utils" }
+elog = { path = "../../utils/error/elog" }
+fd = { path = "../../storage/file/fd" }
+guc_file = { path = "../../utils/misc/guc_file" }
+types_guc = { path = "../../../_support/types/types_guc" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+timeline_seams = { path = "../../access/transam/timeline_seams" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+interrupt = { path = "../interrupt" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+libc = "0.2"
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lwlock = { path = "../../storage/lmgr/lwlock" }
+mcx = { path = "../../../_support/mcx" }
+miscinit = { path = "../../utils/init/miscinit" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+timeline = { path = "../../access/transam/timeline" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+walsummarizer_seams = { path = "../walsummarizer_seams" }
+xact = { path = "../../access/transam/xact" }
+xlogreader = { path = "../../access/transam/xlogreader" }
+xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+xlogrecovery = { path = "../../access/transam/xlogrecovery" }
+xlogutils = { path = "../../access/transam/xlogutils" }
+pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
+mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+dynahash = { path = "../../utils/hash/dynahash" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+aio_seams = { path = "../../storage/aio/aio_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }

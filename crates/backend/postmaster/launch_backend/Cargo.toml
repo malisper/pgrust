@@ -22,6 +22,7 @@ bgworker = { path = "../bgworker" }
 bgwriter = { path = "../bgwriter" }
 checkpointer = { path = "../checkpointer" }
 pgarch = { path = "../pgarch" }
+walsummarizer = { path = "../walsummarizer" }
 postmaster_startup = { path = "../startup" }
 walwriter = { path = "../walwriter" }
 postmaster_seams = { path = "../postmaster_seams" }
@@ -29,6 +30,8 @@ interrupt = { path = "../interrupt" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 ipc = { path = "../../storage/ipc/ipc" }
 libc = "0.2"
+
+syslogger_seams = { path = "../syslogger_seams" }
 
 [dev-dependencies]
 xact_seams = { path = "../../access/transam/xact_seams" }

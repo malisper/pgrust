@@ -116,6 +116,7 @@ syncscan = { path = "../../backend/access/common/syncscan" }
 bgwriter = { path = "../../backend/postmaster/bgwriter" }
 walwriter = { path = "../../backend/postmaster/walwriter" }
 pgarch = { path = "../../backend/postmaster/pgarch" }
+walsummarizer = { path = "../../backend/postmaster/walsummarizer" }
 postmaster_startup = { path = "../../backend/postmaster/startup" }
 rewrite_handler = { path = "../../backend/rewrite/rewrite_handler" }
 rewrite_define = { path = "../../backend/rewrite/rewrite_define" }

@@ -98,3 +98,10 @@ seam_core::seam!(
         lock_held: bool,
     ) -> PgResult<ProcNumber>
 );
+
+seam_core::seam!(
+    // StandbyTransactionIdIsPrepared(xid) (twophase.c); standby's
+    // StandbyReleaseOldLocks is the cyclic caller (twophase -> xlogreader ->
+    // rmgr -> rmgrdesc -> standby).
+    pub fn standby_transaction_id_is_prepared(xid: TransactionId) -> PgResult<bool>
+);

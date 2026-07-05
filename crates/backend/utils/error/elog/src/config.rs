@@ -114,7 +114,9 @@ thread_local! { static EXIT_ON_ANY_ERROR: Cell<bool> = const { Cell::new(false) 
 // `proc_exit_inprogress` (storage/ipc/ipc.c).
 thread_local! { static PROC_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(false) }; }
 // `redirection_done` (postmaster.c): stderr goes to the syslogger pipe.
-thread_local! { static REDIRECTION_DONE: Cell<bool> = const { Cell::new(false) }; }
+// Process-wide: C fork-inherits it into every child; one fd table shares the
+// redirected fd 2, so every thread must agree.
+static REDIRECTION_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 // Mirrors `MyBackendType == B_LOGGER` (miscinit.c).
 thread_local! { static AM_SYSLOGGER: Cell<bool> = const { Cell::new(false) }; }
 // `IsUnderPostmaster` (globals.c).
@@ -152,11 +154,11 @@ pub fn set_proc_exit_inprogress(value: bool) {
 }
 
 pub fn redirection_done() -> bool {
-    REDIRECTION_DONE.with(Cell::get)
+    REDIRECTION_DONE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn set_redirection_done(value: bool) {
-    REDIRECTION_DONE.with(|c| c.set(value));
+    REDIRECTION_DONE.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn am_syslogger() -> bool {

@@ -13,6 +13,8 @@ xlogutils = { path = "../../transam/xlogutils" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 
+standby = { path = "../../../storage/ipc/standby" }
+
 [dev-dependencies]
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }

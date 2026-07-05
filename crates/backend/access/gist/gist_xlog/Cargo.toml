@@ -13,3 +13,4 @@ types_gist = { path = "../../../../_support/types/gist" }
 xlogutils = { path = "../../transam/xlogutils" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
+standby = { path = "../../../storage/ipc/standby" }

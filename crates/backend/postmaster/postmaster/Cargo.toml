@@ -52,6 +52,7 @@ guc_seams = { path = "../../utils/misc/guc_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 auth_seams = { path = "../../libpq/auth_seams" }
 autovacuum_seams = { path = "../autovacuum_seams" }
+syslogger = { path = "../syslogger" }
 syslogger_seams = { path = "../syslogger_seams" }
 launcher_seams = { path = "../../replication/launcher_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

@@ -155,7 +155,13 @@ fn gistRedoDeleteRecord(record: &XLogReaderState) -> PgResult<()> {
     let xldata = GistxlogDelete::decode(md);
 
     if xlogutils::InHotStandby() {
-        panic!("unported: gist delete-record recovery conflicts (standby lane)");
+        let (rlocator, _, _, _) =
+            record.block_tag_extended(0).expect("gistRedoDeleteRecord: no block 0");
+        standby::ResolveRecoveryConflictWithSnapshot(
+            xldata.snapshotConflictHorizon,
+            xldata.isCatalogRel,
+            rlocator,
+        )?;
     }
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
@@ -314,9 +320,18 @@ fn gistRedoPageDelete(record: &XLogReaderState) -> PgResult<()> {
 }
 
 // gistRedoPageReuse: conflict point for hot standby only.
-fn gistRedoPageReuse(_record: &XLogReaderState) -> PgResult<()> {
+fn gistRedoPageReuse(record: &XLogReaderState) -> PgResult<()> {
     if xlogutils::InHotStandby() {
-        panic!("unported: gist page-reuse recovery conflicts (standby lane)");
+        let md = main_data(record);
+        let locator = types_storage::RelFileLocator::new(
+            u32::from_ne_bytes(md[0..4].try_into().unwrap()),
+            u32::from_ne_bytes(md[4..8].try_into().unwrap()),
+            u32::from_ne_bytes(md[8..12].try_into().unwrap()),
+        );
+        let horizon = types_core::FullTransactionId::from_u64(u64::from_ne_bytes(
+            md[16..24].try_into().unwrap(),
+        ));
+        standby::ResolveRecoveryConflictWithSnapshotFullXid(horizon, md[24] != 0, locator)?;
     }
     Ok(())
 }

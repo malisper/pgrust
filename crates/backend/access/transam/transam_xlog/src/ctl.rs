@@ -339,6 +339,11 @@ pub fn GetWALInsertionTimeLine() -> TimeLineID {
     XLogCtl().InsertTimeLineID.load(Ordering::Relaxed)
 }
 
+pub fn GetWALInsertionTimeLineIfSet() -> TimeLineID {
+    let ctl = XLogCtl();
+    ctl.info_lck.with(|| ctl.InsertTimeLineID.load(Ordering::Relaxed))
+}
+
 pub fn GetFakeLSNForUnloggedRel() -> XLogRecPtr {
     XLogCtl().unloggedLSN.fetch_add(1, Ordering::SeqCst)
 }

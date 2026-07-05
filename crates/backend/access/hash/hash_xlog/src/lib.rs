@@ -814,9 +814,13 @@ fn hash_xlog_vacuum_one_page(record: &mut XLogReaderState) -> PgResult<()> {
     let xldata = main_data(record);
     let ntuples = u16_at(xldata, 4);
 
-    // InHotStandby ResolveRecoveryConflictWithSnapshot: standby lane, loud.
     if xlogutils::InHotStandby() {
-        panic!("unported: hash_xlog_vacuum_one_page hot-standby conflict resolution");
+        let horizon = u32::from_ne_bytes(xldata[0..4].try_into().unwrap());
+        let is_catalog_rel = xldata[6] != 0;
+        let (rlocator, _, _, _) = record
+            .block_tag_extended(0)
+            .expect("hash_xlog_vacuum_one_page: no block 0");
+        standby::ResolveRecoveryConflictWithSnapshot(horizon, is_catalog_rel, rlocator)?;
     }
 
     let (action, buffer) = XLogReadBufferForRedoExtended(record, 0, ReadBufferMode::Normal, true)?;

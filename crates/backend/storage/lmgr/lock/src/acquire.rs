@@ -86,13 +86,14 @@ pub fn LockAcquireExtended(
     let lockmethodid = locktag.locktag_lockmethodid as LOCKMETHODID;
     let lockMethodTable = lock_method_checked(lockmethodid, lockmode)?;
 
-    // C also exempts the startup process (InRecovery); recovery has no
-    // backends here until the standby unit lands. Field tests run before the
-    // seam call (C tests RecoveryInProgress first, but it is a memoized read
-    // with no ordering requirement) so the hot path skips the indirect call.
+    // Field tests run before the seam call (C tests RecoveryInProgress
+    // first, but it is a memoized read with no ordering requirement) so the
+    // hot path skips the indirect call. !InRecovery exempts the startup
+    // process taking standby AELs, as C.
     if (locktag.locktag_type == LOCKTAG_OBJECT || locktag.locktag_type == LOCKTAG_RELATION)
         && lockmode > RowExclusiveLock
         && transam_xlog_seams::recovery_in_progress::call()
+        && !xlogutils_seams::in_recovery::call()
     {
         return Err(Box::new(
             PgError::new(

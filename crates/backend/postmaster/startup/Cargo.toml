@@ -24,6 +24,7 @@ mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
 miscinit = { path = "../../utils/init/miscinit" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+standby = { path = "../../storage/ipc/standby" }
 standby_seams = { path = "../../storage/ipc/standby_seams" }
 startup_seams = { path = "../startup_seams" }
 timeout = { path = "../../utils/misc/timeout" }

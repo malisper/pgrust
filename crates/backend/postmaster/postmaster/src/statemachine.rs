@@ -390,9 +390,28 @@ pub fn StartChildProcess(child_type: BackendType) -> Option<PmChild> {
     Some(PmChild { child_slot, bkend_type: child_type, pid })
 }
 
-/// StartSysLogger — the syslogger pipe machinery is that unit's port.
 pub fn StartSysLogger() {
-    panic!("StartSysLogger: syslogger unported (backend-postmaster-syslogger)");
+    debug_assert!(with_pm(|pm| pm.syslogger.is_none()));
+    let Some(child_slot) = pmchild_seams::assign_postmaster_child_slot::call(BackendType::Logger)
+    else {
+        panic!("no postmaster child slot available for syslogger");
+    };
+    // C: SysLogger_Start's FATALs longjmp out of the postmaster.
+    let pid = match syslogger::SysLogger_Start(child_slot) {
+        Ok(pid) => pid,
+        Err(e) => {
+            elog::emit_error_report_for(&e);
+            ExitPostmaster(1);
+        }
+    };
+    if pid == 0 {
+        pmchild_seams::release_postmaster_child_slot::call(child_slot);
+    } else {
+        pmchild_seams::set_child_pid::call(child_slot, pid);
+        with_pm(|pm| {
+            pm.syslogger = Some(PmChild { child_slot, bkend_type: BackendType::Logger, pid })
+        });
+    }
 }
 
 /// StartBackgroundWorker(rw) (postmaster.c). Failure marks the entry crashed

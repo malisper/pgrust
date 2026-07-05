@@ -19,6 +19,7 @@ guc = { path = "../../../utils/misc/guc" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 shmem = { path = "../shmem" }
 dsm_core = { path = "../dsm_core" }
+dsm_registry = { path = "../dsm_registry" }
 lwlock = { path = "../../lmgr/lwlock" }
 lmgr_proc = { path = "../../lmgr/lmgr_proc" }
 lock = { path = "../../lmgr/lock" }
@@ -38,6 +39,7 @@ procsignal = { path = "../procsignal" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
 slot = { path = "../../../replication/slot" }
 pgarch = { path = "../../../postmaster/pgarch" }
+walsummarizer = { path = "../../../postmaster/walsummarizer" }
 syncscan = { path = "../../../access/common/syncscan" }
 procarray = { path = "../procarray" }
 ipci_seams = { path = "../ipci_seams" }

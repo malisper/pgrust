@@ -96,18 +96,6 @@ fn StartupProcExit(_code: i32, _arg: usize) {
     }
 }
 
-fn standby_deadlock_handler() {
-    panic!("StandbyDeadLockHandler unported (storage/ipc/standby.c)");
-}
-
-fn standby_timeout_handler() {
-    panic!("StandbyTimeoutHandler unported (storage/ipc/standby.c)");
-}
-
-fn standby_lock_timeout_handler() {
-    panic!("StandbyLockTimeoutHandler unported (storage/ipc/standby.c)");
-}
-
 fn fatal_exit(e: &PgError) -> ! {
     elog::emit_error_report_for(e);
     ipc::proc_exit(1, g::MyProcPid())
@@ -134,9 +122,9 @@ pub fn StartupProcessMain(startup_data: &StartupData) -> ! {
 
     timeout::InitializeTimeouts();
 
-    timeout::RegisterTimeout(STANDBY_DEADLOCK_TIMEOUT, standby_deadlock_handler);
-    timeout::RegisterTimeout(STANDBY_TIMEOUT, standby_timeout_handler);
-    timeout::RegisterTimeout(STANDBY_LOCK_TIMEOUT, standby_lock_timeout_handler);
+    timeout::RegisterTimeout(STANDBY_DEADLOCK_TIMEOUT, standby::StandbyDeadLockHandler);
+    timeout::RegisterTimeout(STANDBY_TIMEOUT, standby::StandbyTimeoutHandler);
+    timeout::RegisterTimeout(STANDBY_LOCK_TIMEOUT, standby::StandbyLockTimeoutHandler);
 
     libpq_pqsignal::unblock_signals();
 
