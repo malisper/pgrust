@@ -68,11 +68,52 @@ struct CacheEntry {
     complete: bool,
     lru_prev: u32,
     lru_next: u32,
+    // Kernel-cached key (byval single-key kernels only; Datum::null()
+    // under ProbeKernel::Expr): probes compare this word instead of
+    // storing + deforming the entry's params image per candidate.
+    key: Datum,
+    key_isnull: bool,
 }
 
 enum KeyExpr<'mcx> {
     Param(u32),
     Expr(PgBox<'mcx, ExprState<'mcx>>),
+}
+
+// Single-int-key probe kernel (execgrouping ProbeKernel precedent): the
+// dominant Memoize shape is one PARAM_EXEC int4/int8 key, where C's probe
+// cost is a simplehash inline compare while the Expr path pays probeslot
+// clear/store + a hash interp round trip + a per-candidate entry-tuple
+// store/deform + an eq interp round trip. Kernel hash matches the expr path
+// bit-for-bit (EEOP_HASHDATUM_FIRST: NULL hashes as 0, init value 0) and eq
+// is NOT DISTINCT — exactly exec_build_grouping_equal's fold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeKernel {
+    Expr,
+    Int4,
+    Int8,
+}
+
+impl ProbeKernel {
+    fn select(nkeys: usize, hashfns: &[Oid], eqfns: &[Oid]) -> ProbeKernel {
+        if nkeys == 1 {
+            match (hashfns[0], eqfns[0]) {
+                (450, 65) => return ProbeKernel::Int4,
+                (949, 467) => return ProbeKernel::Int8,
+                _ => {}
+            }
+        }
+        ProbeKernel::Expr
+    }
+}
+
+// hashfunc.c hashint8's cross-type-compatible fold to 32 bits.
+#[inline(always)]
+fn hashint8_fold(key: Datum) -> u32 {
+    let val = key.as_i64();
+    let lohalf = val as u32;
+    let hihalf = (val >> 32) as u32;
+    lohalf ^ if val >= 0 { hihalf } else { !hihalf }
 }
 
 pub trait MemoizeChild<'mcx> {
@@ -92,6 +133,7 @@ pub struct MemoizeState<'mcx> {
     hash_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     eq_expr: Option<PgBox<'mcx, ExprState<'mcx>>>,
     key_attrs: PgVec<'mcx, KeyAttr>,
+    kernel: ProbeKernel,
     binary_mode: bool,
     singlerow: bool,
     entries: PgVec<'mcx, Option<CacheEntry>>,
@@ -176,6 +218,7 @@ pub fn exec_init_memoize<'mcx>(
         key_attrs.push(KeyAttr { byval: att.attbyval, len: att.attlen });
     }
 
+    let mut kernel = ProbeKernel::Expr;
     let (hash_expr, eq_expr) = if node.binary_mode {
         (None, None)
     } else {
@@ -206,6 +249,7 @@ pub fn exec_init_memoize<'mcx>(
             &eqfns,
             node.collations,
         )?;
+        kernel = ProbeKernel::select(nkeys, &hashfns, &eqfns);
         (Some(hash_expr), Some(eq_expr))
     };
 
@@ -222,6 +266,7 @@ pub fn exec_init_memoize<'mcx>(
         hash_expr,
         eq_expr,
         key_attrs,
+        kernel,
         binary_mode: node.binary_mode,
         singlerow: node.singlerow,
         entries: PgVec::new_in(mcx),
@@ -389,27 +434,36 @@ fn varlena_data<'m>(mcx: Mcx<'m>, p: *const u8) -> PgResult<&'m [u8]> {
     }
 }
 
+#[inline]
+fn eval_key<'mcx>(
+    key: &mut KeyExpr<'mcx>,
+    ecxt: EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum, bool)> {
+    match key {
+        KeyExpr::Param(pid) => {
+            let prm = &estate.es_param_exec_vals[*pid as usize];
+            debug_assert!(!prm.exec_plan, "nestloop params are never pending");
+            Ok((prm.value, prm.isnull))
+        }
+        KeyExpr::Expr(expr) => {
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            // SAFETY: the per-tuple context outlives this eval (reset-only).
+            unsafe { expr.arm_result_mcx_raw(per_tuple) };
+            let mut slots = EvalSlots { scan: None, inner: None, outer: None };
+            let r = exec_eval_expr(expr, &mut slots)?;
+            Ok((r.value, r.isnull))
+        }
+    }
+}
+
 fn prepare_probe_slot<'mcx>(
     node: &mut MemoizeState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     exectuples::exec_clear_tuple(&mut node.probeslot, estate.es_query_cxt);
     for i in 0..node.param_exprs.len() {
-        let (value, isnull) = match &mut node.param_exprs[i] {
-            KeyExpr::Param(pid) => {
-                let prm = &estate.es_param_exec_vals[*pid as usize];
-                debug_assert!(!prm.exec_plan, "nestloop params are never pending");
-                (prm.value, prm.isnull)
-            }
-            KeyExpr::Expr(expr) => {
-                let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
-                // SAFETY: the per-tuple context outlives this eval (reset-only).
-                unsafe { expr.arm_result_mcx_raw(per_tuple) };
-                let mut slots = EvalSlots { scan: None, inner: None, outer: None };
-                let r = exec_eval_expr(expr, &mut slots)?;
-                (r.value, r.isnull)
-            }
-        };
+        let (value, isnull) = eval_key(&mut node.param_exprs[i], node.ps_ExprContext, estate)?;
         let base = node.probeslot.base_mut();
         base.tts_values[i] = value;
         base.tts_isnull[i] = isnull;
@@ -599,52 +653,94 @@ fn cache_lookup<'mcx>(
     estate: &mut EStateData<'mcx>,
     found: &mut bool,
 ) -> PgResult<Option<u32>> {
-    prepare_probe_slot(node, estate)?;
-    let hash = probe_hash(node, estate)?;
-    let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
-    let slot_mcx = estate.es_query_cxt;
+    let kernel = node.kernel;
+    let (hash, kernel_key, kernel_isnull);
+    let existing = if kernel == ProbeKernel::Expr {
+        prepare_probe_slot(node, estate)?;
+        hash = probe_hash(node, estate)?;
+        (kernel_key, kernel_isnull) = (Datum::null(), false);
+        let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
+        let slot_mcx = estate.es_query_cxt;
 
-    let MemoizeState {
-        entries, hashtab, tableslot, probeslot, eq_expr, key_attrs, binary_mode, ..
-    } = node;
-    let mut eq_err: Option<Box<PgError>> = None;
-    let existing = hashtab
-        .find(hash as u64, |&ix| {
-            let e = entries[ix as usize].as_ref().expect("live entry");
-            if e.hash != hash {
-                return false;
-            }
-            match probe_equal(
-                tableslot,
-                probeslot,
-                eq_expr.as_mut(),
-                key_attrs,
-                *binary_mode,
-                per_tuple,
-                slot_mcx,
-                e.params,
-            ) {
-                Ok(m) => m,
-                Err(err) => {
-                    eq_err = Some(err);
-                    false
+        let MemoizeState {
+            entries, hashtab, tableslot, probeslot, eq_expr, key_attrs, binary_mode, ..
+        } = node;
+        let mut eq_err: Option<Box<PgError>> = None;
+        let existing = hashtab
+            .find(hash as u64, |&ix| {
+                let e = entries[ix as usize].as_ref().expect("live entry");
+                if e.hash != hash {
+                    return false;
                 }
-            }
-        })
-        .copied();
-    if let Some(err) = eq_err {
-        return Err(err);
-    }
+                match probe_equal(
+                    tableslot,
+                    probeslot,
+                    eq_expr.as_mut(),
+                    key_attrs,
+                    *binary_mode,
+                    per_tuple,
+                    slot_mcx,
+                    e.params,
+                ) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        eq_err = Some(err);
+                        false
+                    }
+                }
+            })
+            .copied();
+        if let Some(err) = eq_err {
+            return Err(err);
+        }
+        existing
+    } else {
+        let (key, isnull) = eval_key(&mut node.param_exprs[0], node.ps_ExprContext, estate)?;
+        (kernel_key, kernel_isnull) = (key, isnull);
+        let h32 = match (kernel, isnull) {
+            (_, true) => 0,
+            (ProbeKernel::Int4, _) => hashfn::hash_bytes_uint32(key.as_u32()),
+            _ => hashfn::hash_bytes_uint32(hashint8_fold(key)),
+        };
+        hash = hashfn::murmurhash32(h32);
+        let MemoizeState { entries, hashtab, .. } = node;
+        // NOT DISTINCT over the entry's cached key word (grouping-equal fold).
+        hashtab
+            .find(hash as u64, |&ix| {
+                let e = entries[ix as usize].as_ref().expect("live entry");
+                e.hash == hash
+                    && match (isnull, e.key_isnull) {
+                        (false, false) => {
+                            if kernel == ProbeKernel::Int4 {
+                                e.key.as_i32() == key.as_i32()
+                            } else {
+                                e.key.as_i64() == key.as_i64()
+                            }
+                        }
+                        (a, b) => a & b,
+                    }
+            })
+            .copied()
+    };
     if let Some(ix) = existing {
         *found = true;
         node.lru_move_tail(ix);
         return Ok(Some(ix));
     }
     *found = false;
+    if kernel != ProbeKernel::Expr {
+        // Misses are the rare leg: build the probeslot image only now (the
+        // entry's params minimal tuple keeps C's accounting + rescan shape).
+        exectuples::exec_clear_tuple(&mut node.probeslot, estate.es_query_cxt);
+        let base = node.probeslot.base_mut();
+        base.tts_values[0] = kernel_key;
+        base.tts_isnull[0] = kernel_isnull;
+        exectuples::exec_store_virtual_tuple(&mut node.probeslot);
+    }
 
     let params = exectuples::exec_copy_slot_minimal_tuple(
         &mut node.probeslot,
-        slot_mcx,
+        estate.es_query_cxt,
         table_mcx(node.table_ctx),
         0,
     )?;
@@ -669,6 +765,8 @@ fn cache_lookup<'mcx>(
         complete: false,
         lru_prev: INVALID,
         lru_next: INVALID,
+        key: kernel_key,
+        key_isnull: kernel_isnull,
     });
     let entries_ref = &node.entries;
     node.hashtab.insert_unique(hash as u64, ix, |&i| {
@@ -927,11 +1025,12 @@ pub fn memoize_stats(node: &MemoizeState<'_>) -> MemoizeInstrumentation {
 
 // Exempt: cache memory is released via exec_end_memoize and the table
 // context's registered destructor.
-mcx::forget_safe_nodrop!(MemoStatus, KeyAttr);
+mcx::forget_safe_nodrop!(MemoStatus, KeyAttr, ProbeKernel);
 mcx::forget_safe_struct!(
-    CacheEntry { params, tuplehead, hash, complete, lru_prev, lru_next },
+    CacheEntry { params, tuplehead, hash, complete, lru_prev, lru_next, key,
+        key_isnull },
     MemoizeState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot, mstatus, nkeys,
-        key_attrs, binary_mode, singlerow, entries, free_slots, built,
+        key_attrs, kernel, binary_mode, singlerow, entries, free_slots, built,
         lru_head, lru_tail, table_ctx, mem_used, mem_limit, entry, last_tuple;
         ps_ResultTupleDesc, tableslot, probeslot, param_exprs, hash_expr,
         eq_expr, hashtab, stats },
