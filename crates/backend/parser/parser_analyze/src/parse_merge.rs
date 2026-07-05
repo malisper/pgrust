@@ -25,11 +25,12 @@ pub(crate) fn transformMergeStmt<'mcx>(
     debug_assert!(pstate.p_ctenamespace.is_nil());
     qry.commandType = CmdType::CMD_MERGE;
 
-    if stmt.withClause.is_some() {
-        panic!(
-            "transformMergeStmt (parse_merge.c): transformWithClause (parse_cte.c) \
-             wiring unported — MERGE WITH lane"
-        );
+    if let Some(with) = stmt.withClause {
+        if with.as_with_clause().expect("withClause").recursive {
+            return Err(merge_with_recursive());
+        }
+        qry.cteList = crate::parse_cte::transformWithClause(mcx, pstate, with)?;
+        qry.hasModifyingCTE = pstate.p_hasModifyingCTE;
     }
 
     let mut target_perms: types_nodes::parsenodes::AclMode = 0;
@@ -267,6 +268,18 @@ fn set_namespace_visibility<'mcx>(
         break;
     }
     Ok(())
+}
+
+#[cold]
+fn merge_with_recursive() -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("WITH RECURSIVE is not supported for MERGE statement".to_string())
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_merge.c", 0, "transformMergeStmt")),
+    )
 }
 
 #[cold]
