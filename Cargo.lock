@@ -1318,6 +1318,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "attoptcache"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "reloptions",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_tuple",
+]
+
+[[package]]
 name = "auth"
 version = "0.0.0"
 dependencies = [
@@ -2913,6 +2927,7 @@ dependencies = [
  "aio_seams",
  "arrayfuncs",
  "async_seams",
+ "attoptcache",
  "autovacuum_seams",
  "backend_progress",
  "backend_progress_seams",

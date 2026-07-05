@@ -45,6 +45,7 @@ arrayfuncs = { path = "../../utils/adt/arrayfuncs" }
 detoast = { path = "../../access/common/detoast" }
 detoast_seams = { path = "../../access/common/detoast_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+attoptcache = { path = "../../utils/cache/attoptcache" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 vacuum_seams = { path = "../vacuum_seams" }

@@ -359,6 +359,7 @@ members = [
     "crates/backend/utils/time/combocid",
     "crates/backend/utils/cache/typcache_seams",
     "crates/backend/utils/cache/typcache",
+    "crates/backend/utils/cache/attoptcache",
     "crates/backend/utils/cache/partcache",
     "crates/backend/partitioning/partbounds",
     "crates/backend/partitioning/partprune",

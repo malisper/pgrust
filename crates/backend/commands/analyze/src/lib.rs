@@ -460,6 +460,16 @@ fn do_analyze_rel<'mcx>(
                     ts_typanalyze::compute_tsvector_stats(anl_mcx, col_cx.mcx(), s, &src, numrows)?
                 }
             }
+            // n_distinct / n_distinct_inherited attoptions override
+            // (analyze.c:568-582).
+            if let Some(aopt) =
+                attoptcache::get_attribute_options(anl_mcx, onerel.rd_id, s.tupattnum as i16)?
+            {
+                let n_distinct = if inh { aopt.n_distinct_inherited } else { aopt.n_distinct };
+                if n_distinct != 0.0 {
+                    s.stadistinct = n_distinct as f32;
+                }
+            }
             col_cx.reset();
         }
         if hasindex {
