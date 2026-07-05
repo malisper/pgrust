@@ -178,8 +178,11 @@ impl ShmMq {
         self.mq_bytes_written.store(cur + n as u64, Ordering::Relaxed);
     }
 
-    fn detach_internal(&self) {
-        let me = MyProcNumber();
+    // `me` is the handle's attach-time identity, NOT MyProcNumber(): handles
+    // are dropped during FATAL unwinds after the exit callbacks (ProcKill)
+    // already released this thread's proc identity — C never hits this order
+    // because _exit skips stack cleanup and dsm_detach runs before ProcKill.
+    fn detach_internal(&self, me: ProcNumber) {
         self.spin_acquire();
         let victim = if self.sender() == Some(me) {
             self.receiver()
@@ -234,6 +237,8 @@ pub struct ShmMqHandle {
     mqh_counterparty_attached: bool,
     mqh_detached: bool,
     my_latch: Option<LatchHandle>,
+    // Attach-time identity; detach must not consult MyProcNumber() (above).
+    mqh_self: ProcNumber,
 }
 
 pub fn shm_mq_attach(mq: Arc<ShmMq>) -> ShmMqHandle {
@@ -253,6 +258,7 @@ pub fn shm_mq_attach(mq: Arc<ShmMq>) -> ShmMqHandle {
         mqh_counterparty_attached: false,
         mqh_detached: false,
         my_latch: MyLatch(),
+        mqh_self: MyProcNumber(),
     }
 }
 
@@ -521,7 +527,7 @@ impl ShmMqHandle {
             self.mqh_queue.inc_bytes_written(self.mqh_send_pending);
             self.mqh_send_pending = 0;
         }
-        self.mqh_queue.detach_internal();
+        self.mqh_queue.detach_internal(self.mqh_self);
     }
 
     fn send_bytes(&mut self, data: &[u8], nowait: bool) -> PgResult<(ShmMqResult, usize)> {
