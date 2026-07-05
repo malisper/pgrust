@@ -177,6 +177,23 @@ pub(crate) fn startup_error_context(e: Box<PgError>, fname: &str, src: &str) -> 
     Box::new(err)
 }
 
+// sql_function_parse_error_callback (pg_proc.c:1000). C's real
+// function_parse_error_transpose remaps a captured syntax-error position back
+// into the enclosing CREATE FUNCTION source text and suppresses the context
+// line entirely in that case; we don't have that remap, but the plain
+// no-position case (semantic errors like a return-type mismatch) must not say
+// "during startup" — that phrase belongs only to functions.c's execution-time
+// callback, not this compile-time validator.
+#[cold]
+fn validator_error_context(e: Box<PgError>, fname: &str, src: &str) -> Box<PgError> {
+    let had_pos = e.cursor_position().is_some_and(|p| p > 0);
+    let mut err = transpose_position(*e, src);
+    if !had_pos {
+        err.add_context_line(format!("SQL function \"{fname}\""));
+    }
+    Box::new(err)
+}
+
 // sql_exec_error_callback (functions.c:1928).
 #[cold]
 fn exec_error_context(
@@ -1326,7 +1343,7 @@ fn fc_fmgr_sql_validator(
             }
             Ok(())
         })();
-        r.map_err(|e| startup_error_context(e, proname.as_str(), prosrc.as_str()))?;
+        r.map_err(|e| validator_error_context(e, proname.as_str(), prosrc.as_str()))?;
     }
     Ok(Datum::null())
 }
