@@ -12,6 +12,7 @@ pub mod scan;
 pub mod split;
 pub mod state;
 pub mod util;
+pub mod vacuum;
 pub mod wal;
 
 use ::mcx::MemoryContext;
@@ -26,6 +27,7 @@ pub use get::{gistgetbitmap, gistgettuple};
 pub use insert::gistdoinsert;
 pub use scan::{gistbeginscan, gistcanreturn, gistendscan, gistrescan};
 pub use state::{initGISTstate, GistState};
+pub use vacuum::gistbulkdelete_collect;
 
 #[cold]
 #[inline(never)]

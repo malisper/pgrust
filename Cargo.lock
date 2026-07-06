@@ -5756,6 +5756,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_gist",
+ "types_nbtree",
  "types_rel",
  "types_relscan",
  "types_scan",
