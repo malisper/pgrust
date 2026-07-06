@@ -993,6 +993,109 @@ pub fn AlterRoleSet<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterRoleSetStmt<'_>) -> PgResu
     Ok(roleid)
 }
 
+// RenameRole (user.c)
+pub fn RenameRole<'mcx>(mcx: Mcx<'mcx>, oldname: &str, newname: &str) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, catalog::AuthIdRelationId, RowExclusiveLock)?;
+
+    let Some(oldtuple) = SearchSysCache1(AUTHNAME, SysCacheKey::Str(oldname))? else {
+        return Err(err(format!("role \"{oldname}\" does not exist"), ERRCODE_UNDEFINED_OBJECT));
+    };
+
+    let roleid = SysCacheGetAttrNotNull(AUTHNAME, &oldtuple, Anum_pg_authid_oid)?.as_oid();
+    let rolsuper = SysCacheGetAttrNotNull(AUTHNAME, &oldtuple, Anum_pg_authid_rolsuper)?.as_bool();
+    let curname = name_attr(AUTHNAME, &oldtuple, Anum_pg_authid_rolname)?;
+
+    if roleid == miscinit::GetSessionUserId() {
+        return Err(err("session user cannot be renamed".into(), ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+    if roleid == miscinit::GetOuterUserId() {
+        return Err(err("current user cannot be renamed".into(), ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    if catalog::IsReservedName(&curname) {
+        return Err(err_detail(
+            &format!("role name \"{curname}\" is reserved"),
+            "Role names starting with \"pg_\" are reserved.".into(),
+            ERRCODE_RESERVED_NAME,
+        ));
+    }
+    if catalog::IsReservedName(newname) {
+        return Err(err_detail(
+            &format!("role name \"{newname}\" is reserved"),
+            "Role names starting with \"pg_\" are reserved.".into(),
+            ERRCODE_RESERVED_NAME,
+        ));
+    }
+
+    if adt_acl::get_role_oid(newname, true)? != InvalidOid {
+        return Err(err(format!("role \"{newname}\" already exists"), ERRCODE_DUPLICATE_OBJECT));
+    }
+
+    if rolsuper {
+        if !superuser::superuser()? {
+            return Err(err_detail(
+                "permission denied to rename role",
+                "Only roles with the SUPERUSER attribute may rename roles with the SUPERUSER attribute.".into(),
+                ERRCODE_INSUFFICIENT_PRIVILEGE,
+            ));
+        }
+    } else if !have_createrole_privilege()?
+        || !adt_acl::is_admin_of_role(miscinit::GetUserId(), roleid)?
+    {
+        return Err(err_detail(
+            "permission denied to rename role",
+            format!(
+                "Only roles with the CREATEROLE attribute and the ADMIN option on role \"{curname}\" may rename this role."
+            ),
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+        ));
+    }
+
+    let mut repl_val = [Datum::null(); Natts_pg_authid];
+    let mut repl_null = [false; Natts_pg_authid];
+    let mut repl_repl = [false; Natts_pg_authid];
+
+    let mut rolname = NameData::default();
+    rolname.namestrcpy(newname);
+    repl_val[(Anum_pg_authid_rolname - 1) as usize] =
+        Datum::from_usize(rolname.data.as_ptr() as usize);
+    repl_repl[(Anum_pg_authid_rolname - 1) as usize] = true;
+
+    let (password_datum, password_null) =
+        SysCacheGetAttr(AUTHNAME, &oldtuple, Anum_pg_authid_rolpassword)?;
+    if !password_null {
+        let p = password_datum.as_usize() as *const u8;
+        // SAFETY: a live varlena readable through its full VARSIZE_ANY.
+        let image = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+        let payload = varlena::open_image(mcx, image)?;
+        let shadow_pass =
+            core::str::from_utf8(payload.as_bytes()).expect("rolpassword is server-encoding text");
+        // MD5 uses the username as salt, so it is cleared on a rename.
+        if crypt::get_password_type(shadow_pass) == crypt::PasswordType::Md5 {
+            repl_repl[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+            repl_null[(Anum_pg_authid_rolpassword - 1) as usize] = true;
+            notice("MD5 password cleared because of role rename".into(), "RenameRole")?;
+        }
+    }
+
+    let otid = oldtuple.tuple().t_self;
+    let mut newtuple = heaptuple::heap_modify_tuple(
+        mcx,
+        &oldtuple.tuple(),
+        rel.descr(),
+        &repl_val,
+        &repl_null,
+        &repl_repl,
+    )?;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtuple)?;
+
+    ReleaseSysCache(oldtuple);
+
+    rel.close(NoLock)?;
+
+    Ok(roleid)
+}
+
 // DROP ROLE
 pub fn DropRole<'mcx>(mcx: Mcx<'mcx>, stmt: &DropRoleStmt<'_>) -> PgResult<()> {
     if !have_createrole_privilege()? {

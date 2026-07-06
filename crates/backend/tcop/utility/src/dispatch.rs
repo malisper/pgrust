@@ -2044,6 +2044,14 @@ fn exec_rename_stmt_inner<'mcx>(
                 stmt.newname.expect("RenameStmt.newname"),
             )?;
         }
+        types_nodes::parsenodes::ObjectType::OBJECT_ROLE => {
+            let roleid = user::RenameRole(
+                mcx,
+                stmt.subname.expect("RenameStmt.subname"),
+                stmt.newname.expect("RenameStmt.newname"),
+            )?;
+            return Ok(Some(ObjectAddress::set(catalog::AuthIdRelationId, roleid)));
+        }
         other => panic!("unported: ExecRenameStmt {other:?}"),
     }
     Ok(None)

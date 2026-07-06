@@ -206,7 +206,7 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     if tn.names.is_nil() || tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid lane");
     }
-    let (typoid, typname) = resolveTypeNames(mcx, tn)?;
+    let (typoid, typname) = resolve_type_names_ext(mcx, tn, missing_ok)?;
     if typoid == InvalidOid {
         if missing_ok {
             return Ok(InvalidOid);

@@ -13,11 +13,11 @@ pub const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
 pub fn get_cast_oid(sourcetypeid: Oid, targettypeid: Oid, missing_ok: bool) -> PgResult<Oid> {
     let oid = syscache_seams::lookup_pg_cast_oid::call(sourcetypeid, targettypeid)?;
     if oid == InvalidOid && !missing_ok {
-        // C renders type names via format_type_be; the format_type crate deps
-        // lsyscache, so this error keeps raw oids (cycle).
         return Err(Box::new(
             PgError::error(format!(
-                "cast from type {sourcetypeid} to type {targettypeid} does not exist"
+                "cast from type {} to type {} does not exist",
+                format_type::format_type_be(sourcetypeid)?,
+                format_type::format_type_be(targettypeid)?
             ))
             .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
         ));
