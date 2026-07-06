@@ -790,7 +790,7 @@ fn vacuum_error_mid_scan_abort_releases_all_pins() {
     let stmt = parse_vacuum("VACUUM (SKIP_DATABASE_STATS) t", ctx.mcx());
     xact::StartTransactionCommand().unwrap();
     INJECT_ARMED.store(true, Relaxed);
-    let err = commands_vacuum::ExecVacuum(ctx.mcx(), stmt, true)
+    let err = commands_vacuum::ExecVacuum(ctx.mcx(), stmt, "", true)
         .expect_err("injected failure must surface");
     INJECT_ARMED.store(false, Relaxed);
     assert!(
@@ -812,7 +812,7 @@ fn vacuum_error_mid_scan_abort_releases_all_pins() {
 
     // The system stays usable: the same VACUUM now completes.
     xact::StartTransactionCommand().unwrap();
-    commands_vacuum::ExecVacuum(ctx.mcx(), stmt, true).unwrap();
+    commands_vacuum::ExecVacuum(ctx.mcx(), stmt, "", true).unwrap();
     xact::CommitTransactionCommand().unwrap();
     assert_no_pins("after successful VACUUM");
 }
