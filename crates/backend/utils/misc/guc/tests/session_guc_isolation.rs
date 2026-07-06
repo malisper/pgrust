@@ -42,7 +42,6 @@ fn spawn_session(
     body: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        guc_tables::session::mark_session_thread();
         guc::store::initialize_guc_options_for_child(&snapshot).unwrap();
         guc::store::restore_nondefault_variables(&snapshot).unwrap();
         body();
@@ -101,6 +100,6 @@ fn session_set_is_private_and_survives_child_bringup() {
     a_ready_rx.recv().unwrap();
     a.join().unwrap();
 
-    // Override released on session exit: fast path is override-free again.
+    // Session exit tears down only A's TLS copy; this thread's is untouched.
     assert!(enable_incremental_sort());
 }

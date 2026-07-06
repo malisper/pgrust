@@ -10,7 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 guc = { path = "../../utils/misc/guc" }
-guc_tables = { path = "../../utils/misc/guc_tables" }
 types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 init_small = { path = "../../utils/init/init_small" }
