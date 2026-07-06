@@ -1107,10 +1107,11 @@ fn match_orclause_to_indexcol<'mcx>(
     }))
 }
 
-// get_index_clause_from_support (indxpath.c): closed-set dispatch on the
-// prosupport oid instead of C's fmgr detour (rule 4); like_regex_support
-// (like_support.c) is the only in-core SupportRequestIndexCondition provider
-// besides tsmatchsel's, which stays loud.
+// get_index_clause_from_support (indxpath.c): the in-core providers keep
+// their native closed-set dispatch; other prosupport functions get the
+// SupportRequestIndexCondition through fmgr, C's protocol — the returned
+// datum is a List of bare index clauses (NIL declines), lossiness rides
+// back on the request.
 fn get_index_clause_from_support<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rinfo: RinfoId,
@@ -1126,6 +1127,7 @@ fn get_index_clause_from_support<'mcx>(
         return Ok(None);
     }
     let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let mut lossy = true;
     let exprs = match shape.prosupport {
         1023 | 1025 | 1364 | 1024 | 6242 => {
             let ptype = match shape.prosupport {
@@ -1173,7 +1175,37 @@ fn get_index_clause_from_support<'mcx>(
         // (rangetypes.c) handle only SupportRequestSimplify: an
         // index-condition request returns NULL.
         6345 | 6346 => return Ok(None),
-        other => panic!("get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"),
+        prosupport => {
+            let mut req = types_nodes::supportnodes::SupportRequestIndexCondition::new(
+                funcid,
+                Some(clause),
+                indexarg,
+                indexcol as i32,
+                index.opfamily[indexcol],
+                index.indexcollations[indexcol],
+            );
+            let addr = core::ptr::from_mut(&mut req) as usize;
+            let result = fmgr_core::oid_function_call1_coll(
+                prosupport,
+                0,
+                datum::Datum::from_usize(addr),
+            )?;
+            match core::ptr::NonNull::new(result.as_usize() as *mut ()) {
+                None => None,
+                Some(p) => {
+                    // SAFETY: prosupport contract — a non-NIL result is a live
+                    // List node of bare clauses built by the support function.
+                    let node = unsafe { types_nodes::Node::from_raw(p) };
+                    let list = node.as_list().expect("support function returns a List");
+                    let mut v = PgVec::new_in(run.mcx);
+                    for e in list.iter() {
+                        v.push(e);
+                    }
+                    lossy = req.lossy;
+                    Some(v)
+                }
+            }
+        }
     };
     let Some(exprs) = exprs else {
         return Ok(None);
@@ -1188,7 +1220,7 @@ fn get_index_clause_from_support<'mcx>(
     Ok(Some(IndexClause {
         rinfo: Some(rinfo),
         indexquals,
-        lossy: true,
+        lossy,
         indexcol: indexcol as i16,
         indexcols: PgVec::new_in(run.mcx),
     }))
