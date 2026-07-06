@@ -9,7 +9,8 @@ mod state;
 pub use catalog::{map_partition_qual, CreateTriggerFiringOn, CreateTriggerInternal, InternalTriggerArgs, TriggerSetParentTrigger};
 pub use ddl::{get_trigger_oid, renametrig, CreateTrigger, EnableDisableTrigger, RemoveTriggerById};
 pub use exec::{
-    trigger_depth, ExecBSTruncateTriggers, ExecCallTriggerFunc, TriggerEnabled, TriggerFmgrCache,
+    trigger_depth, ExecBSInsertTriggers, ExecBSTruncateTriggers, ExecCallTriggerFunc,
+    TriggerEnabled, TriggerFmgrCache,
     TriggerWhenCache, TriggerWhenEval,
 };
 pub use queue::{

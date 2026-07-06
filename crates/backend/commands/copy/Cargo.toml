@@ -64,6 +64,9 @@ copy_seams = { path = "../copy_seams" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 types_portal = { path = "../../../_support/types/portal" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
+relcache = { path = "../../utils/cache/relcache" }
+types_trigger = { path = "../../../_support/types/types_trigger" }
+trigger = { path = "../trigger" }
 libc = "0.2"
 
 [dev-dependencies]
