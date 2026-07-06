@@ -38,6 +38,7 @@ indexam = { path = "../../access/index/indexam" }
 tupdesc = { path = "../../access/common/tupdesc" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 aclchk = { path = "../../catalog/aclchk" }
+catalog_heap = { path = "../../catalog/catalog_heap" }
 miscinit = { path = "../../utils/init/miscinit" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 pg_depend = { path = "../../catalog/pg_depend" }

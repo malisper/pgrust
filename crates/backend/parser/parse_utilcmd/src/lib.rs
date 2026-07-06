@@ -1670,13 +1670,15 @@ pub fn transformCreateStmt<'mcx>(
     Ok(result)
 }
 
+// Returns the inherited column's type oid when found (C threads it into the
+// WITHOUT OVERLAPS range check, parse_utilcmd.c:2712-2715).
 fn key_found_in_inh_relations<'mcx>(
     mcx: Mcx<'mcx>,
     key: &str,
-    is_primary: bool,
+    add_not_null: bool,
     inh_relations: &NodeList<'mcx>,
     nnconstraints: &mut NodeList<'mcx>,
-) -> PgResult<bool> {
+) -> PgResult<Option<Oid>> {
     for inode in inh_relations.iter() {
         let prv = inode.as_variant::<RangeVar>().expect("inhRelations RangeVar");
         let relname = prv.relname.expect("RangeVar.relname");
@@ -1702,15 +1704,15 @@ fn key_found_in_inh_relations<'mcx>(
                 .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
             ));
         }
-        let mut found = false;
+        let mut found: Option<Oid> = None;
         for i in 0..rel.rd_att.natts as usize {
             let att = rel.rd_att.attr(i);
             if att.attisdropped {
                 continue;
             }
             if att.attname.name_str() == key.as_bytes() {
-                found = true;
-                if is_primary {
+                found = Some(att.atttypid);
+                if add_not_null {
                     let inhname = {
                         let mut s = PgString::new_in(mcx);
                         s.try_push_str(key)?;
@@ -1722,11 +1724,11 @@ fn key_found_in_inh_relations<'mcx>(
             }
         }
         rel.close(types_rel::NoLock)?;
-        if found {
-            return Ok(true);
+        if found.is_some() {
+            return Ok(found);
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &'mcx str) -> PgResult<Node<'mcx>> {
@@ -1805,16 +1807,33 @@ fn transform_index_constraints<'mcx>(
                 .expect("Constraint");
         index.tableSpace = constraint.indexspace;
         // Included columns (parse_utilcmd.c:2841-2929): no NOT NULL forcing,
-        // no duplicate complaints. System-column/inherited-column lookups are
-        // narrowed away, as in the key loop below.
+        // no duplicate complaints.
         let mut including_params = NodeList::nil();
         for keynode in constraint.including.iter() {
             let key = keynode.as_string().expect("constraint including").sval;
-            if !columns
+            let mut found = columns
                 .iter()
-                .any(|cn| cn.as_variant::<ColumnDef>().expect("ColumnDef").colname == Some(key))
-            {
-                return Err(key_column_missing(key, constraint.location));
+                .any(|cn| cn.as_variant::<ColumnDef>().expect("ColumnDef").colname == Some(key));
+            if !found {
+                if catalog_heap::SystemAttributeByName(key).is_some() {
+                    found = true;
+                } else if !inh_relations.is_nil() {
+                    found = key_found_in_inh_relations(
+                        mcx,
+                        key,
+                        false,
+                        inh_relations,
+                        nnconstraints,
+                    )?
+                    .is_some();
+                }
+            }
+            if !found && !isalter {
+                return Err(cursor_at(
+                    key_column_missing(key, constraint.location),
+                    Some(src.as_bytes()),
+                    constraint.location,
+                ));
             }
             let mut iparam = Node::build::<IndexElem>(mcx)?;
             iparam.name = Some(key);
@@ -1845,6 +1864,7 @@ fn transform_index_constraints<'mcx>(
             let key = keynode.as_string().expect("constraint keys").sval;
             let mut found = false;
             let mut found_column: Option<Node<'mcx>> = None;
+            let mut typid = InvalidOid;
             for cn in columns.iter() {
                 let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
                 if cd.colname != Some(key) {
@@ -1876,6 +1896,24 @@ fn transform_index_constraints<'mcx>(
                 }
                 break;
             }
+            if !found {
+                if catalog_heap::SystemAttributeByName(key).is_some() {
+                    // System columns are never null; no PK forcing needed
+                    // (parse_utilcmd.c:2672-2680).
+                    found = true;
+                } else if !inh_relations.is_nil() {
+                    if let Some(inh_typid) = key_found_in_inh_relations(
+                        mcx,
+                        key,
+                        is_primary,
+                        inh_relations,
+                        nnconstraints,
+                    )? {
+                        found = true;
+                        typid = inh_typid;
+                    }
+                }
+            }
             // C: on the ALTER path missing keys may exist in the table
             // already; DefineIndex complains if not (parse_utilcmd.c:2734).
             if !found && !isalter {
@@ -1893,14 +1931,16 @@ fn transform_index_constraints<'mcx>(
             }
             // C: the WITHOUT OVERLAPS part must be a range or multirange type.
             if constraint.without_overlaps && keyidx == nkeys - 1 {
-                if let Some(cn) = found_column {
-                    let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
-                    let typid = if let Some(tn_node) = cd.typeName {
-                        let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
-                        typenameTypeIdAndMod(mcx, None, tn)?.0
-                    } else {
-                        InvalidOid
-                    };
+                if found {
+                    if typid == InvalidOid {
+                        if let Some(cn) = found_column {
+                            let cd = cn.as_variant::<ColumnDef>().expect("ColumnDef");
+                            if let Some(tn_node) = cd.typeName {
+                                let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
+                                typid = typenameTypeIdAndMod(mcx, None, tn)?.0;
+                            }
+                        }
+                    }
                     if typid == InvalidOid
                         || !(lsyscache::type_is_range(typid)?
                             || lsyscache::type_is_multirange(typid)?)
