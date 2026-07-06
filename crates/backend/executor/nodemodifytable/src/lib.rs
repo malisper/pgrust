@@ -1114,14 +1114,6 @@ pub fn exec_modify_table<'mcx>(
                 let slot = &mut estate.es_tupleTable[plan_slot.0 as usize];
                 exectuples::slot_getattr(slot, mt.result_oid_attno as i32, &mut isnull)
             };
-            merge_dbg(|| {
-                format!(
-                    "dispatch datum={:#x} isnull={} last_result_oid={}",
-                    datum.as_usize(),
-                    isnull,
-                    mt.last_result_oid
-                )
-            });
             if isnull {
                 if mt.operation == CmdType::CMD_MERGE {
                     // Both cache halves must move together: clobbering cur
@@ -1662,14 +1654,6 @@ fn exec_merge<'mcx>(
     tupleid: Option<ItemPointerData>,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
-    merge_dbg(|| {
-        format!(
-            "row tupleid={:?} cur={} reloid={}",
-            tupleid.map(|t| (types_tuple::ItemPointerGetBlockNumber(&t), types_tuple::ItemPointerGetOffsetNumber(&t))),
-            mt.cur,
-            mt.rel().rd_id
-        )
-    });
     let mut rslot = None;
     let mut matched = tupleid.is_some();
     if let Some(mut tid) = tupleid {
@@ -1680,15 +1664,6 @@ fn exec_merge<'mcx>(
         rslot = exec_merge_not_matched(mt, estate, plan_slot, epq_eval)?;
     }
     Ok(rslot)
-}
-
-// DEBUG(merge-lane triage): env-gated row trace; remove before delivery.
-fn merge_dbg(msg: impl FnOnce() -> String) {
-    static ON: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var("PGRUST_MERGE_DBG").is_ok());
-    if *ON {
-        eprintln!("MERGE-DBG {}", msg());
-    }
 }
 
 enum MergeMatchedOutcome {
@@ -1871,16 +1846,6 @@ fn exec_merge_matched_scan<'mcx>(
         }
 
         mt.merge_active_cmd = Some(command_type);
-        merge_dbg(|| {
-            format!(
-                "matched-arm cmd={:?} by_source={} tupleid=({},{}) reloid={}",
-                command_type,
-                use_by_source,
-                types_tuple::ItemPointerGetBlockNumber(tupleid),
-                types_tuple::ItemPointerGetOffsetNumber(tupleid),
-                mt.rel().rd_id
-            )
-        });
         let mut tmfd = TM_FailureData::default();
         let result = match command_type {
             CmdType::CMD_UPDATE => {
@@ -1966,7 +1931,6 @@ fn exec_merge_matched_scan<'mcx>(
 
         match result {
             TM_Result::TM_Ok => {
-                merge_dbg(|| format!("matched-ok cmd={command_type:?}"));
                 match command_type {
                     CmdType::CMD_UPDATE => mt.mt_merge_updated += 1.0,
                     CmdType::CMD_DELETE => mt.mt_merge_deleted += 1.0,
@@ -1986,7 +1950,6 @@ fn exec_merge_matched_scan<'mcx>(
                 return Ok(MergeMatchedOutcome::NotMatched);
             }
             TM_Result::TM_Updated => {
-                merge_dbg(|| "matched TM_Updated -> lock+EPQ".to_string());
                 // Concurrent update: lock the latest version and re-run the
                 // join via EvalPlanQual (was_matched is always true here).
                 let inputslot = eval_plan_qual_slot(mt, estate);
@@ -2456,15 +2419,6 @@ fn exec_merge_not_matched<'mcx>(
                 mt.merge_active_cmd = Some(CmdType::CMD_INSERT);
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
-                merge_dbg(|| {
-                    let t = estate.es_tupleTable[new_id.0 as usize].base().tts_tid;
-                    format!(
-                        "not-matched-insert -> tid=({},{}) leaf={:?}",
-                        types_tuple::ItemPointerGetBlockNumber(&t),
-                        types_tuple::ItemPointerGetOffsetNumber(&t),
-                        mt.last_insert_leaf
-                    )
-                });
                 mt.mt_merge_inserted += 1.0;
                 let inserted = match inserted {
                     Ok(v) => v,
@@ -4904,8 +4858,15 @@ fn exec_insert<'mcx>(
         }
     } else {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let ModifyTableState { rels, cur, router, leaf_indexes, index_eval_cx, .. } = &mut *mt;
-        let r = &mut rels[*cur];
+        let ModifyTableState {
+            rels, root, cur, insert_target_root, router, leaf_indexes, index_eval_cx, ..
+        } = &mut *mt;
+        // Inheritance-root MERGE INSERT: the tuple lands in the root itself.
+        let r = if *insert_target_root && leaf_idx.is_none() {
+            root.as_mut().unwrap_or(&mut rels[*cur])
+        } else {
+            &mut rels[*cur]
+        };
         let (rel, indexes) = match leaf_idx {
             Some(idx) => (
                 router.as_ref().unwrap().leaf_rel(idx),
