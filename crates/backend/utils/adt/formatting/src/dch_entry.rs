@@ -738,7 +738,7 @@ mod tests {
 
     fn to_char_str(fmt: &[u8]) -> String {
         let ctx = MemoryContext::new("dch-test");
-        let v = timestamp_to_char(ctx.mcx(), ts_1997(), fmt).unwrap();
+        let v = timestamp_to_char(ctx.mcx(), ::types_core::InvalidOid, ts_1997(), fmt).unwrap();
         String::from_utf8_lossy(v.data()).into_owned()
     }
 
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn to_date_ymd() {
         let ctx = MemoryContext::new("dch-test");
-        let d = to_date(ctx.mcx(), b"2011-12-18", b"YYYY-MM-DD").unwrap();
+        let d = to_date(ctx.mcx(), ::types_core::InvalidOid, b"2011-12-18", b"YYYY-MM-DD").unwrap();
         let mut y = 0;
         let mut m = 0;
         let mut day = 0;
