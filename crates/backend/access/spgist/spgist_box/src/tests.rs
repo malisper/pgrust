@@ -42,17 +42,25 @@ fn predicates_4d() {
     let q0 = nextRectBox(&root, &centroid, 0);
     let q15 = nextRectBox(&root, &centroid, 0xF);
 
+    // Existential semantics: "can ANY box in the quadrant satisfy the op" —
+    // q15 (all lows past the centroid) still admits boxes wholly left of
+    // x=100, and q0 (lows unbounded below) admits boxes containing `small`.
     let far_right = getRangeBox(&mkbox(100.0, 0.0, 110.0, 10.0));
     assert!(left4D(&q0, &far_right));
     assert!(!right4D(&q0, &far_right));
     assert!(overLeft4D(&q0, &far_right));
-    assert!(!left4D(&q15, &far_right));
+    assert!(left4D(&q15, &far_right));
     assert!(overlap4D(&q15, &far_right));
+
+    let far_left = getRangeBox(&mkbox(-200.0, 0.0, -190.0, 10.0));
+    assert!(!left4D(&q15, &far_left));
+    assert!(right4D(&q15, &far_left));
 
     let small = getRangeBox(&mkbox(1.0, 1.0, 2.0, 2.0));
     assert!(contain4D(&q15, &small));
     assert!(overlap4D(&q0, &small));
-    assert!(!contain4D(&q0, &small));
+    assert!(contain4D(&q0, &small));
+    assert!(!contain4D(&q15, &getRangeBox(&mkbox(-5.0, -5.0, 2.0, 2.0))));
 
     let huge = getRangeBox(&mkbox(-100.0, -100.0, 100.0, 100.0));
     assert!(contained4D(&q0, &huge));
