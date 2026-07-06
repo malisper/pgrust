@@ -626,6 +626,10 @@ pub struct EStateData<'mcx> {
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
     pub es_epq_active: bool,
+    /// Thread-native agg table handoff: (partial Agg plan_node_id, erased
+    /// nodeagg::merge::AggTableHandoff), leader-registered at ExecInitAgg,
+    /// copied into worker estates by execParallel (no C counterpart).
+    pub es_agg_handoff: alloc::vec::Vec<(i32, alloc::sync::Arc<dyn core::any::Any + Send + Sync>)>,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -743,6 +747,7 @@ impl<'mcx> EStateData<'mcx> {
             es_jit_instr: ::jit_deform::JitInstrumentation::default(),
             es_epq: None,
             es_epq_active: false,
+            es_agg_handoff: alloc::vec::Vec::new(),
         }
     }
 
@@ -1233,6 +1238,7 @@ mcx::forget_safe_struct!(
         es_bitmap_instrumentation, es_worker_instrument,
         es_subplan_hook, es_subplan_init_hook,
         es_subplan_eval_hook, es_subplan_expr_states, es_cte_proc_hook,
+        es_agg_handoff,
     },
 );
 // SAFETY: arena-backed PgVecs of no-drop Copy payloads (asserted above);

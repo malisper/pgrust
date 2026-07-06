@@ -78,6 +78,9 @@ pub(crate) struct ParallelExecShared {
     queues: Mutex<Vec<(Arc<shm_mq::ShmMq>, Arc<tqueue::ChunkLedger>)>>,
     // Written once by the leader's InitializeDSM walk, before workers launch.
     nodes: Mutex<Vec<(i32, ParallelNodeShared)>>,
+    // Thread-native agg table handoff carriers under this Gather's subtree
+    // (executils::EStateData::es_agg_handoff), copied into worker estates.
+    agg_handoff: Vec<(i32, Arc<dyn Any + Send + Sync>)>,
     instrumentation: Option<SharedInstrumentation>,
     usage: Mutex<Vec<(BufferUsage, WalUsage)>>,
 }
@@ -439,6 +442,9 @@ pub fn exec_init_parallel_plan<'mcx>(
         Ok(())
     })?;
 
+    let mut subtree_ids = Vec::new();
+    collect_plan_node_ids(Some(child_plan), &mut subtree_ids);
+
     let instrumented = estate.es_instrument != 0;
     let shared = Arc::new(ParallelExecShared {
         // SAFETY: the pstmt lives in the leader's executor arena; workers are
@@ -455,6 +461,12 @@ pub fn exec_init_parallel_plan<'mcx>(
         eflags: estate.es_top_eflags,
         queues: Mutex::new(Vec::new()),
         nodes: Mutex::new(nodes),
+        agg_handoff: estate
+            .es_agg_handoff
+            .iter()
+            .filter(|(id, _)| subtree_ids.contains(id))
+            .map(|(id, h)| (*id, Arc::clone(h)))
+            .collect(),
         instrumentation: instrumented.then(|| SharedInstrumentation {
             instrument_options: estate.es_instrument,
             workers: Mutex::new((0..nworkers).map(|_| None).collect()),
@@ -464,8 +476,6 @@ pub fn exec_init_parallel_plan<'mcx>(
     let tqueue = setup_tuple_queues(&shared, nworkers);
     parallel::set_private(pcxt, Arc::clone(&shared) as Arc<dyn Any + Send + Sync>);
 
-    let mut subtree_ids = Vec::new();
-    collect_plan_node_ids(Some(child_plan), &mut subtree_ids);
     Ok(ParallelExecutorInfo {
         pcxt,
         shared,
@@ -707,6 +717,11 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                         ParamExecData { value: *value, isnull: *isnull, exec_plan: false };
                 }
                 drop(pe);
+                d.estate.es_agg_handoff = exec
+                    .agg_handoff
+                    .iter()
+                    .map(|(id, h)| (*id, Arc::clone(h)))
+                    .collect();
                 // ExecParallelInitializeWorker, then the tuple bound (C order).
                 let estate = &mut d.estate;
                 if let Some(ps) = d.planstate.as_mut() {

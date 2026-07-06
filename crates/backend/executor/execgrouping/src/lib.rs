@@ -61,6 +61,37 @@ pub struct TupleHashEntryData {
     key: Datum,
 }
 
+impl TupleHashEntryData {
+    #[inline]
+    pub fn hash(&self) -> u32 {
+        self.hash
+    }
+
+    #[inline]
+    pub fn tuple(&self) -> NonNull<MinimalTupleData> {
+        self.first_tuple
+    }
+
+    /// Repoint at a relocated image (table-handoff copy; the new image must
+    /// carry the same additionalsize prefix).
+    #[inline]
+    pub fn set_tuple(&mut self, tuple: NonNull<MinimalTupleData>) {
+        self.first_tuple = tuple;
+    }
+
+    /// The entry's pergroup prefix (entry_additional's per-entry form).
+    #[inline]
+    pub fn additional(&self, additionalsize: usize) -> Option<NonNull<u8>> {
+        if additionalsize == 0 {
+            return None;
+        }
+        let t = self.first_tuple.as_ptr().cast::<u8>();
+        // SAFETY: the tuple sits additionalsize bytes into its allocation
+        // (exec_copy_slot_minimal_tuple contract).
+        unsafe { Some(NonNull::new_unchecked(t.sub(additionalsize))) }
+    }
+}
+
 const _: () = assert!(core::mem::size_of::<TupleHashEntryData>() == 24);
 
 // Monomorphized single-byval-key probe kernel selected at build from the
@@ -542,6 +573,61 @@ impl<'mcx> TupleHashTable<'mcx> {
                 .insert_or_find(hash, ix, |i| entries[i as usize].hash, |_| Ok(false))?;
         debug_assert!(!found && got == ix);
         Ok((Some(ix), true))
+    }
+
+    #[inline]
+    pub fn entries(&self) -> &[TupleHashEntryData] {
+        &self.entries
+    }
+
+    #[inline]
+    pub fn additionalsize(&self) -> usize {
+        self.additionalsize
+    }
+
+    /// Stored-tuple equality against the slot's tuple, via this table's key
+    /// kernel / grouping-equal program (the `lookup` match arm, entry-free).
+    pub fn match_tuple(
+        &mut self,
+        input_slot: &mut SlotData<'mcx>,
+        input_key: (Datum, bool),
+        entry: &TupleHashEntryData,
+        slot_mcx: Mcx<'mcx>,
+    ) -> PgResult<bool> {
+        match self.kernel {
+            ProbeKernel::Int4 { .. } => Ok(match (input_key.1, entry.key_isnull) {
+                (false, false) => input_key.0.as_i32() == entry.key.as_i32(),
+                (a, b) => a & b,
+            }),
+            ProbeKernel::Int8 { .. } => Ok(match (input_key.1, entry.key_isnull) {
+                (false, false) => input_key.0.as_i64() == entry.key.as_i64(),
+                (a, b) => a & b,
+            }),
+            ProbeKernel::Expr => {
+                // SAFETY: caller keeps entry images live (insert contract).
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(
+                        &mut self.tableslot,
+                        slot_mcx,
+                        entry.first_tuple,
+                    )
+                };
+                let mut slots = EvalSlots {
+                    scan: None,
+                    inner: Some(input_slot),
+                    outer: Some(&mut self.tableslot),
+                };
+                exec_qual(Some(&mut self.tab_eq_func), &mut slots)
+            }
+        }
+    }
+
+    /// The kernel's cached-key extraction for `match_tuple` callers.
+    pub fn kernel_key_of(&self, input_slot: &mut SlotData<'mcx>) -> (Datum, bool) {
+        match self.kernel {
+            ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } => kernel_key(input_slot, att),
+            ProbeKernel::Expr => (Datum::null(), true),
+        }
     }
 
     /// C `FindTupleHashEntry`: find-only probe with a caller-supplied
