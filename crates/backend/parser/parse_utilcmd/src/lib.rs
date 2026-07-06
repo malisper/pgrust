@@ -2157,6 +2157,19 @@ pub fn transformIndexConstraintForAlter<'mcx>(
             | ConstrType::CONSTR_EXCLUSION
     ));
     let is_exclusion = constraint.contype == ConstrType::CONSTR_EXCLUSION;
+    // transformTableConstraint isforeign guards (parse_utilcmd.c:1043-1066).
+    if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        let what = match constraint.contype {
+            ConstrType::CONSTR_PRIMARY => "primary key",
+            ConstrType::CONSTR_UNIQUE => "unique",
+            _ => "exclusion",
+        };
+        return Err(not_supported_on_foreign_tables(
+            what,
+            Some(query_string),
+            constraint.location,
+        ));
+    }
     if constraint.indexname.is_some() {
         return transform_existing_index_constraint(mcx, rel, cnode, query_string);
     }
@@ -3061,24 +3074,6 @@ pub fn transformAlterTableCmd<'mcx>(
             let c = defnode
                 .as_variant::<types_nodes::rawnodes::Constraint>()
                 .expect("Constraint");
-            // transformTableConstraint isforeign guards
-            // (parse_utilcmd.c:1043-1090).
-            if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-                let what = match c.contype {
-                    types_nodes::rawnodes::ConstrType::CONSTR_PRIMARY => Some("primary key"),
-                    types_nodes::rawnodes::ConstrType::CONSTR_UNIQUE => Some("unique"),
-                    types_nodes::rawnodes::ConstrType::CONSTR_EXCLUSION => Some("exclusion"),
-                    types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN => Some("foreign key"),
-                    _ => None,
-                };
-                if let Some(what) = what {
-                    return Err(not_supported_on_foreign_tables(
-                        what,
-                        Some(query_string),
-                        c.location,
-                    ));
-                }
-            }
             match c.contype {
                 types_nodes::rawnodes::ConstrType::CONSTR_CHECK
                 | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN

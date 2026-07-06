@@ -3033,6 +3033,30 @@ fn run_seq_stmts<'mcx>(mcx: Mcx<'mcx>, stmts: &NodeList<'mcx>) -> PgResult<()> {
         // closes before each sub-statement collects and reopens after
         // (utility.c:1959-1989).
         let saved = event_trigger::EventTriggerAlterTableSuspend();
+        // Queued AlterTableStmt (per-column FDW options from ADD COLUMN ...
+        // OPTIONS): recurse as ProcessUtilityForAlterTable does; the nested
+        // AlterTable collects its own commands.
+        if let Some(at) = s.as_variant::<types_nodes::parsenodes::AlterTableStmt>() {
+            let tag = match at.objtype {
+                types_nodes::parsenodes::ObjectType::OBJECT_FOREIGN_TABLE => {
+                    types_core::CommandTag(13)
+                }
+                _ => types_core::CommandTag(34),
+            };
+            let lockmode = AlterTableGetLockLevel(&at.cmds);
+            let relid = AlterTableLookupRelation(mcx, at, lockmode)?;
+            event_trigger::EventTriggerAlterTableStart(tag);
+            event_trigger::EventTriggerAlterTableRelid(relid);
+            let res = AlterTable(mcx, relid, lockmode, at, "", tag);
+            event_trigger::EventTriggerAlterTableEnd();
+            res?;
+            if let Some((t, relid)) = saved {
+                event_trigger::EventTriggerAlterTableStart(t);
+                event_trigger::EventTriggerAlterTableRelid(relid);
+            }
+            xact::CommandCounterIncrement()?;
+            continue;
+        }
         let (seqoid, tag) = if let Some(cs) = s.as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
         {
             (
