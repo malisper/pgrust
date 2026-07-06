@@ -1132,13 +1132,9 @@ pub fn exec_modify_table<'mcx>(
                     UpdateResult::CrossPart(inserted) => {
                         if let Some(islot) = inserted {
                             if mt.rel().project_returning.is_some() {
-                                return Ok(Some(exec_process_returning(
-                                    mt,
-                                    estate,
-                                    CmdType::CMD_UPDATE,
-                                    mt.rel().ri_oldTupleSlot,
-                                    Some(islot),
-                                    plan_slot,
+                                let old = mt.rel().ri_oldTupleSlot;
+                                return Ok(Some(exec_cross_part_returning(
+                                    mt, estate, old, islot, plan_slot,
                                 )?));
                             }
                         }
@@ -1768,12 +1764,11 @@ fn exec_merge_matched_scan<'mcx>(
                         let mut rslot = None;
                         if let Some(islot) = inserted {
                             if mt.rel().project_returning.is_some() {
-                                rslot = Some(exec_process_returning(
+                                rslot = Some(exec_cross_part_returning(
                                     mt,
                                     estate,
-                                    CmdType::CMD_UPDATE,
                                     Some(old_id),
-                                    Some(islot),
+                                    islot,
                                     plan_slot,
                                 )?);
                             }
@@ -3052,6 +3047,155 @@ fn exec_cross_partition_update<'mcx>(
     Ok(UpdateResult::CrossPart(inserted))
 }
 
+// ExecInitRoutingInfo's RETURNING leg (execPartition.c:623-680), expressed in
+// root coordinates: the routed-INSERT slots here stay root-format, so one
+// projection over the root descriptor — returningLists[0] with the first
+// result rel's varattnos map-converted to the root's (map_variable_attnos +
+// build_attrmap_by_name, C's exact mechanism) — serves every destination
+// leaf. Values match C's per-leaf projections because both maps pair columns
+// by name. The same construction is C's rootRelInfo leg for MERGE root
+// INSERTs (nodeModifyTable.c:3911-3947).
+fn exec_init_root_returning<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let node = mt.plan;
+    if node.returningLists.is_nil() {
+        return Ok(());
+    }
+    // Root == rels[0]: the per-rel projection already targets the root layout.
+    if mt.root.is_none() || mt.root.as_ref().is_some_and(|r| r.project_returning.is_some()) {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let first_rti = mt.rels[0].rti;
+    let root_rti = mt.root.as_ref().expect("checked").rti;
+    let rlist = node
+        .returningLists
+        .nth(0)
+        .as_list()
+        .expect("returningLists cell is a List");
+    let (root_desc, root_reltype, attmap) = {
+        let EStateData { es_relations, .. } = &*estate;
+        let first = es_relations[(first_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let root_rel = es_relations[(root_rti - 1) as usize]
+            .as_ref()
+            .expect("root relation opened");
+        let attmap = tupdesc::build_attrmap_by_name_if_req(
+            mcx,
+            &root_rel.rd_att,
+            &first.rd_att,
+            false,
+        )?;
+        (root_rel.rd_att.clone(), root_rel.rd_rel.reltype, attmap)
+    };
+    let mut mapped = types_nodes::list::NodeList::nil();
+    for tle_node in &rlist {
+        let n = match &attmap {
+            None => tle_node,
+            Some(map) => {
+                rewrite_manip::map_variable_attnos(mcx, tle_node, first_rti as i32, 0, map, root_reltype)?.0
+            }
+        };
+        mapped.lappend(mcx, n)?;
+    }
+    let params = estate.param_bind();
+    let is_merge = node.operation == CmdType::CMD_MERGE;
+    let proj = executils::with_subplan_compile_env(estate, |env| {
+        if is_merge {
+            execexpr::exec_build_merge_projection_info_subplans(
+                mcx,
+                &mapped,
+                Some(&root_desc),
+                params,
+                env,
+            )
+        } else {
+            execexpr::exec_build_projection_info_subplans(
+                mcx,
+                &mapped,
+                Some(&root_desc),
+                params,
+                env,
+            )
+        }
+    })?;
+    mt.root.as_mut().expect("checked").project_returning = Some(proj);
+    Ok(())
+}
+
+// The cross-partition UPDATE RETURNING evaluation (C ExecInsert:1298-1348 +
+// ExecDelete's saveOld leg 1823-1890): C projects on the routed destination
+// rel with the source partition's deleted tuple converted through the root
+// as OLD; our slots stay root-format, so the root projection runs over the
+// root-format inserted slot, with the old tuple converted child-to-root
+// (ExecGetChildToRootMap) when the projection references OLD.
+fn exec_cross_part_returning<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    old_leaf_slot: Option<ExecSlotId>,
+    islot: ExecSlotId,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    let mcx = estate.es_query_cxt;
+    exec_init_root_returning(mt, estate)?;
+    let has_old = mt
+        .root_rel()
+        .project_returning
+        .as_deref()
+        .is_some_and(|st| st.has_old());
+    let mut old_root: Option<ExecSlotId> = None;
+    if has_old {
+        if let Some(src_id) = old_leaf_slot {
+            let map = {
+                let EStateData { es_relations, .. } = &*estate;
+                let src = es_relations[(mt.rel().rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened");
+                let root = es_relations[(mt.root_rel().rti - 1) as usize]
+                    .as_ref()
+                    .expect("root relation opened");
+                tupdesc::build_attrmap_by_name_if_req(mcx, &src.rd_att, &root.rd_att, false)?
+            };
+            match map {
+                None => old_root = Some(src_id),
+                Some(map) => {
+                    if mt.root_rel().ri_ReturningSlot.is_none() {
+                        let (kind, desc) = {
+                            let EStateData { es_relations, .. } = &*estate;
+                            let root = es_relations[(mt.root_rel().rti - 1) as usize]
+                                .as_ref()
+                                .expect("root relation opened");
+                            (tableam::table_slot_callbacks(root), root.rd_att.clone())
+                        };
+                        mt.root_rel_mut().ri_ReturningSlot =
+                            Some(estate.exec_init_extra_tuple_slot(Some(desc), kind));
+                    }
+                    let out_id = mt.root_rel().ri_ReturningSlot.expect("just built");
+                    let EStateData { es_tupleTable, .. } = &mut *estate;
+                    let (i, o) = (src_id.0 as usize, out_id.0 as usize);
+                    assert!(i != o && i < es_tupleTable.len() && o < es_tupleTable.len());
+                    let base = es_tupleTable.as_mut_ptr();
+                    // SAFETY: distinct in-bounds indices of one live slice.
+                    let (in_slot, out) = unsafe { (&mut *base.add(i), &mut *base.add(o)) };
+                    exectuples::execute_attr_map_slot(&map, in_slot, out, mcx);
+                    // C copies the source tableoid and tid through (1883-1886):
+                    // OLD.tableoid/ctid report the source partition's row.
+                    out.base_mut().tts_tableOid = in_slot.base().tts_tableOid;
+                    out.base_mut().tts_tid = in_slot.base().tts_tid;
+                    old_root = Some(out_id);
+                }
+            }
+        }
+    }
+    mt.insert_target_root = mt.root.is_some();
+    let out = exec_process_returning(mt, estate, CmdType::CMD_UPDATE, old_root, Some(islot), plan_slot);
+    mt.insert_target_root = false;
+    out
+}
+
 // ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
 // arm; concurrent TM_Updated runs the EPQ recheck (ldelete loop).
 fn exec_delete<'mcx>(
@@ -3699,11 +3843,18 @@ fn exec_process_returning<'mcx>(
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let suspended = {
-            let state = mt
-                .rels[mt.cur]
-                .project_returning
-                .as_deref_mut()
-                .expect("RETURNING projection built");
+            let ModifyTableState { rels, root, cur, insert_target_root, .. } = &mut *mt;
+            // insert_target_root: cross-partition UPDATE / MERGE root-INSERT
+            // RETURNING runs the root's projection (C evaluates the routed
+            // destination's ri_projectReturning; our slots are root-format).
+            let state = if *insert_target_root {
+                root.as_mut().unwrap_or(&mut rels[0])
+            } else {
+                &mut rels[*cur]
+            }
+            .project_returning
+            .as_deref_mut()
+            .expect("RETURNING projection built");
             state.set_old_new_null(old_id.is_none(), new_id.is_none());
             // C mtstate->mt_merge_action: under MERGE, `cmd` is the fired
             // action's command type; MERGE_SUPPORT_FUNC steps read it.
@@ -4261,6 +4412,14 @@ fn exec_insert<'mcx>(
                 )?;
             }
         }
+    }
+
+    // C returns the leaf-format slot itself; our RETURNING reads the
+    // root-format one, so carry the inserted tuple's tid over for new.ctid
+    // (tableoid was copied before the insert).
+    if work_slot != slot_id {
+        let tid = estate.es_tupleTable[work_slot.0 as usize].base().tts_tid;
+        estate.es_tupleTable[slot_id.0 as usize].base_mut().tts_tid = tid;
     }
 
     if work_slot != slot_id && mt.transition_capture.is_some() {

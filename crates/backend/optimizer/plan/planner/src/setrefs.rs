@@ -737,11 +737,6 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
             debug_assert!(m.rowMarks.is_nil());
-            // set_returning_clause_references: the other-relations index over
-            // the subplan tlist is empty on this lane (join DML loud upstream;
-            // preprocess_targetlist checked every RETURNING Var references the
-            // result relation) and rtoffset is 0, so C's fix_join_expr reduces
-            // to the fix_expr_common walk over unchanged Vars.
             if !m.withCheckOptionLists.is_nil() {
                 debug_assert_eq!(m.withCheckOptionLists.len(), m.resultRelations.len());
                 let mut new_wlists = NodeList::nil();
@@ -789,70 +784,46 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let has_returning = !m.returningLists.is_nil();
             if has_returning {
                 debug_assert_eq!(m.returningLists.len(), m.resultRelations.len());
-                if m.operation == types_nodes::nodes_enums::CmdType::CMD_MERGE {
-                    // set_returning_clause_references: source-relation Vars
-                    // become OUTER_VAR over the subplan tlist (the plan slot
-                    // is the RETURNING projection's outer tuple).
-                    let subplan_tlist = &m
-                        .plan
-                        .lefttree
-                        .expect("ModifyTable has a subplan")
-                        .as_plan()
-                        .expect("plan node")
-                        .targetlist;
-                    let empty = NodeList::nil();
-                    let mut new_lists = NodeList::nil();
-                    for (rlist_node, resultrel) in
-                        m.returningLists.iter().zip(m.resultRelations.iter())
-                    {
-                        let rlist =
-                            rlist_node.as_list().expect("returningLists cell is a List");
-                        let fixed = fix_join_expr_list(
-                            run,
-                            rlist,
-                            subplan_tlist,
-                            &empty,
-                            rtoffset,
-                            NrmMatch::Equal,
-                            resultrel,
-                            m.plan.plan_rows,
-                        )?;
-                        new_lists.lappend(run.mcx, Node::mk_list(run.mcx, fixed)?)?;
-                    }
-                    // SAFETY: exclusive plan-tree ownership (prologue note).
-                    unsafe {
-                        plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
-                            p.returningLists = new_lists;
-                        })
-                    }
-                    .expect("ModifyTable node");
-                } else {
-                    // Vars pass through unchanged, but SubPlan-bearing lists
-                    // can be rewritten (AlternativeSubPlan selection, subplan
-                    // cost adjustment) — install the fixed lists then.
-                    let mut new_lists = NodeList::nil();
-                    let mut changed = false;
-                    for rlist_node in &m.returningLists {
-                        let rlist =
-                            rlist_node.as_list().expect("returningLists cell is a List");
-                        match fix_scan_list(run, rlist, rtoffset, m.plan.plan_rows)? {
-                            None => new_lists.lappend(run.mcx, rlist_node)?,
-                            Some(f) => {
-                                changed = true;
-                                new_lists.lappend(run.mcx, Node::mk_list(run.mcx, f)?)?;
-                            }
-                        }
-                    }
-                    if changed {
-                        // SAFETY: exclusive plan-tree ownership (prologue note).
-                        unsafe {
-                            plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
-                                p.returningLists = new_lists;
-                            })
-                        }
-                        .expect("ModifyTable node");
-                    }
+                // set_returning_clause_references (setrefs.c:3399): per result
+                // rel, non-result-relation Vars become OUTER_VAR over the
+                // subplan tlist (the plan slot is the RETURNING projection's
+                // outer tuple); result-rel Vars stay scan Vars. C builds the
+                // index with build_tlist_index_other_vars, which excludes the
+                // result relation's own Vars from capture.
+                let subplan = m
+                    .plan
+                    .lefttree
+                    .expect("ModifyTable has a subplan")
+                    .as_plan()
+                    .expect("plan node");
+                let empty = NodeList::nil();
+                let mut new_lists = NodeList::nil();
+                for (rlist_node, resultrel) in
+                    m.returningLists.iter().zip(m.resultRelations.iter())
+                {
+                    let rlist =
+                        rlist_node.as_list().expect("returningLists cell is a List");
+                    let other_vars =
+                        build_tlist_other_vars(run, &subplan.targetlist, resultrel)?;
+                    let fixed = fix_join_expr_list(
+                        run,
+                        rlist,
+                        &other_vars,
+                        &empty,
+                        rtoffset,
+                        NrmMatch::Equal,
+                        resultrel,
+                        subplan.plan_rows,
+                    )?;
+                    new_lists.lappend(run.mcx, Node::mk_list(run.mcx, fixed)?)?;
                 }
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::ModifyTable, _>(|p| {
+                        p.returningLists = new_lists;
+                    })
+                }
+                .expect("ModifyTable node");
             }
             // The EXCLUDED pseudo-rel is a 'pseudo join' inner side: its Vars
             // in onConflictSet/onConflictWhere become INNER_VAR over the
@@ -3574,6 +3545,30 @@ fn set_hash_references<'mcx>(
     set_dummy_tlist_references(run, plan, rtoffset)?;
     debug_assert!(plan.as_plan().unwrap().qual.is_nil());
     Ok(())
+}
+
+// build_tlist_index_other_vars (setrefs.c): searchable subset of a tlist for
+// RETURNING fixup — Vars of relations other than ignore_rel, plus
+// PlaceHolderVar entries (C keeps has_ph_vars searching the whole tlist).
+fn build_tlist_other_vars<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    tlist: &NodeList<'mcx>,
+    ignore_rel: i32,
+) -> PgResult<NodeList<'mcx>> {
+    let mut out = NodeList::nil();
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        match tle.expr.node_tag() {
+            NodeTag::T_Var => {
+                if tle.expr.as_var().unwrap().varno != ignore_rel {
+                    out.lappend(run.mcx, tle_node)?;
+                }
+            }
+            NodeTag::T_PlaceHolderVar => out.lappend(run.mcx, tle_node)?,
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 fn fix_join_expr_list<'mcx>(

@@ -8235,6 +8235,7 @@ dependencies = [
  "relcache_seams",
  "resowner",
  "rewrite_handler",
+ "rewrite_manip",
  "rmgr",
  "s_lock_seams",
  "scan_fgram",
