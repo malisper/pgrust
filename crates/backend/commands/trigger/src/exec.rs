@@ -296,6 +296,47 @@ impl<'a, 'mcx> TriggerWhenEval<'a, 'mcx> {
     }
 }
 
+// ExecBSInsertTriggers (trigger.c), standalone-caller form (COPY FROM); the
+// executor's INSERT path fires through nodemodifytable's exec_bs_triggers.
+pub fn ExecBSInsertTriggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &types_trigger::TriggerDesc<'static>,
+    fmgr: &mut TriggerFmgrCache,
+    when: &mut TriggerWhenEval<'_, 'mcx>,
+) -> PgResult<()> {
+    use types_trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_INSERT, TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSERT,
+        TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK,
+    };
+    if !trigdesc.trig_insert_before_statement {
+        return Ok(());
+    }
+    let tg_event = TRIGGER_EVENT_INSERT | TRIGGER_EVENT_BEFORE;
+    for (i, trigger) in trigdesc.triggers.iter().enumerate() {
+        if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | TRIGGER_TYPE_INSERT)
+            != TRIGGER_TYPE_STATEMENT | TRIGGER_TYPE_BEFORE | TRIGGER_TYPE_INSERT
+        {
+            continue;
+        }
+        if !TriggerEnabled(trigger) {
+            continue;
+        }
+        if !when.check(i, trigger, rel, tg_event, None, None)? {
+            continue;
+        }
+        let finfo = fmgr.get(i, trigger.tgfoid)?;
+        let mut tdata = TriggerData::new(tg_event, rel, None, None, trigger);
+        if ExecCallTriggerFunc(mcx, &mut tdata, finfo)?.is_some() {
+            return Err(Box::new(
+                PgError::error("BEFORE STATEMENT trigger cannot return a value".to_string())
+                    .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ExecBSTruncateTriggers (trigger.c); ExecAS lives with the queue.
 pub fn ExecBSTruncateTriggers<'mcx>(
     mcx: Mcx<'mcx>,

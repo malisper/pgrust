@@ -21,6 +21,7 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_fmgr::FmgrInfo;
+use types_nodes::nodes_enums::CmdType;
 use types_nodes::NodeList;
 use types_rel::Relation;
 use types_tuple::NameData;
@@ -373,6 +374,36 @@ pub fn CopyFrom<'mcx>(
         }
         ti_options |= tableam_vocab::TABLE_INSERT_FROZEN;
     }
+    let trigdesc = if rel.rd_hastriggers {
+        relcache::RelationGetTriggerDesc(rel.rd_id)?
+    } else {
+        None
+    };
+    // BEFORE/INSTEAD/AFTER row triggers and transition tables on a
+    // partitioned target route through leaf resultRelInfos (B9 charter).
+    if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        if let Some(td) = &trigdesc {
+            if td.trig_insert_before_row
+                || td.trig_insert_instead_row
+                || td.trig_insert_after_row
+                || td.trig_insert_new_table
+            {
+                panic!("CopyFrom: triggers on a partitioned COPY target not ported");
+            }
+        }
+    }
+    let transition_capture = match &trigdesc {
+        Some(td) => trigger::MakeTransitionCaptureState(td, rel.rd_id, CmdType::CMD_INSERT)?,
+        None => None,
+    };
+    let mut trig_fmgr = trigger::TriggerFmgrCache::default();
+    let mut trig_when = trigger::TriggerWhenCache::default();
+    if let Some(td) = &trigdesc {
+        trigger::AfterTriggerBeginQuery();
+        let mut when =
+            trigger::TriggerWhenEval { mcx, cache: &mut trig_when, modified_cols: None };
+        trigger::ExecBSInsertTriggers(mcx, rel, td, &mut trig_fmgr, &mut when)?;
+    }
     // CopyFromErrorCallback scope: C installs error_context_stack here, after
     // the relkind + FREEZE checks; buffered-but-unflushed slots on the Err
     // path are simply dropped, as C's are (the aborted xact kills flushed
@@ -380,12 +411,33 @@ pub fn CopyFrom<'mcx>(
     let body = if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
         copy_from_partitioned_body(mcx, cstate, rel, ti_options)
     } else {
-        copy_from_body(mcx, cstate, rel, ti_options)
+        let mut trig = trigdesc.as_ref().map(|td| CopyTrig {
+            td,
+            tc: transition_capture.as_ref(),
+            when: &mut trig_when,
+        });
+        copy_from_body(mcx, cstate, rel, ti_options, trig.as_mut())
     };
     match body {
-        Ok(n) => Ok(n),
+        Ok(n) => {
+            if let Some(td) = &trigdesc {
+                let mut when =
+                    trigger::TriggerWhenEval { mcx, cache: &mut trig_when, modified_cols: None };
+                trigger::ExecASInsertTriggers(rel, td, transition_capture.as_ref(), Some(&mut when))?;
+                trigger::AfterTriggerEndQuery()?;
+            }
+            Ok(n)
+        }
         Err(e) => Err(copy_from_error_context(cstate, rel, e)),
     }
+}
+
+// The AR-trigger slice of C's resultRelInfo that CopyMultiInsertBufferFlush
+// touches.
+struct CopyTrig<'a, 'mcx> {
+    td: &'a types_trigger::TriggerDesc<'static>,
+    tc: Option<&'a trigger::TransitionCaptureState>,
+    when: &'a mut trigger::TriggerWhenCache<'mcx>,
 }
 
 fn copy_from_body<'mcx>(
@@ -393,6 +445,7 @@ fn copy_from_body<'mcx>(
     cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
     ti_options: i32,
+    mut trig: Option<&mut CopyTrig<'_, 'mcx>>,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
 
@@ -497,6 +550,7 @@ fn copy_from_body<'mcx>(
                 ti_options,
                 &mut bistate,
                 &mut index_state,
+                trig.as_deref_mut(),
             )?;
             flushed += nused as i64;
             pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
@@ -516,6 +570,7 @@ fn copy_from_body<'mcx>(
             ti_options,
             &mut bistate,
             &mut index_state,
+            trig.as_deref_mut(),
         )?;
         flushed += nused as i64;
         pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
@@ -585,9 +640,6 @@ fn copy_from_partitioned_body<'mcx>(
     ti_options: i32,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
-    if rel.rd_hastriggers {
-        panic!("CopyFrom: triggers on a partitioned COPY target not ported");
-    }
 
     let mut qualexpr = init_where_qual(mcx, cstate)?;
     let mut router = execpartition::PartitionTupleRouting::new(mcx, rel)?;
@@ -775,6 +827,7 @@ fn flush_part_buffers<'mcx>(
             ti_options,
             &mut buf.bistate,
             index_state,
+            None,
         )?;
         flushed += buf.nused as i64;
         buf.nused = 0;
@@ -796,6 +849,7 @@ fn flush_multi_insert<'mcx>(
     ti_options: i32,
     bistate: &mut tableam_vocab::BulkInsertStateData,
     index_state: &mut execindexing::ResultRelIndexState<'mcx>,
+    mut trig: Option<&mut CopyTrig<'_, 'mcx>>,
 ) -> PgResult<()> {
     let save_cur_lineno = cstate.cur_lineno;
     let save_line_buf_valid = cstate.line_buf_valid;
@@ -804,22 +858,39 @@ fn flush_multi_insert<'mcx>(
     let mut refs: Vec<&mut types_slot::SlotData<'mcx>> = slots.iter_mut().collect();
     tableam::table_multi_insert(mcx, rel, &mut refs, mycid, ti_options, Some(bistate))?;
 
-    if index_state.num_indices() > 0 {
+    if index_state.num_indices() > 0 || trig.is_some() {
         // C resets the per-tuple econtext per buffered row (CopyMultiInsertBufferFlush).
         let mut eval_cx = MemoryContext::new_bump("CopyIndexEvalPerTuple");
         for (i, slot) in refs.into_iter().enumerate() {
             eval_cx.reset();
             cstate.cur_lineno = linenos[i];
-            execindexing::ExecInsertIndexTuples(
-                mcx,
-                eval_cx.mcx(),
-                index_state,
-                rel,
-                slot,
-                false,
-                None,
-                &[],
-            )?;
+            let recheck_indexes = if index_state.num_indices() > 0 {
+                execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    eval_cx.mcx(),
+                    index_state,
+                    rel,
+                    slot,
+                    false,
+                    None,
+                    &[],
+                )?
+            } else {
+                PgVec::new_in(mcx)
+            };
+            if let Some(t) = trig.as_deref_mut() {
+                let mut when =
+                    trigger::TriggerWhenEval { mcx, cache: &mut *t.when, modified_cols: None };
+                trigger::ExecARInsertTriggers(
+                    mcx,
+                    rel,
+                    Some(t.td),
+                    slot.base().tts_tid,
+                    &recheck_indexes,
+                    t.tc,
+                    Some(&mut when),
+                )?;
+            }
         }
     }
 
