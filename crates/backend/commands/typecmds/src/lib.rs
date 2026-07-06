@@ -878,7 +878,7 @@ pub fn DefineType<'mcx>(
     let mut storage = TYPSTORAGE_PLAIN;
     if let Some(defel) = likeTypeEl {
         let tn = commands_define::defGetTypeName(mcx, defel)?;
-        let (likeoid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+        let (likeoid, _typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(pstate), tn)?;
         if !lsyscache::get_typisdefined(likeoid)? {
             let name = type_name_to_string(mcx, tn)?;
             return Err(Box::new(

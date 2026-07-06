@@ -92,9 +92,21 @@ fn typename_type_id_and_mod<'mcx>(
         return Ok((tn.typeOid, -1));
     }
 
+    // C typenameType attaches parser_errposition(pstate, typeName->location)
+    // to every lookup error on this path.
+    let at_tn = |mut e: Box<PgError>| {
+        if let Some(ps) = pstate {
+            let pos =
+                parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
+            if e.cursor_position.is_none() && pos > 0 {
+                e.cursor_position = Some(pos);
+            }
+        }
+        e
+    };
     let (typoid, typname) = resolveTypeNames(mcx, tn)?;
     if typoid == InvalidOid {
-        return Err(type_does_not_exist(typname));
+        return Err(at_tn(type_does_not_exist(typname)));
     }
     // C LookupTypeNameExtended: array bounds convert to the array type.
     let typoid = if tn.arrayBounds.is_nil() {
@@ -102,13 +114,13 @@ fn typename_type_id_and_mod<'mcx>(
     } else {
         let arr = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
         if arr == InvalidOid {
-            return Err(type_does_not_exist(typname));
+            return Err(at_tn(type_does_not_exist(typname)));
         }
         arr
     };
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
-        _ => return Err(type_is_only_a_shell(typname)),
+        _ => return Err(at_tn(type_is_only_a_shell(typname))),
     }
     match syscache_seams::pg_type_typtype::call(typoid)? {
         Some(t)
