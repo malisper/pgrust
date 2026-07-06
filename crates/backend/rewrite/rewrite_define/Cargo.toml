@@ -37,3 +37,5 @@ format_type = { path = "../../utils/adt/format_type" }
 init_small = { path = "../../utils/init/init_small" }
 inval = { path = "../../utils/cache/inval" }
 rewrite_define_seams = { path = "../rewrite_define_seams" }
+aclchk = { path = "../../catalog/aclchk" }
+miscinit = { path = "../../utils/init/miscinit" }

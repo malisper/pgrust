@@ -12237,6 +12237,7 @@ dependencies = [
 name = "rewrite_define"
 version = "0.1.0"
 dependencies = [
+ "aclchk",
  "catalog",
  "catalog_dependency",
  "catalog_indexing",
@@ -12250,6 +12251,7 @@ dependencies = [
  "inval",
  "lsyscache",
  "mcx",
+ "miscinit",
  "outfuncs",
  "parse_expr",
  "parser_analyze",

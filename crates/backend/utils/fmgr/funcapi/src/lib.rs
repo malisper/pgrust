@@ -129,7 +129,7 @@ fn expr_type(expr: Option<Node<'_>>) -> Oid {
         NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
         NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
         NodeTag::T_JsonExpr => node.as_json_expr().unwrap().returning.expect("returning").typid,
-        NodeTag::T_CoerceToDomainValue => node.as_coerce_to_domain_value().unwrap().typeId,
+        NodeTag::T_SQLValueFunction => node.as_sql_value_function().unwrap().r#type,
         tag => panic!("funcapi exprType: node family {tag:?} not ported"),
     }
 }
