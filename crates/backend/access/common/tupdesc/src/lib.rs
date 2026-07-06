@@ -682,6 +682,15 @@ pub fn build_attrmap_by_name<'mcx>(
     build_attrmap_by_name_impl(mcx, indesc, outdesc, false)
 }
 
+// build_attrmap_by_name (attmap.c), missing_ok=true shape.
+pub fn build_attrmap_by_name_missing_ok<'mcx>(
+    mcx: Mcx<'mcx>,
+    indesc: &TupleDescData<'_>,
+    outdesc: &TupleDescData<'_>,
+) -> PgResult<PgVec<'mcx, i16>> {
+    build_attrmap_by_name_impl(mcx, indesc, outdesc, true)
+}
+
 // check_attrmap_match (attmap.c): true when the map is a one-to-one identity,
 // so the caller can skip runtime tuple conversion entirely.
 fn check_attrmap_match(indesc: &TupleDescData<'_>, outdesc: &TupleDescData<'_>, attmap: &[i16]) -> bool {

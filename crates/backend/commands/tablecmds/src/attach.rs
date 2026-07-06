@@ -655,6 +655,8 @@ fn MergeConstraintsIntoExisting<'mcx>(
     let conrel = table::table_open(mcx, types_core::CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
     let parent_cons = scan_constraints(mcx, &conrel, parent_rel.rd_id)?;
     let desc = conrel.descr();
+    let attmap =
+        tupdesc::build_attrmap_by_name_missing_ok(mcx, parent_rel.descr(), child_rel.descr())?;
     for pcon in parent_cons.iter() {
         if pcon.contype != CONSTRAINT_CHECK && pcon.contype != CONSTRAINT_NOTNULL {
             continue;
@@ -676,10 +678,15 @@ fn MergeConstraintsIntoExisting<'mcx>(
                     continue;
                 }
             } else if ccon.contype == CONSTRAINT_NOTNULL {
-                // Identity attmaps only (asserted at the ATTACH entry), so
-                // parent and child not-null columns match by attno directly.
-                if pcon.nn_attno != ccon.nn_attno {
+                if pcon.nn_attno != attmap[ccon.nn_attno as usize - 1] {
                     continue;
+                }
+                let parent_att = parent_rel.descr().attr(pcon.nn_attno as usize - 1);
+                let child_att = child_rel.descr().attr(ccon.nn_attno as usize - 1);
+                if parent_att.attisdropped || child_att.attisdropped {
+                    return Err(Box::new(PgError::error(
+                        "found not-null constraint on dropped columns",
+                    )));
                 }
             }
             if ccon.contype == CONSTRAINT_CHECK {
