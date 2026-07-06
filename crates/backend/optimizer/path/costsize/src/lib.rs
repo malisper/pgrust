@@ -610,10 +610,6 @@ pub fn cost_samplescan(
         )
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_samplescan (costsize.c): parameterized path; M2 lateral lane"
-    );
     let tsc = run
         .rte(relid as usize)
         .tablesample
@@ -622,7 +618,10 @@ pub fn cost_samplescan(
         .expect("tablesample is a TableSampleClause");
     let tsm = ::tablesample::Tsm::get(tsc.tsmhandler);
 
-    let rows = base_rows;
+    let rows = match &run.root.path(path_id).base().param_info {
+        Some(pi) => pi.ppi_rows,
+        None => base_rows,
+    };
     let mut startup_cost = 0.0;
     let (spc_random_page_cost, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
     // NextSampleBlock implies random access, else sequential (as C).
@@ -633,8 +632,7 @@ pub fn cost_samplescan(
     };
     let mut run_cost = spc_page_cost * pages as f64;
 
-    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)
-        .expect("unparameterized path has no param clauses");
+    let qpqual_cost = get_restriction_qual_cost(run, rel, path_id)?;
     startup_cost += qpqual_cost.startup;
     let cpu_per_tuple = gucs::cpu_tuple_cost() + qpqual_cost.per_tuple;
     run_cost += cpu_per_tuple * tuples;
