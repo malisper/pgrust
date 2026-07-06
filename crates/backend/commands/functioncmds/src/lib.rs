@@ -1,6 +1,6 @@
 // functioncmds.c CREATE FUNCTION/PROCEDURE lane. Loud: inline SQL bodies
 // (BEGIN ATOMIC / RETURN), parameter defaults, TABLE parameter mode,
-// WINDOW/TRANSFORM/SUPPORT options, languages beyond sql+internal+C+plpgsql,
+// TRANSFORM/SUPPORT options, languages beyond sql+internal+C+plpgsql,
 // %TYPE / typmod TypeNames, DROP FUNCTION, DO.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -11,6 +11,7 @@ pub use cast_transform::{get_transform_oid, CreateCast, CreateTransform};
 use mcx::Mcx;
 use pg_proc::{
     ClanguageId, ProcedureCreateArgs, INTERNALlanguageId, PROKIND_FUNCTION, PROKIND_PROCEDURE,
+    PROKIND_WINDOW,
     PROPARALLEL_RESTRICTED, PROPARALLEL_SAFE, PROPARALLEL_UNSAFE, PROVOLATILE_IMMUTABLE,
     PROVOLATILE_STABLE, PROVOLATILE_VOLATILE, SQLlanguageId,
 };
@@ -87,6 +88,7 @@ fn invalid_procedure_attribute(source_text: &str, location: types_core::ParseLoc
 struct FunctionAttrs<'mcx> {
     as_clause: Option<&'mcx DefElem<'mcx>>,
     language: Option<&'mcx str>,
+    windowfunc: bool,
     volatility: i8,
     strict: bool,
     security: bool,
@@ -224,6 +226,7 @@ fn compute_function_attributes<'mcx>(
     let mut rows_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut support_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut parallel_item: Option<&'mcx DefElem<'mcx>> = None;
+    let mut windowfunc_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut set_items: Vec<&VariableSetStmt<'_>> = Vec::new();
 
     let is_procedure = stmt.is_procedure;
@@ -249,7 +252,7 @@ fn compute_function_attributes<'mcx>(
             "as" => &mut as_item,
             "language" => &mut language_item,
             "transform" => unported("TRANSFORM option"),
-            "window" => unported("WINDOW option"),
+            "window" => &mut windowfunc_item,
             "volatility" => &mut volatility_item,
             "strict" => &mut strict_item,
             "security" => &mut security_item,
@@ -302,6 +305,7 @@ fn compute_function_attributes<'mcx>(
     Ok(FunctionAttrs {
         as_clause: as_item,
         language: language_item.map(defel_str),
+        windowfunc: windowfunc_item.map(defel_bool).unwrap_or(false),
         volatility: volatility_item.map_or(PROVOLATILE_VOLATILE, interpret_func_volatility),
         strict: strict_item.map(defel_bool).unwrap_or(false),
         security: security_item.map(defel_bool).unwrap_or(false),
@@ -1174,7 +1178,13 @@ pub fn CreateFunction<'mcx>(
             prosrc: as_parsed.prosrc,
             probin: as_parsed.probin,
             prosqlbody: as_parsed.sql_body,
-            prokind: if stmt.is_procedure { PROKIND_PROCEDURE } else { PROKIND_FUNCTION },
+            prokind: if stmt.is_procedure {
+                PROKIND_PROCEDURE
+            } else if attrs.windowfunc {
+                PROKIND_WINDOW
+            } else {
+                PROKIND_FUNCTION
+            },
             security_definer: attrs.security,
             isLeakProof: attrs.leakproof,
             isStrict: attrs.strict,

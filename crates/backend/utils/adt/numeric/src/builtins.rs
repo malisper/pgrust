@@ -377,7 +377,7 @@ fn inv_null_state(name: &str) -> Box<::types_error::PgError> {
     Box::new(::types_error::PgError::error(format!("{name} called with NULL state")))
 }
 
-// int2/int4/int8_accum_inv + int8_avg_accum_inv (numeric.c), HAVE_INT128 arm.
+// int2/int4_accum_inv + int8_avg_accum_inv (numeric.c), HAVE_INT128 arm.
 macro_rules! fc_int128_inv {
     ($($fc:ident: $get:ident, $name:literal;)*) => {$(
         pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -400,12 +400,35 @@ macro_rules! fc_int128_inv {
 fc_int128_inv! {
     fc_int2_accum_inv: as_i16, "int2_accum_inv";
     fc_int4_accum_inv: as_i32, "int4_accum_inv";
-    fc_int8_accum_inv: as_i64, "int8_accum_inv";
     fc_int8_avg_accum_inv: as_i64, "int8_avg_accum_inv";
 }
 
-// numeric_accum_inv (numeric.c): a false discard is a hard error (the
-// window machinery treats an in-band NULL as restart, this is not that).
+// int8_accum_inv (numeric.c): the NumericAggState lane (int8's sumX2 can
+// exceed int128); a false discard is a hard error — dscale is always zero.
+pub fn fc_int8_accum_inv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use crate::aggregates::NumericAggState;
+    let [a, b] = *fcinfo.args_n::<2>();
+    if a.isnull {
+        return Err(inv_null_state("int8_accum_inv"));
+    }
+    let state = a.value.as_usize() as *mut NumericAggState;
+    if !b.isnull {
+        let img = crate::ops::int64_to_numeric(b.value.as_i64());
+        // SAFETY: a non-null arg0 is the aggcontext-lived state the forward
+        // transfn returned; no other reference is live during the call.
+        let ok = unsafe {
+            let agg_mcx = fcinfo.agg_context().ok_or_else(non_aggregate_context)?;
+            crate::aggregates::do_numeric_discard(&mut *state, agg_mcx, img.num())?
+        };
+        if !ok {
+            panic!("do_numeric_discard failed unexpectedly");
+        }
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+// numeric_accum_inv (numeric.c): a false discard returns SQL NULL — the
+// window machinery's restart signal.
 pub fn fc_numeric_accum_inv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     use crate::aggregates::NumericAggState;
     let [a, b] = *fcinfo.args_n::<2>();
@@ -414,13 +437,15 @@ pub fn fc_numeric_accum_inv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo)
     }
     let state = a.value.as_usize() as *mut NumericAggState;
     if !b.isnull {
-        // SAFETY: state as fc_int2_accum_inv; arg1 read guarded by isnull.
-        unsafe {
+        // SAFETY: state as fc_int8_accum_inv; arg1 read guarded by isnull.
+        let ok = unsafe {
             let num = num_arg(fcinfo, 1)?;
             let agg_mcx = fcinfo.agg_context().ok_or_else(non_aggregate_context)?;
-            if !crate::aggregates::do_numeric_discard(&mut *state, agg_mcx, num)? {
-                panic!("do_numeric_discard failed unexpectedly");
-            }
+            crate::aggregates::do_numeric_discard(&mut *state, agg_mcx, num)?
+        };
+        if !ok {
+            fcinfo.return_null();
+            return Ok(Datum::from_usize(0));
         }
     }
     Ok(Datum::from_usize(state as usize))

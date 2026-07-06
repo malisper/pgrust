@@ -416,64 +416,6 @@ fn collect_window_funcs<'mcx>(
     CollectWindowFuncs { out }.visit(node).map(|_| ())
 }
 
-// contain_volatile_functions (clauses.c) over the arg shapes this lane
-// admits; unknown tags are loud rather than assumed stable.
-fn contain_volatile_functions(node: Node<'_>) -> PgResult<bool> {
-    match node.node_tag() {
-        NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => Ok(false),
-        NodeTag::T_RelabelType => {
-            contain_volatile_functions(node.as_relabel_type().unwrap().arg)
-        }
-        NodeTag::T_FuncExpr => {
-            let f = node.as_func_expr().unwrap();
-            if lsyscache::func_volatile(f.funcid)? == b'v' as i8 {
-                return Ok(true);
-            }
-            for a in f.args.iter() {
-                if contain_volatile_functions(a)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        NodeTag::T_OpExpr => {
-            let o = node.as_op_expr().unwrap();
-            if lsyscache::func_volatile(o.opfuncid)? == b'v' as i8 {
-                return Ok(true);
-            }
-            for a in o.args.iter() {
-                if contain_volatile_functions(a)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        NodeTag::T_CoerceViaIO => {
-            // check_functions_in_node (nodeFuncs.c): both the output and
-            // input IO functions decide volatility.
-            let c = node.as_coerce_via_io().unwrap();
-            let (outfn, _varlena) = lsyscache::getTypeOutputInfo(expr_type(c.arg))?;
-            if lsyscache::func_volatile(outfn)? == b'v' as i8 {
-                return Ok(true);
-            }
-            let (infn, _ioparam) = lsyscache::getTypeInputInfo(c.resulttype)?;
-            if lsyscache::func_volatile(infn)? == b'v' as i8 {
-                return Ok(true);
-            }
-            contain_volatile_functions(c.arg)
-        }
-        // check_functions_in_node (nodeFuncs.c) carries no function of its
-        // own for CoerceToDomain; volatility is the argument's.
-        NodeTag::T_CoerceToDomain => {
-            contain_volatile_functions(node.as_coerce_to_domain().unwrap().arg)
-        }
-        tag => panic!(
-            "contain_volatile_functions (clauses.c): node family {tag:?} not ported \
-             (window-agg lane)"
-        ),
-    }
-}
-
 // get_fn_expr_arg_stable (fmgr.c): Const or extern Param.
 fn arg_is_stable(node: Node<'_>) -> bool {
     match node.node_tag() {
@@ -486,14 +428,71 @@ fn arg_is_stable(node: Node<'_>) -> bool {
     }
 }
 
+fn wfkind_for_builtin(oid: Oid) -> Option<WfKind> {
+    Some(match oid {
+        F_WINDOW_ROW_NUMBER => WfKind::RowNumber,
+        F_WINDOW_RANK => WfKind::Rank,
+        F_WINDOW_DENSE_RANK => WfKind::DenseRank,
+        F_WINDOW_PERCENT_RANK => WfKind::PercentRank,
+        F_WINDOW_CUME_DIST => WfKind::CumeDist,
+        F_WINDOW_NTILE => WfKind::Ntile,
+        F_WINDOW_LAG => WfKind::LeadLag { forward: false, withoffset: false, withdefault: false },
+        F_WINDOW_LAG_WITH_OFFSET => {
+            WfKind::LeadLag { forward: false, withoffset: true, withdefault: false }
+        }
+        F_WINDOW_LAG_WITH_OFFSET_AND_DEFAULT => {
+            WfKind::LeadLag { forward: false, withoffset: true, withdefault: true }
+        }
+        F_WINDOW_LEAD => WfKind::LeadLag { forward: true, withoffset: false, withdefault: false },
+        F_WINDOW_LEAD_WITH_OFFSET => {
+            WfKind::LeadLag { forward: true, withoffset: true, withdefault: false }
+        }
+        F_WINDOW_LEAD_WITH_OFFSET_AND_DEFAULT => {
+            WfKind::LeadLag { forward: true, withoffset: true, withdefault: true }
+        }
+        F_WINDOW_FIRST_VALUE => WfKind::FirstValue,
+        F_WINDOW_LAST_VALUE => WfKind::LastValue,
+        F_WINDOW_NTH_VALUE => WfKind::NthValue,
+        _ => return None,
+    })
+}
+
+// C dispatches window functions through fmgr (fmgr_info resolves an
+// internal-language pg_proc row by prosrc); a user-defined WINDOW function
+// over a builtin prosrc lands on the same C body, so the prosrc name keys
+// the kind here.
+fn wfkind_for(mcx: ::mcx::Mcx<'_>, winfnoid: Oid) -> PgResult<WfKind> {
+    if let Some(k) = wfkind_for_builtin(winfnoid) {
+        return Ok(k);
+    }
+    let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(mcx, winfnoid)?;
+    let by_name = prosrc
+        .as_deref()
+        .map(::fmgr_core::fmgr_internal_function)
+        .filter(|&oid| oid != 0)
+        .and_then(wfkind_for_builtin);
+    match by_name {
+        Some(k) => Ok(k),
+        None => panic!(
+            "eval_windowfunction (nodeWindowAgg.c): window function oid {winfnoid} \
+             (prosrc {:?}) not ported",
+            prosrc.as_deref()
+        ),
+    }
+}
+
 fn build_argstates<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
     args: &NodeList<'mcx>,
     params: ::execexpr::ParamBind<'mcx>,
+    sub: Option<::execexpr::SubplanCompileEnv>,
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>> {
     let mut out = PgVec::new_in(mcx);
     for a in args.iter() {
-        out.push(exec_init_expr(mcx, Some(a), params)?.expect("window arg ExprState"));
+        out.push(
+            ::execexpr::exec_init_expr_subplans(mcx, Some(a), params, sub)?
+                .expect("window arg ExprState"),
+        );
     }
     Ok(out)
 }
@@ -591,6 +590,7 @@ pub fn exec_init_window_agg<'mcx>(
             } else {
                 peragg.push(initialize_peragg_framed(
                     mcx,
+                    wnode,
                     wfunc,
                     frameOptions,
                     wfuncno as u16,
@@ -618,40 +618,10 @@ pub fn exec_init_window_agg<'mcx>(
             peragg_wfuncno.push(wfuncno as u16);
             WfKind::PlainAgg { aggno }
         } else {
-            let kind = match wfunc.winfnoid {
-                F_WINDOW_ROW_NUMBER => WfKind::RowNumber,
-                F_WINDOW_RANK => WfKind::Rank,
-                F_WINDOW_DENSE_RANK => WfKind::DenseRank,
-                F_WINDOW_PERCENT_RANK => WfKind::PercentRank,
-                F_WINDOW_CUME_DIST => WfKind::CumeDist,
-                F_WINDOW_NTILE => WfKind::Ntile,
-                F_WINDOW_LAG => {
-                    WfKind::LeadLag { forward: false, withoffset: false, withdefault: false }
-                }
-                F_WINDOW_LAG_WITH_OFFSET => {
-                    WfKind::LeadLag { forward: false, withoffset: true, withdefault: false }
-                }
-                F_WINDOW_LAG_WITH_OFFSET_AND_DEFAULT => {
-                    WfKind::LeadLag { forward: false, withoffset: true, withdefault: true }
-                }
-                F_WINDOW_LEAD => {
-                    WfKind::LeadLag { forward: true, withoffset: false, withdefault: false }
-                }
-                F_WINDOW_LEAD_WITH_OFFSET => {
-                    WfKind::LeadLag { forward: true, withoffset: true, withdefault: false }
-                }
-                F_WINDOW_LEAD_WITH_OFFSET_AND_DEFAULT => {
-                    WfKind::LeadLag { forward: true, withoffset: true, withdefault: true }
-                }
-                F_WINDOW_FIRST_VALUE => WfKind::FirstValue,
-                F_WINDOW_LAST_VALUE => WfKind::LastValue,
-                F_WINDOW_NTH_VALUE => WfKind::NthValue,
-                other => panic!(
-                    "eval_windowfunction (nodeWindowAgg.c): window function oid {other} \
-                     not ported"
-                ),
-            };
-            argstates = build_argstates(mcx, &wfunc.args, params)?;
+            let kind = wfkind_for(mcx, wfunc.winfnoid)?;
+            argstates = ::executils::with_subplan_compile_env(estate, |env| {
+                build_argstates(mcx, &wfunc.args, params, env)
+            })?;
             for st in argstates.iter_mut() {
                 // C evaluates WinGetFuncArg* in the tmpcontext per-tuple
                 // memory; by-ref arg results (lead/lag default coercions)
@@ -1018,6 +988,7 @@ fn initialize_peragg_default<'mcx>(
 // C divergence, superuser-owned builtins in the live set).
 fn initialize_peragg_framed<'mcx>(
     mcx: ::mcx::Mcx<'mcx>,
+    wnode: Node<'mcx>,
     wfunc: &'mcx WindowFunc<'mcx>,
     frame_options: i32,
     wfuncno: u16,
@@ -1033,12 +1004,6 @@ fn initialize_peragg_framed<'mcx>(
             shape.aggkind
         );
     }
-    let mut volatile = false;
-    for a in wfunc.args.iter() {
-        if contain_volatile_functions(a)? {
-            volatile = true;
-        }
-    }
     let use_ma_code = if shape.aggminvtransfn == 0 {
         false
     } else if shape.aggmfinalmodify == AGGMODIFY_READ_ONLY
@@ -1048,7 +1013,8 @@ fn initialize_peragg_framed<'mcx>(
     } else if frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {
         false
     } else {
-        !volatile
+        // C checks the whole WindowFunc: args, FILTER, and run condition.
+        !::clauses::contain_volatile_functions(wnode)?
     };
     let (transfn_oid, invtransfn_oid, finalfn_oid, finalextra, finalmodify, aggtranstype, minit) =
         if use_ma_code {
@@ -1195,7 +1161,7 @@ fn initialize_peragg_framed<'mcx>(
         trans_byval,
         agg_state,
         private_ctx,
-        argstates: build_argstates(mcx, &wfunc.args, params)?,
+        argstates: build_argstates(mcx, &wfunc.args, params, None)?,
         filterstate: match wfunc.aggfilter {
             Some(f) => Some(exec_init_expr(mcx, Some(f), params)?.expect("filter ExprState")),
             None => None,
@@ -2229,6 +2195,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
 
     fn eval_arg_on_slot(
         &mut self,
+        estate: &mut EStateData<'mcx>,
         perfunc_ix: usize,
         argno: usize,
         which: WhichSlot,
@@ -2238,6 +2205,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             ref mut agg_row_slot,
             ref mut temp_slot_1,
             ref mut temp_slot_2,
+            tmpcontext,
             ..
         } = *self;
         let slot = match which {
@@ -2245,19 +2213,28 @@ impl<'mcx> WindowAggStateData<'mcx> {
             WhichSlot::Temp1 => temp_slot_1,
             WhichSlot::Temp2 => temp_slot_2,
         };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(slot) };
-        exec_eval_expr(&mut perfunc[perfunc_ix].argstates[argno], &mut slots)
+        ::executils::exec_eval_expr_with_subplans_outer(
+            &mut perfunc[perfunc_ix].argstates[argno],
+            slot,
+            estate,
+            tmpcontext,
+        )
     }
 
     // WinGetFuncArgCurrent: evaluate on the current row (scan slot).
     fn win_get_func_arg_current(
         &mut self,
+        estate: &mut EStateData<'mcx>,
         perfunc_ix: usize,
         argno: usize,
     ) -> PgResult<NullableDatum> {
-        let Self { ref mut perfunc, ref mut scan_slot, .. } = *self;
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(scan_slot) };
-        exec_eval_expr(&mut perfunc[perfunc_ix].argstates[argno], &mut slots)
+        let Self { ref mut perfunc, ref mut scan_slot, tmpcontext, .. } = *self;
+        ::executils::exec_eval_expr_with_subplans_outer(
+            &mut perfunc[perfunc_ix].argstates[argno],
+            scan_slot,
+            estate,
+            tmpcontext,
+        )
     }
 
     // WinGetFuncArgInPartition; the result may borrow tuplestore memory
@@ -2289,7 +2266,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         if set_mark {
             self.set_mark_position(perfunc_ix, abs_pos)?;
         }
-        let nd = self.eval_arg_on_slot(perfunc_ix, argno, WhichSlot::Temp1)?;
+        let nd = self.eval_arg_on_slot(estate, perfunc_ix, argno, WhichSlot::Temp1)?;
         Ok((nd, false))
     }
 
@@ -2422,7 +2399,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         if set_mark {
             self.set_mark_position(perfunc_ix, mark_pos)?;
         }
-        let nd = self.eval_arg_on_slot(perfunc_ix, argno, WhichSlot::Temp1)?;
+        let nd = self.eval_arg_on_slot(estate, perfunc_ix, argno, WhichSlot::Temp1)?;
         Ok((nd, false))
     }
 
@@ -2495,7 +2472,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 if self.perfunc[perfunc_ix].ntile == 0 {
                     self.spool_tuples(estate, fetch, -1)?;
                     let total = self.spooled_rows;
-                    let nd = self.win_get_func_arg_current(perfunc_ix, 0)?;
+                    let nd = self.win_get_func_arg_current(estate, perfunc_ix, 0)?;
                     if nd.isnull {
                         self.write_result(perfunc_ix, NullableDatum::null());
                         return Ok(());
@@ -2531,7 +2508,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             }
             WfKind::LeadLag { forward, withoffset, withdefault } => {
                 let (offset, const_offset) = if withoffset {
-                    let nd = self.win_get_func_arg_current(perfunc_ix, 1)?;
+                    let nd = self.win_get_func_arg_current(estate, perfunc_ix, 1)?;
                     if nd.isnull {
                         self.write_result(perfunc_ix, NullableDatum::null());
                         return Ok(());
@@ -2551,7 +2528,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                     const_offset,
                 )?;
                 if isout && withdefault {
-                    nd = self.win_get_func_arg_current(perfunc_ix, 2)?;
+                    nd = self.win_get_func_arg_current(estate, perfunc_ix, 2)?;
                 }
                 nd
             }
@@ -2580,7 +2557,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 nd
             }
             WfKind::NthValue => {
-                let nd = self.win_get_func_arg_current(perfunc_ix, 1)?;
+                let nd = self.win_get_func_arg_current(estate, perfunc_ix, 1)?;
                 if nd.isnull {
                     self.write_result(perfunc_ix, NullableDatum::null());
                     return Ok(());

@@ -8693,6 +8693,7 @@ version = "0.1.0"
 dependencies = [
  "aclchk_seams",
  "adt_int8",
+ "clauses",
  "coerce",
  "datum",
  "execexpr",
