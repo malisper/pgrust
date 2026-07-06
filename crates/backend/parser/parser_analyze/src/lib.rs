@@ -1299,6 +1299,43 @@ fn transformValuesClause<'mcx>(
     Ok(qry)
 }
 
+// contain_vars_of_level (var.c), levelsup 0: any Var/CurrentOfExpr of the
+// current query level (CREATE RULE's OLD/NEW references in VALUES lists).
+struct ContainVarsOfLevelZero {
+    sublevels_up: i64,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for ContainVarsOfLevelZero {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_Var => {
+                Ok(node.as_var().unwrap().varlevelsup as i64 == self.sublevels_up)
+            }
+            NodeTag::T_CurrentOfExpr => Ok(self.sublevels_up == 0),
+            NodeTag::T_Query => {
+                let q = node.as_query().unwrap();
+                self.sublevels_up += 1;
+                let r = nodes_core::query_tree_walker(q, self, 0);
+                self.sublevels_up -= 1;
+                r
+            }
+            _ => nodes_core::expression_tree_walker(node, self),
+        }
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let r = nodes_core::query_tree_walker(q, self, 0);
+        self.sublevels_up -= 1;
+        r
+    }
+}
+
+fn contain_vars_of_level_zero(node: Node<'_>) -> PgResult<bool> {
+    use nodes_core::NodeWalker as _;
+    ContainVarsOfLevelZero { sublevels_up: 0 }.visit(node)
+}
+
 fn transformInsertStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
@@ -1481,9 +1518,20 @@ fn transformInsertStmt<'mcx>(
                 colcollations.lappend(mcx, 0)?;
             }
 
-            // contain_vars_of_level lateral marking only fires inside CREATE
-            // RULE (NEW/OLD in the rtable); the target rel is the only RTE.
-            debug_assert_eq!(pstate.p_rtable.len(), 1);
+            // Inside CREATE RULE the NEW/OLD namespace entries can inject
+            // current-level Vars into the VALUES lists; the RTE must then be
+            // marked LATERAL (C contain_vars_of_level over exprsLists).
+            let mut lateral = false;
+            if pstate.p_rtable.len() != 1 {
+                'rows: for row in &exprs_lists {
+                    for e in row.as_list().expect("row list").iter() {
+                        if contain_vars_of_level_zero(e)? {
+                            lateral = true;
+                            break 'rows;
+                        }
+                    }
+                }
+            }
             let nsitem = parse_relation::addRangeTableEntryForValues(
                 mcx,
                 pstate,
@@ -1492,7 +1540,7 @@ fn transformInsertStmt<'mcx>(
                 coltypmods,
                 colcollations,
                 None,
-                false,
+                lateral,
                 true,
             )?;
             let (vars, _names) = parse_relation::expandNSItemVars(mcx, pstate, nsitem, 0, -1)?;
