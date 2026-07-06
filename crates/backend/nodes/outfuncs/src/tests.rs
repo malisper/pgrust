@@ -333,3 +333,57 @@ fn copy_boundary_arms_round_trip() {
         assert_eq!(s1.as_str(), s2.as_str());
     }
 }
+
+// Live pg_rewrite ev_action for a recursive CTE view with SEARCH BREADTH
+// FIRST + CYCLE. Round-trips readfuncs -> outfuncs byte-for-byte.
+#[test]
+fn search_cycle_ev_action_roundtrips() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = include_str!("../../readfuncs/fixtures/search_cycle_ev_action.txt").trim();
+    let n = readfuncs::stringToNode(mcx, s).unwrap();
+    let out = nodeToString(mcx, n).unwrap();
+    assert_eq!(out.as_str(), s);
+}
+
+#[test]
+fn notify_stmt_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = Node::mk(
+        mcx,
+        types_nodes::parsenodes::NotifyStmt { conditionname: Some("chan"), payload: Some("hi") },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToString(mcx, n).unwrap().as_str(),
+        "{NOTIFYSTMT :conditionname chan :payload hi}"
+    );
+}
+
+#[test]
+fn notify_stmt_no_payload_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = Node::mk(
+        mcx,
+        types_nodes::parsenodes::NotifyStmt { conditionname: Some("chan"), payload: None },
+    )
+    .unwrap();
+    assert_eq!(
+        nodeToString(mcx, n).unwrap().as_str(),
+        "{NOTIFYSTMT :conditionname chan :payload <>}"
+    );
+}
+
+#[test]
+fn next_value_expr_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let n = Node::mk(mcx, types_nodes::primnodes::NextValueExpr { seqid: 16400, typeId: 20 })
+        .unwrap();
+    assert_eq!(
+        nodeToString(mcx, n).unwrap().as_str(),
+        "{NEXTVALUEEXPR :seqid 16400 :typeId 20}"
+    );
+}

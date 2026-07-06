@@ -458,6 +458,26 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
                 p.paramkind as u32, p.paramid, p.paramtype, p.paramtypmod, p.paramcollid
             );
         }
+        NodeTag::T_CTESearchClause => out_cte_search_clause(
+            out,
+            node.as_variant::<types_nodes::parsenodes::CTESearchClause>()
+                .expect("CTESearchClause"),
+        )?,
+        NodeTag::T_CTECycleClause => out_cte_cycle_clause(
+            out,
+            node.as_variant::<types_nodes::parsenodes::CTECycleClause>()
+                .expect("CTECycleClause"),
+        )?,
+        NodeTag::T_NotifyStmt => out_notify_stmt(
+            out,
+            node.as_variant::<types_nodes::parsenodes::NotifyStmt>()
+                .expect("NotifyStmt"),
+        )?,
+        NodeTag::T_NextValueExpr => out_next_value_expr(
+            out,
+            node.as_variant::<types_nodes::primnodes::NextValueExpr>()
+                .expect("NextValueExpr"),
+        )?,
         NodeTag::T_CommonTableExpr => out_common_table_expr(
             out,
             node.as_variant::<CommonTableExpr>().expect("CommonTableExpr"),
@@ -1512,19 +1532,17 @@ fn out_sub_link(out: &mut PgString<'_>, s: &SubLink<'_>) -> PgResult<()> {
 }
 
 fn out_common_table_expr(out: &mut PgString<'_>, c: &CommonTableExpr<'_>) -> PgResult<()> {
-    if c.search_clause.is_some() {
-        panic!("_outCTESearchClause (outfuncs.c): SEARCH clause unported");
-    }
-    if c.cycle_clause.is_some() {
-        panic!("_outCTECycleClause (outfuncs.c): CYCLE clause unported");
-    }
     w!(out, "{{COMMONTABLEEXPR :ctename ");
     out_str(out, c.ctename);
     w!(out, " :aliascolnames ");
     out_list(out, &c.aliascolnames)?;
     w!(out, " :ctematerialized {} :ctequery ", c.ctematerialized as u32);
     out_opt_node(out, c.ctequery)?;
-    w!(out, " :search_clause <> :cycle_clause <> :location -1 :cterecursive ");
+    w!(out, " :search_clause ");
+    out_opt_node(out, c.search_clause)?;
+    w!(out, " :cycle_clause ");
+    out_opt_node(out, c.cycle_clause)?;
+    w!(out, " :location -1 :cterecursive ");
     out_bool(out, c.cterecursive);
     w!(out, " :cterefcount {} :ctecolnames ", c.cterefcount);
     out_list(out, &c.ctecolnames)?;
@@ -1535,6 +1553,51 @@ fn out_common_table_expr(out: &mut PgString<'_>, c: &CommonTableExpr<'_>) -> PgR
     w!(out, " :ctecolcollations ");
     out_oid_list(out, &c.ctecolcollations);
     w!(out, "}}");
+    Ok(())
+}
+
+fn out_cte_search_clause(out: &mut PgString<'_>, s: &types_nodes::parsenodes::CTESearchClause<'_>) -> PgResult<()> {
+    w!(out, "{{CTESEARCHCLAUSE :search_col_list ");
+    out_list(out, &s.search_col_list)?;
+    w!(out, " :search_breadth_first ");
+    out_bool(out, s.search_breadth_first);
+    w!(out, " :search_seq_column ");
+    out_str(out, s.search_seq_column);
+    w!(out, " :location -1}}");
+    Ok(())
+}
+
+fn out_cte_cycle_clause(out: &mut PgString<'_>, c: &types_nodes::parsenodes::CTECycleClause<'_>) -> PgResult<()> {
+    w!(out, "{{CTECYCLECLAUSE :cycle_col_list ");
+    out_list(out, &c.cycle_col_list)?;
+    w!(out, " :cycle_mark_column ");
+    out_str(out, c.cycle_mark_column);
+    w!(out, " :cycle_mark_value ");
+    out_opt_node(out, c.cycle_mark_value)?;
+    w!(out, " :cycle_mark_default ");
+    out_opt_node(out, c.cycle_mark_default)?;
+    w!(out, " :cycle_path_column ");
+    out_str(out, c.cycle_path_column);
+    w!(
+        out,
+        " :location -1 :cycle_mark_type {} :cycle_mark_typmod {} :cycle_mark_collation {} \
+         :cycle_mark_neop {}}}",
+        c.cycle_mark_type, c.cycle_mark_typmod, c.cycle_mark_collation, c.cycle_mark_neop
+    );
+    Ok(())
+}
+
+fn out_notify_stmt(out: &mut PgString<'_>, n: &types_nodes::parsenodes::NotifyStmt<'_>) -> PgResult<()> {
+    w!(out, "{{NOTIFYSTMT :conditionname ");
+    out_str(out, n.conditionname);
+    w!(out, " :payload ");
+    out_str(out, n.payload);
+    w!(out, "}}");
+    Ok(())
+}
+
+fn out_next_value_expr(out: &mut PgString<'_>, n: &types_nodes::primnodes::NextValueExpr) -> PgResult<()> {
+    w!(out, "{{NEXTVALUEEXPR :seqid {} :typeId {}}}", n.seqid, n.typeId);
     Ok(())
 }
 
