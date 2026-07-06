@@ -161,6 +161,9 @@ fn token_type_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
     ::tupdesc::TupleDescInitEntry(&mut desc, 3, Some("description"), TEXTOID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // BlessTupleDesc (via TupleDescGetAttInMetadata, wparser.c tt_setup):
+    // FieldSelect over these tuples needs the registered typmod.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
     let mut rows = Vec::with_capacity(parser::LASTNUM as usize);
     for d in lextype() {
         let alias = varlena_result(::varlena::cstring_to_text(mcx, d.alias.as_bytes())?);
@@ -215,6 +218,8 @@ fn parse_rows(fcinfo: &Fcinfo) -> PgResult<SrfRows> {
     ::tupdesc::TupleDescInitEntry(&mut desc, 2, Some("token"), TEXTOID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // BlessTupleDesc (wparser.c prs_setup), as tt_setup above.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
     let mut rows = Vec::new();
     while parser::tparser_get(&mut prs)? {
         let token = varlena_result(::varlena::cstring_to_text(mcx, prs.token_bytes())?);
