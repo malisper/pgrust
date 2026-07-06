@@ -11914,6 +11914,7 @@ dependencies = [
  "catalog",
  "coerce",
  "datum",
+ "detoast",
  "detoast_seams",
  "dfmgr",
  "elog_seams",
