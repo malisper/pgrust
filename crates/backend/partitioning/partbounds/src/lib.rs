@@ -14,7 +14,8 @@ pub use merge::{
 };
 pub use qual::{
     check_default_partition_contents, get_proposed_default_constraint, get_qual_from_partbound,
-    make_ands_explicit, map_partition_varattnos, read_boundspec, PARTBOUNDS_BUILTINS,
+    make_ands_explicit, map_partition_varattnos, read_boundspec, read_boundspec_opt,
+    PARTBOUNDS_BUILTINS,
 };
 
 use datum::Datum;

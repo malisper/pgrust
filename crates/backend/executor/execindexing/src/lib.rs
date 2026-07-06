@@ -896,14 +896,17 @@ fn check_exclusion_or_unique_constraint<'mcx>(
 
 /// IndexCheckExclusion (catalog/index.c): validate existing rows against a
 /// freshly built exclusion index (ALTER TABLE ADD EXCLUDE over live data).
-/// ResetReindexProcessing is elided (reindex-processing state is const-false
-/// in this port's genam).
 pub fn IndexCheckExclusion<'mcx>(
     mcx: Mcx<'mcx>,
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
     index_info: &mut IndexInfo<'mcx>,
 ) -> PgResult<()> {
+    // C clears reindex-processing here so the probe scans below may open the
+    // now-fully-valid index (index.c:3213).
+    if ::types_rel::reindex::ReindexIsCurrentlyProcessingIndex(index_relation.rd_id) {
+        ::types_rel::reindex::reset_reindex_processing();
+    }
     let eval_cx = ::mcx::MemoryContext::new("IndexCheckExclusion");
     let eval_mcx = eval_cx.mcx();
     let mut slot = exectuples::make_tuple_table_slot(

@@ -31,6 +31,7 @@ readfuncs = { path = "../../../nodes/readfuncs" }
 relcache = { path = "../../cache/relcache" }
 genam = { path = "../../../access/index/genam" }
 table = { path = "../../../access/table/table" }
+relation_seams = { path = "../../../access/common/relation_seams" }
 detoast = { path = "../../../access/common/detoast" }
 parse_relation = { path = "../../../parser/parse_relation" }
 rewrite_manip = { path = "../../../rewrite/rewrite_manip" }

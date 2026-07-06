@@ -53,6 +53,21 @@ pub(crate) struct LikeCxt<'a, 'mcx> {
     pub is_foreign: bool,
 }
 
+// get_collation/get_opclass tail (parse_utilcmd.c:2192, 2225): list_make2 of
+// the (always emitted) namespace name and the object name.
+fn qualified_name_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    nspoid: ::types_core::Oid,
+    name: &::types_tuple::NameData,
+) -> PgResult<NodeList<'mcx>> {
+    let nsp = lsyscache::get_namespace_name(mcx, nspoid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspoid}"));
+    let name = core::str::from_utf8(name.name_str()).expect("name");
+    let mut list = NodeList::make1(mcx, Node::mk_string(mcx, str_in(mcx, nsp.as_str())?)?)?;
+    list.lappend(mcx, Node::mk_string(mcx, str_in(mcx, name)?)?)?;
+    Ok(list)
+}
+
 pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
@@ -665,14 +680,29 @@ pub fn generateClonedIndexStmt<'mcx>(
         let typcollation = syscache_seams::lookup_pg_type_shape::call(keycoltype)?
             .expect("pg_type row vanished")
             .typcollation;
-        if indcollation != InvalidOid && indcollation != typcollation {
-            unported("generateClonedIndexStmt: non-default collations");
-        }
-        if indclass[keyno]
-            != indexcmds_seams::get_default_opclass::call(keycoltype, source_idx.rd_rel.relam)?
+        // get_collation (parse_utilcmd.c:2173): NIL when default for the
+        // datatype, else always schema-qualified.
+        let collation = if indcollation != InvalidOid && indcollation != typcollation {
+            let row = syscache_seams::lookup_pg_collation_locale_row::call(mcx, indcollation)?
+                .unwrap_or_else(|| panic!("cache lookup failed for collation {indcollation}"));
+            qualified_name_list(mcx, row.collnamespace, &row.collname)?
+        } else {
+            NodeList::nil()
+        };
+        // get_opclass (parse_utilcmd.c:2207): NIL when default for the
+        // datatype, else always schema-qualified.
+        let (opcname, opcnamespace, opcmethod) =
+            syscache_seams::pg_opclass_name_namespace_method::call(indclass[keyno])?
+                .unwrap_or_else(|| {
+                    panic!("cache lookup failed for opclass {}", indclass[keyno])
+                });
+        let opclass = if indclass[keyno]
+            != indexcmds_seams::get_default_opclass::call(keycoltype, opcmethod)?
         {
-            unported("generateClonedIndexStmt: non-default operator classes");
-        }
+            qualified_name_list(mcx, opcnamespace, &opcname)?
+        } else {
+            NodeList::nil()
+        };
 
         let mut ordering = SortByDir::SORTBY_DEFAULT;
         let mut nulls_ordering = SortByNulls::SORTBY_NULLS_DEFAULT;
@@ -693,6 +723,8 @@ pub fn generateClonedIndexStmt<'mcx>(
                 core::str::from_utf8(source_idx.rd_att.attr(keyno).attname.name_str())
                     .expect("index column name"),
             )?),
+            collation,
+            opclass,
             ordering,
             nulls_ordering,
             ..IndexElem::default()

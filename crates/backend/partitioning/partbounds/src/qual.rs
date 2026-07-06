@@ -500,6 +500,16 @@ fn text_to_str<'mcx>(mcx: ::mcx::Mcx<'mcx>, d: Datum) -> &'mcx str {
 }
 
 pub fn read_boundspec<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<&'mcx PartitionBoundSpec<'mcx>> {
+    Ok(read_boundspec_opt(mcx, relid)?
+        .unwrap_or_else(|| panic!("missing relpartbound for relation {relid}")))
+}
+
+// NULL relpartbound is legal: index partitions carry relispartition without
+// a bound (C generate_partition_qual reads the attr with isnull).
+pub fn read_boundspec_opt<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<&'mcx PartitionBoundSpec<'mcx>>> {
     let tuple = cache_syscache::SearchSysCache1(
         RELOID,
         cache_syscache::SysCacheKey::Value(Datum::from_oid(relid)),
@@ -507,12 +517,16 @@ pub fn read_boundspec<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<&'mcx Partit
     .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
     let (d, isnull) =
         cache_syscache::SysCacheGetAttr(RELOID, &tuple, Anum_pg_class_relpartbound)?;
-    assert!(!isnull, "missing relpartbound for relation {relid}");
+    if isnull {
+        cache_syscache::ReleaseSysCache(tuple);
+        return Ok(None);
+    }
     let node = readfuncs::stringToNode(mcx, text_to_str(mcx, d))?;
     cache_syscache::ReleaseSysCache(tuple);
-    Ok(node
-        .as_variant::<PartitionBoundSpec>()
-        .unwrap_or_else(|| panic!("expected PartitionBoundSpec")))
+    Ok(Some(
+        node.as_variant::<PartitionBoundSpec>()
+            .unwrap_or_else(|| panic!("expected PartitionBoundSpec")),
+    ))
 }
 
 fn get_range_key_properties<'mcx>(

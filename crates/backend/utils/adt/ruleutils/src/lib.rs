@@ -1559,7 +1559,9 @@ pub fn pg_get_partition_constraintdef_worker(
     }
     // C holds AccessShareLock through the deparse; lock machinery is another
     // lane (matches the pg_get_expr divergence above).
-    let rel = table::table_open(mcx, relation_id, types_rel::AccessShareLock)?;
+    // relation_open, not table_open: index partitions are legal inputs
+    // (get_partition_qual_relid, partcache.c:306).
+    let rel = relation_seams::relation_open::call(mcx, relation_id, types_rel::AccessShareLock)?;
     let and_args = partdesc::RelationGetPartitionQual(mcx, &rel)?;
     rel.close(types_rel::AccessShareLock)?;
     // The cached qual list is 'static (List is invariant); copy into mcx as
