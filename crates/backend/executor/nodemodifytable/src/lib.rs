@@ -121,9 +121,9 @@ pub struct ModifyTableState<'mcx> {
     // The shared RETURNING result slot (C ps_ResultTupleSlot): all result
     // rels project into one slot over the node targetlist's descriptor.
     returning_slot: Option<ExecSlotId>,
-    // C ps_ExprContext: SubPlan args in RETURNING evaluate against it (scan =
-    // returned tuple, outer = plan tuple); reset per projected row.
-    returning_ecxt: Option<executils::EcxtId>,
+    // C ps_ExprContext: SubPlans in RETURNING / ON CONFLICT DO UPDATE /
+    // MERGE actions evaluate against it; reset per row.
+    node_ecxt: Option<executils::EcxtId>,
     // C mt_root_tuple_slot: root-format staging slot for a cross-partition
     // UPDATE's re-routed tuple.
     cross_part_root_slot: Option<ExecSlotId>,
@@ -423,12 +423,19 @@ pub fn exec_init_modify_table<'mcx>(
     // The shared RETURNING result slot, virtual over the caller-built
     // descriptor (C ExecInitResultTupleSlotTL over the node targetlist).
     let mut returning_slot = None;
-    let mut returning_ecxt = None;
+    let mut node_ecxt = None;
     if !node.returningLists.is_nil() {
         let desc = returning_desc.expect("caller passes the RETURNING result descriptor");
         returning_slot =
             Some(estate.exec_init_extra_tuple_slot(Some(desc), TupleSlotKind::Virtual));
-        returning_ecxt = Some(estate.create_expr_context());
+    }
+    // C creates ps_ExprContext lazily for RETURNING / ON CONFLICT UPDATE /
+    // MERGE (the consumers of SubPlan-bearing node expressions).
+    if !node.returningLists.is_nil()
+        || node.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
+        || !node.mergeActionLists.is_nil()
+    {
+        node_ecxt = Some(estate.create_expr_context());
     }
     let rti = rels[0].rti;
 
@@ -462,10 +469,20 @@ pub fn exec_init_modify_table<'mcx>(
         if node.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
             let params = estate.param_bind();
             let proj = {
-                let rel = estate.es_relations[(rti - 1) as usize]
+                let desc = estate.es_relations[(rti - 1) as usize]
                     .as_ref()
-                    .expect("result relation opened");
-                exec_build_projection_info(mcx, &node.onConflictSet, Some(&rel.rd_att), params)?
+                    .expect("result relation opened")
+                    .rd_att
+                    .clone();
+                executils::with_subplan_compile_env(estate, |env| {
+                    execexpr::exec_build_projection_info_subplans(
+                        mcx,
+                        &node.onConflictSet,
+                        Some(&desc),
+                        params,
+                        env,
+                    )
+                })?
             };
             let set_desc = execscan::exec_type_from_tl(mcx, &node.onConflictSet)?;
             setvals_slot = Some({
@@ -493,7 +510,10 @@ pub fn exec_init_modify_table<'mcx>(
                 let qual = where_node
                     .as_list()
                     .expect("onConflictWhere is an implicit-AND List after preprocessing");
-                where_clause = execexpr::exec_init_qual(mcx, qual, estate.param_bind())?;
+                let params = estate.param_bind();
+                where_clause = executils::with_subplan_compile_env(estate, |env| {
+                    execexpr::exec_init_qual_subplans(mcx, qual, params, env)
+                })?;
             }
         }
         on_conflict = Some(OnConflictState {
@@ -525,7 +545,7 @@ pub fn exec_init_modify_table<'mcx>(
         index_eval_cx: Some(mcx::MemoryContext::new_bump("IndexEvalPerTuple")),
         snapshot_any: Some(Rc::new(SnapshotData::sentinel(estate.es_query_cxt, SNAPSHOT_ANY))),
         returning_slot,
-        returning_ecxt,
+        node_ecxt,
         on_conflict,
         oc_old_slot: None,
         transition_capture,
@@ -706,7 +726,10 @@ fn init_result_rel<'mcx>(
             let join_condition = if jc.is_nil() {
                 None
             } else {
-                execexpr::exec_init_qual(mcx, jc, estate.param_bind())?
+                let params = estate.param_bind();
+                executils::with_subplan_compile_env(estate, |env| {
+                    execexpr::exec_init_qual_subplans(mcx, jc, params, env)
+                })?
             };
             let (kind, desc) = {
                 let rel = estate.es_relations[(rti - 1) as usize]
@@ -742,7 +765,9 @@ fn init_result_rel<'mcx>(
                     None => None,
                     Some(q) => {
                         let ql = q.as_list().expect("preprocessed WHEN qual is a List");
-                        execexpr::exec_init_qual(mcx, ql, params)?
+                        executils::with_subplan_compile_env(estate, |env| {
+                            execexpr::exec_init_qual_subplans(mcx, ql, params, env)
+                        })?
                     }
                 };
                 let mut exec_action = MergeActionExec {
@@ -758,16 +783,23 @@ fn init_result_rel<'mcx>(
                         // descriptor shapes the projection and the plan-output
                         // check; the insert itself routes through the root).
                         let insert_rti = root_rti.unwrap_or(rti);
-                        let rel = estate.es_relations[(insert_rti - 1) as usize]
-                            .as_ref()
-                            .expect("result relation opened");
-                        exec_check_plan_output(rel, &action.targetList)?;
-                        exec_action.proj = Some(exec_build_projection_info(
-                            mcx,
-                            &action.targetList,
-                            Some(&rel.rd_att),
-                            params,
-                        )?);
+                        let desc = {
+                            let rel = estate.es_relations[(insert_rti - 1) as usize]
+                                .as_ref()
+                                .expect("result relation opened");
+                            exec_check_plan_output(rel, &action.targetList)?;
+                            rel.rd_att.clone()
+                        };
+                        exec_action.proj =
+                            Some(executils::with_subplan_compile_env(estate, |env| {
+                                execexpr::exec_build_projection_info_subplans(
+                                    mcx,
+                                    &action.targetList,
+                                    Some(&desc),
+                                    params,
+                                    env,
+                                )
+                            })?);
                     }
                     CmdType::CMD_UPDATE => {
                         for tle_node in &action.targetList {
@@ -779,15 +811,20 @@ fn init_result_rel<'mcx>(
                             );
                         }
                         let proj = {
-                            let rel = estate.es_relations[(rti - 1) as usize]
+                            let desc = estate.es_relations[(rti - 1) as usize]
                                 .as_ref()
-                                .expect("result relation opened");
-                            exec_build_projection_info(
-                                mcx,
-                                &action.targetList,
-                                Some(&rel.rd_att),
-                                params,
-                            )?
+                                .expect("result relation opened")
+                                .rd_att
+                                .clone();
+                            executils::with_subplan_compile_env(estate, |env| {
+                                execexpr::exec_build_projection_info_subplans(
+                                    mcx,
+                                    &action.targetList,
+                                    Some(&desc),
+                                    params,
+                                    env,
+                                )
+                            })?
                         };
                         let set_desc = execscan::exec_type_from_tl(mcx, &action.targetList)?;
                         let slot = exectuples::make_tuple_table_slot(
@@ -1598,20 +1635,45 @@ fn exec_merge_matched_scan<'mcx>(
     // the join: satisfied = MATCHED list, else NOT MATCHED BY SOURCE list
     // (C 3128-3139). A NULL condition means only MATCHED actions exist.
     let use_by_source = {
+        pre_eval_param_deps(
+            mt.rel().merge.as_ref().expect("merge state").join_condition.as_deref(),
+            estate,
+        )?;
+        let jc_subplans = mt
+            .rel()
+            .merge
+            .as_ref()
+            .expect("merge state")
+            .join_condition
+            .as_deref()
+            .is_some_and(|q| q.has_subplan());
+        let node_ecxt = mt.node_ecxt;
         let ModifyTableState { rels, cur, .. } = &mut *mt;
         let merge = rels[*cur].merge.as_mut().expect("merge state");
         match merge.join_condition.as_deref_mut() {
             None => false,
             Some(jc) => {
-                let EStateData { es_tupleTable, .. } = &mut *estate;
-                let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
-                assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
-                let base = es_tupleTable.as_mut_ptr();
-                // SAFETY: distinct in-bounds indices of one live slice.
-                let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
-                let mut slots =
-                    EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
-                !execexpr::exec_qual(Some(jc), &mut slots)?
+                if jc_subplans {
+                    let ec = node_ecxt.expect("node ecxt created with MERGE");
+                    estate.reset_expr_context(ec);
+                    {
+                        let e = estate.ecxt_mut(ec);
+                        e.ecxt_scantuple = Some(old_id);
+                        e.ecxt_innertuple = Some(plan_slot);
+                        e.ecxt_outertuple = None;
+                    }
+                    !executils::exec_qual_with_subplans(Some(jc), estate, ec)?
+                } else {
+                    let EStateData { es_tupleTable, .. } = &mut *estate;
+                    let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
+                    assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
+                    let base = es_tupleTable.as_mut_ptr();
+                    // SAFETY: distinct in-bounds indices of one live slice.
+                    let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
+                    let mut slots =
+                        EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
+                    !execexpr::exec_qual(Some(jc), &mut slots)?
+                }
             }
         }
     };
@@ -1627,23 +1689,53 @@ fn exec_merge_matched_scan<'mcx>(
     for ai in 0..n_actions {
         // WHEN [MATCHED] AND qual: scan = old target tuple, inner = plan row.
         let (command_type, pass) = {
+            let node_ecxt = mt.node_ecxt;
+            {
+                let merge = mt.rel().merge.as_ref().expect("merge state");
+                let action = if use_by_source {
+                    &merge.not_matched_by_source_actions[ai]
+                } else {
+                    &merge.matched_actions[ai]
+                };
+                pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
+            }
             let merge = mt.rel_mut().merge.as_mut().expect("merge state");
             let action = if use_by_source {
                 &mut merge.not_matched_by_source_actions[ai]
             } else {
                 &mut merge.matched_actions[ai]
             };
-            let EStateData { es_tupleTable, .. } = &mut *estate;
-            let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
-            assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
-            let base = es_tupleTable.as_mut_ptr();
-            // SAFETY: distinct in-bounds indices of one live slice.
-            let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
-            let mut slots = EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
-            (
-                action.command_type,
-                execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
-            )
+            if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+                let ec = node_ecxt.expect("node ecxt created with MERGE");
+                estate.reset_expr_context(ec);
+                {
+                    let e = estate.ecxt_mut(ec);
+                    e.ecxt_scantuple = Some(old_id);
+                    e.ecxt_innertuple = Some(plan_slot);
+                    e.ecxt_outertuple = None;
+                }
+                (
+                    action.command_type,
+                    executils::exec_qual_with_subplans(
+                        action.when_qual.as_deref_mut(),
+                        estate,
+                        ec,
+                    )?,
+                )
+            } else {
+                let EStateData { es_tupleTable, .. } = &mut *estate;
+                let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
+                assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
+                let base = es_tupleTable.as_mut_ptr();
+                // SAFETY: distinct in-bounds indices of one live slice.
+                let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
+                let mut slots =
+                    EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
+                (
+                    action.command_type,
+                    execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
+                )
+            }
         };
         if !pass {
             continue;
@@ -1813,6 +1905,7 @@ fn merge_project_update<'mcx>(
     let mcx = estate.es_query_cxt;
     let old_id = mt.rel().ri_oldTupleSlot.expect("merge slots");
     let new_id = mt.rel().ri_newTupleSlot.expect("merge slots");
+    let node_ecxt = mt.node_ecxt;
     let merge = mt.rel_mut().merge.as_mut().expect("merge state");
     let action = if by_source {
         &mut merge.not_matched_by_source_actions[action_idx]
@@ -1821,7 +1914,19 @@ fn merge_project_update<'mcx>(
     };
     let setvals_id = action.setvals_slot.expect("UPDATE action state");
 
-    {
+    pre_eval_param_deps(action.proj.as_deref(), estate)?;
+    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = Some(old_id);
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        let proj = action.proj.as_deref_mut().expect("UPDATE action projection");
+        executils::exec_project_with_subplans(proj, estate, ec, setvals_id)?;
+    } else {
         let EStateData { es_tupleTable, .. } = &mut *estate;
         let (o, p, v) = (old_id.0 as usize, plan_slot.0 as usize, setvals_id.0 as usize);
         assert!(o != p && o != v && p != v);
@@ -2090,14 +2195,38 @@ fn exec_merge_not_matched<'mcx>(
     let n_actions = mt.rel().merge.as_ref().expect("merge state").not_matched_actions.len();
     for ai in 0..n_actions {
         let (command_type, pass) = {
+            let node_ecxt = mt.node_ecxt;
+            {
+                let merge = mt.rel().merge.as_ref().expect("merge state");
+                pre_eval_param_deps(merge.not_matched_actions[ai].when_qual.as_deref(), estate)?;
+            }
             let merge = mt.rel_mut().merge.as_mut().expect("merge state");
             let action = &mut merge.not_matched_actions[ai];
-            let plan = &mut estate.es_tupleTable[plan_slot.0 as usize];
-            let mut slots = EvalSlots { scan: None, inner: Some(plan), outer: None };
-            (
-                action.command_type,
-                execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
-            )
+            if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+                let ec = node_ecxt.expect("node ecxt created with MERGE");
+                estate.reset_expr_context(ec);
+                {
+                    let e = estate.ecxt_mut(ec);
+                    e.ecxt_scantuple = None;
+                    e.ecxt_innertuple = Some(plan_slot);
+                    e.ecxt_outertuple = None;
+                }
+                (
+                    action.command_type,
+                    executils::exec_qual_with_subplans(
+                        action.when_qual.as_deref_mut(),
+                        estate,
+                        ec,
+                    )?,
+                )
+            } else {
+                let plan = &mut estate.es_tupleTable[plan_slot.0 as usize];
+                let mut slots = EvalSlots { scan: None, inner: Some(plan), outer: None };
+                (
+                    action.command_type,
+                    execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
+                )
+            }
         };
         if !pass {
             continue;
@@ -2105,19 +2234,38 @@ fn exec_merge_not_matched<'mcx>(
         match command_type {
             CmdType::CMD_INSERT => {
                 {
+                    let node_ecxt = mt.node_ecxt;
+                    {
+                        let merge = mt.rel().merge.as_ref().expect("merge state");
+                        pre_eval_param_deps(merge.not_matched_actions[ai].proj.as_deref(), estate)?;
+                    }
                     let merge = mt.rel_mut().merge.as_mut().expect("merge state");
                     let action = &mut merge.not_matched_actions[ai];
-                    let EStateData { es_tupleTable, .. } = &mut *estate;
-                    let (p, n) = (plan_slot.0 as usize, new_id.0 as usize);
-                    assert!(p != n && p < es_tupleTable.len() && n < es_tupleTable.len());
-                    let base = es_tupleTable.as_mut_ptr();
-                    // SAFETY: distinct in-bounds indices of one live slice.
-                    let (plan, new_slot) =
-                        unsafe { (&mut *base.add(p), &mut *base.add(n)) };
-                    let mut slots =
-                        EvalSlots { scan: None, inner: Some(plan), outer: None };
-                    let proj = action.proj.as_deref_mut().expect("INSERT action projection");
-                    execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
+                    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
+                        let ec = node_ecxt.expect("node ecxt created with MERGE");
+                        estate.reset_expr_context(ec);
+                        {
+                            let e = estate.ecxt_mut(ec);
+                            e.ecxt_scantuple = None;
+                            e.ecxt_innertuple = Some(plan_slot);
+                            e.ecxt_outertuple = None;
+                        }
+                        let proj =
+                            action.proj.as_deref_mut().expect("INSERT action projection");
+                        executils::exec_project_with_subplans(proj, estate, ec, new_id)?;
+                    } else {
+                        let EStateData { es_tupleTable, .. } = &mut *estate;
+                        let (p, n) = (plan_slot.0 as usize, new_id.0 as usize);
+                        assert!(p != n && p < es_tupleTable.len() && n < es_tupleTable.len());
+                        let base = es_tupleTable.as_mut_ptr();
+                        // SAFETY: distinct in-bounds indices of one live slice.
+                        let (plan, new_slot) =
+                            unsafe { (&mut *base.add(p), &mut *base.add(n)) };
+                        let mut slots =
+                            EvalSlots { scan: None, inner: Some(plan), outer: None };
+                        let proj = action.proj.as_deref_mut().expect("INSERT action projection");
+                        execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
+                    }
                 }
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
@@ -3487,6 +3635,21 @@ fn get_tuple_for_trigger<'mcx>(
     }
 }
 
+// ExecEvalParamExec's pending-initplan arm, hoisted out of the interpreter
+// (execscan precedent).
+fn pre_eval_param_deps(
+    state: Option<&ExprState<'_>>,
+    estate: &mut EStateData<'_>,
+) -> PgResult<()> {
+    if let Some(st) = state {
+        let deps = st.param_exec_deps();
+        if !deps.is_empty() {
+            executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
+    Ok(())
+}
+
 // ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple,
 // outer slot = the plan tuple, projected into the node's virtual result slot
 // (C's econtext scantuple/outertuple + ExecProject).
@@ -3521,7 +3684,7 @@ fn exec_process_returning<'mcx>(
     // The node econtext for SubPlan evaluation inside RETURNING (C
     // ps_ExprContext): scan = returned tuple, outer = plan tuple; reset per
     // projected row (C ResetExprContext in the ExecModifyTable loop).
-    let ec = mt.returning_ecxt.expect("RETURNING ecxt created at init");
+    let ec = mt.node_ecxt.expect("RETURNING ecxt created at init");
     estate.reset_expr_context(ec);
     let mcx = estate.es_query_cxt;
     let (t, p, r) = (tuple_slot.0 as usize, plan_slot.0 as usize, result_id.0 as usize);
@@ -4232,7 +4395,42 @@ fn exec_on_conflict_update<'mcx>(
 
     // EXCLUDED reads through INNER_VAR (setrefs), the existing tuple through
     // scan Vars; evaluate the WHERE qual then the SET projection that way.
-    {
+    let use_subplans = {
+        let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+        pre_eval_param_deps(oc.where_clause.as_deref(), estate)?;
+        pre_eval_param_deps(oc.set_proj.as_deref(), estate)?;
+        oc.where_clause.as_deref().is_some_and(|q| q.has_subplan())
+            || oc.set_proj.as_deref().is_some_and(|p| p.has_subplan())
+    };
+    if use_subplans {
+        let ec = mt.node_ecxt.expect("node ecxt created with ON CONFLICT UPDATE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = Some(existing_id);
+            e.ecxt_innertuple = Some(excluded_id);
+            e.ecxt_outertuple = None;
+        }
+        let pass = {
+            let oc = mt.on_conflict.as_mut().expect("on_conflict state");
+            executils::exec_qual_with_subplans(oc.where_clause.as_deref_mut(), estate, ec)?
+        };
+        if !pass {
+            clear_slot(estate, existing_id);
+            return Ok(OnConflictOutcome::Done(None));
+        }
+        if !mt.rel().wco_exprs.is_empty() {
+            let ModifyTableState { rels, cur, .. } = &mut *mt;
+            let r = &mut rels[*cur];
+            let scan = &mut estate.es_tupleTable[existing_id.0 as usize];
+            exec_with_check_options(&mut r.wco_exprs, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+        }
+        {
+            let oc = mt.on_conflict.as_mut().expect("on_conflict state");
+            let set_proj = oc.set_proj.as_deref_mut().expect("DO UPDATE projection");
+            executils::exec_project_with_subplans(set_proj, estate, ec, setvals_id)?;
+        }
+    } else {
         let ModifyTableState { rels, cur, on_conflict, .. } = &mut *mt;
         let r = &mut rels[*cur];
         let oc = on_conflict.as_mut().expect("on_conflict state");
@@ -5191,7 +5389,7 @@ mcx::forget_safe_struct!(
         virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
-        returning_ecxt, oc_old_slot, cross_part_root_slot;
+        node_ecxt, oc_old_slot, cross_part_root_slot;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters,
