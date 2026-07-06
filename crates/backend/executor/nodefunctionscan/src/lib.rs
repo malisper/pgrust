@@ -431,6 +431,15 @@ fn exec_make_table_function_result<'mcx>(
     ecxt: ::executils::EcxtId,
     arg_mcx: &mut ::mcx::MemoryContext,
 ) -> PgResult<Tuplestore> {
+    // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter
+    // (execscan pattern): the funcexpr args may carry InitPlan Params.
+    for st in setexpr.elided_func_state.iter().map(|b| &**b).chain(setexpr.args.iter().map(|b| &**b))
+    {
+        let deps = st.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
     if setexpr.elided_func_state.is_some() {
         return run_elided(setexpr, expected_desc, random_access, estate, ecxt);
     }
