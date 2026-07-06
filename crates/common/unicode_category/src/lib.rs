@@ -12,6 +12,13 @@ use tables::*;
 pub const PG_U_UNASSIGNED: u8 = 0;
 pub const PG_U_TITLECASE_LETTER: u8 = 3;
 pub const PG_U_DECIMAL_NUMBER: u8 = 9;
+pub const PG_U_SPACE_SEPARATOR: u8 = 12;
+pub const PG_U_CONTROL: u8 = 15;
+pub const PG_U_SURROGATE: u8 = 18;
+// General categories P* (punctuation) and S* (symbol), per unicode_category.h.
+const PG_U_P_CATEGORIES: [u8; 7] = [19, 20, 21, 22, 23, 28, 29];
+const PG_U_S_CATEGORIES: [u8; 4] = [24, 25, 26, 27];
+const PG_U_CHARACTER_TAB: u32 = 0x09;
 
 const PG_U_PROP_ALPHABETIC: u8 = 1 << 0;
 const PG_U_PROP_LOWERCASE: u8 = 1 << 1;
@@ -130,6 +137,52 @@ pub fn pg_u_isalpha(code: u32) -> bool {
 
 pub fn pg_u_isalnum(code: u32, posix: bool) -> bool {
     pg_u_isalpha(code) || pg_u_isdigit(code, posix)
+}
+
+pub fn pg_u_isupper(code: u32) -> bool {
+    pg_u_prop_uppercase(code)
+}
+
+pub fn pg_u_islower(code: u32) -> bool {
+    pg_u_prop_lowercase(code)
+}
+
+pub fn pg_u_isblank(code: u32) -> bool {
+    code == PG_U_CHARACTER_TAB || unicode_category(code) == PG_U_SPACE_SEPARATOR
+}
+
+pub fn pg_u_isgraph(code: u32) -> bool {
+    let cat = unicode_category(code);
+    if cat == PG_U_CONTROL || cat == PG_U_SURROGATE || cat == PG_U_UNASSIGNED
+        || pg_u_isspace(code)
+    {
+        return false;
+    }
+    true
+}
+
+pub fn pg_u_isprint(code: u32) -> bool {
+    if unicode_category(code) == PG_U_CONTROL {
+        return false;
+    }
+    pg_u_isgraph(code) || pg_u_isblank(code)
+}
+
+pub fn pg_u_ispunct(code: u32, posix: bool) -> bool {
+    if posix && pg_u_isalpha(code) {
+        return false;
+    }
+    let cat = unicode_category(code);
+    let in_p = PG_U_P_CATEGORIES.contains(&cat);
+    if posix {
+        in_p || PG_U_S_CATEGORIES.contains(&cat)
+    } else {
+        in_p
+    }
+}
+
+pub fn pg_u_isspace(code: u32) -> bool {
+    pg_u_prop_white_space(code)
 }
 
 #[cfg(test)]
