@@ -116,23 +116,45 @@ impl Default for ChunkLedger {
     }
 }
 
+// Engagement evidence, worker-local (no hot-path shared-line traffic);
+// reported once at shutdown when PGRUST_TQUEUE_STATS is set.
+#[derive(Default)]
+struct TqueueStats {
+    chunk_tuples: u64,
+    byte_tuples: u64,
+    chunks: u64,
+}
+
 pub struct DrTqueue {
     queue: Option<ShmMqHandle>,
     ledger: Option<Arc<ChunkLedger>>,
     chunk: Option<Box<TupleChunk>>,
     scratch: Option<MemoryContext>,
+    stats: TqueueStats,
 }
 
 /// `CreateTupleQueueDestReceiver` (tqueue.c) — per-tuple copy path (fail-open
 /// fallback; anything that can't batch, e.g. a future cross-process queue).
 pub fn tqueue_create_DR(queue: ShmMqHandle) -> DrTqueue {
-    DrTqueue { queue: Some(queue), ledger: None, chunk: None, scratch: None }
+    DrTqueue {
+        queue: Some(queue),
+        ledger: None,
+        chunk: None,
+        scratch: None,
+        stats: TqueueStats::default(),
+    }
 }
 
 /// Batched variant: tuples accumulate into ledger chunks; the ring carries
 /// chunk indices.
 pub fn tqueue_create_DR_batched(queue: ShmMqHandle, ledger: Arc<ChunkLedger>) -> DrTqueue {
-    DrTqueue { queue: Some(queue), ledger: Some(ledger), chunk: None, scratch: None }
+    DrTqueue {
+        queue: Some(queue),
+        ledger: Some(ledger),
+        chunk: None,
+        scratch: None,
+        stats: TqueueStats::default(),
+    }
 }
 
 impl DrTqueue {
@@ -140,7 +162,7 @@ impl DrTqueue {
 
     /// `tqueueReceiveSlot`: false = queue detached, stop early.
     pub fn receive_slot(&mut self, slot: &mut SlotData<'_>) -> PgResult<bool> {
-        let DrTqueue { queue, ledger, chunk, scratch } = self;
+        let DrTqueue { queue, ledger, chunk, scratch, stats } = self;
         let queue = queue.as_mut().expect("tqueueReceiveSlot after shutdown");
         // ExecFetchSlotMinimalTuple's no-copy arm.
         if let SlotData::Minimal(m) = &*slot {
@@ -150,7 +172,7 @@ impl DrTqueue {
                     let t_len = p.as_ref().t_len as usize;
                     core::slice::from_raw_parts(p.as_ptr().cast::<u8>(), t_len)
                 };
-                return push_bytes(queue, ledger, chunk, bytes);
+                return push_bytes(queue, ledger, chunk, stats, bytes);
             }
         }
         exectuples::slot_getallattrs(slot);
@@ -173,7 +195,7 @@ impl DrTqueue {
             // SAFETY: a formed minimal tuple is a live flat image of t_len bytes.
             let bytes =
                 unsafe { core::slice::from_raw_parts(tup.as_ptr(), tup.t_len() as usize) };
-            push_bytes(queue, ledger, chunk, bytes)?
+            push_bytes(queue, ledger, chunk, stats, bytes)?
         };
         ctx.reset();
         Ok(sent)
@@ -181,15 +203,21 @@ impl DrTqueue {
 
     /// One tuple image into the transport; false = queue detached.
     pub fn push_tuple_bytes(&mut self, tuple: &[u8]) -> PgResult<bool> {
-        let DrTqueue { queue, ledger, chunk, .. } = self;
-        push_bytes(queue.as_mut().expect("tqueueReceiveSlot after shutdown"), ledger, chunk, tuple)
+        let DrTqueue { queue, ledger, chunk, stats, .. } = self;
+        push_bytes(
+            queue.as_mut().expect("tqueueReceiveSlot after shutdown"),
+            ledger,
+            chunk,
+            stats,
+            tuple,
+        )
     }
 
     /// Hand the pending chunk to the leader; false = queue detached.
     pub fn flush(&mut self) -> PgResult<bool> {
-        let DrTqueue { queue, ledger, chunk, .. } = self;
+        let DrTqueue { queue, ledger, chunk, stats, .. } = self;
         let Some(ledger) = ledger else { return Ok(true) };
-        flush_chunk(queue.as_mut().expect("tqueue flush after shutdown"), ledger, chunk)
+        flush_chunk(queue.as_mut().expect("tqueue flush after shutdown"), ledger, chunk, stats)
     }
 
     /// `tqueueShutdownReceiver`: flush the pending chunk, detach the queue.
@@ -200,6 +228,12 @@ impl DrTqueue {
         if let Some(mut q) = self.queue.take() {
             q.detach();
         }
+        if std::env::var_os("PGRUST_TQUEUE_STATS").is_some() {
+            eprintln!(
+                "tqueue-stats: chunk_tuples={} chunks={} byte_tuples={}",
+                self.stats.chunk_tuples, self.stats.chunks, self.stats.byte_tuples
+            );
+        }
         Ok(())
     }
 }
@@ -209,17 +243,22 @@ fn push_bytes(
     queue: &mut ShmMqHandle,
     ledger: &Option<Arc<ChunkLedger>>,
     chunk: &mut Option<Box<TupleChunk>>,
+    stats: &mut TqueueStats,
     tuple: &[u8],
 ) -> PgResult<bool> {
-    let Some(ledger) = ledger else { return tqueue_send_bytes(queue, tuple) };
+    let Some(ledger) = ledger else {
+        stats.byte_tuples += 1;
+        return tqueue_send_bytes(queue, tuple);
+    };
     let need = ALIGN + maxalign(tuple.len());
     let full = chunk.as_ref().is_some_and(|c| c.used + need > c.capacity());
-    if full && !flush_chunk(queue, ledger, chunk)? {
+    if full && !flush_chunk(queue, ledger, chunk, stats)? {
         return Ok(false);
     }
     chunk
         .get_or_insert_with(|| Box::new(TupleChunk::with_capacity(CHUNK_CAPACITY.max(need))))
         .push(tuple);
+    stats.chunk_tuples += 1;
     Ok(true)
 }
 
@@ -227,8 +266,10 @@ fn flush_chunk(
     queue: &mut ShmMqHandle,
     ledger: &ChunkLedger,
     pending: &mut Option<Box<TupleChunk>>,
+    stats: &mut TqueueStats,
 ) -> PgResult<bool> {
     let Some(mut chunk) = pending.take() else { return Ok(true) };
+    stats.chunks += 1;
 
     let idx = loop {
         match ledger.try_install(chunk) {
