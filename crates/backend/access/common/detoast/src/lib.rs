@@ -4,7 +4,8 @@
 //! varlena images (`&[u8]`, header included); results are fresh 4B-header
 //! images charged to the caller's `Mcx`. External on-disk fetch crosses
 //! `toast_internals_seams` (loud until the toast unit lands); indirect arms
-//! panic loudly; expanded arms flatten through `datum::expandeddatum`.
+//! dereference the embedded pointer (`struct varatt_indirect`); expanded arms
+//! flatten through `datum::expandeddatum`.
 
 use mcx::{Mcx, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
@@ -128,10 +129,25 @@ fn copy_verbatim<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>>
     mcx::slice_in(mcx, &attr[..varsize_any(attr)])
 }
 
-#[cold]
-#[inline(never)]
-fn indirect_unported(who: &str) -> ! {
-    panic!("{who}: indirect TOAST pointer — toast_internals indirect dereference is not ported");
+/// `struct varatt_indirect` (varatt.h) holds a raw pointer to a live varlena;
+/// dereference it into a borrowed slice sized off its own header.
+///
+/// # Safety
+/// `attr` is a live `VARTAG_INDIRECT` image (writer invariant: the embedded
+/// pointer stays valid for the indirect Datum's lifetime, matching C's
+/// `struct varatt_indirect`).
+unsafe fn indirect_target<'a>(attr: &[u8]) -> &'a [u8] {
+    let raw = usize::from_ne_bytes(
+        attr[VARHDRSZ_EXTERNAL..VARHDRSZ_EXTERNAL + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let ptr = raw as *const u8;
+    // SAFETY: caller contract.
+    unsafe {
+        let len = varatt::varsize_any(ptr);
+        core::slice::from_raw_parts(ptr, len)
+    }
 }
 
 fn flatten_expanded<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
@@ -160,7 +176,14 @@ pub fn detoast_external_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVe
     if is_external_ondisk(attr) {
         toast_internals_seams::toast_fetch_datum::call(mcx, attr)
     } else if is_external_indirect(attr) {
-        indirect_unported("detoast_external_attr");
+        // SAFETY: writer invariant (see indirect_target).
+        let target = unsafe { indirect_target(attr) };
+        debug_assert!(!is_external_indirect(target));
+        if is_external(target) {
+            detoast_external_attr(mcx, target)
+        } else {
+            copy_verbatim(mcx, target)
+        }
     } else if is_external_expanded(attr) {
         flatten_expanded(mcx, attr)
     } else {
@@ -179,7 +202,13 @@ pub fn detoast_attr<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u
             Ok(fetched)
         }
     } else if is_external_indirect(attr) {
-        indirect_unported("detoast_attr");
+        // SAFETY: writer invariant (see indirect_target).
+        let target = unsafe { indirect_target(attr) };
+        debug_assert!(!is_external_indirect(target));
+        // C copies iff the recursion returned the dereferenced pointer
+        // unchanged; this port's fallthrough already always returns an
+        // owned copy, so the plain recursive call matches C's semantics.
+        detoast_attr(mcx, target)
     } else if is_external_expanded(attr) {
         let flat = flatten_expanded(mcx, attr)?;
         // C: flatteners are not allowed to produce compressed/short output.
@@ -253,7 +282,10 @@ pub fn detoast_attr_slice<'mcx>(
             Some(toast_internals_seams::toast_fetch_datum::call(mcx, attr)?)
         }
     } else if is_external_indirect(attr) {
-        indirect_unported("detoast_attr_slice");
+        // SAFETY: writer invariant (see indirect_target).
+        let target = unsafe { indirect_target(attr) };
+        debug_assert!(!is_external_indirect(target));
+        return detoast_attr_slice(mcx, target, sliceoffset, slicelength);
     } else if is_external_expanded(attr) {
         Some(flatten_expanded(mcx, attr)?)
     } else {
@@ -388,7 +420,10 @@ pub fn toast_raw_datum_size(value: &[u8]) -> usize {
     if is_external_ondisk(value) {
         VarattExternal::from_image(value).va_rawsize as usize
     } else if is_external_indirect(value) {
-        indirect_unported("toast_raw_datum_size");
+        // SAFETY: writer invariant (see indirect_target).
+        let target = unsafe { indirect_target(value) };
+        debug_assert!(!is_external_indirect(target));
+        toast_raw_datum_size(target)
     } else if is_external_expanded(value) {
         // SAFETY: expanded image embeds a live header pointer (flatten_expanded).
         unsafe {
@@ -410,7 +445,10 @@ pub fn toast_datum_size(value: &[u8]) -> usize {
     if is_external_ondisk(value) {
         VarattExternal::from_image(value).extsize() as usize
     } else if is_external_indirect(value) {
-        indirect_unported("toast_datum_size");
+        // SAFETY: writer invariant (see indirect_target).
+        let target = unsafe { indirect_target(value) };
+        debug_assert!(!is_external_indirect(target));
+        toast_datum_size(target)
     } else if is_external_expanded(value) {
         // SAFETY: expanded image embeds a live header pointer (flatten_expanded).
         unsafe {
