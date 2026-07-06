@@ -9475,6 +9475,7 @@ dependencies = [
  "partcache",
  "pg_inherits",
  "readfuncs",
+ "rewrite_manip",
  "snapmgr",
  "table",
  "types_core",

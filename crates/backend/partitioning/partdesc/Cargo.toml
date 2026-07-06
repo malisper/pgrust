@@ -18,6 +18,7 @@ partbounds = { path = "../partbounds" }
 partcache = { path = "../../utils/cache/partcache" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
 readfuncs = { path = "../../nodes/readfuncs" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 inval = { path = "../../utils/cache/inval" }
