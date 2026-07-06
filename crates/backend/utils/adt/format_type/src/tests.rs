@@ -43,6 +43,7 @@ fn install_fixture() {
                 VARCHAROID => Some(shape("varchar", InvalidOid, InvalidOid)),
                 INT4ARRAYOID => Some(shape("_int4", INT4OID, F_ARRAY_SUBSCRIPT_HANDLER)),
                 20000 => Some(shape("mytype", InvalidOid, InvalidOid)),
+                20001 => Some(shape("othertype", InvalidOid, InvalidOid)),
                 _ => None,
             })
         });
@@ -62,6 +63,36 @@ fn install_fixture() {
                 typdelim: b',' as i8,
                 typisdefined: true,
             }))
+        });
+        // C TypeIsVisible semantics for the fixture: builtins and 20000 are
+        // on the path; 20001 (initdb-band oid 13000 nsp) is not.
+        namespace_seams::type_is_visible::set(|typid| Ok(typid != 20001));
+        namespace_seams::is_temp_namespace::set(|_| false);
+        syscache_seams::pg_type_domain_shape::set(|typid| {
+            let mut n = types_tuple::NameData::default();
+            let name: &[u8] = match typid {
+                20001 => b"othertype",
+                INT4OID => b"int4",
+                TEXTOID => b"text",
+                CHAROID => b"char",
+                BPCHAROID => b"bpchar",
+                VARCHAROID => b"varchar",
+                _ => b"mytype",
+            };
+            n.data[..name.len()].copy_from_slice(name);
+            Ok(Some(syscache_seams::PgTypeDomainShape {
+                typname: n,
+                typnamespace: 13000,
+                typtype: b'b' as i8,
+                typnotnull: false,
+                typbasetype: types_core::InvalidOid,
+            }))
+        });
+        syscache_seams::pg_namespace_nspname::set(|nspid| {
+            assert_eq!(nspid, 13000);
+            let mut n = types_tuple::NameData::default();
+            n.data[..18].copy_from_slice(b"information_schema");
+            Ok(Some(n))
         });
         fmgr_seams::fmgr_info::set(|oid| match oid {
             VARCHARTYPMODOUT => Ok(types_fmgr::FmgrInfo::new(
@@ -107,8 +138,16 @@ fn unknown_oid_is_cache_lookup_error() {
 #[test]
 fn user_type_renders_via_type_is_visible() {
     install_fixture();
-    namespace_seams::type_is_visible::set(|typid| Ok(typid == 20000));
     assert_eq!(format_type_be(20000).unwrap(), "mytype");
+}
+
+// C qualifies purely on visibility, no OID gate: an initdb-band type whose
+// schema is off the search_path renders schema-qualified (the
+// information_schema.cardinal_number domain-violation message shape).
+#[test]
+fn invisible_initdb_band_type_renders_qualified() {
+    install_fixture();
+    assert_eq!(format_type_be(20001).unwrap(), "information_schema.othertype");
 }
 
 #[test]

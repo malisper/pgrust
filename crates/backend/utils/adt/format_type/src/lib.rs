@@ -9,7 +9,7 @@ use datum::Datum;
 use keywords::{KeywordCategory, ScanKeywordCategories, ScanKeywordLookup, ScanKeywords};
 use types_core::primitive::InvalidOid;
 use types_core::catalog::{
-    FirstNormalObjectId, BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
+    BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
     INT8OID, INTERVALOID, JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID,
     VARBITOID, VARCHAROID,
 };
@@ -135,9 +135,11 @@ pub fn format_type_extended(
                 .unwrap_or_else(|_| panic!("non-UTF-8 pg_type.typname"));
             // C: quote_qualified_identifier(NULL-if-visible nspname, typname).
             let mut quoted = String::new();
+            // C qualifies purely on visibility (no OID gate): initdb-created
+            // types (information_schema domains, oid < FirstNormalObjectId)
+            // must qualify when their schema is not on search_path.
             if flags & FORMAT_TYPE_FORCE_QUALIFY != 0
-                || (named_oid >= FirstNormalObjectId
-                    && !namespace_seams::type_is_visible::call(named_oid)?)
+                || !namespace_seams::type_is_visible::call(named_oid)?
             {
                 let t = syscache_seams::pg_type_domain_shape::call(named_oid)?
                     .ok_or_else(|| type_lookup_failed(named_oid))?;
