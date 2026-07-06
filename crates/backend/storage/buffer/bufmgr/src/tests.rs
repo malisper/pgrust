@@ -1047,3 +1047,92 @@ fn buf_table_dense_grow_delete_reinsert() {
     assert!(format!("{err:?}").contains("shared buffer hash table corrupted"));
 }
 
+
+// ---- cleanup lock / pin-count waiter ----
+
+// The foreign_data-sweep abort shape: a cleanup-lock waiter (VACUUM) parks in
+// ProcWaitForSignal under BM_PIN_COUNT_WAITER while another backend holds a
+// pin; that backend's last unpin wakes it via WakePinCountWaiter/ProcSendSignal.
+#[test]
+fn cleanup_lock_waits_for_concurrent_pin_and_is_woken_by_unpin() {
+    let _g = setup();
+    let rel = 9800u32;
+    let b = read_blk(rel, 0);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        become_backend();
+        let owner =
+            resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "pin-holder")
+                .unwrap();
+        resowner::SetCurrentResourceOwner(owner);
+        let b2 = read_blk(rel, 0);
+        tx.send(b2).unwrap();
+        // Unpin only once the cleanup waiter has registered; ProcSendSignal
+        // before the waiter parks is safe (latch stays set), so no lost wakeup.
+        let desc = GetBufferDescriptor(b2 - 1);
+        while desc.state.load(Ordering::Acquire) & types_storage::buf::BM_PIN_COUNT_WAITER == 0 {
+            std::thread::yield_now();
+        }
+        ReleaseBuffer(b2).unwrap();
+    });
+    let b2 = rx.recv().unwrap();
+    assert_eq!(b2, b, "both backends must resolve to the same buffer");
+    LockBufferForCleanup(b).unwrap();
+    holder.join().unwrap();
+
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert_eq!(state & BUF_REFCOUNT_MASK, 1, "cleanup lock implies pincount 1");
+    assert_eq!(state & types_storage::buf::BM_PIN_COUNT_WAITER, 0);
+    assert_eq!(crate::pin::pin_count_wait_buf(), -1);
+    assert!(crate::ops::IsBufferCleanupOK(b));
+    UnlockReleaseBuffer(b).unwrap();
+}
+
+// UnlockBuffers (abort path) clears an abandoned BM_PIN_COUNT_WAITER so the
+// next unpin does not try to wake a waiter that already errored out.
+#[test]
+fn unlock_buffers_clears_abandoned_waiter_flag() {
+    let _g = setup();
+    let rel = 9802u32;
+    let b = read_blk(rel, 0);
+    let desc = GetBufferDescriptor(b - 1);
+
+    let mut state = LockBufHdr(desc);
+    // SAFETY: header lock held.
+    unsafe { desc.set_wait_backend_pgprocno(globals::MyProcNumber()) };
+    crate::pin::set_pin_count_wait_buf(desc.buf_id);
+    state |= types_storage::buf::BM_PIN_COUNT_WAITER;
+    UnlockBufHdr(desc, state);
+
+    UnlockBuffers();
+    assert_eq!(crate::pin::pin_count_wait_buf(), -1);
+    let state = desc.state.load(Ordering::Acquire);
+    assert_eq!(state & types_storage::buf::BM_PIN_COUNT_WAITER, 0);
+    ReleaseBuffer(b).unwrap();
+}
+
+// A failed ResourceOwnerForget on unpin degrades to WARNING; a panic here
+// during unwind aborts the whole process (the sweep's crash amplification).
+#[test]
+fn unpin_with_mismatched_owner_warns_instead_of_panicking() {
+    let _g = setup();
+    let rel = 9803u32;
+    let save = resowner::CurrentResourceOwner();
+    let b = read_blk(rel, 0);
+
+    let other =
+        resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "wrong-owner").unwrap();
+    resowner::SetCurrentResourceOwner(other);
+    // Pin is remembered on `save`; the forget on `other` fails but the shared
+    // refcount must still be released without panicking.
+    ReleaseBuffer(b).unwrap();
+    assert_eq!(GetPrivateRefCount(b), 0);
+
+    resowner::SetCurrentResourceOwner(save);
+    resowner::ResourceOwnerForget(save, datum::Datum::from_i32(b), crate::pin::buffer_pin_desc())
+        .unwrap();
+    resowner::ResourceOwnerDelete(other);
+    let state = GetBufferDescriptor(b - 1).state.load(Ordering::Acquire);
+    assert_eq!(state & BUF_REFCOUNT_MASK, 0);
+}

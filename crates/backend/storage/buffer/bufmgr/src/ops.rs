@@ -22,6 +22,8 @@ use crate::pin::{
     CheckBufferIsPinnedOnce, ReleaseBuffer,
 };
 
+const PG_WAIT_BUFFERPIN: u32 = 0x0400_0000;
+
 pub const BUFFER_LOCK_UNLOCK: i32 = 0;
 pub const BUFFER_LOCK_SHARE: i32 = 1;
 pub const BUFFER_LOCK_EXCLUSIVE: i32 = 2;
@@ -61,8 +63,9 @@ pub fn ConditionalLockBuffer(buffer: Buffer) -> PgResult<bool> {
     LWLockConditionalAcquire(&shared_desc(buffer).content_lock, LW_EXCLUSIVE)
 }
 
-/// LockBufferForCleanup (bufmgr.c); the multi-backend wait arm needs
-/// ProcWaitForSignal.
+/// LockBufferForCleanup (bufmgr.c): loops until it holds the exclusive
+/// content lock with pincount 1; waits on ProcWaitForSignal, woken by
+/// UnpinBuffer's WakePinCountWaiter.
 pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
     debug_assert!(BufferIsPinned(buffer));
     debug_assert!(pin_count_wait_buf() == -1);
@@ -101,7 +104,28 @@ pub fn LockBufferForCleanup(buffer: Buffer) -> PgResult<()> {
         buf_state |= BM_PIN_COUNT_WAITER;
         UnlockBufHdr(desc, buf_state);
         LockBuffer(buffer, BUFFER_LOCK_UNLOCK)?;
-        panic!("unported callee reached from bufmgr.c LockBufferForCleanup: ProcWaitForSignal (storage/lmgr/proc.c)");
+        if xlogutils_seams::in_hot_standby::is_installed()
+            && xlogutils_seams::in_hot_standby::call()
+        {
+            // Startup-process arm: on error PIN_COUNT_WAIT_BUF stays set so
+            // the abort path's UnlockBuffers clears BM_PIN_COUNT_WAITER.
+            lmgr_proc::SetStartupBufferPinWaitBufId(buffer - 1);
+            let waited = standby_seams::resolve_recovery_conflict_with_buffer_pin::call();
+            lmgr_proc::SetStartupBufferPinWaitBufId(-1);
+            waited?;
+        } else {
+            lmgr_proc::ProcWaitForSignal(PG_WAIT_BUFFERPIN);
+        }
+        // ProcWaitForSignal can return on unrelated latch sets; clear the
+        // waiter flag only if it is still ours, then retry.
+        let mut buf_state = LockBufHdr(desc);
+        if buf_state & BM_PIN_COUNT_WAITER != 0
+            && desc.wait_backend_pgprocno() == globals::MyProcNumber()
+        {
+            buf_state &= !BM_PIN_COUNT_WAITER;
+        }
+        UnlockBufHdr(desc, buf_state);
+        set_pin_count_wait_buf(-1);
     }
 }
 
