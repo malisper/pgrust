@@ -969,6 +969,13 @@ fn default_violated(mcx: Mcx<'_>, default_rel: &Relation<'_>) -> Box<PgError> {
 struct ColumnsHashData {
     relid: Oid,
     nkeys: usize,
+    // InvalidOid means the fixed-arity (non-variadic) call form; otherwise
+    // this is the element type of the VARIADIC "any" array argument, and
+    // partcollid/partsupfunc carry a single entry (C: my_extra->partsupfunc[0]).
+    variadic_type: Oid,
+    variadic_typlen: i16,
+    variadic_typbyval: bool,
+    variadic_typalign: i8,
     // std Vec justified: rides FmgrInfo.fn_extra, same
     // open-set slot the C fn_mcxt allocation fills.
     partcollid: Vec<Oid>,
@@ -999,52 +1006,100 @@ pub fn fc_satisfies_hash_partition(
         return Err(hash_param_error("remainder for hash partition must be less than modulus"));
     }
     let flinfo = flinfo.expect("satisfies_hash_partition: NULL flinfo");
-    // C's VARIADIC-array call form dispatches on get_fn_expr_variadic.
-    if let Some(fx) = &flinfo.fn_expr {
-        if let Some(fe) = fx.downcast_ref::<FuncExpr<'static>>() {
-            if fe.funcvariadic {
-                panic!("satisfies_hash_partition: variadic array call form unported");
-            }
-        }
-    }
+    // C's call-form dispatch: get_fn_expr_variadic(fcinfo->flinfo).
+    let is_variadic = funcapi::get_fn_expr_variadic(Some(flinfo));
 
     let stale =
         flinfo.fn_extra_ref::<ColumnsHashData>().map_or(true, |x| x.relid != parent_id);
     if stale {
         let mcx = fcinfo.result_mcx();
         let parent = table::table_open(mcx, parent_id, AccessShareLock)?;
-        let key = partcache::RelationGetPartitionKey(&parent)?;
-        if key.strategy as u8 != PARTITION_STRATEGY_HASH {
-            let name = lsyscache::get_rel_name(mcx, parent_id)?
-                .map(|s| s.as_str().to_string())
-                .unwrap_or_default();
-            return Err(hash_param_error_owned(format!(
-                "\"{name}\" is not a hash partitioned table"
-            )));
-        }
-        let nargs = fcinfo.nargs as usize - 3;
-        if key.partnatts as usize != nargs {
-            return Err(hash_param_error_owned(format!(
-                "number of partitioning columns ({}) does not match number of partition keys \
-                 provided ({nargs})",
-                key.partnatts
-            )));
-        }
-        // C rechecks each argument's type via get_fn_expr_argtype +
-        // IsBinaryCoercible; fn_expr is not threaded to this call form, so the
-        // check is skipped (constraint-generated calls always match).
-        let mut partcollid = Vec::with_capacity(nargs);
-        let mut partsupfunc = Vec::with_capacity(nargs);
-        for j in 0..nargs {
-            partcollid.push(key.partcollation[j]);
-            partsupfunc.push(key.partsupfunc[j].borrow().clone());
-        }
-        flinfo.set_fn_extra(ColumnsHashData {
-            relid: parent_id,
-            nkeys: nargs,
-            partcollid,
-            partsupfunc,
-        });
+        // partcache::RelationGetPartitionKey only searches pg_partitioned_table
+        // when relkind is RELKIND_PARTITIONED_TABLE (C partcache.c:51-58);
+        // otherwise C hands back NULL without a syscache lookup. Mirror that
+        // gate here so a non-partitioned or child-partition relid reaches the
+        // SQL error below instead of the "cache lookup failed" internal panic.
+        let key = if parent.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            Some(partcache::RelationGetPartitionKey(&parent)?)
+        } else {
+            None
+        };
+        let key = match key {
+            Some(key) if key.strategy as u8 == PARTITION_STRATEGY_HASH => key,
+            _ => {
+                let name = lsyscache::get_rel_name(mcx, parent_id)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                parent.close(NoLock)?;
+                return Err(hash_param_error_owned(format!(
+                    "\"{name}\" is not a hash partitioned table"
+                )));
+            }
+        };
+
+        let extra = if !is_variadic {
+            let nargs = fcinfo.nargs as usize - 3;
+            if key.partnatts as usize != nargs {
+                return Err(hash_param_error_owned(format!(
+                    "number of partitioning columns ({}) does not match number of partition \
+                     keys provided ({nargs})",
+                    key.partnatts
+                )));
+            }
+            let mut partcollid = Vec::with_capacity(nargs);
+            let mut partsupfunc = Vec::with_capacity(nargs);
+            for j in 0..nargs {
+                let argtype = funcapi::get_fn_expr_argtype(Some(flinfo), j + 3);
+                let parttypid = key.parttypid[j];
+                if argtype != parttypid && !coerce::IsBinaryCoercible(argtype, parttypid)? {
+                    return Err(hash_param_error_owned(format!(
+                        "column {} of the partition key has type {}, but supplied value is of \
+                         type {}",
+                        j + 1,
+                        format_type::format_type_be(parttypid)?,
+                        format_type::format_type_be(argtype)?,
+                    )));
+                }
+                partcollid.push(key.partcollation[j]);
+                partsupfunc.push(key.partsupfunc[j].borrow().clone());
+            }
+            ColumnsHashData {
+                relid: parent_id,
+                nkeys: nargs,
+                variadic_type: InvalidOid,
+                variadic_typlen: 0,
+                variadic_typbyval: false,
+                variadic_typalign: 0,
+                partcollid,
+                partsupfunc,
+            }
+        } else {
+            let variadic_type = variadic_array_elemtype(fcinfo)?;
+            let (typlen, typbyval, typalign) = lsyscache::get_typlenbyvalalign(variadic_type)?;
+            for j in 0..key.partnatts as usize {
+                let parttypid = key.parttypid[j];
+                if parttypid != variadic_type {
+                    return Err(hash_param_error_owned(format!(
+                        "column {} of the partition key has type \"{}\", but supplied value is \
+                         of type \"{}\"",
+                        j + 1,
+                        format_type::format_type_be(parttypid)?,
+                        format_type::format_type_be(variadic_type)?,
+                    )));
+                }
+            }
+            ColumnsHashData {
+                relid: parent_id,
+                nkeys: key.partnatts as usize,
+                variadic_type,
+                variadic_typlen: typlen,
+                variadic_typbyval: typbyval,
+                variadic_typalign: typalign,
+                partcollid: vec![key.partcollation[0]],
+                partsupfunc: vec![key.partsupfunc[0].borrow().clone()],
+            }
+        };
+        flinfo.set_fn_extra(extra);
         // Hold the lock until commit.
         parent.close(NoLock)?;
     }
@@ -1052,23 +1107,98 @@ pub fn fc_satisfies_hash_partition(
     let my = flinfo.fn_extra_mut::<ColumnsHashData>().expect("just built");
     let seed = Datum::from_u64(HASH_PARTITION_SEED);
     let mut row_hash: u64 = 0;
-    for i in 0..my.nkeys {
-        let argno = i + 3;
-        if fcinfo.args[argno].isnull {
-            continue;
+
+    if my.variadic_type == InvalidOid {
+        for i in 0..my.nkeys {
+            let argno = i + 3;
+            if fcinfo.args[argno].isnull {
+                continue;
+            }
+            let hash = invoke_hash_support(
+                fcinfo,
+                &mut my.partsupfunc[i],
+                my.partcollid[i],
+                fcinfo.args[argno].value,
+                seed,
+            )?;
+            row_hash = hash_combine64(row_hash, hash);
         }
-        let mut call = LocalFcinfo::<2>::new(my.partcollid[i]);
-        // Custom hash opclasses (SQL-function support procs) allocate by-ref
-        // intermediates through the frame's result mcx.
-        // SAFETY: the outer frame's armed context outlives this inner call.
-        unsafe { call.set_result_mcx(fcinfo.result_mcx_detached()) };
-        call.set_arg(0, fcinfo.args[argno].value);
-        call.set_arg(1, seed);
-        let hash = my.partsupfunc[i].invoke(&mut call)?;
-        assert!(!call.isnull, "partition hash support function returned NULL");
-        row_hash = hash_combine64(row_hash, hash.as_u64());
+    } else {
+        let (datums, isnull) = deconstruct_variadic_array(
+            fcinfo,
+            my.variadic_typlen,
+            my.variadic_typbyval,
+            my.variadic_typalign,
+        )?;
+        if datums.len() != my.nkeys {
+            return Err(hash_param_error_owned(format!(
+                "number of partitioning columns ({}) does not match number of partition keys \
+                 provided ({})",
+                my.nkeys,
+                datums.len()
+            )));
+        }
+        for i in 0..datums.len() {
+            if isnull[i] {
+                continue;
+            }
+            let hash = invoke_hash_support(
+                fcinfo,
+                &mut my.partsupfunc[0],
+                my.partcollid[0],
+                datums[i],
+                seed,
+            )?;
+            row_hash = hash_combine64(row_hash, hash);
+        }
     }
     Ok(Datum::from_bool(row_hash % modulus as u64 == remainder as u64))
+}
+
+// Custom hash opclasses (SQL-function support procs) allocate by-ref
+// intermediates through the frame's result mcx.
+fn invoke_hash_support(
+    fcinfo: &FunctionCallInfoBaseData,
+    supfunc: &mut FmgrInfo,
+    collid: Oid,
+    val: Datum,
+    seed: Datum,
+) -> PgResult<u64> {
+    let mut call = LocalFcinfo::<2>::new(collid);
+    // SAFETY: the outer frame's armed context outlives this inner call.
+    unsafe { call.set_result_mcx(fcinfo.result_mcx_detached()) };
+    call.set_arg(0, val);
+    call.set_arg(1, seed);
+    let hash = supfunc.invoke(&mut call)?;
+    assert!(!call.isnull, "partition hash support function returned NULL");
+    Ok(hash.as_u64())
+}
+
+// Raw array bytes for the VARIADIC "any" call form's sole trailing argument
+// (C: PG_GETARG_ARRAYTYPE_P(3)).
+fn variadic_array_bytes<'mcx>(fcinfo: &FunctionCallInfoBaseData) -> PgResult<&'mcx [u8]> {
+    // SAFETY: the outer frame's armed context outlives this array's readers.
+    let mcx: Mcx<'mcx> = unsafe { fcinfo.result_mcx_detached() };
+    // SAFETY: a live varlena array Datum readable through its VARSIZE_ANY.
+    let p = unsafe { fcinfo.arg_ptr(3) };
+    let raw = unsafe { core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)) };
+    Ok(detoast_seams::detoast_attr::call(mcx, raw)?.leak())
+}
+
+fn variadic_array_elemtype(fcinfo: &FunctionCallInfoBaseData) -> PgResult<Oid> {
+    Ok(arrayfuncs::arr_elemtype(variadic_array_bytes(fcinfo)?))
+}
+
+fn deconstruct_variadic_array<'mcx>(
+    fcinfo: &FunctionCallInfoBaseData,
+    typlen: i16,
+    typbyval: bool,
+    typalign: i8,
+) -> PgResult<(mcx::PgVec<'mcx, Datum>, mcx::PgVec<'mcx, bool>)> {
+    // SAFETY: the outer frame's armed context outlives this array's readers.
+    let mcx: Mcx<'mcx> = unsafe { fcinfo.result_mcx_detached() };
+    let flat = variadic_array_bytes(fcinfo)?;
+    arrayfuncs::deconstruct_array(mcx, flat, typlen as i32, typbyval, typalign as u8, true)
 }
 
 #[cold]
