@@ -1005,6 +1005,9 @@ fn pull_up_simple_subquery<'mcx>(
             crate::subselect::query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
         crate::prep::replace_empty_jointree(mcx, &mut sub_local)?;
         crate::subselect::pull_up_sublinks(run, &mut sub_local)?;
+        // C: preprocess its function RTEs to inline any set-returning
+        // functions (prepjointree.c:1353).
+        preprocess_function_rtes(run, &mut sub_local)?;
         if sub_local.rtable.iter().any(|n| {
             matches!(
                 n.as_range_tbl_entry().expect("rtable cell").rtekind,
@@ -1042,7 +1045,7 @@ fn pull_up_simple_subquery<'mcx>(
             RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
         )
     }) {
-        // C recursively completes preprocess_function_rtes +
+        // C recursively completes preprocess_function_rtes (SRF inlining) and
         // pull_up_subqueries for the child before splicing it in; runs on a
         // cells-copy (C copyObject), the shared tree is never written.
         let mut sub_local = crate::subselect::query_cells_copy(mcx, shared_sub)?;
