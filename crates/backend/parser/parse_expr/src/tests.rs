@@ -66,6 +66,10 @@ fn install_oper_fixture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        // transformExpressionList's star-form probe (insert-lane F1): the
+        // multi-assign rigs feed non-star sources, so Ok(None) = the normal
+        // transformExpr path, exactly the pre-seam behavior these tests pin.
+        parse_func_seams::expandExpressionListStar::set(|_, _, _, _| Ok(None));
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
             let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
             if l == INT4OID && r == INT4OID {
