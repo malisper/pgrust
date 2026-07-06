@@ -103,10 +103,7 @@ impl<'mcx> DestReceiver<'mcx> {
                 dr.shutdown();
                 Ok(())
             }
-            DestReceiver::TupleQueue(dr) => {
-                dr.shutdown();
-                Ok(())
-            }
+            DestReceiver::TupleQueue(dr) => dr.shutdown(),
         }
     }
 

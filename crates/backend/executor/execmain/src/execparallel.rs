@@ -73,7 +73,9 @@ pub(crate) struct ParallelExecShared {
     param_exec: Mutex<Vec<(i32, Datum, bool)>>,
     tuples_needed: i64,
     eflags: i32,
-    queues: Mutex<Vec<Arc<shm_mq::ShmMq>>>,
+    // Tuple queue pair per worker: shm_mq ring (chunk indices + detach
+    // discipline) and the chunk ledger the payloads cross through.
+    queues: Mutex<Vec<(Arc<shm_mq::ShmMq>, Arc<tqueue::ChunkLedger>)>>,
     // Written once by the leader's InitializeDSM walk, before workers launch.
     nodes: Mutex<Vec<(i32, ParallelNodeShared)>>,
     instrumentation: Option<SharedInstrumentation>,
@@ -83,7 +85,7 @@ pub(crate) struct ParallelExecShared {
 pub struct ParallelExecutorInfo {
     pub pcxt: parallel::ParallelContextId,
     shared: Arc<ParallelExecShared>,
-    tqueue: Vec<Option<shm_mq::ShmMqHandle>>,
+    tqueue: Vec<Option<(shm_mq::ShmMqHandle, Arc<tqueue::ChunkLedger>)>>,
     pub reader: Vec<tqueue::TupleQueueReader>,
     pub finished: bool,
     instrumented: bool,
@@ -358,15 +360,16 @@ fn serialize_param_exec(
 fn setup_tuple_queues(
     shared: &ParallelExecShared,
     nworkers: i32,
-) -> Vec<Option<shm_mq::ShmMqHandle>> {
+) -> Vec<Option<(shm_mq::ShmMqHandle, Arc<tqueue::ChunkLedger>)>> {
     let me = init_small::globals::MyProcNumber();
     let mut queues = Vec::with_capacity(nworkers.max(0) as usize);
     let mut handles = Vec::with_capacity(nworkers.max(0) as usize);
     for _ in 0..nworkers {
         let mq = shm_mq::shm_mq_create(tqueue::PARALLEL_TUPLE_QUEUE_SIZE);
         mq.set_receiver(me);
-        handles.push(Some(shm_mq::shm_mq_attach(Arc::clone(&mq))));
-        queues.push(mq);
+        let ledger = Arc::new(tqueue::ChunkLedger::new());
+        handles.push(Some((shm_mq::shm_mq_attach(Arc::clone(&mq)), Arc::clone(&ledger))));
+        queues.push((mq, ledger));
     }
     *shared.queues.lock().unwrap_or_else(|e| e.into_inner()) = queues;
     handles
@@ -479,11 +482,12 @@ pub fn exec_parallel_create_readers(pei: &mut ParallelExecutorInfo) {
     debug_assert!(pei.reader.is_empty());
     let launched = parallel::nworkers_launched(pei.pcxt);
     for i in 0..launched as usize {
-        let mut handle = pei.tqueue[i].take().expect("tuple queue handle already taken");
+        let (mut handle, ledger) =
+            pei.tqueue[i].take().expect("tuple queue handle already taken");
         if let Some(bgwh) = parallel::worker_bgwhandle(pei.pcxt, i) {
             handle.set_handle(bgwh.slot, bgwh.generation);
         }
-        pei.reader.push(tqueue::TupleQueueReader::new(handle));
+        pei.reader.push(tqueue::TupleQueueReader::new_batched(handle, ledger));
     }
 }
 
@@ -638,13 +642,16 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     let me = parallel::ParallelWorkerNumber();
     debug_assert!(me >= 0);
 
-    let mq = {
+    let (mq, ledger) = {
         let queues = exec.queues.lock().unwrap_or_else(|e| e.into_inner());
-        Arc::clone(&queues[me as usize])
+        let (mq, ledger) = &queues[me as usize];
+        (Arc::clone(mq), Arc::clone(ledger))
     };
     mq.set_sender(init_small::globals::MyProcNumber());
-    let mut receiver =
-        DestReceiver::TupleQueue(tqueue::tqueue_create_DR(shm_mq::shm_mq_attach(mq)));
+    let mut receiver = DestReceiver::TupleQueue(tqueue::tqueue_create_DR_batched(
+        shm_mq::shm_mq_attach(mq),
+        ledger,
+    ));
 
     // SAFETY: leader-arena pstmt, alive until the leader joins this thread.
     let pstmt: &PlannedStmt<'_> = unsafe { &*exec.pstmt.0 };

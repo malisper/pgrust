@@ -190,7 +190,7 @@ fn gather_getnext<'mcx>(
             if let Some(ptr) = gather_readnext(node)? {
                 let mcx = estate.es_query_cxt;
                 let slot = estate.slot_mut(node.funnel_slot);
-                // SAFETY: queue memory (8-aligned ring/reassembly buffer),
+                // SAFETY: transport memory (8-aligned batch chunk or ring),
                 // live until the next receive on this reader — consumed
                 // before the next gather_readnext, as C.
                 unsafe { ::exectuples::exec_store_minimal_tuple_ptr(slot, mcx, ptr) };

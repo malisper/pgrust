@@ -22,7 +22,7 @@ const PG_WAIT_IPC: u32 = 0x0800_0000;
 // PG_WAIT_IPC | index in wait_event_names.txt's IPC section.
 const WAIT_EVENT_MQ_INTERNAL: u32 = PG_WAIT_IPC + 33;
 const WAIT_EVENT_MQ_RECEIVE: u32 = PG_WAIT_IPC + 35;
-const WAIT_EVENT_MQ_SEND: u32 = PG_WAIT_IPC + 36;
+pub const WAIT_EVENT_MQ_SEND: u32 = PG_WAIT_IPC + 36;
 
 // Divergence from C: the ring is its own Arc'd allocation, not the tail of an
 // in-segment header, so the minimum is just one MAXALIGN'd chunk.
@@ -101,6 +101,12 @@ impl ShmMq {
 
     fn detached(&self) -> bool {
         self.mq_detached.load(Ordering::Relaxed)
+    }
+
+    // For layered transports (tqueue batch chunks): observable detach state,
+    // same Relaxed read the send/receive paths use.
+    pub fn is_detached(&self) -> bool {
+        self.detached()
     }
 
     fn set_detached(&self) {
@@ -663,7 +669,9 @@ impl Drop for ShmMqHandle {
     }
 }
 
-fn wait_on_my_latch(my_latch: Option<LatchHandle>, wait_event_info: u32) -> PgResult<()> {
+// Pub for layered transports that block on the same latch discipline
+// (tqueue's chunk-slot wait uses the MQ_SEND wait event).
+pub fn wait_on_my_latch(my_latch: Option<LatchHandle>, wait_event_info: u32) -> PgResult<()> {
     let latch = my_latch.expect("shm_mq blocking operation requires MyLatch");
     WaitLatch(Some(latch), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event_info)?;
     ResetLatch(latch);
