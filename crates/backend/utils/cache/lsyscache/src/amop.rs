@@ -24,6 +24,20 @@ pub const GIN_AM_OID: Oid = 2742;
 pub const SPGIST_AM_OID: Oid = 4000;
 pub const BRIN_AM_OID: Oid = 3580;
 
+// A non-builtin AM (CREATE ACCESS METHOD over a builtin index handler)
+// behaves as its handler's builtin AM (amapi.c resolves via GetIndexAmRoutine).
+fn canonical_index_am(amoid: Oid) -> Oid {
+    match syscache_seams::pg_am_amhandler::call(amoid) {
+        Ok(Some(330)) => BTREE_AM_OID,
+        Ok(Some(331)) => HASH_AM_OID,
+        Ok(Some(333)) => GIN_AM_OID,
+        Ok(Some(332)) => GIST_AM_OID,
+        Ok(Some(334)) => SPGIST_AM_OID,
+        Ok(Some(335)) => BRIN_AM_OID,
+        _ => amoid,
+    }
+}
+
 // amapi.c IndexAmTranslateStrategy over the built-in AMs (bttranslatestrategy
 // / hashtranslatestrategy; gist/gin/spgist/brin define no translator).
 // Non-core AMs need GetIndexAmRoutineByAmId, unported: loud panic.
@@ -33,7 +47,10 @@ fn index_am_translate_strategy(strategy: i16, amoid: Oid, _opfamily: Oid) -> Com
         BTREE_AM_OID => COMPARE_INVALID,
         HASH_AM_OID if strategy == HTEqualStrategyNumber => COMPARE_EQ,
         HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => COMPARE_INVALID,
-        _ => panic!("IndexAmTranslateStrategy for non-builtin AM {amoid}: amapi.c unported"),
+        _ => match canonical_index_am(amoid) {
+            c if c != amoid => index_am_translate_strategy(strategy, c, _opfamily),
+            _ => panic!("IndexAmTranslateStrategy for non-builtin AM {amoid}: amapi.c unported"),
+        },
     }
 }
 
@@ -44,7 +61,10 @@ fn index_am_translate_cmptype(cmptype: CompareType, amoid: Oid, _opfamily: Oid) 
         BTREE_AM_OID => InvalidStrategy,
         HASH_AM_OID if cmptype == COMPARE_EQ => HTEqualStrategyNumber as StrategyNumber,
         HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => InvalidStrategy,
-        _ => panic!("IndexAmTranslateCompareType for non-builtin AM {amoid}: amapi.c unported"),
+        _ => match canonical_index_am(amoid) {
+            c if c != amoid => index_am_translate_cmptype(cmptype, c, _opfamily),
+            _ => panic!("IndexAmTranslateCompareType for non-builtin AM {amoid}: amapi.c unported"),
+        },
     }
 }
 
@@ -54,7 +74,10 @@ fn index_am_consistent_flags(amoid: Oid) -> (bool, bool) {
         BTREE_AM_OID => (true, true),
         HASH_AM_OID => (true, false),
         GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => (false, false),
-        _ => panic!("GetIndexAmRoutineByAmId for non-builtin AM {amoid}: amapi.c unported"),
+        _ => match canonical_index_am(amoid) {
+            c if c != amoid => index_am_consistent_flags(c),
+            _ => panic!("GetIndexAmRoutineByAmId for non-builtin AM {amoid}: amapi.c unported"),
+        },
     }
 }
 
@@ -124,7 +147,10 @@ fn get_opmethod_canorder(amoid: Oid) -> bool {
     match amoid {
         BTREE_AM_OID => true,
         HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => false,
-        _ => panic!("get_opmethod_canorder for non-builtin AM {amoid}: amapi.c unported"),
+        _ => match canonical_index_am(amoid) {
+            c if c != amoid => get_opmethod_canorder(c),
+            _ => panic!("get_opmethod_canorder for non-builtin AM {amoid}: amapi.c unported"),
+        },
     }
 }
 

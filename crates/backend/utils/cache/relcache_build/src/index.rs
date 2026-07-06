@@ -103,17 +103,17 @@ pub(crate) fn relation_init_index_access_info(
     };
     indkey.extend_from_slice(keyvals);
 
-    let amsupport = match form.relam {
-        BTREE_AM_OID => BTNProcs,
-        HASH_AM_OID => HASHNProcs,
-        GIN_AM_OID => GINNProcs,
-        GIST_AM_OID => GISTNProcs,
-        SPGIST_AM_OID => SPGISTNProcs,
-        BRIN_AM_OID => BRINNProcs,
-        other => panic!(
-            "relcache_build: index AM {other} for index {relid} unported \
-             (amapi closed set is btree+hash+gin+gist+spgist+brin)"
-        ),
+    // amroutine->amsupport per handler; from_relam covers non-builtin AMs
+    // over builtin handlers.
+    let amsupport = match types_relscan::IndexAmKind::from_relam(form.relam) {
+        types_relscan::IndexAmKind::Btree => BTNProcs,
+        types_relscan::IndexAmKind::Hash => HASHNProcs,
+        types_relscan::IndexAmKind::Gin => GINNProcs,
+        types_relscan::IndexAmKind::Gist => GISTNProcs,
+        types_relscan::IndexAmKind::Spgist => SPGISTNProcs,
+        types_relscan::IndexAmKind::Brin => BRINNProcs,
+        #[allow(unreachable_patterns)]
+        other => panic!("relcache_build: index AM kind {other:?} for index {relid} unported"),
     };
     let mut opfamily: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;
     let mut opcintype: PgVec<'static, Oid> = mcx::vec_with_capacity_in(mcx, nkey)?;

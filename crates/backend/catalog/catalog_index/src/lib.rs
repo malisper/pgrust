@@ -66,33 +66,6 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(types_error::ERROR, msg).with_sqlstate(sqlstate))
 }
 
-// index_create runs before the index relation exists, so a non-builtin AM
-// (CREATE ACCESS METHOD over a builtin index handler) resolves through
-// pg_am.amhandler into relscan's registry here (mirrors relcache's arm).
-fn register_index_am_kind(relam: Oid) -> PgResult<()> {
-    use types_relscan::IndexAmKind;
-    if matches!(
-        relam,
-        BTREE_AM_OID | HASH_AM_OID | GIN_AM_OID | GIST_AM_OID
-    ) || relam == types_core::SPGIST_AM_OID
-        || relam == types_core::BRIN_AM_OID
-    {
-        return Ok(());
-    }
-    let kind = match syscache_seams::pg_am_amhandler::call(relam)? {
-        Some(330) => IndexAmKind::Btree,
-        Some(331) => IndexAmKind::Hash,
-        Some(333) => IndexAmKind::Gin,
-        Some(332) => IndexAmKind::Gist,
-        Some(334) => IndexAmKind::Spgist,
-        Some(335) => IndexAmKind::Brin,
-        Some(other) => unported(&format!("index_create: index AM handler function {other}")),
-        None => panic!("cache lookup failed for access method {relam}"),
-    };
-    types_relscan::register_index_am(relam, kind);
-    Ok(())
-}
-
 fn oid_scankey(attno: usize, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
@@ -573,7 +546,6 @@ pub fn index_create<'mcx>(
     if extra.constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS != 0 {
         unported("index_create: existing-index constraint flag");
     }
-    register_index_am_kind(accessMethodId)?;
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
