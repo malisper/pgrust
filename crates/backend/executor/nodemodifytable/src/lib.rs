@@ -2010,7 +2010,7 @@ fn merge_update_act<'mcx>(
             && !execpartition::exec_partition_check(mcx, &mut mt.rel_mut().partition_check, rel, slot)?
         {
             if mt.root.is_none() {
-                return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
+                return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None));
             }
             // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
             // performed outside this borrow scope.
@@ -2767,7 +2767,7 @@ fn exec_update<'mcx>(
                     return Err(invalid_on_update_specification());
                 }
                 if mt.root.is_none() {
-                    return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
+                    return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None));
                 }
                 // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
                 // performed outside this borrow scope.
@@ -4242,7 +4242,7 @@ fn exec_insert<'mcx>(
         {
             let slot = &mut es_tupleTable[slot_id.0 as usize];
             if !execpartition::exec_partition_check(mcx, &mut r.partition_check, target, slot)? {
-                return Err(execpartition::partition_constraint_violation(mcx, target, slot));
+                return Err(execpartition::partition_constraint_violation(mcx, target, slot, None));
             }
         }
     }
@@ -4341,6 +4341,10 @@ fn exec_insert<'mcx>(
     }
 
     {
+        // Copy-out RTE/perminfo handles for the cold partition-constraint
+        // error path (the destructure below pins *estate).
+        let target_rte = estate.es_range_table[(mt.rels[mt.cur].rti - 1) as usize];
+        let perminfos = estate.es_rteperminfos;
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
         let operation = mt.operation;
         let ModifyTableState {
@@ -4416,7 +4420,31 @@ fn exec_insert<'mcx>(
         // leaf BR trigger could have changed the row.
         if rel.rd_rel.relispartition && (leaf_idx.is_none() || leaf_has_br_insert) {
             if !execpartition::exec_partition_check(mcx, pcheck, rel, slot)? {
-                return Err(execpartition::partition_constraint_violation(mcx, rel, slot));
+                // ExecGetInsertedCols/UpdatedCols via the target RTE's
+                // perminfo, remapped to the leaf's attnos (execUtils.c).
+                let mod_cols = {
+                    let rte = target_rte;
+                    let mut cols = types_nodes::Bitmapset::empty();
+                    if rte.perminfoindex > 0 {
+                        if let Some(pis) = perminfos {
+                            let pi = pis
+                                .nth(rte.perminfoindex as usize - 1)
+                                .as_rte_permission_info()
+                                .expect("permInfos cell");
+                            cols = pi.insertedCols.union(&pi.updatedCols, mcx)?;
+                        }
+                    }
+                    match leaf_idx.and_then(|idx| router.as_ref().unwrap().leaf_attrmap(idx)) {
+                        Some(map) => execute_attr_map_cols(mcx, map, &cols)?,
+                        None => cols,
+                    }
+                };
+                return Err(execpartition::partition_constraint_violation(
+                    mcx,
+                    rel,
+                    slot,
+                    Some(&mod_cols),
+                ));
             }
         }
 

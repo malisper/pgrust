@@ -423,6 +423,21 @@ pub fn contain_exec_param(clause: Node<'_>, param_ids: &[i32]) -> PgResult<bool>
     ContainExecParam { param_ids }.visit(clause)
 }
 
+struct ContainAnyExecParam;
+
+impl<'mcx> NodeWalker<'mcx> for ContainAnyExecParam {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(p) = node.as_param() {
+            return Ok(p.paramkind == ParamKind::PARAM_EXEC);
+        }
+        expression_tree_walker(node, self)
+    }
+}
+
+pub fn contain_exec_params(clause: Node<'_>) -> PgResult<bool> {
+    ContainAnyExecParam.visit(clause)
+}
+
 struct ContainContextDependent {
     casetestexpr_ok: bool,
 }
