@@ -180,6 +180,52 @@ pub(crate) fn replace_outer_agg<'mcx>(
     )
 }
 
+/// replace_outer_returning (paramassign.c): no dedupe, as replace_outer_agg.
+pub(crate) fn replace_outer_returning<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    retlevelsup: u32,
+    rexpr_node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    debug_assert!(retlevelsup > 0);
+    let idx = run
+        .suspended_roots
+        .len()
+        .checked_sub(retlevelsup as usize)
+        .unwrap_or_else(|| {
+            panic!(
+                "replace_outer_returning (paramassign.c): retlevelsup {retlevelsup} \
+                 exceeds the ancestor chain"
+            )
+        });
+    let mcx = run.mcx;
+    let retexpr = rexpr_node
+        .as_returning_expr()
+        .expect("ReturningExpr")
+        .retexpr;
+    let ptype = nodes_core::expr_type(retexpr);
+    let ptypmod = nodes_core::expr_typmod(retexpr);
+    let pcollid = nodes_core::expr_collation(retexpr);
+    let copy = rewrite_manip::copy_node(mcx, rexpr_node)?;
+    rewrite_manip::IncrementVarSublevelsUp(copy, -(retlevelsup as i32), 0)?;
+    let param_id = run.glob.param_exec_types.len() as i32;
+    run.glob.param_exec_types.lappend(mcx, ptype)?;
+    let target = &mut run.suspended_roots[idx].root;
+    let item_id = target.alloc_expr_node(copy);
+    let pp = target.alloc_planner_param_item(PlannerParamItem { item: item_id, paramId: param_id });
+    target.plan_params.push(pp);
+    Node::mk(
+        mcx,
+        Param {
+            paramkind: ParamKind::PARAM_EXEC,
+            paramid: param_id,
+            paramtype: ptype,
+            paramtypmod: ptypmod,
+            paramcollid: pcollid,
+            location: -1,
+        },
+    )
+}
+
 /// replace_outer_grouping (paramassign.c): no dedupe, as replace_outer_agg.
 pub(crate) fn replace_outer_grouping<'mcx>(
     run: &mut PlannerRun<'mcx>,
