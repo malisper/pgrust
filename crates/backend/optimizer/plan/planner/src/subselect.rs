@@ -2259,6 +2259,9 @@ fn finalize_plan<'mcx>(
     let mut ext_param = paramids.clone_in(mcx)?;
     ext_param.add_members(mcx, &init_ext_param)?;
     ext_param.del_members(&init_set_param);
+    // C returns plan->allParam: a child's initplan ext/set params propagate
+    // into every ancestor's paramids.
+    let ret = all_param.clone_in(mcx)?;
     // SAFETY: the plan tree is exclusively owned by this planning invocation
     // (C writes the same fields in place).
     unsafe {
@@ -2268,7 +2271,7 @@ fn finalize_plan<'mcx>(
         })
     }
     .expect("plan node");
-    Ok(paramids)
+    Ok(ret)
 }
 
 fn finalize_primnode_list<'mcx>(

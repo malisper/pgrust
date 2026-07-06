@@ -317,21 +317,32 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))
 }
 
-/// ExecHashSubPlan's chgParam rebuild trigger, marked at the param change.
+/// UpdateChangedParamSet (execAmi.c) over the estate's SubPlan states: chg ∩
+/// allParam accumulates on the subplan (C planstate->chgParam); the next
+/// evaluation's rescan carries it into the subplan tree (buildSubPlanHash /
+/// ExecScanSubPlan rescan with chgParam) so initplans inside the subplan
+/// re-mark their output params. A non-empty accumulated set is also
+/// ExecHashSubPlan's rebuild trigger.
 pub(crate) fn mark_hashed_subplans_stale<'mcx>(
     estate: &mut EStateData<'mcx>,
     chg: &::types_nodes::bitmapset::Bitmapset<'mcx>,
-) {
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
     for i in 0..estate.es_subplan_expr_states.len() {
         let (p, _) = estate.es_subplan_expr_states[i];
         // SAFETY: entries are SubPlanExprStates leaked on this estate.
         let sstate = unsafe { &mut *p.cast::<SubPlanExprState<'mcx>>().as_ptr() };
+        let all_param = &sstate.plan.as_plan().expect("plan node").allParam;
+        if !chg.overlap(all_param) {
+            continue;
+        }
+        let parmset = chg.intersect(all_param, mcx)?;
+        sstate.chg_param.add_members(mcx, &parmset)?;
         if let Some(h) = sstate.hashed.as_mut() {
-            if h.built && chg.overlap(&sstate.plan.as_plan().expect("plan node").extParam) {
-                h.built = false;
-            }
+            h.built = false;
         }
     }
+    Ok(())
 }
 
 pub(crate) struct SubPlanExprState<'mcx> {
@@ -341,6 +352,9 @@ pub(crate) struct SubPlanExprState<'mcx> {
     param_ids: PgVec<'mcx, i32>,
     /// MULTIEXPR output params (C subplan->setParam); nil otherwise.
     set_param: PgVec<'mcx, i32>,
+    /// Accumulated changed params (C SubPlanState planstate->chgParam),
+    /// consumed by the next evaluation's rescan of the subplan tree.
+    chg_param: ::types_nodes::bitmapset::Bitmapset<'mcx>,
     plan: Node<'mcx>,
     ps_cell: NonNull<Option<PlanStateNode<'mcx>>>,
     testexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -490,6 +504,7 @@ fn exec_init_sub_plan_expr<'mcx>(
             par_param,
             param_ids,
             set_param,
+            chg_param: Bitmapset::empty(),
             plan,
             ps_cell: cell.cast(),
             testexpr,
@@ -710,13 +725,16 @@ fn scan_sub_plan_loop<'mcx>(
         // SAFETY: the ExprContext outlives the plan (reset-only).
         unsafe { te.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
     }
-    if sstate.par_param.is_empty() {
+    // ExecScanSubPlan: parParam ids join the accumulated chgParam before the
+    // rescan; the accumulated set is consumed here (C clears node->chgParam
+    // at the end of ExecReScan).
+    let mut chg = core::mem::replace(&mut sstate.chg_param, Bitmapset::empty());
+    for &id in sstate.par_param.iter() {
+        chg.add_member(mcx, id)?;
+    }
+    if chg.is_empty() {
         crate::execami::exec_re_scan(ps, estate)?;
     } else {
-        let mut chg = Bitmapset::empty();
-        for &id in sstate.par_param.iter() {
-            chg.add_member(mcx, id)?;
-        }
         crate::execami::exec_re_scan_with_chg(ps, sstate.plan, estate, &chg)?;
     }
 
@@ -1165,7 +1183,14 @@ fn build_sub_plan_hash_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
-    crate::execami::exec_re_scan(ps, estate)?;
+    // buildSubPlanHash rescans with the accumulated chgParam so param-bearing
+    // nodes (including initplans) inside the subplan reset before the refill.
+    let chg = core::mem::replace(&mut sstate.chg_param, Bitmapset::empty());
+    if chg.is_empty() {
+        crate::execami::exec_re_scan(ps, estate)?;
+    } else {
+        crate::execami::exec_re_scan_with_chg(ps, sstate.plan, estate, &chg)?;
+    }
     while let Some(slot_id) = exec_proc_node(ps, estate)? {
         load_param_ids(sstate, estate, slot_id);
         let h = sstate.hashed.as_mut().unwrap();
