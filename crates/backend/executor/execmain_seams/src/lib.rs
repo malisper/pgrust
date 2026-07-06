@@ -111,6 +111,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // show_modifytable_info reads mtstate->resultRelInfo, which excludes
+    // initially-pruned result relations: es_unpruned_relids membership.
+    pub fn query_desc_rti_unpruned(query_desc: QueryDescHandle, rti: i32) -> Option<bool>
+);
+
+seam_core::seam!(
     pub fn query_desc_agg_instrument(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
