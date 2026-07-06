@@ -549,17 +549,15 @@ pub fn build_distances<'mcx>(
         distances.push(DistanceValue { index: i as i32, value: r.as_f64() });
     }
 
-    // compare_distances: descending by value; C qsort tie order is the parity
-    // requirement (which gaps survive reduction).
-    pg_qsort_arg(&mut distances, |da, db| {
-        Ok(if da.value < db.value {
-            1
-        } else if da.value > db.value {
-            -1
-        } else {
-            0
-        })
-    })?;
+    // compare_distances, descending by value. C sorts with libc qsort here
+    // (NOT pg_qsort): glibc's qsort is a stable merge sort in practice, so
+    // tied distances keep ascending gap-index order — and which equal-valued
+    // gaps survive reduce_expanded_ranges is exactly what the index-file
+    // byte-parity gate observes. A stable sort over the index-ordered input
+    // reproduces that.
+    distances.sort_by(|da, db| {
+        db.value.partial_cmp(&da.value).unwrap_or(core::cmp::Ordering::Equal)
+    });
 
     Ok(Some(distances))
 }
