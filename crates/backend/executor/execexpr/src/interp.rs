@@ -3209,10 +3209,6 @@ fn eval_whole_row(
             // rowtype; we return RECORD.
             desc.tdtypeid = ::types_core::catalog::RECORDOID;
             desc.tdtypmod = -1;
-            // WRDBG: temporary lane instrumentation — remove before delivery.
-            if wr.colnames.is_none() && desc.natts > 0 {
-                desc.attr_mut(0).attname.namestrcpy("WRDBGNONE");
-            }
             if let Some(cn) = wr.colnames {
                 // SAFETY: plan-lived eref colnames captured at compile.
                 exec_type_set_col_names(&mut desc, unsafe { cn.as_ref() });
