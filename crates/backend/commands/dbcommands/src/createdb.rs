@@ -65,29 +65,14 @@ fn defGetObjectId(def: &DefElem<'_>) -> PgResult<Oid> {
         .into())
 }
 
-// pg_get_encoding_from_locale (chklocale.c), reduced to the locales the fleet
-// clusters use; anything else is loud rather than a wrong encoding guess.
-fn pg_get_encoding_from_locale(locale: &str) -> i32 {
-    if locale.is_empty() {
-        return -1;
-    }
-    if locale.eq_ignore_ascii_case("C") || locale.eq_ignore_ascii_case("POSIX") {
-        return PG_SQL_ASCII;
-    }
-    let lower = locale.to_ascii_lowercase();
-    if lower.ends_with(".utf-8") || lower.ends_with(".utf8") || lower == "c.utf-8" {
-        return PG_UTF8;
-    }
-    panic!("pg_get_encoding_from_locale: locale \"{locale}\" unported (chklocale.c codeset probe)");
-}
 
 pub fn check_encoding_locale_matches(
     encoding: i32,
     collate: &str,
     ctype: &str,
 ) -> PgResult<()> {
-    let ctype_encoding = pg_get_encoding_from_locale(ctype);
-    let collate_encoding = pg_get_encoding_from_locale(collate);
+    let ctype_encoding = pg_locale::pg_get_encoding_from_locale(Some(ctype), true)?;
+    let collate_encoding = pg_locale::pg_get_encoding_from_locale(Some(collate), true)?;
 
     let allowed = |loc_encoding: i32| -> PgResult<bool> {
         Ok(loc_encoding == encoding

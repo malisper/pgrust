@@ -179,6 +179,12 @@ pub fn check_locale_time(newval: &str) -> PgResult<bool> {
 
 pub fn assign_locale_time(newval: &str) {
     LOCALE_TIME.with(|s| *s.borrow_mut() = newval.to_owned());
+    // C: CurrentLCTimeValid = false.
+    crate::locale_time::invalidate_lc_time();
+}
+
+pub(crate) fn locale_time_value() -> String {
+    LOCALE_TIME.with(|s| s.borrow().clone())
 }
 
 // C: "" is accepted only when source == PGC_S_DEFAULT (can't verify the
@@ -238,7 +244,10 @@ pub(crate) fn install_guc_hooks() {
     });
     vars::locale_time.install(GucVarAccessors {
         get: || Some(LOCALE_TIME.with(|s| s.borrow().clone())),
-        set: |v| LOCALE_TIME.with(|s| *s.borrow_mut() = v.unwrap_or_default()),
+        set: |v| {
+            LOCALE_TIME.with(|s| *s.borrow_mut() = v.unwrap_or_default());
+            crate::locale_time::invalidate_lc_time();
+        },
     });
     vars::locale_messages.install(GucVarAccessors {
         get: || Some(LOCALE_MESSAGES.with(|s| s.borrow().clone())),

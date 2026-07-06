@@ -1,10 +1,12 @@
 //! DCH_to_char producer: broken-down time + format picture -> output text
-//! (formatting.c:2518-2787). C-locale English names only; the `TM`/localized
-//! and ICU name paths loudly panic.
+//! (formatting.c:2518-2787). `TM` renders the cache_locale_time names under
+//! the call collation's case mapping.
 
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use ::types_error::{PgError, PgResult, ERRCODE_INVALID_DATETIME_FORMAT};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_DATETIME_FORMAT,
+};
 
 use ::adt_datetime::{date2j, fsec_t, HOURS_PER_DAY, MONTHS_PER_YEAR, SECS_PER_HOUR, SECS_PER_MINUTE};
 
@@ -102,8 +104,36 @@ fn pg_append(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn tm_panic() -> ! {
-    panic!("DCH TM/localized month-day names (cache_locale_time) not ported")
+enum TmCaseMode {
+    Upper,
+    Init,
+    Lower,
+}
+
+// The S_TM leg shared by the month/day name arms (formatting.c:2596 etc.):
+// case-map the localized name under collid, bounded by the C output-buffer
+// budget check.
+fn append_tm_localized<'mcx>(
+    mcx: Mcx<'mcx>,
+    out: &mut Vec<u8>,
+    name: &[u8],
+    mode: TmCaseMode,
+    collid: Oid,
+    key_len: usize,
+) -> PgResult<()> {
+    let cased = match mode {
+        TmCaseMode::Upper => crate::case::str_toupper(mcx, name, collid)?,
+        TmCaseMode::Init => crate::case::str_initcap(mcx, name, collid)?,
+        TmCaseMode::Lower => crate::case::str_tolower(mcx, name, collid)?,
+    };
+    if cased.len() <= (key_len + TM_SUFFIX_LEN) * DCH_MAX_ITEM_SIZ {
+        pg_append(out, &cased);
+        Ok(())
+    } else {
+        Err(PgError::error("localized string format value too long")
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE)
+            .into())
+    }
 }
 
 fn apply_thth(out: &mut Vec<u8>, start: usize, suffix: u8) -> PgResult<()> {
@@ -118,12 +148,14 @@ fn apply_thth(out: &mut Vec<u8>, start: usize, suffix: u8) -> PgResult<()> {
 /// DCH_processor: C `DCH_to_char` (formatting.c:2518). Renders `nodes` for the
 /// broken-down time `in_` into an owned byte buffer.
 pub fn dch_to_char<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     nodes: &[FormatNode],
     is_interval: bool,
     in_: &TmToChar,
-    _collid: Oid,
+    collid: Oid,
 ) -> PgResult<Vec<u8>> {
+    // C: cache localized days and months (formatting.c:2529).
+    let localized = pg_locale::cache_locale_time(mcx)?;
     let mut out: Vec<u8> = Vec::new();
     let tm = &in_.tm;
 
@@ -340,7 +372,15 @@ pub fn dch_to_char<'mcx>(
                     continue;
                 }
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.full_months[(tm.tm_mon - 1) as usize],
+                        TmCaseMode::Upper,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 let name = asc_toupper(MONTHS_FULL[(tm.tm_mon - 1) as usize].as_bytes());
                 pg_append(
@@ -355,7 +395,15 @@ pub fn dch_to_char<'mcx>(
                     continue;
                 }
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.full_months[(tm.tm_mon - 1) as usize],
+                        TmCaseMode::Init,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(
                     &mut out,
@@ -372,7 +420,15 @@ pub fn dch_to_char<'mcx>(
                     continue;
                 }
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.full_months[(tm.tm_mon - 1) as usize],
+                        TmCaseMode::Lower,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 let name = asc_tolower(MONTHS_FULL[(tm.tm_mon - 1) as usize].as_bytes());
                 pg_append(
@@ -387,7 +443,15 @@ pub fn dch_to_char<'mcx>(
                     continue;
                 }
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.abbrev_months[(tm.tm_mon - 1) as usize],
+                        TmCaseMode::Upper,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(&mut out, &asc_toupper(MONTHS[(tm.tm_mon - 1) as usize].as_bytes()));
             }
@@ -397,7 +461,15 @@ pub fn dch_to_char<'mcx>(
                     continue;
                 }
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.abbrev_months[(tm.tm_mon - 1) as usize],
+                        TmCaseMode::Init,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(&mut out, MONTHS[(tm.tm_mon - 1) as usize].as_bytes());
             }
@@ -407,7 +479,15 @@ pub fn dch_to_char<'mcx>(
                     continue;
                 }
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.abbrev_months[(tm.tm_mon - 1) as usize],
+                        TmCaseMode::Lower,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(&mut out, &asc_tolower(MONTHS[(tm.tm_mon - 1) as usize].as_bytes()));
             }
@@ -426,7 +506,15 @@ pub fn dch_to_char<'mcx>(
             DCH_DAY => {
                 invalid_for_interval(is_interval)?;
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.full_days[tm.tm_wday as usize],
+                        TmCaseMode::Upper,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 let name = asc_toupper(DAYS[tm.tm_wday as usize].as_bytes());
                 pg_append(
@@ -438,7 +526,15 @@ pub fn dch_to_char<'mcx>(
             DCH_DAY_CAP => {
                 invalid_for_interval(is_interval)?;
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.full_days[tm.tm_wday as usize],
+                        TmCaseMode::Init,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(
                     &mut out,
@@ -449,7 +545,15 @@ pub fn dch_to_char<'mcx>(
             DCH_DAY_LOWER => {
                 invalid_for_interval(is_interval)?;
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.full_days[tm.tm_wday as usize],
+                        TmCaseMode::Lower,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 let name = asc_tolower(DAYS[tm.tm_wday as usize].as_bytes());
                 pg_append(
@@ -461,21 +565,45 @@ pub fn dch_to_char<'mcx>(
             DCH_DY => {
                 invalid_for_interval(is_interval)?;
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.abbrev_days[tm.tm_wday as usize],
+                        TmCaseMode::Upper,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(&mut out, &asc_toupper(DAYS_SHORT[tm.tm_wday as usize].as_bytes()));
             }
             DCH_DY_CAP => {
                 invalid_for_interval(is_interval)?;
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.abbrev_days[tm.tm_wday as usize],
+                        TmCaseMode::Init,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(&mut out, DAYS_SHORT[tm.tm_wday as usize].as_bytes());
             }
             DCH_DY_LOWER => {
                 invalid_for_interval(is_interval)?;
                 if s_tm(suffix) {
-                    tm_panic();
+                    append_tm_localized(
+                        mcx,
+                        &mut out,
+                        &localized.abbrev_days[tm.tm_wday as usize],
+                        TmCaseMode::Lower,
+                        collid,
+                        key.len,
+                    )?;
+                    continue;
                 }
                 pg_append(&mut out, &asc_tolower(DAYS_SHORT[tm.tm_wday as usize].as_bytes()));
             }

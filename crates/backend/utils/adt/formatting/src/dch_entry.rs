@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use ::datum::Varlena;
 use ::mcx::{Mcx, PgVec};
-use ::types_core::{InvalidOid, Oid};
+use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, SoftErrorContext, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE};
 
 use ::adt_datetime::{
@@ -97,12 +97,14 @@ fn datetime_to_char_body<'mcx>(
     tmtc: &TmToChar,
     fmt: &[u8],
     is_interval: bool,
+    collid: Oid,
 ) -> PgResult<Vec<u8>> {
     let format = fetch_format(fmt, false)?;
-    dch_to_char(mcx, &format, is_interval, tmtc, InvalidOid)
+    dch_to_char(mcx, &format, is_interval, tmtc, collid)
 }
 
-pub fn timestamp_to_char<'mcx>(mcx: Mcx<'mcx>, ts: i64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
+pub fn timestamp_to_char<'mcx>(mcx: Mcx<'mcx>,
+    collid: Oid, ts: i64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
     if fmt.is_empty() || TIMESTAMP_NOT_FINITE(ts) {
         return text_result(mcx, b"");
     }
@@ -121,11 +123,12 @@ pub fn timestamp_to_char<'mcx>(mcx: Mcx<'mcx>, ts: i64, fmt: &[u8]) -> PgResult<
     copy_tm(&mut tmtc.tm, &tm);
     tmtc.fsec = fsec;
 
-    let out = datetime_to_char_body(mcx, &tmtc, fmt, false)?;
+    let out = datetime_to_char_body(mcx, &tmtc, fmt, false, collid)?;
     text_result(mcx, &out)
 }
 
-pub fn timestamptz_to_char<'mcx>(mcx: Mcx<'mcx>, ts: i64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
+pub fn timestamptz_to_char<'mcx>(mcx: Mcx<'mcx>,
+    collid: Oid, ts: i64, fmt: &[u8]) -> PgResult<Varlena<'mcx>> {
     if fmt.is_empty() || TIMESTAMP_NOT_FINITE(ts) {
         return text_result(mcx, b"");
     }
@@ -147,12 +150,13 @@ pub fn timestamptz_to_char<'mcx>(mcx: Mcx<'mcx>, ts: i64, fmt: &[u8]) -> PgResul
     tmtc.fsec = fsec;
     tmtc.tzn = tzn.map(|s| s.as_bytes().to_vec());
 
-    let out = datetime_to_char_body(mcx, &tmtc, fmt, false)?;
+    let out = datetime_to_char_body(mcx, &tmtc, fmt, false, collid)?;
     text_result(mcx, &out)
 }
 
 pub fn interval_to_char<'mcx>(
     mcx: Mcx<'mcx>,
+    collid: Oid,
     it: &::adt_datetime::Interval,
     fmt: &[u8],
 ) -> PgResult<Varlena<'mcx>> {
@@ -168,11 +172,12 @@ pub fn interval_to_char<'mcx>(
     tmtc.tm.tm_mon = tt.tm_mon;
     tmtc.tm.tm_year = tt.tm_year;
 
-    let out = datetime_to_char_body(mcx, &tmtc, fmt, true)?;
+    let out = datetime_to_char_body(mcx, &tmtc, fmt, true, collid)?;
     text_result(mcx, &out)
 }
 
-pub fn to_timestamp<'mcx>(mcx: Mcx<'mcx>, text: &[u8], fmt: &[u8]) -> PgResult<i64> {
+pub fn to_timestamp<'mcx>(mcx: Mcx<'mcx>,
+    collid: Oid, text: &[u8], fmt: &[u8]) -> PgResult<i64> {
     let mut tm = zero_tm();
     let mut ftz = FmtTz::default();
     let mut fsec: fsec_t = 0;
@@ -182,7 +187,7 @@ pub fn to_timestamp<'mcx>(mcx: Mcx<'mcx>, text: &[u8], fmt: &[u8]) -> PgResult<i
         mcx,
         text,
         fmt,
-        InvalidOid,
+        collid,
         false,
         &mut tm,
         &mut fsec,
@@ -212,13 +217,14 @@ pub fn to_timestamp<'mcx>(mcx: Mcx<'mcx>, text: &[u8], fmt: &[u8]) -> PgResult<i
     Ok(result)
 }
 
-pub fn to_date<'mcx>(mcx: Mcx<'mcx>, text: &[u8], fmt: &[u8]) -> PgResult<DateADT> {
+pub fn to_date<'mcx>(mcx: Mcx<'mcx>,
+    collid: Oid, text: &[u8], fmt: &[u8]) -> PgResult<DateADT> {
     let mut tm = zero_tm();
     let mut ftz = FmtTz::default();
     let mut fsec: fsec_t = 0;
 
     do_to_timestamp(
-        mcx, text, fmt, InvalidOid, false, &mut tm, &mut fsec, &mut ftz, None, None, None,
+        mcx, text, fmt, collid, false, &mut tm, &mut fsec, &mut ftz, None, None, None,
     )?;
 
     if !IS_VALID_JULIAN(tm.tm_year, tm.tm_mon, tm.tm_mday) {

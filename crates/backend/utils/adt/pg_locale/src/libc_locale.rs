@@ -26,6 +26,22 @@ extern "C" {
     fn towlower_l(c: wint_t, loc: locale_t) -> wint_t;
     fn towupper_l(c: wint_t, loc: locale_t) -> wint_t;
     fn iswalnum_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswdigit_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswalpha_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswupper_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswlower_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswgraph_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswprint_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswpunct_l(c: wint_t, loc: locale_t) -> c_int;
+    fn iswspace_l(c: wint_t, loc: locale_t) -> c_int;
+    fn isdigit_l(c: c_int, loc: locale_t) -> c_int;
+    fn isalpha_l(c: c_int, loc: locale_t) -> c_int;
+    fn isupper_l(c: c_int, loc: locale_t) -> c_int;
+    fn islower_l(c: c_int, loc: locale_t) -> c_int;
+    fn isgraph_l(c: c_int, loc: locale_t) -> c_int;
+    fn isprint_l(c: c_int, loc: locale_t) -> c_int;
+    fn ispunct_l(c: c_int, loc: locale_t) -> c_int;
+    fn isspace_l(c: c_int, loc: locale_t) -> c_int;
     #[cfg(target_os = "macos")]
     fn mbstowcs_l(dest: *mut wchar_t, src: *const c_char, n: size_t, loc: locale_t) -> size_t;
     #[cfg(target_os = "macos")]
@@ -122,6 +138,12 @@ fn newlocale(mask: c_int, locale: &str, base: locale_t) -> Option<locale_t> {
     } else {
         Some(loc)
     }
+}
+
+// cache_locale_time's newlocale(LC_ALL_MASK, ...) leg (pg_locale.c:752).
+pub(crate) fn newlocale_all(locale: &str) -> PgResult<locale_t> {
+    newlocale(libc::LC_ALL_MASK, locale, core::ptr::null_mut())
+        .ok_or_else(|| report_newlocale_failure(locale))
 }
 
 fn is_c_or_posix(name: &str) -> bool {
@@ -230,6 +252,82 @@ pub fn pg_toupper(ch: u8) -> u8 {
 pub(crate) fn tolower_l_byte(c: u8, lt: LibcLocale) -> u8 {
     // SAFETY: pure ctype call; c promoted as unsigned char per C.
     unsafe { tolower_l(c as c_int, lt.get()) as u8 }
+}
+
+/// wc-ctype classes probed by the regex engine (regc_pg_locale.c).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WcClass {
+    Digit,
+    Alpha,
+    Alnum,
+    Upper,
+    Lower,
+    Graph,
+    Print,
+    Punct,
+    Space,
+}
+
+// regc_pg_locale.c LIBC_WIDE arms: wchar_t is 4 bytes on every supported
+// target, so C's `sizeof(wchar_t) >= 4 || c <= 0xFFFF` wide gate is always
+// taken and the in-function 1-byte fall-thru is dead here.
+pub(crate) fn wc_isclass_wide(c: u32, class: WcClass, lt: LibcLocale) -> bool {
+    let c = c as wint_t;
+    let l = lt.get();
+    // SAFETY: pure wctype calls.
+    (unsafe {
+        match class {
+            WcClass::Digit => iswdigit_l(c, l),
+            WcClass::Alpha => iswalpha_l(c, l),
+            WcClass::Alnum => iswalnum_l(c, l),
+            WcClass::Upper => iswupper_l(c, l),
+            WcClass::Lower => iswlower_l(c, l),
+            WcClass::Graph => iswgraph_l(c, l),
+            WcClass::Print => iswprint_l(c, l),
+            WcClass::Punct => iswpunct_l(c, l),
+            WcClass::Space => iswspace_l(c, l),
+        }
+    }) != 0
+}
+
+// regc_pg_locale.c LIBC_1BYTE arms: c <= UCHAR_MAX guard lives at the caller.
+pub(crate) fn wc_isclass_1byte(c: u8, class: WcClass, lt: LibcLocale) -> bool {
+    let c = c as c_int;
+    let l = lt.get();
+    // SAFETY: pure ctype calls.
+    (unsafe {
+        match class {
+            WcClass::Digit => isdigit_l(c, l),
+            WcClass::Alpha => isalpha_l(c, l),
+            WcClass::Alnum => isalnum_l(c, l),
+            WcClass::Upper => isupper_l(c, l),
+            WcClass::Lower => islower_l(c, l),
+            WcClass::Graph => isgraph_l(c, l),
+            WcClass::Print => isprint_l(c, l),
+            WcClass::Punct => ispunct_l(c, l),
+            WcClass::Space => isspace_l(c, l),
+        }
+    }) != 0
+}
+
+pub(crate) fn wc_toupper_wide(c: u32, lt: LibcLocale) -> u32 {
+    // SAFETY: pure wctype call.
+    unsafe { towupper_l(c as wint_t, lt.get()) as u32 }
+}
+
+pub(crate) fn wc_tolower_wide(c: u32, lt: LibcLocale) -> u32 {
+    // SAFETY: pure wctype call.
+    unsafe { towlower_l(c as wint_t, lt.get()) as u32 }
+}
+
+pub(crate) fn wc_toupper_1byte(c: u8, lt: LibcLocale) -> u32 {
+    // SAFETY: pure ctype call.
+    unsafe { toupper_l(c as c_int, lt.get()) as u32 }
+}
+
+pub(crate) fn wc_tolower_1byte(c: u8, lt: LibcLocale) -> u32 {
+    // SAFETY: pure ctype call.
+    unsafe { tolower_l(c as c_int, lt.get()) as u32 }
 }
 
 fn write_prefix(dest: &mut [u8], src: &[u8]) {

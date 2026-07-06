@@ -17,7 +17,9 @@ use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ErrorLocation, WARNING};
 
 mod builtin_case;
+mod chklocale;
 mod icu;
+mod locale_time;
 mod icu_ffi;
 mod lconv;
 mod libc_locale;
@@ -26,8 +28,10 @@ mod setup;
 mod tests;
 
 pub use icu::{icu_language_tag, icu_validate_locale};
+pub use chklocale::pg_get_encoding_from_locale;
 pub use lconv::{pglc_localeconv, PgLconv, CHAR_MAX};
-pub use libc_locale::{pg_tolower, pg_toupper};
+pub use locale_time::{cache_locale_time, LocalizedTimeNames};
+pub use libc_locale::{pg_tolower, pg_toupper, WcClass};
 pub use setup::{
     assign_locale_messages, assign_locale_monetary, assign_locale_numeric, assign_locale_time,
     check_locale, check_locale_messages, check_locale_monetary, check_locale_numeric,
@@ -118,6 +122,45 @@ impl PgLocale {
     // SB_lower_char's tolower_l arm (like_match.c); SB encodings only.
     pub fn tolower_l(&self, c: u8) -> u8 {
         libc_locale::tolower_l_byte(c, self.lt)
+    }
+
+    // regc_pg_locale.c LIBC_WIDE/LIBC_1BYTE arms; the strategy dispatch lives
+    // in regex_core::regex_locale. libc provider only.
+    pub fn wc_isclass_wide(&self, c: u32, class: WcClass) -> bool {
+        libc_locale::wc_isclass_wide(c, class, self.lt)
+    }
+
+    pub fn wc_isclass_1byte(&self, c: u32, class: WcClass) -> bool {
+        c <= u8::MAX as u32 && libc_locale::wc_isclass_1byte(c as u8, class, self.lt)
+    }
+
+    pub fn wc_toupper_wide(&self, c: u32) -> u32 {
+        libc_locale::wc_toupper_wide(c, self.lt)
+    }
+
+    pub fn wc_tolower_wide(&self, c: u32) -> u32 {
+        libc_locale::wc_tolower_wide(c, self.lt)
+    }
+
+    pub fn wc_toupper_1byte(&self, c: u32) -> u32 {
+        if c <= u8::MAX as u32 {
+            libc_locale::wc_toupper_1byte(c as u8, self.lt)
+        } else {
+            c
+        }
+    }
+
+    pub fn wc_tolower_1byte(&self, c: u32) -> u32 {
+        if c <= u8::MAX as u32 {
+            libc_locale::wc_tolower_1byte(c as u8, self.lt)
+        } else {
+            c
+        }
+    }
+
+    // pattern_char_isalpha's isalpha_l arm (like_support.c:1849).
+    pub fn isalpha_l(&self, c: u8) -> bool {
+        libc_locale::wc_isclass_1byte(c, WcClass::Alpha, self.lt)
     }
 }
 
