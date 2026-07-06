@@ -3597,6 +3597,35 @@ fn fix_join_expr_list<'mcx>(
 }
 
 // fix_join_expr_mutator (setrefs.c) over the shapes this lane can carry.
+// fix_join_expr_mutator's acceptable_rel arm (C copyVar; keeps nullingrels).
+fn fix_join_acceptable_rel_var<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    var: &types_nodes::primnodes::Var<'mcx>,
+    rtoffset: i32,
+    node: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    if rtoffset == 0 {
+        return Ok(node);
+    }
+    let mut newvar = types_nodes::primnodes::Var {
+        varno: var.varno + rtoffset,
+        varattno: var.varattno,
+        vartype: var.vartype,
+        vartypmod: var.vartypmod,
+        varcollid: var.varcollid,
+        varnullingrels: var.varnullingrels.clone_in(mcx)?,
+        varlevelsup: var.varlevelsup,
+        varreturningtype: var.varreturningtype,
+        varnosyn: var.varnosyn,
+        varattnosyn: var.varattnosyn,
+        location: var.location,
+    };
+    if newvar.varnosyn > 0 {
+        newvar.varnosyn = newvar.varnosyn.wrapping_add(rtoffset as u32);
+    }
+    Node::mk(mcx, newvar)
+}
+
 fn fix_join_expr_mutator<'mcx>(
     run: &mut PlannerRun<'mcx>,
     node: Node<'mcx>,
@@ -3627,8 +3656,7 @@ fn fix_join_expr_mutator<'mcx>(
                     var.varno,
                     acceptable_rel
                 );
-                debug_assert_eq!(rtoffset, 0);
-                return Ok(node);
+                return fix_join_acceptable_rel_var(mcx, var, rtoffset, node);
             }
             if let Some(new) = search_join_tlist_for_var(
                 run,
@@ -3650,11 +3678,10 @@ fn fix_join_expr_mutator<'mcx>(
             )? {
                 return Ok(new);
             }
-            // ON CONFLICT's result-relation Vars stay scan Vars (C adds
-            // rtoffset, asserted 0 on this lane).
+            // Result-relation Vars stay scan Vars, shifted into the
+            // flattened rangetable (C copyVar + varno += rtoffset).
             if acceptable_rel != 0 && var.varno == acceptable_rel {
-                debug_assert_eq!(rtoffset, 0);
-                return Ok(node);
+                return fix_join_acceptable_rel_var(mcx, var, rtoffset, node);
             }
             panic!("variable not found in subplan target lists");
         }
