@@ -605,16 +605,45 @@ pub fn ParseFuncOrColumn<'mcx>(
                 over_node, _last_srf, location,
             )
         }
-        FuncDetail::NotFound => Err(undefined_function(
-            pstate,
-            parts,
-            argnames.as_slice(),
-            actual_arg_types,
-            fn_call.agg_order.len() > 1 && !fn_call.agg_within_group,
-            proc_call,
-            location,
-        )),
+        FuncDetail::NotFound => {
+            // C parse_func.c:592-599 — could_be_projection (line 216-229):
+            // a single-arg, undecorated, unqualified call on a composite
+            // value is retried as `(arg).funcname` before erroring.
+            if fargs.len() == 1
+                && !proc_call
+                && fn_call.agg_order.is_nil()
+                && agg_filter.is_none()
+                && !fn_call.agg_star
+                && !fn_call.agg_distinct
+                && over.is_none()
+                && !fn_call.func_variadic
+                && argnames.is_empty()
+                && parts.len() == 1
+                && (actual_arg_types[0] == RECORDOID || is_complex(actual_arg_types[0])?)
+            {
+                if let Some(node) =
+                    ParseComplexProjection(mcx, pstate, parts[0], fargs.nth(0), location)?
+                {
+                    return Ok(node);
+                }
+            }
+            Err(undefined_function(
+                pstate,
+                parts,
+                argnames.as_slice(),
+                actual_arg_types,
+                fn_call.agg_order.len() > 1 && !fn_call.agg_within_group,
+                proc_call,
+                location,
+            ))
+        }
     }
+}
+
+// C ISCOMPLEX (parse_type.h): typeOrDomainTypeRelid(typeid) != InvalidOid,
+// i.e. the type (or its base, for a domain) has a backing pg_class row.
+fn is_complex(typid: Oid) -> PgResult<bool> {
+    Ok(OidIsValid(lsyscache::get_typ_typrelid(typid)?))
 }
 
 // C: ParseFuncOrColumn's shared variadic packing — the trailing nvargs

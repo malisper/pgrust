@@ -650,4 +650,67 @@ mod complex_projection_record {
             crate::ParseComplexProjection(mcx, &mut pstate, "nosuch", first_arg, -1).unwrap();
         assert!(none.is_none());
     }
+
+    // C parse_func.c:592-599 — a call `b(record_var)` where `b` is not a
+    // function is retried as `(record_var).b` (misc.sql's name(hobbies_r)).
+    #[test]
+    fn func_call_notation_falls_back_to_field_projection() {
+        install_fixture();
+        install_record_fixture();
+        let ctx = MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let mut pstate = make_parsestate(mcx, None);
+
+        let c1 =
+            Node::mk_const(mcx, INT4OID, -1, InvalidOid, 4, datum::Datum::null(), true, true)
+                .unwrap();
+        let c2 = Node::mk_const(
+            mcx,
+            TEXTOID,
+            -1,
+            DEFAULT_COLLATION_OID,
+            -1,
+            datum::Datum::null(),
+            true,
+            false,
+        )
+        .unwrap();
+        let inner_tlist = NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, c1, 1, Some("a"), false).unwrap(),
+            Node::mk_target_entry(mcx, c2, 2, Some("b"), false).unwrap(),
+        )
+        .unwrap();
+        let inner_names = NodeList::make2(
+            mcx,
+            Node::mk_string(mcx, "a").unwrap(),
+            Node::mk_string(mcx, "b").unwrap(),
+        )
+        .unwrap();
+        let inner = subquery_rte(mcx, "inner_ss", inner_tlist, inner_names, NodeList::nil());
+
+        let outer_tlist = NodeList::make1(
+            mcx,
+            Node::mk_target_entry(mcx, record_var(mcx, 1, 0), 1, Some("r"), false).unwrap(),
+        )
+        .unwrap();
+        let outer_names = NodeList::make1(mcx, Node::mk_string(mcx, "r").unwrap()).unwrap();
+        let outer = subquery_rte(
+            mcx,
+            "outer_ss",
+            outer_tlist,
+            outer_names,
+            NodeList::make1(mcx, inner).unwrap(),
+        );
+        pstate.p_rtable.lappend(mcx, outer).unwrap();
+
+        let first_arg = record_var(mcx, 1, 1);
+        let fargs = NodeList::make1(mcx, first_arg).unwrap();
+        let fc = crate::tests::func_call(mcx, "b", false, false);
+        let node = crate::tests::call(mcx, &mut pstate, fc, fargs, &[RECORDOID]).unwrap();
+
+        let fs = node.as_field_select().unwrap();
+        assert_eq!(fs.fieldnum, 2);
+        assert_eq!(fs.resulttype, TEXTOID);
+    }
 }
