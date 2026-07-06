@@ -81,6 +81,7 @@ pub fn init_seams() {
     );
     execmain_seams::query_desc_index_searches::set(querydesc::query_desc_index_searches_seam);
     execmain_seams::exec_clean_type_from_tl::set(typefromtl::exec_clean_type_from_tl_seam);
+    execmain_seams::exec_check_permissions::set(execmain::exec_check_permissions);
     execmain_seams::exec_current_of::set(execcurrent::exec_current_of_seam);
     execmain_seams::query_desc_workers_launched::set(
         querydesc::query_desc_workers_launched_seam,

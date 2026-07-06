@@ -87,14 +87,13 @@ pub fn RangeVarCallbackMaintainsTable(
     let aclresult =
         aclchk::pg_class_aclcheck(relId, miscinit::GetUserId(), adt_acl::ACL_MAINTAIN)?;
     if aclresult != aclchk::ACLCHECK_OK {
-        // get_relkind_objtype: every reachable relkind maps to OBJECT_TABLE
-        // except matview, where C says "permission denied for materialized
-        // view" — error-text divergence until the matview lane lands.
-        aclchk_seams::aclcheck_error::call(
-            aclresult,
-            types_nodes::parsenodes::ObjectType::OBJECT_TABLE as i32,
-            relation.relname,
-        )?;
+        // get_relkind_objtype (objectaddress.c): matview vs table noun.
+        let objtype = if relkind == types_rel::RELKIND_MATVIEW {
+            types_nodes::parsenodes::ObjectType::OBJECT_MATVIEW
+        } else {
+            types_nodes::parsenodes::ObjectType::OBJECT_TABLE
+        };
+        aclchk_seams::aclcheck_error::call(aclresult, objtype as i32, relation.relname)?;
     }
     Ok(())
 }

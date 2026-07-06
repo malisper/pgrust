@@ -1553,6 +1553,28 @@ fn ensure_all_updated_cols<'mcx>(
     Ok(())
 }
 
+// bms_union(ExecGetInsertedCols, ExecGetUpdatedCols) through the result
+// RTE's perminfo (execUtils.c GetResultRTEPermissionInfo): pass the root's
+// rti for a routed child so the numbering matches the description relation.
+fn rte_modified_cols<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    es_range_table: &[&'mcx types_nodes::RangeTblEntry<'mcx>],
+    es_rteperminfos: Option<&types_nodes::NodeList<'mcx>>,
+    rti: u32,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let rte = es_range_table[(rti - 1) as usize];
+    if rte.perminfoindex > 0 {
+        if let Some(pis) = es_rteperminfos {
+            let pi = pis
+                .nth(rte.perminfoindex as usize - 1)
+                .as_rte_permission_info()
+                .expect("permInfos cell");
+            return pi.insertedCols.union(&pi.updatedCols, mcx);
+        }
+    }
+    Ok(types_nodes::Bitmapset::empty())
+}
+
 // execute_attr_map_cols (attmap.c): translate a perminfo column bitmapset
 // (attnos offset by FirstLowInvalidHeapAttributeNumber) from the map's input
 // (root) numbering to its output (child) numbering; attr_map[out-1] = in.
@@ -2352,7 +2374,8 @@ fn merge_update_act<'mcx>(
     let mut cross_part = false;
     pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
     let result = {
-        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, .. } = &mut *estate;
+        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, es_range_table, es_rteperminfos, .. } =
+            &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
         let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
         let rel = es_relations[(mt.rel().rti - 1) as usize]
@@ -2373,7 +2396,19 @@ fn merge_update_act<'mcx>(
             && !execpartition::exec_partition_check(mcx, &mut mt.rel_mut().partition_check, rel, slot)?
         {
             if mt.root.is_none() {
-                return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None, None));
+                let mod_cols = rte_modified_cols(
+                    mcx,
+                    &es_range_table[..],
+                    *es_rteperminfos,
+                    mt.rels[mt.cur].rti,
+                )?;
+                return Err(execpartition::partition_constraint_violation(
+                    mcx,
+                    rel,
+                    slot,
+                    Some(&mod_cols),
+                    None,
+                ));
             }
             // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
             // performed outside this borrow scope.
@@ -2393,14 +2428,24 @@ fn merge_update_act<'mcx>(
         }
 
         {
-            // C sets ri_RootResultRelInfo on every child result rel of the
-            // initial query (nodeModifyTable.c:4811-4822); constraint errors
-            // report the failing row in the root's rowtype (execMain.c).
-            let err_root_rel = mt.root.as_ref().map(|rr| {
-                es_relations[(rr.rti - 1) as usize].as_ref().expect("root relation opened")
-            });
+            // ExecConstraints (execMain.c): partition children report through
+            // the root rel + root perminfo (ri_RootResultRelInfo leg).
+            let (perm_rti, err_root_rel) = match &mt.root {
+                Some(rr) => (rr.rti, es_relations[(rr.rti - 1) as usize].as_ref()),
+                None => (mt.rels[mt.cur].rti, None),
+            };
+            let mod_cols =
+                rte_modified_cols(mcx, &es_range_table[..], *es_rteperminfos, perm_rti)?;
             let r = &mut mt.rels[mt.cur];
-            exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, err_root_rel)?;
+            exec_constraints(
+                mcx,
+                &mut r.check_exprs,
+                &mut r.virtual_nn_exprs,
+                rel,
+                slot,
+                err_root_rel,
+                Some(&mod_cols),
+            )?;
         }
 
         tableam::table_tuple_update(
@@ -3157,7 +3202,15 @@ fn exec_update<'mcx>(
         let mut cross_part = false;
         pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
         let result = {
-            let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, .. } = &mut *estate;
+            let EStateData {
+                es_relations,
+                es_tupleTable,
+                es_snapshot,
+                es_range_table,
+                es_rteperminfos,
+            es_crosscheck_snapshot,
+                ..
+            } = &mut *estate;
             let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
             let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
             let rel = es_relations[(mt.rel().rti - 1) as usize]
@@ -3186,7 +3239,19 @@ fn exec_update<'mcx>(
                     return Err(invalid_on_update_specification());
                 }
                 if mt.root.is_none() {
-                    return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None, None));
+                    let mod_cols = rte_modified_cols(
+                        mcx,
+                        &es_range_table[..],
+                        *es_rteperminfos,
+                        mt.rels[mt.cur].rti,
+                    )?;
+                    return Err(execpartition::partition_constraint_violation(
+                        mcx,
+                        rel,
+                        slot,
+                        Some(&mod_cols),
+                        None,
+                    ));
                 }
                 // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
                 // performed outside this borrow scope.
@@ -3204,15 +3269,24 @@ fn exec_update<'mcx>(
                 exec_with_check_options_basic(&mut mt.rel_mut().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
             }
             {
-                // C sets ri_RootResultRelInfo on every child result rel of
-                // the initial query (nodeModifyTable.c:4811-4822); constraint
-                // errors report the failing row in the root's rowtype
-                // (execMain.c).
-                let err_root_rel = mt.root.as_ref().map(|rr| {
-                    es_relations[(rr.rti - 1) as usize].as_ref().expect("root relation opened")
-                });
+                // ExecConstraints (execMain.c): partition children report
+                // through the root rel + root perminfo.
+                let (perm_rti, err_root_rel) = match &mt.root {
+                    Some(rr) => (rr.rti, es_relations[(rr.rti - 1) as usize].as_ref()),
+                    None => (mt.rels[mt.cur].rti, None),
+                };
+                let mod_cols =
+                    rte_modified_cols(mcx, &es_range_table[..], *es_rteperminfos, perm_rti)?;
                 let r = &mut mt.rels[mt.cur];
-                exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, err_root_rel)?;
+                exec_constraints(
+                    mcx,
+                    &mut r.check_exprs,
+                    &mut r.virtual_nn_exprs,
+                    rel,
+                    slot,
+                    err_root_rel,
+                    Some(&mod_cols),
+                )?;
             }
 
             tableam::table_tuple_update(
@@ -5370,30 +5444,38 @@ fn exec_insert<'mcx>(
             Some(_) => es_relations[(root_rti - 1) as usize].as_ref(),
             None => None,
         };
-        exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot, err_root_rel)?;
+        // ExecGetInsertedCols/UpdatedCols via the target RTE's perminfo, in
+        // the description rel's (root's) numbering (execUtils.c
+        // GetResultRTEPermissionInfo).
+        let mod_cols = {
+            let rte = target_rte;
+            let mut cols = types_nodes::Bitmapset::empty();
+            if rte.perminfoindex > 0 {
+                if let Some(pis) = perminfos {
+                    let pi = pis
+                        .nth(rte.perminfoindex as usize - 1)
+                        .as_rte_permission_info()
+                        .expect("permInfos cell");
+                    cols = pi.insertedCols.union(&pi.updatedCols, mcx)?;
+                }
+            }
+            cols
+        };
+        exec_constraints(
+            mcx,
+            check_exprs,
+            virtual_nn_exprs,
+            rel,
+            slot,
+            err_root_rel,
+            Some(&mod_cols),
+        )?;
 
         // ExecInsert (nodeModifyTable.c): direct INSERTs into a partition
         // check the partition constraint; routed tuples re-check only when a
         // leaf BR trigger could have changed the row.
         if rel.rd_rel.relispartition && (leaf_idx.is_none() || leaf_has_br_insert) {
             if !execpartition::exec_partition_check(mcx, pcheck, rel, slot)? {
-                // ExecGetInsertedCols/UpdatedCols via the target RTE's
-                // perminfo, in the description rel's (root's) numbering
-                // (execUtils.c GetResultRTEPermissionInfo).
-                let mod_cols = {
-                    let rte = target_rte;
-                    let mut cols = types_nodes::Bitmapset::empty();
-                    if rte.perminfoindex > 0 {
-                        if let Some(pis) = perminfos {
-                            let pi = pis
-                                .nth(rte.perminfoindex as usize - 1)
-                                .as_rte_permission_info()
-                                .expect("permInfos cell");
-                            cols = pi.insertedCols.union(&pi.updatedCols, mcx)?;
-                        }
-                    }
-                    cols
-                };
                 return Err(execpartition::partition_constraint_violation(
                     mcx,
                     rel,
@@ -6211,11 +6293,20 @@ fn exec_leaf_conflict_update<'mcx>(
     let mut update_indexes = TU_UpdateIndexes::TU_None;
     let result = {
         let ModifyTableState {
-            rels, root, router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check, ..
+            router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check,
+            rels, root, cur, ..
         } = &mut *mt;
         let root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
-        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, .. } = &mut *estate;
+        let EStateData {
+            es_tupleTable,
+            es_snapshot,
+            es_relations,
+            es_range_table,
+            es_rteperminfos,
+            es_crosscheck_snapshot,
+            ..
+        } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
         let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
         let slot = &mut es_tupleTable[proj_id.0 as usize];
@@ -6235,11 +6326,22 @@ fn exec_leaf_conflict_update<'mcx>(
             return Err(invalid_on_update_specification());
         }
 
-        // The routed leaf's ri_RootResultRelInfo is the routing root:
-        // constraint errors report the failing row in the root's rowtype
-        // (execMain.c).
-        let err_root_rel = es_relations[(root_rti - 1) as usize].as_ref();
-        exec_constraints(mcx, &mut leaf_checks[idx], &mut leaf_virtual_nn[idx], rel, slot, err_root_rel)?;
+        // ri_RootResultRelInfo leg: the routed leaf reports through the
+        // target's (root's) rel + perminfo (execMain.c ExecConstraints).
+        let (perm_rti, err_root_rel) = match root {
+            Some(rr) => (rr.rti, es_relations[(rr.rti - 1) as usize].as_ref()),
+            None => (rels[*cur].rti, es_relations[(rels[*cur].rti - 1) as usize].as_ref()),
+        };
+        let mod_cols = rte_modified_cols(mcx, &es_range_table[..], *es_rteperminfos, perm_rti)?;
+        exec_constraints(
+            mcx,
+            &mut leaf_checks[idx],
+            &mut leaf_virtual_nn[idx],
+            rel,
+            slot,
+            err_root_rel,
+            Some(&mod_cols),
+        )?;
 
         tableam::table_tuple_update(
             mcx,
@@ -6641,13 +6743,15 @@ fn exec_view_check_options<'mcx>(
         }
     }
     let Some(i) = failing else { return Ok(()) };
-    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-    let (vrel, root_rel) = match rel {
+    let EStateData { es_relations, es_tupleTable, es_range_table, es_rteperminfos, .. } =
+        &mut *estate;
+    let (vrel, root_rel, perm_rti) = match rel {
         WcoRel::Rti { rti, root_rti } => (
             es_relations[(rti - 1) as usize].as_ref().expect("result relation opened"),
             root_rti.map(|r| {
                 es_relations[(r - 1) as usize].as_ref().expect("root relation opened")
             }),
+            root_rti.unwrap_or(rti),
         ),
         WcoRel::Leaf { rel, root_rti } => (
             rel,
@@ -6656,10 +6760,14 @@ fn exec_view_check_options<'mcx>(
                     .as_ref()
                     .expect("result relation opened"),
             ),
+            root_rti,
         ),
     };
+    // ExecWithCheckOptions (execMain.c): the failing-row DETAIL is filtered by
+    // column privileges plus the target RTE perminfo's modified columns.
+    let mod_cols = rte_modified_cols(mcx, &es_range_table[..], *es_rteperminfos, perm_rti)?;
     let slot = &mut es_tupleTable[slot_id.0 as usize];
-    Err(view_wco_violation(mcx, wcos[i].relname, vrel, slot, root_rel))
+    Err(view_wco_violation(mcx, wcos[i].relname, vrel, slot, root_rel, Some(&mod_cols)))
 }
 
 #[cold]
@@ -6670,12 +6778,13 @@ fn view_wco_violation<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> Box<PgError> {
     let mut e = PgError::error(format!(
         "new row violates check option for view \"{relname}\""
     ))
     .with_sqlstate(types_error::ERRCODE_WITH_CHECK_OPTION_VIOLATION);
-    if let Ok(desc) = root_slot_value_description(mcx, rel, slot, root_rel) {
+    if let Ok(Some(desc)) = root_slot_value_description(mcx, rel, slot, root_rel, modified_cols) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)
@@ -6729,19 +6838,20 @@ pub fn exec_constraints<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     if let Some(constr) = rel.rd_att.constr.as_deref() {
         if constr.has_not_null {
-            exec_not_null_constraints(mcx, rel, slot, root_rel)?;
+            exec_not_null_constraints(mcx, rel, slot, root_rel, modified_cols)?;
             if constr.has_generated_virtual {
                 if let Some(i) = exec_rel_gen_virtual_notnull(mcx, virtual_nn_exprs, rel, slot)? {
-                    return Err(not_null_violation(mcx, rel, slot, i, root_rel));
+                    return Err(not_null_violation(mcx, rel, slot, i, root_rel, modified_cols));
                 }
             }
         }
         if constr.num_check > 0 {
             if let Some(failed) = exec_rel_check(mcx, check_exprs, rel, slot)? {
-                return Err(check_violation(mcx, rel, slot, failed, root_rel));
+                return Err(check_violation(mcx, rel, slot, failed, root_rel, modified_cols));
             }
         }
     }
@@ -6811,6 +6921,7 @@ fn exec_not_null_constraints<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     for i in 0..rel.rd_att.natts as usize {
         let att = rel.rd_att.attr(i);
@@ -6818,7 +6929,7 @@ fn exec_not_null_constraints<'mcx>(
             continue;
         }
         if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
-            return Err(not_null_violation(mcx, rel, slot, i, root_rel));
+            return Err(not_null_violation(mcx, rel, slot, i, root_rel, modified_cols));
         }
     }
     Ok(())
@@ -7007,66 +7118,6 @@ pub fn exec_rel_gen_virtual_notnull<'mcx>(
     Ok(None)
 }
 
-// ExecBuildSlotValueDescription (execMain.c), table-SELECT-permission arm
-// (single-superuser boot: column-ACL filtering and RLS are unreachable).
-// rev_map[rel_attno-1] = the slot's attno for that column: a routed leaf's
-// row reported in the root's rowtype (C converts the slot; we remap reads).
-fn slot_value_description<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    rel: &Relation<'mcx>,
-    slot: &mut SlotData<'mcx>,
-    rev_map: Option<&[i16]>,
-) -> PgResult<String> {
-    const MAX_FIELD_LEN: usize = 64;
-    exectuples::slot_getallattrs(slot);
-    let mut buf = String::from("(");
-    let mut write_comma = false;
-    for i in 0..rel.rd_att.natts as usize {
-        let att = rel.rd_att.attr(i);
-        if att.attisdropped {
-            continue;
-        }
-        if write_comma {
-            buf.push_str(", ");
-        }
-        write_comma = true;
-        if att.attgenerated == VIRTUAL_GEN {
-            buf.push_str("virtual");
-            continue;
-        }
-        let i = match rev_map {
-            Some(map) => map[i] as usize - 1,
-            None => i,
-        };
-        let base = slot.base();
-        if base.tts_isnull[i] {
-            buf.push_str("null");
-            continue;
-        }
-        let value = base.tts_values[i];
-        let (foutoid, _) = lsyscache::typ::getTypeOutputInfo(att.atttypid)?;
-        let mut finfo = fmgr_core::fmgr_info(foutoid)?;
-        let out = fmgr_core::function_call1_coll_in(&mut finfo, 0, mcx, value)?;
-        // SAFETY: output fns return a NUL-terminated cstring datum.
-        let s = unsafe {
-            core::ffi::CStr::from_ptr(out.as_usize() as *const core::ffi::c_char)
-        }
-        .to_bytes();
-        let s = core::str::from_utf8(s).expect("type output is UTF-8");
-        if s.len() <= MAX_FIELD_LEN {
-            buf.push_str(s);
-        } else {
-            let mut end = MAX_FIELD_LEN;
-            while !s.is_char_boundary(end) {
-                end -= 1;
-            }
-            buf.push_str(&s[..end]);
-            buf.push_str("...");
-        }
-    }
-    buf.push(')');
-    Ok(buf)
-}
 
 #[cold]
 #[inline(never)]
@@ -7086,6 +7137,7 @@ fn not_null_violation<'mcx>(
     slot: &mut SlotData<'mcx>,
     attidx: usize,
     root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> Box<PgError> {
     let att = rel.rd_att.attr(attidx);
     let col = String::from_utf8_lossy(att.attname.name_str()).into_owned();
@@ -7097,7 +7149,7 @@ fn not_null_violation<'mcx>(
     .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION)
     .with_schema_name(schema_name_of(mcx, rel))
     .with_table_name(table);
-    if let Ok(desc) = root_slot_value_description(mcx, rel, slot, root_rel) {
+    if let Ok(Some(desc)) = root_slot_value_description(mcx, rel, slot, root_rel, modified_cols) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     e.column_name = Some(col);
@@ -7105,19 +7157,21 @@ fn not_null_violation<'mcx>(
 }
 
 // ExecConstraints' ri_RootResultRelInfo leg: a routed leaf's failing row is
-// reported in the root's rowtype (execMain.c reverse attrmap).
+// reported in the root's rowtype (execMain.c reverse attrmap); modified_cols
+// is numbered in the description relation's (root's) attnos.
 fn root_slot_value_description<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     root_rel: Option<&Relation<'mcx>>,
-) -> PgResult<String> {
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+) -> PgResult<Option<String>> {
     match root_rel {
         Some(root) if root.rd_id != rel.rd_id => {
             let map = tupdesc::build_attrmap_by_name_if_req(mcx, &rel.rd_att, &root.rd_att, false)?;
-            slot_value_description(mcx, root, slot, map.as_deref())
+            execpartition::slot_value_description(mcx, root, slot, modified_cols, map.as_deref())
         }
-        _ => slot_value_description(mcx, rel, slot, None),
+        _ => execpartition::slot_value_description(mcx, rel, slot, modified_cols, None),
     }
 }
 
@@ -7129,6 +7183,7 @@ fn check_violation<'mcx>(
     slot: &mut SlotData<'mcx>,
     failed: usize,
     root_rel: Option<&Relation<'mcx>>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> Box<PgError> {
     let constr = rel.rd_att.constr.as_deref().expect("has checks");
     let ccname = constr.check[failed]
@@ -7144,7 +7199,7 @@ fn check_violation<'mcx>(
     .with_schema_name(schema_name_of(mcx, rel))
     .with_table_name(table)
     .with_constraint_name(ccname);
-    if let Ok(desc) = root_slot_value_description(mcx, rel, slot, root_rel) {
+    if let Ok(Some(desc)) = root_slot_value_description(mcx, rel, slot, root_rel, modified_cols) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)

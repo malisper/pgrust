@@ -141,6 +141,7 @@ pmsignal = { path = "../../backend/storage/ipc/pmsignal" }
 procarray = { path = "../../backend/storage/ipc/procarray" }
 procsignal = { path = "../../backend/storage/ipc/procsignal" }
 shmem = { path = "../../backend/storage/ipc/shmem" }
+aio_funcs = { path = "../../backend/storage/aio/aio_funcs" }
 sinval = { path = "../../backend/storage/ipc/sinval" }
 waiteventset = { path = "../../backend/storage/ipc/waiteventset" }
 lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }

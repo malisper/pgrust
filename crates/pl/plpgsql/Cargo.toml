@@ -25,6 +25,7 @@ execexpr = { path = "../../backend/executor/execexpr" }
 fmgr = { package = "types_fmgr", path = "../../_support/types/fmgr" }
 fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
 format_type = { path = "../../backend/utils/adt/format_type" }
+adt_regproc = { path = "../../backend/utils/adt/regproc" }
 funcapi = { path = "../../backend/utils/fmgr/funcapi" }
 lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
 guc = { path = "../../backend/utils/misc/guc" }

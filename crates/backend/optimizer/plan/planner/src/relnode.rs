@@ -62,6 +62,31 @@ pub fn find_base_rel_ignore_join(run: &crate::run::PlannerRun<'_>, relid: i32) -
     panic!("no relation entry for relid {relid} (find_base_rel_ignore_join)");
 }
 
+// build_simple_rel (relnode.c): a RELATION rel's userid is its
+// RTEPermissionInfo's checkAsUser; an RTE without a perminfo checks as the
+// current user (InvalidOid).
+fn rte_check_as_user(run: &crate::run::PlannerRun<'_>, varno: usize) -> u32 {
+    let (query, index) = match run.root.simple_rte_array[varno] {
+        RangeTblEntryId::Parse { query, index } => (query, index),
+        other => panic!("rte_check_as_user({varno}): unresolvable {other:?}"),
+    };
+    let parse = run.queries[query.0 as usize];
+    let rte = parse
+        .rtable
+        .nth(index as usize)
+        .as_range_tbl_entry()
+        .expect("rtable cell is a RangeTblEntry");
+    if rte.perminfoindex == 0 {
+        return 0;
+    }
+    parse
+        .rteperminfos
+        .nth(rte.perminfoindex as usize - 1)
+        .as_rte_permission_info()
+        .expect("rteperminfos cell")
+        .checkAsUser
+}
+
 // build_simple_rel (relnode.c), parentless arm (inheritance children are the
 // M2 partition lane).
 pub fn build_simple_rel<'mcx>(
@@ -76,6 +101,8 @@ pub fn build_simple_rel<'mcx>(
         }
         _ => 0,
     };
+    let check_as_user = (rtekind == RTEKind::RTE_RELATION)
+        .then(|| rte_check_as_user(run, relid as usize));
     let root = &mut run.root;
     assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
     assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
@@ -94,9 +121,7 @@ pub fn build_simple_rel<'mcx>(
 
     match rtekind {
         RTEKind::RTE_RELATION => {
-            // rel.userid comes from the RTE's perminfo checkAsUser; RTEs on
-            // this lane panicked earlier when perminfoindex != 0.
-            rel.userid = 0;
+            rel.userid = check_as_user.expect("computed for RTE_RELATION");
         }
         RTEKind::RTE_RESULT => {
             // RTE_RESULT has no columns, nor could it have a whole-row Var.
@@ -144,6 +169,17 @@ pub fn build_simple_rel_child<'mcx>(
         }
         _ => 0,
     };
+    // C: a relation child under a subquery parent (UNION ALL pull-up) has its
+    // own perminfo; under a relation parent it inherits the parent's userid.
+    let userid = if rtekind == RTEKind::RTE_RELATION {
+        if run.root.rel(parent).rtekind == RTEKind::RTE_SUBQUERY as u32 {
+            rte_check_as_user(run, relid as usize)
+        } else {
+            run.root.rel(parent).userid
+        }
+    } else {
+        0
+    };
     let root = &mut run.root;
     assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
     assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
@@ -159,7 +195,7 @@ pub fn build_simple_rel_child<'mcx>(
     rel.nparts = -1;
     rel.baserestrict_min_security = u32::MAX;
     rel.pathtarget_id = Some(empty_pathtarget_id(root));
-    rel.userid = root.rel(parent).userid;
+    rel.userid = userid;
     match rtekind {
         RTEKind::RTE_RELATION => {}
         RTEKind::RTE_RESULT => {

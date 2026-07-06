@@ -53,5 +53,6 @@ tcop_dest = { path = "../../tcop/dest" }
 xact = { path = "../../access/transam/xact" }
 spi = { path = "../../executor/spi" }
 indexam = { path = "../../access/index/indexam" }
+execindexing = { path = "../../executor/execindexing" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_pathnodes = { path = "../../../_support/types/pathnodes" }

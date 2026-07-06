@@ -2345,6 +2345,7 @@ fn ATExecAddColumn<'mcx>(
     if let Some(raw_default) = col_def.raw_default {
         // AddRelationNewConstraints over the one RawColumnDefault; the rel
         // must be re-opened to see the new attribute (C rebuilds in place).
+        // relation_open, not table_open: C's rel may be a composite type.
         let rel2 = relation_seams::relation_open::call(mcx, myrelid, NoLock)?;
         crate::constraints::add_relation_new_constraints(
             mcx,
@@ -2358,6 +2359,7 @@ fn ATExecAddColumn<'mcx>(
     }
 
     // Relations without storage skip the phase-3 fill decision entirely.
+    // relation_open, not table_open: C's rel may be a composite type.
     let rel3 = relation_seams::relation_open::call(mcx, myrelid, NoLock)?;
     if types_rel::RELKIND_HAS_STORAGE(rel3.rd_rel.relkind) {
         add_column_phase3_fill(
@@ -5059,6 +5061,16 @@ fn ATPrepAlterColumnType<'mcx>(
     pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
 
     let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(&pstate), tn)?;
+
+    let aclresult = aclchk::object_aclcheck(
+        types_core::TYPE_RELATION_ID,
+        targettype,
+        miscinit::GetUserId(),
+        adt_acl::ACL_USAGE,
+    )?;
+    if aclresult != aclchk::ACLCHECK_OK {
+        crate::aclcheck_error_type(aclresult, targettype)?;
+    }
 
     let targetcollid =
         crate::GetColumnDefCollationPos(Some(query_string.as_bytes()), def, targettype)?;

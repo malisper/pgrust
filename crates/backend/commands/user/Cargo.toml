@@ -24,6 +24,7 @@ varlena = { path = "../../utils/adt/varlena" }
 crypt = { path = "../../libpq/crypt" }
 mbutils = { path = "../../utils/mb/mbutils" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 catcache = { path = "../../utils/cache/catcache" }
 catalog = { path = "../../catalog/catalog" }
 catalog_indexing = { path = "../../catalog/catalog_indexing" }

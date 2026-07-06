@@ -423,10 +423,14 @@ fn agg_lookup_failed(aggfnoid: Oid) -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
-    Box::new(
-        PgError::error(format!("permission denied for aggregate {aggfnoid}"))
-            .with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
-    )
+    let msg = match syscache_seams::pg_proc_proname::call(aggfnoid) {
+        Ok(Some(name)) => format!(
+            "permission denied for aggregate {}",
+            core::str::from_utf8(name.name_str()).expect("catalog NameData is valid UTF-8")
+        ),
+        _ => format!("permission denied for aggregate {aggfnoid}"),
+    };
+    Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE))
 }
 
 fn collect_aggrefs<'mcx>(

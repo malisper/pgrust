@@ -15,6 +15,9 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { package = "types_fmgr", path = "../../../../_support/types/fmgr" }
 elog = { path = "../../../utils/error/elog" }
 shmem_seams = { path = "../shmem_seams" }
+funcapi = { path = "../../../utils/fmgr/funcapi" }
+varlena = { path = "../../../utils/adt/varlena" }
+mcx = { path = "../../../../_support/mcx" }
 
 [dev-dependencies]
 s_lock = { path = "../../lmgr/s_lock" }

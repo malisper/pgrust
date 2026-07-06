@@ -762,6 +762,17 @@ fn copy_from_partitioned_body<'mcx>(
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
 
+    // The DoCopy perminfo's insertedCols (copy.c): constraint-error DETAILs
+    // always include the columns the user provided data for (execMain.c
+    // ExecBuildSlotValueDescription), root-numbered.
+    let inserted_cols = {
+        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+        let mut b = types_nodes::Bitmapset::empty();
+        for &a in cstate.attnumlist.iter() {
+            b.add_member(mcx, a as i32 - FLIHAN)?;
+        }
+        b
+    };
     let mut qualexpr = init_where_qual(mcx, cstate)?;
     let mut router = execpartition::PartitionTupleRouting::new(mcx, rel)?;
     // C GetPerTupleExprContext: expression partition keys evaluate here,
@@ -934,6 +945,7 @@ fn copy_from_partitioned_body<'mcx>(
                 lrel,
                 use_slot,
                 Some(rel),
+                Some(&inserted_cols),
             )?;
             // ExecPartitionCheck (copyfrom.c:1361-1368): a routed row is
             // re-checked only when a BR trigger could have moved it.
@@ -1033,7 +1045,15 @@ fn copy_from_partitioned_body<'mcx>(
             slot.base_mut().tts_tableOid = lrel.rd_id;
             // Virtual-generated columns on a routed-into partition panic above,
             // so the virtual-NN compile cache is never populated.
-            nodemodifytable::exec_constraints(mcx, &mut leaf_checks[leaf], &mut None, lrel, slot, Some(rel))?;
+            nodemodifytable::exec_constraints(
+                mcx,
+                &mut leaf_checks[leaf],
+                &mut None,
+                lrel,
+                slot,
+                Some(rel),
+                Some(&inserted_cols),
+            )?;
             // Routed rows skip ExecPartitionCheck (bound proven on descent;
             // the DEFAULT-partition re-check runs inside find_partition).
             buf.linenos[buf.nused] = cstate.cur_lineno;

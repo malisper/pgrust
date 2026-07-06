@@ -48,16 +48,86 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
 
 // Top-level flat copy with sub-structure zapped; alias/eref stay by ref.
 fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
-    let mcx = run.mcx;
     let parse = run.parse();
     for rte_node in &parse.rtable {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        add_rte_to_flat_rtable(run, &parse.rteperminfos, rte)?;
+    }
+    // C's dead-subquery pass: planned subqueries not referenced by the plan
+    // tree must contribute their RTEs anyway. Live setop leaves are always
+    // scanned; a subquery rel without a subroot means it was never planned —
+    // flatten its relation RTEs so the executor still checks permissions.
+    for (i, rte_node) in parse.rtable.iter().enumerate() {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        let rti = (i + 1) as i32;
+        if rte.rtekind == RTEKind::RTE_SUBQUERY
+            && !rte.inh
+            && rti < run.root.simple_rel_array_size
+        {
+            if let Some(rel) = run.root.simple_rel_array[rti as usize] {
+                if run.root.rel(rel).subroot_idx.is_none() {
+                    let subquery =
+                        rte.subquery.expect("unplanned subquery RTE keeps its Query");
+                    flatten_unplanned_rtes(run, subquery)?;
+                }
+                // IS_DUMMY_REL recursion arm: dummy children still surface as
+                // SubqueryScan(Result) plans here, so their rtables flatten
+                // through the plan walk.
+            }
+        }
+    }
+    Ok(())
+}
+
+// flatten_unplanned_rtes/flatten_rtes_walker (setrefs.c).
+fn flatten_unplanned_rtes<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    subquery: &'mcx types_nodes::parsenodes::Query<'mcx>,
+) -> PgResult<()> {
+    struct W<'a, 'b, 'mcx> {
+        run: &'a mut PlannerRun<'mcx>,
+        query: &'b types_nodes::parsenodes::Query<'mcx>,
+    }
+    impl<'a, 'b, 'mcx> nodes_core::NodeWalker<'mcx> for W<'a, 'b, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(rte) = node.as_range_tbl_entry() {
+                if rte.rtekind == RTEKind::RTE_RELATION
+                    || (rte.rtekind == RTEKind::RTE_SUBQUERY && rte.relid != 0)
+                {
+                    add_rte_to_flat_rtable(self.run, &self.query.rteperminfos, rte)?;
+                }
+                return Ok(false);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+        fn visit_query_ref(
+            &mut self,
+            q: &'mcx types_nodes::parsenodes::Query<'mcx>,
+        ) -> PgResult<bool> {
+            let save = self.query;
+            self.query = q;
+            let r = nodes_core::query_tree_walker(q, self, nodes_core::QTW_EXAMINE_RTES_BEFORE)?;
+            self.query = save;
+            Ok(r)
+        }
+    }
+    let mut w = W { run, query: subquery };
+    nodes_core::query_tree_walker(subquery, &mut w, nodes_core::QTW_EXAMINE_RTES_BEFORE)?;
+    Ok(())
+}
+
+fn add_rte_to_flat_rtable<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rteperminfos: &NodeList<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    {
         // C shares the RTEPermissionInfo node into glob->finalrteperminfos and
         // renumbers the copied RTE's index.
         let mut new_perminfoindex = 0;
         if rte.perminfoindex > 0 {
-            let perminfo =
-                parse_relation::getRTEPermissionInfo(&parse.rteperminfos, rte)?;
+            let perminfo = parse_relation::getRTEPermissionInfo(rteperminfos, rte)?;
             run.glob.finalrteperminfos.lappend(mcx, perminfo)?;
             new_perminfoindex = run.glob.finalrteperminfos.len() as types_core::Index;
         }
@@ -106,28 +176,6 @@ fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
             run.glob.relation_oids.lappend(mcx, rte.relid)?;
             let rti = run.glob.finalrtable.len() as i32;
             run.glob.all_relids.add_member(mcx, rti)?;
-        }
-    }
-    // C's dead-subquery pass: planned subqueries not referenced by the plan
-    // tree must contribute their RTEs anyway. Live setop leaves are always
-    // scanned; a subquery rel without a subroot means it was never planned.
-    for (i, rte_node) in parse.rtable.iter().enumerate() {
-        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        let rti = (i + 1) as i32;
-        if rte.rtekind == RTEKind::RTE_SUBQUERY
-            && !rte.inh
-            && rti < run.root.simple_rel_array_size
-        {
-            if let Some(rel) = run.root.simple_rel_array[rti as usize] {
-                assert!(
-                    run.root.rel(rel).subroot_idx.is_some(),
-                    "flatten_unplanned_rtes (setrefs.c): unplanned subquery RTE; \
-                     constraint-exclusion lane unported"
-                );
-                // IS_DUMMY_REL recursion arm: dummy children still surface as
-                // SubqueryScan(Result) plans here, so their rtables flatten
-                // through the plan walk.
-            }
         }
     }
     Ok(())
