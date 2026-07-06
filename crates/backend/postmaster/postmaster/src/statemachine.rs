@@ -80,6 +80,8 @@ pub(crate) fn HandleFatalError(
     debug_assert!(with_pm(|pm| !pm.fatal_error));
     debug_assert!(with_pm(|pm| pm.shutdown != ImmediateShutdown));
 
+    launch_backend::wpool::flush();
+
     pmsignal::SetQuitSignalReason(reason);
 
     let sigtosend = if consider_sigabrt && guc_tables::vars::send_abort_for_crash.read() {

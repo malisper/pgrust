@@ -15,3 +15,13 @@ seam_core::seam!(
     // C `PgStartTime` (timestamp.c global, written once by the postmaster).
     pub fn pg_start_time() -> i64
 );
+
+seam_core::seam!(
+    // §3.1 P-pool claim: hand a just-registered BGWORKER_CLASS_PARALLEL slot
+    // to a parked standby thread, bypassing the postmaster round-trip and
+    // thread spawn. Returns the standby's reserved MyProcPid, or 0 when no
+    // standby is available (caller falls back to the postmaster spawn path).
+    // Called under the bgworker registry lock; lock order registry -> pool ->
+    // pmchild matches BackgroundWorkerStateChange's registry -> pmchild.
+    pub fn parallel_pool_dispatch(slot: i32, generation: u64) -> i32
+);

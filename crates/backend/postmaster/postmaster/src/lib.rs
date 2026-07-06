@@ -273,6 +273,10 @@ pub fn process_pm_reload_request() -> PgResult<()> {
         "process_pm_reload_request",
     );
 
+    // Parked standbys carry a pre-reload GUC snapshot; retire them so the
+    // next maintain() respawns from the reloaded state.
+    launch_backend::wpool::flush();
+
     let shutdown = with_pm(|pm| pm.shutdown);
     if shutdown <= SmartShutdown {
         report(
