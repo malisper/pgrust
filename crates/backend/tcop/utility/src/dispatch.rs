@@ -2104,15 +2104,7 @@ fn exec_index_stmt<'mcx>(
         tag,
     );
     event_trigger::EventTriggerAlterTableEnd();
-    if let Some(comment) = stmt.idxcomment {
-        commands_comment::CreateComments(
-            mcx,
-            index_relid,
-            types_core::RELATION_RELATION_ID,
-            0,
-            Some(comment),
-        )?;
-    }
+    // idxcomment is applied inside DefineIndex (indexcmds.c:1288).
     Ok(())
 }
 
