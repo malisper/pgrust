@@ -1300,19 +1300,23 @@ fn pull_up_simple_subquery<'mcx>(
                 };
             }
             RTEKind::RTE_SUBQUERY => {
+                // C's whole-Query OffsetVarNodes / IncrementVarSublevelsUp
+                // (prepjointree.c pull_up_simple_subquery) descend into
+                // retained child subqueries: uplevel Vars there reference the
+                // pulled-up rtable (LATERAL) or levels above it. Deep copy
+                // first — the body is shared with the stored rule. A dead
+                // (nested-pulled-up) child has subquery zapped to None.
                 if !pre_adjusted {
-                    // C's whole-Query OffsetVarNodes / IncrementVarSublevelsUp
-                    // (prepjointree.c pull_up_simple_subquery) descend into
-                    // retained child subqueries: uplevel Vars there reference
-                    // the pulled-up rtable (LATERAL) or levels above it. Deep
-                    // copy first — the body is shared with the stored rule.
-                    let body = crte.subquery.expect("RTE_SUBQUERY has a subquery");
-                    let deep = rewrite_manip::copy_query_node(mcx, body)?;
-                    rewrite_manip::OffsetVarNodes(mcx, deep, rtoffset, 1)?;
-                    rewrite_manip::IncrementVarSublevelsUp(deep, -1, 2)?;
-                    let deep_q = deep.as_query().expect("Query round trip");
-                    // SAFETY: exclusive pre-seal fixup of the fresh copy.
-                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.subquery = Some(deep_q)) };
+                    if let Some(body) = crte.subquery {
+                        let deep = rewrite_manip::copy_query_node(mcx, body)?;
+                        rewrite_manip::OffsetVarNodes(mcx, deep, rtoffset, 1)?;
+                        rewrite_manip::IncrementVarSublevelsUp(deep, -1, 2)?;
+                        let deep_q = deep.as_query().expect("Query round trip");
+                        // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                        unsafe {
+                            copy.with_mut::<RangeTblEntry, _>(|r| r.subquery = Some(deep_q))
+                        };
+                    }
                 }
                 // Retained (non-simple or sublink-pulled) child subqueries can
                 // carry lateral cross-references once spliced under a LATERAL
