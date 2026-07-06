@@ -194,12 +194,12 @@ fn ConstructTupleDescriptor<'mcx>(
     collationIds: &[Oid],
     opclassIds: &[Oid],
 ) -> PgResult<TupleDescData<'mcx>> {
-    // amroutine->amkeytype: InvalidOid for btree/gin/gist/brin, INT4OID for hash.
-    let amkeytype = match accessMethodId {
-        BTREE_AM_OID | GIN_AM_OID | GIST_AM_OID | types_core::SPGIST_AM_OID
-        | types_core::BRIN_AM_OID => InvalidOid,
-        HASH_AM_OID => INT4OID,
-        other => unported(&format!("ConstructTupleDescriptor: index AM {other}")),
+    // amroutine->amkeytype: InvalidOid for btree/gin/gist/spgist/brin,
+    // INT4OID for hash; from_relam covers non-builtin AMs over builtin
+    // handlers (index_create registered the mapping).
+    let amkeytype = match types_relscan::IndexAmKind::from_relam(accessMethodId) {
+        types_relscan::IndexAmKind::Hash => INT4OID,
+        _ => InvalidOid,
     };
     let numatts = indexInfo.ii_NumIndexAttrs as usize;
     let numkeyatts = indexInfo.ii_NumIndexKeyAttrs as usize;

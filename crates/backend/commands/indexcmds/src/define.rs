@@ -709,17 +709,23 @@ pub fn DefineIndex<'mcx>(
             "EXCLUDE"
         };
         for i in 0..key.partnatts as usize {
-            // Hash partitioning is loud upstream; list/range use btree.
+            // List/range partkeys use btree opclasses, hash partkeys hash
+            // ones (indexcmds.c:997-1001, in sync with ComputePartitionAttrs).
+            let eq_strategy: i16 = if key.strategy == partcache::PARTITION_STRATEGY_HASH {
+                lsyscache::HTEqualStrategyNumber
+            } else {
+                BTEqualStrategyNumber as i16
+            };
             let ptkey_eqop = lsyscache::get_opfamily_member(
                 key.partopfamily[i],
                 key.partopcintype[i],
                 key.partopcintype[i],
-                BTEqualStrategyNumber as i16,
+                eq_strategy,
             )?;
             if ptkey_eqop == InvalidOid {
                 panic!(
                     "missing operator {}({},{}) in partition opfamily {}",
-                    BTEqualStrategyNumber, key.partopcintype[i], key.partopcintype[i],
+                    eq_strategy, key.partopcintype[i], key.partopcintype[i],
                     key.partopfamily[i]
                 );
             }
