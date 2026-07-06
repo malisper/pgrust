@@ -2544,6 +2544,8 @@ pub enum InstrExtra {
     IndexSearches(u64),
     /// Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     WorkersLaunched(i32),
+    /// MERGE mt_merge_inserted/updated/deleted (EXPLAIN's Tuples: line).
+    MergeCounts([f64; 3]),
 }
 
 /// ANALYZE wraps every node, so only Instrumented arms can match the id.
@@ -2675,6 +2677,11 @@ fn instr_extra_of<'mcx>(
         PlanStateNode::GatherMerge(gm) => {
             Some(InstrExtra::WorkersLaunched(gm.state.nworkers_launched))
         }
+        PlanStateNode::ModifyTable(mps) => Some(InstrExtra::MergeCounts([
+            mps.mt.mt_merge_inserted,
+            mps.mt.mt_merge_updated,
+            mps.mt.mt_merge_deleted,
+        ])),
         _ => None,
     }
 }

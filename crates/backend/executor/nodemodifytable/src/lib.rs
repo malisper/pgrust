@@ -161,6 +161,11 @@ pub struct ModifyTableState<'mcx> {
     // C ExecInsert's *insert_destrel out-param (routed leaf of the last
     // insert; None = unrouted), for the cross-partition FK update event.
     last_insert_leaf: Option<usize>,
+    // mt_merge_inserted/updated/deleted (EXPLAIN ANALYZE's Tuples: line;
+    // skipped is derived by explain as source-total minus these).
+    pub mt_merge_inserted: f64,
+    pub mt_merge_updated: f64,
+    pub mt_merge_deleted: f64,
 }
 
 impl<'mcx> ModifyTableState<'mcx> {
@@ -570,6 +575,9 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
         last_insert_leaf: None,
+        mt_merge_inserted: 0.0,
+        mt_merge_updated: 0.0,
+        mt_merge_deleted: 0.0,
     })
 }
 
@@ -1764,12 +1772,38 @@ fn exec_merge_matched_scan<'mcx>(
         let result = match command_type {
             CmdType::CMD_UPDATE => {
                 merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
+                // ExecUpdatePrologue: BEFORE ROW UPDATE triggers; a NULL
+                // return is C's "do nothing" (goto out, no count).
+                if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row) {
+                    match merge_tuple_for_trigger(mt, estate, tupleid)? {
+                        MergeTrigFetch::Fetched(trig_old) => {
+                            if !br_row_triggers(
+                                mt,
+                                estate,
+                                types_trigger::TRIGGER_TYPE_UPDATE,
+                                types_trigger::TRIGGER_EVENT_UPDATE,
+                                Some(trig_old),
+                                Some(new_id),
+                                None,
+                            )? {
+                                return Ok(MergeMatchedOutcome::Done(None));
+                            }
+                        }
+                        MergeTrigFetch::SelfModified(fd) => {
+                            return Err(merge_self_modified(&fd, output_cid));
+                        }
+                        MergeTrigFetch::Deleted => {
+                            return Ok(MergeMatchedOutcome::NotMatched);
+                        }
+                    }
+                }
                 match merge_update_act(mt, estate, tupleid, new_id, &mut tmfd, &mut *epq_eval)? {
                     MergeUpdActRes::Tm(r) => r,
                     // C ExecMergeMatched crossPartUpdate leg: the INSERT half
                     // counted the row; RETURNING reports the inserted row
                     // (cpUpdateReturningSlot).
                     MergeUpdActRes::CrossPart(inserted) => {
+                        mt.mt_merge_updated += 1.0;
                         let mut rslot = None;
                         if let Some(islot) = inserted {
                             if mt.rel().project_returning.is_some() {
@@ -1786,13 +1820,44 @@ fn exec_merge_matched_scan<'mcx>(
                     }
                 }
             }
-            CmdType::CMD_DELETE => merge_delete_act(mt, estate, tupleid, &mut tmfd)?,
+            CmdType::CMD_DELETE => {
+                // ExecDeletePrologue: BEFORE ROW DELETE triggers.
+                if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_delete_before_row) {
+                    match merge_tuple_for_trigger(mt, estate, tupleid)? {
+                        MergeTrigFetch::Fetched(trig_old) => {
+                            if !br_row_triggers(
+                                mt,
+                                estate,
+                                types_trigger::TRIGGER_TYPE_DELETE,
+                                types_trigger::TRIGGER_EVENT_DELETE,
+                                Some(trig_old),
+                                None,
+                                None,
+                            )? {
+                                return Ok(MergeMatchedOutcome::Done(None));
+                            }
+                        }
+                        MergeTrigFetch::SelfModified(fd) => {
+                            return Err(merge_self_modified(&fd, output_cid));
+                        }
+                        MergeTrigFetch::Deleted => {
+                            return Ok(MergeMatchedOutcome::NotMatched);
+                        }
+                    }
+                }
+                merge_delete_act(mt, estate, tupleid, &mut tmfd)?
+            }
             CmdType::CMD_NOTHING => TM_Result::TM_Ok,
             other => panic!("unknown action in MERGE WHEN clause: {other:?}"),
         };
 
         match result {
             TM_Result::TM_Ok => {
+                match command_type {
+                    CmdType::CMD_UPDATE => mt.mt_merge_updated += 1.0,
+                    CmdType::CMD_DELETE => mt.mt_merge_deleted += 1.0,
+                    _ => {}
+                }
                 if mt.canSetTag && command_type != CmdType::CMD_NOTHING {
                     estate.es_processed += 1;
                 }
@@ -2276,6 +2341,7 @@ fn exec_merge_not_matched<'mcx>(
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
                 mt.insert_target_root = false;
+                mt.mt_merge_inserted += 1.0;
                 if let Some(islot) = inserted? {
                     if mt.rel().project_returning.is_some() {
                         return Ok(Some(exec_process_returning(
@@ -3836,6 +3902,75 @@ fn fetch_wholerow_tuple<'mcx>(
     Ok(unsafe {
         types_tuple::HeapTupleData::from_raw_parts(hdr, t_len, tid, types_core::InvalidOid)
     })
+}
+
+// GetTupleForTrigger outcomes MERGE must tell apart: C's ExecMergeMatched
+// maps a BEFORE ROW prologue's TM_SelfModified to the 21000/27000-exact
+// errors and TM_Deleted to the NOT MATCHED flip instead of a silent skip.
+enum MergeTrigFetch {
+    Fetched(ExecSlotId),
+    SelfModified(TM_FailureData),
+    Deleted,
+}
+
+fn merge_tuple_for_trigger<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tupleid: &ItemPointerData,
+) -> PgResult<MergeTrigFetch> {
+    let slot_id = ensure_trig_old_slot(mt, estate);
+    let output_cid = estate.es_output_cid;
+    let mut tmfd = TM_FailureData::default();
+    let lock_result = {
+        let mcx = estate.es_query_cxt;
+        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let rel = es_relations[(mt.rel().rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let flags = if xact::IsolationUsesXactSnapshot() {
+            0
+        } else {
+            TUPLE_LOCK_FLAG_FIND_LAST_VERSION
+        };
+        tableam::table_tuple_lock(
+            mcx,
+            rel,
+            tupleid,
+            snapshot,
+            &mut es_tupleTable[slot_id.0 as usize],
+            output_cid,
+            LockTupleMode::LockTupleExclusive,
+            LockWaitPolicy::LockWaitBlock,
+            flags,
+            &mut tmfd,
+        )?
+    };
+    match lock_result {
+        TM_Result::TM_SelfModified => Ok(MergeTrigFetch::SelfModified(tmfd)),
+        TM_Result::TM_Ok => {
+            if tmfd.traversed {
+                panic!(
+                    "GetTupleForTrigger (trigger.c): EPQ recheck after a \
+                     concurrent update unported on the MERGE BEFORE ROW path"
+                );
+            }
+            Ok(MergeTrigFetch::Fetched(slot_id))
+        }
+        TM_Result::TM_Updated => {
+            if xact::IsolationUsesXactSnapshot() {
+                return Err(serialization_conflict("update"));
+            }
+            panic!("GetTupleForTrigger (trigger.c): unexpected table_tuple_lock status")
+        }
+        TM_Result::TM_Deleted => {
+            if xact::IsolationUsesXactSnapshot() {
+                return Err(serialization_conflict("delete"));
+            }
+            Ok(MergeTrigFetch::Deleted)
+        }
+        other => panic!("GetTupleForTrigger (trigger.c): unrecognized status {other:?}"),
+    }
 }
 
 fn get_tuple_for_trigger<'mcx>(
@@ -5814,7 +5949,8 @@ mcx::forget_safe_struct!(
         virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
-        node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf;
+        node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
+        mt_merge_inserted, mt_merge_updated, mt_merge_deleted;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_existing,
