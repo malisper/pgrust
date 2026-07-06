@@ -47,8 +47,8 @@ pub fn spgbeginscan<'mcx>(
         panic!("unported: SP-GiST ordered (KNN) scans (distance lane)");
     }
 
-    let state = crate::initSpGistState(r)?;
-    let recon_tup_desc = crate::utils::getSpGistTupleDesc(r, &state.attType);
+    let state = crate::initSpGistState(mcx, r)?;
+    let recon_tup_desc = crate::utils::getSpGistTupleDesc(mcx, r, &state.attType)?;
 
     let inner_oid = index_getprocid(r, spgKeyColumn, SPGIST_INNER_CONSISTENT_PROC);
     let leaf_oid = index_getprocid(r, spgKeyColumn, SPGIST_LEAF_CONSISTENT_PROC);

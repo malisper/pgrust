@@ -255,27 +255,39 @@ pub(crate) fn set_cache(index: &Relation<'_>, cache: SpGistCache) {
     index.rd_amcache_spgist.set(Some(cache));
 }
 
-/// getSpGistTupleDesc; the adjusted-copy arm (leaf type != column type) is
-/// unreachable for the live opclass set and stays LOUD.
+/// getSpGistTupleDesc; the copy arm serves compress opclasses (leaf type !=
+/// column type, e.g. poly_ops storing bounding boxes). The copy allocates in
+/// `mcx`, which must outlive the consuming state/scan.
 pub fn getSpGistTupleDesc<'mcx>(
+    mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     keyType: &SpGistTypeDesc,
-) -> std::rc::Rc<TupleDescData<'mcx>> {
+) -> PgResult<std::rc::Rc<TupleDescData<'mcx>>> {
     if keyType.type_ == index.rd_att.attr(spgKeyColumn).atttypid {
-        index.rd_att.clone()
+        Ok(index.rd_att.clone())
     } else {
-        panic!(
-            "unported: SP-GiST leaf tupdesc with key type {} != column type {} (compress-opclass lane)",
-            keyType.type_,
-            index.rd_att.attr(spgKeyColumn).atttypid
-        );
+        let mut desc = ::tupdesc::CreateTupleDescCopy(mcx, &index.rd_att)?;
+        let att = desc.attr_mut(spgKeyColumn);
+        att.atttypid = keyType.type_;
+        att.atttypmod = -1;
+        att.attlen = keyType.attlen;
+        att.attbyval = keyType.attbyval;
+        att.attalign = keyType.attalign;
+        att.attstorage = keyType.attstorage;
+        att.attcompression = 0;
+        att.attcollation = InvalidOid;
+        desc.populate_compact_attribute(spgKeyColumn);
+        Ok(std::rc::Rc::new(desc))
     }
 }
 
 /// initSpGistState; support procs resolved once onto the carrier.
-pub fn initSpGistState<'mcx>(index: &Relation<'mcx>) -> PgResult<SpGistState<'mcx>> {
+pub fn initSpGistState<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'mcx>,
+) -> PgResult<SpGistState<'mcx>> {
     let cache = spgGetCache(index)?;
-    let leaf_tup_desc = getSpGistTupleDesc(index, &cache.attLeafType);
+    let leaf_tup_desc = getSpGistTupleDesc(mcx, index, &cache.attLeafType)?;
     let redirect_xid = xact::GetTopTransactionIdIfAny();
 
     let resolve = |procnum: u16| -> PgResult<::types_fmgr::FmgrInfo> {

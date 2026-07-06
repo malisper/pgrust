@@ -74,7 +74,7 @@ pub fn spgbuild<'mcx>(
     spgist::spg_unlock_release(rootbuffer)?;
     spgist::spg_unlock_release(nullbuffer)?;
 
-    let mut state = spgist::initSpGistState(index)?;
+    let mut state = spgist::initSpGistState(mcx, index)?;
     state.isBuild = true;
     let mut indtuples: u64 = 0;
     let mut temp = MemoryContext::new_bump("SP-GiST build temporary context");
