@@ -1418,10 +1418,8 @@ pub fn AlterFunction<'mcx>(
     Ok(address)
 }
 
-// Guts of function deletion (functioncmds.c RemoveFunctionById); aggregates
-// and per-function pgstat drop are loud/no-op until their lanes land.
+// Guts of function deletion (functioncmds.c RemoveFunctionById).
 pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
-    const Anum_pg_proc_prokind: i32 = 21;
     const PROKIND_AGGREGATE: i8 = b'a' as i8;
 
     let relation = table::table_open(
@@ -1444,7 +1442,12 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
     let mut isnull = false;
     // SAFETY: prokind is a fixed NOT NULL pg_proc column.
     let prokind = unsafe {
-        types_tuple::heap_getattr(tup, Anum_pg_proc_prokind, relation.descr(), &mut isnull)
+        types_tuple::heap_getattr(
+            tup,
+            pg_proc::Anum_pg_proc_prokind as i32,
+            relation.descr(),
+            &mut isnull,
+        )
     }
     .as_i8();
     catalog_indexing::CatalogTupleDelete(&relation, &tid)?;
@@ -1452,7 +1455,33 @@ pub fn RemoveFunctionById<'mcx>(mcx: Mcx<'mcx>, funcOid: Oid) -> PgResult<()> {
     relation.close(types_rel::RowExclusiveLock)?;
     pgstat::function::pgstat_drop_function(funcOid);
     if prokind == PROKIND_AGGREGATE {
-        unported("RemoveFunctionById: pg_aggregate tuple deletion (aggregate DDL lane)");
+        let aggrel = table::table_open(
+            mcx,
+            types_core::AGGREGATE_RELATION_ID,
+            types_rel::RowExclusiveLock,
+        )?;
+        let mut key = types_scan::scankey::ScanKeyData::empty();
+        key.sk_attno = 1;
+        key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+        key.sk_collation = 0;
+        key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+            .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+        key.sk_argument = datum::Datum::from_oid(funcOid);
+        let mut scan = genam::systable_beginscan(
+            mcx,
+            &aggrel,
+            types_core::AGGREGATE_FNOID_INDEX_ID,
+            true,
+            None,
+            &[key],
+        )?;
+        let tup = genam::systable_getnext(mcx, &mut scan)?.unwrap_or_else(|| {
+            panic!("cache lookup failed for pg_aggregate tuple for function {funcOid}")
+        });
+        let tid = tup.t_self;
+        catalog_indexing::CatalogTupleDelete(&aggrel, &tid)?;
+        genam::systable_endscan(mcx, scan)?;
+        aggrel.close(types_rel::RowExclusiveLock)?;
     }
     Ok(())
 }
