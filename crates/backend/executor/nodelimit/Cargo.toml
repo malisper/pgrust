@@ -11,11 +11,16 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_scan = { path = "../../../_support/types/types_scan" }
 types_slot = { path = "../../../_support/types/types_slot" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
 execexpr = { path = "../execexpr" }
+exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 init_small = { path = "../../utils/init/init_small" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 
 [dev-dependencies]
-exectuples = { path = "../exectuples" }
-types_tuple = { path = "../../../_support/types/types_tuple" }
+types_core = { path = "../../../_support/types/types_core" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }

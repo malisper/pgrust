@@ -4,9 +4,11 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
-use ::execexpr::{exec_eval_expr, EvalSlots, ExprState};
+use std::rc::Rc;
+
+use ::execexpr::{exec_build_grouping_equal, exec_eval_expr, exec_qual, EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
-use ::mcx::PgBox;
+use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
     ERRCODE_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE,
@@ -14,7 +16,8 @@ use ::types_error::{
 use ::types_nodes::plannodes::Limit;
 use ::types_nodes::LimitOption;
 use ::types_scan::sdir::ScanDirectionIsForward;
-use ::types_slot::EXEC_FLAG_MARK;
+use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_MARK};
+use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
@@ -61,14 +64,20 @@ pub struct LimitState<'mcx> {
     pub lstate: LimitStateCond,
     position: i64,
     pub subSlot: Option<ExecSlotId>,
+    // WITH TIES: last in-window tuple + the tie-detection equality program
+    // (C: last_slot + eqfunction from execTuplesMatchPrepare).
+    last_slot: Option<SlotData<'mcx>>,
+    eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 /// `ExecInitLimit` minus child linkage (caller inits the outer child with the
-/// unmodified eflags, as C does).
+/// unmodified eflags, as C does). `outer_desc` is the outer child's result
+/// type; only WITH TIES reads it.
 pub fn exec_init_limit<'mcx>(
     node: &'mcx Limit<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
+    outer_desc: Option<&Rc<TupleDescData<'static>>>,
 ) -> PgResult<LimitState<'mcx>> {
     debug_assert!(eflags & EXEC_FLAG_MARK == 0);
     let mcx = estate.es_query_cxt;
@@ -82,12 +91,28 @@ pub fn exec_init_limit<'mcx>(
         // SAFETY: the ExprContext outlives the programs (same estate).
         unsafe { st.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
     }
-    if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
-        panic!(
-            "ExecInitLimit (nodeLimit.c): WITH TIES lane needs \
-             execTuplesMatchPrepare (execGrouping.c), not ported"
-        );
-    }
+    let (last_slot, eq) = if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
+        let desc = outer_desc.expect("WITH TIES requires the outer result type");
+        let num_cols = node.uniqNumCols as usize;
+        debug_assert!(node.uniqColIdx.len() == num_cols);
+        let mut eqfuncoids: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, num_cols)?;
+        for &op in node.uniqOperators {
+            eqfuncoids.push(lsyscache::get_opcode(op)?);
+        }
+        let eq = exec_build_grouping_equal(
+            mcx,
+            desc,
+            desc,
+            node.uniqColIdx,
+            &eqfuncoids,
+            node.uniqCollations,
+        )?;
+        let last_slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+        (Some(last_slot), Some(eq))
+    } else {
+        (None, None)
+    };
     Ok(LimitState {
         plan: node,
         ps_ExprContext,
@@ -100,13 +125,23 @@ pub fn exec_init_limit<'mcx>(
         lstate: LIMIT_INITIAL,
         position: 0,
         subSlot: None,
+        last_slot,
+        eq,
     })
 }
 
-#[cold]
-#[inline(never)]
-fn ties_lane_unreachable() -> ! {
-    panic!("nodeLimit: WITH TIES tuple-match lane unreachable (init panics first)")
+// ExecCopySlot(node->last_slot, slot): retain the boundary tuple for tie
+// comparison.
+fn save_last_slot<'mcx>(
+    node: &mut LimitState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let last = node.last_slot.as_mut().expect("WITH TIES has a last slot");
+    let src = estate.slot_mut(slot);
+    exectuples::exec_copy_slot(last, src, mcx, mcx)?;
+    Ok(())
 }
 
 #[cold]
@@ -147,7 +182,7 @@ pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
                     if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
                         && node.position - node.offset == node.count - 1
                     {
-                        ties_lane_unreachable();
+                        save_last_slot(node, estate, slot)?;
                     }
                     node.subSlot = Some(slot);
                     node.position += 1;
@@ -176,7 +211,7 @@ pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
                     if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
                         && node.position - node.offset == node.count - 1
                     {
-                        ties_lane_unreachable();
+                        save_last_slot(node, estate, slot)?;
                     }
                     node.subSlot = Some(slot);
                     node.position += 1;
@@ -195,7 +230,36 @@ pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
             }
             LIMIT_WINDOWEND_TIES => {
                 if forward {
-                    ties_lane_unreachable();
+                    // Advance until the first row whose ORDER BY keys differ
+                    // from the retained boundary tuple.
+                    let Some(slot) = child.exec_proc(estate)? else {
+                        node.lstate = LIMIT_SUBPLANEOF;
+                        return Ok(None);
+                    };
+                    let eq = node.eq.as_mut().expect("WITH TIES has an eq program");
+                    // SAFETY: the per-tuple context outlives this evaluation
+                    // and is reset right after (C: ExecQualAndReset;
+                    // packed-capable eq procs detoast-expand into it).
+                    unsafe {
+                        eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
+                    };
+                    let last = node.last_slot.as_mut().expect("WITH TIES has a last slot");
+                    let new_slot = estate.slot_mut(slot);
+                    // C: ecxt_innertuple = incoming, ecxt_outertuple = last_slot.
+                    let mut slots = EvalSlots {
+                        scan: None,
+                        inner: Some(&mut *new_slot),
+                        outer: Some(last),
+                    };
+                    let matched = exec_qual(Some(&mut **eq), &mut slots)?;
+                    estate.reset_expr_context(node.ps_ExprContext);
+                    if matched {
+                        node.subSlot = Some(slot);
+                        node.position += 1;
+                        break;
+                    }
+                    node.lstate = LIMIT_WINDOWEND;
+                    return Ok(None);
                 }
                 if node.position <= node.offset + 1 {
                     node.lstate = LIMIT_WINDOWSTART;
@@ -225,7 +289,12 @@ pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
                     return Ok(None);
                 }
                 if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
-                    ties_lane_unreachable();
+                    // We advanced one past the window to detect ties, so
+                    // re-fetch the previous tuple from the subplan.
+                    let Some(slot) = child.exec_proc(estate)? else {
+                        return Err(backwards_failed());
+                    };
+                    node.subSlot = Some(slot);
                 }
                 node.lstate = LIMIT_INWINDOW;
                 break;
@@ -347,14 +416,22 @@ fn negative_limit() -> Box<PgError> {
 pub fn exec_end_limit(node: &mut LimitState<'_>) {
     node.limitOffset = None;
     node.limitCount = None;
+    if let Some(eq) = node.eq.as_mut() {
+        eq.release_frames();
+    }
+    node.eq = None;
+    if let Some(last) = node.last_slot.as_mut() {
+        last.base_mut().tts_tupleDescriptor = None;
+    }
 }
 
 mcx::forget_safe_nodrop!(LimitStateCond);
 
-// Exempt: limitOffset/limitCount are released in exec_end_limit; LimitOption
-// is no-drop, const-proven below.
+// Exempt: limitOffset/limitCount/eq are released in exec_end_limit (eq via
+// release_frames), last_slot's descriptor likewise; LimitOption is no-drop,
+// const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<LimitOption>());
 mcx::forget_safe_struct!(
     LimitState<'_> { plan, ps_ExprContext, offset, count, noCount, lstate,
-        position, subSlot; limitOffset, limitCount, limitOption },
+        position, subSlot; limitOffset, limitCount, limitOption, last_slot, eq },
 );

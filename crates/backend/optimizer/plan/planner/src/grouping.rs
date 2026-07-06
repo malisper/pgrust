@@ -2323,16 +2323,12 @@ fn get_number_of_groups<'mcx>(
     Ok(1.0)
 }
 
-// create_distinct_paths + create_final_distinct_paths (planner.c); partial
-// paths are always empty so create_partial_distinct_paths is a no-op.
+// create_distinct_paths (planner.c).
 fn create_distinct_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     input_rel: RelId,
     target: types_pathnodes::PtId,
 ) -> PgResult<RelId> {
-    let parse = run.parse();
-    let has_distinct_on = parse.hasDistinctOn;
-
     let distinct_rel = crate::relnode::fetch_upper_rel(&mut run.root, UPPERREL_DISTINCT);
     {
         let (serverid, userid, useridiscurrent, has_fdw, in_parallel) = {
@@ -2353,6 +2349,190 @@ fn create_distinct_paths<'mcx>(
         d.consider_parallel = in_parallel;
         d.pathtarget_id = Some(target);
     }
+
+    create_final_distinct_paths(run, input_rel, distinct_rel)?;
+    create_partial_distinct_paths(run, input_rel, distinct_rel, target)?;
+
+    if run.root.rel(distinct_rel).pathlist.is_empty() {
+        return Err(could_not_implement("DISTINCT"));
+    }
+    crate::pathnode::set_cheapest(run, distinct_rel)?;
+    Ok(distinct_rel)
+}
+
+// create_partial_distinct_paths (planner.c): distinctify each worker's
+// stream, gather, then run the final distinctification over the gathered
+// paths.
+fn create_partial_distinct_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    input_rel: RelId,
+    final_distinct_rel: RelId,
+    target: types_pathnodes::PtId,
+) -> PgResult<()> {
+    {
+        let input = run.root.rel(input_rel);
+        if !input.consider_parallel || input.partial_pathlist.is_empty() {
+            return Ok(());
+        }
+    }
+    let parse = run.parse();
+    // Parallel DISTINCT ON would lose the deterministic row choice.
+    if parse.hasDistinctOn {
+        return Ok(());
+    }
+
+    let partial_distinct_rel =
+        crate::relnode::fetch_upper_rel(&mut run.root, UPPERREL_PARTIAL_DISTINCT);
+    {
+        let (serverid, userid, useridiscurrent, has_fdw, in_parallel) = {
+            let input = run.root.rel(input_rel);
+            (
+                input.serverid,
+                input.userid,
+                input.useridiscurrent,
+                input.has_fdwroutine,
+                input.consider_parallel,
+            )
+        };
+        let d = run.root.rel_mut(partial_distinct_rel);
+        d.serverid = serverid;
+        d.userid = userid;
+        d.useridiscurrent = useridiscurrent;
+        d.has_fdwroutine = has_fdw;
+        d.consider_parallel = in_parallel;
+        d.pathtarget_id = Some(target);
+    }
+
+    let cheapest_partial = run.root.rel(input_rel).partial_pathlist[0];
+    let num_distinct_rows = {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_distinctClause);
+        let exprs = sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let rows = run.root.path(cheapest_partial).base().rows;
+        crate::selfuncs::estimate_num_groups(run, &exprs, rows)?
+    };
+
+    if grouping_is_sortable(run, &run.root.processed_distinctClause) {
+        let distinct_pathkeys =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.distinct_pathkeys);
+        let paths = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel(input_rel).partial_pathlist,
+        );
+        for &input_path in paths.iter() {
+            let useful_list = get_useful_pathkeys_for_distinct(
+                run,
+                &distinct_pathkeys,
+                &crate::relnode::pgvec_clone_shallow(
+                    run.mcx,
+                    &run.root.path(input_path).base().pathkeys,
+                ),
+            );
+            for useful in useful_list {
+                let Some(sorted) = make_ordered_path(
+                    run,
+                    partial_distinct_rel,
+                    input_path,
+                    cheapest_partial,
+                    &useful,
+                    -1.0,
+                )? else {
+                    continue;
+                };
+                if run.root.distinct_pathkeys.is_empty() {
+                    // All DISTINCT keys redundant: each worker contributes at
+                    // most one row; the final step limits again post-Gather.
+                    let limit =
+                        limit_one_path(run, partial_distinct_rel, sorted)?;
+                    crate::pathnode::add_partial_path(run, partial_distinct_rel, limit);
+                } else {
+                    let numkeys = run.root.distinct_pathkeys.len() as i32;
+                    let unique = crate::pathnode::create_upper_unique_path(
+                        run,
+                        partial_distinct_rel,
+                        sorted,
+                        numkeys,
+                        num_distinct_rows,
+                    );
+                    crate::pathnode::add_partial_path(run, partial_distinct_rel, unique);
+                }
+            }
+        }
+    }
+
+    // Hash arm: enable_hashagg is a hard off-switch here (no must-hash
+    // fallback; the final step still has its own alternatives).
+    if crate::gucs::enable_hashagg()
+        && grouping_is_hashable(run, &run.root.processed_distinctClause)
+    {
+        let distinct_clause =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_distinctClause);
+        let input_target = run
+            .root
+            .path(cheapest_partial)
+            .base()
+            .pathtarget_id
+            .expect("input path has a pathtarget");
+        let agg_path = crate::pathnode::create_agg_path(
+            run,
+            partial_distinct_rel,
+            cheapest_partial,
+            input_target,
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_SIMPLE,
+            distinct_clause,
+            mcx::PgVec::new_in(run.mcx),
+            &types_pathnodes::AggClauseCosts::default(),
+            num_distinct_rows,
+        )?;
+        crate::pathnode::add_partial_path(run, partial_distinct_rel, agg_path);
+    }
+
+    if !run.root.rel(partial_distinct_rel).partial_pathlist.is_empty() {
+        crate::allpaths::generate_useful_gather_paths(run, partial_distinct_rel, true)?;
+        crate::pathnode::set_cheapest(run, partial_distinct_rel)?;
+        // Re-distinctify to remove duplicates across workers.
+        create_final_distinct_paths(run, partial_distinct_rel, final_distinct_rel)?;
+    }
+    Ok(())
+}
+
+// LIMIT 1 as a Const int8 (makeConst in the C arms of planner.c).
+fn limit_one_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    subpath: types_pathnodes::PathId,
+) -> PgResult<types_pathnodes::PathId> {
+    let limit_count = types_nodes::Node::mk_const(
+        run.mcx,
+        types_core::catalog::INT8OID,
+        -1,
+        0,
+        8,
+        datum::Datum::from_i64(1),
+        false,
+        true,
+    )?;
+    Ok(crate::pathnode::create_limit_path(
+        run,
+        rel,
+        subpath,
+        None,
+        Some(limit_count),
+        types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT,
+        0,
+        1,
+    ))
+}
+
+// create_final_distinct_paths (planner.c).
+fn create_final_distinct_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    input_rel: RelId,
+    distinct_rel: RelId,
+) -> PgResult<()> {
+    let parse = run.parse();
+    let has_distinct_on = parse.hasDistinctOn;
 
     let cheapest = run
         .root
@@ -2407,20 +2587,22 @@ fn create_distinct_paths<'mcx>(
                     continue;
                 };
                 if run.root.distinct_pathkeys.is_empty() {
-                    panic!(
-                        "create_final_distinct_paths (planner.c): all-redundant \
-                         DISTINCT keys (LIMIT 1 uniqification); M2 const-EC lane"
+                    // All DISTINCT keys redundant: every retained tuple is
+                    // indistinguishable, so LIMIT 1 over the sorted path
+                    // uniquifies (a pre-existing LIMIT may duplicate, as C).
+                    let limit = limit_one_path(run, distinct_rel, sorted)?;
+                    crate::pathnode::add_path(run, distinct_rel, limit);
+                } else {
+                    let numkeys = run.root.distinct_pathkeys.len() as i32;
+                    let unique = crate::pathnode::create_upper_unique_path(
+                        run,
+                        distinct_rel,
+                        sorted,
+                        numkeys,
+                        num_distinct_rows,
                     );
+                    crate::pathnode::add_path(run, distinct_rel, unique);
                 }
-                let numkeys = run.root.distinct_pathkeys.len() as i32;
-                let unique = crate::pathnode::create_upper_unique_path(
-                    run,
-                    distinct_rel,
-                    sorted,
-                    numkeys,
-                    num_distinct_rows,
-                );
-                crate::pathnode::add_path(run, distinct_rel, unique);
             }
         }
     }
@@ -2455,11 +2637,7 @@ fn create_distinct_paths<'mcx>(
         crate::pathnode::add_path(run, distinct_rel, agg_path);
     }
 
-    if run.root.rel(distinct_rel).pathlist.is_empty() {
-        return Err(could_not_implement("DISTINCT"));
-    }
-    crate::pathnode::set_cheapest(run, distinct_rel)?;
-    Ok(distinct_rel)
+    Ok(())
 }
 
 // get_useful_pathkeys_for_distinct (planner.c).
