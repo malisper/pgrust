@@ -18,7 +18,7 @@ pub use queue::{
     AfterTriggerBeginXact, AfterTriggerEndQuery, AfterTriggerEndSubXact, AfterTriggerEndXact,
     AfterTriggerFireDeferred, AfterTriggerPendingOnRel, ExecARDeleteTriggers,
     ExecARInsertTriggers, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
-    ExecASTruncateTriggers, ExecASUpdateTriggers, MakeTransitionCaptureState,
+    ChildToRoot, ExecASTruncateTriggers, ExecASUpdateTriggers, MakeTransitionCaptureState,
     TransitionCaptureState,
 };
 pub use state::AfterTriggerSetState;

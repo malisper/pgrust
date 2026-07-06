@@ -22,7 +22,8 @@ use types_trigger::{
     TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK,
     TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_UPDATE,
 };
-use types_tuple::{HeapTupleData, ItemPointerData};
+use heaptuple::HeapTuple;
+use types_tuple::{HeapTupleData, ItemPointerData, TupleDescData};
 
 use crate::exec::TriggerWhenEval;
 
@@ -205,13 +206,35 @@ pub fn MakeTransitionCaptureState(
     }))
 }
 
-// AfterTriggerSaveEvent's transition-capture head, tuple-based; the caller
-// verified rel has no child-to-root conversion map.
+// C ri_ChildToRootMap (ExecGetChildToRootMap, execUtils.c:1300): the attmap
+// the executor resolves per child result relation for converting its tuples
+// to the root target relation's rowtype. Consumed by transition capture
+// (TransitionTableAddTuple, trigger.c:5587) and the cross-partition UPDATE
+// event legs (AfterTriggerSaveEvent trigger.c:6384-6410).
+pub struct ChildToRoot<'a, 'mcx> {
+    pub map: &'a [i16],
+    pub child_desc: &'a TupleDescData<'mcx>,
+    pub root_desc: &'a TupleDescData<'mcx>,
+}
+
+impl ChildToRoot<'_, '_> {
+    fn convert<'m>(&self, mcx: Mcx<'m>, tup: &HeapTupleData<'_>) -> PgResult<HeapTuple<'m>> {
+        heaptuple::execute_attr_map_tuple(mcx, tup, self.child_desc, self.root_desc, self.map)
+    }
+}
+
+// AfterTriggerSaveEvent's transition-capture head, tuple-based. Tuples from
+// an attno-remapped child are converted to the root's rowtype before storing
+// (C TransitionTableAddTuple via GetAfterTriggersStoreSlot; the tuplestore
+// copies on put, so the converted image is transient query-mcx storage).
 fn capture_transition_tuples(
+    mcx: Mcx<'_>,
     tc: &TransitionCaptureState,
     event: u32,
     old_tup: Option<&HeapTupleData<'_>>,
     new_tup: Option<&HeapTupleData<'_>>,
+    old_conv: Option<&ChildToRoot<'_, '_>>,
+    new_conv: Option<&ChildToRoot<'_, '_>>,
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     debug_assert!(depth >= 0);
@@ -227,7 +250,13 @@ fn capture_transition_tuples(
             _ => TuplestoreHandle::NULL,
         };
         if !ts.is_null() {
-            tuplestore::hold::put_heap_tuple(ts, old)?;
+            match old_conv {
+                Some(c) => {
+                    let t = c.convert(mcx, old)?;
+                    tuplestore::hold::put_heap_tuple(ts, t.as_tuple())?
+                }
+                None => tuplestore::hold::put_heap_tuple(ts, old)?,
+            }
         }
     }
     if let Some(new) = new_tup {
@@ -241,7 +270,13 @@ fn capture_transition_tuples(
             _ => TuplestoreHandle::NULL,
         };
         if !ts.is_null() {
-            tuplestore::hold::put_heap_tuple(ts, new)?;
+            match new_conv {
+                Some(c) => {
+                    let t = c.convert(mcx, new)?;
+                    tuplestore::hold::put_heap_tuple(ts, t.as_tuple())?
+                }
+                None => tuplestore::hold::put_heap_tuple(ts, new)?,
+            }
         }
     }
     Ok(())
@@ -761,14 +796,47 @@ fn AfterTriggerExecute<'mcx>(
         None
     };
 
+    // AfterTriggerExecute (trigger.c:4438-4500): a cross-partition event's
+    // tuples fetched from the leaf partitions are converted to the root
+    // partitioned table's format — tg_relation is the root. C caches the
+    // maps on the executor's ResultRelInfos (ExecGetChildToRootMap); the
+    // queue rebuilds them per event (cold path: FK enforcement on moved
+    // rows only).
+    let (mut t1_conv, mut t2_conv): (Option<HeapTuple<'_>>, Option<HeapTuple<'_>>) = (None, None);
+    if let Some((s, d)) = &cp_rels {
+        if let Some(map) =
+            tupdesc::build_attrmap_by_name_if_req(mcx, &s.rd_att, &rel.rd_att, false)?
+        {
+            t1_conv =
+                Some(heaptuple::execute_attr_map_tuple(mcx, &t1, &s.rd_att, &rel.rd_att, &map)?);
+        }
+        if let Some(t2v) = &t2 {
+            if let Some(map) =
+                tupdesc::build_attrmap_by_name_if_req(mcx, &d.rd_att, &rel.rd_att, false)?
+            {
+                t2_conv = Some(heaptuple::execute_attr_map_tuple(
+                    mcx, t2v, &d.rd_att, &rel.rd_att, &map,
+                )?);
+            }
+        }
+    }
+    let t1_ref: &mut HeapTupleData<'_> = match t1_conv.as_mut() {
+        Some(c) => c.as_tuple_mut(),
+        None => &mut t1,
+    };
+    let mut t2_ref: Option<&mut HeapTupleData<'_>> = match t2_conv.as_mut() {
+        Some(c) => Some(c.as_tuple_mut()),
+        None => t2.as_mut(),
+    };
+
     let tg_event = event & (TRIGGER_EVENT_OPMASK | TRIGGER_EVENT_ROW);
     let result = if ri_trigger_kind(trigger.tgfoid) == RI_TRIGGER_NONE {
         let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
         let mut tdata = types_trigger_call::TriggerData::new(
             tg_event,
             &rel,
-            Some(&mut t1),
-            t2.as_mut(),
+            Some(t1_ref),
+            t2_ref.as_deref_mut(),
             trigger,
         );
         tdata.tg_oldtable = tg_oldtable.0;
@@ -779,8 +847,8 @@ fn AfterTriggerExecute<'mcx>(
         let data = RiTriggerData {
             tg_event,
             tg_relation: &rel,
-            tg_trigtuple: &t1,
-            tg_newtuple: t2.as_ref(),
+            tg_trigtuple: t1_ref,
+            tg_newtuple: t2_ref.as_deref(),
             tg_trigger: trigger,
         };
         ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data)
@@ -1084,6 +1152,9 @@ pub fn ExecARInsertTriggers<'mcx>(
     recheck_indexes: &[Oid],
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    // rel's child->root map when rel is an attno-remapped child of the
+    // capture target (C TransitionTableAddTuple's ExecGetChildToRootMap).
+    child_to_root: Option<&ChildToRoot<'_, 'mcx>>,
 ) -> PgResult<()> {
     let after_row = trigdesc.is_some_and(|td| td.trig_insert_after_row);
     let capture = transition_capture.filter(|tc| tc.tcs_insert_new_table);
@@ -1106,10 +1177,13 @@ pub fn ExecARInsertTriggers<'mcx>(
     let new_t = r_new.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
     if let Some(tc) = capture {
         capture_transition_tuples(
+            mcx,
             tc,
             TRIGGER_EVENT_INSERT,
             None,
             Some(new_t.as_ref().expect("fetched above")),
+            None,
+            child_to_root,
         )?;
         if !after_row {
             return Ok(());
@@ -1143,6 +1217,7 @@ pub fn ExecARDeleteTriggers<'mcx>(
     // C is_crosspart_update: this DELETE is the source half of a row
     // movement; cloned PK RI triggers are skipped (the root CP event runs).
     is_crosspart_update: bool,
+    child_to_root: Option<&ChildToRoot<'_, 'mcx>>,
 ) -> PgResult<()> {
     let capture = transition_capture.filter(|tc| tc.tcs_delete_old_table);
     if !trigdesc.trig_delete_after_row && capture.is_none() {
@@ -1162,9 +1237,12 @@ pub fn ExecARDeleteTriggers<'mcx>(
     let old_t = r_old.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
     if let Some(tc) = capture {
         capture_transition_tuples(
+            mcx,
             tc,
             TRIGGER_EVENT_DELETE,
             Some(old_t.as_ref().expect("fetched above")),
+            None,
+            child_to_root,
             None,
         )?;
         if !trigdesc.trig_delete_after_row {
@@ -1208,6 +1286,11 @@ pub fn ExecARUpdateTriggers<'mcx>(
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
     is_crosspart_update: bool,
+    // Child->root maps for the old (source) and new (destination) tuples;
+    // one-sided capture calls pass the leaf's own map on the live side, the
+    // root CP event passes the source/destination leaf maps.
+    src_conv: Option<&ChildToRoot<'_, 'mcx>>,
+    dst_conv: Option<&ChildToRoot<'_, 'mcx>>,
 ) -> PgResult<()> {
     let after_row = trigdesc.is_some_and(|td| td.trig_update_after_row);
     let capture = transition_capture
@@ -1240,10 +1323,28 @@ pub fn ExecARUpdateTriggers<'mcx>(
     let old_t = r_old.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
     let new_t = r_new.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
     if let Some(tc) = capture {
-        capture_transition_tuples(tc, TRIGGER_EVENT_UPDATE, old_t.as_ref(), new_t.as_ref())?;
+        capture_transition_tuples(
+            mcx, tc, TRIGGER_EVENT_UPDATE, old_t.as_ref(), new_t.as_ref(), src_conv, dst_conv,
+        )?;
     }
     if !after_row || old_t.is_some() != new_t.is_some() {
         return Ok(());
+    }
+    // C AfterTriggerSaveEvent (trigger.c:6384-6410): the root CP UPDATE
+    // event's leaf tuples are converted to the partitioned root's format
+    // before the trigger loop — the WHEN and RI key checks run in root
+    // coordinates, and the queued ctids still point into the leaves.
+    let (old_root, new_root);
+    let (mut old_ref, mut new_ref) = (old_t.as_ref(), new_t.as_ref());
+    if src_rel.is_some() && dst_rel.is_some() {
+        if let Some(c) = src_conv {
+            old_root = c.convert(mcx, old_ref.expect("checked above"))?;
+            old_ref = Some(old_root.as_tuple());
+        }
+        if let Some(c) = dst_conv {
+            new_root = c.convert(mcx, new_ref.expect("checked above"))?;
+            new_ref = Some(new_root.as_tuple());
+        }
     }
     after_trigger_save_event(
         mcx,
@@ -1253,8 +1354,8 @@ pub fn ExecARUpdateTriggers<'mcx>(
         TRIGGER_TYPE_UPDATE,
         old_tid.expect("checked above"),
         new_tid.expect("checked above"),
-        old_t.as_ref(),
-        new_t.as_ref(),
+        old_ref,
+        new_ref,
         recheck_indexes,
         transition_capture,
         when,
