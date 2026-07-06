@@ -1,6 +1,14 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::RwLock;
 
+// Session-settable vars (PGC_USERSET/SUSET/BACKEND + per-session INTERNAL
+// like is_superuser) use per-session backings; postmaster/sighup-scope and
+// compile-time-constant vars keep plain process-global cells.
+use crate::{
+    session_guc_bool as session_bool_var, session_guc_int as session_int_var,
+    session_guc_real as session_real_var, session_guc_string as session_string_var,
+};
+
 macro_rules! bool_var {
     ($cell:ident, $name:ident, $set:ident, $boot:expr) => {
         static $cell: AtomicBool = AtomicBool::new($boot);
@@ -57,67 +65,57 @@ macro_rules! string_var {
 }
 
 bool_var!(B_AllowAlterSystem, AllowAlterSystem, set_AllowAlterSystem, true);
-bool_var!(B_log_duration, log_duration, set_log_duration, false);
-bool_var!(B_Debug_print_plan, Debug_print_plan, set_Debug_print_plan, false);
-bool_var!(
-    B_Debug_print_parse,
+session_bool_var!(B_log_duration, log_duration, set_log_duration, false);
+session_bool_var!(B_Debug_print_plan, Debug_print_plan, set_Debug_print_plan, false);
+session_bool_var!(B_Debug_print_parse,
     Debug_print_parse,
     set_Debug_print_parse,
     false
 );
-bool_var!(
-    B_Debug_print_rewritten,
+session_bool_var!(B_Debug_print_rewritten,
     Debug_print_rewritten,
     set_Debug_print_rewritten,
     false
 );
-bool_var!(
-    B_Debug_pretty_print,
+session_bool_var!(B_Debug_pretty_print,
     Debug_pretty_print,
     set_Debug_pretty_print,
     true
 );
-bool_var!(B_log_parser_stats, log_parser_stats, set_log_parser_stats, false);
-bool_var!(
-    B_log_planner_stats,
+session_bool_var!(B_log_parser_stats, log_parser_stats, set_log_parser_stats, false);
+session_bool_var!(B_log_planner_stats,
     log_planner_stats,
     set_log_planner_stats,
     false
 );
-bool_var!(
-    B_log_executor_stats,
+session_bool_var!(B_log_executor_stats,
     log_executor_stats,
     set_log_executor_stats,
     false
 );
-bool_var!(
-    B_log_statement_stats,
+session_bool_var!(B_log_statement_stats,
     log_statement_stats,
     set_log_statement_stats,
     false
 );
-bool_var!(B_row_security, row_security, set_row_security, true);
-bool_var!(
-    B_check_function_bodies,
+session_bool_var!(B_row_security, row_security, set_row_security, true);
+session_bool_var!(B_check_function_bodies,
     check_function_bodies,
     set_check_function_bodies,
     true
 );
-bool_var!(
-    B_default_with_oids,
+session_bool_var!(B_default_with_oids,
     default_with_oids,
     set_default_with_oids,
     false
 );
-bool_var!(
-    B_current_role_is_superuser,
+session_bool_var!(B_current_role_is_superuser,
     current_role_is_superuser,
     set_current_role_is_superuser,
     false
 );
 bool_var!(B_assert_enabled, assert_enabled, set_assert_enabled, false);
-bool_var!(
-    B_in_hot_standby_guc,
+session_bool_var!(B_in_hot_standby_guc,
     in_hot_standby_guc,
     set_in_hot_standby_guc,
     false
@@ -130,23 +128,20 @@ bool_var!(
     true
 );
 
-int_var!(
-    I_log_parameter_max_length,
+session_int_var!(I_log_parameter_max_length,
     log_parameter_max_length,
     set_log_parameter_max_length,
     -1
 );
-int_var!(
-    I_log_parameter_max_length_on_error,
+session_int_var!(I_log_parameter_max_length_on_error,
     log_parameter_max_length_on_error,
     set_log_parameter_max_length_on_error,
     0
 );
-int_var!(I_log_temp_files, log_temp_files, set_log_temp_files, -1);
-int_var!(I_temp_file_limit, temp_file_limit, set_temp_file_limit, -1);
-int_var!(I_num_temp_buffers, num_temp_buffers, set_num_temp_buffers, 1024);
-int_var!(
-    I_ssl_renegotiation_limit,
+session_int_var!(I_log_temp_files, log_temp_files, set_log_temp_files, -1);
+session_int_var!(I_temp_file_limit, temp_file_limit, set_temp_file_limit, -1);
+session_int_var!(I_num_temp_buffers, num_temp_buffers, set_num_temp_buffers, 1024);
+session_int_var!(I_ssl_renegotiation_limit,
     ssl_renegotiation_limit,
     set_ssl_renegotiation_limit,
     0
@@ -243,22 +238,20 @@ string_var!(
     Some("/tmp")
 );
 
-int_var!(I_PostAuthDelay, PostAuthDelay, set_PostAuthDelay, 0);
+session_int_var!(I_PostAuthDelay, PostAuthDelay, set_PostAuthDelay, 0);
 
-int_var!(
-    I_log_min_duration_sample,
+session_int_var!(I_log_min_duration_sample,
     log_min_duration_sample,
     set_log_min_duration_sample,
     -1
 );
-int_var!(
-    I_log_min_duration_statement,
+session_int_var!(I_log_min_duration_statement,
     log_min_duration_statement,
     set_log_min_duration_statement,
     -1
 );
 
-int_var!(I_log_statement, log_statement, set_log_statement, 0);
+session_int_var!(I_log_statement, log_statement, set_log_statement, 0);
 
 int_var!(I_huge_pages, huge_pages, set_huge_pages, 2); // HUGE_PAGES_TRY
 int_var!(
@@ -268,42 +261,36 @@ int_var!(
     3
 ); // HUGE_PAGES_UNKNOWN
 
-int_var!(
-    I_compute_query_id,
+session_int_var!(I_compute_query_id,
     compute_query_id,
     set_compute_query_id,
     2
 ); // COMPUTE_QUERY_ID_AUTO
 
-real_var!(R_phony_random_seed, phony_random_seed, set_phony_random_seed, 0.0);
-real_var!(
-    R_log_statement_sample_rate,
+session_real_var!(R_phony_random_seed, phony_random_seed, set_phony_random_seed, 0.0);
+session_real_var!(R_log_statement_sample_rate,
     log_statement_sample_rate,
     set_log_statement_sample_rate,
     1.0
 );
-real_var!(
-    R_log_xact_sample_rate,
+session_real_var!(R_log_xact_sample_rate,
     log_xact_sample_rate,
     set_log_xact_sample_rate,
     0.0
 );
 
 string_var!(CELL_event_source, event_source, set_event_source, None);
-string_var!(
-    CELL_client_encoding_string,
+session_string_var!(CELL_client_encoding_string,
     client_encoding_string,
     set_client_encoding_string,
     Some("SQL_ASCII")
 );
-string_var!(
-    CELL_datestyle_string,
+session_string_var!(CELL_datestyle_string,
     datestyle_string,
     set_datestyle_string,
     Some("ISO, MDY")
 );
-string_var!(
-    CELL_server_encoding_string,
+session_string_var!(CELL_server_encoding_string,
     server_encoding_string,
     set_server_encoding_string,
     Some("SQL_ASCII")
@@ -314,14 +301,12 @@ string_var!(
     set_server_version_string,
     Some("18.3") // PG_VERSION
 );
-string_var!(
-    CELL_role_string,
+session_string_var!(CELL_role_string,
     role_string,
     set_role_string,
     Some("none")
 );
-string_var!(
-    CELL_session_authorization_string,
+session_string_var!(CELL_session_authorization_string,
     session_authorization_string,
     set_session_authorization_string,
     None
@@ -332,8 +317,7 @@ string_var!(
     set_syslog_ident_str,
     Some("postgres")
 );
-string_var!(
-    CELL_timezone_string,
+session_string_var!(CELL_timezone_string,
     timezone_string,
     set_timezone_string,
     Some("GMT")
@@ -344,8 +328,7 @@ string_var!(
     set_log_timezone_string,
     Some("GMT")
 );
-string_var!(
-    CELL_timezone_abbreviations_string,
+session_string_var!(CELL_timezone_abbreviations_string,
     timezone_abbreviations_string,
     set_timezone_abbreviations_string,
     None
@@ -365,14 +348,12 @@ string_var!(
     set_external_pid_file,
     None
 );
-string_var!(
-    CELL_application_name,
+session_string_var!(CELL_application_name,
     application_name,
     set_application_name,
     Some("")
 );
-string_var!(
-    CELL_backtrace_functions,
+session_string_var!(CELL_backtrace_functions,
     backtrace_functions,
     set_backtrace_functions,
     Some("")

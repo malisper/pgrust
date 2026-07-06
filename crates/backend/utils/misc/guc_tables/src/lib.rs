@@ -9,6 +9,7 @@ pub mod backing;
 pub mod consts;
 pub mod hooks;
 pub mod option_sets;
+pub mod session;
 mod slots;
 mod tables;
 pub mod vars;
