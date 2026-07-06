@@ -150,7 +150,7 @@ pub fn index_getprocid(index: &Relation<'_>, attno_0based: usize, procnum: u16) 
         .unwrap_or(InvalidOid)
 }
 
-// GetIndexInputType: single-key AM; the expression-column arm is LOUD.
+// GetIndexInputType (spgutils.c); single-key AM.
 fn get_index_input_type(index: &Relation<'_>) -> PgResult<Oid> {
     let opcintype = index.rd_opcintype[spgKeyColumn];
     const ANYOID_LOW: Oid = 2276; // "any"
@@ -169,7 +169,7 @@ fn get_index_input_type(index: &Relation<'_>) -> PgResult<Oid> {
             heapcol,
         )?);
     }
-    panic!("unported: SP-GiST polymorphic opclass input type {opcintype} (GetIndexInputType expression arm)");
+    indexam_seams::index_expression_input_type::call(index, spgKeyColumn)
 }
 
 /// spgGetCache. Reads/installs the rd_amcache_spgist slot on the relcache

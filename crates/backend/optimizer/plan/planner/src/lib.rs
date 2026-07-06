@@ -136,6 +136,15 @@ pub fn init_seams() {
     planner_seams::planner::set(|mcx, parse, query_string, cursor_options, bound_params| {
         planner(mcx, parse, query_string, cursor_options, bound_params)
     });
+    // find_simplified_clause's gate (rangetypes.c): volatile / subplan /
+    // >10*cpu_operator_cost elemExprs must not be evaluated twice.
+    clauses_seams::expr_safe_to_evaluate_twice::set(|node| {
+        if clauses::contain_volatile_functions(node)? || clauses::contain_subplans(node)? {
+            return Ok(false);
+        }
+        let cost = costsize::cost_qual_eval_node(None, node)?;
+        Ok(cost.startup + cost.per_tuple <= 10.0 * costsize::gucs::cpu_operator_cost())
+    });
     planner_seams::clauselist_selectivity::set(crate::clausesel::clauselist_selectivity);
     planner_seams::clause_selectivity::set(crate::clausesel::clause_selectivity);
     planner_seams::make_restrictinfo::set(crate::initsplan::make_restrictinfo);

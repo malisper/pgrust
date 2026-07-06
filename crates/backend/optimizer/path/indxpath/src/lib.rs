@@ -1169,6 +1169,10 @@ fn get_index_clause_from_support<'mcx>(
                 index.opfamily[indexcol],
             )?
         }
+        // range_contains_elem_support / elem_contained_by_range_support
+        // (rangetypes.c) handle only SupportRequestSimplify: an
+        // index-condition request returns NULL.
+        6345 | 6346 => return Ok(None),
         other => panic!("get_index_clause_from_support (indxpath.c): prosupport {other}; M2 lane"),
     };
     let Some(exprs) = exprs else {

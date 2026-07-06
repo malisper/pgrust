@@ -9,6 +9,7 @@ adt_date = { path = "../adt_date" }
 arrayfuncs = { path = "../arrayfuncs" }
 datum = { path = "../../../../_support/types/datum" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
+clauses_seams = { path = "../../../optimizer/util/clauses_seams" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 adt_numeric = { path = "../numeric" }
 format_type = { path = "../format_type" }

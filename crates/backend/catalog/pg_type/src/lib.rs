@@ -736,6 +736,9 @@ pub fn moveArrayTypeName<'mcx>(
     let newname = makeArrayTypeName(typeName, typeNamespace)?;
     let newname_str = core::str::from_utf8(newname.name_str()).expect("array type name UTF-8");
     RenameTypeInternal(mcx, typeOid, newname_str, typeNamespace)?;
+    // C bumps the command counter so later lookups (makeArrayTypeName, the
+    // caller's TypeCreate) see the rename instead of the old name.
+    xact::CommandCounterIncrement()?;
     Ok(true)
 }
 

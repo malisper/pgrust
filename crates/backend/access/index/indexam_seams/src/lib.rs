@@ -34,3 +34,15 @@ seam_core::seam!(
         rel: &Relation<'_>,
     ) -> PgResult<std::rc::Rc<[Option<std::boxed::Box<[u8]>>]>>
 );
+
+seam_core::seam!(
+    // GetIndexInputType's expression-column arm (spgutils.c):
+    // getBaseType(exprType(<indexcol's entry in rd_indexprs>)). Implemented
+    // by catalog_index (RelationGetIndexExpressions + exprType live above
+    // the AM layer); the expression tree is deserialized into a scratch
+    // context there — only the type Oid crosses back.
+    pub fn index_expression_input_type<'a, 'mcx>(
+        rel: &'a Relation<'mcx>,
+        indexcol_0based: usize,
+    ) -> PgResult<Oid>
+);

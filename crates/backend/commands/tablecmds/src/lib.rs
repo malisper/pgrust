@@ -219,6 +219,16 @@ pub fn BuildDescForRelation<'mcx>(
             .as_variant::<TypeName>()
             .expect("TypeName");
         let (atttypid, atttypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+        // C BuildDescForRelation (tablecmds.c): USAGE on every column type.
+        let aclresult = aclchk::object_aclcheck(
+            types_core::TYPE_RELATION_ID,
+            atttypid,
+            miscinit::GetUserId(),
+            adt_acl::ACL_USAGE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            aclcheck_error_type(aclresult, atttypid)?;
+        }
         let attcollation = GetColumnDefCollation(entry, atttypid)?;
         tupdesc::TupleDescInitEntry(&mut desc, attnum, Some(colname), atttypid, atttypmod, 0)?;
         tupdesc::TupleDescInitEntryCollation(&mut desc, attnum, attcollation);

@@ -912,7 +912,7 @@ pub fn AlterTypeOwner<'mcx>(
         return Err(cannot_alter_array_type(type_oid, row.typelem)?);
     }
     if row.typtype == TYPTYPE_MULTIRANGE {
-        unported("AlterTypeOwner: multirange type");
+        return Err(cannot_alter_multirange_type(type_oid)?);
     }
 
     if row.typowner != new_owner_id {
@@ -1157,6 +1157,22 @@ fn cannot_alter_array_type(type_oid: Oid, elem_oid: Oid) -> PgResult<Box<PgError
                 "You can alter type {elem}, which will alter the array type as well."
             )),
     ))
+}
+
+#[cold]
+#[inline(never)]
+fn cannot_alter_multirange_type(type_oid: Oid) -> PgResult<Box<PgError>> {
+    let name = format_type::format_type_be(type_oid)?;
+    let rangetype = lsyscache::misc::get_multirange_range(type_oid)?;
+    let mut e = PgError::new(ERROR, format!("cannot alter multirange type {name}"))
+        .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE);
+    if rangetype != InvalidOid {
+        e = e.with_hint(format!(
+            "You can alter type {}, which will alter the multirange type as well.",
+            format_type::format_type_be(rangetype)?
+        ));
+    }
+    Ok(Box::new(e))
 }
 
 #[cold]
