@@ -978,7 +978,11 @@ impl<'mcx> EStateData<'mcx> {
                 | RTEKind::RTE_JOIN
                 | RTEKind::RTE_TABLEFUNC
                 | RTEKind::RTE_CTE
-                | RTEKind::RTE_NAMEDTUPLESTORE => {}
+                | RTEKind::RTE_NAMEDTUPLESTORE
+                // The grouping-step RTE rides the flat rtable expr-free
+                // (setrefs zaps groupexprs); C's ExecInitRangeTable is
+                // kind-agnostic.
+                | RTEKind::RTE_GROUP => {}
                 // A pulled-up (dead) subquery RTE stays in the range table
                 // for its lock/ACL surface, as in C; a live subquery is the
                 // unported SubqueryScan lane.
