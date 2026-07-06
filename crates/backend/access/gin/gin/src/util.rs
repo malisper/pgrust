@@ -104,25 +104,31 @@ pub(crate) fn gin_pending_list_cleanup_size(rel: &Relation<'_>) -> i64 {
     }
 }
 
-/// GinPageIsRecyclable (ginvacuum.c): only vacuum produces deleted pages.
-pub(crate) fn gin_page_is_recyclable(buf: Buffer) -> bool {
-    // SAFETY: caller holds the conditional lock taken in GinNewBuffer.
+/// GinPageIsRecyclable (ginvacuum.c).
+pub(crate) fn gin_page_is_recyclable(buf: Buffer) -> PgResult<bool> {
+    // SAFETY: caller holds at least a share lock (GinNewBuffer's conditional
+    // lock, or ginvacuumcleanup's share lock).
     let page = unsafe { page_ref(buf) };
     if page.is_new() {
-        return true;
+        return Ok(true);
     }
     let opaque = crate::page_opaque(&page);
     if crate::GinPageIsDeleted(&opaque) {
         // GinPageGetDeleteXid == pd_prune_xid; pending-list deletions leave
-        // it invalid (always recyclable). A valid xid is the posting-tree
-        // page-deletion lane (GlobalVisCheckRemovableXid; vacuum).
+        // it invalid (always recyclable). A valid xid is a posting-tree page
+        // deletion: recyclable once no scan can still see it. C passes
+        // rel=NULL to GlobalVisCheckRemovableXid — the shared-rels horizon
+        // (handle 1), the most conservative choice.
         let delete_xid = page.prune_xid();
         if delete_xid == 0 {
-            return true;
+            return Ok(true);
         }
-        unported("recycling a deleted posting-tree page (vacuum lane)");
+        return procarray_seams::global_vis_test_is_removable_xid::call(
+            ::types_core::GlobalVisStateHandle::new(1),
+            delete_xid,
+        );
     }
-    false
+    Ok(false)
 }
 
 /// GinNewBuffer: recycle via FSM or extend; returned pinned + exclusive.
@@ -136,7 +142,7 @@ pub fn GinNewBuffer(rel: &Relation<'_>) -> PgResult<Buffer> {
 
         let buffer = bm::read_buffer::call(rel, blkno)?;
         if bm::conditional_lock_buffer::call(buffer)? {
-            if gin_page_is_recyclable(buffer) {
+            if gin_page_is_recyclable(buffer)? {
                 return Ok(buffer);
             }
             bm::lock_buffer::call(buffer, crate::GIN_UNLOCK)?;

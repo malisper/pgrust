@@ -1263,3 +1263,96 @@ pub(crate) fn ginScanBeginPostingTree<'s>(
     btree.full_scan = true;
     crate::btree::ginFindLeafPage(mcx, rel, &mut btree, true, false)
 }
+
+/// ginVacuumPostingTreeLeaf: drop dead TIDs from every segment of a
+/// posting-tree leaf, recompress in place, WAL-log the actions.
+pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
+    scratch: Mcx<'s>,
+    gvs: &mut crate::vacuum::GinVacuumState<'_, '_, '_>,
+    buffer: Buffer,
+) -> PgResult<()> {
+    let rel = gvs.rel;
+    // SAFETY: pin + exclusive lock held by the caller.
+    let bytes = page_bytes(&unsafe { page_ref(buffer) });
+    let mut leaf = disassemble_leaf(bytes);
+
+    let mut removed_something = false;
+    for seg in leaf.segs.iter_mut() {
+        let old_seg_size = seg.seg.as_ref().map_or(GinDataPageMaxDataSize, |s| s.len());
+        if seg.items.is_none() {
+            let sb = *seg.seg.as_ref().expect("segment bytes");
+            seg.items = Some(decode_seg(scratch, &sb)?);
+        }
+        let items = items_slice(seg.items.as_ref().unwrap(), &[]);
+        let Some(cleaned) = crate::vacuum::ginVacuumItemPointers(scratch, gvs, items)? else {
+            continue;
+        };
+        if !cleaned.is_empty() {
+            let ncleaned = cleaned.len();
+            let (packed, npacked) = ginCompressPostingList(scratch, &cleaned, old_seg_size)?;
+            if npacked != ncleaned {
+                panic!("could not fit vacuumed posting list");
+            }
+            seg.seg = Some(owned_seg(scratch, packed));
+            seg.items = Some(owned_items(scratch, cleaned));
+            seg.action = GIN_SEGMENT_REPLACE;
+        } else {
+            seg.seg = None;
+            seg.items = None;
+            seg.action = GIN_SEGMENT_DELETE;
+        }
+        removed_something = true;
+    }
+
+    if !removed_something {
+        return Ok(());
+    }
+
+    // dataPlaceToPageLeafRecompress requires owned copies of every surviving
+    // segment at or after the first modification (in-place shift aliasing).
+    let mut modified = false;
+    for seg in leaf.segs.iter_mut() {
+        if seg.action != GIN_SEGMENT_UNMODIFIED {
+            modified = true;
+        }
+        if modified && seg.action != GIN_SEGMENT_DELETE {
+            if let Some(SegBytes::Page(..)) = seg.seg {
+                let src = seg.seg.as_ref().unwrap().as_slice();
+                let mut copy: PgVec<'_, u8> = mcx::vec_with_capacity_in(scratch, src.len())?;
+                vec_append(&mut copy, src)?;
+                seg.seg = Some(owned_seg(scratch, copy));
+            }
+        }
+    }
+
+    let need_wal = relation_needs_wal(rel);
+    if need_wal {
+        compute_leaf_recompress_wal_data(&mut leaf, &[]);
+    }
+
+    data_place_to_page_leaf_recompress(buffer, &leaf);
+    bm::mark_buffer_dirty::call(buffer)?;
+
+    if need_wal {
+        let recptr = ::xloginsert_seams::xlog_insert_record::call(
+            RM_GIN,
+            XLOG_GIN_VACUUM_DATA_LEAF_PAGE,
+            0,
+            &[],
+            &[XLogRegBuf {
+                block_id: 0,
+                buffer,
+                flags: ::xloginsert_seams::REGBUF_STANDARD,
+                bufdata: &[&leaf.walinfo],
+            }],
+        )?;
+        // SAFETY: pin + exclusive lock held.
+        unsafe { page_mut(buffer) }.set_lsn(recptr);
+    }
+    Ok(())
+}
+
+/// GinDataLeafPageIsEmpty (compressed leaves only; pre-9.4 loud upstream).
+pub(crate) fn gin_data_leaf_page_is_empty(bytes: &[u8]) -> bool {
+    data_leaf_posting_list_size(bytes) == 0
+}

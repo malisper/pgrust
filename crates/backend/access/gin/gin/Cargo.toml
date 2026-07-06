@@ -36,3 +36,8 @@ adt_tsvector_core = { path = "../../../utils/adt/tsvector_core" }
 xact = { path = "../../transam/xact" }
 pg_prng = { path = "../../../../common/pg_prng" }
 types_snapshot = { path = "../../../../_support/types/snapshot" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+varsup_seams = { path = "../../transam/varsup_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+miscinit = { path = "../../../utils/init/miscinit" }
