@@ -1,6 +1,6 @@
 //! brin.c: the BRIN index access method (build, insert, bitmap scan).
-//! Summarize/desummarize SQL paths live in brin_funcs/brin_build. Loud
-//! lanes: autosummarize, vacuum, parallel build, reloptions.
+//! Summarize/desummarize SQL paths and vacuum live in brin_funcs/brin_build.
+//! Loud lanes: autosummarize, parallel build, reloptions.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -703,14 +703,6 @@ fn disk_attr_for(bdesc: &BrinDesc<'_>, keyno: usize, i: usize) -> (bool, i16) {
     }
     let att = bdesc.bd_disktdesc.compact_attr(stored + i);
     (att.attbyval, att.attlen)
-}
-
-pub fn brinbulkdelete() -> ! {
-    unported("brinbulkdelete (vacuum lane)")
-}
-
-pub fn brinvacuumcleanup() -> ! {
-    unported("brinvacuumcleanup (vacuum lane; brinsummarize itself is ported in brin_build)")
 }
 
 pub fn brinoptions() -> ! {

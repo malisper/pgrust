@@ -14,8 +14,10 @@ use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_brin::*;
 use ::types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, RmgrIds};
 use ::types_error::{PgError, PgResult};
-use ::types_rel::Relation;
+use ::types_rel::{AccessShareLock, Relation};
+use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::bufpage::{PageMut, PageRef};
+use ::types_storage::ReadBufferMode;
 use ::types_tuple::itemptr::{ItemPointerData, ItemPointerGetBlockNumber};
 use ::xloginsert_seams::{XLogRegBuf, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
@@ -23,7 +25,7 @@ use brin::{add_values_to_range, brin_build_desc, brin_get_pages_per_range, union
 use brin_pageops::{
     brinGetTupleForHeapBlock, brinRevmapInitialize, brinRevmapTerminate,
     brin_can_do_samepage_update, brin_doinsert, brin_doupdate, brin_metapage_init,
-    relation_needs_wal,
+    brin_page_cleanup, relation_needs_wal,
 };
 use brin_tuple::{
     brin_form_placeholder_tuple, brin_form_tuple, brin_memtuple_initialize, brin_new_memtuple,
@@ -345,6 +347,8 @@ fn summarize_range<'mcx>(
     )?;
 
     loop {
+        postgres_seams::check_for_interrupts::call()?;
+
         let form = MemoryContext::new_bump("brin summarize newtup");
         let newtup =
             brin_form_tuple(form.mcx(), &state.bs_bdesc, heapBlk, &mut state.bs_dtuple)?;
@@ -427,6 +431,7 @@ pub fn brinsummarize<'mcx>(
         if !include_partial && startBlk + pagesPerRange > heapNumBlocks {
             break;
         }
+        postgres_seams::check_for_interrupts::call()?;
 
         let got = brinGetTupleForHeapBlock(
             index,
@@ -482,4 +487,69 @@ pub fn brinsummarize<'mcx>(
     }
     brinRevmapTerminate(revmap)?;
     Ok(())
+}
+
+pub fn init_seams() {
+    indexam_seams::brin_vacuum_cleanup::set(brinvacuumcleanup);
+}
+
+/// brin_vacuum_scan (brin.c): physical-order pass repairing uncataloged
+/// pages (lost to a crash after extension) and refreshing the FSM.
+fn brin_vacuum_scan(idxrel: &Relation<'_>, strategy: &BufferAccessStrategy) -> PgResult<()> {
+    let nblocks = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+        idxrel,
+        ForkNumber::MAIN_FORKNUM,
+    )?;
+    for blkno in 0..nblocks {
+        postgres_seams::check_for_interrupts::call()?;
+        let buf = bufmgr_seams::read_buffer_extended::call(
+            idxrel,
+            ForkNumber::MAIN_FORKNUM,
+            blkno,
+            ReadBufferMode::Normal,
+            strategy.clone(),
+        )?;
+        brin_page_cleanup(idxrel, buf)?;
+        release_buffer::call(buf)?;
+    }
+    // Upper FSM pages too: propagates brin_page_cleanup's leaf updates and
+    // repairs pre-existing out-of-dateness.
+    freespace::FreeSpaceMapVacuum(idxrel)
+}
+
+/// brinvacuumcleanup (brin.c) minus the analyze_only early return, which the
+/// indexam dispatch keeps; reached via indexam_seams (indexam cannot depend
+/// on this crate: execindexing -> indexam). Returns (num_pages, increment to
+/// num_index_tuples). C passes &stats->num_index_tuples for BOTH brinsummarize
+/// out-pointers, so the increment is summarized + existing.
+pub fn brinvacuumcleanup<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'mcx>,
+    strategy: BufferAccessStrategy,
+) -> PgResult<(BlockNumber, f64)> {
+    let num_pages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+        index,
+        ForkNumber::MAIN_FORKNUM,
+    )?;
+
+    let heapOid = index.rd_index.as_ref().expect("index").indrelid;
+    let heapRel = table::table_open(mcx, heapOid, AccessShareLock)?;
+
+    brin_vacuum_scan(index, &strategy)?;
+
+    let mut summarized = 0.0f64;
+    let mut existing = 0.0f64;
+    brinsummarize(
+        mcx,
+        index,
+        &heapRel,
+        BRIN_ALL_BLOCKRANGES,
+        false,
+        Some(&mut summarized),
+        Some(&mut existing),
+    )?;
+
+    heapRel.close(AccessShareLock)?;
+
+    Ok((num_pages, summarized + existing))
 }
