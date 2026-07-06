@@ -381,10 +381,6 @@ fn dispatch_switch<'mcx>(
                 aclchk::ExecuteGrantStmt(mcx, stmt)?;
             }
         }
-        T_AlterDefaultPrivilegesStmt => {
-            let stmt = parsetree.as_alter_default_privileges_stmt().unwrap();
-            aclchk::ExecAlterDefaultPrivilegesStmt(mcx, stmt)?;
-        }
         T_GrantRoleStmt => {
             let stmt = parsetree.as_grant_role_stmt().unwrap();
             user::GrantRole(mcx, stmt)?;
@@ -641,10 +637,6 @@ fn dispatch_switch<'mcx>(
         T_DropRoleStmt => {
             let stmt = parsetree.as_drop_role_stmt().unwrap();
             user::DropRole(mcx, stmt)?;
-        }
-        T_DropOwnedStmt => {
-            let stmt = parsetree.as_drop_owned_stmt().unwrap();
-            user::DropOwnedObjects(mcx, stmt)?;
         }
         T_ReassignOwnedStmt => {
             let stmt = parsetree.as_reassign_owned_stmt().unwrap();
@@ -1115,6 +1107,27 @@ fn slow_switch<'mcx>(
                 .expect("AlterStatsStmt");
             collect_gap("ALTER STATISTICS");
             statscmds::AlterStatistics(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_DropOwnedStmt => {
+            // C: ProcessUtilitySlow (utility.c:1817) — the sql_drop fences must
+            // be armed so shdepDropOwned's deletions are collected; no
+            // commands stashed for DROP.
+            let stmt = parsetree.as_drop_owned_stmt().unwrap();
+            user::DropOwnedObjects(mcx, stmt)?;
+            Ok(None)
+        }
+
+        T_AlterDefaultPrivilegesStmt => {
+            // C: ExecAlterDefaultPrivilegesStmt + EventTriggerCollectAlterDefPrivs
+            // (utility.c:1823); commandCollected = true.
+            let stmt = parsetree.as_alter_default_privileges_stmt().unwrap();
+            aclchk::ExecAlterDefaultPrivilegesStmt(mcx, stmt)?;
+            event_trigger::EventTriggerCollectAlterDefPrivs(
+                CreateCommandTag(parsetree),
+                stmt.action.expect("AlterDefaultPrivilegesStmt.action").objtype,
+            );
             Ok(None)
         }
 

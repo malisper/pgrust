@@ -461,10 +461,10 @@ fn do_compile(
         fn_is_trigger = FnTrigger::DmlTrigger;
     } else if is_event_trigger {
         if !proc.argtypes.is_empty() {
-            return Err(crate::exec::exec_err(
+            return Err(hdr_ctx(crate::exec::exec_err(
                 types_error::ERRCODE_INVALID_FUNCTION_DEFINITION,
                 "event trigger functions cannot have declared arguments".to_string(),
-            ));
+            )));
         }
         rettypeid = VOIDOID;
         fn_retbyval = false;

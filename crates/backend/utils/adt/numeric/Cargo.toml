@@ -22,6 +22,7 @@ hashfn = { path = "../../../../common/hashfn" }
 hyperloglog = { path = "../../../lib/hyperloglog" }
 pg_prng = { path = "../../../../common/pg_prng" }
 types_nodes = { path = "../../../../_support/types/nodes" }
+nodes_core = { path = "../../../nodes/nodes_core" }
 pqformat = { path = "../../../libpq/pqformat" }
 stringinfo = { path = "../../../../_support/types/stringinfo" }
 mcx = { path = "../../../../_support/mcx" }

@@ -55,6 +55,8 @@ pub(crate) enum CollectedCommandData {
     // C copies the whole InternalGrant; the ported SRF surface reads only
     // is_grant (via tag) and objtype.
     Grant { objtype: types_nodes::parsenodes::ObjectType },
+    // C copies the AlterDefaultPrivilegesStmt; only objtype is SRF-visible.
+    DefPrivs { objtype: types_nodes::parsenodes::ObjectType },
 }
 
 // C stores copyObject(parsetree) and derives the tag lazily in the SRF; node
@@ -476,6 +478,27 @@ pub fn EventTriggerCollectGrant(is_grant: bool, objtype: types_nodes::parsenodes
                 address: ObjectAddress::set(InvalidOid, InvalidOid),
                 secondary_object: ObjectAddress::set(InvalidOid, InvalidOid),
                 data: CollectedCommandData::Grant { objtype },
+            });
+        }
+    });
+}
+
+// EventTriggerCollectAlterDefPrivs (event_trigger.c:2023).
+pub fn EventTriggerCollectAlterDefPrivs(
+    tag: CommandTag,
+    objtype: types_nodes::parsenodes::ObjectType,
+) {
+    if !collecting() {
+        return;
+    }
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            st.command_list.push(CollectedCommand {
+                in_extension: creating_extension(),
+                tag,
+                address: ObjectAddress::set(InvalidOid, InvalidOid),
+                secondary_object: ObjectAddress::set(InvalidOid, InvalidOid),
+                data: CollectedCommandData::DefPrivs { objtype },
             });
         }
     });

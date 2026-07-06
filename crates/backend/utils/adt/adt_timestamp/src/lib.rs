@@ -333,6 +333,19 @@ pub fn timestamptz_out(dt: TimestampTz, buf: &mut TsBuf) -> PgResult<usize> {
 /// C contract: `tm_year` full value, `tm_mon` one-based. `Err(())` is the C
 /// `-1` out-of-range return.
 #[allow(clippy::result_unit_err)]
+// TimestampTimestampTzRequiresRewrite (timestamp.c): rewrite-free only when
+// the session timezone is a fixed zero offset from UTC.
+pub fn TimestampTimestampTzRequiresRewrite() -> bool {
+    let Some(zone) = tz::session_timezone() else {
+        return true;
+    };
+    let mut offset: i64 = 0;
+    if tz::pg_get_timezone_offset(zone, &mut offset) && offset == 0 {
+        return false;
+    }
+    true
+}
+
 pub fn timestamp2tm(
     dt: Timestamp,
     tzp: Option<&mut i32>,

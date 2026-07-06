@@ -159,6 +159,19 @@ fn fc_pg_event_trigger_ddl_commands(
                     srf.putvalues(&values, &nulls)?;
                     continue;
                 }
+                CollectedCommandData::DefPrivs { objtype } => {
+                    nulls[0] = true;
+                    nulls[1] = true;
+                    nulls[2] = true;
+                    values[3] = text_datum(mcx, cmdtag::GetCommandTagName(cmd.tag))?;
+                    values[4] = text_datum(mcx, stringify_adefprivs_objtype(*objtype)?)?;
+                    nulls[5] = true;
+                    nulls[6] = true;
+                    values[7] = Datum::from_bool(cmd.in_extension);
+                    values[8] = Datum::from_usize(cmd as *const _ as usize);
+                    srf.putvalues(&values, &nulls)?;
+                    continue;
+                }
             };
 
             let Some(identity) =
@@ -197,6 +210,31 @@ fn fc_pg_event_trigger_ddl_commands(
 
 // stringify_grant_objtype (event_trigger.c): the ObjectType spelling used by
 // GRANT/REVOKE; types GRANT cannot reach are C's elog(ERROR) arm.
+// stringify_adefprivs_objtype (event_trigger.c).
+fn stringify_adefprivs_objtype(
+    objtype: types_nodes::parsenodes::ObjectType,
+) -> PgResult<&'static str> {
+    use types_nodes::parsenodes::ObjectType::*;
+    Ok(match objtype {
+        OBJECT_COLUMN => "COLUMNS",
+        OBJECT_TABLE => "TABLES",
+        OBJECT_SEQUENCE => "SEQUENCES",
+        OBJECT_DATABASE => "DATABASES",
+        OBJECT_DOMAIN => "DOMAINS",
+        OBJECT_FDW => "FOREIGN DATA WRAPPERS",
+        OBJECT_FOREIGN_SERVER => "FOREIGN SERVERS",
+        OBJECT_FUNCTION => "FUNCTIONS",
+        OBJECT_LANGUAGE => "LANGUAGES",
+        OBJECT_LARGEOBJECT => "LARGE OBJECTS",
+        OBJECT_SCHEMA => "SCHEMAS",
+        OBJECT_PROCEDURE => "PROCEDURES",
+        OBJECT_ROUTINE => "ROUTINES",
+        OBJECT_TABLESPACE => "TABLESPACES",
+        OBJECT_TYPE => "TYPES",
+        other => panic!("unsupported object type: {other:?}"),
+    })
+}
+
 fn stringify_grant_objtype(objtype: types_nodes::parsenodes::ObjectType) -> PgResult<&'static str> {
     use types_nodes::parsenodes::ObjectType::*;
     Ok(match objtype {
