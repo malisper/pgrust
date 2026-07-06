@@ -124,8 +124,9 @@ pub fn exec_init_merge_join<'mcx>(
                 | JoinType::JOIN_FULL
                 | JoinType::JOIN_SEMI
                 | JoinType::JOIN_ANTI
+                | JoinType::JOIN_RIGHT_ANTI
         ),
-        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; RIGHT_SEMI/RIGHT_ANTI lane unported",
+        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; RIGHT_SEMI lane unported",
         node.join.jointype
     );
     assert!(
@@ -145,11 +146,15 @@ pub fn exec_init_merge_join<'mcx>(
         node.join.jointype,
         JoinType::JOIN_LEFT | JoinType::JOIN_ANTI | JoinType::JOIN_FULL
     );
-    let mj_FillInner =
-        matches!(node.join.jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_FULL);
+    let mj_FillInner = matches!(
+        node.join.jointype,
+        JoinType::JOIN_RIGHT | JoinType::JOIN_RIGHT_ANTI | JoinType::JOIN_FULL
+    );
     let mut mj_ConstFalseJoin = false;
-    if matches!(node.join.jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_FULL)
-        && !check_constant_qual(&node.join.joinqual, &mut mj_ConstFalseJoin)
+    if matches!(
+        node.join.jointype,
+        JoinType::JOIN_RIGHT | JoinType::JOIN_RIGHT_ANTI | JoinType::JOIN_FULL
+    ) && !check_constant_qual(&node.join.joinqual, &mut mj_ConstFalseJoin)
     {
         return Err(non_mergeable_join_cond(node.join.jointype));
     }
@@ -677,6 +682,13 @@ where
                     }
                     if node.js_single_match {
                         node.mj_JoinState = EXEC_MJ_NEXTOUTER;
+                    }
+                    // A right-antijoin never returns a matched tuple; unless
+                    // inner_unique, stay on this outer tuple and keep
+                    // scanning the inner side for matches.
+                    if node.plan.join.jointype == JoinType::JOIN_RIGHT_ANTI {
+                        estate.reset_expr_context(node.ps_ExprContext);
+                        continue;
                     }
                     if eval_qual(node, estate, Qual::Other)? {
                         return Ok(Some(project_result(node, estate)?));
