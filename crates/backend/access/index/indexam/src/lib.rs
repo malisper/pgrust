@@ -184,10 +184,7 @@ pub fn index_bulk_delete<'mcx>(
         IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
         IndexAmKind::Hash => panic!("unported: hashbulkdelete (hash vacuum lane)"),
         IndexAmKind::Gin => gin::ginbulkdelete(mcx, info, istat, dead_items),
-        IndexAmKind::Gist => {
-            gist::gistbulkdelete(info.index)?;
-            Ok(istat.unwrap_or_default())
-        }
+        IndexAmKind::Gist => gist::gistbulkdelete(info, istat, dead_items),
         IndexAmKind::Spgist => {
             spgist::spgbulkdelete(info.index)?;
             Ok(istat.unwrap_or_default())
@@ -235,10 +232,7 @@ pub fn index_vacuum_cleanup<'mcx>(
             }
         }
         IndexAmKind::Gin => gin::ginvacuumcleanup(mcx, info, istat),
-        IndexAmKind::Gist => {
-            gist::gistvacuumcleanup(info.index, info.analyze_only)?;
-            Ok(istat)
-        }
+        IndexAmKind::Gist => gist::gistvacuumcleanup(info, istat),
         IndexAmKind::Spgist => {
             spgist::spgvacuumcleanup(info.index, info.analyze_only)?;
             Ok(istat)

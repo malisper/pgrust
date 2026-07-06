@@ -33,3 +33,7 @@ tidbitmap = { path = "../../../nodes/tidbitmap" }
 init_small = { path = "../../../utils/init/init_small" }
 freespace = { path = "../../../storage/freespace/freespace" }
 pg_prng = { path = "../../../../common/pg_prng" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+varsup = { path = "../../transam/varsup" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+elog = { path = "../../../utils/error/elog" }
