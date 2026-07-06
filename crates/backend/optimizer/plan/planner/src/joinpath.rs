@@ -1628,15 +1628,7 @@ fn hash_inner_and_outer<'mcx>(
         && crate::relnode::relids_is_empty(&run.root.rel(joinrel).lateral_relids)
     {
         let cheapest_partial_outer = run.root.rel(outerrel).partial_pathlist[0];
-        // DIVERGENCE: the parallel_hash=true arm (shared table from a partial
-        // inner) stays generation-blocked until the parallel-aware Hash
-        // executor lands (ExecParallelHashTableCreate + the per-node
-        // DSM/worker arms rejected loud by execparallel::walk_parallel_aware);
-        // a generated plan panics at Gather startup. C picks Parallel Hash
-        // Join here; we fall back to the next-best path.
-        const PARALLEL_HASH_EXECUTOR_LANDED: bool = false;
-        if PARALLEL_HASH_EXECUTOR_LANDED
-            && !run.root.rel(innerrel).partial_pathlist.is_empty()
+        if !run.root.rel(innerrel).partial_pathlist.is_empty()
             && save_jointype != JOIN_UNIQUE_INNER
             && gucs::enable_parallel_hash()
         {
