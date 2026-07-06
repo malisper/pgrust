@@ -48,7 +48,7 @@ pub fn init_seams() {}
 mod tests;
 
 mod gsets;
-mod merge;
+pub mod merge;
 
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
@@ -2813,7 +2813,7 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
         }
     }
     hashagg_finish_initial_spills(node, estate)?;
-    merge::maybe_install_handoff(node, estate);
+    merge::maybe_install_handoff(node);
     let ph = node.perhash.as_mut().unwrap();
     ph.table_filled = true;
     ph.hashiter = 0;
@@ -3127,7 +3127,7 @@ where
     }
     merge::consume_handoff(node, estate)?;
     hashagg_finish_initial_spills(node, estate)?;
-    merge::maybe_install_handoff(node, estate);
+    merge::maybe_install_handoff(node);
     let ph = node.perhash.as_mut().unwrap();
     ph.table_filled = true;
     ph.hashiter = 0;

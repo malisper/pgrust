@@ -78,9 +78,10 @@ pub(crate) struct ParallelExecShared {
     queues: Mutex<Vec<(Arc<shm_mq::ShmMq>, Arc<tqueue::ChunkLedger>)>>,
     // Written once by the leader's InitializeDSM walk, before workers launch.
     nodes: Mutex<Vec<(i32, ParallelNodeShared)>>,
-    // Thread-native agg table handoff carriers under this Gather's subtree
-    // (executils::EStateData::es_agg_handoff), copied into worker estates.
-    agg_handoff: Vec<(i32, Arc<dyn Any + Send + Sync>)>,
+    // Thread-native agg table handoff registry snapshot (nodeagg::merge);
+    // worker threads adopt it before their run (leader-registered at
+    // ExecInitAgg, keyed by partial Agg plan-node address).
+    agg_handoff: ::nodeagg::merge::AggHandoffExport,
     instrumentation: Option<SharedInstrumentation>,
     usage: Mutex<Vec<(BufferUsage, WalUsage)>>,
 }
@@ -461,12 +462,7 @@ pub fn exec_init_parallel_plan<'mcx>(
         eflags: estate.es_top_eflags,
         queues: Mutex::new(Vec::new()),
         nodes: Mutex::new(nodes),
-        agg_handoff: estate
-            .es_agg_handoff
-            .iter()
-            .filter(|(id, _)| subtree_ids.contains(id))
-            .map(|(id, h)| (*id, Arc::clone(h)))
-            .collect(),
+        agg_handoff: ::nodeagg::merge::export_registry(),
         instrumentation: instrumented.then(|| SharedInstrumentation {
             instrument_options: estate.es_instrument,
             workers: Mutex::new((0..nworkers).map(|_| None).collect()),
@@ -693,6 +689,8 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         .then(|| exec.query_text.clone())
         .unwrap_or_default();
 
+    ::nodeagg::merge::adopt_registry(&exec.agg_handoff);
+
     let mut run = || -> PgResult<()> {
         crate::execmain::executor_start_seam(qd, exec.eflags)?;
         if inject.contains("pgrust:worker-panic-run") {
@@ -717,11 +715,6 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                         ParamExecData { value: *value, isnull: *isnull, exec_plan: false };
                 }
                 drop(pe);
-                d.estate.es_agg_handoff = exec
-                    .agg_handoff
-                    .iter()
-                    .map(|(id, h)| (*id, Arc::clone(h)))
-                    .collect();
                 // ExecParallelInitializeWorker, then the tuple bound (C order).
                 let estate = &mut d.estate;
                 if let Some(ps) = d.planstate.as_mut() {
@@ -841,6 +834,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     let result = match result {
         Ok(r) => r,
         Err(payload) => {
+            ::nodeagg::merge::clear_thread_registry();
             querydesc::release_query_desc_seam(qd);
             types_portal::params::free(params);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -849,6 +843,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             std::panic::resume_unwind(payload);
         }
     };
+    ::nodeagg::merge::clear_thread_registry();
     if result.is_err() {
         querydesc::release_query_desc_seam(qd);
     } else {
