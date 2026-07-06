@@ -505,6 +505,14 @@ fn collect_subplans_expr<'mcx>(
         NodeTag::T_CoerceToDomain => {
             collect_subplans_expr(node.as_coerce_to_domain().unwrap().arg, out)
         }
+        NodeTag::T_WithCheckOption => {
+            if let Some(q) = node.as_with_check_option().unwrap().qual {
+                collect_subplans_expr(q, out);
+            }
+        }
+        NodeTag::T_ReturningExpr => {
+            collect_subplans_expr(node.as_returning_expr().unwrap().retexpr, out)
+        }
         _ => {}
     }
 }
