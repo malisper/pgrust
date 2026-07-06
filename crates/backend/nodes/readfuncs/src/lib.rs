@@ -421,6 +421,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"DISTINCTEXPR" => self.read_distinct_expr(),
             b"NULLIFEXPR" => self.read_null_if_expr(),
             b"ONCONFLICTEXPR" => self.read_on_conflict_expr(),
+            b"NOTIFYSTMT" => self.read_notify_stmt(),
             b"INFERENCEELEM" => self.read_inference_elem(),
             b"SUBSCRIPTINGREF" => self.read_subscripting_ref(),
             b"WINDOWFUNC" => self.read_window_func(),
@@ -580,6 +581,13 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         d.args = self.read_node_list("args")?;
         d.location = self.read_location("location");
         Ok(d.seal())
+    }
+
+    fn read_notify_stmt(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let conditionname = self.read_str("conditionname")?;
+        let payload = self.read_str("payload")?;
+        Node::mk(mcx, types_nodes::parsenodes::NotifyStmt { conditionname, payload })
     }
 
     fn read_on_conflict_expr(&mut self) -> PgResult<Node<'mcx>> {

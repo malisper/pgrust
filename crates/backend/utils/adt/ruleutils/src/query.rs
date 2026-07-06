@@ -700,6 +700,21 @@ pub(crate) fn get_query_def<'mcx>(
             ctx.buf.push_str("NOTHING");
             Ok(())
         }
+        // get_utility_query_def: only NOTIFY can appear in rules.
+        CmdType::CMD_UTILITY => {
+            let stmt = query
+                .utilityStmt
+                .and_then(|n| n.as_notify_stmt())
+                .unwrap_or_else(|| gap("get_utility_query_def", "non-NOTIFY utility statement"));
+            append_context_keyword(ctx, "", 0, PRETTYINDENT_STD, 1);
+            let name = stmt.conditionname.expect("NOTIFY has a condition name");
+            ctx.buf.push_str(&format!("NOTIFY {}", quote_identifier(name)));
+            if let Some(payload) = stmt.payload {
+                ctx.buf.push_str(", ");
+                crate::deparse::simple_quote_literal(&mut ctx.buf, payload);
+            }
+            Ok(())
+        }
         other => gap("get_query_def", &format!("{other:?} deparse")),
     };
 
