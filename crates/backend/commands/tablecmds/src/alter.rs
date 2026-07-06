@@ -6798,8 +6798,8 @@ const Anum_pg_class_oid_mv: usize = 1;
 const Anum_pg_class_relnamespace_mv: usize = 3;
 const Anum_pg_class_relowner_mv: usize = 6;
 const Anum_pg_class_reltablespace_mv: usize = 9;
-const Anum_pg_class_relisshared_mv: usize = 15;
-const Anum_pg_class_relkind_mv: usize = 17;
+const Anum_pg_class_relisshared_mv: usize = 16;
+const Anum_pg_class_relkind_mv: usize = 18;
 
 // AlterObjectTypeCommandTag(objtype) restricted to the MoveAll object types
 // (commandtag.rs consts CMDTAG_ALTER_{TABLE,INDEX,MATERIALIZED_VIEW}); the

@@ -1935,6 +1935,89 @@ fn alter_materialized_view_shapes() {
 }
 
 #[test]
+fn grant_all_in_schema_shapes() {
+    use types_nodes::parsenodes::{GrantStmt, GrantTargetType, ObjectType};
+    let list = parse("GRANT SELECT ON ALL TABLES IN SCHEMA s, s2 TO u");
+    let g = only_stmt(&list).stmt.unwrap().as_variant::<GrantStmt>().expect("GrantStmt");
+    assert!(g.is_grant);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA);
+    assert_eq!(g.objtype, ObjectType::OBJECT_TABLE);
+    assert_eq!(g.objects.len(), 2);
+
+    let list = parse("REVOKE ALL ON ALL SEQUENCES IN SCHEMA s FROM u CASCADE");
+    let g = only_stmt(&list).stmt.unwrap().as_variant::<GrantStmt>().expect("GrantStmt");
+    assert!(!g.is_grant);
+    assert_eq!(g.targtype, GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA);
+    assert_eq!(g.objtype, ObjectType::OBJECT_SEQUENCE);
+    assert_eq!(g.objects.len(), 1);
+}
+
+#[test]
+fn alter_move_all_in_tablespace_shapes() {
+    use types_nodes::parsenodes::{AlterTableMoveAllStmt, ObjectType};
+    let list = parse("ALTER TABLE ALL IN TABLESPACE ts SET TABLESPACE ts2");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<AlterTableMoveAllStmt>()
+        .expect("AlterTableMoveAllStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_TABLE);
+    assert_eq!(a.orig_tablespacename, Some("ts"));
+    assert_eq!(a.new_tablespacename, Some("ts2"));
+    assert!(a.roles.is_nil());
+    assert!(!a.nowait);
+
+    let list = parse("ALTER TABLE ALL IN TABLESPACE ts OWNED BY r1, r2 SET TABLESPACE ts2 NOWAIT");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<AlterTableMoveAllStmt>()
+        .expect("AlterTableMoveAllStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_TABLE);
+    assert_eq!(a.roles.len(), 2);
+    assert!(a.nowait);
+
+    let list = parse("ALTER INDEX ALL IN TABLESPACE ts SET TABLESPACE ts2 NOWAIT");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<AlterTableMoveAllStmt>()
+        .expect("AlterTableMoveAllStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_INDEX);
+    assert!(a.nowait);
+
+    let list = parse("ALTER MATERIALIZED VIEW ALL IN TABLESPACE ts OWNED BY r SET TABLESPACE ts2");
+    let a = only_stmt(&list)
+        .stmt
+        .unwrap()
+        .as_variant::<AlterTableMoveAllStmt>()
+        .expect("AlterTableMoveAllStmt");
+    assert_eq!(a.objtype, ObjectType::OBJECT_MATVIEW);
+    assert_eq!(a.roles.len(), 1);
+    assert_eq!(a.orig_tablespacename, Some("ts"));
+    assert_eq!(a.new_tablespacename, Some("ts2"));
+}
+
+#[test]
+fn gram_train_3_rule_numbers_match_tables() {
+    use crate::tables::names::{YYRLINE, YYTNAME};
+    use crate::tables::YYR1;
+    for (rule, name, line) in [
+        (1062, "privilege_target", 7941),
+        (1063, "privilege_target", 7950),
+        (279, "AlterTableStmt", 2135),
+        (280, "AlterTableStmt", 2147),
+        (284, "AlterTableStmt", 2189),
+        (285, "AlterTableStmt", 2201),
+        (292, "AlterTableStmt", 2273),
+        (293, "AlterTableStmt", 2285),
+    ] {
+        assert_eq!(YYTNAME[YYR1[rule] as usize], name, "rule {rule}");
+        assert_eq!(YYRLINE[rule], line, "rule {rule}");
+    }
+}
+
+#[test]
 fn gram_train_2_rule_numbers_match_tables() {
     use crate::tables::names::{YYRLINE, YYTNAME};
     use crate::tables::YYR1;

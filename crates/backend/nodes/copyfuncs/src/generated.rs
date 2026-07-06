@@ -33,8 +33,9 @@ use types_nodes::parsenodes::{
     AlterDatabaseSetStmt, AlterDatabaseStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt,
     AlterEventTrigStmt, AlterFunctionStmt, AlterObjectSchemaStmt, AlterOpFamilyStmt,
     AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt,
-    AlterRoleStmt, AlterSubscriptionStmt, AlterTableCmd, AlterTableSpaceOptionsStmt,
-    AlterTableStmt, CTECycleClause, CTESearchClause, CheckPointStmt, ClosePortalStmt,
+    AlterRoleStmt, AlterSubscriptionStmt, AlterTableCmd, AlterTableMoveAllStmt,
+    AlterTableSpaceOptionsStmt, AlterTableStmt, CTECycleClause, CTESearchClause, CheckPointStmt,
+    ClosePortalStmt,
     ClusterStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt,
     CreateConversionStmt, CreateEventTrigStmt, CreateFunctionStmt, CreateOpClassItem,
     CreateOpClassStmt, CreateOpFamilyStmt, CreatePLangStmt, CreatePolicyStmt,
@@ -226,6 +227,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterTableSpaceOptionsStmt => {
             let s = node.as_variant::<AlterTableSpaceOptionsStmt>().expect("AlterTableSpaceOptionsStmt");
             Node::mk(mcx, copy_AlterTableSpaceOptionsStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterTableMoveAllStmt => {
+            let s = node.as_variant::<AlterTableMoveAllStmt>().expect("AlterTableMoveAllStmt");
+            Node::mk(mcx, copy_AlterTableMoveAllStmt(mcx, s)?)?
         }
         NodeTag::T_AlterTableStmt => {
             let s = node.as_variant::<AlterTableStmt>().expect("AlterTableStmt");
@@ -1689,6 +1694,16 @@ pub(crate) fn copy_AlterTableSpaceOptionsStmt<'d>(mcx: Mcx<'d>, s: &AlterTableSp
         tablespacename: opt_str_in(mcx, s.tablespacename)?,
         options: copy_node_list(mcx, &s.options)?,
         isReset: s.isReset,
+    })
+}
+
+pub(crate) fn copy_AlterTableMoveAllStmt<'d>(mcx: Mcx<'d>, s: &AlterTableMoveAllStmt<'_>) -> PgResult<AlterTableMoveAllStmt<'d>> {
+    Ok(AlterTableMoveAllStmt {
+        orig_tablespacename: opt_str_in(mcx, s.orig_tablespacename)?,
+        objtype: s.objtype,
+        roles: copy_node_list(mcx, &s.roles)?,
+        new_tablespacename: opt_str_in(mcx, s.new_tablespacename)?,
+        nowait: s.nowait,
     })
 }
 
