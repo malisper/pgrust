@@ -143,6 +143,9 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_ValuesScan => {
             rels_used.add_member(mcx, node.as_values_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_FunctionScan => {
+            rels_used.add_member(mcx, node.as_function_scan().unwrap().scan.scanrelid as i32)?;
+        }
         NodeTag::T_TableFuncScan => {
             rels_used
                 .add_member(mcx, node.as_table_func_scan().unwrap().scan.scanrelid as i32)?;
