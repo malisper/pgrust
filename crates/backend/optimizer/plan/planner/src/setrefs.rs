@@ -1093,14 +1093,14 @@ fn audit_no_phv(plan: Node<'_>) {
         }
     }
     let joinqual = match plan.node_tag() {
-        NodeTag::T_NestLoop => Some(plan.as_nest_loop().unwrap().join.joinqual.clone()),
-        NodeTag::T_MergeJoin => Some(plan.as_merge_join().unwrap().join.joinqual.clone()),
-        NodeTag::T_HashJoin => Some(plan.as_hash_join().unwrap().join.joinqual.clone()),
+        NodeTag::T_NestLoop => Some(&plan.as_nest_loop().unwrap().join.joinqual),
+        NodeTag::T_MergeJoin => Some(&plan.as_merge_join().unwrap().join.joinqual),
+        NodeTag::T_HashJoin => Some(&plan.as_hash_join().unwrap().join.joinqual),
         _ => None,
     };
     if let Some(list) = joinqual {
         let mut w = PhvAudit { tag: plan.node_tag(), field: "joinqual" };
-        for n in &list {
+        for n in list {
             let _ = nodes_core::expression_tree_walker(n, &mut w);
         }
     }
