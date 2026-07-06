@@ -66,10 +66,26 @@ fn install_oper_fixture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
-        // transformExpressionList's star-form probe (insert-lane F1): the
-        // multi-assign rigs feed non-star sources, so Ok(None) = the normal
-        // transformExpr path, exactly the pre-seam behavior these tests pin.
-        parse_func_seams::expandExpressionListStar::set(|_, _, _, _| Ok(None));
+        // transformExpressionList seam (groupingsets' whole-fn design, which
+        // superseded insert-lane F1's star probe): the rigs feed star-free
+        // sources, so per-item transformExpr + SetToDefault passthrough is
+        // the exact C path these tests pin.
+        parse_func_seams::transformExpressionList::set(|mcx, pstate, exprlist, kind, allow_default| {
+            let saved = pstate.p_expr_kind;
+            pstate.p_expr_kind = kind;
+            let mut out = types_nodes::NodeList::nil();
+            for e in exprlist.iter() {
+                if allow_default
+                    && e.node_tag() == types_nodes::NodeTag::T_SetToDefault
+                {
+                    out.lappend(mcx, e)?;
+                } else {
+                    out.lappend(mcx, super::transformExprRecurse(mcx, pstate, e)?)?;
+                }
+            }
+            pstate.p_expr_kind = saved;
+            Ok(out)
+        });
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
             let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
             if l == INT4OID && r == INT4OID {

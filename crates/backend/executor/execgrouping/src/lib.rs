@@ -87,9 +87,242 @@ impl ProbeKernel {
     }
 }
 
+
+// simplehash.h-parity open-addressing index over `entries`: robin-hood
+// insertion, doubling growth, backward iteration from the first free bucket.
+// Byte-identical hashed-output ROW ORDER depends on reproducing C's bucket
+// layout exactly (SH_INSERT_HASH_INTERNAL / SH_GROW / SH_ITERATE).
+const SH_EMPTY: u32 = u32::MAX;
+const SH_FILLFACTOR: f64 = 0.9;
+const SH_MAX_FILLFACTOR: f64 = 0.98;
+const SH_GROW_MAX_DIB: u32 = 25;
+const SH_GROW_MAX_MOVE: u32 = 150;
+const SH_GROW_MIN_FILLFACTOR: f64 = 0.1;
+const SH_MAX_SIZE: u64 = (u32::MAX as u64) + 1;
+
+struct SimpleHashIndex {
+    // bucket -> entry index, SH_EMPTY when free.
+    buckets: Vec<u32>,
+    sizemask: u32,
+    members: u64,
+    grow_threshold: u64,
+}
+
+impl SimpleHashIndex {
+    fn compute_size(newsize: u64) -> u64 {
+        newsize.max(2).next_power_of_two()
+    }
+
+    fn with_nelements(nelements: usize) -> Self {
+        let size = Self::compute_size(
+            (SH_MAX_SIZE as f64).min(nelements as f64 / SH_FILLFACTOR) as u64,
+        );
+        let mut t = SimpleHashIndex {
+            buckets: vec![SH_EMPTY; size as usize],
+            sizemask: (size - 1) as u32,
+            members: 0,
+            grow_threshold: 0,
+        };
+        t.update_grow_threshold();
+        t
+    }
+
+    fn size(&self) -> u64 {
+        self.buckets.len() as u64
+    }
+
+    fn update_grow_threshold(&mut self) {
+        let size = self.size();
+        self.grow_threshold = if size == SH_MAX_SIZE {
+            (size as f64 * SH_MAX_FILLFACTOR) as u64
+        } else {
+            (size as f64 * SH_FILLFACTOR) as u64
+        };
+    }
+
+    #[inline]
+    fn initial_bucket(&self, hash: u32) -> u32 {
+        hash & self.sizemask
+    }
+
+    #[inline]
+    fn distance(&self, optimal: u32, bucket: u32) -> u32 {
+        if optimal <= bucket {
+            bucket - optimal
+        } else {
+            (self.size() as u32).wrapping_add(bucket) - optimal
+        }
+    }
+
+    fn grow(&mut self, newsize: u64, entry_hash: impl Fn(u32) -> u32) {
+        let oldsize = self.size() as u32;
+        let old = core::mem::replace(
+            &mut self.buckets,
+            vec![SH_EMPTY; Self::compute_size(newsize) as usize],
+        );
+        self.sizemask = (self.buckets.len() - 1) as u32;
+        self.update_grow_threshold();
+        // Start copying at the first bucket that is free or optimally placed
+        // in the OLD table, so runs move over without conflicts (SH_GROW).
+        let mut startelem = 0u32;
+        for i in 0..oldsize {
+            if old[i as usize] == SH_EMPTY {
+                startelem = i;
+                break;
+            }
+            let optimal = entry_hash(old[i as usize]) & ((oldsize - 1) as u32);
+            if optimal == i {
+                startelem = i;
+                break;
+            }
+        }
+        let mut copyelem = startelem;
+        for _ in 0..oldsize {
+            let ix = old[copyelem as usize];
+            if ix != SH_EMPTY {
+                let mut cur = self.initial_bucket(entry_hash(ix));
+                while self.buckets[cur as usize] != SH_EMPTY {
+                    cur = (cur + 1) & self.sizemask;
+                }
+                self.buckets[cur as usize] = ix;
+            }
+            copyelem += 1;
+            if copyelem >= oldsize {
+                copyelem = 0;
+            }
+        }
+    }
+
+    /// SH_INSERT_HASH_INTERNAL: probe for a match via `matches`; on miss,
+    /// robin-hood place `new_ix`. Returns (entry index, found-existing).
+    fn insert_or_find(
+        &mut self,
+        hash: u32,
+        new_ix: u32,
+        entry_hash: impl Fn(u32) -> u32 + Copy,
+        mut matches: impl FnMut(u32) -> PgResult<bool>,
+    ) -> PgResult<(u32, bool)> {
+        'restart: loop {
+            let mut insertdist = 0u32;
+            if self.members >= self.grow_threshold {
+                assert!(self.size() != SH_MAX_SIZE, "hash table size exceeded");
+                self.grow(self.size() * 2, entry_hash);
+            }
+            let startelem = self.initial_bucket(hash);
+            let mut curelem = startelem;
+            loop {
+                let occupant = self.buckets[curelem as usize];
+                if occupant == SH_EMPTY {
+                    self.members += 1;
+                    self.buckets[curelem as usize] = new_ix;
+                    return Ok((new_ix, false));
+                }
+                if entry_hash(occupant) == hash && matches(occupant)? {
+                    return Ok((occupant, true));
+                }
+                let curoptimal = self.initial_bucket(entry_hash(occupant));
+                let curdist = self.distance(curoptimal, curelem);
+                if insertdist > curdist {
+                    // Shift the colliding run forward one bucket and take
+                    // the vacated spot.
+                    let mut emptyelem = curelem;
+                    let mut emptydist = 0u32;
+                    loop {
+                        emptyelem = (emptyelem + 1) & self.sizemask;
+                        if self.buckets[emptyelem as usize] == SH_EMPTY {
+                            break;
+                        }
+                        emptydist += 1;
+                        if emptydist > SH_GROW_MAX_MOVE
+                            && (self.members as f64 / self.size() as f64)
+                                >= SH_GROW_MIN_FILLFACTOR
+                        {
+                            self.grow_threshold = 0;
+                            continue 'restart;
+                        }
+                    }
+                    let mut moveelem = emptyelem;
+                    while moveelem != curelem {
+                        let prev = moveelem.wrapping_sub(1) & self.sizemask;
+                        self.buckets[moveelem as usize] = self.buckets[prev as usize];
+                        moveelem = prev;
+                    }
+                    self.members += 1;
+                    self.buckets[curelem as usize] = new_ix;
+                    return Ok((new_ix, false));
+                }
+                curelem = (curelem + 1) & self.sizemask;
+                insertdist += 1;
+                if insertdist > SH_GROW_MAX_DIB
+                    && (self.members as f64 / self.size() as f64) >= SH_GROW_MIN_FILLFACTOR
+                {
+                    self.grow_threshold = 0;
+                    continue 'restart;
+                }
+            }
+        }
+    }
+
+    /// Find-only probe (SH_LOOKUP shape).
+    fn find(
+        &self,
+        hash: u32,
+        entry_hash: impl Fn(u32) -> u32,
+        mut matches: impl FnMut(u32) -> PgResult<bool>,
+    ) -> PgResult<Option<u32>> {
+        let startelem = self.initial_bucket(hash);
+        let mut curelem = startelem;
+        loop {
+            let occupant = self.buckets[curelem as usize];
+            if occupant == SH_EMPTY {
+                return Ok(None);
+            }
+            if entry_hash(occupant) == hash && matches(occupant)? {
+                return Ok(Some(occupant));
+            }
+            curelem = (curelem + 1) & self.sizemask;
+            if curelem == startelem {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// SH_START_ITERATE + SH_ITERATE: backward walk from the first free
+    /// bucket. `cursor` starts at 0; it packs the start bucket (high 32
+    /// bits) and visited count + 1 (low 32 bits).
+    fn iterate(&self, cursor: &mut usize) -> Option<u32> {
+        let size = self.size() as usize;
+        let (start, mut visited) = if *cursor == 0 {
+            let start =
+                (0..size).find(|&i| self.buckets[i] == SH_EMPTY).expect("free bucket exists")
+                    as u32;
+            (start, 0usize)
+        } else {
+            ((*cursor >> 32) as u32, (*cursor & 0xffff_ffff) - 1)
+        };
+        let mut result = None;
+        while visited < size {
+            let bucket = start.wrapping_sub(1).wrapping_sub(visited as u32) & self.sizemask;
+            visited += 1;
+            let ix = self.buckets[bucket as usize];
+            if ix != SH_EMPTY {
+                result = Some(ix);
+                break;
+            }
+        }
+        *cursor = ((start as usize) << 32) | (visited + 1);
+        result
+    }
+
+    fn clear(&mut self) {
+        self.buckets.fill(SH_EMPTY);
+        self.members = 0;
+    }
+}
+
 pub struct TupleHashTable<'mcx> {
     entries: PgVec<'mcx, TupleHashEntryData>,
-    hashtab: hashbrown::HashTable<u32>,
+    hashtab: SimpleHashIndex,
     additionalsize: usize,
     kernel: ProbeKernel,
     tab_hash_expr: PgBox<'mcx, ExprState<'mcx>>,
@@ -150,7 +383,7 @@ pub fn build_tuple_hash_table<'mcx>(
 
     Ok(TupleHashTable {
         entries: vec_with_capacity_in(metacxt, nbuckets)?,
-        hashtab: hashbrown::HashTable::with_capacity(nbuckets),
+        hashtab: SimpleHashIndex::with_nelements(nbuckets),
         additionalsize,
         kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions),
         tab_hash_expr,
@@ -179,16 +412,17 @@ pub fn get_hash_memory_limit() -> usize {
 impl<'mcx> TupleHashTable<'mcx> {
     /// Global-heap + fn_extra release; the table is then safe to forget.
     pub fn release(&mut self) {
-        self.hashtab = hashbrown::HashTable::new();
+        self.hashtab = SimpleHashIndex::with_nelements(0);
+        self.hashtab.buckets = Vec::new();
         self.tab_hash_expr.release_frames();
         self.tab_eq_func.release_frames();
         self.tableslot.base_mut().tts_tupleDescriptor = None;
     }
 
-    // C MemoryContextMemAllocated(hash_metacxt); 5 = swiss-table slot+control.
+    // C MemoryContextMemAllocated(hash_metacxt).
     pub fn meta_mem(&self) -> usize {
         self.entries.capacity() * core::mem::size_of::<TupleHashEntryData>()
-            + self.hashtab.capacity() * 5
+            + self.hashtab.buckets.capacity() * core::mem::size_of::<u32>()
     }
 
     /// C `TupleHashTableHash`; the caller resets its per-tuple context.
@@ -226,57 +460,47 @@ impl<'mcx> TupleHashTable<'mcx> {
         let mut eq_err: Option<Box<PgError>> = None;
         let input_slot = input_slot;
         // Kernel match = NOT DISTINCT over the entry's cached key datum.
+        let entry_hash = |ix: u32| entries[ix as usize].hash;
         let found = match *kernel {
             ProbeKernel::Int4 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
-                hashtab
-                    .find(hash as u64, |ix: &u32| {
-                        let e = &entries[*ix as usize];
-                        e.hash == hash
-                            && match (isnull, e.key_isnull) {
-                                (false, false) => e.key.as_i32() == key.as_i32(),
-                                (a, b) => a & b,
-                            }
+                hashtab.find(hash, entry_hash, |ix| {
+                    let e = &entries[ix as usize];
+                    Ok(match (isnull, e.key_isnull) {
+                        (false, false) => e.key.as_i32() == key.as_i32(),
+                        (a, b) => a & b,
                     })
-                    .copied()
+                })?
             }
             ProbeKernel::Int8 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
-                hashtab
-                    .find(hash as u64, |ix: &u32| {
-                        let e = &entries[*ix as usize];
-                        e.hash == hash
-                            && match (isnull, e.key_isnull) {
-                                (false, false) => e.key.as_i64() == key.as_i64(),
-                                (a, b) => a & b,
-                            }
+                hashtab.find(hash, entry_hash, |ix| {
+                    let e = &entries[ix as usize];
+                    Ok(match (isnull, e.key_isnull) {
+                        (false, false) => e.key.as_i64() == key.as_i64(),
+                        (a, b) => a & b,
                     })
-                    .copied()
+                })?
             }
-            ProbeKernel::Expr => hashtab
-                .find(hash as u64, |ix: &u32| {
-                    let e = &entries[*ix as usize];
-                    if e.hash != hash {
-                        return false;
+            ProbeKernel::Expr => hashtab.find(hash, entry_hash, |ix| {
+                let e = &entries[ix as usize];
+                // SAFETY: entry images live in table_mcx until reset().
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(tableslot, slot_mcx, e.first_tuple)
+                };
+                let mut slots = EvalSlots {
+                    scan: None,
+                    inner: Some(&mut *input_slot),
+                    outer: Some(&mut *tableslot),
+                };
+                match exec_qual(Some(tab_eq_func), &mut slots) {
+                    Ok(m) => Ok(m),
+                    Err(e) => {
+                        eq_err = Some(e);
+                        Ok(false)
                     }
-                    // SAFETY: entry images live in table_mcx until reset().
-                    unsafe {
-                        exectuples::exec_store_minimal_tuple_ptr(tableslot, slot_mcx, e.first_tuple)
-                    };
-                    let mut slots = EvalSlots {
-                        scan: None,
-                        inner: Some(&mut *input_slot),
-                        outer: Some(&mut *tableslot),
-                    };
-                    match exec_qual(Some(tab_eq_func), &mut slots) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            eq_err = Some(e);
-                            false
-                        }
-                    }
-                })
-                .copied(),
+                }
+            })?,
         };
         if let Some(e) = eq_err {
             return Err(e);
@@ -312,8 +536,11 @@ impl<'mcx> TupleHashTable<'mcx> {
         }
         self.entries.push(TupleHashEntryData { first_tuple, hash, key_isnull, key });
         let entries = &self.entries;
-        self.hashtab
-            .insert_unique(hash as u64, ix, |i| entries[*i as usize].hash as u64);
+        // The match closure never fires: the find above proved absence.
+        let (got, found) =
+            self.hashtab
+                .insert_or_find(hash, ix, |i| entries[i as usize].hash, |_| Ok(false))?;
+        debug_assert!(!found && got == ix);
         Ok((Some(ix), true))
     }
 
@@ -323,28 +550,14 @@ impl<'mcx> TupleHashTable<'mcx> {
     pub fn find_entry_with(
         &self,
         hash: u32,
-        mut eq: impl FnMut(u32) -> PgResult<bool>,
+        eq: impl FnMut(u32) -> PgResult<bool>,
     ) -> PgResult<Option<u32>> {
-        let mut eq_err: Option<Box<PgError>> = None;
-        let found = self
-            .hashtab
-            .find(hash as u64, |ix: &u32| {
-                if self.entries[*ix as usize].hash != hash {
-                    return false;
-                }
-                match eq(*ix) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eq_err = Some(e);
-                        false
-                    }
-                }
-            })
-            .copied();
-        if let Some(e) = eq_err {
-            return Err(e);
-        }
-        Ok(found)
+        self.hashtab.find(hash, |ix| self.entries[ix as usize].hash, eq)
+    }
+
+    /// C SH_START_ITERATE/SH_ITERATE bucket-order drain; `cursor` starts 0.
+    pub fn iterate(&self, cursor: &mut usize) -> Option<u32> {
+        self.hashtab.iterate(cursor)
     }
 
     #[inline]

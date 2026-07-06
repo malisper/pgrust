@@ -729,7 +729,9 @@ fn walk_query<'w, 'mcx: 'w>(
             | RTEKind::RTE_CTE
             | RTEKind::RTE_TABLEFUNC
             | RTEKind::RTE_FUNCTION
-            | RTEKind::RTE_VALUES => {}
+            | RTEKind::RTE_VALUES
+            // C's default arm; groupexprs ride the rtable recursion below.
+            | RTEKind::RTE_GROUP => {}
             other => walker_unported(&format!("rtekind {other:?}")),
         }
     }
@@ -807,6 +809,9 @@ fn walk_query_fields<'w, 'mcx: 'w>(
             }
             RTEKind::RTE_FUNCTION => walk_list(&rte.functions, context)?,
             RTEKind::RTE_VALUES => walk_list(&rte.values_lists, context)?,
+            // range_table_walker without QTW_IGNORE_GROUPEXPRS: the grouping
+            // expressions live only here (the tlist holds GROUP Vars).
+            RTEKind::RTE_GROUP => walk_list(&rte.groupexprs, context)?,
             other => walker_unported(&format!("rtekind {other:?}")),
         }
         walk_list(&rte.securityQuals, context)?;

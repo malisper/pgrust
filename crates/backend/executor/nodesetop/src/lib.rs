@@ -483,12 +483,10 @@ fn setop_retrieve_hash_table<'mcx>(
         }
         let (counts, tup) = {
             let StrategyState::Hashed(hs) = &mut node.strategy else { unreachable!() };
-            if hs.hashiter >= hs.hashtable.num_entries() {
+            let Some(ix) = hs.hashtable.iterate(&mut hs.hashiter) else {
                 node.setop_done = true;
                 return Ok(None);
-            }
-            let ix = hs.hashiter as u32;
-            hs.hashiter += 1;
+            };
             // SAFETY: pergroup was initialized during fill; the block lives
             // as long as the table.
             let counts = unsafe { pergroup(&hs.hashtable, ix).as_ptr().read() };

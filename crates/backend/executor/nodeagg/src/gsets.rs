@@ -667,9 +667,7 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
             let HashSetsState { perhash, hash_first_slot, current_set, .. } = h;
             let ix = loop {
                 let ph = &mut perhash[*current_set];
-                if ph.hashiter < ph.hashtable.num_entries() {
-                    let ix = ph.hashiter as u32;
-                    ph.hashiter += 1;
+                if let Some(ix) = ph.hashtable.iterate(&mut ph.hashiter) {
                     break ix;
                 }
                 if *current_set + 1 < perhash.len() {

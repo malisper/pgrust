@@ -623,9 +623,9 @@ pub fn consider_groupingsets_paths<'mcx>(
             rollups = gd.rollups.iter().cloned().collect();
         }
 
-        // C lcons's each hashed rollup: final order is reverse(hash_sets),
-        // then the sorted rollups.
-        for gs in hash_sets.iter().rev() {
+        // C lcons's each hashed rollup while walking hash_sets forward: the
+        // final order is reverse(hash_sets), then the sorted rollups.
+        for gs in hash_sets.iter() {
             assert!(!gs.set.is_empty());
             rollups.insert(0, make_hashed_rollup(run, gs)?);
         }
