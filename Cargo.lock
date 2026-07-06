@@ -9413,12 +9413,16 @@ dependencies = [
 name = "partbounds"
 version = "0.1.0"
 dependencies = [
+ "arrayfuncs",
  "cache_syscache",
  "clauses_seams",
+ "coerce",
  "copyfuncs",
  "datum",
  "detoast_seams",
  "execexpr",
+ "format_type",
+ "funcapi",
  "lsyscache",
  "mbutils",
  "mcx",
