@@ -117,9 +117,25 @@ const fn id_bool(v: bool) -> bool {
 const fn id_i32(v: i32) -> i32 {
     v
 }
+const fn id_i64(v: i64) -> i64 {
+    v
+}
+const fn id_u32(v: u32) -> u32 {
+    v
+}
+const fn id_u64(v: u64) -> u64 {
+    v
+}
+const fn id_usize(v: usize) -> usize {
+    v
+}
 
 session_scalar!(SessionBool, bool, AtomicBool, id_bool, id_bool);
 session_scalar!(SessionI32, i32, AtomicI32, id_i32, id_i32);
+session_scalar!(SessionI64, i64, std::sync::atomic::AtomicI64, id_i64, id_i64);
+session_scalar!(SessionU32, u32, AtomicU32, id_u32, id_u32);
+session_scalar!(SessionU64, u64, AtomicU64, id_u64, id_u64);
+session_scalar!(SessionUsize, usize, std::sync::atomic::AtomicUsize, id_usize, id_usize);
 session_scalar!(SessionF64, f64, AtomicU64, f64::to_bits, f64::from_bits);
 
 pub struct StrOverrideSlot {
