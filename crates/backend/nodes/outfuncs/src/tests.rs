@@ -387,3 +387,61 @@ fn next_value_expr_matches_c_format() {
         "{NEXTVALUEEXPR :seqid 16400 :typeId 20}"
     );
 }
+
+// ROW(a, b) < ROW(c, d): two-column row comparison, as produced for
+// `WHERE (a, b) < (c, d)`.
+#[test]
+fn row_compare_expr_matches_c_format() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    let mut opnos = types_nodes::list::OidList::nil();
+    opnos.lappend(mcx, 97).unwrap();
+    opnos.lappend(mcx, 97).unwrap();
+    let mut opfamilies = types_nodes::list::OidList::nil();
+    opfamilies.lappend(mcx, 1976).unwrap();
+    opfamilies.lappend(mcx, 1976).unwrap();
+    let mut inputcollids = types_nodes::list::OidList::nil();
+    inputcollids.lappend(mcx, 0).unwrap();
+    inputcollids.lappend(mcx, 0).unwrap();
+
+    let mut largs = NodeList::nil();
+    largs.lappend(mcx, Node::mk(mcx, int4_const(1)).unwrap()).unwrap();
+    largs.lappend(mcx, Node::mk(mcx, int4_const(2)).unwrap()).unwrap();
+    let mut rargs = NodeList::nil();
+    rargs.lappend(mcx, Node::mk(mcx, int4_const(3)).unwrap()).unwrap();
+    rargs.lappend(mcx, Node::mk(mcx, int4_const(4)).unwrap()).unwrap();
+
+    let n = Node::mk(
+        mcx,
+        types_nodes::primnodes::RowCompareExpr {
+            cmptype: 1, // COMPARE_LT
+            opnos,
+            opfamilies,
+            inputcollids,
+            largs,
+            rargs,
+        },
+    )
+    .unwrap();
+
+    let s1 = nodeToString(mcx, n).unwrap();
+    assert_eq!(
+        s1.as_str(),
+        "{ROWCOMPAREEXPR :cmptype 1 :opnos (o 97 97) :opfamilies (o 1976 1976) \
+         :inputcollids (o 0 0) :largs ({CONST :consttype 23 :consttypmod -1 \
+         :constcollid 0 :constlen 4 :constbyval true :constisnull false \
+         :location -1 :constvalue 4 [ 1 0 0 0 0 0 0 0 ]} {CONST :consttype 23 \
+         :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true \
+         :constisnull false :location -1 :constvalue 4 [ 2 0 0 0 0 0 0 0 ]}) \
+         :rargs ({CONST :consttype 23 :consttypmod -1 :constcollid 0 \
+         :constlen 4 :constbyval true :constisnull false :location -1 \
+         :constvalue 4 [ 3 0 0 0 0 0 0 0 ]} {CONST :consttype 23 :consttypmod \
+         -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false \
+         :location -1 :constvalue 4 [ 4 0 0 0 0 0 0 0 ]})}"
+    );
+
+    let back = readfuncs::stringToNode(mcx, s1.as_str()).unwrap();
+    let s2 = nodeToString(mcx, back).unwrap();
+    assert_eq!(s1.as_str(), s2.as_str());
+}

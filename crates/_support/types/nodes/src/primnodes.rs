@@ -319,6 +319,19 @@ pub struct RowCompareExpr<'mcx> {
     pub rargs: NodeList<'mcx>,
 }
 
+impl Default for RowCompareExpr<'_> {
+    fn default() -> Self {
+        RowCompareExpr {
+            cmptype: 0,
+            opnos: crate::list::OidList::nil(),
+            opfamilies: crate::list::OidList::nil(),
+            inputcollids: crate::list::OidList::nil(),
+            largs: NodeList::nil(),
+            rargs: NodeList::nil(),
+        }
+    }
+}
+
 pub struct GroupingFunc<'mcx> {
     pub args: NodeList<'mcx>,
     pub refs: crate::list::IntList<'mcx>,

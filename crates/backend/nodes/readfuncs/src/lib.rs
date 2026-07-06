@@ -442,6 +442,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"FIELDSELECT" => self.read_field_select(),
             b"FIELDSTORE" => self.read_field_store(),
             b"ROWEXPR" => self.read_row_expr(),
+            b"ROWCOMPAREEXPR" => self.read_row_compare_expr(),
             b"MERGEACTION" => self.read_merge_action(),
             b"XMLEXPR" => self.read_xml_expr(),
             b"TABLEFUNC" => self.read_table_func(),
@@ -763,6 +764,18 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         let retold = self.read_bool("retold");
         let retexpr = self.read_node("retexpr")?.expect("ReturningExpr has a retexpr");
         Node::mk(mcx, types_nodes::primnodes::ReturningExpr { retlevelsup, retold, retexpr })
+    }
+
+    fn read_row_compare_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut r = Node::build::<types_nodes::primnodes::RowCompareExpr>(mcx)?;
+        r.cmptype = self.read_i32("cmptype");
+        r.opnos = self.read_oid_list("opnos")?;
+        r.opfamilies = self.read_oid_list("opfamilies")?;
+        r.inputcollids = self.read_oid_list("inputcollids")?;
+        r.largs = self.read_node_list("largs")?;
+        r.rargs = self.read_node_list("rargs")?;
+        Ok(r.seal())
     }
 
     fn read_field_select(&mut self) -> PgResult<Node<'mcx>> {
