@@ -1065,7 +1065,13 @@ pub fn exec_modify_table<'mcx>(
             });
             if isnull {
                 if mt.operation == CmdType::CMD_MERGE {
+                    // Both cache halves must move together: clobbering cur
+                    // while last_result_oid stands lets the next row of the
+                    // pre-insert relation skip the lookup and run against
+                    // rels[0] (C passes resultRelInfo as an argument and
+                    // leaves the mt_lastResultOid cache untouched).
                     mt.cur = 0;
+                    mt.last_result_oid = 0;
                     if let Some(rslot) = exec_merge(mt, estate, plan_slot, None, &mut epq_eval)? {
                         return Ok(Some(rslot));
                     }
