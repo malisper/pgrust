@@ -445,6 +445,12 @@ pub struct IndexScanDescData<'mcx> {
     pub xs_heap_continue: bool,
     pub xs_heapfetch: Option<IndexFetchTableData<'mcx>>,
     pub xs_recheck: bool,
+
+    // amcanorderbyop (KNN) scans: numberOfOrderBys entries, filled by the AM
+    // per returned tuple (C xs_orderbyvals/xs_orderbynulls/xs_recheckorderby).
+    pub xs_orderbyvals: PgVec<'mcx, datum::Datum>,
+    pub xs_orderbynulls: PgVec<'mcx, bool>,
+    pub xs_recheckorderby: bool,
     pub xs_prefetch: IndexPrefetchState,
 
     pub xs_pgstat_index_tuples: u64,
@@ -502,6 +508,17 @@ pub fn relation_get_index_scan<'mcx>(
         xs_heap_continue: false,
         xs_heapfetch: None,
         xs_recheck: false,
+        xs_orderbyvals: {
+            let mut v = PgVec::new_in(mcx);
+            v.resize(norderbys.max(0) as usize, datum::Datum::null());
+            v
+        },
+        xs_orderbynulls: {
+            let mut v = PgVec::new_in(mcx);
+            v.resize(norderbys.max(0) as usize, true);
+            v
+        },
+        xs_recheckorderby: false,
         xs_prefetch: IndexPrefetchState::reset(),
         xs_pgstat_index_tuples: 0,
         xs_pgstat_heap_fetches: 0,
