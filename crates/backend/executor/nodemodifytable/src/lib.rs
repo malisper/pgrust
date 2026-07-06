@@ -2223,12 +2223,6 @@ fn merge_update_act<'mcx>(
     let ModifyTableState { rels, cur, index_eval_cx, .. } = &mut *mt;
     if let Some(indexes) = rels[*cur].indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
-            if update_indexes == TU_UpdateIndexes::TU_Summarizing {
-                panic!(
-                    "ExecUpdateEpilogue (nodeModifyTable.c): onlySummarizing \
-                     index maintenance (BRIN lane) not ported"
-                );
-            }
             recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
                 index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
@@ -2238,6 +2232,7 @@ fn merge_update_act<'mcx>(
                 false,
                 None,
                 &[],
+                update_indexes == TU_UpdateIndexes::TU_Summarizing,
             )?;
         }
     }
@@ -3088,12 +3083,6 @@ fn exec_update<'mcx>(
     let ModifyTableState { rels, cur, index_eval_cx, .. } = &mut *mt;
     if let Some(indexes) = rels[*cur].indexes.as_mut() {
         if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
-            if update_indexes == TU_UpdateIndexes::TU_Summarizing {
-                panic!(
-                    "ExecUpdateEpilogue (nodeModifyTable.c): onlySummarizing \
-                     index maintenance (BRIN lane) not ported"
-                );
-            }
             recheck_indexes = execindexing::ExecInsertIndexTuples(
                 mcx,
                 index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
@@ -3103,6 +3092,7 @@ fn exec_update<'mcx>(
                 false,
                 None,
                 &[],
+                update_indexes == TU_UpdateIndexes::TU_Summarizing,
             )?;
         }
     }
@@ -5048,6 +5038,7 @@ fn exec_insert<'mcx>(
                     true,
                     Some(&mut spec_conflict),
                     arbiters,
+                    false,
                 )?;
                 tableam::table_tuple_complete_speculative(
                     mcx,
@@ -5103,6 +5094,7 @@ fn exec_insert<'mcx>(
                     false,
                     None,
                     &[],
+                    false,
                 )?;
             }
         }
@@ -5701,12 +5693,6 @@ fn exec_leaf_conflict_update<'mcx>(
         let slot = &mut es_tupleTable[proj_id.0 as usize];
         if let Some(indexes) = leaf_indexes[idx].as_mut() {
             if indexes.num_indices() > 0 && update_indexes != TU_UpdateIndexes::TU_None {
-                if update_indexes == TU_UpdateIndexes::TU_Summarizing {
-                    panic!(
-                        "ExecUpdateEpilogue (nodeModifyTable.c): onlySummarizing \
-                         index maintenance (BRIN lane) not ported"
-                    );
-                }
                 recheck_indexes = execindexing::ExecInsertIndexTuples(
                     mcx,
                     index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
@@ -5716,6 +5702,7 @@ fn exec_leaf_conflict_update<'mcx>(
                     false,
                     None,
                     &[],
+                    update_indexes == TU_UpdateIndexes::TU_Summarizing,
                 )?;
             }
         }

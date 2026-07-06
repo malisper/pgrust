@@ -17,6 +17,7 @@ types_nbtree = { path = "../../../_support/types/types_nbtree" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
 indexam = { path = "../../access/index/indexam" }
+types_relscan = { path = "../../access/index/relscan" }
 genam_seams = { path = "../../access/index/genam_seams" }
 relcache_seams = { path = "../../utils/cache/relcache_seams" }
 relcache_build_seams = { path = "../../utils/cache/relcache_build_seams" }
