@@ -1568,14 +1568,18 @@ fn index_coll_matches_expr_coll(idxcollation: u32, exprcollation: u32) -> bool {
     idxcollation == 0 || idxcollation == exprcollation
 }
 
-// match_index_to_operand (indxpath.c); PlaceHolderVar stripping is dead (PHVs
-// are loud upstream).
-pub fn match_index_to_operand(
-    run: &PlannerRun<'_>,
-    mut operand: Node<'_>,
+// match_index_to_operand (indxpath.c). strip_noop_phvs runs before Relabel
+// stripping; PHV removal can bring RelabelTypes into adjacency
+// (indxpath.c:4425-4442). The strip is deep (nested PHVs in the operand),
+// gated on a strippable PHV existing so the common case never copies.
+pub fn match_index_to_operand<'mcx>(
+    run: &PlannerRun<'mcx>,
+    mut operand: Node<'mcx>,
     indexcol: usize,
     index: &IndexOptInfo<'_>,
 ) -> bool {
+    operand = vars::strip_noop_phvs(run.mcx, operand)
+        .expect("strip_noop_phvs: arena allocation failed");
     while operand.node_tag() == NodeTag::T_RelabelType {
         operand = operand.as_relabel_type().unwrap().arg;
     }

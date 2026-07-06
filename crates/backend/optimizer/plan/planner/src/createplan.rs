@@ -1658,6 +1658,8 @@ fn fix_indexqual_operand<'mcx>(
     mut node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
+    // strip_noop_phvs before Relabel stripping (createplan.c:5274).
+    node = vars::strip_noop_phvs(mcx, node)?;
     while node.node_tag() == NodeTag::T_RelabelType {
         node = node.as_relabel_type().unwrap().arg;
     }

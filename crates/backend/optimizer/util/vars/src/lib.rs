@@ -14,7 +14,7 @@ pub use var::{
     flatten_group_exprs, flatten_group_exprs_list, flatten_join_alias_vars, locate_var_of_level, pull_var_clause,
     FjavRoot,
     pull_varattnos, pull_varnos, pull_varnos_of_level, pull_varnos_with_phv_hook,
-    pull_vars_of_level, PhvVarnosHook,
+    pull_vars_of_level, strip_noop_phvs, PhvVarnosHook,
     PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS, PVC_INCLUDE_WINDOWFUNCS,
     PVC_RECURSE_AGGREGATES, PVC_RECURSE_PLACEHOLDERS, PVC_RECURSE_WINDOWFUNCS,
 };
