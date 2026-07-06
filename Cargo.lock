@@ -9315,6 +9315,7 @@ dependencies = [
  "catalog_namespace",
  "commands_comment",
  "datum",
+ "detoast",
  "elog",
  "elog_seams",
  "fmgr_core",

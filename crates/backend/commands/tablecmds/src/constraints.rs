@@ -728,8 +728,7 @@ fn cook_constraint<'mcx>(
     Ok(expr)
 }
 
-// StoreRelCheck (heap.c); partitioned-table NO INHERIT check unreachable
-// (relkind gated to 'r' in DefineRelation).
+// StoreRelCheck (heap.c).
 fn store_rel_check<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -749,6 +748,18 @@ fn store_rel_check<'mcx>(
         if !att_nos.iter().any(|&a| a == attno) {
             att_nos.push(attno);
         }
+    }
+    // Partitioned tables hold no rows themselves, so a NO INHERIT
+    // constraint makes no sense (heap.c:2195-2203).
+    if is_no_inherit && rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        let relname = core::str::from_utf8(rel.rd_rel.relname.name_str()).expect("relname");
+        return Err(Box::new(
+            types_error::PgError::new(
+                types_error::ERROR,
+                format!("cannot add NO INHERIT constraint to partitioned table \"{relname}\""),
+            )
+            .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
+        ));
     }
     let mut entry = pg_constraint::ConstraintEntry::base(
         ccname,

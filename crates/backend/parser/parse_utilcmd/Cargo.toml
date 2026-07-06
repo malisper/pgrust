@@ -36,6 +36,7 @@ relation = { path = "../../access/common/relation" }
 genam = { path = "../../access/index/genam" }
 indexam = { path = "../../access/index/indexam" }
 tupdesc = { path = "../../access/common/tupdesc" }
+detoast = { path = "../../access/common/detoast" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 aclchk = { path = "../../catalog/aclchk" }
 catalog_heap = { path = "../../catalog/catalog_heap" }
