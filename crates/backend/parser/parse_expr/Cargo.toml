@@ -15,6 +15,7 @@ analyze_seams = { path = "../analyze_seams" }
 datum = { path = "../../../_support/types/datum" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 coerce = { path = "../coerce" }
+copyfuncs = { path = "../../nodes/copyfuncs" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 init_small = { path = "../../utils/init/init_small" }

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 datum = { path = "../../../_support/types/datum" }
 detoast = { path = "../../access/common/detoast" }
 elog = { path = "../../utils/error/elog" }
+fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 fmgr = { package = "types_fmgr", path = "../../../_support/types/fmgr" }

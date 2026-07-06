@@ -157,12 +157,88 @@ pub fn json_strip_nulls<'mcx>(
     varlena::cstring_to_text(mcx, out.as_bytes())
 }
 
-/// C: json_validate (json.c). unique-keys lane (json_unique hash) unported.
-pub fn json_validate(json: &[u8], check_unique_keys: bool, throw_error: bool) -> PgResult<bool> {
-    assert!(
-        !check_unique_keys,
-        "json_validate: WITH UNIQUE KEYS (json_unique hash) unported — sqljson-lane loud"
-    );
+// C JsonUniqueParsingState: (object_id, de-escaped key) hash with a stack of
+// per-nesting object ids.
+struct UniqueState<'mcx> {
+    check: mcx::PgFxHashMap<'mcx, (i32, &'mcx [u8]), ()>,
+    stack: alloc::vec::Vec<i32>,
+    id_counter: i32,
+    unique: bool,
+}
+
+impl<'mcx> JsonSem<'mcx> for UniqueState<'mcx> {
+    fn object_start(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
+        if self.unique {
+            self.stack.push(self.id_counter);
+            self.id_counter += 1;
+        }
+        Ok(true)
+    }
+
+    fn object_end(&mut self, _lex: &JsonLex<'_>) -> PgResult<bool> {
+        if self.unique {
+            self.stack.pop();
+        }
+        Ok(true)
+    }
+
+    fn object_field_start(
+        &mut self,
+        _lex: &JsonLex<'_>,
+        fname: &'mcx [u8],
+        _isnull: bool,
+    ) -> PgResult<bool> {
+        if self.unique {
+            let object_id = *self.stack.last().expect("field inside an object");
+            if self.check.insert((object_id, fname), ()).is_some() {
+                self.unique = false;
+                self.stack.clear();
+            }
+        }
+        Ok(true)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn duplicate_json_object_key() -> Box<PgError> {
+    Box::new(
+        PgError::error("duplicate JSON object key value")
+            .with_sqlstate(types_error::ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE),
+    )
+}
+
+/// C: json_validate (json.c:1811).
+pub fn json_validate<'mcx>(
+    mcx: Mcx<'mcx>,
+    json: &'mcx [u8],
+    check_unique_keys: bool,
+    throw_error: bool,
+) -> PgResult<bool> {
+    if check_unique_keys {
+        let mut lex = JsonLexDe::new(mcx, json, mbutils::GetDatabaseEncoding());
+        let mut state = UniqueState {
+            check: mcx::PgFxHashMap::with_hasher_in(Default::default(), mcx),
+            stack: alloc::vec::Vec::new(),
+            id_counter: 0,
+            unique: true,
+        };
+        let r = jsonapi::parse_sem(&mut lex, &mut state)?;
+        if r != JsonError::Success {
+            if throw_error {
+                crate::errsave_parse_error(r, &lex.lex, None)?;
+                unreachable!("hard errsave without escontext returns Err");
+            }
+            return Ok(false);
+        }
+        if !state.unique {
+            if throw_error {
+                return Err(duplicate_json_object_key());
+            }
+            return Ok(false);
+        }
+        return Ok(true);
+    }
     let mut lex = JsonLex::new(json, mbutils::GetDatabaseEncoding());
     let r = crate::jsonapi::parse(&mut lex)?;
     if r != JsonError::Success {

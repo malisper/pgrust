@@ -1973,7 +1973,7 @@ fn eval_json_constructor(
                     .expect("hard errsave without escontext returns Err");
                 Ok((image_datum(image), false))
             } else {
-                ::adt_json::funcs::json_validate(js, true, true)?;
+                ::adt_json::funcs::json_validate(mcx, js, true, true)?;
                 Ok((values[0], false))
             }
         }
@@ -2469,7 +2469,7 @@ fn eval_is_json(
         };
         // Full parse only for uniqueness check or json-text validation.
         if res && (unique_keys || exprtype == TEXTOID) {
-            res = ::adt_json::funcs::json_validate(json, unique_keys, false)?;
+            res = ::adt_json::funcs::json_validate(mcx, json, unique_keys, false)?;
         }
         Ok(res)
     } else if exprtype == JSONBOID {

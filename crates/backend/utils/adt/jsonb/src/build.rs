@@ -153,6 +153,7 @@ impl<'mcx> JsonbValue<'mcx> {
 struct Frame<'mcx> {
     val: JsonbValue<'mcx>,
     unique_keys: bool,
+    skip_nulls: bool,
 }
 
 /// C: JsonbParseState + pushJsonbValueScalar sequencing.
@@ -204,15 +205,22 @@ impl<'mcx> JsonbBuildState<'mcx> {
         self.stack.push(Frame {
             val: JsonbValue::Array { elems, raw_scalar },
             unique_keys: false,
+            skip_nulls: false,
         });
         Ok(())
     }
 
     pub fn begin_object(&mut self, unique_keys: bool) -> PgResult<()> {
+        self.begin_object_flags(unique_keys, false)
+    }
+
+    /// C: WJB_BEGIN_OBJECT + parseState->{unique_keys,skip_nulls}.
+    pub fn begin_object_flags(&mut self, unique_keys: bool, skip_nulls: bool) -> PgResult<()> {
         let pairs = ArenaVec::with_capacity(self.mcx, 4)?;
         self.stack.push(Frame {
             val: JsonbValue::Object { pairs },
             unique_keys,
+            skip_nulls,
         });
         Ok(())
     }
@@ -272,7 +280,7 @@ impl<'mcx> JsonbBuildState<'mcx> {
     pub fn end_object(&mut self) -> PgResult<Option<JsonbValue<'mcx>>> {
         let mut frame = self.stack.pop().expect("end_object without begin");
         if let JsonbValue::Object { pairs } = &mut frame.val {
-            uniqueify_object(pairs, frame.unique_keys)?;
+            uniqueify_object(pairs, frame.unique_keys, frame.skip_nulls)?;
         } else {
             panic!("end_object on non-object");
         }
@@ -300,9 +308,13 @@ impl<'mcx> JsonbBuildState<'mcx> {
     }
 }
 
-/// C: uniqueifyJsonbObject (skip_nulls lanes LOUD with their callers); the
-/// reversed `order` tiebreak makes keep-first mean last-observed-wins.
-fn uniqueify_object(pairs: &mut ArenaVec<'_, JsonbPair<'_>>, unique_keys: bool) -> PgResult<()> {
+/// C: uniqueifyJsonbObject; the reversed `order` tiebreak makes keep-first
+/// mean last-observed-wins.
+fn uniqueify_object(
+    pairs: &mut ArenaVec<'_, JsonbPair<'_>>,
+    unique_keys: bool,
+    skip_nulls: bool,
+) -> PgResult<()> {
     let mut has_non_uniq = false;
     if pairs.len() > 1 {
         // Strict total order (order tiebreak): unstable sort == C qsort_arg.
@@ -324,18 +336,33 @@ fn uniqueify_object(pairs: &mut ArenaVec<'_, JsonbPair<'_>>, unique_keys: bool) 
                 .with_sqlstate(ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE),
         ));
     }
-    if has_non_uniq {
+    if has_non_uniq || skip_nulls {
         let s = pairs.as_mut_slice();
-        let mut res = 0usize;
-        for ptr in 1..s.len() {
-            if length_compare_jsonb_string(s[ptr].key, s[res].key) != core::cmp::Ordering::Equal {
+        let mut start = 0usize;
+        while skip_nulls && start < s.len() && matches!(s[start].value, JsonbValue::Null) {
+            start += 1;
+        }
+        if start == s.len() {
+            pairs.truncate(0);
+            return Ok(());
+        }
+        let mut res = start;
+        for ptr in (start + 1)..s.len() {
+            if length_compare_jsonb_string(s[ptr].key, s[res].key) != core::cmp::Ordering::Equal
+                && (!skip_nulls || !matches!(s[ptr].value, JsonbValue::Null))
+            {
                 res += 1;
                 if ptr != res {
                     s[res] = s[ptr];
                 }
             }
         }
-        pairs.truncate(res + 1);
+        if start > 0 {
+            for k in start..=res {
+                s[k - start] = s[k];
+            }
+        }
+        pairs.truncate(res + 1 - start);
     }
     Ok(())
 }

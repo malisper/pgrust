@@ -20,6 +20,8 @@ use crate::{expr_location, expr_type, transformExprRecurse};
 
 const F_TO_JSON: Oid = 3176;
 const F_TO_JSONB: Oid = 3787;
+const F_CONVERT_FROM: Oid = 1714;
+const F_CONVERT_TO: Oid = 1717;
 const F_JSON_AGG: Oid = 3175;
 const F_JSON_AGG_STRICT: Oid = 6276;
 const F_JSON_OBJECT_AGG: Oid = 3197;
@@ -73,6 +75,55 @@ fn mk_format<'mcx>(
 
 fn jve<'mcx>(n: Node<'mcx>, what: &str) -> &'mcx JsonValueExpr<'mcx> {
     n.as_json_value_expr().unwrap_or_else(|| panic!("{what}: expected JsonValueExpr"))
+}
+
+// getJsonEncodingConst (parse_expr.c:3249): NAMEOID Const with the encoding
+// name; UTF8 is the default.
+fn get_json_encoding_const<'mcx>(mcx: Mcx<'mcx>, format: &JsonFormat) -> PgResult<Node<'mcx>> {
+    let encoding = if format.format_type == JsonFormatType::JS_FORMAT_DEFAULT
+        || format.encoding == JsonEncoding::JS_ENC_DEFAULT
+    {
+        JsonEncoding::JS_ENC_UTF8
+    } else {
+        format.encoding
+    };
+    let enc = match encoding {
+        JsonEncoding::JS_ENC_UTF16 => "UTF16",
+        JsonEncoding::JS_ENC_UTF32 => "UTF32",
+        JsonEncoding::JS_ENC_UTF8 => "UTF8",
+        other => panic!("invalid JSON encoding: {}", other as i32),
+    };
+    let mut block = [0u8; 64];
+    block[..enc.len()].copy_from_slice(enc.as_bytes());
+    let mut name = mcx::vec_with_capacity_in(mcx, 64)?;
+    mcx::vec_append_bytes(&mut name, &block)?;
+    let d = datum::Datum::from_usize(name.as_ptr() as usize);
+    core::mem::forget(name);
+    Node::mk_const(mcx, types_core::catalog::NAMEOID, -1, 0, 64, d, false, false)
+}
+
+// makeJsonByteaToTextConversion (parse_expr.c:3288): convert_from(expr, enc).
+fn make_json_bytea_to_text_conversion<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Node<'mcx>,
+    format: &JsonFormat,
+    location: ParseLoc,
+) -> PgResult<Node<'mcx>> {
+    let encoding = get_json_encoding_const(mcx, format)?;
+    Node::mk(
+        mcx,
+        FuncExpr {
+            funcid: F_CONVERT_FROM,
+            funcresulttype: TEXTOID,
+            funcretset: false,
+            funcvariadic: false,
+            funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+            funccollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, expr, encoding)?,
+            location,
+        },
+    )
 }
 
 // transformJsonValueExpr: coerce a JSON value expression per FORMAT clause /
@@ -178,10 +229,7 @@ fn transformJsonValueExpr<'mcx>(
         }
 
         if format == JsonFormatType::JS_FORMAT_JSON && exprtype == BYTEAOID {
-            panic!(
-                "transformJsonValueExpr: bytea FORMAT JSON (convert_from, \
-                 pg_convert F_CONVERT_FROM=1714) unported — sqljson-lane divergence"
-            );
+            expr = make_json_bytea_to_text_conversion(mcx, expr, ve_format, location)?;
         }
 
         let targettype = if targettype != 0 {
@@ -407,11 +455,32 @@ fn coerceJsonFuncExpr<'mcx>(
         location = format.location;
     }
 
+    // RETURNING bytea FORMAT JSON: convert_to(text, enc) (parse_expr.c:3629).
     if format.format_type == JsonFormatType::JS_FORMAT_JSON && returning.typid == BYTEAOID {
-        panic!(
-            "coerceJsonFuncExpr: RETURNING bytea FORMAT JSON (convert_to, \
-             F_CONVERT_TO=1717) unported — sqljson-lane divergence"
-        );
+        let texpr = coerce::coerce_to_specific_type(
+            mcx,
+            pstate,
+            expr,
+            exprtype,
+            expr_location(expr),
+            TEXTOID,
+            "JSON_FUNCTION",
+        )?;
+        let enc = get_json_encoding_const(mcx, format)?;
+        return Ok(Some(Node::mk(
+            mcx,
+            FuncExpr {
+                funcid: F_CONVERT_TO,
+                funcresulttype: BYTEAOID,
+                funcretset: false,
+                funcvariadic: false,
+                funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+                funccollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, texpr, enc)?,
+                location,
+            },
+        )?));
     }
 
     let res = coerce::coerce_to_target_type(
@@ -577,6 +646,24 @@ pub(crate) fn transformJsonArrayQueryConstructor<'mcx>(
     expr: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     let ctor = expr.as_json_array_query_constructor().unwrap();
+
+    // Transform a copy of the query only to count tlist entries
+    // (parse_expr.c:3958-3967).
+    let query_copy = copyfuncs::copy_object(mcx, ctor.query.expect("query"))?;
+    let qtree = analyze_seams::parse_sub_analyze::call(mcx, query_copy, pstate, None, false, true)?;
+    let nonjunk = qtree
+        .targetList
+        .iter()
+        .filter(|te| !te.as_target_entry().expect("tlist entry").resjunk)
+        .count();
+    if nonjunk != 1 {
+        return Err(err(
+            pstate,
+            types_error::ERRCODE_SYNTAX_ERROR,
+            "subquery must return only one column".into(),
+            ctor.location,
+        ));
+    }
 
     let mut fields = NodeList::make1(mcx, Node::mk_string(mcx, "q")?)?;
     fields.lappend(mcx, Node::mk_string(mcx, "a")?)?;
@@ -861,7 +948,7 @@ fn transformJsonParseArg<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     jsexpr: Node<'mcx>,
-    format: &JsonFormat,
+    format: &'mcx JsonFormat,
     exprtype: &mut Oid,
 ) -> PgResult<Node<'mcx>> {
     let raw_expr = transformExprRecurse(mcx, pstate, jsexpr)?;
@@ -869,34 +956,41 @@ fn transformJsonParseArg<'mcx>(
     *exprtype = expr_type(expr);
 
     if *exprtype == BYTEAOID {
-        panic!(
-            "transformJsonParseArg: bytea input (convert_from F_CONVERT_FROM=1714) \
-             unported — sqljson-lane divergence"
-        );
-    }
-    let (typcategory, _) = lsyscache::get_type_category_preferred(*exprtype)?;
-    if *exprtype == UNKNOWNOID || typcategory == coerce::TYPCATEGORY_STRING {
-        expr = coerce::coerce_to_target_type(
-            mcx,
-            pstate,
-            expr,
-            *exprtype,
-            TEXTOID,
-            -1,
-            coerce::COERCION_IMPLICIT,
-            CoercionForm::COERCE_IMPLICIT_CAST,
-            -1,
-        )?
-        .expect("string category coerces to text");
+        expr = make_json_bytea_to_text_conversion(mcx, expr, format, expr_location(expr))?;
         *exprtype = TEXTOID;
-    }
-    if format.encoding != JsonEncoding::JS_ENC_DEFAULT {
-        return Err(err(
-            pstate,
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            "cannot use JSON FORMAT ENCODING clause for non-bytea input types".into(),
-            format.location,
-        ));
+        expr = Node::mk(
+            mcx,
+            JsonValueExpr {
+                raw_expr: Some(raw_expr),
+                formatted_expr: Some(expr),
+                format: Some(format),
+            },
+        )?;
+    } else {
+        let (typcategory, _) = lsyscache::get_type_category_preferred(*exprtype)?;
+        if *exprtype == UNKNOWNOID || typcategory == coerce::TYPCATEGORY_STRING {
+            expr = coerce::coerce_to_target_type(
+                mcx,
+                pstate,
+                expr,
+                *exprtype,
+                TEXTOID,
+                -1,
+                coerce::COERCION_IMPLICIT,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?
+            .expect("string category coerces to text");
+            *exprtype = TEXTOID;
+        }
+        if format.encoding != JsonEncoding::JS_ENC_DEFAULT {
+            return Err(err(
+                pstate,
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "cannot use JSON FORMAT ENCODING clause for non-bytea input types".into(),
+                format.location,
+            ));
+        }
     }
     Ok(expr)
 }

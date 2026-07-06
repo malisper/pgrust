@@ -38,6 +38,7 @@ pub enum JsonTypeCategory {
     Jsonb,
     Array,
     Composite,
+    Cast,
     Other,
 }
 
@@ -85,8 +86,7 @@ fn resolve_output(typoid: Oid) -> PgResult<(Oid, Option<FmgrInfo>)> {
     Ok((outfunc, Some(fmgr_seams::fmgr_info::call(outfunc)?)))
 }
 
-/// C: json_categorize_type (jsonfuncs.c) with is_jsonb=false. The
-/// JSONTYPE_CAST arm (cast-to-json lookup for user types) is unported loud.
+/// C: json_categorize_type (jsonfuncs.c:5999) with is_jsonb=false.
 pub fn json_categorize_type(typoid: Oid) -> PgResult<TypeCat> {
     let typoid = lsyscache::getBaseType(typoid)?;
     let (category, (outfuncoid, outfunc)) = match typoid {
@@ -108,9 +108,15 @@ pub fn json_categorize_type(typoid: Oid) -> PgResult<TypeCat> {
             } else if lsyscache::type_is_rowtype(typoid)? {
                 (JsonTypeCategory::Composite, (InvalidOid, None))
             } else if typoid >= FirstNormalObjectId {
-                panic!(
-                    "json_categorize_type: JSONTYPE_CAST lookup for user type {typoid} unported"
-                );
+                let castfunc = fmgr_seams::find_json_cast_func::call(typoid)?;
+                if castfunc != InvalidOid {
+                    (
+                        JsonTypeCategory::Cast,
+                        (castfunc, Some(fmgr_seams::fmgr_info::call(castfunc)?)),
+                    )
+                } else {
+                    (JsonTypeCategory::Other, resolve_output(typoid)?)
+                }
             } else {
                 (JsonTypeCategory::Other, resolve_output(typoid)?)
             }
@@ -297,7 +303,7 @@ pub fn datum_to_json_internal(
         return result.append_bytes(b"null");
     }
 
-    if key_scalar && matches!(cat.category, Array | Composite | Json | Jsonb) {
+    if key_scalar && matches!(cat.category, Array | Composite | Json | Jsonb | Cast) {
         return Err(invalid_param(
             "key value must be scalar, not array, composite, or json",
         ));
@@ -333,6 +339,15 @@ pub fn datum_to_json_internal(
         Json => {
             let outputstr = output_call(cat, mcx, val)?;
             result.append_bytes(outputstr)
+        }
+        Cast => {
+            // outfunc is the cast function: returns json text, appended
+            // verbatim (json.c JSONTYPE_CAST arm).
+            let flinfo = cat.outfunc.as_mut().expect("cast function");
+            let d = types_fmgr::function_call1_coll_in(flinfo, InvalidOid, mcx, val)?;
+            // SAFETY: the cast to json returns a live text varlena datum.
+            let image = unsafe { types_fmgr::datum_varlena_packed(d, mcx)? };
+            result.append_bytes(image.data())
         }
         Jsonb | Null => panic!("datum_to_json_internal: unexpected category"),
         Other => {
@@ -516,7 +531,7 @@ pub fn to_json_is_immutable(typoid: Oid) -> PgResult<bool> {
         Array => false,
         Composite => false,
         // 'i' = PROVOLATILE_IMMUTABLE.
-        Numeric | Other => lsyscache::func_volatile(cat.outfuncoid)? == b'i' as i8,
+        Numeric | Cast | Other => lsyscache::func_volatile(cat.outfuncoid)? == b'i' as i8,
     })
 }
 
@@ -545,8 +560,20 @@ fn odd_argument_list() -> Box<PgError> {
     )
 }
 
-/// C: json_build_object_worker (unique_keys lane unported loud with its
-/// SQL/JSON constructor callers).
+#[cold]
+#[inline(never)]
+fn duplicate_json_object_key(key: &[u8]) -> Box<PgError> {
+    Box::new(
+        PgError::error(alloc::format!(
+            "duplicate JSON object key value: {}",
+            String::from_utf8_lossy(key)
+        ))
+        .with_sqlstate(types_error::ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE),
+    )
+}
+
+/// C: json_build_object_worker. The unique check dedups the rendered key
+/// text (json.c:1290 pstrdup of the appended key, object_id always 0).
 pub fn json_build_object_worker<'mcx>(
     mcx: Mcx<'mcx>,
     args: &[Datum],
@@ -558,25 +585,55 @@ pub fn json_build_object_worker<'mcx>(
     if args.len() % 2 != 0 {
         return Err(odd_argument_list());
     }
-    assert!(
-        !unique_keys,
-        "json_build_object_worker: unique_keys lane unported"
-    );
     let mut result = StringInfo::new_in(mcx)?;
     result.append_byte(b'{')?;
+    let mut unique: Option<(mcx::PgFxHashMap<'mcx, &'mcx [u8], ()>, StringInfo<'mcx>)> =
+        if unique_keys {
+            Some((
+                mcx::PgFxHashMap::with_hasher_in(Default::default(), mcx),
+                StringInfo::new_in(mcx)?,
+            ))
+        } else {
+            None
+        };
     let mut sep: &[u8] = b"";
     let mut i = 0;
     while i < args.len() {
-        if absent_on_null && nulls[i + 1] {
+        let skip = absent_on_null && nulls[i + 1];
+        if skip && unique.is_none() {
             i += 2;
             continue;
         }
-        result.append_bytes(sep)?;
-        sep = b", ";
         if nulls[i] {
             return Err(null_object_key());
         }
-        add_json(mcx, &mut result, args[i], false, types[i], true)?;
+        let key_offset;
+        if skip {
+            let throwaway = &mut unique.as_mut().unwrap().1;
+            throwaway.truncate(0);
+            key_offset = 0;
+            add_json(mcx, throwaway, args[i], false, types[i], true)?;
+        } else {
+            result.append_bytes(sep)?;
+            sep = b", ";
+            key_offset = result.len();
+            add_json(mcx, &mut result, args[i], false, types[i], true)?;
+        }
+        if let Some((keys, throwaway)) = unique.as_mut() {
+            let rendered: &[u8] = if skip {
+                &throwaway.as_bytes()[key_offset..]
+            } else {
+                &result.as_bytes()[key_offset..]
+            };
+            let key: &'mcx [u8] = mcx::slice_in(mcx, rendered)?.leak();
+            if keys.insert(key, ()).is_some() {
+                return Err(duplicate_json_object_key(key));
+            }
+            if skip {
+                i += 2;
+                continue;
+            }
+        }
         result.append_bytes(b" : ")?;
         add_json(mcx, &mut result, args[i + 1], nulls[i + 1], types[i + 1], false)?;
         i += 2;

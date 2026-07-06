@@ -32,6 +32,7 @@ pub enum JsonTypeCategory {
     Jsonb,
     Array,
     Composite,
+    Cast,
     Other,
 }
 
@@ -59,8 +60,7 @@ fn resolve_output(typoid: Oid) -> PgResult<Option<FmgrInfo>> {
     Ok(Some(fmgr_seams::fmgr_info::call(outfunc)?))
 }
 
-/// C: json_categorize_type (jsonfuncs.c) with is_jsonb=true. The
-/// JSONTYPE_CAST arm (cast-to-json lookup for user types) is unported loud.
+/// C: json_categorize_type (jsonfuncs.c:5999) with is_jsonb=true.
 pub fn json_categorize_type(typoid: Oid) -> PgResult<ValCategory> {
     let typoid = lsyscache::getBaseType(typoid)?;
     let (category, outfunc) = match typoid {
@@ -83,9 +83,15 @@ pub fn json_categorize_type(typoid: Oid) -> PgResult<ValCategory> {
             } else if lsyscache::type_is_rowtype(typoid)? {
                 (JsonTypeCategory::Composite, None)
             } else if typoid >= FirstNormalObjectId {
-                panic!(
-                    "json_categorize_type: JSONTYPE_CAST lookup for user type {typoid} unported"
-                );
+                let castfunc = fmgr_seams::find_json_cast_func::call(typoid)?;
+                if castfunc != InvalidOid {
+                    (
+                        JsonTypeCategory::Cast,
+                        Some(fmgr_seams::fmgr_info::call(castfunc)?),
+                    )
+                } else {
+                    (JsonTypeCategory::Other, resolve_output(typoid)?)
+                }
             } else {
                 (JsonTypeCategory::Other, resolve_output(typoid)?)
             }
@@ -172,7 +178,7 @@ pub fn datum_to_jsonb_internal<'mcx>(
         debug_assert!(!key_scalar);
         return insert_item(ps, JsonbItem::Null, false);
     }
-    if key_scalar && matches!(cat.category, Array | Composite | Json | Jsonb) {
+    if key_scalar && matches!(cat.category, Array | Composite | Json | Jsonb | Cast) {
         return Err(invalid_param(
             "key value must be scalar, not array, composite, or json",
         ));
@@ -207,6 +213,14 @@ pub fn datum_to_jsonb_internal<'mcx>(
         Timestamptz => JsonbItem::String(json_encode_datetime(mcx, val, TIMESTAMPTZOID)?),
         Json => {
             let image = detoast_datum(mcx, val)?;
+            return crate::io::parse_json_into(mcx, ps, varlena_payload(image));
+        }
+        Cast => {
+            // outfunc is the cast function: json text parsed into the builder
+            // (jsonb.c JSONTYPE_CAST falls into the JSONTYPE_JSON arm).
+            let flinfo = cat.outfunc.as_mut().expect("cast function");
+            let d = types_fmgr::function_call1_coll_in(flinfo, InvalidOid, mcx, val)?;
+            let image = detoast_datum(mcx, d)?;
             return crate::io::parse_json_into(mcx, ps, varlena_payload(image));
         }
         Jsonb => {
@@ -412,18 +426,16 @@ pub fn jsonb_build_object_worker<'mcx>(
     if args.len() % 2 != 0 {
         return Err(odd_argument_list());
     }
-    assert!(
-        !(absent_on_null && unique_keys),
-        "jsonb_build_object_worker: skip_nulls uniqueify lane unported"
-    );
     let mut ps = JsonbPush::new(mcx)?;
-    ps.push_object_start(unique_keys)?;
+    ps.push_object_start(unique_keys, absent_on_null)?;
     let mut i = 0;
     while i < args.len() {
         if nulls[i] {
             return Err(null_key(i + 1));
         }
-        if absent_on_null && nulls[i + 1] {
+        // Skipped keys still enter the frame when unique_keys — the
+        // uniqueify skip_nulls pass drops them (jsonb.c:1155-1161).
+        if absent_on_null && nulls[i + 1] && !unique_keys {
             i += 2;
             continue;
         }
