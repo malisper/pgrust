@@ -828,14 +828,11 @@ fn ATPrepCmd<'mcx>(
             // ATParseTransformCmd: the identity ALTER SEQUENCE ... AS retype
             // runs before prep (C executes beforeStmts here).
             let relname = rel.name().to_string();
-            let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
+            let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode, query_string)?;
             run_seq_stmts(mcx, &cxt.blist)?;
             debug_assert!(cxt.alist.is_nil());
-            debug_assert!(
-                cxt.ckconstraints.is_nil()
-                    && cxt.nnconstraints.is_nil()
-                    && cxt.fkconstraints.is_nil()
-            );
+            debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+            debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
             ATPrepAlterColumnType(
                 mcx,
                 wqueue,
@@ -1391,29 +1388,21 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_AddIdentity => {
                     let relname = rel.name().to_string();
-                    let cxt =
-                        parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
+                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode, query_string)?;
                     run_seq_stmts(mcx, &cxt.blist)?;
                     debug_assert!(cxt.alist.is_nil());
-                    debug_assert!(
-                        cxt.ckconstraints.is_nil()
-                            && cxt.nnconstraints.is_nil()
-                            && cxt.fkconstraints.is_nil()
-                    );
+                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+                    debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
                     ATExecAddIdentity(mcx, &rel, cmd)?;
                 }
                 AlterTableType::AT_SetIdentity => {
                     let relname = rel.name().to_string();
-                    let cxt =
-                        parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode)?;
+                    let cxt = parse_utilcmd::transformAlterTableCmd(mcx, &rel, &relname, cnode, query_string)?;
                     run_seq_stmts(mcx, &cxt.blist)?;
                     debug_assert!(cxt.alist.is_nil());
-                    debug_assert!(
-                        cxt.ckconstraints.is_nil()
-                            && cxt.nnconstraints.is_nil()
-                            && cxt.fkconstraints.is_nil()
-                    );
+                    debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
+                    debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
                     ATExecSetIdentity(mcx, &rel, cmd)?;
                 }
@@ -2090,12 +2079,38 @@ fn ATExecAddColumn<'mcx>(
     }
 
     if !recursing && cmd.subtype != AlterTableType::AT_AddColumnToView {
-        let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode)?;
-        // ATParseTransformCmd: beforeStmts (serial CREATE SEQUENCE) run now;
-        // afterStmts (OWNED BY needs the column) run at the end of phase 3.
+        let cxt = parse_utilcmd::transformAlterTableCmd(mcx, rel, &relname, cnode, query_string)?;
+        // ATParseTransformCmd (tablecmds.c:5738-5745): serial/identity
+        // CreateSeqStmts run before the subcommand; the AlterSeqStmts wait
+        // in tab->afterStmts until the end of phase 3 (tablecmds.c:6103).
         run_seq_stmts(mcx, &cxt.blist)?;
         for s in cxt.alist.iter() {
             wqueue[tabidx].after_stmts.lappend(mcx, s)?;
+        }
+        // transformAlterTableStmt folds IndexStmts into AT_AddIndex (or
+        // AT_AddIndexConstraint for USING INDEX) subcommands after running
+        // transformIndexStmt (parse_utilcmd.c:3817-3838); ATParseTransformCmd
+        // schedules them (tablecmds.c:5765-5771).
+        for istmt in cxt.ixstmts.iter() {
+            parse_clause::transformIndexStmt(mcx, wqueue[tabidx].relid, istmt, query_string)?;
+            let is_existing = istmt
+                .as_variant::<types_nodes::rawnodes::IndexStmt>()
+                .expect("IndexStmt")
+                .indexOid
+                != InvalidOid;
+            let mut newcmd = Node::build::<AlterTableCmd>(mcx)?;
+            newcmd.subtype = if is_existing {
+                AlterTableType::AT_AddIndexConstraint
+            } else {
+                AlterTableType::AT_AddIndex
+            };
+            newcmd.def = Some(istmt);
+            let target_pass = if is_existing {
+                AT_PASS_ADD_INDEXCONSTR
+            } else {
+                AT_PASS_ADD_INDEX
+            };
+            wqueue[tabidx].subcmds[target_pass].lappend(mcx, newcmd.seal())?;
         }
         // ATParseTransformCmd: generated AT_AddConstraint subcommands are
         // scheduled into later passes of the same wqueue entry.
