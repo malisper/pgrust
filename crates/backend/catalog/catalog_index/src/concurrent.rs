@@ -112,7 +112,7 @@ pub fn index_set_state_flags<'mcx>(
     values.resize(natts, Datum::null());
     nulls.resize(natts, false);
     replace.resize(natts, false);
-    let mut set = |anum: i32, v: bool, values: &mut mcx::PgVec<'_, Datum>, replace: &mut mcx::PgVec<'_, bool>| {
+    let set = |anum: i32, v: bool, values: &mut mcx::PgVec<'_, Datum>, replace: &mut mcx::PgVec<'_, bool>| {
         values[anum as usize - 1] = Datum::from_bool(v);
         replace[anum as usize - 1] = true;
     };
