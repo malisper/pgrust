@@ -46,6 +46,9 @@ pub struct PartitionTupleRouting<'mcx> {
     // C ri_RootToPartitionMap per leaf: root layout -> leaf layout, None for
     // layout-identical leaves (callers own the conversion slots).
     leaf_maps: Vec<Option<mcx::PgVec<'mcx, i16>>>,
+    // ExecFindPartition's routing-root partition-constraint pre-check
+    // (execPartition.c:286-291), compiled once (C ri_PartitionCheckExpr).
+    root_check: Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
 }
 
 impl<'mcx> PartitionTupleRouting<'mcx> {
@@ -58,6 +61,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             dispatch_slots: Vec::new(),
             leaves: Vec::new(),
             leaf_maps: Vec::new(),
+            root_check: None,
         };
         prt.init_dispatch(root_rc, None)?;
         Ok(prt)
@@ -145,6 +149,16 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         eval_mcx: Mcx<'_>,
     ) -> PgResult<usize> {
         let mcx = self.mcx;
+        // C ExecFindPartition's routing-root pre-check (execPartition.c:286-
+        // 291): a tuple that does not belong in the root itself is rejected
+        // before any dispatch.
+        if self.dispatches[0].rel.rd_rel.relispartition {
+            let PartitionTupleRouting { dispatches, root_check, .. } = &mut *self;
+            let rel = &dispatches[0].rel;
+            if !exec_partition_check(mcx, root_check, rel, slot)? {
+                return Err(partition_constraint_violation(mcx, rel, slot));
+            }
+        }
         let mut values = [Datum::null(); PARTITION_MAX_KEYS];
         let mut isnull = [false; PARTITION_MAX_KEYS];
         let mut dispatch_idx = 0usize;
