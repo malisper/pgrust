@@ -320,7 +320,8 @@ const fn bn(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmgr
 pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     bn(438, "pg_num_nulls", 1, fc_pg_num_nulls),
     bn(440, "pg_num_nonnulls", 1, fc_pg_num_nonnulls),
-    b(1619, "pg_typeof", 1, fc_pg_typeof),
+    // pg_proc.dat 1619 proisstrict=f: pg_typeof(NULL) still reports the type.
+    bn(1619, "pg_typeof", 1, fc_pg_typeof),
     b(6210, "pg_input_is_valid", 2, fc_pg_input_is_valid),
     b(6211, "pg_input_error_info", 2, fc_pg_input_error_info),
     bn(817, "current_query", 0, fc_current_query),
