@@ -648,6 +648,7 @@ fn explain_stmt(sql: &'static str) -> String {
         types_portal::QueryEnvHandle::NULL,
         std::time::Duration::from_millis(0),
         None,
+        None,
     )
     .unwrap();
     snapmgr::PopActiveSnapshot().unwrap();

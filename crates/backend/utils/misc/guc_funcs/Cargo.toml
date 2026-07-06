@@ -16,6 +16,7 @@ funcapi = { path = "../../fmgr/funcapi" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 format_type = { path = "../../adt/format_type" }
 guc = { path = "../guc" }
+guc_seams = { path = "../guc_seams" }
 guc_tables = { path = "../guc_tables" }
 mcx = { path = "../../../../_support/mcx" }
 miscinit = { path = "../../init/miscinit" }

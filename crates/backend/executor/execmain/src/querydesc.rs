@@ -491,16 +491,17 @@ pub(crate) fn query_desc_worker_instrument_seam(
     with_qd(h, |qd| {
         let exec = qd.exec.as_ref()?;
         exec.with(|d| {
-            if d.estate.es_worker_instrument.is_empty() {
-                return None;
-            }
-            Some(
-                d.estate
-                    .es_worker_instrument
-                    .iter()
-                    .map(|w| w.instrument.get(idx).copied().unwrap_or_default())
-                    .collect(),
-            )
+            // C attaches worker_instrument only within the Gather subtree
+            // (WorkerInstr::node_ids); a node outside every subtree gets no
+            // Workers group.
+            let out: Vec<_> = d
+                .estate
+                .es_worker_instrument
+                .iter()
+                .filter(|w| w.node_ids.contains(&plan_node_id))
+                .map(|w| w.instrument.get(idx).copied().unwrap_or_default())
+                .collect();
+            (!out.is_empty()).then_some(out)
         })
     })
 }

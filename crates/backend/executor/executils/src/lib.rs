@@ -622,7 +622,12 @@ pub struct EStateData<'mcx> {
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
 /// plan_node_id; the side tables are (plan_node_id, data) pairs.
+/// `node_ids` lists the Gather subtree's plan_node_ids: C attaches
+/// worker_instrument only to planstates under the Gather
+/// (ExecParallelRetrieveInstrumentation walks that subtree), so nodes
+/// outside it must not grow a Workers group in EXPLAIN.
 pub struct WorkerInstr<'mcx> {
+    pub node_ids: PgVec<'mcx, i32>,
     pub instrument: PgVec<'mcx, Instrumentation>,
     pub sort: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
     pub incsort: PgVec<'mcx, (i32, IncrementalSortInfo)>,
@@ -1168,7 +1173,7 @@ mcx::forget_safe_struct!(
         es_subplan_eval_hook, es_subplan_expr_states, es_cte_proc_hook,
     },
 );
-// SAFETY: six arena-backed PgVecs of no-drop Copy payloads (asserted above);
+// SAFETY: arena-backed PgVecs of no-drop Copy payloads (asserted above);
 // forgetting reclaims nothing beyond arena bytes.
 unsafe impl mcx::ForgetSafe for WorkerInstr<'_> {}
 

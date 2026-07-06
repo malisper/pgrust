@@ -13,6 +13,7 @@ rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }
 table = { path = "../../access/table/table" }
 datum = { path = "../../../_support/types/datum" }
+define = { path = "../../commands/define" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 types_rel = { path = "../../../_support/types/rel" }

@@ -82,17 +82,47 @@ pub fn ExplainPrintPlan<'mcx>(
         }
     }
     ExplainNode(root, None, None, None, es)?;
-    if es.settings {
-        node_gap(
-            "ExplainPrintSettings",
-            "SETTINGS needs get_explain_guc_options (guc lane)",
-        );
-    }
+    ExplainPrintSettings(es)?;
     if es.verbose
         && pstmt.queryId != 0
         && guc_tables::backing::compute_query_id() != guc_tables::consts::COMPUTE_QUERY_ID_REGRESS
     {
         ExplainPropertyInteger("Query Identifier", None, pstmt.queryId, es);
+    }
+    Ok(())
+}
+
+// explain.c ExplainPrintSettings.
+fn ExplainPrintSettings(es: &mut ExplainState<'_>) -> PgResult<()> {
+    if !es.settings {
+        return Ok(());
+    }
+    let gucs = guc_seams::get_explain_guc_options::call()?;
+    if es.format != EXPLAIN_FORMAT_TEXT {
+        ExplainOpenGroup("Settings", Some("Settings"), true, es);
+        for (name, setting) in &gucs {
+            ExplainPropertyText(name, setting.as_deref().unwrap_or(""), es);
+        }
+        ExplainCloseGroup("Settings", Some("Settings"), true, es);
+    } else {
+        if gucs.is_empty() {
+            return Ok(());
+        }
+        let mut line = String::new();
+        for (i, (name, setting)) in gucs.iter().enumerate() {
+            if i > 0 {
+                line.push_str(", ");
+            }
+            match setting {
+                Some(v) => {
+                    write!(line, "{name} = '{v}'").expect("string write");
+                }
+                None => {
+                    write!(line, "{name} = NULL").expect("string write");
+                }
+            }
+        }
+        ExplainPropertyText("Settings", &line, es);
     }
     Ok(())
 }
