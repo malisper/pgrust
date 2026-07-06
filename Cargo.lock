@@ -3897,6 +3897,7 @@ dependencies = [
  "acl_seams",
  "aclchk_seams",
  "aio_seams",
+ "backend_progress",
  "clauses",
  "copy_seams",
  "datum",
