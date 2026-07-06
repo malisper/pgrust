@@ -305,68 +305,18 @@ pub fn ParseFuncOrColumn<'mcx>(
 
             // C: forget VARIADIC decoration on a non-variadic function.
             let mut func_variadic = fn_call.func_variadic && OidIsValid(vatype);
-            let fargs = if nvargs > 0 && vatype != types_core::catalog::ANYOID {
-                // C: pack the trailing nvargs coerced arguments into an
-                // ArrayExpr — the call becomes VARIADIC.
-                let non_var_args = fargs.len() - nvargs as usize;
-                let mut plain: PgVec<'mcx, Node<'mcx>> =
-                    mcx::vec_with_capacity_in(mcx, non_var_args + 1)?;
-                let mut vargs: PgVec<'mcx, Node<'mcx>> =
-                    mcx::vec_with_capacity_in(mcx, nvargs as usize)?;
-                for (i, n) in fargs.iter().enumerate() {
-                    if i < non_var_args {
-                        plain.push(n);
-                    } else {
-                        vargs.push(n);
-                    }
-                }
-                let element_typeid = post_coercion_type(
-                    actual_arg_types[non_var_args],
-                    declared_arg_types[non_var_args],
-                )?;
-                let array_typeid = lsyscache::get_array_type(element_typeid)?;
-                let vargs = NodeList::from_slice(mcx, vargs.as_slice())?;
-                if !OidIsValid(array_typeid) {
-                    let encoding = mbutils::GetDatabaseEncoding();
-                    let loc = vargs.first().map_or(-1, expr_location);
-                    return Err(Box::new(
-                        ereport(ERROR)
-                            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
-                            .errmsg(format!(
-                                "could not find array type for data type {}",
-                                format_type::format_type_be(element_typeid)?
-                            ))
-                            .errposition(parser_errposition(pstate, loc, encoding))
-                            .into_error(),
-                    ));
-                }
-                let list_loc = {
-                    let mut loc = -1;
-                    for n in vargs.iter() {
-                        loc = if loc < 0 {
-                            expr_location(n)
-                        } else {
-                            let l = expr_location(n);
-                            if l < 0 { loc } else { loc.min(l) }
-                        };
-                    }
-                    loc
-                };
-                let newa = Node::mk(
-                    mcx,
-                    types_nodes::primnodes::ArrayExpr {
-                        elements: vargs,
-                        element_typeid,
-                        array_typeid,
-                        multidims: false,
-                        location: list_loc,
-                        ..Default::default()
-                    },
-                )?;
-                plain.push(newa);
+            let fargs = if let Some((packed, _)) = pack_variadic_args(
+                mcx,
+                pstate,
+                &fargs,
+                actual_arg_types,
+                &declared_arg_types,
+                nvargs,
+                vatype,
+            )? {
                 debug_assert!(!func_variadic);
                 func_variadic = true;
-                NodeList::from_slice(mcx, plain.as_slice())?
+                packed
             } else {
                 fargs
             };
@@ -527,6 +477,26 @@ pub fn ParseFuncOrColumn<'mcx>(
             )?;
             let fargs =
                 make_fn_arguments(mcx, pstate, fargs, actual_arg_types, &declared_arg_types)?;
+            // C: the variadic ArrayExpr packing is shared across function
+            // kinds — a variadic aggregate call (vatype != "any") packs too.
+            let mut func_variadic = fn_call.func_variadic && OidIsValid(vatype);
+            let mut packed_array_type = InvalidOid;
+            let fargs = if let Some((packed, array_typeid)) = pack_variadic_args(
+                mcx,
+                pstate,
+                &fargs,
+                actual_arg_types,
+                &declared_arg_types,
+                nvargs,
+                vatype,
+            )? {
+                debug_assert!(!func_variadic);
+                func_variadic = true;
+                packed_array_type = array_typeid;
+                packed
+            } else {
+                fargs
+            };
             if let Some(over_node) = over {
                 return build_window_func(
                     mcx, pstate, funcid, rettype, retset, fargs, true, fn_call, agg_filter,
@@ -535,10 +505,22 @@ pub fn ParseFuncOrColumn<'mcx>(
             }
             // C's aggargtypes = exprType per coerced arg (parse_agg.c);
             // parse_expr::expr_type is dependency-forbidden here, so replay
-            // coerce_type's head-arm result-type contract.
-            let mut agg_arg_types = mcx::vec_with_capacity_in(mcx, actual_arg_types.len())?;
-            for (&a, &d) in actual_arg_types.iter().zip(declared_arg_types.iter()) {
+            // coerce_type's head-arm result-type contract. A packed variadic
+            // call has one trailing ArrayExpr arg in place of the nvargs
+            // actuals.
+            let n_plain = if OidIsValid(packed_array_type) {
+                actual_arg_types.len() - nvargs as usize
+            } else {
+                actual_arg_types.len()
+            };
+            let mut agg_arg_types = mcx::vec_with_capacity_in(mcx, n_plain + 1)?;
+            for (&a, &d) in
+                actual_arg_types.iter().zip(declared_arg_types.iter()).take(n_plain)
+            {
                 agg_arg_types.push(post_coercion_type(a, d)?);
+            }
+            if OidIsValid(packed_array_type) {
+                agg_arg_types.push(packed_array_type);
             }
 
             if fargs.is_nil() && !fn_call.agg_star && !fn_call.agg_within_group {
@@ -573,6 +555,7 @@ pub fn ParseFuncOrColumn<'mcx>(
             aggref.aggkind = aggkind;
             aggref.aggfilter = agg_filter;
             aggref.aggstar = fn_call.agg_star;
+            aggref.aggvariadic = func_variadic;
             aggref.location = location;
 
             parse_agg::transformAggregateCall(
@@ -632,6 +615,79 @@ pub fn ParseFuncOrColumn<'mcx>(
             location,
         )),
     }
+}
+
+// C: ParseFuncOrColumn's shared variadic packing — the trailing nvargs
+// coerced arguments become one ArrayExpr and the call turns VARIADIC; a
+// VARIADIC "any" call stays unpacked. Applies to normal functions,
+// aggregates, and window functions alike. Returns None when no packing
+// applies; otherwise the new fargs plus the packed array type (the packed
+// call's trailing argument type).
+fn pack_variadic_args<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    fargs: &NodeList<'mcx>,
+    actual_arg_types: &[Oid],
+    declared_arg_types: &[Oid],
+    nvargs: i16,
+    vatype: Oid,
+) -> PgResult<Option<(NodeList<'mcx>, Oid)>> {
+    if nvargs == 0 || vatype == types_core::catalog::ANYOID {
+        return Ok(None);
+    }
+    let non_var_args = fargs.len() - nvargs as usize;
+    let mut plain: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(mcx, non_var_args + 1)?;
+    let mut vargs: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(mcx, nvargs as usize)?;
+    for (i, n) in fargs.iter().enumerate() {
+        if i < non_var_args {
+            plain.push(n);
+        } else {
+            vargs.push(n);
+        }
+    }
+    let element_typeid =
+        post_coercion_type(actual_arg_types[non_var_args], declared_arg_types[non_var_args])?;
+    let array_typeid = lsyscache::get_array_type(element_typeid)?;
+    let vargs = NodeList::from_slice(mcx, vargs.as_slice())?;
+    if !OidIsValid(array_typeid) {
+        let encoding = mbutils::GetDatabaseEncoding();
+        let loc = vargs.first().map_or(-1, expr_location);
+        return Err(Box::new(
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!(
+                    "could not find array type for data type {}",
+                    format_type::format_type_be(element_typeid)?
+                ))
+                .errposition(parser_errposition(pstate, loc, encoding))
+                .into_error(),
+        ));
+    }
+    let list_loc = {
+        let mut loc = -1;
+        for n in vargs.iter() {
+            loc = if loc < 0 {
+                expr_location(n)
+            } else {
+                let l = expr_location(n);
+                if l < 0 { loc } else { loc.min(l) }
+            };
+        }
+        loc
+    };
+    let newa = Node::mk(
+        mcx,
+        types_nodes::primnodes::ArrayExpr {
+            elements: vargs,
+            element_typeid,
+            array_typeid,
+            multidims: false,
+            location: list_loc,
+            ..Default::default()
+        },
+    )?;
+    plain.push(newa);
+    Ok(Some((NodeList::from_slice(mcx, plain.as_slice())?, array_typeid)))
 }
 
 // unify_hypothetical_args (parse_func.c): coerce each hypothetical direct

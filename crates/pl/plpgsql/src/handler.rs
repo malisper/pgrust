@@ -100,7 +100,7 @@ fn plpgsql_compile(
     fn_collation: Oid,
     for_validator: bool,
     kind: CallKind,
-    call_expr: Option<types_nodes::node_tree::Node<'static>>,
+    call_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<FuncCacheEntry> {
     let (cur_xmin, cur_tid, key_argtypes) =
         proc_call_stamp(fn_oid, call_expr, for_validator)?;
@@ -148,7 +148,7 @@ fn plpgsql_compile(
 // expression when the signature can vary per call, empty otherwise.
 fn proc_call_stamp(
     fn_oid: Oid,
-    call_expr: Option<types_nodes::node_tree::Node<'static>>,
+    call_expr: Option<types_core::fmgr::FnExprErased>,
     for_validator: bool,
 ) -> PgResult<(u32, (u32, u16), Vec<Oid>)> {
     let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(fn_oid)))? else {
@@ -367,7 +367,7 @@ fn do_compile(
     fn_tid: (u32, u16),
     for_validator: bool,
     is_dml_trigger: bool,
-    call_expr: Option<types_nodes::node_tree::Node<'static>>,
+    call_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<PlFunction> {
     let mut proc = read_proc_row(fn_oid)?;
     // plpgsql_compile_error_callback covers header processing too: pre-parse
@@ -554,8 +554,9 @@ fn do_compile(
                     _ => types_core::INT4OID,
                 };
             } else {
-                rettypeid =
-                    call_expr.map_or(types_core::InvalidOid, funcapi::get_call_expr_rettype);
+                rettypeid = call_expr
+                    .as_ref()
+                    .map_or(types_core::InvalidOid, funcapi::erased_call_expr_rettype);
                 if !OidIsValid(rettypeid) {
                     return Err(hdr_ctx(crate::exec::exec_err(
                         types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -782,7 +783,7 @@ fn plpgsql_call_handler(
             Some(td) => CallKind::Trigger(td.tg_trigger.tgoid),
             None => CallKind::Function,
         };
-        let call_expr = flinfo.as_ref().and_then(|f| funcapi::call_expr_node(f));
+        let call_expr = flinfo.as_ref().and_then(|f| f.fn_expr);
         let entry = plpgsql_compile(fn_oid, fcinfo.fncollation, false, kind, call_expr)?;
         entry.use_count.set(entry.use_count.get() + 1);
         let r = match (entry.func.fn_is_trigger, trigdata, evtrigdata) {

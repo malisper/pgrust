@@ -281,6 +281,7 @@ struct AggArgContext<'mcx> {
     min_varlevel: i32,
     min_agglevel: i32,
     agg_loc: ParseLoc,
+    var_loc: ParseLoc,
     min_ctelevel: i32,
     min_cte_name: Option<&'mcx str>,
     sublevels_up: i32,
@@ -297,13 +298,13 @@ fn check_agg_arguments<'mcx>(
         min_varlevel: -1,
         min_agglevel: -1,
         agg_loc: -1,
+        var_loc: -1,
         min_ctelevel: -1,
         min_cte_name: None,
         sublevels_up: 0,
     };
-    for node in directargs {
-        check_agg_arguments_walker(pstate, node, &mut ctx)?;
-    }
+    // C walks args + filter only here; directargs get a separate pass below
+    // and do not participate in the agg's semantic-level computation.
     for node in args {
         check_agg_arguments_walker(pstate, node, &mut ctx)?;
     }
@@ -325,9 +326,9 @@ fn check_agg_arguments<'mcx>(
             "check_agg_arguments",
         ));
     }
-    if ctx.min_ctelevel >= 0 && ctx.min_ctelevel < agglevel {
+    let nested_cte_error = |ctx: &AggArgContext<'mcx>| -> Box<PgError> {
         let name = ctx.min_cte_name.unwrap_or("");
-        return Err(Box::new(
+        Box::new(
             ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("outer-level aggregate cannot use a nested CTE")
@@ -339,7 +340,42 @@ fn check_agg_arguments<'mcx>(
                 ))
                 .into_error()
                 .with_error_location(ErrorLocation::new("parse_agg.c", 0, "check_agg_arguments")),
-        ));
+        )
+    };
+    if ctx.min_ctelevel >= 0 && ctx.min_ctelevel < agglevel {
+        return Err(nested_cte_error(&ctx));
+    }
+
+    // C's separate direct-arguments pass: a Var of the agg's semantic level
+    // is allowed there, a lower-level Var or a same-level agg is not.
+    if !directargs.is_nil() {
+        ctx.min_varlevel = -1;
+        ctx.min_agglevel = -1;
+        ctx.min_ctelevel = -1;
+        for node in directargs {
+            check_agg_arguments_walker(pstate, node, &mut ctx)?;
+        }
+        if ctx.min_varlevel >= 0 && ctx.min_varlevel < agglevel {
+            return Err(grouping_error(
+                pstate,
+                "outer-level aggregate cannot contain a lower-level variable in its direct \
+                 arguments"
+                    .into(),
+                ctx.var_loc,
+                "check_agg_arguments",
+            ));
+        }
+        if ctx.min_agglevel >= 0 && ctx.min_agglevel <= agglevel {
+            return Err(grouping_error(
+                pstate,
+                "aggregate function calls cannot be nested".into(),
+                ctx.agg_loc,
+                "check_agg_arguments",
+            ));
+        }
+        if ctx.min_ctelevel >= 0 && ctx.min_ctelevel < agglevel {
+            return Err(nested_cte_error(&ctx));
+        }
     }
     Ok(agglevel)
 }
@@ -382,9 +418,13 @@ fn check_agg_arguments_walker<'mcx>(
 ) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Var => {
-            let varlevelsup = node.as_var().unwrap().varlevelsup as i32 - ctx.sublevels_up;
+            let var = node.as_var().unwrap();
+            let varlevelsup = var.varlevelsup as i32 - ctx.sublevels_up;
             if varlevelsup >= 0 && (ctx.min_varlevel < 0 || ctx.min_varlevel > varlevelsup) {
                 ctx.min_varlevel = varlevelsup;
+                // locate_var_of_level(min_varlevel): first Var of the winning
+                // level in traversal order (mins only tighten).
+                ctx.var_loc = var.location;
             }
             Ok(())
         }

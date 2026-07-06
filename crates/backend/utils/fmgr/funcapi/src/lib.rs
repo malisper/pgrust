@@ -196,6 +196,24 @@ pub fn get_call_expr_argtype(node: Node<'_>, argnum: usize) -> Oid {
     expr_type(Some(args.nth(argnum)))
 }
 
+/// C: get_call_expr_argtype over an erased fn_expr — a real call-expression
+/// node, or the AggFnArgTypes carrier standing in for C's constructed
+/// aggregate support-fn FuncExpr (build_aggregate_transfn_expr and kin).
+pub fn erased_call_expr_argtype(e: &types_core::fmgr::FnExprErased, argnum: usize) -> Oid {
+    if let Some(agg) = e.downcast_ref::<types_core::fmgr::AggFnArgTypes>() {
+        return agg.argtypes.get(argnum).copied().unwrap_or(InvalidOid);
+    }
+    e.downcast_ref::<Node<'static>>().map_or(InvalidOid, |n| get_call_expr_argtype(*n, argnum))
+}
+
+/// C: get_fn_expr_rettype's core over an erased fn_expr (node or carrier).
+pub fn erased_call_expr_rettype(e: &types_core::fmgr::FnExprErased) -> Oid {
+    if let Some(agg) = e.downcast_ref::<types_core::fmgr::AggFnArgTypes>() {
+        return agg.rettype;
+    }
+    e.downcast_ref::<Node<'static>>().map_or(InvalidOid, |n| expr_type(Some(*n)))
+}
+
 /// C: get_fn_expr_arg_stable (fmgr.c) — Const or external Param arguments.
 pub fn get_fn_expr_arg_stable(flinfo: Option<&FmgrInfo>, argnum: usize) -> bool {
     let Some(e) = flinfo.and_then(|f| f.fn_expr.as_ref()) else {
@@ -854,10 +872,12 @@ fn resolve_anymultirange_from_others(a: &mut PolymorphicActuals) -> PgResult<()>
 
 // C: resolve_polymorphic_argtypes (funcapi.c). `argmodes` empty means all IN.
 // Ok(false) is C's `return false`: an input's actual type was unavailable.
+// `call_expr` is the erased fn_expr: aggregate support-fn flinfos carry the
+// AggFnArgTypes stand-in where C has a constructed FuncExpr.
 pub fn resolve_polymorphic_argtypes(
     argtypes: &mut [Oid],
     argmodes: &[i8],
-    call_expr: Option<Node<'_>>,
+    call_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<bool> {
     let mut poly = PolymorphicActuals::default();
     let mut anyc = PolymorphicActuals::default();
@@ -896,7 +916,9 @@ pub fn resolve_polymorphic_argtypes(
             } else {
                 if *actual == InvalidOid {
                     *actual =
-                        call_expr.map_or(InvalidOid, |n| get_call_expr_argtype(n, inargno));
+                        call_expr
+                            .as_ref()
+                            .map_or(InvalidOid, |e| erased_call_expr_argtype(e, inargno));
                     if *actual == InvalidOid {
                         return Ok(false);
                     }
@@ -958,7 +980,7 @@ pub fn resolve_polymorphic_argtypes(
 pub fn cfunc_resolve_polymorphic_argtypes(
     argtypes: &mut [Oid],
     argmodes: &[i8],
-    call_expr: Option<Node<'_>>,
+    call_expr: Option<types_core::fmgr::FnExprErased>,
     for_validator: bool,
     proname: &str,
 ) -> PgResult<()> {
@@ -981,8 +1003,9 @@ pub fn cfunc_resolve_polymorphic_argtypes(
                 continue;
             }
             if argtypes[i] == RECORDOID || argtypes[i] == types_core::RECORDARRAYOID {
-                let resolved =
-                    call_expr.map_or(InvalidOid, |n| get_call_expr_argtype(n, inargno));
+                let resolved = call_expr
+                    .as_ref()
+                    .map_or(InvalidOid, |e| erased_call_expr_argtype(e, inargno));
                 if resolved != InvalidOid {
                     argtypes[i] = resolved;
                 }
