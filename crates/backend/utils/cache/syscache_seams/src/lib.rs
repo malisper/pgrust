@@ -562,6 +562,14 @@ seam_core::seam!(
     pub fn lookup_pg_opclass_shape(opclass: Oid) -> PgResult<Option<PgOpclassShape>>
 );
 
+// SearchSysCache1(CLAOID) projected to (opcname, opcnamespace, opcmethod);
+// parse_utilcmd get_opclass's qualified-name emission.
+seam_core::seam!(
+    pub fn pg_opclass_name_namespace_method(
+        opclass: Oid,
+    ) -> PgResult<Option<(types_tuple::NameData, Oid, Oid)>>
+);
+
 // GetSysCacheOid3(CLAAMNAMENSP): pg_opclass by (opcmethod, opcname,
 // opcnamespace); InvalidOid when absent.
 seam_core::seam!(

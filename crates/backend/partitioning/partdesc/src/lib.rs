@@ -271,18 +271,24 @@ fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'sta
     }
     let cmcx = with_state(|st| st.mcx);
     let parent_oid = pg_inherits::get_partition_parent(cmcx, relid, true)?;
-    let parent = table::table_open(cmcx, parent_oid, types_rel::AccessShareLock)?;
-    let spec = partbounds::read_boundspec(cmcx, relid)?;
-    let key = partcache::RelationGetPartitionKey(&parent)?;
-    let pdesc = RelationGetPartitionDesc(&parent, false)?;
-    let my_qual = partbounds::get_qual_from_partbound(
-        cmcx,
-        &key,
-        parent_oid,
-        pdesc.boundinfo.as_ref(),
-        &pdesc.oids,
-        spec,
-    )?;
+    // C relation_open (index partitions reach here too); their relpartbound
+    // is NULL and their parent is a partitioned index with no partition key.
+    let parent = relation_seams::relation_open::call(cmcx, parent_oid, types_rel::AccessShareLock)?;
+    let my_qual = match partbounds::read_boundspec_opt(cmcx, relid)? {
+        Some(spec) => {
+            let key = partcache::RelationGetPartitionKey(&parent)?;
+            let pdesc = RelationGetPartitionDesc(&parent, false)?;
+            partbounds::get_qual_from_partbound(
+                cmcx,
+                &key,
+                parent_oid,
+                pdesc.boundinfo.as_ref(),
+                &pdesc.oids,
+                spec,
+            )?
+        }
+        None => NodeList::nil(),
+    };
     let mut result = NodeList::nil();
     if parent.rd_rel.relispartition {
         for q in generate_partition_qual(&parent)?.iter() {

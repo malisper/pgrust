@@ -778,7 +778,9 @@ pub fn DefineIndex<'mcx>(
                         found = true;
                         break;
                     } else if exclusion {
-                        let opname = regproc::format_operator(mcx, idx_eqop)?;
+                        // C prints get_opname here (indexcmds.c:1079), not format_operator.
+                        let opname_pg = lsyscache::get_opname(mcx, idx_eqop)?.expect("opname");
+                        let opname = opname_pg.as_str();
                         let att = rel.rd_att.attr(key.partattrs[i] as usize - 1);
                         let attname = core::str::from_utf8(att.attname.name_str())
                             .expect("attname");

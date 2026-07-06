@@ -582,6 +582,26 @@ fn pg_opclass_opcname(opclass: Oid) -> PgResult<Option<types_tuple::NameData>> {
     Ok(Some(name))
 }
 
+fn pg_opclass_name_namespace_method(
+    opclass: Oid,
+) -> PgResult<Option<(types_tuple::NameData, Oid, Oid)>> {
+    let Some(tuple) = SearchSysCache1(CLAOID, SysCacheKey::Value(Datum::from_oid(opclass)))? else {
+        return Ok(None);
+    };
+    const ANUM_PG_OPCLASS_OPCNAME: i32 = 3;
+    const ANUM_PG_OPCLASS_OPCNAMESPACE: i32 = 4;
+    let t = tuple.tuple();
+    let d = getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCNAME);
+    // SAFETY: opcname is a NameData column; the datum points at its 64-byte
+    // inline image inside the held tuple.
+    let name = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+    let nsp = getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCNAMESPACE).as_oid();
+    let method = getattr(&t, CLAOID, ANUM_PG_OPCLASS_OPCMETHOD).as_oid();
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some((name, nsp, method)))
+}
+
 fn lookup_pg_opfamily_oid_exact(amoid: Oid, opfname: &str, nsp: Oid) -> PgResult<Oid> {
     let Some(tuple) = SearchSysCache3(
         OPFAMILYAMNAMENSP,
@@ -2750,6 +2770,7 @@ pub(crate) fn install() {
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
     syscache_seams::lookup_pg_opfamily_shape::set(lookup_pg_opfamily_shape);
     syscache_seams::pg_opclass_opcname::set(pg_opclass_opcname);
+    syscache_seams::pg_opclass_name_namespace_method::set(pg_opclass_name_namespace_method);
     syscache_seams::lookup_pg_amop_rows::set(lookup_pg_amop_rows);
     syscache_seams::lookup_pg_amproc_rows::set(lookup_pg_amproc_rows);
     syscache_seams::lookup_pg_opclass_rows_by_am::set(lookup_pg_opclass_rows_by_am);

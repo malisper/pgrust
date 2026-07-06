@@ -1080,6 +1080,41 @@ fn ATRewriteCatalogs<'mcx>(
                                 parse_utilcmd::transformIndexConstraintForAlter(
                                     mcx, &rel, defnode, query_string,
                                 )?;
+                            // ATParseTransformCmd fabricates the stmt's
+                            // relation with inh = recurse (tablecmds.c:5827);
+                            // DefineIndex's partitioned ONLY arm reads it.
+                            {
+                                let nsp = lsyscache::get_namespace_name(
+                                    mcx,
+                                    rel.rd_rel.relnamespace,
+                                )?
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "cache lookup failed for namespace {}",
+                                        rel.rd_rel.relnamespace
+                                    )
+                                });
+                                let rv = types_nodes::RangeVar {
+                                    catalogname: None,
+                                    schemaname: Some(str_in_mcx(mcx, nsp.as_str())?),
+                                    relname: Some(str_in_mcx(mcx, rel.name())?),
+                                    inh: cmd.recurse,
+                                    relpersistence: rel.rd_rel.relpersistence,
+                                    alias: None,
+                                    location: -1,
+                                };
+                                let rv: &'mcx types_nodes::RangeVar<'mcx> =
+                                    types_nodes::Node::mk_mut(mcx, rv)?.seal_ref();
+                                // SAFETY: statement-owned parse tree; no
+                                // derived refs live yet.
+                                unsafe {
+                                    istmt
+                                        .with_mut::<types_nodes::rawnodes::IndexStmt, _>(
+                                            |s| s.relation = Some(rv),
+                                        )
+                                        .expect("IndexStmt");
+                                }
+                            }
                             let is_existing = istmt
                                 .as_variant::<types_nodes::rawnodes::IndexStmt>()
                                 .expect("IndexStmt")
@@ -1366,6 +1401,23 @@ fn ATRewriteCatalogs<'mcx>(
                             mcx, wqueue, &rel, pcmd, query_string,
                         )?;
                     } else {
+                        // transformPartitionCmd (parse_utilcmd.c:4239): ALTER
+                        // TABLE grammar allows a bound on a partitioned index;
+                        // a partitioned index cannot have one.
+                        if pcmd.bound.is_some() {
+                            return Err(Box::new(
+                                PgError::new(
+                                    ERROR,
+                                    format!(
+                                        "\"{}\" is not a partitioned table",
+                                        rel.name()
+                                    ),
+                                )
+                                .with_sqlstate(
+                                    types_error::ERRCODE_INVALID_OBJECT_DEFINITION,
+                                ),
+                            ));
+                        }
                         crate::attach::ATExecAttachPartitionIdx(
                             mcx,
                             &rel,
@@ -4355,6 +4407,13 @@ fn dropconstraint_internal<'mcx>(
 
 // ATExecAddIndex: the IndexStmt is already transformed; indexcmds depends on
 // tablecmds, so DefineIndex rides a seam.
+fn str_in_mcx<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
+    let mut v = mcx::PgString::new_in(mcx);
+    v.try_push_str(s)?;
+    // SAFETY: PgString invariant — bytes are valid UTF-8.
+    Ok(unsafe { core::str::from_utf8_unchecked(v.into_bytes().leak()) })
+}
+
 fn ATExecAddIndex<'mcx>(
     mcx: Mcx<'mcx>,
     tab: &mut AlteredTableInfo<'mcx>,

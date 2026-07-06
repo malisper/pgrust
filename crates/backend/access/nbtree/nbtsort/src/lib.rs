@@ -66,8 +66,23 @@ pub fn btbuild<'mcx>(
     }
 
     let mut sortstate = spool_begin(heap, index, indexInfo)?;
+    // Unique builds route dead tuples into a second spool, kept out of the
+    // uniqueness check and merged back in _bt_load (nbtsort.c:436); it gets
+    // only work_mem.
+    let mut spool2 = if indexInfo.ii_Unique {
+        Some(tuplesort::Tuplesort::begin_index_btree(
+            heap,
+            index,
+            false,
+            false,
+            init_small::globals::work_mem(),
+            tuplesort::TUPLESORT_NONE,
+        )?)
+    } else {
+        None
+    };
+    let mut havedead = false;
     let mut indtuples = 0.0f64;
-    let enforce_unique = indexInfo.ii_Unique;
 
     let reltuples = execindexing::table_index_build_scan(
         mcx,
@@ -76,17 +91,22 @@ pub fn btbuild<'mcx>(
         indexInfo,
         true,
         |_index_rel, tid, values, isnull, tuple_is_alive| {
-            if !tuple_is_alive && enforce_unique {
-                // C routes dead tuples to spool2 and merges in _bt_load.
-                unported("_bt_spool spool2 (dead tuples under a unique build)");
+            if tuple_is_alive || spool2.is_none() {
+                sortstate.putindextuplevalues(*tid, values, isnull)?;
+            } else {
+                havedead = true;
+                spool2.as_mut().expect("spool2").putindextuplevalues(*tid, values, isnull)?;
             }
-            sortstate.putindextuplevalues(*tid, values, isnull)?;
             indtuples += 1.0;
             Ok(())
         },
     )?;
 
-    leafbuild(mcx, index, sortstate, indexInfo.ii_Unique)?;
+    if !havedead {
+        spool2 = None;
+    }
+
+    leafbuild(mcx, index, sortstate, spool2, indexInfo.ii_Unique)?;
 
     Ok(IndexBuildResult { heap_tuples: reltuples, index_tuples: indtuples })
 }
@@ -123,9 +143,13 @@ fn leafbuild<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     mut sortstate: tuplesort::Tuplesort,
+    mut spool2: Option<tuplesort::Tuplesort>,
     is_unique: bool,
 ) -> PgResult<()> {
     sortstate.performsort()?;
+    if let Some(s2) = spool2.as_mut() {
+        s2.performsort()?;
+    }
 
     let mut inskey = nbtree::bt_mkscankey(index, None)?;
     inskey.allequalimage = bt_allequalimage(index)?;
@@ -142,7 +166,40 @@ fn leafbuild<'mcx>(
         wstate.inskey.allequalimage && !is_unique && bt_get_deduplicate_items(index);
 
     let mut levels: Vec<BTPageState<'mcx>> = Vec::new();
-    if deduplicate {
+    if let Some(mut sort2) = spool2 {
+        // _bt_load merge arm (nbtsort.c:1156): interleave the live and dead
+        // spools in key-then-TID order; dedup never applies (unique build).
+        let mut itup = sortstate.getindextuple(true)?;
+        let mut itup2 = sort2.getindextuple(true)?;
+        loop {
+            let load1 = match (itup, itup2) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                // SAFETY: each image stays live until its own spool's next
+                // getindextuple; both fetches below happen after buildadd
+                // copies what it retains.
+                (Some(t1), Some(t2)) => {
+                    // SAFETY: see contract above.
+                    let cmp = unsafe { sortstate.compare_index_tuples(t1, t2) };
+                    cmp <= 0
+                }
+            };
+            if levels.is_empty() {
+                let st = pagestate(&mut wstate, 0);
+                levels.push(st);
+            }
+            if load1 {
+                // SAFETY: live image (contract above).
+                unsafe { buildadd(mcx, &mut wstate, &mut levels, 0, itup.expect("itup"), 0)? };
+                itup = sortstate.getindextuple(true)?;
+            } else {
+                // SAFETY: live image (contract above).
+                unsafe { buildadd(mcx, &mut wstate, &mut levels, 0, itup2.expect("itup2"), 0)? };
+                itup2 = sort2.getindextuple(true)?;
+            }
+        }
+    } else if deduplicate {
         let keysz = index.indnkeyatts();
         // C: 1/10 of the page, MAXALIGN_DOWN, minus one line pointer.
         let maxpostingsize = ((BLCKSZ * 10 / 100) & !7) - core::mem::size_of::<ItemIdData>();

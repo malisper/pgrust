@@ -1283,6 +1283,40 @@ impl Tuplesort {
         })
     }
 
+    /// _bt_load's spool/spool2 merge comparator (nbtsort.c:1203): full key
+    /// compare via this sort's own SortSupport keys, then the TID tiebreak.
+    /// No unique enforcement — the merge legitimately interleaves equal keys
+    /// from the dead-tuple spool.
+    ///
+    /// # Safety
+    /// `a` and `b` are live index-tuple images formed under this sort's
+    /// tuple descriptor.
+    pub unsafe fn compare_index_tuples(&self, a: nbtree::itup::ITup, b: nbtree::itup::ITup) -> i32 {
+        self.0.with(|st| {
+            let SortVariant::Index { tup_desc, nkeys, .. } = &st.variant else {
+                panic!("compare_index_tuples on a non-index tuplesort")
+            };
+            for nkey in 1..=(*nkeys as i16) {
+                let key = &st.sort_keys[nkey as usize - 1];
+                let (mut isnull1, mut isnull2) = (false, false);
+                // SAFETY: live images under this sort's descriptor (fn contract).
+                let (d1, d2) = unsafe {
+                    (
+                        nbtree::itup::index_getattr(a, nkey, tup_desc, &mut isnull1),
+                        nbtree::itup::index_getattr(b, nkey, tup_desc, &mut isnull2),
+                    )
+                };
+                let c = ssup::apply_sort_comparator_in(st.mcx, d1, isnull1, d2, isnull2, key);
+                if c != 0 {
+                    return c;
+                }
+            }
+            // SAFETY: t_tid header read of live images (fn contract).
+            let (t1, t2) = unsafe { (nbtree::itup::t_tid(a), nbtree::itup::t_tid(b)) };
+            ::types_tuple::itemptr::ItemPointerCompare(&t1, &t2)
+        })
+    }
+
     /// `tuplesort_getindextuple`; image owned by the sort, valid until the
     /// next tuplesort call.
     #[inline]
