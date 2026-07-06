@@ -419,3 +419,29 @@ fn newlocale_failure_matches_c() {
     );
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_PARAMETER_VALUE);
 }
+
+#[test]
+fn chklocale_c_posix_and_bogus() {
+    assert_eq!(
+        crate::pg_get_encoding_from_locale(Some("C"), false).unwrap(),
+        0 // PG_SQL_ASCII
+    );
+    assert_eq!(
+        crate::pg_get_encoding_from_locale(Some("posix"), false).unwrap(),
+        0
+    );
+    assert_eq!(
+        crate::pg_get_encoding_from_locale(Some("nonsense"), false).unwrap(),
+        -1
+    );
+}
+
+#[test]
+fn cache_locale_time_c_locale_names() {
+    let ctx = mcx::MemoryContext::new("lc_time_test");
+    let names = crate::cache_locale_time(ctx.mcx()).unwrap();
+    assert_eq!(names.abbrev_months[0], b"Jan");
+    assert_eq!(names.full_months[1].to_ascii_lowercase(), b"february");
+    assert_eq!(names.abbrev_days[0], b"Sun");
+    assert_eq!(names.full_days[6].to_ascii_lowercase(), b"saturday");
+}

@@ -307,10 +307,11 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         )
     }
 
-    // parse_datatype (pl_gram.y) via parseTypeString.
+    // parse_datatype (pl_gram.y) via parseTypeString; declared datatypes
+    // carry the function's input collation (pl_gram.y parse_datatype).
     fn parse_datatype(&mut self, type_name: &str, _location: i32) -> PgResult<PlType> {
         let (typoid, typmod) = parse_utilcmd::parseTypeString(self.scratch, type_name)?;
-        CompState::build_datatype(typoid, typmod, types_core::InvalidOid)
+        CompState::build_datatype(typoid, typmod, self.fn_input_collation)
     }
 
     // read_datatype (pl_gram.y); the lookahead token is passed in.
@@ -773,17 +774,39 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             false
         };
 
-        let datatype = self.read_datatype(None)?;
+        let mut datatype = self.read_datatype(None)?;
 
-        // decl_collate.
+        // decl_collate (pl_gram.y:789-806) + the decl_statement collation
+        // insertion (pl_gram.y:516-526); errposition is the COLLATE keyword.
         let t = self.yylex()?;
         if t.0 == K_COLLATE {
-            panic!(
-                "decl_collate (pl_gram.y): COLLATE in declarations unported \
-                 (get_collation_oid) — unit backend-pl-plpgsql-gram"
-            );
+            let collate_loc = t.2;
+            let ct = self.yylex()?;
+            let names: Vec<String> = if ct.0 == T_WORD {
+                vec![ct.1.word.as_ref().expect("T_WORD").ident.clone()]
+            } else if ct.0 == T_CWORD {
+                ct.1.cword.as_ref().expect("T_CWORD").idents.clone()
+            } else if let Some(kw) = Self::unreserved_keyword_name(&ct) {
+                vec![kw.to_string()]
+            } else {
+                return Err(self.yyerror("syntax error", ct.2));
+            };
+            let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let collation = catalog_namespace::get_collation_oid(&refs, false)?;
+            if !types_core::OidIsValid(datatype.collation) {
+                return Err(self.gram_err_pos(
+                    types_error::ERRCODE_DATATYPE_MISMATCH,
+                    format!(
+                        "collations are not supported by type {}",
+                        format_type::format_type_be(datatype.typoid)?
+                    ),
+                    collate_loc,
+                ));
+            }
+            datatype.collation = collation;
+        } else {
+            self.push_back(&t)?;
         }
-        self.push_back(&t)?;
 
         // decl_notnull.
         let mut notnull = false;

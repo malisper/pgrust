@@ -317,7 +317,9 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
     if attnum <= 0 {
         unported("RemoveAttributeById: system attributes (never dropped)");
     }
-    let rel = table::table_open(mcx, relid, AccessExclusiveLock)?;
+    // C: relation_open (heap.c:1700) — a cascaded drop can target a
+    // composite type's column, which table_open rejects.
+    let rel = relation::relation_open(mcx, relid, AccessExclusiveLock)?;
     let attr_rel = table::table_open(mcx, ATTRIBUTE_RELATION_ID, RowExclusiveLock)?;
 
     let keys = [
