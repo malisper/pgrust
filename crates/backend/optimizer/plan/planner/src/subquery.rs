@@ -63,7 +63,16 @@ pub fn subquery_planner<'mcx>(
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
     }
-    crate::prepjointree::preprocess_function_rtes(run, &mut parse)?;
+    // preprocess_function_rtes (prepjointree.c) itself loops the rtable and
+    // no-ops without an RTE_FUNCTION entry, so skipping the call here when
+    // none exists is semantics-preserving.
+    if parse
+        .rtable
+        .iter()
+        .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_FUNCTION)
+    {
+        crate::prepjointree::preprocess_function_rtes(run, &mut parse)?;
+    }
     if parse.rtable.iter().any(|n| {
         matches!(
             n.as_range_tbl_entry().expect("rtable cell").rtekind,
