@@ -2432,6 +2432,31 @@ fn replace_vars_in_query_value<'mcx>(
     if !changed {
         return Ok(None);
     }
+    // replace_rte_variables_mutator's inserted_sublink leg: a replacement
+    // expression spliced into this sub-Query may carry a SubLink; without the
+    // flag the sub-planner skips SS_process_sublinks and the raw SubLink
+    // reaches cost_qual_eval.
+    if !newq.hasSubLinks {
+        let jt_has = match newq.jointree {
+            None => false,
+            Some(jt) => {
+                let mut found = rewrite_manip::checkExprHasSubLink_opt(jt.quals)?;
+                for child in &jt.fromlist {
+                    if found {
+                        break;
+                    }
+                    found = rewrite_manip::checkExprHasSubLink(child)?;
+                }
+                found
+            }
+        };
+        newq.hasSubLinks = jt_has
+            || rewrite_manip::checkExprHasSubLink_list(&newq.targetList)?
+            || rewrite_manip::checkExprHasSubLink_list(&newq.returningList)?
+            || rewrite_manip::checkExprHasSubLink_opt(newq.havingQual)?
+            || rewrite_manip::checkExprHasSubLink_opt(newq.limitOffset)?
+            || rewrite_manip::checkExprHasSubLink_opt(newq.limitCount)?;
+    }
     Ok(Some(newq))
 }
 

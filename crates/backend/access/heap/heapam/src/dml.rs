@@ -1989,16 +1989,24 @@ pub fn heap_update(
             // DEBUG(merge-lane triage): tuple forensics; revert to
             // invisible_tuple("update") before delivery.
             let td = oldtup.t_data();
+            let dbg_xmin = td.xmin_raw();
+            let dbg_is_cur =
+                xact_seams::transaction_id_is_current_transaction_id::call(dbg_xmin);
+            let dbg_committed =
+                transam_seams::transaction_id_did_commit::call(dbg_xmin).unwrap_or(false);
             let dbg = std::format!(
                 "attempted to update invisible tuple [rel={} tid=({},{}) xmin={} xmax={} \
-                 infomask={:#x} cid={}]",
+                 infomask={:#x} cid={} myxid={} xmin_is_current={} xmin_did_commit={}]",
                 relation.rd_id,
                 ItemPointerGetBlockNumber(otid),
                 ItemPointerGetOffsetNumber(otid),
-                td.xmin_raw(),
+                dbg_xmin,
                 td.xmax_raw(),
                 td.t_infomask,
                 cid,
+                xid,
+                dbg_is_cur,
+                dbg_committed,
             );
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
             pin.release();
