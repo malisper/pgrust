@@ -460,6 +460,7 @@ pub fn RegisterDynamicBackgroundWorker(
 
     let parallel = worker.bgw_flags & BGWORKER_CLASS_PARALLEL != 0;
 
+    let mut pool_pid: pid_t = 0;
     let handle = with_registry(|reg| {
         if parallel
             && reg.parallel_register_count.wrapping_sub(reg.parallel_terminate_count)
@@ -484,6 +485,40 @@ pub fn RegisterDynamicBackgroundWorker(
                     reg.parallel_register_count = reg.parallel_register_count.wrapping_add(1);
                 }
                 slot.in_use = true;
+                // §3.1 P-pool fast path: claim a parked standby here, inside
+                // the registry critical section — the rw entry is created with
+                // its pid before the postmaster can observe the slot, so
+                // maybe_start_bgworkers never double-starts it. Miss (pid 0)
+                // falls back to the postmaster spawn path unchanged.
+                if parallel && postmaster_seams::parallel_pool_dispatch::is_installed() {
+                    let pid = postmaster_seams::parallel_pool_dispatch::call(
+                        slotno as i32,
+                        generation,
+                    );
+                    if pid != 0 {
+                        let _ = report(
+                            DEBUG1,
+                            format!("registering background worker \"{}\"", worker.bgw_name),
+                        );
+                        let _ = report(
+                            DEBUG1,
+                            format!("starting background worker process \"{}\"", worker.bgw_name),
+                        );
+                        let rw = RegisteredBgWorker {
+                            worker: worker.clone(),
+                            pid,
+                            crashed_at: 0,
+                            shmem_slot: slotno as i32,
+                            terminate: false,
+                        };
+                        match reg.registered.iter_mut().find(|e| e.is_none()) {
+                            Some(hole) => *hole = Some(rw),
+                            None => reg.registered.push(Some(rw)),
+                        }
+                        reg.slots[slotno].pid = pid;
+                        pool_pid = pid;
+                    }
+                }
                 return Some(BackgroundWorkerHandle { slot: slotno as i32, generation });
             }
         }
@@ -493,6 +528,10 @@ pub fn RegisterDynamicBackgroundWorker(
     if handle.is_some() {
         pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_BACKGROUND_WORKER_CHANGE);
         gtrace("l.register.signaled");
+        // ReportBackgroundWorkerPID parity for the pool path.
+        if pool_pid != 0 && worker.bgw_notify_pid != 0 {
+            send_signal(worker.bgw_notify_pid, libc::SIGUSR1);
+        }
     }
 
     Ok(handle)

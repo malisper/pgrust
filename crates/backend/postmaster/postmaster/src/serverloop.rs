@@ -410,6 +410,10 @@ pub fn LaunchMissingBackgroundProcesses() {
     if with_pm(|pm| pm.start_worker_needed || pm.have_crashed_worker) {
         crate::statemachine::maybe_start_bgworkers();
     }
+
+    if with_pm(|pm| pm.shutdown == NoShutdown && !pm.fatal_error) {
+        launch_backend::wpool::maintain();
+    }
     let _ = loc(3400, "LaunchMissingBackgroundProcesses");
     let _ = FastShutdown;
 }

@@ -6974,6 +6974,7 @@ dependencies = [
  "libpq_pqsignal",
  "miscinit",
  "pgarch",
+ "pmchild_seams",
  "postmaster_seams",
  "postmaster_startup",
  "pqcomm_seams",

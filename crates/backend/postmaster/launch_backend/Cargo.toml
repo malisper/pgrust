@@ -25,6 +25,7 @@ pgarch = { path = "../pgarch" }
 walsummarizer = { path = "../walsummarizer" }
 postmaster_startup = { path = "../startup" }
 walwriter = { path = "../walwriter" }
+pmchild_seams = { path = "../pmchild_seams" }
 postmaster_seams = { path = "../postmaster_seams" }
 interrupt = { path = "../interrupt" }
 procsignal = { path = "../../storage/ipc/procsignal" }

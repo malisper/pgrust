@@ -22,6 +22,7 @@ mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
 pmchild_seams = { path = "../pmchild_seams" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
+postmaster_seams = { path = "../postmaster_seams" }
 postgres = { path = "../../tcop/postgres" }
 postinit = { path = "../../utils/init/postinit" }
 procsignal = { path = "../../storage/ipc/procsignal" }
@@ -32,4 +33,3 @@ types_startup = { path = "../../../_support/types/types_startup" }
 types_storage = { path = "../../../_support/types/types_storage" }
 
 [dev-dependencies]
-postmaster_seams = { path = "../postmaster_seams" }
