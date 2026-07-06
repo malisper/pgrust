@@ -52,14 +52,12 @@ pub fn seam_pg_regexec(
     search_start: i32,
     pmatch: &mut [RegMatch],
 ) -> PgResult<RegexecResult> {
-    let cx = MemoryContext::new("RegexpExecContext");
-
     let re = regex_of(re);
     let guts = re
         .re_guts
         .as_ref()
         .expect("pg_regexec: compiled regex has no guts");
-    let res = crate::regex_exec::pg_regexec(cx.mcx(), guts, data, search_start, pmatch, 0);
+    let res = crate::regex_exec::pg_regexec(guts, data, search_start, pmatch, 0);
 
     match res {
         Ok(true) => Ok(RegexecResult::Matched),

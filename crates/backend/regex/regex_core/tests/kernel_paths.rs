@@ -19,9 +19,8 @@ fn run(pat: &str, s: &str, eflags: i32, nmatch: usize) -> bool {
     pg_set_regex_collation(cx.mcx(), C_COLLATION_OID).unwrap();
     let re = pg_regcomp(cx.mcx(), &w(pat), REG_ADVANCED, C_COLLATION_OID).unwrap();
     let guts = re.re_guts.as_ref().unwrap();
-    let ex = MemoryContext::new("miri-exec");
     let mut pm = vec![RegMatch::UNSET; nmatch];
-    pg_regexec(ex.mcx(), guts, &w(s), 0, &mut pm, eflags).unwrap()
+    pg_regexec(guts, &w(s), 0, &mut pm, eflags).unwrap()
 }
 
 #[test]
