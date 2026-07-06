@@ -32,7 +32,10 @@ pub struct ExecAuxRowMark {
     pub ctidAttNo: i16,
     pub toidAttNo: i16,
     pub wholeAttNo: i16,
-    pub mark_slot: ExecSlotId,
+    // C has no slot here (EvalPlanQualSlot at use time); the port makes it at
+    // init for the locking marks only — non-locking (EPQ-list) marks never
+    // read it.
+    pub mark_slot: Option<ExecSlotId>,
 }
 
 pub struct LockRowsState<'mcx> {
@@ -96,25 +99,51 @@ pub fn exec_init_lock_rows<'mcx>(
         }
         let erm = estate.es_rowmarks[(rc.rti - 1) as usize]
             .expect("InitPlan built the ExecRowMark for every PlanRowMark rti");
-        let ctid_name = format!("ctid{}", erm.rowmarkId);
-        let ctidAttNo = find_junk_attribute_in_tlist(outer_tlist, &ctid_name);
-        assert!(ctidAttNo != 0, "could not find junk {ctid_name} column");
+        // ExecBuildAuxRowMark (execMain.c): ctid junk for every method but
+        // COPY; wholerow junk for COPY; tableoid junk for child rels.
+        let (ctidAttNo, wholeAttNo) = if erm.markType != RowMarkType::ROW_MARK_COPY {
+            let ctid_name = format!("ctid{}", erm.rowmarkId);
+            let n = find_junk_attribute_in_tlist(outer_tlist, &ctid_name);
+            if n == 0 {
+                return Err(internal(&format!("could not find junk {ctid_name} column")));
+            }
+            (n, 0)
+        } else {
+            let whole_name = format!("wholerow{}", erm.rowmarkId);
+            let n = find_junk_attribute_in_tlist(outer_tlist, &whole_name);
+            if n == 0 {
+                return Err(internal(&format!("could not find junk {whole_name} column")));
+            }
+            (0, n)
+        };
         let toidAttNo = if erm.rti != erm.prti {
             let toid_name = format!("tableoid{}", erm.rowmarkId);
             let n = find_junk_attribute_in_tlist(outer_tlist, &toid_name);
-            assert!(n != 0, "could not find junk {toid_name} column");
+            if n == 0 {
+                return Err(internal(&format!("could not find junk {toid_name} column")));
+            }
             n
         } else {
             0
         };
-        estate.exec_get_range_table_relation(rc.rti, false)?;
-        let mark_slot = eval_plan_qual_slot(estate, rc.rti);
-        let aerm =
-            ExecAuxRowMark { rti: rc.rti, ctidAttNo, toidAttNo, wholeAttNo: 0, mark_slot };
         if erm.markType.requires_row_share_lock() {
-            lr_arowMarks.push(aerm);
+            estate.exec_get_range_table_relation(rc.rti, false)?;
+            let mark_slot = Some(eval_plan_qual_slot(estate, rc.rti));
+            lr_arowMarks.push(ExecAuxRowMark {
+                rti: rc.rti,
+                ctidAttNo,
+                toidAttNo,
+                wholeAttNo,
+                mark_slot,
+            });
         } else {
-            lr_epq_arowMarks.push(aerm);
+            lr_epq_arowMarks.push(ExecAuxRowMark {
+                rti: rc.rti,
+                ctidAttNo,
+                toidAttNo,
+                wholeAttNo,
+                mark_slot: None,
+            });
         }
     }
     Ok(LockRowsState { plan: node, lr_arowMarks, lr_epq_arowMarks })
@@ -137,7 +166,12 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
         for i in 0..node.lr_arowMarks.len() {
             let (rti, ctid_att, toid_att, mark_slot) = {
                 let aerm = &node.lr_arowMarks[i];
-                (aerm.rti, aerm.ctidAttNo, aerm.toidAttNo, aerm.mark_slot)
+                (
+                    aerm.rti,
+                    aerm.ctidAttNo,
+                    aerm.toidAttNo,
+                    aerm.mark_slot.expect("locking mark slot made at init"),
+                )
             };
             let mut erm = estate.es_rowmarks[(rti - 1) as usize].expect("locking rowmark");
             // Clear any leftover EPQ test tuple for this rel (C does this
@@ -270,7 +304,8 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
         if epq_needed {
             // Locked latest versions already sit in the EPQ test slots;
             // non-locked-rel origslot re-fetch is the epq module's loud arm.
-            let input = node.lr_arowMarks[0].mark_slot;
+            let input =
+                node.lr_arowMarks[0].mark_slot.expect("locking mark slot made at init");
             let Some(epqslot) = epq_eval(estate, input)? else {
                 continue 'lnext;
             };
