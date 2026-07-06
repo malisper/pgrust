@@ -769,6 +769,7 @@ dependencies = [
  "adt_date",
  "adt_numeric",
  "arrayfuncs",
+ "clauses_seams",
  "datum",
  "detoast_seams",
  "fmgr_seams",
@@ -10300,6 +10301,7 @@ dependencies = [
  "types_scan",
  "types_tuple",
  "varlena",
+ "xact",
 ]
 
 [[package]]
@@ -13586,6 +13588,7 @@ dependencies = [
  "fmgr_seams",
  "freespace",
  "heaptuple",
+ "indexam_seams",
  "init_small",
  "lsyscache",
  "mcx",
