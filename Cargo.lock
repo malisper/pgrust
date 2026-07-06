@@ -13027,6 +13027,7 @@ dependencies = [
  "smgr",
  "snapbuild",
  "snapmgr",
+ "spgist_box",
  "spgist_kdtree",
  "spgist_quadtree",
  "spgist_text",
@@ -13599,6 +13600,20 @@ dependencies = [
  "xact",
  "xloginsert",
  "xloginsert_seams",
+]
+
+[[package]]
+name = "spgist_box"
+version = "0.1.0"
+dependencies = [
+ "adt_geo",
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_scan",
+ "types_spgist",
 ]
 
 [[package]]

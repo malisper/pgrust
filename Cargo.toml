@@ -548,6 +548,7 @@ members = [
     "crates/backend/access/spgist/spgist_text",
     "crates/backend/access/spgist/spgist_quadtree",
     "crates/backend/access/spgist/spgist_kdtree",
+    "crates/backend/access/spgist/spgist_box",
     "crates/backend/access/spgist/spgist_proc",
     "crates/backend/access/spgist/spgist_validate",
     "crates/backend/access/brin/brin",
