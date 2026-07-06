@@ -2021,7 +2021,7 @@ fn exec_create_stats_stmt<'mcx>(
         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
         .expect("CreateStatsStmt");
     collect_gap("CREATE STATISTICS");
-    statscmds::CreateStatistics(mcx, stmt)?;
+    statscmds::CreateStatistics(mcx, stmt, true)?;
     Ok(())
 }
 
