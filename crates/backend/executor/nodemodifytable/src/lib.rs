@@ -161,6 +161,9 @@ pub struct ModifyTableState<'mcx> {
     // C ExecInsert's *insert_destrel out-param (routed leaf of the last
     // insert; None = unrouted), for the cross-partition FK update event.
     last_insert_leaf: Option<usize>,
+    // C mt_merge_action's commandType: the WHEN action being executed
+    // (routed-INSERT WCO kind selection, nodeModifyTable.c:1079-1081).
+    merge_active_cmd: Option<CmdType>,
     // mt_merge_inserted/updated/deleted (EXPLAIN ANALYZE's Tuples: line;
     // skipped is derived by explain as source-total minus these).
     pub mt_merge_inserted: f64,
@@ -573,6 +576,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
         last_insert_leaf: None,
+        merge_active_cmd: None,
         mt_merge_inserted: 0.0,
         mt_merge_updated: 0.0,
         mt_merge_deleted: 0.0,
@@ -1766,6 +1770,7 @@ fn exec_merge_matched_scan<'mcx>(
             exec_with_check_options(&mut r.wco_exprs, kind, old_slot)?;
         }
 
+        mt.merge_active_cmd = Some(command_type);
         let mut tmfd = TM_FailureData::default();
         let result = match command_type {
             CmdType::CMD_UPDATE => {
@@ -2336,6 +2341,7 @@ fn exec_merge_not_matched<'mcx>(
                         execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
                     }
                 }
+                mt.merge_active_cmd = Some(CmdType::CMD_INSERT);
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
                 mt.mt_merge_inserted += 1.0;
@@ -4508,6 +4514,7 @@ fn exec_insert<'mcx>(
         let perminfos = estate.es_rteperminfos;
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
         let operation = mt.operation;
+        let merge_active_cmd = mt.merge_active_cmd;
         let ModifyTableState {
             rels,
             cur,
@@ -4563,17 +4570,36 @@ fn exec_insert<'mcx>(
         }
 
         if !r.wco_exprs.is_empty() {
-            if leaf_idx.is_some() {
-                panic!("ExecInsert: WCOs on a routed partition (leaf attr map) not ported");
-            }
-            let wco_kind = if operation == CmdType::CMD_UPDATE {
+            // A cross-partition-moving UPDATE (or MERGE UPDATE action)
+            // checks the target's UPDATE policies through the routed insert
+            // (C nodeModifyTable.c:1067-1090).
+            let wco_kind = if operation == CmdType::CMD_UPDATE
+                || (operation == CmdType::CMD_MERGE
+                    && merge_active_cmd == Some(CmdType::CMD_UPDATE))
+            {
                 WCOKind::WCO_RLS_UPDATE_CHECK
             } else {
                 WCOKind::WCO_RLS_INSERT_CHECK
             };
-            exec_with_check_options(&mut r.wco_exprs, wco_kind, slot)?;
+            if remapped {
+                // The WCO programs are root-compiled; the pre-conversion
+                // root-format image at slot_id carries the same values —
+                // unless a leaf BR trigger rewrote the leaf tuple.
+                if leaf_has_br_insert {
+                    panic!(
+                        "ExecInsert: WCOs after a leaf BR trigger on an \
+                         attno-remapped partition not ported"
+                    );
+                }
+                let root_slot = &mut es_tupleTable[slot_id.0 as usize];
+                exec_with_check_options(&mut r.wco_exprs, wco_kind, root_slot)?;
+            } else {
+                let slot = &mut es_tupleTable[work_slot.0 as usize];
+                exec_with_check_options(&mut r.wco_exprs, wco_kind, slot)?;
+            }
         }
 
+        let slot = &mut es_tupleTable[work_slot.0 as usize];
         // ri_RootResultRelInfo: a routed leaf's constraint errors report
         // the failing row in the root's rowtype (execMain.c).
         let err_root_rel = match leaf_idx {
@@ -5969,7 +5995,7 @@ mcx::forget_safe_struct!(
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
-        mt_merge_inserted, mt_merge_updated, mt_merge_deleted;
+        mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_existing,
