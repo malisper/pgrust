@@ -1272,6 +1272,7 @@ dependencies = [
  "syscache_seams",
  "types_core",
  "types_error",
+ "types_gist",
  "types_pathnodes",
  "types_relscan",
  "types_scan",
