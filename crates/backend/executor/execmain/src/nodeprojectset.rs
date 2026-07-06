@@ -220,6 +220,27 @@ fn exec_project_srf<'mcx>(
 ) -> PgResult<bool> {
     let ecxt = node.ps.ps_ExprContext.expect("ProjectSetState without ExprContext");
     let result = node.ps.ps_ResultTupleSlot.expect("ProjectSetState without result slot");
+    // C runs pending initplans lazily inside ExecEvalExpr (ExecEvalParamExec,
+    // execExprInterp.c); the SRF args' and scalar elems' $n params resolve
+    // here instead (execscan note).
+    for elem in node.elems.iter() {
+        match elem {
+            Elem::Srf(srf) => {
+                for arg in srf.args.iter() {
+                    let deps = arg.param_exec_deps();
+                    if !deps.is_empty() {
+                        ::executils::exec_eval_param_exec_params(estate, deps)?;
+                    }
+                }
+            }
+            Elem::Scalar(state) => {
+                let deps = state.param_exec_deps();
+                if !deps.is_empty() {
+                    ::executils::exec_eval_param_exec_params(estate, deps)?;
+                }
+            }
+        }
+    }
     let per_tuple: NonNull<MemoryContext> =
         NonNull::from(estate.ecxt(ecxt).per_tuple_mcx().context());
     node.pending_srf_tuples = false;

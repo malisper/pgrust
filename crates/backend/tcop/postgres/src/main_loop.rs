@@ -629,8 +629,8 @@ fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
     if payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
         std::panic::resume_unwind(payload);
     }
-    match payload.downcast::<PgError>() {
-        Ok(e) => *e,
+    match ::types_error::pg_error_from_panic(payload) {
+        Ok(e) => e,
         Err(payload) => {
             let msg = payload
                 .downcast_ref::<String>()
