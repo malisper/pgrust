@@ -103,7 +103,10 @@ pub fn remove_useless_result_rtes<'mcx>(
                 }
             }
             parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
-            check_rowmarks_on_result(run, parse);
+        }
+        // Unconditional in C: marks on SURVIVING RESULT RTEs drop too.
+        if !run.root.rowMarks.is_empty() {
+            drop_rowmarks_on_result(run, parse);
         }
         return Ok(());
     }
@@ -135,27 +138,26 @@ pub fn remove_useless_result_rtes<'mcx>(
     if !dropped_outer_joins.is_empty() {
         crate::prepjointree::remove_nulling_relids(run, parse, &dropped_outer_joins, None)?;
     }
-    check_rowmarks_on_result(run, parse);
+    if !run.root.rowMarks.is_empty() {
+        drop_rowmarks_on_result(run, parse);
+    }
     Ok(())
 }
 
-// C drops any PlanRowMark on a RESULT RTE (removed or surviving); the rowmark
-// store is id-indexed here, so removal would dangle ids — loud until a lane
-// needs it.
-fn check_rowmarks_on_result<'mcx>(run: &PlannerRun<'mcx>, parse: &Query<'mcx>) {
-    for &id in run.root.rowMarks.iter() {
-        let rc = run.rowmark(id);
+// C drops any PlanRowMark on a RESULT RTE (removed or surviving): the RTE
+// produces no rows to mark. Only the id list shrinks; the store entry goes
+// unreferenced (C frees the list cell, not the mark).
+fn drop_rowmarks_on_result<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) {
+    let rowmarks = &run.rowmarks;
+    run.root.rowMarks.retain(|&id| {
+        let rc = &rowmarks[id.0 as usize];
         let rte = parse
             .rtable
             .nth(rc.rti as usize - 1)
             .as_range_tbl_entry()
             .expect("rtable cell");
-        assert!(
-            rte.rtekind != RTEKind::RTE_RESULT,
-            "remove_useless_result_rtes (prepjointree.c): PlanRowMark drop on RESULT; \
-             M2 rowmark lane"
-        );
-    }
+        rte.rtekind != RTEKind::RTE_RESULT
+    });
 }
 
 struct QualSlot<'mcx> {
