@@ -100,20 +100,43 @@ fn recurse_set_operations<'mcx>(
         run.root.rel_mut(rel).pathtarget_id = Some(pt);
         Ok((rel, tlist, trivial))
     } else if let Some(op) = set_op.as_set_operation_stmt() {
-        let (rel, tlist) = if op.op == SetOperation::SETOP_UNION {
+        let (rel, mut tlist) = if op.op == SetOperation::SETOP_UNION {
             generate_union_paths(run, op, refnames_tlist)?
         } else {
             generate_nonunion_paths(run, op, refnames_tlist)?
         };
+        let mut trivial = true;
         if !tlist_same_datatypes(&tlist, col_types) || !tlist_same_collations(&tlist, col_collations)
         {
-            panic!(
-                "recurse_set_operations (prepunion.c): nested setop output needs a coercion \
-                 projection (apply_projection_to_path); setop projection lane"
+            // Vars use varno 0 so setrefs can match them against the setop
+            // subplan tlist (recurse_set_operations, prepunion.c).
+            (tlist, trivial) = generate_setop_tlist(
+                run,
+                col_types,
+                col_collations,
+                0,
+                false,
+                &tlist,
+                refnames_tlist,
+            )?;
+            let target_id = create_pathtarget(run, &tlist)?;
+            let paths =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).pathlist);
+            for (i, &subpath) in paths.iter().enumerate() {
+                let path =
+                    crate::pathnode::apply_projection_to_path(run, rel, subpath, target_id)?;
+                if path != subpath {
+                    run.root.rel_mut(rel).pathlist[i] = path;
+                }
+            }
+            assert!(
+                run.root.rel(rel).partial_pathlist.is_empty(),
+                "recurse_set_operations: parallel-union partial-path arm unported \
+                 (C prepunion.c:326-338 projects partial paths)"
             );
         }
         postprocess_setop_rel(run, rel)?;
-        Ok((rel, tlist, true))
+        Ok((rel, tlist, trivial))
     } else {
         panic!("recurse_set_operations (prepunion.c): unrecognized node {:?}", set_op.node_tag());
     }
