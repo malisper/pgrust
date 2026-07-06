@@ -679,6 +679,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &c.exclRelTlist)?;
             w!(out, "}}");
         }
+        NodeTag::T_InferenceElem => {
+            let ie = node
+                .as_variant::<types_nodes::primnodes::InferenceElem>()
+                .expect("InferenceElem");
+            w!(out, "{{INFERENCEELEM :expr ");
+            out_opt_node(out, ie.expr)?;
+            w!(out, " :infercollid {} :inferopclass {}}}", ie.infercollid, ie.inferopclass);
+        }
         NodeTag::T_SubPlan => {
             let sp = node.as_variant::<types_nodes::primnodes::SubPlan>().expect("SubPlan");
             w!(out, "{{SUBPLAN :subLinkType {}", sp.subLinkType as u32);
