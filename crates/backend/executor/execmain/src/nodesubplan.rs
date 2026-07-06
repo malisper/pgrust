@@ -36,6 +36,21 @@ pub(crate) struct SubPlanState<'mcx> {
     ps_cell: core::ptr::NonNull<Option<PlanStateNode<'mcx>>>,
 }
 
+// ExecInitSubPlan's NULL-planstate check: fails if the planner mistakenly
+// puts a parallel-unsafe subplan into a parallelized subquery; see
+// ExecSerializePlan.
+fn check_subplan_initialized(cell: NonNull<()>, subplan: &SubPlan<'_>) -> PgResult<()> {
+    // SAFETY: es_subplanstates cells are arena-live Option<PlanStateNode>
+    // installed by InitPlan; shared read, no take-out here.
+    if unsafe { (*cell.cast::<Option<PlanStateNode<'_>>>().as_ptr()).is_none() } {
+        return Err(Box::new(PgError::error(format!(
+            "subplan \"{}\" was not initialized",
+            subplan.plan_name.unwrap_or("?")
+        ))));
+    }
+    Ok(())
+}
+
 /// `ExecInitSubPlan` (nodeSubplan.c), initPlan arm: parks the SubPlanState on
 /// every setParam so the first param read runs the subplan.
 pub(crate) fn exec_init_sub_plan<'mcx>(
@@ -83,6 +98,7 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
         .get((subplan.plan_id - 1) as usize)
         .unwrap_or_else(|| panic!("subplan \"{}\" was not initialized", subplan.plan_name.unwrap_or("?")))
         .0;
+    check_subplan_initialized(cell, subplan)?;
 
     let mut set_param: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     for id in subplan.setParam.iter() {
@@ -399,11 +415,13 @@ fn exec_init_sub_plan_expr<'mcx>(
             panic!("subplan \"{}\" was not initialized", subplan.plan_name.unwrap_or("?"))
         })
         .0;
+    check_subplan_initialized(cell, subplan)?;
     let plan = estate
         .es_plannedstmt
         .expect("es_plannedstmt set before plan init")
         .subplans
-        .nth((subplan.plan_id - 1) as usize);
+        .nth((subplan.plan_id - 1) as usize)
+        .expect("initialized subplan has a plan cell");
 
     if !matches!(
         subplan.subLinkType,

@@ -1364,7 +1364,7 @@ fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
     .unwrap();
 
     assert_eq!(stmt.subplans.len(), 1);
-    assert_eq!(stmt.subplans.nth(0).node_tag(), NodeTag::T_SeqScan);
+    assert_eq!(stmt.subplans.nth(0).unwrap().node_tag(), NodeTag::T_SeqScan);
     assert_eq!(stmt.paramExecTypes.len(), 1);
 
     let plan = stmt.planTree.unwrap();
@@ -1375,7 +1375,7 @@ fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
     // Top plan flattens first (as C); the subplan's SeqScan gets the offset.
     assert_eq!(stmt.rtable.len(), 2);
     assert_eq!(cscan.scan.scanrelid, 1);
-    assert_eq!(stmt.subplans.nth(0).as_seq_scan().unwrap().scan.scanrelid, 2);
+    assert_eq!(stmt.subplans.nth(0).unwrap().as_seq_scan().unwrap().scan.scanrelid, 2);
     assert_eq!(cscan.scan.plan.plan_rows, 10000.0);
 
     assert_eq!(cscan.scan.plan.initPlan.len(), 1);
@@ -2002,7 +2002,7 @@ mod minmax_agg {
         // subplans[0]: Limit 1 -> Index Only Scan Backward on t_pkey with the
         // IS NOT NULL index qual.
         assert_eq!(stmt.subplans.len(), 1);
-        let limit_node = stmt.subplans.nth(0);
+        let limit_node = stmt.subplans.nth(0).unwrap();
         assert_eq!(limit_node.node_tag(), NodeTag::T_Limit);
         let limit = limit_node.as_limit().unwrap();
         assert_eq!(limit.plan.plan_rows, 1.0);
@@ -2033,7 +2033,7 @@ mod minmax_agg {
         let stmt = plan_minmax(mcx, MIN_INT4, 1);
         assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_Result);
         assert_eq!(stmt.subplans.len(), 1);
-        let limit = stmt.subplans.nth(0).as_limit().unwrap();
+        let limit = stmt.subplans.nth(0).unwrap().as_limit().unwrap();
         let ios = limit.plan.lefttree.unwrap().as_index_only_scan().unwrap();
         assert_eq!(ios.indexorderdir, 1);
     }
@@ -3996,7 +3996,7 @@ fn expr_sublink_plans_to_initplan_param() {
     assert!(!base.extParam.is_member(0));
 
     // The initplan's plan tree scans t and returns pk.
-    let subplan = stmt.subplans.nth(0);
+    let subplan = stmt.subplans.nth(0).unwrap();
     let sub_base = subplan.as_plan().unwrap();
     assert_eq!(sub_base.targetlist.len(), 1);
     // Subplan scan relid was offset into the flat rtable.
@@ -4106,7 +4106,7 @@ fn uncorrelated_exists_plans_to_gating_result_over_initplan() {
     assert_eq!(sp.firstColType, 2278);
 
     // simplify_EXISTS_query stripped the sub-tlist.
-    let subplan = stmt.subplans.nth(0);
+    let subplan = stmt.subplans.nth(0).unwrap();
     assert_eq!(subplan.node_tag(), NodeTag::T_SeqScan);
     assert!(subplan.as_plan().unwrap().targetlist.is_nil());
     assert_eq!(subplan.as_seq_scan().unwrap().scan.scanrelid, 2);

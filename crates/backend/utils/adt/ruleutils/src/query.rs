@@ -50,7 +50,7 @@ pub(crate) struct DeparseNamespace<'mcx> {
     pub unique_using: bool,
     pub using_names: Vec<String>,
     pub ctes: Vec<&'mcx types_nodes::parsenodes::CommonTableExpr<'mcx>>,
-    pub subplans: Option<&'mcx NodeList<'mcx>>,
+    pub subplans: Option<&'mcx types_nodes::list::OptNodeList<'mcx>>,
     // SQL-function-body deparse (print_function_sqlbody).
     pub funcname: Option<String>,
     pub argnames: Option<Vec<String>>,

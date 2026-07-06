@@ -533,6 +533,8 @@ pub fn exec_init_node<'mcx>(
                     .expect("es_plannedstmt set before plan init")
                     .subplans
                     .nth(idx)
+                    // CTE subplans are parallel-restricted; never a NULL hole.
+                    .expect("CteScan subplan cell present")
                     .as_plan()
                     .expect("subplans cell is a plan tree");
                 (sub.exec_get_result_type(sub_plan)?, &sub_plan.targetlist)

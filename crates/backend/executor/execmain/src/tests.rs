@@ -2766,7 +2766,9 @@ fn mk_expr_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mc
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
     pstmt.planTree = Some(scan);
-    pstmt.subplans = NodeList::make1(mcx, mk_initplan_sub_seqscan(mcx, true)).unwrap();
+    pstmt.subplans =
+        ::types_nodes::list::OptNodeList::make1(mcx, Some(mk_initplan_sub_seqscan(mcx, true)))
+            .unwrap();
     pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
     pstmt.rtable = rtable;
     pstmt.permInfos = perms;
@@ -2827,7 +2829,9 @@ fn mk_exists_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
     pstmt.planTree = Some(top);
-    pstmt.subplans = NodeList::make1(mcx, mk_initplan_sub_seqscan(mcx, false)).unwrap();
+    pstmt.subplans =
+        ::types_nodes::list::OptNodeList::make1(mcx, Some(mk_initplan_sub_seqscan(mcx, false)))
+            .unwrap();
     pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, 16).unwrap();
     pstmt.rtable = rtable;
     pstmt.permInfos = perms;
@@ -2964,6 +2968,100 @@ fn exists_initplan_empty_subquery_gates_to_zero_rows() {
     let rows = run_initplan_pstmt(mk_exists_initplan_pstmt(mcx, t1, t2)).unwrap();
     assert_eq!(rows, Vec::<i32>::new());
     scanfix::quiesced();
+}
+
+// --- ExecSerializePlan NULL-hole subplan transfer (execParallel.c) ---
+
+#[test]
+fn worker_pstmt_nulls_parallel_unsafe_subplans() {
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    install_seams();
+    let mcx = leaked_mcx();
+    let mk_sub = |safe: bool| {
+        Node::mk(
+            mcx,
+            SeqScan {
+                scan: Scan {
+                    plan: Plan { parallel_safe: safe, ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap()
+    };
+    let mut subplans = ::types_nodes::list::OptNodeList::nil();
+    subplans.lappend(mcx, Some(mk_sub(true))).unwrap();
+    subplans.lappend(mcx, Some(mk_sub(false))).unwrap();
+    subplans.lappend(mcx, Some(mk_sub(true))).unwrap();
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(mk_sub(true));
+    pstmt.subplans = subplans;
+    pstmt.paramExecTypes =
+        ::types_nodes::list::OidList::make2(mcx, INT4OID, INT4OID).unwrap();
+    let pstmt = pstmt.seal_ref();
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_plannedstmt = Some(pstmt);
+        let worker = crate::execparallel::build_worker_pstmt(
+            &data.estate,
+            pstmt.planTree.unwrap(),
+        )
+        .unwrap();
+        // The unsafe subplan is a NULL hole; the safe ones keep their
+        // plan_id positions.
+        assert_eq!(worker.subplans.len(), 3);
+        assert!(worker.subplans.nth(0).is_some());
+        assert!(worker.subplans.nth(1).is_none());
+        assert!(worker.subplans.nth(2).is_some());
+        assert_eq!(worker.paramExecTypes.as_slice(), pstmt.paramExecTypes.as_slice());
+        assert!(worker.rowMarks.is_nil());
+        assert!(worker.resultRelations.is_nil());
+        assert!(worker.rewindPlanIDs.is_empty());
+    });
+}
+
+#[test]
+fn initplan_hole_reference_errors_subplan_not_initialized() {
+    use ::types_nodes::plannodes::{Result as ResultPlan};
+    install_seams();
+    let mcx = leaked_mcx();
+    let tle = Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
+        .unwrap();
+    let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+    result.plan.targetlist = NodeList::make1(mcx, tle).unwrap();
+    result.plan.initPlan = NodeList::make1(
+        mcx,
+        mk_sub_plan_node(mcx, ::types_nodes::SubLinkType::EXISTS_SUBLINK, 16),
+    )
+    .unwrap();
+    let top = result.seal();
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(top);
+    // ExecSerializePlan's parallel-unsafe hole in the worker copy.
+    pstmt.subplans = ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
+    pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, 16).unwrap();
+    let pstmt = pstmt.seal_ref();
+    with_exec_data(pstmt, |data, pstmt| {
+        {
+            let n = pstmt.paramExecTypes.len();
+            let es = &mut data.estate;
+            es.es_param_exec_vals.extend(core::iter::repeat_n(
+                ::types_portal::params::ParamExecData::EMPTY,
+                n,
+            ));
+            es.es_param_subplans.extend(core::iter::repeat_n(None, n));
+        }
+        let err =
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap_err();
+        assert!(
+            err.message().contains("subplan \"InitPlan 1\" was not initialized"),
+            "{}",
+            err.message()
+        );
+    });
 }
 
 // WindowAgg(part by g, ord by a) over Sort(g,a) over SeqScan: SELECT g, a,
@@ -3478,7 +3576,7 @@ fn mk_multiexpr_pstmt<'mcx>(
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
     pstmt.planTree = Some(plan_node);
-    pstmt.subplans = NodeList::make1(mcx, sub_plan_tree).unwrap();
+    pstmt.subplans = ::types_nodes::list::OptNodeList::make1(mcx, Some(sub_plan_tree)).unwrap();
     pstmt.paramExecTypes = OidList::make2(mcx, INT4OID, INT4OID).unwrap();
     pstmt.seal_ref()
 }

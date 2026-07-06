@@ -477,23 +477,34 @@ pub(crate) fn init_plan<'mcx>(
             if pstmt.rewindPlanIDs.is_member((i + 1) as i32) {
                 sp_eflags |= types_slot::EXEC_FLAG_REWIND;
             }
-            let ps = exec_init_node(Some(subplan), &mut data.estate, sp_eflags)?
-                .expect("subplans cells are plan trees");
+            // A NULL cell is ExecSerializePlan's parallel-unsafe hole: no
+            // init, and the None state makes any reference loud in
+            // ExecInitSubPlan (C: ExecInitNode(NULL) == NULL).
+            let ps = match subplan {
+                Some(subplan) => Some(
+                    exec_init_node(Some(subplan), &mut data.estate, sp_eflags)?
+                        .expect("subplans cells are plan trees"),
+                ),
+                None => None,
+            };
             // C registers inside ExecInitModifyTable (!canSetTag → lcons onto
             // es_auxmodifytables); a wCTE ModifyTable is always its subplan's
             // root here, so it registers where the state cell exists.
-            let is_aux_mt = {
-                let mut root = &ps;
-                if let crate::PlanStateNode::Instrumented(instr) = root {
-                    root = &instr.inner;
+            let is_aux_mt = match &ps {
+                Some(ps) => {
+                    let mut root = ps;
+                    if let crate::PlanStateNode::Instrumented(instr) = root {
+                        root = &instr.inner;
+                    }
+                    matches!(root, crate::PlanStateNode::ModifyTable(m) if !m.mt.canSetTag)
                 }
-                matches!(root, crate::PlanStateNode::ModifyTable(m) if !m.mt.canSetTag)
+                None => false,
             };
             // Arena-cell ownership (not a struct field) so the type-erased
             // pointer never aliases a live &mut ExecData; the PlanState's Rc
             // releases run in standard_executor_end's explicit take+drop
             // (abort-path leak is the registry hazard class; see CATALOG).
-            let mut cell = ::mcx::alloc_in(data.estate.es_query_cxt, Some(ps))?;
+            let mut cell = ::mcx::alloc_in(data.estate.es_query_cxt, ps)?;
             let raw: *mut Option<crate::PlanStateNode<'_>> = &mut *cell;
             core::mem::forget(cell);
             let cell = ::executils::SubplanStateCell(

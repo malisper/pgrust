@@ -285,7 +285,10 @@ fn rescan_mark_initplans<'mcx>(
             .es_plannedstmt
             .expect("es_plannedstmt set before rescan")
             .subplans
-            .nth((sp.plan_id - 1) as usize);
+            .nth((sp.plan_id - 1) as usize)
+            // A shipped tree's initPlan SubPlans are parallel-safe: never a
+            // NULL hole (an unsafe reference errors at ExecInitSubPlan).
+            .expect("initPlan references a transferred subplan");
         let ext = &init_plan.as_plan().expect("plan node").extParam;
         if sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK {
             if chg.overlap(ext) {

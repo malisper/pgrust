@@ -7,7 +7,7 @@ use core::mem::offset_of;
 use types_core::{Cardinality, Cost, Index, Oid, ParseLoc};
 
 use crate::bitmapset::Bitmapset;
-use crate::list::{IntList, NodeList, OidList};
+use crate::list::{IntList, NodeList, OidList, OptNodeList};
 use crate::node_tree::{Node, NodeRep, NodeVariant};
 use crate::nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};
 use crate::tags::NodeTag;
@@ -31,9 +31,9 @@ pub struct PlannedStmt<'mcx> {
     // C: integer list of RT indexes, or NIL.
     pub resultRelations: IntList<'mcx>,
     pub appendRelations: NodeList<'mcx>,
-    // Divergence: C subplans cells can be NULL; NodeList cells cannot. Revisit
-    // when SubPlan lands (SELECT 1 and near-trivial plans have NIL here).
-    pub subplans: NodeList<'mcx>,
+    // NULL cells are ExecSerializePlan's parallel-unsafe holes: they keep the
+    // plan_id indexes of the safe subplans aligned for workers.
+    pub subplans: OptNodeList<'mcx>,
     pub rewindPlanIDs: Bitmapset<'mcx>,
     pub rowMarks: NodeList<'mcx>,
     pub relationOids: OidList<'mcx>,
@@ -64,7 +64,7 @@ impl Default for PlannedStmt<'_> {
             permInfos: NodeList::nil(),
             resultRelations: IntList::nil(),
             appendRelations: NodeList::nil(),
-            subplans: NodeList::nil(),
+            subplans: OptNodeList::nil(),
             rewindPlanIDs: Bitmapset::empty(),
             rowMarks: NodeList::nil(),
             relationOids: OidList::nil(),

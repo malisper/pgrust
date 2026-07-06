@@ -260,24 +260,21 @@ fn node_child_lists<'mcx>(node: Node<'mcx>) -> Vec<&'mcx NodeList<'mcx>> {
 // the leader's executor arena and crosses by reference. The resjunk-clearing
 // copy is replaced by the worker-side junk-filter suppression in InitPlan
 // (same observable: junk columns reach the leader).
-fn build_worker_pstmt<'mcx>(
+pub(crate) fn build_worker_pstmt<'mcx>(
     estate: &EStateData<'mcx>,
     plan_node: Node<'mcx>,
 ) -> PgResult<&'mcx PlannedStmt<'mcx>> {
     let leader = estate.es_plannedstmt.expect("parallel plan without es_plannedstmt");
-    for (i, subplan) in leader.subplans.iter().enumerate() {
-        let sp = subplan.as_plan().expect("subplans cell is a plan tree");
-        if !sp.parallel_safe {
-            // C leaves a NULL hole; NodeList cells cannot be NULL (planner
-            // lane owns the hole representation).
-            panic!(
-                "ExecSerializePlan (execParallel.c): parallel-unsafe subplan {} — \
-                 NULL-hole subplan transfer unported",
-                i + 1
-            );
-        }
-    }
     let mcx = estate.es_query_cxt;
+    // Transfer only parallel-safe subplans, leaving a NULL hole for unsafe
+    // ones so the plan_id indexes of the safe ones are preserved; workers
+    // must never ExecInitNode an unsafe subplan.
+    let mut subplans = ::types_nodes::list::OptNodeList::nil();
+    for subplan in leader.subplans.iter() {
+        let cell = subplan
+            .filter(|sp| sp.as_plan().expect("subplans cell is a plan tree").parallel_safe);
+        subplans.lappend(mcx, cell)?;
+    }
     let pstmt = PlannedStmt {
         commandType: CmdType::CMD_SELECT,
         queryId: leader.queryId,
@@ -296,7 +293,7 @@ fn build_worker_pstmt<'mcx>(
         permInfos: leader.permInfos.clone_in(mcx)?,
         resultRelations: ::types_nodes::list::IntList::nil(),
         appendRelations: NodeList::nil(),
-        subplans: leader.subplans.clone_in(mcx)?,
+        subplans,
         rewindPlanIDs: Bitmapset::empty(),
         rowMarks: NodeList::nil(),
         relationOids: ::types_nodes::list::OidList::nil(),

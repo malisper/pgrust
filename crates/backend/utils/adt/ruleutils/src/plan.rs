@@ -120,7 +120,7 @@ pub fn deparse_expression<'mcx>(
 pub(crate) fn set_deparse_plan<'mcx>(
     ps: &mut DpnsPlan<'mcx>,
     plan: Node<'mcx>,
-    subplans: Option<&'mcx NodeList<'mcx>>,
+    subplans: Option<&'mcx types_nodes::list::OptNodeList<'mcx>>,
 ) {
     ps.plan = Some(plan);
 
@@ -139,7 +139,9 @@ pub(crate) fn set_deparse_plan<'mcx>(
         Some(
             subplans
                 .expect("plan deparse context has subplans")
-                .nth(cs.ctePlanId as usize - 1),
+                .nth(cs.ctePlanId as usize - 1)
+                // CTE subplans are parallel-restricted; never a NULL hole.
+                .expect("CteScan subplan cell present"),
         )
     } else if let Some(mt) = plan.as_modify_table() {
         if mt.operation == CmdType::CMD_MERGE {
