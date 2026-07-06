@@ -14,6 +14,7 @@ const TRIGGER_OID_INDEX_ID: Oid = 2702;
 const Anum_pg_trigger_oid: AttrNumber = 1;
 const Anum_pg_trigger_tgrelid: AttrNumber = 2;
 const POLICY_RELATION_ID: Oid = 3256;
+const DEFAULT_ACL_RELATION_ID: Oid = 826;
 const TYPE_RELATION_ID: Oid = types_core::TYPE_RELATION_ID;
 const CONSTRAINT_RELATION_ID: Oid = 2606;
 const PROCEDURE_RELATION_ID: Oid = 1255;
@@ -160,7 +161,9 @@ fn obtain_object_name_namespace(
                 .map(|s| s.as_str().to_string());
             (Some(nsp), name)
         }
-        REWRITE_RELATION_ID => (None, None),
+        // ObjectProperty rows with no name/namespace attnums (objectaddress.c):
+        // C's obtain_object_name_namespace is a no-op for these classes.
+        REWRITE_RELATION_ID | DEFAULT_ACL_RELATION_ID => (None, None),
         other => match class_naming(other) {
             Some(naming) => syscache_naming(object.objectId, &naming)?,
             None => panic!(
