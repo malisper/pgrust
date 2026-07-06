@@ -2010,7 +2010,7 @@ fn merge_update_act<'mcx>(
             && !execpartition::exec_partition_check(mcx, &mut mt.rel_mut().partition_check, rel, slot)?
         {
             if mt.root.is_none() {
-                return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None));
+                return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None, None));
             }
             // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
             // performed outside this borrow scope.
@@ -2031,7 +2031,7 @@ fn merge_update_act<'mcx>(
 
         {
             let r = &mut mt.rels[mt.cur];
-            exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot)?;
+            exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, None)?;
         }
 
         tableam::table_tuple_update(
@@ -2767,7 +2767,7 @@ fn exec_update<'mcx>(
                     return Err(invalid_on_update_specification());
                 }
                 if mt.root.is_none() {
-                    return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None));
+                    return Err(execpartition::partition_constraint_violation(mcx, rel, slot, None, None));
                 }
                 // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
                 // performed outside this borrow scope.
@@ -2786,7 +2786,7 @@ fn exec_update<'mcx>(
             }
             {
                 let r = &mut mt.rels[mt.cur];
-                exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot)?;
+                exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, None)?;
             }
 
             tableam::table_tuple_update(
@@ -4242,7 +4242,7 @@ fn exec_insert<'mcx>(
         {
             let slot = &mut es_tupleTable[slot_id.0 as usize];
             if !execpartition::exec_partition_check(mcx, &mut r.partition_check, target, slot)? {
-                return Err(execpartition::partition_constraint_violation(mcx, target, slot, None));
+                return Err(execpartition::partition_constraint_violation(mcx, target, slot, None, None));
             }
         }
     }
@@ -4413,7 +4413,13 @@ fn exec_insert<'mcx>(
             exec_with_check_options(&mut r.wco_exprs, wco_kind, slot)?;
         }
 
-        exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot)?;
+        // ri_RootResultRelInfo: a routed leaf's constraint errors report
+        // the failing row in the root's rowtype (execMain.c).
+        let err_root_rel = match leaf_idx {
+            Some(_) => es_relations[(r.rti - 1) as usize].as_ref(),
+            None => None,
+        };
+        exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot, err_root_rel)?;
 
         // ExecInsert (nodeModifyTable.c): direct INSERTs into a partition
         // check the partition constraint; routed tuples re-check only when a
@@ -4421,7 +4427,8 @@ fn exec_insert<'mcx>(
         if rel.rd_rel.relispartition && (leaf_idx.is_none() || leaf_has_br_insert) {
             if !execpartition::exec_partition_check(mcx, pcheck, rel, slot)? {
                 // ExecGetInsertedCols/UpdatedCols via the target RTE's
-                // perminfo, remapped to the leaf's attnos (execUtils.c).
+                // perminfo, in the description rel's (root's) numbering
+                // (execUtils.c GetResultRTEPermissionInfo).
                 let mod_cols = {
                     let rte = target_rte;
                     let mut cols = types_nodes::Bitmapset::empty();
@@ -4434,16 +4441,14 @@ fn exec_insert<'mcx>(
                             cols = pi.insertedCols.union(&pi.updatedCols, mcx)?;
                         }
                     }
-                    match leaf_idx.and_then(|idx| router.as_ref().unwrap().leaf_attrmap(idx)) {
-                        Some(map) => execute_attr_map_cols(mcx, map, &cols)?,
-                        None => cols,
-                    }
+                    cols
                 };
                 return Err(execpartition::partition_constraint_violation(
                     mcx,
                     rel,
                     slot,
                     Some(&mod_cols),
+                    err_root_rel,
                 ));
             }
         }
@@ -4971,7 +4976,7 @@ fn exec_leaf_conflict_update<'mcx>(
             return Err(invalid_on_update_specification());
         }
 
-        exec_constraints(mcx, &mut leaf_checks[idx], &mut leaf_virtual_nn[idx], rel, slot)?;
+        exec_constraints(mcx, &mut leaf_checks[idx], &mut leaf_virtual_nn[idx], rel, slot, None)?;
 
         tableam::table_tuple_update(
             mcx,
@@ -5311,7 +5316,7 @@ fn view_wco_violation<'mcx>(
         "new row violates check option for view \"{relname}\""
     ))
     .with_sqlstate(types_error::ERRCODE_WITH_CHECK_OPTION_VIOLATION);
-    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+    if let Ok(desc) = slot_value_description(mcx, rel, slot, None) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)
@@ -5364,19 +5369,20 @@ pub fn exec_constraints<'mcx>(
     virtual_nn_exprs: &mut Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    root_rel: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
     if let Some(constr) = rel.rd_att.constr.as_deref() {
         if constr.has_not_null {
-            exec_not_null_constraints(mcx, rel, slot)?;
+            exec_not_null_constraints(mcx, rel, slot, root_rel)?;
             if constr.has_generated_virtual {
                 if let Some(i) = exec_rel_gen_virtual_notnull(mcx, virtual_nn_exprs, rel, slot)? {
-                    return Err(not_null_violation(mcx, rel, slot, i));
+                    return Err(not_null_violation(mcx, rel, slot, i, root_rel));
                 }
             }
         }
         if constr.num_check > 0 {
             if let Some(failed) = exec_rel_check(mcx, check_exprs, rel, slot)? {
-                return Err(check_violation(mcx, rel, slot, failed));
+                return Err(check_violation(mcx, rel, slot, failed, root_rel));
             }
         }
     }
@@ -5441,6 +5447,7 @@ fn exec_not_null_constraints<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    root_rel: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
     for i in 0..rel.rd_att.natts as usize {
         let att = rel.rd_att.attr(i);
@@ -5448,7 +5455,7 @@ fn exec_not_null_constraints<'mcx>(
             continue;
         }
         if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
-            return Err(not_null_violation(mcx, rel, slot, i));
+            return Err(not_null_violation(mcx, rel, slot, i, root_rel));
         }
     }
     Ok(())
@@ -5608,10 +5615,13 @@ pub fn exec_rel_gen_virtual_notnull<'mcx>(
 
 // ExecBuildSlotValueDescription (execMain.c), table-SELECT-permission arm
 // (single-superuser boot: column-ACL filtering and RLS are unreachable).
+// rev_map[rel_attno-1] = the slot's attno for that column: a routed leaf's
+// row reported in the root's rowtype (C converts the slot; we remap reads).
 fn slot_value_description<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    rev_map: Option<&[i16]>,
 ) -> PgResult<String> {
     const MAX_FIELD_LEN: usize = 64;
     exectuples::slot_getallattrs(slot);
@@ -5630,6 +5640,10 @@ fn slot_value_description<'mcx>(
             buf.push_str("virtual");
             continue;
         }
+        let i = match rev_map {
+            Some(map) => map[i] as usize - 1,
+            None => i,
+        };
         let base = slot.base();
         if base.tts_isnull[i] {
             buf.push_str("null");
@@ -5677,6 +5691,7 @@ fn not_null_violation<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     attidx: usize,
+    root_rel: Option<&Relation<'mcx>>,
 ) -> Box<PgError> {
     let att = rel.rd_att.attr(attidx);
     let col = String::from_utf8_lossy(att.attname.name_str()).into_owned();
@@ -5688,11 +5703,28 @@ fn not_null_violation<'mcx>(
     .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION)
     .with_schema_name(schema_name_of(mcx, rel))
     .with_table_name(table);
-    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+    if let Ok(desc) = root_slot_value_description(mcx, rel, slot, root_rel) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     e.column_name = Some(col);
     Box::new(e)
+}
+
+// ExecConstraints' ri_RootResultRelInfo leg: a routed leaf's failing row is
+// reported in the root's rowtype (execMain.c reverse attrmap).
+fn root_slot_value_description<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    root_rel: Option<&Relation<'mcx>>,
+) -> PgResult<String> {
+    match root_rel {
+        Some(root) if root.rd_id != rel.rd_id => {
+            let map = tupdesc::build_attrmap_by_name_if_req(mcx, &rel.rd_att, &root.rd_att, false)?;
+            slot_value_description(mcx, root, slot, map.as_deref())
+        }
+        _ => slot_value_description(mcx, rel, slot, None),
+    }
 }
 
 #[cold]
@@ -5702,6 +5734,7 @@ fn check_violation<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     failed: usize,
+    root_rel: Option<&Relation<'mcx>>,
 ) -> Box<PgError> {
     let constr = rel.rd_att.constr.as_deref().expect("has checks");
     let ccname = constr.check[failed]
@@ -5717,7 +5750,7 @@ fn check_violation<'mcx>(
     .with_schema_name(schema_name_of(mcx, rel))
     .with_table_name(table)
     .with_constraint_name(ccname);
-    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+    if let Ok(desc) = root_slot_value_description(mcx, rel, slot, root_rel) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)
