@@ -3810,6 +3810,19 @@ fn exec_process_returning<'mcx>(
         let st = mt.rel().project_returning.as_deref().expect("RETURNING projection built");
         (st.has_old(), st.has_new())
     };
+    // C runs pending initplans lazily inside ExecProject (ExecEvalParamExec);
+    // RETURNING-list $n params resolve here instead (execscan note).
+    {
+        let ModifyTableState { rels, cur, .. } = &*mt;
+        let deps = rels[*cur]
+            .project_returning
+            .as_deref()
+            .expect("RETURNING projection built")
+            .param_exec_deps();
+        if !deps.is_empty() {
+            executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
     let old_src = match old_id {
         Some(id) => Some(id),
         None if has_old => Some(exec_get_all_null_slot(mt, estate)?),
