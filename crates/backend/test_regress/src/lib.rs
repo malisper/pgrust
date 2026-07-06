@@ -356,8 +356,111 @@ fn fc_test_canonicalize_path(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
 
 /* ===================== make_tuple_indirect(record) ======================= */
 
-fn fc_make_tuple_indirect(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("regress: make_tuple_indirect requires the indirect-TOAST substrate (VARTAG_INDIRECT unported)");
+// Marker byte for a 1-byte-header "external" varlena (VARATT_IS_1B_E); this
+// codebase's varlena helpers assume little-endian throughout (see detoast.rs).
+const VARATT_EXTERNAL_MARKER: u8 = 0x01;
+
+#[inline]
+fn regress_is_external(b: &[u8]) -> bool {
+    b[0] == VARATT_EXTERNAL_MARKER
+}
+
+#[inline]
+fn regress_is_external_ondisk(b: &[u8]) -> bool {
+    regress_is_external(b) && b[1] == ::types_tuple::varatt::VARTAG_ONDISK
+}
+
+#[inline]
+fn regress_is_external_indirect(b: &[u8]) -> bool {
+    regress_is_external(b) && b[1] == ::types_tuple::varatt::VARTAG_INDIRECT
+}
+
+/// # Safety
+/// `d` carries a live varlena pointer readable for its full VARSIZE_ANY.
+unsafe fn regress_va_slice<'a>(d: Datum) -> &'a [u8] {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract.
+    unsafe {
+        let len = ::types_tuple::varatt::varsize_any(p);
+        core::slice::from_raw_parts(p, len)
+    }
+}
+
+fn fc_make_tuple_indirect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    // SAFETY: catalog arg 0 is a non-null composite datum (strict fn).
+    let raw = unsafe { fcinfo.arg_varlena_raw(0) };
+    let rec = detoast_seams::detoast_attr::call(mcx, raw)?;
+    debug_assert!(rec.len() >= ::types_tuple::SizeofHeapTupleHeader);
+    // SAFETY: detoasted composite image; header prefix is in bounds.
+    let hdr = unsafe { &*(rec.as_ptr() as *const ::types_tuple::HeapTupleHeaderData) };
+    let tup_type = hdr.type_id();
+    let tup_typmod = hdr.typmod();
+    let tupdesc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, tup_type, tup_typmod)?;
+    let ncolumns = tupdesc.natts as usize;
+
+    // SAFETY: MAXALIGN'd detoasted image of datum_length() == rec.len() bytes.
+    let tuple = unsafe {
+        ::types_tuple::HeapTupleData::from_raw_parts(
+            rec.as_ptr(),
+            hdr.datum_length(),
+            ::types_tuple::ItemPointerData::invalid(),
+            ::types_core::InvalidOid,
+        )
+    };
+
+    let mut values: ::mcx::PgVec<'_, Datum> =
+        ::mcx::vec_from_elem_in(mcx, Datum::null(), ncolumns);
+    let mut nulls: ::mcx::PgVec<'_, bool> = ::mcx::vec_from_elem_in(mcx, true, ncolumns);
+    ::types_tuple::heap_deform_tuple(&tuple, &tupdesc, &mut values, &mut nulls);
+
+    for i in 0..ncolumns {
+        let att = &tupdesc.attrs[i];
+        // only work on existing, not-null varlenas
+        if att.attisdropped
+            || nulls[i]
+            || att.attlen != -1
+            || att.attstorage == ::types_tuple::TYPSTORAGE_PLAIN
+        {
+            continue;
+        }
+
+        // SAFETY: non-null varlena datum produced by heap_deform_tuple.
+        let attr = unsafe { regress_va_slice(values[i]) };
+
+        // don't recursively indirect
+        if regress_is_external_indirect(attr) {
+            continue;
+        }
+
+        // copy datum, so it still lives later
+        let copy: ::mcx::PgVec<'_, u8> = if regress_is_external_ondisk(attr) {
+            detoast::detoast_external_attr(mcx, attr)?
+        } else {
+            let mut v = ::mcx::vec_with_capacity_in(mcx, attr.len())?;
+            ::mcx::vec_append_bytes(&mut v, attr)?;
+            v
+        };
+        let target_ptr = copy.leak().as_ptr() as usize;
+
+        // build indirection Datum: 1-byte-header external tag + a raw
+        // pointer to the copy (C's `struct varatt_indirect`).
+        let mut wrapper = [0u8; ::types_tuple::varatt::VARHDRSZ_EXTERNAL + 8];
+        wrapper[0] = VARATT_EXTERNAL_MARKER;
+        wrapper[1] = ::types_tuple::varatt::VARTAG_INDIRECT;
+        wrapper[::types_tuple::varatt::VARHDRSZ_EXTERNAL..].copy_from_slice(&target_ptr.to_ne_bytes());
+        let new_attr = byref_result(mcx, &wrapper)?;
+
+        values[i] = new_attr;
+    }
+
+    let newtup = ::heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    // Intentionally not flattened through the normal composite-result path
+    // (C's comment): returning t_data as-is keeps the indirect pointers live
+    // for later statements to exercise, matching regress.c's contract.
+    let t_data_ptr = newtup.header_ptr() as usize;
+    core::mem::forget(newtup);
+    Ok(Datum::from_usize(t_data_ptr))
 }
 
 /* ========================= get_environ() ================================= */

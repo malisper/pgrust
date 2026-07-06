@@ -30,6 +30,8 @@ relpath = { path = "../../common/relpath" }
 elog_seams = { path = "../utils/error/elog_seams" }
 typcache = { path = "../utils/cache/typcache" }
 detoast_seams = { path = "../access/common/detoast_seams" }
+detoast = { path = "../access/common/detoast" }
+heaptuple = { path = "../access/common/heaptuple" }
 catalog = { path = "../catalog/catalog" }
 init_small = { path = "../utils/init/init_small" }
 funcapi = { path = "../utils/fmgr/funcapi" }
