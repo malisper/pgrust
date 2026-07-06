@@ -6,16 +6,17 @@
 // detectNewRows, cross-type comparison casts, cross-collation initial-check
 // quals. Divergences: constraint-info cache has no syscache invalidation
 // callback (constraint rows are immutable in the ported DDL surface; DROP
-// removes the triggers that key into it), the violation DETAIL permission
-// check is the superuser fast path, and ri_PlanCheck/ri_PerformCheck skip
-// C's owner-uid switch (superuser fast path repo-wide).
+// removes the triggers that key into it) and the violation DETAIL permission
+// check is the superuser fast path.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use core::cell::RefCell;
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgHashMap, PgString, PgVec};
 use ri_triggers_seams::RiTriggerData;
-use types_core::{InvalidOid, Oid, INDEX_MAX_KEYS};
+use types_core::{
+    InvalidOid, Oid, INDEX_MAX_KEYS, SECURITY_LOCAL_USERID_CHANGE, SECURITY_NOFORCE_RLS,
+};
 use types_tuple::NameData;
 use types_error::{
     PgError, PgResult, ERRCODE_FOREIGN_KEY_VIOLATION, ERRCODE_RESTRICT_VIOLATION, ERROR,
@@ -27,6 +28,7 @@ use types_tuple::HeapTupleData;
 const RI_MAX_NUMKEYS: usize = INDEX_MAX_KEYS as usize;
 const RI_PLAN_CHECK_LOOKUPPK: i32 = 1;
 const RI_PLAN_CHECK_LOOKUPPK_FROM_PK: i32 = 2;
+const RI_PLAN_LAST_ON_PK: i32 = RI_PLAN_CHECK_LOOKUPPK_FROM_PK;
 const RI_PLAN_CASCADE_ONDELETE: i32 = 3;
 const RI_PLAN_CASCADE_ONUPDATE: i32 = 4;
 const RI_PLAN_NO_ACTION: i32 = 5;
@@ -233,7 +235,7 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
                 )?;
                 querybuf.try_push_str("(x1.r)")?;
             }
-            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey, &fk_rel, &pk_rel)?
         }
     };
 
@@ -267,6 +269,13 @@ fn ri_restrict<'mcx>(
     let fk_rel = table::table_open(mcx, riinfo.fk_relid, RowShareLock)?;
     let pk_rel = tgdata.tg_relation;
     let oldtup = tgdata.tg_trigtuple;
+
+    // trigger.c skips queuing PK-side RI triggers whose old key contains a
+    // NULL (RI_FKey_pk_upd_check_required); this port queues them, so the
+    // equivalent skip lives here — a NULL key cannot be referenced.
+    if ri_NullCheck(&pk_rel.rd_att, oldtup, &riinfo, true) != RI_KEYS_NONE_NULL {
+        return fk_rel.close(RowShareLock);
+    }
 
     // Temporal FKs fold replacement-row lookup into the main query below.
     if is_no_action
@@ -378,7 +387,7 @@ fn ri_restrict<'mcx>(
                 querybuf.try_push_str(", false)")?;
             }
             querybuf.try_push_str(" FOR KEY SHARE OF x")?;
-            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey, &fk_rel, &pk_rel)?
         }
     };
 
@@ -440,7 +449,7 @@ fn RI_FKey_cascade_del<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -
                 querysep = "AND";
                 queryoids[i] = pk_type;
             }
-            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey, &fk_rel, &pk_rel)?
         }
     };
 
@@ -510,7 +519,7 @@ fn RI_FKey_cascade_upd<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -
                 queryoids[j] = pk_type;
             }
             querybuf.try_push_str(qualbuf.as_str())?;
-            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys * 2], &qkey)?
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys * 2], &qkey, &fk_rel, &pk_rel)?
         }
     };
 
@@ -599,7 +608,7 @@ fn ri_set<'mcx>(
                 qualsep = "AND";
                 queryoids[i] = pk_type;
             }
-            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey, &fk_rel, &pk_rel)?
         }
     };
 
@@ -700,7 +709,7 @@ fn ri_Check_Pk_Match<'mcx>(
                 )?;
                 querybuf.try_push_str("(x1.r)")?;
             }
-            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey)?
+            ri_PlanCheck(querybuf.as_str(), &queryoids[..riinfo.nkeys], &qkey, &fk_rel, &pk_rel)?
         }
     };
 
@@ -1242,8 +1251,24 @@ fn ri_FetchPreparedPlan(key: &(Oid, i32)) -> Option<spi::SpiPlanPtr> {
 
 // ri_PlanCheck (ri_triggers.c). The C owner-uid switch is the superuser fast
 // path repo-wide; plan validity re-checks ride the plancache.
-fn ri_PlanCheck(querystr: &str, argtypes: &[Oid], key: &(Oid, i32)) -> PgResult<spi::SpiPlanPtr> {
-    let qplan = spi::SPI_prepare(querystr, argtypes)?;
+fn ri_PlanCheck(
+    querystr: &str,
+    argtypes: &[Oid],
+    key: &(Oid, i32),
+    fk_rel: &Relation<'_>,
+    pk_rel: &Relation<'_>,
+) -> PgResult<spi::SpiPlanPtr> {
+    // The query runs against the PK or FK table per the query type code; both
+    // plan and check execute as that table's owner.
+    let query_rel = if key.1 <= RI_PLAN_LAST_ON_PK { pk_rel } else { fk_rel };
+    let (_, save_sec_context) = miscinit::GetUserIdAndSecContext();
+    let guard = miscinit::SecContextGuard::set(
+        query_rel.rd_rel.relowner,
+        save_sec_context | SECURITY_LOCAL_USERID_CHANGE | SECURITY_NOFORCE_RLS,
+    );
+    let qplan = spi::SPI_prepare(querystr, argtypes);
+    guard.restore();
+    let qplan = qplan?;
     spi::SPI_keepplan(qplan);
     RI_QUERY_CACHE.with(|c| {
         let mut b = c.borrow_mut();
@@ -1303,6 +1328,12 @@ fn ri_PerformCheck<'mcx>(
     }
 
     let limit = if expect_ok == spi::SPI_OK_SELECT { 1 } else { 0 };
+    let query_rel = if qkey.1 <= RI_PLAN_LAST_ON_PK { pk_rel } else { fk_rel };
+    let (_, save_sec_context) = miscinit::GetUserIdAndSecContext();
+    let guard = miscinit::SecContextGuard::set(
+        query_rel.rd_rel.relowner,
+        save_sec_context | SECURITY_LOCAL_USERID_CHANGE | SECURITY_NOFORCE_RLS,
+    );
     let spi_result = spi::SPI_execute_snapshot(
         qplan,
         &vals[..nargs],
@@ -1312,7 +1343,9 @@ fn ri_PerformCheck<'mcx>(
         false,
         false,
         limit,
-    )?;
+    );
+    guard.restore();
+    let spi_result = spi_result?;
 
     if spi_result != expect_ok {
         panic!(
