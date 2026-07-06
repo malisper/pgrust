@@ -37,6 +37,9 @@ miscinit = { path = "../../utils/init/miscinit" }
 init_small = { path = "../../utils/init/init_small" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 xact = { path = "../../access/transam/xact" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+pg_database = { path = "../../catalog/pg_database" }
 types_scan = { path = "../../../_support/types/types_scan" }
 genam = { path = "../../access/index/genam" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }

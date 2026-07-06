@@ -422,6 +422,21 @@ pub fn LockSharedObject(
     Ok(())
 }
 
+pub fn ConditionalLockSharedObject(
+    classid: Oid,
+    objid: Oid,
+    objsubid: u16,
+    lockmode: LOCKMODE,
+) -> PgResult<bool> {
+    let tag = LOCKTAG::object(types_core::primitive::InvalidOid, classid, objid, objsubid);
+    let res = acquire(tag, lockmode, true)?;
+    if res == LOCKACQUIRE_NOT_AVAIL {
+        return Ok(false);
+    }
+    absorb_inval_and_clear(tag, lockmode, res)?;
+    Ok(true)
+}
+
 pub fn UnlockSharedObject(
     classid: Oid,
     objid: Oid,

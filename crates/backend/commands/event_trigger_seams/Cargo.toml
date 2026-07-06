@@ -11,3 +11,4 @@ seam_core = { path = "../../../_support/seam_core" }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 pg_depend = { path = "../../catalog/pg_depend" }
+types_nodes = { path = "../../../_support/types/nodes" }

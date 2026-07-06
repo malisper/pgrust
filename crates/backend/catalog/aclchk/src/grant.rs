@@ -379,8 +379,7 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
     exec_grant_stmt_oids(mcx, &mut istmt)
 }
 
-// ExecGrantStmt_oids (aclchk.c). EventTriggerCollectGrant is unported (the
-// utility dispatcher runs no event-trigger context yet).
+// ExecGrantStmt_oids (aclchk.c).
 fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>) -> PgResult<()> {
     match istmt.objtype {
         ObjectType::OBJECT_TABLE | ObjectType::OBJECT_SEQUENCE => exec_grant_relation(mcx, istmt),
@@ -406,7 +405,11 @@ fn exec_grant_stmt_oids<'mcx>(mcx: Mcx<'mcx>, istmt: &mut InternalGrant<'_, '_>)
             "ExecGrantStmt_oids (aclchk.c): objtype {} unported",
             other as i32
         ),
-    }
+    }?;
+
+    // C collects after execution so ExecGrant_* can adjust istmt first.
+    event_trigger_seams::event_trigger_collect_grant::call(istmt.is_grant, istmt.objtype);
+    Ok(())
 }
 
 // objectNamesToOids (aclchk.c) + the get_object_address arms it reaches

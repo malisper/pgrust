@@ -22,3 +22,19 @@ seam_core::seam!(
         normal: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // EventTriggerCollectGrant (event_trigger.c), including C's
+    // EventTriggerSupportsObjectType guard at the ExecGrantStmt_oids call
+    // site (aclchk.c:654-655).
+    pub fn event_trigger_collect_grant(
+        is_grant: bool,
+        objtype: types_nodes::parsenodes::ObjectType,
+    )
+);
+
+seam_core::seam!(
+    // EventTriggerOnLogin (event_trigger.c), called from PostgresMain
+    // (postgres.c:4369) below the crate graph's event_trigger node.
+    pub fn event_trigger_on_login<'mcx>(mcx: mcx::Mcx<'mcx>) -> PgResult<()>
+);

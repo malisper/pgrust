@@ -50,6 +50,9 @@ pub(crate) struct SQLDropObject {
 pub(crate) enum CollectedCommandData {
     Simple,
     AlterTable { class_id: Oid, object_id: Oid, nsubcmds: usize },
+    // C copies the whole InternalGrant; the ported SRF surface reads only
+    // is_grant (via tag) and objtype.
+    Grant { objtype: types_nodes::parsenodes::ObjectType },
 }
 
 // C stores copyObject(parsetree) and derives the tag lazily in the SRF; node
@@ -163,6 +166,7 @@ fn event_trigger_common_setup(
     mcx: Mcx<'_>,
     tag: CommandTag,
     event: EventTriggerEvent,
+    unfiltered: bool,
 ) -> PgResult<Vec<Oid>> {
     debug_assert!(match event {
         EventTriggerEvent::TableRewrite => cmdtag::command_tag_table_rewrite_ok(tag),
@@ -171,7 +175,7 @@ fn event_trigger_common_setup(
     let cachelist = EventCacheLookup(mcx, event)?;
     let mut runlist = Vec::new();
     for item in cachelist.iter() {
-        if filter_event_trigger(tag, item) {
+        if unfiltered || filter_event_trigger(tag, item) {
             runlist.push(item.fnoid);
         }
     }
@@ -216,7 +220,7 @@ pub fn EventTriggerDDLCommandStart(mcx: Mcx<'_>, tag: CommandTag) -> PgResult<()
     if !event_triggers_active() {
         return Ok(());
     }
-    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::DdlCommandStart)?;
+    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::DdlCommandStart, false)?;
     if runlist.is_empty() {
         return Ok(());
     }
@@ -234,7 +238,7 @@ pub fn EventTriggerDDLCommandEnd(mcx: Mcx<'_>, tag: CommandTag) -> PgResult<()> 
     if !state_is_set() {
         return Ok(());
     }
-    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::DdlCommandEnd)?;
+    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::DdlCommandEnd, false)?;
     if runlist.is_empty() {
         return Ok(());
     }
@@ -251,7 +255,7 @@ pub fn EventTriggerSQLDrop(mcx: Mcx<'_>, tag: CommandTag) -> PgResult<()> {
     if !have_drops {
         return Ok(());
     }
-    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::SqlDrop)?;
+    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::SqlDrop, false)?;
     if runlist.is_empty() {
         return Ok(());
     }
@@ -270,6 +274,95 @@ pub fn EventTriggerSQLDrop(mcx: Mcx<'_>, tag: CommandTag) -> PgResult<()> {
     res
 }
 
+// EventTriggerOnLogin (event_trigger.c): fires once during backend startup;
+// when no login trigger remains it opportunistically clears the stale
+// pg_database.dathasloginevt fast flag under a conditional custom lock.
+pub fn EventTriggerOnLogin(mcx: Mcx<'_>) -> PgResult<()> {
+    if !event_triggers_active()
+        || !OidIsValid(init_small::globals::MyDatabaseId())
+        || !init_small::globals::MyDatabaseHasLoginEventTriggers()
+    {
+        return Ok(());
+    }
+    let tag = cmdtag::GetCommandTagEnum(b"LOGIN");
+    xact::StartTransactionCommand()?;
+    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::Login, false)?;
+    if !runlist.is_empty() {
+        let snapshot = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snapshot)?;
+        EventTriggerInvoke(&runlist, "login", tag)?;
+        snapmgr::PopActiveSnapshot()?;
+    } else if lmgr::ConditionalLockSharedObject(
+        types_core::catalog::DATABASE_RELATION_ID,
+        init_small::globals::MyDatabaseId(),
+        0,
+        types_rel::AccessExclusiveLock,
+    )? {
+        // Under the lock a concurrent CREATE/ALTER sets the flag only after
+        // inserting the trigger, so an empty unfiltered list is conclusive.
+        let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::Login, true)?;
+        if runlist.is_empty() {
+            reset_database_has_login_event_triggers(mcx)?;
+        }
+    }
+    xact::CommitTransactionCommand()?;
+    Ok(())
+}
+
+// C: inplace update rather than a regular one — no row-lock wait, no TOAST.
+fn reset_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()> {
+    let dbid = init_small::globals::MyDatabaseId();
+    let pg_db =
+        table::table_open(mcx, types_core::catalog::DATABASE_RELATION_ID, types_rel::RowExclusiveLock)?;
+    let mut key = types_scan::ScanKeyData::empty();
+    key.sk_attno = pg_database::Anum_pg_database_oid as types_core::AttrNumber;
+    key.sk_strategy = types_scan::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)?;
+    key.sk_argument = datum::Datum::from_oid(dbid);
+    let Some((tuple, state)) = genam::systable_inplace_update_begin(
+        mcx,
+        &pg_db,
+        pg_database::DatabaseOidIndexId,
+        true,
+        &[key],
+    )?
+    else {
+        return Err(elog::ereport(types_error::ERROR)
+            .errmsg(format!("could not find tuple for database {dbid}"))
+            .into_error()
+            .into());
+    };
+    let descr = pg_db.descr();
+    let mut isnull = false;
+    // SAFETY: dathasloginevt is a fixed NOT NULL pg_database column.
+    let hasloginevt = unsafe {
+        types_tuple::heap_getattr(
+            tuple.as_tuple(),
+            pg_database::Anum_pg_database_dathasloginevt,
+            descr,
+            &mut isnull,
+        )
+    }
+    .as_bool();
+    if hasloginevt {
+        let natts = descr.natts as usize;
+        let mut values = vec![datum::Datum::null(); natts];
+        let mut nulls = vec![false; natts];
+        let mut replace = vec![false; natts];
+        values[pg_database::Anum_pg_database_dathasloginevt as usize - 1] =
+            datum::Datum::from_bool(false);
+        replace[pg_database::Anum_pg_database_dathasloginevt as usize - 1] = true;
+        let newtup =
+            heaptuple::heap_modify_tuple(mcx, tuple.as_tuple(), descr, &values, &nulls, &replace)?;
+        genam::systable_inplace_update_finish(mcx, state, newtup.as_tuple())?;
+    } else {
+        genam::systable_inplace_update_cancel(mcx, state)?;
+    }
+    pg_db.close(types_rel::RowExclusiveLock)?;
+    Ok(())
+}
+
 pub fn EventTriggerTableRewrite(
     mcx: Mcx<'_>,
     tag: CommandTag,
@@ -282,7 +375,7 @@ pub fn EventTriggerTableRewrite(
     if !state_is_set() {
         return Ok(());
     }
-    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::TableRewrite)?;
+    let runlist = event_trigger_common_setup(mcx, tag, EventTriggerEvent::TableRewrite, false)?;
     if runlist.is_empty() {
         return Ok(());
     }
@@ -361,6 +454,26 @@ pub fn EventTriggerCollectSimpleCommand(
                 address,
                 secondary_object,
                 data: CollectedCommandData::Simple,
+            });
+        }
+    });
+}
+
+// EventTriggerCollectGrant (event_trigger.c), with the ExecGrantStmt_oids
+// call-site guard EventTriggerSupportsObjectType (aclchk.c:654) folded in.
+pub fn EventTriggerCollectGrant(is_grant: bool, objtype: types_nodes::parsenodes::ObjectType) {
+    if !EventTriggerSupportsObjectType(objtype) || !collecting() {
+        return;
+    }
+    let tag = cmdtag::GetCommandTagEnum(if is_grant { b"GRANT" } else { b"REVOKE" });
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            st.command_list.push(CollectedCommand {
+                in_extension: creating_extension(),
+                tag,
+                address: ObjectAddress::set(InvalidOid, InvalidOid),
+                secondary_object: ObjectAddress::set(InvalidOid, InvalidOid),
+                data: CollectedCommandData::Grant { objtype },
             });
         }
     });
@@ -477,6 +590,8 @@ pub fn init_seams() {
     event_trigger_seams::event_trigger_sql_drop_add_object::set(
         sqldrop::EventTriggerSQLDropAddObject,
     );
+    event_trigger_seams::event_trigger_collect_grant::set(EventTriggerCollectGrant);
+    event_trigger_seams::event_trigger_on_login::set(EventTriggerOnLogin);
     fmgr_core::register_late_builtins(srf::EVENT_TRIGGER_BUILTINS);
 
     guc_tables::vars::event_triggers.install(guc_tables::GucVarAccessors {
