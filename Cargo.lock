@@ -8141,6 +8141,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "postgres_seams",
+ "syscache_seams",
  "tuplesort",
  "types_error",
  "types_nbtree",
