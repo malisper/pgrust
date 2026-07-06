@@ -48,15 +48,27 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
 
 // Top-level flat copy with sub-structure zapped; alias/eref stay by ref.
 fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
+    add_rtes_to_flat_rtable_recursing(run, false)
+}
+
+// C's `recursing` mode keeps only relation RTEs (and former relations);
+// live subqueries flatten through the SubqueryScan plan walk instead.
+fn add_rtes_to_flat_rtable_recursing(run: &mut PlannerRun<'_>, recursing: bool) -> PgResult<()> {
     let parse = run.parse();
     for rte_node in &parse.rtable {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        add_rte_to_flat_rtable(run, &parse.rteperminfos, rte)?;
+        if !recursing
+            || rte.rtekind == RTEKind::RTE_RELATION
+            || (rte.rtekind == RTEKind::RTE_SUBQUERY && rte.relid != 0)
+        {
+            add_rte_to_flat_rtable(run, &parse.rteperminfos, rte)?;
+        }
     }
-    // C's dead-subquery pass: planned subqueries not referenced by the plan
-    // tree must contribute their RTEs anyway. Live setop leaves are always
-    // scanned; a subquery rel without a subroot means it was never planned —
-    // flatten its relation RTEs so the executor still checks permissions.
+    // C's dead-subquery pass: subqueries not referenced by the plan tree must
+    // contribute their RTEs anyway so the executor still checks permissions.
+    // No subroot = never planned (self-contradictory constraints); a subroot
+    // whose FINAL rel is dummy planned to nothing and never gets a
+    // SubqueryScan walk.
     for (i, rte_node) in parse.rtable.iter().enumerate() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         let rti = (i + 1) as i32;
@@ -65,14 +77,29 @@ fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
             && rti < run.root.simple_rel_array_size
         {
             if let Some(rel) = run.root.simple_rel_array[rti as usize] {
-                if run.root.rel(rel).subroot_idx.is_none() {
-                    let subquery =
-                        rte.subquery.expect("unplanned subquery RTE keeps its Query");
-                    flatten_unplanned_rtes(run, subquery)?;
+                match run.root.rel(rel).subroot_idx {
+                    None => {
+                        let subquery =
+                            rte.subquery.expect("unplanned subquery RTE keeps its Query");
+                        flatten_unplanned_rtes(run, subquery)?;
+                    }
+                    Some(idx) => {
+                        run.swap_with_rel_subroot(idx);
+                        let final_rel = crate::relnode::fetch_upper_rel(
+                            &mut run.root,
+                            types_pathnodes::UPPERREL_FINAL,
+                        );
+                        let r = if recursing
+                            || crate::joinrels::is_dummy_rel(&run.root, final_rel)
+                        {
+                            add_rtes_to_flat_rtable_recursing(run, true)
+                        } else {
+                            Ok(())
+                        };
+                        run.swap_with_rel_subroot(idx);
+                        r?;
+                    }
                 }
-                // IS_DUMMY_REL recursion arm: dummy children still surface as
-                // SubqueryScan(Result) plans here, so their rtables flatten
-                // through the plan walk.
             }
         }
     }

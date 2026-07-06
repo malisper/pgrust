@@ -440,8 +440,9 @@ fn permission_denied(relid: ::types_core::Oid) -> PgResult<()> {
     aclchk_seams::aclcheck_error::call(1, objtype as i32, name)
 }
 
-/// `ExecCheckOneRelPerms` (execMain.c).
-fn exec_check_one_rel_perms(pi: &RTEPermissionInfo<'_>) -> PgResult<bool> {
+/// `ExecCheckOneRelPerms` (execMain.c). Exported for subquery_planner's
+/// planner-startup view permission check.
+pub fn exec_check_one_rel_perms(pi: &RTEPermissionInfo<'_>) -> PgResult<bool> {
     use types_nodes::parsenodes::ACL_UPDATE;
     const FIRST_LOW_INVALID_HEAP_ATTNUM: i32 = -7;
 
