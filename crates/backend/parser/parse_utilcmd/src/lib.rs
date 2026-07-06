@@ -1318,6 +1318,43 @@ fn transformColumnDefinition<'mcx>(
         let colname = column.colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
+    // Per-column FDW options become a post-create ALTER FOREIGN TABLE ALTER
+    // COLUMN ... OPTIONS statement (parse_utilcmd.c:1008-1033).
+    if !column.fdwoptions.is_nil() {
+        use types_nodes::parsenodes::{
+            AlterTableCmd, AlterTableStmt, AlterTableType, DropBehavior, ObjectType,
+        };
+        let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
+        cmd.subtype = AlterTableType::AT_AlterColumnGenericOptions;
+        cmd.name = column.colname;
+        let mut opts = NodeList::nil();
+        for o in column.fdwoptions.iter() {
+            opts.lappend(mcx, o)?;
+        }
+        cmd.def = Some(Node::mk_list(mcx, opts)?);
+        cmd.behavior = DropBehavior::DROP_RESTRICT;
+        cmd.missing_ok = false;
+        let mut cmds = NodeList::nil();
+        cmds.lappend(mcx, cmd.seal())?;
+        let rv = Node::mk_mut(
+            mcx,
+            RangeVar {
+                catalogname: relation.catalogname,
+                schemaname: relation.schemaname,
+                relname: relation.relname,
+                inh: relation.inh,
+                relpersistence: relation.relpersistence,
+                alias: relation.alias,
+                location: relation.location,
+            },
+        )?
+        .seal_ref();
+        let mut stmt = Node::build::<AlterTableStmt>(mcx)?;
+        stmt.relation = Some(rv);
+        stmt.cmds = cmds;
+        stmt.objtype = ObjectType::OBJECT_FOREIGN_TABLE;
+        cxt.alist.lappend(mcx, stmt.seal())?;
+    }
     // Typed-table/partition column options carry no typeName; C skips
     // transformColumnType for them (parse_utilcmd.c:1055).
     let Some(tn_node) = column.typeName else {
@@ -3024,6 +3061,24 @@ pub fn transformAlterTableCmd<'mcx>(
             let c = defnode
                 .as_variant::<types_nodes::rawnodes::Constraint>()
                 .expect("Constraint");
+            // transformTableConstraint isforeign guards
+            // (parse_utilcmd.c:1043-1090).
+            if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                let what = match c.contype {
+                    types_nodes::rawnodes::ConstrType::CONSTR_PRIMARY => Some("primary key"),
+                    types_nodes::rawnodes::ConstrType::CONSTR_UNIQUE => Some("unique"),
+                    types_nodes::rawnodes::ConstrType::CONSTR_EXCLUSION => Some("exclusion"),
+                    types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN => Some("foreign key"),
+                    _ => None,
+                };
+                if let Some(what) = what {
+                    return Err(not_supported_on_foreign_tables(
+                        what,
+                        Some(query_string),
+                        c.location,
+                    ));
+                }
+            }
             match c.contype {
                 types_nodes::rawnodes::ConstrType::CONSTR_CHECK
                 | types_nodes::rawnodes::ConstrType::CONSTR_FOREIGN

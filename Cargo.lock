@@ -6611,6 +6611,7 @@ dependencies = [
  "parser_small1",
  "partcache",
  "partdesc",
+ "pg_class_seams",
  "pg_constraint",
  "pg_depend",
  "pg_inherits",
