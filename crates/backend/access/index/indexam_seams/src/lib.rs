@@ -48,6 +48,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // get_func_rettype (lsyscache.c): gistrescan resolves the ordering
+    // operator's result type (so->orderByTypes) from the scankey's fn_oid;
+    // syscache lives above the AM layer.
+    pub fn get_func_rettype(funcid: Oid) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     // GetIndexInputType's expression-column arm (spgutils.c):
     // getBaseType(exprType(<indexcol's entry in rd_indexprs>)). Implemented
     // by catalog_index (RelationGetIndexExpressions + exprType live above

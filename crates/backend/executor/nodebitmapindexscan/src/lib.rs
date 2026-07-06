@@ -50,8 +50,15 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
     // C divergence: isshared only picks the dsa allocator for biss_result;
     // thread-native builds a plain arena bitmap and freezes it at
     // tbm_prepare_shared_iterate, so no arm is needed here.
-    let (biss_ScanKeys, runtime_keys) =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, estate.param_bind())?;
+    let mut runtime_keys = ::mcx::PgVec::new_in(mcx);
+    let biss_ScanKeys = exec_index_build_scan_keys(
+        mcx,
+        &index_rel,
+        &node.indexqual,
+        estate.param_bind(),
+        false,
+        &mut runtime_keys,
+    )?;
     let biss_Runtime = if runtime_keys.is_empty() {
         None
     } else {
@@ -141,7 +148,7 @@ pub fn exec_rescan_bitmap_index_scan<'mcx>(
 ) -> PgResult<()> {
     if let Some(rt) = node.biss_Runtime.as_deref_mut() {
         estate.reset_expr_context(rt.ecxt);
-        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.biss_ScanKeys)?;
+        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.biss_ScanKeys, &mut [])?;
         rt.ready = true;
     }
     if let Some(scandesc) = node.biss_ScanDesc.as_deref_mut() {

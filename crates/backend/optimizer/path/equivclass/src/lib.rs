@@ -316,7 +316,7 @@ fn add_eq_member<'mcx>(
 
 // setup_eclass_member_iterator + eclass_member_iterator_next (equivclass.c),
 // flattened: all parent members plus child members stored under relids' rels.
-fn ec_members_for_relids<'mcx>(
+pub fn ec_members_for_relids<'mcx>(
     run: &PlannerRun<'mcx>,
     ec: EcId,
     relids: &Relids<'mcx>,

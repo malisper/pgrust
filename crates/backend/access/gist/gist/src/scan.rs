@@ -29,10 +29,6 @@ pub fn gistbeginscan<'mcx>(
     nkeys: i32,
     norderbys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    if norderbys > 0 {
-        panic!("unported: gist ordered (KNN) scans (distance/pairing-heap lane)");
-    }
-
     let mut giststate = initGISTstate(mcx, r)?;
     // gistscan.c:180-203 (in C, lazily under gistrescan's xs_want_itup arm;
     // rescan here has no mcx, so the divergent-type descriptor is built at
@@ -65,6 +61,13 @@ pub fn gistbeginscan<'mcx>(
         ),
         qual_ok: true,
         firstCall: true,
+        // gistscan.c:99-107: distance workspace sized to norderbys.
+        distances: vec![
+            ::types_gist::state::IndexOrderByDistance::default();
+            norderbys.max(0) as usize
+        ],
+        orderByTypes: Vec::new(),
+        cur_recontup: None,
         killedItems: None,
         numKilled: 0,
         curBlkno: InvalidBlockNumber,
@@ -93,10 +96,6 @@ pub fn gistrescan(
     key: Option<&[ScanKeyData]>,
     orderbys: Option<&[ScanKeyData]>,
 ) -> PgResult<()> {
-    if orderbys.is_some_and(|o| !o.is_empty()) || scan.numberOfOrderBys > 0 {
-        panic!("unported: gist ordered (KNN) scans (distance/pairing-heap lane)");
-    }
-
     let index_rel = scan.indexRelation.as_ref().expect("index scan parked (skeleton)").alias();
     let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
         crate::non_gist_opaque()
@@ -104,6 +103,7 @@ pub fn gistrescan(
 
     // queue reuse replaces C's scanCxt/queueCxt dance: reset + reuse slots.
     so.queue.reset();
+    so.cur_recontup = None;
 
     if scan.xs_want_itup {
         // Storage types == opcintypes: the index descriptor IS C's built
@@ -163,6 +163,48 @@ pub fn gistrescan(
             skey.sk_func.fn_nargs = src.fn_nargs;
             skey.sk_func.fn_strict = src.fn_strict;
             skey.sk_func.fn_retset = src.fn_retset;
+        }
+    }
+
+    // gistscan.c:279-341: swap the ordering operator's fn for the opclass
+    // Distance method; sk_strategy/sk_subtype carry the operator identity.
+    // orderByTypes records the ordering operator's result type before the
+    // swap — getNextNearest converts the float8 distances to it.
+    if let Some(orderbys) = orderbys.filter(|_| scan.numberOfOrderBys > 0) {
+        debug_assert!(orderbys.len() == scan.numberOfOrderBys as usize);
+        let mut fn_extras: Vec<Option<::types_fmgr::FnExtra>> = scan
+            .orderByData
+            .iter_mut()
+            .map(|k| k.sk_func.fn_extra.take())
+            .collect();
+
+        so.orderByTypes.clear();
+        scan.orderByData.clear();
+        for (i, k) in orderbys.iter().enumerate() {
+            let finfo = fmgr_info_copy(&so.giststate.distanceFn[k.sk_attno as usize - 1]);
+            if finfo.fn_oid == 0 {
+                return Err(Box::new(::types_error::PgError::error(format!(
+                    "missing support function {} for attribute {} of index \"{}\"",
+                    ::types_gist::GIST_DISTANCE_PROC,
+                    k.sk_attno,
+                    index_rel.name(),
+                ))));
+            }
+            so.orderByTypes
+                .push(indexam_seams::get_func_rettype::call(k.sk_func.fn_oid)?);
+            let mut skey = ScanKeyData {
+                sk_flags: k.sk_flags,
+                sk_attno: k.sk_attno,
+                sk_strategy: k.sk_strategy,
+                sk_subtype: k.sk_subtype,
+                sk_collation: k.sk_collation,
+                sk_func: finfo,
+                sk_argument: k.sk_argument,
+            };
+            if let Some(extra) = fn_extras.get_mut(i).and_then(|e| e.take()) {
+                skey.sk_func.fn_extra = Some(extra);
+            }
+            scan.orderByData.push(skey);
         }
     }
 

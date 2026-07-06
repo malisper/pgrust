@@ -174,7 +174,10 @@ pub fn get_relation_info<'mcx>(
             // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers);
             // a partitioned index has no AM (C NULLifies these fields).
             if !is_partitioned_index {
-                info.amcanorderbyop = am_is_gist || am_is_spgist;
+                // C: gist || spgist. SP-GiST held back until its ordered
+                // amrescan lands (spgist scan.rs KNN lane) — advertising it
+                // here would route ORDER BY <-> into that loud panic.
+                info.amcanorderbyop = am_is_gist;
                 info.amoptionalkey =
                     am_is_btree || am_is_gin || am_is_gist || am_is_spgist || am_is_brin;
                 info.amsearcharray = am_is_btree;

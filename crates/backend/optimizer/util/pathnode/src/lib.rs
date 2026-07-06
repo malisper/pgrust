@@ -1506,12 +1506,14 @@ pub fn create_bitmap_heap_path<'mcx>(
     Ok(id)
 }
 
-// create_index_path (pathnode.c); indexorderbys loud upstream.
+// create_index_path (pathnode.c).
 #[allow(clippy::too_many_arguments)]
 pub fn create_index_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     index: &'mcx IndexOptInfo<'mcx>,
     indexclauses: PgVec<'mcx, IndexClause<'mcx>>,
+    indexorderbys: PgVec<'mcx, types_pathnodes::NodeId>,
+    indexorderbycols: PgVec<'mcx, i32>,
     pathkeys: PgVec<'mcx, PathKey>,
     indexscandir: ScanDirection,
     indexonly: bool,
@@ -1526,13 +1528,12 @@ pub fn create_index_path<'mcx>(
     path.param_info = param_info;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.pathkeys = pathkeys;
-    let mcx = run.mcx;
     let node = IndexPath {
         path,
         indexinfo: Some(index),
         indexclauses,
-        indexorderbys: PgVec::new_in(mcx),
-        indexorderbycols: PgVec::new_in(mcx),
+        indexorderbys,
+        indexorderbycols,
         indexscandir,
         indextotalcost: 0.0,
         indexselectivity: 0.0,

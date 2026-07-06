@@ -37,6 +37,9 @@ pub struct IndexOnlyScanState<'mcx> {
     pub ioss_ScanDesc: Option<PgBox<'mcx, IndexScanDescData<'mcx>>>,
     pub ioss_RelationDesc: Option<Relation<'mcx>>,
     pub ioss_ScanKeys: PgVec<'mcx, ScanKeyData>,
+    // amcanorderbyop scans: the AM returns tuples in distance order; IOS has
+    // no reorder queue (lossy distances are an error below).
+    pub ioss_OrderByKeys: PgVec<'mcx, ScanKeyData>,
     pub ioss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
     pub ioss_TableSlot: ExecSlotId,
     pub ioss_OrderDir: ScanDirection,
@@ -162,9 +165,12 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
                 if !passes {
                     continue;
                 }
-                if scandesc.numberOfOrderBys > 0 {
-                    lossy_distance_unported();
-                }
+            }
+
+            // C nodeIndexonlyscan.c:237: rechecking ORDER BY distances is
+            // unsupported in index-only scans.
+            if scandesc.numberOfOrderBys > 0 && scandesc.xs_recheckorderby {
+                return Err(lossy_distance_error());
             }
 
             // Index-only predicate locks are page-level: the tuple-level lock
@@ -199,11 +205,15 @@ impl<'mcx> IndexOnlyScanState<'mcx> {
             self.ioss_RelationDesc.as_ref().expect("index relation open"),
             snapshot,
             self.ioss_ScanKeys.len() as i32,
-            0,
+            self.ioss_OrderByKeys.len() as i32,
         )?;
         scandesc.xs_want_itup = true;
         if self.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
-            index_rescan(&mut scandesc, Some(&self.ioss_ScanKeys), None)?;
+            index_rescan(
+                &mut scandesc,
+                Some(&self.ioss_ScanKeys),
+                Some(&self.ioss_OrderByKeys),
+            )?;
         }
         // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
         self.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
@@ -301,10 +311,10 @@ fn no_data_returned() -> Box<PgError> {
 
 #[cold]
 #[inline(never)]
-fn lossy_distance_unported() -> ! {
-    panic!(
-        "nodeindexonlyscan: lossy distance recheck ereport (0A000) not ported \
-         (indexorderby lane loud-panics at init)"
+fn lossy_distance_error() -> Box<PgError> {
+    Box::new(
+        PgError::error("lossy distance functions are not supported in index-only scans")
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
     )
 }
 
@@ -452,12 +462,12 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
     })?;
     let recheckqual = exec_init_qual(mcx, &node.recheckqual, params)?;
 
-    if !node.indexorderby.is_nil() {
-        orderby_unported();
-    }
-
-    let (ioss_ScanKeys, runtime_keys) =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
+    let mut runtime_keys = PgVec::new_in(mcx);
+    let ioss_ScanKeys =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys)?;
+    // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
+    let ioss_OrderByKeys =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys)?;
     let ioss_Runtime = if runtime_keys.is_empty() {
         None
     } else {
@@ -479,6 +489,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_IndexOid: index_rel.rd_id,
         ioss_RelationDesc: Some(index_rel),
         ioss_ScanKeys,
+        ioss_OrderByKeys,
         ioss_Runtime,
         ioss_TableSlot,
         ioss_OrderDir: order_dir(node.indexorderdir),
@@ -514,12 +525,6 @@ fn order_dir(dir: i32) -> ScanDirection {
         1 => ScanDirection::ForwardScanDirection,
         other => panic!("invalid indexorderdir {other}"),
     }
-}
-
-#[cold]
-#[inline(never)]
-fn orderby_unported() -> ! {
-    panic!("nodeindexonlyscan: indexorderby (amcanorderbyop lane) not ported")
 }
 
 /// Executor-skeleton park: release everything per-run (VM buffer, pins/heap
@@ -586,6 +591,7 @@ pub fn exec_end_index_only_scan(node: &mut IndexOnlyScanState<'_>) -> PgResult<(
     }
     node.recheckqual = None;
     node.ioss_ScanKeys.clear();
+    node.ioss_OrderByKeys.clear();
     node.ioss_Runtime = None;
     Ok(())
 }
@@ -597,17 +603,24 @@ pub fn exec_rescan_index_only_scan<'mcx>(
 ) -> PgResult<()> {
     if let Some(rt) = node.ioss_Runtime.as_deref_mut() {
         estate.reset_expr_context(rt.ecxt);
-        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.ioss_ScanKeys)?;
+        exec_index_eval_runtime_keys(
+            estate,
+            rt.ecxt,
+            &mut rt.keys,
+            &mut node.ioss_ScanKeys,
+            &mut node.ioss_OrderByKeys,
+        )?;
         rt.ready = true;
     }
     let IndexOnlyScanState {
         ioss_ScanDesc,
         ioss_ScanKeys,
+        ioss_OrderByKeys,
         ss,
         ..
     } = node;
     if let Some(scandesc) = ioss_ScanDesc.as_deref_mut() {
-        index_rescan(scandesc, Some(ioss_ScanKeys), None)?;
+        index_rescan(scandesc, Some(ioss_ScanKeys), Some(ioss_OrderByKeys))?;
     }
     execscan::exec_scan_rescan(ss, estate);
     Ok(())
@@ -658,12 +671,16 @@ pub fn exec_index_only_scan_initialize_dsm<'mcx>(
         heap,
         index,
         node.ioss_ScanKeys.len() as i32,
-        0,
+        node.ioss_OrderByKeys.len() as i32,
         std::sync::Arc::clone(&pscan),
     )?;
     scandesc.xs_want_itup = true;
     if node.ioss_Runtime.as_deref().is_none_or(|r| r.ready) {
-        index_rescan(&mut scandesc, Some(&node.ioss_ScanKeys), None)?;
+        index_rescan(
+            &mut scandesc,
+            Some(&node.ioss_ScanKeys),
+            Some(&node.ioss_OrderByKeys),
+        )?;
     }
     debug_assert!(node.ioss_ScanDesc.is_none());
     node.ioss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
@@ -697,7 +714,7 @@ pub fn exec_index_only_scan_initialize_worker<'mcx>(
         heap,
         index,
         node.ioss_ScanKeys.len() as i32,
-        0,
+        node.ioss_OrderByKeys.len() as i32,
         pscan,
     )?;
     scandesc.xs_want_itup = true;
@@ -715,5 +732,6 @@ const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
     IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware, ioss_IndexOid;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
-        ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir, ioss_VMBuffer },
+        ioss_OrderByKeys, ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir,
+        ioss_VMBuffer },
 );

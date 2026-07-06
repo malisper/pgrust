@@ -1345,6 +1345,7 @@ pub fn init_seams() {
     catalog_index_seams::index_build_dummy::set(index_build_dummy);
     indexam_seams::relation_get_index_att_options::set(relation_get_index_att_options);
     indexam_seams::index_expression_input_type::set(index_expression_input_type);
+    indexam_seams::get_func_rettype::set(lsyscache::get_func_rettype);
 }
 
 // GetIndexInputType's expression-column arm (spgutils.c):
