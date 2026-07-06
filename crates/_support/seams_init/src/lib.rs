@@ -16,6 +16,7 @@ pub fn init_all() {
     commands_analyze::init_seams();
     commands_tablespace::init_seams();
     sequence::init_seams();
+    pg_constraint::init_seams();
     extension::init_seams();
     clog::init_seams();
     commit_ts::init_seams();
