@@ -99,7 +99,12 @@ pub fn select_rtable_names_for_explain<'mcx>(
         .map(|n| n.as_range_tbl_entry().expect("rtable entry"))
         .collect();
     let mut dpns = DeparseNamespace::empty(rt);
-    query::set_rtable_names(mcx, &mut dpns, &[], Some(rels_used))?;
+    // C's rels_used is NULL when no plan node referenced any RTE (an empty
+    // Bitmapset has no representation), and set_rtable_names treats NULL as
+    // "no filter": every RTE keeps its name (scanless plans, e.g. a dummy
+    // join under GroupAggregate, still deparse qualified Vars).
+    let rels_used = if rels_used.is_empty() { None } else { Some(rels_used) };
+    query::set_rtable_names(mcx, &mut dpns, &[], rels_used)?;
     Ok(std::mem::take(&mut dpns.rtable_names))
 }
 
