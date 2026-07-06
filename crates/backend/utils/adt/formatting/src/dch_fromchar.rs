@@ -1,6 +1,5 @@
 //! DCH_from_char consumer + DCH_datetime_type (formatting.c:3165-3831).
-//! C-locale English names only; `TM`/localized names loudly panic (the locale
-//! subsystem is unported here).
+//! `TM` matches against the cache_locale_time localized names.
 
 use ::mcx::Mcx;
 use ::types_core::{InvalidOid, Oid};
@@ -22,10 +21,6 @@ fn errsave(escontext: Option<&mut SoftErrorContext>, err: PgError) -> PgResult<(
 
 fn pg_mblen_cstr(s: &[u8]) -> i32 {
     mbutils::pg_mblen_range(s).unwrap_or(s.len() as i32)
-}
-
-fn tm_panic() -> ! {
-    panic!("DCH TM/localized month-day names (cache_locale_time) not ported")
 }
 
 /// C: `TmFromChar` (formatting.c:440). `abbrev` is inline (max TOKMAXLEN
@@ -115,6 +110,8 @@ pub fn dch_from_char<'mcx>(
     std: bool,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<bool> {
+    // C: cache localized days and months (formatting.c:3178).
+    let localized = pg_locale::cache_locale_time(mcx)?;
     let mut fx_mode = std;
     let mut extra_skip: i32 = 0;
 
@@ -435,16 +432,18 @@ pub fn dch_from_char<'mcx>(
                 }
             }
             DCH_MONTH | DCH_MONTH_CAP | DCH_MONTH_LOWER => {
-                if s_tm(suffix) {
-                    tm_panic();
-                }
+                let localized_arr = if s_tm(suffix) {
+                    Some(localized.full_months.as_slice())
+                } else {
+                    None
+                };
                 let mut value = 0;
                 if !from_char_seq_search(
                     mcx,
                     &mut value,
                     &mut cur,
                     &MONTHS_FULL,
-                    None,
+                    localized_arr,
                     collid,
                     node_name,
                     escontext.as_deref_mut(),
@@ -456,16 +455,18 @@ pub fn dch_from_char<'mcx>(
                 }
             }
             DCH_MON | DCH_MON_CAP | DCH_MON_LOWER => {
-                if s_tm(suffix) {
-                    tm_panic();
-                }
+                let localized_arr = if s_tm(suffix) {
+                    Some(localized.abbrev_months.as_slice())
+                } else {
+                    None
+                };
                 let mut value = 0;
                 if !from_char_seq_search(
                     mcx,
                     &mut value,
                     &mut cur,
                     &MONTHS,
-                    None,
+                    localized_arr,
                     collid,
                     node_name,
                     escontext.as_deref_mut(),
@@ -484,16 +485,18 @@ pub fn dch_from_char<'mcx>(
                 skip_thth(&mut cur, suffix);
             }
             DCH_DAY | DCH_DAY_CAP | DCH_DAY_LOWER => {
-                if s_tm(suffix) {
-                    tm_panic();
-                }
+                let localized_arr = if s_tm(suffix) {
+                    Some(localized.full_days.as_slice())
+                } else {
+                    None
+                };
                 let mut value = 0;
                 if !from_char_seq_search(
                     mcx,
                     &mut value,
                     &mut cur,
                     &DAYS,
-                    None,
+                    localized_arr,
                     collid,
                     node_name,
                     escontext.as_deref_mut(),
@@ -506,16 +509,18 @@ pub fn dch_from_char<'mcx>(
                 out.d += 1;
             }
             DCH_DY | DCH_DY_CAP | DCH_DY_LOWER => {
-                if s_tm(suffix) {
-                    tm_panic();
-                }
+                let localized_arr = if s_tm(suffix) {
+                    Some(localized.abbrev_days.as_slice())
+                } else {
+                    None
+                };
                 let mut value = 0;
                 if !from_char_seq_search(
                     mcx,
                     &mut value,
                     &mut cur,
                     &DAYS_SHORT,
-                    None,
+                    localized_arr,
                     collid,
                     node_name,
                     escontext.as_deref_mut(),

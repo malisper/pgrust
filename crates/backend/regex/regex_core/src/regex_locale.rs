@@ -6,37 +6,32 @@ use ::types_core::{Oid, PgWChar, C_COLLATION_OID, OidIsValid};
 use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INDETERMINATE_COLLATION};
 
-use ::pg_locale::{COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
+use ::pg_locale::{PgLocale, WcClass, COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
 use mbutils_seams as mb_seams;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegexWcClass {
-    Digit, Alpha, Alnum, Upper, Lower, Graph, Print, Punct, Space,
-}
 
 #[cold]
 #[inline(never)]
-fn regex_wc_isclass_nonc(strategy: PgLocaleStrategy, class: RegexWcClass, c: PgWChar) -> bool {
+fn regex_wc_isclass_nonc(strategy: PgLocaleStrategy, class: WcClass, c: PgWChar) -> bool {
     panic!(
         "regex: wc-ctype probe {class:?} for c={c} under {strategy:?} not ported \
-         (pg_locale wc-ctype surface: regc_pg_locale.c BUILTIN/LIBC/ICU arms)"
+         (pg_locale wc-ctype surface: regc_pg_locale.c BUILTIN/ICU arms)"
     );
 }
 
 // Builtin provider ctype: unicode_category.c pg_u_is* over the codepoint,
 // posix-restricted per regc_pg_locale.c's `!casemap_full` convention.
-fn regex_wc_isclass_builtin(class: RegexWcClass, c: PgWChar, posix: bool) -> bool {
+fn regex_wc_isclass_builtin(class: WcClass, c: PgWChar, posix: bool) -> bool {
     let code = c as u32;
     match class {
-        RegexWcClass::Digit => unicode_category::pg_u_isdigit(code, posix),
-        RegexWcClass::Alpha => unicode_category::pg_u_isalpha(code),
-        RegexWcClass::Alnum => unicode_category::pg_u_isalnum(code, posix),
-        RegexWcClass::Upper => unicode_category::pg_u_isupper(code),
-        RegexWcClass::Lower => unicode_category::pg_u_islower(code),
-        RegexWcClass::Graph => unicode_category::pg_u_isgraph(code),
-        RegexWcClass::Print => unicode_category::pg_u_isprint(code),
-        RegexWcClass::Punct => unicode_category::pg_u_ispunct(code, posix),
-        RegexWcClass::Space => unicode_category::pg_u_isspace(code),
+        WcClass::Digit => unicode_category::pg_u_isdigit(code, posix),
+        WcClass::Alpha => unicode_category::pg_u_isalpha(code),
+        WcClass::Alnum => unicode_category::pg_u_isalnum(code, posix),
+        WcClass::Upper => unicode_category::pg_u_isupper(code),
+        WcClass::Lower => unicode_category::pg_u_islower(code),
+        WcClass::Graph => unicode_category::pg_u_isgraph(code),
+        WcClass::Print => unicode_category::pg_u_isprint(code),
+        WcClass::Punct => unicode_category::pg_u_ispunct(code, posix),
+        WcClass::Space => unicode_category::pg_u_isspace(code),
     }
 }
 
@@ -46,7 +41,7 @@ fn regex_wc_tocase_nonc(strategy: PgLocaleStrategy, upper: bool, c: PgWChar) -> 
     let which = if upper { "toupper" } else { "tolower" };
     panic!(
         "regex: wc-{which} for c={c} under {strategy:?} not ported \
-         (pg_locale wc-case surface: regc_pg_locale.c BUILTIN/LIBC/ICU arms)"
+         (pg_locale wc-case surface: regc_pg_locale.c BUILTIN/ICU arms)"
     );
 }
 
@@ -73,6 +68,9 @@ struct RegexLocaleState {
     is_default: bool,
     // Builtin only: pg_u_isdigit/isalnum/ispunct's posix arg is !casemap_full.
     builtin_posix: bool,
+    // C's pg_regex_locale: collation-cache entry pointer, live for the
+    // Builtin/LibcWide/Libc1Byte/Icu strategies.
+    locale: Option<&'static PgLocale>,
 }
 
 thread_local! {
@@ -82,6 +80,7 @@ thread_local! {
             collation: 0, // InvalidOid
             is_default: false,
             builtin_posix: false,
+            locale: None,
         })
     };
 }
@@ -178,6 +177,7 @@ pub fn pg_set_regex_collation<'mcx>(mcx: Mcx<'mcx>, collation: Oid) -> PgResult<
     let mut is_default = false;
     let mut builtin_posix = false;
     let mut active_collation = collation;
+    let mut active_locale: Option<&'static PgLocale> = None;
 
     if !OidIsValid(collation) {
         return Err(PgError::error(
@@ -204,20 +204,22 @@ pub fn pg_set_regex_collation<'mcx>(mcx: Mcx<'mcx>, collation: Oid) -> PgResult<
         if locale.ctype_is_c {
             strategy = PgLocaleStrategy::C;
             active_collation = 0; // locale = 0
-        } else if locale.provider == COLLPROVIDER_BUILTIN {
-            debug_assert_eq!(mb_seams::get_database_encoding::call(), PG_UTF8);
-            strategy = PgLocaleStrategy::Builtin;
-            is_default = locale.is_default;
-            builtin_posix = !locale.builtin_casemap_full;
-        } else if locale.provider == COLLPROVIDER_ICU {
-            strategy = PgLocaleStrategy::Icu;
-            is_default = locale.is_default;
         } else {
-            debug_assert_eq!(locale.provider, COLLPROVIDER_LIBC);
-            if mb_seams::get_database_encoding::call() == PG_UTF8 {
-                strategy = PgLocaleStrategy::LibcWide;
+            // C's pg_regex_locale assignment (regc_pg_locale.c).
+            active_locale = Some(locale);
+            if locale.provider == COLLPROVIDER_BUILTIN {
+                debug_assert_eq!(mb_seams::get_database_encoding::call(), PG_UTF8);
+                strategy = PgLocaleStrategy::Builtin;
+                builtin_posix = !locale.builtin_casemap_full;
+            } else if locale.provider == COLLPROVIDER_ICU {
+                strategy = PgLocaleStrategy::Icu;
             } else {
-                strategy = PgLocaleStrategy::Libc1Byte;
+                debug_assert_eq!(locale.provider, COLLPROVIDER_LIBC);
+                if mb_seams::get_database_encoding::call() == PG_UTF8 {
+                    strategy = PgLocaleStrategy::LibcWide;
+                } else {
+                    strategy = PgLocaleStrategy::Libc1Byte;
+                }
             }
             is_default = locale.is_default;
         }
@@ -229,35 +231,40 @@ pub fn pg_set_regex_collation<'mcx>(mcx: Mcx<'mcx>, collation: Oid) -> PgResult<
             collation: active_collation,
             is_default,
             builtin_posix,
+            locale: if matches!(strategy, PgLocaleStrategy::C) {
+                None
+            } else {
+                active_locale
+            },
         })
     });
     Ok(())
 }
 
 #[inline]
-fn pg_wc_isclass(c: PgWChar, c_bit: u8, class: RegexWcClass) -> bool {
+fn pg_wc_isclass(c: PgWChar, c_bit: u8, class: WcClass) -> bool {
     let st = regex_locale_state();
     match st.strategy {
         PgLocaleStrategy::C => c <= 127 && (PG_CHAR_PROPERTIES[c as usize] & c_bit) != 0,
         PgLocaleStrategy::Builtin => regex_wc_isclass_builtin(class, c, st.builtin_posix),
-        strat @ (PgLocaleStrategy::LibcWide
-        | PgLocaleStrategy::Libc1Byte
-        | PgLocaleStrategy::Icu) => {
+        PgLocaleStrategy::LibcWide => st.locale.unwrap().wc_isclass_wide(c, class),
+        PgLocaleStrategy::Libc1Byte => st.locale.unwrap().wc_isclass_1byte(c, class),
+        strat @ PgLocaleStrategy::Icu => {
             regex_wc_isclass_nonc(strat, class, c)
         }
     }
 }
 
 pub fn pg_wc_isdigit(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISDIGIT, RegexWcClass::Digit)
+    pg_wc_isclass(c, PG_ISDIGIT, WcClass::Digit)
 }
 
 pub fn pg_wc_isalpha(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISALPHA, RegexWcClass::Alpha)
+    pg_wc_isclass(c, PG_ISALPHA, WcClass::Alpha)
 }
 
 pub fn pg_wc_isalnum(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISALNUM, RegexWcClass::Alnum)
+    pg_wc_isclass(c, PG_ISALNUM, WcClass::Alnum)
 }
 
 pub fn pg_wc_isword(c: PgWChar) -> bool {
@@ -268,27 +275,27 @@ pub fn pg_wc_isword(c: PgWChar) -> bool {
 }
 
 pub fn pg_wc_isupper(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISUPPER, RegexWcClass::Upper)
+    pg_wc_isclass(c, PG_ISUPPER, WcClass::Upper)
 }
 
 pub fn pg_wc_islower(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISLOWER, RegexWcClass::Lower)
+    pg_wc_isclass(c, PG_ISLOWER, WcClass::Lower)
 }
 
 pub fn pg_wc_isgraph(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISGRAPH, RegexWcClass::Graph)
+    pg_wc_isclass(c, PG_ISGRAPH, WcClass::Graph)
 }
 
 pub fn pg_wc_isprint(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISPRINT, RegexWcClass::Print)
+    pg_wc_isclass(c, PG_ISPRINT, WcClass::Print)
 }
 
 pub fn pg_wc_ispunct(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISPUNCT, RegexWcClass::Punct)
+    pg_wc_isclass(c, PG_ISPUNCT, WcClass::Punct)
 }
 
 pub fn pg_wc_isspace(c: PgWChar) -> bool {
-    pg_wc_isclass(c, PG_ISSPACE, RegexWcClass::Space)
+    pg_wc_isclass(c, PG_ISSPACE, WcClass::Space)
 }
 
 pub fn pg_wc_toupper(c: PgWChar) -> PgWChar {
@@ -301,11 +308,18 @@ pub fn pg_wc_toupper(c: PgWChar) -> PgWChar {
                 c
             }
         }
-        strat @ (PgLocaleStrategy::LibcWide | PgLocaleStrategy::Libc1Byte) => {
+        PgLocaleStrategy::LibcWide => {
             if st.is_default && c <= 127 {
                 pg_ascii_toupper(c as u8) as PgWChar
             } else {
-                regex_wc_tocase_nonc(strat, true, c)
+                st.locale.unwrap().wc_toupper_wide(c)
+            }
+        }
+        PgLocaleStrategy::Libc1Byte => {
+            if st.is_default && c <= 127 {
+                pg_ascii_toupper(c as u8) as PgWChar
+            } else {
+                st.locale.unwrap().wc_toupper_1byte(c)
             }
         }
         PgLocaleStrategy::Builtin => unicode_case::unicode_uppercase_simple(c as u32) as PgWChar,
@@ -323,11 +337,18 @@ pub fn pg_wc_tolower(c: PgWChar) -> PgWChar {
                 c
             }
         }
-        strat @ (PgLocaleStrategy::LibcWide | PgLocaleStrategy::Libc1Byte) => {
+        PgLocaleStrategy::LibcWide => {
             if st.is_default && c <= 127 {
                 pg_ascii_tolower(c as u8) as PgWChar
             } else {
-                regex_wc_tocase_nonc(strat, false, c)
+                st.locale.unwrap().wc_tolower_wide(c)
+            }
+        }
+        PgLocaleStrategy::Libc1Byte => {
+            if st.is_default && c <= 127 {
+                pg_ascii_tolower(c as u8) as PgWChar
+            } else {
+                st.locale.unwrap().wc_tolower_1byte(c)
             }
         }
         PgLocaleStrategy::Builtin => unicode_case::unicode_lowercase_simple(c as u32) as PgWChar,

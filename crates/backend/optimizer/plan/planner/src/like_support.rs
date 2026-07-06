@@ -242,15 +242,16 @@ fn pattern_fixed_prefix<'mcx>(
     }
 }
 
-// pattern_char_isalpha (like_support.c); only the ctype_is_c and
-// multibyte-highbit arms are live on this substrate.
+// pattern_char_isalpha (like_support.c:1493).
 fn pattern_char_isalpha(c: u8, is_multibyte: bool, locale: &pg_locale::PgLocale) -> bool {
     if locale.ctype_is_c {
         c.is_ascii_alphabetic()
     } else if is_multibyte && c >= 0x80 {
         true
+    } else if locale.provider != pg_locale::COLLPROVIDER_LIBC {
+        c >= 0x80 || c.is_ascii_alphabetic()
     } else {
-        panic!("pattern_char_isalpha (like_support.c): locale-aware ctype; C-collation lane only");
+        locale.isalpha_l(c)
     }
 }
 

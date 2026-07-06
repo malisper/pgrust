@@ -81,7 +81,7 @@ pub fn fc_timestamp_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         return Ok(fcinfo.return_null());
     }
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(dch_entry::timestamp_to_char(mcx, ts, fmt.data())?))
+    Ok(varlena_result(dch_entry::timestamp_to_char(mcx, fcinfo.fncollation, ts, fmt.data())?))
 }
 
 pub fn fc_timestamptz_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -92,21 +92,21 @@ pub fn fc_timestamptz_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         return Ok(fcinfo.return_null());
     }
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(dch_entry::timestamptz_to_char(mcx, ts, fmt.data())?))
+    Ok(varlena_result(dch_entry::timestamptz_to_char(mcx, fcinfo.fncollation, ts, fmt.data())?))
 }
 
 pub fn fc_to_timestamp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null text varlenas.
     let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
-    Ok(Datum::from_i64(dch_entry::to_timestamp(mcx, val.data(), fmt.data())?))
+    Ok(Datum::from_i64(dch_entry::to_timestamp(mcx, fcinfo.fncollation, val.data(), fmt.data())?))
 }
 
 pub fn fc_to_date(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: strict fn — args 0/1 are non-null text varlenas.
     let (val, fmt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let mcx = fcinfo.result_mcx();
-    Ok(Datum::from_i32(dch_entry::to_date(mcx, val.data(), fmt.data())?))
+    Ok(Datum::from_i32(dch_entry::to_date(mcx, fcinfo.fncollation, val.data(), fmt.data())?))
 }
 
 pub fn fc_interval_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -127,7 +127,7 @@ pub fn fc_interval_to_char(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
         return Ok(fcinfo.return_null());
     }
     let mcx = fcinfo.result_mcx();
-    Ok(varlena_result(dch_entry::interval_to_char(mcx, &it, fmt.data())?))
+    Ok(varlena_result(dch_entry::interval_to_char(mcx, fcinfo.fncollation, &it, fmt.data())?))
 }
 
 const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
