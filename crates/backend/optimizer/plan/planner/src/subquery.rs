@@ -63,22 +63,26 @@ pub fn subquery_planner<'mcx>(
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
     }
-    // preprocess_function_rtes (prepjointree.c) itself loops the rtable and
-    // no-ops without an RTE_FUNCTION entry, so skipping the call here when
-    // none exists is semantics-preserving.
-    if parse
-        .rtable
-        .iter()
-        .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_FUNCTION)
-    {
+    // One scan feeds both triggers: preprocess_function_rtes (prepjointree.c)
+    // loops the rtable and no-ops without an RTE_FUNCTION entry, so gating the
+    // call is semantics-preserving; it never mutates rtekind, so the pull-up
+    // trigger computed pre-call matches main's post-call scan.
+    let mut has_function_rte = false;
+    let mut has_pullup_rte = false;
+    for n in &parse.rtable {
+        match n.as_range_tbl_entry().expect("rtable cell").rtekind {
+            RTEKind::RTE_FUNCTION => {
+                has_function_rte = true;
+                has_pullup_rte = true;
+            }
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES => has_pullup_rte = true,
+            _ => {}
+        }
+    }
+    if has_function_rte {
         crate::prepjointree::preprocess_function_rtes(run, &mut parse)?;
     }
-    if parse.rtable.iter().any(|n| {
-        matches!(
-            n.as_range_tbl_entry().expect("rtable cell").rtekind,
-            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
-        )
-    }) {
+    if has_pullup_rte {
         crate::prepjointree::pull_up_subqueries(run, &mut parse)?;
     }
     if parse.setOperations.is_some() {
