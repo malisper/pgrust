@@ -5,8 +5,19 @@ use guc_tables::{vars, GucVarAccessors};
 use types_error::PgResult;
 
 static SHARED_PRELOAD_LIBRARIES: RwLock<Option<String>> = RwLock::new(None);
-static SESSION_PRELOAD_LIBRARIES: RwLock<Option<String>> = RwLock::new(None);
-static LOCAL_PRELOAD_LIBRARIES: RwLock<Option<String>> = RwLock::new(None);
+
+guc_tables::session_guc_string!(
+    SESSION_PRELOAD_LIBRARIES,
+    session_preload_libraries_string_get,
+    session_preload_libraries_string_set,
+    Some("")
+);
+guc_tables::session_guc_string!(
+    LOCAL_PRELOAD_LIBRARIES,
+    local_preload_libraries_string_get,
+    local_preload_libraries_string_set,
+    Some("")
+);
 
 thread_local! {
     static IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
@@ -48,11 +59,11 @@ pub fn process_shared_preload_libraries_done() -> bool {
 
 pub fn process_session_preload_libraries() -> PgResult<()> {
     load_libraries(
-        string_get(&SESSION_PRELOAD_LIBRARIES).as_deref(),
+        session_preload_libraries_string_get().as_deref(),
         "session_preload_libraries",
     );
     load_libraries(
-        string_get(&LOCAL_PRELOAD_LIBRARIES).as_deref(),
+        local_preload_libraries_string_get().as_deref(),
         "local_preload_libraries",
     );
     Ok(())
@@ -72,11 +83,11 @@ pub(crate) fn install_preload_guc_vars() {
         set: |v| *SHARED_PRELOAD_LIBRARIES.write().unwrap() = v,
     });
     vars::session_preload_libraries_string.install(GucVarAccessors {
-        get: || string_get(&SESSION_PRELOAD_LIBRARIES),
-        set: |v| *SESSION_PRELOAD_LIBRARIES.write().unwrap() = v,
+        get: session_preload_libraries_string_get,
+        set: session_preload_libraries_string_set,
     });
     vars::local_preload_libraries_string.install(GucVarAccessors {
-        get: || string_get(&LOCAL_PRELOAD_LIBRARIES),
-        set: |v| *LOCAL_PRELOAD_LIBRARIES.write().unwrap() = v,
+        get: local_preload_libraries_string_get,
+        set: local_preload_libraries_string_set,
     });
 }

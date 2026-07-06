@@ -81,41 +81,7 @@ const PGJIT_DEFORM: i32 = 1 << 4;
 
 // GUC backing this crate reads (double-install panics flag future homes).
 pub mod gucs {
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-
-    macro_rules! real_guc {
-        ($cell:ident, $get:ident, $set:ident, $boot:expr) => {
-            static $cell: AtomicU64 = AtomicU64::new(($boot as f64).to_bits());
-            pub fn $get() -> f64 {
-                f64::from_bits($cell.load(Ordering::Relaxed))
-            }
-            pub fn $set(v: f64) {
-                $cell.store(v.to_bits(), Ordering::Relaxed);
-            }
-        };
-    }
-    macro_rules! int_guc {
-        ($cell:ident, $get:ident, $set:ident, $boot:expr) => {
-            static $cell: AtomicI32 = AtomicI32::new($boot);
-            pub fn $get() -> i32 {
-                $cell.load(Ordering::Relaxed)
-            }
-            pub fn $set(v: i32) {
-                $cell.store(v, Ordering::Relaxed);
-            }
-        };
-    }
-    macro_rules! bool_guc {
-        ($cell:ident, $get:ident, $set:ident, $boot:expr) => {
-            static $cell: AtomicBool = AtomicBool::new($boot);
-            pub fn $get() -> bool {
-                $cell.load(Ordering::Relaxed)
-            }
-            pub fn $set(v: bool) {
-                $cell.store(v, Ordering::Relaxed);
-            }
-        };
-    }
+    use guc_tables::{session_guc_bool as bool_guc, session_guc_int as int_guc, session_guc_real as real_guc};
 
     pub use ::costsize::gucs::*;
     real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);

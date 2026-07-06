@@ -782,14 +782,19 @@ pub fn pgstat_clear_backend_status_snapshot() {
 
 // The two GUCs backend_status.c owns; C static initializers, overwritten by
 // GUC boot values.
-static TRACK_ACTIVITIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+guc_tables::session_guc_bool!(
+    TRACK_ACTIVITIES,
+    pgstat_track_activities_backing,
+    set_pgstat_track_activities_backing,
+    false
+);
 static TRACK_ACTIVITY_QUERY_SIZE: AtomicI32 = AtomicI32::new(1024);
 
 pub fn init_seams() {
     use backend_status_seams as s;
     guc_tables::vars::pgstat_track_activities.install(guc_tables::GucVarAccessors {
-        get: || TRACK_ACTIVITIES.load(Relaxed),
-        set: |v| TRACK_ACTIVITIES.store(v, Relaxed),
+        get: pgstat_track_activities_backing,
+        set: set_pgstat_track_activities_backing,
     });
     guc_tables::vars::pgstat_track_activity_query_size.install(guc_tables::GucVarAccessors {
         get: || TRACK_ACTIVITY_QUERY_SIZE.load(Relaxed),

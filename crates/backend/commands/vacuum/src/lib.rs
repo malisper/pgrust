@@ -1207,14 +1207,13 @@ fn vac_truncate_clog(
 }
 
 macro_rules! vacuum_guc_int {
-    ($($cell:ident, $var:ident, $boot:expr;)+) => {
-        $( static $cell: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new($boot); )+
+    ($($cell:ident, $get:ident, $set:ident, $var:ident, $boot:expr;)+) => {
+        $( guc_tables::session_guc_int!($cell, $get, $set, $boot); )+
         fn install_guc_ints() {
-            use std::sync::atomic::Ordering::Relaxed;
             $(
                 guc_tables::vars::$var.install(guc_tables::GucVarAccessors {
-                    get: || $cell.load(Relaxed),
-                    set: |v| $cell.store(v, Relaxed),
+                    get: $get,
+                    set: $set,
                 });
             )+
         }
@@ -1222,35 +1221,42 @@ macro_rules! vacuum_guc_int {
 }
 
 vacuum_guc_int! {
-    VACUUM_FREEZE_MIN_AGE, vacuum_freeze_min_age, 50000000;
-    VACUUM_FREEZE_TABLE_AGE, vacuum_freeze_table_age, 150000000;
-    VACUUM_MXID_FREEZE_MIN_AGE, vacuum_multixact_freeze_min_age, 5000000;
-    VACUUM_MXID_FREEZE_TABLE_AGE, vacuum_multixact_freeze_table_age, 150000000;
-    VACUUM_FAILSAFE_AGE, vacuum_failsafe_age, 1600000000;
-    VACUUM_MXID_FAILSAFE_AGE, vacuum_multixact_failsafe_age, 1600000000;
+    VACUUM_FREEZE_MIN_AGE, vacuum_freeze_min_age_guc, set_vacuum_freeze_min_age_guc, vacuum_freeze_min_age, 50000000;
+    VACUUM_FREEZE_TABLE_AGE, vacuum_freeze_table_age_guc, set_vacuum_freeze_table_age_guc, vacuum_freeze_table_age, 150000000;
+    VACUUM_MXID_FREEZE_MIN_AGE, vacuum_multixact_freeze_min_age_guc, set_vacuum_multixact_freeze_min_age_guc, vacuum_multixact_freeze_min_age, 5000000;
+    VACUUM_MXID_FREEZE_TABLE_AGE, vacuum_multixact_freeze_table_age_guc, set_vacuum_multixact_freeze_table_age_guc, vacuum_multixact_freeze_table_age, 150000000;
+    VACUUM_FAILSAFE_AGE, vacuum_failsafe_age_guc, set_vacuum_failsafe_age_guc, vacuum_failsafe_age, 1600000000;
+    VACUUM_MXID_FAILSAFE_AGE, vacuum_multixact_failsafe_age_guc, set_vacuum_multixact_failsafe_age_guc, vacuum_multixact_failsafe_age, 1600000000;
 }
 
-static VACUUM_TRUNCATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+guc_tables::session_guc_bool!(VACUUM_TRUNCATE, vacuum_truncate_guc, set_vacuum_truncate_guc, true);
 // C home: vacuum.c `bool track_cost_delay_timing`.
-static TRACK_COST_DELAY_TIMING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0.03f64.to_bits());
+guc_tables::session_guc_bool!(
+    TRACK_COST_DELAY_TIMING,
+    track_cost_delay_timing_guc,
+    set_track_cost_delay_timing_guc,
+    false
+);
+guc_tables::session_guc_real!(
+    VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE,
+    vacuum_max_eager_freeze_failure_rate_guc,
+    set_vacuum_max_eager_freeze_failure_rate_guc,
+    0.03
+);
 
 pub fn init_seams() {
-    use std::sync::atomic::Ordering::Relaxed;
     install_guc_ints();
     guc_tables::vars::vacuum_truncate.install(guc_tables::GucVarAccessors {
-        get: || VACUUM_TRUNCATE.load(Relaxed),
-        set: |v| VACUUM_TRUNCATE.store(v, Relaxed),
+        get: vacuum_truncate_guc,
+        set: set_vacuum_truncate_guc,
     });
     guc_tables::vars::vacuum_max_eager_freeze_failure_rate.install(guc_tables::GucVarAccessors {
-        get: || f64::from_bits(VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE.load(Relaxed)),
-        set: |v| VACUUM_MAX_EAGER_FREEZE_FAILURE_RATE.store(v.to_bits(), Relaxed),
+        get: vacuum_max_eager_freeze_failure_rate_guc,
+        set: set_vacuum_max_eager_freeze_failure_rate_guc,
     });
     guc_tables::vars::track_cost_delay_timing.install(guc_tables::GucVarAccessors {
-        get: || TRACK_COST_DELAY_TIMING.load(Relaxed),
-        set: |v| TRACK_COST_DELAY_TIMING.store(v, Relaxed),
+        get: track_cost_delay_timing_guc,
+        set: set_track_cost_delay_timing_guc,
     });
     // Fixture tests pre-install a relstats sink (no pg_class there); keep it.
     if !vacuum_seams::vac_update_relstats::is_installed() {
