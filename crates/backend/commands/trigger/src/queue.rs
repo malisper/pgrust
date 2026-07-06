@@ -12,7 +12,7 @@ use types_core::{CommandId, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_nodes::nodes_enums::CmdType;
 use types_portal::TuplestoreHandle;
-use types_rel::{NoLock, Relation};
+use types_rel::{NoLock, Relation, RELKIND_PARTITIONED_TABLE};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
 use types_trigger::{
     Trigger, TriggerDesc, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED, RI_TRIGGER_FK,
@@ -47,6 +47,10 @@ struct AfterTriggerEvent {
     firing_id: CommandId,
     // C ats_table: index into this depth's TRANS_TABLES entry; MAX = none.
     table_idx: u32,
+    // C AFTER_TRIGGER_CP_UPDATE ate_src_part/ate_dst_part: the leaf partitions
+    // ctid1/ctid2 point into for a cross-partition update event on the root.
+    src_part: Oid,
+    dst_part: Oid,
 }
 
 pub(crate) struct TransTable {
@@ -329,7 +333,8 @@ pub fn AfterTriggerPendingOnRel(relid: Oid) -> bool {
     })
 }
 
-fn ri_trigger_kind(tgfoid: Oid) -> i32 {
+// RI_FKey_trigger_type (ri_triggers.c).
+pub fn ri_trigger_kind(tgfoid: Oid) -> i32 {
     match tgfoid {
         F_RI_FKEY_CASCADE_DEL..=F_RI_FKEY_SETDEFAULT_UPD
         | F_RI_FKEY_NOACTION_DEL
@@ -400,6 +405,8 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
                         relid: ev.relid,
                         firing_id: 0,
                         table_idx: ev.table_idx,
+                        src_part: ev.src_part,
+                        dst_part: ev.dst_part,
                     });
                     ev.flags |= AFTER_TRIGGER_DONE;
                 }
@@ -431,16 +438,20 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
             while i < evs.len() {
                 let ev = &evs[i];
                 if ev.flags & AFTER_TRIGGER_IN_PROGRESS != 0 && ev.firing_id == firing_id {
-                    return Some((ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx));
+                    return Some((
+                        ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx,
+                        ev.src_part, ev.dst_part,
+                    ));
                 }
                 i += 1;
             }
             None
         });
-        let Some((ctid1, ctid2, event, tgoid, relid, table_idx)) = next else {
+        let Some((ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part)) = next
+        else {
             break;
         };
-        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid, table_idx)?;
+        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part)?;
         with_list(sel, |evs| {
             let ev = &mut evs[i];
             ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
@@ -664,6 +675,7 @@ pub(crate) fn fire_now_immediate() -> PgResult<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn AfterTriggerExecute<'mcx>(
     mcx: Mcx<'mcx>,
     ctid1: ItemPointerData,
@@ -672,6 +684,8 @@ fn AfterTriggerExecute<'mcx>(
     tgoid: Oid,
     relid: Oid,
     table_idx: u32,
+    src_part: Oid,
+    dst_part: Oid,
 ) -> PgResult<()> {
     let Some(trigdesc) = relcache::RelationGetTriggerDesc(relid)? else {
         return Ok(());
@@ -716,8 +730,21 @@ fn AfterTriggerExecute<'mcx>(
         return result;
     }
 
+    // C AFTER_TRIGGER_CP_UPDATE: the two ctids live in the source/destination
+    // leaf partitions, not in rel (the root); fetch from those. The caller
+    // vetted the leaves as attno-identical to the root, so the tuples are
+    // already in the root's format (C converts via ExecGetChildToRootMap).
+    let cp_rels = if src_part != Oid::default() {
+        Some((table::table_open(mcx, src_part, NoLock)?, table::table_open(mcx, dst_part, NoLock)?))
+    } else {
+        None
+    };
+    let (fetch1_rel, fetch2_rel) = match &cp_rels {
+        Some((s, d)) => (s, d),
+        None => (&rel, &rel),
+    };
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
-    let r1 = heapam::heap_fetch(&rel, &snap, ctid1, false)?;
+    let r1 = heapam::heap_fetch(fetch1_rel, &snap, ctid1, false)?;
     if !r1.found {
         return Err(fetch_failed(1));
     }
@@ -725,7 +752,7 @@ fn AfterTriggerExecute<'mcx>(
     let is_update = event & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_UPDATE;
     let r2;
     let mut t2 = if is_update {
-        r2 = heapam::heap_fetch(&rel, &snap, ctid2, false)?;
+        r2 = heapam::heap_fetch(fetch2_rel, &snap, ctid2, false)?;
         if !r2.found {
             return Err(fetch_failed(2));
         }
@@ -758,6 +785,10 @@ fn AfterTriggerExecute<'mcx>(
         };
         ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data)
     };
+    if let Some((s, d)) = cp_rels {
+        s.close(NoLock)?;
+        d.close(NoLock)?;
+    }
     rel.close(NoLock)?;
     result
 }
@@ -786,12 +817,18 @@ fn after_trigger_save_event<'mcx>(
     recheck_indexes: &[Oid],
     transition_capture: Option<&TransitionCaptureState>,
     mut when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    // C is_crosspart_update: a DELETE on the source partition of a row
+    // movement, or the UPDATE queued on the root by
+    // ExecCrossPartitionUpdateForeignKey (cp_parts = source/dest leaf oids).
+    is_crosspart_update: bool,
+    cp_parts: Option<(Oid, Oid)>,
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
         return Err(outside_query());
     }
     let d = depth as usize;
+    let partitioned = rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE;
     for (tgindx, trigger) in trigdesc.triggers.iter().enumerate() {
         if !trigger_type_matches(trigger.tgtype, tgtype_event) {
             continue;
@@ -816,6 +853,12 @@ fn after_trigger_save_event<'mcx>(
         if is_update || is_delete {
             match ri_trigger_kind(trigger.tgfoid) {
                 RI_TRIGGER_PK => {
+                    // Cross-partition update: the component DELETE's cloned PK
+                    // triggers are skipped — the root's CP UPDATE event
+                    // enforces the FK (C's tgisclone skip).
+                    if is_delete && is_crosspart_update && trigger.tgisclone {
+                        continue;
+                    }
                     // C also skips DELETEs whose old key contains a NULL
                     // (RI_FKey_pk_upd_check_required with newslot NULL);
                     // divergence: those queue and no-op inside ri_restrict.
@@ -832,6 +875,12 @@ fn after_trigger_save_event<'mcx>(
                     }
                 }
                 RI_TRIGGER_FK => {
+                    // C: skip the UPDATE event on a partitioned FK table
+                    // during its own cross-partition update — the destination
+                    // leaf's INSERT event performs the check.
+                    if is_update && partitioned {
+                        continue;
+                    }
                     if is_update
                         && !ri_triggers_seams::ri_fkey_fk_upd_check_required::call(
                             mcx,
@@ -844,7 +893,14 @@ fn after_trigger_save_event<'mcx>(
                         continue;
                     }
                 }
-                _ => {}
+                // RI_TRIGGER_NONE: ordinary row triggers on a partitioned
+                // rel are not queued for the root CP UPDATE event — the same
+                // trigger exists (cloned) on the affected leaves (C's arm).
+                _ => {
+                    if partitioned {
+                        continue;
+                    }
+                }
             }
         }
         const F_UNIQUE_KEY_RECHECK: Oid = 1250;
@@ -864,6 +920,7 @@ fn after_trigger_save_event<'mcx>(
         } else {
             u32::MAX
         };
+        let (src_part, dst_part) = cp_parts.unwrap_or_default();
         with_list(EvList::Query(d), |evs| {
             evs.push(AfterTriggerEvent {
                 flags: 0,
@@ -874,6 +931,8 @@ fn after_trigger_save_event<'mcx>(
                 relid: rel.rd_id,
                 firing_id: 0,
                 table_idx,
+                src_part,
+                dst_part,
             });
         });
     }
@@ -960,6 +1019,8 @@ fn save_stmt_event<'mcx>(
                 relid: rel.rd_id,
                 firing_id: 0,
                 table_idx,
+                src_part: Oid::default(),
+                dst_part: Oid::default(),
             });
         });
     }
@@ -1067,6 +1128,8 @@ pub fn ExecARInsertTriggers<'mcx>(
         recheck_indexes,
         transition_capture,
         when,
+        false,
+        None,
     )
 }
 
@@ -1077,6 +1140,9 @@ pub fn ExecARDeleteTriggers<'mcx>(
     old_tid: ItemPointerData,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    // C is_crosspart_update: this DELETE is the source half of a row
+    // movement; cloned PK RI triggers are skipped (the root CP event runs).
+    is_crosspart_update: bool,
 ) -> PgResult<()> {
     let capture = transition_capture.filter(|tc| tc.tcs_delete_old_table);
     if !trigdesc.trig_delete_after_row && capture.is_none() {
@@ -1118,56 +1184,82 @@ pub fn ExecARDeleteTriggers<'mcx>(
         &[],
         transition_capture,
         when,
+        is_crosspart_update,
+        None,
     )
 }
 
+// C ExecARUpdateTriggers: src_rel/dst_rel are the source/destination leaf
+// partitions of a cross-partition update — old_tid points into src_rel (or
+// rel) and new_tid into dst_rel (or rel). One-sided calls (old-only on the
+// source's DELETE half, new-only on the destination's INSERT half) capture
+// into the UPDATE transition tables and queue no row events (C's
+// TupIsNull-XOR early return).
 #[allow(clippy::too_many_arguments)]
 pub fn ExecARUpdateTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
-    old_tid: ItemPointerData,
-    new_tid: ItemPointerData,
+    trigdesc: Option<&TriggerDesc<'static>>,
+    src_rel: Option<&Relation<'mcx>>,
+    dst_rel: Option<&Relation<'mcx>>,
+    old_tid: Option<ItemPointerData>,
+    new_tid: Option<ItemPointerData>,
     recheck_indexes: &[Oid],
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
+    is_crosspart_update: bool,
 ) -> PgResult<()> {
+    let after_row = trigdesc.is_some_and(|td| td.trig_update_after_row);
     let capture = transition_capture
         .filter(|tc| tc.tcs_update_old_table || tc.tcs_update_new_table);
-    if !trigdesc.trig_update_after_row && capture.is_none() {
+    if !after_row && capture.is_none() {
         return Ok(());
     }
     // GetTupleForTrigger's fetch, for the RI-skip inspections and capture.
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
-    let r_old = heapam::heap_fetch(rel, &snap, old_tid, false)?;
-    if !r_old.found {
-        return Err(fetch_failed(1));
-    }
-    let r_new = heapam::heap_fetch(rel, &snap, new_tid, false)?;
-    if !r_new.found {
-        return Err(fetch_failed(2));
-    }
-    let old_t = r_old.tuple().expect("found fetch has a tuple");
-    let new_t = r_new.tuple().expect("found fetch has a tuple");
-    if let Some(tc) = capture {
-        capture_transition_tuples(tc, TRIGGER_EVENT_UPDATE, Some(&old_t), Some(&new_t))?;
-        if !trigdesc.trig_update_after_row {
-            return Ok(());
+    let r_old = match old_tid {
+        Some(tid) => {
+            let r = heapam::heap_fetch(src_rel.unwrap_or(rel), &snap, tid, false)?;
+            if !r.found {
+                return Err(fetch_failed(1));
+            }
+            Some(r)
         }
+        None => None,
+    };
+    let r_new = match new_tid {
+        Some(tid) => {
+            let r = heapam::heap_fetch(dst_rel.unwrap_or(rel), &snap, tid, false)?;
+            if !r.found {
+                return Err(fetch_failed(2));
+            }
+            Some(r)
+        }
+        None => None,
+    };
+    let old_t = r_old.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
+    let new_t = r_new.as_ref().map(|r| r.tuple().expect("found fetch has a tuple"));
+    if let Some(tc) = capture {
+        capture_transition_tuples(tc, TRIGGER_EVENT_UPDATE, old_t.as_ref(), new_t.as_ref())?;
+    }
+    if !after_row || old_t.is_some() != new_t.is_some() {
+        return Ok(());
     }
     after_trigger_save_event(
         mcx,
         rel,
-        trigdesc,
+        trigdesc.expect("after_row implies a trigdesc"),
         TRIGGER_EVENT_UPDATE,
         TRIGGER_TYPE_UPDATE,
-        old_tid,
-        new_tid,
-        Some(&old_t),
-        Some(&new_t),
+        old_tid.expect("checked above"),
+        new_tid.expect("checked above"),
+        old_t.as_ref(),
+        new_t.as_ref(),
         recheck_indexes,
         transition_capture,
         when,
+        is_crosspart_update,
+        src_rel.zip(dst_rel).map(|(s, d)| (s.rd_id, d.rd_id)),
     )
 }
 

@@ -13,7 +13,7 @@ pub use exec::{
     TriggerWhenCache, TriggerWhenEval,
 };
 pub use queue::{
-    before_stmt_triggers_fired, AfterTriggerBeginQuery, AfterTriggerBeginSubXact,
+    before_stmt_triggers_fired, ri_trigger_kind, AfterTriggerBeginQuery, AfterTriggerBeginSubXact,
     AfterTriggerBeginXact, AfterTriggerEndQuery, AfterTriggerEndSubXact, AfterTriggerEndXact,
     AfterTriggerFireDeferred, AfterTriggerPendingOnRel, ExecARDeleteTriggers,
     ExecARInsertTriggers, ExecARUpdateTriggers, ExecASDeleteTriggers, ExecASInsertTriggers,
