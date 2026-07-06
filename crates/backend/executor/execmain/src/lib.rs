@@ -81,6 +81,9 @@ pub fn init_seams() {
     execmain_seams::query_desc_workers_launched::set(
         querydesc::query_desc_workers_launched_seam,
     );
+    execmain_seams::query_desc_merge_instrument::set(
+        querydesc::query_desc_merge_instrument_seam,
+    );
     execmain_seams::query_desc_worker_instrument::set(
         querydesc::query_desc_worker_instrument_seam,
     );

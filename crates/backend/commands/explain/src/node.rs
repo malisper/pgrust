@@ -1164,6 +1164,52 @@ pub fn ExplainNode<'mcx>(
                     );
                 }
             }
+            // MERGE Tuples: line (show_modifytable_info, explain.c:4681-4726);
+            // total = outer plan's ntuples, skipped derived.
+            if mt.operation == types_nodes::CmdType::CMD_MERGE
+                && es.analyze
+                && instrument.is_some()
+                && !es.qd.is_null()
+            {
+                if let Some((inserted, updated, deleted)) =
+                    execmain_seams::query_desc_merge_instrument::call(es.qd, plan.plan_node_id)
+                {
+                    let total = plan
+                        .lefttree
+                        .and_then(|l| {
+                            execmain_seams::query_desc_instrument::call(
+                                es.qd,
+                                plan_of(l).plan_node_id,
+                            )
+                        })
+                        .map_or(0.0, |i| i.ntuples);
+                    let skipped = total - inserted - updated - deleted;
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        if total > 0.0 {
+                            crate::format::ExplainIndentText(es);
+                            append!(es, "Tuples:");
+                            if inserted > 0.0 {
+                                append!(es, " inserted={inserted:.0}");
+                            }
+                            if updated > 0.0 {
+                                append!(es, " updated={updated:.0}");
+                            }
+                            if deleted > 0.0 {
+                                append!(es, " deleted={deleted:.0}");
+                            }
+                            if skipped > 0.0 {
+                                append!(es, " skipped={skipped:.0}");
+                            }
+                            append!(es, "\n");
+                        }
+                    } else {
+                        crate::format::ExplainPropertyFloat("Tuples Inserted", None, inserted, 0, es);
+                        crate::format::ExplainPropertyFloat("Tuples Updated", None, updated, 0, es);
+                        crate::format::ExplainPropertyFloat("Tuples Deleted", None, deleted, 0, es);
+                        crate::format::ExplainPropertyFloat("Tuples Skipped", None, skipped, 0, es);
+                    }
+                }
+            }
         }
         _ => unreachable!(),
     }

@@ -470,6 +470,17 @@ pub(crate) fn query_desc_workers_launched_seam(
     }
 }
 
+/// MERGE (inserted, updated, deleted) counters (EXPLAIN's Tuples: line).
+pub(crate) fn query_desc_merge_instrument_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<(f64, f64, f64)> {
+    match query_desc_instr_extra(h, plan_node_id)? {
+        crate::procnode::InstrExtra::MergeCounts([i, u, d]) => Some((i, u, d)),
+        _ => None,
+    }
+}
+
 /// Per-worker Instrumentation for one plan node (C planstate->worker_instrument),
 /// indexed by worker number; entries with nloops <= 0 are the caller's to skip.
 pub(crate) fn query_desc_worker_instrument_seam(

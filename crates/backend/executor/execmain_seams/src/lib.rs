@@ -182,6 +182,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // MERGE (mt_merge_inserted, mt_merge_updated, mt_merge_deleted) for
+    // EXPLAIN ANALYZE's Tuples: line (skipped = source total - these).
+    pub fn query_desc_merge_instrument(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<(f64, f64, f64)>
+);
+
+seam_core::seam!(
     // Per-worker Instrumentation for a node, indexed by worker number
     // (C planstate->worker_instrument).
     pub fn query_desc_worker_instrument(
