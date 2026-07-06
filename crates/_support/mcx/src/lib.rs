@@ -120,6 +120,9 @@ pub(crate) struct Acct {
     pub(crate) limited_path: Cell<bool>,
     pub(crate) arena_footprint: Cell<usize>,
     pub(crate) arena_nblocks: Cell<usize>,
+    // Active-window tail as of the last block transition (bump backends only);
+    // per-alloc bumps never touch Acct, so this reads high vs C's live freeptr.
+    pub(crate) window_tail: Cell<usize>,
     pub(crate) is_bump: bool,
     pub(crate) kind: &'static str,
     pub(crate) parent: Option<AcctRc>,
@@ -644,6 +647,7 @@ impl MemoryContext {
             limited_path: Cell::new(limited_path),
             arena_footprint: Cell::new(init_footprint),
             arena_nblocks: Cell::new(init_nblocks),
+            window_tail: Cell::new(0),
             is_bump,
             kind,
             parent,
@@ -752,6 +756,7 @@ impl MemoryContext {
             acct.self_peak.set(footprint);
             acct.arena_footprint.set(footprint);
             acct.arena_nblocks.set(a.nblocks());
+            acct.window_tail.set(a.window_tail());
             self.is_reset.set(true);
             return;
         }
@@ -796,6 +801,7 @@ impl MemoryContext {
                 acct.self_peak.set(footprint);
                 acct.arena_footprint.set(footprint);
                 acct.arena_nblocks.set(a.nblocks());
+                acct.window_tail.set(a.window_tail());
             }
             Backend::Generation(a) => {
                 let a = a.get_mut();
@@ -916,6 +922,7 @@ impl Drop for MemoryContext {
         }
         self.acct.ident.borrow_mut().take();
         self.acct.self_used.set(0);
+        self.acct.window_tail.set(0);
     }
 }
 
@@ -956,6 +963,8 @@ pub struct TreeStats {
     pub is_bump: bool,
     pub arena_footprint: usize,
     pub nblocks: usize,
+    // Bump backends only; block-transition snapshot (see Acct::window_tail).
+    pub free_tail: usize,
     pub children: alloc::vec::Vec<TreeStats>,
 }
 
@@ -988,6 +997,7 @@ fn tree_stats_node(acct: &Acct) -> TreeStats {
         is_bump: acct.is_bump,
         arena_footprint: acct.arena_footprint.get(),
         nblocks: acct.arena_nblocks.get(),
+        free_tail: acct.window_tail.get(),
         children,
     }
 }

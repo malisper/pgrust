@@ -56,6 +56,10 @@ impl BumpArena {
         self.blocks.len() + self.oversize.len()
     }
 
+    pub(crate) fn window_tail(&self) -> usize {
+        self.cur_end as usize - self.cur_ptr as usize
+    }
+
     #[inline]
     pub(crate) fn alloc(
         &mut self,
@@ -101,6 +105,7 @@ impl BumpArena {
                         self.cur_ptr = base.add(csize);
                         self.cur_end = base.add(k.size);
                     }
+                    acct.window_tail.set(k.size - csize);
                     return Ok(NonNull::slice_from_raw_parts(k.ptr, csize));
                 }
             }
@@ -127,6 +132,7 @@ impl BumpArena {
             self.cur_ptr = p.as_ptr().add(csize);
             self.cur_end = p.as_ptr().add(blksize);
         }
+        acct.window_tail.set(blksize - csize);
         self.blocks.push(block);
         Ok(NonNull::slice_from_raw_parts(p, csize))
     }
@@ -164,6 +170,7 @@ impl BumpArena {
         self.mem_allocated += size;
         self.oversize.push((p.cast(), layout));
         acct.commit_block(size, self.mem_allocated, self.nblocks());
+        acct.window_tail.set(self.window_tail());
         Ok(p)
     }
 
@@ -270,6 +277,7 @@ mod tests {
             limited_path: Cell::new(false),
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
+            window_tail: Cell::new(0),
             is_bump: true,
             kind: "Bump",
             parent: None,
