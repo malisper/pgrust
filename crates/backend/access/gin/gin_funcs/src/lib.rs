@@ -46,9 +46,8 @@ fn is_gin_index(indexRel: &Relation<'_>) -> bool {
     indexRel.rd_rel.relkind == RELKIND_INDEX && indexRel.rd_rel.relam == GIN_AM_OID
 }
 
-/// gin_clean_pending_list (ginfast.c). Returns pages_deleted, computed as the
-/// drop in the metapage's nPendingPages across the cleanup (RELATION_IS_OTHER_TEMP
-/// is const-false in this single-backend model, so that C check is a no-op here).
+/// gin_clean_pending_list (ginfast.c). RELATION_IS_OTHER_TEMP is const-false
+/// in this single-backend model, so that C check is a no-op here.
 pub fn fc_gin_clean_pending_list(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -82,11 +81,10 @@ pub fn fc_gin_clean_pending_list(
     let is_valid = indexRel.rd_index.as_ref().map_or(false, |i| i.indisvalid);
 
     let pages_deleted: i64 = if is_valid {
-        let before = gin::ginGetStats(&indexRel)?.nPendingPages as i64;
+        let mut stats = ::types_nbtree::IndexBulkDeleteResult::default();
         let state = gin::build::initGinState(&indexRel)?;
-        gin::ginInsertCleanup(mcx, &indexRel, &state, true, true, true)?;
-        let after = gin::ginGetStats(&indexRel)?.nPendingPages as i64;
-        (before - after).max(0)
+        gin::ginInsertCleanup(mcx, &indexRel, &state, true, true, true, Some(&mut stats))?;
+        stats.pages_deleted as i64
     } else {
         let _ = elog::elog(
             DEBUG1,
@@ -119,7 +117,7 @@ mod tests {
 
     #[test]
     fn builtins_match_pg_proc_dat() {
-        let expect = [(3789u32, "gin_clean_pending_list", 1usize)];
+        let expect = [(3789u32, "gin_clean_pending_list", 1i16)];
         assert_eq!(GIN_FUNCS_BUILTINS.len(), expect.len());
         for (b, (foid, name, nargs)) in GIN_FUNCS_BUILTINS.iter().zip(expect) {
             assert_eq!(b.foid, foid);

@@ -19,6 +19,7 @@ pub(crate) mod opclass;
 pub(crate) mod postinglist;
 pub(crate) mod scan;
 pub(crate) mod util;
+pub(crate) mod vacuum;
 pub(crate) mod wal;
 
 use ::bufmgr_seams as bm;
@@ -226,14 +227,7 @@ pub(crate) fn vec_append<'mcx, T: Copy>(
     Ok(())
 }
 
-/// ginbulkdelete/ginvacuumcleanup: the VACUUM lane, loud per the port scope.
-pub fn ginbulkdelete() -> ! {
-    unported("ginbulkdelete (VACUUM lane; land backend-access-gin-ginvacuum)")
-}
-
-pub fn ginvacuumcleanup() -> ! {
-    unported("ginvacuumcleanup (VACUUM lane; land backend-access-gin-ginvacuum)")
-}
+pub use vacuum::{ginbulkdelete, ginvacuumcleanup};
 
 /// GUC storage owned by this unit (C: ginfast.c gin_pending_list_limit,
 /// ginget.c GinFuzzySearchLimit).

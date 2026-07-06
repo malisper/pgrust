@@ -1,5 +1,5 @@
 //! ginfast.c: pending-list fast insert + cleanup. gin_clean_pending_list
-//! (SQL callable) is loud.
+//! (SQL callable) lives in the gin_funcs crate.
 
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
@@ -21,7 +21,7 @@ use crate::util::{
 };
 use crate::{
     meta_of, page_bytes, page_bytes_mut, page_mut, page_opaque, page_ref, relation_needs_wal,
-    unported, write_meta_to, write_opaque, GinPageIsDeleted, GIN_EXCLUSIVE, GIN_SHARE, GIN_UNLOCK,
+    write_meta_to, write_opaque, GinPageIsDeleted, GIN_EXCLUSIVE, GIN_SHARE, GIN_UNLOCK,
     RM_GIN,
 };
 
@@ -397,7 +397,7 @@ pub(crate) fn ginHeapTupleFastInsert<'s>(
     bm::release_buffer::call(metabuffer)?;
 
     if need_cleanup {
-        ginInsertCleanup(mcx, rel, state, false, true, false)?;
+        ginInsertCleanup(mcx, rel, state, false, true, false, None)?;
     }
     Ok(())
 }
@@ -407,6 +407,8 @@ fn shift_list(
     rel: &Relation<'_>,
     metabuffer: Buffer,
     new_head: BlockNumber,
+    fill_fsm: bool,
+    mut stats: Option<&mut ::types_nbtree::IndexBulkDeleteResult>,
 ) -> PgResult<()> {
     // SAFETY: pin + exclusive lock held throughout.
     let mut blkno_to_delete = { meta_of(page_bytes(&unsafe { page_ref(metabuffer) })).head };
@@ -429,6 +431,10 @@ fn shift_list(
             debug_assert!(!GinPageIsDeleted(&opaque));
             n_deleted_heap_tuples += opaque.maxoff as i64;
             blkno_to_delete = opaque.rightlink;
+        }
+
+        if let Some(s) = stats.as_deref_mut() {
+            s.pages_deleted += ndeleted as u32;
         }
 
         let metadata = {
@@ -500,8 +506,10 @@ fn shift_list(
             bm::lock_buffer::call(*buf, GIN_UNLOCK)?;
             bm::release_buffer::call(*buf)?;
         }
-        for blk in &freespace[..ndeleted] {
-            freespace::RecordFreeIndexPage(rel, *blk)?;
+        if fill_fsm {
+            for blk in &freespace[..ndeleted] {
+                freespace::RecordFreeIndexPage(rel, *blk)?;
+            }
         }
 
         if blkno_to_delete == new_head {
@@ -553,8 +561,7 @@ fn process_pending_page(
 }
 
 /// ginInsertCleanup. Page-level heavyweight lock arbitration is a no-op in
-/// the single-backend model; forceCleanup callers (vacuum lane) are loud at
-/// their entry points.
+/// the single-backend model.
 pub fn ginInsertCleanup<'s>(
     _outer: Mcx<'s>,
     rel: &Relation<'_>,
@@ -562,6 +569,7 @@ pub fn ginInsertCleanup<'s>(
     full_clean: bool,
     fill_fsm: bool,
     force_cleanup: bool,
+    mut stats: Option<&mut ::types_nbtree::IndexBulkDeleteResult>,
 ) -> PgResult<()> {
     let work_memory = if force_cleanup {
         init_small::globals::maintenance_work_mem()
@@ -653,11 +661,7 @@ pub fn ginInsertCleanup<'s>(
             bm::lock_buffer::call(buffer, GIN_UNLOCK)?;
             bm::release_buffer::call(buffer)?;
 
-            if fill_fsm {
-                shift_list(rel, metabuffer, blkno)?;
-            } else {
-                unported("ginInsertCleanup with fill_fsm=false (vacuum lane)");
-            }
+            shift_list(rel, metabuffer, blkno, fill_fsm, stats.as_deref_mut())?;
             fsm_vac = true;
 
             bm::lock_buffer::call(metabuffer, GIN_UNLOCK)?;

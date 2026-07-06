@@ -19,3 +19,4 @@ fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 indexam_seams = { path = "../../index/indexam_seams" }
 miscinit = { path = "../../../utils/init/miscinit" }
 transam_xlog = { path = "../../transam/transam_xlog" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
