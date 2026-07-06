@@ -128,6 +128,7 @@ fn mk_state<'mcx>(
         num_errors: 0,
         defaults: mcx::vec_from_elem_in(mcx, false, 8),
         bytes_processed: 0,
+        volatile_defexprs: false,
     }
 }
 

@@ -79,6 +79,7 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) escontext: Option<Box<types_fmgr::ErrorSaveNode>>,
     pub(crate) num_errors: u64,
     pub(crate) bytes_processed: u64,
+    pub(crate) volatile_defexprs: bool,
 }
 
 impl CopyFromState<'_, '_> {
@@ -202,9 +203,6 @@ pub fn BeginCopyFrom<'mcx, 's>(
             }
         }
     }
-    if volatile_defexprs {
-        unported("FROM with volatile default expressions (CIM_SINGLE lane)");
-    }
     pgstat_progress_start_command(PROGRESS_COMMAND_COPY, rel.rd_id);
     let mut progress_type = PROGRESS_COPY_TYPE_PIPE;
     let mut progress_bytes_total: i64 = 0;
@@ -293,6 +291,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
             .then(|| Box::new(types_fmgr::ErrorSaveNode::new(false))),
         num_errors: 0,
         bytes_processed: 0,
+        volatile_defexprs,
     };
     if is_binary {
         cstate.receive_copy_binary_header()?;
@@ -452,6 +451,10 @@ fn copy_from_body<'mcx>(
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 
     let mut qualexpr = init_where_qual(mcx, cstate)?;
+    // CIM_SINGLE arms of copyfrom.c:1028-1052: volatile expressions may query
+    // the table mid-load, so every row must be visible as soon as stored.
+    let single_insert = cstate.volatile_defexprs || where_clause_volatile(cstate)?;
+    let mut single_eval_cx = MemoryContext::new_bump("CopySingleInsertEval");
 
     let has_generated_stored =
         rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored);
@@ -533,6 +536,42 @@ fn copy_from_body<'mcx>(
             }
         }
 
+        if single_insert {
+            single_eval_cx.reset();
+            tableam::table_tuple_insert(mcx, rel, slot, mycid, ti_options, Some(&mut bistate))?;
+            let recheck_indexes = if index_state.num_indices() > 0 {
+                execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    single_eval_cx.mcx(),
+                    &mut index_state,
+                    rel,
+                    slot,
+                    false,
+                    None,
+                    &[],
+                )?
+            } else {
+                PgVec::new_in(mcx)
+            };
+            if let Some(t) = trig.as_deref_mut() {
+                let mut when =
+                    trigger::TriggerWhenEval { mcx, cache: &mut *t.when, modified_cols: None };
+                trigger::ExecARInsertTriggers(
+                    mcx,
+                    rel,
+                    Some(t.td),
+                    slot.base().tts_tid,
+                    &recheck_indexes,
+                    t.tc,
+                    Some(&mut when),
+                )?;
+            }
+            processed += 1;
+            flushed += 1;
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
+            continue;
+        }
+
         exectuples::exec_materialize_slot(slot, mcx)?;
         linenos[nused] = cstate.cur_lineno;
         nused += 1;
@@ -582,15 +621,21 @@ fn copy_from_body<'mcx>(
     Ok(processed)
 }
 
+// The whereClause volatility arm of C's insert-method selection
+// (copyfrom.c:1041).
+fn where_clause_volatile(cstate: &CopyFromState<'_, '_>) -> PgResult<bool> {
+    for wc in cstate.where_clause.iter() {
+        if clauses::contain_volatile_functions(wc)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn init_where_qual<'mcx>(
     mcx: Mcx<'mcx>,
     cstate: &CopyFromState<'mcx, '_>,
 ) -> PgResult<Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>> {
-    for wc in cstate.where_clause.iter() {
-        if clauses::contain_volatile_functions(wc)? {
-            unported("FROM ... WHERE with volatile functions (CIM_SINGLE lane)");
-        }
-    }
     let mut qualexpr =
         execexpr::exec_init_qual(mcx, &cstate.where_clause, execexpr::ParamBind::NONE)?;
     if let Some(q) = qualexpr.as_mut() {
@@ -656,6 +701,12 @@ fn copy_from_partitioned_body<'mcx>(
     let mut processed: u64 = 0;
     let mut excluded: i64 = 0;
     let mut flushed: i64 = 0;
+    // CIM_SINGLE arms of copyfrom.c:1028-1052 (single bistate, pin released
+    // on partition switch; C copyfrom.c:1260).
+    let single_insert = cstate.volatile_defexprs || where_clause_volatile(cstate)?;
+    let mut single_bistate = single_insert.then(heapam::GetBulkInsertState);
+    let mut prev_leaf: Option<usize> = None;
+    let mut leaf_slots: Vec<Option<types_slot::SlotData<'mcx>>> = Vec::new();
 
     loop {
         postgres_seams::check_for_interrupts::call()?;
@@ -710,6 +761,67 @@ fn copy_from_partitioned_body<'mcx>(
             {
                 panic!("CopyFrom: generated columns on a routed-into partition not ported");
             }
+        }
+
+        if single_insert {
+            let lrel = router.leaf_rel(leaf);
+            if prev_leaf != Some(leaf) {
+                if let Some(b) = single_bistate.as_mut() {
+                    heapam::ReleaseBulkInsertStatePin(b);
+                }
+                prev_leaf = Some(leaf);
+            }
+            if leaf_slots.len() <= leaf {
+                leaf_slots.resize_with(leaf + 1, || None);
+            }
+            let use_slot: &mut types_slot::SlotData<'mcx> = match router.leaf_attrmap(leaf) {
+                Some(map) => {
+                    if leaf_slots[leaf].is_none() {
+                        leaf_slots[leaf] = Some(tableam::table_slot_create(mcx, lrel)?);
+                    }
+                    let ls = leaf_slots[leaf].as_mut().expect("just created");
+                    exectuples::exec_clear_tuple(ls, mcx);
+                    exectuples::execute_attr_map_slot(map, &mut rootslot, ls, mcx);
+                    ls
+                }
+                None => &mut rootslot,
+            };
+            use_slot.base_mut().tts_tableOid = lrel.rd_id;
+            nodemodifytable::exec_constraints(
+                mcx,
+                &mut leaf_checks[leaf],
+                &mut None,
+                lrel,
+                use_slot,
+            )?;
+            tableam::table_tuple_insert(
+                mcx,
+                lrel,
+                use_slot,
+                mycid,
+                ti_options,
+                single_bistate.as_mut(),
+            )?;
+            if leaf_indexes[leaf].is_none() {
+                leaf_indexes[leaf] = Some(execindexing::ExecOpenIndices(mcx, lrel, false)?);
+            }
+            let idx = leaf_indexes[leaf].as_mut().expect("just opened");
+            if idx.num_indices() > 0 {
+                execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    route_eval_cx.mcx(),
+                    idx,
+                    lrel,
+                    use_slot,
+                    false,
+                    None,
+                    &[],
+                )?;
+            }
+            processed += 1;
+            flushed += 1;
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
+            continue;
         }
 
         let bidx = match buffers.iter().position(|b| b.leaf == leaf) {
