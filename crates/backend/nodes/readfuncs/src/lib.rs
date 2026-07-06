@@ -13,18 +13,18 @@ use types_nodes::list::{IntList, NodeList, OidList, OptNodeList};
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes_enums::{CmdType, LimitOption};
 use types_nodes::parsenodes::{
-    CTECycleClause, CTEMaterialize, CTESearchClause, CommonTableExpr, Query, QuerySource, RTEKind,
-    RTEPermissionInfo, RangeTblEntry, RangeTblFunction, SetOperation, SetOperationStmt,
-    SortGroupClause, WindowClause,
+    CTECycleClause, CTEMaterialize, CTESearchClause, CommonTableExpr, NotifyStmt, Query,
+    QuerySource, RTEKind, RTEPermissionInfo, RangeTblEntry, RangeTblFunction, SetOperation,
+    SetOperationStmt, SortGroupClause, WindowClause,
 };
 use types_nodes::primnodes::{
     Aggref, Alias, ArrayExpr, BoolExpr, BoolExprType, CaseExpr, CaseTestExpr, CaseWhen,
     CoalesceExpr, CoerceViaIO, CoercionForm, Const, FieldSelect, FieldStore, FromExpr, FuncExpr,
     JoinExpr, MergeAction,
-    MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NullTest, NullTestType, OpExpr,
-    OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType, ScalarArrayOpExpr,
-    SubLink, SubLinkType, TableFunc, TableFuncType, TargetEntry, Var, VarReturningType, WindowFunc,
-    XmlExpr, XmlExprOp, XmlOptionType,
+    MergeMatchKind, MinMaxExpr, MinMaxOp, NamedArgExpr, NextValueExpr, NullTest, NullTestType,
+    OpExpr, OverridingKind, Param, ParamKind, RangeTblRef, CollateExpr, RelabelType,
+    ScalarArrayOpExpr, SubLink, SubLinkType, TableFunc, TableFuncType, TargetEntry, Var,
+    VarReturningType, WindowFunc, XmlExpr, XmlExprOp, XmlOptionType,
 };
 use types_nodes::Node;
 
@@ -447,6 +447,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JSONTABLEPATH" => self.read_json_table_path(),
             b"JSONTABLEPATHSCAN" => self.read_json_table_path_scan(),
             b"JSONTABLESIBLINGJOIN" => self.read_json_table_sibling_join(),
+            b"NOTIFYSTMT" => self.read_notify_stmt(),
+            b"NEXTVALUEEXPR" => self.read_next_value_expr(),
             other => panic!(
                 "parseNodeString (readfuncs.c): {} read arm unported (view SELECT-rule + \
                  DEFAULT/CHECK expr sets only)",
@@ -715,6 +717,22 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         c.cycle_mark_collation = self.read_u32("cycle_mark_collation");
         c.cycle_mark_neop = self.read_u32("cycle_mark_neop");
         Ok(c.seal())
+    }
+
+    fn read_notify_stmt(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut n = Node::build::<NotifyStmt>(mcx)?;
+        n.conditionname = self.read_str("conditionname")?;
+        n.payload = self.read_str("payload")?;
+        Ok(n.seal())
+    }
+
+    fn read_next_value_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let mut n = Node::build::<NextValueExpr>(mcx)?;
+        n.seqid = self.read_u32("seqid");
+        n.typeId = self.read_u32("typeId");
+        Ok(n.seal())
     }
 
     fn read_named_arg_expr(&mut self) -> PgResult<Node<'mcx>> {
