@@ -606,6 +606,10 @@ pub(crate) fn get_rule_expr<'mcx>(
         NodeTag::T_ReturningExpr => {
             get_rule_expr(node.as_returning_expr().unwrap().retexpr, ctx, showimplicit)
         }
+        NodeTag::T_SetToDefault => {
+            ctx.buf.push_str("DEFAULT");
+            Ok(())
+        }
         other => gap("get_rule_expr", &format!("{other:?} deparse arm")),
     }
 }

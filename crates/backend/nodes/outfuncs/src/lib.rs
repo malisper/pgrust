@@ -644,6 +644,35 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_int_list(out, &m.updateColnos);
             w!(out, "}}");
         }
+        NodeTag::T_OnConflictExpr => {
+            let c = node
+                .as_variant::<types_nodes::primnodes::OnConflictExpr>()
+                .expect("OnConflictExpr");
+            w!(out, "{{ONCONFLICTEXPR :action {}", c.action as u32);
+            w!(out, " :arbiterElems ");
+            out_list(out, &c.arbiterElems)?;
+            w!(out, " :arbiterWhere ");
+            out_opt_node(out, c.arbiterWhere)?;
+            w!(out, " :constraint {}", c.constraint);
+            w!(out, " :onConflictSet ");
+            out_list(out, &c.onConflictSet)?;
+            w!(out, " :onConflictWhere ");
+            out_opt_node(out, c.onConflictWhere)?;
+            w!(out, " :exclRelIndex {}", c.exclRelIndex);
+            w!(out, " :exclRelTlist ");
+            out_list(out, &c.exclRelTlist)?;
+            w!(out, "}}");
+        }
+        NodeTag::T_NotifyStmt => {
+            let n = node
+                .as_variant::<types_nodes::parsenodes::NotifyStmt>()
+                .expect("NotifyStmt");
+            w!(out, "{{NOTIFYSTMT :conditionname ");
+            out_str(out, n.conditionname);
+            w!(out, " :payload ");
+            out_str(out, n.payload);
+            w!(out, "}}");
+        }
         NodeTag::T_WithCheckOption => {
             let w = node
                 .as_variant::<types_nodes::parsenodes::WithCheckOption>()
