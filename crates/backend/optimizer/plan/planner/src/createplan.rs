@@ -232,10 +232,10 @@ fn build_physical_tlist<'mcx>(
     let relation = table::table_open(mcx, reloid, 0)?;
     let mut tlist = NodeList::nil();
     for att in relation.rd_att.attrs.iter() {
-        assert!(
-            !att.attisdropped,
-            "build_physical_tlist (plancat.c): dropped column NULL Const; M2 lane"
-        );
+        if att.attisdropped || att.atthasmissing {
+            // found a dropped or missing col, so punt
+            return Ok(NodeList::nil());
+        }
         let var = Node::mk_var(
             mcx,
             varno as i32,
@@ -364,11 +364,17 @@ fn create_scan_plan<'mcx>(
         } else {
             build_physical_tlist(run, rel_id)?
         };
-        if flags & CP_LABEL_TLIST != 0 {
+        if physical.is_nil() {
+            // Failed because of dropped cols, so use regular method
             let target_id = run.root.path(best_path).base().pathtarget_id.unwrap();
-            apply_pathtarget_labeling_to_tlist(run, &physical, target_id);
+            build_path_tlist(run, target_id, best_path)?
+        } else {
+            if flags & CP_LABEL_TLIST != 0 {
+                let target_id = run.root.path(best_path).base().pathtarget_id.unwrap();
+                apply_pathtarget_labeling_to_tlist(run, &physical, target_id);
+            }
+            physical
         }
-        physical
     } else {
         let target_id = run.root.path(best_path).base().pathtarget_id.unwrap();
         build_path_tlist(run, target_id, best_path)?
