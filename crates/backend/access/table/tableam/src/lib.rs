@@ -365,28 +365,47 @@ mod heap {
     ) -> PgResult<TM_Result> {
         exectuples::exec_materialize_slot(slot, mcx)?;
         slot.base_mut().tts_tableOid = rel.rd_id;
-        let tuple = match slot {
-            SlotData::Heap(h) => h.tuple.as_mut(),
-            SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
-            _ => panic!(
-                "heapam_tuple_update (heapam_handler.c): non-heap slot copy arm \
-                 not ported"
-            ),
-        }
-        .expect("materialized heap slot holds a tuple");
-        tuple.t_tableOid = rel.rd_id;
-        let result = ::heapam::heap_update(
-            rel,
-            otid,
-            tuple,
-            cid,
-            crosscheck.as_deref(),
-            wait,
-            tmfd,
-            lockmode,
-            update_indexes,
-        )?;
-        let t_self = tuple.t_self;
+        let (result, t_self) = match slot {
+            SlotData::Heap(_) | SlotData::BufferHeap(_) => {
+                let tuple = match slot {
+                    SlotData::Heap(h) => h.tuple.as_mut(),
+                    SlotData::BufferHeap(b) => b.base.tuple.as_mut(),
+                    _ => unreachable!(),
+                }
+                .expect("materialized heap slot holds a tuple");
+                tuple.t_tableOid = rel.rd_id;
+                let result = ::heapam::heap_update(
+                    rel,
+                    otid,
+                    tuple,
+                    cid,
+                    crosscheck.as_deref(),
+                    wait,
+                    tmfd,
+                    lockmode,
+                    update_indexes,
+                )?;
+                (result, tuple.t_self)
+            }
+            // ExecFetchSlotHeapTuple copy arm (virtual source slots, e.g. the
+            // ON CONFLICT DO UPDATE projection over a partitioned target).
+            _ => {
+                let mut tuple = exectuples::exec_copy_slot_heap_tuple(slot, mcx, mcx)?;
+                tuple.t_tableOid = rel.rd_id;
+                let result = ::heapam::heap_update(
+                    rel,
+                    otid,
+                    &mut tuple,
+                    cid,
+                    crosscheck.as_deref(),
+                    wait,
+                    tmfd,
+                    lockmode,
+                    update_indexes,
+                )?;
+                (result, tuple.t_self)
+            }
+        };
         slot.base_mut().tts_tid = t_self;
         Ok(result)
     }
