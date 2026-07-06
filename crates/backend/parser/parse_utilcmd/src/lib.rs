@@ -386,7 +386,7 @@ fn typename_to_string(tn: &TypeName<'_>) -> String {
 }
 
 // typenameTypeMod (parse_type.c): raw typmods -> cstring[] -> typmodin.
-fn typenameTypeMod<'mcx>(
+pub fn typenameTypeMod<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
