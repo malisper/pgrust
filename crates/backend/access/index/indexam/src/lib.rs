@@ -209,6 +209,7 @@ pub fn index_bulk_delete_collect<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete_collect(mcx, info, callback),
+        IndexAmKind::Gist => gist::gistbulkdelete_collect(info, callback),
         _ => panic!("unported: ambulkdelete TID-collect beyond btree (validate_index)"),
     }
 }
