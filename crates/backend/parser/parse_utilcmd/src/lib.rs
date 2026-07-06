@@ -3077,6 +3077,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_string_soft_hard_split() {
+        let mcx = ctx().mcx();
+        // Whitespace-only input: typeStringToTypeName's own arm is soft.
+        let mut soft = SoftErrorContext::new(true);
+        assert!(typeStringToTypeNameEsc(mcx, " \t ", Some(&mut soft)).unwrap().is_none());
+        assert_eq!(soft.error().unwrap().message(), "invalid type name \" \t \"");
+        // >3 dotted names stay hard even with a soft context
+        // (DeconstructQualifiedName's default arm, namespace.c).
+        let mut soft = SoftErrorContext::new(true);
+        let err = parseTypeStringEsc(mcx, "way.too.many.names", Some(&mut soft)).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "improper qualified name (too many dotted names): way.too.many.names"
+        );
+        // Raw-parser syntax errors stay hard, with pts_error_callback's
+        // context line.
+        let mut soft = SoftErrorContext::new(true);
+        let err =
+            parseTypeStringEsc(mcx, "incorrect type name syntax", Some(&mut soft)).unwrap_err();
+        assert_eq!(err.message(), "syntax error at or near \"type\"");
+        assert_eq!(err.context(), Some("invalid type name \"incorrect type name syntax\""));
+    }
+
+    #[test]
     fn quote_identifier_matches_c() {
         let mcx = ctx().mcx();
         assert_eq!(quote_identifier(mcx, "st_id_seq").unwrap().as_str(), "st_id_seq");
