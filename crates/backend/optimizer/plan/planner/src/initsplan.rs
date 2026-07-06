@@ -394,6 +394,13 @@ fn extract_lateral_references<'mcx>(
     let mut vars: types_nodes::NodeList<'mcx> = types_nodes::NodeList::nil();
     let mut levelsup = 0;
     match rte.rtekind {
+        // A lateral tablesample argument (prepjointree lateral propagation)
+        // carries level-zero Vars.
+        RTEKind::RTE_RELATION => {
+            if let Some(tsc) = rte.tablesample {
+                vars = vars::pull_vars_of_level(mcx, tsc, 0)?;
+            }
+        }
         RTEKind::RTE_SUBQUERY => {
             levelsup = 1;
             let q = rte.subquery.expect("RTE_SUBQUERY has a subquery");

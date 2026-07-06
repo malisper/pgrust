@@ -99,13 +99,21 @@ fn use_physical_tlist(run: &PlannerRun<'_>, best_path: PathId, flags: i32) -> bo
     let base = run.root.path(best_path).base();
     let rel_id = base.parent;
     let rel = run.root.rel(rel_id);
-    // C also admits FUNCTION/TABLEFUNC/VALUES; those arms of
-    // build_physical_tlist are unported, so their scans keep the path tlist
-    // (a VERBOSE Output divergence only, not a semantic one).
     if (rel.rtekind != types_pathnodes::RTE_RELATION
         && rel.rtekind != types_pathnodes::RTE_SUBQUERY
+        && rel.rtekind != types_pathnodes::RTE_FUNCTION
+        && rel.rtekind != types_pathnodes::RTE_TABLEFUNC
+        && rel.rtekind != types_pathnodes::RTE_VALUES
         && rel.rtekind != types_pathnodes::RTE_CTE)
         || rel.reloptkind != types_pathnodes::RELOPT_BASEREL
+    {
+        return false;
+    }
+    // An empty-tlist bitmap scan stays as-is (may skip heap fetches).
+    if base.pathtype == crate::pathnode::tag16(NodeTag::T_BitmapHeapScan)
+        && base
+            .pathtarget_id
+            .is_some_and(|id| run.root.pathtarget(id).exprs.is_empty())
     {
         return false;
     }
@@ -225,6 +233,32 @@ fn build_physical_tlist<'mcx>(
                 Node::mk_var(mcx, varno as i32, (i + 1) as i16, typid, typmod, coll, 0)?;
             let tle = Node::mk_target_entry(mcx, var, (i + 1) as i16, None, false)?;
             tlist.lappend(mcx, tle)?;
+        }
+        return Ok(tlist);
+    }
+    if matches!(
+        run.root.rel(rel_id).rtekind,
+        types_pathnodes::RTE_FUNCTION | types_pathnodes::RTE_TABLEFUNC | types_pathnodes::RTE_VALUES
+    ) {
+        let (_, colvars) = parse_relation::expandRTE(
+            mcx,
+            rte,
+            varno as i32,
+            0,
+            types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            -1,
+            true,
+        )?;
+        let mut tlist = NodeList::nil();
+        for var_node in &colvars {
+            let Some(var) = var_node.as_var() else {
+                // A non-Var in expandRTE's output means a dropped column.
+                return Ok(NodeList::nil());
+            };
+            tlist.lappend(
+                mcx,
+                Node::mk_target_entry(mcx, var_node, var.varattno, None, false)?,
+            )?;
         }
         return Ok(tlist);
     }
@@ -520,13 +554,22 @@ fn extract_actual_clauses<'mcx>(
 ) -> NodeList<'mcx> {
     let mut out = NodeList::nil();
     for &rid in rinfos {
-        if run.root.rinfo(rid).pseudoconstant {
+        if run.root.rinfo(rid).pseudoconstant || rinfo_is_constant_true(run, rid) {
             continue;
         }
         out.lappend(run.mcx, *run.root.expr_node(run.root.rinfo(rid).clause))
             .expect("lappend");
     }
     out
+}
+
+// rinfo_is_constant_true (restrictinfo.c:444): reconsider_outer_join_clauses
+// throws back dummy constant-TRUE clauses; they must not reach the plan.
+fn rinfo_is_constant_true(run: &PlannerRun<'_>, rid: RinfoId) -> bool {
+    match run.root.expr_node(run.root.rinfo(rid).clause).as_const() {
+        Some(c) => !c.constisnull && c.constvalue.as_bool(),
+        None => false,
+    }
 }
 
 // extract_actual_join_clauses (restrictinfo.c): joinquals vs pushed-down
@@ -539,7 +582,7 @@ fn extract_actual_join_clauses<'mcx>(
     let mut joinquals = NodeList::nil();
     let mut otherquals = NodeList::nil();
     for &rid in rinfos {
-        if run.root.rinfo(rid).pseudoconstant {
+        if run.root.rinfo(rid).pseudoconstant || rinfo_is_constant_true(run, rid) {
             continue;
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
