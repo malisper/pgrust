@@ -759,17 +759,6 @@ fn fc_gtsquery_compress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     entry_result(fcinfo, &retval)
 }
 
-// tsquery_gist.c makeTSQuerySign: TSQS_SIGLEN = 64.
-pub fn make_tsquery_sign(q: TsQueryRef<'_>) -> u64 {
-    let mut sign: u64 = 0;
-    for i in 0..q.size() {
-        if let ::adt_tsvector_core::query::Item::Val(op) = q.item(i) {
-            sign |= 1u64 << ((op.valcrc as u32) % 64);
-        }
-    }
-    sign
-}
-
 // tsquery_gist.c gtsquery_consistent; keys are bare TSQuerySign int8 datums.
 fn fc_gtsquery_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
