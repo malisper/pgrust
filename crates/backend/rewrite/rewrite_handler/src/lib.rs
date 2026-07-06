@@ -1199,7 +1199,11 @@ struct RirOut<'mcx> {
     with_check_options: PgVec<'mcx, Node<'mcx>>,
 }
 
-fn stamp_query_flags(qnode: Node<'_>, rir: &RirOut<'_>) {
+fn stamp_query_flags<'mcx>(
+    mcx: Mcx<'mcx>,
+    qnode: Node<'mcx>,
+    rir: &RirOut<'mcx>,
+) -> PgResult<()> {
     if rir.has_row_security || rir.has_sub_links {
         // SAFETY: the rewriter owns the just-analyzed tree single-threaded; no
         // reference derived from `qnode` is live across this write.
@@ -1211,11 +1215,22 @@ fn stamp_query_flags(qnode: Node<'_>, rir: &RirOut<'_>) {
         }
         .expect("Query node");
     }
-    assert!(
-        rir.with_check_options.is_empty(),
-        "fireRIRrules (rewriteHandler.c): RLS WithCheckOptions on a nested Query \
-         (DML in CTE) not ported"
-    );
+    // RLS WCOs of a nested Query (DML in a CTE) attach to that Query itself,
+    // new ones first (C fireRIRrules mutates parsetree->withCheckOptions in
+    // place, rewriteHandler.c:2288).
+    if !rir.with_check_options.is_empty() {
+        let mut wcos = NodeList::from_slice(mcx, &rir.with_check_options)?;
+        // SAFETY: same exclusive rewriter ownership as above.
+        unsafe {
+            qnode.with_mut::<Query, _>(|q| -> PgResult<()> {
+                wcos.concat(mcx, &q.withCheckOptions)?;
+                q.withCheckOptions = wcos;
+                Ok(())
+            })
+        }
+        .expect("Query node")?;
+    }
+    Ok(())
 }
 
 fn fireRIRrules<'mcx>(
@@ -1244,7 +1259,7 @@ fn fireRIRrules<'mcx>(
         let cte_query_node = cte.ctequery.expect("analyzed CTE query");
         let ctequery = cte_query_node.as_query().expect("analyzed CTE query");
         let rir = fireRIRrules(mcx, ctequery, active_rirs)?;
-        stamp_query_flags(cte_query_node, &rir);
+        stamp_query_flags(mcx, cte_query_node, &rir)?;
         out.has_row_security |= rir.has_row_security;
     }
     // The EXCLUDED pseudo-relation must stay RTE_RELATION; never expand it.
@@ -1352,7 +1367,7 @@ fn fireRIRrules<'mcx>(
                 if let Some(sl) = node.as_sub_link() {
                     let sub = sl.subselect.as_query().expect("analyzed sublink sub-select");
                     let rir = fireRIRrules(self.mcx, sub, self.active_rirs)?;
-                    stamp_query_flags(sl.subselect, &rir);
+                    stamp_query_flags(self.mcx, sl.subselect, &rir)?;
                     self.has_row_security |= rir.has_row_security;
                 }
                 nodes_core::expression_tree_walker(node, self)
@@ -1506,7 +1521,7 @@ fn fireRIRrules<'mcx>(
                             let rir = fireRIRrules(self.mcx, sub, self.active_rirs)?;
                             // has_row_security discard: only reachable with the
                             // RTE's own has_row_security already true (C asserts).
-                            stamp_query_flags(sl.subselect, &rir);
+                            stamp_query_flags(self.mcx, sl.subselect, &rir)?;
                         }
                         nodes_core::expression_tree_walker(node, self)
                     }
@@ -2624,7 +2639,7 @@ fn ApplyRetrieveRule<'mcx>(
     }
 
     let rir = fireRIRrules(mcx, rule_action, active_rirs)?;
-    stamp_query_flags(action_node, &rir);
+    stamp_query_flags(mcx, action_node, &rir)?;
     *caller_has_row_security |= rir.has_row_security;
     let rule_action = action_node.as_query().expect("rule action is a Query");
 

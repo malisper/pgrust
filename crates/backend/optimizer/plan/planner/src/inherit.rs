@@ -1032,7 +1032,32 @@ pub fn apply_child_basequals<'mcx>(
             cq_min_security = cq_min_security.min(security_level);
         }
     }
-    // Child securityQuals: only UNION-ALL appendrels carry them (loud lane).
+    // Child securityQuals (UNION-ALL appendrels only; inheritance children
+    // never carry their own, see expand_single_inheritance_child). Like
+    // process_security_barrier_quals but with no general deductions.
+    let child_sq = &run.rte(appinfo.child_relid as usize).securityQuals;
+    let mut security_level: u32 = 0;
+    for qualset_node in child_sq {
+        let qualset = qualset_node.as_list().expect("securityQuals cell is a List");
+        for qual in qualset.iter() {
+            let childrinfo = crate::initsplan::make_restrictinfo(
+                run,
+                qual,
+                true,
+                false,
+                false,
+                false,
+                security_level,
+                None,
+                None,
+                None,
+            )?;
+            childquals.push(childrinfo);
+            cq_min_security = cq_min_security.min(security_level);
+        }
+        security_level += 1;
+    }
+    debug_assert!(security_level <= run.root.qual_security_level);
     let crel = run.root.rel_mut(child_rel);
     crel.baserestrictinfo = childquals;
     crel.baserestrict_min_security = cq_min_security;
