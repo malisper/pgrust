@@ -37,33 +37,44 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
 }
 
 // remove_useless_result_rtes + remove_useless_results_recurse
-// (prepjointree.c:3596). remove_result_refs and the find_dependent_phvs
-// checks are vacuous here: PlaceHolderVar creation is loud, so lastPHId is
-// always 0 and no PHV can reference a dropped rel. C mutates in place; here
-// the recursion returns None for untouched subtrees so the unchanged case
-// (every RESULT-bearing query pays this pass) allocates nothing.
+// (prepjointree.c:3596). C mutates in place; here the recursion returns None
+// for untouched subtrees so the unchanged case (every RESULT-bearing query
+// pays this pass) allocates nothing.
 pub fn remove_useless_result_rtes<'mcx>(
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
 ) -> PgResult<()> {
     let mcx = run.mcx;
     let f = parse.jointree.expect("top jointree is a FromExpr");
     // All-RangeTblRef fast path (SELECT 1 and every no-join query pays this
     // pass): the recursion is a per-child no-op, so drop RESULT siblings
-    // directly and rebuild only when something dropped.
+    // directly and rebuild only when something dropped. A RESULT that
+    // computes PHVs needed by a sibling must stay (C's
+    // find_dependent_phvs_in_jointree gate against the whole FromExpr).
     if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
+        let f_node = Node::mk(mcx, FromExpr { fromlist: f.fromlist.clone_in(mcx)?, quals: f.quals })?;
         let total = f.fromlist.len();
-        let mut dropped = 0usize;
+        let mut dropped: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
         let mut fromlist = NodeList::nil();
         for n in &f.fromlist {
-            if total - dropped > 1 && get_result_relid(parse, n) != 0 {
-                dropped += 1;
+            let varno = get_result_relid(parse, n);
+            if total - dropped.len() > 1
+                && varno != 0
+                && !crate::prepjointree::find_dependent_phvs_in_jointree(
+                    run, parse, f_node, varno,
+                )?
+            {
+                dropped.push(varno);
                 continue;
             }
             fromlist.lappend(mcx, n)?;
         }
-        if dropped > 0 {
-            parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
+        if !dropped.is_empty() {
+            let new_f = Node::mk(mcx, FromExpr { fromlist, quals: f.quals })?;
+            for &varno in dropped.iter() {
+                crate::prepjointree::remove_result_refs(run, parse, varno, new_f)?;
+            }
+            parse.jointree = Some(new_f.as_from_expr().expect("just built"));
             check_rowmarks_on_result(run, parse);
         }
         return Ok(());
@@ -87,20 +98,9 @@ pub fn remove_useless_result_rtes<'mcx>(
             None => children.push(Some(child)),
         }
     }
-    let mut remaining = children.len();
-    let mut ndropped = 0usize;
-    for child in children.iter_mut() {
-        if remaining > 1 && get_result_relid(parse, child.expect("live child")) != 0 {
-            remaining -= 1;
-            ndropped += 1;
-            *child = None;
-        }
-    }
+    let (fromlist, ndropped) =
+        drop_result_children(run, parse, &mut children, slot.node)?;
     if any_child_changed || slot.changed || ndropped > 0 {
-        let mut fromlist = NodeList::nil();
-        for child in children.iter().flatten() {
-            fromlist.lappend(mcx, *child)?;
-        }
         parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: slot.node })?);
     }
 
@@ -133,6 +133,55 @@ fn check_rowmarks_on_result<'mcx>(run: &PlannerRun<'mcx>, parse: &Query<'mcx>) {
 struct QualSlot<'mcx> {
     node: Option<Node<'mcx>>,
     changed: bool,
+}
+
+// The FromExpr-arm drop loop shared by the top level and the recursion:
+// RESULT rels with at least one sibling drop unless a sibling (or the quals)
+// references PHVs evaluated at them; dropped rels get remove_result_refs
+// against the surviving fromlist.
+fn drop_result_children<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    children: &mut [Option<Node<'mcx>>],
+    quals: Option<Node<'mcx>>,
+) -> PgResult<(NodeList<'mcx>, usize)> {
+    let mcx = run.mcx;
+    let mut remaining = children.len();
+    let mut dropped: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+    for i in 0..children.len() {
+        if remaining <= 1 {
+            break;
+        }
+        let child = children[i].expect("live child");
+        let varno = get_result_relid(parse, child);
+        if varno == 0 {
+            continue;
+        }
+        // C checks against f as it currently stands (already-dropped RESULT
+        // siblings excluded; they carry no expressions anyway).
+        let mut cur = NodeList::nil();
+        for c in children.iter().flatten() {
+            cur.lappend(mcx, *c)?;
+        }
+        let f_node = Node::mk(mcx, FromExpr { fromlist: cur, quals })?;
+        if crate::prepjointree::find_dependent_phvs_in_jointree(run, parse, f_node, varno)? {
+            continue;
+        }
+        remaining -= 1;
+        dropped.push(varno);
+        children[i] = None;
+    }
+    let mut fromlist = NodeList::nil();
+    for c in children.iter().flatten() {
+        fromlist.lappend(mcx, *c)?;
+    }
+    if !dropped.is_empty() {
+        let new_f = Node::mk(mcx, FromExpr { fromlist: fromlist.clone_in(mcx)?, quals })?;
+        for &varno in dropped.iter() {
+            crate::prepjointree::remove_result_refs(run, parse, varno, new_f)?;
+        }
+    }
+    Ok((fromlist, dropped.len()))
 }
 
 fn get_result_relid<'mcx>(parse: &Query<'mcx>, jtnode: Node<'mcx>) -> i32 {
@@ -168,7 +217,7 @@ fn merge_quals<'mcx>(
 
 // Returns Some(replacement) when the subtree changed, None when untouched.
 fn remove_useless_results_recurse<'mcx>(
-    run: &PlannerRun<'mcx>,
+    run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
     jtnode: Node<'mcx>,
     mut parent_quals: Option<&mut QualSlot<'mcx>>,
@@ -198,17 +247,10 @@ fn remove_useless_results_recurse<'mcx>(
                     None => children.push(Some(child)),
                 }
             }
-            let mut remaining = children.len();
-            let mut ndropped = 0usize;
-            for child in children.iter_mut() {
-                if remaining > 1 && get_result_relid(parse, child.expect("live child")) != 0 {
-                    remaining -= 1;
-                    ndropped += 1;
-                    *child = None;
-                }
-            }
-            if remaining == 1 && (slot.node.is_none() || parent_quals.is_some()) {
-                let kept = children.iter().flatten().next().copied().expect("one child");
+            let (fromlist, ndropped) =
+                drop_result_children(run, parse, &mut children, slot.node)?;
+            if fromlist.len() == 1 && (slot.node.is_none() || parent_quals.is_some()) {
+                let kept = fromlist.nth(0);
                 if let Some(p) = parent_quals {
                     merge_quals(mcx, slot.node, p)?;
                 }
@@ -216,10 +258,6 @@ fn remove_useless_results_recurse<'mcx>(
             }
             if !any_child_changed && !slot.changed && ndropped == 0 {
                 return Ok(None);
-            }
-            let mut fromlist = NodeList::nil();
-            for child in children.iter().flatten() {
-                fromlist.lappend(mcx, *child)?;
             }
             Ok(Some(Node::mk(mcx, FromExpr { fromlist, quals: slot.node })?))
         }
@@ -272,8 +310,22 @@ fn remove_useless_results_recurse<'mcx>(
                 JoinType::JOIN_INNER => {
                     let lrel = get_result_relid(parse, larg);
                     let rrel = get_result_relid(parse, rarg);
-                    if lrel != 0 || rrel != 0 {
-                        let keep = if lrel != 0 { rarg } else { larg };
+                    // C gates the larg drop on the rarg (the only side that
+                    // may hold a lateral ref to it); the rarg drop needs no
+                    // gate since nothing after it can reference it.
+                    let keep = if lrel != 0
+                        && !crate::prepjointree::find_dependent_phvs_in_jointree(
+                            run, parse, rarg, lrel,
+                        )? {
+                        crate::prepjointree::remove_result_refs(run, parse, lrel, rarg)?;
+                        Some(rarg)
+                    } else if rrel != 0 {
+                        crate::prepjointree::remove_result_refs(run, parse, rrel, larg)?;
+                        Some(larg)
+                    } else {
+                        None
+                    };
+                    if let Some(keep) = keep {
                         if slot.node.is_some() && parent_quals.is_none() {
                             return Ok(Some(Node::mk(
                                 mcx,
@@ -290,7 +342,15 @@ fn remove_useless_results_recurse<'mcx>(
                     }
                 }
                 JoinType::JOIN_LEFT => {
-                    if get_result_relid(parse, rarg) != 0 {
+                    // Strength-reduce only if no PHV depends on the RESULT
+                    // rel when the qual could null-extend it (C: quals == NIL
+                    // || !find_dependent_phvs).
+                    let varno = get_result_relid(parse, rarg);
+                    if varno != 0
+                        && (slot.node.is_none()
+                            || !crate::prepjointree::find_dependent_phvs(run, parse, varno)?)
+                    {
+                        crate::prepjointree::remove_result_refs(run, parse, varno, larg)?;
                         dropped_outer_joins.add_member(mcx, j.rtindex)?;
                         return Ok(Some(larg));
                     }
@@ -298,6 +358,12 @@ fn remove_useless_results_recurse<'mcx>(
                 JoinType::JOIN_SEMI => {
                     if get_result_relid(parse, rarg) != 0 {
                         debug_assert_eq!(j.rtindex, 0);
+                        crate::prepjointree::remove_result_refs(
+                            run,
+                            parse,
+                            get_result_relid(parse, rarg),
+                            larg,
+                        )?;
                         if slot.node.is_some() && parent_quals.is_none() {
                             return Ok(Some(Node::mk(
                                 mcx,

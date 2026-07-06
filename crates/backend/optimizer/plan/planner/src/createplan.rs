@@ -294,9 +294,9 @@ fn replace_nestloop_params_mutator<'mcx>(
                 }
             }
         }
-        panic!(
-            "replace_nestloop_params_mutator (createplan.c):              replace_nestloop_param_placeholdervar (lateral PHV param) unported"
-        );
+        return Ok(Some(crate::paramassign::replace_nestloop_param_placeholdervar(
+            run, phv, node,
+        )?));
     }
     clauses::walker::expression_tree_mutator(run.mcx, node, &mut |n| {
         replace_nestloop_params_mutator(run, n)
@@ -3453,8 +3453,10 @@ fn create_nestloop_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
         otherclauses = replace_nestloop_params_list(run, &otherclauses)?;
     }
 
+    let req_outer =
+        crate::relnode::relids_copy(mcx, crate::pathnode::path_req_outer(run.root.path(path_id).base()));
     let nest_params =
-        crate::paramassign::identify_current_nestloop_params(run, &outerrelids)?;
+        crate::paramassign::identify_current_nestloop_params(run, &outerrelids, &req_outer)?;
 
     let mut plan = Node::build::<types_nodes::plannodes::NestLoop>(mcx)?;
     plan.join.plan.targetlist = tlist;
@@ -4006,7 +4008,10 @@ fn create_append_plan<'mcx>(
                 a.first_partial_path,
                 crate::relnode::pgvec_clone_shallow(mcx, &a.path.pathkeys),
                 a.limit_tuples,
-                a.path.param_info.is_some(),
+                // C folds param_info->ppi_clauses (via replace_nestloop_params)
+                // into the prunequal; appendrel ParamPathInfos carry no
+                // clauses, so only a clause-bearing one is loud below.
+                a.path.param_info.as_ref().is_some_and(|ppi| !ppi.ppi_clauses.is_empty()),
             ),
             _ => unreachable!(),
         };
@@ -4052,8 +4057,8 @@ fn create_append_plan<'mcx>(
     if crate::gucs::enable_partition_pruning() {
         assert!(
             !has_param_info,
-            "create_append_plan (createplan.c): parameterized Append prunequal \
-             (replace_nestloop_params) unported"
+            "create_append_plan (createplan.c): parameterized Append ppi_clauses \
+             prunequal (replace_nestloop_params) unported"
         );
         let rinfos = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel_id).baserestrictinfo);
         let mut prunequal: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);

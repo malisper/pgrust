@@ -649,11 +649,15 @@ pub(crate) fn add_paths_to_append_rel(
     rel: RelId,
     live_childrels: &[RelId],
 ) -> PgResult<()> {
+    use types_pathnodes::relids::{relids_copy, relids_equal, relids_is_empty};
     let mcx = run.mcx;
     let mut subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
+    let mut subpaths_valid = true;
     let mut startup_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
     let mut startup_valid = run.root.rel(rel).consider_startup;
     let mut all_child_pathkeys: mcx::PgVec<'_, mcx::PgVec<'_, PathKey>> =
+        mcx::PgVec::new_in(mcx);
+    let mut all_child_outers: mcx::PgVec<'_, types_pathnodes::Relids<'_>> =
         mcx::PgVec::new_in(mcx);
     for &childrel in live_childrels {
         // Child partial paths exist since the parallel-p3 landing (C builds
@@ -664,10 +668,9 @@ pub(crate) fn add_paths_to_append_rel(
             Some(p) if run.root.path(p).base().param_info.is_none() => {
                 accumulate_append_subpath(&run.root, p, &mut subpaths);
             }
-            _ => panic!(
-                "add_paths_to_append_rel (allpaths.c): parameterized-only child; \
-                 parameterized-append lane"
-            ),
+            // A child with only parameterized paths: no unparameterized
+            // Append, but the per-parameterization loop below still applies.
+            _ => subpaths_valid = false,
         }
         if startup_valid {
             match run.root.rel(childrel).cheapest_startup_path {
@@ -690,38 +693,163 @@ pub(crate) fn add_paths_to_append_rel(
         for pi in 0..run.root.rel(childrel).pathlist.len() {
             let childpath = run.root.rel(childrel).pathlist[pi];
             let childkeys = &run.root.path(childpath).base().pathkeys;
-            if childkeys.is_empty() {
-                continue;
+            if !childkeys.is_empty() {
+                let found = all_child_pathkeys.iter().any(|existing| {
+                    crate::pathkeys::compare_pathkeys(existing, childkeys)
+                        == crate::pathkeys::PathKeysComparison::Equal
+                });
+                if !found {
+                    all_child_pathkeys
+                        .push(crate::relnode::pgvec_clone_shallow(mcx, childkeys));
+                }
             }
-            let found = all_child_pathkeys.iter().any(|existing| {
-                crate::pathkeys::compare_pathkeys(existing, childkeys)
-                    == crate::pathkeys::PathKeysComparison::Equal
-            });
-            if !found {
-                all_child_pathkeys
-                    .push(crate::relnode::pgvec_clone_shallow(mcx, childkeys));
+            let childouter =
+                crate::pathnode::path_req_outer(run.root.path(childpath).base());
+            if !relids_is_empty(childouter) {
+                let found =
+                    all_child_outers.iter().any(|existing| relids_equal(existing, childouter));
+                if !found {
+                    all_child_outers.push(relids_copy(mcx, childouter));
+                }
             }
         }
     }
 
-    let pid =
-        crate::pathnode::create_append_path(run, rel, subpaths, mcx::PgVec::new_in(mcx), -1.0)?;
-    add_path(run, rel, pid);
-    if startup_valid {
+    if subpaths_valid {
         let pid = crate::pathnode::create_append_path(
             run,
             rel,
-            startup_subpaths,
+            subpaths,
             mcx::PgVec::new_in(mcx),
+            &None,
             -1.0,
         )?;
         add_path(run, rel, pid);
+        if startup_valid {
+            let pid = crate::pathnode::create_append_path(
+                run,
+                rel,
+                startup_subpaths,
+                mcx::PgVec::new_in(mcx),
+                &None,
+                -1.0,
+            )?;
+            add_path(run, rel, pid);
+        }
+        if !all_child_pathkeys.is_empty() {
+            generate_orderedappend_paths(run, rel, live_childrels, &all_child_pathkeys)?;
+        }
     }
 
-    if !all_child_pathkeys.is_empty() {
-        generate_orderedappend_paths(run, rel, live_childrels, &all_child_pathkeys)?;
+    // Build unordered, parameterized Append paths for each parameterization
+    // seen among the child rels (lateral references force these).
+    for oi in 0..all_child_outers.len() {
+        let required_outer = relids_copy(mcx, &all_child_outers[oi]);
+        let mut par_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
+        let mut par_valid = true;
+        for &childrel in live_childrels {
+            if run.root.rel(childrel).pathlist.is_empty() {
+                par_valid = false;
+                break;
+            }
+            match get_cheapest_parameterized_child_path(run, childrel, &required_outer)? {
+                Some(subpath) => {
+                    accumulate_append_subpath(&run.root, subpath, &mut par_subpaths);
+                }
+                None => {
+                    par_valid = false;
+                    break;
+                }
+            }
+        }
+        if par_valid {
+            let pid = crate::pathnode::create_append_path(
+                run,
+                rel,
+                par_subpaths,
+                mcx::PgVec::new_in(mcx),
+                &required_outer,
+                -1.0,
+            )?;
+            add_path(run, rel, pid);
+        }
     }
     Ok(())
+}
+
+// get_cheapest_parameterized_child_path (allpaths.c).
+fn get_cheapest_parameterized_child_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<Option<types_pathnodes::PathId>> {
+    use types_pathnodes::relids::{relids_equal, relids_is_subset};
+    let mcx = run.mcx;
+    let paths = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel).pathlist);
+    let cheapest = crate::pathkeys::get_cheapest_path_for_pathkeys(
+        run,
+        &paths,
+        &[],
+        required_outer,
+        crate::pathnode::CostSelector::Total,
+        false,
+    )
+    .expect("cheapest path with no more than the needed parameterization");
+    if relids_equal(
+        crate::pathnode::path_req_outer(run.root.path(cheapest).base()),
+        required_outer,
+    ) {
+        return Ok(Some(cheapest));
+    }
+    // No exact match: reparameterize candidates and keep the cheapest.
+    let mut best: Option<types_pathnodes::PathId> = None;
+    for &pid in paths.iter() {
+        {
+            let p = run.root.path(pid).base();
+            if !relids_is_subset(crate::pathnode::path_req_outer(p), required_outer) {
+                continue;
+            }
+            if let Some(b) = best {
+                if crate::pathnode::compare_path_costs(
+                    run.root.path(b).base(),
+                    p,
+                    crate::pathnode::CostSelector::Total,
+                ) <= 0
+                {
+                    continue;
+                }
+            }
+        }
+        let candidate = if relids_equal(
+            crate::pathnode::path_req_outer(run.root.path(pid).base()),
+            required_outer,
+        ) {
+            pid
+        } else {
+            match crate::pathnode::reparameterize_path(run, pid, required_outer, 1.0)? {
+                Some(np) => {
+                    debug_assert!(relids_equal(
+                        crate::pathnode::path_req_outer(run.root.path(np).base()),
+                        required_outer
+                    ));
+                    if let Some(b) = best {
+                        if crate::pathnode::compare_path_costs(
+                            run.root.path(b).base(),
+                            run.root.path(np).base(),
+                            crate::pathnode::CostSelector::Total,
+                        ) <= 0
+                        {
+                            continue;
+                        }
+                    }
+                    np
+                }
+                None => continue,
+            }
+        };
+        best = Some(candidate);
+    }
+    Ok(best)
 }
 
 // generate_orderedappend_paths (allpaths.c): one ordered path set per child
@@ -795,6 +923,7 @@ fn generate_orderedappend_paths<'mcx>(
                 run,
                 &child_paths,
                 pathkeys,
+                &None,
                 crate::pathnode::CostSelector::Startup,
                 false,
             );
@@ -802,6 +931,7 @@ fn generate_orderedappend_paths<'mcx>(
                 run,
                 &child_paths,
                 pathkeys,
+                &None,
                 crate::pathnode::CostSelector::Total,
                 false,
             );
@@ -865,6 +995,7 @@ fn generate_orderedappend_paths<'mcx>(
                 rel,
                 startup_subpaths,
                 crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                &None,
                 -1.0,
             )?;
             add_path(run, rel, pid);
@@ -874,6 +1005,7 @@ fn generate_orderedappend_paths<'mcx>(
                     rel,
                     total_subpaths,
                     crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                    &None,
                     -1.0,
                 )?;
                 add_path(run, rel, pid);
@@ -884,6 +1016,7 @@ fn generate_orderedappend_paths<'mcx>(
                     rel,
                     fractional_subpaths,
                     crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
+                    &None,
                     -1.0,
                 )?;
                 add_path(run, rel, pid);

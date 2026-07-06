@@ -316,6 +316,7 @@ fn generate_union_paths<'mcx>(
                 run,
                 &paths,
                 &union_pathkeys,
+                &None,
                 crate::pathnode::CostSelector::Total,
                 false,
             ) {
@@ -350,6 +351,7 @@ fn generate_union_paths<'mcx>(
         result_rel,
         cheapest_pathlist,
         PgVec::new_in(mcx),
+        &None,
         -1.0,
     )?;
     let apath_rows = run.root.path(apath).base().rows;
@@ -687,6 +689,7 @@ fn sorted_nonunion_input<'mcx>(
         run,
         &paths,
         nonunion_pathkeys,
+        &None,
         crate::pathnode::CostSelector::Total,
         false,
     ) {

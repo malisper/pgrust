@@ -6133,3 +6133,597 @@ mod pull_var_walker_vocab {
         assert_eq!(out.len(), 2);
     }
 }
+
+// LATERAL replacement legs of the subquery-pullup family: distilled from the
+// join-suite queries failing 'no relation entry for relid N'
+// (notes/join-using-bundle.md residual fingerprint).
+mod lateral_pullup {
+    use super::*;
+
+    fn rel_rte(mcx: Mcx<'_>) -> Node<'_> {
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_RELATION;
+        rte.relid = TBL;
+        rte.relkind = b'r';
+        rte.rellockmode = 1;
+        rte.inh = false;
+        rte.seal()
+    }
+
+    fn subquery_rte<'mcx>(
+        mcx: Mcx<'mcx>,
+        subquery: Query<'mcx>,
+        name: &'mcx str,
+        colnames: &[&'mcx str],
+        lateral: bool,
+    ) -> Node<'mcx> {
+        let mut cols = NodeList::nil();
+        for c in colnames {
+            cols.lappend(mcx, Node::mk_string(mcx, c).unwrap()).unwrap();
+        }
+        let eref = alloc_leak_in(
+            mcx,
+            types_nodes::primnodes::Alias { aliasname: Some(name), colnames: cols },
+        )
+        .unwrap();
+        let mut rte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        rte.rtekind = RTEKind::RTE_SUBQUERY;
+        rte.subquery = Some(alloc_leak_in(mcx, subquery).unwrap());
+        rte.lateral = lateral;
+        rte.eref = Some(eref);
+        rte.alias = Some(eref);
+        rte.inFromCl = true;
+        rte.seal()
+    }
+
+    // The analyzer's output for `(VALUES (<expr>))` in FROM: a subquery
+    // wrapping a single-row RTE_VALUES.
+    fn values_wrapper_query<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> Query<'mcx> {
+        let row = Node::mk_list(mcx, NodeList::make1(mcx, expr).unwrap()).unwrap();
+        let values_lists = NodeList::make1(mcx, row).unwrap();
+        let colname = Node::mk_string(mcx, "column1").unwrap();
+        let eref = alloc_leak_in(
+            mcx,
+            types_nodes::primnodes::Alias {
+                aliasname: Some("*VALUES*"),
+                colnames: NodeList::make1(mcx, colname).unwrap(),
+            },
+        )
+        .unwrap();
+        let mut vrte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+        vrte.rtekind = RTEKind::RTE_VALUES;
+        vrte.values_lists = values_lists;
+        vrte.eref = Some(eref);
+        let rtable = NodeList::make1(mcx, vrte.seal()).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals: None,
+            },
+        )
+        .unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("column1"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            ..Query::default()
+        }
+    }
+
+    // `SELECT ss.y FROM t a, t b, LATERAL (VALUES (a.pk)) ss(y)
+    //  WHERE b.pk = ss.y` — C: pull_up_simple_values inside the subquery,
+    // then pull_up_simple_subquery; fully flattens to a join of a and b on
+    // b.pk = a.pk (join.sql `lateral (values(a.unique1))` shape).
+    #[test]
+    fn lateral_values_single_row_flattens() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let a_pk_up = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+        let ss = values_wrapper_query(mcx, a_pk_up);
+        let mut rtable = NodeList::make1(mcx, rel_rte(mcx)).unwrap();
+        rtable.lappend(mcx, rel_rte(mcx)).unwrap();
+        rtable.lappend(mcx, subquery_rte(mcx, ss, "ss", &["y"], true)).unwrap();
+        let mut fromlist = NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 2).unwrap()).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 3).unwrap()).unwrap();
+        let b_pk = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let ss_y = Node::mk_var(mcx, 3, 1, 23, -1, 0, 0).unwrap();
+        let quals = Node::mk(
+            mcx,
+            types_nodes::primnodes::OpExpr {
+                opno: INT4EQ_OP,
+                opfuncid: INT4EQ_PROC,
+                opresulttype: 16,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, b_pk, ss_y).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        let jointree = alloc_leak_in(mcx, FromExpr { fromlist, quals: Some(quals) }).unwrap();
+        let ss_y_out = Node::mk_var(mcx, 3, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, ss_y_out, 1, Some("y"), false).unwrap();
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 70,
+            ..Query::default()
+        };
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT ss.y FROM t a, t b, LATERAL (VALUES (a.pk)) ss(y) WHERE b.pk = ss.y",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        // C flattens completely: a join of the two heap scans, no Values Scan.
+        let mut stack = vec![stmt.planTree.unwrap()];
+        while let Some(p) = stack.pop() {
+            assert_ne!(p.node_tag(), NodeTag::T_ValuesScan, "VALUES survived pull-up");
+            let plan = p.as_plan().unwrap();
+            if let Some(l) = plan.lefttree {
+                stack.push(l);
+            }
+            if let Some(r) = plan.righttree {
+                stack.push(r);
+            }
+        }
+    }
+
+    // `SELECT ss2.y FROM (SELECT a.pk AS x FROM t a) ss1,
+    //  LATERAL (VALUES (ss1.x)) ss2(y)` — the VALUES list references a
+    // pulled-up subquery's output (join.sql `lateral (values(x))` shape).
+    #[test]
+    fn lateral_values_over_pulled_up_subquery_output() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+
+        // ss1 = SELECT a.pk AS x FROM t a
+        let ss1 = {
+            let rtable = NodeList::make1(mcx, rel_rte(mcx)).unwrap();
+            let jointree = alloc_leak_in(
+                mcx,
+                FromExpr {
+                    fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap())
+                        .unwrap(),
+                    quals: None,
+                },
+            )
+            .unwrap();
+            let pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+            let tle = Node::mk_target_entry(mcx, pk, 1, Some("x"), false).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                jointree: Some(jointree),
+                rtable,
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                ..Query::default()
+            }
+        };
+        let ss1_x_up = Node::mk_var(mcx, 1, 1, 23, -1, 0, 1).unwrap();
+        let ss2 = values_wrapper_query(mcx, ss1_x_up);
+        let mut rtable =
+            NodeList::make1(mcx, subquery_rte(mcx, ss1, "ss1", &["x"], false)).unwrap();
+        rtable.lappend(mcx, subquery_rte(mcx, ss2, "ss2", &["y"], true)).unwrap();
+        let mut fromlist = NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 2).unwrap()).unwrap();
+        let jointree = alloc_leak_in(mcx, FromExpr { fromlist, quals: None }).unwrap();
+        let y = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, y, 1, Some("y"), false).unwrap();
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 80,
+            ..Query::default()
+        };
+        planner(
+            mcx,
+            parse,
+            "SELECT ss2.y FROM (SELECT a.pk AS x FROM t a) ss1, LATERAL (VALUES (ss1.x)) ss2(y)",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+    }
+
+    // `SELECT ss1.x, ss2.y, ss3.z FROM (SELECT 1 AS x) ss1
+    //  LEFT JOIN (SELECT 2 AS y) ss2 ON true,
+    //  LATERAL (SELECT ss2.y LIMIT 1) ss3(z)` — pull-up of ss2 under the
+    // outer join replaces ss2.y with a PHV-wrapped Const; the replacement
+    // must descend into the LATERAL subquery at sublevel 1 (C wrap_non_vars,
+    // join.sql `lateral (select ss2.y limit 1)` shape).
+    #[test]
+    fn phv_replacement_reaches_lateral_subquery() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+
+        let select_const = |v: i32, name: &'static str| {
+            let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap();
+            let tle = Node::mk_target_entry(mcx, konst, 1, Some(name), false).unwrap();
+            let jointree =
+                alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                jointree: Some(jointree),
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                ..Query::default()
+            }
+        };
+        let nulled_var = |varno: i32, attno: i16, levelsup: u32| {
+            let mut nulling = types_nodes::Bitmapset::empty();
+            nulling.add_member(mcx, 3).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::Var {
+                    varno,
+                    varattno: attno,
+                    vartype: 23,
+                    vartypmod: -1,
+                    varnullingrels: nulling,
+                    varlevelsup: levelsup,
+                    varnosyn: varno as u32,
+                    varattnosyn: attno,
+                    location: -1,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        // ss3 = SELECT ss2.y AS z LIMIT 1 (LIMIT blocks pull-up).
+        let ss3 = {
+            let tle =
+                Node::mk_target_entry(mcx, nulled_var(2, 1, 1), 1, Some("z"), false).unwrap();
+            let jointree =
+                alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                jointree: Some(jointree),
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                limitCount: Some(
+                    Node::mk_const(mcx, 20, -1, 0, 8, Datum::from_i64(1), false, true).unwrap(),
+                ),
+                limitOption: types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT,
+                ..Query::default()
+            }
+        };
+
+        let mut rtable =
+            NodeList::make1(mcx, subquery_rte(mcx, select_const(1, "x"), "ss1", &["x"], false))
+                .unwrap();
+        rtable
+            .lappend(mcx, subquery_rte(mcx, select_const(2, "y"), "ss2", &["y"], false))
+            .unwrap();
+        // RTE_JOIN for `ss1 LEFT JOIN ss2 ON true`.
+        {
+            let mut joinaliasvars =
+                NodeList::make1(mcx, Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap()).unwrap();
+            joinaliasvars.lappend(mcx, nulled_var(2, 1, 0)).unwrap();
+            let mut colnames = NodeList::make1(mcx, Node::mk_string(mcx, "x").unwrap()).unwrap();
+            colnames.lappend(mcx, Node::mk_string(mcx, "y").unwrap()).unwrap();
+            let eref = alloc_leak_in(
+                mcx,
+                types_nodes::primnodes::Alias { aliasname: Some("unnamed_join"), colnames },
+            )
+            .unwrap();
+            let mut leftcols = types_nodes::list::IntList::nil();
+            let mut rightcols = types_nodes::list::IntList::nil();
+            leftcols.lappend(mcx, 1).unwrap();
+            rightcols.lappend(mcx, 1).unwrap();
+            let mut jrte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            jrte.rtekind = RTEKind::RTE_JOIN;
+            jrte.jointype = types_nodes::JoinType::JOIN_LEFT;
+            jrte.joinaliasvars = joinaliasvars;
+            jrte.joinleftcols = leftcols;
+            jrte.joinrightcols = rightcols;
+            jrte.eref = Some(eref);
+            jrte.inFromCl = true;
+            rtable.lappend(mcx, jrte.seal()).unwrap();
+        }
+        rtable.lappend(mcx, subquery_rte(mcx, ss3, "ss3", &["z"], true)).unwrap();
+
+        let join = Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype: types_nodes::JoinType::JOIN_LEFT,
+                isNatural: false,
+                larg: Node::mk_range_tbl_ref(mcx, 1).unwrap(),
+                rarg: Node::mk_range_tbl_ref(mcx, 2).unwrap(),
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: Some(
+                    Node::mk_const(mcx, 16, -1, 0, 1, Datum::from_bool(true), false, true)
+                        .unwrap(),
+                ),
+                alias: None,
+                rtindex: 3,
+            },
+        )
+        .unwrap();
+        let mut fromlist = NodeList::make1(mcx, join).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 4).unwrap()).unwrap();
+        let jointree = alloc_leak_in(mcx, FromExpr { fromlist, quals: None }).unwrap();
+
+        let mut tlist = NodeList::nil();
+        let x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        tlist.lappend(mcx, Node::mk_target_entry(mcx, x, 1, Some("x"), false).unwrap()).unwrap();
+        tlist
+            .lappend(
+                mcx,
+                Node::mk_target_entry(mcx, nulled_var(2, 1, 0), 2, Some("y"), false).unwrap(),
+            )
+            .unwrap();
+        let z = Node::mk_var(mcx, 4, 1, 23, -1, 0, 0).unwrap();
+        tlist.lappend(mcx, Node::mk_target_entry(mcx, z, 3, Some("z"), false).unwrap()).unwrap();
+
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: tlist,
+            stmt_location: 0,
+            stmt_len: 120,
+            ..Query::default()
+        };
+        planner(
+            mcx,
+            parse,
+            "SELECT ss1.x, ss2.y, ss3.z FROM (SELECT 1 AS x) ss1 LEFT JOIN (SELECT 2 AS y) ss2 \
+             ON true, LATERAL (SELECT ss2.y LIMIT 1) ss3(z)",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+    }
+
+    fn setop_leaf_rte<'mcx>(
+        mcx: Mcx<'mcx>,
+        subquery: Query<'mcx>,
+        name: &'mcx str,
+    ) -> Node<'mcx> {
+        subquery_rte(mcx, subquery, name, &["vx"], false)
+    }
+
+    // UNION ALL setop Query over two single-column leaves.
+    fn union_all_query<'mcx>(mcx: Mcx<'mcx>, left: Query<'mcx>, right: Query<'mcx>) -> Query<'mcx> {
+        use types_nodes::list::{IntList, OidList};
+        use types_nodes::parsenodes::{SetOperation, SetOperationStmt};
+        let mut rtable = NodeList::make1(mcx, setop_leaf_rte(mcx, left, "*SELECT* 1")).unwrap();
+        rtable.lappend(mcx, setop_leaf_rte(mcx, right, "*SELECT* 2")).unwrap();
+        let stmt = Node::mk(
+            mcx,
+            SetOperationStmt {
+                op: SetOperation::SETOP_UNION,
+                all: true,
+                larg: Some(Node::mk_range_tbl_ref(mcx, 1).unwrap()),
+                rarg: Some(Node::mk_range_tbl_ref(mcx, 2).unwrap()),
+                colTypes: OidList::make1(mcx, 23).unwrap(),
+                colTypmods: IntList::make1(mcx, -1).unwrap(),
+                colCollations: OidList::make1(mcx, 0).unwrap(),
+                groupClauses: NodeList::nil(),
+            },
+        )
+        .unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+        let v = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, v, 1, Some("vx"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            setOperations: Some(stmt),
+            ..Query::default()
+        }
+    }
+
+    // Empty-FROM leaf `SELECT <expr>`.
+    fn leaf_query<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> Query<'mcx> {
+        let tle = Node::mk_target_entry(mcx, expr, 1, Some("vx"), false).unwrap();
+        let jointree =
+            alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            jointree: Some(jointree),
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            ..Query::default()
+        }
+    }
+
+    // `SELECT v.vx FROM t a, LATERAL (SELECT a.pk UNION ALL SELECT a.val)
+    //  v(vx)` — UNION ALL inside a lateral subquery, leaves carrying uplevel
+    // refs (join.sql `lateral (... union all ...)` shape).
+    #[test]
+    fn union_all_in_lateral_subquery_plans() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let a_pk = Node::mk_var(mcx, 1, 1, 23, -1, 0, 2).unwrap();
+        let a_val = Node::mk_var(mcx, 1, 2, 23, -1, 0, 2).unwrap();
+        let v = union_all_query(mcx, leaf_query(mcx, a_pk), leaf_query(mcx, a_val));
+        let mut rtable = NodeList::make1(mcx, rel_rte(mcx)).unwrap();
+        rtable.lappend(mcx, subquery_rte(mcx, v, "v", &["vx"], true)).unwrap();
+        let mut fromlist = NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 2).unwrap()).unwrap();
+        let jointree = alloc_leak_in(mcx, FromExpr { fromlist, quals: None }).unwrap();
+        let vx = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, vx, 1, Some("vx"), false).unwrap();
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 70,
+            ..Query::default()
+        };
+        planner(
+            mcx,
+            parse,
+            "SELECT v.vx FROM t a, LATERAL (SELECT a.pk UNION ALL SELECT a.val) v(vx)",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+    }
+
+    // `SELECT v.vx FROM (SELECT 1 AS x) ss1 LEFT JOIN (SELECT 2 AS y) ss2
+    //  ON true, LATERAL (SELECT ss1.x UNION ALL SELECT ss2.y) v(vx)` — the
+    // PHV-wrapped replacement for ss2.y must reach the UNION ALL leaves at
+    // sublevel 2 inside the lateral subquery.
+    #[test]
+    fn phv_replacement_reaches_union_all_in_lateral() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let select_const = |v: i32, name: &'static str| {
+            let konst = Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(v), false, true).unwrap();
+            let tle = Node::mk_target_entry(mcx, konst, 1, Some(name), false).unwrap();
+            let jointree =
+                alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
+            Query {
+                commandType: CmdType::CMD_SELECT,
+                jointree: Some(jointree),
+                targetList: NodeList::make1(mcx, tle).unwrap(),
+                ..Query::default()
+            }
+        };
+        let nulled_var = |varno: i32, attno: i16, levelsup: u32| {
+            let mut nulling = types_nodes::Bitmapset::empty();
+            nulling.add_member(mcx, 3).unwrap();
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::Var {
+                    varno,
+                    varattno: attno,
+                    vartype: 23,
+                    vartypmod: -1,
+                    varnullingrels: nulling,
+                    varlevelsup: levelsup,
+                    varnosyn: varno as u32,
+                    varattnosyn: attno,
+                    location: -1,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let ss1_x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 2).unwrap();
+        let v = union_all_query(
+            mcx,
+            leaf_query(mcx, ss1_x),
+            leaf_query(mcx, nulled_var(2, 1, 2)),
+        );
+        let mut rtable =
+            NodeList::make1(mcx, subquery_rte(mcx, select_const(1, "x"), "ss1", &["x"], false))
+                .unwrap();
+        rtable
+            .lappend(mcx, subquery_rte(mcx, select_const(2, "y"), "ss2", &["y"], false))
+            .unwrap();
+        {
+            let mut joinaliasvars =
+                NodeList::make1(mcx, Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap()).unwrap();
+            joinaliasvars.lappend(mcx, nulled_var(2, 1, 0)).unwrap();
+            let mut colnames = NodeList::make1(mcx, Node::mk_string(mcx, "x").unwrap()).unwrap();
+            colnames.lappend(mcx, Node::mk_string(mcx, "y").unwrap()).unwrap();
+            let eref = alloc_leak_in(
+                mcx,
+                types_nodes::primnodes::Alias { aliasname: Some("unnamed_join"), colnames },
+            )
+            .unwrap();
+            let mut leftcols = types_nodes::list::IntList::nil();
+            let mut rightcols = types_nodes::list::IntList::nil();
+            leftcols.lappend(mcx, 1).unwrap();
+            rightcols.lappend(mcx, 1).unwrap();
+            let mut jrte = Node::build::<types_nodes::parsenodes::RangeTblEntry>(mcx).unwrap();
+            jrte.rtekind = RTEKind::RTE_JOIN;
+            jrte.jointype = types_nodes::JoinType::JOIN_LEFT;
+            jrte.joinaliasvars = joinaliasvars;
+            jrte.joinleftcols = leftcols;
+            jrte.joinrightcols = rightcols;
+            jrte.eref = Some(eref);
+            jrte.inFromCl = true;
+            rtable.lappend(mcx, jrte.seal()).unwrap();
+        }
+        rtable.lappend(mcx, subquery_rte(mcx, v, "v", &["vx"], true)).unwrap();
+        let join = Node::mk(
+            mcx,
+            types_nodes::JoinExpr {
+                jointype: types_nodes::JoinType::JOIN_LEFT,
+                isNatural: false,
+                larg: Node::mk_range_tbl_ref(mcx, 1).unwrap(),
+                rarg: Node::mk_range_tbl_ref(mcx, 2).unwrap(),
+                usingClause: NodeList::nil(),
+                join_using_alias: None,
+                quals: Some(
+                    Node::mk_const(mcx, 16, -1, 0, 1, Datum::from_bool(true), false, true)
+                        .unwrap(),
+                ),
+                alias: None,
+                rtindex: 3,
+            },
+        )
+        .unwrap();
+        let mut fromlist = NodeList::make1(mcx, join).unwrap();
+        fromlist.lappend(mcx, Node::mk_range_tbl_ref(mcx, 4).unwrap()).unwrap();
+        let jointree = alloc_leak_in(mcx, FromExpr { fromlist, quals: None }).unwrap();
+        let vx = Node::mk_var(mcx, 4, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, vx, 1, Some("vx"), false).unwrap();
+        let parse = Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 120,
+            ..Query::default()
+        };
+        planner(
+            mcx,
+            parse,
+            "SELECT v.vx FROM (SELECT 1 AS x) ss1 LEFT JOIN (SELECT 2 AS y) ss2 ON true, \
+             LATERAL (SELECT ss1.x UNION ALL SELECT ss2.y) v(vx)",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+    }
+}
+

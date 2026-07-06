@@ -407,8 +407,13 @@ pub(crate) fn process_subquery_nestloop_params<'mcx>(
 pub(crate) fn identify_current_nestloop_params<'mcx>(
     run: &mut PlannerRun<'mcx>,
     leftrelids: &types_pathnodes::Relids<'mcx>,
+    outerrelids: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<types_nodes::NodeList<'mcx>> {
     let mcx = run.mcx;
+    // A PHV is evaluable in the lefthand path if it uses the lefthand rels
+    // plus available required-outer rels — but not if it uses *only*
+    // required-outer rels (it should be evaluated higher in the tree then).
+    let allleftrelids = crate::relnode::relids_union(mcx, leftrelids, outerrelids);
     let mut result = types_nodes::NodeList::nil();
     let mut i = 0;
     while i < run.root.curOuterParams.len() {
@@ -421,9 +426,49 @@ pub(crate) fn identify_current_nestloop_params<'mcx>(
                 .expect("curOuterParams holds NestLoopParam nodes");
             (nlp.paramno, nlp.paramval)
         };
+        if let Some(phv) = paramval.as_place_holder_var() {
+            let phid = crate::placeholder::find_placeholder_info(run, phv)?;
+            let eval_at = crate::relnode::relids_copy(mcx, &run.root.phinfo(phid).ph_eval_at);
+            if crate::relnode::relids_is_subset(&eval_at, &allleftrelids)
+                && crate::relnode::relids_overlap(&eval_at, leftrelids)
+            {
+                run.root.curOuterParams.remove(i);
+                // C hasSubLinks edge: a pulled-up PHV may still hold a
+                // SubLink; the placeholder_list's ph_var carries the SubPlan
+                // form instead.
+                let base = if run.queries[run.root.parse.0 as usize].hasSubLinks {
+                    crate::placeholder::ph_var_node(run, phid)?
+                } else {
+                    rewrite_manip::copy_node(mcx, paramval)?
+                };
+                let nulling = {
+                    let nr = crate::placeholder::get_placeholder_nulling_relids(run, phid);
+                    crate::relnode::relids_intersect(mcx, &nr, leftrelids)
+                };
+                let mut phnullingrels = types_nodes::Bitmapset::empty();
+                for x in crate::relnode::relids_members(&nulling) {
+                    phnullingrels.add_member(mcx, x)?;
+                }
+                // SAFETY: fresh copy_node/ph_var_node output; exclusive.
+                unsafe {
+                    base.with_mut::<PlaceHolderVar, _>(|p| {
+                        p.phnullingrels = phnullingrels;
+                    })
+                }
+                .expect("PlaceHolderVar");
+                let nlp_node = Node::mk(
+                    mcx,
+                    types_nodes::plannodes::NestLoopParam { paramno, paramval: base },
+                )?;
+                result.lappend(mcx, nlp_node)?;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
         let var = paramval
             .as_var()
-            .expect("NestLoopParam values are Vars (PHVs are loud upstream)");
+            .expect("NestLoopParam values are Vars or PlaceHolderVars");
         if crate::relnode::relids_is_member(var.varno, leftrelids) {
             run.root.curOuterParams.remove(i);
             let rel = crate::relnode::find_base_rel(&run.root, var.varno);

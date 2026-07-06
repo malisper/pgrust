@@ -31,6 +31,16 @@ pub fn pull_up_subqueries<'mcx>(
         let Some((rti, lowest_outer_join)) = target else { return Ok(()) };
         let rte_node = parse.rtable.nth(rti as usize - 1);
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        if rte.rtekind == RTEKind::RTE_VALUES {
+            // C dispatch: no VALUES pullup below an outer join nor into an
+            // appendrel (the driver only targets it when neither applies).
+            if is_simple_values(parse, rti, rte)? {
+                pull_up_simple_values(mcx, parse, rti, rte)?;
+            } else {
+                kept.push(rti);
+            }
+            continue;
+        }
         if is_simple_subquery(mcx, rte, lowest_outer_join)? {
             if !pull_up_simple_subquery(run, parse, rti, rte_node, lowest_outer_join, None)? {
                 kept.push(rti);
@@ -269,6 +279,17 @@ pub(crate) fn query_has_uplevel_vars<'mcx>(q: &'mcx Query<'mcx>) -> PgResult<boo
                     }
                     Ok(false)
                 }
+                NodeTag::T_PlaceHolderVar => {
+                    // PHVs made by pullup_replace_vars carry uplevel refs the
+                    // same way (C IncrementVarSublevelsUp adjusts them too).
+                    if node.as_place_holder_var().expect("PlaceHolderVar").phlevelsup
+                        > self.depth
+                    {
+                        self.found = true;
+                        return Ok(true);
+                    }
+                    nodes_core::expression_tree_walker(node, self)
+                }
                 NodeTag::T_RangeTblEntry => {
                     let rte = node.as_range_tbl_entry().expect("RangeTblEntry");
                     if rte.rtekind == RTEKind::RTE_CTE && rte.ctelevelsup > self.depth {
@@ -402,6 +423,14 @@ fn find_pullable_subquery<'mcx>(
             // duplicated.
             if rte.rtekind == RTEKind::RTE_SUBQUERY && !rte.inh && !kept.contains(&rti) {
                 *target = Some((rti, lowest_outer_join));
+            }
+            // Simple VALUES pullup is disallowed below an outer join (C
+            // dispatch); the driver never runs inside an appendrel.
+            if rte.rtekind == RTEKind::RTE_VALUES
+                && lowest_outer_join.is_none()
+                && !kept.contains(&rti)
+            {
+                *target = Some((rti, None));
             }
         }
         NodeTag::T_FromExpr => {
@@ -554,6 +583,97 @@ pub(crate) fn rte_copy_with_perminfoindex<'mcx>(
 
 // is_simple_subquery (prepjointree.c): false keeps the RTE for the
 // SubqueryScan path (set_subquery_pathlist).
+// is_simple_values (prepjointree.c): exactly one row, no SRFs or volatile
+// functions, and the VALUES RTE is the only entry of its query level (the
+// only shape the parser generates).
+fn is_simple_values<'mcx>(
+    parse: &Query<'mcx>,
+    rti: i32,
+    rte: &RangeTblEntry<'mcx>,
+) -> PgResult<bool> {
+    debug_assert_eq!(rte.rtekind, RTEKind::RTE_VALUES);
+    if rte.values_lists.len() != 1 {
+        return Ok(false);
+    }
+    for row in &rte.values_lists {
+        for expr in row.as_list().expect("values row") {
+            if coerce::expression_returns_set(expr) || clauses::contain_volatile_functions(expr)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(parse.rtable.len() == 1 && rti == 1)
+}
+
+// pull_up_simple_values (prepjointree.c): replace the query's references to
+// the VALUES outputs with the (copied) VALUES expressions and swap the RTE
+// for a RESULT RTE. The jointree structure is untouched (the RangeTblRef
+// stays, now pointing at the RESULT RTE).
+fn pull_up_simple_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    parse: &mut Query<'mcx>,
+    varno: i32,
+    rte: &RangeTblEntry<'mcx>,
+) -> PgResult<()> {
+    debug_assert_eq!(varno, 1);
+    let values_list = rte.values_lists.nth(0).as_list().expect("values row");
+    // C: Assert(!contain_vars_of_level(values_list, 0)) — level-zero Vars are
+    // impossible in a VALUES list; lateral references are uplevel Vars and
+    // ride along into the parent as-is.
+    let mut tlist = NodeList::nil();
+    for (i, expr) in values_list.iter().enumerate() {
+        tlist.lappend(
+            mcx,
+            Node::mk_target_entry(mcx, copy_expr(mcx, expr, 0)?, (i + 1) as i16, None, false)?,
+        )?;
+    }
+    // perform_pullup_replace_vars with REPLACE_WRAP_NONE and no lateral
+    // context: no outer joins or appendrels can surround a bare VALUES query
+    // level, so no PHV wrapping arises (replace_var_expr's PHV leg is loud
+    // without a context).
+    if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
+        replace_var_expr(mcx, n, varno, &tlist, false, None)
+    })? {
+        parse.targetList = l;
+    }
+    if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {
+        replace_var_expr(mcx, n, varno, &tlist, false, None)
+    })? {
+        parse.returningList = l;
+    }
+    parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, None)?;
+    debug_assert!(parse.mergeActionList.is_nil());
+    let jt = parse.jointree.expect("jointree is a FromExpr");
+    if let Some(q) = jt.quals {
+        if let Some(nq) = replace_var_expr(mcx, q, varno, &tlist, false, None)? {
+            parse.jointree = Some(mcx::alloc_leak_in(
+                mcx,
+                FromExpr { fromlist: jt.fromlist.clone_in(mcx)?, quals: Some(nq) },
+            )?);
+        }
+    }
+    // Replace the rangetable with a lone RESULT RTE; the RangeTblRef in the
+    // jointree is already index 1.
+    let eref = Node::mk_mut(
+        mcx,
+        types_nodes::Alias { aliasname: Some("*RESULT*"), colnames: NodeList::nil() },
+    )?
+    .seal_ref();
+    parse.rtable = NodeList::make1(
+        mcx,
+        Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RESULT,
+                eref: Some(eref),
+                inFromCl: true,
+                ..Default::default()
+            },
+        )?,
+    )?;
+    Ok(())
+}
+
 fn is_simple_subquery<'mcx>(
     mcx: Mcx<'mcx>,
     rte: &RangeTblEntry<'mcx>,
@@ -680,7 +800,10 @@ fn pull_up_simple_subquery<'mcx>(
         crate::prep::replace_empty_jointree(mcx, &mut sub_local)?;
         crate::subselect::pull_up_sublinks(run, &mut sub_local)?;
         if sub_local.rtable.iter().any(|n| {
-            n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY
+            matches!(
+                n.as_range_tbl_entry().expect("rtable cell").rtekind,
+                RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES
+            )
         }) {
             pull_up_subqueries(run, &mut sub_local)?;
         }
@@ -704,11 +827,12 @@ fn pull_up_simple_subquery<'mcx>(
         rewrite_manip::OffsetVarNodes(mcx, sealed, rtoffset, 0)?;
         rewrite_manip::IncrementVarSublevelsUp(sealed, -1, 1)?;
         (sealed.as_query().expect("Query"), true)
-    } else if shared_sub
-        .rtable
-        .iter()
-        .any(|n| n.as_range_tbl_entry().expect("rtable cell").rtekind == RTEKind::RTE_SUBQUERY)
-    {
+    } else if shared_sub.rtable.iter().any(|n| {
+        matches!(
+            n.as_range_tbl_entry().expect("rtable cell").rtekind,
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES
+        )
+    }) {
         // C recursively completes pull_up_subqueries for the child before
         // splicing it in; runs on a cells-copy (C copyObject), the shared
         // tree is never written.
@@ -1139,6 +1263,194 @@ fn get_relids_in_jointree_no_inner<'mcx>(
     Ok(())
 }
 
+// get_relids_in_jointree (prepjointree.c), include_outer_joins=false,
+// include_inner_joins=false: base relids only.
+fn get_relids_in_jointree_base<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    out: &mut types_nodes::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    match node.node_tag() {
+        NodeTag::T_RangeTblRef => {
+            out.add_member(mcx, node.as_range_tbl_ref().unwrap().rtindex)?;
+        }
+        NodeTag::T_FromExpr => {
+            for child in &node.as_from_expr().unwrap().fromlist {
+                get_relids_in_jointree_base(mcx, child, out)?;
+            }
+        }
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            get_relids_in_jointree_base(mcx, j.larg, out)?;
+            get_relids_in_jointree_base(mcx, j.rarg, out)?;
+        }
+        other => panic!("get_relids_in_jointree (prepjointree.c): {other:?}"),
+    }
+    Ok(())
+}
+
+// find_dependent_phvs_walker (prepjointree.c): a PHV whose phrels are exactly
+// {varno} pins the RESULT rel that computes it.
+struct FindDependentPhvs<'mcx> {
+    relids: types_nodes::Bitmapset<'mcx>,
+    sublevels_up: u32,
+}
+impl<'mcx> nodes_core::NodeWalker<'mcx> for FindDependentPhvs<'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        match node.node_tag() {
+            NodeTag::T_PlaceHolderVar => {
+                let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+                if phv.phlevelsup == self.sublevels_up && phv.phrels.equal(&self.relids) {
+                    return Ok(true);
+                }
+                nodes_core::expression_tree_walker(node, self)
+            }
+            NodeTag::T_Query => {
+                self.sublevels_up += 1;
+                let r = nodes_core::query_tree_walker(node.as_query().expect("Query"), self, 0)?;
+                self.sublevels_up -= 1;
+                Ok(r)
+            }
+            _ => nodes_core::expression_tree_walker(node, self),
+        }
+    }
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let r = nodes_core::query_tree_walker(q, self, 0)?;
+        self.sublevels_up -= 1;
+        Ok(r)
+    }
+}
+
+// find_dependent_phvs (prepjointree.c): any PHV anywhere in the Query (or the
+// append_rel_list) whose relids are exactly {varno}?
+pub(crate) fn find_dependent_phvs<'mcx>(
+    run: &crate::run::PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    varno: i32,
+) -> PgResult<bool> {
+    use nodes_core::NodeWalker as _;
+    if run.glob.last_ph_id == 0 {
+        return Ok(false);
+    }
+    let mut w = FindDependentPhvs {
+        relids: types_nodes::Bitmapset::make_singleton(run.mcx, varno)?,
+        sublevels_up: 0,
+    };
+    if nodes_core::query_tree_walker(parse, &mut w, 0)? {
+        return Ok(true);
+    }
+    for ai in 0..run.root.append_rel_list.len() {
+        for &tid in run.root.append_rel_list[ai].translated_vars.iter() {
+            if tid == types_pathnodes::NodeId::default() {
+                continue;
+            }
+            if w.visit(*run.root.expr_node(tid))? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+// find_dependent_phvs_in_jointree (prepjointree.c): the fragment's own quals
+// plus the lateral RTEs it references can carry PHVs evaluated at varno.
+pub(crate) fn find_dependent_phvs_in_jointree<'mcx>(
+    run: &crate::run::PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    node: Node<'mcx>,
+    varno: i32,
+) -> PgResult<bool> {
+    use nodes_core::NodeWalker as _;
+    let mcx = run.mcx;
+    if run.glob.last_ph_id == 0 {
+        return Ok(false);
+    }
+    let mut w = FindDependentPhvs {
+        relids: types_nodes::Bitmapset::make_singleton(mcx, varno)?,
+        sublevels_up: 0,
+    };
+    if w.visit(node)? {
+        return Ok(true);
+    }
+    let mut subrelids = types_nodes::Bitmapset::empty();
+    get_relids_in_jointree_base(mcx, node, &mut subrelids)?;
+    for relid in subrelids.iter() {
+        let rte = parse
+            .rtable
+            .nth(relid as usize - 1)
+            .as_range_tbl_entry()
+            .expect("rtable cell");
+        if !rte.lateral {
+            continue;
+        }
+        // range_table_entry_walker legs that can carry expressions.
+        if let Some(sq) = rte.subquery {
+            if w.visit_query_ref(sq)? {
+                return Ok(true);
+            }
+        }
+        for f in &rte.functions {
+            let rtf = f.as_range_tbl_function().expect("functions cell");
+            if let Some(fx) = rtf.funcexpr {
+                if w.visit(fx)? {
+                    return Ok(true);
+                }
+            }
+        }
+        for l in &rte.values_lists {
+            if w.visit(l)? {
+                return Ok(true);
+            }
+        }
+        if let Some(tf) = rte.tablefunc {
+            if w.visit(tf)? {
+                return Ok(true);
+            }
+        }
+        for sq in &rte.securityQuals {
+            if w.visit(sq)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+// remove_result_refs (prepjointree.c): retarget PHVs that were evaluated at
+// the dropped RESULT rel to the jointree fragment that replaces it.
+pub(crate) fn remove_result_refs<'mcx>(
+    run: &mut crate::run::PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    varno: i32,
+    newjtloc: Node<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    if run.glob.last_ph_id == 0 {
+        return Ok(());
+    }
+    let mut subrelids = types_nodes::Bitmapset::empty();
+    get_relids_in_jointree_no_inner(mcx, newjtloc, &mut subrelids)?;
+    debug_assert!(!subrelids.is_empty());
+    crate::placeholder::substitute_phv_relids_query(mcx, parse, varno, &subrelids)?;
+    // fix_append_rel_relids (prepjointree.c).
+    let mut subvarno: Option<i32> = None;
+    for ai in 0..run.root.append_rel_list.len() {
+        debug_assert_ne!(run.root.append_rel_list[ai].parent_relid, varno as u32);
+        if run.root.append_rel_list[ai].child_relid == varno as u32 {
+            let sv = *subvarno.get_or_insert_with(|| {
+                subrelids.get_singleton_member().expect("singleton subrelids")
+            });
+            run.root.append_rel_list[ai].child_relid = sv as u32;
+        }
+        replace_appinfo_translated_vars(run, ai, &mut |n| {
+            crate::placeholder::substitute_phv_relids(mcx, n, varno, &subrelids)?;
+            Ok(None)
+        })?;
+    }
+    Ok(())
+}
+
 fn replace_appinfo_translated_vars<'mcx>(
     run: &mut crate::run::PlannerRun<'mcx>,
     ai: usize,
@@ -1368,6 +1680,47 @@ fn offset_expr<'mcx>(
         NodeTag::T_RangeTblRef => {
             let r = node.as_range_tbl_ref().expect("RangeTblRef");
             Ok(Some(Node::mk_range_tbl_ref(mcx, r.rtindex + rtoffset)?))
+        }
+        NodeTag::T_PlaceHolderVar => {
+            let phv = node.as_place_holder_var().expect("PlaceHolderVar");
+            let phexpr = match offset_expr(mcx, phv.phexpr, rtoffset)? {
+                Some(e) => e,
+                None => rewrite_manip::copy_node(mcx, phv.phexpr)?,
+            };
+            if phv.phlevelsup > 0 {
+                // IncrementVarSublevelsUp(-1, 1): the PHV is one level closer
+                // to its rels after pull-up; phrels are already in the
+                // parent's numbering.
+                return Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::primnodes::PlaceHolderVar {
+                        phexpr,
+                        phrels: phv.phrels.clone_in(mcx)?,
+                        phnullingrels: phv.phnullingrels.clone_in(mcx)?,
+                        phid: phv.phid,
+                        phlevelsup: phv.phlevelsup - 1,
+                    },
+                )?));
+            }
+            // OffsetVarNodes: level-zero phrels/phnullingrels are sub-local.
+            let mut phrels = types_nodes::Bitmapset::empty();
+            for m in phv.phrels.iter() {
+                phrels.add_member(mcx, m + rtoffset)?;
+            }
+            let mut phnullingrels = types_nodes::Bitmapset::empty();
+            for m in phv.phnullingrels.iter() {
+                phnullingrels.add_member(mcx, m + rtoffset)?;
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::PlaceHolderVar {
+                    phexpr,
+                    phrels,
+                    phnullingrels,
+                    phid: phv.phid,
+                    phlevelsup: 0,
+                },
+            )?))
         }
         _ => clauses::walker::expression_tree_mutator(mcx, node, &mut |n| {
             offset_expr(mcx, n, rtoffset)
@@ -1848,38 +2201,74 @@ fn replace_vars_in_query_value<'mcx>(
         newq.jointree = Some(mcx::alloc_leak_in(mcx, FromExpr { fromlist, quals })?);
     }
 
+    // range_table_mutator legs of replace_rte_variables (rewriteManip.c):
+    // RTEs inside the sibling subquery can carry level-su references to the
+    // pulled-up rel in their expressions (the RTE itself need not be marked
+    // LATERAL — a non-lateral VALUES RTE holds its wrapper's lateral refs as
+    // uplevel Vars). query_cells_copy shares RTE nodes with the original
+    // query, so a changed RTE gets a fresh copy.
+    let mut new_rtable = NodeList::nil();
+    let mut rt_changed = false;
     for srte_node in &newq.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
-        if !srte.lateral {
-            continue;
-        }
+        let mut replacement: Option<Node<'mcx>> = None;
         match srte.rtekind {
             RTEKind::RTE_FUNCTION => {
-                // query_cells_copy shares RTE nodes with the original query;
-                // an in-place functions rewrite would scribble a shared tree.
-                if map_rtfunctions(mcx, &srte.functions, &mut |n| {
+                if let Some(l) = map_rtfunctions(mcx, &srte.functions, &mut |n| {
                     replace_var_expr_su(mcx, n, varno, tlist, lateral, ph, su)
-                })?
-                .is_some()
-                {
-                    panic!(
-                        "pullup_replace_vars_subquery (prepjointree.c): lateral function \
-                         RTE inside a lateral sibling subquery references the pulled-up \
-                         rel; nested-lateral rewrite arm unported"
-                    );
+                })? {
+                    let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                    // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.functions = l) };
+                    replacement = Some(copy);
+                }
+            }
+            RTEKind::RTE_VALUES => {
+                if let Some(l) = clauses::walker::mutate_list(mcx, &srte.values_lists, &mut |n| {
+                    replace_var_expr_su(mcx, n, varno, tlist, lateral, ph, su)
+                })? {
+                    let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                    // SAFETY: as above.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.values_lists = l) };
+                    replacement = Some(copy);
                 }
             }
             RTEKind::RTE_SUBQUERY => {
                 let inner = srte.subquery.expect("RTE_SUBQUERY has a subquery");
-                if contains_level_ref(inner, varno, su + 1)? {
-                    panic!(
-                        "pullup_replace_vars_subquery (prepjointree.c): doubly nested \
-                         lateral subquery references the pulled-up rel; unported"
-                    );
+                if let Some(q2) =
+                    replace_vars_in_query_value(mcx, inner, varno, tlist, lateral, ph, su + 1)?
+                {
+                    let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                    let newsub = mcx::alloc_leak_in(mcx, q2)?;
+                    // SAFETY: as above.
+                    unsafe {
+                        copy.with_mut::<RangeTblEntry, _>(|r| r.subquery = Some(newsub))
+                    };
+                    replacement = Some(copy);
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                let tf = srte.tablefunc.expect("TABLEFUNC RTE has tablefunc");
+                if let Some(n) = replace_var_expr_su(mcx, tf, varno, tlist, lateral, ph, su)? {
+                    let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                    // SAFETY: as above.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(n)) };
+                    replacement = Some(copy);
                 }
             }
             _ => {}
         }
+        match replacement {
+            Some(copy) => {
+                rt_changed = true;
+                new_rtable.lappend(mcx, copy)?;
+            }
+            None => new_rtable.lappend(mcx, srte_node)?,
+        }
+    }
+    if rt_changed {
+        changed = true;
+        newq.rtable = new_rtable;
     }
 
     if !changed {
@@ -1952,50 +2341,6 @@ fn replace_in_sibling_jointree<'mcx>(
         }
         other => panic!("replace_vars_in_jointree (prepjointree.c): {other:?} jointree arm"),
     }
-}
-
-// contain_vars_of_level-style probe for references to one specific varno.
-fn contains_level_ref<'mcx>(q: &'mcx Query<'mcx>, varno: i32, level: u32) -> PgResult<bool> {
-    use nodes_core::NodeWalker;
-    struct W {
-        varno: i32,
-        level: u32,
-        found: bool,
-    }
-    impl<'mcx> NodeWalker<'mcx> for W {
-        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-            if let Some(v) = node.as_var() {
-                if v.varlevelsup == self.level && v.varno == self.varno {
-                    self.found = true;
-                    return Ok(true);
-                }
-                return Ok(false);
-            }
-            if matches!(node.node_tag(), NodeTag::T_Query | NodeTag::T_SubLink) {
-                self.level += 1;
-                let r = nodes_core::expression_tree_walker(node, self);
-                self.level -= 1;
-                return r;
-            }
-            nodes_core::expression_tree_walker(node, self)
-        }
-    }
-    let mut w = W { varno, level, found: false };
-    for te in &q.targetList {
-        w.visit(te)?;
-    }
-    if let Some(jt) = q.jointree {
-        for n in &jt.fromlist {
-            w.visit(n)?;
-        }
-        if let Some(qq) = jt.quals {
-            w.visit(qq)?;
-        }
-    }
-    if let Some(h) = q.havingQual {
-        w.visit(h)?;
-    }
-    Ok(w.found)
 }
 
 fn replace_opt<'mcx>(
