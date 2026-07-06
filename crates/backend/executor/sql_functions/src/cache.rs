@@ -313,9 +313,10 @@ pub(crate) fn cached_sql_function(
         flinfo,
         expected_desc,
     )?);
-    let cacheable = entry.owned.with(|s| {
-        !(s.rettype == types_core::catalog::RECORDOID && s.rettupdesc.is_some())
-    });
+    // A RECORD rettype resolves from the CALLING context (expectedDesc /
+    // coldeflist), so the entry is context-dependent and must never be
+    // shared across call sites — C re-resolves per fn_extra fcache.
+    let cacheable = entry.owned.with(|s| s.rettype != types_core::catalog::RECORDOID);
     if cacheable {
         SQL_FN_CACHE.with(|c| {
             c.borrow_mut().insert(key, entry.clone());

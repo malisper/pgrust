@@ -7966,7 +7966,6 @@ dependencies = [
  "pgstat",
  "tupdesc",
  "tuplestore",
- "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",

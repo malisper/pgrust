@@ -219,10 +219,12 @@ pub fn exec_init_function_scan<'mcx>(
         let mut setexpr = exec_init_table_function_result(mcx, rtfunc, estate)?;
         let (tupdesc, returns_tuple) = build_function_tupdesc(mcx, rtfunc)?;
         setexpr.returns_tuple = returns_tuple;
-        natts += tupdesc.natts;
+        // C: colcount is the plan-time funccolcount; a named composite may
+        // have gained or lost columns since, so fs->tupdesc can differ.
+        natts += rtfunc.funccolcount;
         funcstates.push(FunctionScanPerFuncState {
             setexpr,
-            colcount: tupdesc.natts,
+            colcount: rtfunc.funccolcount,
             tupdesc: Rc::new(tupdesc),
             tstore: None,
             rowcount: -1,
@@ -238,7 +240,7 @@ pub fn exec_init_function_scan<'mcx>(
             tupdesc::CreateTemplateTupleDesc(mcx, natts + if ordinality { 1 } else { 0 })?;
         let mut attno: i16 = 0;
         for fs in funcstates.iter() {
-            for j in 1..=fs.tupdesc.natts {
+            for j in 1..=fs.colcount {
                 attno += 1;
                 tupdesc::TupleDescCopyEntry(&mut d, attno, &fs.tupdesc, j as i16);
             }
@@ -350,45 +352,44 @@ fn build_function_tupdesc<'mcx>(
     rtfunc: &RangeTblFunction<'mcx>,
 ) -> PgResult<(TupleDescData<'mcx>, bool)> {
     let fexpr = rtfunc.funcexpr.expect("RangeTblFunction has funcexpr");
+    // C: a coldeflist takes priority regardless of the resolved result class
+    // (the RECORD-Const leg can resolve Composite with a different natts).
+    if !rtfunc.funccolnames.is_nil() {
+        // BuildDescFromLists over the parse-time coldeflist + BlessTupleDesc.
+        let n = rtfunc.funccolnames.len();
+        let mut d = tupdesc::CreateTemplateTupleDesc(mcx, n as i32)?;
+        for i in 0..n {
+            let attno = (i + 1) as i16;
+            let name = rtfunc
+                .funccolnames
+                .nth(i)
+                .as_string()
+                .expect("funccolnames cell is String")
+                .sval;
+            tupdesc::TupleDescInitEntry(
+                &mut d,
+                attno,
+                Some(name),
+                rtfunc.funccoltypes.nth(i),
+                rtfunc.funccoltypmods.nth(i),
+                0,
+            )?;
+            tupdesc::TupleDescInitEntryCollation(&mut d, attno, rtfunc.funccolcollations.nth(i));
+        }
+        if d.tdtypeid == types_core::catalog::RECORDOID && d.tdtypmod < 0 {
+            typcache_seams::assign_record_type_typmod::call(&mut d)?;
+        }
+        return Ok((d, true));
+    }
     let resolved = funcapi::get_expr_result_type(mcx, Some(fexpr))?;
     match resolved.class {
         funcapi::TypeFuncClass::Scalar => {
-            debug_assert!(rtfunc.funccolnames.is_nil());
             let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
             tupdesc::TupleDescInitEntry(&mut d, 1, None, resolved.result_type_id, -1, 0)?;
             tupdesc::TupleDescInitEntryCollation(&mut d, 1, execscan::expr_collation(fexpr));
-            debug_assert_eq!(rtfunc.funccolcount, 1);
             Ok((d, false))
         }
-        funcapi::TypeFuncClass::Record if !rtfunc.funccolnames.is_nil() => {
-            // BuildDescFromLists over the parse-time coldeflist; C also
-            // blesses the desc (record-registry typmods are unmodeled here).
-            let n = rtfunc.funccolnames.len();
-            debug_assert_eq!(rtfunc.funccolcount as usize, n);
-            let mut d = tupdesc::CreateTemplateTupleDesc(mcx, n as i32)?;
-            for i in 0..n {
-                let attno = (i + 1) as i16;
-                let name = rtfunc
-                    .funccolnames
-                    .nth(i)
-                    .as_string()
-                    .expect("funccolnames cell is String")
-                    .sval;
-                tupdesc::TupleDescInitEntry(
-                    &mut d,
-                    attno,
-                    Some(name),
-                    rtfunc.funccoltypes.nth(i),
-                    rtfunc.funccoltypmods.nth(i),
-                    0,
-                )?;
-                tupdesc::TupleDescInitEntryCollation(&mut d, attno, rtfunc.funccolcollations.nth(i));
-            }
-            Ok((d, true))
-        }
-        funcapi::TypeFuncClass::Composite
-        | funcapi::TypeFuncClass::CompositeDomain
-        | funcapi::TypeFuncClass::Record => {
+        funcapi::TypeFuncClass::Composite | funcapi::TypeFuncClass::CompositeDomain => {
             let d = resolved.result_tuple_desc.unwrap_or_else(|| {
                 panic!(
                     "ExecInitFunctionScan (nodeFunctionscan.c): {:?} result without a \
@@ -396,12 +397,11 @@ fn build_function_tupdesc<'mcx>(
                     resolved.class
                 )
             });
-            debug_assert_eq!(rtfunc.funccolcount as i32, d.natts);
             Ok((d, true))
         }
         other => panic!(
             "ExecInitFunctionScan (nodeFunctionscan.c): function result class {other:?} \
-             unported"
+             without a coldeflist"
         ),
     }
 }
@@ -703,9 +703,23 @@ fn put_composite_row<'mcx>(
         nulls.resize(natts, true);
         return store.putvalues(expected_desc, &values, &nulls);
     }
-    let p = result.as_usize() as *const u8;
-    // SAFETY: a non-null composite result datum is a live HeapTupleHeader
-    // image readable for its datum length.
+    // C DatumGetHeapTupleHeader: detoast (expanded records arrive as
+    // extended datums) before reading the composite header.
+    let src = result.as_usize() as *const u8;
+    // SAFETY: a non-null composite result datum is a live varlena image.
+    let _flat;
+    let p = unsafe {
+        if !::types_tuple::varatt::varatt_is_4b_u(src) {
+            let image =
+                core::slice::from_raw_parts(src, ::types_tuple::varatt::varsize_any(src));
+            _flat = ::detoast_seams::detoast_attr::call(mcx, image)?;
+            _flat.as_ptr()
+        } else {
+            src
+        }
+    };
+    // SAFETY: p is a plain composite HeapTupleHeader image readable for its
+    // datum length.
     let header = unsafe { &*(p as *const ::types_tuple::htup::HeapTupleHeaderData) };
     match set_desc {
         None => {
