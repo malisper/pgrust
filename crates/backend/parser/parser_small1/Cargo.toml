@@ -30,5 +30,6 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 wchar = { path = "../../../common/wchar" }
 
 [dev-dependencies]
+namespace_seams = { path = "../../catalog/namespace_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 types_portal = { path = "../../../_support/types/portal" }

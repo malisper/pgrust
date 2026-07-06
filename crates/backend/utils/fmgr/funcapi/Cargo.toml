@@ -27,6 +27,7 @@ init_small = { path = "../../init/init_small" }
 tuplestore = { path = "../../sort/tuplestore" }
 
 [dev-dependencies]
+namespace_seams = { path = "../../../catalog/namespace_seams" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 types_slot = { path = "../../../../_support/types/types_slot" }
