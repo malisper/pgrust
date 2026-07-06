@@ -470,11 +470,29 @@ pub fn index_parkscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     }
     debug_assert!(!scan.xs_temp_snap);
     scan.xs_snapshot = None;
+    // Drain the batched pgstat counters while the index alias is still live
+    // (C counts per call via the pgstat.h macros, so per-run visibility of
+    // the counts matches C; the batch is pure deferral).
+    drain_pgstat_counters(scan);
     // Relation aliases are relcache refcounts (CheckTableNotInUse counts
     // them): a parked scan must hold none.
     scan.heapRelation = None;
     scan.indexRelation = None;
     Ok(())
+}
+
+fn drain_pgstat_counters(scan: &mut IndexScanDescData<'_>) {
+    let index_rel = scan.index_rel();
+    pgstat::relation::pgstat_count_index_scan_batched(
+        index_rel.rd_id,
+        index_rel.rd_rel.relisshared,
+        scan.xs_pgstat_index_scans,
+        scan.xs_pgstat_index_tuples,
+        scan.xs_pgstat_heap_fetches,
+    );
+    scan.xs_pgstat_index_scans = 0;
+    scan.xs_pgstat_index_tuples = 0;
+    scan.xs_pgstat_heap_fetches = 0;
 }
 
 /// Executor-skeleton re-arm: the per-execution slice of `index_beginscan`
@@ -500,14 +518,11 @@ pub fn index_rearmscan<'mcx>(
 
 pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
     // Drain of the per-scan batched pgstat counters (C counts per call via
-    // the pgstat.h macros; increments gate on pgstat_enabled).
-    pgstat::relation::pgstat_count_index_scan_batched(
-        scan.indexRelation.rd_id,
-        scan.indexRelation.rd_rel.relisshared,
-        scan.xs_pgstat_index_scans,
-        scan.xs_pgstat_index_tuples,
-        scan.xs_pgstat_heap_fetches,
-    );
+    // the pgstat.h macros; increments gate on pgstat_enabled). A parked scan
+    // (skeleton) drained at index_parkscan and holds no relation alias.
+    if scan.indexRelation.is_some() {
+        drain_pgstat_counters(&mut scan);
+    }
     if let Some(heapfetch) = scan.xs_heapfetch.take() {
         fetch::end(heapfetch);
     }
