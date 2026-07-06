@@ -990,6 +990,9 @@ fn slow_switch<'mcx>(
                             CreateCommandTag(stmt),
                         );
                     }
+                    T_CreateStatsStmt => {
+                        exec_create_stats_stmt(mcx, stmt, source_text)?;
+                    }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
                 }
                 if i < stmts.len() {
@@ -1074,41 +1077,7 @@ fn slow_switch<'mcx>(
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
-                .expect("CreateStatsStmt");
-            if let Some(first) = stmt.relations.iter().next() {
-                let Some(rv_node) = first.as_range_var() else {
-                    return Err(Box::new(
-                        types_error::PgError::new(
-                            types_error::ERROR,
-                            "CREATE STATISTICS only supports relation names in the FROM clause"
-                                .to_string(),
-                        )
-                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-                    ));
-                };
-                let rv = rel_vocab::RangeVar {
-                    catalogname: rv_node.catalogname,
-                    schemaname: rv_node.schemaname,
-                    relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
-                    inh: rv_node.inh,
-                    relpersistence: rv_node.relpersistence,
-                    location: rv_node.location,
-                };
-                let relid = catalog_namespace::RangeVarGetRelidExtended(
-                    &rv,
-                    types_rel::ShareUpdateExclusiveLock,
-                    0,
-                    None,
-                )?;
-                parse_clause::transformStatsStmt(mcx, relid, stmt_node, source_text)?;
-            }
-            let stmt = stmt_node
-                .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
-                .expect("CreateStatsStmt");
-            collect_gap("CREATE STATISTICS");
-            statscmds::CreateStatistics(mcx, stmt)?;
+            exec_create_stats_stmt(mcx, stmt_node, source_text)?;
             Ok(None)
         }
 
@@ -2007,6 +1976,52 @@ fn exec_rename_stmt_inner<'mcx>(
         }
         other => panic!("unported: ExecRenameStmt {other:?}"),
     }
+    Ok(())
+}
+
+fn exec_create_stats_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt_node: Node<'mcx>,
+    source_text: &str,
+) -> PgResult<()> {
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+        .expect("CreateStatsStmt");
+    if let Some(first) = stmt.relations.iter().next() {
+        let Some(rv_node) = first.as_range_var() else {
+            return Err(Box::new(
+                types_error::PgError::new(
+                    types_error::ERROR,
+                    "CREATE STATISTICS only supports relation names in the FROM clause"
+                        .to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        };
+        let rv = rel_vocab::RangeVar {
+            catalogname: rv_node.catalogname,
+            schemaname: rv_node.schemaname,
+            relname: rv_node.relname.expect("CreateStatsStmt relation without relname"),
+            inh: rv_node.inh,
+            relpersistence: rv_node.relpersistence,
+            location: rv_node.location,
+        };
+        let relid = catalog_namespace::RangeVarGetRelidExtended(
+            &rv,
+            types_rel::ShareUpdateExclusiveLock,
+            0,
+            None,
+        )?;
+        // Cloned LIKE statistics arrive pre-transformed (C utility.c:1901).
+        if !stmt.transformed {
+            parse_clause::transformStatsStmt(mcx, relid, stmt_node, source_text)?;
+        }
+    }
+    let stmt = stmt_node
+        .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
+        .expect("CreateStatsStmt");
+    collect_gap("CREATE STATISTICS");
+    statscmds::CreateStatistics(mcx, stmt)?;
     Ok(())
 }
 

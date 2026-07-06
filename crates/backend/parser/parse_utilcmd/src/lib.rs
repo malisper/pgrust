@@ -1457,6 +1457,57 @@ pub fn transformCreateStmt<'mcx>(
             return Ok(NodeList::nil());
         }
     }
+    // Qualify an unqualified non-temp target (parse_utilcmd.c:215-224) so
+    // added-on commands (LIKE expansion) can't latch onto a same-named
+    // relation earlier in the search path.
+    let relation = if relation.schemaname.is_none()
+        && relation.relpersistence != types_core::RELPERSISTENCE_TEMP
+    {
+        let nspid = RangeVarGetCreationNamespace(mcx, relation)?;
+        let nsname = leak_str(
+            lsyscache::get_namespace_name(mcx, nspid)?
+                .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspid}")),
+        );
+        let stamped: &'mcx RangeVar<'mcx> = Node::mk_mut(
+            mcx,
+            RangeVar {
+                catalogname: relation.catalogname,
+                schemaname: Some(nsname),
+                relname: relation.relname,
+                inh: relation.inh,
+                relpersistence: relation.relpersistence,
+                alias: relation.alias,
+                location: relation.location,
+            },
+        )?
+        .seal_ref();
+        // SAFETY: parse tree is analyze-owned; no derived refs live.
+        unsafe {
+            if is_foreign {
+                stmt_node
+                    .with_mut::<types_nodes::rawnodes::CreateForeignTableStmt, _>(|s| {
+                        s.base.relation = Some(stamped)
+                    })
+                    .expect("CreateForeignTableStmt");
+            } else {
+                stmt_node
+                    .with_mut::<CreateStmt, _>(|s| s.relation = Some(stamped))
+                    .expect("CreateStmt");
+            }
+        }
+        stamped
+    } else {
+        relation
+    };
+    // Re-derive: the stamp above mutated the statement node.
+    let stmt: &CreateStmt<'mcx> = if is_foreign {
+        &stmt_node
+            .as_variant::<types_nodes::rawnodes::CreateForeignTableStmt>()
+            .expect("transformCreateStmt on non-CreateStmt")
+            .base
+    } else {
+        stmt_node.as_variant::<CreateStmt>().expect("transformCreateStmt on non-CreateStmt")
+    };
     let mut columns = NodeList::nil();
     if let Some(of_tn) = stmt.ofTypename {
         transformOfType(mcx, of_tn, &mut columns, Some(query_string))?;
@@ -1493,7 +1544,7 @@ pub fn transformCreateStmt<'mcx>(
                 columns.lappend(mcx, elt)?;
             }
             NodeTag::T_TableLikeClause => {
-                let mut cxt = like::LikeCxt {
+                let mut likecxt = like::LikeCxt {
                     relation,
                     columns: &mut columns,
                     nnconstraints: &mut nnconstraints,
@@ -1501,7 +1552,7 @@ pub fn transformCreateStmt<'mcx>(
                     alist: &mut save_alist,
                     is_foreign,
                 };
-                like::transformTableLikeClause(mcx, &mut cxt, elt, query_string)?;
+                like::transformTableLikeClause(mcx, &mut likecxt, &mut cxt, elt, query_string)?;
             }
             NodeTag::T_Constraint => {
                 let c = elt.as_variant::<Constraint>().expect("Constraint");
@@ -1587,6 +1638,11 @@ pub fn transformCreateStmt<'mcx>(
         false,
     )?;
 
+    // LIKE re-consideration runs after index creation, before FK creation
+    // (parse_utilcmd.c:337-351): a LIKE-cloned pkey behaves like ALTER TABLE
+    // ADD and must be the one that hits the duplicate-pkey check.
+    alist.concat(mcx, &likeclauses)?;
+
     // transformFKConstraints(skipValidation=true, isAddConstraint=false).
     if !fkconstraints.is_nil() {
         for cnode in fkconstraints.iter() {
@@ -1653,13 +1709,12 @@ pub fn transformCreateStmt<'mcx>(
         }
     }
 
-    // C: result = blist ++ [stmt] ++ likeclauses ++ indexes/fk ++ save_alist;
-    // C's save_alist captured the element-loop alist (serial OWNED BY + LIKE
-    // statements) before transformIndexConstraints (parse_utilcmd.c:390-395,
-    // 465-471).
+    // C: result = blist ++ [stmt] ++ indexes ++ likeclauses ++ fk ++
+    // save_alist; C's save_alist captured the element-loop alist (serial
+    // OWNED BY + LIKE statements) before transformIndexConstraints
+    // (parse_utilcmd.c:390-395, 465-471).
     let mut result = cxt.blist;
     result.lappend(mcx, stmt_node)?;
-    result.concat(mcx, &likeclauses)?;
     for a in alist.iter() {
         result.lappend(mcx, a)?;
     }
@@ -2466,7 +2521,7 @@ fn leak_str(s: PgString<'_>) -> &str {
 // (SEQUENCE NAME/LOGGED/UNLOGGED options are loud). rel = C's cxt->rel
 // (ALTER TABLE: namespace/persistence/owner come from the existing table);
 // col_exists routes the OWNED BY AlterSeqStmt to blist (AT_AddIdentity).
-fn generateSerialExtraStmts<'mcx>(
+pub(crate) fn generateSerialExtraStmts<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RangeVar<'mcx>,
     column_node: Node<'mcx>,
@@ -2513,24 +2568,27 @@ fn generateSerialExtraStmts<'mcx>(
     )?
     .seal_ref();
 
-    // AS seqtypid, prepended so a user AS lands the redundant-option error.
-    let mut as_tn = Node::build::<TypeName>(mcx)?;
-    as_tn.typeOid = seqtypid;
-    as_tn.typemod = -1;
-    as_tn.location = -1;
-    let as_defel = Node::mk(
-        mcx,
-        DefElem {
-            defnamespace: None,
-            defname: Some("as"),
-            arg: Some(as_tn.seal()),
-            defaction: DefElemAction::DEFELEM_UNSPEC,
-            location: -1,
-        },
-    )?;
-
+    // AS seqtypid, prepended so a user AS lands the redundant-option error;
+    // skipped when no sequence data type was specified (LIKE INCLUDING
+    // IDENTITY passes InvalidOid, parse_utilcmd.c:523-529).
     let mut options = seqoptions;
-    options.lcons(mcx, as_defel)?;
+    if seqtypid != InvalidOid {
+        let mut as_tn = Node::build::<TypeName>(mcx)?;
+        as_tn.typeOid = seqtypid;
+        as_tn.typemod = -1;
+        as_tn.location = -1;
+        let as_defel = Node::mk(
+            mcx,
+            DefElem {
+                defnamespace: None,
+                defname: Some("as"),
+                arg: Some(as_tn.seal()),
+                defaction: DefElemAction::DEFELEM_UNSPEC,
+                location: -1,
+            },
+        )?;
+        options.lcons(mcx, as_defel)?;
+    }
     let mut seqstmt = Node::build::<CreateSeqStmt>(mcx)?;
     seqstmt.for_identity = for_identity;
     seqstmt.sequence = Some(seq_rv);

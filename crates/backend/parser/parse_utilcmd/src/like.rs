@@ -1,6 +1,6 @@
 // LIKE arm: transformTableLikeClause + expandTableLikeClause +
-// generateClonedIndexStmt. LOUD: identity/compression copy,
-// non-default opclass/collation, extended statistics.
+// generateClonedIndexStmt + generateClonedExtStatsStmt. LOUD: compression
+// copy, non-default opclass/collation.
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid, NAMEDATALEN, RELATION_RELATION_ID};
 use types_error::{
@@ -34,7 +34,7 @@ const INDOPTION_DESC: i16 = 1 << 0;
 const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
 const CONSTRAINT_RELATION_ID: Oid = 2606;
 const StatisticExtRelationId: Oid = 3381;
-const StatisticExtRelidIndexId: Oid = 3379;
+const StatisticExtOidIndexId: Oid = 3380;
 const IndexRelidIndexId: Oid = 2679;
 const Anum_pg_index_indclass: i32 = 18;
 
@@ -57,6 +57,37 @@ pub(crate) fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let mut v: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len())?;
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
     Ok(core::str::from_utf8(v.leak()).expect("was UTF-8"))
+}
+
+// sequence_options (sequence.c:1707): an existing sequence's parameters as
+// CREATE SEQUENCE options; 64-bit values become Float per gram.y.
+fn sequence_options<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<NodeList<'mcx>> {
+    use types_nodes::parsenodes::{DefElem, DefElemAction};
+    let form = syscache_seams::lookup_pg_sequence_form::call(relid)?
+        .unwrap_or_else(|| panic!("cache lookup failed for sequence {relid}"));
+    let mut options = NodeList::nil();
+    let int_opt = |v: i64| -> PgResult<Node<'mcx>> {
+        Node::mk_float(mcx, str_in(mcx, &v.to_string())?)
+    };
+    let opts: [(&'static str, Node<'mcx>); 6] = [
+        ("cache", int_opt(form.seqcache)?),
+        ("cycle", Node::mk_boolean(mcx, form.seqcycle)?),
+        ("increment", int_opt(form.seqincrement)?),
+        ("maxvalue", int_opt(form.seqmax)?),
+        ("minvalue", int_opt(form.seqmin)?),
+        ("start", int_opt(form.seqstart)?),
+    ];
+    for (name, arg) in opts {
+        let defel = DefElem {
+            defnamespace: None,
+            defname: Some(name),
+            arg: Some(arg),
+            defaction: DefElemAction::DEFELEM_UNSPEC,
+            location: -1,
+        };
+        options.lappend(mcx, Node::mk(mcx, defel)?)?;
+    }
+    Ok(options)
 }
 
 fn rel_vocab_rv<'a>(rv: &'a RangeVar<'a>) -> rel_vocab::RangeVar<'a> {
@@ -84,6 +115,7 @@ fn errdetail_relkind_not_supported(relkind: u8) -> &'static str {
 pub(crate) fn transformTableLikeClause<'mcx>(
     mcx: Mcx<'mcx>,
     cxt: &mut LikeCxt<'_, 'mcx>,
+    create_cxt: &mut crate::CreateStmtCxt<'mcx>,
     tlc_node: Node<'mcx>,
     query_string: &str,
 ) -> PgResult<()> {
@@ -185,12 +217,6 @@ pub(crate) fn transformTableLikeClause<'mcx>(
         }
         // Identity/storage/compression never copy onto foreign tables
         // (C parse_utilcmd.c:1219,1239,1247 !cxt->isforeign).
-        if attribute.attidentity != 0
-            && (options & CREATE_TABLE_LIKE_IDENTITY) != 0
-            && !cxt.is_foreign
-        {
-            unported("LIKE INCLUDING IDENTITY (identity sequences)");
-        }
         if (options & CREATE_TABLE_LIKE_STORAGE) != 0 && !cxt.is_foreign {
             def.storage = attribute.attstorage as u8;
         }
@@ -199,6 +225,36 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             && !cxt.is_foreign
         {
             unported("LIKE INCLUDING COMPRESSION (GetCompressionMethodName)");
+        }
+        let def_node = Node::mk(mcx, def)?;
+        // Copy identity if requested (parse_utilcmd.c:1214-1235): recreate
+        // the owned sequence from the source column's sequence parameters.
+        if attribute.attidentity != 0
+            && (options & CREATE_TABLE_LIKE_IDENTITY) != 0
+            && !cxt.is_foreign
+        {
+            let seq_relid =
+                pg_depend::getIdentitySequence(mcx, relid, attribute.attnum as i32, false)?;
+            let seq_options = sequence_options(mcx, seq_relid)?;
+            let defref = def_node.as_variant::<ColumnDef>().expect("ColumnDef");
+            crate::generateSerialExtraStmts(
+                mcx,
+                cxt.relation,
+                def_node,
+                defref,
+                InvalidOid,
+                seq_options,
+                true,
+                None,
+                false,
+                create_cxt,
+            )?;
+            // SAFETY: parse tree is analyze-owned; no derived refs live.
+            unsafe {
+                def_node
+                    .with_mut::<ColumnDef, _>(|c| c.identity = attribute.attidentity as u8)
+                    .expect("ColumnDef");
+            }
         }
         if (options & CREATE_TABLE_LIKE_COMMENTS) != 0 {
             if let Some(comment) =
@@ -214,7 +270,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
                 cxt.alist.lappend(mcx, stmt)?;
             }
         }
-        cxt.columns.lappend(mcx, Node::mk(mcx, def)?)?;
+        cxt.columns.lappend(mcx, def_node)?;
     }
 
     let has_not_null =
@@ -464,10 +520,20 @@ pub fn expandTableLikeClause<'mcx>(
         }
     }
 
-    if (options & CREATE_TABLE_LIKE_STATISTICS) != 0
-        && has_extended_statistics(mcx, relation.rd_id)?
-    {
-        unported("LIKE INCLUDING STATISTICS (generateClonedExtStatsStmt)");
+    if (options & CREATE_TABLE_LIKE_STATISTICS) != 0 {
+        let parent_extstats = relcache::statextlist::RelationGetStatExtList(mcx, relation.rd_id)?;
+        for &parent_stat_oid in parent_extstats.iter() {
+            let mut stats_stmt =
+                generateClonedExtStatsStmt(mcx, heap_rel, childrel.rd_id, parent_stat_oid, &attmap)?;
+            if (options & CREATE_TABLE_LIKE_COMMENTS) != 0 {
+                if let Some(comment) =
+                    commands_comment::GetComment(mcx, parent_stat_oid, StatisticExtRelationId, 0)?
+                {
+                    stats_stmt.stxcomment = Some(str_in(mcx, comment.as_str())?);
+                }
+            }
+            result.lappend(mcx, Node::mk(mcx, stats_stmt)?)?;
+        }
     }
 
     childrel.close(NoLock)?;
@@ -754,27 +820,175 @@ fn read_indclass<'mcx>(mcx: Mcx<'mcx>, index_id: Oid, nkeys: usize) -> PgResult<
     Ok(out)
 }
 
-fn has_extended_statistics<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<bool> {
+// Inline/detoasted varlena payload past the 4-byte header.
+fn varlena_image(d: datum::Datum) -> &'static [u8] {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: varlena header declares the image length.
+    unsafe {
+        let b0 = *p;
+        let len = if b0 == 0x01 {
+            2 + types_tuple::varatt::vartag_size(*p.add(1))
+        } else if b0 & 0x01 != 0 {
+            ((b0 as usize) >> 1) & 0x7F
+        } else {
+            (u32::from_ne_bytes(*(p as *const [u8; 4])) >> 2) as usize
+        };
+        core::slice::from_raw_parts(p, len)
+    }
+}
+
+fn text_str<'mcx>(mcx: Mcx<'mcx>, d: datum::Datum) -> PgResult<&'mcx str> {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null text datum into a live catalog tuple.
+    let b0 = unsafe { *p };
+    let src: &[u8] = if b0 == 0x01 || (b0 & 0x03) == 0x02 {
+        &detoast::detoast_attr(mcx, varlena_image(d))?.leak()[4..]
+    } else if b0 & 0x01 != 0 {
+        let len = ((b0 as usize) >> 1) & 0x7F;
+        // SAFETY: short varlena header declares len bytes including itself.
+        unsafe { core::slice::from_raw_parts(p.add(1), len - 1) }
+    } else {
+        &varlena_image(d)[4..]
+    };
+    let mut copied: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, src.len())?;
+    mcx::vec_append_bytes(&mut copied, src)?;
+    Ok(core::str::from_utf8(copied.leak()).expect("stxexprs is UTF-8"))
+}
+
+// 1-D no-null in-line array payload: 20-byte header, then elements.
+fn array_elems(d: datum::Datum, elemtype: Oid, what: &str) -> (usize, &'static [u8]) {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-toasted 4-byte-header array datum into a live catalog tuple.
+    let body = unsafe {
+        let b0 = *p;
+        assert!(b0 != 0x01 && (b0 & 0x03) != 0x02 && b0 & 0x01 == 0, "{what}: toasted array");
+        let w = u32::from_ne_bytes(*(p as *const [u8; 4]));
+        core::slice::from_raw_parts(p.add(4), ((w as usize) >> 2) - 4)
+    };
+    let read = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
+    if read(0) != 1 || read(4) != 0 || read(8) != elemtype as i32 {
+        panic!("{what} has unexpected array shape");
+    }
+    (read(12) as usize, &body[20..])
+}
+
+// generateClonedExtStatsStmt (parse_utilcmd.c:2046): clone one extended
+// statistics object of the LIKE source onto the new table.
+fn generateClonedExtStatsStmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_rel: &'mcx RangeVar<'mcx>,
+    heap_relid: Oid,
+    source_statsid: Oid,
+    attmap: &[AttrNumber],
+) -> PgResult<types_nodes::rawnodes::CreateStatsStmt<'mcx>> {
     use datum::Datum;
+    use types_nodes::rawnodes::{CreateStatsStmt, StatsElem};
     use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    const Anum_pg_statistic_ext_stxkeys: i32 = 6;
+    const Anum_pg_statistic_ext_stxkind: i32 = 8;
+    const Anum_pg_statistic_ext_stxexprs: i32 = 9;
+    const CHAROID: Oid = 18;
+    const INT2OID: Oid = 21;
+
     let mut key = ScanKeyData::empty();
-    key.sk_attno = 2;
+    key.sk_attno = 1;
     key.sk_strategy = BTEqualStrategyNumber;
     key.sk_collation = 0;
     key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
         .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
-    key.sk_argument = Datum::from_oid(relid);
+    key.sk_argument = Datum::from_oid(source_statsid);
     let rel = table::table_open(mcx, StatisticExtRelationId, AccessShareLock)?;
     let mut scan = genam::systable_beginscan(
         mcx,
         &rel,
-        StatisticExtRelidIndexId,
+        StatisticExtOidIndexId,
         true,
         None,
         core::slice::from_ref(&key),
     )?;
-    let found = genam::systable_getnext(mcx, &mut scan)?.is_some();
+    let tup = genam::systable_getnext(mcx, &mut scan)?
+        .unwrap_or_else(|| panic!("cache lookup failed for statistics object {source_statsid}"));
+    let desc = rel.descr();
+
+    let mut isnull = false;
+    // SAFETY: NOT NULL stxkind under pg_statistic_ext's descriptor.
+    let kind_d =
+        unsafe { types_tuple::heap_getattr(tup, Anum_pg_statistic_ext_stxkind, desc, &mut isnull) };
+    debug_assert!(!isnull);
+    let (nkinds, kinddata) = array_elems(kind_d, CHAROID, "stxkind");
+    let mut stat_types = NodeList::nil();
+    for &kind in &kinddata[..nkinds] {
+        let name = match kind {
+            b'd' => "ndistinct",
+            b'f' => "dependencies",
+            b'm' => "mcv",
+            // Expression stats are not exposed to users.
+            b'e' => continue,
+            other => panic!("unrecognized statistics kind {}", other as char),
+        };
+        stat_types.lappend(mcx, Node::mk_string(mcx, name)?)?;
+    }
+
+    // SAFETY: NOT NULL int2vector stxkeys under pg_statistic_ext's descriptor.
+    let keys_d =
+        unsafe { types_tuple::heap_getattr(tup, Anum_pg_statistic_ext_stxkeys, desc, &mut isnull) };
+    debug_assert!(!isnull);
+    let (nkeys, keydata) = array_elems(keys_d, INT2OID, "stxkeys");
+    let mut def_names = NodeList::nil();
+    for i in 0..nkeys {
+        let attnum = i16::from_ne_bytes(keydata[i * 2..i * 2 + 2].try_into().unwrap());
+        let attname = lsyscache::get_attname(mcx, heap_relid, attnum, false)?
+            .expect("statistics key column");
+        let selem = StatsElem { name: Some(str_in(mcx, attname.as_str())?), expr: None };
+        def_names.lappend(mcx, Node::mk(mcx, selem)?)?;
+    }
+
+    // Expressions append after simple column references; the relative order
+    // is irrelevant for the CREATE command (C comment at 2108-2116).
+    // SAFETY: nullable text stxexprs under pg_statistic_ext's descriptor.
+    let exprs_d = unsafe {
+        types_tuple::heap_getattr(tup, Anum_pg_statistic_ext_stxexprs, desc, &mut isnull)
+    };
+    if !isnull {
+        let exprs_str = text_str(mcx, exprs_d)?;
+        let exprs =
+            readfuncs::stringToNode(mcx, exprs_str)?.as_list().expect("stxexprs is a List");
+        for expr in exprs.iter() {
+            // C ignores found_whole_row here.
+            let (mapped, _) = rewrite_manip::map_variable_attnos(
+                mcx,
+                expr,
+                1,
+                0,
+                attmap,
+                types_core::InvalidOid,
+            )?;
+            let selem = StatsElem { name: None, expr: Some(mapped) };
+            def_names.lappend(mcx, Node::mk(mcx, selem)?)?;
+        }
+    }
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;
-    Ok(found)
+
+    let heap_rv = Node::mk(
+        mcx,
+        RangeVar {
+            catalogname: heap_rel.catalogname,
+            schemaname: heap_rel.schemaname,
+            relname: heap_rel.relname,
+            inh: heap_rel.inh,
+            relpersistence: heap_rel.relpersistence,
+            alias: heap_rel.alias,
+            location: heap_rel.location,
+        },
+    )?;
+    Ok(CreateStatsStmt {
+        defnames: NodeList::nil(),
+        stat_types,
+        exprs: def_names,
+        relations: NodeList::make1(mcx, heap_rv)?,
+        stxcomment: None,
+        transformed: true,
+        if_not_exists: false,
+    })
 }
