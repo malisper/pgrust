@@ -141,6 +141,7 @@ pub fn reindex_index<'mcx>(
     skip_constraint_checks: bool,
     persistence: u8,
     params: &ReindexParams,
+    on_collect: Option<&mut dyn FnMut(Oid)>,
 ) -> PgResult<()> {
     let ru0 = pg_rusage::pg_rusage_init();
     let missing_ok = params.options & REINDEXOPT_MISSING_OK != 0;
@@ -173,6 +174,13 @@ pub fn reindex_index<'mcx>(
     } else {
         indexam::index_open(mcx, indexId, AccessExclusiveLock)?
     };
+
+    // C: EventTriggerCollectSimpleCommand(RelationRelationId, indexId, stmt) —
+    // fired only when a REINDEX statement (not an internal caller such as
+    // CLUSTER/VACUUM FULL/TRUNCATE) drives this reindex.
+    if let Some(cb) = on_collect {
+        cb(indexId);
+    }
 
     if iRel.rd_rel.relkind == RELKIND_PARTITIONED_INDEX {
         return Err(Box::new(PgError::new(
@@ -405,6 +413,7 @@ pub fn reindex_relation<'mcx>(
     relid: Oid,
     flags: i32,
     params: &ReindexParams,
+    on_collect: &mut dyn FnMut(Oid),
 ) -> PgResult<bool> {
     let rel = if params.options & REINDEXOPT_MISSING_OK != 0 {
         match table::try_table_open(mcx, relid, ShareLock)? {
@@ -442,7 +451,7 @@ pub fn reindex_relation<'mcx>(
         let mut newparams = *params;
         newparams.options &= !REINDEXOPT_MISSING_OK;
         newparams.tablespace_oid = InvalidOid;
-        result |= reindex_relation(mcx, toast_relid, flags, &newparams)?;
+        result |= reindex_relation(mcx, toast_relid, flags, &newparams, on_collect)?;
     }
 
     let persistence = if flags & REINDEX_REL_FORCE_INDEXES_UNLOGGED != 0 {
@@ -484,6 +493,7 @@ pub fn reindex_relation<'mcx>(
             flags & REINDEX_REL_CHECK_CONSTRAINTS == 0,
             persistence,
             params,
+            Some(&mut *on_collect),
         )?;
         xact::CommandCounterIncrement()?;
         debug_assert!(!types_rel::reindex::ReindexIsProcessingIndex(indexOid));

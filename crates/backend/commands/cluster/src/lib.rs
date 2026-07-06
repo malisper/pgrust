@@ -176,6 +176,7 @@ pub fn finish_heap_swap<'mcx>(
             old_heap_oid,
             reindex_flags,
             &catalog_index::ReindexParams::default(),
+            &mut |_index_id| {},
         )?;
         if !rebuilt {
             // reindex_relation's trailing CCI (it ran none without indexes):

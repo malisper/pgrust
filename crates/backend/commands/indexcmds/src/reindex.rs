@@ -6,11 +6,27 @@ use catalog_index::{
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
 };
 use mcx::Mcx;
-use types_core::{InvalidOid, Oid};
+use pg_depend::ObjectAddress;
+use types_core::{InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
+
+// Every path in this file is reached only from ExecReindex, i.e. an actual
+// REINDEX statement is always driving the call (unlike catalog_index's
+// reindex_index/reindex_relation, which CLUSTER/VACUUM FULL/TRUNCATE also
+// call with no statement). C's guard is `if (stmt)`; here it is unconditional.
+fn collect_reindex_cb() -> impl FnMut(Oid) {
+    let tag = cmdtag::GetCommandTagEnum(b"REINDEX");
+    move |index_id: Oid| {
+        event_trigger::EventTriggerCollectSimpleCommand(
+            ObjectAddress::set(RELATION_RELATION_ID, index_id),
+            ObjectAddress::set(InvalidOid, InvalidOid),
+            tag,
+        );
+    }
+}
 use types_nodes::parsenodes::{DropBehavior, ReindexObjectType, ReindexStmt};
 use types_rel::{
     AccessExclusiveLock, LockRelId, ShareLock, ShareUpdateExclusiveLock, RELKIND_INDEX,
@@ -153,7 +169,8 @@ fn ReindexIndex<'mcx>(
     } else {
         let mut newparams = *params;
         newparams.options |= REINDEXOPT_REPORT_PROGRESS;
-        reindex_index(mcx, ind_oid, false, persistence, &newparams)
+        let mut collect = collect_reindex_cb();
+        reindex_index(mcx, ind_oid, false, persistence, &newparams, Some(&mut collect))
     }
 }
 
@@ -242,11 +259,13 @@ fn ReindexTable<'mcx>(
     }
     let mut newparams = *params;
     newparams.options |= REINDEXOPT_REPORT_PROGRESS;
+    let mut collect = collect_reindex_cb();
     let result = reindex_relation(
         mcx,
         heap_oid,
         REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
         &newparams,
+        &mut collect,
     )?;
     if !result {
         elog::ereport(types_error::NOTICE)
@@ -533,16 +552,19 @@ fn ReindexMultipleInternal<'mcx>(
         } else if relkind == RELKIND_INDEX {
             let mut newparams = *params;
             newparams.options |= REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;
-            reindex_index(mcx, relid, false, relpersistence as u8, &newparams)?;
+            let mut collect = collect_reindex_cb();
+            reindex_index(mcx, relid, false, relpersistence as u8, &newparams, Some(&mut collect))?;
             snapmgr::PopActiveSnapshot()?;
         } else {
             let mut newparams = *params;
             newparams.options |= REINDEXOPT_REPORT_PROGRESS | REINDEXOPT_MISSING_OK;
+            let mut collect = collect_reindex_cb();
             let result = reindex_relation(
                 mcx,
                 relid,
                 REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
                 &newparams,
+                &mut collect,
             )?;
             if result && params.options & REINDEXOPT_VERBOSE != 0 {
                 elog::ereport(types_error::INFO)
@@ -785,6 +807,14 @@ fn ReindexRelationConcurrently<'mcx>(
         guard.restore();
 
         heapRel.close(types_rel::NoLock)?;
+
+        // index.c: EventTriggerCollectSimpleCommand(RelationRelationId,
+        // newIndexId, stmt) — unconditional here (see collect_reindex_cb).
+        event_trigger::EventTriggerCollectSimpleCommand(
+            ObjectAddress::set(RELATION_RELATION_ID, new_index_id),
+            ObjectAddress::set(InvalidOid, InvalidOid),
+            cmdtag::GetCommandTagEnum(b"REINDEX"),
+        );
     }
 
     for &heap_oid in heap_relation_ids.iter() {

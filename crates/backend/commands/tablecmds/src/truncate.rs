@@ -246,6 +246,7 @@ fn ExecuteTruncateGuts<'mcx>(
                 heap_relid,
                 catalog_index::REINDEX_REL_PROCESS_TOAST,
                 &catalog_index::ReindexParams::default(),
+                &mut |_index_id| {},
             )?;
         }
         pgstat::relation::pgstat_count_truncate(rel.rd_id, rel.rd_rel.relisshared);
