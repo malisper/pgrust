@@ -6838,6 +6838,9 @@ mod group_keys_reorder {
         assert_eq!(n, 0);
         assert_eq!(&pks[..], &[a, b, agg]);
         assert_eq!(&clauses[..], &[ca, cb, cagg]);
+    }
+}
+
 // Appendrel EC family: child EquivalenceMember translation (equivclass.c
 // add_child_rel_equivalences / add_child_eq_member) and the ancestor set
 // feeding check_index_predicates' otherrels (relnode.c find_childrel_parents).
