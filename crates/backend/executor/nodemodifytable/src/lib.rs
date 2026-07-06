@@ -3092,7 +3092,7 @@ fn exec_init_root_returning<'mcx>(
         (root_rel.rd_att.clone(), root_rel.rd_rel.reltype, attmap)
     };
     let mut mapped = types_nodes::list::NodeList::nil();
-    for tle_node in &rlist {
+    for tle_node in rlist {
         let n = match &attmap {
             None => tle_node,
             Some(map) => {
