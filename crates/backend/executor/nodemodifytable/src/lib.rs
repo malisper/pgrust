@@ -6667,6 +6667,10 @@ fn exec_rel_check<'mcx>(
                 // execMain.c:1818 expand_generated_columns_in_expr.
                 node = expand_generated_columns_in_expr(mcx, node, rel, 1)?.unwrap_or(node);
             }
+            // C ExecPrepareExpr: expression_planner before init — the stored
+            // ccbin is parse output (CollateExpr survives until const-fold).
+            node = clauses::eval_const_expressions(mcx, node)?;
+            nodes_core::fix_opfuncids(node)?;
             let mut state = execexpr::exec_init_expr(mcx, Some(node), execexpr::ParamBind::NONE)?
                 .expect("check constraint expr");
             // Whole-row/composite steps return by-ref datums (C evaluates in
