@@ -711,7 +711,7 @@ fn transformPLAssignStmt<'mcx>(
 
     transformFromClause(mcx, pstate, &sstmt.fromClause)?;
 
-    let mut tlist = transformTargetList(
+    let tlist = transformTargetList(
         mcx,
         pstate,
         &sstmt.targetList,
