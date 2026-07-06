@@ -20,6 +20,8 @@ pg_locale_seams = { path = "../../utils/adt/pg_locale_seams" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
+unicode_category = { path = "../../../common/unicode_category" }
+unicode_case = { path = "../../../common/unicode_case" }
 
 [dev-dependencies]
 regex = { path = "../../../_support/types/regex" }

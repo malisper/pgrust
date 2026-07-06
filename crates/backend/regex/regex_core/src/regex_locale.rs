@@ -23,6 +23,23 @@ fn regex_wc_isclass_nonc(strategy: PgLocaleStrategy, class: RegexWcClass, c: PgW
     );
 }
 
+// Builtin provider ctype: unicode_category.c pg_u_is* over the codepoint,
+// posix-restricted per regc_pg_locale.c's `!casemap_full` convention.
+fn regex_wc_isclass_builtin(class: RegexWcClass, c: PgWChar, posix: bool) -> bool {
+    let code = c as u32;
+    match class {
+        RegexWcClass::Digit => unicode_category::pg_u_isdigit(code, posix),
+        RegexWcClass::Alpha => unicode_category::pg_u_isalpha(code),
+        RegexWcClass::Alnum => unicode_category::pg_u_isalnum(code, posix),
+        RegexWcClass::Upper => unicode_category::pg_u_isupper(code),
+        RegexWcClass::Lower => unicode_category::pg_u_islower(code),
+        RegexWcClass::Graph => unicode_category::pg_u_isgraph(code),
+        RegexWcClass::Print => unicode_category::pg_u_isprint(code),
+        RegexWcClass::Punct => unicode_category::pg_u_ispunct(code, posix),
+        RegexWcClass::Space => unicode_category::pg_u_isspace(code),
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn regex_wc_tocase_nonc(strategy: PgLocaleStrategy, upper: bool, c: PgWChar) -> PgWChar {
@@ -54,6 +71,8 @@ struct RegexLocaleState {
     strategy: PgLocaleStrategy,
     collation: Oid,
     is_default: bool,
+    // Builtin only: pg_u_isdigit/isalnum/ispunct's posix arg is !casemap_full.
+    builtin_posix: bool,
 }
 
 thread_local! {
@@ -62,6 +81,7 @@ thread_local! {
             strategy: PgLocaleStrategy::C,
             collation: 0, // InvalidOid
             is_default: false,
+            builtin_posix: false,
         })
     };
 }
@@ -156,6 +176,7 @@ fn pg_ascii_tolower(ch: u8) -> u8 {
 pub fn pg_set_regex_collation<'mcx>(mcx: Mcx<'mcx>, collation: Oid) -> PgResult<()> {
     let strategy;
     let mut is_default = false;
+    let mut builtin_posix = false;
     let mut active_collation = collation;
 
     if !OidIsValid(collation) {
@@ -187,6 +208,7 @@ pub fn pg_set_regex_collation<'mcx>(mcx: Mcx<'mcx>, collation: Oid) -> PgResult<
             debug_assert_eq!(mb_seams::get_database_encoding::call(), PG_UTF8);
             strategy = PgLocaleStrategy::Builtin;
             is_default = locale.is_default;
+            builtin_posix = !locale.builtin_casemap_full;
         } else if locale.provider == COLLPROVIDER_ICU {
             strategy = PgLocaleStrategy::Icu;
             is_default = locale.is_default;
@@ -206,6 +228,7 @@ pub fn pg_set_regex_collation<'mcx>(mcx: Mcx<'mcx>, collation: Oid) -> PgResult<
             strategy,
             collation: active_collation,
             is_default,
+            builtin_posix,
         })
     });
     Ok(())
@@ -216,8 +239,8 @@ fn pg_wc_isclass(c: PgWChar, c_bit: u8, class: RegexWcClass) -> bool {
     let st = regex_locale_state();
     match st.strategy {
         PgLocaleStrategy::C => c <= 127 && (PG_CHAR_PROPERTIES[c as usize] & c_bit) != 0,
-        strat @ (PgLocaleStrategy::Builtin
-        | PgLocaleStrategy::LibcWide
+        PgLocaleStrategy::Builtin => regex_wc_isclass_builtin(class, c, st.builtin_posix),
+        strat @ (PgLocaleStrategy::LibcWide
         | PgLocaleStrategy::Libc1Byte
         | PgLocaleStrategy::Icu) => {
             regex_wc_isclass_nonc(strat, class, c)
@@ -285,9 +308,8 @@ pub fn pg_wc_toupper(c: PgWChar) -> PgWChar {
                 regex_wc_tocase_nonc(strat, true, c)
             }
         }
-        strat @ (PgLocaleStrategy::Builtin | PgLocaleStrategy::Icu) => {
-            regex_wc_tocase_nonc(strat, true, c)
-        }
+        PgLocaleStrategy::Builtin => unicode_case::unicode_uppercase_simple(c as u32) as PgWChar,
+        strat @ PgLocaleStrategy::Icu => regex_wc_tocase_nonc(strat, true, c),
     }
 }
 
@@ -308,9 +330,8 @@ pub fn pg_wc_tolower(c: PgWChar) -> PgWChar {
                 regex_wc_tocase_nonc(strat, false, c)
             }
         }
-        strat @ (PgLocaleStrategy::Builtin | PgLocaleStrategy::Icu) => {
-            regex_wc_tocase_nonc(strat, false, c)
-        }
+        PgLocaleStrategy::Builtin => unicode_case::unicode_lowercase_simple(c as u32) as PgWChar,
+        strat @ PgLocaleStrategy::Icu => regex_wc_tocase_nonc(strat, false, c),
     }
 }
 

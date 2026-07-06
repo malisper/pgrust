@@ -11856,6 +11856,8 @@ dependencies = [
  "stack_depth",
  "types_core",
  "types_error",
+ "unicode_case",
+ "unicode_category",
 ]
 
 [[package]]
