@@ -385,6 +385,149 @@ pub fn ExecBSTruncateTriggers<'mcx>(
     Ok(())
 }
 
+// ExecBRInsertTriggers (trigger.c), standalone-caller form (COPY FROM); the
+// executor's INSERT path fires through nodemodifytable's br_row_triggers.
+// false = a trigger returned NULL, suppressing the row.
+pub fn ExecBRInsertTriggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &types_trigger::TriggerDesc<'static>,
+    fmgr: &mut TriggerFmgrCache,
+    when: &mut TriggerWhenEval<'_, 'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    insert_row_triggers(mcx, rel, trigdesc, fmgr, when, slot, false)
+}
+
+// ExecIRInsertTriggers (trigger.c), standalone-caller form (COPY FROM into a
+// view with an INSTEAD OF INSERT row trigger).
+pub fn ExecIRInsertTriggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &types_trigger::TriggerDesc<'static>,
+    fmgr: &mut TriggerFmgrCache,
+    when: &mut TriggerWhenEval<'_, 'mcx>,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    insert_row_triggers(mcx, rel, trigdesc, fmgr, when, slot, true)
+}
+
+fn insert_row_triggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    trigdesc: &types_trigger::TriggerDesc<'static>,
+    fmgr: &mut TriggerFmgrCache,
+    when: &mut TriggerWhenEval<'_, 'mcx>,
+    slot: &mut SlotData<'mcx>,
+    instead: bool,
+) -> PgResult<bool> {
+    use types_trigger::{
+        TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_INSTEAD, TRIGGER_EVENT_ROW,
+        TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_LEVEL_MASK,
+        TRIGGER_TYPE_ROW, TRIGGER_TYPE_TIMING_MASK,
+    };
+    let (type_timing, event_timing) = if instead {
+        (TRIGGER_TYPE_INSTEAD, TRIGGER_EVENT_INSTEAD)
+    } else {
+        (TRIGGER_TYPE_BEFORE, TRIGGER_EVENT_BEFORE)
+    };
+    let tg_event = TRIGGER_EVENT_INSERT | TRIGGER_EVENT_ROW | event_timing;
+    for (i, trigger) in trigdesc.triggers.iter().enumerate() {
+        if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | TRIGGER_TYPE_INSERT)
+            != TRIGGER_TYPE_ROW | type_timing | TRIGGER_TYPE_INSERT
+        {
+            continue;
+        }
+        if !TriggerEnabled(trigger) {
+            continue;
+        }
+        if !when.check(i, trigger, rel, tg_event, None, Some(slot))? {
+            continue;
+        }
+        let (img, len, tid, toid) = {
+            let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, mcx)?;
+            match fetched {
+                exectuples::FetchedHeapTuple::Slot(t) => {
+                    (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+                }
+                exectuples::FetchedHeapTuple::Copied(t) => {
+                    (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+                }
+            }
+        };
+        // SAFETY: a materialized query-context image; the slot is not written
+        // while this handle lives within this iteration.
+        let mut cur = unsafe { HeapTupleData::from_raw_parts(img, len, tid, toid) };
+        let cur_nn = NonNull::from(&mut cur);
+        let finfo = fmgr.get(i, trigger.tgfoid)?;
+        let mut tdata =
+            types_trigger_call::TriggerData::from_raw(tg_event, rel, Some(cur_nn), None, trigger);
+        let ret = ExecCallTriggerFunc(mcx, &mut tdata, finfo)?;
+        match ret {
+            None => return Ok(false),
+            Some(p) if p == cur_nn => {}
+            Some(p) => {
+                // SAFETY: the trigger's returned tuple, live in the per-call
+                // context; copied into the slot before reuse.
+                let returned = unsafe { p.as_ref() };
+                let nulled = check_modified_virtual_generated(mcx, rel, returned)?;
+                let returned = nulled.as_ref().map_or(returned, |t| t.as_tuple());
+                let img = unsafe {
+                    core::slice::from_raw_parts(returned.header_ptr(), returned.t_len as usize)
+                };
+                let mut buf = mcx::vec_with_capacity_in(mcx, img.len())?;
+                mcx::vec_append_bytes(&mut buf, img).map_err(|_| mcx.oom(img.len()))?;
+                let ptr = buf.as_ptr();
+                core::mem::forget(buf);
+                // SAFETY: fresh query-context copy of the returned image.
+                let copy = unsafe {
+                    HeapTupleData::from_raw_parts(
+                        ptr,
+                        returned.t_len,
+                        returned.t_self,
+                        returned.t_tableOid,
+                    )
+                };
+                exectuples::exec_force_store_heap_tuple(copy, slot, mcx)?;
+            }
+        }
+    }
+    Ok(true)
+}
+
+// check_modified_virtual_generated (trigger.c:6735): a trigger-returned tuple
+// must not carry a non-null value in a virtual generated column; offending
+// columns revert to null. None means the tuple was already clean.
+fn check_modified_virtual_generated<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    tuple: &HeapTupleData<'_>,
+) -> PgResult<Option<heaptuple::HeapTuple<'mcx>>> {
+    const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    let tupdesc = &*rel.rd_att;
+    if !tupdesc.constr.as_deref().is_some_and(|c| c.has_generated_virtual) {
+        return Ok(None);
+    }
+    let mut cols: mcx::PgVec<'_, i32> = mcx::PgVec::new_in(mcx);
+    for i in 0..tupdesc.natts as usize {
+        if tupdesc.attr(i).attgenerated == VIRTUAL_GEN
+            && !types_tuple::heap_attisnull(tuple, i as i32 + 1, Some(tupdesc))
+        {
+            cols.push(i as i32 + 1);
+        }
+    }
+    if cols.is_empty() {
+        return Ok(None);
+    }
+    let mut values: mcx::PgVec<'_, datum::Datum> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    for _ in 0..cols.len() {
+        values.push(datum::Datum::null());
+        isnull.push(true);
+    }
+    heaptuple::heap_modify_tuple_by_cols(mcx, tuple, tupdesc, &cols, &values, &isnull).map(Some)
+}
+
 thread_local! {
     static TRIGGER_DEPTH: Cell<i32> = const { Cell::new(0) };
 }

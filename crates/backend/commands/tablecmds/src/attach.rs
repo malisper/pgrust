@@ -1734,7 +1734,6 @@ fn DropClonedTriggersFromPartition<'mcx>(mcx: Mcx<'mcx>, partition_id: Oid) -> P
         genam::systable_beginscan(mcx, &tgrel, TriggerRelidNameIndexId, true, None, &keys)?;
     let desc = tgrel.descr();
     let mut objects = catalog_dependency::ObjectAddresses::new();
-    let mut any = false;
     while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
         let (tgparentid, _) = getattr(tup, desc, Anum_pg_trigger_tgparentid);
         if tgparentid.as_oid() == InvalidOid {
@@ -1763,18 +1762,17 @@ fn DropClonedTriggersFromPartition<'mcx>(mcx: Mcx<'mcx>, partition_id: Oid) -> P
             TriggerRelationId,
             oid.as_oid(),
         ));
-        any = true;
     }
     genam::systable_endscan(mcx, scan)?;
-    if any {
-        xact::CommandCounterIncrement()?;
-        catalog_dependency::performMultipleDeletions(
-            mcx,
-            &objects,
-            catalog_dependency::DropBehavior::DROP_RESTRICT,
-            catalog_dependency::PERFORM_DELETION_INTERNAL,
-        )?;
-    }
+    // C increments unconditionally (tablecmds.c:21560); DetachPartitionFinalize's
+    // identity drop relies on it to see RemoveInheritance's pg_attribute updates.
+    xact::CommandCounterIncrement()?;
+    catalog_dependency::performMultipleDeletions(
+        mcx,
+        &objects,
+        catalog_dependency::DropBehavior::DROP_RESTRICT,
+        catalog_dependency::PERFORM_DELETION_INTERNAL,
+    )?;
     tgrel.close(RowExclusiveLock)
 }
 

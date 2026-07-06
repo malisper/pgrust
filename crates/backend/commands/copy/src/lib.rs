@@ -163,18 +163,31 @@ pub fn DoCopy<'mcx>(
     };
     let rel = table::table_openrv(mcx, &rv, lockmode)?;
 
-    // ExecCheckPermissions, relation-level arm. Column-level GRANT is
-    // unported, so the column fallback reduces to the plain denial error.
+    // DoCopy's ExecCheckPermissions (copy.c:193-205 -> ExecCheckOneRelPerms):
+    // relation-level ACL first, then per-column ACL over the COPY column list.
     let required = if is_from { ACL_INSERT } else { ACL_SELECT };
-    let r = aclchk_seams::object_aclcheck::call(
-        types_core::catalog::RELATION_RELATION_ID,
-        rel.rd_id,
-        userid,
-        required,
-    )?;
-    if r != ACLCHECK_OK {
-        // OBJECT_TABLE discriminant (parsenodes.h ObjectType).
-        aclchk_seams::aclcheck_error::call(r, 41, rv.relname)?;
+    let rel_perms = aclchk_seams::pg_class_aclmask::call(rel.rd_id, userid, required, true)?;
+    if required & !rel_perms != 0 {
+        let attnums = CopyGetAttnums(mcx, &rel.rd_att, Some(&rel), &stmt.attlist)?;
+        let mut ok = true;
+        if attnums.is_empty() {
+            // No column referenced: the privilege on any column will do.
+            ok = aclchk_seams::pg_attribute_aclcheck_all::call(rel.rd_id, userid, required, false)?
+                == ACLCHECK_OK;
+        }
+        for &attnum in attnums.iter() {
+            if aclchk_seams::pg_attribute_aclcheck::call(rel.rd_id, attnum, userid, required)?
+                != ACLCHECK_OK
+            {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            // ACLCHECK_NO_PRIV + OBJECT_TABLE discriminant (parsenodes.h
+            // ObjectType).
+            aclchk_seams::aclcheck_error::call(1, 41, rv.relname)?;
+        }
     }
     if rls::check_enable_rls(rel.rd_id, types_core::InvalidOid, false)?
         == rls::CheckEnableRls::RlsEnabled
