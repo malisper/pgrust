@@ -695,28 +695,54 @@ pub fn set_default_table_access_method(value: &str) {
     });
 }
 
+// check_default_table_access_method (tableamapi.c:102).
 fn check_default_table_access_method(
     newval: &mut Option<String>,
     _extra: &mut Option<guc_tables::GucHookExtra>,
-    _source: ::types_guc::GucSource,
+    source: ::types_guc::GucSource,
 ) -> PgResult<bool> {
+    let errdetail = |d: String| {
+        if guc_seams::guc_check_errdetail::is_installed() {
+            guc_seams::guc_check_errdetail::call(d);
+        }
+    };
     let name = newval.as_deref().unwrap_or("");
 
     if name.is_empty() {
-        return Err(Box::new(PgError::error(
-            "\"default_table_access_method\" cannot be empty.",
-        )));
+        errdetail("\"default_table_access_method\" cannot be empty.".to_string());
+        return Ok(false);
     }
 
     if name.len() >= NAMEDATALEN as usize {
-        return Err(Box::new(PgError::error(format!(
+        errdetail(format!(
             "\"default_table_access_method\" is too long (maximum {} characters).",
             NAMEDATALEN - 1
-        ))));
+        ));
+        return Ok(false);
     }
 
-    // C probes get_table_am_oid when IsTransactionState() && MyDatabaseId
-    // valid; both unported, so every caller is on C's accept-on-faith path.
+    // C accepts on faith outside a transaction or before database selection;
+    // uninstalled seams (unit tests) land on the same path.
+    if xact_seams::is_transaction_state::is_installed()
+        && tableam_seams::get_table_am_oid::is_installed()
+        && xact_seams::is_transaction_state::call()
+        && init_small::globals::MyDatabaseId() != ::types_core::InvalidOid
+    {
+        // A wrong-type AM (e.g. an index AM) raises hard from get_table_am_oid.
+        if tableam_seams::get_table_am_oid::call(name, true)? == ::types_core::InvalidOid {
+            if source == ::types_guc::GucSource::PGC_S_TEST {
+                elog_seams::ereport_msg::call(
+                    ::types_error::NOTICE,
+                    format!("table access method \"{name}\" does not exist"),
+                    None,
+                )?;
+            } else {
+                errdetail(format!("Table access method \"{name}\" does not exist."));
+                return Ok(false);
+            }
+        }
+    }
+
     Ok(true)
 }
 

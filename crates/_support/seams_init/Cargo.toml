@@ -46,6 +46,7 @@ timeline = { path = "../../backend/access/transam/timeline" }
 xlogarchive = { path = "../../backend/access/transam/xlogarchive" }
 xlogutils = { path = "../../backend/access/transam/xlogutils" }
 aclchk = { path = "../../backend/catalog/aclchk" }
+commands_amcmds = { path = "../../backend/commands/amcmds" }
 rls = { path = "../../backend/utils/misc/rls" }
 commands_policy = { path = "../../backend/commands/policy" }
 commands_publicationcmds = { path = "../../backend/commands/publicationcmds" }

@@ -180,12 +180,21 @@ fn guc_storage_and_check_hook() {
     ));
 
     let mut empty = Some(String::new());
-    assert!(check_default_table_access_method(&mut empty, &mut extra, source).is_err());
+    assert!(matches!(
+        check_default_table_access_method(&mut empty, &mut extra, source),
+        Ok(false)
+    ));
     let mut none = None;
-    assert!(check_default_table_access_method(&mut none, &mut extra, source).is_err());
+    assert!(matches!(
+        check_default_table_access_method(&mut none, &mut extra, source),
+        Ok(false)
+    ));
 
     let mut long = Some("x".repeat(64));
-    assert!(check_default_table_access_method(&mut long, &mut extra, source).is_err());
+    assert!(matches!(
+        check_default_table_access_method(&mut long, &mut extra, source),
+        Ok(false)
+    ));
     let mut fits = Some("x".repeat(63));
     assert!(matches!(
         check_default_table_access_method(&mut fits, &mut extra, source),

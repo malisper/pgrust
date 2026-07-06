@@ -26,3 +26,9 @@ seam_core::seam!(
         tid: ItemPointerData,
     ) -> PgResult<ItemPointerData>
 );
+
+seam_core::seam!(
+    // get_table_am_oid (amcmds.c); tableamapi.c's GUC check hook reaches up
+    // into commands (guc <- tableam <- amcmds is not a crate edge).
+    pub fn get_table_am_oid(amname: &str, missing_ok: bool) -> PgResult<types_core::Oid>
+);
