@@ -66,6 +66,33 @@ fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(types_error::ERROR, msg).with_sqlstate(sqlstate))
 }
 
+// index_create runs before the index relation exists, so a non-builtin AM
+// (CREATE ACCESS METHOD over a builtin index handler) resolves through
+// pg_am.amhandler into relscan's registry here (mirrors relcache's arm).
+fn register_index_am_kind(relam: Oid) -> PgResult<()> {
+    use types_relscan::IndexAmKind;
+    if matches!(
+        relam,
+        BTREE_AM_OID | HASH_AM_OID | GIN_AM_OID | GIST_AM_OID
+    ) || relam == types_core::SPGIST_AM_OID
+        || relam == types_core::BRIN_AM_OID
+    {
+        return Ok(());
+    }
+    let kind = match syscache_seams::pg_am_amhandler::call(relam)? {
+        Some(330) => IndexAmKind::Btree,
+        Some(331) => IndexAmKind::Hash,
+        Some(333) => IndexAmKind::Gin,
+        Some(332) => IndexAmKind::Gist,
+        Some(334) => IndexAmKind::Spgist,
+        Some(335) => IndexAmKind::Brin,
+        Some(other) => unported(&format!("index_create: index AM handler function {other}")),
+        None => panic!("cache lookup failed for access method {relam}"),
+    };
+    types_relscan::register_index_am(relam, kind);
+    Ok(())
+}
+
 fn oid_scankey(attno: usize, oid: Oid) -> ScanKeyData {
     let mut key = ScanKeyData::empty();
     key.sk_attno = attno as AttrNumber;
@@ -546,15 +573,7 @@ pub fn index_create<'mcx>(
     if extra.constr_flags & INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS != 0 {
         unported("index_create: existing-index constraint flag");
     }
-    if accessMethodId != BTREE_AM_OID
-        && accessMethodId != HASH_AM_OID
-        && accessMethodId != GIN_AM_OID
-        && accessMethodId != GIST_AM_OID
-        && accessMethodId != types_core::SPGIST_AM_OID
-        && accessMethodId != types_core::BRIN_AM_OID
-    {
-        unported("index_create: index AMs beyond btree/hash/gin/gist/spgist/brin");
-    }
+    register_index_am_kind(accessMethodId)?;
 
     let pg_class = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
 
@@ -1060,38 +1079,37 @@ pub fn index_build<'mcx>(
     indexInfo: &mut IndexInfo<'mcx>,
     isreindex: bool,
 ) -> PgResult<()> {
-    if indexRelation.rd_rel.relam != BTREE_AM_OID
-        && indexRelation.rd_rel.relam != HASH_AM_OID
-        && indexRelation.rd_rel.relam != GIN_AM_OID
-        && indexRelation.rd_rel.relam != GIST_AM_OID
-        && indexRelation.rd_rel.relam != types_core::SPGIST_AM_OID
-        && indexRelation.rd_rel.relam != types_core::BRIN_AM_OID
-    {
-        unported("index_build: index AMs beyond btree/hash/gin/gist/spgist/brin");
-    }
+    let am_kind = types_relscan::IndexAmKind::from_relam(indexRelation.rd_rel.relam);
 
     let guard = miscinit::SecContextGuard::security_restricted(heapRelation.rd_rel.relowner);
     let save_nestlevel = guc::NewGUCNestLevel();
     guc::RestrictSearchPath()?;
 
-    let stats = if indexRelation.rd_rel.relam == BTREE_AM_OID {
-        let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
-        (r.heap_tuples, r.index_tuples)
-    } else if indexRelation.rd_rel.relam == HASH_AM_OID {
-        let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
-        (r.heap_tuples, r.index_tuples)
-    } else if indexRelation.rd_rel.relam == types_core::BRIN_AM_OID {
-        let r = brin_build::brinbuild(mcx, heapRelation, indexRelation, indexInfo)?;
-        (r.heap_tuples, r.index_tuples)
-    } else if indexRelation.rd_rel.relam == types_core::SPGIST_AM_OID {
-        let r = spgist_build::spgbuild(mcx, heapRelation, indexRelation, indexInfo)?;
-        (r.heap_tuples, r.index_tuples)
-    } else if indexRelation.rd_rel.relam == GIN_AM_OID {
-        let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
-        (r.heap_tuples, r.index_tuples)
-    } else {
-        let r = gistbuild::gistbuild(mcx, heapRelation, indexRelation, indexInfo)?;
-        (r.heap_tuples, r.index_tuples)
+    let stats = match am_kind {
+        types_relscan::IndexAmKind::Btree => {
+            let r = nbtsort::btbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
+        types_relscan::IndexAmKind::Hash => {
+            let r = hashsort::hashbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
+        types_relscan::IndexAmKind::Brin => {
+            let r = brin_build::brinbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
+        types_relscan::IndexAmKind::Spgist => {
+            let r = spgist_build::spgbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
+        types_relscan::IndexAmKind::Gin => {
+            let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
+        _ => {
+            let r = gistbuild::gistbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
     };
 
     if indexRelation.rd_rel.relpersistence == types_core::RELPERSISTENCE_UNLOGGED {
@@ -1103,14 +1121,15 @@ pub fn index_build<'mcx>(
         if !smgr::smgrexists(key, ForkNumber::INIT_FORKNUM)? {
             smgr::smgrcreate(key, ForkNumber::INIT_FORKNUM, false)?;
             catalog_storage::log_smgrcreate(&key.locator, ForkNumber::INIT_FORKNUM)?;
-            match indexRelation.rd_rel.relam {
-                BTREE_AM_OID => nbtsort::btbuildempty(indexRelation)?,
-                HASH_AM_OID => hashsort::hashbuildempty(indexRelation)?,
-                GIN_AM_OID => ginbuild::ginbuildempty(indexRelation)?,
-                GIST_AM_OID => gistbuild::gistbuildempty(indexRelation)?,
-                types_core::SPGIST_AM_OID => spgist_build::spgbuildempty(indexRelation)?,
-                types_core::BRIN_AM_OID => brin_build::brinbuildempty(indexRelation)?,
-                other => unported(&format!("index_build: ambuildempty for AM {other}")),
+            match am_kind {
+                types_relscan::IndexAmKind::Btree => nbtsort::btbuildempty(indexRelation)?,
+                types_relscan::IndexAmKind::Hash => hashsort::hashbuildempty(indexRelation)?,
+                types_relscan::IndexAmKind::Gin => ginbuild::ginbuildempty(indexRelation)?,
+                types_relscan::IndexAmKind::Gist => gistbuild::gistbuildempty(indexRelation)?,
+                types_relscan::IndexAmKind::Spgist => spgist_build::spgbuildempty(indexRelation)?,
+                types_relscan::IndexAmKind::Brin => brin_build::brinbuildempty(indexRelation)?,
+                #[allow(unreachable_patterns)]
+                other => unported(&format!("index_build: ambuildempty for AM {other:?}")),
             }
         }
     }

@@ -1539,12 +1539,18 @@ fn ComputeIndexAttrs<'mcx>(
         opclassIds[attn] = resolved?;
         if attribute.opclass.is_nil() {
             if opclassIds[attn] == InvalidOid {
-                return Err(err(
-                    format!(
-                        "data type {} has no default operator class for access method \"{amname}\"",
-                        format_type::format_type_be(atttype)?
+                return Err(Box::new(
+                    (*err(
+                        format!(
+                            "data type {} has no default operator class for access method \"{amname}\"",
+                            format_type::format_type_be(atttype)?
+                        ),
+                        ERRCODE_UNDEFINED_OBJECT,
+                    ))
+                    .with_hint(
+                        "You must specify an operator class for the index or define a \
+                         default operator class for the data type.",
                     ),
-                    ERRCODE_UNDEFINED_OBJECT,
                 ));
             }
         }
