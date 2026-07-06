@@ -2616,7 +2616,35 @@ fn replace_vars_in_query_value<'mcx>(
                 found
             }
         };
+        // rtable expressions are this query's own (C query_tree_walker
+        // QTW_EXAMINE_RTES): a replacement spliced into a FUNCTION/VALUES
+        // RTE carries the SubLink too.
+        let mut rt_has = false;
+        for srte_node in &newq.rtable {
+            let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
+            rt_has = match srte.rtekind {
+                RTEKind::RTE_FUNCTION => {
+                    let mut found = false;
+                    for f_node in &srte.functions {
+                        let rtf = f_node.as_range_tbl_function().expect("functions cell");
+                        if rewrite_manip::checkExprHasSubLink_opt(rtf.funcexpr)? {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                }
+                RTEKind::RTE_VALUES => {
+                    rewrite_manip::checkExprHasSubLink_list(&srte.values_lists)?
+                }
+                _ => false,
+            };
+            if rt_has {
+                break;
+            }
+        }
         newq.hasSubLinks = jt_has
+            || rt_has
             || rewrite_manip::checkExprHasSubLink_list(&newq.targetList)?
             || rewrite_manip::checkExprHasSubLink_list(&newq.returningList)?
             || rewrite_manip::checkExprHasSubLink_opt(newq.havingQual)?

@@ -263,6 +263,11 @@ fn eval_join_qual<'mcx>(
     if qual.is_none() {
         return Ok(true);
     }
+    // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter.
+    let deps = qual.as_ref().unwrap().param_exec_deps();
+    if !deps.is_empty() {
+        ::executils::exec_eval_param_exec_params(estate, deps)?;
+    }
     if qual.as_ref().is_some_and(|q| q.has_subplan()) {
         return ::executils::exec_qual_with_subplans(qual, estate, ecxt);
     }
@@ -295,6 +300,11 @@ fn project_join_tuple<'mcx>(
     result: ExecSlotId,
     proj: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
+    // ExecEvalParamExec pending-initplan arm, hoisted out of the interpreter.
+    let deps = proj.param_exec_deps();
+    if !deps.is_empty() {
+        ::executils::exec_eval_param_exec_params(estate, deps)?;
+    }
     if proj.has_subplan() {
         return ::executils::exec_project_with_subplans(proj, estate, ecxt, result);
     }
