@@ -25,8 +25,8 @@ use ::types_core::xact::{
 };
 use ::types_core::{BlockNumber, InvalidOid, MultiXactId, Oid};
 use ::types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_TABLE, ERROR, WARNING,
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, WARNING,
 };
 use ::types_nodes::parsenodes::VacuumStmt;
 use ::types_nodes::NodeList;
@@ -150,6 +150,10 @@ pub fn ExecVacuum<'mcx>(
     let mut process_toast = true;
     let mut skip_database_stats = false;
     let mut only_database_stats = false;
+    let mut ring_size: i32 = -1;
+    // MIN_BAS_VAC_RING_SIZE_KB (miscadmin.h:278); MAX in guc_tables consts.
+    const MIN_BAS_VAC_RING_SIZE_KB: i32 = 128;
+    const MAX_BAS_VAC_RING_SIZE_KB: i32 = 16 * 1024 * 1024;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
@@ -207,9 +211,33 @@ pub fn ExecVacuum<'mcx>(
                 }
                 params.nworkers = if nworkers == 0 { -1 } else { nworkers };
             }
-            name @ "buffer_usage_limit" => {
-                if explain::defGetBoolean(opt).unwrap_or(true) {
-                    unported_option(name);
+            "buffer_usage_limit" => {
+                let vac_buffer_size = explain::defGetString(mcx, opt)?;
+                let (result, hint) =
+                    match guc::units::parse_int(vac_buffer_size, ::types_guc::GUC_UNIT_KB) {
+                        guc::units::ParseNum::Ok(v) => (Some(v), None),
+                        guc::units::ParseNum::Err { hint } => (None, hint),
+                    };
+                match result {
+                    Some(v)
+                        if v == 0
+                            || (MIN_BAS_VAC_RING_SIZE_KB..=MAX_BAS_VAC_RING_SIZE_KB)
+                                .contains(&v) =>
+                    {
+                        ring_size = v;
+                    }
+                    _ => {
+                        let mut e = ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                            .errmsg(format!(
+                                "BUFFER_USAGE_LIMIT option must be 0 or between \
+                                 {MIN_BAS_VAC_RING_SIZE_KB} kB and {MAX_BAS_VAC_RING_SIZE_KB} kB"
+                            ));
+                        if let Some(h) = hint {
+                            e = e.errhint(h);
+                        }
+                        return Err(e.into_error().into());
+                    }
                 }
             }
             name => {
@@ -262,6 +290,18 @@ pub fn ExecVacuum<'mcx>(
             .into());
     }
 
+    // vacuum.c:342: VACUUM (FULL, ANALYZE) may use the ring; plain FULL errors.
+    if ring_size != -1
+        && params.options & VACOPT_FULL != 0
+        && params.options & VACOPT_ANALYZE == 0
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL")
+            .into_error()
+            .into());
+    }
+
     if freeze {
         params.freeze_min_age = 0;
         params.freeze_table_age = 0;
@@ -269,7 +309,22 @@ pub fn ExecVacuum<'mcx>(
         params.multixact_freeze_table_age = 0;
     }
 
-    let bstrategy = bufmgr_seams::get_access_strategy::call(BufferAccessStrategyType::BasVacuum);
+    // vacuum.c:440: no strategy for FULL / ONLY_DATABASE_STATS unless ANALYZE.
+    let bstrategy = if params.options & (VACOPT_ONLY_DATABASE_STATS | VACOPT_FULL) == 0
+        || params.options & VACOPT_ANALYZE != 0
+    {
+        let ring_size = if ring_size == -1 {
+            init_small::globals::VacuumBufferUsageLimit()
+        } else {
+            ring_size
+        };
+        bufmgr_seams::get_access_strategy_with_size::call(
+            BufferAccessStrategyType::BasVacuum,
+            ring_size,
+        )
+    } else {
+        None
+    };
 
     vacuum(mcx, &vacstmt.rels, &params, bstrategy, is_top_level)
 }
@@ -1416,10 +1471,4 @@ fn loc(routine: &'static str) -> ::types_error::ErrorLocation {
 #[inline(never)]
 fn unported(unit: &str) -> ! {
     panic!("unported callee reached from vacuum.c: {unit}");
-}
-
-#[cold]
-#[inline(never)]
-fn unported_option(name: &str) -> ! {
-    panic!("unported callee reached from vacuum.c: ExecVacuum option \"{name}\"");
 }

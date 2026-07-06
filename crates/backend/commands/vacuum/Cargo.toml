@@ -59,6 +59,7 @@ clog = { path = "../../access/transam/clog" }
 async_seams = { path = "../async_seams" }
 pg_database = { path = "../../catalog/pg_database" }
 types_guc = { path = "../../../_support/types/types_guc" }
+guc = { path = "../../utils/misc/guc" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
 
 parallel_seams = { path = "../../access/transam/parallel_seams" }
