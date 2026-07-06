@@ -244,11 +244,26 @@ fn remove_leftjoinrel_from_query<'mcx>(
     run.root.simple_rel_array[relid as usize] = None;
     run.root.simple_rte_array[relid as usize] = types_pathnodes::RangeTblEntryId::Invalid;
 
-    // rebuild_placeholder_attr_needed: no PHVs on this lane.
+    rebuild_placeholder_attr_needed(run);
     rebuild_joinclause_attr_needed(run);
     crate::equivclass::rebuild_eclass_attr_needed(run)?;
     crate::initsplan::rebuild_lateral_attr_needed(run)?;
     Ok(())
+}
+
+// rebuild_placeholder_attr_needed (placeholder.c).
+fn rebuild_placeholder_attr_needed(run: &mut PlannerRun<'_>) {
+    let mcx = run.mcx;
+    let phids = pgvec_clone_shallow(mcx, &run.root.placeholder_list);
+    for &phid in phids.iter() {
+        let phexpr = *run.root.expr_node(run.root.phinfo(phid).ph_var_phexpr);
+        let eval_at = relids_copy(mcx, &run.root.phinfo(phid).ph_eval_at);
+        let mut vars: PgVec<'_, types_nodes::Node<'_>> = PgVec::new_in(mcx);
+        crate::initsplan::pull_var_nodes(phexpr, &mut vars);
+        if !vars.is_empty() {
+            crate::initsplan::add_vars_to_attr_needed(run, &vars, &eval_at);
+        }
+    }
 }
 
 // remove_join_clause_from_rels (joininfo.c).

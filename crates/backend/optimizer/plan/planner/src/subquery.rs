@@ -521,7 +521,11 @@ pub fn subquery_planner<'mcx>(
     if has_outer_joins {
         crate::prepjointree::reduce_outer_joins(run, &mut parse)?;
     }
-    if has_result_rtes {
+    // C gates this on hasResultRTEs || hasOuterJoins (planner.c:1215): the
+    // pass also flattens single-child FromExprs under outer joins, folding
+    // their quals into the upper join's ON list so make_outerjoininfo sees
+    // identity-3 ordering constraints from intermediate degenerate quals.
+    if has_result_rtes || has_outer_joins {
         remove_useless_result_rtes(run, &mut parse)?;
     }
 
