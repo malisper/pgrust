@@ -129,6 +129,9 @@ fn install_type_fixture() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // The rig models a live session over pg_catalog-band builtins:
+        // always visible, so error strings stay unqualified (C TypeIsVisible).
+        namespace_seams::type_is_visible::set(|_| Ok(true));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(Some(types_tuple::PgTypeShape {
                 typlen: -2,

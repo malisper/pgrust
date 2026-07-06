@@ -46,6 +46,9 @@ static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
+        // The rig models a live session over pg_catalog-band builtins:
+        // always visible, so error strings stay unqualified (C TypeIsVisible).
+        namespace_seams::type_is_visible::set(|_| Ok(true));
         syscache_seams::lookup_pg_proc_shape::set(|funcid| {
             Ok(match funcid {
                 F_SCALAR => Some(proc_shape(INT4OID, PROKIND_FUNCTION, 1)),

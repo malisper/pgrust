@@ -29,6 +29,9 @@ fn install_fixture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         miscinit_seams::get_user_id::set(|| 10);
+        // The rig models a live session over pg_catalog-band builtins:
+        // always visible, so error strings stay unqualified (C TypeIsVisible).
+        namespace_seams::type_is_visible::set(|_| Ok(true));
         pg_inherits_seams::type_inherits_from::set(|_, _| Ok(false));
         syscache_seams::lookup_pg_operator_candidates::set(|mcx, name, l, r| {
             if name == "@@" {
