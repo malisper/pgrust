@@ -350,7 +350,11 @@ fn collect_node_subplans<'mcx>(
                 for action_node in actions {
                     let Some(action) = action_node.as_merge_action() else { continue };
                     if let Some(q) = action.qual {
-                        collect_subplans_expr(q, &mut out);
+                        // Preprocessed WHEN quals are implicit-AND Lists.
+                        match q.as_list() {
+                            Some(l) => walk_list(&mut out, l),
+                            None => collect_subplans_expr(q, &mut out),
+                        }
                     }
                     walk_list(&mut out, &action.targetList);
                 }

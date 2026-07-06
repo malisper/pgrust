@@ -1030,7 +1030,7 @@ pub fn heap_delete(
         if result == TM_Result::TM_Invisible {
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
             pin.release();
-            return Err(invisible_tuple("delete"));
+            return Err(invisible_tuple("update"));
         } else if result == TM_Result::TM_BeingModified && wait {
             let xwait = tp.t_data().xmax_raw();
             let infomask = tp.t_data().t_infomask;
