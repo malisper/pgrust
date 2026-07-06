@@ -142,7 +142,12 @@ struct MergeRun {
 }
 
 // C advance_combine semantics for a byval transition, one incoming partial
-// state (the AggPlainTrans[Init][Strict]ByVal contract, input-check folded).
+// state (the AggPlainTransInitStrictByVal contract, input-check folded).
+// `dst` is a WORKER partial state serving as the accumulator, not a fresh
+// finalize pergroup: its no_trans_value is stale under non-strict partial
+// transfns (int4_sum never clears it), so never-adopted is detected by
+// trans_value_is_null — exact for the whitelist because those fns never
+// return NULL from non-NULL args (a strict combine chain cannot go null).
 fn combine_one(
     c: &mut MergeCombine,
     agg_node: NonNull<AggStateNode>,
@@ -154,13 +159,10 @@ fn combine_one(
         if src.trans_value_is_null {
             return Ok(());
         }
-        if dst.no_trans_value {
+        if dst.trans_value_is_null {
             dst.trans_value = src.trans_value;
             dst.trans_value_is_null = false;
             dst.no_trans_value = false;
-            return Ok(());
-        }
-        if dst.trans_value_is_null {
             return Ok(());
         }
     }
