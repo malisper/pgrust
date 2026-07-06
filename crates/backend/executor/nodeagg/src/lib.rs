@@ -307,7 +307,8 @@ struct TransTyp {
 struct PerSortData<'mcx> {
     first_slot: SlotData<'mcx>,
     pending_slot: SlotData<'mcx>,
-    eq: PgBox<'mcx, ExprState<'mcx>>,
+    // None when numCols == 0 (all keys constant): no boundary, one group.
+    eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
     have_pending: bool,
 }
 
@@ -616,10 +617,9 @@ pub fn exec_init_agg<'mcx>(
     if node.aggstrategy == AGG_PLAIN && node.numCols != 0 {
         panic!("ExecInitAgg (nodeAgg.c): AGG_PLAIN with grouping columns cannot happen");
     }
-    assert!(
-        node.aggstrategy != AGG_SORTED || node.numCols > 0,
-        "ExecInitAgg (nodeAgg.c): AGG_SORTED without grouping columns cannot happen"
-    );
+    // AGG_SORTED with numCols == 0 is legal: every grouping key was proved
+    // constant (or the grouping set is empty), so the whole input is one
+    // group; C's boundary check is guarded by numCols > 0.
 
     // Hashed: the node context IS the table context (C hands
     // BuildTupleHashTable the same hashcontext memory).
@@ -1010,7 +1010,9 @@ pub fn exec_init_agg<'mcx>(
             // (ExecQualAndReset), which agg_retrieve_sorted resets per row.
             // SAFETY: the tmpcontext ExprContext outlives the program (same
             // estate).
-            unsafe { ps.eq.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+            if let Some(eq) = ps.eq.as_mut() {
+                unsafe { eq.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+            }
         }
         let evaltrans = ::executils::with_subplan_compile_env(estate, |env| {
             ::execexpr::exec_build_agg_trans_subplans(mcx, &specs, fm_agg_node, params, env)
@@ -1098,18 +1100,22 @@ fn init_persort<'mcx>(
 
     let num_cols = node.numCols as usize;
     debug_assert!(node.grpColIdx.len() == num_cols && node.grpOperators.len() == num_cols);
-    let mut eqfuncoids: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, num_cols)?;
-    for &op in node.grpOperators {
-        eqfuncoids.push(lsyscache::get_opcode(op)?);
-    }
-    let eq = ::execexpr::exec_build_grouping_equal(
-        mcx,
-        &outer_desc,
-        &outer_desc,
-        node.grpColIdx,
-        &eqfuncoids,
-        node.grpCollations,
-    )?;
+    let eq = if num_cols > 0 {
+        let mut eqfuncoids: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, num_cols)?;
+        for &op in node.grpOperators {
+            eqfuncoids.push(lsyscache::get_opcode(op)?);
+        }
+        Some(::execexpr::exec_build_grouping_equal(
+            mcx,
+            &outer_desc,
+            &outer_desc,
+            node.grpColIdx,
+            &eqfuncoids,
+            node.grpCollations,
+        )?)
+    } else {
+        None
+    };
     let first_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
     let pending_slot =
@@ -2814,7 +2820,11 @@ where
                 inner: Some(&mut ps.first_slot),
                 outer: Some(&mut *outer_slot),
             };
-            let same_group = exec_qual(Some(&mut ps.eq), &mut slots)?;
+            let same_group = match ps.eq.as_mut() {
+                Some(eq) => exec_qual(Some(eq), &mut slots)?,
+                // numCols == 0: no group boundary, as C's numCols > 0 guard.
+                None => true,
+            };
             if !same_group {
                 exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, mcx, mcx)?;
                 ps.have_pending = true;
