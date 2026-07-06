@@ -348,9 +348,6 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
     if tn.pct_type {
         return resolve_pct_type(mcx, tn);
     }
-    if !tn.typmods.is_nil() || tn.typemod != -1 {
-        unported("type modifiers on function signature types");
-    }
     if tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid");
     }
@@ -388,6 +385,11 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
     } else {
         typoid
     };
+    // C typenameTypeId: the typmod is validated by typenameTypeMod, then
+    // discarded — function signatures store bare type OIDs.
+    if typoid != InvalidOid && !tn.typmods.is_nil() {
+        parse_utilcmd::typenameTypeMod(mcx, None, tn, typoid)?;
+    }
     Ok((typoid, typname))
 }
 

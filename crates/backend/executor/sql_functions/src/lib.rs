@@ -616,13 +616,20 @@ pub fn fmgr_sql(
             Ok(fcinfo.return_null())
         }
         FnOutcome::Materialized => {
-            let ts = guard.0.with_mut(|s| {
+            let (ts, set_desc) = guard.0.with_mut(|s| {
                 let h = s.tstore;
                 s.tstore = TuplestoreHandle::NULL;
-                h
+                // C: rsi->setDesc from junkFilter->jf_cleanTupType; the
+                // fn_extra fcache outlives the call, so a borrow suffices.
+                let d = s
+                    .junk
+                    .as_ref()
+                    .map(|j| core::ptr::NonNull::from(&*j.clean_desc).cast::<core::ffi::c_void>());
+                (h, d)
             });
             let rsi = fcinfo.rsinfo_mut().expect("checked at entry");
             rsi.returnMode = SetFunctionReturnMode::Materialize;
+            rsi.setDesc = set_desc;
             if !ts.is_null() {
                 let store = tuplestore::hold::take(ts).expect("live materialize store");
                 rsi.setResult = Some(Box::new(store));

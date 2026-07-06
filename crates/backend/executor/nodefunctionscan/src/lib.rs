@@ -480,7 +480,12 @@ fn run_elided<'mcx>(
     let mut slots = EvalSlots { scan: None, inner: None, outer: None };
     let NullableDatum { value, isnull } = exec_eval_expr(elided, &mut slots)?;
     if setexpr.returns_tuple {
-        put_composite_row(&mut store, expected_desc, value, isnull, estate)?;
+        let mut set_desc: Option<TupleDescData<'mcx>> = None;
+        put_composite_row(&mut store, expected_desc, &mut set_desc, value, isnull, estate)?;
+        // C: cross-check the function-provided tupdesc against expectedDesc.
+        if let Some(d) = &set_desc {
+            tupledesc_match(expected_desc, d)?;
+        }
     } else {
         store.putvalues(expected_desc, &[value], &[isnull])?;
     }
@@ -537,11 +542,20 @@ fn run_value_per_call<'mcx, const N: usize>(
         // that's an empty result, but a non-set function still contributes
         // one all-nulls row (expectedDesc-shaped).
         if !setexpr.returns_set {
-            put_composite_row(&mut store, expected_desc, ::datum::Datum::null(), true, estate)?;
+            let mut none = None;
+            put_composite_row(
+                &mut store,
+                expected_desc,
+                &mut none,
+                ::datum::Datum::null(),
+                true,
+                estate,
+            )?;
         }
         return Ok(store);
     }
 
+    let mut set_desc: Option<TupleDescData<'mcx>> = None;
     let mut first_time = true;
     loop {
         estate.ecxt_mut(ecxt).reset();
@@ -570,7 +584,14 @@ fn run_value_per_call<'mcx, const N: usize>(
                     break;
                 }
                 if setexpr.returns_tuple {
-                    put_composite_row(&mut store, expected_desc, result, fcinfo.isnull, estate)?;
+                    put_composite_row(
+                        &mut store,
+                        expected_desc,
+                        &mut set_desc,
+                        result,
+                        fcinfo.isnull,
+                        estate,
+                    )?;
                 } else {
                     store.putvalues(expected_desc, &[result], &[fcinfo.isnull])?;
                 }
@@ -606,6 +627,11 @@ fn run_value_per_call<'mcx, const N: usize>(
             }
         }
         first_time = false;
+    }
+    // C: if the set carried its own tupdesc (RECORD-returning ValuePerCall
+    // rows), cross-check it against expectedDesc.
+    if let Some(d) = &set_desc {
+        tupledesc_match(expected_desc, d)?;
     }
     Ok(store)
 }
@@ -655,39 +681,61 @@ fn tupledesc_match(
     Ok(())
 }
 
-// execSRF.c returnsTuple arm: C's RECORD rowtype-consistency check is
-// subsumed by deforming with the scan's expected descriptor.
+// execSRF.c returnsTuple arm: the row is stored as its own rowtype; setDesc
+// captures the first row's embedded type so the caller can cross-check it
+// against expectedDesc (tupledesc_match) once the set is complete.
 fn put_composite_row<'mcx>(
     store: &mut Tuplestore,
     expected_desc: &TupleDescData<'mcx>,
+    set_desc: &mut Option<TupleDescData<'mcx>>,
     result: ::datum::Datum,
     isnull: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let natts = expected_desc.natts as usize;
     let mcx = estate.es_query_cxt;
-    let mut values: PgVec<'_, ::datum::Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
-    let mut nulls: PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
-    values.resize(natts, ::datum::Datum::null());
-    nulls.resize(natts, true);
-    if !isnull {
-        let p = result.as_usize() as *const u8;
-        // SAFETY: a non-null composite result datum is a live HeapTupleHeader
-        // image readable for its datum length.
-        let header = unsafe { &*(p as *const ::types_tuple::htup::HeapTupleHeaderData) };
-        let t_len = header.datum_length();
-        // SAFETY: same image, exclusive for this call.
-        let tuple = unsafe {
-            ::types_tuple::htup::HeapTupleData::from_raw_parts(
-                p,
-                t_len,
-                Default::default(),
-                ::types_core::InvalidOid,
-            )
-        };
-        ::types_tuple::getattr::heap_deform_tuple(&tuple, expected_desc, &mut values, &mut nulls);
+    if isnull {
+        // C: a NULL from a tuple-returning function expands to a row of all
+        // nulls, shaped by expectedDesc.
+        let natts = expected_desc.natts as usize;
+        let mut values: PgVec<'_, ::datum::Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<'_, bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        values.resize(natts, ::datum::Datum::null());
+        nulls.resize(natts, true);
+        return store.putvalues(expected_desc, &values, &nulls);
     }
-    store.putvalues(expected_desc, &values, &nulls)
+    let p = result.as_usize() as *const u8;
+    // SAFETY: a non-null composite result datum is a live HeapTupleHeader
+    // image readable for its datum length.
+    let header = unsafe { &*(p as *const ::types_tuple::htup::HeapTupleHeaderData) };
+    match set_desc {
+        None => {
+            // C: first non-NULL result — resolve the tupdesc from the type
+            // info embedded in the rowtype datum.
+            *set_desc = Some(typcache_seams::lookup_rowtype_tupdesc_copy::call(
+                mcx,
+                header.type_id(),
+                header.typmod(),
+            )?);
+        }
+        Some(d) => {
+            if header.type_id() != d.tdtypeid || header.typmod() != d.tdtypmod {
+                return Err(Box::new(
+                    PgError::error("rows returned by function are not all of the same row type")
+                        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+                ));
+            }
+        }
+    }
+    // SAFETY: same image, exclusive for this call.
+    let tuple = unsafe {
+        ::types_tuple::htup::HeapTupleData::from_raw_parts(
+            p,
+            header.datum_length(),
+            Default::default(),
+            ::types_core::InvalidOid,
+        )
+    };
+    store.put_heap_tuple(&tuple)
 }
 
 pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
