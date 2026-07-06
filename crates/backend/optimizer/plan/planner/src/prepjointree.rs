@@ -4501,10 +4501,51 @@ pub fn expand_generated_columns_in_expr<'mcx>(
                 return Ok(None);
             }
             if v.varattno == 0 {
-                panic!(
-                    "expand_generated_columns_in_expr (rewriteHandler.c): whole-row \
-                     Var over a virtual-generated relation unported"
-                );
+                // ReplaceVarsFromTargetList whole-row arm (rewriteManip.c:1801):
+                // a named-rowtype whole-row Var becomes a RowExpr over
+                // per-field Vars (dropped columns as NULL int4 consts,
+                // expandRTE shape); virtual generated fields expand, the rest
+                // keep their Vars (REPLACEVARS_CHANGE_VARNO).
+                let mut args = NodeList::nil();
+                for i in 0..rel.rd_att.natts as usize {
+                    let att = rel.rd_att.attr(i);
+                    let field = if att.attisdropped {
+                        Node::mk_const(
+                            mcx,
+                            types_core::catalog::INT4OID,
+                            -1,
+                            0,
+                            4,
+                            datum::Datum::null(),
+                            true,
+                            true,
+                        )?
+                    } else if att.attgenerated == VIRTUAL_GEN {
+                        let e = generation_expr(mcx, rel, i + 1)?;
+                        change_varno_expr(mcx, e, 1, varno)?.unwrap_or(e)
+                    } else {
+                        Node::mk_var(
+                            mcx,
+                            varno,
+                            (i + 1) as i16,
+                            att.atttypid,
+                            att.atttypmod,
+                            att.attcollation,
+                            0,
+                        )?
+                    };
+                    args.lappend(mcx, field)?;
+                }
+                return Ok(Some(Node::mk(
+                    mcx,
+                    types_nodes::RowExpr {
+                        args,
+                        row_typeid: v.vartype,
+                        row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                        colnames: NodeList::nil(),
+                        location: v.location,
+                    },
+                )?));
             }
             if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
                 return Ok(None);
