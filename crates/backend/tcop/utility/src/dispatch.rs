@@ -1906,6 +1906,17 @@ fn exec_alter_owner_non_et<'mcx>(
                 aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
             commands_tablespace::AlterTableSpaceOwner(mcx, name, newowner)
         }
+        types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
+            let name = stmt
+                .object
+                .expect("AlterOwnerStmt.object")
+                .as_string()
+                .expect("database name String")
+                .sval;
+            let newowner =
+                aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
+            dbcommands::AlterDatabaseOwner(mcx, name, newowner).map(|_| ())
+        }
         types_nodes::parsenodes::ObjectType::OBJECT_EVENT_TRIGGER => {
             // C: ExecAlterOwnerStmt case OBJECT_EVENT_TRIGGER (alter.c) ->
             // AlterEventTriggerOwner (event_trigger.c). Address is dropped:
