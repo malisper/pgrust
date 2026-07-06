@@ -15,6 +15,53 @@ pub struct SupportRequestRows<'mcx> {
     pub rows: f64,
 }
 
+// operator oid -> selectivity; errors propagate through the fmgr call.
+pub type SelectivityEstimator<'a> =
+    dyn FnMut(Oid) -> Result<f64, alloc::boxed::Box<types_error::PgError>> + 'a;
+
+// C carries root/args/inputcollid/varRelid/jointype/sjinfo so the callee can
+// invoke restriction_selectivity/join_selectivity itself; this port's planner
+// state stays behind `estimate`, pre-bound by function_selectivity to the
+// right one of those two paths.
+#[repr(C)]
+pub struct SupportRequestSelectivity<'a> {
+    tag: NodeTag,
+    pub funcid: Oid,
+    pub is_join: bool,
+    pub selectivity: f64,
+    pub estimate: &'a mut SelectivityEstimator<'a>,
+}
+
+impl<'a> SupportRequestSelectivity<'a> {
+    pub fn new(funcid: Oid, is_join: bool, estimate: &'a mut SelectivityEstimator<'a>) -> Self {
+        SupportRequestSelectivity {
+            tag: NodeTag::T_SupportRequestSelectivity,
+            funcid,
+            is_join,
+            selectivity: -1.0,
+            estimate,
+        }
+    }
+}
+
+/// Demux a prosupport request pointer by its leading tag.
+///
+/// # Safety
+/// `p` must point at a live support-request node built by the `new`
+/// constructors in this module (tag-first repr(C)), exclusively borrowed
+/// for `'a`.
+pub unsafe fn support_request_selectivity_mut<'a, 'b>(
+    p: *mut (),
+) -> Option<&'a mut SupportRequestSelectivity<'b>> {
+    // SAFETY: caller contract — tag-first node, live and exclusive.
+    unsafe {
+        if *p.cast::<NodeTag>() != NodeTag::T_SupportRequestSelectivity {
+            return None;
+        }
+        Some(&mut *p.cast::<SupportRequestSelectivity<'b>>())
+    }
+}
+
 #[repr(C)]
 pub struct SupportRequestSimplify<'mcx> {
     tag: NodeTag,
@@ -57,6 +104,7 @@ const _: () = {
     assert!(core::mem::offset_of!(SupportRequestCost, tag) == 0);
     assert!(core::mem::offset_of!(SupportRequestSimplify, tag) == 0);
     assert!(core::mem::offset_of!(SupportRequestIndexCondition, tag) == 0);
+    assert!(core::mem::offset_of!(SupportRequestSelectivity, tag) == 0);
 };
 
 impl<'mcx> SupportRequestIndexCondition<'mcx> {
@@ -113,5 +161,21 @@ pub unsafe fn support_request_rows_mut<'a, 'mcx>(
             return None;
         }
         Some(&mut *p.cast::<SupportRequestRows<'mcx>>())
+    }
+}
+
+/// Demux a prosupport request pointer by its leading tag.
+///
+/// # Safety
+/// Same contract as [`support_request_rows_mut`].
+pub unsafe fn support_request_cost_mut<'a, 'mcx>(
+    p: *mut (),
+) -> Option<&'a mut SupportRequestCost<'mcx>> {
+    // SAFETY: caller contract — tag-first node, live and exclusive.
+    unsafe {
+        if *p.cast::<NodeTag>() != NodeTag::T_SupportRequestCost {
+            return None;
+        }
+        Some(&mut *p.cast::<SupportRequestCost<'mcx>>())
     }
 }

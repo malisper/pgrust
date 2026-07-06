@@ -449,6 +449,8 @@ pub(crate) fn clause_selectivity_node_ext<'mcx>(
                 f.inputcollid,
                 is_join,
                 varrelid,
+                jointype,
+                sjinfo,
             )
         }
         NodeTag::T_ScalarArrayOpExpr => {

@@ -957,9 +957,11 @@ pub fn join_selectivity<'mcx>(
     Ok(result)
 }
 
-// function_selectivity (plancat.c): closed-set SupportRequestSelectivity
-// dispatch on the prosupport oid; like_regex_support (like_support.c) is the
-// only wired in-core provider, everything else stays loud.
+// function_selectivity (plancat.c): SupportRequestSelectivity dispatch on the
+// prosupport oid. The in-core like_regex_support providers (like_support.c)
+// stay native; other prosupport functions get the request through fmgr with
+// the restriction/join estimator pre-bound (planner state does not cross the
+// fmgr boundary in this port).
 pub fn function_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
     funcid: Oid,
@@ -967,6 +969,8 @@ pub fn function_selectivity<'mcx>(
     inputcollid: Oid,
     is_join: bool,
     varrelid: i32,
+    jointype: types_pathnodes::JoinType,
+    sjinfo: Option<&types_pathnodes::SpecialJoinInfo<'mcx>>,
 ) -> PgResult<f64> {
     use crate::like_support::PatternType;
     let shape = syscache_seams::pg_proc_cost_shape::call(funcid)?
@@ -978,10 +982,33 @@ pub fn function_selectivity<'mcx>(
         1364 => PatternType::Regex,
         1024 => PatternType::RegexIc,
         6242 => PatternType::Prefix,
-        other => panic!(
-            "function_selectivity (plancat.c): SupportRequestSelectivity for prosupport {other}; \
-             M2 lane"
-        ),
+        prosupport => {
+            let mut estimate = |operatorid: Oid| -> PgResult<f64> {
+                if is_join {
+                    join_selectivity(run, operatorid, args, inputcollid, jointype, sjinfo)
+                } else {
+                    restriction_selectivity(run, operatorid, args, inputcollid, varrelid)
+                }
+            };
+            let mut req = types_nodes::supportnodes::SupportRequestSelectivity::new(
+                funcid,
+                is_join,
+                &mut estimate,
+            );
+            let addr = core::ptr::from_mut(&mut req) as usize;
+            let result = fmgr_core::oid_function_call1_coll(
+                prosupport,
+                0,
+                datum::Datum::from_usize(addr),
+            )?;
+            if result.as_usize() == addr {
+                if !(0.0..=1.0).contains(&req.selectivity) {
+                    panic!("invalid function selectivity: {}", req.selectivity);
+                }
+                return Ok(req.selectivity);
+            }
+            return Ok(0.3333333);
+        }
     };
     if is_join {
         return Ok(crate::selfuncs::DEFAULT_MATCH_SEL);
