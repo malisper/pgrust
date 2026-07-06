@@ -272,7 +272,7 @@ fn jsonb_object_agg_transfn_worker(
                 key: Some(json_categorize_type(key_type)?),
             })
         })?;
-        new_state(aggmcx, |ps| ps.push_object_start(unique_keys))?
+        new_state(aggmcx, |ps| ps.push_object_start(unique_keys, absent_on_null))?
     } else {
         a.value.as_usize() as *mut JsonbAggState
     };

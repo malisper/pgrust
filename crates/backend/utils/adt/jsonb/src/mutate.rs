@@ -62,8 +62,8 @@ impl<'mcx> JsonbPush<'mcx> {
 
     /// C: WJB_BEGIN_OBJECT + parseState->unique_keys (jsonb_build_object,
     /// jsonb_object_agg — their uniqueness check rides uniqueifyJsonbObject).
-    pub fn push_object_start(&mut self, unique_keys: bool) -> PgResult<()> {
-        self.st.begin_object(unique_keys)
+    pub fn push_object_start(&mut self, unique_keys: bool, skip_nulls: bool) -> PgResult<()> {
+        self.st.begin_object_flags(unique_keys, skip_nulls)
     }
 
     /// C: pushJsonbValue with a NULL JsonbValue (container tokens).

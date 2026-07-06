@@ -145,6 +145,7 @@ struct PerAggData<'mcx> {
     agg_state: NonNull<AggStateNode>,
     private_ctx: bool,
     argstates: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    filterstate: Option<PgBox<'mcx, ExprState<'mcx>>>,
     init_value: NullableDatum,
     trans_value: NullableDatum,
     trans_count: i64,
@@ -532,6 +533,7 @@ pub fn exec_init_window_agg<'mcx>(
     let mut perfunc: PgVec<'mcx, PerFuncData<'mcx>> = PgVec::new_in(mcx);
     let mut wfuncnos: PgVec<'mcx, (Node<'mcx>, u16)> = vec_with_capacity_in(mcx, numfuncs)?;
     let mut agg_specs_args: PgVec<'mcx, NodeList<'mcx>> = PgVec::new_in(mcx);
+    let mut agg_specs_filter: PgVec<'mcx, Option<Node<'mcx>>> = PgVec::new_in(mcx);
     let mut trans_init: PgVec<'mcx, NullableDatum> = PgVec::new_in(mcx);
     let mut trans_fnoid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut trans_collid: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
@@ -557,9 +559,6 @@ pub fn exec_init_window_agg<'mcx>(
                 wfunc.winref, node.winref
             );
         }
-        if wfunc.aggfilter.is_some() {
-            panic!("ExecInitWindowAgg (nodeWindowAgg.c): FILTER not ported");
-        }
         let aclresult = aclchk_seams::object_aclcheck::call(
             PROCEDURE_RELATION_ID,
             wfunc.winfnoid,
@@ -576,6 +575,7 @@ pub fn exec_init_window_agg<'mcx>(
         let kind = if wfunc.winagg {
             let aggno = agg_specs_args.len() as u16;
             if default_frame {
+                agg_specs_filter.push(wfunc.aggfilter);
                 initialize_peragg_default(
                     mcx,
                     wfunc,
@@ -597,14 +597,23 @@ pub fn exec_init_window_agg<'mcx>(
                     params,
                     agg_node.expect("winagg implies agg_node"),
                 )?);
-                for st in peragg.last_mut().expect("just pushed").argstates.iter_mut() {
-                    // C evaluates framed-agg args in the tmpcontext per-tuple
-                    // memory; by-ref arg results ride the armed result mcx.
-                    // SAFETY: the tmpcontext ExprContext outlives the
-                    // programs (same estate).
-                    unsafe { st.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+                {
+                    let pa = peragg.last_mut().expect("just pushed");
+                    for st in pa
+                        .argstates
+                        .iter_mut()
+                        .chain(pa.filterstate.as_mut().map(|b| &mut *b))
+                    {
+                        // C evaluates framed-agg args and FILTER in the
+                        // tmpcontext per-tuple memory; by-ref results ride
+                        // the armed result mcx.
+                        // SAFETY: the tmpcontext ExprContext outlives the
+                        // programs (same estate).
+                        unsafe { st.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
+                    }
                 }
                 agg_specs_args.push(NodeList::nil());
+                agg_specs_filter.push(None);
             }
             peragg_wfuncno.push(wfuncno as u16);
             WfKind::PlainAgg { aggno }
@@ -703,7 +712,7 @@ pub fn exec_init_window_agg<'mcx>(
                 init_value_is_null: trans_init[aggno].isnull,
                 arg_types: trans_argtypes[aggno],
                 args: &agg_specs_args[aggno],
-                aggfilter: None,
+                aggfilter: agg_specs_filter[aggno],
                 pergroup: pg,
                 ordered: None,
                 cur_agg: None,
@@ -1187,6 +1196,10 @@ fn initialize_peragg_framed<'mcx>(
         agg_state,
         private_ctx,
         argstates: build_argstates(mcx, &wfunc.args, params)?,
+        filterstate: match wfunc.aggfilter {
+            Some(f) => Some(exec_init_expr(mcx, Some(f), params)?.expect("filter ExprState")),
+            None => None,
+        },
         init_value,
         trans_value: init_value,
         trans_count: 0,
@@ -2825,6 +2838,28 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(())
     }
 
+    // The FILTER gate of advance_windowaggregate[_base]; true = advance.
+    fn agg_filter_passes(&mut self, aggno: usize, which: WhichSlot) -> PgResult<bool> {
+        let Self {
+            ref mut peragg,
+            ref mut agg_row_slot,
+            ref mut temp_slot_1,
+            ref mut temp_slot_2,
+            ..
+        } = *self;
+        let Some(f) = peragg[aggno].filterstate.as_mut() else {
+            return Ok(true);
+        };
+        let slot = match which {
+            WhichSlot::AggRow => agg_row_slot,
+            WhichSlot::Temp1 => temp_slot_1,
+            WhichSlot::Temp2 => temp_slot_2,
+        };
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
+        let res = exec_eval_expr(f, &mut slots)?;
+        Ok(!res.isnull && res.value.as_bool())
+    }
+
     // advance_windowaggregate (nodeWindowAgg.c); transfns run over the
     // per-input-tuple context (C tmpcontext).
     fn advance_windowaggregate(
@@ -2833,6 +2868,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
         aggno: usize,
         which: WhichSlot,
     ) -> PgResult<()> {
+        if !self.agg_filter_passes(aggno, which)? {
+            return Ok(());
+        }
         let nargs = self.peragg[aggno].num_arguments as usize;
         let mut args = [NullableDatum::null(); 4];
         assert!(nargs < 4);
@@ -2916,6 +2954,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
         estate: &EStateData<'mcx>,
         aggno: usize,
     ) -> PgResult<bool> {
+        if !self.agg_filter_passes(aggno, WhichSlot::Temp1)? {
+            return Ok(true);
+        }
         let nargs = self.peragg[aggno].num_arguments as usize;
         let mut args = [NullableDatum::null(); 4];
         assert!(nargs < 4);
@@ -3374,6 +3415,7 @@ pub fn exec_end_window_agg(node: &mut WindowAggStateData<'_>) {
     }
     for pa in node.peragg.iter_mut() {
         pa.argstates.clear();
+        pa.filterstate = None;
         pa.finalfn = None;
         match &mut pa.kernel {
             AggKernel::Generic { transfn } => transfn.fn_extra = None,
@@ -3442,7 +3484,7 @@ mcx::forget_safe_struct!(
         has_inverse, num_final_args, resulttype_len, resulttype_byval,
         trans_typlen, trans_byval, agg_state, private_ctx, init_value,
         trans_value, trans_count, int_sum, result_value, restart;
-        argstates, kernel, finalfn },
+        argstates, filterstate, kernel, finalfn },
     WindowAggStateData<'_> { plan, frameOptions, ps_ExprContext, tmpcontext,
         ps_ResultTupleSlot, first_part_valid, agg_row_valid, perfunc, peragg,
         trans_init, trans_typlen, trans_byval, agg_node, _pergroup, pergroup_base,

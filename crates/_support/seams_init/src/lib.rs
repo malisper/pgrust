@@ -94,6 +94,7 @@ pub fn init_all() {
     vars::init_seams();
     parser_driver::init_seams();
     parse_expr::init_seams();
+    coerce::init_seams();
     parse_func::init_seams();
     parse_target::init_seams();
     parse_utilcmd::init_seams();

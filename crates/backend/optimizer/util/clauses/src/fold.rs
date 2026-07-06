@@ -1189,6 +1189,10 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             }
             let raw = j.raw_expr.expect("raw_expr");
             let new_raw = ece_mutator(raw, cx)?.unwrap_or(raw);
+            // C's mutator copies unconditionally, so raw_expr never aliases
+            // nodes inside formatted_expr; preprocess_aggrefs relies on that
+            // (a shared volatile Aggref would be renumbered twice).
+            let new_raw = copyfuncs::copy_object(cx.mcx, new_raw)?;
             Ok(Some(Node::mk(
                 cx.mcx,
                 types_nodes::JsonValueExpr {

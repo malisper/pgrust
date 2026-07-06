@@ -755,7 +755,10 @@ fn get_json_agg_constructor<'mcx>(
 ) -> PgResult<()> {
     let func = ctor.func.expect("func");
     let Some(aggref) = func.as_aggref() else {
-        gap("get_json_agg_constructor", "WindowFunc (OVER) deparse");
+        let Some(wfunc) = func.as_window_func() else {
+            gap("get_json_agg_constructor", "non-Aggref/WindowFunc constructor func");
+        };
+        return get_windowfunc_expr_helper(wfunc, ctx, Some((ctor, funcname, is_json_objectagg)));
     };
     // get_agg_expr_helper: funcname override + options suffix.
     if aggref.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE {
@@ -1838,19 +1841,37 @@ fn get_windowfunc_expr<'mcx>(
     wfunc: &'mcx types_nodes::primnodes::WindowFunc<'mcx>,
     ctx: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
-    let mut argtypes = Vec::with_capacity(wfunc.args.len());
-    let mut argnames = Vec::new();
-    for arg in wfunc.args.iter() {
-        if let Some(na) = arg.as_named_arg_expr() {
-            argnames.push(na.name.expect("NamedArgExpr has a name"));
+    get_windowfunc_expr_helper(wfunc, ctx, None)
+}
+
+// C get_windowfunc_expr_helper: `json` carries the SQL/JSON constructor
+// funcname/options override (ruleutils.c:11133).
+fn get_windowfunc_expr_helper<'mcx>(
+    wfunc: &'mcx types_nodes::primnodes::WindowFunc<'mcx>,
+    ctx: &mut DeparseContext<'mcx>,
+    json: Option<(&'mcx types_nodes::JsonConstructorExpr<'mcx>, &str, bool)>,
+) -> PgResult<()> {
+    if let Some((_, funcname, _)) = json {
+        ctx.buf.push_str(funcname);
+    } else {
+        let mut argtypes = Vec::with_capacity(wfunc.args.len());
+        let mut argnames = Vec::new();
+        for arg in wfunc.args.iter() {
+            if let Some(na) = arg.as_named_arg_expr() {
+                argnames.push(na.name.expect("NamedArgExpr has a name"));
+            }
+            argtypes.push(parse_expr::expr_type(arg));
         }
-        argtypes.push(parse_expr::expr_type(arg));
+        let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, &argnames, false)?;
+        ctx.buf.push_str(&funcname);
     }
-    let funcname = generate_function_name(ctx.mcx, wfunc.winfnoid, &argtypes, &argnames, false)?;
-    ctx.buf.push_str(&funcname);
     ctx.buf.push('(');
     if wfunc.winstar {
         ctx.buf.push('*');
+    } else if matches!(json, Some((_, _, true))) {
+        get_rule_expr(wfunc.args.nth(0), ctx, false)?;
+        ctx.buf.push_str(" : ");
+        get_rule_expr(wfunc.args.nth(1), ctx, false)?;
     } else {
         let mut first = true;
         for arg in wfunc.args.iter() {
@@ -1860,6 +1881,9 @@ fn get_windowfunc_expr<'mcx>(
             first = false;
             get_rule_expr(arg, ctx, true)?;
         }
+    }
+    if let Some((ctor, _, _)) = json {
+        get_json_constructor_options(ctor, ctx)?;
     }
     if let Some(filter) = wfunc.aggfilter {
         ctx.buf.push_str(") FILTER (WHERE ");

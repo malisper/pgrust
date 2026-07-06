@@ -105,6 +105,7 @@ parser_driver = { path = "../../backend/parser/parser_driver" }
 parse_collate = { path = "../../backend/parser/parse_collate" }
 parse_relation = { path = "../../backend/parser/parse_relation" }
 parse_clause = { path = "../../backend/parser/parse_clause" }
+coerce = { path = "../../backend/parser/coerce" }
 parse_expr = { path = "../../backend/parser/parse_expr" }
 parse_func = { path = "../../backend/parser/parse_func" }
 parse_target = { path = "../../backend/parser/parse_target" }

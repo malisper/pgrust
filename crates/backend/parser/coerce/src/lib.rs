@@ -918,6 +918,17 @@ pub fn IsPreferredType(category: i8, typid: Oid) -> PgResult<bool> {
     })
 }
 
+pub fn init_seams() {
+    fmgr_seams::find_json_cast_func::set(|typoid| {
+        let (ptype, castfunc) =
+            find_coercion_pathway(types_core::catalog::JSONOID, typoid, COERCION_EXPLICIT)?;
+        Ok(match ptype {
+            COERCION_PATH_FUNC => castfunc,
+            _ => InvalidOid,
+        })
+    });
+}
+
 pub fn find_coercion_pathway(
     targetTypeId: Oid,
     sourceTypeId: Oid,

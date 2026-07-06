@@ -25,6 +25,7 @@ arrayutils = { path = "../../../utils/adt/arrayutils" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 clauses_seams = { path = "../clauses_seams" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
 typcache_seams = { path = "../../../utils/cache/typcache_seams" }
 var_seams = { path = "../var_seams" }
 stack_depth = { path = "../../../utils/misc/stack_depth" }
