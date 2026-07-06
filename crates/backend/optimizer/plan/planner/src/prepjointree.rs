@@ -438,12 +438,9 @@ fn find_pullable_subquery<'mcx>(
             {
                 *target = Some((rti, None));
             }
-            // pull_up_constant_function candidate; below an outer join C
-            // would PHV-wrap — declined here (divergence noted at the fn).
-            if rte.rtekind == RTEKind::RTE_FUNCTION
-                && lowest_outer_join.is_none()
-                && !kept.contains(&rti)
-            {
+            // pull_up_constant_function candidate; C dispatches it regardless
+            // of lowest_outer_join (nulled refs PHV-wrap at the Var level).
+            if rte.rtekind == RTEKind::RTE_FUNCTION && !kept.contains(&rti) {
                 *target = Some((rti, None));
             }
         }
@@ -715,10 +712,10 @@ pub fn preprocess_function_rtes<'mcx>(
 
 // pull_up_constant_function (prepjointree.c): a FUNCTION RTE whose expression
 // was const-simplified to a Const becomes an RTE_RESULT and the Const
-// replaces the parent's Vars; the RangeTblRef is reused. Divergence: C wraps
-// replacements in PlaceHolderVars below outer joins / under grouping sets /
-// in appendrels; those shapes are declined here (the RTE just stays, which is
-// always plan-valid).
+// replaces the parent's Vars; the RangeTblRef is reused. Nulled references
+// get PHV-wrapped by the Var-level rule in replace_var_expr (C: nulled Vars
+// always wrap); the PHVs keep phrels = {varno} — the RESULT RTE stays until
+// remove_useless_result_rtes.
 fn pull_up_constant_function<'mcx>(
     run: &mut crate::run::PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
@@ -727,7 +724,7 @@ fn pull_up_constant_function<'mcx>(
 ) -> PgResult<bool> {
     let mcx = run.mcx;
     let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-    if rte.funcordinality || rte.functions.len() != 1 || !parse.groupingSets.is_nil() {
+    if rte.funcordinality || rte.functions.len() != 1 {
         return Ok(false);
     }
     let rtf = rte.functions.nth(0).as_range_tbl_function().expect("functions cell");
@@ -745,22 +742,41 @@ fn pull_up_constant_function<'mcx>(
     let mut tlist = NodeList::nil();
     tlist.lappend(mcx, Node::mk_target_entry(mcx, copy_expr(mcx, funcexpr, 0)?, 1, None, false)?)?;
 
+    // C rvcontext: relids/nullinfo NULL (a Const has no lateral refs);
+    // grouping sets force wrap_all as in pull_up_simple_subquery.
+    let last_ph_id = core::cell::Cell::new(run.glob.last_ph_id);
+    let rv_cache = core::cell::RefCell::new(mcx::vec_from_elem_in::<Option<Node<'mcx>>>(
+        mcx,
+        None,
+        tlist.len() + 1,
+    ));
+    let empty_relids = types_nodes::Bitmapset::empty();
+    let phc = PullupPhCtx {
+        wrap_all: !parse.groupingSets.is_nil(),
+        last_ph_id: &last_ph_id,
+        rv_cache: &rv_cache,
+        sub_relids: &empty_relids,
+        eref: rte.eref,
+        nullinfo: None,
+        result_relation: 0,
+    };
+
     if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
-        replace_var_expr(mcx, n, varno, &tlist, false, None)
+        replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
     })? {
         parse.targetList = l;
     }
-    parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, None)?;
+    parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, Some(&phc))?;
     if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {
-        replace_var_expr(mcx, n, varno, &tlist, false, None)
+        replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
     })? {
         parse.returningList = l;
     }
     for action_node in &parse.mergeActionList {
         let action = action_node.as_merge_action().expect("mergeActionList cell");
-        let new_qual = replace_opt(mcx, action.qual, varno, &tlist, false, None)?;
+        let new_qual = replace_opt(mcx, action.qual, varno, &tlist, false, Some(&phc))?;
         let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
-            replace_var_expr(mcx, n, varno, &tlist, false, None)
+            replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
         })? {
             Some(l) => l,
             None => action.targetList.clone_in(mcx)?,
@@ -775,7 +791,7 @@ fn pull_up_constant_function<'mcx>(
         .expect("MergeAction");
     }
     parse.mergeJoinCondition =
-        replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist, false, None)?;
+        replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist, false, Some(&phc))?;
 
     // The jointree keeps its structure; splice_and_replace only rewrites
     // quals and lateral siblings when handed the RangeTblRef back as its own
@@ -786,16 +802,16 @@ fn pull_up_constant_function<'mcx>(
     for child in &jt.fromlist {
         new_fromlist.lappend(
             mcx,
-            splice_and_replace(mcx, &parse.rtable, child, varno, &tlist, false, None, same_rtr)?,
+            splice_and_replace(mcx, &parse.rtable, child, varno, &tlist, false, Some(&phc), same_rtr)?,
         )?;
     }
-    let new_quals = replace_opt(mcx, jt.quals, varno, &tlist, false, None)?;
+    let new_quals = replace_opt(mcx, jt.quals, varno, &tlist, false, Some(&phc))?;
     parse.jointree =
         Some(mcx::alloc_leak_in(mcx, FromExpr { fromlist: new_fromlist, quals: new_quals })?);
 
     for i in 0..run.root.append_rel_list.len() {
         replace_appinfo_translated_vars(run, i, &mut |n| {
-            replace_var_expr(mcx, n, varno, &tlist, false, None)
+            replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
         })?;
     }
     for orte_node in &parse.rtable {
@@ -803,7 +819,7 @@ fn pull_up_constant_function<'mcx>(
         match orte.rtekind {
             RTEKind::RTE_JOIN => {
                 if let Some(l) = clauses::walker::mutate_list(mcx, &orte.joinaliasvars, &mut |n| {
-                    replace_var_expr(mcx, n, varno, &tlist, false, None)
+                    replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
                 })? {
                     // SAFETY: pre-seal tree owned by this planner invocation.
                     unsafe { orte_node.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = l) };
@@ -811,7 +827,7 @@ fn pull_up_constant_function<'mcx>(
             }
             RTEKind::RTE_GROUP => {
                 if let Some(l) = clauses::walker::mutate_list(mcx, &orte.groupexprs, &mut |n| {
-                    replace_var_expr(mcx, n, varno, &tlist, false, None)
+                    replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
                 })? {
                     // SAFETY: as above.
                     unsafe { orte_node.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = l) };
@@ -829,6 +845,9 @@ fn pull_up_constant_function<'mcx>(
             r.lateral = false;
         })
     };
+    // PHVs built here keep phrels = {varno}; the RT index stays valid until
+    // remove_useless_result_rtes (C comment: no PHV fixup needed).
+    run.glob.last_ph_id = last_ph_id.get();
     Ok(true)
 }
 
@@ -960,9 +979,12 @@ fn pull_up_simple_subquery<'mcx>(
         if sub_local.rtable.iter().any(|n| {
             matches!(
                 n.as_range_tbl_entry().expect("rtable cell").rtekind,
-                RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES
+                RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
             )
         }) {
+            // C order in pull_up_simple_subquery: preprocess_function_rtes
+            // on the subroot, then the recursive pull_up_subqueries.
+            preprocess_function_rtes(run, &mut sub_local)?;
             pull_up_subqueries(run, &mut sub_local)?;
         }
         // C rechecks after hacking on the copy; on failure the copy is
@@ -988,12 +1010,12 @@ fn pull_up_simple_subquery<'mcx>(
     } else if shared_sub.rtable.iter().any(|n| {
         matches!(
             n.as_range_tbl_entry().expect("rtable cell").rtekind,
-            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
         )
     }) {
-        // C recursively completes pull_up_subqueries for the child before
-        // splicing it in; runs on a cells-copy (C copyObject), the shared
-        // tree is never written.
+        // C recursively completes preprocess_function_rtes +
+        // pull_up_subqueries for the child before splicing it in; runs on a
+        // cells-copy (C copyObject), the shared tree is never written.
         let mut sub_local = crate::subselect::query_cells_copy(mcx, shared_sub)?;
         // Fresh RTE nodes: the recursive pass ends with a with_mut fixup
         // (subquery = None) that must never write a shared node.
@@ -1004,6 +1026,7 @@ fn pull_up_simple_subquery<'mcx>(
                 .lappend(mcx, rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?)?;
         }
         sub_local.rtable = fresh_rtable;
+        preprocess_function_rtes(run, &mut sub_local)?;
         pull_up_subqueries(run, &mut sub_local)?;
         // C rechecks unconditionally after the recursive pull_up_subqueries:
         // nested pull-ups can leave the member's jointree bottoming out at a
@@ -1273,11 +1296,21 @@ fn pull_up_simple_subquery<'mcx>(
             // range_table_entry_walker (nodeFuncs.c) walks rte->tablesample
             // for RTE_RELATION: a LATERAL tablesample argument carries Vars
             // (own rel: varno offset; lateral uplevel: varlevelsup -1).
-            RTEKind::RTE_RELATION if !pre_adjusted => {
+            RTEKind::RTE_RELATION => {
                 if let Some(tsc) = crte.tablesample {
-                    if let Some(off) = offset_expr(mcx, tsc, rtoffset)? {
-                        // SAFETY: exclusive pre-seal fixup of the fresh copy.
-                        unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(off)) };
+                    if !pre_adjusted {
+                        if let Some(off) = offset_expr(mcx, tsc, rtoffset)? {
+                            // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                            unsafe {
+                                copy.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(off))
+                            };
+                        }
+                    }
+                    // C's lateral-propagation loop (prepjointree.c:1495): a
+                    // tablesample argument can carry lateral cross-references.
+                    if rte.lateral {
+                        // SAFETY: as above.
+                        unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.lateral = true) };
                     }
                 }
             }
