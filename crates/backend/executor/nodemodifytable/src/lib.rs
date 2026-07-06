@@ -2266,12 +2266,16 @@ fn merge_update_act<'mcx>(
     // the actual row, post defaults/triggers) — C's shared WCO_VIEW_CHECK leg.
     if !mt.rel().wco_exprs.is_empty() {
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let r = &mut mt.rels[mt.cur];
         let rel = es_relations[(r.rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
+        let root_rel = root_rti.map(|rti| {
+            es_relations[(rti - 1) as usize].as_ref().expect("root relation opened")
+        });
         let slot = &mut es_tupleTable[slot_id.0 as usize];
-        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
+        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, root_rel)?;
     }
     Ok(MergeUpdActRes::Tm(TM_Result::TM_Ok))
 }
@@ -3128,12 +3132,16 @@ fn exec_update<'mcx>(
     if !mt.rel().wco_exprs.is_empty() {
         let mcx = estate.es_query_cxt;
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let r = &mut mt.rels[mt.cur];
         let rel = es_relations[(r.rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
+        let root_rel = root_rti.map(|rti| {
+            es_relations[(rti - 1) as usize].as_ref().expect("root relation opened")
+        });
         let slot = &mut es_tupleTable[slot_id.0 as usize];
-        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
+        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, root_rel)?;
     }
 
     if mt.canSetTag {
@@ -5094,10 +5102,20 @@ fn exec_insert<'mcx>(
     match leaf_idx {
         Some(idx) if mt.leaf_wco[idx].as_ref().is_some_and(|w| !w.is_empty()) => {
             let mcx = estate.es_query_cxt;
+            let target_rti = mt.rel().rti;
             let ModifyTableState { router, leaf_wco, .. } = &mut *mt;
             let rel = router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+            let root_rel = estate.es_relations[(target_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
             let slot = &mut estate.es_tupleTable[work_slot.0 as usize];
-            exec_view_check_options(mcx, leaf_wco[idx].as_mut().expect("checked"), rel, slot)?;
+            exec_view_check_options(
+                mcx,
+                leaf_wco[idx].as_mut().expect("checked"),
+                rel,
+                slot,
+                Some(root_rel),
+            )?;
         }
         None if !mt.rel().wco_exprs.is_empty() => {
             let mcx = estate.es_query_cxt;
@@ -5107,7 +5125,7 @@ fn exec_insert<'mcx>(
                 .as_ref()
                 .expect("result relation opened");
             let slot = &mut es_tupleTable[slot_id.0 as usize];
-            exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
+            exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, None)?;
         }
         _ => {}
     }
@@ -5795,6 +5813,10 @@ fn exec_view_check_options<'mcx>(
     wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    // ExecWithCheckOptions WCO_VIEW_CHECK (execMain.c): a child result rel's
+    // failing row is reported in the ROOT's rowtype (ri_RootResultRelInfo
+    // reverse-attmap leg, as ExecConstraints).
+    root_rel: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
     for w in wcos.iter_mut() {
         if w.kind != WCOKind::WCO_VIEW_CHECK {
@@ -5802,7 +5824,7 @@ fn exec_view_check_options<'mcx>(
         }
         let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
         if !execexpr::exec_qual(Some(&mut *w.state), &mut slots)? {
-            return Err(view_wco_violation(mcx, w.relname, rel, slot));
+            return Err(view_wco_violation(mcx, w.relname, rel, slot, root_rel));
         }
     }
     Ok(())
@@ -5815,12 +5837,13 @@ fn view_wco_violation<'mcx>(
     relname: &str,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    root_rel: Option<&Relation<'mcx>>,
 ) -> Box<PgError> {
     let mut e = PgError::error(format!(
         "new row violates check option for view \"{relname}\""
     ))
     .with_sqlstate(types_error::ERRCODE_WITH_CHECK_OPTION_VIOLATION);
-    if let Ok(desc) = slot_value_description(mcx, rel, slot, None) {
+    if let Ok(desc) = root_slot_value_description(mcx, rel, slot, root_rel) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)
