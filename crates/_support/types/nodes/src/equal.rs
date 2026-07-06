@@ -20,7 +20,7 @@ use crate::primnodes::{
     CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, DistinctExpr, FieldSelect, FieldStore, ReturningExpr, FromExpr, FuncExpr, GroupingFunc, NamedArgExpr,
     NullTest, OpExpr, Param, PlaceHolderVar, RangeTblRef, RangeVar, RelabelType, RowCompareExpr, RowExpr,
-    SQLValueFunction, ScalarArrayOpExpr, SubLink, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
+    SQLValueFunction, ScalarArrayOpExpr, SubLink, SubPlan, SubscriptingRef, TableFunc, TargetEntry, Var, WindowFunc,
     MergeSupportFunc, WindowFuncRunCondition, XmlExpr,
 };
 use crate::rawnodes::{
@@ -75,6 +75,7 @@ pub fn equal(a: Node<'_>, b: Node<'_>) -> bool {
         NodeTag::T_ScalarArrayOpExpr => cmp!(as_scalar_array_op_expr),
         NodeTag::T_ArrayExpr => cmp!(as_array_expr),
         NodeTag::T_SubLink => cmp!(as_sub_link),
+        NodeTag::T_SubPlan => cmp!(as_sub_plan),
         NodeTag::T_SubscriptingRef => cmp!(as_subscripting_ref),
         NodeTag::T_BoolExpr => cmp!(as_bool_expr),
         NodeTag::T_RelabelType => cmp!(as_relabel_type),
@@ -400,6 +401,27 @@ impl NodeEqual for SubLink<'_> {
             && equal_opt(self.testexpr, b.testexpr)
             && self.operName.node_equal(&b.operName)
             && equal(self.subselect, b.subselect)
+    }
+}
+
+impl NodeEqual for SubPlan<'_> {
+    fn node_equal(&self, b: &Self) -> bool {
+        self.subLinkType == b.subLinkType
+            && equal_opt(self.testexpr, b.testexpr)
+            && self.paramIds.node_equal(&b.paramIds)
+            && self.plan_id == b.plan_id
+            && self.plan_name == b.plan_name
+            && self.firstColType == b.firstColType
+            && self.firstColTypmod == b.firstColTypmod
+            && self.firstColCollation == b.firstColCollation
+            && self.useHashTable == b.useHashTable
+            && self.unknownEqFalse == b.unknownEqFalse
+            && self.parallel_safe == b.parallel_safe
+            && self.setParam.node_equal(&b.setParam)
+            && self.parParam.node_equal(&b.parParam)
+            && self.args.node_equal(&b.args)
+            && self.startup_cost == b.startup_cost
+            && self.per_call_cost == b.per_call_cost
     }
 }
 
