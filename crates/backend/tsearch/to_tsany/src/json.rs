@@ -228,9 +228,12 @@ impl<'mcx> HeadlineJsonState<'mcx> {
             Some(v) => Datum::from_usize(v as *const _ as usize),
             None => Datum::from_usize(0),
         };
-        ::types_fmgr::function_call3_coll(
+        // The parser's headline proc (prsd_headline) builds by-ref results
+        // through its frame's result mcx; thread the outer call's context.
+        ::types_fmgr::function_call3_coll_in(
             &mut self.headline_fi,
             InvalidOid,
+            self.mcx,
             Datum::from_usize(core::ptr::from_mut(&mut self.prs) as usize),
             opts_datum,
             Datum::from_usize(self.qimage.as_ptr() as usize),

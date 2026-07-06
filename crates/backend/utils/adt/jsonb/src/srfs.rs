@@ -217,6 +217,9 @@ fn each_rows(fcinfo: &Fcinfo, as_text: bool, name: &str) -> PgResult<SrfRows> {
     )?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // C: BlessTupleDesc — the rows are anonymous record datums; record_out
+    // needs the registered typmod stamped into each tuple header.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
     let mut it = JsonbIterator::init(mcx, payload)?;
     let mut rows: Vec<Vec<u8>> = Vec::new();

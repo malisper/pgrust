@@ -6,7 +6,7 @@ extern crate alloc;
 use crate::container::JsonbItem;
 use crate::iter::{JsonbIterator, WjbToken};
 use adt_jsonpath::path::{jsp_init_by_buffer, ItemType, JsonPathItem, JSONPATH_LAX};
-use adt_numeric::{get_str_from_var, Num, NumericVar};
+use adt_numeric::{get_str_from_var, Num};
 use datum::Datum;
 use gin_vocab::{JspGinOp, JSP_GIN_AND, JSP_GIN_ENTRY, JSP_GIN_OR};
 use mcx::{Mcx, PgVec};
@@ -65,13 +65,23 @@ fn make_text_key<'m>(mcx: Mcx<'m>, mut flag: u8, s: &[u8]) -> PgResult<Datum> {
     Ok(Datum::from_usize(p as usize))
 }
 
-/// numeric_normalize: strip trailing zeroes, render to text.
+/// numeric_normalize: render with dscale, then strip trailing fractional
+/// zeroes (and a bare trailing '.') textually, matching C exactly so that
+/// 25 and 25.0 produce the same GIN key.
 fn numeric_normalize(image: &[u8], out: &mut alloc::vec::Vec<u8>) {
     // JsonbItem::Numeric carries the full 4-byte-header numeric image.
     let num = Num::from_payload(&image[4..]);
-    let mut var = NumericVar::from_view(num.view());
-    var.strip();
-    get_str_from_var(var.view(), out);
+    get_str_from_var(num.view(), out);
+    if out.contains(&b'.') {
+        let mut last = out.len();
+        while out[last - 1] == b'0' {
+            last -= 1;
+        }
+        if out[last - 1] == b'.' {
+            last -= 1;
+        }
+        out.truncate(last);
+    }
 }
 
 /// make_scalar_key.
