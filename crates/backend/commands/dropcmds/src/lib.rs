@@ -71,6 +71,9 @@ fn owningrel_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<St
 
 fn type_does_not_exist_skipping(tn: &TypeName<'_>) -> PgResult<Option<String>> {
     if !OidIsValid(catalog_objectaddress::LookupTypeNameOid(tn, true)?) {
+        if let Some(msg) = schema_does_not_exist_skipping(&tn.names)? {
+            return Ok(Some(msg));
+        }
         return Ok(Some(format!(
             "type \"{}\" does not exist, skipping",
             catalog_objectaddress::TypeNameToString(tn)
@@ -86,11 +89,8 @@ fn type_in_list_does_not_exist_skipping(
     for n in typenames.iter() {
         let Some(n) = n else { continue };
         let tn = n.as_variant::<TypeName>().expect("objargs holds TypeName nodes");
-        if !OidIsValid(catalog_objectaddress::LookupTypeNameOid(tn, true)?) {
-            return Ok(Some(format!(
-                "type \"{}\" does not exist, skipping",
-                catalog_objectaddress::TypeNameToString(tn)
-            )));
+        if let Some(msg) = type_does_not_exist_skipping(tn)? {
+            return Ok(Some(msg));
         }
     }
     Ok(None)

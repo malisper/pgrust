@@ -1254,11 +1254,10 @@ pub fn get_object_address<'mcx>(
                     .last()
                     .and_then(|n| n.as_type_name())
                     .expect("cast target TypeName");
-                if missing_ok {
-                    unported("OBJECT_CAST missing_ok lane");
-                }
-                let sourcetypeid = parse_utilcmd::LookupTypeNameOid(mcx, source)?;
-                let targettypeid = parse_utilcmd::LookupTypeNameOid(mcx, target)?;
+                let sourcetypeid =
+                    parse_utilcmd::LookupTypeNameOidExtended(mcx, source, missing_ok)?;
+                let targettypeid =
+                    parse_utilcmd::LookupTypeNameOidExtended(mcx, target, missing_ok)?;
                 let oid = lsyscache::get_cast_oid(sourcetypeid, targettypeid, missing_ok)?;
                 (ObjectAddress::set(CastRelationId, oid), None)
             }
