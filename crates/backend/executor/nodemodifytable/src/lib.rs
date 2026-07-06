@@ -2475,7 +2475,10 @@ fn merge_delete_act<'mcx>(
     if result != TM_Result::TM_Ok {
         return Ok(result);
     }
-    if let Some(td) = mt.rel().trigdesc.clone() {
+    let delete_capture =
+        mt.transition_capture.as_ref().is_some_and(|tc| tc.tcs_delete_old_table);
+    if mt.rel().trigdesc.is_some() || delete_capture {
+        let td = mt.rel().trigdesc.clone();
         let result_rti = mt.rel().rti;
         ensure_child_to_root(mt, estate)?;
         let root_rti = mt.root.as_ref().map(|rr| rr.rti);
@@ -2495,8 +2498,8 @@ fn merge_delete_act<'mcx>(
             modified_cols: None,
         };
         ::trigger::ExecARDeleteTriggers(
-            *es_query_cxt, rel, &td, *tupleid, transition_capture.as_ref(), Some(&mut when),
-            false, conv.as_ref(),
+            *es_query_cxt, rel, td.as_deref(), *tupleid, transition_capture.as_ref(),
+            Some(&mut when), false, conv.as_ref(),
         )?;
     }
     Ok(TM_Result::TM_Ok)
@@ -3788,7 +3791,9 @@ fn exec_delete<'mcx>(
     let moved_capture = changing_part
         && mt.operation == CmdType::CMD_UPDATE
         && mt.transition_capture.as_ref().is_some_and(|tc| tc.tcs_update_old_table);
-    if mt.rel().trigdesc.is_some() || moved_capture {
+    let delete_capture =
+        mt.transition_capture.as_ref().is_some_and(|tc| tc.tcs_delete_old_table);
+    if mt.rel().trigdesc.is_some() || moved_capture || delete_capture {
         let td = mt.rel().trigdesc.clone();
         let result_rti = mt.rel().rti;
         ensure_child_to_root(mt, estate)?;
@@ -3815,12 +3820,10 @@ fn exec_delete<'mcx>(
             )?;
         }
         let ar_tcs = if moved_capture { None } else { transition_capture.as_ref() };
-        if let Some(td) = td.as_deref() {
-            ::trigger::ExecARDeleteTriggers(
-                *es_query_cxt, rel, td, *tupleid, ar_tcs, Some(&mut when), changing_part,
-                conv.as_ref(),
-            )?;
-        }
+        ::trigger::ExecARDeleteTriggers(
+            *es_query_cxt, rel, td.as_deref(), *tupleid, ar_tcs, Some(&mut when),
+            changing_part, conv.as_ref(),
+        )?;
     }
 
     if mt.canSetTag && !changing_part {

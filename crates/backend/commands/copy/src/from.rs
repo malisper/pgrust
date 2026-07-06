@@ -404,6 +404,11 @@ pub fn CopyFrom<'mcx>(
             }
         }
     }
+    // AfterTriggerBeginQuery precedes MakeTransitionCaptureState (copyfrom.c
+    // 961/972): the capture registry keys off the query depth it opens.
+    if trigdesc.is_some() {
+        trigger::AfterTriggerBeginQuery();
+    }
     let transition_capture = match &trigdesc {
         Some(td) => trigger::MakeTransitionCaptureState(td, rel.rd_id, CmdType::CMD_INSERT)?,
         None => None,
@@ -411,7 +416,6 @@ pub fn CopyFrom<'mcx>(
     let mut trig_fmgr = trigger::TriggerFmgrCache::default();
     let mut trig_when = trigger::TriggerWhenCache::default();
     if let Some(td) = &trigdesc {
-        trigger::AfterTriggerBeginQuery();
         let mut when =
             trigger::TriggerWhenEval { mcx, cache: &mut trig_when, modified_cols: None };
         trigger::ExecBSInsertTriggers(mcx, rel, td, &mut trig_fmgr, &mut when)?;

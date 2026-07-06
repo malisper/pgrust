@@ -1083,6 +1083,23 @@ pub(crate) fn ATExecAddInherit<'mcx>(
         ));
     }
 
+    // FindTriggerIncompatibleWithInheritance (tablecmds.c:17346-17353).
+    if let Some(trigger_name) = crate::attach::find_transition_table_trigger(mcx, child_rel)? {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "trigger \"{trigger_name}\" prevents table \"{child_name}\" from becoming an inheritance child"
+                ),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "ROW triggers with transition tables are not supported in inheritance hierarchies."
+                    .to_string(),
+            ),
+        ));
+    }
+
     CreateInheritance(mcx, child_rel, &parent_rel, false)?;
     // Keep the lock on the parent relation until commit.
     parent_rel.close(NoLock)

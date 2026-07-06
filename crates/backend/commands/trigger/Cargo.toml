@@ -66,3 +66,4 @@ tuplestore = { path = "../../utils/sort/tuplestore" }
 exectuples = { path = "../../executor/exectuples" }
 types_portal = { path = "../../../_support/types/portal" }
 pgstat = { path = "../../utils/activity/pgstat" }
+guc_tables = { path = "../../utils/misc/guc_tables" }

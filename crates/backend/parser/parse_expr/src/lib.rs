@@ -2592,8 +2592,10 @@ fn improper_qualified_name(
     )
 }
 
-// resolve_column_ref marshal: ColumnRef fields to &str names (an A_Star
-// field means the reference cannot be a plpgsql name).
+// resolve_column_ref marshal: ColumnRef fields to &str names. A trailing
+// A_Star is a whole-row record reference (pl_comp.c:1131-1163: A.* / A.B.*
+// match only NSTYPE_REC, never scalars); a non-trailing A_Star cannot be a
+// plpgsql name.
 fn plpgsql_column_ref<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
@@ -2605,6 +2607,46 @@ fn plpgsql_column_ref<'mcx>(
     let mut names: [&str; 3] = [""; 3];
     if fields.is_empty() || fields.len() > 3 {
         return Ok(None);
+    }
+    let n = fields.len();
+    if fields[n - 1].node_tag() == NodeTag::T_A_Star {
+        // Whole-row arms (pl_comp.c:1131-1163): "*" blocks scalar matches
+        // (keeps the valueless-rec 55000 arm), then a rec-gated prefix
+        // lookup returns the whole-row Param (parse_target precedent).
+        if n < 2 {
+            return Ok(None);
+        }
+        for (i, f) in fields[..n - 1].iter().enumerate() {
+            match f.as_string() {
+                Some(s) => names[i] = s.sval,
+                None => return Ok(None),
+            }
+        }
+        names[n - 1] = "*";
+        if let Some(node) = parser_small1::plpgsql_resolve_column_ref(
+            mcx,
+            pstate,
+            st,
+            &names[..n],
+            location,
+            false,
+            mbutils::GetDatabaseEncoding(),
+        )? {
+            return Ok(Some(node));
+        }
+        let prefix = names[..n - 1].join(".").to_ascii_lowercase();
+        if !st.recs.iter().any(|r| *r == prefix) {
+            return Ok(None);
+        }
+        return parser_small1::plpgsql_resolve_column_ref(
+            mcx,
+            pstate,
+            st,
+            &names[..n - 1],
+            location,
+            false,
+            mbutils::GetDatabaseEncoding(),
+        );
     }
     for (i, f) in fields.iter().enumerate() {
         match f.as_string() {

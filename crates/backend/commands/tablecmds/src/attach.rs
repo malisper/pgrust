@@ -349,12 +349,12 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     attachrel.close(NoLock)
 }
 
-// FindTriggerIncompatibleWithInheritance over pg_trigger: row triggers with
-// transition tables block ATTACH.
-fn check_no_transition_table_triggers<'mcx>(
+// FindTriggerIncompatibleWithInheritance over pg_trigger: the first row
+// trigger with transition tables, if any (trigger.c:2280).
+pub(crate) fn find_transition_table_trigger<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Option<String>> {
     const Anum_pg_trigger_tgname: usize = 4;
     const Anum_pg_trigger_tgtype: usize = 6;
     const Anum_pg_trigger_tgoldtable: usize = 18;
@@ -380,7 +380,15 @@ fn check_no_transition_table_triggers<'mcx>(
     }
     genam::systable_endscan(mcx, scan)?;
     tgrel.close(AccessShareLock)?;
-    if let Some(trigger_name) = bad {
+    Ok(bad)
+}
+
+// Row triggers with transition tables block ATTACH (tablecmds.c:20430).
+fn check_no_transition_table_triggers<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+) -> PgResult<()> {
+    if let Some(trigger_name) = find_transition_table_trigger(mcx, rel)? {
         return Err(Box::new(
             PgError::new(
                 ERROR,
