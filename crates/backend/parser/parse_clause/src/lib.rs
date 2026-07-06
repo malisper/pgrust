@@ -1930,13 +1930,9 @@ pub fn transformOnConflictArbiter<'mcx>(
     let mut constraint = InvalidOid;
 
     if let Some(infer) = infer {
-        // Arbiter expressions see only non-qualified references to the
-        // target table; hide every other relation.
-        let save_namespace =
-            core::mem::replace(&mut pstate.p_namespace, mcx::PgVec::new_in(mcx));
-        let target_nsitem = arbiter_target_nsitem(mcx, pstate)?;
-        parse_relation::addNSItemToQuery(mcx, pstate, target_nsitem, false, false, true)?;
-
+        // C does not touch pstate->p_namespace here: the caller
+        // (transformInsertStmt) already reset it to just the target
+        // relation (rel_visible + cols_visible) before calling this.
         if !infer.indexElems.is_nil() {
             arbiter_elems = resolve_unique_index_expr(mcx, pstate, infer)?;
         }
@@ -1948,7 +1944,6 @@ pub fn transformOnConflictArbiter<'mcx>(
                 ParseExprKind::EXPR_KIND_INDEX_PREDICATE,
             )?);
         }
-        pstate.p_namespace = save_namespace;
 
         // ON CONSTRAINT name: resolve the constraint OID and mark the
         // constrained columns as requiring SELECT privilege, as if the
@@ -2027,48 +2022,28 @@ fn resolve_unique_index_expr<'mcx>(
         };
         let expr = transformExpr(mcx, pstate, parse, ParseExprKind::EXPR_KIND_INDEX_EXPRESSION)?;
 
-        if !ielem.collation.is_nil() || !ielem.opclass.is_nil() || !ielem.opclassopts.is_nil() {
-            panic!(
-                "resolve_unique_index_expr (parse_clause.c): COLLATE/opclass arbiter \
-                 elements (LookupCollation/ResolveOpClass) unported — upsert lane"
-            );
-        }
+        // C: LookupCollation / get_opclass_oid(BTREE_AM_OID, ...).
+        let infercollid = if ielem.collation.is_nil() {
+            InvalidOid
+        } else {
+            catalog_namespace::get_collation_oid_list(&ielem.collation, false)
+                .map_err(|e| resolve_arbiter_position(pstate, e, expr_location(expr)))?
+        };
+        let inferopclass = if ielem.opclass.is_nil() {
+            InvalidOid
+        } else {
+            opclasscmds_seams::get_opclass_oid::call(types_core::BTREE_AM_OID, &ielem.opclass, false)?
+        };
 
         result.lappend(
             mcx,
             Node::mk(
                 mcx,
-                types_nodes::InferenceElem {
-                    expr: Some(expr),
-                    infercollid: InvalidOid,
-                    inferopclass: InvalidOid,
-                },
+                types_nodes::InferenceElem { expr: Some(expr), infercollid, inferopclass },
             )?,
         )?;
     }
     Ok(result)
-}
-
-// The target nsitem is stored as a shared ref; addNSItemToQuery needs an
-// owned-mutable copy to set visibility flags on.
-fn arbiter_target_nsitem<'mcx>(
-    mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
-) -> PgResult<&'mcx mut ParseNamespaceItem<'mcx>> {
-    let t = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
-    let nsitem = ParseNamespaceItem {
-        p_names: t.p_names,
-        p_rte: t.p_rte,
-        p_rtindex: t.p_rtindex,
-        p_perminfo: t.p_perminfo,
-        p_nscolumns: t.p_nscolumns,
-        p_rel_visible: false,
-        p_cols_visible: true,
-        p_lateral_only: core::cell::Cell::new(false),
-        p_lateral_ok: core::cell::Cell::new(true),
-        p_returning_type: t.p_returning_type,
-    };
-    Ok(mcx::leak_in(mcx::alloc_in(mcx, nsitem)?))
 }
 
 #[cold]
@@ -2128,6 +2103,20 @@ fn on_conflict_bad_index_elem(
                 "resolve_unique_index_expr",
             )),
     )
+}
+
+// C: setup_parser_errposition_callback around LookupCollation's get_collation_oid.
+#[cold]
+#[inline(never)]
+fn resolve_arbiter_position(
+    pstate: &ParseState<'_, '_>,
+    e: Box<PgError>,
+    location: ParseLoc,
+) -> Box<PgError> {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    Box::new((*e).with_cursor_position(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding())))
 }
 
 pub fn transformLimitClause<'mcx>(

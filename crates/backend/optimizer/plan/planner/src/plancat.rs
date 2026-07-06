@@ -1127,12 +1127,14 @@ pub fn infer_arbiter_indexes<'mcx>(
             if !indexed_attrs.equal(&infer_attrs) {
                 break 'matched false;
             }
-            // RelationGetIndexExpressions shape: stringToNode only, no
-            // const-folding (equal() against raw parser output relies on it).
+            // RelationGetIndexExpressions: stringToNode + eval_const_expressions
+            // — necessary, not just optimization, since arbiterElems went
+            // through the same folding via preprocess_expression (relcache.c).
             let mut idx_exprs: Vec<types_nodes::Node<'mcx>> = Vec::new();
             if let Some(src) = ind.indexprs_src.as_ref() {
                 let node = readfuncs::stringToNode(mcx, src.as_str())?;
                 for e in node.as_list().expect("indexprs is a List").iter() {
+                    let e = clauses::eval_const_expressions(mcx, e)?;
                     if varno != 1 {
                         change_var_nodes(e, varno);
                     }
