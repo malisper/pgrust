@@ -3024,21 +3024,19 @@ fn agg_retrieve_hash_table<'mcx>(
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
 
-        let done = {
-            let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
-            ph.hashiter >= ph.hashtable.num_entries()
+        let next = {
+            let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+            ph.hashtable.iterate(&mut ph.hashiter)
         };
-        if done {
+        let Some(ix) = next else {
             if !agg_refill_hash_table(node, estate)? {
                 node.agg_done = true;
                 return Ok(None);
             }
             continue;
-        }
+        };
         let pergroup = {
             let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
-            let ix = ph.hashiter as u32;
-            ph.hashiter += 1;
 
             let tup = ph.hashtable.entry_tuple(ix);
             // SAFETY: entry images live in the node's table context for the

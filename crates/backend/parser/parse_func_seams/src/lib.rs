@@ -33,15 +33,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // transformExpressionList's "something.*" detection (ExpandColumnRefStar /
-    // ExpandIndirectionStar, parse_target.c); Ok(None) means the raw node is
-    // not a star-form and the caller should transformExpr it normally. A
-    // direct parse_expr -> parse_target dep would cycle (parse_target already
-    // depends on parse_expr). Installed by parse_target.
-    pub fn expandExpressionListStar<'a, 'p, 'mcx>(
+    // transformExpressionList (parse_target.c); ROW() and VALUES item lists
+    // expand `x.*` stars, which needs parse_target's expansion machinery
+    // above parse_expr. Installed by parse_target.
+    pub fn transformExpressionList<'a, 'p, 'mcx>(
         mcx: mcx::Mcx<'mcx>,
         pstate: &'a mut parser_small1::ParseState<'p, 'mcx>,
-        raw_node: types_nodes::Node<'mcx>,
-        expr_kind: parser_small1::ParseExprKind,
-    ) -> types_error::PgResult<Option<types_nodes::NodeList<'mcx>>>
+        exprlist: &'a types_nodes::NodeList<'mcx>,
+        exprKind: parser_small1::ParseExprKind,
+        allowDefault: bool,
+    ) -> types_error::PgResult<types_nodes::NodeList<'mcx>>
 );

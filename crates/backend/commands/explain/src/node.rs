@@ -1825,6 +1825,10 @@ fn show_grouping_set_keys<'mcx>(
     // C's passthrough shape, and grpColIdx resnos address the child tlist.
     let child = node.as_agg().expect("Agg plan node").plan.lefttree.expect("Agg has an outer plan");
     let tlist = &plan_of(child).targetlist;
+    // The child tlist's own INNER/OUTER refs resolve at the child's level:
+    // push the Agg as an ancestor and deparse in the child's context (the
+    // show_group_keys shape).
+    let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
     let (keyname, keysetname) = if aggnode.aggstrategy == 2 || aggnode.aggstrategy == 3 {
         ("Hash Key", "Hash Keys")
     } else {
@@ -1841,7 +1845,7 @@ fn show_grouping_set_keys<'mcx>(
                 node_gap("show_sort_group_keys", "no tlist entry for key column")
             });
             let mut buf = PgString::new_in(mcx);
-            deparse_expr(es, node, ancestors, tle.expr, useprefix, true, &mut buf)?;
+            deparse_expr(es, child, Some(&pushed), tle.expr, useprefix, true, &mut buf)?;
             show_sortorder_options(
                 &mut buf,
                 tle.expr,
@@ -1870,7 +1874,7 @@ fn show_grouping_set_keys<'mcx>(
                 node_gap("show_grouping_set_keys", "no tlist entry for key column")
             });
             let mut buf = PgString::new_in(mcx);
-            deparse_expr(es, node, ancestors, tle.expr, useprefix, true, &mut buf)?;
+            deparse_expr(es, child, Some(&pushed), tle.expr, useprefix, true, &mut buf)?;
             result.push(buf);
         }
         if result.is_empty() && es.format == EXPLAIN_FORMAT_TEXT {
