@@ -415,6 +415,7 @@ pub fn exec_bind_message<'mcx>(
     }
 
     start_xact_command()?;
+    crate::stmt_trace::probe("b.xact");
 
     let num_pformats = pqformat::pq_getmsgint(input_message, 2)? as usize;
     let mut pformats: PgVec<'mcx, i16> = PgVec::new_in(mcx);
@@ -588,8 +589,10 @@ pub fn exec_bind_message<'mcx>(
     }
 
     pqformat::pq_getmsgend(input_message)?;
+    crate::stmt_trace::probe("b.params");
 
     let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
+    crate::stmt_trace::probe("b.plan");
 
     let stmt_slice = plancache::CachedPlanStmtList(cplan);
     // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
@@ -623,12 +626,14 @@ pub fn exec_bind_message<'mcx>(
     }
 
     pquery::PortalStart(&portal, params, 0, None)?;
+    crate::stmt_trace::probe("b.portalstart");
 
     pquery::PortalSetResultFormat(&portal, &rformats)?;
 
     if elog::config::where_to_send_output() == CommandDest::Remote {
         pqformat::pq_putemptymessage(pqmsg::BIND_COMPLETE)?;
     }
+    crate::stmt_trace::probe("b.done");
 
     match check_log_duration(false) {
         (1, msec_str) => {
@@ -769,6 +774,7 @@ pub fn exec_execute_message<'mcx>(
     }
 
     start_xact_command()?;
+    crate::stmt_trace::probe("e.xact");
 
     let execute_is_fetch = !portal.borrow().atStart;
 
@@ -805,6 +811,7 @@ pub fn exec_execute_message<'mcx>(
         None, /* altdest aliases dest, as in C */
         Some(&mut qc),
     )?;
+    crate::stmt_trace::probe("e.run");
 
     receiver.destroy();
 
@@ -821,6 +828,7 @@ pub fn exec_execute_message<'mcx>(
             crate::simple_query::disable_statement_timeout()?;
         }
 
+        crate::stmt_trace::probe("e.commit");
         tcop_dest::EndCommand(&qc, dest, false)?;
     } else {
         if elog::config::where_to_send_output() == CommandDest::Remote {

@@ -257,6 +257,8 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
 
 
     tcop_dest::ReadyForQuery(mcx, elog::config::where_to_send_output())?;
+    crate::stmt_trace::probe("rfq.flushed");
+    crate::stmt_trace::flush();
     state.send_ready_for_query = false;
 
     Ok(())
@@ -437,6 +439,7 @@ fn dispatch_message<'mcx>(
             pqformat::pq_getmsgend(input_message)?;
             xact::EndImplicitTransactionBlock();
             simple_query::finish_xact_command()?;
+            crate::stmt_trace::probe("s.commit");
             state.send_ready_for_query = true;
         }
 
@@ -651,6 +654,7 @@ fn run_one_iteration_inner<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgRes
     set_doing_command_read(true);
 
     let firstchar = ReadCommand(&mut input_message)?;
+    crate::stmt_trace::probe_read(firstchar);
 
     if state.idle_in_transaction_timeout_enabled {
         timeout_seams::disable_timeout::call(

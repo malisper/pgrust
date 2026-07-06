@@ -179,11 +179,13 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
     }
 
     start_xact_command()?;
+    crate::stmt_trace::probe("q.xact");
 
     drop_unnamed_stmt();
 
 
     let parsetree_list = pg_parse_query(mcx, query_string)?;
+    crate::stmt_trace::probe("q.parse");
 
     if check_log_statement(&parsetree_list) {
         ereport(LOG)
@@ -244,6 +246,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             &[],
             QueryEnvHandle::NULL,
         )?;
+        crate::stmt_trace::probe("q.rewrite");
 
         let plantree_list = pg_plan_queries(
             mcx,
@@ -252,6 +255,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
         )?;
+        crate::stmt_trace::probe("q.plan");
 
         if snapshot_set {
             snapmgr::PopActiveSnapshot()?;
@@ -275,6 +279,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         )?;
 
         pquery::PortalStart(&portal, ParamListHandle::NULL, 0, None)?;
+        crate::stmt_trace::probe("q.portalstart");
 
         /* Output format: text unless FETCH from a binary cursor. */
         let format: i16 = match stmt.node_tag() {
@@ -305,6 +310,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             Some(&mut qc),
         )?;
 
+        crate::stmt_trace::probe("q.run");
         receiver.destroy();
 
         portalmem::PortalDrop(&portal, false)?;
@@ -333,6 +339,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
     }
 
     finish_xact_command()?;
+    crate::stmt_trace::probe("q.commit");
 
     if parsetree_list.is_empty() {
         tcop_dest::NullCommand(dest)?;
