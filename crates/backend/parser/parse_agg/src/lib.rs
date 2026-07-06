@@ -769,6 +769,9 @@ pub fn parseCheckAggregates<'mcx>(
             || !qry.groupingSets.is_nil()
     );
 
+    // gset_common (intersection seeded with the first set) limits which
+    // grouping Vars can prove functional dependencies (groupClauseCommonVars).
+    let mut gset_common: PgVec<'_, i32> = PgVec::new_in(mcx);
     if !qry.groupingSets.is_nil() {
         // The 4096 limit is arbitrary, bounding pathological constructs.
         let Some(gsets) = expand_grouping_sets(mcx, &qry.groupingSets, qry.groupDistinct, 4096)?
@@ -781,10 +784,6 @@ pub fn parseCheckAggregates<'mcx>(
             };
             return Err(grouping_sets_limit_error(pstate, location));
         };
-        // gset_common (intersection seeded with the smallest set) feeds
-        // functional-dependency checks and varnullingrels, both on unported
-        // lanes here.
-        let mut gset_common: PgVec<'_, i32> = PgVec::new_in(mcx);
         if let Some(first) = gsets.first() {
             gset_common.extend_from_slice(first);
             if !gset_common.is_empty() {
@@ -836,6 +835,20 @@ pub fn parseCheckAggregates<'mcx>(
 
     let hnvg = hnvg;
     let grp = grp.as_slice();
+    // groupClauseCommonVars: grouping Vars present in every grouping set —
+    // the only ones usable for functional-dependency proofs.
+    let mut common_vars: PgVec<'_, Node<'mcx>> = PgVec::new_in(mcx);
+    for (expr, sgref) in grp.iter() {
+        if expr.as_var().is_some()
+            && (qry.groupingSets.is_nil() || gset_common.contains(&(*sgref as i32)))
+        {
+            common_vars.push(*expr);
+        }
+    }
+    let mut cuc = CucState {
+        func_grouped_rels: PgVec::new_in(mcx),
+        constraint_deps: PgVec::new_in(mcx),
+    };
     for tle in &qry.targetList {
         finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, tle)?;
     }
@@ -845,7 +858,7 @@ pub fn parseCheckAggregates<'mcx>(
         } else {
             tle
         };
-        check_ungrouped_columns(pstate, qry, grp, hnvg, 0, false, clause)?;
+        check_ungrouped_columns(mcx, pstate, qry, grp, &common_vars, hnvg, 0, false, &mut cuc, clause)?;
     }
     if let Some(having) = qry.havingQual {
         finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, having)?;
@@ -854,7 +867,10 @@ pub fn parseCheckAggregates<'mcx>(
         } else {
             having
         };
-        check_ungrouped_columns(pstate, qry, grp, hnvg, 0, false, clause)?;
+        check_ungrouped_columns(mcx, pstate, qry, grp, &common_vars, hnvg, 0, false, &mut cuc, clause)?;
+    }
+    for &dep in cuc.constraint_deps.iter() {
+        qry.constraintDeps.lappend(mcx, dep)?;
     }
 
     // C: per spec, aggregates can't appear in a recursive term.
@@ -1206,58 +1222,81 @@ fn is_var_grouped(grp: &[(Node<'_>, Index)], var: &types_nodes::primnodes::Var<'
     false
 }
 
-struct CucWalker<'a, 'b, 'g, 'p, 'mcx> {
+// func_grouped_rels + the constraintDeps accumulator, shared across the
+// whole substitute_grouped_columns recursion (targetList and HAVING both).
+struct CucState<'mcx> {
+    func_grouped_rels: PgVec<'mcx, i32>,
+    constraint_deps: PgVec<'mcx, Oid>,
+}
+
+struct CucWalker<'a, 'b, 'g, 'p, 's, 'mcx> {
+    mcx: Mcx<'mcx>,
     pstate: &'a ParseState<'p, 'mcx>,
     qry: &'b Query<'mcx>,
     grp: &'g [(Node<'mcx>, Index)],
+    common_vars: &'g [Node<'mcx>],
     hnvg: bool,
     sublevels_up: i32,
     in_agg_direct_args: bool,
+    cuc: &'s mut CucState<'mcx>,
 }
 
-impl<'mcx> nodes_core::NodeWalker<'mcx> for CucWalker<'_, '_, '_, '_, 'mcx> {
+impl<'mcx> nodes_core::NodeWalker<'mcx> for CucWalker<'_, '_, '_, '_, '_, 'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         check_ungrouped_columns(
+            self.mcx,
             self.pstate,
             self.qry,
             self.grp,
+            self.common_vars,
             self.hnvg,
             self.sublevels_up,
             self.in_agg_direct_args,
+            self.cuc,
             node,
         )?;
         Ok(false)
     }
     fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
         cuc_query(
+            self.mcx,
             self.pstate,
             self.qry,
             self.grp,
+            self.common_vars,
             self.hnvg,
             self.sublevels_up,
             self.in_agg_direct_args,
+            self.cuc,
             q,
         )?;
         Ok(false)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cuc_query<'mcx>(
+    mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
     qry: &Query<'mcx>,
     grp: &[(Node<'mcx>, Index)],
+    common_vars: &[Node<'mcx>],
     hnvg: bool,
     sublevels_up: i32,
     in_agg_direct_args: bool,
+    cuc: &mut CucState<'mcx>,
     q: &'mcx Query<'mcx>,
 ) -> PgResult<()> {
     let mut w = CucWalker {
+        mcx,
         pstate,
         qry,
         grp,
+        common_vars,
         hnvg,
         sublevels_up: sublevels_up + 1,
         in_agg_direct_args,
+        cuc,
     };
     nodes_core::query_tree_walker(q, &mut w, 0)?;
     Ok(())
@@ -1266,13 +1305,17 @@ fn cuc_query<'mcx>(
 // substitute_grouped_columns_mutator's 42803 check (all grouping exprs are
 // Vars on this lane): an original-level Var outside an aggregate must be
 // grouped.
+#[allow(clippy::too_many_arguments)]
 fn check_ungrouped_columns<'mcx>(
+    mcx: Mcx<'mcx>,
     pstate: &ParseState<'_, 'mcx>,
     qry: &Query<'mcx>,
     grp: &[(Node<'mcx>, Index)],
+    common_vars: &[Node<'mcx>],
     hnvg: bool,
     sublevels_up: i32,
     in_agg_direct_args: bool,
+    cuc: &mut CucState<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<()> {
     // C order: Aggref/GroupingFunc level gates first, then the hnvg equal()
@@ -1284,7 +1327,9 @@ fn check_ungrouped_columns<'mcx>(
             if agglevelsup == sublevels_up {
                 debug_assert!(!in_agg_direct_args);
                 for arg in &agg.aggdirectargs {
-                    check_ungrouped_columns(pstate, qry, grp, hnvg, sublevels_up, true, arg)?;
+                    check_ungrouped_columns(
+                        mcx, pstate, qry, grp, common_vars, hnvg, sublevels_up, true, cuc, arg,
+                    )?;
                 }
                 return Ok(());
             }
@@ -1318,19 +1363,66 @@ fn check_ungrouped_columns<'mcx>(
             if (!hnvg || sublevels_up != 0) && is_var_grouped(grp, var) {
                 return Ok(());
             }
+            // Last-ditch check before erroring: a Var functionally dependent
+            // on the grouped columns (rel PK ⊆ GROUP BY) is acceptable; the
+            // proof is cached per RTE and its constraint OID recorded so the
+            // query is invalidated if the constraint is dropped.
+            if cuc.func_grouped_rels.contains(&var.varno) {
+                return Ok(());
+            }
+            let rte = qry
+                .rtable
+                .nth(var.varno as usize - 1)
+                .as_range_tbl_entry()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "check_ungrouped_columns (parse_agg.c): varno {} has no RTE",
+                        var.varno
+                    )
+                });
+            // The relid guard keeps synthetic catalog-less RTEs (unit-test
+            // fixtures) away from the pg_constraint scan; a real RTE_RELATION
+            // always carries a valid relid.
+            if rte.rtekind == RTEKind::RTE_RELATION
+                && rte.relid != types_core::InvalidOid
+                && pg_constraint::check_functional_grouping(
+                    mcx,
+                    rte.relid,
+                    var.varno,
+                    0,
+                    common_vars,
+                    &mut cuc.constraint_deps,
+                )?
+            {
+                cuc.func_grouped_rels.push(var.varno);
+                return Ok(());
+            }
             Err(ungrouped_var_error(pstate, qry, var, in_agg_direct_args, sublevels_up))
         }
         NodeTag::T_Query => cuc_query(
+            mcx,
             pstate,
             qry,
             grp,
+            common_vars,
             hnvg,
             sublevels_up,
             in_agg_direct_args,
+            cuc,
             node.as_query().expect("tag checked"),
         ),
         _ => {
-            let mut w = CucWalker { pstate, qry, grp, hnvg, sublevels_up, in_agg_direct_args };
+            let mut w = CucWalker {
+                mcx,
+                pstate,
+                qry,
+                grp,
+                common_vars,
+                hnvg,
+                sublevels_up,
+                in_agg_direct_args,
+                cuc,
+            };
             nodes_core::expression_tree_walker(node, &mut w)?;
             Ok(())
         }
