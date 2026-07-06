@@ -390,7 +390,6 @@ pub(crate) struct AlteredTableInfo<'mcx> {
     new_tablespace: Oid,
     chg_access_method: bool,
     new_access_method: Oid,
-    has_newvals: bool,
     verify_new_notnull: bool,
     after_stmts: NodeList<'mcx>,
     newvals: PgVec<'mcx, NewColumnValue<'mcx>>,
@@ -418,7 +417,6 @@ impl<'mcx> AlteredTableInfo<'mcx> {
             new_tablespace: InvalidOid,
             chg_access_method: false,
             new_access_method: InvalidOid,
-            has_newvals: false,
             verify_new_notnull: false,
             after_stmts: NodeList::nil(),
             newvals: PgVec::new_in(mcx),
@@ -773,10 +771,11 @@ fn ATPrepCmd<'mcx>(
     };
     let pass = match cmd.subtype {
         AlterTableType::AT_AddColumn => {
-            // ATPrepAddColumn: the composite-type recursion arm stays loud
-            // via ATSimplePermissions' allowed-targets gate.
             if !recursing && rel_reloftype(rel.rd_id)? != InvalidOid {
                 return Err(typed_table_err("cannot add column to typed table"));
+            }
+            if rel.rd_rel.relkind == types_rel::RELKIND_COMPOSITE_TYPE {
+                ATTypedTableRecursion(mcx, wqueue, rel, cnode, cmd.behavior, lockmode, query_string)?;
             }
             set_recurse();
             AT_PASS_ADD_COL
@@ -784,6 +783,9 @@ fn ATPrepCmd<'mcx>(
         AlterTableType::AT_DropColumn => {
             if !recursing && rel_reloftype(rel.rd_id)? != InvalidOid {
                 return Err(typed_table_err("cannot drop column from typed table"));
+            }
+            if rel.rd_rel.relkind == types_rel::RELKIND_COMPOSITE_TYPE {
+                ATTypedTableRecursion(mcx, wqueue, rel, cnode, cmd.behavior, lockmode, query_string)?;
             }
             set_recurse();
             AT_PASS_DROP
@@ -930,6 +932,7 @@ fn ATPrepCmd<'mcx>(
             AT_PASS_MISC
         }
         AlterTableType::AT_DropInherit => AT_PASS_MISC,
+        AlterTableType::AT_DropOids => AT_PASS_DROP,
         // These commands never recurse; no command-specific prep.
         AlterTableType::AT_ReplicaIdentity
         | AlterTableType::AT_AddOf
@@ -971,6 +974,15 @@ fn ATPrepAddInherit(rel: &Relation<'_>) -> PgResult<()> {
         return Err(Box::new(
             PgError::new(ERROR, "cannot change inheritance of a partition".to_string())
                 .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+        ));
+    }
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot change inheritance of partitioned table".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
         ));
     }
     Ok(())
@@ -1040,7 +1052,7 @@ fn ATRewriteCatalogs<'mcx>(
                     )?;
                 }
                 AlterTableType::AT_ColumnDefault => {
-                    ATExecColumnDefault(mcx, &rel, cmd, query_string)?;
+                    ATExecColumnDefault(mcx, &rel, cmd)?;
                 }
                 AlterTableType::AT_DropNotNull => {
                     ATExecDropNotNull(mcx, &rel, cmd, lockmode)?;
@@ -1108,6 +1120,13 @@ fn ATRewriteCatalogs<'mcx>(
                         }
                         ConstrType::CONSTR_NOTNULL if pass == AT_PASS_ADD_CONSTR => {
                             wqueue[tabidx].subcmds[AT_PASS_COL_ATTRS].lappend(mcx, cnode)?;
+                        }
+                        // ATParseTransformCmd (tablecmds.c): at ADD_CONSTR,
+                        // non-index constraints are requeued for the
+                        // ADD_OTHERCONSTR pass, after ADD_INDEX.
+                        _ if pass == AT_PASS_ADD_CONSTR => {
+                            wqueue[tabidx].subcmds[AT_PASS_ADD_OTHERCONSTR]
+                                .lappend(mcx, cnode)?;
                         }
                         ConstrType::CONSTR_NOTNULL | ConstrType::CONSTR_CHECK => {
                             ATAddCheckNNConstraint(
@@ -1225,7 +1244,7 @@ fn ATRewriteCatalogs<'mcx>(
                     ATExecAlterColumnType(mcx, &mut wqueue[tabidx], &rel, cmd)?;
                 }
                 AlterTableType::AT_SetExpression => {
-                    ATExecSetExpression(mcx, &mut wqueue[tabidx], &rel, cmd, query_string)?;
+                    ATExecSetExpression(mcx, &mut wqueue[tabidx], &rel, cmd)?;
                 }
                 AlterTableType::AT_DropExpression => {
                     ATExecDropExpression(mcx, &rel, cmd)?;
@@ -1422,6 +1441,8 @@ fn ATRewriteCatalogs<'mcx>(
                     commands_cluster::mark_index_clustered(mcx, &rel, InvalidOid, false)?;
                 }
                 AlterTableType::AT_SetLogged | AlterTableType::AT_SetUnLogged => {}
+                // Nothing to do here; oid columns don't exist anymore.
+                AlterTableType::AT_DropOids => {}
                 AlterTableType::AT_AddIndexConstraint => {
                     let stmt = cmd
                         .def
@@ -1504,7 +1525,6 @@ fn ATRewriteCatalogs<'mcx>(
                         )?;
                     }
                 }
-                other => unported(&format!("ATExecCmd {other:?}")),
             }
             // C threads each ATExec* return address; only the subcmd count is
             // observable through the ported SRF surface.
@@ -1561,7 +1581,7 @@ fn ATRewriteTableOne<'mcx>(
     if !types_rel::RELKIND_HAS_STORAGE(tab.relkind) {
         return Ok(());
     }
-    if tab.has_newvals || tab.rewrite > 0 {
+    if !tab.newvals.is_empty() || tab.rewrite > 0 {
         let rel = table::table_open(mcx, tab.relid, NoLock)?;
         find_composite_type_dependencies_rel(mcx, rel.rd_rel.reltype, &rel)?;
         rel.close(NoLock)?;
@@ -2264,20 +2284,20 @@ fn ATExecAddColumn<'mcx>(
     if let Some(raw_default) = col_def.raw_default {
         // AddRelationNewConstraints over the one RawColumnDefault; the rel
         // must be re-opened to see the new attribute (C rebuilds in place).
-        let rel2 = table::table_open(mcx, myrelid, NoLock)?;
+        let rel2 = relation_seams::relation_open::call(mcx, myrelid, NoLock)?;
         crate::constraints::add_relation_new_constraints(
             mcx,
             &rel2,
             &[(newattnum as AttrNumber, raw_default, col_def.generated)],
             &NodeList::nil(),
-            query_string,
+            None,
         )?;
         rel2.close(NoLock)?;
         xact::CommandCounterIncrement()?;
     }
 
     // Relations without storage skip the phase-3 fill decision entirely.
-    let rel3 = table::table_open(mcx, myrelid, NoLock)?;
+    let rel3 = relation_seams::relation_open::call(mcx, myrelid, NoLock)?;
     if types_rel::RELKIND_HAS_STORAGE(rel3.rd_rel.relkind) {
         add_column_phase3_fill(
             mcx,
@@ -2426,7 +2446,6 @@ fn add_column_phase3_fill<'mcx>(
     }
     if let Some(defval) = defval {
         let defval = clauses::eval_const_expressions(mcx, defval)?;
-        tab.has_newvals = true;
         tab.newvals.push(NewColumnValue {
             attnum,
             expr: defval,
@@ -2704,7 +2723,6 @@ fn ATExecColumnDefault<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
-    query_string: &str,
 ) -> PgResult<()> {
     let col_name = cmd.name.expect("AT_ColumnDefault name");
     let relname = rel.name().to_string();
@@ -2752,7 +2770,7 @@ fn ATExecColumnDefault<'mcx>(
             rel,
             &[(attnum, def, 0)],
             &NodeList::nil(),
-            query_string,
+            None,
         )?;
     }
     Ok(())
@@ -2789,7 +2807,6 @@ fn ATExecSetExpression<'mcx>(
     tab: &mut AlteredTableInfo<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
-    query_string: &str,
 ) -> PgResult<()> {
     let col_name = cmd.name.expect("AT_SetExpression name");
     let relname = rel.name().to_string();
@@ -2864,7 +2881,7 @@ fn ATExecSetExpression<'mcx>(
         rel,
         &[(attnum, newexpr, attgenerated as u8)],
         &NodeList::nil(),
-        query_string,
+        None,
     )?;
     xact::CommandCounterIncrement()?;
 
@@ -3934,7 +3951,7 @@ pub(crate) fn ATAddCheckNNConstraint<'mcx>(
         &NodeList::make1(mcx, constr_copy)?,
         recursing || is_readd,
         !recursing,
-        query_string,
+        None,
     )?;
     debug_assert!(cooked.len() <= 1);
     for c in cooked.iter() {
@@ -4798,40 +4815,42 @@ fn ATPrepAlterColumnType<'mcx>(
     let def = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
     let tn = def.typeName.expect("ColumnDef.typeName").as_variant::<TypeName>().expect("TypeName");
 
-    if rel_reloftype(rel.rd_id)? != InvalidOid && !recursing {
-        let mut e = *typed_table_err("cannot alter column type of typed table");
+    let with_pos = |e: PgError, location: i32| -> Box<PgError> {
         let pos = parser_small1::parser_errposition_source(
             Some(query_string.as_bytes()),
-            def.location,
+            location,
             mbutils::GetDatabaseEncoding(),
         );
-        if pos > 0 {
-            e = e.with_cursor_position(pos);
-        }
-        return Err(Box::new(e));
+        Box::new(if pos > 0 { e.with_cursor_position(pos) } else { e })
+    };
+
+    if rel_reloftype(rel.rd_id)? != InvalidOid && !recursing {
+        return Err(with_pos(*typed_table_err("cannot alter column type of typed table"), def.location));
     }
 
     let Some((attnum, attinhcount)) = attname_lookup(mcx, rel.rd_id, col_name, false)? else {
-        return Err(undefined_column(col_name, &relname));
+        return Err(with_pos(*undefined_column(col_name, &relname), def.location));
     };
     if attnum <= 0 {
-        return Err(cannot_alter_system_column(col_name));
+        return Err(with_pos(*cannot_alter_system_column(col_name), def.location));
     }
     let att = *rel.rd_att.attr(attnum as usize - 1);
     if att.attgenerated != 0 && (def.raw_default.is_some() || def.cooked_default.is_some()) {
-        return Err(Box::new(
+        return Err(with_pos(
             PgError::new(
                 ERROR,
                 "cannot specify USING when altering type of generated column".to_string(),
             )
             .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_DEFINITION)
             .with_detail(format!("Column \"{col_name}\" is a generated column.")),
+            def.location,
         ));
     }
     if attinhcount > 0 && !recursing {
-        return Err(Box::new(
+        return Err(with_pos(
             PgError::new(ERROR, format!("cannot alter inherited column \"{col_name}\""))
                 .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            def.location,
         ));
     }
     let mut is_expr = false;
@@ -4858,9 +4877,13 @@ fn ATPrepAlterColumnType<'mcx>(
         }
         return Err(Box::new(e));
     }
-    let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+    let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
 
-    let targetcollid = crate::GetColumnDefCollation(def, targettype)?;
+    let (targettype, targettypmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(&pstate), tn)?;
+
+    let targetcollid =
+        crate::GetColumnDefCollationPos(Some(query_string.as_bytes()), def, targettype)?;
     {
         let mut rowtypes: mcx::PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
         rowtypes.push(rel.rd_rel.reltype);
@@ -4881,8 +4904,6 @@ fn ATPrepAlterColumnType<'mcx>(
         && (tab_relkind == RELKIND_RELATION
             || tab_relkind == types_rel::RELKIND_PARTITIONED_TABLE)
     {
-    let mut pstate = parser_small1::make_parsestate(mcx, None);
-    pstate.p_sourcetext = Some(str_arena(mcx, query_string)?.as_bytes());
     let using = match (def.raw_default, def.cooked_default) {
         (Some(raw), _) => {
             let nsitem = parse_relation::addRangeTableEntryForRelation(
@@ -5711,7 +5732,9 @@ fn ATPostAlterTypeParse<'mcx>(
                 let connode = cmd.def.expect("AT_AddConstraint Constraint");
                 let con = connode.as_variant::<Constraint>().expect("Constraint");
                 match con.contype {
-                    ConstrType::CONSTR_PRIMARY | ConstrType::CONSTR_UNIQUE => {
+                    ConstrType::CONSTR_PRIMARY
+                    | ConstrType::CONSTR_UNIQUE
+                    | ConstrType::CONSTR_EXCLUSION => {
                         let (istmt, nnconstraints) =
                             parse_utilcmd::transformIndexConstraintForAlter(
                                 mcx, &rel, connode, def,

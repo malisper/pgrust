@@ -222,7 +222,7 @@ fn renameatt_internal<'mcx>(
     expected_parents: i32,
     behavior: DropBehavior,
 ) -> PgResult<()> {
-    let rel = table::table_open(mcx, relid, AccessExclusiveLock)?;
+    let rel = relation_seams::relation_open::call(mcx, relid, AccessExclusiveLock)?;
     renameatt_check(
         mcx,
         relid,

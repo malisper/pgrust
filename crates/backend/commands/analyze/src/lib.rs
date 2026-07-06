@@ -315,19 +315,26 @@ fn do_analyze_rel<'mcx>(
         let mut seen: PgVec<'_, AttrNumber> = PgVec::new_in(anl_mcx);
         for c in va_cols.iter() {
             let name = c.as_string().expect("column name String").sval;
-            let i = (1..=tupdesc.natts)
-                .find(|&i| tupdesc.attr(i as usize - 1).attname.name_str() == name.as_bytes());
+            // attnameAttNum with sysColOK=false: dropped columns don't match.
+            let i = (1..=tupdesc.natts).find(|&i| {
+                let att = tupdesc.attr(i as usize - 1);
+                att.attname.name_str() == name.as_bytes() && !att.attisdropped
+            });
             let Some(i) = i else {
                 return Err(PgError::error(format!(
-                    "column \"{name}\" of relation does not exist"
+                    "column \"{name}\" of relation \"{}\" does not exist",
+                    onerel.name()
                 ))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN)
                 .into());
             };
             let i = i as AttrNumber;
             if seen.contains(&i) {
                 return Err(PgError::error(format!(
-                    "column \"{name}\" of relation appears more than once"
+                    "column \"{name}\" of relation \"{}\" appears more than once",
+                    onerel.name()
                 ))
+                .with_sqlstate(types_error::ERRCODE_DUPLICATE_COLUMN)
                 .into());
             }
             seen.push(i);

@@ -921,7 +921,12 @@ fn lookup_pg_attribute_attnum_by_name(
         return Ok(0);
     };
     let t = tuple.tuple();
-    let attnum = getattr(&t, ATTNAME, ANUM_PG_ATTRIBUTE_ATTNUM).as_i16();
+    // SearchSysCacheAttName: dropped columns don't match.
+    let attnum = if getattr(&t, ATTNAME, ANUM_PG_ATTRIBUTE_ATTISDROPPED2).as_bool() {
+        0
+    } else {
+        getattr(&t, ATTNAME, ANUM_PG_ATTRIBUTE_ATTNUM).as_i16()
+    };
     drop(t);
     ReleaseSysCache(tuple);
     Ok(attnum)

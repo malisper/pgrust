@@ -1,6 +1,6 @@
-// tsearchcmds.c. LOUD divergences: CREATE TEXT SEARCH PARSER/TEMPLATE (superuser
-// DDL tsdicts never runs), event-trigger collection, pg_shdepend flush on ALTER
-// (owner is pinned, so C's delete+re-record of shared deps is a no-op here).
+// tsearchcmds.c. LOUD divergences: event-trigger collection, pg_shdepend flush
+// on ALTER (owner is pinned, so C's delete+re-record of shared deps is a no-op
+// here).
 #![allow(non_snake_case, non_upper_case_globals)]
 
 pub mod deflist;
@@ -48,10 +48,24 @@ const Anum_pg_ts_dict_dicttemplate: usize = 5;
 const Anum_pg_ts_dict_dictinitoption: usize = 6;
 const Natts_pg_ts_dict: usize = 6;
 
+pub const TSParserOidIndexId: Oid = 3607;
+const Anum_pg_ts_parser_oid: i32 = 1;
+const Anum_pg_ts_parser_prsname: i32 = 2;
+const Anum_pg_ts_parser_prsnamespace: i32 = 3;
+const Anum_pg_ts_parser_prsstart: i32 = 4;
+const Anum_pg_ts_parser_prstoken: i32 = 5;
+const Anum_pg_ts_parser_prsend: i32 = 6;
+const Anum_pg_ts_parser_prsheadline: i32 = 7;
 const Anum_pg_ts_parser_prslextype: i32 = 8;
+const Natts_pg_ts_parser: usize = 8;
 
+pub const TSTemplateOidIndexId: Oid = 3767;
+const Anum_pg_ts_template_oid: i32 = 1;
 const Anum_pg_ts_template_tmplname: i32 = 2;
+const Anum_pg_ts_template_tmplnamespace: i32 = 3;
 const Anum_pg_ts_template_tmplinit: i32 = 4;
+const Anum_pg_ts_template_tmpllexize: i32 = 5;
+const Natts_pg_ts_template: usize = 5;
 
 const Anum_pg_ts_config_oid: usize = 1;
 const Anum_pg_ts_config_cfgname: usize = 2;
@@ -380,6 +394,260 @@ pub fn DefineTSDictionary<'mcx>(
     let address =
         make_dictionary_dependencies(mcx, dictOid, namespaceoid, miscinit::GetUserId(), templId)?;
     dictRel.close(RowExclusiveLock)?;
+    Ok(address)
+}
+
+const TSQUERYOID: Oid = 3615;
+
+#[cold]
+fn func_wrong_rettype(funcname: &[&str], argtypes: &[Oid], rettype: Oid) -> PgResult<Box<PgError>> {
+    let mut sig = funcname.join(".");
+    sig.push('(');
+    for (i, t) in argtypes.iter().enumerate() {
+        if i > 0 {
+            sig.push_str(", ");
+        }
+        sig.push_str(&format_type::format_type_be(*t)?);
+    }
+    sig.push(')');
+    Ok(Box::new(
+        PgError::error(format!(
+            "function {sig} should return type {}",
+            format_type::format_type_be(rettype)?
+        ))
+        .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+    ))
+}
+
+// get_ts_parser_func (tsearchcmds.c): signature-checked regproc lookup.
+fn get_ts_parser_func<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>, attnum: i32) -> PgResult<Oid> {
+    use types_core::catalog::{INTERNALOID, INT4OID, VOIDOID};
+    let funcname = defGetQualifiedName(mcx, defel);
+    let mut ret_type = INTERNALOID;
+    let mut type_id = [INTERNALOID; 3];
+    let nargs: i16 = match attnum {
+        Anum_pg_ts_parser_prsstart => {
+            type_id[1] = INT4OID;
+            2
+        }
+        Anum_pg_ts_parser_prstoken => 3,
+        Anum_pg_ts_parser_prsend => {
+            ret_type = VOIDOID;
+            1
+        }
+        Anum_pg_ts_parser_prsheadline => {
+            type_id[2] = TSQUERYOID;
+            3
+        }
+        Anum_pg_ts_parser_prslextype => 1,
+        other => panic!("unrecognized attribute for text search parser: {other}"),
+    };
+    let argtypes = &type_id[..nargs as usize];
+    let proc_oid = parse_func_seams::LookupFuncName::call(&funcname, nargs, argtypes, false)?;
+    if lsyscache::get_func_rettype(proc_oid)? != ret_type {
+        return Err(func_wrong_rettype(&funcname, argtypes, ret_type)?);
+    }
+    Ok(proc_oid)
+}
+
+fn make_parser_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    prsOid: Oid,
+    namespaceoid: Oid,
+    values: &[Datum; Natts_pg_ts_parser],
+) -> PgResult<ObjectAddress> {
+    let myself = ObjectAddress::set(TSParserRelationId, prsOid);
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+    let mut refs: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
+    refs.push(ObjectAddress::set(NAMESPACE_RELATION_ID, namespaceoid));
+    for attnum in [
+        Anum_pg_ts_parser_prsstart,
+        Anum_pg_ts_parser_prstoken,
+        Anum_pg_ts_parser_prsend,
+        Anum_pg_ts_parser_prslextype,
+        Anum_pg_ts_parser_prsheadline,
+    ] {
+        let func = values[attnum as usize - 1].as_oid();
+        if attnum != Anum_pg_ts_parser_prsheadline || func != InvalidOid {
+            refs.push(ObjectAddress::set(types_core::PROCEDURE_RELATION_ID, func));
+        }
+    }
+    pg_depend::record_object_address_dependencies(mcx, &myself, &mut refs, DependencyType::Normal)?;
+    Ok(myself)
+}
+
+// CREATE TEXT SEARCH PARSER
+pub fn DefineTSParser<'mcx>(mcx: Mcx<'mcx>, stmt: &DefineStmt<'mcx>) -> PgResult<ObjectAddress> {
+    if !superuser::superuser()? {
+        return Err(Box::new(
+            PgError::error("must be superuser to create text search parsers".to_string())
+                .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    let (namespaceoid, prsname) = qualified_name_get_creation_namespace(mcx, &stmt.defnames)?;
+
+    let prsRel = table::table_open(mcx, TSParserRelationId, RowExclusiveLock)?;
+    let prsOid = catalog::GetNewOidWithIndex(
+        mcx,
+        &prsRel,
+        TSParserOidIndexId,
+        Anum_pg_ts_parser_oid as AttrNumber,
+    )?;
+
+    let mut values = [Datum::null(); Natts_pg_ts_parser];
+    let nulls = [false; Natts_pg_ts_parser];
+    let mut pname = NameData::default();
+    pname.namestrcpy(prsname);
+    values[Anum_pg_ts_parser_oid as usize - 1] = Datum::from_oid(prsOid);
+    values[Anum_pg_ts_parser_prsname as usize - 1] =
+        Datum::from_usize(pname.data.as_ptr() as usize);
+    values[Anum_pg_ts_parser_prsnamespace as usize - 1] = Datum::from_oid(namespaceoid);
+
+    for n in stmt.definition.iter() {
+        let defel = n.as_def_elem().expect("definition holds DefElems");
+        let attnum = match defel.defname {
+            Some("start") => Anum_pg_ts_parser_prsstart,
+            Some("gettoken") => Anum_pg_ts_parser_prstoken,
+            Some("end") => Anum_pg_ts_parser_prsend,
+            Some("headline") => Anum_pg_ts_parser_prsheadline,
+            Some("lextypes") => Anum_pg_ts_parser_prslextype,
+            other => {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "text search parser parameter \"{}\" not recognized",
+                        other.unwrap_or("")
+                    ))
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+                ))
+            }
+        };
+        values[attnum as usize - 1] = Datum::from_oid(get_ts_parser_func(mcx, defel, attnum)?);
+    }
+
+    for (attnum, what) in [
+        (Anum_pg_ts_parser_prsstart, "start"),
+        (Anum_pg_ts_parser_prstoken, "gettoken"),
+        (Anum_pg_ts_parser_prsend, "end"),
+        (Anum_pg_ts_parser_prslextype, "lextypes"),
+    ] {
+        if values[attnum as usize - 1].as_oid() == InvalidOid {
+            return Err(Box::new(
+                PgError::error(format!("text search parser {what} method is required"))
+                    .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+            ));
+        }
+    }
+
+    let mut tup = heaptuple::heap_form_tuple(mcx, prsRel.descr(), &values, &nulls)?;
+    catalog_indexing::CatalogTupleInsert(mcx, &prsRel, &mut tup)?;
+    let address = make_parser_dependencies(mcx, prsOid, namespaceoid, &values)?;
+    prsRel.close(RowExclusiveLock)?;
+    Ok(address)
+}
+
+// get_ts_template_func (tsearchcmds.c).
+fn get_ts_template_func<'mcx>(
+    mcx: Mcx<'mcx>,
+    defel: &DefElem<'mcx>,
+    attnum: i32,
+) -> PgResult<Oid> {
+    use types_core::catalog::INTERNALOID;
+    let funcname = defGetQualifiedName(mcx, defel);
+    let type_id = [INTERNALOID; 4];
+    let nargs: i16 = match attnum {
+        Anum_pg_ts_template_tmplinit => 1,
+        Anum_pg_ts_template_tmpllexize => 4,
+        other => panic!("unrecognized attribute for text search template: {other}"),
+    };
+    let argtypes = &type_id[..nargs as usize];
+    let proc_oid = parse_func_seams::LookupFuncName::call(&funcname, nargs, argtypes, false)?;
+    if lsyscache::get_func_rettype(proc_oid)? != INTERNALOID {
+        return Err(func_wrong_rettype(&funcname, argtypes, INTERNALOID)?);
+    }
+    Ok(proc_oid)
+}
+
+fn make_ts_template_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    tmplOid: Oid,
+    namespaceoid: Oid,
+    tmplinit: Oid,
+    tmpllexize: Oid,
+) -> PgResult<ObjectAddress> {
+    let myself = ObjectAddress::set(TSTemplateRelationId, tmplOid);
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+    let mut refs: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
+    refs.push(ObjectAddress::set(NAMESPACE_RELATION_ID, namespaceoid));
+    refs.push(ObjectAddress::set(types_core::PROCEDURE_RELATION_ID, tmpllexize));
+    if tmplinit != InvalidOid {
+        refs.push(ObjectAddress::set(types_core::PROCEDURE_RELATION_ID, tmplinit));
+    }
+    pg_depend::record_object_address_dependencies(mcx, &myself, &mut refs, DependencyType::Normal)?;
+    Ok(myself)
+}
+
+// CREATE TEXT SEARCH TEMPLATE
+pub fn DefineTSTemplate<'mcx>(mcx: Mcx<'mcx>, stmt: &DefineStmt<'mcx>) -> PgResult<ObjectAddress> {
+    if !superuser::superuser()? {
+        return Err(Box::new(
+            PgError::error("must be superuser to create text search templates".to_string())
+                .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    let (namespaceoid, tmplname) = qualified_name_get_creation_namespace(mcx, &stmt.defnames)?;
+
+    let tmplRel = table::table_open(mcx, TSTemplateRelationId, RowExclusiveLock)?;
+    let tmplOid = catalog::GetNewOidWithIndex(
+        mcx,
+        &tmplRel,
+        TSTemplateOidIndexId,
+        Anum_pg_ts_template_oid as AttrNumber,
+    )?;
+
+    let mut values = [Datum::null(); Natts_pg_ts_template];
+    let nulls = [false; Natts_pg_ts_template];
+    let mut tname = NameData::default();
+    tname.namestrcpy(tmplname);
+    values[Anum_pg_ts_template_oid as usize - 1] = Datum::from_oid(tmplOid);
+    values[Anum_pg_ts_template_tmplname as usize - 1] =
+        Datum::from_usize(tname.data.as_ptr() as usize);
+    values[Anum_pg_ts_template_tmplnamespace as usize - 1] = Datum::from_oid(namespaceoid);
+
+    for n in stmt.definition.iter() {
+        let defel = n.as_def_elem().expect("definition holds DefElems");
+        let attnum = match defel.defname {
+            Some("init") => Anum_pg_ts_template_tmplinit,
+            Some("lexize") => Anum_pg_ts_template_tmpllexize,
+            other => {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "text search template parameter \"{}\" not recognized",
+                        other.unwrap_or("")
+                    ))
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+                ))
+            }
+        };
+        values[attnum as usize - 1] = Datum::from_oid(get_ts_template_func(mcx, defel, attnum)?);
+    }
+
+    if values[Anum_pg_ts_template_tmpllexize as usize - 1].as_oid() == InvalidOid {
+        return Err(Box::new(
+            PgError::error("text search template lexize method is required".to_string())
+                .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+        ));
+    }
+
+    let mut tup = heaptuple::heap_form_tuple(mcx, tmplRel.descr(), &values, &nulls)?;
+    catalog_indexing::CatalogTupleInsert(mcx, &tmplRel, &mut tup)?;
+    let address = make_ts_template_dependencies(
+        mcx,
+        tmplOid,
+        namespaceoid,
+        values[Anum_pg_ts_template_tmplinit as usize - 1].as_oid(),
+        values[Anum_pg_ts_template_tmpllexize as usize - 1].as_oid(),
+    )?;
+    tmplRel.close(RowExclusiveLock)?;
     Ok(address)
 }
 

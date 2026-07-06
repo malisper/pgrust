@@ -241,13 +241,21 @@ pub fn heap_create<'mcx>(
     relpersistence: u8,
     allow_system_table_mods: bool,
 ) -> PgResult<(Rc<RelationData<'static>>, TransactionId, MultiXactId)> {
-    if (catalog::IsCatalogNamespace(relnamespace) || catalog::IsToastNamespace(relnamespace))
+    if ((catalog::IsCatalogNamespace(relnamespace) && relkind != types_rel::RELKIND_INDEX)
+        || catalog::IsToastNamespace(relnamespace))
         && !allow_system_table_mods
         && !miscinit_seams::is_bootstrap_processing_mode::call()
     {
-        return Err(err(
-            format!("permission denied to create \"{relname}\": system catalog modifications are currently disallowed"),
-            types_error::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        let nspname = lsyscache::get_namespace_name(mcx, relnamespace)?
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("permission denied to create \"{nspname}.{relname}\""),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .with_detail("System catalog modifications are currently disallowed."),
         ));
     }
 

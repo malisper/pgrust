@@ -544,15 +544,8 @@ fn mcx_dummy() -> Mcx<'static> {
     CTX.with(|c| c.mcx())
 }
 
-// GetColumnDefCollation (parse_type.c): collClause loud upstream.
 fn coldef_collation(def: &ColumnDef<'_>, typeoid: Oid) -> PgResult<Oid> {
-    debug_assert!(def.collClause.is_none(), "COLLATE loud upstream");
-    if def.collOid != InvalidOid {
-        return Ok(def.collOid);
-    }
-    Ok(syscache_seams::lookup_pg_type_shape::call(typeoid)?
-        .expect("pg_type row vanished")
-        .typcollation)
+    crate::GetColumnDefCollation(def, typeoid)
 }
 
 // MergeInheritedAttribute (tablecmds.c:3418).
@@ -1025,12 +1018,6 @@ pub(crate) fn ATExecAddInherit<'mcx>(
             crate::get_relkind_objtype(parent_rel.rd_rel.relkind),
             parent_rel.name(),
         )?;
-    }
-    // ATSimplePermissions(AT_AddInherit) allows ATT_TABLE | ATT_FOREIGN_TABLE.
-    if child_rel.rd_rel.relkind != RELKIND_RELATION
-        && child_rel.rd_rel.relkind != types_rel::RELKIND_FOREIGN_TABLE
-    {
-        unported("ATExecAddInherit: non-plain-table child relkind");
     }
     if parent_rel.rd_rel.relkind != RELKIND_RELATION
         && parent_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
