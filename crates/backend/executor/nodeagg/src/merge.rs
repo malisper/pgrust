@@ -67,6 +67,61 @@ impl AggTableHandoff {
     }
 }
 
+// Per-thread handoff registry keyed by the PARTIAL Agg plan node's address —
+// unique per live plan, and the same object on leader and worker threads
+// (worker pstmts share the leader's plan tree by reference). Kept out of
+// EStateData so the serial per-query path pays nothing (select1 gate).
+// Leader entries are Weak (the finalize's FinalizeMerge holds the strong Arc
+// and deregisters on drop); worker threads adopt for the run and clear after.
+std::thread_local! {
+    static REGISTRY: core::cell::RefCell<Vec<(usize, std::sync::Weak<AggTableHandoff>)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+fn registry_insert(key: usize, h: &Arc<AggTableHandoff>) {
+    REGISTRY.with(|r| {
+        let mut v = r.borrow_mut();
+        v.retain(|(_, w)| w.strong_count() > 0);
+        v.push((key, Arc::downgrade(h)));
+    });
+}
+
+fn registry_remove(key: usize) {
+    let _ = REGISTRY.try_with(|r| r.borrow_mut().retain(|(k, _)| *k != key));
+}
+
+fn registry_get(key: usize) -> Option<Arc<AggTableHandoff>> {
+    REGISTRY.with(|r| {
+        r.borrow().iter().find_map(|(k, w)| (*k == key).then(|| w.upgrade()).flatten())
+    })
+}
+
+/// Leader-side snapshot for execParallel: every registered handoff (workers
+/// match by plan-node address, so entries of unrelated Gathers are inert).
+pub struct AggHandoffExport(Vec<(usize, Arc<AggTableHandoff>)>);
+
+pub fn export_registry() -> AggHandoffExport {
+    AggHandoffExport(REGISTRY.with(|r| {
+        r.borrow().iter().filter_map(|(k, w)| w.upgrade().map(|a| (*k, a))).collect()
+    }))
+}
+
+/// Worker-thread adoption before the run (parallel_query_main); the export
+/// (held in ParallelExecShared) keeps the strong refs for the run.
+pub fn adopt_registry(export: &AggHandoffExport) {
+    REGISTRY.with(|r| {
+        let mut v = r.borrow_mut();
+        for (k, a) in &export.0 {
+            v.push((*k, Arc::downgrade(a)));
+        }
+    });
+}
+
+/// Worker-thread cleanup after the run (all paths, incl. unwind).
+pub fn clear_thread_registry() {
+    let _ = REGISTRY.try_with(|r| r.borrow_mut().clear());
+}
+
 struct MergeCombine {
     flinfo: FmgrInfo,
     strict: bool,
@@ -75,6 +130,7 @@ struct MergeCombine {
 
 pub(crate) struct FinalizeMerge<'mcx> {
     handoff: Arc<AggTableHandoff>,
+    registry_key: usize,
     combines: Vec<MergeCombine>,
     // transno -> partial-output attno of the state column (replay fallback).
     state_cols: Vec<i16>,
@@ -87,6 +143,12 @@ pub(crate) struct FinalizeMerge<'mcx> {
 impl FinalizeMerge<'_> {
     pub(crate) fn has_run(&self) -> bool {
         self.run.is_some()
+    }
+}
+
+impl Drop for FinalizeMerge<'_> {
+    fn drop(&mut self) {
+        registry_remove(self.registry_key);
     }
 }
 
@@ -377,12 +439,11 @@ pub(crate) fn init_finalize_merge<'mcx>(
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(hash_desc));
 
     let handoff = Arc::new(AggTableHandoff::default());
-    estate.es_agg_handoff.push((
-        partial.plan.plan_node_id,
-        Arc::clone(&handoff) as Arc<dyn core::any::Any + Send + Sync>,
-    ));
+    let registry_key = partial as *const Agg<'_> as usize;
+    registry_insert(registry_key, &handoff);
     Ok(Some(FinalizeMerge {
         handoff,
+        registry_key,
         combines,
         state_cols,
         replay_slot,
@@ -394,17 +455,14 @@ pub(crate) fn init_finalize_merge<'mcx>(
 // Worker-side install at fill completion: the leader registered a handoff for
 // this plan node iff the shape is engaged. A spilled table keeps the classic
 // row emission (its groups already went partly to tape).
-pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>, estate: &EStateData<'_>) {
+pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
     if node.plan.aggsplit != AGGSPLIT_INITIAL_SERIAL || node.plan.aggstrategy != AGG_HASHED {
         return;
     }
     let id = node.plan.plan.plan_node_id;
-    let Some(handoff) = estate.es_agg_handoff.iter().find_map(|(nid, h)| {
-        (*nid == id).then(|| Arc::clone(h))
-    }) else {
+    let Some(handoff) = registry_get(node.plan as *const Agg<'_> as usize) else {
         return;
     };
-    let Ok(handoff) = handoff.downcast::<AggTableHandoff>() else { return };
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     if ph.spill.ever_spilled || !ph.spill.batches.is_empty() {
         return;
