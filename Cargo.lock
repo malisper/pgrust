@@ -5899,6 +5899,7 @@ dependencies = [
  "bulkwrite",
  "datum",
  "execindexing",
+ "fd",
  "gist",
  "guc_tables",
  "init_small",

@@ -106,7 +106,8 @@ fn temp_page_mut(temp: &mut PageTemp) -> PageMut<'_> {
 }
 
 /// gistplacetopage. `buffer` must be pinned + exclusively locked by caller
-/// and stays so on return. Returns (is_split, splitinfo).
+/// and stays so on return. Returns (is_split, splitinfo); `newblkno` receives
+/// the block the first new/updated tuple landed on.
 #[allow(clippy::too_many_arguments)]
 pub fn gistplacetopage<'mcx>(
     mcx: Mcx<'mcx>,
@@ -120,6 +121,7 @@ pub fn gistplacetopage<'mcx>(
     markfollowright: bool,
     heap_rel: &Relation<'_>,
     is_build: bool,
+    mut newblkno: Option<&mut BlockNumber>,
 ) -> PgResult<(bool, Vec<GISTPageSplitInfo<'mcx>>)> {
     let blkno = buffer.block_number();
     let page = buffer.page();
@@ -269,6 +271,14 @@ pub fn gistplacetopage<'mcx>(
                 v
             };
 
+            if let Some(nb) = newblkno.as_deref_mut() {
+                for t in &tuples {
+                    if t[..6] == itup[0][..6] {
+                        *nb = d.blkno;
+                    }
+                }
+            }
+
             let fill = |pm: &mut PageMut<'_>| -> PgResult<()> {
                 gistfillbuffer(rel.name(), pm, &tuples, FirstOffsetNumber)?;
                 page_opaque_update(pm, |op| {
@@ -382,6 +392,10 @@ pub fn gistplacetopage<'mcx>(
             gistGetFakeLSN(rel)?
         };
         buf_page_mut(buffer.buffer()).set_lsn(recptr);
+
+        if let Some(nb) = newblkno {
+            *nb = blkno;
+        }
     }
 
     if let Some(lc) = leftchildbuf {
@@ -978,6 +992,7 @@ fn gistinserttuples<'mcx>(
             true,
             state.heap_rel,
             state.is_build,
+            None,
         );
         pin.release();
         res?

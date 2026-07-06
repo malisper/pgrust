@@ -50,7 +50,7 @@ pub(crate) unsafe fn itup_get_tid(itup: ITup) -> ItemPointerData {
 }
 
 #[inline]
-pub(crate) unsafe fn itup_block_number(itup: ITup) -> BlockNumber {
+pub unsafe fn itup_block_number(itup: ITup) -> BlockNumber {
     let hi = itup.cast::<u16>().read_unaligned() as u32;
     let lo = itup.add(2).cast::<u16>().read_unaligned() as u32;
     (hi << 16) | lo
