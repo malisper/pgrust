@@ -78,10 +78,6 @@ pub(crate) struct ParallelExecShared {
     queues: Mutex<Vec<(Arc<shm_mq::ShmMq>, Arc<tqueue::ChunkLedger>)>>,
     // Written once by the leader's InitializeDSM walk, before workers launch.
     nodes: Mutex<Vec<(i32, ParallelNodeShared)>>,
-    // Thread-native agg table handoff registry snapshot (nodeagg::merge);
-    // worker threads adopt it before their run (leader-registered at
-    // ExecInitAgg, keyed by partial Agg plan-node address).
-    agg_handoff: ::nodeagg::merge::AggHandoffExport,
     instrumentation: Option<SharedInstrumentation>,
     usage: Mutex<Vec<(BufferUsage, WalUsage)>>,
 }
@@ -389,6 +385,7 @@ pub fn exec_init_parallel_plan<'mcx>(
     nworkers: i32,
     tuples_needed: i64,
 ) -> PgResult<ParallelExecutorInfo> {
+    parallel::gtrace("l.initplan.begin");
     // ExecSetParamPlanMulti: force initplan outputs before workers read them.
     ::executils::exec_eval_param_exec_params(estate, &crate::nodegather::bms_members(send_params))?;
     walk_parallel_aware(Some(child_plan));
@@ -443,9 +440,6 @@ pub fn exec_init_parallel_plan<'mcx>(
         Ok(())
     })?;
 
-    let mut subtree_ids = Vec::new();
-    collect_plan_node_ids(Some(child_plan), &mut subtree_ids);
-
     let instrumented = estate.es_instrument != 0;
     let shared = Arc::new(ParallelExecShared {
         // SAFETY: the pstmt lives in the leader's executor arena; workers are
@@ -462,7 +456,6 @@ pub fn exec_init_parallel_plan<'mcx>(
         eflags: estate.es_top_eflags,
         queues: Mutex::new(Vec::new()),
         nodes: Mutex::new(nodes),
-        agg_handoff: ::nodeagg::merge::export_registry(),
         instrumentation: instrumented.then(|| SharedInstrumentation {
             instrument_options: estate.es_instrument,
             workers: Mutex::new((0..nworkers).map(|_| None).collect()),
@@ -472,6 +465,9 @@ pub fn exec_init_parallel_plan<'mcx>(
     let tqueue = setup_tuple_queues(&shared, nworkers);
     parallel::set_private(pcxt, Arc::clone(&shared) as Arc<dyn Any + Send + Sync>);
 
+    let mut subtree_ids = Vec::new();
+    collect_plan_node_ids(Some(child_plan), &mut subtree_ids);
+    parallel::gtrace("l.initplan.end");
     Ok(ParallelExecutorInfo {
         pcxt,
         shared,
@@ -681,6 +677,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         QueryEnvHandle::NULL,
         instrument_options,
     )?;
+    parallel::gtrace("w.qd.created");
 
     // Worker-panic containment injection: forced fault on demand, env-gated
     // so the surface is inert in production (crash-restart-design pattern).
@@ -689,10 +686,9 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         .then(|| exec.query_text.clone())
         .unwrap_or_default();
 
-    ::nodeagg::merge::adopt_registry(&exec.agg_handoff);
-
     let mut run = || -> PgResult<()> {
         crate::execmain::executor_start_seam(qd, exec.eflags)?;
+        parallel::gtrace("w.execstart.done");
         if inject.contains("pgrust:worker-panic-run") {
             panic!("injected parallel worker panic (run)");
         }
@@ -794,7 +790,9 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         let save = ::instrument::instr_start_parallel_query();
 
         let count = if exec.tuples_needed < 0 { 0 } else { exec.tuples_needed as u64 };
+        parallel::gtrace("w.run.begin");
         crate::execmain::executor_run_seam(qd, ForwardScanDirection, count, &mut receiver)?;
+        parallel::gtrace("w.run.end");
         crate::execmain::executor_finish_seam(qd)?;
 
         {
@@ -834,7 +832,6 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     let result = match result {
         Ok(r) => r,
         Err(payload) => {
-            ::nodeagg::merge::clear_thread_registry();
             querydesc::release_query_desc_seam(qd);
             types_portal::params::free(params);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -843,7 +840,6 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             std::panic::resume_unwind(payload);
         }
     };
-    ::nodeagg::merge::clear_thread_registry();
     if result.is_err() {
         querydesc::release_query_desc_seam(qd);
     } else {

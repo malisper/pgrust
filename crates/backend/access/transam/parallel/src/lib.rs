@@ -137,6 +137,20 @@ pub fn ParallelWorkerNumber() -> i32 {
     PARALLEL_WORKER_NUMBER.with(|c| c.get())
 }
 
+// Gather launch-path phase timestamps, PGRUST_GATHER_TRACE-gated (§2 fixed-cost
+// attribution); off the launch path this is never called.
+pub fn gtrace(phase: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
+        return;
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    eprintln!("GTRACE {phase} w={} t_us={t}", ParallelWorkerNumber());
+}
+
 pub fn IsParallelWorker() -> bool {
     ParallelWorkerNumber() >= 0
 }
@@ -223,6 +237,7 @@ pub fn CreateParallelContext(
 }
 
 pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
+    gtrace("l.dsm.begin");
     let mut nworkers = with_pcxt(id, |p| p.nworkers);
 
     if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
@@ -315,6 +330,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
             .collect();
         p.shared = Some(shared);
     });
+    gtrace("l.dsm.end");
     Ok(())
 }
 
@@ -392,6 +408,7 @@ pub fn LaunchParallelWorkers(id: ParallelContextId) -> PgResult<i32> {
         return Ok(0);
     }
     let shared = shared.expect("InitializeParallelDSM not run");
+    gtrace("l.launch.begin");
 
     lmgr_proc::BecomeLockGroupLeader()?;
 
@@ -446,6 +463,7 @@ pub fn LaunchParallelWorkers(id: ParallelContextId) -> PgResult<i32> {
         p.known_attached_workers = vec![false; p.nworkers_to_launch as usize];
         p.nknown_attached_workers = 0;
     });
+    gtrace("l.launch.end");
     Ok(launched)
 }
 
@@ -819,6 +837,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     let worker_number = i32::from_ne_bytes(entry.bgw_extra[0..4].try_into().unwrap());
     debug_assert!(worker_number >= 0);
     PARALLEL_WORKER_NUMBER.with(|c| c.set(worker_number));
+    gtrace("w.main.enter");
 
     let shared = SHARED_REGISTRY
         .lock()
@@ -841,6 +860,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     latch::SetLatch(types_storage::latch::LatchHandle::proc(
         shared.parallel_leader_proc_number,
     ));
+    gtrace("w.attached");
 
     // C pq_redirect_to_shm_mq: sub-ERROR client-bound reports become 'N'
     // messages; ERROR+ is forwarded exactly once from the unwind payload.
@@ -925,15 +945,18 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     // InitPostgres for a database-less worker; our InitPostgres has no such
     // arm yet, so InvalidOid (the substrate e2e) skips the connect step.
     if shared.database_id != InvalidOid {
+        gtrace("w.conn.begin");
         bgworker::BackgroundWorkerInitializeConnectionByOid(
             shared.database_id,
             shared.authenticated_user_id,
             bgworker::BGWORKER_BYPASS_ALLOWCONN | bgworker::BGWORKER_BYPASS_ROLELOGINCHECK,
         )?;
         mbutils::SetClientEncoding(mbutils::GetDatabaseEncoding())?;
+        gtrace("w.conn.end");
     }
 
     xact::StartParallelWorkerTransaction(&shared.tstate)?;
+    gtrace("w.txn.started");
 
     catalog_storage::RestorePendingSyncs(&shared.pending_syncs);
     relmapper::RestoreRelationMap(&shared.relmap)?;
@@ -950,8 +973,10 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     snapmgr::PushActiveSnapshot(&asnapshot)?;
 
     inval::local::InvalidateSystemCaches()?;
+    gtrace("w.inval.done");
 
     guc::store::restore_nondefault_variables(&shared.guc_state)?;
+    gtrace("w.guc.done");
 
     miscinit::SetUserIdAndSecContext(shared.current_user_id, shared.sec_context);
 
@@ -968,7 +993,9 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     INITIALIZING_PARALLEL_WORKER.with(|c| c.set(false));
     xact::EnterParallelMode();
 
+    gtrace("w.entry.begin");
     entrypt(shared)?;
+    gtrace("w.entry.end");
 
     xact::ExitParallelMode();
     snapmgr::PopActiveSnapshot()?;

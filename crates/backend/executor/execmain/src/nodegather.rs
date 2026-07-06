@@ -111,6 +111,7 @@ fn gather_startup<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let gather = node.plan;
+    ::parallel::gtrace("l.gather.begin");
     if gather.num_workers > 0 && estate.es_use_parallel_mode {
         match node.pei.as_mut() {
             None => {
@@ -144,6 +145,7 @@ fn gather_startup<'mcx>(
     node.need_to_scan_locally =
         node.nreaders == 0 || (!gather.single_copy && leader_participation());
     node.initialized = true;
+    ::parallel::gtrace("l.gather.launched");
     Ok(())
 }
 
@@ -274,6 +276,7 @@ pub(crate) fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
 
 /// `ExecShutdownGatherWorkers` (nodeGather.c).
 pub fn exec_shutdown_gather_workers(node: &mut GatherState<'_>) -> PgResult<()> {
+    ::parallel::gtrace("l.gather.workers_done");
     node.reader = Vec::new();
     node.nreaders = 0;
     node.nextreader = 0;

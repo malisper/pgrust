@@ -492,6 +492,7 @@ pub fn RegisterDynamicBackgroundWorker(
 
     if handle.is_some() {
         pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_BACKGROUND_WORKER_CHANGE);
+        gtrace("l.register.signaled");
     }
 
     Ok(handle)
@@ -706,7 +707,22 @@ fn fatal_exit(e: &PgError) -> ! {
     ipc::proc_exit(1, g::MyProcPid())
 }
 
+// Launch-path phase timestamp, PGRUST_GATHER_TRACE-gated (duplicated from
+// parallel::gtrace — this crate sits below parallel in the dep graph).
+fn gtrace(phase: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
+        return;
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    eprintln!("GTRACE {phase} w=? t_us={t}");
+}
+
 pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
+    gtrace("w.bgw.thread_start");
     let my_pid = g::MyProcPid();
 
     let StartupData::BgWorker(d) = startup_data else {
