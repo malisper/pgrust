@@ -438,6 +438,7 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"JSONBEHAVIOR" => self.read_json_behavior(),
             b"JSONEXPR" => self.read_json_expr(),
             b"NAMEDARGEXPR" => self.read_named_arg_expr(),
+            b"RETURNINGEXPR" => self.read_returning_expr(),
             b"FIELDSELECT" => self.read_field_select(),
             b"FIELDSTORE" => self.read_field_store(),
             b"ROWEXPR" => self.read_row_expr(),
@@ -754,6 +755,14 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
         r.colnames = self.read_node_list("colnames")?;
         r.location = self.read_location("location");
         Ok(r.seal())
+    }
+
+    fn read_returning_expr(&mut self) -> PgResult<Node<'mcx>> {
+        let mcx = self.mcx;
+        let retlevelsup = self.read_i32("retlevelsup");
+        let retold = self.read_bool("retold");
+        let retexpr = self.read_node("retexpr")?.expect("ReturningExpr has a retexpr");
+        Node::mk(mcx, types_nodes::primnodes::ReturningExpr { retlevelsup, retold, retexpr })
     }
 
     fn read_field_select(&mut self) -> PgResult<Node<'mcx>> {

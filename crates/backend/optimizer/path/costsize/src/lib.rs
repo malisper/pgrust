@@ -412,6 +412,10 @@ fn cost_qual_eval_walker<'mcx>(
         NodeTag::T_PlaceHolderVar => {
             cost_qual_eval_walker(run.as_deref_mut(), node.as_place_holder_var().unwrap().phexpr, cost)
         }
+        // No C case: falls to C's expression_tree_walker default.
+        NodeTag::T_ReturningExpr => {
+            cost_qual_eval_walker(run.as_deref_mut(), node.as_returning_expr().unwrap().retexpr, cost)
+        }
         other => panic!("cost_qual_eval_walker (costsize.c): {other:?}; M2 expression lane"),
     }
 }
