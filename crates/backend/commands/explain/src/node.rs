@@ -322,6 +322,40 @@ fn collect_node_subplans<'mcx>(
                 }
             }
         }
+        // ExecInitMerge order: per action, WHEN qual then projection; the
+        // per-rel lists share plan_ids and the printer dedups.
+        NodeTag::T_ModifyTable => {
+            let mt = node.as_modify_table().unwrap();
+            for wlist in mt.withCheckOptionLists.iter() {
+                if let Some(l) = wlist.as_list() {
+                    walk_list(&mut out, l);
+                }
+            }
+            for rlist in mt.returningLists.iter() {
+                if let Some(l) = rlist.as_list() {
+                    walk_list(&mut out, l);
+                }
+            }
+            walk_list(&mut out, &mt.onConflictSet);
+            if let Some(w) = mt.onConflictWhere {
+                collect_subplans_expr(w, &mut out);
+            }
+            for jc in mt.mergeJoinConditions.iter() {
+                if let Some(l) = jc.as_list() {
+                    walk_list(&mut out, l);
+                }
+            }
+            for mal in mt.mergeActionLists.iter() {
+                let Some(actions) = mal.as_list() else { continue };
+                for action_node in actions {
+                    let Some(action) = action_node.as_merge_action() else { continue };
+                    if let Some(q) = action.qual {
+                        collect_subplans_expr(q, &mut out);
+                    }
+                    walk_list(&mut out, &action.targetList);
+                }
+            }
+        }
         // Scans: projection compiles before the qual (C ExecInitSeqScan).
         _ => {
             walk_list(&mut out, &plan.targetlist);
