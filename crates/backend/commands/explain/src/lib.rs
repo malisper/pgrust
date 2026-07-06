@@ -37,17 +37,12 @@ const XMLOID: Oid = 142;
 const JSONOID: Oid = 114;
 
 pub(crate) mod gucs {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static QUOTE_ALL_IDENTIFIERS: AtomicBool = AtomicBool::new(false);
-
-    pub fn quote_all_identifiers() -> bool {
-        QUOTE_ALL_IDENTIFIERS.load(Ordering::Relaxed)
-    }
-
-    pub fn set_quote_all_identifiers(v: bool) {
-        QUOTE_ALL_IDENTIFIERS.store(v, Ordering::Relaxed);
-    }
+    guc_tables::session_guc_bool!(
+        QUOTE_ALL_IDENTIFIERS,
+        quote_all_identifiers,
+        set_quote_all_identifiers,
+        false
+    );
 }
 
 // quote_all_identifiers backing moves to ruleutils when that unit lands

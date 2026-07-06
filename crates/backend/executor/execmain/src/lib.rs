@@ -98,12 +98,11 @@ pub fn init_seams() {
     );
     execparallel::register_parallel_query_main();
     {
-        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-        static PLP: AtomicBool = AtomicBool::new(true);
+        guc_tables::session_guc_bool!(PLP, parallel_leader_participation_stand_in, set_parallel_leader_participation_stand_in, true);
         guc_tables::vars::parallel_leader_participation.install_if_absent(
             guc_tables::GucVarAccessors {
-                get: || PLP.load(Relaxed),
-                set: |v| PLP.store(v, Relaxed),
+                get: parallel_leader_participation_stand_in,
+                set: set_parallel_leader_participation_stand_in,
             },
         );
     }

@@ -2315,14 +2315,17 @@ mod tests {
     }
 }
 
-static DEFAULT_STATISTICS_TARGET: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(100);
+guc_tables::session_guc_int!(
+    DEFAULT_STATISTICS_TARGET,
+    default_statistics_target_guc,
+    set_default_statistics_target_guc,
+    100
+);
 
 pub fn init_seams() {
-    use std::sync::atomic::Ordering::Relaxed;
     guc_tables::vars::default_statistics_target.install(guc_tables::GucVarAccessors {
-        get: || DEFAULT_STATISTICS_TARGET.load(Relaxed),
-        set: |v| DEFAULT_STATISTICS_TARGET.store(v, Relaxed),
+        get: default_statistics_target_guc,
+        set: set_default_statistics_target_guc,
     });
     commands_analyze_seams::analyze_rel::set(analyze_rel_seam);
 }
