@@ -307,6 +307,8 @@ fn index_am_flags(kind: types_relscan::IndexAmKind) -> (bool, bool, bool, bool) 
         Gist => (false, false, true, true),
         Spgist => (false, false, false, true),
         Brin => (false, false, true, false),
+        #[allow(unreachable_patterns)]
+        _ => (false, false, false, false),
     }
 }
 
