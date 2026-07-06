@@ -386,6 +386,19 @@ unsafe fn regress_va_slice<'a>(d: Datum) -> &'a [u8] {
     }
 }
 
+// C allocates the indirect targets (and the returned tuple) in
+// TopTransactionContext so they outlive the call: the tuple image gets
+// copied around by the executor, the pointed-to targets do not. Rust
+// analogue per the pg_enum precedent: a retained backend-life leaked arena
+// (test-only path; the regress file's footprint is bounded).
+fn indirect_target_mcx() -> ::mcx::Mcx<'static> {
+    thread_local! {
+        static TCX: ::mcx::Mcx<'static> =
+            Box::leak(Box::new(::mcx::MemoryContext::new("MakeTupleIndirectTargets"))).mcx();
+    }
+    TCX.with(|m| *m)
+}
+
 fn fc_make_tuple_indirect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     // SAFETY: catalog arg 0 is a non-null composite datum (strict fn).
@@ -433,11 +446,12 @@ fn fc_make_tuple_indirect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
             continue;
         }
 
-        // copy datum, so it still lives later
-        let copy: ::mcx::PgVec<'_, u8> = if regress_is_external_ondisk(attr) {
-            detoast::detoast_external_attr(mcx, attr)?
+        // copy datum, so it still lives later (C: TopTransactionContext)
+        let tcx = indirect_target_mcx();
+        let copy: ::mcx::PgVec<'static, u8> = if regress_is_external_ondisk(attr) {
+            detoast::detoast_external_attr(tcx, attr)?
         } else {
-            let mut v = ::mcx::vec_with_capacity_in(mcx, attr.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(tcx, attr.len())?;
             ::mcx::vec_append_bytes(&mut v, attr)?;
             v
         };
@@ -454,7 +468,8 @@ fn fc_make_tuple_indirect(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
         values[i] = new_attr;
     }
 
-    let newtup = ::heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    // C forms the result inside the TopTransactionContext switch as well.
+    let newtup = ::heaptuple::heap_form_tuple(indirect_target_mcx(), &tupdesc, &values, &nulls)?;
     // Intentionally not flattened through the normal composite-result path
     // (C's comment): returning t_data as-is keeps the indirect pointers live
     // for later statements to exercise, matching regress.c's contract.
