@@ -20,6 +20,7 @@ const CONSTRAINT_RELATION_ID: Oid = 2606;
 const PROCEDURE_RELATION_ID: Oid = 1255;
 const REWRITE_RELATION_ID: Oid = 2618;
 const STATISTIC_EXT_RELATION_ID: Oid = 3381;
+const USER_MAPPING_RELATION_ID: Oid = types_core::USER_MAPPING_RELATION_ID;
 
 pub fn EventTriggerSQLDropAddObject(
     mcx: Mcx<'_>,
@@ -163,7 +164,7 @@ fn obtain_object_name_namespace(
         }
         // ObjectProperty rows with no name/namespace attnums (objectaddress.c):
         // C's obtain_object_name_namespace is a no-op for these classes.
-        REWRITE_RELATION_ID | DEFAULT_ACL_RELATION_ID => (None, None),
+        REWRITE_RELATION_ID | DEFAULT_ACL_RELATION_ID | USER_MAPPING_RELATION_ID => (None, None),
         other => match class_naming(other) {
             Some(naming) => syscache_naming(object.objectId, &naming)?,
             None => panic!(
