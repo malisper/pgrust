@@ -374,7 +374,10 @@ fn generate_union_paths<'mcx>(
         result_rel,
         cheapest_pathlist,
         PgVec::new_in(mcx),
+        PgVec::new_in(mcx),
         &None,
+        0,
+        false,
         -1.0,
     )?;
     let apath_rows = run.root.path(apath).base().rows;

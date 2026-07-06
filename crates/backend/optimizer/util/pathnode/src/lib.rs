@@ -2639,24 +2639,72 @@ pub fn create_subqueryscan_path<'mcx>(
     Ok(id)
 }
 
-// create_append_path (pathnode.c), serial arm: no partial subpaths, no
-// parallel append, no required_outer.
+// bms_compare (bitmapset.c): big-integer comparison of the two sets.
+fn relids_cmp(a: &types_pathnodes::Relids<'_>, b: &types_pathnodes::Relids<'_>) -> core::cmp::Ordering {
+    let mut am: Vec<i32> = types_pathnodes::relids::relids_members(a).collect();
+    let mut bm: Vec<i32> = types_pathnodes::relids::relids_members(b).collect();
+    loop {
+        match (am.pop(), bm.pop()) {
+            (None, None) => return core::cmp::Ordering::Equal,
+            (None, Some(_)) => return core::cmp::Ordering::Less,
+            (Some(_), None) => return core::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x != y => return x.cmp(&y),
+            _ => {}
+        }
+    }
+}
+
+// append_total_cost_compare / append_startup_cost_compare (pathnode.c):
+// descending cost, ties broken by bms_compare on parent relids.
+fn sort_append_subpaths(
+    run: &PlannerRun<'_>,
+    subpaths: &mut [PathId],
+    selector: CostSelector,
+) {
+    subpaths.sort_by(|&a, &b| {
+        let pa = run.root.path(a).base();
+        let pb = run.root.path(b).base();
+        match compare_path_costs(pa, pb, selector) {
+            0 => relids_cmp(&run.root.rel(pa.parent).relids, &run.root.rel(pb.parent).relids),
+            c if c < 0 => core::cmp::Ordering::Greater,
+            _ => core::cmp::Ordering::Less,
+        }
+    });
+}
+
+// create_append_path (pathnode.c).
+#[allow(clippy::too_many_arguments)]
 pub fn create_append_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
-    subpaths: PgVec<'mcx, PathId>,
+    mut subpaths: PgVec<'mcx, PathId>,
+    mut partial_subpaths: PgVec<'mcx, PathId>,
     pathkeys: PgVec<'mcx, PathKey>,
     required_outer: &types_pathnodes::Relids<'mcx>,
+    parallel_workers: i32,
+    parallel_aware: bool,
     rows: f64,
 ) -> PgResult<PathId> {
+    debug_assert!(!parallel_aware || parallel_workers > 0);
     let mut path = base_path(run, NodeTag::T_AppendPath, NodeTag::T_Append, rel_id);
     // C: appendrels are never SJE removal targets, so the appendrel
     // parampathinfo variant applies unconditionally here.
     path.param_info = get_appendrel_parampathinfo(run, rel_id, required_outer);
-    path.parallel_aware = false;
+    path.parallel_aware = parallel_aware;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.parallel_workers = parallel_workers;
     path.pathkeys = pathkeys;
+    if parallel_aware {
+        // Non-partial subpaths by descending total cost (workers claim the
+        // expensive ones first); partial subpaths by descending startup cost.
+        debug_assert!(path.pathkeys.is_empty());
+        sort_append_subpaths(run, &mut subpaths, CostSelector::Total);
+        sort_append_subpaths(run, &mut partial_subpaths, CostSelector::Startup);
+    }
     let first_partial_path = subpaths.len() as i32;
+    for &sp in partial_subpaths.iter() {
+        subpaths.push(sp);
+    }
     let limit_tuples = if types_pathnodes::relids::relids_equal(
         &run.root.rel(rel_id).relids,
         &run.root.all_query_rels,
@@ -2673,6 +2721,7 @@ pub fn create_append_path<'mcx>(
         ));
         path.parallel_safe = path.parallel_safe && s.parallel_safe;
     }
+    debug_assert!(!parallel_aware || path.parallel_safe);
     let single = (subpaths.len() == 1).then(|| subpaths[0]);
     let id = run.root.alloc_path(PathNode::AppendPath(types_pathnodes::AppendPath {
         path,
@@ -2681,24 +2730,28 @@ pub fn create_append_path<'mcx>(
         limit_tuples,
     }));
     match single {
-        // A single non-parallel-aware child makes the Append a no-op that
-        // setrefs removes: inherit its size, cost and pathkeys.
+        // A single child whose parallel awareness matches makes the Append a
+        // no-op that setrefs removes: inherit its size, cost and pathkeys.
         Some(child_id) => {
-            let (c_rows, c_startup, c_total, c_keys) = {
+            let (c_aware, c_rows, c_startup, c_total, c_keys) = {
                 let c = run.root.path(child_id).base();
-                debug_assert!(!c.parallel_aware);
                 (
+                    c.parallel_aware,
                     c.rows,
                     c.startup_cost,
                     c.total_cost,
                     types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &c.pathkeys),
                 )
             };
-            let p = run.root.path_mut(id).base_mut();
-            p.rows = c_rows;
-            p.startup_cost = c_startup;
-            p.total_cost = c_total;
-            p.pathkeys = c_keys;
+            if c_aware == parallel_aware {
+                let p = run.root.path_mut(id).base_mut();
+                p.rows = c_rows;
+                p.startup_cost = c_startup;
+                p.total_cost = c_total;
+            } else {
+                costsize::cost_append(run, id);
+            }
+            run.root.path_mut(id).base_mut().pathkeys = c_keys;
         }
         None => costsize::cost_append(run, id),
     }

@@ -982,9 +982,15 @@ pub fn exec_init_node<'mcx>(
             let nvalid = valid.num_members() as usize;
             substates.try_reserve_exact(nvalid).map_err(|_| mcx.oom(nvalid))?;
             subplan_origin.try_reserve_exact(nvalid).map_err(|_| mcx.oom(nvalid))?;
+            // C ExecInitAppend: as_first_partial_plan is the lowest surviving
+            // (post-pruning, compacted-space) subplan index that is partial.
+            let mut first_partial = nvalid as i32;
             let mut i = valid.next_member(-1);
             while i >= 0 {
                 let subplan = ap_plan.appendplans.nth(i as usize);
+                if i >= ap_plan.first_partial_plan && (substates.len() as i32) < first_partial {
+                    first_partial = substates.len() as i32;
+                }
                 let state = exec_init_node(Some(subplan), estate, eflags)?
                     .expect("Append subplan list holds plan nodes");
                 substates.push(state);
@@ -996,6 +1002,7 @@ pub fn exec_init_node<'mcx>(
                 estate,
                 eflags,
                 substates.len(),
+                first_partial,
                 prune_state,
             )?;
             PlanStateNode::Append(::mcx::alloc_in(

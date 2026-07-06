@@ -1259,7 +1259,10 @@ fn create_grouping_paths<'mcx>(
                 grouped_rel,
                 subpaths,
                 mcx::PgVec::new_in(run.mcx),
+                mcx::PgVec::new_in(run.mcx),
                 &None,
+                0,
+                false,
                 -1.0,
             )?
         } else {
