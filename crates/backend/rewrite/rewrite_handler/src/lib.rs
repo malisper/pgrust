@@ -2517,17 +2517,22 @@ fn mcx_str<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
 
 // The fireRIRrules/ApplyRetrieveRule result-relation view arm
 // (rewriteHandler.c:1737-1805), hoisted to run on the owned Query before
-// fireRIRrules: UPDATE/DELETE on an INSTEAD OF view append an unexpanded
-// target copy of the view RTE, re-point RETURNING at it, and add the resjunk
-// wholerow Var over the original (soon-expanded) RTE. C copyObject-deep-copies
-// RETURNING before ChangeVarNodes; the tree here is query-owned, mutate in
-// place.
+// fireRIRrules: UPDATE/DELETE/MERGE on a view append an unexpanded target
+// copy of the view RTE (needed regardless of INSTEAD OF triggers, so the
+// original RTE can be expanded for read access), re-point RETURNING at it,
+// and add the resjunk wholerow Var over the original (soon-expanded) RTE.
+// C copyObject-deep-copies RETURNING before ChangeVarNodes; the tree here is
+// query-owned, mutate in place. mergeTargetRelation is left pointing at the
+// original (now expanded) RTE, matching C.
 fn rewrite_dml_view_with_instead_trigger<'mcx>(
     mcx: Mcx<'mcx>,
     q: &mut Query<'mcx>,
 ) -> PgResult<()> {
     if q.resultRelation == 0
-        || !matches!(q.commandType, CmdType::CMD_UPDATE | CmdType::CMD_DELETE)
+        || !matches!(
+            q.commandType,
+            CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
+        )
     {
         return Ok(());
     }

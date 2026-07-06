@@ -1909,6 +1909,30 @@ fn exec_rename_stmt_inner<'mcx>(
         types_nodes::parsenodes::ObjectType::OBJECT_TABCONSTRAINT => {
             tablecmds::RenameConstraint(mcx, stmt)?;
         }
+        types_nodes::parsenodes::ObjectType::OBJECT_RULE => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt = unsafe {
+                core::mem::transmute::<
+                    &types_nodes::parsenodes::RenameStmt<'_>,
+                    &types_nodes::parsenodes::RenameStmt<'mcx>,
+                >(stmt)
+            };
+            let rvn = stmt.relation.expect("RENAME RULE has a relation");
+            let rv = rel_vocab::RangeVar {
+                catalogname: rvn.catalogname,
+                schemaname: rvn.schemaname,
+                relname: rvn.relname.expect("RangeVar.relname"),
+                inh: rvn.inh,
+                relpersistence: rvn.relpersistence,
+                location: rvn.location,
+            };
+            rewrite_define::RenameRewriteRule(
+                mcx,
+                &rv,
+                stmt.subname.expect("RenameStmt.subname"),
+                stmt.newname.expect("RenameStmt.newname"),
+            )?;
+        }
         types_nodes::parsenodes::ObjectType::OBJECT_AGGREGATE
         | types_nodes::parsenodes::ObjectType::OBJECT_COLLATION
         | types_nodes::parsenodes::ObjectType::OBJECT_CONVERSION

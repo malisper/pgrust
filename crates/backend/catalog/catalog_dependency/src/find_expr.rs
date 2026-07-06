@@ -1,12 +1,14 @@
 // find_expr_references_walker slice bounded to the node set a view SELECT
 // produces; every other tag/rtekind/Query feature is loud with its C symbol.
+use cache_syscache::SysCacheKey;
+use datum::Datum;
 use mcx::Mcx;
 use pg_depend::{object_address_comparator, DependencyType, ObjectAddress};
 use types_core::{
     catalog::{DEFAULT_COLLATION_OID, RECORDOID},
     InvalidOid, Oid, CONSTRAINT_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::list::NodeList;
 use types_nodes::node_tree::Node;
 use types_nodes::nodes_enums::CmdType;
@@ -16,10 +18,9 @@ use types_nodes::NodeTag;
 const OperatorRelationId: Oid = 2617;
 const OperatorFamilyRelationId: Oid = 2753;
 const CollationRelationId: Oid = 3456;
+const TSConfigRelationId: Oid = 3602;
+const TSDictionaryRelationId: Oid = 3600;
 const InvalidAttrNumber: i16 = 0;
-
-const REG_TYPE_OIDS: [Oid; 11] =
-    [24, 2202, 2203, 2204, 2205, 2206, 4191, 3734, 3769, 4089, 4096];
 
 #[cold]
 #[inline(never)]
@@ -159,8 +160,107 @@ fn walker<'w, 'mcx: 'w>(
             if con.constcollid != InvalidOid && con.constcollid != DEFAULT_COLLATION_OID {
                 context.add(CollationRelationId, con.constcollid, 0);
             }
-            if !con.constisnull && REG_TYPE_OIDS.contains(&con.consttype) {
-                walker_unported("reg*-type Const object reference");
+            if !con.constisnull {
+                let objoid = con.constvalue.as_oid();
+                match con.consttype {
+                    24 | 2202 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::PROCOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(types_core::PROCEDURE_RELATION_ID, objoid, 0);
+                        }
+                    }
+                    2203 | 2204 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::OPEROID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(OperatorRelationId, objoid, 0);
+                        }
+                    }
+                    2205 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::RELOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(RELATION_RELATION_ID, objoid, 0);
+                        }
+                    }
+                    2206 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::TYPEOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(TYPE_RELATION_ID, objoid, 0);
+                        }
+                    }
+                    4191 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::COLLOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(CollationRelationId, objoid, 0);
+                        }
+                    }
+                    3734 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::TSCONFIGOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(TSConfigRelationId, objoid, 0);
+                        }
+                    }
+                    3769 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::TSDICTOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(TSDictionaryRelationId, objoid, 0);
+                        }
+                    }
+                    4089 => {
+                        if cache_syscache::SearchSysCacheExists(
+                            cache_syscache::NAMESPACEOID,
+                            SysCacheKey::Value(Datum::from_oid(objoid)),
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                            SysCacheKey::UNUSED,
+                        )? {
+                            context.add(types_core::NAMESPACE_RELATION_ID, objoid, 0);
+                        }
+                    }
+                    4096 => {
+                        return Err(Box::new(
+                            PgError::error(
+                                "constant of the type regrole cannot be used here".to_string(),
+                            )
+                            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        ));
+                    }
+                    _ => {}
+                }
             }
             Ok(())
         }
@@ -619,7 +719,7 @@ fn walk_query<'w, 'mcx: 'w>(
                             .and_then(|e| e.aliasname)
                             .expect("RTE_NAMEDTUPLESTORE has an eref aliasname")
                     ))
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
                 ));
             }
             // RTE_CTE/RTE_VALUES collations only duplicate ones referenced
