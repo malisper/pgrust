@@ -234,7 +234,11 @@ pub fn capture_nondefault_variables() -> Vec<NondefaultGuc> {
 // read_nondefault_variables (guc.c): InitializeGUCOptions must already have
 // run on this thread (SubPostmasterMain order).
 pub fn restore_nondefault_variables(vars: &[NondefaultGuc]) -> PgResult<()> {
+    // Per-variable timing, PGRUST_GATHER_TRACE-gated (§2 fixed-cost hunt).
+    let trace = std::env::var_os("PGRUST_GATHER_TRACE").is_some();
+    let t0 = trace.then(std::time::Instant::now);
     for v in vars {
+        let tv = trace.then(std::time::Instant::now);
         crate::set_config_option_ext(
             &v.name,
             v.value.as_deref(),
@@ -246,6 +250,15 @@ pub fn restore_nondefault_variables(vars: &[NondefaultGuc]) -> PgResult<()> {
             ErrorLevel(0),
             true,
         )?;
+        if let Some(tv) = tv {
+            let us = tv.elapsed().as_micros();
+            if us >= 100 {
+                eprintln!("GTRACE guc.var name={} dt_us={us}", v.name);
+            }
+        }
+    }
+    if let Some(t0) = t0 {
+        eprintln!("GTRACE guc.restore n={} total_us={}", vars.len(), t0.elapsed().as_micros());
     }
     Ok(())
 }
