@@ -99,6 +99,18 @@ where
     if node.grp_done {
         return Ok(None);
     }
+    // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec;
+    // this executor hoists instead (nodeagg/noderesult pattern).
+    let deps = node.proj.param_exec_deps();
+    if !deps.is_empty() {
+        ::executils::exec_eval_param_exec_params(estate, deps)?;
+    }
+    if let Some(q) = node.qual.as_deref() {
+        let deps = q.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
 
     if !node.have_first {
         let Some(outer_id) = fetch_outer(estate)? else {
