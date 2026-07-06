@@ -4055,11 +4055,6 @@ fn create_append_plan<'mcx>(
 
     let mut part_prune_index = -1;
     if crate::gucs::enable_partition_pruning() {
-        assert!(
-            !has_param_info,
-            "create_append_plan (createplan.c): parameterized Append ppi_clauses \
-             prunequal (replace_nestloop_params) unported"
-        );
         let rinfos = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel_id).baserestrictinfo);
         let mut prunequal: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
         for &rid in rinfos.iter() {
@@ -4067,6 +4062,21 @@ fn create_append_plan<'mcx>(
                 continue;
             }
             prunequal.push(*run.root.expr_node(run.root.rinfo(rid).clause));
+        }
+        if has_param_info {
+            // A parameterized Append checks its ppi_clauses in the children;
+            // outer-rel Vars therein become nestloop Params for pruning.
+            let prmquals = match &run.root.path(path_id).base().param_info {
+                Some(ppi) => crate::relnode::pgvec_clone_shallow(mcx, &ppi.ppi_clauses),
+                None => unreachable!(),
+            };
+            for &rid in prmquals.iter() {
+                if run.root.rinfo(rid).pseudoconstant {
+                    continue;
+                }
+                let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+                prunequal.push(replace_nestloop_params(run, clause)?);
+            }
         }
         if !prunequal.is_empty() {
             part_prune_index =
