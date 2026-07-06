@@ -13,6 +13,7 @@ use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_UNDEFINED_OBJECT, WARNING,
 };
+use ::types_nodes::supportnodes;
 
 const LIBRARY: &str = "regress";
 const NAMEDATALEN: usize = 64;
@@ -725,8 +726,38 @@ fn fc_is_catalog_text_unique_index_oid(
 
 /* ====================== test_support_func(internal) ====================== */
 
-fn fc_test_support_func(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("regress: test_support_func requires the planner SupportRequest machinery (unported)");
+// regress.c test_support_func: assumes its subject is int4eq (selectivity)
+// or generate_series_int4 (rows).
+fn fc_test_support_func(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    const Int4EqualOperator: ::types_core::Oid = 96;
+    let raw = fcinfo.arg(0).as_usize() as *mut ();
+    let mut ret = 0usize;
+    // SAFETY (each demux): prosupport contract — arg 0 is a live tag-first
+    // support-request node owned by the planner for this call's duration.
+    if let Some(req) = unsafe { supportnodes::support_request_selectivity_mut(raw) } {
+        req.selectivity = (req.estimate)(Int4EqualOperator)?;
+        ret = raw as usize;
+    }
+    if let Some(req) = unsafe { supportnodes::support_request_cost_mut(raw) } {
+        req.startup = 0.0;
+        req.per_tuple = 2.0 * (guc_tables::vars::cpu_operator_cost.get().get)();
+        ret = raw as usize;
+    }
+    if let Some(req) = unsafe { supportnodes::support_request_rows_mut(raw) } {
+        if let Some(fe) = req.node.and_then(|n| n.as_func_expr()) {
+            let args: Vec<_> = fe.args.iter().collect();
+            let (arg1, arg2) = (args[0].as_const(), args[1].as_const());
+            if let (Some(c1), Some(c2)) = (arg1, arg2) {
+                if !c1.constisnull && !c2.constisnull {
+                    let val1 = c1.constvalue.as_i32();
+                    let val2 = c2.constvalue.as_i32();
+                    req.rows = (val2 - val1 + 1) as f64;
+                    ret = raw as usize;
+                }
+            }
+        }
+    }
+    Ok(Datum::from_usize(ret))
 }
 
 /* ================== test_opclass_options_func(internal) ================== */
