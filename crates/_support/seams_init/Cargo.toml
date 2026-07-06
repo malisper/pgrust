@@ -180,6 +180,7 @@ adt_geo = { path = "../../backend/utils/adt/geo" }
 spgist_text = { path = "../../backend/access/spgist/spgist_text" }
 spgist_quadtree = { path = "../../backend/access/spgist/spgist_quadtree" }
 spgist_kdtree = { path = "../../backend/access/spgist/spgist_kdtree" }
+spgist_box = { path = "../../backend/access/spgist/spgist_box" }
 gistproc = { path = "../../backend/access/gist/gistproc" }
 rangetypes_gist = { path = "../../backend/utils/adt/rangetypes_gist" }
 rangetypes_spgist = { path = "../../backend/utils/adt/rangetypes_spgist" }
