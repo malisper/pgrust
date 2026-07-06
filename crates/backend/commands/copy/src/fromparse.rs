@@ -808,10 +808,60 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             return Ok(true);
         }
 
-        // C's COPY_HEADER_TRUE arm: consume and discard the header line.
-        if self.cur_lineno == 0 && self.opts.header_line {
+        // NextCopyFromRawFields header arm: consume the header line, and for
+        // COPY_HEADER_MATCH verify it against the column list.
+        if self.cur_lineno == 0 && self.opts.header_line != crate::CopyHeaderChoice::False {
             self.cur_lineno += 1;
-            if self.copy_read_line(is_csv)? {
+            let done = self.copy_read_line(is_csv)?;
+
+            if self.opts.header_line == crate::CopyHeaderChoice::Match {
+                let fldct = if is_csv {
+                    self.copy_read_attributes_csv()?
+                } else {
+                    self.copy_read_attributes_text()?
+                };
+                if fldct != self.attnumlist.len() {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "wrong number of fields in header line: got {fldct}, expected {}",
+                            self.attnumlist.len()
+                        ))
+                        .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
+                    ));
+                }
+                for fldnum0 in 0..self.attnumlist.len() {
+                    let attnum = self.attnumlist[fldnum0];
+                    let attname = self.attname(attnum as usize - 1);
+                    let off = self.raw_fields[fldnum0];
+                    if off < 0 {
+                        return Err(Box::new(
+                            PgError::error(format!(
+                                "column name mismatch in header line field {}: got null value \
+                                 (\"{}\"), expected \"{attname}\"",
+                                fldnum0 + 1,
+                                self.opts.null_print
+                            ))
+                            .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
+                        ));
+                    }
+                    let bytes = &self.attribute_buf[off as usize..];
+                    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                    let colname = &bytes[..nul];
+                    if colname != self.attnames[attnum as usize - 1].name_str() {
+                        return Err(Box::new(
+                            PgError::error(format!(
+                                "column name mismatch in header line field {}: got \"{}\", \
+                                 expected \"{attname}\"",
+                                fldnum0 + 1,
+                                String::from_utf8_lossy(colname)
+                            ))
+                            .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
+                        ));
+                    }
+                }
+            }
+
+            if done {
                 return Ok(false);
             }
         }
@@ -1219,7 +1269,7 @@ pub mod bench_internals {
                 escape: b'"',
                 null_print,
                 default_print: None,
-                header_line: false,
+                header_line: crate::CopyHeaderChoice::False,
                 force_quote: None,
                 force_quote_all: false,
                 force_notnull: None,

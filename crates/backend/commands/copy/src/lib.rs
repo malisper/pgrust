@@ -45,6 +45,15 @@ fn unported(what: &str) -> ! {
     panic!("unported: COPY {what}")
 }
 
+// CopyHeaderChoice (copy.h).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum CopyHeaderChoice {
+    #[default]
+    False,
+    True,
+    Match,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum CopyOnErrorChoice {
     #[default]
@@ -70,7 +79,7 @@ pub struct CopyFormatOptions<'s> {
     pub escape: u8,
     pub null_print: &'s str,
     pub default_print: Option<&'s str>,
-    pub header_line: bool,
+    pub header_line: CopyHeaderChoice,
     pub force_quote: Option<&'s NodeList<'s>>,
     pub force_quote_all: bool,
     pub force_notnull: Option<&'s NodeList<'s>>,
@@ -412,13 +421,16 @@ fn def_boolean(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<bool> {
     ))
 }
 
-// defGetCopyHeaderChoice (copy.c); COPY_HEADER_MATCH is loud.
-fn def_header_choice(d: &types_nodes::parsenodes::DefElem<'_>, is_from: bool) -> PgResult<bool> {
-    let Some(arg) = d.arg else { return Ok(true) };
+// defGetCopyHeaderChoice (copy.c).
+fn def_header_choice(
+    d: &types_nodes::parsenodes::DefElem<'_>,
+    is_from: bool,
+) -> PgResult<CopyHeaderChoice> {
+    let Some(arg) = d.arg else { return Ok(CopyHeaderChoice::True) };
     if let Some(i) = arg.as_integer() {
         match i.ival {
-            0 => return Ok(false),
-            1 => return Ok(true),
+            0 => return Ok(CopyHeaderChoice::False),
+            1 => return Ok(CopyHeaderChoice::True),
             _ => {}
         }
     } else {
@@ -434,10 +446,10 @@ fn def_header_choice(d: &types_nodes::parsenodes::DefElem<'_>, is_from: bool) ->
             ""
         };
         if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
-            return Ok(true);
+            return Ok(CopyHeaderChoice::True);
         }
         if sval.eq_ignore_ascii_case("false") || sval.eq_ignore_ascii_case("off") {
-            return Ok(false);
+            return Ok(CopyHeaderChoice::False);
         }
         if sval.eq_ignore_ascii_case("match") {
             if !is_from {
@@ -446,7 +458,7 @@ fn def_header_choice(d: &types_nodes::parsenodes::DefElem<'_>, is_from: bool) ->
                         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
                 ));
             }
-            unported("HEADER match");
+            return Ok(CopyHeaderChoice::Match);
         }
     }
     Err(Box::new(
@@ -571,7 +583,7 @@ pub fn ProcessCopyOptions<'s>(
         escape: 0,
         null_print: "",
         default_print: None,
-        header_line: false,
+        header_line: CopyHeaderChoice::False,
         force_quote: None,
         force_quote_all: false,
         force_notnull: None,
@@ -789,7 +801,7 @@ pub fn ProcessCopyOptions<'s>(
                 .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
         ));
     }
-    if opts.binary && opts.header_line {
+    if opts.binary && opts.header_line != CopyHeaderChoice::False {
         return Err(cannot_in_binary("HEADER"));
     }
     if !opts.csv_mode && quote.is_some() {
