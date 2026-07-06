@@ -3777,7 +3777,8 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
     pstmt.planTree = Some(outer);
-    pstmt.subplans = NodeList::make2(mcx, init_top, body).unwrap();
+    pstmt.subplans =
+        ::types_nodes::list::OptNodeList::make2(mcx, Some(init_top), Some(body)).unwrap();
     pstmt.paramExecTypes = OidList::make2(mcx, INT4OID, INT4OID).unwrap();
     pstmt.rtable = rtable;
     pstmt.permInfos = perms;
