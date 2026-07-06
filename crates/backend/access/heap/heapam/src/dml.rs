@@ -1986,9 +1986,25 @@ pub fn heap_update(
         debug_assert!(result != TM_Result::TM_BeingModified || wait);
 
         if result == TM_Result::TM_Invisible {
+            // DEBUG(merge-lane triage): tuple forensics; revert to
+            // invisible_tuple("update") before delivery.
+            let td = oldtup.t_data();
+            let dbg = std::format!(
+                "attempted to update invisible tuple [rel={} tid=({},{}) xmin={} xmax={} \
+                 infomask={:#x} cid={}]",
+                relation.rd_id,
+                ItemPointerGetBlockNumber(otid),
+                ItemPointerGetOffsetNumber(otid),
+                td.xmin_raw(),
+                td.xmax_raw(),
+                td.t_infomask,
+                cid,
+            );
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
             pin.release();
-            return Err(invisible_tuple("update"));
+            return Err(Box::new(
+                PgError::error(dbg).with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
         } else if result == TM_Result::TM_BeingModified && wait {
             let xwait = oldtup.t_data().xmax_raw();
             let infomask = oldtup.t_data().t_infomask;
