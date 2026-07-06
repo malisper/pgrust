@@ -59,7 +59,7 @@ pub fn find_base_rel_ignore_join(run: &crate::run::PlannerRun<'_>, relid: i32) -
             }
         }
     }
-    panic!("no relation entry for relid {relid}");
+    panic!("no relation entry for relid {relid} (find_base_rel_ignore_join)");
 }
 
 // build_simple_rel (relnode.c), parentless arm (inheritance children are the

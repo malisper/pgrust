@@ -66,6 +66,7 @@ impl PgStatState {
                 self.pending_order.push(key);
                 // Stale-true on a test-local state is harmless (see HAVE_PENDING).
                 HAVE_PENDING.with(|c| c.set(true));
+                crate::shmem::ensure_entry_for_pending(key);
                 v.insert(new_pending_data(key, mcx))
             }
         }

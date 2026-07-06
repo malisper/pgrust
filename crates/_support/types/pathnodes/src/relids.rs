@@ -209,8 +209,16 @@ pub fn relids_subset_compare(a: &Relids<'_>, b: &Relids<'_>) -> SubsetCmp {
 
 // find_base_rel (relnode.c).
 pub fn find_base_rel(root: &PlannerInfo<'_>, relid: i32) -> RelId {
-    assert!(relid > 0 && relid < root.simple_rel_array_size, "no relation entry for relid {relid}");
-    root.simple_rel_array[relid as usize].unwrap_or_else(|| panic!("no relation entry for relid {relid}"))
+    // C elog text plus the site/level: the message never reaches conforming
+    // output, and the two find_base_rel homes are otherwise identical.
+    assert!(
+        relid > 0 && relid < root.simple_rel_array_size,
+        "no relation entry for relid {relid} (find_base_rel, level {})",
+        root.query_level
+    );
+    root.simple_rel_array[relid as usize].unwrap_or_else(|| {
+        panic!("no relation entry for relid {relid} (find_base_rel, level {})", root.query_level)
+    })
 }
 
 // find_childrel_parents (relnode.c): relids of all appendrel ancestors of a

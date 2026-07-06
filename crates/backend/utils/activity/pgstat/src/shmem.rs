@@ -194,6 +194,26 @@ pub(crate) fn drop_entry(key: PgStat_HashKey) {
 }
 
 // pgstat_copy_relation_stats' shared-entry copy.
+// pgstat_prep_pending_entry's pgstat_get_entry_ref(create=true) leg: C
+// creates the zeroed shared-hash entry at first count, so readers observe it
+// before any flush (pg_stat_get_function_calls = 0 mid-transaction,
+// pg_stat_have_stats after an index scan, pgstat_copy_relation_stats source
+// lookup after REINDEX CONCURRENTLY).
+pub(crate) fn ensure_entry_for_pending(key: PgStat_HashKey) {
+    use crate::pending::{
+        PGSTAT_KIND_DATABASE as KD, PGSTAT_KIND_FUNCTION as KF, PGSTAT_KIND_RELATION as KR,
+        PGSTAT_KIND_SUBSCRIPTION as KS,
+    };
+    let mut store = SHARED_STATS.lock().unwrap();
+    store.entry(key).or_insert_with(|| match key.kind {
+        KR => SharedEntry::Relation(PgStat_StatTabEntry::default()),
+        KD => SharedEntry::Database(PgStat_StatDBEntry::default()),
+        KF => SharedEntry::Function(Default::default()),
+        KS => SharedEntry::Subscription(Default::default()),
+        other => panic!("pending entry for unported stats kind {other:?}"),
+    });
+}
+
 pub(crate) fn copy_entry(src: PgStat_HashKey, dst: PgStat_HashKey) {
     let mut store = SHARED_STATS.lock().unwrap();
     if let Some(&e) = store.get(&src) {
