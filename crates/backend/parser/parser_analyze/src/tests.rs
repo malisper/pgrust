@@ -883,7 +883,12 @@ mod from_where {
 
         assert!(q.hasAggs);
         assert!(q.groupingSets.is_nil());
-        assert!(!q.hasGroupRTE, "RTE_GROUP substitution is a recorded divergence");
+        // RTE_GROUP substitution landed with the groupingsets lane (C
+        // parse_analyze.c/parse_clause.c since PG17's RTE_GROUP: a query
+        // with GROUP BY gets the group RTE and hasGroupRTE = true) — the
+        // formerly-recorded divergence is retired; this pin now asserts
+        // C's behavior.
+        assert!(q.hasGroupRTE, "RTE_GROUP substitution is C's behavior (divergence retired)");
         assert_eq!(q.groupClause.len(), 1);
         let gc = q.groupClause.nth(0).as_sort_group_clause().unwrap();
         let t0 = q.targetList.nth(0).as_target_entry().unwrap();
