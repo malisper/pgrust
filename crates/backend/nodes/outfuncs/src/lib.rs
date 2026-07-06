@@ -73,6 +73,14 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
         NodeTag::T_XmlExpr => {
             out_xml_expr(out, node.as_variant::<XmlExpr>().expect("XmlExpr"))?
         }
+        NodeTag::T_ReturningExpr => {
+            let r = node.as_returning_expr().expect("ReturningExpr");
+            w!(out, "{{RETURNINGEXPR :retlevelsup {} :retold ", r.retlevelsup);
+            out_bool(out, r.retold);
+            w!(out, " :retexpr ");
+            out_node(out, r.retexpr)?;
+            w!(out, "}}");
+        }
         NodeTag::T_FieldSelect => {
             let f = node.as_field_select().expect("FieldSelect");
             w!(out, "{{FIELDSELECT :arg ");

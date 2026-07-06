@@ -601,6 +601,11 @@ pub(crate) fn get_rule_expr<'mcx>(
             }
             Ok(())
         }
+        // Only seen while EXPLAINing a plan (rewriter-added, never in a rule);
+        // display just the wrapped expression (an expanded view column).
+        NodeTag::T_ReturningExpr => {
+            get_rule_expr(node.as_returning_expr().unwrap().retexpr, ctx, showimplicit)
+        }
         other => gap("get_rule_expr", &format!("{other:?} deparse arm")),
     }
 }
@@ -987,6 +992,9 @@ fn is_simple_node(node: Node<'_>, parent: Option<Node<'_>>, pretty_flags: i32) -
         }
         NodeTag::T_ConvertRowtypeExpr => {
             is_simple_node(node.as_convert_rowtype_expr().unwrap().arg, Some(node), pretty_flags)
+        }
+        NodeTag::T_ReturningExpr => {
+            is_simple_node(node.as_returning_expr().unwrap().retexpr, Some(node), pretty_flags)
         }
 
         NodeTag::T_OpExpr => {
