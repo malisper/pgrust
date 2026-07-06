@@ -263,10 +263,11 @@ pub(crate) fn ginNewScanKey(
             break;
         }
 
-        // C: nullFlags -> category codes.
+        // C: nullFlags -> category codes; null keys need index placeholders.
         let categories: Vec<GinNullCategory> = (0..query_values.len())
             .map(|i| {
                 if null_flags.get(i).copied().unwrap_or(false) {
+                    has_null_query = true;
                     GIN_CAT_NULL_KEY
                 } else {
                     GIN_CAT_NORM_KEY
