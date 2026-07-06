@@ -216,17 +216,6 @@ pub enum DfaSpace {
     Heap(HeapSpace),
 }
 
-impl DfaSpace {
-    fn for_cnfa(cnfa: &Cnfa) -> RegResult<DfaSpace> {
-        debug_assert!(cnfa.nstates != 0);
-        if small_ok(cnfa) {
-            Ok(DfaSpace::Small(SmallDfaSpace::new()))
-        } else {
-            Ok(DfaSpace::Heap(HeapSpace::for_cnfa(cnfa)?))
-        }
-    }
-}
-
 #[derive(Copy, Clone)]
 pub struct DfaMeta {
     pub nssets: usize,
@@ -270,14 +259,34 @@ impl DfaMeta {
 
 pub struct SubDfa {
     meta: DfaMeta,
-    space: Box<DfaSpace>,
+    space: core::mem::ManuallyDrop<Box<DfaSpace>>,
+}
+
+// C's newdfa (rege_dfa.c) MALLOCs the smalldfa block WITHOUT zeroing — the
+// kernel initializes every sset row via pickss before reading it (nssused
+// starts at 0 in the fresh DfaMeta). Dirty reuse of pooled space is therefore
+// exactly C's contract; zero-filling a fresh SmallDfaSpace per pg_regexec
+// call was 34% of ClickBench Q29's CPU.
+const SUBDFA_POOL_CAP: usize = 40; // C regexec.c LOCALDFAS — max live sub-DFAs per call
+
+std::thread_local! {
+    static SUBDFA_POOL: core::cell::RefCell<Vec<Box<DfaSpace>>> =
+        const { core::cell::RefCell::new(Vec::new()) };
 }
 
 impl SubDfa {
     fn new(eflags: i32, cnfa: &Cnfa) -> RegResult<SubDfa> {
+        debug_assert!(cnfa.nstates != 0);
+        let space = if small_ok(cnfa) {
+            SUBDFA_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_else(|| Box::new(DfaSpace::Small(SmallDfaSpace::new())))
+        } else {
+            Box::new(DfaSpace::Heap(HeapSpace::for_cnfa(cnfa)?))
+        };
         Ok(SubDfa {
             meta: DfaMeta::new(eflags, cnfa),
-            space: Box::new(DfaSpace::for_cnfa(cnfa)?),
+            space: core::mem::ManuallyDrop::new(space),
         })
     }
 
@@ -286,6 +295,21 @@ impl SubDfa {
         let r = f(&mut d);
         self.meta = d.meta();
         r
+    }
+}
+
+impl Drop for SubDfa {
+    fn drop(&mut self) {
+        // SAFETY: drop runs once; `space` is never read after the take.
+        let space = unsafe { core::mem::ManuallyDrop::take(&mut self.space) };
+        if matches!(*space, DfaSpace::Small(_)) {
+            SUBDFA_POOL.with(|p| {
+                let mut p = p.borrow_mut();
+                if p.len() < SUBDFA_POOL_CAP {
+                    p.push(space);
+                }
+            });
+        }
     }
 }
 
@@ -1409,8 +1433,7 @@ fn cfindloop(
 }
 
 
-pub fn pg_regexec<'mcx>(
-    _mcx: Mcx<'mcx>,
+pub fn pg_regexec(
     guts: &Guts,
     data: &[chr],
     search_start: i32,
