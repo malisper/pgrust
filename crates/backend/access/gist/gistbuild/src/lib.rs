@@ -1,7 +1,9 @@
-//! gistbuild.c, insert-based (plain) + sorted build. LOUD lanes: buffered
-//! build (buffering=on / auto-switch) and non-range sortsupport opclasses
-//! (gist_point_sortsupport z-order).
+//! gistbuild.c: insert-based (plain), buffered, and sorted build. LOUD lane:
+//! non-range sortsupport opclasses (gist_point_sortsupport z-order).
 #![allow(non_snake_case)]
+
+pub mod buffered;
+pub mod buffers;
 
 use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext};
@@ -25,6 +27,16 @@ pub struct IndexBuildResult {
 }
 
 const BUFFERING_MODE_SWITCH_CHECK_STEP: u64 = 256;
+const BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET: u64 = 4096;
+
+/// GistBuildMode, minus GIST_SORTED_BUILD (dispatched up front).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GistBuildMode {
+    Disabled,
+    Auto,
+    Stats,
+    Active,
+}
 
 /// gistbuild.
 pub fn gistbuild<'mcx>(
@@ -37,24 +49,29 @@ pub fn gistbuild<'mcx>(
         panic!("index \"{}\" already contains data", index.name());
     }
 
+    let mut build_mode = match index.rd_options.as_ref().and_then(|o| o.gist()) {
+        Some(o) => match o.buffering_mode {
+            types_rel::GistOptBufferingMode::GIST_OPTION_BUFFERING_ON => GistBuildMode::Stats,
+            types_rel::GistOptBufferingMode::GIST_OPTION_BUFFERING_OFF => GistBuildMode::Disabled,
+            types_rel::GistOptBufferingMode::GIST_OPTION_BUFFERING_AUTO => GistBuildMode::Auto,
+        },
+        None => GistBuildMode::Auto,
+    };
+
     let fillfactor = index.get_fillfactor(GIST_DEFAULT_FILLFACTOR);
     let freespace = BLCKSZ * (100 - fillfactor as usize) / 100;
-
-    if index.rd_options.as_ref().and_then(|o| o.gist()).is_some_and(|o| {
-        o.buffering_mode == types_rel::GistOptBufferingMode::GIST_OPTION_BUFFERING_ON
-    }) {
-        panic!("unported: gist buffered build (WITH (buffering=on); gistbuildbuffers lane)");
-    }
-
-    let nkeys = index.indnkeyatts() as usize;
-    let hasallsortsupports =
-        (0..nkeys).all(|i| index_getprocid(index, i, GIST_SORTSUPPORT_PROC) != 0);
 
     let mut giststate = initGISTstate(mcx, index)?;
     let mut temp = MemoryContext::new_bump("GiST temporary context");
 
-    if hasallsortsupports {
-        return gist_sorted_build(mcx, heap, index, indexInfo, &mut giststate, &mut temp);
+    // Unless buffering mode was forced, use sorting when possible.
+    if build_mode != GistBuildMode::Stats {
+        let nkeys = index.indnkeyatts() as usize;
+        let hasallsortsupports =
+            (0..nkeys).all(|i| index_getprocid(index, i, GIST_SORTSUPPORT_PROC) != 0);
+        if hasallsortsupports {
+            return gist_sorted_build(mcx, heap, index, indexInfo, &mut giststate, &mut temp);
+        }
     }
 
     {
@@ -68,6 +85,8 @@ pub fn gistbuild<'mcx>(
     }
 
     let mut indtuples: u64 = 0;
+    let mut indtuples_size: u64 = 0;
+    let mut bufstate: Option<buffered::BufBuild<'mcx>> = None;
 
     let reltuples = execindexing::table_index_build_scan(
         mcx,
@@ -75,43 +94,116 @@ pub fn gistbuild<'mcx>(
         index,
         indexInfo,
         true,
+        // gistBuildCallback
         |index_rel, tid, values, isnull, _tuple_is_alive| {
-            let tmcx = temp.mcx();
-            let mut itup = gistFormTuple(tmcx, &mut giststate, index_rel, values, isnull, true)?;
-            unsafe {
-                itup.as_mut_ptr()
-                    .cast::<ItemPointerData>()
-                    .write_unaligned(*tid);
+            {
+                let tmcx = temp.mcx();
+                let mut itup =
+                    gistFormTuple(tmcx, &mut giststate, index_rel, values, isnull, true)?;
+                unsafe {
+                    itup.as_mut_ptr()
+                        .cast::<ItemPointerData>()
+                        .write_unaligned(*tid);
+                }
+
+                indtuples += 1;
+                // SAFETY: owned live image.
+                indtuples_size += unsafe { gist::util::index_tuple_size(itup.as_ptr()) } as u64;
+
+                if build_mode != GistBuildMode::Active {
+                    gist::insert::gistdoinsert(
+                        tmcx,
+                        index_rel,
+                        itup.as_ptr(),
+                        freespace,
+                        &mut giststate,
+                        heap,
+                        true,
+                    )?;
+                } else {
+                    let bb = bufstate.as_mut().expect("buffering active");
+                    let rootlevel = bb.gfbb.rootlevel;
+                    // SAFETY: owned live image.
+                    let itup_slice = unsafe { gist::util::itup_slice(itup.as_ptr()) };
+                    buffered::gist_process_itup(
+                        tmcx,
+                        index_rel,
+                        heap,
+                        freespace,
+                        &mut giststate,
+                        bb,
+                        itup_slice,
+                        0,
+                        rootlevel,
+                    )?;
+                }
             }
-
-            indtuples += 1;
-
-            gist::insert::gistdoinsert(
-                tmcx,
-                index_rel,
-                itup.as_ptr(),
-                freespace,
-                &mut giststate,
-                heap,
-                true,
-            )?;
-            drop(itup);
+            if build_mode == GistBuildMode::Active {
+                buffered::gist_process_emptying_queue(
+                    &mut temp,
+                    index_rel,
+                    heap,
+                    freespace,
+                    &mut giststate,
+                    bufstate.as_mut().expect("buffering active"),
+                )?;
+            }
             temp.reset();
 
-            if indtuples % BUFFERING_MODE_SWITCH_CHECK_STEP == 0 {
-                let nblocks =
-                    bufmgr::RelationGetNumberOfBlocksInFork(index_rel, ForkNumber::MAIN_FORKNUM)?;
-                let effective_cache_size = (guc_tables::vars::effective_cache_size.get().get)() as u64;
-                if effective_cache_size < nblocks as u64 {
-                    panic!(
-                        "unported: gist buffered build (index grew past \
-                         effective_cache_size; gistbuildbuffers lane)"
-                    );
+            if build_mode == GistBuildMode::Active
+                && indtuples % BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET == 0
+            {
+                let bb = bufstate.as_mut().expect("buffering active");
+                bb.gfbb.pages_per_buffer = buffered::calculate_pages_per_buffer(
+                    index_rel,
+                    freespace,
+                    indtuples,
+                    indtuples_size,
+                    bb.gfbb.level_step,
+                );
+            }
+
+            // Switch to buffering once the index outgrows the cache (auto) or
+            // once tuple-size stats are settled (buffering=on).
+            let switch = match build_mode {
+                GistBuildMode::Auto => {
+                    indtuples % BUFFERING_MODE_SWITCH_CHECK_STEP == 0 && {
+                        let nblocks = bufmgr::RelationGetNumberOfBlocksInFork(
+                            index_rel,
+                            ForkNumber::MAIN_FORKNUM,
+                        )?;
+                        let effective_cache_size =
+                            (guc_tables::vars::effective_cache_size.get().get)() as u64;
+                        effective_cache_size < nblocks as u64
+                    }
+                }
+                GistBuildMode::Stats => indtuples >= BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET,
+                _ => false,
+            };
+            if switch {
+                match buffered::gist_init_buffering(
+                    mcx,
+                    index_rel,
+                    freespace,
+                    indtuples,
+                    indtuples_size,
+                )? {
+                    Some(bb) => {
+                        bufstate = Some(bb);
+                        build_mode = GistBuildMode::Active;
+                    }
+                    None => build_mode = GistBuildMode::Disabled,
                 }
             }
             Ok(())
         },
     )?;
+
+    if build_mode == GistBuildMode::Active {
+        let bb = bufstate.as_mut().expect("buffering active");
+        buffered::gist_empty_all_buffers(&mut temp, index, heap, freespace, &mut giststate, bb)?;
+        bufstate.take().expect("buffering active").gfbb.free()?;
+    }
 
     if gist::relation_needs_wal_pub(index) {
         let nblocks = bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)?;

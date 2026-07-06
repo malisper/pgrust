@@ -1,6 +1,6 @@
 //! GiST access method (gist.c + gistutil.c + gistscan.c + gistget.c +
 //! gistsplit.c + gistbuild.c plain path + gistxlog.c producers). LOUD lanes:
-//! vacuum (gistbulkdelete/gistvacuumcleanup), buffered build, sorted build
+//! vacuum (gistbulkdelete/gistvacuumcleanup), sorted build
 //! (point_ops sortsupport), KNN/ordered scans, unlogged/temp relations.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]

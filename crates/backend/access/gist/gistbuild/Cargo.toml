@@ -22,3 +22,4 @@ datum = { path = "../../../../_support/types/datum" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 tuplesort = { path = "../../../utils/sort/tuplesort" }
 bulkwrite = { path = "../../../storage/smgr/bulkwrite" }
+fd = { path = "../../../storage/file/fd" }
