@@ -150,7 +150,13 @@ fn chararray_image<'mcx>(mcx: Mcx<'mcx>, vals: &[u8]) -> PgResult<PgVec<'mcx, u8
     Ok(out)
 }
 
-pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'mcx>) -> PgResult<()> {
+// check_rights=false on ALTER TABLE's AT_ReAddStatistics rebuild
+// (tablecmds.c:9693 passes !is_rebuild).
+pub fn CreateStatistics<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreateStatsStmt<'mcx>,
+    check_rights: bool,
+) -> PgResult<()> {
     let mut attnums: [i16; STATS_MAX_DIMENSIONS] = [0; STATS_MAX_DIMENSIONS];
     let mut nattnums = 0usize;
     let stxowner = miscinit_seams::get_user_id::call();
@@ -235,6 +241,23 @@ pub fn CreateStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateStatsStmt<'mcx>) -> P
         let name = ChooseExtendedStatisticName(rel.name(), &name2, "stat", nsp)?;
         (nsp, name)
     };
+
+    if check_rights {
+        let aclresult = aclchk::object_aclcheck(
+            types_core::catalog::NAMESPACE_RELATION_ID,
+            namespace_id,
+            miscinit_seams::get_user_id::call(),
+            types_nodes::parsenodes::ACL_CREATE,
+        )?;
+        if aclresult != aclchk::ACLCHECK_OK {
+            let nspname = lsyscache::get_namespace_name(mcx, namespace_id)?;
+            aclchk::aclcheck_error(
+                aclresult,
+                types_nodes::parsenodes::ObjectType::OBJECT_SCHEMA,
+                nspname.as_ref().map(|s| s.as_str()).unwrap_or(""),
+            )?;
+        }
+    }
 
     if statext_name_exists(&namestr, namespace_id)? {
         if stmt.if_not_exists {
