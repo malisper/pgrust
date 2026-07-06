@@ -322,7 +322,14 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
             let iob = fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * nr)?;
             let iobo = fix_scan_list(run, &s.indexorderbyorig, rtoffset, 2.0 * nr)?;
-            if rtoffset != 0 {
+            if rtoffset != 0
+                || tl.is_some()
+                || qual.is_some()
+                || iq.is_some()
+                || iqo.is_some()
+                || iob.is_some()
+                || iobo.is_some()
+            {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
                     plan.with_mut::<types_nodes::plannodes::IndexScan, _>(|p| {
@@ -346,7 +353,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let nr = s.scan.plan.plan_rows;
             let iq = fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * nr)?;
             let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
-            if rtoffset != 0 {
+            if rtoffset != 0 || iq.is_some() || iqo.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
                     plan.with_mut::<types_nodes::plannodes::BitmapIndexScan, _>(|p| {
@@ -365,7 +372,7 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, nr)?;
             let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * nr)?;
             let bqo = fix_scan_list(run, &s.bitmapqualorig, rtoffset, 2.0 * nr)?;
-            if rtoffset != 0 {
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || bqo.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
                 unsafe {
                     plan.with_mut::<types_nodes::plannodes::BitmapHeapScan, _>(|p| {

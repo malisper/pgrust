@@ -1203,8 +1203,16 @@ pub fn ExplainNode<'mcx>(
                     crate::format::ExplainPropertyList("Conflict Arbiter Indexes", &idx_names, es);
                 }
                 if let Some(w) = mt.onConflictWhere {
-                    let mut qual = NodeList::nil();
-                    qual.lappend(mcx, w)?;
+                    // onConflictWhere is an implicit-AND List after
+                    // preprocessing (C casts it straight to List).
+                    let qual = match w.as_list() {
+                        Some(l) => l.clone_in(mcx)?,
+                        None => {
+                            let mut q = NodeList::nil();
+                            q.lappend(mcx, w)?;
+                            q
+                        }
+                    };
                     show_upper_qual(&qual, "Conflict Filter", node, ancestors, es)?;
                     // C also prints "Rows Removed by Conflict Filter" under
                     // ANALYZE; the executor doesn't count nfiltered there yet.

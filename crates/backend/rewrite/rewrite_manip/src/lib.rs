@@ -661,6 +661,19 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for IncrVarSublevels {
                 .expect("GroupingFunc");
                 nodes_core::expression_tree_walker(node, self)
             }
+            NodeTag::T_ReturningExpr => {
+                let (min, delta) = (self.min_sublevels_up, self.delta);
+                // SAFETY: as above.
+                unsafe {
+                    node.with_mut::<types_nodes::primnodes::ReturningExpr, _>(|r| {
+                        if r.retlevelsup as u32 >= min {
+                            r.retlevelsup = r.retlevelsup.wrapping_add(delta);
+                        }
+                    })
+                }
+                .expect("ReturningExpr");
+                nodes_core::expression_tree_walker(node, self)
+            }
             NodeTag::T_CurrentOfExpr => {
                 if self.min_sublevels_up == 0 {
                     return Err(internal("cannot push down CurrentOfExpr").into());
@@ -1542,7 +1555,7 @@ fn ReplaceVarFromTargetList<'mcx>(
             };
             args.lappend(mcx, field)?;
         }
-        return Node::mk(
+        let rowexpr = Node::mk(
             mcx,
             types_nodes::RowExpr {
                 args,
@@ -1555,7 +1568,18 @@ fn ReplaceVarFromTargetList<'mcx>(
                 },
                 location: var.location,
             },
-        );
+        )?;
+        if var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
+            return Node::mk(
+                mcx,
+                types_nodes::primnodes::ReturningExpr {
+                    retlevelsup: 0,
+                    retold: var.varreturningtype == VarReturningType::VAR_RETURNING_OLD,
+                    retexpr: rowexpr,
+                },
+            );
+        }
+        return Ok(rowexpr);
     }
     let tle = targetlist
         .iter()
