@@ -974,7 +974,10 @@ fn create_ctescan_plan<'mcx>(
     let (plan_id, cte_param_id) = crate::cte::cte_plan_id_and_param(run, scan_relid as usize);
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+    }
 
     let mut plan = Node::build::<types_nodes::plannodes::CteScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
@@ -1175,7 +1178,7 @@ fn create_bitmap_scan_plan<'mcx>(
         qpqual_rinfos.push(rid);
     }
     let ordered = order_qual_clauses(run, &qpqual_rinfos)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
 
     // list_difference_ptr(bitmapqualorig, qpqual): drop double-tested clauses.
     if !qpqual.is_nil() {
@@ -1186,6 +1189,11 @@ fn create_bitmap_scan_plan<'mcx>(
             }
         }
         bitmapqualorig = kept;
+    }
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        bitmapqualorig = replace_nestloop_params_list(run, &bitmapqualorig)?;
     }
 
     let mut plan = Node::build::<types_nodes::plannodes::BitmapHeapScan<'mcx>>(mcx)?;
@@ -1332,8 +1340,14 @@ fn create_bitmap_subplan<'mcx>(
 
     // C builds a throwaway IndexScan via create_indexscan_plan and moves its
     // qual lists over; the direct fix_indexqual_references call is the same
-    // computation without the discarded node.
-    let (stripped_indexquals, fixed_indexquals) = fix_indexqual_references(run, bitmapqual)?;
+    // computation without the discarded node, so it must also replicate
+    // create_indexscan_plan's nestloop-param replacement of the stripped
+    // quals (fixed quals get theirs inside fix_indexqual_clause).
+    let (mut stripped_indexquals, fixed_indexquals) =
+        fix_indexqual_references(run, bitmapqual)?;
+    if run.root.path(bitmapqual).base().param_info.is_some() {
+        stripped_indexquals = replace_nestloop_params_list(run, &stripped_indexquals)?;
+    }
 
     let (indexoid, indextotalcost, tuples) = {
         let PathNode::IndexPath(ip) = run.root.path(bitmapqual) else { unreachable!() };
