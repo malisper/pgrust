@@ -3641,8 +3641,12 @@ fn fix_join_expr_mutator<'mcx>(
             if var.varreturningtype
                 != types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT
             {
+                // C additionally requires outer_itlist != NULL, but the
+                // RETURNING fixup's other-vars index can be an empty list
+                // here (indistinguishable from absent); inner-nil plus
+                // acceptable_rel identifies the RETURNING context.
                 assert!(
-                    inner_tlist.is_nil() && !outer_tlist.is_nil() && acceptable_rel != 0,
+                    inner_tlist.is_nil() && acceptable_rel != 0,
                     "variable returning old/new found outside RETURNING list"
                 );
                 assert!(
@@ -3709,6 +3713,12 @@ fn fix_join_expr_mutator<'mcx>(
         // C fix_expr_common has no MergeSupportFunc leg: the node passes
         // through untouched to the executor (EEOP_MERGE_SUPPORT_FUNC).
         NodeTag::T_MergeSupportFunc => Ok(node),
+        // No C case: falls to C's expression_tree_mutator default.
+        NodeTag::T_ReturningExpr => {
+            let r = node.as_returning_expr().unwrap();
+            let retexpr = fix_join_expr_mutator(run, r.retexpr, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?;
+            Node::mk(mcx, types_nodes::primnodes::ReturningExpr { retexpr, ..*r })
+        }
         NodeTag::T_TargetEntry => {
             let tle = node.as_target_entry().unwrap();
             let newexpr =
@@ -4360,6 +4370,30 @@ fn fix_join_expr_mutator<'mcx>(
 // search_indexed_tlist_for_var, join leg: miss returns None so the caller can
 // probe the other side. The nullingrels cross-check mirrors C's elog guard;
 // the emitted Var keeps the reference Var's nullingrels (C copyVar).
+// build_tlist_index_other_vars (setrefs.c): restrict the matchable tlist to
+// Vars of rels other than ignore_rel (PlaceHolderVars stay matchable;
+// has_non_vars is never set, matching the search functions' Var/PHV-only
+// matching here).
+fn build_other_vars_tlist<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tlist: &NodeList<'mcx>,
+    ignore_rel: i32,
+) -> PgResult<NodeList<'mcx>> {
+    let mut out = NodeList::nil();
+    for tle_node in tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        let keep = match tle.expr.node_tag() {
+            NodeTag::T_Var => tle.expr.as_var().unwrap().varno != ignore_rel,
+            NodeTag::T_PlaceHolderVar => true,
+            _ => false,
+        };
+        if keep {
+            out.lappend(mcx, tle_node)?;
+        }
+    }
+    Ok(out)
+}
+
 fn search_join_tlist_for_var<'mcx>(
     run: &mut PlannerRun<'mcx>,
     var: &types_nodes::primnodes::Var<'mcx>,
