@@ -174,3 +174,7 @@ fn lookup_am_handler_func(
 
     Ok(handlerOid)
 }
+
+pub fn init_seams() {
+    tableam_seams::get_table_am_oid::set(get_table_am_oid);
+}

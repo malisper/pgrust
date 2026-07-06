@@ -26,3 +26,4 @@ superuser = { path = "../../utils/misc/superuser" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 format_type = { path = "../../utils/adt/format_type" }
 parse_func = { path = "../../parser/parse_func" }
+tableam_seams = { path = "../../access/table/tableam_seams" }

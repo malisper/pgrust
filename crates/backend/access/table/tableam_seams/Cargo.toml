@@ -12,6 +12,7 @@ path = "src/lib.rs"
 mcx = { path = "../../../../_support/mcx" }
 seam_core = { path = "../../../../_support/seam_core" }
 tableam_vocab = { path = "../tableam_vocab" }
+types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_rel = { path = "../../../../_support/types/rel" }
 types_storage = { path = "../../../../_support/types/types_storage" }

@@ -22,6 +22,8 @@ procarray = { path = "../../../storage/ipc/procarray" }
 multixact = { path = "../../transam/multixact" }
 catalog_storage = { path = "../../../catalog/catalog_storage" }
 xact_seams = { path = "../../transam/xact_seams" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
+elog_seams = { path = "../../../utils/error/elog_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 tableam_vocab = { path = "../tableam_vocab" }
 heapam = { path = "../../heap/heapam" }
