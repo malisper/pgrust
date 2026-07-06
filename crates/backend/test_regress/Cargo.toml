@@ -32,4 +32,7 @@ typcache = { path = "../utils/cache/typcache" }
 detoast_seams = { path = "../access/common/detoast_seams" }
 catalog = { path = "../catalog/catalog" }
 init_small = { path = "../utils/init/init_small" }
+funcapi = { path = "../utils/fmgr/funcapi" }
+heaptuple = { path = "../access/common/heaptuple" }
+namespace_seams = { path = "../catalog/namespace_seams" }
 libc = "0.2"

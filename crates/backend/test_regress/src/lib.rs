@@ -10,7 +10,8 @@ use ::fmgr::{
     PGFunction,
 };
 use ::types_error::{
-    PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, WARNING,
+    PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION,
+    ERRCODE_UNDEFINED_OBJECT, WARNING,
 };
 
 const LIBRARY: &str = "regress";
@@ -666,8 +667,133 @@ fn fc_test_enc_setup(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResul
 
 /* ============ test_enc_conversion(bytea, name, name, bool) =============== */
 
-fn fc_test_enc_conversion(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("regress: test_enc_conversion requires OUT-parameter functions (functioncmds unported)");
+// SAFETY: strict fn; catalog arg i is a `name` datum, live for the call.
+unsafe fn arg_name_str(fcinfo: &Fcinfo, i: usize) -> String {
+    let raw = unsafe { fcinfo.arg_name(i) };
+    let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+    String::from_utf8_lossy(&raw[..end]).into_owned()
+}
+
+#[cold]
+fn invalid_encoding_name_error(name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("invalid encoding name \"{name}\""))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
+    )
+}
+
+#[cold]
+fn no_default_conversion_error(src_encoding: i32, dest_encoding: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "default conversion function for encoding \"{}\" to \"{}\" does not exist",
+            mbutils::pg_encoding_to_char(src_encoding),
+            mbutils::pg_encoding_to_char(dest_encoding),
+        ))
+        .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION),
+    )
+}
+
+// regress.c test_enc_conversion: OUT (validlen int, result bytea) row built via
+// get_call_result_type + heap_form_tuple, the same convention as
+// commit_ts::fmgr_builtins::composite_result / pg_controldata's builtins.
+fn composite_result_2(
+    flinfo: &FmgrInfo,
+    fcinfo: &mut Fcinfo,
+    values: &[Datum; 2],
+    isnull: &[bool; 2],
+) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
+    if resolved.class != funcapi::TypeFuncClass::Composite {
+        return Err(err("return type must be a row type".to_string()));
+    }
+    let tupdesc = resolved
+        .result_tuple_desc
+        .expect("composite result has tupdesc");
+    let tup = heaptuple::heap_form_tuple(mcx, &tupdesc, values, isnull)?;
+    let d = Datum::from_usize(tup.header_ptr() as usize);
+    core::mem::forget(tup); // leak into the arming context (C palloc ownership)
+    Ok(d)
+}
+
+fn fc_test_enc_conversion(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("test_enc_conversion: NULL flinfo");
+
+    // SAFETY: strict fn, bytea arg live for the call.
+    let string = unsafe { fcinfo.arg_varlena_packed(0) }?;
+    let src_bytes = string.data();
+    // SAFETY: strict fn, name args live for the call.
+    let src_name = unsafe { arg_name_str(fcinfo, 1) };
+    let dest_name = unsafe { arg_name_str(fcinfo, 2) };
+    let no_error = fcinfo.arg_bool(3);
+
+    let src_encoding = mbutils::pg_char_to_encoding(&src_name);
+    if src_encoding < 0 {
+        return Err(invalid_encoding_name_error(&src_name));
+    }
+    let dest_encoding = mbutils::pg_char_to_encoding(&dest_name);
+    if dest_encoding < 0 {
+        return Err(invalid_encoding_name_error(&dest_name));
+    }
+
+    // SAFETY: mcx stays live for this call only; composite_result_2 re-derives
+    // its own handle rather than reusing this one across the &mut borrow below.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+
+    if src_encoding == dest_encoding {
+        // No conversion possible: validate in place, byte-offset semantics
+        // (mbutils::pg_verify_mbstr's oklen) so the SQL wrapper's substr()
+        // math on `validlen` lines up with C's report_invalid_encoding cut.
+        let oklen = wchar::pg_encoding_verifymbstr(src_encoding, src_bytes) as usize;
+        if oklen != src_bytes.len() {
+            if no_error {
+                let result = varlena_result(varlena::cstring_to_text(mcx, &src_bytes[..oklen])?);
+                return composite_result_2(
+                    flinfo,
+                    fcinfo,
+                    &[Datum::from_i32(oklen as i32), result],
+                    &[false, false],
+                );
+            }
+            return Err(mbutils::report_invalid_encoding(
+                src_encoding,
+                &src_bytes[oklen..],
+            ));
+        }
+        let result = varlena_result(varlena::cstring_to_text(mcx, src_bytes)?);
+        return composite_result_2(
+            flinfo,
+            fcinfo,
+            &[Datum::from_i32(oklen as i32), result],
+            &[false, false],
+        );
+    }
+
+    let proc = namespace_seams::find_default_conversion_proc::call(src_encoding, dest_encoding)?;
+    if proc == types_core::InvalidOid {
+        return Err(no_default_conversion_error(src_encoding, dest_encoding));
+    }
+
+    let cap = src_bytes.len() * mbutils::MAX_CONVERSION_GROWTH + 1;
+    let (convertedlen, dest) = mbutils::pg_do_encoding_conversion_buf(
+        mcx,
+        proc,
+        src_encoding,
+        dest_encoding,
+        src_bytes,
+        cap as i32,
+        no_error,
+    )?;
+
+    let result = varlena_result(varlena::cstring_to_text(mcx, &dest)?);
+    drop(dest); // ends the mcx-tied borrow before the &mut fcinfo call below
+    composite_result_2(
+        flinfo,
+        fcinfo,
+        &[Datum::from_i32(convertedlen), result],
+        &[false, false],
+    )
 }
 
 /* ============== test_bytea_to_text / test_text_to_bytea ================== */
