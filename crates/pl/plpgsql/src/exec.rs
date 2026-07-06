@@ -1975,16 +1975,14 @@ impl<'a> Estate<'a> {
                     PlDatum::Rec(r) => r.refname.clone(),
                     _ => String::new(),
                 };
+                // pl_exec.c:5215-5226: a NULL record with a named composite
+                // type is instantiated empty before field assignment; only a
+                // RECORD-typed rec errors (inside instantiate_empty_rec).
+                if matches!(&self.datums[recno as usize], DatumVal::Rec(None)) {
+                    self.instantiate_empty_rec(recno)?;
+                }
                 let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
-                    return Err(Box::new(
-                        elog::ereport(ERROR)
-                            .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                            .errmsg(format!("record \"{recname}\" is not assigned yet"))
-                            .errdetail(
-                                "The tuple structure of a not-yet-assigned record is indeterminate.",
-                            )
-                            .into_error(),
-                    ));
+                    panic!("plpgsql exec_assign_value: rec \"{recname}\" valueless after instantiate");
                 };
                 let mut found: Option<(usize, Oid, i32, i16, bool)> = None;
                 for (i, n) in rv.desc.names.iter().enumerate() {
