@@ -8359,10 +8359,12 @@ impl<'mcx> Parser<'mcx> {
                 list.lappend(mcx, view.v(3).node().expect("NumericOnly"))?;
                 *yyval = YYSTYPE::List(list);
             }
-            1064..=1066 => {
+            1062..=1066 => {
                 let mut n = Node::build::<GrantStmt>(mcx)?;
                 n.targtype = GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA;
                 n.objtype = match rule {
+                    1062 => ObjectType::OBJECT_TABLE,
+                    1063 => ObjectType::OBJECT_SEQUENCE,
                     1064 => ObjectType::OBJECT_FUNCTION,
                     1065 => ObjectType::OBJECT_PROCEDURE,
                     _ => ObjectType::OBJECT_ROUTINE,

@@ -971,6 +971,14 @@ fn node(out: &mut String, n: Node<'_>) {
         int_field(out, "objtype", a.objtype as i32);
         bool_field(out, "missing_ok", a.missing_ok);
         out.push('}');
+    } else if let Some(a) = n.as_variant::<types_nodes::parsenodes::AlterTableMoveAllStmt>() {
+        out.push_str("{ALTERTABLEMOVEALLSTMT");
+        string_field(out, "orig_tablespacename", a.orig_tablespacename);
+        int_field(out, "objtype", a.objtype as i32);
+        list_field(out, "roles", &a.roles);
+        string_field(out, "new_tablespacename", a.new_tablespacename);
+        bool_field(out, "nowait", a.nowait);
+        out.push('}');
     } else if let Some(c) = n.as_variant::<types_nodes::parsenodes::ATAlterConstraint>() {
         out.push_str("{ATALTERCONSTRAINT");
         string_field(out, "conname", c.conname);

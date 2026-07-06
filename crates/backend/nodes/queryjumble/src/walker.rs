@@ -1374,6 +1374,14 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_u32(e.objtype as u32);
             js.f_bool(e.missing_ok);
         }
+        NodeTag::T_AlterTableMoveAllStmt => {
+            let e = cast!(q::AlterTableMoveAllStmt);
+            js.f_str(e.orig_tablespacename);
+            js.f_u32(e.objtype as u32);
+            list(js, &e.roles)?;
+            js.f_str(e.new_tablespacename);
+            js.f_bool(e.nowait);
+        }
         NodeTag::T_AlterTableCmd => {
             let e = cast!(q::AlterTableCmd);
             js.f_u32(e.subtype as u32);

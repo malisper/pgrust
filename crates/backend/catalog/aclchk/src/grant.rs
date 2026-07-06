@@ -42,9 +42,15 @@ use crate::{
     ANUM_PG_CLASS_RELACL, ANUM_PG_CLASS_RELNATTS, ANUM_PG_TYPE_TYPTYPE,
 };
 
+const ANUM_PG_CLASS_OID: i32 = 1;
 const ANUM_PG_CLASS_RELNAME: i32 = 2;
+const ANUM_PG_CLASS_RELNAMESPACE: i32 = 3;
 const ANUM_PG_CLASS_RELOWNER: i32 = 6;
 const ANUM_PG_CLASS_RELKIND: i32 = 18;
+const ANUM_PG_PROC_OID: i32 = 1;
+const ANUM_PG_PROC_PRONAMESPACE: i32 = 3;
+const ANUM_PG_PROC_PROKIND: i32 = 10;
+const PROKIND_PROCEDURE: i8 = b'p' as i8;
 const ANUM_PG_ATTRIBUTE_ATTNAME: i32 = 2;
 const ANUM_PG_ATTRIBUTE_ATTISDROPPED: i32 = 17;
 const ANUM_PG_ATTRIBUTE_ATTACL: i32 = 22;
@@ -296,10 +302,11 @@ pub fn ExecuteGrantStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &GrantStmt<'_>) -> PgResult<
         GrantTargetType::ACL_TARGET_OBJECT => {
             object_names_to_oids(mcx, stmt.objtype, &stmt.objects, stmt.is_grant)?
         }
-        other => panic!(
-            "ExecuteGrantStmt (aclchk.c): targtype {} unported (ALL ... IN SCHEMA lane)",
-            other as i32
-        ),
+        GrantTargetType::ACL_TARGET_ALL_IN_SCHEMA => {
+            objects_in_schema_to_oids(mcx, stmt.objtype, &stmt.objects)?
+        }
+        // ACL_TARGET_DEFAULTS is routed via AlterDefaultPrivileges, never here.
+        other => panic!("unrecognized GrantStmt.targtype: {}", other as i32),
     };
 
     let mut grantees: PgVec<'_, Oid> = mcx::vec_with_capacity_in(mcx, stmt.grantees.len())?;
@@ -570,6 +577,120 @@ fn object_names_to_oids<'mcx>(
         ),
     }
     Ok(objects)
+}
+
+// objectsInSchemaToOids (aclchk.c): every object of the type in the named
+// schemas; USAGE is checked on the schemas, not the individual objects.
+fn objects_in_schema_to_oids<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    nspnames: &types_nodes::list::NodeList<'_>,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let mut objects: PgVec<'mcx, Oid> = mcx::vec_new_in(mcx);
+    for cell in nspnames.iter() {
+        let nspname = cell.as_string().expect("schema name").sval;
+        let namespace_id = catalog_namespace::LookupExplicitNamespace(nspname, false)?;
+        match objtype {
+            ObjectType::OBJECT_TABLE => {
+                for relkind in [
+                    types_rel::RELKIND_RELATION,
+                    RELKIND_VIEW,
+                    types_rel::RELKIND_MATVIEW,
+                    types_rel::RELKIND_FOREIGN_TABLE,
+                    types_rel::RELKIND_PARTITIONED_TABLE,
+                ] {
+                    get_relations_in_namespace(mcx, namespace_id, relkind, &mut objects)?;
+                }
+            }
+            ObjectType::OBJECT_SEQUENCE => {
+                get_relations_in_namespace(mcx, namespace_id, RELKIND_SEQUENCE, &mut objects)?;
+            }
+            ObjectType::OBJECT_FUNCTION
+            | ObjectType::OBJECT_PROCEDURE
+            | ObjectType::OBJECT_ROUTINE => {
+                let rel = table::table_open(mcx, PROCEDURE_RELATION_ID, AccessShareLock)?;
+                let key = [oid_scan_key(ANUM_PG_PROC_PRONAMESPACE, namespace_id)];
+                let mut scan = genam::systable_beginscan(
+                    mcx,
+                    &rel,
+                    types_core::InvalidOid,
+                    false,
+                    None,
+                    &key,
+                )?;
+                let desc = rel.descr();
+                while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+                    let mut isnull = false;
+                    // SAFETY: fixed NOT NULL pg_proc columns under its descriptor.
+                    let prokind = unsafe {
+                        types_tuple::heap_getattr(tup, ANUM_PG_PROC_PROKIND, desc, &mut isnull)
+                    }
+                    .as_i8();
+                    // OBJECT_FUNCTION includes aggregates and window functions.
+                    if (objtype == ObjectType::OBJECT_FUNCTION && prokind == PROKIND_PROCEDURE)
+                        || (objtype == ObjectType::OBJECT_PROCEDURE
+                            && prokind != PROKIND_PROCEDURE)
+                    {
+                        continue;
+                    }
+                    // SAFETY: fixed NOT NULL pg_proc columns under its descriptor.
+                    let oid = unsafe {
+                        types_tuple::heap_getattr(tup, ANUM_PG_PROC_OID, desc, &mut isnull)
+                    }
+                    .as_oid();
+                    objects.push(oid);
+                }
+                genam::systable_endscan(mcx, scan)?;
+                rel.close(AccessShareLock)?;
+            }
+            other => panic!("unrecognized GrantStmt.objtype: {}", other as i32),
+        }
+    }
+    Ok(objects)
+}
+
+// getRelationsInNamespace (aclchk.c).
+fn get_relations_in_namespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    namespace_id: Oid,
+    relkind: u8,
+    relations: &mut PgVec<'mcx, Oid>,
+) -> PgResult<()> {
+    let rel = table::table_open(mcx, RELATION_RELATION_ID, AccessShareLock)?;
+    let key = [oid_scan_key(ANUM_PG_CLASS_RELNAMESPACE, namespace_id)];
+    let mut scan =
+        genam::systable_beginscan(mcx, &rel, types_core::InvalidOid, false, None, &key)?;
+    let desc = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_class columns under its descriptor.
+        let kind = unsafe {
+            types_tuple::heap_getattr(tup, ANUM_PG_CLASS_RELKIND, desc, &mut isnull)
+        }
+        .as_i8() as u8;
+        if kind != relkind {
+            continue;
+        }
+        // SAFETY: fixed NOT NULL pg_class columns under its descriptor.
+        let oid =
+            unsafe { types_tuple::heap_getattr(tup, ANUM_PG_CLASS_OID, desc, &mut isnull) }
+                .as_oid();
+        relations.push(oid);
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(())
+}
+
+fn oid_scan_key(attno: i32, oid: Oid) -> types_scan::scankey::ScanKeyData {
+    let mut key = types_scan::scankey::ScanKeyData::empty();
+    key.sk_attno = attno as types_core::AttrNumber;
+    key.sk_strategy = types_scan::scankey::BTEqualStrategyNumber;
+    key.sk_collation = 0;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(oid);
+    key
 }
 
 // get_object_address_type's OBJECT_DOMAIN restriction (objectaddress.c).
