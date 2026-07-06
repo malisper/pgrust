@@ -752,7 +752,7 @@ fn pull_up_constant_function<'mcx>(
     ));
     let empty_relids = types_nodes::Bitmapset::empty();
     let phc = PullupPhCtx {
-        wrap_all: !parse.groupingSets.is_nil(),
+        wrap_option: core::cell::Cell::new(if parse.groupingSets.is_nil() { WRAP_NONE } else { WRAP_ALL }),
         last_ph_id: &last_ph_id,
         rv_cache: &rv_cache,
         sub_relids: &empty_relids,
@@ -1118,7 +1118,7 @@ fn pull_up_simple_subquery<'mcx>(
     // rewrites it; lateral-only, like C.
     let nullinfo = if lateral { Some(get_nullingrels(mcx, parse)?) } else { None };
     let phc = PullupPhCtx {
-        wrap_all: !parse.groupingSets.is_nil(),
+        wrap_option: core::cell::Cell::new(if parse.groupingSets.is_nil() { WRAP_NONE } else { WRAP_ALL }),
         last_ph_id: &last_ph_id,
         rv_cache: &rv_cache,
         sub_relids: &full_relids,
@@ -1827,6 +1827,19 @@ fn splice_and_replace<'mcx>(
             let j = node.as_join_expr().unwrap();
             let larg = splice_and_replace(mcx, rtable, j.larg, varno, tlist, lateral, ph, replacement)?;
             let rarg = splice_and_replace(mcx, rtable, j.rarg, varno, tlist, lateral, ph, replacement)?;
+            // C replace_vars_in_jointree: var-free expressions in FULL-join
+            // quals must be PHV-wrapped or the clause's side cannot be
+            // identified and no merge/hash FULL plan can be made.
+            let save_wrap = ph.map(|p| p.wrap_option.get());
+            if j.jointype == types_nodes::JoinType::JOIN_FULL {
+                if let Some(p) = ph {
+                    p.wrap_option.set(WRAP_VARFREE);
+                }
+            }
+            let quals = replace_opt(mcx, j.quals, varno, tlist, lateral, ph)?;
+            if let (Some(p), Some(w)) = (ph, save_wrap) {
+                p.wrap_option.set(w);
+            }
             Node::mk(
                 mcx,
                 types_nodes::JoinExpr {
@@ -1836,7 +1849,7 @@ fn splice_and_replace<'mcx>(
                     rarg,
                     usingClause: j.usingClause.clone_in(mcx)?,
                     join_using_alias: j.join_using_alias,
-                    quals: replace_opt(mcx, j.quals, varno, tlist, lateral, ph)?,
+                    quals,
                     alias: j.alias,
                     rtindex: j.rtindex,
                 },
@@ -1995,12 +2008,18 @@ fn offset_opt<'mcx>(
     }
 }
 
-// pullup_replace_vars_callback's PHV state: wrap_all is C's REPLACE_WRAP_ALL
+// C ReplaceWrapOption (prepjointree.c:62).
+pub(crate) const WRAP_NONE: u8 = 0;
+pub(crate) const WRAP_ALL: u8 = 1;
+pub(crate) const WRAP_VARFREE: u8 = 2;
+
+// pullup_replace_vars_callback's PHV state: wrap_option is C's ReplaceWrapOption
 // (parent grouping sets); rv_cache dedups PHVs per attno so repeated
 // references share one phid; last_ph_id shadows glob.last_ph_id (written back
 // by pull_up_simple_subquery). None on paths that cannot make PHVs.
 pub(crate) struct PullupPhCtx<'a, 'mcx> {
-    wrap_all: bool,
+    // Cell: replace_vars_in_jointree sets VARFREE around FULL-join quals.
+    wrap_option: core::cell::Cell<u8>,
     last_ph_id: &'a core::cell::Cell<u32>,
     rv_cache: &'a core::cell::RefCell<mcx::PgVec<'mcx, Option<Node<'mcx>>>>,
     // C rcon->relids: the subquery's rels including inner-join relids.
@@ -2127,7 +2146,7 @@ fn replace_var_expr_su<'mcx>(
                 )?));
             }
             let nulled = !v.varnullingrels.is_empty();
-            let need_phv = nulled || ph.is_some_and(|p| p.wrap_all);
+            let need_phv = nulled || ph.is_some_and(|p| p.wrap_option.get() != WRAP_NONE);
             let cacheable = need_phv && (v.varattno as usize) <= tlist.len();
             let newnode = 'built: {
                 if cacheable {
@@ -2226,7 +2245,7 @@ fn replace_var_expr_su<'mcx>(
                     // the subquery; a strict expression over the subquery's
                     // Vars (or over lateral rels under that same join) takes
                     // the nullingrels directly.
-                    let wrap = if ph.is_some_and(|p| p.wrap_all) || v.varattno == 0 {
+                    let wrap = if ph.is_some_and(|p| p.wrap_option.get() == WRAP_ALL) || v.varattno == 0 {
                         true
                     } else if let Some(nv) = gen.as_var().filter(|nv| nv.varlevelsup == 0) {
                         lateral
@@ -4296,7 +4315,7 @@ pub fn expand_virtual_generated_columns<'mcx>(
         ));
         let empty_relids = types_nodes::Bitmapset::empty();
         let phc = PullupPhCtx {
-            wrap_all: !parse.groupingSets.is_nil(),
+            wrap_option: core::cell::Cell::new(if parse.groupingSets.is_nil() { WRAP_NONE } else { WRAP_ALL }),
             last_ph_id: &last_ph_id,
             rv_cache: &rv_cache,
             sub_relids: &empty_relids,

@@ -648,9 +648,10 @@ fn create_seqscan_plan<'mcx>(
     Ok(plan.seal())
 }
 
-// create_samplescan_plan (createplan.c). C runs replace_nestloop_params over
-// the quals and the tablesample clause for parameterized paths; those are
-// loud upstream (cost_samplescan asserts no param_info).
+// create_samplescan_plan (createplan.c): parameterized paths get
+// replace_nestloop_params over the quals and the tablesample clause (the
+// clause is rebuilt by hand — the expression walker has no
+// TableSampleClause arm).
 fn create_samplescan_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     best_path: PathId,
@@ -662,14 +663,28 @@ fn create_samplescan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     let rte = run.rte(scan_relid as usize);
     debug_assert!(rte.rtekind == types_nodes::RTEKind::RTE_RELATION);
-    let tsc = rte.tablesample.expect("sampled rel has a tablesample clause");
-    assert!(
-        run.root.path(best_path).base().param_info.is_none(),
-        "create_samplescan_plan (createplan.c): nestloop params; M2 lateral lane"
-    );
+    let mut tsc = rte.tablesample.expect("sampled rel has a tablesample clause");
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        let t = tsc.as_table_sample_clause().expect("TableSampleClause");
+        let args = replace_nestloop_params_list(run, &t.args)?;
+        let repeatable = match t.repeatable {
+            Some(r) => Some(replace_nestloop_params(run, r)?),
+            None => None,
+        };
+        tsc = Node::mk(
+            mcx,
+            types_nodes::parsenodes::TableSampleClause {
+                tsmhandler: t.tsmhandler,
+                args,
+                repeatable,
+            },
+        )?;
+    }
 
     let mut plan = Node::build::<SampleScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;
