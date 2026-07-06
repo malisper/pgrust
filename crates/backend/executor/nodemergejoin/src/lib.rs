@@ -21,6 +21,9 @@ use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
+#[cfg(test)]
+mod tests;
+
 const EXEC_MJ_INITIALIZE_OUTER: u8 = 1;
 const EXEC_MJ_INITIALIZE_INNER: u8 = 2;
 const EXEC_MJ_JOINTUPLES: u8 = 3;
@@ -577,7 +580,11 @@ where
                     }
                     MJEvalResult::EndOfJoin => {
                         if node.mj_FillInner {
+                            // C: no inner tuple has been fetched yet, so
+                            // MatchedInner=true forces ENDOUTER to advance
+                            // the inner scan before null-filling.
                             node.mj_JoinState = EXEC_MJ_ENDOUTER;
+                            node.mj_MatchedInner = true;
                         } else {
                             return Ok(None);
                         }
@@ -601,7 +608,10 @@ where
                     }
                     MJEvalResult::EndOfJoin => {
                         if node.mj_FillOuter {
+                            // C: MatchedOuter=false makes ENDINNER emit the
+                            // just-fetched outer before advancing.
                             node.mj_JoinState = EXEC_MJ_ENDINNER;
+                            node.mj_MatchedOuter = false;
                         } else {
                             return Ok(None);
                         }
