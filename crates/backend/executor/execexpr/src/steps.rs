@@ -50,6 +50,9 @@ pub enum Step {
     Const { value: Datum, isnull: bool, out: OutRef },
     // Param pointers resolve at compile into address-stable params arrays.
     ParamExtern { prm: NonNull<::types_portal::params::ParamExternData>, out: OutRef },
+    // Unbound PARAM_EXTERN: C errors at evaluation (ExecEvalParamExtern),
+    // not at init — EXPLAIN (GENERIC_PLAN) inits but never evaluates.
+    ParamExternMissing { paramid: i32 },
     ParamExec { prm: NonNull<::types_portal::params::ParamExecData>, out: OutRef },
     FuncExpr { call: FuncCall, out: OutRef },
     FuncExprStrict1 { call: FuncCall, out: OutRef },

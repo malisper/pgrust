@@ -1069,9 +1069,11 @@ fn param_extern_missing_value_errors_42704() {
     use ::types_nodes::primnodes::ParamKind;
     with_mcx(|mcx| {
         let node = mk_param(mcx, ParamKind::PARAM_EXTERN, 2, INT4OID);
-        let Err(err) = exec_init_expr(mcx, Some(node), ParamBind::NONE) else {
-            panic!("unbound PARAM_EXTERN must fail at compile");
-        };
+        // C errors at evaluation, not init (EXPLAIN GENERIC_PLAN inits only).
+        let mut state = exec_init_expr(mcx, Some(node), ParamBind::NONE).unwrap().unwrap();
+        assert!(matches!(state.steps()[0], Step::ParamExternMissing { .. }));
+        let mut slots = EvalSlots::default();
+        let err = exec_eval_expr(&mut state, &mut slots).unwrap_err();
         assert_eq!(err.message, "no value found for parameter 2");
         assert_eq!(err.sqlstate, ::types_error::ERRCODE_UNDEFINED_OBJECT);
     });
