@@ -808,7 +808,7 @@ fn run_vacuum(sql: &str) {
     let stmt = raw.stmt.unwrap().as_vacuum_stmt().expect("VacuumStmt");
 
     xact::StartTransactionCommand().unwrap();
-    commands_vacuum::ExecVacuum(mcx, stmt, true).unwrap();
+    commands_vacuum::ExecVacuum(mcx, stmt, "", true).unwrap();
     // ExecVacuum left a fresh transaction open, matching the commit waiting
     // in PostgresMain.
     xact::CommitTransactionCommand().unwrap();
