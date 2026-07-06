@@ -557,6 +557,22 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &r.colnames)?;
             w!(out, " :location -1}}");
         }
+        NodeTag::T_RowCompareExpr => {
+            let r = node
+                .as_variant::<types_nodes::primnodes::RowCompareExpr>()
+                .expect("RowCompareExpr");
+            w!(out, "{{ROWCOMPAREEXPR :cmptype {} :opnos ", r.cmptype);
+            out_oid_list(out, &r.opnos);
+            w!(out, " :opfamilies ");
+            out_oid_list(out, &r.opfamilies);
+            w!(out, " :inputcollids ");
+            out_oid_list(out, &r.inputcollids);
+            w!(out, " :largs ");
+            out_list(out, &r.largs)?;
+            w!(out, " :rargs ");
+            out_list(out, &r.rargs)?;
+            w!(out, "}}");
+        }
         NodeTag::T_MinMaxExpr => {
             let m =
                 node.as_variant::<types_nodes::primnodes::MinMaxExpr>().expect("MinMaxExpr");
