@@ -62,10 +62,11 @@ pub fn subquery_planner<'mcx>(
     if parse.hasSubLinks {
         crate::subselect::pull_up_sublinks(run, &mut parse)?;
     }
+    crate::prepjointree::preprocess_function_rtes(run, &mut parse)?;
     if parse.rtable.iter().any(|n| {
         matches!(
             n.as_range_tbl_entry().expect("rtable cell").rtekind,
-            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES
+            RTEKind::RTE_SUBQUERY | RTEKind::RTE_VALUES | RTEKind::RTE_FUNCTION
         )
     }) {
         crate::prepjointree::pull_up_subqueries(run, &mut parse)?;

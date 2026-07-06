@@ -41,6 +41,12 @@ pub fn pull_up_subqueries<'mcx>(
             }
             continue;
         }
+        if rte.rtekind == RTEKind::RTE_FUNCTION {
+            if !pull_up_constant_function(run, parse, rti, rte_node)? {
+                kept.push(rti);
+            }
+            continue;
+        }
         if is_simple_subquery(mcx, rte, lowest_outer_join)? {
             if !pull_up_simple_subquery(run, parse, rti, rte_node, lowest_outer_join, None)? {
                 kept.push(rti);
@@ -432,6 +438,14 @@ fn find_pullable_subquery<'mcx>(
             {
                 *target = Some((rti, None));
             }
+            // pull_up_constant_function candidate; below an outer join C
+            // would PHV-wrap — declined here (divergence noted at the fn).
+            if rte.rtekind == RTEKind::RTE_FUNCTION
+                && lowest_outer_join.is_none()
+                && !kept.contains(&rti)
+            {
+                *target = Some((rti, None));
+            }
         }
         NodeTag::T_FromExpr => {
             let f = node.as_from_expr().unwrap();
@@ -672,6 +686,150 @@ fn pull_up_simple_values<'mcx>(
         )?,
     )?;
     Ok(())
+}
+
+// preprocess_function_rtes (prepjointree.c): const-simplify FUNCTION RTE
+// expressions between pull_up_sublinks and pull_up_subqueries so that
+// pull_up_constant_function sees Consts. inline_set_returning_function
+// (SQL-language SRF inlining) is unported; C returns NULL for every other
+// function class, so skipping it only forgoes that inlining.
+pub fn preprocess_function_rtes<'mcx>(
+    run: &mut crate::run::PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+) -> PgResult<()> {
+    let mcx = run.mcx;
+    for rte_node in &parse.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        if rte.rtekind != RTEKind::RTE_FUNCTION {
+            continue;
+        }
+        if let Some(l) = map_rtfunctions(mcx, &rte.functions, &mut |n| {
+            clauses::eval_const_expressions_with_params(mcx, n, run.glob.bound_params).map(Some)
+        })? {
+            // SAFETY: pre-seal Query owned by this planner invocation.
+            unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.functions = l) };
+        }
+    }
+    Ok(())
+}
+
+// pull_up_constant_function (prepjointree.c): a FUNCTION RTE whose expression
+// was const-simplified to a Const becomes an RTE_RESULT and the Const
+// replaces the parent's Vars; the RangeTblRef is reused. Divergence: C wraps
+// replacements in PlaceHolderVars below outer joins / under grouping sets /
+// in appendrels; those shapes are declined here (the RTE just stays, which is
+// always plan-valid).
+fn pull_up_constant_function<'mcx>(
+    run: &mut crate::run::PlannerRun<'mcx>,
+    parse: &mut Query<'mcx>,
+    varno: i32,
+    rte_node: Node<'mcx>,
+) -> PgResult<bool> {
+    let mcx = run.mcx;
+    let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+    if rte.funcordinality || rte.functions.len() != 1 || !parse.groupingSets.is_nil() {
+        return Ok(false);
+    }
+    let rtf = rte.functions.nth(0).as_range_tbl_function().expect("functions cell");
+    let Some(funcexpr) = rtf.funcexpr else { return Ok(false) };
+    let Some(c) = funcexpr.as_const() else { return Ok(false) };
+    // funccolcount/funccolnames + TYPEFUNC_SCALAR via type_is_rowtype
+    // (get_expr_result_type resolves a Const's class from its type).
+    if rtf.funccolcount != 1
+        || !rtf.funccolnames.is_nil()
+        || lsyscache::typ::type_is_rowtype(c.consttype)?
+    {
+        return Ok(false);
+    }
+
+    let mut tlist = NodeList::nil();
+    tlist.lappend(mcx, Node::mk_target_entry(mcx, copy_expr(mcx, funcexpr, 0)?, 1, None, false)?)?;
+
+    if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
+        replace_var_expr(mcx, n, varno, &tlist, false, None)
+    })? {
+        parse.targetList = l;
+    }
+    parse.havingQual = replace_opt(mcx, parse.havingQual, varno, &tlist, false, None)?;
+    if let Some(l) = clauses::walker::mutate_list(mcx, &parse.returningList, &mut |n| {
+        replace_var_expr(mcx, n, varno, &tlist, false, None)
+    })? {
+        parse.returningList = l;
+    }
+    for action_node in &parse.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = replace_opt(mcx, action.qual, varno, &tlist, false, None)?;
+        let new_tlist = match clauses::walker::mutate_list(mcx, &action.targetList, &mut |n| {
+            replace_var_expr(mcx, n, varno, &tlist, false, None)
+        })? {
+            Some(l) => l,
+            None => action.targetList.clone_in(mcx)?,
+        };
+        // SAFETY: pre-seal tree owned by this planner invocation.
+        unsafe {
+            action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                a.qual = new_qual;
+                a.targetList = new_tlist;
+            })
+        }
+        .expect("MergeAction");
+    }
+    parse.mergeJoinCondition =
+        replace_opt(mcx, parse.mergeJoinCondition, varno, &tlist, false, None)?;
+
+    // The jointree keeps its structure; splice_and_replace only rewrites
+    // quals and lateral siblings when handed the RangeTblRef back as its own
+    // replacement (C: "We can reuse the RangeTblRef node").
+    let same_rtr = Node::mk_range_tbl_ref(mcx, varno)?;
+    let jt = parse.jointree.expect("jointree is a FromExpr");
+    let mut new_fromlist = NodeList::nil();
+    for child in &jt.fromlist {
+        new_fromlist.lappend(
+            mcx,
+            splice_and_replace(mcx, &parse.rtable, child, varno, &tlist, false, None, same_rtr)?,
+        )?;
+    }
+    let new_quals = replace_opt(mcx, jt.quals, varno, &tlist, false, None)?;
+    parse.jointree =
+        Some(mcx::alloc_leak_in(mcx, FromExpr { fromlist: new_fromlist, quals: new_quals })?);
+
+    for i in 0..run.root.append_rel_list.len() {
+        replace_appinfo_translated_vars(run, i, &mut |n| {
+            replace_var_expr(mcx, n, varno, &tlist, false, None)
+        })?;
+    }
+    for orte_node in &parse.rtable {
+        let orte = orte_node.as_range_tbl_entry().expect("rtable cell");
+        match orte.rtekind {
+            RTEKind::RTE_JOIN => {
+                if let Some(l) = clauses::walker::mutate_list(mcx, &orte.joinaliasvars, &mut |n| {
+                    replace_var_expr(mcx, n, varno, &tlist, false, None)
+                })? {
+                    // SAFETY: pre-seal tree owned by this planner invocation.
+                    unsafe { orte_node.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = l) };
+                }
+            }
+            RTEKind::RTE_GROUP => {
+                if let Some(l) = clauses::walker::mutate_list(mcx, &orte.groupexprs, &mut |n| {
+                    replace_var_expr(mcx, n, varno, &tlist, false, None)
+                })? {
+                    // SAFETY: as above.
+                    unsafe { orte_node.with_mut::<RangeTblEntry, _>(|r| r.groupexprs = l) };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // SAFETY: rtable cell of this planner-owned Query; exclusive fixup.
+    unsafe {
+        rte_node.with_mut::<RangeTblEntry, _>(|r| {
+            r.rtekind = RTEKind::RTE_RESULT;
+            r.functions = NodeList::nil();
+            r.lateral = false;
+        })
+    };
+    Ok(true)
 }
 
 fn is_simple_subquery<'mcx>(

@@ -16532,6 +16532,7 @@ dependencies = [
  "ts_locale",
  "ts_parse",
  "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
