@@ -7,19 +7,17 @@
 use mcx::{Mcx, PgVec};
 use relcache::rules::RewriteRuleMeta;
 use rewrite_manip::{ReplaceVarsNoMatchOption, PRS2_NEW_VARNO, PRS2_OLD_VARNO};
+use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::{Query, QuerySource, RTEKind, RangeTblEntry};
 use types_nodes::{Node, NodeList, NodeTag};
 
 pub(crate) const RULE_FIRES_ON_ORIGIN: u8 = b'O';
-pub(crate) const RULE_FIRES_ALWAYS: u8 = b'A';
 pub(crate) const RULE_FIRES_ON_REPLICA: u8 = b'R';
 pub(crate) const RULE_DISABLED: u8 = b'D';
 
 // matchLocks (rewriteHandler.c). Returns indices into `rules`.
-// session_replication_role: ORIGIN is the only ported role (trigger_enabled
-// precedent), so the REPLICA suppression arm reduces to its ORIGIN/LOCAL leg.
 pub(crate) fn matchLocks(
     event: CmdType,
     rules: &[RewriteRuleMeta],
@@ -38,12 +36,15 @@ pub(crate) fn matchLocks(
             *has_update = true;
         }
         if rule.event != CmdType::CMD_SELECT as i32 {
-            if rule.enabled == RULE_FIRES_ON_REPLICA || rule.enabled == RULE_DISABLED {
+            if guc_tables::vars::SessionReplicationRole.read()
+                == guc_tables::consts::SESSION_REPLICATION_ROLE_REPLICA
+            {
+                if rule.enabled == RULE_FIRES_ON_ORIGIN || rule.enabled == RULE_DISABLED {
+                    continue;
+                }
+            } else if rule.enabled == RULE_FIRES_ON_REPLICA || rule.enabled == RULE_DISABLED {
                 continue;
             }
-            debug_assert!(
-                rule.enabled == RULE_FIRES_ON_ORIGIN || rule.enabled == RULE_FIRES_ALWAYS
-            );
             if parsetree.commandType == CmdType::CMD_MERGE {
                 return Err(Box::new(
                     PgError::error(format!("cannot execute MERGE on relation \"{rel_name}\""))
@@ -72,6 +73,7 @@ pub(crate) fn fireRules<'mcx>(
     instead_flag: &mut bool,
     returning_flag: &mut bool,
     qual_product: &mut Option<Node<'mcx>>,
+    rel_owner: Oid,
 ) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
     let mut results: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for &li in locks {
@@ -97,10 +99,14 @@ pub(crate) fn fireRules<'mcx>(
                 rule.qual_src.as_ref().expect("qualified rule").as_str(),
                 rt_index,
                 event,
+                rel_owner,
             )?;
         }
 
         let actions_node = readfuncs::stringToNode(mcx, rule.action_src.as_str())?;
+        // setRuleCheckAsUser at RelationBuildRuleLock (relcache.c): the rule's
+        // table references are checked as the relation owner, not the invoker.
+        crate::set_rule_check_as_user_node(actions_node, rel_owner)?;
         let actions = actions_node.as_list().expect("ev_action is a List");
         for action_node in actions.iter() {
             let action_q = action_node.as_query().expect("rule action is a Query");
@@ -109,7 +115,11 @@ pub(crate) fn fireRules<'mcx>(
             }
             let rule_qual = match &rule.qual_src {
                 None => None,
-                Some(s) => Some(readfuncs::stringToNode(mcx, s.as_str())?),
+                Some(s) => {
+                    let q = readfuncs::stringToNode(mcx, s.as_str())?;
+                    crate::set_rule_check_as_user_node(q, rel_owner)?;
+                    Some(q)
+                }
             };
             let rule_action = rewriteRuleAction(
                 mcx,
@@ -446,8 +456,10 @@ fn CopyAndAddInvertedQual<'mcx>(
     qual_src: &str,
     rt_index: i32,
     event: CmdType,
+    rel_owner: Oid,
 ) -> PgResult<()> {
     let new_qual = readfuncs::stringToNode(mcx, qual_src)?;
+    crate::set_rule_check_as_user_node(new_qual, rel_owner)?;
     acquire_locks_on_sublinks(mcx, Some(new_qual))?;
     rewrite_manip::ChangeVarNodes(mcx, new_qual, PRS2_OLD_VARNO, rt_index, 0)?;
     let new_qual = if event == CmdType::CMD_INSERT || event == CmdType::CMD_UPDATE {

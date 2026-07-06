@@ -324,6 +324,7 @@ fn RewriteQuery<'mcx>(
             &mut instead,
             &mut returning,
             &mut qual_product,
+            rel.rd_rel.relowner,
         )?;
         product_count = product_queries.len();
 
@@ -2780,6 +2781,15 @@ fn applyLockingClause<'mcx>(
     )?;
     // SAFETY: rewriter-owned tree; no derived refs live.
     unsafe { qry_node.with_mut::<Query, _>(|q| q.rowMarks.lappend(mcx, rc)) }.expect("Query")?;
+    Ok(())
+}
+
+// setRuleCheckAsUser (rewriteDefine.c) over a bare node. C stamps the rule
+// cache once in RelationBuildRuleLock (relcache.c); the text cache defers it
+// to each fresh read.
+pub(crate) fn set_rule_check_as_user_node<'mcx>(node: Node<'mcx>, userid: Oid) -> PgResult<()> {
+    let mut w = RuleCheckAsUser { userid };
+    nodes_core::NodeWalker::visit(&mut w, node)?;
     Ok(())
 }
 
