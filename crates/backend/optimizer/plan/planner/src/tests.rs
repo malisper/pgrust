@@ -3646,7 +3646,17 @@ mod pattern_saop_arms {
         let mcx = cx.mcx();
         let mut run = crate::run::PlannerRun::new(mcx);
         assert_eq!(
-            crate::plancat::function_selectivity(&mut run, 65, &[], 0, false, 0).unwrap(),
+            crate::plancat::function_selectivity(
+                &mut run,
+                65,
+                &[],
+                0,
+                false,
+                0,
+                types_pathnodes::JOIN_INNER,
+                None,
+            )
+            .unwrap(),
             0.3333333
         );
     }
