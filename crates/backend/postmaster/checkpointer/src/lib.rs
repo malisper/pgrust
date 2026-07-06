@@ -77,23 +77,25 @@ pub fn CheckPointTimeout() -> i32 {
     CHECK_POINT_TIMEOUT.get()
 }
 
-// PendingCheckpointerStats (C home pgstat_checkpointer.c, written from here
-// as extern); relocates when the pgstat activity unit ports.
-pub mod pending_stats {
-    use std::cell::Cell;
-    thread_local! {
-        pub static NUM_TIMED: Cell<u64> = const { Cell::new(0) };
-        pub static NUM_REQUESTED: Cell<u64> = const { Cell::new(0) };
-        pub static NUM_PERFORMED: Cell<u64> = const { Cell::new(0) };
-        pub static RESTARTPOINTS_TIMED: Cell<u64> = const { Cell::new(0) };
-        pub static RESTARTPOINTS_REQUESTED: Cell<u64> = const { Cell::new(0) };
-        pub static RESTARTPOINTS_PERFORMED: Cell<u64> = const { Cell::new(0) };
-        pub static MAXWRITTEN_CLEAN: Cell<u64> = const { Cell::new(0) };
+// PendingCheckpointerStats bumps (C writes the pgstat_checkpointer.c extern
+// struct directly); the counts land in pgstat's pending struct so
+// pgstat_report_checkpointer flushes them.
+mod pending_stats {
+    macro_rules! bump_via_seam {
+        ($name:ident) => {
+            pub fn $name() {
+                if pgstat_seams::$name::is_installed() {
+                    pgstat_seams::$name::call();
+                }
+            }
+        };
     }
-}
-
-fn bump(counter: &'static std::thread::LocalKey<Cell<u64>>) {
-    counter.with(|c| c.set(c.get() + 1));
+    bump_via_seam!(pgstat_count_checkpointer_num_timed);
+    bump_via_seam!(pgstat_count_checkpointer_num_requested);
+    bump_via_seam!(pgstat_count_checkpointer_num_performed);
+    bump_via_seam!(pgstat_count_checkpointer_restartpoints_timed);
+    bump_via_seam!(pgstat_count_checkpointer_restartpoints_requested);
+    bump_via_seam!(pgstat_count_checkpointer_restartpoints_performed);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -294,7 +296,7 @@ pub fn CheckpointerMain(startup_data: &StartupData) -> ! {
     elog::config::set_exit_on_any_error(true);
 
     if SHUTDOWN_XLOG_PENDING.load(Relaxed) {
-        bump(&pending_stats::NUM_REQUESTED);
+        pending_stats::pgstat_count_checkpointer_num_requested();
         transam_xlog::ShutdownXLOG().unwrap_or_else(|e| fatal_exit(&e));
         report_checkpointer_stats();
         report_wal_stats(true);
@@ -420,18 +422,18 @@ fn checkpointer_main_loop() -> PgResult<()> {
             }
 
             if chkpt_or_rstpt_timed {
-                bump(if do_restartpoint {
-                    &pending_stats::RESTARTPOINTS_TIMED
+                if do_restartpoint {
+                    pending_stats::pgstat_count_checkpointer_restartpoints_timed();
                 } else {
-                    &pending_stats::NUM_TIMED
-                });
+                    pending_stats::pgstat_count_checkpointer_num_timed();
+                }
             }
             if chkpt_or_rstpt_requested {
-                bump(if do_restartpoint {
-                    &pending_stats::RESTARTPOINTS_REQUESTED
+                if do_restartpoint {
+                    pending_stats::pgstat_count_checkpointer_restartpoints_requested();
                 } else {
-                    &pending_stats::NUM_REQUESTED
-                });
+                    pending_stats::pgstat_count_checkpointer_num_requested();
+                }
             }
 
             if !do_restartpoint
@@ -472,11 +474,11 @@ fn checkpointer_main_loop() -> PgResult<()> {
             if !do_restartpoint {
                 LAST_CHECKPOINT_TIME.set(now);
                 if ckpt_performed {
-                    bump(&pending_stats::NUM_PERFORMED);
+                    pending_stats::pgstat_count_checkpointer_num_performed();
                 }
             } else if ckpt_performed {
                 LAST_CHECKPOINT_TIME.set(now);
-                bump(&pending_stats::RESTARTPOINTS_PERFORMED);
+                pending_stats::pgstat_count_checkpointer_restartpoints_performed();
             } else {
                 LAST_CHECKPOINT_TIME.set(now - CheckPointTimeout() as i64 + 15);
             }

@@ -689,6 +689,7 @@ pub fn assign_recovery_prefetch(new_value: i32) {
 
 pub fn init_seams() {
     xlogprefetcher_seams::xlog_prefetch_reconfigure::set(XLogPrefetchReconfigure);
+    xlogprefetcher_seams::xlog_prefetch_reset_stats::set(XLogPrefetchResetStats);
     guc_tables::vars::recovery_prefetch.install(guc_tables::GucVarAccessors {
         get: recovery_prefetch,
         set: |v| RECOVERY_PREFETCH.with(|c| c.set(v)),

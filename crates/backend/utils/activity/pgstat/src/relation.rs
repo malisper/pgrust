@@ -241,6 +241,26 @@ pub fn pgstat_count_index_tuples(relid: Oid, relisshared: bool, n: PgStat_Counte
     with_counts(relid, relisshared, |c| c.tuples_returned += n);
 }
 
+// Drain of indexam's per-scan batched counters (the pgstat_count_index_scan /
+// pgstat_count_index_tuples / pgstat_count_heap_fetch macros, one probe per
+// scan). heap_fetches is idx_tup_fetch: C counts it against the index rel.
+pub fn pgstat_count_index_scan_batched(
+    relid: Oid,
+    relisshared: bool,
+    numscans: u64,
+    tuples_returned: u64,
+    tuples_fetched: u64,
+) {
+    if numscans == 0 && tuples_returned == 0 && tuples_fetched == 0 {
+        return;
+    }
+    with_counts(relid, relisshared, |c| {
+        c.numscans += numscans as PgStat_Counter;
+        c.tuples_returned += tuples_returned as PgStat_Counter;
+        c.tuples_fetched += tuples_fetched as PgStat_Counter;
+    });
+}
+
 pub fn pgstat_count_buffer_read(relid: Oid, relisshared: bool) {
     with_counts(relid, relisshared, |c| c.blocks_fetched += 1);
 }

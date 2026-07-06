@@ -100,8 +100,15 @@ pub fn pgstat_fetch_consistency() -> i32 {
     FETCH_CONSISTENCY.with(|c| c.get())
 }
 
+// assign_stats_fetch_consistency (pgstat.c): a mode change forces a snapshot
+// clear on the next access.
 pub fn set_pgstat_fetch_consistency(v: i32) {
-    FETCH_CONSISTENCY.with(|c| c.set(v));
+    FETCH_CONSISTENCY.with(|c| {
+        if c.get() != v {
+            shmem::force_snapshot_clear_on_next_access();
+        }
+        c.set(v);
+    });
 }
 
 thread_local! {
@@ -148,6 +155,24 @@ pub fn init_seams() {
     pgstat_seams::pgstat_count_checkpointer_slru_written::set(
         checkpointer::pgstat_count_checkpointer_slru_written,
     );
+    pgstat_seams::pgstat_count_checkpointer_num_timed::set(|| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.num_timed += 1)
+    });
+    pgstat_seams::pgstat_count_checkpointer_num_requested::set(|| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.num_requested += 1)
+    });
+    pgstat_seams::pgstat_count_checkpointer_num_performed::set(|| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.num_performed += 1)
+    });
+    pgstat_seams::pgstat_count_checkpointer_restartpoints_timed::set(|| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.restartpoints_timed += 1)
+    });
+    pgstat_seams::pgstat_count_checkpointer_restartpoints_requested::set(|| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.restartpoints_requested += 1)
+    });
+    pgstat_seams::pgstat_count_checkpointer_restartpoints_performed::set(|| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.restartpoints_performed += 1)
+    });
 
     pgstat_seams::pgstat_report_checkpointer::set(checkpointer::pgstat_report_checkpointer);
     pgstat_seams::pgstat_report_bgwriter::set(bgwriter::pgstat_report_bgwriter);

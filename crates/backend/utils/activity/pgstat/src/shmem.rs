@@ -2,7 +2,7 @@
 // entries in DSM dshash outside memory contexts; one process-global mutex
 // replaces the dshash partitions and per-entry lwlocks on this cold path.
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -265,6 +265,22 @@ pub(crate) fn update_database_entry(key: PgStat_HashKey, f: impl FnOnce(&mut PgS
     f(dbentry);
 }
 
+// C force_stats_snapshot_clear (pgstat.c): a stats_fetch_consistency change
+// discards the snapshot on the next access, not at assign time.
+thread_local! {
+    static FORCE_SNAPSHOT_CLEAR: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn force_snapshot_clear_on_next_access() {
+    FORCE_SNAPSHOT_CLEAR.with(|c| c.set(true));
+}
+
+pub(crate) fn consume_forced_snapshot_clear() {
+    if FORCE_SNAPSHOT_CLEAR.with(|c| c.replace(false)) {
+        clear_snapshot();
+    }
+}
+
 struct SnapshotState {
     mode: i32,
     snapshot_timestamp: TimestampTz,
@@ -280,6 +296,7 @@ thread_local! {
 }
 
 pub(crate) fn build_snapshot() {
+    consume_forced_snapshot_clear();
     let built = SNAPSHOT.with(|s| {
         let mut snap = s.borrow_mut();
         if snap.mode == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
@@ -314,6 +331,7 @@ pub(crate) fn build_snapshot() {
 }
 
 pub fn pgstat_get_stat_snapshot_timestamp() -> Option<TimestampTz> {
+    consume_forced_snapshot_clear();
     SNAPSHOT.with(|s| {
         let snap = s.borrow();
         (snap.mode == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT).then_some(snap.snapshot_timestamp)
@@ -323,6 +341,7 @@ pub fn pgstat_get_stat_snapshot_timestamp() -> Option<TimestampTz> {
 // Returns an owned copy; C hands back a pointer into snapshot memory. The
 // negative-lookup caching in CACHE mode mirrors C's entry->data = NULL.
 pub(crate) fn fetch_entry(key: PgStat_HashKey) -> Option<SharedEntry> {
+    consume_forced_snapshot_clear();
     let consistency = crate::pgstat_fetch_consistency();
 
     if consistency == PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {

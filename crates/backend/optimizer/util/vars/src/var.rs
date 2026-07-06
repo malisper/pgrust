@@ -999,14 +999,17 @@ fn adjust_standard_join_alias_expression<'mcx>(
     }
 }
 
-// flatten_group_exprs (var.c), root == NULL arm: GROUP-RTE Vars replaced by
-// the referenced grouping expressions (shared, not copied — deparse reads
-// only). sublevels_up stays 0 because Query/SubLink descent is a loud panic,
-// so IncrementVarSublevelsUp and the agglevelsup < sublevels_up arm are
-// unreachable here.
+// flatten_group_exprs (var.c): GROUP-RTE Vars replaced by the referenced
+// grouping expressions (shared, not copied — the arena share is our copy
+// model). Serves both C arms: root == NULL (deparse/pushdown) and the planner
+// call, whose mark_nullable_by_grouping leg is a no-op because group Vars
+// carry varnullingrels only under grouping sets (parse_agg.c buildGroupedVar),
+// which the planner caller rejects loudly. sublevels_up stays 0 because
+// Query/SubLink descent is a loud panic, so IncrementVarSublevelsUp and the
+// agglevelsup < sublevels_up arm are unreachable here.
 pub fn flatten_group_exprs<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &'mcx Query<'mcx>,
+    query: &Query<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     Ok(fge_mutate(mcx, query, node)?.unwrap_or(node))
@@ -1015,8 +1018,8 @@ pub fn flatten_group_exprs<'mcx>(
 /// None = unchanged (caller keeps the original list).
 pub fn flatten_group_exprs_list<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &'mcx Query<'mcx>,
-    list: &'mcx NodeList<'mcx>,
+    query: &Query<'mcx>,
+    list: &NodeList<'mcx>,
 ) -> PgResult<Option<&'mcx NodeList<'mcx>>> {
     match fge_list(mcx, query, list)? {
         None => Ok(None),
@@ -1028,7 +1031,7 @@ pub fn flatten_group_exprs_list<'mcx>(
 
 fn fge_list<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &'mcx Query<'mcx>,
+    query: &Query<'mcx>,
     list: &NodeList<'mcx>,
 ) -> PgResult<Option<NodeList<'mcx>>> {
     let mut changed = false;
@@ -1060,7 +1063,7 @@ fn fge_unported(what: &str) -> ! {
 
 fn fge_mutate<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &'mcx Query<'mcx>,
+    query: &Query<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
     use types_nodes::primnodes as pn;
@@ -1080,7 +1083,21 @@ fn fge_mutate<'mcx>(
                 return Ok(None);
             }
             debug_assert!(var.varattno > 0);
-            Ok(Some(rte.groupexprs.nth(var.varattno as usize - 1)))
+            let newvar = rte.groupexprs.nth(var.varattno as usize - 1);
+            // C preserves the original Var's location on a Var replacement.
+            if let Some(v) = newvar.as_var() {
+                if v.location != var.location {
+                    return Ok(Some(Node::mk(
+                        mcx,
+                        pn::Var {
+                            varnullingrels: v.varnullingrels.clone_in(mcx)?,
+                            location: var.location,
+                            ..*v
+                        },
+                    )?));
+                }
+            }
+            Ok(Some(newvar))
         }
         NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(None),
         // C: a GroupingFunc of the original or higher level (always, with
@@ -1402,7 +1419,7 @@ fn fge_mutate<'mcx>(
 
 fn fge_opt<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &'mcx Query<'mcx>,
+    query: &Query<'mcx>,
     node: Option<Node<'mcx>>,
 ) -> PgResult<Option<Node<'mcx>>> {
     match node {
