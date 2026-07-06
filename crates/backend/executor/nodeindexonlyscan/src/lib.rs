@@ -545,6 +545,9 @@ pub fn skeleton_park(node: &mut IndexOnlyScanState<'_>) -> PgResult<()> {
 /// Executor-skeleton re-arm: re-pin both relations and re-arm the parked
 /// scan descriptor for a new execution (fresh snapshot; the exec_re_scan
 /// pass that follows runs index_rescan before any fetch).
+/// AcquireExecutorLocks covers tables only: the index lock is retaken here
+/// with rellockmode, as C's ExecInitIndexOnlyScan does per execution
+/// (nodeIndexonlyscan.c:608); index_close(NoLock) keeps it to end of transaction.
 pub fn skeleton_rebind<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -554,7 +557,11 @@ pub fn skeleton_rebind<'mcx>(
     let rel = estate
         .exec_get_range_table_relation(node.ss.scanrelid, false)?
         .alias();
-    let index_rel = indexam::index_open(mcx, node.ioss_IndexOid, NoLock)?;
+    let index_rel = indexam::index_open(
+        mcx,
+        node.ioss_IndexOid,
+        ::nodeindexscan::index_lockmode(estate, node.ss.scanrelid),
+    )?;
     if let Some(scandesc) = node.ioss_ScanDesc.as_deref_mut() {
         let snapshot = estate
             .es_snapshot
