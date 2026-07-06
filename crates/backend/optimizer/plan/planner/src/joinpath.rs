@@ -514,6 +514,7 @@ fn generate_mergejoin_paths<'mcx>(
             run,
             &inner_pathlist,
             trialsortkeys,
+            &None,
             CostSelector::Total,
             is_partial,
         );
@@ -564,6 +565,7 @@ fn generate_mergejoin_paths<'mcx>(
             run,
             &inner_pathlist,
             trialsortkeys,
+            &None,
             CostSelector::Startup,
             is_partial,
         );

@@ -2081,9 +2081,8 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
                 .expect("set_rel_width: PlaceHolderInfo missing");
             tuple_width += run.root.phinfo(phinfo_id).ph_width as i64;
         } else {
-            if node.node_tag() == NodeTag::T_Var {
-                panic!("set_rel_width (costsize.c): foreign Var in reltarget; M2 join lane");
-            }
+            // C's catch-all: an expression, or a Var of another relation (a
+            // lateral reference) — width from the type, eval cost charged.
             let (typid, typmod) = expr_type_typmod(node);
             let item_width = lsyscache::get_typavgwidth(typid, typmod)?;
             debug_assert!(item_width > 0);

@@ -409,6 +409,37 @@ pub fn path_req_outer<'p, 'mcx>(path: &'p Path<'mcx>) -> &'p Relids<'mcx> {
     }
 }
 
+// reparameterize_path (pathnode.c): rebuild a path with more (never less)
+// parameterization. Returns None when the path can't serve; the SeqScan and
+// RTE_RESULT arms are the live surface (parameterized-append children), the
+// remaining C arms stay loud until a lane needs them.
+pub fn reparameterize_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    path_id: PathId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+    _loop_count: f64,
+) -> PgResult<Option<PathId>> {
+    let (pathtype, rel_id) = {
+        let p = run.root.path(path_id).base();
+        if !types_pathnodes::relids::relids_is_subset(path_req_outer(p), required_outer) {
+            return Ok(None);
+        }
+        (p.pathtype, p.parent)
+    };
+    if pathtype == tag16(NodeTag::T_SeqScan) {
+        return Ok(Some(create_seqscan_path(run, rel_id, required_outer, 0)?));
+    }
+    if pathtype == tag16(NodeTag::T_Result)
+        && matches!(run.root.path(path_id), PathNode::Path(_))
+    {
+        return Ok(Some(create_resultscan_path(run, rel_id, required_outer)?));
+    }
+    panic!(
+        "reparameterize_path (pathnode.c): pathtype {pathtype} arm unported; \
+         parameterized-append lane"
+    );
+}
+
 // add_path (pathnode.c).
 pub fn add_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId, new_id: PathId) -> PathId {
     use types_pathnodes::relids::{relids_subset_compare, SubsetCmp};
@@ -2615,9 +2646,13 @@ pub fn create_append_path<'mcx>(
     rel_id: RelId,
     subpaths: PgVec<'mcx, PathId>,
     pathkeys: PgVec<'mcx, PathKey>,
+    required_outer: &types_pathnodes::Relids<'mcx>,
     rows: f64,
 ) -> PgResult<PathId> {
     let mut path = base_path(run, NodeTag::T_AppendPath, NodeTag::T_Append, rel_id);
+    // C: appendrels are never SJE removal targets, so the appendrel
+    // parampathinfo variant applies unconditionally here.
+    path.param_info = get_appendrel_parampathinfo(run, rel_id, required_outer);
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.pathkeys = pathkeys;
@@ -2632,7 +2667,10 @@ pub fn create_append_path<'mcx>(
     };
     for &sp in subpaths.iter() {
         let s = run.root.path(sp).base();
-        debug_assert!(s.param_info.is_none());
+        debug_assert!(types_pathnodes::relids::relids_is_subset(
+            path_req_outer(s),
+            required_outer
+        ));
         path.parallel_safe = path.parallel_safe && s.parallel_safe;
     }
     let single = (subpaths.len() == 1).then(|| subpaths[0]);

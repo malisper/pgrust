@@ -1079,12 +1079,13 @@ fn pathkeys_useful_for_setop(run: &PlannerRun<'_>, pathkeys: &[PathKey]) -> usiz
     pathkeys_count_contained_in(&run.root.setop_pathkeys, pathkeys).1
 }
 
-// get_cheapest_path_for_pathkeys (pathkeys.c); required_outer is always empty
-// and partial paths never reach here.
-pub fn get_cheapest_path_for_pathkeys(
-    run: &PlannerRun<'_>,
+// get_cheapest_path_for_pathkeys (pathkeys.c); partial paths never reach
+// here.
+pub fn get_cheapest_path_for_pathkeys<'mcx>(
+    run: &PlannerRun<'mcx>,
     paths: &[types_pathnodes::PathId],
     pathkeys: &[PathKey],
+    required_outer: &types_pathnodes::Relids<'mcx>,
     cost_criterion: crate::pathnode::CostSelector,
     require_parallel_safe: bool,
 ) -> Option<types_pathnodes::PathId> {
@@ -1101,7 +1102,12 @@ pub fn get_cheapest_path_for_pathkeys(
                 continue;
             }
         }
-        if pathkeys_contained_in(pathkeys, &path.pathkeys) && path.param_info.is_none() {
+        if pathkeys_contained_in(pathkeys, &path.pathkeys)
+            && types_pathnodes::relids::relids_is_subset(
+                crate::pathnode::path_req_outer(path),
+                required_outer,
+            )
+        {
             matched_path = Some(pid);
         }
     }
