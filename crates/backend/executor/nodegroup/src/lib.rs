@@ -23,7 +23,8 @@ pub struct GroupState<'mcx> {
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
     pub ps_ResultTupleSlot: ExecSlotId,
     firsttuple_slot: SlotData<'mcx>,
-    eq: PgBox<'mcx, ExprState<'mcx>>,
+    // None when numCols == 0 (every key proved constant): one group.
+    eq: Option<PgBox<'mcx, ExprState<'mcx>>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     proj: PgBox<'mcx, ExprState<'mcx>>,
     grp_done: bool,
@@ -48,19 +49,23 @@ pub fn exec_init_group<'mcx>(
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::Virtual);
 
     let num_cols = node.numCols as usize;
-    debug_assert!(num_cols > 0 && node.grpColIdx.len() == num_cols);
-    let mut eqfuncoids: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, num_cols)?;
-    for &op in node.grpOperators {
-        eqfuncoids.push(lsyscache::get_opcode(op)?);
-    }
-    let eq = exec_build_grouping_equal(
-        mcx,
-        outer_desc,
-        outer_desc,
-        node.grpColIdx,
-        &eqfuncoids,
-        node.grpCollations,
-    )?;
+    debug_assert!(node.grpColIdx.len() == num_cols);
+    let eq = if num_cols > 0 {
+        let mut eqfuncoids: PgVec<'mcx, u32> = vec_with_capacity_in(mcx, num_cols)?;
+        for &op in node.grpOperators {
+            eqfuncoids.push(lsyscache::get_opcode(op)?);
+        }
+        Some(exec_build_grouping_equal(
+            mcx,
+            outer_desc,
+            outer_desc,
+            node.grpColIdx,
+            &eqfuncoids,
+            node.grpCollations,
+        )?)
+    } else {
+        None
+    };
     let firsttuple_slot = exectuples::make_tuple_table_slot(
         mcx,
         TupleSlotKind::MinimalTuple,
@@ -112,11 +117,13 @@ where
                 node.grp_done = true;
                 return Ok(None);
             };
+            let Some(eq) = node.eq.as_mut() else {
+                // Zero grouping columns: the whole input is one group.
+                continue;
+            };
             // SAFETY: per-tuple context outlives the eval; reset per input
             // tuple (C ExecQualAndReset).
-            unsafe {
-                node.eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
-            };
+            unsafe { eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx()) };
             estate.reset_expr_context(node.ps_ExprContext);
             let outer_slot = estate.slot_mut(outer_id);
             let mut slots = EvalSlots {
@@ -124,7 +131,7 @@ where
                 inner: Some(&mut node.firsttuple_slot),
                 outer: Some(&mut *outer_slot),
             };
-            if !exec_qual(Some(&mut node.eq), &mut slots)? {
+            if !exec_qual(Some(eq), &mut slots)? {
                 break outer_id;
             }
         };
@@ -167,7 +174,9 @@ impl<'mcx> GroupState<'mcx> {
 /// `ExecEndGroup` node-local half; the caller ends the outer child.
 pub fn exec_end_group(node: &mut GroupState<'_>) {
     node.firsttuple_slot.base_mut().tts_tupleDescriptor = None;
-    node.eq.release_frames();
+    if let Some(eq) = node.eq.as_mut() {
+        eq.release_frames();
+    }
     if let Some(q) = node.qual.as_mut() {
         q.release_frames();
     }
