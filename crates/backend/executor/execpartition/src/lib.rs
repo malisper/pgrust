@@ -353,6 +353,24 @@ pub fn exec_partition_check<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
+    // Recursion tripwire: constraint compile/eval must never route back here.
+    #[cfg(debug_assertions)]
+    let _depth = {
+        use core::cell::Cell;
+        thread_local! { static DEPTH: Cell<u32> = const { Cell::new(0) }; }
+        struct G;
+        impl Drop for G {
+            fn drop(&mut self) {
+                DEPTH.with(|d| d.set(d.get() - 1));
+            }
+        }
+        DEPTH.with(|d| {
+            let n = d.get();
+            assert!(n < 8, "exec_partition_check recursion depth {n}");
+            d.set(n + 1);
+        });
+        G
+    };
     if cache.is_none() {
         let qual = partdesc::RelationGetPartitionQual(mcx, rel)?;
         let expr = partbounds::make_ands_explicit(mcx, qual)?;
