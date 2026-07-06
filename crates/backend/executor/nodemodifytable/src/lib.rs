@@ -166,6 +166,11 @@ pub struct ModifyTableState<'mcx> {
     // execPartition.c:781-864): only built for attno-remapped leaves; other
     // leaves reuse the root's DO UPDATE state as C does.
     leaf_on_conflict: Vec<Option<LeafOnConflict<'mcx>>>,
+    // C ExecInitPartitionInfo's per-leaf ri_projectReturning: the first
+    // returningList translated to the leaf's attnos; only built (and used)
+    // for attno-remapped leaves — a non-remapped leaf's projection is
+    // identical to the root's.
+    leaf_returning: Vec<Option<PgBox<'mcx, ExprState<'mcx>>>>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -174,6 +179,14 @@ pub struct ModifyTableState<'mcx> {
     // C ExecInsert's *insert_destrel out-param (routed leaf of the last
     // insert; None = unrouted), for the cross-partition FK update event.
     last_insert_leaf: Option<usize>,
+    // The remapped leaf's work slot when the last insert converted into a
+    // leaf layout (ri_PartitionTupleSlot); RETURNING evaluates the leaf
+    // projection over it (C ExecInsert projects on the routed leaf).
+    last_insert_remapped: Option<ExecSlotId>,
+    // Set with oc_old_slot when ON CONFLICT DO UPDATE modified a remapped
+    // leaf: its existing/proj slots are leaf-format, so RETURNING runs the
+    // leaf-translated projection.
+    oc_returning_leaf: Option<usize>,
     // C mt_merge_action's commandType: the WHEN action being executed
     // (routed-INSERT WCO kind selection, nodeModifyTable.c:1079-1081).
     merge_active_cmd: Option<CmdType>,
@@ -580,7 +593,21 @@ pub fn exec_init_modify_table<'mcx>(
             for attno in node.onConflictCols.iter() {
                 set_attnos.push(attno as u16);
             }
-            assert_eq!(set_attnos.len(), node.onConflictSet.len());
+            // ExecBuildUpdateProjection (execExpr.c:580-601): junk entries
+            // (MULTIEXPR SubPlans) follow the SET columns and are never
+            // assigned; onConflictCols covers only the non-junk columns.
+            let mut non_junk = 0usize;
+            let mut seen_junk = false;
+            for tle_node in &node.onConflictSet {
+                let tle = tle_node.as_target_entry().expect("TargetEntry");
+                if tle.resjunk {
+                    seen_junk = true;
+                } else {
+                    assert!(!seen_junk, "onConflictSet tlist: junk before a SET column");
+                    non_junk += 1;
+                }
+            }
+            assert_eq!(set_attnos.len(), non_junk);
             if let Some(where_node) = node.onConflictWhere {
                 let qual = where_node
                     .as_list()
@@ -637,10 +664,13 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_child_to_root: Vec::new(),
         leaf_wco: Vec::new(),
         leaf_on_conflict: Vec::new(),
+        leaf_returning: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
         last_insert_leaf: None,
+        last_insert_remapped: None,
+        oc_returning_leaf: None,
         merge_active_cmd: None,
         mt_merge_inserted: 0.0,
         mt_merge_updated: 0.0,
@@ -2711,6 +2741,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_child_to_root.clear();
     mt.leaf_wco.clear();
     mt.leaf_on_conflict.clear();
+    mt.leaf_returning.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -3263,8 +3294,21 @@ fn exec_update<'mcx>(
     }
 
     let ar_new_tid = slot.base().tts_tid;
-    if let Some(td) = mt.rel().trigdesc.clone() {
-        if td.triggers.iter().any(|t| t.tgnattr > 0) {
+    // ExecARUpdateTriggers (trigger.c) fires on trig_update_after_row OR an
+    // active transition capture: a statement trigger with a REFERENCING
+    // clause on the root captures child rows even when the child has no row
+    // triggers (trigdesc NULL).
+    let td = mt.rel().trigdesc.clone();
+    let tc_active = if mt.operation == CmdType::CMD_INSERT {
+        mt.oc_transition_capture.is_some()
+    } else {
+        mt.transition_capture.is_some()
+    };
+    if td.is_some() || tc_active {
+        if td
+            .as_ref()
+            .is_some_and(|td| td.triggers.iter().any(|t| t.tgnattr > 0))
+        {
             ensure_all_updated_cols(mt, estate, false)?;
         }
         let result_rti = mt.rel().rti;
@@ -3296,7 +3340,7 @@ fn exec_update<'mcx>(
         });
         let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
         ::trigger::ExecARUpdateTriggers(
-            mcx, rel, Some(&td), None, None, Some(*tupleid), Some(ar_new_tid),
+            mcx, rel, td.as_deref(), None, None, Some(*tupleid), Some(ar_new_tid),
             &recheck_indexes, tc, Some(&mut when), false, conv.as_ref(), conv.as_ref(),
         )?;
     }
@@ -4396,36 +4440,86 @@ fn exec_process_returning<'mcx>(
 ) -> PgResult<ExecSlotId> {
     let result_id = mt.returning_slot.expect("RETURNING slot initialized");
     let (has_old, has_new) = {
-        let st = mt.rel().project_returning.as_deref().expect("RETURNING projection built");
+        let ModifyTableState { rels, root, cur, insert_target_root, .. } = &*mt;
+        let st = if *insert_target_root {
+            root.as_ref().unwrap_or(&rels[0])
+        } else {
+            &rels[*cur]
+        }
+        .project_returning
+        .as_deref()
+        .expect("RETURNING projection built");
         (st.has_old(), st.has_new())
     };
+    // C ExecInsert projects RETURNING on the routed leaf's ResultRelInfo over
+    // the leaf-format tuple. A remapped leaf needs the leaf-translated
+    // projection and the leaf work slot so system columns read the real
+    // inserted tuple; for everything else the root-format projection over
+    // the root slot (tid + tableoid carried over by exec_insert) is
+    // byte-identical and keeps the OLD/NEW legs, so the insert leaf path
+    // only engages for projections without OLD/NEW refs. insert_target_root
+    // marks the cross-partition-UPDATE insert half's RETURNING call.
+    //
+    // ON CONFLICT DO UPDATE on a remapped leaf (oc_returning_leaf) differs:
+    // the existing (OLD) and projected (NEW/tuple) slots are BOTH
+    // leaf-format, so the leaf projection runs with the passed old/new
+    // sources intact (C ExecUpdate on the leaf ResultRelInfo).
+    let oc_leaf = mt.oc_returning_leaf.take();
+    let ins_leaf = mt.last_insert_remapped.take();
+    let leaf = match oc_leaf {
+        Some(idx) => Some((idx, new_id.expect("DO UPDATE returned the leaf proj slot"))),
+        None => match ins_leaf {
+            Some(ws)
+                if (cmd == CmdType::CMD_INSERT || mt.insert_target_root)
+                    && !has_old
+                    && !has_new =>
+            {
+                Some((mt.last_insert_leaf.expect("remapped insert routed to a leaf"), ws))
+            }
+            _ => None,
+        },
+    };
+    if let Some((idx, _)) = leaf {
+        resolve_leaf_returning(mt, estate, idx)?;
+    }
     // C runs pending initplans lazily inside ExecProject (ExecEvalParamExec);
     // RETURNING-list $n params resolve here instead (execscan note).
     {
-        let ModifyTableState { rels, cur, .. } = &*mt;
-        let deps = rels[*cur]
-            .project_returning
-            .as_deref()
-            .expect("RETURNING projection built")
-            .param_exec_deps();
+        let ModifyTableState { rels, cur, leaf_returning, .. } = &*mt;
+        let deps = match leaf {
+            Some((idx, _)) => leaf_returning[idx].as_deref(),
+            None => rels[*cur].project_returning.as_deref(),
+        }
+        .expect("RETURNING projection built")
+        .param_exec_deps();
         if !deps.is_empty() {
             executils::exec_eval_param_exec_params(estate, deps)?;
         }
     }
+    // The insert leaf path carries no OLD/NEW steps (gated above): keep both
+    // sources empty so the slot-aliasing checks below see only
+    // scan/plan/result (the root-format new slot may alias the plan slot).
+    // The conflict leaf path keeps them: both are leaf-format.
+    let keep_old_new = leaf.is_none() || oc_leaf.is_some();
     let old_src = match old_id {
-        Some(id) => Some(id),
+        Some(id) if keep_old_new => Some(id),
         None if has_old => Some(exec_get_all_null_slot(mt, estate)?),
-        None => None,
+        _ => None,
     };
     let new_src = match new_id {
-        Some(id) => Some(id),
+        Some(id) if keep_old_new => Some(id),
         None if has_new => Some(exec_get_all_null_slot(mt, estate)?),
-        None => None,
+        _ => None,
     };
-    let tuple_slot = match cmd {
-        CmdType::CMD_INSERT | CmdType::CMD_UPDATE => new_id.expect("returned new tuple"),
-        CmdType::CMD_DELETE => old_id.expect("returned old tuple"),
-        other => panic!("ExecProcessReturning (nodeModifyTable.c): unrecognized commandType: {other:?}"),
+    let tuple_slot = match leaf {
+        Some((_, ws)) => ws,
+        None => match cmd {
+            CmdType::CMD_INSERT | CmdType::CMD_UPDATE => new_id.expect("returned new tuple"),
+            CmdType::CMD_DELETE => old_id.expect("returned old tuple"),
+            other => panic!(
+                "ExecProcessReturning (nodeModifyTable.c): unrecognized commandType: {other:?}"
+            ),
+        },
     };
     // The node econtext for SubPlan evaluation inside RETURNING (C
     // ps_ExprContext): scan = returned tuple, outer = plan tuple; reset per
@@ -4445,17 +4539,22 @@ fn exec_process_returning<'mcx>(
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let suspended = {
-            let ModifyTableState { rels, root, cur, insert_target_root, .. } = &mut *mt;
+            let ModifyTableState { rels, root, cur, insert_target_root, leaf_returning, .. } =
+                &mut *mt;
             // insert_target_root: cross-partition UPDATE / MERGE root-INSERT
             // RETURNING runs the root's projection (C evaluates the routed
-            // destination's ri_projectReturning; our slots are root-format).
-            let state = if *insert_target_root {
-                root.as_mut().unwrap_or(&mut rels[0])
-            } else {
-                &mut rels[*cur]
+            // destination's ri_projectReturning; our slots are root-format)
+            // — except a remapped routed leaf, which projects its own
+            // leaf-translated list over the leaf-format tuple.
+            let state = match leaf {
+                Some((idx, _)) => leaf_returning[idx].as_deref_mut(),
+                None if *insert_target_root => root
+                    .as_mut()
+                    .unwrap_or(&mut rels[0])
+                    .project_returning
+                    .as_deref_mut(),
+                None => rels[*cur].project_returning.as_deref_mut(),
             }
-            .project_returning
-            .as_deref_mut()
             .expect("RETURNING projection built");
             state.set_old_new_null(old_id.is_none(), new_id.is_none());
             // C mtstate->mt_merge_action: under MERGE, `cmd` is the fired
@@ -4709,6 +4808,72 @@ fn resolve_leaf_wco<'mcx>(
     Ok(())
 }
 
+// ExecInitPartitionInfo's RETURNING leg (execPartition.c): an attno-remapped
+// routed leaf projects RETURNING from its own layout — the first
+// returningList with Vars translated to the leaf's attnos
+// (map_partition_varattnos).
+fn resolve_leaf_returning<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<()> {
+    if mt.leaf_returning[idx].is_some() {
+        return Ok(());
+    }
+    let node = mt.plan;
+    let mcx = estate.es_query_cxt;
+    let first_rti = mt.rels[0].rti;
+    let rlist = node
+        .returningLists
+        .nth(0)
+        .as_list()
+        .expect("returningLists cell is a List");
+    let (leaf_desc, leaf_reltype, attmap) = {
+        let first = estate.es_relations[(first_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let leaf = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+        let attmap =
+            tupdesc::build_attrmap_by_name_if_req(mcx, &leaf.rd_att, &first.rd_att, false)?;
+        (leaf.rd_att.clone(), leaf.rd_rel.reltype, attmap)
+    };
+    let mut mapped = types_nodes::list::NodeList::nil();
+    for tle_node in rlist {
+        let n = match &attmap {
+            None => tle_node,
+            Some(map) => {
+                rewrite_manip::map_variable_attnos(
+                    mcx,
+                    tle_node,
+                    first_rti as i32,
+                    0,
+                    map,
+                    leaf_reltype,
+                )?
+                .0
+            }
+        };
+        mapped.lappend(mcx, n)?;
+    }
+    let params = estate.param_bind();
+    let is_merge = node.operation == CmdType::CMD_MERGE;
+    let proj = executils::with_subplan_compile_env(estate, |env| {
+        if is_merge {
+            execexpr::exec_build_merge_projection_info_subplans(
+                mcx,
+                &mapped,
+                Some(&leaf_desc),
+                params,
+                env,
+            )
+        } else {
+            execexpr::exec_build_projection_info_subplans(mcx, &mapped, Some(&leaf_desc), params, env)
+        }
+    })?;
+    mt.leaf_returning[idx] = Some(proj);
+    Ok(())
+}
+
 // Assemble the trigger crate's conversion spec from a resolved cache slot.
 #[inline]
 fn child_to_root_spec<'a, 'mcx>(
@@ -4921,6 +5086,7 @@ fn exec_insert<'mcx>(
                 mt.leaf_existing.push(None);
                 mt.leaf_child_to_root.push(None);
                 mt.leaf_wco.push(None);
+                mt.leaf_returning.push(None);
                 mt.leaf_on_conflict.push(None);
             }
             Some(idx)
@@ -4959,6 +5125,7 @@ fn exec_insert<'mcx>(
             work_slot = lsid;
         }
     }
+    mt.last_insert_remapped = (work_slot != slot_id).then_some(work_slot);
 
     // An attno-remapped leaf gets its own DO UPDATE SET/WHERE state with Vars
     // mapped to the leaf's attnos (C ExecInitPartitionInfo's map != NULL leg,
@@ -5716,6 +5883,10 @@ fn exec_on_conflict_update<'mcx>(
     if modified && mt.rel().project_returning.is_some() {
         // C clears `existing` only after ExecUpdate's RETURNING projection.
         mt.oc_old_slot = Some(existing_id);
+        // A remapped leaf's existing/proj slots are leaf-format: RETURNING
+        // must run the leaf-translated projection (C ExecUpdate on the leaf
+        // ResultRelInfo projects its own ri_projectReturning).
+        mt.oc_returning_leaf = remapped;
     } else {
         clear_slot(estate, existing_id);
     }
@@ -5849,7 +6020,21 @@ fn resolve_leaf_on_conflict<'mcx>(
         assert!(leaf_attno > 0, "invalid ON CONFLICT SET column number");
         set_attnos.push(leaf_attno as u16);
     }
-    assert_eq!(set_attnos.len(), node.onConflictSet.len());
+    // ExecBuildUpdateProjection (execExpr.c:580-601): junk entries
+    // (MULTIEXPR SubPlans) follow the SET columns and are never
+    // assigned; onConflictCols covers only the non-junk columns.
+    let mut non_junk = 0usize;
+    let mut seen_junk = false;
+    for tle_node in &node.onConflictSet {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if tle.resjunk {
+            seen_junk = true;
+        } else {
+            assert!(!seen_junk, "onConflictSet tlist: junk before a SET column");
+            non_junk += 1;
+        }
+    }
+    assert_eq!(set_attnos.len(), non_junk);
 
     let mut where_clause = None;
     if let Some(where_node) = node.onConflictWhere {
@@ -6840,12 +7025,13 @@ mcx::forget_safe_struct!(
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
+        last_insert_remapped, oc_returning_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
         leaf_on_conflict, leaf_existing,
-        leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
+        leaf_returning, leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },
 );
