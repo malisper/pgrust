@@ -192,6 +192,9 @@ fn install_proc_boot_seams() {
     miscinit_seams::switch_to_shared_latch::set(|| {});
     miscinit_seams::switch_back_to_local_latch::set(|| {});
     miscinit_seams::get_user_id::set(|| 10);
+    // vacuum_is_permitted_for_relation calls miscinit::GetUserId() directly
+    // (not the seam); arm the thread-local too.
+    miscinit::SetUserIdAndSecContext(10, 0);
     miscinit_seams::is_bootstrap_processing_mode::set(|| false);
     waitevent_seams::pgstat_set_wait_event_storage::set(|_| {});
     waitevent_seams::pgstat_report_wait_start::set(|_| {});
