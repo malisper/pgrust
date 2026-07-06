@@ -344,6 +344,21 @@ pub fn exec_re_scan_with_chg<'mcx>(
     if !chg.overlap(&base.allParam) {
         return exec_re_scan(node, estate);
     }
+    exec_re_scan_chg_forced(node, plan, estate, chg)
+}
+
+/// The chg arms without the allParam-overlap early-out. Gather's deferred
+/// rescan sets the child's chgParam to {rescan_param} directly (C
+/// bms_add_member, no UpdateChangedParamSet intersection), so the child's
+/// node-local chg behavior must run even when rescan_param is absent from
+/// its allParam.
+pub(crate) fn exec_re_scan_chg_forced<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    plan: Node<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &types_nodes::bitmapset::Bitmapset<'mcx>,
+) -> PgResult<()> {
+    let base = plan.as_plan().expect("plan-tree node");
 
     // The initplan mark/rescan walk and the hashed-SubPlan stale sweep are
     // outlined cold: this function runs per Memoize probe (200k/q on
@@ -594,36 +609,69 @@ pub fn exec_re_scan_with_chg<'mcx>(
             exec_re_scan_with_chg(&mut s.outer, base.lefttree.expect("SetOp outer plan"), estate, chg)?;
             exec_re_scan_with_chg(&mut s.inner, base.righttree.expect("SetOp inner plan"), estate, chg)?;
         }
+        // ExecReScanGather: chg lands on the child via UpdateChangedParamSet
+        // (∩ its allParam) plus rescan_param (no intersection); a non-empty
+        // pending set defers the child rescan to the next leader pull, after
+        // ExecParallelReinitialize has re-created the DSM.
         PlanStateNode::Gather(g) => {
             let g = &mut **g;
             crate::nodegather::exec_shutdown_gather_workers(&mut g.state)?;
             g.state.initialized = false;
-            if g.state.plan.rescan_param >= 0 {
-                panic!(
-                    "ExecReScanGather (nodeGather.c): rescan_param deferred-rescan \
-                     lane unported"
-                );
-            }
-            exec_re_scan_with_chg(
-                &mut g.outer,
-                base.lefttree.expect("Gather outer plan"),
+            let outer_plan = base.lefttree.expect("Gather outer plan");
+            accumulate_outer_chg(
+                &mut g.state.outer_chg,
+                outer_plan,
                 estate,
                 chg,
+                g.state.plan.rescan_param,
             )?;
+            if g.state.outer_chg.is_empty() {
+                exec_re_scan_with_chg(&mut g.outer, outer_plan, estate, chg)?;
+            }
         }
         PlanStateNode::GatherMerge(gm) => {
             let gm = &mut **gm;
             crate::nodegathermerge::exec_rescan_gather_merge_pre(&mut gm.state, estate)?;
-            exec_re_scan_with_chg(
-                &mut gm.outer,
-                base.lefttree.expect("GatherMerge outer plan"),
+            let outer_plan = base.lefttree.expect("GatherMerge outer plan");
+            accumulate_outer_chg(
+                &mut gm.state.outer_chg,
+                outer_plan,
                 estate,
                 chg,
+                gm.state.plan.rescan_param,
             )?;
+            if gm.state.outer_chg.is_empty() {
+                exec_re_scan_with_chg(&mut gm.outer, outer_plan, estate, chg)?;
+            }
         }
         PlanStateNode::ModifyTable(_) => {
             panic!("ExecReScan (execAmi.c): node type 232 does not support ExecReScan")
         }
+    }
+    Ok(())
+}
+
+// The Gather/GatherMerge rescan chgParam build: chg ∩ child allParam
+// (UpdateChangedParamSet) plus rescan_param when assigned (direct
+// bms_add_member in ExecReScanGather/ExecReScanGatherMerge).
+fn accumulate_outer_chg<'mcx>(
+    outer_chg: &mut types_nodes::bitmapset::Bitmapset<'mcx>,
+    outer_plan: Node<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    chg: &types_nodes::bitmapset::Bitmapset<'mcx>,
+    rescan_param: i32,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let outer_allparam = &outer_plan.as_plan().expect("plan node").allParam;
+    let mut x = chg.next_member(-1);
+    while x >= 0 {
+        if outer_allparam.is_member(x) {
+            outer_chg.add_member(mcx, x)?;
+        }
+        x = chg.next_member(x);
+    }
+    if rescan_param >= 0 {
+        outer_chg.add_member(mcx, rescan_param)?;
     }
     Ok(())
 }

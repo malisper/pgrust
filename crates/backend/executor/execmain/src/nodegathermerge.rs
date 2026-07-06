@@ -82,6 +82,9 @@ pub struct GatherMergeState<'mcx> {
     worker_slots: mcx::PgVec<'mcx, ExecSlotId>,
     gm_heap: mcx::PgVec<'mcx, i32>,
     tuple_buffers: Vec<GmTupleBuffer>,
+    // C outerPlan->chgParam: deferred-rescan set from ExecReScanGatherMerge;
+    // consumed at the leader's next local pull, after ExecParallelReinitialize.
+    pub outer_chg: ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 /// `ExecInitGatherMerge` + `gather_merge_setup` (nodeGatherMerge.c).
@@ -166,6 +169,7 @@ pub fn exec_init_gather_merge<'mcx>(
         worker_slots,
         gm_heap,
         tuple_buffers,
+        outer_chg: ::types_nodes::bitmapset::Bitmapset::empty(),
     })
 }
 
@@ -366,6 +370,12 @@ fn gather_merge_readnext<'mcx>(
 ) -> PgResult<bool> {
     if reader == 0 {
         if node.need_to_scan_locally {
+            crate::nodegather::apply_pending_outer_chg(
+                &mut node.outer_chg,
+                outer,
+                node.plan.plan.lefttree.expect("GatherMerge without an outer plan"),
+                estate,
+            )?;
             if let Some(id) = exec_proc_node(outer, estate)? {
                 node.gm_slots[0] = Some(id);
                 return Ok(true);
@@ -538,23 +548,26 @@ pub(crate) fn exec_rescan_gather_merge_pre<'mcx>(
     node.initialized = false;
     node.gm_initialized = false;
     node.need_to_scan_locally = false;
-    if node.plan.rescan_param >= 0 {
-        panic!(
-            "ExecReScanGatherMerge (nodeGatherMerge.c): rescan_param deferred-rescan \
-             lane unported"
-        );
-    }
     Ok(())
 }
 
-/// `ExecReScanGatherMerge` (nodeGatherMerge.c).
+/// `ExecReScanGatherMerge` (nodeGatherMerge.c). With a rescan_param the child
+/// rescan is deferred (chgParam): parallel-aware children must see
+/// ReInitializeDSM before their ReScan.
 pub fn exec_rescan_gather_merge<'mcx>(
     node: &mut GatherMergeState<'mcx>,
     outer: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     exec_rescan_gather_merge_pre(node, estate)?;
-    crate::execami::exec_re_scan(outer, estate)
+    if node.plan.rescan_param >= 0 {
+        let mcx = estate.es_query_cxt;
+        node.outer_chg.add_member(mcx, node.plan.rescan_param)?;
+    }
+    if node.outer_chg.is_empty() {
+        return crate::execami::exec_re_scan(outer, estate);
+    }
+    Ok(())
 }
 
 const _: () = assert!(!core::mem::needs_drop::<SortSupport>());
@@ -564,6 +577,6 @@ const _: () = assert!(!core::mem::needs_drop::<SortSupport>());
 ::mcx::forget_safe_struct!(
     GatherMergeState<'_> { plan, ps, initialized, gm_initialized,
         need_to_scan_locally, tuples_needed, nworkers_launched, nreaders,
-        gm_nkeys, gm_slots, worker_slots, gm_heap;
+        gm_nkeys, gm_slots, worker_slots, gm_heap, outer_chg;
         pei, reader, gm_sortkeys, tuple_buffers },
 );
