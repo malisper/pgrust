@@ -156,7 +156,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             let PartitionTupleRouting { dispatches, root_check, .. } = &mut *self;
             let rel = &dispatches[0].rel;
             if !exec_partition_check(mcx, root_check, rel, slot)? {
-                return Err(partition_constraint_violation(mcx, rel, slot));
+                return Err(partition_constraint_violation(mcx, rel, slot, None));
             }
         }
         let mut values = [Datum::null(); PARTITION_MAX_KEYS];
@@ -339,7 +339,7 @@ fn check_default_partition<'mcx>(
     let r = execexpr::exec_eval_expr(state, &mut slots)?;
     // ExecCheck: NULL passes.
     if !r.isnull && !r.value.as_bool() {
-        return Err(partition_constraint_violation(mcx, target, slot));
+        return Err(partition_constraint_violation(mcx, target, slot, None));
     }
     Ok(())
 }
@@ -395,6 +395,7 @@ pub fn partition_constraint_violation<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> Box<PgError> {
     let table = rel.name().to_string();
     let mut e = PgError::new(
@@ -410,27 +411,65 @@ pub fn partition_constraint_violation<'mcx>(
             .unwrap_or_default(),
     )
     .with_table_name(table);
-    if let Ok(desc) = slot_value_description(mcx, rel, slot) {
+    if let Ok(Some(desc)) = slot_value_description(mcx, rel, slot, modified_cols) {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)
 }
 
-// ExecBuildSlotValueDescription, table-SELECT-permission arm (single-
-// superuser boot: column-ACL filtering and RLS are unreachable).
-fn slot_value_description<'mcx>(
+// ExecBuildSlotValueDescription (execMain.c): without table-level SELECT,
+// only columns the user provided (modified_cols, rel-numbered offset by
+// FirstLowInvalidHeapAttributeNumber) or can read are shown, prefixed by
+// their name list; None elides the DETAIL entirely.
+pub fn slot_value_description<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<String> {
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+) -> PgResult<Option<String>> {
     const MAX_FIELD_LEN: usize = 64;
+    const ACL_SELECT: u64 = 1 << 1;
+    const ACLCHECK_OK: i32 = 0;
+    // FirstLowInvalidHeapAttributeNumber (htup_details.h).
+    const FLIHAN: i32 = -7;
+    let relid = rel.rd_id;
+    let mut table_perm = false;
+    let mut any_perm = false;
+    let mut userid = Oid::default();
+    if rls_seams::check_enable_rls::call(relid, Oid::default(), true)?
+        != rls_seams::CheckEnableRls::RlsEnabled
+    {
+        userid = miscinit_seams::get_user_id::call();
+        if aclchk_seams::pg_class_aclcheck_ext::call(relid, userid, ACL_SELECT)?.0 == ACLCHECK_OK {
+            table_perm = true;
+            any_perm = true;
+        }
+    }
     exectuples::slot_getallattrs(slot);
     let mut buf = String::from("(");
+    let mut collist = String::from("(");
     let mut write_comma = false;
+    let mut write_comma_collist = false;
     for i in 0..rel.rd_att.natts as usize {
         let att = rel.rd_att.attr(i);
         if att.attisdropped {
             continue;
+        }
+        if !table_perm {
+            let aclok =
+                aclchk_seams::pg_attribute_aclcheck::call(relid, att.attnum, userid, ACL_SELECT)?
+                    == ACLCHECK_OK;
+            let modified = modified_cols
+                .is_some_and(|mc| mc.is_member(att.attnum as i32 - FLIHAN));
+            if !aclok && !modified {
+                continue;
+            }
+            any_perm = true;
+            if write_comma_collist {
+                collist.push_str(", ");
+            }
+            write_comma_collist = true;
+            collist.push_str(core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8"));
         }
         if write_comma {
             buf.push_str(", ");
@@ -462,8 +501,16 @@ fn slot_value_description<'mcx>(
             buf.push_str("...");
         }
     }
+    if !any_perm {
+        return Ok(None);
+    }
     buf.push(')');
-    Ok(buf)
+    if !table_perm {
+        collist.push_str(") = ");
+        collist.push_str(&buf);
+        return Ok(Some(collist));
+    }
+    Ok(Some(buf))
 }
 
 // get_partition_for_tuple, LIST/RANGE arms with the last-found cache.
@@ -687,10 +734,45 @@ fn no_partition_error(
     isnull: &[bool],
 ) -> Box<PgError> {
     let n = pd.key.partnatts as usize;
+    // The key description leaks data: elide it under RLS, and without SELECT
+    // on the table or on every key column (expression keys always elide).
+    const ACL_SELECT: u64 = 1 << 1;
+    const ACLCHECK_OK: i32 = 0;
+    let show_detail = (|| -> PgResult<bool> {
+        let relid = pd.rel.rd_id;
+        if rls_seams::check_enable_rls::call(relid, Oid::default(), true)?
+            == rls_seams::CheckEnableRls::RlsEnabled
+        {
+            return Ok(false);
+        }
+        let userid = miscinit_seams::get_user_id::call();
+        if aclchk_seams::pg_class_aclcheck_ext::call(relid, userid, ACL_SELECT)?.0 == ACLCHECK_OK {
+            return Ok(true);
+        }
+        for i in 0..n {
+            let attnum = pd.key.partattrs[i];
+            if attnum == 0
+                || aclchk_seams::pg_attribute_aclcheck::call(relid, attnum, userid, ACL_SELECT)?
+                    != ACLCHECK_OK
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })()
+    .unwrap_or(false);
+    if !show_detail {
+        return Box::new(
+            PgError::new(
+                ERROR,
+                format!("no partition of relation \"{}\" found for row", pd.rel.name()),
+            )
+            .with_sqlstate(ERRCODE_CHECK_VIOLATION),
+        );
+    }
     let mut keydesc = String::from("(");
-    // pg_get_partkeydef_columns handles expression keys (C truncates values at
-    // maxfieldlen=64 and elides the detail under RLS/ACL denial; both are
-    // standing residuals here).
+    // pg_get_partkeydef_columns handles expression keys (C truncates values
+    // at maxfieldlen=64; standing residual here).
     let cols = ruleutils_seams::pg_get_partkeydef_columns::call(mcx, pd.rel.rd_id)
         .ok()
         .flatten()

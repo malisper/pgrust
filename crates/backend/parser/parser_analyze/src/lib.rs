@@ -2021,7 +2021,6 @@ pub(crate) fn transformInsertRow<'mcx>(
     attrnos: &[i32],
     strip_indirection: bool,
 ) -> PgResult<types_nodes::NodeList<'mcx>> {
-    let _ = strip_indirection;
     if exprlist.len() > icolumns.len() {
         return Err(insert_row_length_error(
             pstate,
@@ -2051,9 +2050,33 @@ pub(crate) fn transformInsertRow<'mcx>(
             &col.indirection,
             col.location,
         )?;
+        // For a multi-row VALUES RTE the assignment machinery runs again over
+        // the RTE Vars; top-level FieldStores/SubscriptingRefs (and any
+        // CoerceToDomain above one) must be peeled back to the source value.
+        let expr = if strip_indirection { strip_assignment_indirection(expr) } else { expr };
         result.lappend(mcx, expr)?;
     }
     Ok(result)
+}
+
+fn strip_assignment_indirection(mut expr: Node<'_>) -> Node<'_> {
+    loop {
+        let mut subexpr = expr;
+        while let Some(c) = subexpr.as_coerce_to_domain() {
+            subexpr = c.arg;
+        }
+        if let Some(fstore) = subexpr.as_field_store() {
+            expr = fstore.newvals.nth(0);
+        } else if let Some(sbsref) = subexpr.as_subscripting_ref() {
+            match sbsref.refassgnexpr {
+                Some(assign) => expr = assign,
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+    expr
 }
 
 // exprLocation(IntoClause) resolves to its rel's location (nodeFuncs.c).

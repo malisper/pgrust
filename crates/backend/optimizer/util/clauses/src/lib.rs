@@ -12,7 +12,7 @@ pub mod walker;
 mod tests;
 
 pub use classify::{
-    commute_op_expr, contain_agg_clause, contain_context_dependent_node, contain_exec_param,
+    commute_op_expr, contain_agg_clause, contain_context_dependent_node, contain_exec_param, contain_exec_params,
     contain_leaked_vars, contain_mutable_functions, contain_mutable_functions_after_planning,
     contain_nonstrict_functions, contain_subplans, contain_volatile_functions,
     contain_volatile_functions_after_planning, contain_volatile_functions_not_nextval,

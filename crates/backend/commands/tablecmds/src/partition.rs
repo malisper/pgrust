@@ -490,7 +490,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
                     // rest must repeat it.
                     if let Some(k) = seen_kind {
                         if k != kind {
-                            return Err(infinite_bounds_error(k, prd.location));
+                            return Err(infinite_bounds_error(pstate, k, prd.location));
                         }
                     } else if kind != PartitionRangeDatumKind::Value {
                         seen_kind = Some(kind);
@@ -642,8 +642,9 @@ fn null_range_bound() -> Box<PgError> {
 #[cold]
 #[inline(never)]
 fn infinite_bounds_error(
+    pstate: &parser_small1::ParseState<'_, '_>,
     kind: types_nodes::rawnodes::PartitionRangeDatumKind,
-    _location: i32,
+    location: i32,
 ) -> Box<PgError> {
     let what = match kind {
         types_nodes::rawnodes::PartitionRangeDatumKind::Minvalue => "MINVALUE",
@@ -654,7 +655,12 @@ fn infinite_bounds_error(
             ERROR,
             format!("every bound following {what} must also be {what}"),
         )
-        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+        .with_cursor_position(parser_small1::parser_errposition(
+            pstate,
+            location,
+            mbutils::GetDatabaseEncoding(),
+        )),
     )
 }
 

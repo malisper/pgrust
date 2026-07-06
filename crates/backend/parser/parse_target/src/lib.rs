@@ -186,6 +186,10 @@ fn transformAssignedExprInternal<'mcx>(
     // Stamp the placeholder with the column's type so exprType is usable;
     // the rewriter substitutes the real default (rewriteTargetListIU).
     let expr = if let Some(d) = expr.as_set_to_default() {
+        // No default exists for a portion of a column.
+        if !indirection.is_nil() {
+            return Err(default_with_indirection(pstate, indirection, location));
+        }
         Node::mk(
             mcx,
             types_nodes::primnodes::SetToDefault {
@@ -336,6 +340,32 @@ pub fn checkInsertTargets<'mcx>(
         }
         Ok((cols.clone_in(mcx)?, attrnos))
     }
+}
+
+#[cold]
+fn default_with_indirection(
+    pstate: &ParseState<'_, '_>,
+    indirection: &NodeList<'_>,
+    location: i32,
+) -> Box<types_error::PgError> {
+    use types_error::{ErrorLocation, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+    let msg = if indirection.nth(0).as_a_indices().is_some() {
+        "cannot set an array element to DEFAULT"
+    } else {
+        "cannot set a subfield to DEFAULT"
+    };
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(msg.to_string())
+            .errposition(parser_small1::parser_errposition(
+                pstate,
+                location,
+                mbutils::GetDatabaseEncoding(),
+            ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("parse_target.c", 0, "transformAssignedExpr")),
+    )
 }
 
 #[cold]

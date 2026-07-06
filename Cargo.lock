@@ -4809,6 +4809,7 @@ dependencies = [
 name = "execpartition"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "clauses_seams",
  "datum",
  "execexpr",
@@ -4817,10 +4818,12 @@ dependencies = [
  "fmgr_core",
  "lsyscache",
  "mcx",
+ "miscinit_seams",
  "partbounds",
  "partcache",
  "partdesc",
  "partprune",
+ "rls_seams",
  "ruleutils_seams",
  "table",
  "tupdesc",

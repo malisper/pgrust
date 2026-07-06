@@ -73,6 +73,12 @@ impl<'mcx> ScanNode<'mcx> for ValuesScanState<'mcx> {
                 assert_eq!(states.len(), natts, "values row length vs scan tupdesc");
             }
             for resind in 0..states.len() {
+                // C runs pending initplans lazily inside ExecEvalExpr
+                // (ExecEvalParamExec); the $n params resolve here instead.
+                if !states[resind].param_exec_deps().is_empty() {
+                    let deps = states[resind].param_exec_deps().to_vec();
+                    ::executils::exec_eval_param_exec_params(estate, &deps)?;
+                }
                 let d = ::executils::exec_eval_expr_with_subplans(
                     &mut states[resind],
                     estate,
@@ -174,7 +180,11 @@ pub fn exec_init_values_scan<'mcx>(
         .try_reserve(array_len as usize)
         .map_err(|_| mcx.oom(array_len as usize))?;
     for row in &node.values_lists {
-        if !estate.es_subplanstates.is_empty() && clauses::contain_subplans(row)? {
+        // Rows referencing initplan $n params ride the pre-initialized leg
+        // too: it can run pending initplans (ExecEvalParamExec's lazy arm).
+        if !estate.es_subplanstates.is_empty()
+            && (clauses::contain_subplans(row)? || clauses::contain_exec_params(row)?)
+        {
             let row_list = row.as_list().expect("values row is a List");
             let pb = estate.param_bind();
             let mut states: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
