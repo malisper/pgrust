@@ -1392,8 +1392,17 @@ fn transformInsertStmt<'mcx>(
         .expect("grammar always sets InsertStmt.relation")
         .as_range_var()
         .expect("insert_target is a RangeVar");
+    let target_perms = match stmt.onConflictClause {
+        Some(occ)
+            if occ.as_on_conflict_clause().expect("OnConflictClause").action
+                == types_nodes::primnodes::OnConflictAction::ONCONFLICT_UPDATE =>
+        {
+            ACL_INSERT | types_nodes::parsenodes::ACL_UPDATE
+        }
+        _ => ACL_INSERT,
+    };
     qry.resultRelation =
-        parse_clause::setTargetTable(mcx, pstate, relation, false, false, ACL_INSERT)?;
+        parse_clause::setTargetTable(mcx, pstate, relation, false, false, target_perms)?;
 
     let (icolumns, attrnos) = parse_target::checkInsertTargets(mcx, pstate, &stmt.cols)?;
     debug_assert_eq!(icolumns.len(), attrnos.len());

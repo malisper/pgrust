@@ -3923,10 +3923,19 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
         .seal_ref(),
     );
 
-    // A non-empty targetList here means a trigger-updatable view target
-    // (add_nulling_relids over its wholerow Var) — the view lane is loud
-    // upstream in the rewriter.
-    debug_assert!(parse.targetList.is_nil());
+    // A non-empty targetList here is a trigger-updatable view target: its
+    // wholerow Var (over the expanded view) is nullable when the target is on
+    // the join's inner side (C prepjointree.c:304-315).
+    if !parse.targetList.is_nil()
+        && matches!(jointype, JoinType::JOIN_RIGHT | JoinType::JOIN_FULL)
+    {
+        let copy = copyfuncs::copy_object(
+            mcx,
+            Node::mk_list(mcx, parse.targetList.clone_in(mcx)?)?,
+        )?;
+        add_source_nulling(mcx, copy, parse.mergeTargetRelation, joinrti)?;
+        parse.targetList = copy.as_list().expect("List").clone_in(mcx)?;
+    }
 
     // With the source on the join's nullable side, its Vars above the join —
     // in the retained join condition, the actions, and RETURNING — carry the
@@ -4050,31 +4059,46 @@ fn add_source_nulling<'mcx>(
         mcx: Mcx<'x>,
         source_rti: i32,
         join_rti: i32,
+        sublevels_up: u32,
     }
     impl<'mcx> nodes_core::NodeWalker<'mcx> for W<'mcx> {
         fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-            if node.node_tag() == NodeTag::T_Var {
-                let v = node.as_var().expect("Var");
-                if v.varlevelsup == 0 && v.varno == self.source_rti {
-                    let (mcx, jrti) = (self.mcx, self.join_rti);
-                    // SAFETY: exclusive fresh copy (caller contract).
-                    unsafe {
-                        node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
-                            v.varnullingrels.add_member(mcx, jrti)
-                        })
+            match node.node_tag() {
+                NodeTag::T_Var => {
+                    let v = node.as_var().expect("Var");
+                    if v.varlevelsup == self.sublevels_up && v.varno == self.source_rti {
+                        let (mcx, jrti) = (self.mcx, self.join_rti);
+                        // SAFETY: exclusive fresh copy (caller contract).
+                        unsafe {
+                            node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
+                                v.varnullingrels.add_member(mcx, jrti)
+                            })
+                        }
+                        .expect("Var")?;
                     }
-                    .expect("Var")?;
+                    Ok(false)
                 }
-                return Ok(false);
+                NodeTag::T_Query => {
+                    self.sublevels_up += 1;
+                    let r = nodes_core::query_tree_walker(
+                        node.as_query().expect("Query"),
+                        self,
+                        0,
+                    )?;
+                    self.sublevels_up -= 1;
+                    Ok(r)
+                }
+                _ => nodes_core::expression_tree_walker(node, self),
             }
-            debug_assert!(
-                node.node_tag() != NodeTag::T_Query,
-                "add_nulling_relids: sublevels_up walk (Query recursion) not needed here"
-            );
-            nodes_core::expression_tree_walker(node, self)
+        }
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.sublevels_up += 1;
+            let r = nodes_core::query_tree_walker(q, self, 0)?;
+            self.sublevels_up -= 1;
+            Ok(r)
         }
     }
-    let mut w = W { mcx, source_rti, join_rti };
+    let mut w = W { mcx, source_rti, join_rti, sublevels_up: 0 };
     use nodes_core::NodeWalker;
     w.visit(node)?;
     Ok(())

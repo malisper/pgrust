@@ -453,8 +453,10 @@ pub fn exec_init_modify_table<'mcx>(
                             .expect("planned WCO has a qual")
                             .as_list()
                             .expect("WCO qual is an implicit-AND List after preprocessing");
-                        let state = execexpr::exec_init_qual(mcx, qual, params)?
-                            .expect("planner dropped constant-true WCO quals");
+                        let state = executils::with_subplan_compile_env(estate, |env| {
+                            execexpr::exec_init_qual_subplans(mcx, qual, params, env)
+                        })?
+                        .expect("planner dropped constant-true WCO quals");
                         root_exec.wco_exprs.push(WcoExpr {
                             kind: wco.kind,
                             relname: wco.relname.expect("WCO relname"),
@@ -766,8 +768,10 @@ fn init_result_rel<'mcx>(
                     .expect("planned WCO has a qual")
                     .as_list()
                     .expect("WCO qual is an implicit-AND List after preprocessing");
-                let state = execexpr::exec_init_qual(mcx, qual, params)?
-                    .expect("planner dropped constant-true WCO quals");
+                let state = executils::with_subplan_compile_env(estate, |env| {
+                    execexpr::exec_init_qual_subplans(mcx, qual, params, env)
+                })?
+                .expect("planner dropped constant-true WCO quals");
                 wco_exprs.push(WcoExpr {
                     kind: wco.kind,
                     relname: wco.relname.expect("WCO relname"),
@@ -1003,6 +1007,35 @@ fn check_valid_result_rel<'mcx>(
 ) -> PgResult<()> {
     let operation = node.operation;
     if rel.rd_rel.relkind == types_rel::RELKIND_VIEW {
+        if operation == CmdType::CMD_MERGE {
+            // view_has_instead_trigger (rewriteHandler.c), MERGE arm: every
+            // non-NOTHING action needs its INSTEAD OF row trigger.
+            let mal = node
+                .mergeActionLists
+                .nth(0)
+                .as_list()
+                .expect("mergeActionLists cell is a List");
+            for action_node in mal {
+                let action = action_node.as_merge_action().expect("MergeAction cell");
+                let ok = match action.commandType {
+                    CmdType::CMD_INSERT => {
+                        trigdesc.is_some_and(|td| td.trig_insert_instead_row)
+                    }
+                    CmdType::CMD_UPDATE => {
+                        trigdesc.is_some_and(|td| td.trig_update_instead_row)
+                    }
+                    CmdType::CMD_DELETE => {
+                        trigdesc.is_some_and(|td| td.trig_delete_instead_row)
+                    }
+                    CmdType::CMD_NOTHING => true,
+                    other => panic!("unrecognized commandType: {other:?}"),
+                };
+                if !ok {
+                    return Err(error_view_not_updatable_merge(rel, action.commandType));
+                }
+            }
+            return Ok(());
+        }
         let has_instead = match operation {
             CmdType::CMD_INSERT => trigdesc.is_some_and(|td| td.trig_insert_instead_row),
             CmdType::CMD_UPDATE => trigdesc.is_some_and(|td| td.trig_update_instead_row),
@@ -1083,6 +1116,35 @@ fn error_view_not_updatable(rel: &Relation<'_>, operation: CmdType) -> Box<PgErr
     )
 }
 
+// error_view_not_updatable (rewriteHandler.c), CMD_MERGE arm: MERGE hints
+// omit rules (MERGE doesn't support them).
+#[cold]
+#[inline(never)]
+fn error_view_not_updatable_merge(rel: &Relation<'_>, action: CmdType) -> Box<PgError> {
+    let name = rel.name();
+    let (msg, hint) = match action {
+        CmdType::CMD_INSERT => (
+            format!("cannot insert into view \"{name}\""),
+            "To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT \
+             trigger.",
+        ),
+        CmdType::CMD_UPDATE => (
+            format!("cannot update view \"{name}\""),
+            "To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.",
+        ),
+        _ => (
+            format!("cannot delete from view \"{name}\""),
+            "To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE \
+             trigger.",
+        ),
+    };
+    Box::new(
+        PgError::error(msg)
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(hint.to_string()),
+    )
+}
+
 /// `ExecModifyTable` (nodeModifyTable.c), INSERT/UPDATE/DELETE loop.
 /// `epq_eval` is execMain's `EvalPlanQual` over the caller-owned EPQState
 /// (input = the locked latest row version in the EvalPlanQualSlot).
@@ -1127,7 +1189,9 @@ pub fn exec_modify_table<'mcx>(
                     // leaves the mt_lastResultOid cache untouched).
                     mt.cur = 0;
                     mt.last_result_oid = 0;
-                    if let Some(rslot) = exec_merge(mt, estate, plan_slot, None, &mut epq_eval)? {
+                    if let Some(rslot) =
+                        exec_merge(mt, estate, plan_slot, None, None, &mut epq_eval)?
+                    {
                         return Ok(Some(rslot));
                     }
                     continue;
@@ -1189,6 +1253,18 @@ pub fn exec_modify_table<'mcx>(
                     Some(slot),
                 )?;
                 if modified {
+                    // Parent-view CHECK OPTIONs still apply after INSTEAD OF
+                    // triggers (C ExecUpdateEpilogue's WCO_VIEW_CHECK leg).
+                    if !mt.rel().wco_exprs.is_empty() {
+                        let mcx = estate.es_query_cxt;
+                        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                        let r = &mut mt.rels[mt.cur];
+                        let rel = es_relations[(r.rti - 1) as usize]
+                            .as_ref()
+                            .expect("result relation opened");
+                        let s = &mut es_tupleTable[slot.0 as usize];
+                        exec_view_check_options(mcx, &mut r.wco_exprs, rel, s, None)?;
+                    }
                     if mt.canSetTag {
                         estate.es_processed += 1;
                     }
@@ -1290,14 +1366,22 @@ pub fn exec_modify_table<'mcx>(
                 }
             }
             CmdType::CMD_MERGE => {
-                let tupleid = fetch_merge_row_id(mt, estate, plan_slot);
-                if tupleid.is_none() {
+                // A view target carries the old row as a wholerow junk attr
+                // (NULL = NOT MATCHED); tables carry a ctid (C 4237-4291).
+                let (tupleid, oldtup) = if mt.rel().relkind == types_rel::RELKIND_VIEW {
+                    (None, fetch_wholerow_tuple_opt(mt, estate, plan_slot)?)
+                } else {
+                    (fetch_merge_row_id(mt, estate, plan_slot), None)
+                };
+                if tupleid.is_none() && oldtup.is_none() {
                     // NOT MATCHED rows run against the node's toplevel result
                     // relation, not any specific child's (C 4283-4287).
                     mt.cur = 0;
                     mt.last_result_oid = 0;
                 }
-                if let Some(rslot) = exec_merge(mt, estate, plan_slot, tupleid, &mut epq_eval)? {
+                if let Some(rslot) =
+                    exec_merge(mt, estate, plan_slot, tupleid, oldtup, &mut epq_eval)?
+                {
                     return Ok(Some(rslot));
                 }
             }
@@ -1656,12 +1740,16 @@ fn exec_merge<'mcx>(
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
     tupleid: Option<ItemPointerData>,
+    oldtup: Option<types_tuple::HeapTupleData<'mcx>>,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mut rslot = None;
-    let mut matched = tupleid.is_some();
-    if let Some(mut tid) = tupleid {
-        rslot = exec_merge_matched(mt, estate, plan_slot, &mut tid, &mut matched, epq_eval)?;
+    let mut matched = tupleid.is_some() || oldtup.is_some();
+    if matched {
+        let mut tid = tupleid.unwrap_or_default();
+        rslot = exec_merge_matched(
+            mt, estate, plan_slot, &mut tid, oldtup, &mut matched, epq_eval,
+        )?;
     }
     if !matched {
         debug_assert!(rslot.is_none());
@@ -1687,6 +1775,7 @@ fn exec_merge_matched<'mcx>(
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
     tupleid: &mut ItemPointerData,
+    oldtup: Option<types_tuple::HeapTupleData<'mcx>>,
     matched: &mut bool,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
@@ -1697,7 +1786,19 @@ fn exec_merge_matched<'mcx>(
             return Ok(None);
         }
     }
-    fetch_old_row_version(mt, estate, tupleid)?;
+    match oldtup {
+        // View target: the wholerow junk attr is the old row (C 3040-3045).
+        Some(old_tup) => {
+            let old_id = mt.rel().ri_oldTupleSlot.expect("ExecInitMergeTupleSlots ran");
+            let mcx = estate.es_query_cxt;
+            exectuples::exec_force_store_heap_tuple(
+                old_tup,
+                &mut estate.es_tupleTable[old_id.0 as usize],
+                mcx,
+            )?;
+        }
+        None => fetch_old_row_version(mt, estate, tupleid)?,
+    }
 
     loop {
         match exec_merge_matched_scan(mt, estate, plan_slot, tupleid, matched, epq_eval)? {
@@ -1852,6 +1953,55 @@ fn exec_merge_matched_scan<'mcx>(
         mt.merge_active_cmd = Some(command_type);
         let mut tmfd = TM_FailureData::default();
         let result = match command_type {
+            CmdType::CMD_UPDATE if mt
+                .rel()
+                .trigdesc
+                .as_ref()
+                .is_some_and(|td| td.trig_update_instead_row) =>
+            {
+                // INSTEAD OF ROW UPDATE triggers on a view target
+                // (C 3202-3213); the epilogue's WCO_VIEW_CHECK still applies.
+                merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
+                if !ir_row_triggers(
+                    mt,
+                    estate,
+                    types_trigger::TRIGGER_TYPE_UPDATE,
+                    types_trigger::TRIGGER_EVENT_UPDATE,
+                    Some(old_id),
+                    Some(new_id),
+                )? {
+                    return Ok(MergeMatchedOutcome::Done(None));
+                }
+                if !mt.rel().wco_exprs.is_empty() {
+                    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                    let r = &mut mt.rels[mt.cur];
+                    let rel = es_relations[(r.rti - 1) as usize]
+                        .as_ref()
+                        .expect("result relation opened");
+                    let slot = &mut es_tupleTable[new_id.0 as usize];
+                    exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, None)?;
+                }
+                TM_Result::TM_Ok
+            }
+            CmdType::CMD_DELETE if mt
+                .rel()
+                .trigdesc
+                .as_ref()
+                .is_some_and(|td| td.trig_delete_instead_row) =>
+            {
+                // INSTEAD OF ROW DELETE triggers on a view target (C 3255-3266).
+                if !ir_row_triggers(
+                    mt,
+                    estate,
+                    types_trigger::TRIGGER_TYPE_DELETE,
+                    types_trigger::TRIGGER_EVENT_DELETE,
+                    Some(old_id),
+                    None,
+                )? {
+                    return Ok(MergeMatchedOutcome::Done(None));
+                }
+                TM_Result::TM_Ok
+            }
             CmdType::CMD_UPDATE => {
                 merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
                 // ExecUpdatePrologue: BEFORE ROW UPDATE triggers; a NULL
@@ -4022,11 +4172,22 @@ fn fetch_wholerow_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
 ) -> PgResult<types_tuple::HeapTupleData<'mcx>> {
+    Ok(fetch_wholerow_tuple_opt(mt, estate, plan_slot)?.expect("wholerow is NULL"))
+}
+
+// MERGE leg: a NULL wholerow means the outer join produced a NOT MATCHED row.
+fn fetch_wholerow_tuple_opt<'mcx>(
+    mt: &ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<Option<types_tuple::HeapTupleData<'mcx>>> {
     debug_assert!(mt.rel().ri_RowIdAttNo > 0);
     let slot = &mut estate.es_tupleTable[plan_slot.0 as usize];
     let mut isnull = false;
     let datum = exectuples::slot_getattr(slot, mt.rel().ri_RowIdAttNo as i32, &mut isnull);
-    assert!(!isnull, "wholerow is NULL");
+    if isnull {
+        return Ok(None);
+    }
     let hdr = datum.as_usize() as *const u8;
     // SAFETY: a composite datum is an in-memory HeapTupleHeader image
     // (RowExpr output, never toasted); live in the plan slot for this row.
@@ -4036,9 +4197,9 @@ fn fetch_wholerow_tuple<'mcx>(
     let mut tid = ItemPointerData::default();
     ItemPointerSetInvalid(&mut tid);
     // SAFETY: image bounds established above.
-    Ok(unsafe {
+    Ok(Some(unsafe {
         types_tuple::HeapTupleData::from_raw_parts(hdr, t_len, tid, types_core::InvalidOid)
-    })
+    }))
 }
 
 // GetTupleForTrigger outcomes MERGE must tell apart: C's ExecMergeMatched
@@ -4629,6 +4790,17 @@ fn exec_insert<'mcx>(
             Some(slot_id),
         )? {
             return Ok(None);
+        }
+        // Parent-view CHECK OPTIONs still apply after INSTEAD OF triggers
+        // (C ExecInsert's shared WCO_VIEW_CHECK leg).
+        if !mt.rel().wco_exprs.is_empty() {
+            let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+            let r = &mut mt.rels[mt.cur];
+            let rel = es_relations[(r.rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let slot = &mut es_tupleTable[slot_id.0 as usize];
+            exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, None)?;
         }
         if mt.canSetTag {
             estate.es_processed += 1;
