@@ -242,11 +242,14 @@ impl Default for OpFamilyMember {
 }
 
 // C resolves any pg_am row through its amhandler; the closed IndexAmKind set
-// makes non-builtin AMs (CREATE ACCESS METHOD over a builtin handler) a
-// registry that relcache fills when it resolves the handler.
+// gives non-builtin AMs (CREATE ACCESS METHOD over a builtin handler) a
+// registry plus a lazy resolver (amapi's pg_am.amhandler lookup, installed at
+// seams init) so any from_relam site covers them regardless of call order.
 thread_local! {
     static REGISTERED_INDEX_AMS: std::cell::RefCell<Vec<(Oid, IndexAmKind)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static INDEX_AM_RESOLVER: std::cell::Cell<Option<fn(Oid) -> Option<IndexAmKind>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 pub fn register_index_am(relam: Oid, kind: IndexAmKind) {
@@ -258,12 +261,23 @@ pub fn register_index_am(relam: Oid, kind: IndexAmKind) {
     });
 }
 
+pub fn set_index_am_resolver(f: fn(Oid) -> Option<IndexAmKind>) {
+    INDEX_AM_RESOLVER.with(|c| c.set(Some(f)));
+}
+
 #[cold]
 #[inline(never)]
 fn registered_index_am(relam: Oid) -> IndexAmKind {
-    REGISTERED_INDEX_AMS
+    if let Some(k) = REGISTERED_INDEX_AMS
         .with(|v| v.borrow().iter().find(|&&(o, _)| o == relam).map(|&(_, k)| k))
-        .unwrap_or_else(|| unported_index_am(relam))
+    {
+        return k;
+    }
+    if let Some(k) = INDEX_AM_RESOLVER.with(std::cell::Cell::get).and_then(|f| f(relam)) {
+        register_index_am(relam, k);
+        return k;
+    }
+    unported_index_am(relam)
 }
 
 #[cold]

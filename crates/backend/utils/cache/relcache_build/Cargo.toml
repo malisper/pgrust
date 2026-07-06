@@ -9,6 +9,7 @@ name = "relcache_build"
 path = "src/lib.rs"
 
 [dependencies]
+types_relscan = { path = "../../../access/index/relscan" }
 reloptions = { path = "../../../access/common/reloptions" }
 types_trigger = { path = "../../../../_support/types/types_trigger" }
 mcx = { path = "../../../../_support/mcx" }

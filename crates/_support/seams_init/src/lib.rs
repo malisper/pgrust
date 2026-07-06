@@ -38,6 +38,7 @@ pub fn init_all() {
     twophase_config::init_seams();
     aclchk::init_seams();
     commands_amcmds::init_seams();
+    amapi::init_seams();
     rls::init_seams();
     commands_policy::init_seams();
     commands_publicationcmds::init_seams();

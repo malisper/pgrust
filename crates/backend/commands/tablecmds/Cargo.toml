@@ -7,6 +7,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+types_relscan = { path = "../../access/index/relscan" }
 rewrite_define = { path = "../../rewrite/rewrite_define" }
 reloptions = { path = "../../access/common/reloptions" }
 mcx = { path = "../../../_support/mcx" }

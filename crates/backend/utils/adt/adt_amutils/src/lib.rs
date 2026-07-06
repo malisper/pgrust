@@ -184,7 +184,7 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
         has_amproperty: false,
         has_ambuildphasename: false,
     };
-    match amoid {
+    match canonical_index_am(amoid) {
         BTREE_AM_OID => Some(&BT),
         HASH_AM_OID => Some(&HASH),
         GIST_AM_OID => Some(&GIST),
@@ -192,6 +192,26 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
         SPGIST_AM_OID => Some(&SPGIST),
         BRIN_AM_OID => Some(&BRIN),
         _ => None,
+    }
+}
+
+// pg_am.amhandler -> the handler's builtin AM (C reads the IndexAmRoutine, so
+// a non-builtin AM over a builtin handler shares its arms).
+fn canonical_index_am(amoid: Oid) -> Oid {
+    if matches!(
+        amoid,
+        BTREE_AM_OID | HASH_AM_OID | GIN_AM_OID | GIST_AM_OID | SPGIST_AM_OID | BRIN_AM_OID
+    ) {
+        return amoid;
+    }
+    match syscache_seams::pg_am_amhandler::call(amoid) {
+        Ok(Some(330)) => BTREE_AM_OID,
+        Ok(Some(331)) => HASH_AM_OID,
+        Ok(Some(333)) => GIN_AM_OID,
+        Ok(Some(332)) => GIST_AM_OID,
+        Ok(Some(334)) => SPGIST_AM_OID,
+        Ok(Some(335)) => BRIN_AM_OID,
+        _ => amoid,
     }
 }
 
@@ -215,7 +235,7 @@ fn am_property(
     attno: i32,
     prop: Prop,
 ) -> PgResult<Option<Option<bool>>> {
-    match amoid {
+    match canonical_index_am(amoid) {
         // btproperty (nbtutils.c)
         BTREE_AM_OID => Ok(match prop {
             Prop::Returnable if attno != 0 => Some(Some(true)),
@@ -480,7 +500,7 @@ pub fn fc_pg_indexam_progress_phasename(
 ) -> PgResult<Datum> {
     let amoid = fcinfo.arg_oid(0);
     let phasenum = fcinfo.arg_i64(1) as i32 as i64;
-    let name = match amoid {
+    let name = match canonical_index_am(amoid) {
         BTREE_AM_OID => bt_phasename(phasenum),
         GIN_AM_OID => gin_phasename(phasenum),
         _ => match am_flags(amoid) {

@@ -344,3 +344,19 @@ fn no_handler(name: String) -> Box<PgError> {
 
 #[cfg(test)]
 mod tests;
+
+// from_relam's lazy resolver: pg_am.amhandler -> builtin IndexAmRoutine
+// (relcache/GetIndexAmRoutineByAmId path); None only when the pg_am row is
+// missing, so the caller's loud panic stands.
+fn resolve_index_am_kind(amoid: Oid) -> Option<IndexAmKind> {
+    let tuple = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid))).ok()??;
+    let amhandler = SysCacheGetAttrNotNull(AMOID, &tuple, Anum_pg_am_amhandler)
+        .map(|d| d.as_oid())
+        .ok();
+    ReleaseSysCache(tuple);
+    amhandler.map(GetIndexAmRoutine)
+}
+
+pub fn init_seams() {
+    types_relscan::set_index_am_resolver(resolve_index_am_kind);
+}

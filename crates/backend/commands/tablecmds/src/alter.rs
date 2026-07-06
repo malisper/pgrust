@@ -6387,9 +6387,10 @@ fn ATExecReplicaIdentity<'mcx>(
             rel.name()
         )));
     }
-    // rd_indam->amcanunique: btree is the only ported AM whose handler sets
-    // it (matches stock pg_am; CREATE ACCESS METHOD is unported).
-    let amcanunique = index_rel.rd_rel.relam == types_core::BTREE_AM_OID;
+    // rd_indam->amcanunique: only the btree handler sets it; from_relam
+    // covers non-builtin AMs over builtin handlers.
+    let amcanunique = types_relscan::IndexAmKind::from_relam(index_rel.rd_rel.relam)
+        == types_relscan::IndexAmKind::Btree;
     if (!amcanunique || !index_form.indisunique)
         && !(index_form.indisunique && index_form.indisexclusion)
     {
