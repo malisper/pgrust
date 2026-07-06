@@ -2486,6 +2486,46 @@ fn get_windowclause_startup_tuples<'mcx>(
 const APPEND_CPU_COST_MULTIPLIER: f64 = 0.5;
 
 // cost_append (costsize.c), serial arm; parallel append has no lane.
+// append_nonpartial_cost (costsize.c): greedy assignment of the (cost-
+// descending) non-partial subpaths to workers; returns the highest per-worker
+// total.
+fn append_nonpartial_cost(
+    run: &PlannerRun<'_>,
+    subpaths: &[types_pathnodes::PathId],
+    numpaths: usize,
+    parallel_workers: i32,
+) -> f64 {
+    if numpaths == 0 {
+        return 0.0;
+    }
+    let arrlen = (parallel_workers.max(0) as usize).min(numpaths);
+    let mut costarr: Vec<f64> = subpaths
+        .iter()
+        .take(arrlen)
+        .map(|&sp| run.root.path(sp).base().total_cost)
+        .collect();
+    let mut min_index = arrlen - 1;
+    for (path_index, &sp) in subpaths.iter().enumerate().skip(arrlen) {
+        if path_index == numpaths {
+            break;
+        }
+        costarr[min_index] += run.root.path(sp).base().total_cost;
+        min_index = 0;
+        for i in 0..arrlen {
+            if costarr[i] < costarr[min_index] {
+                min_index = i;
+            }
+        }
+    }
+    let mut max_index = 0;
+    for i in 0..arrlen {
+        if costarr[i] > costarr[max_index] {
+            max_index = i;
+        }
+    }
+    costarr[max_index]
+}
+
 pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
     let (subpaths, parallel_aware, pathkeys_empty) = match run.root.path(path_id) {
         types_pathnodes::PathNode::AppendPath(a) => (
@@ -2495,10 +2535,6 @@ pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
         ),
         _ => panic!("cost_append: not an AppendPath"),
     };
-    assert!(
-        !parallel_aware,
-        "cost_append (costsize.c): parallel append; M3 parallel lane"
-    );
     {
         let p = run.root.path_mut(path_id).base_mut();
         p.disabled_nodes = 0;
@@ -2507,6 +2543,48 @@ pub fn cost_append(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId) {
         p.rows = 0.0;
     }
     if subpaths.is_empty() {
+        return;
+    }
+    if parallel_aware {
+        let (first_partial, parallel_workers) = match run.root.path(path_id) {
+            types_pathnodes::PathNode::AppendPath(a) => {
+                (a.first_partial_path, a.path.parallel_workers)
+            }
+            _ => unreachable!(),
+        };
+        debug_assert!(pathkeys_empty);
+        let parallel_divisor = get_parallel_divisor(parallel_workers);
+        let mut rows = 0.0;
+        let mut disabled = 0;
+        let mut startup = 0.0;
+        let mut total = 0.0;
+        for (i, &sp) in subpaths.iter().enumerate() {
+            let s = run.root.path(sp).base();
+            // Startup: the cheapest-startup child among those that get a
+            // worker assigned immediately.
+            if i == 0 {
+                startup = s.startup_cost;
+            } else if (i as i32) < parallel_workers {
+                startup = startup.min(s.startup_cost);
+            }
+            if (i as i32) < first_partial {
+                rows += s.rows / parallel_divisor;
+            } else {
+                let subpath_divisor = get_parallel_divisor(s.parallel_workers);
+                rows += s.rows * (subpath_divisor / parallel_divisor);
+                total += s.total_cost;
+            }
+            disabled += s.disabled_nodes;
+            rows = clamp_row_est(rows);
+        }
+        total +=
+            append_nonpartial_cost(run, &subpaths, first_partial as usize, parallel_workers);
+        total += gucs::cpu_tuple_cost() * APPEND_CPU_COST_MULTIPLIER * rows;
+        let p = run.root.path_mut(path_id).base_mut();
+        p.rows = rows;
+        p.disabled_nodes = disabled;
+        p.startup_cost = startup;
+        p.total_cost = total;
         return;
     }
     let mut rows = 0.0;

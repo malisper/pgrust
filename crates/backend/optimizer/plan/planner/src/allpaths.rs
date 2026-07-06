@@ -659,14 +659,19 @@ pub(crate) fn add_paths_to_append_rel(
         mcx::PgVec::new_in(mcx);
     let mut all_child_outers: mcx::PgVec<'_, types_pathnodes::Relids<'_>> =
         mcx::PgVec::new_in(mcx);
+    let mut partial_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(mcx);
+    let mut partial_subpaths_valid = true;
+    let mut pa_partial_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> =
+        mcx::PgVec::new_in(mcx);
+    let mut pa_nonpartial_subpaths: mcx::PgVec<'_, types_pathnodes::PathId> =
+        mcx::PgVec::new_in(mcx);
+    let mut pa_subpaths_valid =
+        crate::gucs::enable_parallel_append() && run.root.rel(rel).consider_parallel;
     for &childrel in live_childrels {
-        // Child partial paths exist since the parallel-p3 landing (C builds
-        // partial/parallel Append from them); until the parallel-append lane
-        // lands they are dropped here and the Append stays serial.
         let cheapest_total = run.root.rel(childrel).cheapest_total_path;
         match cheapest_total {
             Some(p) if run.root.path(p).base().param_info.is_none() => {
-                accumulate_append_subpath(&run.root, p, &mut subpaths);
+                accumulate_append_subpath(&run.root, p, &mut subpaths, None);
             }
             // A child with only parameterized paths: no unparameterized
             // Append, but the per-parameterization loop below still applies.
@@ -685,9 +690,43 @@ pub(crate) fn add_paths_to_append_rel(
                         p
                     };
                     debug_assert!(run.root.path(chosen).base().param_info.is_none());
-                    accumulate_append_subpath(&run.root, chosen, &mut startup_subpaths);
+                    accumulate_append_subpath(&run.root, chosen, &mut startup_subpaths, None);
                 }
                 None => startup_valid = false,
+            }
+        }
+        let cheapest_partial_path = run.root.rel(childrel).partial_pathlist.first().copied();
+        match cheapest_partial_path {
+            Some(p) => accumulate_append_subpath(&run.root, p, &mut partial_subpaths, None),
+            None => partial_subpaths_valid = false,
+        }
+        if pa_subpaths_valid {
+            let pl = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(childrel).pathlist);
+            let nppath = crate::pathkeys::get_cheapest_parallel_safe_total_inner(run, &pl);
+            match (cheapest_partial_path, nppath) {
+                (None, None) => pa_subpaths_valid = false,
+                (Some(pp), np)
+                    if np.is_none()
+                        || run.root.path(pp).base().total_cost
+                            < run.root.path(np.unwrap()).base().total_cost =>
+                {
+                    accumulate_append_subpath(
+                        &run.root,
+                        pp,
+                        &mut pa_partial_subpaths,
+                        Some(&mut pa_nonpartial_subpaths),
+                    );
+                }
+                (_, np) => {
+                    // Only a non-partial path, or a single backend running it
+                    // beats the partial path's all-workers estimate.
+                    accumulate_append_subpath(
+                        &run.root,
+                        np.expect("non-partial parallel-safe path"),
+                        &mut pa_nonpartial_subpaths,
+                        None,
+                    );
+                }
             }
         }
         for pi in 0..run.root.rel(childrel).pathlist.len() {
@@ -721,7 +760,10 @@ pub(crate) fn add_paths_to_append_rel(
             rel,
             subpaths,
             mcx::PgVec::new_in(mcx),
+            mcx::PgVec::new_in(mcx),
             &None,
+            0,
+            false,
             -1.0,
         )?;
         add_path(run, rel, pid);
@@ -731,14 +773,76 @@ pub(crate) fn add_paths_to_append_rel(
                 rel,
                 startup_subpaths,
                 mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
                 &None,
+                0,
+                false,
                 -1.0,
             )?;
             add_path(run, rel, pid);
         }
-        if !all_child_pathkeys.is_empty() {
-            generate_orderedappend_paths(run, rel, live_childrels, &all_child_pathkeys)?;
+    }
+
+    // Unordered, unparameterized append of the child partial paths;
+    // parallel-aware when permitted.
+    let mut partial_rows = -1.0;
+    if partial_subpaths_valid && !partial_subpaths.is_empty() {
+        let mut parallel_workers = 0;
+        for &sp in partial_subpaths.iter() {
+            parallel_workers = parallel_workers.max(run.root.path(sp).base().parallel_workers);
         }
+        debug_assert!(parallel_workers > 0);
+        let pa_enabled = crate::gucs::enable_parallel_append();
+        if pa_enabled {
+            // At least log2(# children) workers: spread across the children.
+            parallel_workers =
+                parallel_workers.max((live_childrels.len() as u32).ilog2() as i32 + 1);
+            parallel_workers =
+                parallel_workers.min(crate::gucs::max_parallel_workers_per_gather());
+        }
+        debug_assert!(parallel_workers > 0);
+        let pid = crate::pathnode::create_append_path(
+            run,
+            rel,
+            mcx::PgVec::new_in(mcx),
+            partial_subpaths,
+            mcx::PgVec::new_in(mcx),
+            &None,
+            parallel_workers,
+            pa_enabled,
+            -1.0,
+        )?;
+        partial_rows = run.root.path(pid).base().rows;
+        crate::pathnode::add_partial_path(run, rel, pid);
+    }
+
+    // Parallel-aware append mixing partial and non-partial subpaths: only
+    // worthwhile when some child has a substantially cheaper non-partial path.
+    if pa_subpaths_valid && !pa_nonpartial_subpaths.is_empty() {
+        let mut parallel_workers = 0;
+        for &sp in pa_partial_subpaths.iter() {
+            parallel_workers = parallel_workers.max(run.root.path(sp).base().parallel_workers);
+        }
+        parallel_workers =
+            parallel_workers.max((live_childrels.len() as u32).ilog2() as i32 + 1);
+        parallel_workers = parallel_workers.min(crate::gucs::max_parallel_workers_per_gather());
+        debug_assert!(parallel_workers > 0);
+        let pid = crate::pathnode::create_append_path(
+            run,
+            rel,
+            pa_nonpartial_subpaths,
+            pa_partial_subpaths,
+            mcx::PgVec::new_in(mcx),
+            &None,
+            parallel_workers,
+            true,
+            partial_rows,
+        )?;
+        crate::pathnode::add_partial_path(run, rel, pid);
+    }
+
+    if subpaths_valid && !all_child_pathkeys.is_empty() {
+        generate_orderedappend_paths(run, rel, live_childrels, &all_child_pathkeys)?;
     }
 
     // Build unordered, parameterized Append paths for each parameterization
@@ -754,7 +858,7 @@ pub(crate) fn add_paths_to_append_rel(
             }
             match get_cheapest_parameterized_child_path(run, childrel, &required_outer)? {
                 Some(subpath) => {
-                    accumulate_append_subpath(&run.root, subpath, &mut par_subpaths);
+                    accumulate_append_subpath(&run.root, subpath, &mut par_subpaths, None);
                 }
                 None => {
                     par_valid = false;
@@ -768,7 +872,10 @@ pub(crate) fn add_paths_to_append_rel(
                 rel,
                 par_subpaths,
                 mcx::PgVec::new_in(mcx),
+                mcx::PgVec::new_in(mcx),
                 &required_outer,
+                0,
+                false,
                 -1.0,
             )?;
             add_path(run, rel, pid);
@@ -980,10 +1087,10 @@ fn generate_orderedappend_paths<'mcx>(
                     fractional_subpaths.push(get_singleton_append_subpath(&run.root, f));
                 }
             } else {
-                accumulate_append_subpath(&run.root, cheapest_startup, &mut startup_subpaths);
-                accumulate_append_subpath(&run.root, cheapest_total, &mut total_subpaths);
+                accumulate_append_subpath(&run.root, cheapest_startup, &mut startup_subpaths, None);
+                accumulate_append_subpath(&run.root, cheapest_total, &mut total_subpaths, None);
                 if let Some(f) = cheapest_fractional {
-                    accumulate_append_subpath(&run.root, f, &mut fractional_subpaths);
+                    accumulate_append_subpath(&run.root, f, &mut fractional_subpaths, None);
                 }
             }
             i += direction;
@@ -994,8 +1101,11 @@ fn generate_orderedappend_paths<'mcx>(
                 run,
                 rel,
                 startup_subpaths,
+                mcx::PgVec::new_in(mcx),
                 crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
                 &None,
+                0,
+                false,
                 -1.0,
             )?;
             add_path(run, rel, pid);
@@ -1004,8 +1114,11 @@ fn generate_orderedappend_paths<'mcx>(
                     run,
                     rel,
                     total_subpaths,
+                    mcx::PgVec::new_in(mcx),
                     crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
                     &None,
+                    0,
+                    false,
                     -1.0,
                 )?;
                 add_path(run, rel, pid);
@@ -1015,8 +1128,11 @@ fn generate_orderedappend_paths<'mcx>(
                     run,
                     rel,
                     fractional_subpaths,
+                    mcx::PgVec::new_in(mcx),
                     crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
                     &None,
+                    0,
+                    false,
                     -1.0,
                 )?;
                 add_path(run, rel, pid);
@@ -1052,18 +1168,31 @@ fn generate_orderedappend_paths<'mcx>(
     Ok(())
 }
 
-// accumulate_append_subpath (allpaths.c), non-parallel arm: flatten nested
-// serial Appends and MergeAppends (multi-level partitioning).
+// accumulate_append_subpath (allpaths.c): flatten nested Appends and
+// MergeAppends (multi-level partitioning); a parallel-aware child Append with
+// non-partial subpaths splits into (partial -> subpaths, non-partial ->
+// special_subpaths) when the caller can accept that.
 fn accumulate_append_subpath(
     root: &types_pathnodes::PlannerInfo<'_>,
     path: types_pathnodes::PathId,
     subpaths: &mut mcx::PgVec<'_, types_pathnodes::PathId>,
+    special_subpaths: Option<&mut mcx::PgVec<'_, types_pathnodes::PathId>>,
 ) {
     match root.path(path) {
-        types_pathnodes::PathNode::AppendPath(a) if !a.path.parallel_aware => {
-            debug_assert!(a.first_partial_path as usize == a.subpaths.len());
+        types_pathnodes::PathNode::AppendPath(a)
+            if !a.path.parallel_aware || a.first_partial_path == 0 =>
+        {
             for &sp in a.subpaths.iter() {
                 subpaths.push(sp);
+            }
+        }
+        types_pathnodes::PathNode::AppendPath(a) if special_subpaths.is_some() => {
+            let special = special_subpaths.expect("checked above");
+            for &sp in a.subpaths.iter().skip(a.first_partial_path as usize) {
+                subpaths.push(sp);
+            }
+            for &sp in a.subpaths.iter().take(a.first_partial_path as usize) {
+                special.push(sp);
             }
         }
         types_pathnodes::PathNode::MergeAppendPath(m) => {

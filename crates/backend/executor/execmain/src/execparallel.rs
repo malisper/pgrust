@@ -61,6 +61,7 @@ pub(crate) enum ParallelNodeShared {
     IndexScan(Arc<::indexam::ParallelIndexScanDescShared>),
     BitmapHeapScan(Arc<::nodebitmapheapscan::ParallelBitmapHeapState>),
     HashJoin(Arc<::nodehash::parallel::ParallelHashJoinState>),
+    Append(Arc<::nodeappend::ParallelAppendState>),
 }
 
 pub(crate) struct ParallelExecShared {
@@ -116,6 +117,7 @@ fn walk_parallel_aware(node: Option<Node<'_>>) {
                 | ::types_nodes::NodeTag::T_BitmapHeapScan
                 | ::types_nodes::NodeTag::T_HashJoin
                 | ::types_nodes::NodeTag::T_Hash
+                | ::types_nodes::NodeTag::T_Append
         )
     {
         panic!(
@@ -143,6 +145,8 @@ pub(crate) enum ParallelScanMut<'x, 'mcx> {
     // A parallel-aware HashJoin (Parallel Hash): the whole node, because the
     // shared state hangs off the inner Hash sub-node.
     HashJoin(&'x mut crate::procnode::HashJoinNode<'mcx>),
+    // Parallel Append: the subplan claim table lives on the AppendState.
+    Append(&'x mut ::nodeappend::AppendState<'mcx>),
 }
 
 impl ParallelScanMut<'_, '_> {
@@ -153,6 +157,7 @@ impl ParallelScanMut<'_, '_> {
             ParallelScanMut::IndexOnlyScan(ios) => ios.ioss_PlanNodeId,
             ParallelScanMut::BitmapHeapScan(bhs) => bhs.plan_node_id,
             ParallelScanMut::HashJoin(hj) => hj.state.plan.join.plan.plan_node_id,
+            ParallelScanMut::Append(ap) => ap.plan.plan.plan_node_id,
         }
     }
 }
@@ -235,6 +240,10 @@ fn for_each_parallel_scan<'mcx>(
             for_each_parallel_scan(&mut x.inner, f)?;
         }
         N::Append(x) => {
+            let x = &mut **x;
+            if x.state.plan.plan.parallel_aware {
+                f(ParallelScanMut::Append(&mut x.state))?;
+            }
             for sub in x.substates.iter_mut() {
                 for_each_parallel_scan(sub, f)?;
             }
@@ -419,6 +428,9 @@ pub fn exec_init_parallel_plan<'mcx>(
                 hj.hash.state.set_parallel_state(Arc::clone(&ps));
                 ParallelNodeShared::HashJoin(ps)
             }
+            ParallelScanMut::Append(ap) => {
+                ParallelNodeShared::Append(::nodeappend::exec_append_initialize_dsm(ap))
+            }
         };
         nodes.push((id, shared));
         Ok(())
@@ -522,6 +534,10 @@ pub fn exec_parallel_reinitialize<'mcx>(
                 .parallel_state()
                 .expect("parallel hash join was initialized")
                 .reinitialize()
+        }
+        ParallelScanMut::Append(ap) => {
+            ::nodeappend::exec_append_reinitialize_dsm(ap);
+            Ok(())
         }
     })
 }
@@ -737,6 +753,15 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                                 let p = Arc::clone(p);
                                 drop(nodes);
                                 hj.hash.state.set_parallel_state(p);
+                                Ok(())
+                            }
+                            (
+                                ParallelScanMut::Append(ap),
+                                ParallelNodeShared::Append(p),
+                            ) => {
+                                let p = Arc::clone(p);
+                                drop(nodes);
+                                ::nodeappend::exec_append_initialize_worker(ap, p);
                                 Ok(())
                             }
                             _ => panic!(
