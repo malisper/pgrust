@@ -162,6 +162,10 @@ pub struct ModifyTableState<'mcx> {
     // C ExecInitPartitionInfo's per-leaf ri_WithCheckOptions: the first WCO
     // list translated to the leaf's attnos via map_variable_attnos.
     leaf_wco: Vec<Option<mcx::PgVec<'mcx, WcoExpr<'mcx>>>>,
+    // C ExecInitPartitionInfo's per-leaf OnConflictSetState (map != NULL leg,
+    // execPartition.c:781-864): only built for attno-remapped leaves; other
+    // leaves reuse the root's DO UPDATE state as C does.
+    leaf_on_conflict: Vec<Option<LeafOnConflict<'mcx>>>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -269,6 +273,19 @@ struct OnConflictState<'mcx> {
     setvals_slot: Option<ExecSlotId>,
     proj_slot: Option<ExecSlotId>,
     set_proj: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    set_attnos: mcx::PgVec<'mcx, u16>,
+    where_clause: Option<PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// The remapped-leaf half of C's per-partition OnConflictSetState
+// (ExecInitPartitionInfo, execPartition.c:781-864): SET/WHERE recompiled with
+// EXCLUDED (INNER_VAR) and target (firstVarno) Vars mapped to the leaf's
+// attnos, the SET target colnos adjusted through the same map, and the
+// projection slots rebuilt over the leaf descriptor.
+struct LeafOnConflict<'mcx> {
+    setvals_slot: ExecSlotId,
+    proj_slot: ExecSlotId,
+    set_proj: PgBox<'mcx, ExprState<'mcx>>,
     set_attnos: mcx::PgVec<'mcx, u16>,
     where_clause: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
@@ -616,6 +633,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_existing: Vec::new(),
         leaf_child_to_root: Vec::new(),
         leaf_wco: Vec::new(),
+        leaf_on_conflict: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
@@ -2533,6 +2551,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_existing.clear();
     mt.leaf_child_to_root.clear();
     mt.leaf_wco.clear();
+    mt.leaf_on_conflict.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -4702,6 +4721,7 @@ fn exec_insert<'mcx>(
                 mt.leaf_existing.push(None);
                 mt.leaf_child_to_root.push(None);
                 mt.leaf_wco.push(None);
+                mt.leaf_on_conflict.push(None);
             }
             Some(idx)
         } else {
@@ -4740,10 +4760,13 @@ fn exec_insert<'mcx>(
         }
     }
 
-    // The EXCLUDED pseudo-rel and the SET/WHERE programs are compiled against
-    // the root layout; an attno-remapped leaf would need C's map plumbing.
-    if onconflict != 0 && work_slot != slot_id {
-        panic!("ExecInsert: ON CONFLICT on an attno-remapped partition not ported");
+    // An attno-remapped leaf gets its own DO UPDATE SET/WHERE state with Vars
+    // mapped to the leaf's attnos (C ExecInitPartitionInfo's map != NULL leg,
+    // execPartition.c:781-864); DO NOTHING needs no extra state.
+    if onconflict == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
+        && work_slot != slot_id
+    {
+        resolve_leaf_on_conflict(mt, estate, leaf_idx.expect("remapped implies routed"))?;
     }
 
     // C fires BR INSERT on the routed leaf's ResultRelInfo (cloned triggers).
@@ -5150,20 +5173,28 @@ fn exec_on_conflict_update<'mcx>(
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     // A routed leaf's WCOs are the first list translated to the leaf's
-    // attnos (C ExecInitPartitionInfo); layouts always match here (remapped
-    // ON CONFLICT is loud in the router).
+    // attnos (C ExecInitPartitionInfo).
     if let Some(idx) = leaf {
         if !mt.plan.withCheckOptionLists.is_nil() {
             resolve_leaf_wco(mt, estate, idx)?;
         }
     }
     let existing_id = resolve_existing_slot(mt, estate, leaf);
-    let (setvals_id, proj_id) = {
-        let oc = mt.on_conflict.as_ref().expect("on_conflict state");
-        (
-            oc.setvals_slot.expect("DO UPDATE state"),
-            oc.proj_slot.expect("DO UPDATE state"),
-        )
+    // An attno-remapped leaf carries its own SET/WHERE state and slots
+    // (C reads them off the leaf's ri_onConflict either way).
+    let remapped = leaf.filter(|&idx| mt.leaf_on_conflict[idx].is_some());
+    let (setvals_id, proj_id) = match remapped {
+        Some(idx) => {
+            let l = mt.leaf_on_conflict[idx].as_ref().expect("resolved");
+            (l.setvals_slot, l.proj_slot)
+        }
+        None => {
+            let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+            (
+                oc.setvals_slot.expect("DO UPDATE state"),
+                oc.proj_slot.expect("DO UPDATE state"),
+            )
+        }
     };
 
     let mut tmfd = TM_FailureData::default();
@@ -5249,11 +5280,20 @@ fn exec_on_conflict_update<'mcx>(
     // EXCLUDED reads through INNER_VAR (setrefs), the existing tuple through
     // scan Vars; evaluate the WHERE qual then the SET projection that way.
     let use_subplans = {
-        let oc = mt.on_conflict.as_ref().expect("on_conflict state");
-        pre_eval_param_deps(oc.where_clause.as_deref(), estate)?;
-        pre_eval_param_deps(oc.set_proj.as_deref(), estate)?;
-        oc.where_clause.as_deref().is_some_and(|q| q.has_subplan())
-            || oc.set_proj.as_deref().is_some_and(|p| p.has_subplan())
+        let (where_clause, set_proj) = match remapped {
+            Some(idx) => {
+                let l = mt.leaf_on_conflict[idx].as_ref().expect("resolved");
+                (l.where_clause.as_deref(), Some(&*l.set_proj))
+            }
+            None => {
+                let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+                (oc.where_clause.as_deref(), oc.set_proj.as_deref())
+            }
+        };
+        pre_eval_param_deps(where_clause, estate)?;
+        pre_eval_param_deps(set_proj, estate)?;
+        where_clause.is_some_and(|q| q.has_subplan())
+            || set_proj.is_some_and(|p| p.has_subplan())
     };
     if use_subplans {
         let ec = mt.node_ecxt.expect("node ecxt created with ON CONFLICT UPDATE");
@@ -5265,8 +5305,20 @@ fn exec_on_conflict_update<'mcx>(
             e.ecxt_outertuple = None;
         }
         let pass = {
-            let oc = mt.on_conflict.as_mut().expect("on_conflict state");
-            executils::exec_qual_with_subplans(oc.where_clause.as_deref_mut(), estate, ec)?
+            let where_clause = match remapped {
+                Some(idx) => mt.leaf_on_conflict[idx]
+                    .as_mut()
+                    .expect("resolved")
+                    .where_clause
+                    .as_deref_mut(),
+                None => mt
+                    .on_conflict
+                    .as_mut()
+                    .expect("on_conflict state")
+                    .where_clause
+                    .as_deref_mut(),
+            };
+            executils::exec_qual_with_subplans(where_clause, estate, ec)?
         };
         if !pass {
             clear_slot(estate, existing_id);
@@ -5286,14 +5338,27 @@ fn exec_on_conflict_update<'mcx>(
             }
         }
         {
-            let oc = mt.on_conflict.as_mut().expect("on_conflict state");
-            let set_proj = oc.set_proj.as_deref_mut().expect("DO UPDATE projection");
+            let set_proj = match remapped {
+                Some(idx) => &mut *mt.leaf_on_conflict[idx].as_mut().expect("resolved").set_proj,
+                None => mt
+                    .on_conflict
+                    .as_mut()
+                    .expect("on_conflict state")
+                    .set_proj
+                    .as_deref_mut()
+                    .expect("DO UPDATE projection"),
+            };
             executils::exec_project_with_subplans(set_proj, estate, ec, setvals_id)?;
         }
     } else {
-        let ModifyTableState { rels, cur, on_conflict, leaf_wco, .. } = &mut *mt;
+        let ModifyTableState { rels, cur, on_conflict, leaf_wco, leaf_on_conflict, .. } =
+            &mut *mt;
         let r = &mut rels[*cur];
         let oc = on_conflict.as_mut().expect("on_conflict state");
+        let mut oc_leaf = match remapped {
+            Some(idx) => leaf_on_conflict[idx].as_mut(),
+            None => None,
+        };
         let EStateData { es_tupleTable, .. } = &mut *estate;
         let (e, x, v) = (
             existing_id.0 as usize,
@@ -5312,7 +5377,11 @@ fn exec_on_conflict_update<'mcx>(
             inner: Some(excluded),
             outer: None,
         };
-        if !execexpr::exec_qual(oc.where_clause.as_deref_mut(), &mut slots)? {
+        let where_clause = match &mut oc_leaf {
+            Some(l) => l.where_clause.as_deref_mut(),
+            None => oc.where_clause.as_deref_mut(),
+        };
+        if !execexpr::exec_qual(where_clause, &mut slots)? {
             exectuples::exec_clear_tuple(slots.scan.take().expect("scan slot"), mcx);
             return Ok(OnConflictOutcome::Done(None));
         }
@@ -5331,13 +5400,19 @@ fn exec_on_conflict_update<'mcx>(
             }
         }
 
-        let set_proj = oc.set_proj.as_deref_mut().expect("DO UPDATE projection");
+        let set_proj = match &mut oc_leaf {
+            Some(l) => &mut *l.set_proj,
+            None => oc.set_proj.as_deref_mut().expect("DO UPDATE projection"),
+        };
         execexpr::exec_project(set_proj, &mut slots, setvals, mcx)?;
     }
 
     // Merge SET values over the existing tuple into the projected new tuple.
     {
-        let oc = mt.on_conflict.as_ref().expect("on_conflict state");
+        let set_attnos: &[u16] = match remapped {
+            Some(idx) => &mt.leaf_on_conflict[idx].as_ref().expect("resolved").set_attnos,
+            None => &mt.on_conflict.as_ref().expect("on_conflict state").set_attnos,
+        };
         let EStateData { es_tupleTable, .. } = &mut *estate;
         let (e, v, p) = (
             existing_id.0 as usize,
@@ -5359,7 +5434,7 @@ fn exec_on_conflict_update<'mcx>(
             let natts = eb.tts_nvalid as usize;
             pb.tts_values[..natts].copy_from_slice(&eb.tts_values[..natts]);
             pb.tts_isnull[..natts].copy_from_slice(&eb.tts_isnull[..natts]);
-            for (i, &attno) in oc.set_attnos.iter().enumerate() {
+            for (i, &attno) in set_attnos.iter().enumerate() {
                 pb.tts_values[attno as usize - 1] = vb.tts_values[i];
                 pb.tts_isnull[attno as usize - 1] = vb.tts_isnull[i];
             }
@@ -5434,6 +5509,109 @@ fn resolve_leaf_arbiters<'mcx>(
         panic!("could not find arbiter index on partition");
     }
     Ok(out)
+}
+
+// ExecInitPartitionInfo's DO UPDATE leg for an attno-remapped leaf
+// (execPartition.c:781-864): onConflictSet/Where get their Vars mapped to the
+// leaf's attnos twice — INNER_VAR for the EXCLUDED pseudo-rel, firstVarno for
+// the target — the SET colnos go through adjust_partition_colnos, and the
+// projection slots are rebuilt over the leaf descriptor.
+fn resolve_leaf_on_conflict<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<()> {
+    if mt.leaf_on_conflict[idx].is_some() {
+        return Ok(());
+    }
+    let node = mt.plan;
+    let mcx = estate.es_query_cxt;
+    let first_rti = mt.rels[0].rti;
+    let (leaf_reltype, leaf_kind, leaf_desc, attmap) = {
+        let first = estate.es_relations[(first_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let leaf = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+        let attmap = tupdesc::build_attrmap_by_name(mcx, &leaf.rd_att, &first.rd_att)?;
+        (
+            leaf.rd_rel.reltype,
+            tableam::table_slot_callbacks(leaf),
+            leaf.rd_att.clone(),
+            attmap,
+        )
+    };
+    let map_to_leaf = |n: Node<'mcx>| -> PgResult<Node<'mcx>> {
+        let n = rewrite_manip::map_variable_attnos(
+            mcx,
+            n,
+            types_nodes::primnodes::INNER_VAR,
+            0,
+            &attmap,
+            leaf_reltype,
+        )?
+        .0;
+        Ok(rewrite_manip::map_variable_attnos(
+            mcx,
+            n,
+            first_rti as i32,
+            0,
+            &attmap,
+            leaf_reltype,
+        )?
+        .0)
+    };
+
+    let mut onconflset = types_nodes::list::NodeList::nil();
+    for tle in &node.onConflictSet {
+        onconflset.lappend(mcx, map_to_leaf(tle)?)?;
+    }
+    let params = estate.param_bind();
+    let set_proj = executils::with_subplan_compile_env(estate, |env| {
+        execexpr::exec_build_projection_info_subplans(
+            mcx,
+            &onconflset,
+            Some(&leaf_desc),
+            params,
+            env,
+        )
+    })?;
+    let set_desc = execscan::exec_type_from_tl(mcx, &onconflset)?;
+    let setvals_slot =
+        estate.exec_init_extra_tuple_slot(Some(set_desc), TupleSlotKind::Virtual);
+    let proj_slot = estate.exec_init_extra_tuple_slot(Some(leaf_desc), leaf_kind);
+
+    // adjust_partition_colnos (execPartition.c): root SET colnos through the
+    // child-to-root attrMap.
+    let mut set_attnos: mcx::PgVec<'mcx, u16> = mcx::PgVec::new_in(mcx);
+    for attno in node.onConflictCols.iter() {
+        let leaf_attno = attmap[attno as usize - 1];
+        assert!(leaf_attno > 0, "invalid ON CONFLICT SET column number");
+        set_attnos.push(leaf_attno as u16);
+    }
+    assert_eq!(set_attnos.len(), node.onConflictSet.len());
+
+    let mut where_clause = None;
+    if let Some(where_node) = node.onConflictWhere {
+        let qual = where_node
+            .as_list()
+            .expect("onConflictWhere is an implicit-AND List after preprocessing");
+        let mut mapped = types_nodes::list::NodeList::nil();
+        for q in qual {
+            mapped.lappend(mcx, map_to_leaf(q)?)?;
+        }
+        where_clause = executils::with_subplan_compile_env(estate, |env| {
+            execexpr::exec_init_qual_subplans(mcx, &mapped, params, env)
+        })?;
+    }
+
+    mt.leaf_on_conflict[idx] = Some(LeafOnConflict {
+        setvals_slot,
+        proj_slot,
+        set_proj,
+        set_attnos,
+        where_clause,
+    });
+    Ok(())
 }
 
 // The routed-leaf half of ExecOnConflictUpdate's ExecUpdate call: the locked
@@ -5543,17 +5721,31 @@ fn exec_leaf_conflict_update<'mcx>(
         }
     }
 
-    if let Some(td) = td {
-        if td.triggers.iter().any(|t| t.tgnattr > 0) {
+    // Transition capture runs even when the leaf has no cloned row triggers
+    // (C ExecARUpdateTriggers fires on mt_oc_transition_capture alone).
+    let has_capture = mt
+        .oc_transition_capture
+        .as_ref()
+        .is_some_and(|tc| tc.tcs_update_old_table || tc.tcs_update_new_table);
+    if td.is_some() || has_capture {
+        if td.as_ref().is_some_and(|t| t.triggers.iter().any(|t| t.tgnattr > 0)) {
             // C computes ExecGetAllUpdatedCols against the leaf's attmap;
             // UPDATE OF column triggers on routed leaves stay loud.
             panic!("ExecOnConflictUpdate leaf update: UPDATE OF column triggers not ported");
         }
         let ar_new_tid = estate.es_tupleTable[proj_id.0 as usize].base().tts_tid;
-        // ON CONFLICT on attno-remapped leaves is loud upstream (ExecInsert's
-        // router), so this leaf's child->root map is always identity here.
-        let ModifyTableState { router, leaf_trig_when, oc_transition_capture, .. } = &mut *mt;
+        // Captured rows convert to the root layout through the leaf's
+        // child->root map (C ri_ChildToRootMap in AfterTriggerSaveEvent).
+        ensure_leaf_child_to_root(mt, estate, idx)?;
+        let root_rti = mt.rel().rti;
+        let ModifyTableState {
+            router, leaf_trig_when, leaf_child_to_root, oc_transition_capture, ..
+        } = &mut *mt;
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
+        let root_rel = estate.es_relations[(root_rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let conv = child_to_root_spec(&leaf_child_to_root[idx], rel, Some(root_rel));
         let mut when = ::trigger::TriggerWhenEval {
             mcx,
             cache: &mut leaf_trig_when[idx],
@@ -5562,7 +5754,7 @@ fn exec_leaf_conflict_update<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx,
             rel,
-            Some(&td),
+            td.as_deref(),
             None,
             None,
             Some(*tupleid),
@@ -5571,8 +5763,8 @@ fn exec_leaf_conflict_update<'mcx>(
             oc_transition_capture.as_ref(),
             Some(&mut when),
             false,
-            None,
-            None,
+            conv.as_ref(),
+            conv.as_ref(),
         )?;
     }
 
@@ -6317,7 +6509,8 @@ mcx::forget_safe_struct!(
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
-        leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco, leaf_existing,
+        leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
+        leaf_on_conflict, leaf_existing,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },
