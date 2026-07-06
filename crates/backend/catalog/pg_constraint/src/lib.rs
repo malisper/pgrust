@@ -1248,7 +1248,9 @@ pub fn check_functional_grouping<'mcx>(
     grouping_columns: &[types_nodes::Node<'mcx>],
     constraint_deps: &mut PgVec<'mcx, Oid>,
 ) -> PgResult<bool> {
-    let Some((pkattnos, constraint_oid)) = get_primary_key_attnos(mcx, relid, false)? else {
+    let Some((pkattnos, constraint_oid)) =
+        syscache_seams::pg_constraint_primary_key_attnos::call(mcx, relid, false)?
+    else {
         return Ok(false);
     };
     if pk_subset_of_grouping_columns(&pkattnos, varno, varlevelsup, grouping_columns) {
@@ -1761,4 +1763,10 @@ mod tests {
         assert!(!pk_subset_of_grouping_columns(&[1], 1, 0, &upper));
         assert!(pk_subset_of_grouping_columns(&[1], 1, 1, &upper));
     }
+}
+
+// Registered from seams_init (the parser sits above this crate only through
+// the projection seam).
+pub fn init_seams() {
+    syscache_seams::pg_constraint_primary_key_attnos::set(get_primary_key_attnos);
 }

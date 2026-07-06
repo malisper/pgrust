@@ -13,6 +13,7 @@ operatorcmds = { path = "../../backend/commands/operatorcmds" }
 foreigncmds = { path = "../../backend/commands/foreigncmds" }
 opclasscmds = { path = "../../backend/commands/opclasscmds" }
 sequence = { path = "../../backend/commands/sequence" }
+pg_constraint = { path = "../../backend/catalog/pg_constraint" }
 extension = { path = "../../backend/commands/extension" }
 detoast = { path = "../../backend/access/common/detoast" }
 heaptoast = { path = "../../backend/access/heap/heaptoast" }

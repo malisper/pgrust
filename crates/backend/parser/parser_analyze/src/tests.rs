@@ -848,6 +848,9 @@ mod from_where {
             // errorMissingRTE's searchRangeTableForRel probe; InvalidOid =
             // "no such relation", falling back to eref-alias matching.
             namespace_seams::range_var_get_relid::set(|_, _, _, _| Ok(types_core::InvalidOid));
+            // check_functional_grouping's pkey projection: fixtures have no
+            // primary keys, so None keeps C's 42803 paths live.
+            syscache_seams::pg_constraint_primary_key_attnos::set(|_, _, _| Ok(None));
             table::init_seams();
             super::init_seams_once();
         });

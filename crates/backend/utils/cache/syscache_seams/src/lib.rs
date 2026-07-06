@@ -773,6 +773,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // get_primary_key_attnos (pg_constraint.c) projected for parse-time
+    // callers (check_functional_grouping): parser rigs have no storage, so
+    // the systable scan cannot run below them — same projection rationale as
+    // pg_proc_proargdefaults. None = no (usable) primary key; the deferrable
+    // bail lives in the real impl (pg_constraint::get_primary_key_attnos).
+    pub fn pg_constraint_primary_key_attnos<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        deferrable_ok: bool,
+    ) -> PgResult<Option<(PgVec<'mcx, i16>, Oid)>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_range_shape(range_oid: Oid) -> PgResult<Option<PgRangeShape>>
 );
 
