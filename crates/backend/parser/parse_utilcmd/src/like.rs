@@ -855,21 +855,36 @@ fn text_str<'mcx>(mcx: Mcx<'mcx>, d: datum::Datum) -> PgResult<&'mcx str> {
     Ok(core::str::from_utf8(copied.leak()).expect("stxexprs is UTF-8"))
 }
 
-// 1-D no-null in-line array payload: 20-byte header, then elements.
-fn array_elems(d: datum::Datum, elemtype: Oid, what: &str) -> (usize, &'static [u8]) {
+// 1-D no-null array payload: 20-byte array header, then elements. Expands
+// short/compressed/external images first (C DatumGetArrayTypeP).
+fn array_elems<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: datum::Datum,
+    elemtype: Oid,
+    what: &str,
+) -> PgResult<(usize, &'mcx [u8])> {
     let p = d.as_usize() as *const u8;
-    // SAFETY: non-toasted 4-byte-header array datum into a live catalog tuple.
-    let body = unsafe {
-        let b0 = *p;
-        assert!(b0 != 0x01 && (b0 & 0x03) != 0x02 && b0 & 0x01 == 0, "{what}: toasted array");
-        let w = u32::from_ne_bytes(*(p as *const [u8; 4]));
-        core::slice::from_raw_parts(p.add(4), ((w as usize) >> 2) - 4)
+    // SAFETY: non-null varlena datum into a live catalog tuple.
+    let b0 = unsafe { *p };
+    let body: &'mcx [u8] = if b0 == 0x01 || (b0 & 0x03) == 0x02 {
+        &detoast::detoast_attr(mcx, varlena_image(d))?.leak()[4..]
+    } else {
+        let src: &[u8] = if b0 & 0x01 != 0 {
+            let len = ((b0 as usize) >> 1) & 0x7F;
+            // SAFETY: short varlena header declares len bytes incl. itself.
+            unsafe { core::slice::from_raw_parts(p.add(1), len - 1) }
+        } else {
+            &varlena_image(d)[4..]
+        };
+        let mut copied: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, src.len())?;
+        mcx::vec_append_bytes(&mut copied, src)?;
+        copied.leak()
     };
     let read = |off: usize| i32::from_ne_bytes(body[off..off + 4].try_into().unwrap());
     if read(0) != 1 || read(4) != 0 || read(8) != elemtype as i32 {
         panic!("{what} has unexpected array shape");
     }
-    (read(12) as usize, &body[20..])
+    Ok((read(12) as usize, &body[20..]))
 }
 
 // generateClonedExtStatsStmt (parse_utilcmd.c:2046): clone one extended
@@ -915,7 +930,7 @@ fn generateClonedExtStatsStmt<'mcx>(
     let kind_d =
         unsafe { types_tuple::heap_getattr(tup, Anum_pg_statistic_ext_stxkind, desc, &mut isnull) };
     debug_assert!(!isnull);
-    let (nkinds, kinddata) = array_elems(kind_d, CHAROID, "stxkind");
+    let (nkinds, kinddata) = array_elems(mcx, kind_d, CHAROID, "stxkind")?;
     let mut stat_types = NodeList::nil();
     for &kind in &kinddata[..nkinds] {
         let name = match kind {
@@ -933,7 +948,7 @@ fn generateClonedExtStatsStmt<'mcx>(
     let keys_d =
         unsafe { types_tuple::heap_getattr(tup, Anum_pg_statistic_ext_stxkeys, desc, &mut isnull) };
     debug_assert!(!isnull);
-    let (nkeys, keydata) = array_elems(keys_d, INT2OID, "stxkeys");
+    let (nkeys, keydata) = array_elems(mcx, keys_d, INT2OID, "stxkeys")?;
     let mut def_names = NodeList::nil();
     for i in 0..nkeys {
         let attnum = i16::from_ne_bytes(keydata[i * 2..i * 2 + 2].try_into().unwrap());
