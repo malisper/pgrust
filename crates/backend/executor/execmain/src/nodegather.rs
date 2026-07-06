@@ -29,6 +29,10 @@ pub struct GatherState<'mcx> {
     pub nreaders: usize,
     pub nextreader: usize,
     pub reader: Vec<tqueue::TupleQueueReader>,
+    // C outerPlan->chgParam: the deferred-rescan set ExecReScanGather leaves
+    // for the child; consumed at the leader's next local pull, after
+    // ExecParallelReinitialize.
+    pub outer_chg: Bitmapset<'mcx>,
 }
 
 pub(crate) fn leader_participation() -> bool {
@@ -97,6 +101,7 @@ pub fn exec_init_gather<'mcx>(
         nreaders: 0,
         nextreader: 0,
         reader: Vec::new(),
+        outer_chg: Bitmapset::empty(),
     })
 }
 
@@ -194,6 +199,12 @@ fn gather_getnext<'mcx>(
         }
 
         if node.need_to_scan_locally {
+            apply_pending_outer_chg(
+                &mut node.outer_chg,
+                outer,
+                node.plan.plan.lefttree.expect("Gather without an outer plan"),
+                estate,
+            )?;
             if let Some(id) = exec_proc_node(outer, estate)? {
                 return Ok(Some(id));
             }
@@ -285,7 +296,8 @@ pub fn exec_shutdown_gather(
 }
 
 /// `ExecReScanGather` (nodeGather.c): shut workers down; relaunch on the next
-/// ExecProcNode.
+/// ExecProcNode. With a rescan_param the child rescan is deferred (chgParam):
+/// parallel-aware children must see ReInitializeDSM before their ReScan.
 pub fn exec_rescan_gather<'mcx>(
     node: &mut GatherState<'mcx>,
     outer: &mut PlanStateNode<'mcx>,
@@ -294,19 +306,33 @@ pub fn exec_rescan_gather<'mcx>(
     exec_shutdown_gather_workers(node)?;
     node.initialized = false;
     if node.plan.rescan_param >= 0 {
-        // outerPlan->chgParam has no carrier here; the eager child rescan
-        // below is C's chgParam==NULL arm and is wrong once rescan_param
-        // plans exist (planner emits them in phase 3).
-        panic!(
-            "ExecReScanGather (nodeGather.c): rescan_param deferred-rescan lane unported"
-        );
+        let mcx = estate.es_query_cxt;
+        node.outer_chg.add_member(mcx, node.plan.rescan_param)?;
     }
-    crate::execami::exec_re_scan(outer, estate)
+    if node.outer_chg.is_empty() {
+        return crate::execami::exec_re_scan(outer, estate);
+    }
+    Ok(())
+}
+
+/// C's ExecProcNode chgParam check on the leader's local child: consume the
+/// deferred set before the pull.
+pub(crate) fn apply_pending_outer_chg<'mcx>(
+    outer_chg: &mut Bitmapset<'mcx>,
+    outer: &mut PlanStateNode<'mcx>,
+    outer_plan: ::types_nodes::node_tree::Node<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if outer_chg.is_empty() {
+        return Ok(());
+    }
+    let chg = core::mem::replace(outer_chg, Bitmapset::empty());
+    crate::execami::exec_re_scan_chg_forced(outer, outer_plan, estate, &chg)
 }
 
 // pei/reader are droppy owners (Arc/Mutex/queue handles), released by
 // ExecShutdownGather and release_owned.
 ::mcx::forget_safe_struct!(
     GatherState<'_> { plan, ps, initialized, need_to_scan_locally, tuples_needed,
-        funnel_slot, nworkers_launched, nreaders, nextreader; pei, reader },
+        funnel_slot, nworkers_launched, nreaders, nextreader, outer_chg; pei, reader },
 );

@@ -154,10 +154,21 @@ fn expand_inherited_rtentry<'mcx>(
             processed_tlist_append(run, tle)?;
             newvars.push(var);
         }
+        // A child reported ROW_MARK_COPY where the parent had none (foreign
+        // children); add the wholerow junk var (makeWholeRowVar on the parent
+        // RTE). Unreachable until FDW children land (select_rowmark_type's
+        // foreign arm is loud), ported for C parity.
         if new_all_mark_types & copy_bit != 0 && old_all_mark_types & copy_bit == 0 {
-            panic!(
-                "expand_inherited_rtentry (inherit.c): ROW_MARK_COPY wholerow junk var                  (makeWholeRowVar); non-relation rowmark lane"
-            );
+            let rte = run.rte(rc.rti as usize);
+            let var = Node::mk(
+                mcx,
+                nodes_core::makefuncs::make_whole_row_var(mcx, rte, rc.rti, 0, false)?,
+            )?;
+            let resname = crate::prep::arena_str(mcx, &format!("wholerow{}", rc.rowmarkId))?;
+            let resno = run.processed_tlist.expect("processed_tlist set").len() as i16 + 1;
+            let tle = Node::mk_target_entry(mcx, var, resno, Some(resname), true)?;
+            processed_tlist_append(run, tle)?;
+            newvars.push(var);
         }
         if !old_is_parent {
             let var = mk_var(
