@@ -310,6 +310,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    pub fn adjust_child_rinfo_multilevel<'a, 'mcx>(
+        run: &'a mut PlannerRun<'mcx>,
+        rid: RinfoId,
+        childrel: RelId,
+        parentrel: RelId,
+    ) -> PgResult<RinfoId>
+);
+
+seam_core::seam!(
     pub fn expr_collation<'a>(node: Node<'a>) -> u32
 );
 

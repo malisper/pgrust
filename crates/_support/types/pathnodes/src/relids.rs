@@ -213,6 +213,30 @@ pub fn find_base_rel(root: &PlannerInfo<'_>, relid: i32) -> RelId {
     root.simple_rel_array[relid as usize].unwrap_or_else(|| panic!("no relation entry for relid {relid}"))
 }
 
+// find_childrel_parents (relnode.c): relids of all appendrel ancestors of a
+// child rel (appendrels nest, so there can be several levels).
+pub fn find_childrel_parents<'mcx>(root: &PlannerInfo<'mcx>, rel: RelId) -> Relids<'mcx> {
+    let mcx = root.mcx;
+    debug_assert!(root.rel(rel).reloptkind == crate::RELOPT_OTHER_MEMBER_REL);
+    let mut result: Relids<'mcx> = None;
+    let mut cur = rel;
+    loop {
+        let relid = root.rel(cur).relid;
+        debug_assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
+        let appinfo = root.append_rel_array[relid as usize]
+            .as_ref()
+            .expect("child rel has an AppendRelInfo");
+        let prelid = appinfo.parent_relid;
+        result = relids_add_member(mcx, &result, prelid);
+        cur = find_base_rel(root, prelid as i32);
+        if root.rel(cur).reloptkind != crate::RELOPT_OTHER_MEMBER_REL {
+            break;
+        }
+    }
+    debug_assert!(root.rel(cur).reloptkind == crate::RELOPT_BASEREL);
+    result
+}
+
 pub fn empty_pathtarget_id<'mcx>(root: &mut PlannerInfo<'mcx>) -> PtId {
     let mcx = root.mcx;
     root.alloc_pathtarget(PathTarget::new(mcx))

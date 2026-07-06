@@ -186,6 +186,9 @@ pub fn init_seams() {
     planner_seams::adjust_appendrel_attrs_multilevel::set(
         crate::inherit::adjust_appendrel_attrs_multilevel,
     );
+    planner_seams::adjust_child_rinfo_multilevel::set(
+        crate::inherit::adjust_child_rinfo_multilevel,
+    );
     planner_seams::expr_collation::set(crate::pathkeys::expr_collation);
     planner_seams::is_dummy_rel::set(crate::joinrels::is_dummy_rel);
     planner_seams::make_opclause::set(crate::like_support::make_opclause);

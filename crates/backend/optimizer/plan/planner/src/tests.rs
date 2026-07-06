@@ -6838,5 +6838,128 @@ mod group_keys_reorder {
         assert_eq!(n, 0);
         assert_eq!(&pks[..], &[a, b, agg]);
         assert_eq!(&clauses[..], &[ca, cb, cagg]);
+// Appendrel EC family: child EquivalenceMember translation (equivclass.c
+// add_child_rel_equivalences / add_child_eq_member) and the ancestor set
+// feeding check_index_predicates' otherrels (relnode.c find_childrel_parents).
+mod appendrel_ec {
+    use super::*;
+    use types_pathnodes::relids::{
+        find_childrel_parents, relids_equal, relids_is_member, relids_singleton,
+    };
+    use types_pathnodes::{
+        AppendRelInfo, EquivalenceClass, EquivalenceMember, RelId, RelOptKind,
+        RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL,
+    };
+
+    fn mk_rel<'mcx>(
+        run: &mut crate::run::PlannerRun<'mcx>,
+        relid: u32,
+        kind: RelOptKind,
+    ) -> RelId {
+        let mcx = run.mcx;
+        let mut rel = types_pathnodes::RelOptInfo::new(mcx);
+        rel.relid = relid;
+        rel.relids = relids_singleton(mcx, relid);
+        rel.reloptkind = kind;
+        let id = run.root.alloc_rel(rel);
+        while run.root.simple_rel_array.len() <= relid as usize {
+            run.root.simple_rel_array.push(None);
+        }
+        run.root.simple_rel_array[relid as usize] = Some(id);
+        run.root.simple_rel_array_size =
+            run.root.simple_rel_array_size.max(relid as i32 + 1);
+        id
+    }
+
+    fn mk_appinfo<'mcx>(
+        run: &mut crate::run::PlannerRun<'mcx>,
+        parent_relid: u32,
+        child_relid: u32,
+        translated: &[types_pathnodes::NodeId],
+    ) {
+        let mcx = run.mcx;
+        let mut ai = AppendRelInfo::new(mcx);
+        ai.parent_relid = parent_relid;
+        ai.child_relid = child_relid;
+        // Typed children: the whole-row colnames snapshot needs an RTE
+        // otherwise.
+        ai.parent_reltype = 100001;
+        ai.child_reltype = 100002;
+        ai.translated_vars.extend(translated.iter().copied());
+        while run.root.append_rel_array.len() <= child_relid as usize {
+            run.root.append_rel_array.push(None);
+        }
+        run.root.append_rel_array[child_relid as usize] = Some(ai);
+    }
+
+    #[test]
+    fn find_childrel_parents_walks_all_appendrel_levels() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        mk_rel(&mut run, 1, RELOPT_BASEREL);
+        mk_rel(&mut run, 2, RELOPT_OTHER_MEMBER_REL);
+        let grandchild = mk_rel(&mut run, 3, RELOPT_OTHER_MEMBER_REL);
+        mk_appinfo(&mut run, 1, 2, &[]);
+        mk_appinfo(&mut run, 2, 3, &[]);
+
+        let parents = find_childrel_parents(&run.root, grandchild);
+        assert!(relids_is_member(1, &parents));
+        assert!(relids_is_member(2, &parents));
+        assert!(!relids_is_member(3, &parents));
+    }
+
+    #[test]
+    fn add_child_rel_equivalences_translates_parent_member() {
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let parent = mk_rel(&mut run, 1, RELOPT_BASEREL);
+        let child = mk_rel(&mut run, 2, RELOPT_OTHER_MEMBER_REL);
+        run.root.rel_mut(child).parent = Some(parent);
+        run.root.rel_mut(child).top_parent = Some(parent);
+        run.root.rel_mut(child).top_parent_relids = relids_singleton(mcx, 1);
+
+        let parent_var = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let child_var = Node::mk_var(mcx, 2, 1, 23, -1, 0, 0).unwrap();
+        let child_var_id = run.intern_expr(child_var);
+        mk_appinfo(&mut run, 1, 2, &[child_var_id]);
+
+        let em_expr = run.intern_expr(parent_var);
+        let em = run.root.alloc_em(EquivalenceMember {
+            em_expr,
+            em_relids: relids_singleton(mcx, 1),
+            em_is_const: false,
+            em_is_child: false,
+            em_datatype: 23,
+            em_jdomain: 0,
+            em_parent: None,
+        });
+        let mut ec = EquivalenceClass::new(mcx);
+        ec.ec_relids = relids_singleton(mcx, 1);
+        ec.ec_members.push(em);
+        let ec_id = run.root.alloc_ec(ec);
+        run.root.rel_mut(parent).eclass_indexes = relids_singleton(mcx, ec_id.0);
+        run.root.ec_merging_done = true;
+
+        let appinfo = run.root.append_rel_array[2].clone().unwrap();
+        crate::equivclass::add_child_rel_equivalences(&mut run, &appinfo, parent, child)
+            .unwrap();
+
+        // Parent-side member list and ec_relids are untouched; the child
+        // member lands in ec_childmembers[2] as a translated child Var.
+        let e = run.root.ec(ec_id);
+        assert_eq!(e.ec_members.len(), 1);
+        assert!(relids_equal(&e.ec_relids, &relids_singleton(mcx, 1)));
+        let child_ems = &e.ec_childmembers[2];
+        assert_eq!(child_ems.len(), 1);
+        let cm = run.root.em(child_ems[0]);
+        assert!(cm.em_is_child);
+        assert_eq!(cm.em_parent, Some(em));
+        assert!(relids_equal(&cm.em_relids, &relids_singleton(mcx, 2)));
+        let cexpr = run.root.expr_node(cm.em_expr).as_var().unwrap();
+        assert_eq!(cexpr.varno, 2);
+        assert_eq!(cexpr.varattno, 1);
+        assert!(relids_is_member(ec_id.0 as i32, &run.root.rel(child).eclass_indexes));
     }
 }
