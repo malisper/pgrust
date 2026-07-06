@@ -50,7 +50,7 @@ impl IndexAmKind {
             BRIN_AM_OID => IndexAmKind::Brin,
             #[cfg(feature = "mock")]
             MOCK_AM_OID => IndexAmKind::Mock,
-            other => unported_index_am(other),
+            other => registered_index_am(other),
         }
     }
 
@@ -239,6 +239,31 @@ impl Default for OpFamilyMember {
             refobjid: 0,
         }
     }
+}
+
+// C resolves any pg_am row through its amhandler; the closed IndexAmKind set
+// makes non-builtin AMs (CREATE ACCESS METHOD over a builtin handler) a
+// registry that relcache fills when it resolves the handler.
+thread_local! {
+    static REGISTERED_INDEX_AMS: std::cell::RefCell<Vec<(Oid, IndexAmKind)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn register_index_am(relam: Oid, kind: IndexAmKind) {
+    REGISTERED_INDEX_AMS.with(|v| {
+        let mut v = v.borrow_mut();
+        if !v.iter().any(|&(o, _)| o == relam) {
+            v.push((relam, kind));
+        }
+    });
+}
+
+#[cold]
+#[inline(never)]
+fn registered_index_am(relam: Oid) -> IndexAmKind {
+    REGISTERED_INDEX_AMS
+        .with(|v| v.borrow().iter().find(|&&(o, _)| o == relam).map(|&(_, k)| k))
+        .unwrap_or_else(|| unported_index_am(relam))
 }
 
 #[cold]

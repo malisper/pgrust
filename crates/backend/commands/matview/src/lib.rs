@@ -214,6 +214,7 @@ pub fn RefreshMatViewByOid<'mcx>(
         mcx,
         matview_oid,
         table_space,
+        matview_rel.rd_rel.relam,
         relpersistence,
         ExclusiveLock,
     )?;

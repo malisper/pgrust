@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+types_relscan = { path = "../../../access/index/relscan" }
 types_trigger = { path = "../../../../_support/types/types_trigger" }
 mcx = { path = "../../../../_support/mcx" }
 jit_deform = { path = "../../../../_support/jit_deform" }

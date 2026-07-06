@@ -1482,9 +1482,20 @@ fn ATRewriteCatalogs<'mcx>(
                         )?;
                     }
                 }
-                // Phase-2 arms only fire for partitioned relkinds (no
-                // storage), which are unreachable here; phase 3 does the work.
-                AlterTableType::AT_SetTableSpace | AlterTableType::AT_SetAccessMethod => {}
+                // Phase-2 arm only fires for partitioned relkinds (no
+                // storage); phase 3 does the work otherwise.
+                AlterTableType::AT_SetTableSpace => {}
+                AlterTableType::AT_SetAccessMethod => {
+                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+                        && wqueue[tabidx].chg_access_method
+                    {
+                        ATExecSetAccessMethodNoStorage(
+                            mcx,
+                            &rel,
+                            wqueue[tabidx].new_access_method,
+                        )?;
+                    }
+                }
                 other => unported(&format!("ATExecCmd {other:?}")),
             }
             // C threads each ATExec* return address; only the subcmd count is
@@ -1548,11 +1559,11 @@ fn ATRewriteTableOne<'mcx>(
         rel.close(NoLock)?;
     }
     if tab.rewrite > 0 && tab.relkind != types_rel::RELKIND_SEQUENCE {
-        if tab.rewrite & AT_REWRITE_ACCESS_METHOD != 0 {
-            unported("ATRewriteTable rewrite (SET ACCESS METHOD; only heap exists)");
-        }
         if tab.rewrite
-            & !(AT_REWRITE_COLUMN_REWRITE | AT_REWRITE_DEFAULT_VAL | AT_REWRITE_ALTER_PERSISTENCE)
+            & !(AT_REWRITE_COLUMN_REWRITE
+                | AT_REWRITE_DEFAULT_VAL
+                | AT_REWRITE_ALTER_PERSISTENCE
+                | AT_REWRITE_ACCESS_METHOD)
             != 0
         {
             unported("ATRewriteTable rewrite flags");
@@ -1590,6 +1601,11 @@ fn ATRewriteTableOne<'mcx>(
         } else {
             old_heap.rd_rel.reltablespace
         };
+        let new_access_method = if tab.chg_access_method {
+            tab.new_access_method
+        } else {
+            old_heap.rd_rel.relam
+        };
         old_heap.close(NoLock)?;
         // Fire the table_rewrite event trigger before rewriting; parsetree is
         // NULL (no tag) when coming from AlterTableInternal, and it fires
@@ -1597,8 +1613,14 @@ fn ATRewriteTableOne<'mcx>(
         if let Some(tag) = rewrite_tag {
             event_trigger::EventTriggerTableRewrite(mcx, tag, tab.relid, tab.rewrite)?;
         }
-        let oid_new_heap =
-            commands_cluster::make_new_heap(mcx, tab.relid, new_tablespace, persistence, lockmode)?;
+        let oid_new_heap = commands_cluster::make_new_heap(
+            mcx,
+            tab.relid,
+            new_tablespace,
+            new_access_method,
+            persistence,
+            lockmode,
+        )?;
         ATRewriteTable(mcx, tab, oid_new_heap)?;
         commands_cluster::finish_heap_swap(
             mcx,
@@ -6839,9 +6861,10 @@ fn ATPrepSetAccessMethod<'mcx>(
     rel: &Relation<'mcx>,
     amname: Option<&str>,
 ) -> PgResult<()> {
+    // DEFAULT on a partitioned table resets the catalogued AM to InvalidOid.
     let amoid = match amname {
         Some(name) => commands_amcmds::get_table_am_oid(name, false)?,
-        // Partitioned DEFAULT arm unreachable (relkind gate).
+        None if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE => InvalidOid,
         None => commands_amcmds::get_table_am_oid(&tableam::default_table_access_method(), false)?,
     };
     if rel.rd_rel.relam == amoid {
@@ -6850,6 +6873,51 @@ fn ATPrepSetAccessMethod<'mcx>(
     tab.rewrite |= AT_REWRITE_ACCESS_METHOD;
     tab.new_access_method = amoid;
     tab.chg_access_method = true;
+    Ok(())
+}
+
+// ATExecSetAccessMethodNoStorage (tablecmds.c:16525): catalog-only relam
+// change for partitioned tables, with the pg_am dependency kept in step.
+fn ATExecSetAccessMethodNoStorage<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    new_access_method: Oid,
+) -> PgResult<()> {
+    const Anum_pg_class_relam: usize = 7;
+    debug_assert!(!types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind));
+    let old_access_method = rel.rd_rel.relam;
+    if old_access_method == new_access_method {
+        return Ok(());
+    }
+    set_pg_class_datum(mcx, rel.rd_id, Anum_pg_class_relam, Datum::from_oid(new_access_method))?;
+    if old_access_method == InvalidOid {
+        pg_depend::recordDependencyOn(
+            mcx,
+            &pg_depend::ObjectAddress::set(RELATION_RELATION_ID, rel.rd_id),
+            &pg_depend::ObjectAddress::set(
+                commands_amcmds::AccessMethodRelationId,
+                new_access_method,
+            ),
+            pg_depend::DependencyType::Normal,
+        )?;
+    } else if new_access_method == InvalidOid {
+        pg_depend::deleteDependencyRecordsForClass(
+            mcx,
+            RELATION_RELATION_ID,
+            rel.rd_id,
+            commands_amcmds::AccessMethodRelationId,
+            pg_depend::DependencyType::Normal,
+        )?;
+    } else {
+        pg_depend::changeDependencyFor(
+            mcx,
+            RELATION_RELATION_ID,
+            rel.rd_id,
+            commands_amcmds::AccessMethodRelationId,
+            old_access_method,
+            new_access_method,
+        )?;
+    }
     Ok(())
 }
 
