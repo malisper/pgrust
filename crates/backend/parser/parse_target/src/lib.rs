@@ -678,8 +678,16 @@ fn ExpandRowReference<'mcx>(
 
     let tupdesc = match expr.as_var() {
         Some(var) if var.vartype == RECORDOID => expandRecordVariable(mcx, pstate, expr, 0)?,
-        _ => funcapi::get_expr_result_tupdesc(mcx, Some(expr), false)?
-            .expect("no_error=false returns a descriptor"),
+        // C falls back to lookup_rowtype_tupdesc_copy(exprType, exprTypmod):
+        // registered RECORD-typmod expressions (plpgsql rec whole-row Params).
+        _ => match funcapi::get_expr_result_tupdesc(mcx, Some(expr), true)? {
+            Some(td) => td,
+            None => typcache_seams::lookup_rowtype_tupdesc_copy::call(
+                mcx,
+                expr_type(expr),
+                nodes_core::node_funcs::expr_typmod(expr),
+            )?,
+        },
     };
     let mut result = NodeList::nil();
     for i in 0..tupdesc.natts as usize {

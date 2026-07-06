@@ -378,6 +378,65 @@ pub fn exec_init_modify_table<'mcx>(
                 // the root projection lazily (exec_init_root_returning, the
                 // C 3844-3947 rootRelInfo leg in root coordinates).
                 let mcx = estate.es_query_cxt;
+                // C 3867-3910: the root's WITH CHECK OPTIONs, mapped from the
+                // first result rel's list to root attnos.
+                if !node.withCheckOptionLists.is_nil() {
+                    let first_rti = rels[0].rti;
+                    let (root_reltype, attmap) = {
+                        let EStateData { es_relations, .. } = &*estate;
+                        let first = es_relations[(first_rti - 1) as usize]
+                            .as_ref()
+                            .expect("result relation opened");
+                        let root_rel = es_relations[(root_exec.rti - 1) as usize]
+                            .as_ref()
+                            .expect("root relation opened");
+                        (
+                            root_rel.rd_rel.reltype,
+                            tupdesc::build_attrmap_by_name_if_req(
+                                mcx,
+                                &root_rel.rd_att,
+                                &first.rd_att,
+                                false,
+                            )?,
+                        )
+                    };
+                    let wlist = node
+                        .withCheckOptionLists
+                        .nth(0)
+                        .as_list()
+                        .expect("withCheckOptionLists cell is a List");
+                    let params = estate.param_bind();
+                    for wco_node in wlist {
+                        let wco_node = match &attmap {
+                            None => wco_node,
+                            Some(map) => {
+                                rewrite_manip::map_variable_attnos(
+                                    mcx,
+                                    wco_node,
+                                    first_rti as i32,
+                                    0,
+                                    map,
+                                    root_reltype,
+                                )?
+                                .0
+                            }
+                        };
+                        let wco = wco_node.as_with_check_option().expect("WCO cell");
+                        let qual = wco
+                            .qual
+                            .expect("planned WCO has a qual")
+                            .as_list()
+                            .expect("WCO qual is an implicit-AND List after preprocessing");
+                        let state = execexpr::exec_init_qual(mcx, qual, params)?
+                            .expect("planner dropped constant-true WCO quals");
+                        root_exec.wco_exprs.push(WcoExpr {
+                            kind: wco.kind,
+                            relname: wco.relname.expect("WCO relname"),
+                            polname: wco.polname,
+                            state,
+                        });
+                    }
+                }
                 let (kind, desc) = {
                     let rel = estate.es_relations[(root_exec.rti - 1) as usize]
                         .as_ref()
@@ -4579,7 +4638,9 @@ fn exec_insert<'mcx>(
         let merge_active_cmd = mt.merge_active_cmd;
         let ModifyTableState {
             rels,
+            root,
             cur,
+            insert_target_root,
             router,
             leaf_indexes,
             leaf_checks,
@@ -4588,7 +4649,14 @@ fn exec_insert<'mcx>(
             leaf_partition_check,
             ..
         } = &mut *mt;
-        let r = &mut rels[*cur];
+        // A MERGE root INSERT over an inherited target runs entirely against
+        // the root (C uses rootRelInfo; constraint exclusion can make rels[0]
+        // an attno-remapped child).
+        let r = if *insert_target_root && leaf_idx.is_none() {
+            root.as_mut().unwrap_or(&mut rels[0])
+        } else {
+            &mut rels[*cur]
+        };
         let (rel, indexes, check_exprs, virtual_nn_exprs, gen_exprs, pcheck) = match leaf_idx {
             Some(idx) => (
                 router.as_ref().unwrap().leaf_rel(idx),
