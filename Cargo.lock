@@ -9376,6 +9376,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tablecmds_seams",
+ "tablespace_seams",
  "tupdesc",
  "typcache_seams",
  "types_array",
