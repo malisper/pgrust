@@ -2513,7 +2513,8 @@ fn executor_start_wires_bound_params_to_estate() {
     run_param_qd(pstmt, h);
     ::types_portal::params::free(h);
 
-    // Without the handle the compile-time resolve must surface C's ereport.
+    // Without the handle, init succeeds and C's ereport surfaces at run
+    // (ExecEvalParamExtern) — EXPLAIN (GENERIC_PLAN) relies on init-only.
     let qd = execmain_seams::create_query_desc::call(
         pstmt,
         "SELECT $1",
@@ -2525,7 +2526,10 @@ fn executor_start_wires_bound_params_to_estate() {
         0,
     )
     .unwrap();
-    let err = execmain_seams::executor_start::call(qd, 0).unwrap_err();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    let mut dest = DestReceiver::DoNothing;
+    let err = execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest)
+        .unwrap_err();
     assert_eq!(err.message, "no value found for parameter 1");
     execmain_seams::release_query_desc::call(qd);
 }

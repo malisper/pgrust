@@ -3765,11 +3765,11 @@ fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Ste
         ParamKind::PARAM_EXTERN => {
             let list = params.extern_params.unwrap_or(&[]);
             if paramid <= 0 || paramid as usize > list.len() {
-                return Err(no_param_value(paramid));
+                return Ok(Step::ParamExternMissing { paramid });
             }
             let prm = &list[(paramid - 1) as usize];
             if prm.ptype == 0 {
-                return Err(no_param_value(paramid));
+                return Ok(Step::ParamExternMissing { paramid });
             }
             assert!(
                 prm.ptype == param.paramtype,
@@ -3788,7 +3788,7 @@ fn init_param(param: &Param, params: ParamBind<'_>, out: OutRef) -> PgResult<Ste
 
 #[cold]
 #[inline(never)]
-fn no_param_value(paramid: i32) -> Box<PgError> {
+pub(crate) fn no_param_value(paramid: i32) -> Box<PgError> {
     Box::new(
         PgError::error(format!("no value found for parameter {paramid}"))
             .with_sqlstate(::types_error::ERRCODE_UNDEFINED_OBJECT),

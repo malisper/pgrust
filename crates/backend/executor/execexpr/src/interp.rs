@@ -731,6 +731,9 @@ fn run_program<'mcx>(
                 let p = unsafe { prm.read() };
                 write_out(*out, p.value, p.isnull);
             }
+            Step::ParamExternMissing { paramid } => {
+                return Err(crate::compile::no_param_value(*paramid));
+            }
             Step::ParamExec { prm, out } => {
                 // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
                 let p = unsafe { prm.read() };
@@ -3939,6 +3942,9 @@ pub(crate) fn exec_one_step<'mcx>(
             let p = unsafe { prm.read() };
             write_out(out, p.value, p.isnull);
         }
+        Step::ParamExternMissing { paramid } => {
+            return Err(crate::compile::no_param_value(paramid));
+        }
         Step::ParamExec { prm, out } => {
             // SAFETY: compile-resolved pointer into stable es_param_exec_vals.
             let p = unsafe { prm.read() };
@@ -4401,6 +4407,7 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::AssignTmp { .. }
         | Step::AssignTmpMakeRo { .. }
         | Step::ParamExtern { .. }
+        | Step::ParamExternMissing { .. }
         | Step::ParamExec { .. }
         | Step::ParamSet { .. }
         | Step::SubPlan { .. }

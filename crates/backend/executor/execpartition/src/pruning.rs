@@ -33,9 +33,14 @@ struct PartitionedRelPruningData<'mcx> {
     pinfo: &'mcx PartitionedRelPruneInfo<'mcx>,
     partkey: Rc<PartitionKeyData>,
     partdesc: Rc<PartitionDescData>,
-    // Re-sequenced by init_exec_partition_prune_contexts after initial
-    // pruning; pinfo's other maps stay valid (identical-partdesc fast path).
+    // Sized by the executor-time partdesc; positions remapped from pinfo when
+    // the partition set changed since planning (plan-time-pruned partitions
+    // leave InvalidOid holes in relid_map; concurrent attach/detach shifts
+    // positions). subplan_map is further re-sequenced by
+    // init_exec_partition_prune_contexts after initial pruning.
     subplan_map: Vec<i32>,
+    subpart_map: Vec<i32>,
+    leafpart_rti_map: Vec<i32>,
     present_parts: Bitmapset<'mcx>,
     initial_ctx: Option<PruneContext<'mcx>>,
     exec_ctx: Option<PruneContext<'mcx>>,
@@ -168,19 +173,58 @@ fn create_partition_prune_state<'mcx>(
                 )
             };
 
-            let identical = partdesc.nparts as i32 == pinfo.nparts
+            // C's identical-partdesc fast path, else the positional remap:
+            // walk both arrays in bound order, skipping relid_map's
+            // InvalidOid holes (plan-time-pruned partitions) and planner-seen
+            // partitions that vanished; partitions the planner never saw get
+            // -1/-1/0 (as if pruned).
+            let n_new = partdesc.nparts;
+            let identical = n_new as i32 == pinfo.nparts
                 && partdesc.oids.iter().zip(pinfo.relid_map.iter()).all(|(a, b)| a == b);
-            assert!(
-                identical,
-                "CreatePartitionPruneState (execPartition.c): partdesc changed since \
-                 planning; concurrent-detach lane"
-            );
+            let (subplan_map, subpart_map, leafpart_rti_map) = if identical {
+                (
+                    pinfo.subplan_map.to_vec(),
+                    pinfo.subpart_map.to_vec(),
+                    pinfo.leafpart_rti_map.to_vec(),
+                )
+            } else {
+                let mut subplan_map = vec![-1i32; n_new];
+                let mut subpart_map = vec![-1i32; n_new];
+                let mut rti_map = vec![0i32; n_new];
+                let n_old = pinfo.nparts as usize;
+                let mut pd_idx = 0usize;
+                for pp_idx in 0..n_new {
+                    while pd_idx < n_old && pinfo.relid_map[pd_idx] == InvalidOid {
+                        pd_idx += 1;
+                    }
+                    loop {
+                        if pd_idx < n_old && pinfo.relid_map[pd_idx] == partdesc.oids[pp_idx] {
+                            subplan_map[pp_idx] = pinfo.subplan_map[pd_idx];
+                            subpart_map[pp_idx] = pinfo.subpart_map[pd_idx];
+                            rti_map[pp_idx] = pinfo.leafpart_rti_map[pd_idx];
+                            pd_idx += 1;
+                            break;
+                        }
+                        // C's recheck goto: peek ahead for a later match
+                        // (planner saw a since-detached partition in between).
+                        match ((pd_idx + 1)..n_old)
+                            .find(|&i| pinfo.relid_map[i] == partdesc.oids[pp_idx])
+                        {
+                            Some(i) => pd_idx = i,
+                            None => break,
+                        }
+                    }
+                }
+                (subplan_map, subpart_map, rti_map)
+            };
 
             let mut pprune = PartitionedRelPruningData {
                 pinfo,
                 partkey,
                 partdesc,
-                subplan_map: pinfo.subplan_map.to_vec(),
+                subplan_map,
+                subpart_map,
+                leafpart_rti_map,
                 present_parts: pinfo.present_parts.clone_in(mcx)?,
                 initial_ctx: None,
                 exec_ctx: None,
@@ -202,7 +246,7 @@ fn create_partition_prune_state<'mcx>(
             if !pinfo.initial_pruning_steps.is_nil() && !state.do_initial_prune {
                 let mut part_index = pprune.present_parts.next_member(-1);
                 while part_index >= 0 {
-                    let rtindex = pinfo.leafpart_rti_map[part_index as usize];
+                    let rtindex = pprune.leafpart_rti_map[part_index as usize];
                     if rtindex != 0 {
                         all_leafpart_rtis.add_member(mcx, rtindex)?;
                     }
@@ -296,9 +340,10 @@ fn init_exec_partition_prune_contexts<'mcx>(
             }
 
             let Some(map) = new_subplan_indexes.as_ref() else { continue };
-            let nparts = prunestate.hierarchies[hi][j].pinfo.nparts;
+            // C pprune->nparts: the executor-time partdesc size.
+            let nparts = prunestate.hierarchies[hi][j].subplan_map.len();
             let mut present = Bitmapset::empty();
-            for k in 0..nparts as usize {
+            for k in 0..nparts {
                 let oldidx = prunestate.hierarchies[hi][j].subplan_map[k];
                 if oldidx >= 0 {
                     debug_assert!(oldidx < n_total_subplans);
@@ -307,7 +352,7 @@ fn init_exec_partition_prune_contexts<'mcx>(
                         present.add_member(mcx, k as i32)?;
                     }
                 } else {
-                    let subidx = prunestate.hierarchies[hi][j].pinfo.subpart_map[k];
+                    let subidx = prunestate.hierarchies[hi][j].subpart_map[k];
                     if subidx >= 0
                         && !prunestate.hierarchies[hi][subidx as usize].present_parts.is_empty()
                     {
@@ -379,14 +424,14 @@ fn find_matching_subplans_recurse<'mcx>(
         let subplan = prunedata[idx].subplan_map[i as usize];
         if subplan >= 0 {
             validsubplans.add_member(mcx, subplan)?;
-            let rti = prunedata[idx].pinfo.leafpart_rti_map[i as usize];
+            let rti = prunedata[idx].leafpart_rti_map[i as usize];
             if rti != 0 {
                 if let Some(rtis) = validsubplan_rtis.as_mut() {
                     rtis.add_member(mcx, rti)?;
                 }
             }
         } else {
-            let partidx = prunedata[idx].pinfo.subpart_map[i as usize];
+            let partidx = prunedata[idx].subpart_map[i as usize];
             if partidx >= 0 {
                 find_matching_subplans_recurse(
                     prunedata,
