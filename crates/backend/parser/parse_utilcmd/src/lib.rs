@@ -235,6 +235,17 @@ fn resolveTypeNames<'mcx, 'tn>(
     mcx: Mcx<'mcx>,
     tn: &TypeName<'tn>,
 ) -> PgResult<(Oid, &'tn str)> {
+    resolve_type_names_ext(mcx, tn, false)
+}
+
+// LookupTypeNameExtended's missing_ok also covers the explicit-schema
+// lookup: a missing schema yields InvalidOid ("type does not exist" at the
+// caller) instead of a schema error.
+fn resolve_type_names_ext<'mcx, 'tn>(
+    mcx: Mcx<'mcx>,
+    tn: &TypeName<'tn>,
+    missing_ok: bool,
+) -> PgResult<(Oid, &'tn str)> {
     let mut names: [&str; 4] = [""; 4];
     let nnames = tn.names.len();
     if nnames == 0 || nnames > 3 {
@@ -257,7 +268,10 @@ fn resolveTypeNames<'mcx, 'tn>(
 
     let typoid = match schemaname {
         Some(schemaname) => {
-            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
+            let namespace_id = catalog_namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
+            if namespace_id == InvalidOid {
+                return Ok((InvalidOid, typname));
+            }
             syscache_seams::lookup_pg_type_oid_by_name::call(typname, namespace_id)?
         }
         None => {
@@ -350,7 +364,9 @@ pub fn parseTypeStringEsc<'mcx>(
         unported("pre-resolved TypeName.typeOid lane");
     }
 
-    let (mut typoid, _typname) = resolveTypeNames(mcx, tn)?;
+    // C: LookupTypeName(NULL, typeName, ..., missing_ok = escontext is an
+    // ErrorSaveContext) — a missing schema soft-NULLs under a soft context.
+    let (mut typoid, _typname) = resolve_type_names_ext(mcx, tn, esc.is_some())?;
     if typoid != InvalidOid && !tn.arrayBounds.is_nil() {
         typoid = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
     }
