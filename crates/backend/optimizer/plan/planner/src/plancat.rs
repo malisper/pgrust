@@ -130,21 +130,16 @@ pub fn get_relation_info<'mcx>(
                 index_rel.rd_rel.relkind == types_rel::RELKIND_INDEX || is_partitioned_index,
                 "get_relation_info (plancat.c): unexpected index relkind"
             );
+            // C reads amroutine fields off rd_indam; from_relam covers
+            // non-builtin relam values over builtin handlers (still loud for
+            // genuinely unknown AMs).
             let relam = index_rel.rd_rel.relam;
-            let am_is_btree = relam == BTREE_AM_OID;
-            let am_is_gin = relam == types_core::GIN_AM_OID;
-            let am_is_gist = relam == types_core::GIST_AM_OID;
-            let am_is_brin = relam == types_core::BRIN_AM_OID;
-            let am_is_spgist = relam == types_core::SPGIST_AM_OID;
-            if !am_is_btree
-                && !am_is_gin
-                && !am_is_gist
-                && !am_is_brin
-                && !am_is_spgist
-                && relam != types_core::HASH_AM_OID
-            {
-                panic!("get_relation_info (plancat.c): index AM {relam}; M2 index-AM lane");
-            }
+            let am_kind = types_relscan::IndexAmKind::from_relam(relam);
+            let am_is_btree = am_kind == types_relscan::IndexAmKind::Btree;
+            let am_is_gin = am_kind == types_relscan::IndexAmKind::Gin;
+            let am_is_gist = am_kind == types_relscan::IndexAmKind::Gist;
+            let am_is_brin = am_kind == types_relscan::IndexAmKind::Brin;
+            let am_is_spgist = am_kind == types_relscan::IndexAmKind::Spgist;
             let ncolumns = ind.indnatts as i32;
             let nkeycolumns = ind.indnkeyatts as i32;
             let mut info = IndexOptInfo::new(mcx);
@@ -160,10 +155,12 @@ pub fn get_relation_info<'mcx>(
                 info.indexcollations.push(
                     index_rel.rd_indcollation.get(i).copied().unwrap_or(0),
                 );
-                info.canreturn.push(match index_rel.rd_rel.relam {
-                    BTREE_AM_OID => btcanreturn(),
-                    types_core::GIST_AM_OID => gist::gistcanreturn(&index_rel, i as i32 + 1),
-                    types_core::SPGIST_AM_OID => {
+                info.canreturn.push(match am_kind {
+                    types_relscan::IndexAmKind::Btree => btcanreturn(),
+                    types_relscan::IndexAmKind::Gist => {
+                        gist::gistcanreturn(&index_rel, i as i32 + 1)
+                    }
+                    types_relscan::IndexAmKind::Spgist => {
                         spgist::spgcanreturn(&index_rel, i as i32 + 1)?
                     }
                     _ => false,
@@ -656,10 +653,10 @@ fn btcanreturn() -> bool {
 // Returnable fallback rides the indexam_seams slot installed here.
 pub fn index_can_return(mcx: mcx::Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool> {
     let rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
-    let res = match rel.rd_rel.relam {
-        BTREE_AM_OID => btcanreturn(),
-        types_core::GIST_AM_OID => gist::gistcanreturn(&rel, attno),
-        types_core::SPGIST_AM_OID => spgist::spgcanreturn(&rel, attno)?,
+    let res = match types_relscan::IndexAmKind::from_relam(rel.rd_rel.relam) {
+        types_relscan::IndexAmKind::Btree => btcanreturn(),
+        types_relscan::IndexAmKind::Gist => gist::gistcanreturn(&rel, attno),
+        types_relscan::IndexAmKind::Spgist => spgist::spgcanreturn(&rel, attno)?,
         _ => false,
     };
     indexam::index_close(rel, types_rel::AccessShareLock)?;

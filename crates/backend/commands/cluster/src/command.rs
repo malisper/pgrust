@@ -340,7 +340,7 @@ fn rebuild_relation<'mcx>(
     }
 
     let oid_new_heap =
-        make_new_heap(mcx, table_oid, old_heap.rd_rel.reltablespace, relpersistence, NoLock)?;
+        make_new_heap(mcx, table_oid, old_heap.rd_rel.reltablespace, old_heap.rd_rel.relam, relpersistence, NoLock)?;
     let new_heap = table::table_open(mcx, oid_new_heap, NoLock)?;
 
     let (frozen_xid, cutoff_multi, swap_toast_by_content) =

@@ -56,6 +56,36 @@ pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult
     }
 }
 
+// RelationInitIndexAccessInfo's amhandler resolution (relcache.c), non-builtin
+// arm: CREATE ACCESS METHOD over a builtin index handler gets its relam mapped
+// into relscan's registry so IndexAmKind::from_relam covers it.
+pub(crate) fn RelationInitIndexAmKind(relam: Oid) -> PgResult<()> {
+    use types_relscan::IndexAmKind;
+    // btree, hash, gin, gist, spgist, brin (pg_am.dat).
+    if matches!(relam, 403 | 405 | 2742 | 783 | 4000 | 3580) {
+        return Ok(());
+    }
+    let kind = match syscache_seams::pg_am_amhandler::call(relam)? {
+        Some(330) => IndexAmKind::Btree,
+        Some(331) => IndexAmKind::Hash,
+        Some(333) => IndexAmKind::Gin,
+        Some(332) => IndexAmKind::Gist,
+        Some(334) => IndexAmKind::Spgist,
+        Some(335) => IndexAmKind::Brin,
+        Some(other) => panic!(
+            "unported: index AM handler function {other} (relam {relam}); \
+             only builtin index handlers are carried"
+        ),
+        None => {
+            return Err(Box::new(PgError::error(format!(
+                "cache lookup failed for access method {relam}"
+            ))))
+        }
+    };
+    types_relscan::register_index_am(relam, kind);
+    Ok(())
+}
+
 // Steady-state arms only: the historic-snapshot (logical decoding) refresh and
 // the parallel-worker rd_firstRelfilelocatorSubid restore are unported.
 pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> {
@@ -134,6 +164,9 @@ pub(crate) fn build_desc_data(target_rel_id: Oid) -> PgResult<Option<RelationDat
         let mcx = cache_mcx();
         let (rd_backend, rd_islocaltemp) = resolve_backend(&scanned.form)?;
         RelationInitTableAccessMethod(scanned.form.relkind, scanned.form.relam)?;
+        if matches!(scanned.form.relkind, RELKIND_INDEX | RELKIND_PARTITIONED_INDEX) {
+            RelationInitIndexAmKind(scanned.form.relam)?;
+        }
         let rd_att =
             relcache_build_seams::relation_build_tuple_desc::call(
                 mcx,

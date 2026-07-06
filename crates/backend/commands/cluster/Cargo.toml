@@ -18,6 +18,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_scan = { path = "../../../_support/types/types_scan" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 heaptuple = { path = "../../access/common/heaptuple" }
+reloptions = { path = "../../access/common/reloptions" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 catalog = { path = "../../catalog/catalog" }
