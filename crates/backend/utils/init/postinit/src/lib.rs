@@ -421,6 +421,20 @@ pub fn BaseInit() -> PgResult<()> {
 }
 
 /// InitPostgres. The C call order below is the deliverable — do not reorder.
+// Launch-path phase timestamp, PGRUST_GATHER_TRACE-gated (duplicated from
+// parallel::gtrace — this crate sits below parallel in the dep graph).
+fn gtrace(phase: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
+        return;
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    eprintln!("GTRACE {phase} w=? t_us={t}");
+}
+
 pub fn InitPostgres(
     mcx: Mcx<'_>,
     in_dbname: Option<&str>,
@@ -436,7 +450,9 @@ pub fn InitPostgres(
 
     ereport(DEBUG3).errmsg_internal("InitPostgres").finish(loc(723, "InitPostgres"))?;
 
+    gtrace("p.enter");
     lmgr_proc::InitProcessPhase2()?;
+    gtrace("p.proc2");
 
     backend_status_seams::pgstat_beinit::call()?;
 
@@ -445,6 +461,7 @@ pub fn InitPostgres(
         // INJECTION_POINT("init-pre-auth"): compiled out (non-assert build).
     }
 
+    gtrace("p.beinit");
     sinval::SharedInvalBackendInit(false)?;
 
     let cancel_key = init_small::globals::MyCancelKey();
@@ -494,13 +511,16 @@ pub fn InitPostgres(
         ipc_seams::before_shmem_exit::call(shutdown_xlog_cb, datum_null())?;
     }
 
+    gtrace("p.timeouts");
     relcache::RelationCacheInitialize();
     cache_syscache::InitCatalogCache()?;
     plancache_portal_seams::init_plan_cache::call()?;
+    gtrace("p.catcache");
 
     portalmem::EnablePortalManager();
 
     relcache::RelationCacheInitializePhase2()?;
+    gtrace("p.relcache2");
 
     ipc_seams::before_shmem_exit::call(shutdown_postgres_cb, datum_null())?;
 
@@ -515,6 +535,7 @@ pub fn InitPostgres(
 
         xact::SetXactIsoLevel(XACT_READ_COMMITTED);
     }
+    gtrace("p.txn");
 
     let backend_type = miscinit::GetMyBackendType();
     if bootstrap
@@ -559,6 +580,7 @@ pub fn InitPostgres(
         am_superuser = superuser_seams::superuser::call()?;
     }
 
+    gtrace("p.auth");
     if init_small::globals::HaveMyProcPort() {
         debug_assert!(!bootstrap);
         backend_status_seams::pgstat_bestart_security::call()?;
@@ -690,6 +712,7 @@ pub fn InitPostgres(
         }
     }
 
+    gtrace("p.dblookup");
     init_small::globals::SetMyDatabaseId(dboid);
 
     // MyProc->databaseId: plain atomic store, no lock (C relies on the
@@ -738,7 +761,9 @@ pub fn InitPostgres(
 
     miscinit::SetDatabasePath(fullpath.as_str());
 
+    gtrace("p.dbpath");
     relcache::RelationCacheInitializePhase3()?;
+    gtrace("p.relcache3");
 
     acl_seams::initialize_acl::call()?;
 
@@ -746,15 +771,18 @@ pub fn InitPostgres(
         CheckMyDatabase(mcx, &dbname, am_superuser, (flags & INIT_PG_OVERRIDE_ALLOW_CONNS) != 0)?;
     }
 
+    gtrace("p.checkdb");
     if init_small::globals::HaveMyProcPort() {
         process_startup_options(am_superuser)?;
     }
 
     process_settings(mcx, init_small::globals::MyDatabaseId(), miscinit::GetSessionUserId())?;
+    gtrace("p.settings");
 
     apply_post_auth_delay();
 
     namespace_seams::initialize_search_path::call()?;
+    gtrace("p.searchpath");
 
     mbutils_seams::initialize_client_encoding::call()?;
 
@@ -771,6 +799,7 @@ pub fn InitPostgres(
     if !bootstrap {
         xact::CommitTransactionCommand()?;
     }
+    gtrace("p.done");
 
     Ok(())
 }
