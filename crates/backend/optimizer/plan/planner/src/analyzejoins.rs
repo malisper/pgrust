@@ -94,7 +94,24 @@ fn join_is_removable<'mcx>(
             }
         }
         let phexpr = *run.root.expr_node(run.root.phinfo(phid).ph_var_phexpr);
-        let varnos = crate::initsplan::pull_varnos_relids(run, phexpr)?;
+        // DIVERGENCE from C's pull_varnos(root, phexpr): a nested PHV
+        // contributes phrels here, not ph_eval_at, keeping this gate
+        // conservative (blocks removal, never unsafe). C's narrower set
+        // admits removals our remove_rel_from_query PHV path then breaks
+        // (setrefs "variable not found", join.sql RHS-removal family);
+        // restore with join-removal completion.
+        let varnos = {
+            let bms = vars::pull_varnos(mcx, phexpr)?;
+            let mut out: types_pathnodes::Relids = None;
+            for x in bms.iter() {
+                out = crate::relnode::relids_union(
+                    mcx,
+                    &out,
+                    &crate::relnode::relids_singleton(mcx, x as u32),
+                );
+            }
+            out
+        };
         if crate::relnode::relids_overlap(&varnos, &inner_relids) {
             return Ok(false);
         }
