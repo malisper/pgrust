@@ -1394,7 +1394,7 @@ fn pull_up_simple_subquery<'mcx>(
 
 // get_relids_in_jointree (prepjointree.c), include_outer_joins=true,
 // include_inner_joins=false.
-fn get_relids_in_jointree_no_inner<'mcx>(
+pub(crate) fn get_relids_in_jointree_no_inner<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     out: &mut types_nodes::Bitmapset<'mcx>,
@@ -3324,7 +3324,7 @@ pub(crate) fn remove_nulling_relids<'mcx>(
 // whose varlevelsup addresses this level and (target = None) or whose varno
 // is in target gets added_relids unioned into varnullingrels; PHVs match on
 // phrels overlap. Callers own the tree (fresh copy_expr output).
-fn add_nulling_relids_expr<'mcx>(
+pub(crate) fn add_nulling_relids_expr<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     target: Option<&types_nodes::Bitmapset<'mcx>>,

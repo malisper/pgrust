@@ -10,6 +10,7 @@ pub mod extended_stats;
 pub mod costsize;
 pub mod createplan;
 pub mod equivclass;
+pub mod flatten_group;
 pub mod grouping;
 pub mod groupingsets;
 pub mod indxpath;

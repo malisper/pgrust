@@ -139,7 +139,7 @@ fn ungrouped_column_is_42803_with_column_name() {
     let tle = Node::mk_target_entry(mcx, var, 1, Some("x"), false).unwrap();
     let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
 
-    let err = parseCheckAggregates(mcx, &pstate, &mut qry).map(|_| ()).unwrap_err();
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
     assert!(
         err.message().contains(
@@ -169,7 +169,7 @@ fn var_inside_aggregate_passes_check() {
     let tle = Node::mk_target_entry(mcx, agg.seal(), 1, Some("sum"), false).unwrap();
     let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
 
-    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
 }
 
 fn group_clause_ref1<'mcx>(mcx: Mcx<'mcx>) -> NodeList<'mcx> {
@@ -207,7 +207,7 @@ fn grouped_column_passes_check() {
     .unwrap();
     let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
     qry.groupClause = group_clause_ref1(mcx);
-    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn ungrouped_column_next_to_group_by_is_42803() {
     qry.targetList = tlist;
     qry.groupClause = group_clause_ref1(mcx);
 
-    let err = parseCheckAggregates(mcx, &pstate, &mut qry).map(|_| ()).unwrap_err();
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
     assert!(
         err.message().contains(
@@ -595,7 +595,7 @@ fn grouped_outer_var_in_sublink_passes_check() {
     tlist.lappend(mcx, tle2).unwrap();
     let mut qry = query_with_rtable(mcx, tlist);
     qry.groupClause = group_clause_ref1(mcx);
-    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
 }
 
 #[test]
@@ -611,7 +611,7 @@ fn ungrouped_outer_var_in_sublink_is_42803() {
     let tle = Node::mk_target_entry(mcx, sublink, 1, Some("s"), false).unwrap();
     let mut qry = query_with_rtable(mcx, NodeList::make1(mcx, tle).unwrap());
 
-    let err = parseCheckAggregates(mcx, &pstate, &mut qry).map(|_| ()).unwrap_err();
+    let err = parseCheckAggregates(mcx, &mut pstate, &mut qry).map(|_| ()).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_GROUPING_ERROR);
     assert_eq!(
         err.message(),
@@ -723,7 +723,7 @@ fn sublink_with_from_clause_passes_ungrouped_check() {
     tlist.lappend(mcx, tle2).unwrap();
     let mut qry = query_with_rtable(mcx, tlist);
     qry.groupClause = group_clause_ref1(mcx);
-    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
 }
 
 #[test]
@@ -756,7 +756,7 @@ fn subscripting_ref_over_grouped_var_passes_check() {
     tlist.lappend(mcx, tle2).unwrap();
     let mut qry = query_with_rtable(mcx, tlist);
     qry.groupClause = group_clause_ref1(mcx);
-    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
 }
 
 #[test]
@@ -793,7 +793,7 @@ fn grouping_func_in_sublink_resolves_refs() {
     tlist.lappend(mcx, tle2).unwrap();
     let mut qry = query_with_rtable(mcx, tlist);
     qry.groupClause = group_clause_ref1(mcx);
-    parseCheckAggregates(mcx, &pstate, &mut qry).unwrap();
+    parseCheckAggregates(mcx, &mut pstate, &mut qry).unwrap();
 
     let grp = gf.as_grouping_func().unwrap();
     assert_eq!(grp.refs.len(), 1);
