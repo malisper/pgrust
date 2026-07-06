@@ -1023,3 +1023,45 @@ mod agg_serial {
         assert!(cloned.dnulls[1]);
     }
 }
+
+mod bitmap_copy_bounds {
+    use crate::element::array_bitmap_copy;
+
+    // A copy ending exactly on the last bit of an exactly-sized bitmap must
+    // not read or write the byte past it (C guards the byte-advance reads on
+    // items remaining and the tail writeback on a partial byte).
+    #[test]
+    fn dest_ends_on_final_byte_boundary() {
+        let mut dest = vec![0u8; 4];
+        array_bitmap_copy(&mut dest, 0, 0, None, 0, 32);
+        assert_eq!(dest, vec![0xFF; 4]);
+
+        // Appending the final bit alone (accumArrayResultArr's per-item feed).
+        let mut dest = vec![0u8; 4];
+        array_bitmap_copy(&mut dest, 0, 0, None, 0, 31);
+        array_bitmap_copy(&mut dest, 0, 31, None, 0, 1);
+        assert_eq!(dest, vec![0xFF; 4]);
+    }
+
+    #[test]
+    fn src_ends_on_final_byte_boundary() {
+        let src = vec![0b1010_1010u8; 2];
+        let mut dest = vec![0u8; 2];
+        array_bitmap_copy(&mut dest, 0, 0, Some((&src, 0)), 0, 16);
+        assert_eq!(dest, src);
+    }
+
+    #[test]
+    fn partial_final_byte_still_written() {
+        let mut dest = vec![0u8; 2];
+        array_bitmap_copy(&mut dest, 0, 0, None, 0, 11);
+        assert_eq!(dest, vec![0xFF, 0x07]);
+
+        // Cross-byte src copy at an unaligned dest offset keeps neighbors.
+        let src = vec![0b0110_0110u8, 0b0000_0101u8];
+        let mut dest = vec![0u8; 2];
+        array_bitmap_copy(&mut dest, 0, 3, Some((&src, 0)), 0, 10);
+        assert_eq!(dest[0], 0b0011_0000);
+        assert_eq!(dest[1], 0b0000_1011);
+    }
+}

@@ -330,6 +330,29 @@ fn agg_array_late_nulls() {
     assert_eq!(to_int4(mcx, &out), vec![Some(1), Some(2), None, Some(4)]);
 }
 
+// v_pagg_test's array_agg(ARRAY[x]) shape: the null bitmap is allocated for
+// aitems = 256 (32 bytes) and item 256 flushes its last byte exactly —
+// array_bitmap_copy must not touch the byte past the bitmap there.
+#[test]
+fn agg_array_bitmap_fills_exact_capacity() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    const INT4_ARRAY: Oid = 1007;
+    let mut st = init_array_result_arr(mcx, INT4_ARRAY, INT4OID).unwrap();
+    for i in 0..257 {
+        let elem = if i % 4 == 0 { None } else { Some(i as i32) };
+        let img = int4_arr(mcx, &[elem], 1);
+        st = accum_array_result_arr(mcx, Some(st), Some(&img), INT4_ARRAY).unwrap();
+    }
+    let out = make_array_result_arr(mcx, &st).unwrap();
+    assert_eq!(dims_of(&out), (2, vec![257, 1], vec![1, 1]));
+    let vals = to_int4(mcx, &out);
+    assert_eq!(vals.len(), 257);
+    for (i, v) in vals.iter().enumerate() {
+        assert_eq!(*v, if i % 4 == 0 { None } else { Some(i as i32) });
+    }
+}
+
 #[test]
 fn trim_array_slices() {
     let ctx = MemoryContext::new_bump("t");
