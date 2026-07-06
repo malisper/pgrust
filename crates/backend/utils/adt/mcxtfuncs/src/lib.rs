@@ -1,5 +1,6 @@
-//! mcxtfuncs.c over the mcxt_stats root-context forest (no single
-//! TopMemoryContext here — thread-native divergence).
+//! mcxtfuncs.c over the mcxt_stats root-context forest. The ownership model
+//! has no single TopMemoryContext (thread-native divergence); the view grafts
+//! the forest under the real TopMemoryContext row for C's parentage shape.
 
 use core::sync::atomic::Ordering::Relaxed;
 
@@ -69,14 +70,17 @@ fn put_context_row(
     values[3] = Datum::from_i32(path.len() as i32);
     values[4] = int4_array_datum(mcx, path)?;
     // C divergence: allocator-native accounting — block footprint where
-    // tracked, charged bytes otherwise; free-chunk counts unavailable.
+    // tracked, charged bytes otherwise; free-chunk counts unavailable. Bump
+    // free space is the block-transition window-tail snapshot, not C's live
+    // freeptr walk.
     let total = if t.arena_footprint > 0 { t.arena_footprint } else { t.used };
     let total = total.max(t.used);
+    let free = if t.is_bump { t.free_tail.min(total) } else { total - t.used };
     values[5] = Datum::from_i64(total as i64);
     values[6] = Datum::from_i64(t.nblocks.max(1) as i64);
-    values[7] = Datum::from_i64((total - t.used) as i64);
+    values[7] = Datum::from_i64(free as i64);
     values[8] = Datum::from_i64(0);
-    values[9] = Datum::from_i64(t.used as i64);
+    values[9] = Datum::from_i64((total - free) as i64);
 
     srf.putvalues(&values, &nulls)
 }
@@ -92,7 +96,15 @@ pub fn fc_pg_get_backend_memory_contexts(
     debug_assert_eq!(srf.tupdesc.natts as usize, COLS);
 
     // breadth-first ids (C keeps them stable near the roots)
-    let forest = mcxt_stats::backend_context_forest();
+    // C parents every context under TopMemoryContext (mcxt.c); the forest here
+    // is flat, so the view grafts the other roots under the real
+    // TopMemoryContext row to keep C's parentage shape (level 1 = one row).
+    let mut forest = mcxt_stats::backend_context_forest();
+    if let Some(i) = forest.iter().position(|t| t.name == "TopMemoryContext") {
+        let mut top = forest.remove(i);
+        top.children.append(&mut forest);
+        forest.push(top);
+    }
     let mut queue: std::collections::VecDeque<(&TreeStats, Vec<i32>)> = Default::default();
     let mut next_id = 1i32;
     for root in &forest {

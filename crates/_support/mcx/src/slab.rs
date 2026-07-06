@@ -332,6 +332,7 @@ mod tests {
             limited_path: Cell::new(false),
             arena_footprint: Cell::new(0),
             arena_nblocks: Cell::new(0),
+            window_tail: Cell::new(0),
             is_bump: true,
             kind: "Slab",
             parent: None,
