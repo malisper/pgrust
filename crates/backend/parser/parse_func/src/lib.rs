@@ -68,7 +68,13 @@ enum FuncDetail<'mcx> {
         nvargs: i16,
         argdefaults: PgVec<'mcx, Node<'mcx>>,
     },
-    WindowFunc { funcid: Oid, rettype: Oid, retset: bool, declared_arg_types: PgVec<'mcx, Oid> },
+    WindowFunc {
+        funcid: Oid,
+        rettype: Oid,
+        retset: bool,
+        declared_arg_types: PgVec<'mcx, Oid>,
+        argdefaults: PgVec<'mcx, Node<'mcx>>,
+    },
     NotFound,
 }
 
@@ -570,7 +576,7 @@ pub fn ParseFuncOrColumn<'mcx>(
 
             Ok(aggref.seal())
         }
-        FuncDetail::WindowFunc { funcid, rettype, retset, declared_arg_types } => {
+        FuncDetail::WindowFunc { funcid, rettype, retset, declared_arg_types, argdefaults } => {
             let Some(over_node) = over else {
                 return Err(wrong_object_type(
                     pstate,
@@ -592,6 +598,21 @@ pub fn ParseFuncOrColumn<'mcx>(
                 ));
             }
             let mut declared_arg_types = declared_arg_types;
+            // C: default types join the generic-consistency check; the
+            // defaults themselves stay out of the parse node (the planner
+            // inserts them at plan time).
+            let mut all_arg_types: PgVec<'mcx, Oid> =
+                mcx::vec_with_capacity_in(mcx, actual_arg_types.len() + argdefaults.len())?;
+            for &t in actual_arg_types {
+                all_arg_types.push(t);
+            }
+            for d in argdefaults.iter() {
+                if all_arg_types.len() >= FUNC_MAX_ARGS {
+                    return Err(too_many_arguments(pstate, location));
+                }
+                all_arg_types.push(default_expr_type(*d));
+            }
+            let actual_arg_types = all_arg_types.as_slice();
             let rettype = coerce::enforce_generic_type_consistency(
                 actual_arg_types,
                 declared_arg_types.as_mut_slice(),
@@ -1422,7 +1443,10 @@ fn func_get_detail<'mcx>(
     // C: fetch and parse the argument defaults the call omitted.
     let mut argdefaults: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     if best.ndargs > 0 {
-        if shape.prokind != PROKIND_FUNCTION && shape.prokind != PROKIND_PROCEDURE {
+        if shape.prokind != PROKIND_FUNCTION
+            && shape.prokind != PROKIND_PROCEDURE
+            && shape.prokind != PROKIND_WINDOW
+        {
             panic!(
                 "func_get_detail (parse_func.c): defaulted {} {funcid} unported",
                 shape.prokind
@@ -1495,6 +1519,7 @@ fn func_get_detail<'mcx>(
             rettype: shape.prorettype,
             retset: shape.proretset,
             declared_arg_types,
+            argdefaults,
         },
         other => panic!("unrecognized prokind: {other} (parse_func.c func_get_detail)"),
     })
