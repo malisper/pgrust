@@ -313,7 +313,7 @@ pub fn DoCopyTo<'mcx>(
         cstate.fe_msgbuf.append_bytes(&0i32.to_be_bytes())?;
     }
 
-    if cstate.opts.header_line {
+    if cstate.opts.header_line != crate::CopyHeaderChoice::False {
         let mut hdr_delim = false;
         let single_attr = cstate.attnumlist.len() == 1;
         for &attnum in cstate.attnumlist.iter() {

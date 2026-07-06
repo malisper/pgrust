@@ -77,7 +77,7 @@ fn mk_state<'mcx>(
             escape: b'"',
             null_print,
             default_print: None,
-            header_line: false,
+            header_line: crate::CopyHeaderChoice::False,
             force_quote: None,
             force_quote_all: false,
             force_notnull: None,
