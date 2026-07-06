@@ -4285,9 +4285,11 @@ dependencies = [
 name = "detoast_seams"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "mcx",
  "seam_core",
  "types_error",
+ "types_tuple",
 ]
 
 [[package]]
@@ -6494,6 +6496,7 @@ dependencies = [
  "combocid_seams",
  "datum",
  "detoast",
+ "detoast_seams",
  "freespace_seams",
  "genam",
  "heapam",
@@ -6549,6 +6552,7 @@ name = "heaptuple"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "detoast_seams",
  "mcx",
  "types_core",
  "types_error",
@@ -10317,6 +10321,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_portal",
  "types_rel",
  "types_tuple",
  "varlena",
@@ -14209,6 +14214,7 @@ dependencies = [
  "parse_expr",
  "parser_seams",
  "parser_small1",
+ "pg_proc",
  "plancache",
  "planner",
  "readfuncs",

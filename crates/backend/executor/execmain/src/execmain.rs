@@ -764,6 +764,16 @@ pub(crate) fn init_plan<'mcx>(
             *cell = Some(erm);
         }
     }
+    // Hooks install unconditionally: SubplanCompileEnv (and with it the
+    // rtable EEOP_WHOLEROW reads for RECORD eref aliases) exists only when
+    // es_subplan_init_hook is set, and whole-row Vars occur in subplan-less
+    // plans. Hooks precede the subplan-init loop: a subplan's own tree can
+    // hold nested SubPlan expressions (plan_id strictly below its own, so
+    // the es_subplanstates lookup mirrors C's incremental lappend order).
+    data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
+    data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
+    data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
+    data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
     if !pstmt.subplans.is_nil() {
         // Hooks precede the subplan-init loop: a subplan's own tree can hold
         // nested SubPlan expressions (plan_id strictly below its own, so the

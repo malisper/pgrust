@@ -2675,7 +2675,7 @@ fn plpgsql_column_ref<'mcx>(
 // C sql_fn_post_column_ref (executor/functions.c): resolve unmatched column
 // references against SQL-function parameter names. Runs only after normal
 // column resolution missed, matching C's hook precedence.
-fn sql_fn_post_column_ref<'mcx>(
+pub fn sql_fn_post_column_ref<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'_, 'mcx>,
     fields: &[Node<'mcx>],

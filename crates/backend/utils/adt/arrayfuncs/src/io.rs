@@ -468,7 +468,16 @@ fn read_array_str<'mcx>(
             }
             ArrayTok::Delim => {
                 if !expect_delim {
-                    return soft(escontext, malformed(orig, "Unexpected delimiter character."));
+                    return soft(
+                        escontext,
+                        malformed(
+                            orig,
+                            &alloc::format!(
+                                "Unexpected \"{}\" character.",
+                                meta.typdelim as char
+                            ),
+                        ),
+                    );
                 }
                 expect_delim = false;
             }

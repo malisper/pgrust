@@ -18,6 +18,7 @@ pglz = { path = "../../../../common/pglz" }
 init_small = { path = "../../../utils/init/init_small" }
 heaptuple = { path = "../../common/heaptuple" }
 detoast = { path = "../../common/detoast" }
+detoast_seams = { path = "../../common/detoast_seams" }
 toastdesc = { path = "../../common/toastdesc" }
 toast_internals_seams = { path = "../../common/toast_internals_seams" }
 heaptoast_seams = { path = "../heaptoast_seams" }

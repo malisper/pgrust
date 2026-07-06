@@ -25,12 +25,6 @@ fn too_many_columns(natts: usize) -> Box<PgError> {
     )
 }
 
-#[cold]
-#[inline(never)]
-fn toast_flatten_unsupported() -> ! {
-    panic!("toast_flatten_tuple_to_datum not ported; detoast unit owns it")
-}
-
 pub fn heap_form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tupleDescriptor: &TupleDescData<'_>,
@@ -193,8 +187,9 @@ pub fn heap_copy_tuple_as_datum<'mcx>(
     tuple: &HeapTupleData<'_>,
     tupleDesc: &TupleDescData<'_>,
 ) -> PgResult<Datum> {
+    // Composite-type Datums must not contain external TOAST pointers.
     if tuple.has_external() {
-        toast_flatten_unsupported();
+        return ::detoast_seams::toast_flatten_tuple_to_datum::call(mcx, tuple, tupleDesc);
     }
 
     let len = tuple.t_len as usize;

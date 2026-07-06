@@ -14,7 +14,11 @@ pub mod ops;
 #[cfg(test)]
 mod tests;
 
-pub use build::{accum_array_result, init_array_result, make_array_result, make_md_array_result};
+pub use build::{
+    accum_array_result, accum_array_result_any, accum_array_result_arr, init_array_result,
+    init_array_result_any, init_array_result_arr, make_array_result, make_array_result_any,
+    make_array_result_arr, make_md_array_result,
+};
 pub use construct::{
     array_contains_nulls, array_get_integer_typmods, construct_array, construct_empty_array,
     construct_md_array, deconstruct_array, deconstruct_array_builtin,

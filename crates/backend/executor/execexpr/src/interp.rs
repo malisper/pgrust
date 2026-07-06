@@ -1590,6 +1590,10 @@ fn eval_scalar_array_op(
     if ndim == 0 {
         nitems = 0;
     }
+    // C: the empty-array result precedes the strict NULL-scalar check.
+    if nitems <= 0 {
+        return Ok((Datum::from_bool(!use_or), false));
+    }
 
     // SAFETY: arg slot 0 of the call's live fcinfo image.
     let scalar = unsafe { crate::steps::arg_slot_of(call.fcinfo, 0).read() };
@@ -1835,6 +1839,12 @@ fn eval_row_expr(
     // SAFETY: the compile-time blessed tupdesc is plan-mcx-lived.
     let desc = unsafe { desc.as_ref() };
     let tuple = ::heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)?;
+    // Composite Datums must not carry external toast pointers
+    // (C HeapTupleHeaderGetDatum, execTuples.c:2413).
+    if tuple.as_tuple().has_external() {
+        let d = ::detoast_seams::toast_flatten_tuple_to_datum::call(mcx, tuple.as_tuple(), desc)?;
+        return Ok((d, false));
+    }
     let d = Datum::from_usize(tuple.image().as_ptr() as usize);
     core::mem::forget(tuple);
     Ok((d, false))

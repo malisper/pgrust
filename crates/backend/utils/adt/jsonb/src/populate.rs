@@ -846,11 +846,16 @@ fn populate_composite(
                 let tuple = heaptuple::heap_form_tuple(mcx, tupdesc, &values, &nulls)?;
                 // C HeapTupleHeaderGetDatum flattens external fields here.
                 if tuple.has_external() {
-                    panic!("populate_composite: toast_flatten_tuple_to_datum not ported");
+                    detoast_seams::toast_flatten_tuple_to_datum::call(
+                        mcx,
+                        tuple.as_tuple(),
+                        tupdesc,
+                    )?
+                } else {
+                    let d = Datum::from_usize(tuple.image().as_ptr() as usize);
+                    core::mem::forget(tuple);
+                    d
                 }
-                let d = Datum::from_usize(tuple.image().as_ptr() as usize);
-                core::mem::forget(tuple);
-                d
             }
         };
     }
@@ -1537,10 +1542,12 @@ fn populate_recordset_record(
     }
     if is_composite_domain {
         let tuple = heaptuple::heap_form_tuple(mcx, tupdesc, &values, &nulls)?;
-        if tuple.has_external() {
-            panic!("populate_recordset_record: toast_flatten_tuple_to_datum not ported");
-        }
-        let d = Datum::from_usize(tuple.image().as_ptr() as usize);
+        // C HeapTupleHeaderGetDatum flattens external fields here.
+        let d = if tuple.has_external() {
+            detoast_seams::toast_flatten_tuple_to_datum::call(mcx, tuple.as_tuple(), tupdesc)?
+        } else {
+            Datum::from_usize(tuple.image().as_ptr() as usize)
+        };
         typcache_seams::domain_check_input::call(d, false, argtype, None)?;
     }
     store.putvalues(tupdesc, &values, &nulls)?;

@@ -30,3 +30,14 @@ seam_core::seam!(
         tn: &'a TypeName<'a>,
     ) -> PgResult<(Oid, i32)>
 );
+
+seam_core::seam!(
+    // typenameTypeIdAndMod without the host's column-lane typtype gate (C has
+    // none); RTE-function coldeflists take record/record[] and defer legality
+    // to CheckAttributeNamesTypes(CHKATYPE_ANYRECORD).
+    pub fn typename_type_id_and_mod_any<'a, 'p, 'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: Option<&'a ParseState<'p, 'mcx>>,
+        tn: &'a TypeName<'a>,
+    ) -> PgResult<(Oid, i32)>
+);

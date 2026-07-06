@@ -943,6 +943,14 @@ fn ExpandColumnRefStar<'mcx>(
     }
 
     let Some(nsitem) = nsitem else {
+        // The post_columnref leg of C's ExpandColumnRefStar:
+        // sql_fn_post_column_ref never overrides a found table (returns NULL
+        // when var != NULL), so it only runs on the nsitem-miss path.
+        if let Some(node) =
+            parse_expr::sql_fn_post_column_ref(mcx, pstate, fields, cref.location)?
+        {
+            return ExpandRowReference(mcx, pstate, node, make_target_entry);
+        }
         let rv = Node::mk_mut(
             mcx,
             types_nodes::RangeVar {

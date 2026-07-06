@@ -58,7 +58,7 @@ pub(crate) unsafe fn va_slice<'a>(d: Datum) -> &'a [u8] {
 }
 
 #[inline]
-fn is_external(b: &[u8]) -> bool {
+pub(crate) fn is_external(b: &[u8]) -> bool {
     b[0] == 0x01
 }
 
@@ -68,7 +68,7 @@ fn is_external_ondisk(b: &[u8]) -> bool {
 }
 
 #[inline]
-fn is_compressed(b: &[u8]) -> bool {
+pub(crate) fn is_compressed(b: &[u8]) -> bool {
     (b[0] & 0x03) == 0x02
 }
 

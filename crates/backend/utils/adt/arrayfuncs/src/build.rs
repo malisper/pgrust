@@ -1,14 +1,22 @@
 use alloc::boxed::Box;
 
-use ::datum::array_build::ArrayBuildState;
+use ::datum::array_build::{ArrayBuildState, ArrayBuildStateAny, ArrayBuildStateArr};
 use ::datum::{Bytea, Datum, VARHDRSZ};
-use ::mcx::{Mcx, PgVec};
+use ::mcx::{vec_append_bytes, vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::Oid;
-use ::types_error::{PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION};
+use ::types_error::{
+    PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+};
 use ::types_fmgr::{receive_function_call, send_function_call, FmgrInfo};
 
-use crate::construct::construct_md_array;
-use crate::foundation::varsize_any;
+use crate::construct::{construct_empty_array, construct_md_array, write_dims_lbounds, write_header};
+use crate::element::array_bitmap_copy;
+use crate::foundation::{
+    arr_data_offset, arr_nullbitmap_off, arr_overhead_nonulls, arr_overhead_withnulls, arr_size,
+    read_dims_lbounds, varsize_any, ARRAYTYPE_HDRSZ, MAXDIM,
+};
 
 // initArrayResult: allocate a build state in the caller-owned context `mcx`
 // (the C private subcontext is the caller's child bump arena — deferred.md).
@@ -241,6 +249,254 @@ pub fn array_agg_deserialize_state<'mcx>(
     }
     ::pqformat::pq_getmsgend(&buf)?;
     Ok(result)
+}
+
+// initArrayResultArr: element type looked up (true-array check) when the
+// caller passes InvalidOid.
+pub fn init_array_result_arr<'mcx>(
+    mcx: Mcx<'mcx>,
+    array_type: Oid,
+    element_type: Oid,
+) -> PgResult<ArrayBuildStateArr<'mcx>> {
+    let element_type = if element_type != 0 {
+        element_type
+    } else {
+        let et = ::lsyscache::get_element_type(array_type)?;
+        if et == 0 {
+            return Err(Box::new(
+                PgError::error(alloc::format!(
+                    "data type {} is not an array type",
+                    ::format_type::format_type_be(array_type)?
+                ))
+                .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+            ));
+        }
+        et
+    };
+    Ok(ArrayBuildStateArr {
+        mcx,
+        data: PgVec::new_in(mcx),
+        nullbitmap: None,
+        abytes: 0,
+        aitems: 0,
+        nbytes: 0,
+        nitems: 0,
+        ndims: 0,
+        dims: [0; MAXDIM],
+        lbs: [0; MAXDIM],
+        array_type,
+        element_type,
+        private_cxt: false,
+    })
+}
+
+#[cold]
+fn diff_dimensionality() -> Box<PgError> {
+    Box::new(
+        PgError::error("cannot accumulate arrays of different dimensionality")
+            .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+    )
+}
+
+// pg_bitutils.h pg_nextpower2_32; valid for num in [1, 2^31].
+fn pg_nextpower2_32(num: u32) -> u32 {
+    debug_assert!(num > 0 && num <= 0x8000_0000);
+    num.next_power_of_two()
+}
+
+// accumArrayResultArr: append one sub-array's data (input detoasted per C's
+// DatumGetArrayTypeP). abytes/aitems track C's growth formulas — they are
+// wire fields of array_agg_array_serialize even though PgVec owns capacity.
+pub fn accum_array_result_arr<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: Option<ArrayBuildStateArr<'mcx>>,
+    dvalue: Datum,
+    disnull: bool,
+    array_type: Oid,
+) -> PgResult<ArrayBuildStateArr<'mcx>> {
+    if disnull {
+        return Err(Box::new(
+            PgError::error("cannot accumulate null arrays")
+                .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+        ));
+    }
+    let p = dvalue.as_usize() as *const u8;
+    // SAFETY: non-null by-ref array datum readable through its varlena header.
+    let raw = unsafe { core::slice::from_raw_parts(p, varsize_any(p)) };
+    let detoasted;
+    let arg: &[u8] = if raw[0] & 0x03 != 0 {
+        detoasted = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+        &detoasted
+    } else {
+        raw
+    };
+
+    let mut st = match astate {
+        Some(s) => {
+            debug_assert_eq!(s.array_type, array_type);
+            s
+        }
+        None => init_array_result_arr(mcx, array_type, 0)?,
+    };
+
+    let (ndims, dims, lbs) = read_dims_lbounds(arg);
+    let nitems = ::arrayutils::array_get_n_items(ndims, &dims)?;
+    let data_off = arr_data_offset(arg);
+    let ndatabytes = arr_size(arg) - data_off;
+
+    if st.ndims == 0 {
+        if ndims == 0 {
+            return Err(Box::new(
+                PgError::error("cannot accumulate empty arrays")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+            ));
+        }
+        if ndims as usize + 1 > MAXDIM {
+            return Err(Box::new(
+                PgError::error(alloc::format!(
+                    "number of array dimensions ({}) exceeds the maximum allowed ({MAXDIM})",
+                    ndims + 1
+                ))
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            ));
+        }
+        st.ndims = ndims + 1;
+        st.dims[0] = 0;
+        st.dims[1..=ndims as usize].copy_from_slice(&dims[..ndims as usize]);
+        st.lbs[0] = 1;
+        st.lbs[1..=ndims as usize].copy_from_slice(&lbs[..ndims as usize]);
+        st.abytes = pg_nextpower2_32(core::cmp::max(1024, ndatabytes as i32 + 1) as u32) as i32;
+    } else {
+        if st.ndims != ndims + 1 {
+            return Err(diff_dimensionality());
+        }
+        for i in 0..ndims as usize {
+            if st.dims[i + 1] != dims[i] || st.lbs[i + 1] != lbs[i] {
+                return Err(diff_dimensionality());
+            }
+        }
+        if st.nbytes + ndatabytes as i32 > st.abytes {
+            st.abytes = core::cmp::max(st.abytes * 2, st.nbytes + ndatabytes as i32);
+        }
+    }
+
+    vec_append_bytes(&mut st.data, &arg[data_off..data_off + ndatabytes])?;
+    st.nbytes += ndatabytes as i32;
+
+    let arg_bitmap = arr_nullbitmap_off(arg);
+    if st.nullbitmap.is_some() || arg_bitmap.is_some() {
+        let newnitems = st.nitems + nitems;
+        match st.nullbitmap.as_mut() {
+            None => {
+                // First input with nulls: prior inputs marked all-non-null.
+                st.aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1) as u32) as i32;
+                let need = (st.aitems as usize + 7) / 8;
+                let mut bm: PgVec<u8> = vec_with_capacity_in(mcx, need)?;
+                bm.resize(need, 0);
+                array_bitmap_copy(&mut bm, 0, 0, None, 0, st.nitems);
+                st.nullbitmap = Some(bm);
+            }
+            Some(bm) => {
+                if newnitems > st.aitems {
+                    st.aitems = core::cmp::max(st.aitems * 2, newnitems);
+                    bm.resize((st.aitems as usize + 7) / 8, 0);
+                }
+            }
+        }
+        let bm = st.nullbitmap.as_mut().unwrap();
+        array_bitmap_copy(bm, 0, st.nitems, arg_bitmap.map(|b| (arg, b)), 0, nitems);
+    }
+
+    st.nitems += nitems;
+    st.dims[0] += 1;
+    Ok(st)
+}
+
+// makeArrayResultArr: N+1-D final result (empty array if nothing accumulated).
+pub fn make_array_result_arr<'mcx>(
+    mcx: Mcx<'mcx>,
+    st: &ArrayBuildStateArr<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    if st.ndims == 0 {
+        return construct_empty_array(mcx, st.element_type);
+    }
+    ::arrayutils::array_get_n_items(st.ndims, &st.dims)?;
+    ::arrayutils::array_check_bounds(st.ndims, &st.dims, &st.lbs)?;
+
+    let mut nbytes = st.nbytes as usize;
+    let dataoffset = if st.nullbitmap.is_some() {
+        let d = arr_overhead_withnulls(st.ndims, st.nitems);
+        nbytes += d;
+        d as i32
+    } else {
+        nbytes += arr_overhead_nonulls(st.ndims);
+        0
+    };
+
+    let mut out: PgVec<u8> = vec_with_capacity_in(mcx, nbytes)?;
+    out.resize(nbytes, 0);
+    write_header(&mut out, nbytes, st.ndims, dataoffset, st.element_type);
+    write_dims_lbounds(&mut out, st.ndims, &st.dims, &st.lbs);
+    let dst = arr_data_offset(&out);
+    out[dst..dst + st.nbytes as usize].copy_from_slice(&st.data[..st.nbytes as usize]);
+    if let Some(bm) = st.nullbitmap.as_deref() {
+        let bo = ARRAYTYPE_HDRSZ + 2 * 4 * st.ndims as usize;
+        array_bitmap_copy(&mut out, bo, 0, Some((bm, 0)), 0, st.nitems);
+    }
+    Ok(out)
+}
+
+// initArrayResultAny: get_array_type (not get_element_type) picks the lane —
+// int2vector/oidvector satisfy both and must accumulate as scalars, matching
+// get_promoted_array_type.
+pub fn init_array_result_any<'mcx>(
+    mcx: Mcx<'mcx>,
+    input_type: Oid,
+    private_cxt: bool,
+) -> PgResult<ArrayBuildStateAny<'mcx>> {
+    if ::lsyscache::get_array_type(input_type)? == 0 {
+        Ok(ArrayBuildStateAny {
+            scalarstate: None,
+            arraystate: Some(init_array_result_arr(mcx, input_type, 0)?),
+        })
+    } else {
+        Ok(ArrayBuildStateAny {
+            scalarstate: Some(init_array_result(mcx, input_type, private_cxt)?),
+            arraystate: None,
+        })
+    }
+}
+
+pub fn accum_array_result_any<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: Option<ArrayBuildStateAny<'mcx>>,
+    dvalue: Datum,
+    disnull: bool,
+    input_type: Oid,
+) -> PgResult<ArrayBuildStateAny<'mcx>> {
+    let mut st = match astate {
+        Some(s) => s,
+        None => init_array_result_any(mcx, input_type, true)?,
+    };
+    if st.scalarstate.is_some() {
+        st.scalarstate =
+            Some(accum_array_result(mcx, st.scalarstate.take(), dvalue, disnull, input_type)?);
+    } else {
+        st.arraystate =
+            Some(accum_array_result_arr(mcx, st.arraystate.take(), dvalue, disnull, input_type)?);
+    }
+    Ok(st)
+}
+
+pub fn make_array_result_any<'mcx>(
+    mcx: Mcx<'mcx>,
+    astate: &ArrayBuildStateAny<'mcx>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    match (&astate.scalarstate, &astate.arraystate) {
+        (Some(s), _) => make_array_result(mcx, s),
+        (None, Some(a)) => make_array_result_arr(mcx, a),
+        (None, None) => unreachable!("ArrayBuildStateAny has no sub-state"),
+    }
 }
 
 pub fn make_md_array_result<'mcx>(

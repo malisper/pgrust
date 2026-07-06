@@ -54,6 +54,31 @@ pub(crate) fn unported_phase2(what: &str) -> ! {
     panic!("unported: nbtree {what} is phase 2")
 }
 
+/// skey.h SK_ROW_HEADER contract: sk_argument holds the pointer word of the
+/// arena-owned subsidiary ScanKeyData array, SK_ROW_END-terminated. All
+/// copies of the header share the one array, as C's struct assignment does.
+///
+/// # Safety
+/// `header` must be a SK_ROW_HEADER key whose subsidiary array (built by
+/// ExecIndexBuildScanKeys) outlives the scan; the caller must not hold
+/// another live reference to the array.
+pub(crate) unsafe fn row_compare_members_mut<'a>(
+    header: &ScanKeyData,
+) -> &'a mut [ScanKeyData] {
+    use ::types_scan::scankey::{SK_ROW_END, SK_ROW_HEADER};
+    debug_assert!(header.sk_flags & SK_ROW_HEADER != 0);
+    let first = header.sk_argument.as_usize() as *mut ScanKeyData;
+    let mut n = 1usize;
+    // SAFETY: caller contract — `first` addresses a live SK_ROW_END-
+    // terminated array.
+    unsafe {
+        while (*first.add(n - 1)).sk_flags & SK_ROW_END == 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts_mut(first, n)
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn non_btree_opaque() -> ! {
