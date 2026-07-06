@@ -2343,7 +2343,7 @@ fn checkTargetlistEntrySQL92(
 ) -> PgResult<()> {
     match expr_kind {
         ParseExprKind::EXPR_KIND_GROUP_BY => {
-            if pstate.p_hasAggs.get() && contains_aggref(tle_expr) {
+            if pstate.p_hasAggs.get() && rewrite_manip::contain_aggs_of_level(tle_expr, 0)? {
                 return Err(aggregate_in_group_by(pstate, expr_kind, tle_expr));
             }
             if pstate.p_hasWindowFuncs && parse_agg::contain_windowfuncs(tle_expr) {
@@ -2358,71 +2358,10 @@ fn checkTargetlistEntrySQL92(
     }
 }
 
-// contain_aggs_of_level(expr, 0) over the ported families (rewriteManip.c);
-// outer-level aggs are a loud lane upstream so any Aggref counts.
-fn contains_aggref(node: Node<'_>) -> bool {
-    match node.node_tag() {
-        // C's walker matches GroupingFunc agglevelsup like an Aggref.
-        NodeTag::T_Aggref | NodeTag::T_GroupingFunc => true,
-        NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param => false,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().args.iter().any(contains_aggref),
-        NodeTag::T_OpExpr => node.as_op_expr().unwrap().args.iter().any(contains_aggref),
-        NodeTag::T_RelabelType => contains_aggref(node.as_relabel_type().unwrap().arg),
-        NodeTag::T_CollateExpr => contains_aggref(node.as_collate_expr().unwrap().arg),
-        NodeTag::T_BoolExpr => node.as_bool_expr().unwrap().args.iter().any(contains_aggref),
-        NodeTag::T_NullTest => {
-            node.as_null_test().unwrap().arg.is_some_and(contains_aggref)
-        }
-        NodeTag::T_BooleanTest => {
-            node.as_boolean_test().unwrap().arg.is_some_and(contains_aggref)
-        }
-        NodeTag::T_DistinctExpr => {
-            node.as_distinct_expr().unwrap().args.iter().any(contains_aggref)
-        }
-        NodeTag::T_RowExpr => node.as_row_expr().unwrap().args.iter().any(contains_aggref),
-        NodeTag::T_CaseExpr => {
-            let case_expr = node.as_case_expr().unwrap();
-            case_expr.arg.is_some_and(contains_aggref)
-                || case_expr.args.iter().any(|w| {
-                    let when = w.as_case_when().unwrap();
-                    when.expr.is_some_and(contains_aggref) || when.result.is_some_and(contains_aggref)
-                })
-                || case_expr.defresult.is_some_and(contains_aggref)
-        }
-        NodeTag::T_CoalesceExpr => {
-            node.as_coalesce_expr().unwrap().args.iter().any(contains_aggref)
-        }
-        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().args.iter().any(contains_aggref),
-        tag => panic!(
-            "contain_aggs_of_level (rewriteManip.c): node family {tag:?} unported — \
-             unit backend-parser-clause"
-        ),
-    }
-}
-
-// locate_agg_of_level's job is the errposition; the first Aggref's location.
+// locate_agg_of_level's job is the errposition; -1 on walker failure keeps
+// the ereport path infallible, as C's error-time lookup.
 fn locate_aggref(node: Node<'_>) -> ParseLoc {
-    match node.node_tag() {
-        NodeTag::T_Aggref => node.as_aggref().unwrap().location,
-        NodeTag::T_GroupingFunc => node.as_grouping_func().unwrap().location,
-        NodeTag::T_FuncExpr => node
-            .as_func_expr()
-            .unwrap()
-            .args
-            .iter()
-            .find(|&a| contains_aggref(a))
-            .map_or(-1, locate_aggref),
-        NodeTag::T_OpExpr => node
-            .as_op_expr()
-            .unwrap()
-            .args
-            .iter()
-            .find(|&a| contains_aggref(a))
-            .map_or(-1, locate_aggref),
-        NodeTag::T_RelabelType => locate_aggref(node.as_relabel_type().unwrap().arg),
-        NodeTag::T_CollateExpr => locate_aggref(node.as_collate_expr().unwrap().arg),
-        _ => -1,
-    }
+    rewrite_manip::locate_agg_of_level(node, 0).unwrap_or(-1)
 }
 
 fn addTargetToSortList<'mcx>(

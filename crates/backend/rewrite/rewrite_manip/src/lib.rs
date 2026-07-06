@@ -13,6 +13,9 @@ use types_nodes::primnodes::{
 };
 use types_nodes::{Node, NodeList, NodeTag};
 
+#[cfg(test)]
+mod tests;
+
 pub const PRS2_OLD_VARNO: i32 = 1;
 pub const PRS2_NEW_VARNO: i32 = 2;
 
@@ -895,6 +898,84 @@ pub fn getInsertSelectQuery_node<'mcx>(
 
 fn rte_at<'a, 'mcx>(rtable: &'a NodeList<'mcx>, varno: i32) -> &'mcx RangeTblEntry<'mcx> {
     rtable.nth(varno as usize - 1).as_range_tbl_entry().expect("rtable holds RangeTblEntry")
+}
+
+// contain_aggs_of_level / contain_aggs_of_level_walker (rewriteManip.c).
+struct ContainAggsOfLevel {
+    sublevels_up: i32,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for ContainAggsOfLevel {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(a) = node.as_aggref() {
+            if a.agglevelsup as i32 == self.sublevels_up {
+                return Ok(true);
+            }
+            // C falls through to examine the arguments.
+        }
+        if let Some(g) = node.as_grouping_func() {
+            if g.agglevelsup as i32 == self.sublevels_up {
+                return Ok(true);
+            }
+        }
+        if let Some(q) = node.as_query() {
+            return self.visit_query_ref(q);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let result = nodes_core::query_tree_walker(q, self, 0);
+        self.sublevels_up -= 1;
+        result
+    }
+}
+
+pub fn contain_aggs_of_level(node: Node<'_>, levelsup: i32) -> PgResult<bool> {
+    let mut w = ContainAggsOfLevel { sublevels_up: levelsup };
+    nodes_core::query_or_expression_tree_walker(node, &mut w, 0)
+}
+
+// locate_agg_of_level / locate_agg_of_level_walker (rewriteManip.c).
+struct LocateAggOfLevel {
+    agg_location: types_core::ParseLoc,
+    sublevels_up: i32,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for LocateAggOfLevel {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(a) = node.as_aggref() {
+            if a.agglevelsup as i32 == self.sublevels_up && a.location >= 0 {
+                self.agg_location = a.location;
+                return Ok(true);
+            }
+            // C falls through to examine the arguments.
+        }
+        if let Some(g) = node.as_grouping_func() {
+            if g.agglevelsup as i32 == self.sublevels_up && g.location >= 0 {
+                self.agg_location = g.location;
+                return Ok(true);
+            }
+        }
+        if let Some(q) = node.as_query() {
+            return self.visit_query_ref(q);
+        }
+        nodes_core::expression_tree_walker(node, self)
+    }
+
+    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+        self.sublevels_up += 1;
+        let result = nodes_core::query_tree_walker(q, self, 0);
+        self.sublevels_up -= 1;
+        result
+    }
+}
+
+pub fn locate_agg_of_level(node: Node<'_>, levelsup: i32) -> PgResult<types_core::ParseLoc> {
+    let mut w = LocateAggOfLevel { agg_location: -1, sublevels_up: levelsup };
+    nodes_core::query_or_expression_tree_walker(node, &mut w, 0)?;
+    Ok(w.agg_location)
 }
 
 struct HasSubLink;
