@@ -1434,6 +1434,8 @@ fn RemoveInheritance<'mcx>(
         let parent_cons = scan_constraints(mcx, &conrel, parent_rel.rd_id)?;
         let mut connames: PgVec<'mcx, &str> = PgVec::new_in(mcx);
         let mut nncolumns: PgVec<'mcx, AttrNumber> = PgVec::new_in(mcx);
+        // tablecmds.c:18032: parent NN attnos are matched in child attno space.
+        let attmap = tupdesc::build_attrmap_by_name(mcx, child_rel.descr(), parent_rel.descr())?;
         for c in parent_cons.iter() {
             if c.connoinherit {
                 continue;
@@ -1441,7 +1443,7 @@ fn RemoveInheritance<'mcx>(
             if c.contype == CONSTRAINT_CHECK {
                 connames.push(c.name.as_str());
             } else if c.contype == CONSTRAINT_NOTNULL {
-                nncolumns.push(c.nn_attno);
+                nncolumns.push(attmap[c.nn_attno as usize - 1]);
             }
         }
         let child_cons = scan_constraints(mcx, &conrel, child_rel.rd_id)?;
