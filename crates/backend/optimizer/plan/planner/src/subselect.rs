@@ -1168,23 +1168,10 @@ fn convert_exists_to_any<'mcx>(
     Ok(Some((subselect, testexpr, param_ids)))
 }
 
-struct ContainAggsOfLevel(i32, bool);
-impl<'mcx> clauses::NodeWalker<'mcx> for ContainAggsOfLevel {
-    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        if let Some(a) = node.as_aggref() {
-            if a.agglevelsup as i32 == self.0 {
-                self.1 = true;
-                return Ok(true);
-            }
-        }
-        clauses::expression_tree_walker(node, self)
-    }
-}
-
+// contain_aggs_of_level (rewriteManip.c); the shared walker recurses into
+// sub-Queries with the level bumped, which the old local walker did not.
 fn contain_aggs_of_level(node: Node<'_>, level: i32) -> PgResult<bool> {
-    let mut w = ContainAggsOfLevel(level, false);
-    w.visit(node)?;
-    Ok(w.1)
+    rewrite_manip::contain_aggs_of_level(node, level)
 }
 
 
