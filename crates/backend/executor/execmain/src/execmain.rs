@@ -180,7 +180,7 @@ fn skeleton_rebind_tree<'mcx>(
 fn skeleton_rearm_exec(qd: &mut QueryDescData, exec: &mut ExecutorHandle) -> PgResult<bool> {
     // P1: C's InitPlan runs ExecCheckPermissions on every cached-plan
     // execution — reuse must too (REVOKE/SET ROLE between EXECUTEs).
-    exec_check_permissions(qd.plannedstmt())?;
+    exec_check_permissions(&qd.plannedstmt().permInfos)?;
     let source_text = qd.source_text();
     // SAFETY: the registered params live in the portal context, which
     // outlives this execution (values are copied out below).
@@ -403,8 +403,8 @@ fn create_command_name(pstmt: &PlannedStmt<'_>) -> &'static str {
 }
 
 /// `ExecCheckPermissions` (ereport_on_violation arm only; no hook).
-fn exec_check_permissions(pstmt: &PlannedStmt<'_>) -> PgResult<()> {
-    for pi_node in pstmt.permInfos.iter() {
+pub(crate) fn exec_check_permissions(perm_infos: &::types_nodes::NodeList<'_>) -> PgResult<()> {
+    for pi_node in perm_infos.iter() {
         let pi = pi_node.as_rte_permission_info().expect("permInfos cell");
         debug_assert!(pi.relid != 0);
         if !exec_check_one_rel_perms(pi)? {
@@ -710,7 +710,7 @@ pub(crate) fn init_plan<'mcx>(
     operation: CmdType,
     eflags: i32,
 ) -> PgResult<Rc<TupleDescData<'static>>> {
-    exec_check_permissions(pstmt)?;
+    exec_check_permissions(&pstmt.permInfos)?;
     // C's bms_copy: the estate owns its pruning set (extended by ExecDoInitialPruning).
     let unpruned = pstmt
         .unprunableRelids

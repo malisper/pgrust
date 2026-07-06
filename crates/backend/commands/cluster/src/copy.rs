@@ -52,12 +52,14 @@ pub fn copy_for_cluster<'mcx>(
             v.extend(form.indkey.iter().copied());
             v
         };
+        let expr_eval = cluster_expr_eval(mcx, old_heap, index)?;
         Some(tuplesort::Tuplesort::begin_cluster(
             heap_desc,
             index,
             &indkey,
             init_small::globals::maintenance_work_mem(),
             tuplesort::TUPLESORT_NONE,
+            expr_eval,
         )?)
     } else {
         None
@@ -278,4 +280,70 @@ fn reform_and_rewrite_tuple<'mcx>(
     }
     let mut copied_tuple = heaptuple::heap_form_tuple(mcx, new_tup_desc, values, isnull)?;
     rewriteheap::rewrite_heap_tuple(rwstate, new_heap, tuple, &mut copied_tuple)
+}
+
+// tuplesort_begin_cluster's expression-index leg (tuplesortvariants.c:310-325
+// + comparetup_cluster_tiebreak:1447-1465): the EState/slot/FormIndexDatum
+// machinery lives with the caller because tuplesort cannot dep the executor.
+fn cluster_expr_eval<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_heap: &Relation<'mcx>,
+    index: &Relation<'mcx>,
+) -> PgResult<Option<tuplesort::ClusterExprEval>> {
+    let mut index_info = execindexing::BuildIndexInfo(mcx, index)?;
+    if index_info.ii_Expressions.is_nil() {
+        return Ok(None);
+    }
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        types_slot::TupleSlotKind::HeapTuple,
+        Some(old_heap.rd_att.clone()),
+    );
+    // C GetPerTupleExprContext(estate): reset once per comparison.
+    let mut eval_ctx = mcx::MemoryContext::new("cluster index expressions");
+    let eval = move |ltup: &HeapTupleData<'_>,
+                     rtup: &HeapTupleData<'_>,
+                     lv: &mut [datum::Datum],
+                     ln: &mut [bool],
+                     rv: &mut [datum::Datum],
+                     rn: &mut [bool]|
+          -> PgResult<()> {
+        eval_ctx.reset();
+        for (tup, values, isnull) in [(ltup, &mut *lv, &mut *ln), (rtup, &mut *rv, &mut *rn)] {
+            // SAFETY: the sort owns the image for the duration of the
+            // comparison; the slot's borrow ends before this call returns.
+            let owned = unsafe {
+                HeapTupleData::from_raw_parts(
+                    tup.header_ptr(),
+                    tup.t_len,
+                    tup.t_self,
+                    tup.t_tableOid,
+                )
+            };
+            exectuples::exec_store_heap_tuple(&mut slot, mcx, owned);
+            execindexing::FormIndexDatum(
+                mcx,
+                eval_ctx.mcx(),
+                &mut index_info,
+                &mut slot,
+                values,
+                isnull,
+            )?;
+        }
+        Ok(())
+    };
+    // SAFETY: lifetime erasure as heap_desc above — old_heap/index and the
+    // command mcx outlive the sort (C contract).
+    let boxed: Box<
+        dyn for<'a> FnMut(
+                &HeapTupleData<'a>,
+                &HeapTupleData<'a>,
+                &mut [datum::Datum],
+                &mut [bool],
+                &mut [datum::Datum],
+                &mut [bool],
+            ) -> PgResult<()>
+            + 'mcx,
+    > = Box::new(eval);
+    Ok(Some(unsafe { core::mem::transmute::<_, tuplesort::ClusterExprEval>(boxed) }))
 }

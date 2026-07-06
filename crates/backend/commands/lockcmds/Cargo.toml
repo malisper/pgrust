@@ -30,3 +30,4 @@ pg_inherits = { path = "../../catalog/pg_inherits" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }
+pg_inherits = { path = "../../catalog/pg_inherits" }

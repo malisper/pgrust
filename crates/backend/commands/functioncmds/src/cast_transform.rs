@@ -56,7 +56,7 @@ fn objdef_err(msg: &str) -> Box<PgError> {
 }
 
 // aclcheck_error_type (aclchk.c): arrays report their element type.
-fn aclcheck_error_type(aclerr: i32, typeOid: Oid) -> PgResult<()> {
+pub(crate) fn aclcheck_error_type(aclerr: i32, typeOid: Oid) -> PgResult<()> {
     let element_type = lsyscache::get_element_type(typeOid)?;
     let typeOid = if OidIsValid(element_type) { element_type } else { typeOid };
     aclchk::aclcheck_error(aclerr, ObjectType::OBJECT_TYPE, &format_type::format_type_be(typeOid)?)

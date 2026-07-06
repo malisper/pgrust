@@ -491,10 +491,6 @@ pub fn DefineIndex<'mcx>(
         ));
     }
 
-    if let Some(wc) = stmt.whereClause {
-        CheckPredicate(mcx, wc)?;
-    }
-
     let reloptions =
         reloptions::transformRelOptions(mcx, None, &stmt.options, None, &[], false, false)?;
     reloptions::index_reloptions(mcx, accessMethodId, reloptions.as_deref(), true)?;
@@ -640,6 +636,13 @@ pub fn DefineIndex<'mcx>(
             name_storage.as_str()
         }
     };
+
+    // Must run as the table owner (indexcmds.c:906, after the :689-690
+    // switch): contain_mutable_functions_after_planning pre-evaluates
+    // constant immutable calls.
+    if let Some(wc) = stmt.whereClause {
+        CheckPredicate(mcx, wc)?;
+    }
 
     let mut indexInfo = IndexInfo {
         ii_NumIndexAttrs: numberOfAttributes as i32,

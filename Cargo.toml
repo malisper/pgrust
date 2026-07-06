@@ -129,6 +129,7 @@ members = [
     "crates/backend/storage/aio/aio_seams",
     "crates/backend/storage/aio/aio_config",
     "crates/backend/storage/aio/aio_uring",
+    "crates/backend/storage/aio/aio_funcs",
     "crates/backend/postmaster/startup_seams",
     "crates/backend/storage/file/fd",
     "crates/backend/port/pg_sema_seams",

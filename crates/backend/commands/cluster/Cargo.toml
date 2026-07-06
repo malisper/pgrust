@@ -61,6 +61,7 @@ elog = { path = "../../utils/error/elog" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 exectuples = { path = "../../executor/exectuples" }
+execindexing = { path = "../../executor/execindexing" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 init_small = { path = "../../utils/init/init_small" }

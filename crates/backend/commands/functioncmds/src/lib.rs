@@ -460,7 +460,7 @@ fn check_defined_and_acl(typoid: Oid) -> PgResult<()> {
         types_nodes::parsenodes::ACL_USAGE,
     )?;
     if aclresult != aclchk::ACLCHECK_OK {
-        unported("aclcheck_error_type (type USAGE denied)");
+        cast_transform::aclcheck_error_type(aclresult, typoid)?;
     }
     Ok(())
 }

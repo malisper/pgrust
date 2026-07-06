@@ -35,7 +35,6 @@ const ROLE_PG_WRITE_SERVER_FILES: Oid = 4570;
 
 const ACL_INSERT: u64 = 1 << 0;
 const ACL_SELECT: u64 = 1 << 1;
-const ACLCHECK_OK: i32 = 0;
 
 const RELKIND_RELATION: u8 = b'r';
 
@@ -163,32 +162,90 @@ pub fn DoCopy<'mcx>(
     };
     let rel = table::table_openrv(mcx, &rv, lockmode)?;
 
-    // DoCopy's ExecCheckPermissions (copy.c:193-205 -> ExecCheckOneRelPerms):
-    // relation-level ACL first, then per-column ACL over the COPY column list.
-    let required = if is_from { ACL_INSERT } else { ACL_SELECT };
-    let rel_perms = aclchk_seams::pg_class_aclmask::call(rel.rd_id, userid, required, true)?;
-    if required & !rel_perms != 0 {
-        let attnums = CopyGetAttnums(mcx, &rel.rd_att, Some(&rel), &stmt.attlist)?;
-        let mut ok = true;
-        if attnums.is_empty() {
-            // No column referenced: the privilege on any column will do.
-            ok = aclchk_seams::pg_attribute_aclcheck_all::call(rel.rd_id, userid, required, false)?
-                == ACLCHECK_OK;
+    // C DoCopy builds a one-relation perminfo and runs ExecCheckPermissions
+    // on it, so a column-list COPY passes on column-level privileges alone.
+    let mut perminfo = types_nodes::parsenodes::RTEPermissionInfo {
+        relid: rel.rd_id,
+        requiredPerms: if is_from { ACL_INSERT } else { ACL_SELECT },
+        ..Default::default()
+    };
+    let mut where_clause = NodeList::nil();
+    if let Some(wc) = stmt.whereClause {
+        let mut pstate = parser_small1::make_parsestate(mcx, None);
+        {
+            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+            mcx::vec_append_bytes(&mut v, source_text.as_bytes())
+                .map_err(|_| mcx.oom(source_text.len()))?;
+            pstate.p_sourcetext = Some(v.leak());
         }
-        for &attnum in attnums.iter() {
-            if aclchk_seams::pg_attribute_aclcheck::call(rel.rd_id, attnum, userid, required)?
-                != ACLCHECK_OK
-            {
-                ok = false;
-                break;
+        let nsitem =
+            parse_relation::addRangeTableEntryForRelation(mcx, &mut pstate, &rel, lockmode, None, false, false)?;
+        let where_perminfo = nsitem.p_perminfo;
+        parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
+        let qual = parse_clause::transformWhereClause(
+            mcx,
+            &mut pstate,
+            Some(wc),
+            parser_small1::ParseExprKind::EXPR_KIND_COPY_WHERE,
+            "WHERE",
+        )?
+        .expect("clause in, clause out");
+        parse_collate::assign_expr_collations(mcx, &pstate, qual)?;
+        // Stored generated columns are not yet computed when the WHERE
+        // filter runs; virtual kept consistent with stored (copy.c:173-185).
+        let mut attnos = types_nodes::Bitmapset::default();
+        vars::pull_varattnos(mcx, qual, 1, &mut attnos)?;
+        // A whole-row reference examines every column (copy.c:156-163).
+        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+        if attnos.is_member(-FLIHAN) {
+            attnos.add_range(mcx, 1 - FLIHAN, rel.rd_att.natts as i32 - FLIHAN)?;
+            attnos.del_member(-FLIHAN);
+        }
+        for m in attnos.iter() {
+            let attno = m + FLIHAN;
+            if attno <= 0 {
+                continue;
+            }
+            if rel.rd_att.attr(attno as usize - 1).attgenerated != 0 {
+                let name =
+                    lsyscache::attribute::get_attname(mcx, rel.rd_id, attno as i16, false)?
+                        .expect("checked missing_ok=false");
+                return Err(Box::new(
+                    PgError::error(
+                        "generated columns are not supported in COPY FROM WHERE conditions",
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE)
+                    .with_detail(format!("Column \"{name}\" is a generated column.")),
+                ));
             }
         }
-        if !ok {
-            // ACLCHECK_NO_PRIV + OBJECT_TABLE discriminant (parsenodes.h
-            // ObjectType).
-            aclchk_seams::aclcheck_error::call(1, 41, rv.relname)?;
+        // In C the WHERE transform marks Vars for SELECT privilege on the
+        // same perminfo (markVarForSelectPriv); fold the pstate copy in.
+        if let Some(wpin) = where_perminfo {
+            let wpi = wpin.as_rte_permission_info().expect("p_perminfo is RTEPermissionInfo");
+            if !wpi.selectedCols.is_empty() {
+                perminfo.requiredPerms |= ACL_SELECT;
+                perminfo.selectedCols.add_members(mcx, &wpi.selectedCols)?;
+            }
+        }
+        let qual = clauses::eval_const_expressions(mcx, qual)?;
+        let qual = planner::prepqual::canonicalize_qual(mcx, qual, false)?;
+        where_clause = clauses::make_ands_implicit(mcx, Some(qual))?;
+        parser_small1::free_parsestate(pstate)?;
+    }
+    {
+        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+        let attnums = CopyGetAttnums(mcx, &rel.rd_att, Some(&rel), &stmt.attlist)?;
+        let bms =
+            if is_from { &mut perminfo.insertedCols } else { &mut perminfo.selectedCols };
+        for &attno in attnums.iter() {
+            bms.add_member(mcx, attno as i32 - FLIHAN)?;
         }
     }
+    execmain_seams::exec_check_permissions::call(&NodeList::make1(
+        mcx,
+        Node::mk(mcx, perminfo)?,
+    )?)?;
     if rls::check_enable_rls(rel.rd_id, types_core::InvalidOid, false)?
         == rls::CheckEnableRls::RlsEnabled
     {
@@ -271,61 +328,6 @@ pub fn DoCopy<'mcx>(
         let processed = DoCopyTo(mcx, &mut cstate, None)?;
         EndCopyTo(cstate)?;
         return Ok(processed);
-    }
-
-    let mut where_clause = NodeList::nil();
-    if let Some(wc) = stmt.whereClause {
-        let mut pstate = parser_small1::make_parsestate(mcx, None);
-        {
-            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
-            mcx::vec_append_bytes(&mut v, source_text.as_bytes())
-                .map_err(|_| mcx.oom(source_text.len()))?;
-            pstate.p_sourcetext = Some(v.leak());
-        }
-        let nsitem =
-            parse_relation::addRangeTableEntryForRelation(mcx, &mut pstate, &rel, lockmode, None, false, false)?;
-        parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
-        let qual = parse_clause::transformWhereClause(
-            mcx,
-            &mut pstate,
-            Some(wc),
-            parser_small1::ParseExprKind::EXPR_KIND_COPY_WHERE,
-            "WHERE",
-        )?
-        .expect("clause in, clause out");
-        parse_collate::assign_expr_collations(mcx, &pstate, qual)?;
-        // Stored generated columns are not yet computed when the WHERE
-        // filter runs; virtual kept consistent with stored (copy.c:173-185).
-        let mut attnos = types_nodes::Bitmapset::default();
-        vars::pull_varattnos(mcx, qual, 1, &mut attnos)?;
-        // A whole-row reference examines every column (copy.c:156-163).
-        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
-        if attnos.is_member(-FLIHAN) {
-            attnos.add_range(mcx, 1 - FLIHAN, rel.rd_att.natts as i32 - FLIHAN)?;
-            attnos.del_member(-FLIHAN);
-        }
-        for m in attnos.iter() {
-            let attno = m + FLIHAN;
-            if attno <= 0 {
-                continue;
-            }
-            if rel.rd_att.attr(attno as usize - 1).attgenerated != 0 {
-                let name =
-                    lsyscache::attribute::get_attname(mcx, rel.rd_id, attno as i16, false)?
-                        .expect("checked missing_ok=false");
-                return Err(Box::new(
-                    PgError::error(
-                        "generated columns are not supported in COPY FROM WHERE conditions",
-                    )
-                    .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE)
-                    .with_detail(format!("Column \"{name}\" is a generated column.")),
-                ));
-            }
-        }
-        let qual = clauses::eval_const_expressions(mcx, qual)?;
-        let qual = planner::prepqual::canonicalize_qual(mcx, qual, false)?;
-        where_clause = clauses::make_ands_implicit(mcx, Some(qual))?;
-        parser_small1::free_parsestate(pstate)?;
     }
 
     let processed = if is_from {

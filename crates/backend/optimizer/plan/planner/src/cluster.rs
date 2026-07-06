@@ -1,7 +1,6 @@
 //! plan_cluster_use_sort (planner.c): cost seqscan+sort vs full index scan
 //! over a mostly-dummy planner state. comparisonCost is 0: an expression
-//! index can reach here (under-costed vs C's 2*cpu_operator_cost) but louds
-//! in tuplesort begin_cluster before any sort runs.
+//! index is under-costed vs C's 2*cpu_operator_cost.
 
 use mcx::Mcx;
 use types_core::Oid;

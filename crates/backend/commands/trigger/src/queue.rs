@@ -440,7 +440,7 @@ fn check_state(event: u32, tgoid: Oid) -> bool {
 }
 
 // afterTriggerMarkEvents (trigger.c); move_deferred = (move_list != NULL).
-fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
+fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResult<bool> {
     debug_assert!(move_deferred == matches!(sel, EvList::Query(_)));
     let firing_id = FIRING_COUNTER.with(|c| c.get());
     let mut moved: Vec<AfterTriggerEvent> = Vec::new();
@@ -476,9 +476,18 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
         found
     });
     if !moved.is_empty() {
+        // trigger.c:4663-4671: a deferred trigger may not be queued past the
+        // end of a security-restricted operation.
+        if miscinit::InSecurityRestrictedOperation() {
+            return Err(PgError::error(
+                "cannot fire deferred trigger within security-restricted operation".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .into());
+        }
         XACT_EVENTS.with(|s| s.borrow_mut().append(&mut moved));
     }
-    found
+    Ok(found)
 }
 
 // afterTriggerInvokeEvents (trigger.c); returns all_fired. Owns the
@@ -552,7 +561,7 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
         return Ok(());
     }
     loop {
-        if !mark_events(EvList::Query(d), true, true) {
+        if !mark_events(EvList::Query(d), true, true)? {
             break;
         }
         let firing_id = FIRING_COUNTER.with(|c| {
@@ -585,7 +594,7 @@ pub fn AfterTriggerFireDeferred() -> PgResult<()> {
         snapmgr::PushActiveSnapshot(&snap)?;
     }
     loop {
-        if !mark_events(EvList::Xact, false, false) {
+        if !mark_events(EvList::Xact, false, false)? {
             break;
         }
         let firing_id = FIRING_COUNTER.with(|c| {
@@ -709,7 +718,7 @@ pub(crate) fn with_con_state<R>(f: impl FnOnce(&mut SetConstraintState) -> R) ->
 pub(crate) fn fire_now_immediate() -> PgResult<()> {
     let mut snapshot_set = false;
     loop {
-        if !mark_events(EvList::Xact, true, false) {
+        if !mark_events(EvList::Xact, true, false)? {
             break;
         }
         if !snapshot_set {

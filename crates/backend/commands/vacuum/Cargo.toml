@@ -67,6 +67,7 @@ parser_small1 = { path = "../../parser/parser_small1" }
 mbutils = { path = "../../utils/mb/mbutils" }
 
 parallel_seams = { path = "../../access/transam/parallel_seams" }
+aclchk = { path = "../../catalog/aclchk" }
 [dev-dependencies]
 indexcmds_seams = { path = "../indexcmds_seams" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }

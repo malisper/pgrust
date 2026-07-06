@@ -5,8 +5,10 @@
 // Mutex is C's ShmemIndexLock); ShmemLock stays a spinlock (lwlock.c brackets
 // its shared counters with it via the seams). Segment mechanics have no
 // thread-model counterpart and no port: InitShmemAccess/Allocation/Index
-// bootstrap, ShmemAllocUnlocked, ShmemAddrIsValid, and pg_get_shmem_allocations
-// 5052 (off/<anonymous>/free rows need ShmemSegHdr's freeoffset/totalsize).
+// bootstrap, ShmemAllocUnlocked, ShmemAddrIsValid. pg_get_shmem_allocations
+// 5052 maps ShmemSegHdr->freeoffset to a bump counter over all ShmemAllocRaw
+// calls, so `off` reproduces C's within-segment offsets; the trailing free
+// row is size 0 (the malloc-backed segment reserves nothing ahead).
 // The NUMA builtins (4099/4100) are ported below as C's no-libnuma build.
 #![allow(non_snake_case)]
 
@@ -36,12 +38,16 @@ struct ShmemIndexEnt {
     name: &'static str,
     location: usize,
     size: usize,
-    #[allow(dead_code)]
     allocated_size: usize,
+    // C: (char *) ent->location - (char *) ShmemSegHdr; here the bump
+    // counter's value when this entry was carved.
+    off: usize,
 }
 
 static SHMEM_INDEX: Mutex<Vec<ShmemIndexEnt>> = Mutex::new(Vec::new());
 static SHMEM_LOCK: AtomicBool = AtomicBool::new(false);
+// ShmemSegHdr->freeoffset counterpart: total bytes bump-allocated so far.
+static SHMEM_FREEOFFSET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn CACHELINEALIGN(len: usize) -> Option<usize> {
     len.checked_add(PG_CACHE_LINE_SIZE - 1)
@@ -55,6 +61,7 @@ fn ShmemAllocRaw(size: usize, allocated_size: &mut usize) -> *mut u8 {
     *allocated_size = padded;
     let layout = Layout::from_size_align(padded.max(PG_CACHE_LINE_SIZE), PG_CACHE_LINE_SIZE)
         .expect("shmem layout");
+    SHMEM_FREEOFFSET.fetch_add(padded, Ordering::Relaxed);
     // SAFETY: layout has non-zero size. Zeroed to match a fresh C segment;
     // leaked for the cluster lifetime, as C shmem is never freed.
     unsafe { std::alloc::alloc_zeroed(layout) }
@@ -101,6 +108,7 @@ pub fn ShmemInitStruct(name: &str, size: usize) -> PgResult<(*mut u8, bool)> {
         location: struct_ptr.expose_provenance(),
         size,
         allocated_size,
+        off: SHMEM_FREEOFFSET.load(Ordering::Relaxed) - allocated_size,
     });
     Ok((struct_ptr, false))
 }
@@ -211,6 +219,61 @@ pub fn fc_pg_get_shmem_allocations_numa(
     unreachable!()
 }
 
+// pg_get_shmem_allocations (shmem.c): named ShmemIndex rows, then
+// <anonymous> (bump usage outside the index), then the free row (size 0
+// here — the malloc-backed segment reserves nothing ahead).
+pub fn fc_pg_get_shmem_allocations(
+    flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    const COLS: usize = 4;
+    let flinfo = flinfo.expect("pg_get_shmem_allocations: resolved FmgrInfo required");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    debug_assert_eq!(srf.tupdesc.natts as usize, COLS);
+
+    let mut named_allocated: usize = 0;
+    {
+        let index = SHMEM_INDEX.lock().expect("ShmemIndex poisoned");
+        for ent in index.iter() {
+            let name = varlena::cstring_to_text(mcx, ent.name.as_bytes())?;
+            let values = [
+                datum::Datum::from_usize(name.as_bytes().as_ptr() as usize),
+                datum::Datum::from_i64(ent.off as i64),
+                datum::Datum::from_i64(ent.size as i64),
+                datum::Datum::from_i64(ent.allocated_size as i64),
+            ];
+            named_allocated += ent.allocated_size;
+            srf.putvalues(&values, &[false; COLS])?;
+        }
+    }
+
+    let freeoffset = SHMEM_FREEOFFSET.load(Ordering::Relaxed);
+    let anon = varlena::cstring_to_text(mcx, b"<anonymous>")?;
+    let anon_size = (freeoffset - named_allocated) as i64;
+    srf.putvalues(
+        &[
+            datum::Datum::from_usize(anon.as_bytes().as_ptr() as usize),
+            datum::Datum::null(),
+            datum::Datum::from_i64(anon_size),
+            datum::Datum::from_i64(anon_size),
+        ],
+        &[false, true, false, false],
+    )?;
+    srf.putvalues(
+        &[
+            datum::Datum::null(),
+            datum::Datum::from_i64(freeoffset as i64),
+            datum::Datum::from_i64(0),
+            datum::Datum::from_i64(0),
+        ],
+        &[true, false, false, false],
+    )?;
+
+    Ok(srf.finish(fcinfo))
+}
+
 pub const SHMEM_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
     types_fmgr::FmgrBuiltin {
         foid: 4099,
@@ -227,6 +290,14 @@ pub const SHMEM_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
         strict: true,
         retset: true,
         func: fc_pg_get_shmem_allocations_numa,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 5052,
+        name: "pg_get_shmem_allocations",
+        nargs: 0,
+        strict: true,
+        retset: true,
+        func: fc_pg_get_shmem_allocations,
     },
 ];
 

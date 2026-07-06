@@ -274,3 +274,11 @@ seam_core::seam!(
         table_name: &'a str,
     ) -> PgResult<Option<types_tuple::ItemPointerData>>
 );
+
+seam_core::seam!(
+    // ExecCheckPermissions (execMain.c) over a bare permInfos list; COPY
+    // checks per-column privileges without a PlannedStmt (copy.c DoCopy).
+    pub fn exec_check_permissions<'p, 'a>(
+        perm_infos: &'p types_nodes::NodeList<'a>,
+    ) -> PgResult<()>
+);

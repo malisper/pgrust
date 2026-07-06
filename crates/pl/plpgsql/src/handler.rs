@@ -685,7 +685,13 @@ fn do_compile(
         .zip(fn_arg_is_input.iter().chain(std::iter::repeat(&true)))
         .filter_map(|(&t, &is_in)| is_in.then_some(t))
         .collect();
-    let fn_signature = format_signature(&proc.proname, &sig_argtypes)?;
+    // pl_comp.c: fn_signature = format_procedure(fn_oid) — schema-qualified
+    // when the function is not visible on the (possibly restricted) search
+    // path; SRO error contexts depend on the qualification.
+    let fn_signature = {
+        let sig_cx = mcx::MemoryContext::new("plpgsql fn_signature");
+        adt_regproc::format_procedure(sig_cx.mcx(), fn_oid)?
+    };
     Ok(PlFunction {
         fn_signature,
         fn_oid,
@@ -836,20 +842,6 @@ fn add_parameter_name(comp: &mut CompState, dno: Dno, name: &str) -> PgResult<()
     };
     comp.ns_additem(itemtype, dno, name);
     Ok(())
-}
-
-// format_procedure minus schema qualification (createfn precedent).
-fn format_signature(name: &str, argtypes: &[Oid]) -> PgResult<String> {
-    let mut s = String::from(name);
-    s.push('(');
-    for (i, &t) in argtypes.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format_type::format_type_be(t)?);
-    }
-    s.push(')');
-    Ok(s)
 }
 
 // plpgsql_call_handler (pl_handler.c), function + DML trigger arms.

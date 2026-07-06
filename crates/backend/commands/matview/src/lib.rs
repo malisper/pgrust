@@ -158,7 +158,7 @@ pub fn RefreshMatViewByOid<'mcx>(
         let mut has_unique = false;
         for &idx_oid in relcache::RelationGetIndexList(mcx, matview_oid)?.iter() {
             let idx = indexam::index_open(mcx, idx_oid, AccessShareLock)?;
-            if is_usable_unique_index(&idx) {
+            if is_usable_unique_index(mcx, &idx)? {
                 has_unique = true;
             }
             idx.close(AccessShareLock)?;
@@ -460,7 +460,7 @@ fn refresh_by_match_merge<'mcx>(
 
     for &idx_oid in relcache::RelationGetIndexList(mcx, matview_oid)?.iter() {
         let index_rel = indexam::index_open(mcx, idx_oid, RowExclusiveLock)?;
-        if is_usable_unique_index(&index_rel) {
+        if is_usable_unique_index(mcx, &index_rel)? {
             let form = index_rel.rd_index.as_ref().expect("usable index has rd_index");
             for i in 0..form.indnkeyatts as usize {
                 let attnum = form.indkey[i];
@@ -578,15 +578,17 @@ fn refresh_by_heap_swap<'mcx>(
 }
 
 // is_usable_unique_index (matview.c): unique, immediate, valid, no
-// predicate, no expression columns.
-fn is_usable_unique_index(index_rel: &Relation<'_>) -> bool {
-    let Some(form) = index_rel.rd_index.as_ref() else { return false };
-    form.indisunique
+// predicate, no expression columns. The predicate test must go through
+// RelationGetIndexPredicate: eval_const_expressions can fold a partial
+// index's predicate to constant TRUE (== NIL), making it usable.
+fn is_usable_unique_index(mcx: Mcx<'_>, index_rel: &Relation<'_>) -> PgResult<bool> {
+    let Some(form) = index_rel.rd_index.as_ref() else { return Ok(false) };
+    Ok(form.indisunique
         && form.indimmediate
         && form.indisvalid
-        && !form.has_indpred
         && form.indnatts > 0
         && form.indkey.iter().all(|&k| k > 0)
+        && execindexing::RelationGetIndexPredicate(mcx, index_rel)?.is_nil())
 }
 
 fn transientrel_startup<'mcx>(

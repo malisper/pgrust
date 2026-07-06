@@ -490,6 +490,11 @@ pub fn slot_value_description<'mcx>(
             buf.push_str(", ");
         }
         write_comma = true;
+        // ATTRIBUTE_GENERATED_VIRTUAL columns print as "virtual" (execMain.c).
+        if att.attgenerated == types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8 {
+            buf.push_str("virtual");
+            continue;
+        }
         let i = match rev_map {
             Some(map) => map[i] as usize - 1,
             None => i,

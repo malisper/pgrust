@@ -171,6 +171,7 @@ impl<'m> TuplesortData<'m> {
             abbrev: &self.abbrev,
             variant: &self.variant,
             unique_violation: &self.unique_violation,
+            have_datum1: self.have_datum1,
         };
         let ctx = &ctx;
         let cmp =
