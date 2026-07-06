@@ -848,6 +848,10 @@ fn prepare_projection_slot<'mcx>(
 }
 
 fn initialize_aggregates_sets(node: &mut AggStateData<'_>, num_reset: usize) {
+    for setno in 0..num_reset {
+        crate::restart_pertrans_sortstates(&mut node.pertrans_sort, setno)
+            .expect("sortstate restart");
+    }
     let gs = node.gsets.as_mut().expect("grouping-sets retrieve");
     for setno in 0..num_reset {
         let base = gs.pergroup_bases[setno];
@@ -1011,6 +1015,7 @@ where
         let current_set = node.gsets.as_ref().unwrap().projected_set as usize;
         prepare_projection_slot(node.gsets.as_mut().unwrap(), current_set, mcx);
         let pergroup = node.gsets.as_ref().unwrap().pergroup_bases[current_set];
+        crate::process_ordered_aggregates_set(node, estate, current_set, pergroup)?;
         crate::finalize_aggregates(node, estate, pergroup)?;
 
         // Qual/tlist SubPlans need the suspension drivers (node-ecxt), same
@@ -1100,6 +1105,11 @@ where
         }
         let mut slots = EvalSlots { scan: None, inner: None, outer: Some(first_slot) };
         exec_eval_expr(&mut phases[*current_phase].evaltrans, &mut slots)?;
+    }
+    if !node.pertrans_sort.is_empty() {
+        let gs = node.gsets.as_ref().unwrap();
+        let nsets = gs.phases[gs.current_phase].numsets.max(1);
+        crate::collect_ordered_input(node, estate, nsets)?;
     }
     estate.reset_expr_context(node.tmpcontext);
     loop {
@@ -1192,6 +1202,11 @@ where
                     exec_eval_expr(&mut phases[*current_phase].evaltrans, &mut slots)?;
                 }
             }
+        }
+        if !node.pertrans_sort.is_empty() {
+            let gs = node.gsets.as_ref().unwrap();
+            let nsets = gs.phases[gs.current_phase].numsets.max(1);
+            crate::collect_ordered_input(node, estate, nsets)?;
         }
         estate.reset_expr_context(node.tmpcontext);
     }

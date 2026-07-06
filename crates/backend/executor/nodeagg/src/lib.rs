@@ -116,7 +116,8 @@ struct PerTransSortData<'mcx> {
     agg_collation: Oid,
     scratch: NonNull<NullableDatum>,
     flag: NonNull<bool>,
-    sortstate: Option<Tuplesort>,
+    // One sortstate per grouping set (C sortstates[maxsets]); [0] otherwise.
+    sortstates: Vec<Option<Tuplesort>>,
     insert_slot: Option<SlotData<'mcx>>,
     slot1: Option<SlotData<'mcx>>,
     slot2: Option<SlotData<'mcx>>,
@@ -284,7 +285,7 @@ fn init_pertrans_sort<'mcx>(
             agg_collation,
             scratch,
             flag,
-            sortstate: None,
+            sortstates: Vec::new(),
             insert_slot,
             slot1,
             slot2,
@@ -705,12 +706,6 @@ pub fn exec_init_agg<'mcx>(
             .ok_or_else(|| agg_lookup_failed(aggref.aggfnoid))?;
         let is_ordered_set = shape.aggkind != AGGKIND_NORMAL;
         debug_assert!(shape.aggkind == aggref.aggkind);
-        if is_ordered_set && has_grouping_sets {
-            panic!(
-                "ExecInitAgg (nodeAgg.c): ordered-set aggregate under grouping sets \
-                 not ported (per-set aggcontexts)"
-            );
-        }
         if (!aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil())
             && node.aggstrategy == AGG_HASHED
         {
@@ -847,14 +842,6 @@ pub fn exec_init_agg<'mcx>(
                     && (!aggref.aggorder.is_nil() || !aggref.aggdistinct.is_nil())
                     && !(aggref.aggpresorted && aggref.aggdistinct.is_nil())
                 {
-                    // C keeps one sortstate per grouping set; PerTransSortData
-                    // is single-set — mis-aggregation, not a missing feature.
-                    if has_grouping_sets {
-                        panic!(
-                            "ExecInitAgg (nodeAgg.c): DISTINCT/ORDER BY aggregate under \
-                             grouping sets not ported (per-set sortstates)"
-                        );
-                    }
                     let (mut ps, ospec) = init_pertrans_sort(
                         mcx,
                         aggref,
@@ -1941,18 +1928,23 @@ fn agg_refill_hash_table<'mcx>(
     Ok(true)
 }
 
-// initialize_aggregates (nodeAgg.c), no sortstates; by-ref initvals datumCopy
-// into the aggcontext.
-fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
-    for ps in node.pertrans_sort.iter_mut() {
+// initialize_aggregate (nodeAgg.c) sortstate restart, one grouping set.
+pub(crate) fn restart_pertrans_sortstates(
+    pertrans_sort: &mut [PerTransSortData<'_>],
+    setno: usize,
+) -> PgResult<()> {
+    for ps in pertrans_sort.iter_mut() {
         if ps.presorted {
             continue;
         }
-        if let Some(old) = ps.sortstate.take() {
+        if ps.sortstates.len() <= setno {
+            ps.sortstates.resize_with(setno + 1, || None);
+        }
+        if let Some(old) = ps.sortstates[setno].take() {
             old.end();
         }
         let work_mem = init_small::globals::work_mem();
-        ps.sortstate = Some(if ps.num_inputs == 1 {
+        ps.sortstates[setno] = Some(if ps.num_inputs == 1 {
             Tuplesort::begin_datum(
                 ps.sortdesc.attr(0).atttypid,
                 ps.sort_ops[0],
@@ -1978,6 +1970,13 @@ fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
             )?
         });
     }
+    Ok(())
+}
+
+// initialize_aggregates (nodeAgg.c); by-ref initvals datumCopy into the
+// aggcontext.
+fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
+    restart_pertrans_sortstates(&mut node.pertrans_sort, 0)?;
     for (transno, init) in node.trans_init.iter().enumerate() {
         let typ = node.trans_typ[transno];
         let value = if !init.isnull && !typ.byval {
@@ -2008,9 +2007,10 @@ fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
 // The tuplesort feed half of the ordered-trans steps: rows the program
 // marked live park their args in scratch until here. Runs before the
 // tmpcontext reset — by-ref scratch datums live in per-tuple memory.
-fn collect_ordered_input<'mcx>(
+pub(crate) fn collect_ordered_input<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
+    nsets: usize,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     let tmp = node.tmpcontext;
@@ -2034,25 +2034,28 @@ fn collect_ordered_input<'mcx>(
             )?;
             continue;
         }
-        let sort = ps.sortstate.as_mut().expect("ordered pertrans sort begun");
-        if ps.num_inputs == 1 {
-            // SAFETY: scratch slot 0 written by the program this row.
-            let nd = unsafe { ps.scratch.read() };
-            sort.putdatum(nd.value, nd.isnull)?;
-        } else {
-            let slot = ps.insert_slot.as_mut().expect("multi-input ordered agg has a slot");
-            exectuples::exec_clear_tuple(slot, mcx);
-            {
-                let base = slot.base_mut();
-                for i in 0..ps.num_inputs {
-                    // SAFETY: i < num_inputs scratch slots.
-                    let nd = unsafe { ps.scratch.as_ptr().add(i).read() };
-                    base.tts_values[i] = nd.value;
-                    base.tts_isnull[i] = nd.isnull;
+        for setno in 0..nsets {
+            let sort = ps.sortstates[setno].as_mut().expect("ordered pertrans sort begun");
+            if ps.num_inputs == 1 {
+                // SAFETY: scratch slot 0 written by the program this row.
+                let nd = unsafe { ps.scratch.read() };
+                sort.putdatum(nd.value, nd.isnull)?;
+            } else {
+                let slot =
+                    ps.insert_slot.as_mut().expect("multi-input ordered agg has a slot");
+                exectuples::exec_clear_tuple(slot, mcx);
+                {
+                    let base = slot.base_mut();
+                    for i in 0..ps.num_inputs {
+                        // SAFETY: i < num_inputs scratch slots.
+                        let nd = unsafe { ps.scratch.as_ptr().add(i).read() };
+                        base.tts_values[i] = nd.value;
+                        base.tts_isnull[i] = nd.isnull;
+                    }
                 }
+                exectuples::exec_store_virtual_tuple(slot);
+                sort.puttupleslot(slot, mcx)?;
             }
-            exectuples::exec_store_virtual_tuple(slot);
-            sort.puttupleslot(slot, mcx)?;
         }
     }
     Ok(())
@@ -2225,12 +2228,24 @@ fn process_ordered_aggregates<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let base = node.pergroup_base;
+    process_ordered_aggregates_set(node, estate, 0, base)
+}
+
+// process_ordered_aggregate_{single,multi} (nodeAgg.c) for one grouping set.
+pub(crate) fn process_ordered_aggregates_set<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    setno: usize,
+    set_pergroup_base: NonNull<AggPerGroup>,
+) -> PgResult<()> {
     if node.pertrans_sort.is_empty() {
         return Ok(());
     }
     let mcx = estate.es_query_cxt;
     let tmp = node.tmpcontext;
-    let AggStateData { pertrans_sort, trans_typ, agg_node, pergroup_base, .. } = node;
+    let AggStateData { pertrans_sort, trans_typ, agg_node, .. } = node;
+    let pergroup_base = &set_pergroup_base;
     for ps in pertrans_sort.iter_mut() {
         // Presorted DISTINCT already advanced per row: drop the group's
         // comparand (C finalize_aggregates' haslast reset).
@@ -2253,7 +2268,7 @@ fn process_ordered_aggregates<'mcx>(
         // SAFETY: the per-tuple context outlives every call below (resets
         // recycle the same context object).
         unsafe { fcinfo.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
-        let mut sort = ps.sortstate.take().expect("ordered pertrans sort begun");
+        let mut sort = ps.sortstates[setno].take().expect("ordered pertrans sort begun");
         sort.performsort()?;
         // Spilled by-ref values live in recycled slab slots (valid until the
         // next fetch): the held DISTINCT comparand needs C's datumCopy shape.
@@ -2430,7 +2445,7 @@ where
             exec_eval_expr(et, &mut slots)?;
         }
         if !node.pertrans_sort.is_empty() {
-            collect_ordered_input(node, estate)?;
+            collect_ordered_input(node, estate, 1)?;
         }
         estate.reset_expr_context(node.tmpcontext);
     }
@@ -2803,7 +2818,7 @@ where
             }
         }
         if !node.pertrans_sort.is_empty() {
-            collect_ordered_input(node, estate)?;
+            collect_ordered_input(node, estate, 1)?;
         }
         estate.reset_expr_context(node.tmpcontext);
         loop {
@@ -2840,7 +2855,7 @@ where
                 exec_eval_expr(et, &mut slots)?;
             }
             if !node.pertrans_sort.is_empty() {
-                collect_ordered_input(node, estate)?;
+                collect_ordered_input(node, estate, 1)?;
             }
             estate.reset_expr_context(node.tmpcontext);
         }
@@ -3131,8 +3146,10 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
     for ps in node.pertrans_sort.iter_mut() {
-        if let Some(sort) = ps.sortstate.take() {
-            sort.end();
+        for st in ps.sortstates.iter_mut() {
+            if let Some(sort) = st.take() {
+                sort.end();
+            }
         }
         // A rescan can cut a group short of finalize: drop the presorted
         // DISTINCT comparand (C leaves haslast set over reset memory here).
@@ -3165,8 +3182,10 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
     for ps in node.pertrans_sort.iter_mut() {
-        if let Some(sort) = ps.sortstate.take() {
-            sort.end();
+        for st in ps.sortstates.iter_mut() {
+            if let Some(sort) = st.take() {
+                sort.end();
+            }
         }
         // A rescan can cut a group short of finalize: drop the presorted
         // DISTINCT comparand (C leaves haslast set over reset memory here).
