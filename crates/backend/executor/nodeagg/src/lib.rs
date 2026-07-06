@@ -2415,6 +2415,30 @@ fn copy_scratch_datum<'m>(
 
 /// `ExecAgg` -> `agg_retrieve_direct` (nodeAgg.c), single-group arm: drain the
 /// outer child through the transition program, then finalize and project the
+// C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec; this
+// executor hoists instead: any pending initplan a program depends on runs
+// before the drive evaluates it (noderesult.c pattern).
+fn hoist_pending_initplans<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mut deps: Vec<u32> = Vec::new();
+    if let Some(et) = node.evaltrans.as_deref() {
+        deps.extend_from_slice(et.param_exec_deps());
+    }
+    deps.extend_from_slice(node.proj.param_exec_deps());
+    if let Some(q) = node.qual.as_deref() {
+        deps.extend_from_slice(q.param_exec_deps());
+    }
+    if let Some(gs) = node.gsets.as_deref() {
+        gs.collect_param_deps(&mut deps);
+    }
+    if !deps.is_empty() {
+        ::executils::exec_eval_param_exec_params(estate, &deps)?;
+    }
+    Ok(())
+}
+
 /// one result row. Zero input rows still produce a row (C contract).
 pub fn exec_agg<'mcx, F>(
     node: &mut AggStateData<'mcx>,
@@ -2427,6 +2451,7 @@ where
     if node.agg_done {
         return Ok(None);
     }
+    hoist_pending_initplans(node, estate)?;
     if node.gsets.is_some() {
         return gsets::exec_agg_gsets(node, estate, &mut fetch_outer);
     }
@@ -2638,7 +2663,7 @@ pub(crate) fn finalize_aggregates<'mcx>(
     let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
     let skip_final = node.skip_final;
     let AggStateData {
-        peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, persort, ..
+        peragg, trans_typ, agg_node, agg_values_base, agg_nulls_base, persort, gsets, ..
     } = node;
     for (aggno, pa) in peragg.iter_mut().enumerate() {
         // SAFETY: transno < the once-allocated pergroup array length; base
@@ -2705,11 +2730,13 @@ pub(crate) fn finalize_aggregates<'mcx>(
             pa.direct_args.len()
         );
         for (i, es) in pa.direct_args.iter_mut().enumerate() {
-            let mut slots = EvalSlots {
-                scan: None,
-                inner: None,
-                outer: persort.as_mut().map(|ps| &mut ps.first_slot),
+            // The current group's representative tuple: AGG_SORTED holds it
+            // in persort; grouping sets hold it in the gsets projection slot.
+            let outer = match persort.as_mut() {
+                Some(ps) => Some(&mut ps.first_slot),
+                None => gsets.as_mut().map(|gs| &mut gs.first_slot),
             };
+            let mut slots = EvalSlots { scan: None, inner: None, outer };
             let nd = exec_eval_expr(es, &mut slots)?;
             direct[i] = nd;
             anynull |= nd.isnull;

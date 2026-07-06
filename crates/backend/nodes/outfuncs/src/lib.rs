@@ -679,6 +679,43 @@ fn out_node(out: &mut PgString<'_>, node: Node<'_>) -> PgResult<()> {
             out_list(out, &c.exclRelTlist)?;
             w!(out, "}}");
         }
+        NodeTag::T_SubPlan => {
+            let sp = node.as_variant::<types_nodes::primnodes::SubPlan>().expect("SubPlan");
+            w!(out, "{{SUBPLAN :subLinkType {}", sp.subLinkType as u32);
+            w!(out, " :testexpr ");
+            out_opt_node(out, sp.testexpr)?;
+            w!(out, " :paramIds ");
+            out_int_list(out, &sp.paramIds);
+            w!(out, " :plan_id {}", sp.plan_id);
+            w!(out, " :plan_name ");
+            out_str(out, sp.plan_name);
+            w!(out, " :firstColType {}", sp.firstColType);
+            w!(out, " :firstColTypmod {}", sp.firstColTypmod);
+            w!(out, " :firstColCollation {}", sp.firstColCollation);
+            w!(out, " :useHashTable ");
+            out_bool(out, sp.useHashTable);
+            w!(out, " :unknownEqFalse ");
+            out_bool(out, sp.unknownEqFalse);
+            w!(out, " :parallel_safe ");
+            out_bool(out, sp.parallel_safe);
+            w!(out, " :setParam ");
+            out_int_list(out, &sp.setParam);
+            w!(out, " :parParam ");
+            out_int_list(out, &sp.parParam);
+            w!(out, " :args ");
+            out_list(out, &sp.args)?;
+            w!(out, " :startup_cost {}", sp.startup_cost);
+            w!(out, " :per_call_cost {}", sp.per_call_cost);
+            w!(out, "}}");
+        }
+        NodeTag::T_AlternativeSubPlan => {
+            let a = node
+                .as_variant::<types_nodes::primnodes::AlternativeSubPlan>()
+                .expect("AlternativeSubPlan");
+            w!(out, "{{ALTERNATIVESUBPLAN :subplans ");
+            out_list(out, &a.subplans)?;
+            w!(out, "}}");
+        }
         NodeTag::T_NotifyStmt => {
             let n = node
                 .as_variant::<types_nodes::parsenodes::NotifyStmt>()
