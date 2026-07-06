@@ -1043,8 +1043,9 @@ fn slow_switch<'mcx>(
         }
 
         T_ReindexStmt => {
-            // C: reindex_index collects via EventTriggerCollectSimpleCommand.
-            collect_gap("REINDEX");
+            // REINDEX collects itself, per-index, inside reindex_index/
+            // reindex_relation/ReindexRelationConcurrently (index.c,
+            // indexcmds.c: EventTriggerCollectSimpleCommand).
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::ReindexStmt>()
                 .expect("ReindexStmt");

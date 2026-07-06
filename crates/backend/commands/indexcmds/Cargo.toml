@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
+cmdtag = { path = "../../tcop/cmdtag" }
+event_trigger = { path = "../event_trigger" }
 reloptions = { path = "../../access/common/reloptions" }
 commands_comment = { path = "../comment" }
 coerce = { path = "../../parser/coerce" }
