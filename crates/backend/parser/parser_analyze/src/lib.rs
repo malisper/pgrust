@@ -667,6 +667,22 @@ pub fn analyze_requires_snapshot(parse_tree: &RawStmt<'_>) -> bool {
     stmt_requires_parse_analysis(parse_tree)
 }
 
+// query_requires_rewrite_plan (analyze.c): the analyzed-tree sibling of
+// stmt_requires_parse_analysis, for plancache entries created from a Query
+// (SQL-function prosqlbody).
+pub fn query_requires_rewrite_plan(query: &Query<'_>) -> bool {
+    if query.commandType != CmdType::CMD_UTILITY {
+        return true;
+    }
+    matches!(
+        query.utilityStmt.expect("CMD_UTILITY Query has utilityStmt").node_tag(),
+        NodeTag::T_DeclareCursorStmt
+            | NodeTag::T_ExplainStmt
+            | NodeTag::T_CreateTableAsStmt
+            | NodeTag::T_CallStmt
+    )
+}
+
 // transformPLAssignStmt (analyze.c). Unported loud: indirection beyond the
 // dotted-name prefix.
 fn transformPLAssignStmt<'mcx>(
