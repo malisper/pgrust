@@ -245,14 +245,18 @@ fn deconstruct_qualified_name<'a>(names: &[&'a str]) -> PgResult<(Option<&'a str
     }
 }
 
-/// C LookupExplicitNamespace(missing_ok=false): lookup + ACL_USAGE check.
+/// C LookupExplicitNamespace: lookup + ACL_USAGE check; missing_ok=true
+/// returns InvalidOid for a missing schema (ACL failures stay hard).
 /// The pg_temp alias arm needs myTempNamespace — loud.
-fn lookup_explicit_namespace(nspname: &str) -> PgResult<Oid> {
+fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid> {
     if nspname == "pg_temp" {
         panic!("LookupExplicitNamespace (namespace.c): pg_temp alias arm unported in adt_regproc");
     }
     let namespace_id = syscache_seams::lookup_pg_namespace_oid_by_name::call(nspname)?;
     if !OidIsValid(namespace_id) {
+        if missing_ok {
+            return Ok(InvalidOid);
+        }
         return Err(Box::new(undefined_schema(nspname)));
     }
     let aclresult = aclchk_seams::object_aclcheck::call(
@@ -283,8 +287,14 @@ fn funcname_candidates<'mcx>(
 ) -> PgResult<(PgVec<'mcx, syscache_seams::PgProcCandidate<'mcx>>, Vec<FuncCand>)> {
     let (schemaname, funcname) = deconstruct_qualified_name(names)?;
     let raw = syscache_seams::lookup_pg_proc_name_candidates::call(mcx, funcname)?;
+    // C FuncnameGetCandidates: regproc callers pass missing_ok=true — a
+    // missing schema yields NULL candidates ("function does not exist"),
+    // never a schema error.
     let ns_filter = match schemaname {
-        Some(name) => Some(lookup_explicit_namespace(name)?),
+        Some(name) => match lookup_explicit_namespace(name, true)? {
+            InvalidOid => return Ok((raw, Vec::new())),
+            id => Some(id),
+        },
         None => None,
     };
     let path = match ns_filter {
@@ -451,7 +461,10 @@ fn parse_name_and_arg_types(
         let typeid = if allow_none && typename.eq_ignore_ascii_case("none") {
             InvalidOid
         } else {
-            regproc_seams::parse_type_string::call(mcx, typename)?.0
+            match regproc_seams::parse_type_string::call(mcx, typename, esc.as_deref_mut())? {
+                Some((typeid, _typmod)) => typeid,
+                None => return Ok(None),
+            }
         };
         if argtypes.len() >= types_core::FUNC_MAX_ARGS {
             return ereturn(esc, None, too_many_arguments());
@@ -532,21 +545,13 @@ pub fn regtypein(mcx: Mcx<'_>, s: &str, mut esc: Esc) -> PgResult<Option<Oid>> {
     if let Some(handled) = parse_dash_or_oid(s, esc.as_deref_mut())? {
         return Ok(Some(handled.unwrap_or(InvalidOid)));
     }
-    // C parseTypeString reports through escontext; the seam's escontext=NULL
-    // shape hard-errors, re-routed into the caller's soft context here.
-    match regproc_seams::parse_type_string::call(mcx, s) {
-        Ok((typid, _typmod)) => Ok(Some(typid)),
-        Err(e) => ereturn(esc, None, *e),
-    }
+    Ok(regproc_seams::parse_type_string::call(mcx, s, esc)?.map(|(typid, _typmod)| typid))
 }
 
 /// to_regtypemod (regproc.c:1229): parseTypeString's soft-error path,
 /// returning the typmod (not the typid) on success.
 pub fn to_regtypemod(mcx: Mcx<'_>, s: &str, esc: Esc) -> PgResult<Option<i32>> {
-    match regproc_seams::parse_type_string::call(mcx, s) {
-        Ok((_typid, typmod)) => Ok(Some(typmod)),
-        Err(e) => ereturn(esc, None, *e),
-    }
+    Ok(regproc_seams::parse_type_string::call(mcx, s, esc)?.map(|(_typid, typmod)| typmod))
 }
 
 fn cstr_in<'mcx>(mcx: Mcx<'mcx>, parts: &[&[u8]]) -> PgResult<RegName<'mcx>> {

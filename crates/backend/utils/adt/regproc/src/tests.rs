@@ -149,15 +149,17 @@ fn install_fakes() {
                 })
             }))
         });
-        regproc_seams::parse_type_string::set(|_mcx, typename| {
+        regproc_seams::parse_type_string::set(|_mcx, typename, esc| {
             match typename.to_ascii_lowercase().as_str() {
-                "text" => Ok((25, -1)),
-                "integer" | "int4" => Ok((23, -1)),
-                "anyarray" => Ok((2277, -1)),
-                _ => Err(Box::new(
+                "text" => Ok(Some((25, -1))),
+                "integer" | "int4" => Ok(Some((23, -1))),
+                "anyarray" => Ok(Some((2277, -1))),
+                _ => types_error::ereturn(
+                    esc,
+                    None,
                     PgError::error(format!("type \"{typename}\" does not exist"))
                         .with_sqlstate(ERRCODE_UNDEFINED_OBJECT),
-                )),
+                ),
             }
         });
         syscache_seams::lookup_authid_by_rolname::set(|rolname| {
@@ -435,6 +437,27 @@ fn regprocedurein_lookup() {
         let mut soft = SoftErrorContext::new(false);
         assert_eq!(regprocedurein(mcx, "lower", Some(&mut soft)).unwrap(), None);
         assert!(soft.error_occurred());
+    });
+}
+
+#[test]
+fn funcname_missing_schema_is_function_not_found() {
+    // C FuncnameGetCandidates(missing_ok=true): a missing schema yields no
+    // candidates ("function does not exist"), never a schema error.
+    with_mcx(|mcx| {
+        let err = regprocin(mcx, "ng_catalog.now", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        assert_eq!(err.message(), "function \"ng_catalog.now\" does not exist");
+        let err = regprocedurein(mcx, "ng_catalog.lower(text)", None).unwrap_err();
+        assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+        assert_eq!(err.message(), "function \"ng_catalog.lower(text)\" does not exist");
+        let mut soft = SoftErrorContext::new(true);
+        assert_eq!(regprocin(mcx, "ng_catalog.now", Some(&mut soft)).unwrap(), Some(0));
+        assert!(soft.error_occurred());
+        assert_eq!(
+            soft.error().unwrap().message(),
+            "function \"ng_catalog.now\" does not exist"
+        );
     });
 }
 
