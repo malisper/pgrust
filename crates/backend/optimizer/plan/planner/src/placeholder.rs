@@ -66,7 +66,15 @@ pub fn find_placeholder_info<'mcx>(
         "too late to create a new PlaceHolderInfo"
     );
 
-    let rels_used = crate::initsplan::pull_varnos_relids(run, phv.phexpr)?;
+    // DIVERGENCE from C's pull_varnos(root, phexpr): a nested PHV inside
+    // phexpr contributes phrels here, not ph_eval_at. The C-shaped eval_at
+    // narrows a nested PHV's evaluation to below joins our join-removal
+    // residue keeps (join.sql RHS-removal family) and the placeholder
+    // consumers then fail setrefs; restore with join-removal completion.
+    let rels_used = {
+        let bms = vars::pull_varnos(mcx, phv.phexpr)?;
+        node_bms_to_relids(mcx, &bms)
+    };
     let phrels = node_bms_to_relids(mcx, &phv.phrels);
     let ph_lateral = {
         let d = relids_difference(mcx, &rels_used, &phrels);
