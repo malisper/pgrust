@@ -403,8 +403,9 @@ impl<'s, 'e, 'mcx> QueryParser<'s, 'e, 'mcx> {
                         self.state = PState::WaitOperand;
                         return Ok(Tok::Opr(OP_OR));
                     } else if is_ts_operator(self.cur()) {
+                        // C stays in WAITOPERATOR here (tsquery.c:488-493); a
+                        // state change would drop the implicit AND below.
                         self.vals.off += 1;
-                        self.state = PState::WaitOperand;
                         continue;
                     } else if !ts_isspace(self.cur()) {
                         self.state = PState::WaitOperand;
