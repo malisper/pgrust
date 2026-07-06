@@ -734,7 +734,14 @@ fn still_valid_check_rejects_type_mismatch() {
         let mut slot = virtual_slot(mcx, &[Some(1)]);
         let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
         let err = exec_eval_expr(&mut state, &mut slots).unwrap_err();
-        assert!(err.message().contains("not compatible"));
+        // CheckVarSlotCompatibility's C-exact wrong-type message (B5).
+        assert!(err.message().contains("has wrong type"), "got: {}", err.message());
+        assert!(
+            err.detail().is_some_and(|d| d.starts_with("Table has type ")
+                && d.contains(", but query expects ")),
+            "got detail: {:?}",
+            err.detail()
+        );
     });
 }
 
