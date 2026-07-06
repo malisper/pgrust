@@ -100,9 +100,9 @@ adt_regexp = { path = "../../../utils/adt/regexp" }
 varlena = { path = "../../../utils/adt/varlena" }
 
 gin = { path = "../../../access/gin/gin" }
+clauses_seams = { path = "../../util/clauses_seams" }
 
 [dev-dependencies]
-clauses_seams = { path = "../../util/clauses_seams" }
 indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
 regex_core = { path = "../../../regex/regex_core" }
 wchar = { path = "../../../../common/wchar" }

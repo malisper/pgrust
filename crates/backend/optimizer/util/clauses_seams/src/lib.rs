@@ -62,3 +62,14 @@ seam_core::seam!(
         declared_arg_types: &'a [Oid],
     ) -> PgResult<types_nodes::NodeList<'mcx>>
 );
+
+seam_core::seam!(
+    // find_simplified_clause's duplicate-evaluation gate (rangetypes.c):
+    // C declines when the elemExpr is volatile, contains a subplan, or costs
+    // more than 10*cpu_operator_cost to evaluate. Installed by the planner
+    // crate (clauses volatility walk + costsize cost walk) — an
+    // adt_rangetypes->clauses dep cycles via typcache.
+    pub fn expr_safe_to_evaluate_twice<'mcx>(
+        node: Node<'mcx>,
+    ) -> PgResult<bool>
+);

@@ -557,12 +557,8 @@ fn range_elem_support(fcinfo: &mut Fcinfo, range_is_left: bool, name: &str) -> P
     }
 }
 
-// find_simplified_clause (rangetypes.c) minus the root-based cost gate: C
-// declines when the elemExpr is volatile, contains subplans, or costs more
-// than 10*cpu_operator_cost to evaluate twice; with no PlannerInfo on the
-// request, the two-bound case here only accepts trivially-cheap elemExprs
-// (Var/Param/Const) and declines otherwise — declining is always safe (the
-// original clause stays).
+// find_simplified_clause (rangetypes.c); the volatile/subplan/cost gate for
+// the two-bound case rides clauses_seams::expr_safe_to_evaluate_twice.
 fn find_simplified_clause<'mcx>(
     mcx: Mcx<'mcx>,
     range_const: Datum,
@@ -605,12 +601,9 @@ fn find_simplified_clause<'mcx>(
     }
 
     if !lower.infinite && !upper.infinite {
-        // The rewrite evaluates elemExpr twice; see the function comment for
-        // the conservative stand-in for C's volatile/subplan/cost gate.
-        if !matches!(
-            elem_expr.node_tag(),
-            NodeTag::T_Var | NodeTag::T_Param | NodeTag::T_Const
-        ) {
+        // The rewrite evaluates elemExpr twice; C declines volatile,
+        // subplan-bearing, or >10*cpu_operator_cost elemExprs.
+        if !::clauses_seams::expr_safe_to_evaluate_twice::call(elem_expr)? {
             return Ok(None);
         }
     }

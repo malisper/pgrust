@@ -1350,6 +1350,31 @@ pub fn init_seams() {
     catalog_index_seams::reset_reindex_state::set(ResetReindexState);
     catalog_index_seams::index_build_dummy::set(index_build_dummy);
     indexam_seams::relation_get_index_att_options::set(relation_get_index_att_options);
+    indexam_seams::index_expression_input_type::set(index_expression_input_type);
+}
+
+// GetIndexInputType's expression-column arm (spgutils.c):
+// getBaseType(exprType(<indexcol's rd_indexprs entry>)). The expression
+// trees live only as long as the scratch context; only the Oid escapes.
+fn index_expression_input_type(
+    rel: &Relation<'_>,
+    indexcol_0based: usize,
+) -> types_error::PgResult<types_core::Oid> {
+    let form = rel.rd_index.as_ref().expect("index relation without rd_index");
+    let scratch = mcx::MemoryContext::new("index_expression_input_type");
+    let exprs = execindexing::RelationGetIndexExpressions(scratch.mcx(), rel)?;
+    let mut expr_iter = exprs.iter();
+    for i in 0..form.indnkeyatts as usize {
+        if form.indkey[i] == 0 {
+            let Some(expr) = expr_iter.next() else {
+                break;
+            };
+            if i == indexcol_0based {
+                return lsyscache::typ::getBaseType(nodes_core::expr_type(expr));
+            }
+        }
+    }
+    Err(Box::new(types_error::PgError::error("wrong number of index expressions")))
 }
 
 pub use drop::{index_drop, IndexGetRelation};
