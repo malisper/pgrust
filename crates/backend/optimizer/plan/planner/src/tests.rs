@@ -6727,3 +6727,116 @@ mod lateral_pullup {
     }
 }
 
+
+// group_keys_reorder_by_pathkeys (pathkeys.c:357-452): matching is confined to
+// the leading num_groupby_pathkeys of group_pathkeys, and a pathkey whose EC
+// lacks a sortref or a matching processed group clause ends the usable prefix
+// (C commit 1349d27) — distilled from the aggregates group_agg_pk trio.
+mod group_keys_reorder {
+    use super::*;
+    use mcx::PgVec;
+    use types_pathnodes::{NodeId, PathKey, COMPARE_LT};
+
+    fn sgc<'mcx>(run: &mut crate::run::PlannerRun<'mcx>, sortref: u32) -> NodeId {
+        let n = Node::mk(
+            run.mcx,
+            types_nodes::parsenodes::SortGroupClause {
+                tleSortGroupRef: sortref,
+                eqop: 96,
+                sortop: 97,
+                reverse_sort: false,
+                nulls_first: false,
+                hashable: true,
+            },
+        )
+        .unwrap();
+        run.root.alloc_expr_node(n)
+    }
+
+    fn pk_with_sortref<'mcx>(run: &mut crate::run::PlannerRun<'mcx>, sortref: u32) -> PathKey {
+        let mut ec = types_pathnodes::EquivalenceClass::new(run.mcx);
+        ec.ec_sortref = sortref;
+        let id = run.root.alloc_ec(ec);
+        PathKey {
+            pk_eclass: Some(id),
+            pk_opfamily: 1976,
+            pk_cmptype: COMPARE_LT,
+            pk_nulls_first: false,
+        }
+    }
+
+    #[test]
+    fn pathkey_ec_without_sortref_ends_prefix() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let a = pk_with_sortref(&mut run, 0);
+        let b = pk_with_sortref(&mut run, 2);
+        let (ca, cb) = (sgc(&mut run, 1), sgc(&mut run, 2));
+        let mut pks: PgVec<'_, PathKey> = PgVec::new_in(mcx);
+        pks.extend([a, b]);
+        let mut clauses: PgVec<'_, NodeId> = PgVec::new_in(mcx);
+        clauses.extend([ca, cb]);
+        let n = crate::pathkeys::group_keys_reorder_by_pathkeys(&run, &[a], &mut pks, &mut clauses, 2);
+        assert_eq!(n, 0);
+        assert_eq!(&pks[..], &[a, b]);
+        assert_eq!(&clauses[..], &[ca, cb]);
+    }
+
+    #[test]
+    fn sortref_without_matching_clause_ends_prefix() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let a = pk_with_sortref(&mut run, 5);
+        let b = pk_with_sortref(&mut run, 2);
+        let (ca, cb) = (sgc(&mut run, 1), sgc(&mut run, 2));
+        let mut pks: PgVec<'_, PathKey> = PgVec::new_in(mcx);
+        pks.extend([a, b]);
+        let mut clauses: PgVec<'_, NodeId> = PgVec::new_in(mcx);
+        clauses.extend([ca, cb]);
+        let n = crate::pathkeys::group_keys_reorder_by_pathkeys(&run, &[a], &mut pks, &mut clauses, 2);
+        assert_eq!(n, 0);
+        assert_eq!(&pks[..], &[a, b]);
+    }
+
+    #[test]
+    fn reorders_leading_group_keys_to_match_path() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let a = pk_with_sortref(&mut run, 1);
+        let b = pk_with_sortref(&mut run, 2);
+        let (ca, cb) = (sgc(&mut run, 1), sgc(&mut run, 2));
+        let mut pks: PgVec<'_, PathKey> = PgVec::new_in(mcx);
+        pks.extend([a, b]);
+        let mut clauses: PgVec<'_, NodeId> = PgVec::new_in(mcx);
+        clauses.extend([ca, cb]);
+        let n = crate::pathkeys::group_keys_reorder_by_pathkeys(&run, &[b], &mut pks, &mut clauses, 2);
+        assert_eq!(n, 1);
+        assert_eq!(&pks[..], &[b, a]);
+        assert_eq!(&clauses[..], &[cb, ca]);
+    }
+
+    #[test]
+    fn aggregate_pathkey_tail_is_not_matched() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        let mut run = crate::run::PlannerRun::new(mcx);
+        let a = pk_with_sortref(&mut run, 1);
+        let b = pk_with_sortref(&mut run, 2);
+        // Aggregate-ORDER-BY pathkey past num_groupby_pathkeys; a stale clause
+        // with its sortref exists, so the head restriction is what stops it.
+        let agg = pk_with_sortref(&mut run, 7);
+        let (ca, cb, cagg) = (sgc(&mut run, 1), sgc(&mut run, 2), sgc(&mut run, 7));
+        let mut pks: PgVec<'_, PathKey> = PgVec::new_in(mcx);
+        pks.extend([a, b, agg]);
+        let mut clauses: PgVec<'_, NodeId> = PgVec::new_in(mcx);
+        clauses.extend([ca, cb, cagg]);
+        let n =
+            crate::pathkeys::group_keys_reorder_by_pathkeys(&run, &[agg], &mut pks, &mut clauses, 2);
+        assert_eq!(n, 0);
+        assert_eq!(&pks[..], &[a, b, agg]);
+        assert_eq!(&clauses[..], &[ca, cb, cagg]);
+    }
+}

@@ -118,38 +118,48 @@ pub struct GroupByOrdering<'mcx> {
 }
 
 // group_keys_reorder_by_pathkeys (pathkeys.c): clauses matched by ec_sortref.
-fn group_keys_reorder_by_pathkeys<'mcx>(
+pub(crate) fn group_keys_reorder_by_pathkeys<'mcx>(
     run: &PlannerRun<'mcx>,
     path_pathkeys: &[PathKey],
     group_pathkeys: &mut PgVec<'mcx, PathKey>,
     group_clauses: &mut PgVec<'mcx, types_pathnodes::NodeId>,
     num_groupby_pathkeys: usize,
 ) -> usize {
-    if group_pathkeys.is_empty() || group_clauses.is_empty() {
+    if path_pathkeys.is_empty() || group_pathkeys.is_empty() {
         return 0;
     }
     let mcx = run.mcx;
     let mut new_pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(mcx);
     let mut new_clauses: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    // Match only within the leading num_groupby_pathkeys of group_pathkeys:
+    // the tail holds aggregate-ORDER-BY pathkeys whose ec_sortref does not
+    // reference the query targetlist (pathkeys.c:380-392).
+    let grouping_pathkeys = &group_pathkeys[..num_groupby_pathkeys.min(group_pathkeys.len())];
     for (i, pk) in path_pathkeys.iter().enumerate() {
-        if i >= num_groupby_pathkeys || !group_pathkeys.contains(pk) {
+        if i >= num_groupby_pathkeys || !grouping_pathkeys.contains(pk) {
             break;
         }
         let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
         let sortref = run.root.ec(ec).ec_sortref;
-        assert!(sortref > 0, "pathkey EC of a group clause has no sortref");
-        let sgc = group_clauses
-            .iter()
-            .copied()
-            .find(|&id| {
-                run.root
-                    .expr_node(id)
-                    .as_sort_group_clause()
-                    .expect("group clause cell")
-                    .tleSortGroupRef
-                    == sortref
-            })
-            .expect("group clause matching the pathkey sortref");
+        // Since C commit 1349d27 a pathkey from the underlying node can lack a
+        // sortref or a matching clause in processed_groupClause; both end the
+        // usable prefix (pathkeys.c:404-427).
+        if sortref == 0 {
+            break;
+        }
+        let Some(sgc) = group_clauses.iter().copied().find(|&id| {
+            run.root
+                .expr_node(id)
+                .as_sort_group_clause()
+                .expect("group clause cell")
+                .tleSortGroupRef
+                == sortref
+        }) else {
+            break;
+        };
+        debug_assert!(
+            run.root.expr_node(sgc).as_sort_group_clause().expect("group clause cell").sortop != 0
+        );
         new_pathkeys.push(*pk);
         new_clauses.push(sgc);
     }

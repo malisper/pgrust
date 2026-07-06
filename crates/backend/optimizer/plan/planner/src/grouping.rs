@@ -740,14 +740,19 @@ fn sortgroupclause_equal(
         && a.hashable == b.hashable
 }
 
-// get_sortgroupref_tle (tlist.c) over the final pathtarget's sortgrouprefs.
+// C consults processed_groupClause, not parse->groupClause (planner.c:5550):
+// a GROUP BY item removed as pathkey-redundant is a non-group column here,
+// which also fixes its position in the group input target.
 fn target_sgref_in_group_clause(run: &PlannerRun<'_>, sgref: u32) -> bool {
     sgref != 0
-        && run
-            .parse()
-            .groupClause
-            .iter()
-            .any(|n| n.as_sort_group_clause().expect("groupClause cell").tleSortGroupRef == sgref)
+        && run.root.processed_groupClause.iter().any(|&id| {
+            run.root
+                .expr_node(id)
+                .as_sort_group_clause()
+                .expect("processed_groupClause cell")
+                .tleSortGroupRef
+                == sgref
+        })
 }
 
 // make_group_input_target (planner.c).
