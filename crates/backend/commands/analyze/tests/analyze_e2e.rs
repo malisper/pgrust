@@ -605,6 +605,8 @@ fn install_relation_seams() {
 fn install_syscache_fixture_overrides() {
     // Real projections stay installed for pg_statistic (the flip under test);
     // pg_type/pg_attribute/pg_opclass live behind mocks (no such catalogs here).
+    // Fixture columns carry no attoptions: valid tuple, null column.
+    syscache_seams::pg_attribute_attoptions::set(|_mcx, _relid, _attnum| Ok(Some(None)));
     syscache_seams::lookup_pg_type_shape::set(|typid| {
         Ok(match typid {
             INT4OID => Some(types_tuple::PgTypeShape {
