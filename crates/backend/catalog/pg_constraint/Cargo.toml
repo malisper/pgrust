@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
