@@ -10,8 +10,8 @@ pub use like::{expandTableLikeClause, generateClonedIndexStmt};
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR,
 };
 use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt, SortByDir,
@@ -238,7 +238,17 @@ fn resolveTypeNames<'mcx, 'tn>(
     let mut names: [&str; 4] = [""; 4];
     let nnames = tn.names.len();
     if nnames == 0 || nnames > 3 {
-        unported("improper TypeName names length");
+        // C DeconstructQualifiedName's default arm (namespace.c).
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!(
+                    "improper qualified name (too many dotted names): {}",
+                    typename_to_string(tn)
+                ),
+            )
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        ));
     }
     for (i, n) in tn.names.iter().enumerate() {
         names[i] = n.as_string().expect("TypeName names").sval;
@@ -293,12 +303,16 @@ fn shell_type(name: &str) -> Box<PgError> {
     )
 }
 
-// typeStringToTypeName (parse_type.c); escontext=NULL shape (hard errors) —
-// misc.c's pg_input_* callers pass NULL there too. pts_error_callback rides
-// as with_context on raw-parse errors only, matching the C callback's span.
-pub fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx TypeName<'mcx>> {
+// typeStringToTypeName (parse_type.c). Only the function's own "invalid type
+// name" arms are escontext-soft; raw-parse errors are hard with
+// pts_error_callback riding as with_context, matching the C callback's span.
+pub fn typeStringToTypeNameEsc<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: &str,
+    esc: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<&'mcx TypeName<'mcx>>> {
     if s.bytes().all(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b)) {
-        return Err(invalid_type_name(s));
+        return ereturn(esc, None, *invalid_type_name(s));
     }
     let list = gram_core::raw_parser(mcx, s, parser_seams::RawParseMode::RAW_PARSE_TYPE_NAME)
         .map_err(|e| Box::new((*e).with_context(format!("invalid type name \"{s}\""))))?;
@@ -306,16 +320,29 @@ pub fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx Typ
     let node = list.first().expect("TYPE_NAME parse yields one node");
     let tn = node.as_type_name().expect("TYPE_NAME parse yields TypeName");
     if tn.setof {
-        return Err(invalid_type_name(s));
+        return ereturn(esc, None, *invalid_type_name(s));
     }
-    Ok(tn)
+    Ok(Some(tn))
 }
 
-/// C `parseTypeString` with a NULL escontext: (type Oid, typmod) for a
-/// standalone type-name string. No typtype restriction (unlike the CREATE
-/// TABLE lane above): any resolvable non-shell type passes, per C.
-pub fn parseTypeString<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<(Oid, i32)> {
-    let tn = typeStringToTypeName(mcx, s)?;
+pub fn typeStringToTypeName<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx TypeName<'mcx>> {
+    Ok(typeStringToTypeNameEsc(mcx, s, None)?.expect("escontext=NULL errors instead of None"))
+}
+
+/// C `parseTypeString`: (type Oid, typmod) for a standalone type-name string;
+/// None when a soft error was captured into `esc`. Soft arms are exactly C's
+/// ereturn sites (invalid type name, type does not exist, shell type); name
+/// deconstruction and typmodin errors stay hard. No typtype restriction
+/// (unlike the CREATE TABLE lane above): any resolvable non-shell type
+/// passes, per C.
+pub fn parseTypeStringEsc<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: &str,
+    mut esc: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<(Oid, i32)>> {
+    let Some(tn) = typeStringToTypeNameEsc(mcx, s, esc.as_deref_mut())? else {
+        return Ok(None);
+    };
     if tn.pct_type {
         unported("LookupTypeName %TYPE");
     }
@@ -328,17 +355,21 @@ pub fn parseTypeString<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<(Oid, i32)> {
         typoid = syscache_seams::pg_type_typarray::call(typoid)?.unwrap_or(InvalidOid);
     }
     if typoid == InvalidOid {
-        return Err(type_does_not_exist(&typeNameToString(tn)));
+        return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn)));
     }
 
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
-        Some(false) => return Err(shell_type(&typeNameToString(tn))),
-        None => return Err(type_does_not_exist(&typeNameToString(tn))),
+        Some(false) => return ereturn(esc, None, *shell_type(&typeNameToString(tn))),
+        None => return ereturn(esc, None, *type_does_not_exist(&typeNameToString(tn))),
     }
 
     let typmod = typenameTypeMod(mcx, None, tn, typoid)?;
-    Ok((typoid, typmod))
+    Ok(Some((typoid, typmod)))
+}
+
+pub fn parseTypeString<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<(Oid, i32)> {
+    Ok(parseTypeStringEsc(mcx, s, None)?.expect("escontext=NULL errors instead of None"))
 }
 
 fn typename_to_string(tn: &TypeName<'_>) -> String {
@@ -3023,7 +3054,7 @@ pub fn init_seams() {
     parse_utilcmd_seams::LookupTypeNameOid::set(LookupTypeNameOid);
     parse_utilcmd_seams::parseTypeString::set(parseTypeString);
     parse_utilcmd_seams::typename_type_id_and_mod::set(typenameTypeIdAndMod);
-    regproc_seams::parse_type_string::set(parseTypeString);
+    regproc_seams::parse_type_string::set(parseTypeStringEsc);
 }
 
 #[cfg(test)]
