@@ -25,6 +25,7 @@ varlena = { path = "../../utils/adt/varlena" }
 table = { path = "../../access/table/table" }
 genam = { path = "../../access/index/genam" }
 catalog = { path = "../catalog" }
+catalog_seams = { path = "../catalog_seams" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
 nodes_core = { path = "../../nodes/nodes_core" }

@@ -1031,6 +1031,8 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(v, out);
             }
         }
+        // PVC_INCLUDE_PLACEHOLDERS: the PHV joins the input target whole.
+        NodeTag::T_PlaceHolderVar => out.push(node),
         other => panic!("pull_var_clause (var.c): {other:?}; M3 expression lane"),
     }
 }
