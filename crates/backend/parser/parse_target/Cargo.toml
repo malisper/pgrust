@@ -25,6 +25,7 @@ parse_relation = { path = "../parse_relation" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 parser_small1 = { path = "../parser_small1" }
 tupdesc = { path = "../../access/common/tupdesc" }
+typcache_seams = { path = "../../utils/cache/typcache_seams" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }

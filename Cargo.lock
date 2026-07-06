@@ -9302,6 +9302,7 @@ dependencies = [
  "parser_small1",
  "syscache_seams",
  "tupdesc",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_nodes",
