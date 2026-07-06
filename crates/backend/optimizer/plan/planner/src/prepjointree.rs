@@ -1005,9 +1005,6 @@ fn pull_up_simple_subquery<'mcx>(
             crate::subselect::query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
         crate::prep::replace_empty_jointree(mcx, &mut sub_local)?;
         crate::subselect::pull_up_sublinks(run, &mut sub_local)?;
-        // C: preprocess its function RTEs to inline any set-returning
-        // functions (prepjointree.c:1353).
-        preprocess_function_rtes(run, &mut sub_local)?;
         if sub_local.rtable.iter().any(|n| {
             matches!(
                 n.as_range_tbl_entry().expect("rtable cell").rtekind,
