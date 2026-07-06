@@ -577,6 +577,10 @@ fn copy_from_body<'mcx>(
                     &recheck_indexes,
                     t.tc,
                     Some(&mut when),
+                    // COPY's target rel is not a child result rel here, so
+                    // there is no child->root capture map (C ri_ChildToRootMap
+                    // is NULL for a non-child result relation).
+                    None,
                 )?;
             }
             processed += 1;
@@ -1015,6 +1019,10 @@ fn flush_multi_insert<'mcx>(
                     &recheck_indexes,
                     t.tc,
                     Some(&mut when),
+                    // COPY's target rel is not a child result rel here, so
+                    // there is no child->root capture map (C ri_ChildToRootMap
+                    // is NULL for a non-child result relation).
+                    None,
                 )?;
             }
         }
