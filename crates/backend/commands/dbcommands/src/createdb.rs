@@ -391,7 +391,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .expect("noerr=false yields a name");
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
-            .errmsg(format!("permission denied to set role \"{}\"", rolename.as_str()))
+            .errmsg(format!("must be able to SET ROLE \"{}\"", rolename.as_str()))
             .into_error()
             .into());
     }

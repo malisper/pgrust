@@ -54,6 +54,31 @@ fn install() {
                 _ => None,
             })
         });
+        // get_cast_oid's undefined-cast message renders via format_type_be.
+        s::lookup_pg_type_typcache_shape::set(|typid| {
+            Ok(match typid {
+                INT4OID | TEXTOID => Some(syscache_seams::PgTypeTypcacheShape {
+                    typname: name(if typid == INT4OID { "int4" } else { "text" }),
+                    typlen: if typid == INT4OID { 4 } else { -1 },
+                    typbyval: typid == INT4OID,
+                    typalign: TYPALIGN_INT,
+                    typstorage: if typid == INT4OID {
+                        TYPSTORAGE_PLAIN
+                    } else {
+                        TYPSTORAGE_EXTENDED
+                    },
+                    typtype: b'b' as i8,
+                    typisdefined: true,
+                    typrelid: InvalidOid,
+                    typsubscript: InvalidOid,
+                    typelem: InvalidOid,
+                    typarray: InvalidOid,
+                    typcollation: InvalidOid,
+                }),
+                _ => None,
+            })
+        });
+        namespace_seams::type_is_visible::set(|_typid| Ok(true));
         s::pg_type_isdefined::set(|typid| Ok((typid != 1).then_some(typid != SHELL_OID)));
         s::pg_type_typtype::set(|typid| {
             Ok(match typid {
@@ -678,6 +703,7 @@ fn misc_getters() {
         assert_eq!(get_cast_oid(INT4OID, TEXTOID, false).unwrap(), 7777);
         let err = get_cast_oid(TEXTOID, INT4OID, false).unwrap_err();
         assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_OBJECT);
+        assert_eq!(err.message(), "cast from type text to type integer does not exist");
         assert_eq!(get_cast_oid(TEXTOID, INT4OID, true).unwrap(), InvalidOid);
         assert_eq!(get_collation_name(m, 100).unwrap().unwrap().as_str(), "default");
         assert!(get_collation_isdeterministic(100).unwrap());

@@ -673,7 +673,7 @@ pub fn AlterDatabaseOwner(mcx: Mcx<'_>, dbname: &str, new_owner_id: Oid) -> PgRe
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
                 .errmsg(format!(
-                    "permission denied to set role \"{}\"",
+                    "must be able to SET ROLE \"{}\"",
                     rolename.as_str()
                 ))
                 .into_error()
