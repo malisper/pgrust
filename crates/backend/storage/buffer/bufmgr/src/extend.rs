@@ -176,7 +176,7 @@ fn extend_to_guts(
     // A concurrent extension may have covered extend_to already: fall back to
     // reading the target block (C keeps the caller's original mode here).
     if buffer == InvalidBuffer {
-        buffer = ReadBuffer_common(smgr, relpersistence, fork, extend_to - 1, mode, strategy)?;
+        buffer = ReadBuffer_common(smgr, relpersistence, fork, extend_to - 1, mode, strategy)?.0;
     }
     Ok(buffer)
 }

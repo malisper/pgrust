@@ -195,6 +195,7 @@ fn install_bufmgr_seams() {
         })
     });
     bufmgr_seams::get_access_strategy::set(|_btype| None);
+    bufmgr_seams::get_access_strategy_with_size::set(|_btype, _kb| None);
     bufmgr_seams::free_access_strategy::set(|_s| {});
 
     smgr_seams::smgr_cached_nblocks::set(|_loc, fork| fork_nblocks(fork as u8));

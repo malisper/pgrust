@@ -195,7 +195,7 @@ fn batched_read_lands_run_and_stops_at_resident() {
     ReleaseBuffer(pre).unwrap();
 
     let before = SMGR_READS.load(Ordering::Relaxed);
-    let b0 = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 0, 32, None).unwrap();
+    let (b0, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 0, 32, None).unwrap();
     assert!(b0 > 0);
     assert_eq!(GetPrivateRefCount(b0), 1);
     assert_eq!(
@@ -229,15 +229,15 @@ fn batched_read_caps_by_hint_and_combine_limit() {
         backend: INVALID_PROC_NUMBER,
     };
     // hint 3 caps the run.
-    let b = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 10, 3, None).unwrap();
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 10, 3, None).unwrap();
     assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 3);
     ReleaseBuffer(b).unwrap();
     // io_combine_limit (default 16) caps a large hint.
-    let b = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 100, 10_000, None).unwrap();
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 100, 10_000, None).unwrap();
     assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 16);
     ReleaseBuffer(b).unwrap();
     // hint 1 degrades to a single-block vectored read.
-    let b = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 200, 1, None).unwrap();
+    let (b, _) = read::ReadBuffer_batched(smgr, RELPERSISTENCE_PERMANENT, 200, 1, None).unwrap();
     assert_eq!(*READV_SIZES.lock().unwrap().last().unwrap(), 1);
     ReleaseBuffer(b).unwrap();
 }
@@ -814,6 +814,7 @@ fn read_local_blk(rel: u32, blkno: u32) -> Buffer {
         None,
     )
     .unwrap()
+    .0
 }
 
 fn setup_extend_seams() {
