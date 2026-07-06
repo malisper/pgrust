@@ -1162,16 +1162,14 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 AlterTableType::AT_ReAddStatistics => {
                     // ATExecAddStatistics (tablecmds.c:9683); the stmt has
-                    // been through transformStatsStmt. DIVERGENCE: the port's
-                    // CreateStatistics always checks namespace rights
-                    // (check_rights=false in C's rebuild) — the caller just
-                    // proved ownership via ALTER TABLE.
+                    // been through transformStatsStmt. check_rights=false:
+                    // C's rebuild arm (tablecmds.c:9693, !is_rebuild).
                     let stmt = cmd
                         .def
                         .expect("AT_ReAddStatistics CreateStatsStmt")
                         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
                         .expect("CreateStatsStmt");
-                    statscmds::CreateStatistics(mcx, stmt)?;
+                    statscmds::CreateStatistics(mcx, stmt, false)?;
                 }
                 AlterTableType::AT_ReAddConstraint => {
                     let defnode = cmd.def.expect("AT_ReAddConstraint Constraint");
