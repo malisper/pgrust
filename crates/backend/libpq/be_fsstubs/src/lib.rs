@@ -4,7 +4,7 @@
 use core::cell::RefCell;
 use core::mem::ManuallyDrop;
 
-use datum::{Datum, Varlena};
+use datum::Varlena;
 use elog::ereport;
 use large_object::{
     inv_close, inv_create, inv_drop, inv_open, inv_read, inv_seek, inv_tell, inv_truncate,
@@ -293,24 +293,150 @@ pub fn be_lowrite<'mcx>(mcx: Mcx<'mcx>, fd: i32, wbuf: &[u8]) -> PgResult<i32> {
     lo_write(mcx, fd, wbuf)
 }
 
-#[cold]
-fn server_fs_unported(name: &str) -> ! {
-    panic!(
-        "{name} (be-fsstubs.c): server-side large-object file transfer unported \
-         (filesystem access policy); use client-side \\lo_import/\\lo_export"
-    );
+// BUFSIZE (be-fsstubs.c).
+const BUFSIZE: usize = 8192;
+
+fn to_fnamebuf(filename: &[u8]) -> String {
+    // text_to_cstring_buffer's encoding (server encoding bytes, NUL-terminated
+    // at MAXPGPATH); paths are opaque bytes to the OS so lossless round-trip
+    // matters more than utf8 validity, but regress fixtures are ASCII.
+    String::from_utf8_lossy(filename).into_owned()
 }
 
-pub fn be_lo_import(_filename: &[u8]) -> PgResult<Oid> {
-    server_fs_unported("lo_import");
+fn lo_import_internal<'mcx>(mcx: Mcx<'mcx>, filename: &[u8], lobjOid: Oid) -> PgResult<Oid> {
+    xact::PreventCommandIfReadOnly("lo_import()")?;
+
+    let fnamebuf = to_fnamebuf(filename);
+
+    let fd = fd::desc::OpenTransientFile(&fnamebuf, libc::O_RDONLY)?;
+    if fd < 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(elog::errno::current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not open server file \"{fnamebuf}\": %m"))
+            .into_error()
+            .into());
+    }
+
+    with_state(|s| s.lo_cleanup_needed = true);
+    let oid = inv_create(mcx, lobjOid)?;
+
+    let result = (|| -> PgResult<()> {
+        let mut lobj = inv_open(mcx, oid, INV_WRITE)?;
+        let mut buf = [0u8; BUFSIZE];
+        loop {
+            // SAFETY: buf is a live BUFSIZE-byte buffer; fd is the transient
+            // file just opened above.
+            let nbytes = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), BUFSIZE) };
+            if nbytes < 0 {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(elog::errno::current_errno())
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not read server file \"{fnamebuf}\": %m"))
+                    .into_error()
+                    .into());
+            }
+            if nbytes == 0 {
+                break;
+            }
+            let written = inv_write(mcx, &mut lobj, &buf[..nbytes as usize])?;
+            debug_assert_eq!(written as usize, nbytes as usize);
+        }
+        inv_close(lobj)
+    })();
+
+    if fd::desc::CloseTransientFile(fd) != 0 {
+        result?;
+        return Err(ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{fnamebuf}\": %m"))
+            .into_error()
+            .into());
+    }
+    result?;
+
+    Ok(oid)
 }
 
-pub fn be_lo_import_with_oid(_filename: &[u8], _oid: Oid) -> PgResult<Oid> {
-    server_fs_unported("lo_import_with_oid");
+pub fn be_lo_import<'mcx>(mcx: Mcx<'mcx>, filename: &[u8]) -> PgResult<Oid> {
+    lo_import_internal(mcx, filename, InvalidOid)
 }
 
-pub fn be_lo_export(_lobjId: Oid, _filename: &[u8]) -> PgResult<i32> {
-    server_fs_unported("lo_export");
+pub fn be_lo_import_with_oid<'mcx>(mcx: Mcx<'mcx>, filename: &[u8], oid: Oid) -> PgResult<Oid> {
+    lo_import_internal(mcx, filename, oid)
+}
+
+pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgResult<i32> {
+    with_state(|s| s.lo_cleanup_needed = true);
+    let mut lobj = inv_open(mcx, lobjId, INV_READ)?;
+
+    let fnamebuf = to_fnamebuf(filename);
+
+    // C reduces the backend's normal 077 umask to 022 for the duration of the
+    // open so exported files aren't world-writable; restored via a guard so
+    // an early return still resets it.
+    struct UmaskGuard(libc::mode_t);
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            // SAFETY: process-wide umask restore, single-threaded backend.
+            unsafe {
+                libc::umask(self.0);
+            }
+        }
+    }
+    // SAFETY: process-wide umask swap, single-threaded backend.
+    let oumask = unsafe { libc::umask(libc::S_IWGRP | libc::S_IWOTH) };
+    let _restore = UmaskGuard(oumask);
+    let fd = fd::desc::OpenTransientFilePerm(
+        &fnamebuf,
+        libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+        (libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH) as u32,
+    )?;
+    drop(_restore);
+    if fd < 0 {
+        return Err(ereport(ERROR)
+            .with_saved_errno(elog::errno::current_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not create server file \"{fnamebuf}\": %m"))
+            .into_error()
+            .into());
+    }
+
+    let result = (|| -> PgResult<()> {
+        let mut buf = [0u8; BUFSIZE];
+        loop {
+            let nbytes = inv_read(mcx, &mut lobj, &mut buf)?;
+            if nbytes <= 0 {
+                break;
+            }
+            // SAFETY: buf's first nbytes bytes were just filled by inv_read.
+            let written =
+                unsafe { libc::write(fd, buf.as_ptr().cast(), nbytes as usize) };
+            if written != nbytes as isize {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(elog::errno::current_errno())
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not write server file \"{fnamebuf}\": %m"))
+                    .into_error()
+                    .into());
+            }
+        }
+        Ok(())
+    })();
+
+    if fd::desc::CloseTransientFile(fd) != 0 {
+        result?;
+        return Err(ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{fnamebuf}\": %m"))
+            .into_error()
+            .into());
+    }
+    result?;
+
+    inv_close(lobj)?;
+
+    Ok(1)
 }
 
 fn lo_truncate_internal<'mcx>(mcx: Mcx<'mcx>, fd: i32, len: int64) -> PgResult<()> {

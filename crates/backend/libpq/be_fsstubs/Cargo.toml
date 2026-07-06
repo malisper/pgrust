@@ -25,3 +25,5 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 resowner_seams = { path = "../../utils/resowner/resowner_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 be_fsstubs_seams = { path = "../be_fsstubs_seams" }
+fd = { path = "../../storage/file/fd" }
+libc = "0.2"

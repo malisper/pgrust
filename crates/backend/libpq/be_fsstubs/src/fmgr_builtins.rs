@@ -73,23 +73,30 @@ pub fn fc_lo_unlink(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
 pub fn fc_lo_import(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text (strict fn).
     let filename = unsafe { fcinfo.arg_varlena_packed(0)? };
-    Ok(Datum::from_oid(crate::be_lo_import(filename.data())?))
+    let mcx = fcinfo.result_mcx();
+    Ok(Datum::from_oid(crate::be_lo_import(mcx, filename.data())?))
 }
 
 pub fn fc_lo_import_with_oid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text (strict fn).
     let filename = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let oid = fcinfo.arg_oid(1);
+    let mcx = fcinfo.result_mcx();
     Ok(Datum::from_oid(crate::be_lo_import_with_oid(
+        mcx,
         filename.data(),
-        fcinfo.arg_oid(1),
+        oid,
     )?))
 }
 
 pub fn fc_lo_export(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 1 is a non-null text (strict fn).
     let filename = unsafe { fcinfo.arg_varlena_packed(1)? };
+    let lobj_id = fcinfo.arg_oid(0);
+    let mcx = fcinfo.result_mcx();
     Ok(Datum::from_i32(crate::be_lo_export(
-        fcinfo.arg_oid(0),
+        mcx,
+        lobj_id,
         filename.data(),
     )?))
 }
