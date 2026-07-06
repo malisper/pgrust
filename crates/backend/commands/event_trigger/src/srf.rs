@@ -146,6 +146,19 @@ fn fc_pg_event_trigger_ddl_commands(
                 CollectedCommandData::AlterTable { class_id, object_id, .. } => {
                     pg_depend::ObjectAddress::set(*class_id, *object_id)
                 }
+                CollectedCommandData::Grant { objtype } => {
+                    nulls[0] = true;
+                    nulls[1] = true;
+                    nulls[2] = true;
+                    values[3] = text_datum(mcx, cmdtag::GetCommandTagName(cmd.tag))?;
+                    values[4] = text_datum(mcx, stringify_grant_objtype(*objtype)?)?;
+                    nulls[5] = true;
+                    nulls[6] = true;
+                    values[7] = Datum::from_bool(cmd.in_extension);
+                    values[8] = Datum::from_usize(cmd as *const _ as usize);
+                    srf.putvalues(&values, &nulls)?;
+                    continue;
+                }
             };
 
             let Some(identity) =
@@ -180,6 +193,36 @@ fn fc_pg_event_trigger_ddl_commands(
     })?;
 
     Ok(srf.finish(fcinfo))
+}
+
+// stringify_grant_objtype (event_trigger.c): the ObjectType spelling used by
+// GRANT/REVOKE; types GRANT cannot reach are C's elog(ERROR) arm.
+fn stringify_grant_objtype(objtype: types_nodes::parsenodes::ObjectType) -> PgResult<&'static str> {
+    use types_nodes::parsenodes::ObjectType::*;
+    Ok(match objtype {
+        OBJECT_COLUMN => "COLUMN",
+        OBJECT_TABLE => "TABLE",
+        OBJECT_SEQUENCE => "SEQUENCE",
+        OBJECT_DATABASE => "DATABASE",
+        OBJECT_DOMAIN => "DOMAIN",
+        OBJECT_FDW => "FOREIGN DATA WRAPPER",
+        OBJECT_FOREIGN_SERVER => "FOREIGN SERVER",
+        OBJECT_FUNCTION => "FUNCTION",
+        OBJECT_LANGUAGE => "LANGUAGE",
+        OBJECT_LARGEOBJECT => "LARGE OBJECT",
+        OBJECT_SCHEMA => "SCHEMA",
+        OBJECT_PARAMETER_ACL => "PARAMETER",
+        OBJECT_PROCEDURE => "PROCEDURE",
+        OBJECT_ROUTINE => "ROUTINE",
+        OBJECT_TABLESPACE => "TABLESPACE",
+        OBJECT_TYPE => "TYPE",
+        other => {
+            return Err(elog::ereport(ERROR)
+                .errmsg(format!("unsupported object type: {}", other as i32))
+                .into_error()
+                .into())
+        }
+    })
 }
 
 fn object_schema_name(mcx: Mcx<'_>, addr: &pg_depend::ObjectAddress) -> PgResult<Option<String>> {

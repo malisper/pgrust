@@ -12,7 +12,7 @@ use types_error::{
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use types_nodes::parsenodes::{AlterEventTrigStmt, CreateEventTrigStmt};
-use types_rel::RowExclusiveLock;
+use types_rel::{AccessExclusiveLock, InplaceUpdateTupleLock, RowExclusiveLock};
 
 use crate::{TRIGGER_DISABLED, TRIGGER_FIRES_ON_ORIGIN};
 
@@ -119,13 +119,6 @@ pub fn CreateEventTrigger<'mcx>(
             ))
             .into_error()
             .into());
-    }
-
-    if eventname == "login" {
-        panic!(
-            "CreateEventTrigger (event_trigger.c): login event triggers unported \
-             (pg_database.dathasloginevt lane)"
-        );
     }
 
     insert_event_trigger_tuple(
@@ -243,6 +236,10 @@ fn insert_event_trigger_tuple<'mcx>(
     let mut tuple = heaptuple::heap_form_tuple(mcx, tgrel.descr(), &values, &nulls)?;
     catalog_indexing::CatalogTupleInsert(mcx, &tgrel, &mut tuple)?;
 
+    if eventname == "login" {
+        SetDatabaseHasLoginEventTriggers(mcx)?;
+    }
+
     pg_depend::recordDependencyOnOwner(mcx, EVENT_TRIGGER_RELATION_ID, trigoid, evt_owner)?;
     let myself = ObjectAddress::set(EVENT_TRIGGER_RELATION_ID, trigoid);
     pg_depend::recordDependencyOn(
@@ -348,14 +345,70 @@ pub fn AlterEventTrigger<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEventTrigStmt<'mcx>) 
     catalog_indexing::CatalogTupleUpdate(mcx, &tgrel, &otid, &mut newtup)?;
 
     if is_login && tgenabled != TRIGGER_DISABLED {
-        panic!(
-            "AlterEventTrigger (event_trigger.c): login event triggers unported \
-             (pg_database.dathasloginevt lane)"
-        );
+        SetDatabaseHasLoginEventTriggers(mcx)?;
     }
 
     tgrel.close(RowExclusiveLock)?;
     Ok(trigoid)
+}
+
+// SetDatabaseHasLoginEventTriggers (event_trigger.c): the shared-object lock
+// is a custom tag serializing this against EventTriggerOnLogin's flag reset;
+// SearchSysCacheLockedCopy1 is composed from Locked1 + copytuple here.
+pub(crate) fn SetDatabaseHasLoginEventTriggers(mcx: Mcx<'_>) -> PgResult<()> {
+    let dbid = init_small::globals::MyDatabaseId();
+    let pg_db = table::table_open(mcx, types_core::catalog::DATABASE_RELATION_ID, RowExclusiveLock)?;
+    lmgr::LockSharedObject(types_core::catalog::DATABASE_RELATION_ID, dbid, 0, AccessExclusiveLock)?;
+    let Some(ctup) = cache_syscache::SearchSysCacheLocked1(
+        cache_syscache::cacheinfo::DATABASEOID,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(dbid)),
+    )?
+    else {
+        return Err(elog::ereport(ERROR)
+            .errmsg(format!("cache lookup failed for database {dbid}"))
+            .into_error()
+            .into());
+    };
+    let tuple = heaptuple::heap_copytuple(mcx, &ctup.tuple())?;
+    cache_syscache::ReleaseSysCache(ctup);
+    let otid = tuple.as_tuple().t_self;
+    let descr = pg_db.descr();
+    let mut isnull = false;
+    // SAFETY: dathasloginevt is a fixed NOT NULL pg_database column.
+    let hasloginevt = unsafe {
+        types_tuple::heap_getattr(
+            tuple.as_tuple(),
+            pg_database::Anum_pg_database_dathasloginevt,
+            descr,
+            &mut isnull,
+        )
+    }
+    .as_bool();
+    if !hasloginevt {
+        let natts = descr.natts as usize;
+        let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        repl_values.resize(natts, Datum::null());
+        repl_isnull.resize(natts, false);
+        repl.resize(natts, false);
+        repl_values[pg_database::Anum_pg_database_dathasloginevt as usize - 1] =
+            Datum::from_bool(true);
+        repl[pg_database::Anum_pg_database_dathasloginevt as usize - 1] = true;
+        let mut newtup = heaptuple::heap_modify_tuple(
+            mcx,
+            tuple.as_tuple(),
+            descr,
+            &repl_values,
+            &repl_isnull,
+            &repl,
+        )?;
+        catalog_indexing::CatalogTupleUpdate(mcx, &pg_db, &otid, &mut newtup)?;
+        xact::CommandCounterIncrement()?;
+    }
+    lmgr::UnlockTuple(&pg_db, &otid, InplaceUpdateTupleLock)?;
+    pg_db.close(RowExclusiveLock)?;
+    Ok(())
 }
 
 pub fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> {

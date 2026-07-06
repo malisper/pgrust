@@ -1245,8 +1245,7 @@ fn slow_switch<'mcx>(
         }
 
         T_GrantStmt => {
-            // C: EventTriggerCollectGrant inside ExecGrantStmt_oids.
-            collect_gap("GRANT");
+            // EventTriggerCollectGrant fires inside ExecGrantStmt_oids (C too).
             let stmt = parsetree.as_grant_stmt().unwrap();
             aclchk::ExecuteGrantStmt(mcx, stmt)?;
             Ok(None)

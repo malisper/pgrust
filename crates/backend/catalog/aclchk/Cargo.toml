@@ -18,6 +18,7 @@ adt_acl = { path = "../../utils/adt/acl" }
 guc = { path = "../../utils/misc/guc" }
 cache_syscache = { path = "../../utils/cache/cache_syscache" }
 aclchk_seams = { path = "../aclchk_seams" }
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
 mcx = { path = "../../../_support/mcx" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_tuple = { path = "../../../_support/types/types_tuple" }

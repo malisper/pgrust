@@ -66,6 +66,8 @@ postinit = { path = "../../utils/init/postinit" }
 miscinit = { path = "../../utils/init/miscinit" }
 types_guc = { path = "../../../_support/types/types_guc" }
 
+event_trigger_seams = { path = "../../commands/event_trigger_seams" }
+
 [dev-dependencies]
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 lwlock = { path = "../../storage/lmgr/lwlock" }

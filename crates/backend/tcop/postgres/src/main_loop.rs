@@ -535,6 +535,12 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 
     let mut message_context = MemoryContext::new_bump("MessageContext");
 
+    // C postgres.c:4369: fire login event triggers before the main loop; a
+    // trigger error here aborts the connection, as C's pre-setjmp ERROR does.
+    {
+        let scratch = MemoryContext::new("EventTriggerOnLogin");
+        event_trigger_seams::event_trigger_on_login::call(scratch.mcx())?;
+    }
 
     let mut state = LoopState {
         send_ready_for_query: true,
