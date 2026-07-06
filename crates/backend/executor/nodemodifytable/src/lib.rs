@@ -821,13 +821,23 @@ fn init_result_rel<'mcx>(
                             })?);
                     }
                     CmdType::CMD_UPDATE => {
+                        // Junk entries (MULTIEXPR SubPlans) are evaluated for
+                        // their Param side effects but never assigned; the
+                        // parser puts them after the SET columns
+                        // (ExecBuildUpdateProjection's evalTargetList shape).
+                        let mut non_junk = 0usize;
+                        let mut seen_junk = false;
                         for tle_node in &action.targetList {
                             let tle = tle_node.as_target_entry().expect("TargetEntry");
-                            assert!(
-                                !tle.resjunk,
-                                "ExecBuildUpdateProjection: junk entry in MERGE UPDATE \
-                                 action targetlist"
-                            );
+                            if tle.resjunk {
+                                seen_junk = true;
+                            } else {
+                                assert!(
+                                    !seen_junk,
+                                    "MERGE UPDATE action tlist: junk before a SET column"
+                                );
+                                non_junk += 1;
+                            }
                         }
                         let proj = {
                             let desc = estate.es_relations[(rti - 1) as usize]
@@ -858,7 +868,7 @@ fn init_result_rel<'mcx>(
                         for attno in action.updateColnos.iter() {
                             exec_action.set_attnos.push(attno as u16);
                         }
-                        assert_eq!(exec_action.set_attnos.len(), action.targetList.len());
+                        assert_eq!(exec_action.set_attnos.len(), non_junk);
                     }
                     CmdType::CMD_DELETE | CmdType::CMD_NOTHING => {}
                     other => panic!("unknown action in MERGE WHEN clause: {other:?}"),
