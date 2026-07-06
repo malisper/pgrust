@@ -298,7 +298,9 @@ pub fn exec_init_function_scan<'mcx>(
         ordinal: 0,
         funcstates,
         scratch: PgVec::new_in(mcx),
-        arg_mcx: mcx.context().new_child("Table function arguments"),
+        // Bump (leak-then-reset) like ExprContext's per-tuple context: arg
+        // evaluation leaks by-ref datums here by design (C argContext).
+        arg_mcx: mcx.context().new_child_bump("Table function arguments"),
         eflags,
     })
 }

@@ -95,10 +95,13 @@ pub fn ginbuild<'mcx>(
             func_ctx.reset();
             {
                 let fmcx = func_ctx.mcx();
-                let (entries, categories) =
-                    ginExtractEntries(fmcx, &state, values[0], isnull[0])?;
-                accum.insert_entries(tid, entries.as_slice(), categories.as_slice())?;
-                indtuples += entries.len() as f64;
+                for i in 0..state.natts as usize {
+                    let attnum = (i + 1) as ::types_core::OffsetNumber;
+                    let (entries, categories) =
+                        ginExtractEntries(fmcx, &state, attnum, values[i], isnull[i])?;
+                    accum.insert_entries(tid, attnum, entries.as_slice(), categories.as_slice())?;
+                    indtuples += entries.len() as f64;
+                }
             }
 
             if accum.allocated_memory
@@ -106,7 +109,7 @@ pub fn ginbuild<'mcx>(
             {
                 accum.begin_scan()?;
                 loop {
-                    let Some((key, category, list)) = accum.next_entry() else {
+                    let Some((attnum, key, category, list)) = accum.next_entry() else {
                         break;
                     };
                     check_for_interrupts();
@@ -115,6 +118,7 @@ pub fn ginbuild<'mcx>(
                         dump_ctx.mcx(),
                         index,
                         &state,
+                        attnum,
                         key,
                         category,
                         list,
@@ -131,7 +135,7 @@ pub fn ginbuild<'mcx>(
 
     accum.begin_scan()?;
     loop {
-        let Some((key, category, list)) = accum.next_entry() else {
+        let Some((attnum, key, category, list)) = accum.next_entry() else {
             break;
         };
         check_for_interrupts();
@@ -140,6 +144,7 @@ pub fn ginbuild<'mcx>(
             dump_ctx.mcx(),
             index,
             &state,
+            attnum,
             key,
             category,
             list,

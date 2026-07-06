@@ -24,8 +24,8 @@ use crate::datapage::{
     posting_item_at,
 };
 use crate::entrypage::{
-    gin_get_downlink, gin_get_nposting, gin_is_posting_tree, gintuple_get_key, ginReadTuple,
-    GinFormTuple, ITup,
+    gin_get_downlink, gin_get_nposting, gin_is_posting_tree, gintuple_get_attrnum,
+    gintuple_get_key, ginReadTuple, GinFormTuple, ITup,
 };
 use crate::fast::ginInsertCleanup;
 use crate::util::{gin_page_is_recyclable, initGinState, ginUpdateStats};
@@ -467,11 +467,14 @@ fn ginVacuumEntryPage<'s>(
 
                 // Form the replacement before deleting: key borrows the old
                 // tuple's bytes (C keeps the same order).
+                let attnum = gintuple_get_attrnum(gvs.state, itup);
                 let mut category = GIN_CAT_NORM_KEY;
-                let key = gintuple_get_key(rel, itup, &mut category);
+                let key = gintuple_get_key(scratch, rel, gvs.state, itup, &mut category)?;
                 let newtup = GinFormTuple(
                     scratch,
                     rel,
+                    gvs.state,
+                    attnum,
                     key,
                     category,
                     plist.as_slice(),

@@ -118,6 +118,7 @@ fn collect_match_bitmap(
         init_small::globals::work_mem() as usize * 1024,
     ));
 
+    let attnum = entry.attnum;
     predicate_lock_page(rel, bm::buffer_get_block_number::call(stack.top().buffer), snapshot)?;
 
     loop {
@@ -133,17 +134,27 @@ fn collect_match_bitmap(
             page.item_raw(id).0
         };
 
+        // Tuple stores another attribute: stop the scan.
+        // SAFETY: live tuple under the lock.
+        if unsafe { crate::entrypage::gintuple_get_attrnum(state, itup) } != attnum {
+            return Ok(true);
+        }
+
         let mut icategory = GIN_CAT_NORM_KEY;
         // SAFETY: live tuple under the lock.
-        let idatum = unsafe { gintuple_get_key(rel, itup, &mut icategory) };
+        let idatum = unsafe { gintuple_get_key(kcx, rel, state, itup, &mut icategory)? };
 
         if entry.isPartialMatch {
             // Partial matches stop at any null (including placeholders).
             if icategory != GIN_CAT_NORM_KEY {
                 return Ok(true);
             }
-            let cmp =
-                crate::opclass::compare_partial(state, entry.queryKey, idatum, entry.strategy);
+            let cmp = crate::opclass::compare_partial(
+                state.col(attnum),
+                entry.queryKey,
+                idatum,
+                entry.strategy,
+            );
             if cmp > 0 {
                 return Ok(true);
             } else if cmp < 0 {
@@ -161,7 +172,7 @@ fn collect_match_bitmap(
 
             // Save the key value to re-find our position after re-locking.
             let saved = if icategory == GIN_CAT_NORM_KEY {
-                Some(datum_copy_key(kcx, state, idatum)?)
+                Some(datum_copy_key(kcx, state.col(attnum), idatum)?)
             } else {
                 None
             };
@@ -191,12 +202,16 @@ fn collect_match_bitmap(
                     let id = page.item_id(off);
                     page.item_raw(id).0
                 };
-                let mut newcat = GIN_CAT_NORM_KEY;
                 // SAFETY: as above.
-                let newdatum = unsafe { gintuple_get_key(rel, itup, &mut newcat) };
-                let cmpto = saved.unwrap_or(idatum);
-                if ginCompareEntries(state, newdatum, newcat, cmpto, icategory) == 0 {
-                    break;
+                if unsafe { crate::entrypage::gintuple_get_attrnum(state, itup) } == attnum {
+                    let mut newcat = GIN_CAT_NORM_KEY;
+                    // SAFETY: as above.
+                    let newdatum =
+                        unsafe { gintuple_get_key(kcx, rel, state, itup, &mut newcat)? };
+                    let cmpto = saved.unwrap_or(idatum);
+                    if ginCompareEntries(state, attnum, newdatum, newcat, cmpto, icategory) == 0 {
+                        break;
+                    }
                 }
                 stack.top_mut().off += 1;
             }
@@ -217,15 +232,15 @@ fn collect_match_bitmap(
     }
 }
 
-fn datum_copy_key(mcx: Mcx<'static>, state: &GinState, key: Datum) -> PgResult<Datum> {
-    if state.key_byval {
+fn datum_copy_key(mcx: Mcx<'static>, col: &GinColState, key: Datum) -> PgResult<Datum> {
+    if col.key_byval {
         return Ok(key);
     }
-    let len = if state.key_len == -1 {
+    let len = if col.key_len == -1 {
         // SAFETY: non-null varlena key.
         unsafe { ::types_tuple::varatt::varsize_any(key.as_usize() as *const u8) }
     } else {
-        state.key_len as usize
+        col.key_len as usize
     };
     let mut buf: PgVec<'static, u8> = mcx::vec_with_capacity_in(mcx, len)?;
     // SAFETY: len bytes of the live key image.
@@ -260,7 +275,14 @@ fn start_scan_entry(
 
         let scratch = MemoryContext::new_bump("gin entry scan scratch");
         let smcx = scratch.mcx();
-        let mut btree = EntryBtree::new(rel, state, entry.queryKey, entry.queryCategory, smcx);
+        let mut btree = EntryBtree::new(
+            rel,
+            state,
+            entry.attnum,
+            entry.queryKey,
+            entry.queryCategory,
+            smcx,
+        );
         // GIN_CAT_EMPTY_QUERY sorts before everything: findItem lands on the
         // leftmost item.
         let mut stack = ginFindLeafPage(smcx, rel, &mut btree, true, false)?;
@@ -948,6 +970,7 @@ fn scan_get_candidate(rel: &Relation<'_>, pos: &mut PendingPosition) -> PgResult
 /// matchPartialInPendingList.
 #[allow(clippy::too_many_arguments)]
 fn match_partial_in_pending_list(
+    mcx: Mcx<'_>,
     state: &GinState,
     rel: &Relation<'_>,
     buffer: Buffer,
@@ -957,10 +980,10 @@ fn match_partial_in_pending_list(
     datum: &mut [Datum],
     category: &mut [GinNullCategory],
     extracted: &mut [bool],
-) -> bool {
+) -> PgResult<bool> {
     // Partial match to a null is not possible.
     if entry.queryCategory != GIN_CAT_NORM_KEY {
-        return false;
+        return Ok(false);
     }
     while off < maxoff {
         // SAFETY: pin + share lock held by the caller.
@@ -969,27 +992,37 @@ fn match_partial_in_pending_list(
             let id = page.item_id(off);
             page.item_raw(id).0
         };
+        // Tuple stores another attribute: stop.
+        // SAFETY: live tuple under the lock.
+        if unsafe { crate::entrypage::gintuple_get_attrnum(state, itup) } != entry.attnum {
+            return Ok(false);
+        }
         let mi = off as usize - 1;
         if !extracted[mi] {
             let mut cat = GIN_CAT_NORM_KEY;
             // SAFETY: live tuple under the lock.
-            datum[mi] = unsafe { gintuple_get_key(rel, itup, &mut cat) };
+            datum[mi] = unsafe { gintuple_get_key(mcx, rel, state, itup, &mut cat)? };
             category[mi] = cat;
             extracted[mi] = true;
         }
         // Once we hit nulls, no further match is possible.
         if category[mi] != GIN_CAT_NORM_KEY {
-            return false;
+            return Ok(false);
         }
-        let cmp = crate::opclass::compare_partial(state, entry.queryKey, datum[mi], entry.strategy);
+        let cmp = crate::opclass::compare_partial(
+            state.col(entry.attnum),
+            entry.queryKey,
+            datum[mi],
+            entry.strategy,
+        );
         if cmp == 0 {
-            return true;
+            return Ok(true);
         } else if cmp > 0 {
-            return false;
+            return Ok(false);
         }
         off += 1;
     }
-    false
+    Ok(false)
 }
 
 /// collectMatchesForHeapRow.
@@ -1032,6 +1065,7 @@ fn collect_matches_for_heap_row(
                 let eid = work.keys[ki].scanEntry[j] as usize;
                 let entry = &work.entries[eid];
 
+                let key_attnum = work.keys[ki].attnum;
                 let mut stop_low = pos.first_offset;
                 let mut stop_high = pos.last_offset;
                 let mut found_eq = false;
@@ -1043,11 +1077,26 @@ fn collect_matches_for_heap_row(
                         let id = page.item_id(stop_middle);
                         page.item_raw(id).0
                     };
+                    // Pending tuples are ordered by (attnum, datum).
+                    // SAFETY: live tuple under the lock.
+                    let tup_attnum =
+                        unsafe { crate::entrypage::gintuple_get_attrnum(state, itup) };
+                    if key_attnum < tup_attnum {
+                        stop_high = stop_middle;
+                        continue;
+                    }
+                    if key_attnum > tup_attnum {
+                        stop_low = stop_middle + 1;
+                        continue;
+                    }
                     let mi = stop_middle as usize - 1;
                     if !extracted[mi] {
                         let mut cat = GIN_CAT_NORM_KEY;
-                        // SAFETY: live tuple under the lock.
-                        datum[mi] = unsafe { gintuple_get_key(rel, itup, &mut cat) };
+                        // SAFETY: live tuple under the lock; kcx is the
+                        // scan-lifetime key context (transient tupdesc only).
+                        let kcx2 = unsafe { work.kcx() };
+                        datum[mi] =
+                            unsafe { gintuple_get_key(kcx2, rel, state, itup, &mut cat)? };
                         category[mi] = cat;
                         extracted[mi] = true;
                     }
@@ -1065,6 +1114,7 @@ fn collect_matches_for_heap_row(
                     } else {
                         ginCompareEntries(
                             state,
+                            entry.attnum,
                             entry.queryKey,
                             entry.queryCategory,
                             datum[mi],
@@ -1074,7 +1124,10 @@ fn collect_matches_for_heap_row(
 
                     if res == 0 {
                         work.keys[ki].entryRes[j] = if entry.isPartialMatch {
+                            // SAFETY: kcx contract as above.
+                            let kcx2 = unsafe { work.kcx() };
                             if match_partial_in_pending_list(
+                                kcx2,
                                 state,
                                 rel,
                                 pos.pending_buffer,
@@ -1084,7 +1137,7 @@ fn collect_matches_for_heap_row(
                                 &mut datum,
                                 &mut category,
                                 &mut extracted,
-                            ) {
+                            )? {
                                 GIN_TRUE
                             } else {
                                 GIN_FALSE
@@ -1104,7 +1157,10 @@ fn collect_matches_for_heap_row(
                 if !found_eq && entry.isPartialMatch {
                     // No exact match: scan forward from the first tuple
                     // greater than the target value.
+                    // SAFETY: kcx contract as above.
+                    let kcx2 = unsafe { work.kcx() };
                     work.keys[ki].entryRes[j] = if match_partial_in_pending_list(
+                        kcx2,
                         state,
                         rel,
                         pos.pending_buffer,
@@ -1114,7 +1170,7 @@ fn collect_matches_for_heap_row(
                         &mut datum,
                         &mut category,
                         &mut extracted,
-                    ) {
+                    )? {
                         GIN_TRUE
                     } else {
                         GIN_FALSE

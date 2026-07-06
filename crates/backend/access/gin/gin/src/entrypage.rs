@@ -1,6 +1,6 @@
-//! ginentrypage.c: entry-tree tuples and page operations. Single-key-column
-//! form only (multicol is loud at initGinState), so the category byte sits at
-//! IndexInfoFindDataOffset + 0 and attnum is always 1.
+//! ginentrypage.c: entry-tree tuples and page operations. Multicolumn entry
+//! tuples carry the attribute number as a leading int2 attribute; the
+//! category byte sits at GinCategoryOffset (data offset, +2 for multicol).
 
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
@@ -19,7 +19,7 @@ use ::types_tuple::itemptr::{
 
 use crate::btree::{Frame, GinBt, GinPlace};
 use crate::postinglist::ginPostingListDecodeAllSegments;
-use crate::util::{gin_init_page_bytes, ginCompareEntries};
+use crate::util::gin_init_page_bytes;
 use crate::{page_mut, page_opaque, page_ref};
 
 pub(crate) const GIN_TREE_POSTING: OffsetNumber = 0xffff;
@@ -82,27 +82,88 @@ pub(crate) unsafe fn gin_set_posting_tree(itup: *mut u8, root: BlockNumber) {
     set_t_tid_parts(itup, Some(root), Some(GIN_TREE_POSTING));
 }
 
-/// GinCategoryOffset + GinGetNullCategory (oneCol).
+/// GinCategoryOffset + GinGetNullCategory.
 #[inline]
-pub(crate) unsafe fn gin_get_null_category(itup: ITup) -> GinNullCategory {
-    let off = index_info_find_data_offset(itup::t_info(itup));
+pub(crate) unsafe fn gin_get_null_category(state: &GinState, itup: ITup) -> GinNullCategory {
+    let off = index_info_find_data_offset(itup::t_info(itup))
+        + if state.one_col { 0 } else { core::mem::size_of::<i16>() };
     *itup.add(off).cast::<GinNullCategory>()
 }
 
-/// gintuple_get_key (oneCol): borrowed datum into the page image.
-pub(crate) unsafe fn gintuple_get_key(
+/// gintuple_get_attrnum. The multicolumn attnum is the first attribute (int2,
+/// never null): raw native-endian read at the data offset.
+#[inline]
+pub(crate) unsafe fn gintuple_get_attrnum(state: &GinState, itup: ITup) -> OffsetNumber {
+    if state.one_col {
+        return FirstOffsetNumber;
+    }
+    let off = index_info_find_data_offset(itup::t_info(itup));
+    let colnum = itup.add(off).cast::<u16>().read_unaligned() as OffsetNumber;
+    debug_assert!(colnum >= 1 && (colnum as u16) <= state.natts);
+    colnum
+}
+
+/// Transient per-column key tupdesc for the multicolumn entry-tuple layout
+/// (C initGinState's state->tupdesc[i]: int2 attnum + key attribute).
+pub(crate) fn gin_col_tupdesc<'s>(
+    mcx: Mcx<'s>,
     rel: &Relation<'_>,
+    attnum: OffsetNumber,
+) -> PgResult<::types_tuple::TupleDescData<'s>> {
+    use ::types_tuple::{CompactAttribute, FormData_pg_attribute};
+    let mut int2 = FormData_pg_attribute {
+        atttypid: ::types_core::INT2OID,
+        attlen: 2,
+        attnum: 1,
+        atttypmod: -1,
+        attbyval: true,
+        attalign: b's' as i8,
+        attstorage: b'p' as i8,
+        ..Default::default()
+    };
+    int2.attislocal = true;
+    let mut key = *rel.rd_att.attr(attnum as usize - 1);
+    key.attnum = 2;
+    let mut attrs = mcx::vec_with_capacity_in(mcx, 2)?;
+    attrs.push(int2);
+    attrs.push(key);
+    let mut compact = mcx::vec_with_capacity_in(mcx, 2)?;
+    compact.push(CompactAttribute::populate_from(&attrs[0]));
+    compact.push(CompactAttribute::populate_from(&attrs[1]));
+    Ok(::types_tuple::TupleDescData {
+        natts: 2,
+        tdtypeid: ::types_core::RECORDOID,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+/// gintuple_get_key: borrowed datum into the page image. `mcx` is scratch for
+/// the transient multicolumn tupdesc only.
+pub(crate) unsafe fn gintuple_get_key(
+    mcx: Mcx<'_>,
+    rel: &Relation<'_>,
+    state: &GinState,
     itup: ITup,
     category: &mut GinNullCategory,
-) -> Datum {
+) -> PgResult<Datum> {
     let mut isnull = false;
-    let res = itup::index_getattr(itup, 1, &rel.rd_att, &mut isnull);
+    let res = if state.one_col {
+        itup::index_getattr(itup, 1, &rel.rd_att, &mut isnull)
+    } else {
+        let colnum = gintuple_get_attrnum(state, itup);
+        let desc = gin_col_tupdesc(mcx, rel, colnum)?;
+        itup::index_getattr(itup, 2, &desc, &mut isnull)
+    };
     *category = if isnull {
-        gin_get_null_category(itup)
+        gin_get_null_category(state, itup)
     } else {
         GIN_CAT_NORM_KEY
     };
-    res
+    Ok(res)
 }
 
 #[cold]
@@ -121,6 +182,8 @@ fn index_row_too_big(newsize: usize, relname: &str) -> Box<PgError> {
 pub(crate) fn GinFormTuple<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'_>,
+    state: &GinState,
+    attnum: OffsetNumber,
     key: Datum,
     category: GinNullCategory,
     data: &[u8],
@@ -128,17 +191,27 @@ pub(crate) fn GinFormTuple<'mcx>(
     nipd: usize,
     error_too_big: bool,
 ) -> PgResult<Option<ItupBuf<'mcx>>> {
-    let values = [key];
-    let isnull = [category != GIN_CAT_NORM_KEY];
-    let itup = index_form_tuple(mcx, &rel.rd_att, &values, &isnull)?;
+    let itup = if state.one_col {
+        let values = [key];
+        let isnull = [category != GIN_CAT_NORM_KEY];
+        index_form_tuple(mcx, &rel.rd_att, &values, &isnull)?
+    } else {
+        let desc = gin_col_tupdesc(mcx, rel, attnum)?;
+        let values = [Datum::from_usize(attnum as usize), key];
+        let isnull = [false, category != GIN_CAT_NORM_KEY];
+        index_form_tuple(mcx, &desc, &values, &isnull)?
+    };
 
     // SAFETY: freshly built owned image.
     let mut newsize = unsafe { itup::index_tuple_size(itup.as_ptr()) };
     // SAFETY: as above.
     if unsafe { itup::index_tuple_has_nulls(itup.as_ptr()) } {
         debug_assert!(category != GIN_CAT_NORM_KEY);
+        // GinCategoryOffset + sizeof(GinNullCategory).
         // SAFETY: as above.
-        let minsize = index_info_find_data_offset(unsafe { itup::t_info(itup.as_ptr()) }) + 1;
+        let minsize = index_info_find_data_offset(unsafe { itup::t_info(itup.as_ptr()) })
+            + if state.one_col { 0 } else { core::mem::size_of::<i16>() }
+            + 1;
         newsize = newsize.max(minsize);
     }
     newsize = SHORTALIGN(newsize);
@@ -179,7 +252,8 @@ pub(crate) fn GinFormTuple<'mcx>(
         }
         if category != GIN_CAT_NORM_KEY {
             debug_assert!(itup::index_tuple_has_nulls(out.as_ptr()));
-            let off = index_info_find_data_offset(itup::t_info(out.as_ptr()));
+            let off = index_info_find_data_offset(itup::t_info(out.as_ptr()))
+                + if state.one_col { 0 } else { core::mem::size_of::<i16>() };
             *out.as_mut_ptr().add(off).cast::<GinNullCategory>() = category;
         }
     }
@@ -258,6 +332,7 @@ pub(crate) struct EntryPayload<'s> {
 pub(crate) struct EntryBtree<'a, 'r, 's> {
     pub rel: &'a Relation<'r>,
     pub state: &'a GinState,
+    pub attnum: OffsetNumber,
     pub key: Datum,
     pub category: GinNullCategory,
     pub is_build: bool,
@@ -270,6 +345,7 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
     pub fn new(
         rel: &'a Relation<'r>,
         state: &'a GinState,
+        attnum: OffsetNumber,
         key: Datum,
         category: GinNullCategory,
         scratch: Mcx<'s>,
@@ -277,6 +353,7 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
         EntryBtree {
             rel,
             state,
+            attnum,
             key,
             category,
             is_build: false,
@@ -289,8 +366,22 @@ impl<'a, 'r, 's> EntryBtree<'a, 'r, 's> {
     pub(crate) fn compare_to(&self, itup: ITup) -> i32 {
         let mut category = GIN_CAT_NORM_KEY;
         // SAFETY: pin held by the caller of the search callbacks.
-        let key = unsafe { gintuple_get_key(self.rel, itup, &mut category) };
-        ginCompareEntries(self.state, self.key, self.category, key, category)
+        let (tup_attnum, key) = unsafe {
+            (
+                gintuple_get_attrnum(self.state, itup),
+                gintuple_get_key(self.scratch, self.rel, self.state, itup, &mut category)
+                    .expect("gin key tupdesc scratch alloc"),
+            )
+        };
+        crate::util::ginCompareAttEntries(
+            self.state,
+            self.attnum,
+            self.key,
+            self.category,
+            tup_attnum,
+            key,
+            category,
+        )
     }
 
     /// entryIsEnoughSpace.

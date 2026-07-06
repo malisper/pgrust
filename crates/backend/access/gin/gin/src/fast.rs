@@ -42,22 +42,33 @@ impl<'s> GinTupleCollector<'s> {
     }
 }
 
-/// ginHeapTupleFastCollect (single key column).
+/// ginHeapTupleFastCollect.
 pub(crate) fn ginHeapTupleFastCollect<'s>(
     mcx: Mcx<'s>,
     rel: &Relation<'_>,
     state: &GinState,
     collector: &mut GinTupleCollector<'s>,
+    attnum: OffsetNumber,
     value: Datum,
     is_null: bool,
     ht_ctid: &ItemPointerData,
 ) -> PgResult<()> {
-    let (entries, categories) = ginExtractEntries(mcx, state, value, is_null)?;
+    let (entries, categories) = ginExtractEntries(mcx, state, attnum, value, is_null)?;
 
     for (i, key) in entries.iter().enumerate() {
-        let mut itup =
-            crate::entrypage::GinFormTuple(mcx, rel, *key, categories[i], &[], 0, 0, true)?
-                .expect("errorTooBig");
+        let mut itup = crate::entrypage::GinFormTuple(
+            mcx,
+            rel,
+            state,
+            attnum,
+            *key,
+            categories[i],
+            &[],
+            0,
+            0,
+            true,
+        )?
+        .expect("errorTooBig");
         // Pending tuples carry the heap TID in t_tid.
         // SAFETY: owned tuple image.
         unsafe { itup::set_t_tid(itup.as_mut_ptr(), *ht_ctid) };
@@ -518,9 +529,11 @@ fn shift_list(
     }
 }
 
-/// processPendingPage (single key column).
-fn process_pending_page(
+/// processPendingPage.
+fn process_pending_page<'s>(
+    mcx: Mcx<'s>,
     rel: &Relation<'_>,
+    state: &GinState,
     accum: &mut BuildAccumulator<'_>,
     ka: &mut (Vec<Datum>, Vec<GinNullCategory>),
     buffer: Buffer,
@@ -533,30 +546,35 @@ fn process_pending_page(
     let maxoff = page.max_offset_number();
     debug_assert!(maxoff >= FirstOffsetNumber);
     let mut heapptr = ItemPointerData::invalid();
+    let mut attrnum: OffsetNumber = 0;
 
     for i in startoff..=maxoff {
         let id = page.item_id(i);
         let itup = page.item_raw(id).0;
         // SAFETY: live tuple under the lock; t_tid is the heap pointer here.
         let tid = unsafe { itup::t_tid(itup) };
+        // SAFETY: as above.
+        let curattnum = unsafe { crate::entrypage::gintuple_get_attrnum(state, itup) };
 
         // C: !ItemPointerIsValid(&heapptr) — validity is posid != 0.
         if heapptr.ip_posid == 0 {
             heapptr = tid;
-        } else if !ItemPointerEquals(&heapptr, &tid) {
-            accum.insert_entries(&heapptr, &ka.0, &ka.1)?;
+            attrnum = curattnum;
+        } else if !(ItemPointerEquals(&heapptr, &tid) && curattnum == attrnum) {
+            accum.insert_entries(&heapptr, attrnum, &ka.0, &ka.1)?;
             ka.0.clear();
             ka.1.clear();
             heapptr = tid;
+            attrnum = curattnum;
         }
         let mut category = GIN_CAT_NORM_KEY;
         // SAFETY: as above.
-        let key = unsafe { gintuple_get_key(rel, itup, &mut category) };
+        let key = unsafe { gintuple_get_key(mcx, rel, state, itup, &mut category)? };
         ka.0.push(key);
         ka.1.push(category);
     }
 
-    accum.insert_entries(&heapptr, &ka.0, &ka.1)?;
+    accum.insert_entries(&heapptr, attrnum, &ka.0, &ka.1)?;
     Ok(())
 }
 
@@ -613,7 +631,7 @@ pub fn ginInsertCleanup<'s>(
             cleanup_finish = true;
         }
 
-        process_pending_page(rel, &mut accum, &mut ka, buffer, FirstOffsetNumber)?;
+        process_pending_page(op_ctx.mcx(), rel, state, &mut accum, &mut ka, buffer, FirstOffsetNumber)?;
 
         // SAFETY: pin + share lock held.
         let opaque = page_opaque(&unsafe { page_ref(buffer) });
@@ -627,11 +645,11 @@ pub fn ginInsertCleanup<'s>(
 
             accum.begin_scan()?;
             loop {
-                let Some((key, category, list)) = accum.next_entry() else {
+                let Some((attnum, key, category, list)) = accum.next_entry() else {
                     break;
                 };
                 let dump_ctx = MemoryContext::new_bump("gin cleanup dump scratch");
-                ginEntryInsert(dump_ctx.mcx(), rel, state, key, category, list, None)?;
+                ginEntryInsert(dump_ctx.mcx(), rel, state, attnum, key, category, list, None)?;
             }
 
             bm::lock_buffer::call(metabuffer, GIN_EXCLUSIVE)?;
@@ -645,14 +663,14 @@ pub fn ginInsertCleanup<'s>(
                 drop(accum);
                 op_ctx.reset();
                 accum = unsafe { erase(BuildAccumulator::new(op_ctx.mcx(), *state)) };
-                process_pending_page(rel, &mut accum, &mut ka, buffer, maxoff + 1)?;
+                process_pending_page(op_ctx.mcx(), rel, state, &mut accum, &mut ka, buffer, maxoff + 1)?;
                 accum.begin_scan()?;
                 loop {
-                    let Some((key, category, list)) = accum.next_entry() else {
+                    let Some((attnum, key, category, list)) = accum.next_entry() else {
                         break;
                     };
                     let dump_ctx = MemoryContext::new_bump("gin cleanup dump scratch");
-                    ginEntryInsert(dump_ctx.mcx(), rel, state, key, category, list, None)?;
+                    ginEntryInsert(dump_ctx.mcx(), rel, state, attnum, key, category, list, None)?;
                 }
             }
 

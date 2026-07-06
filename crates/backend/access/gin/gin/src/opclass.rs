@@ -88,8 +88,8 @@ fn text_payload<'x>(d: Datum) -> &'x [u8] {
 }
 
 /// compareFn: total order on two non-null key datums.
-pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
-    match state.opclass {
+pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
+    match col.opclass {
         GinOpclass::JsonbOps => {
             ::adt_jsonb::gin::gin_compare_jsonb(text_payload(a), text_payload(b))
         }
@@ -107,7 +107,7 @@ pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
         }
         // Element-type default btree comparator (initGinState typcache
         // fallback), closed set resolved to state.elem_cmp.
-        GinOpclass::ArrayOps => match state.elem_cmp {
+        GinOpclass::ArrayOps => match col.elem_cmp {
             GinElemCmp::Int2 => {
                 let (x, y) = (a.as_u64() as i16, b.as_u64() as i16);
                 if x < y {
@@ -143,7 +143,7 @@ pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
             GinElemCmp::Text => {
                 // bttextcmp; the collation is resolved by the time an index
                 // key is compared, so the PgResult never fires here.
-                ::varlena::varstr_cmp(text_payload(a), text_payload(b), state.support_collation)
+                ::varlena::varstr_cmp(text_payload(a), text_payload(b), col.support_collation)
                     .expect("collation resolved for gin array_ops key compare")
             }
             GinElemCmp::None => unreachable!("array_ops compare without elem_cmp"),
@@ -153,12 +153,12 @@ pub(crate) fn compare(state: &GinState, a: Datum, b: Datum) -> i32 {
 
 /// comparePartialFn (tsvector_ops gin_cmp_prefix; only partial-match opclass).
 pub(crate) fn compare_partial(
-    state: &GinState,
+    col: &GinColState,
     partial_key: Datum,
     key: Datum,
     _strategy: StrategyNumber,
 ) -> i32 {
-    match state.opclass {
+    match col.opclass {
         GinOpclass::TsvectorOps => {
             ::adt_tsginidx::gin_cmp_prefix(text_payload(partial_key), text_payload(key))
         }
@@ -170,11 +170,11 @@ pub(crate) fn compare_partial(
 /// "extractValue left it NULL" (all keys non-null).
 pub(crate) fn extract_value<'m>(
     mcx: Mcx<'m>,
-    state: &GinState,
+    col: &GinColState,
     value: Datum,
 ) -> PgResult<(PgVec<'m, Datum>, PgVec<'m, bool>)> {
     let no_nulls = mcx::vec_new_in(mcx);
-    match state.opclass {
+    match col.opclass {
         GinOpclass::JsonbOps => {
             let payload = detoast_payload(mcx, value)?;
             Ok((::adt_jsonb::gin::gin_extract_jsonb(mcx, payload)?, no_nulls))
@@ -230,14 +230,14 @@ pub struct ExtractedQuery<'m> {
 
 pub(crate) fn extract_query<'m>(
     mcx: Mcx<'m>,
-    state: &GinState,
+    col: &GinColState,
     query: Datum,
     strategy: StrategyNumber,
 ) -> PgResult<ExtractedQuery<'m>> {
     let image = detoast_image(mcx, query)?;
-    match state.opclass {
+    match col.opclass {
         GinOpclass::JsonbOps | GinOpclass::JsonbPathOps => {
-            let (entries, search_mode, jsp_ops) = match state.opclass {
+            let (entries, search_mode, jsp_ops) = match col.opclass {
                 GinOpclass::JsonbOps => {
                     ::adt_jsonb::gin::gin_extract_jsonb_query(mcx, image, strategy)?
                 }
@@ -312,7 +312,7 @@ pub(crate) fn extract_query<'m>(
 /// consistentFn (binary). `mcx` is the reset-per-call scratch (C tempCtx).
 pub(crate) fn consistent(
     mcx: Mcx<'_>,
-    state: &GinState,
+    col: &GinColState,
     check: &[GinTernaryValue],
     strategy: StrategyNumber,
     query: Datum,
@@ -323,7 +323,7 @@ pub(crate) fn consistent(
     map_item_operand: &[i32],
     recheck: &mut bool,
 ) -> PgResult<bool> {
-    match state.opclass {
+    match col.opclass {
         GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_consistent_jsonb(
             check, strategy, nkeys, recheck, jsp_ops,
         )),
@@ -368,7 +368,7 @@ pub(crate) fn consistent(
 /// triConsistentFn. `mcx` is the reset-per-call scratch (C tempCtx).
 pub(crate) fn tri_consistent(
     mcx: Mcx<'_>,
-    state: &GinState,
+    col: &GinColState,
     check: &[GinTernaryValue],
     strategy: StrategyNumber,
     query: Datum,
@@ -378,7 +378,7 @@ pub(crate) fn tri_consistent(
     jsp_ops: &[JspGinOp],
     map_item_operand: &[i32],
 ) -> PgResult<GinTernaryValue> {
-    match state.opclass {
+    match col.opclass {
         GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_triconsistent_jsonb(
             check, strategy, nkeys, jsp_ops,
         )),
@@ -464,7 +464,7 @@ pub fn gincost_extract_query(
         F_GINQUERYARRAYEXTRACT => (GinOpclass::ArrayOps, false),
         other => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
     };
-    let state = GinState {
+    let col = GinColState {
         opclass,
         elem_cmp: GinElemCmp::None,
         support_collation: ::types_core::catalog::DEFAULT_COLLATION_OID,
@@ -473,7 +473,7 @@ pub fn gincost_extract_query(
         key_len: -1,
     };
     let scratch = ::mcx::MemoryContext::new_bump("gincost extract scratch");
-    let out = extract_query(scratch.mcx(), &state, query, strategy)?;
+    let out = extract_query(scratch.mcx(), &col, query, strategy)?;
     let npartial = out.partial_match.iter().filter(|&&p| p).count() as i32;
     Ok((out.entries.len() as i32, npartial, out.search_mode))
 }
