@@ -371,11 +371,9 @@ pub fn exec_init_modify_table<'mcx>(
                 })
             });
             if has_insert {
-                if !node.returningLists.is_nil() {
-                    panic!(
-                        "ExecInitMerge (nodeModifyTable.c:3844-3900): RETURNING over an                          inherited/partitioned-target MERGE with INSERT actions (root                          RETURNING attno translation) not ported"
-                    );
-                }
+                // RETURNING over root INSERTs: exec_merge_not_matched builds
+                // the root projection lazily (exec_init_root_returning, the
+                // C 3844-3947 rootRelInfo leg in root coordinates).
                 let mcx = estate.es_query_cxt;
                 let (kind, desc) = {
                     let rel = estate.es_relations[(root_exec.rti - 1) as usize]
@@ -2340,20 +2338,41 @@ fn exec_merge_not_matched<'mcx>(
                 }
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
-                mt.insert_target_root = false;
                 mt.mt_merge_inserted += 1.0;
-                if let Some(islot) = inserted? {
+                let inserted = match inserted {
+                    Ok(v) => v,
+                    Err(e) => {
+                        mt.insert_target_root = false;
+                        return Err(e);
+                    }
+                };
+                if let Some(islot) = inserted {
+                    // Root INSERTs project RETURNING over the root layout
+                    // (C rootRelInfo ri_projectReturning, built lazily here
+                    // from returningLists[0] as in exec_init_root_returning).
+                    let init = if mt.insert_target_root {
+                        exec_init_root_returning(mt, estate)
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(e) = init {
+                        mt.insert_target_root = false;
+                        return Err(e);
+                    }
                     if mt.rel().project_returning.is_some() {
-                        return Ok(Some(exec_process_returning(
+                        let out = exec_process_returning(
                             mt,
                             estate,
                             CmdType::CMD_INSERT,
                             None,
                             Some(islot),
                             plan_slot,
-                        )?));
+                        );
+                        mt.insert_target_root = false;
+                        return Ok(Some(out?));
                     }
                 }
+                mt.insert_target_root = false;
             }
             CmdType::CMD_NOTHING => {}
             other => panic!("unknown action in MERGE WHEN NOT MATCHED clause: {other:?}"),
