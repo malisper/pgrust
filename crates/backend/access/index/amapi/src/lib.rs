@@ -207,10 +207,59 @@ pub fn am_adjust_members(
         IndexAmKind::Spgist => {
             spgist_validate::spgadjustmembers(opfamilyoid, opclassoid, operators, functions)
         }
+        IndexAmKind::Gist => gistadjustmembers(opfamilyoid, opclassoid, operators, functions),
         // C brinhandler sets amadjustmembers = NULL.
         IndexAmKind::Brin => Ok(()),
         other => panic!("unported: amadjustmembers for index AM {other:?}"),
     }
+}
+
+// gistadjustmembers (gistvalidate.c:288): operators always get soft opfamily
+// dependencies; required support functions get hard dependencies, optional
+// ones soft opfamily dependencies.
+fn gistadjustmembers(
+    opfamilyoid: Oid,
+    _opclassoid: Oid,
+    operators: &mut [types_relscan::OpFamilyMember],
+    functions: &mut [types_relscan::OpFamilyMember],
+) -> PgResult<()> {
+    for op in operators.iter_mut() {
+        op.ref_is_hard = false;
+        op.ref_is_family = true;
+        op.refobjid = opfamilyoid;
+    }
+    for op in functions.iter_mut() {
+        match op.number as u16 {
+            types_gist::GIST_CONSISTENT_PROC
+            | types_gist::GIST_UNION_PROC
+            | types_gist::GIST_PENALTY_PROC
+            | types_gist::GIST_PICKSPLIT_PROC
+            | types_gist::GIST_EQUAL_PROC => {
+                op.ref_is_hard = true;
+            }
+            types_gist::GIST_COMPRESS_PROC
+            | types_gist::GIST_DECOMPRESS_PROC
+            | types_gist::GIST_DISTANCE_PROC
+            | types_gist::GIST_FETCH_PROC
+            | types_gist::GIST_OPTIONS_PROC
+            | types_gist::GIST_SORTSUPPORT_PROC
+            | types_gist::GIST_TRANSLATE_CMPTYPE_PROC => {
+                op.ref_is_hard = false;
+                op.ref_is_family = true;
+                op.refobjid = opfamilyoid;
+            }
+            _ => {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "support function number {} is invalid for access method {}",
+                        op.number, "gist"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn am_name(tuple: &catcache::CatCTuple) -> PgResult<String> {
