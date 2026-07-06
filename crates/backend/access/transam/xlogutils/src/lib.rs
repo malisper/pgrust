@@ -780,6 +780,7 @@ fn BufferIsValid(buffer: Buffer) -> bool {
 
 pub fn init_seams() {
     xlogutils_seams::in_recovery::set(in_recovery);
+    xlogutils_seams::in_hot_standby::set(InHotStandby);
     guc_tables::vars::ignore_invalid_pages.install(guc_tables::GucVarAccessors {
         get: ignore_invalid_pages,
         set: set_ignore_invalid_pages,

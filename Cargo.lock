@@ -2137,6 +2137,7 @@ dependencies = [
  "seam_core",
  "shmem_seams",
  "smgr_seams",
+ "standby_seams",
  "transam_xlog_seams",
  "types_core",
  "types_error",
@@ -2149,6 +2150,7 @@ dependencies = [
  "waiteventset",
  "xact_seams",
  "xloginsert_seams",
+ "xlogutils_seams",
 ]
 
 [[package]]

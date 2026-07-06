@@ -54,7 +54,7 @@ pub(crate) fn RememberBufferPin(b: Buffer) {
     .expect("ResourceOwnerRememberBuffer");
 }
 
-#[inline]
+#[cfg(test)]
 pub(crate) fn buffer_pin_desc() -> &'static ResourceOwnerDesc {
     &BUFFER_PIN_DESC
 }
@@ -139,25 +139,27 @@ pub(crate) fn PinBuffer_Locked(desc: &BufferDesc) {
     RememberBufferPin(b);
 }
 
+// ResourceOwnerForgetBuffer failure (entry missing, or owner already
+// releasing) must not panic: unpins run from drop guards during unwind, and a
+// panic there aborts the process. WARN and continue so the shared refcount is
+// still released.
 #[inline]
 pub(crate) fn ForgetBufferPin(b: Buffer) {
-    resowner::ResourceOwnerForget(
+    if let Err(e) = resowner::ResourceOwnerForget(
         resowner::CurrentResourceOwner(),
         Datum::from_i32(b),
         &BUFFER_PIN_DESC,
-    )
-    .expect("ResourceOwnerForgetBuffer");
+    ) {
+        let _ = elog::elog(
+            types_error::WARNING,
+            format!("ResourceOwnerForgetBuffer: buffer {b}: {e}"),
+        );
+    }
 }
 
 #[inline]
 pub(crate) fn UnpinBuffer(desc: &BufferDesc) {
-    let b = BufferDescriptorGetBuffer(desc);
-    resowner::ResourceOwnerForget(
-        resowner::CurrentResourceOwner(),
-        Datum::from_i32(b),
-        &BUFFER_PIN_DESC,
-    )
-    .expect("ResourceOwnerForgetBuffer");
+    ForgetBufferPin(BufferDescriptorGetBuffer(desc));
     UnpinBufferNoOwner(desc);
 }
 
@@ -193,17 +195,24 @@ pub(crate) fn UnpinBufferNoOwner(desc: &BufferDesc) {
     }
 }
 
+// WakePinCountWaiter (bufmgr.c): re-check under the header lock — another
+// backend may have unpinned and woken the waiter already. Runs on every
+// unpin, including abort-path resowner release, so it must never panic.
 fn WakePinCountWaiter(desc: &BufferDesc) {
     let mut buf_state = LockBufHdr(desc);
     if buf_state & BM_PIN_COUNT_WAITER != 0 && buffer_refcount(buf_state) == 1 {
-        let _wait_procno = desc.wait_backend_pgprocno();
+        let wait_procno = desc.wait_backend_pgprocno();
         buf_state &= !BM_PIN_COUNT_WAITER;
         UnlockBufHdr(desc, buf_state);
-        panic!(
-            "unported callee reached from bufmgr.c WakePinCountWaiter: ProcSendSignal (storage/lmgr/proc.c)"
-        );
+        if let Err(e) = lmgr_proc::ProcSendSignal(wait_procno) {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("could not wake pin count waiter {wait_procno}: {e}"),
+            );
+        }
+    } else {
+        UnlockBufHdr(desc, buf_state);
     }
-    UnlockBufHdr(desc, buf_state);
 }
 
 pub fn ReleaseBuffer(buffer: Buffer) -> PgResult<()> {

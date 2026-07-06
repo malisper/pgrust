@@ -34,6 +34,8 @@ aio_seams = { path = "../../aio/aio_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
 fd = { path = "../../file/fd" }
 procsignal_seams = { path = "../../ipc/procsignal_seams" }
+standby_seams = { path = "../../ipc/standby_seams" }
+xlogutils_seams = { path = "../../../access/transam/xlogutils_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 catalog_storage_seams = { path = "../../../catalog/storage_seams" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }

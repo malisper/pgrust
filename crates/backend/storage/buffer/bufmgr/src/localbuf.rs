@@ -7,7 +7,6 @@ use core::cell::{Cell, UnsafeCell};
 use core::mem::ManuallyDrop;
 use core::sync::atomic::Ordering;
 
-use datum::Datum;
 use elog::ereport;
 use mcx::{MemoryContext, PgFxHashMap};
 use types_core::{
@@ -182,12 +181,9 @@ pub(crate) fn PinLocalBuffer(buffer: Buffer, adjust_usagecount: bool) -> bool {
 
 pub(crate) fn UnpinLocalBuffer(buffer: Buffer) {
     UnpinLocalBufferNoOwner(buffer);
-    resowner::ResourceOwnerForget(
-        resowner::CurrentResourceOwner(),
-        Datum::from_i32(buffer),
-        crate::pin::buffer_pin_desc(),
-    )
-    .expect("ResourceOwnerForgetBuffer");
+    // Same never-panic contract as pin::ForgetBufferPin: unpins can run
+    // from drop guards during unwind.
+    crate::pin::ForgetBufferPin(buffer);
 }
 
 pub(crate) fn UnpinLocalBufferNoOwner(buffer: Buffer) {
