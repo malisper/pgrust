@@ -296,36 +296,13 @@ fn collect_node_subplans<'mcx>(
             walk_list(&mut out, joinqual);
             walk_list(&mut out, &plan.targetlist);
         }
-        // ExecInitModifyTable additionally compiles onConflictSet/Where and
-        // returningLists; those exprs can carry their own SubPlans (e.g. an
-        // ON CONFLICT ... WHERE EXISTS (subquery) arbiter/DO UPDATE filter).
+        // ExecInitModifyTable order: WCO, RETURNING, ON CONFLICT, then
+        // ExecInitMerge (per action: WHEN qual then projection); the per-rel
+        // lists share plan_ids and the printer dedups.
         NodeTag::T_ModifyTable => {
             let mt = node.as_modify_table().unwrap();
             walk_list(&mut out, &plan.targetlist);
             walk_list(&mut out, &plan.qual);
-            walk_list(&mut out, &mt.onConflictSet);
-            if let Some(w) = mt.onConflictWhere {
-                collect_subplans_expr(w, &mut out);
-            }
-            for rl in &mt.returningLists {
-                if let Some(l) = rl.as_list() {
-                    walk_list(&mut out, l);
-                }
-            }
-        }
-        NodeTag::T_Result => {
-            walk_list(&mut out, &plan.targetlist);
-            walk_list(&mut out, &plan.qual);
-            if let Some(q) = node.as_result().unwrap().resconstantqual {
-                if let Some(l) = q.as_list() {
-                    walk_list(&mut out, l);
-                }
-            }
-        }
-        // ExecInitMerge order: per action, WHEN qual then projection; the
-        // per-rel lists share plan_ids and the printer dedups.
-        NodeTag::T_ModifyTable => {
-            let mt = node.as_modify_table().unwrap();
             for wlist in mt.withCheckOptionLists.iter() {
                 if let Some(l) = wlist.as_list() {
                     walk_list(&mut out, l);
@@ -357,6 +334,15 @@ fn collect_node_subplans<'mcx>(
                         }
                     }
                     walk_list(&mut out, &action.targetList);
+                }
+            }
+        }
+        NodeTag::T_Result => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            if let Some(q) = node.as_result().unwrap().resconstantqual {
+                if let Some(l) = q.as_list() {
+                    walk_list(&mut out, l);
                 }
             }
         }
