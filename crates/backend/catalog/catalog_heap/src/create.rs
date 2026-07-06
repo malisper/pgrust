@@ -309,6 +309,8 @@ pub fn heap_create<'mcx>(
     if !create_storage && reltablespace != InvalidOid {
         pg_depend::recordDependencyOnTablespace(mcx, RELATION_RELATION_ID, relid, reltablespace)?;
     }
+    // Ensures the stats entry is dropped if the transaction aborts.
+    pgstat::relation::pgstat_create_relation(relid, rel.rd_rel.relisshared);
     Ok((rel, relfrozenxid, relminmxid))
 }
 

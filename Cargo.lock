@@ -6506,6 +6506,7 @@ dependencies = [
  "indexam_seams",
  "mcx",
  "nbtree",
+ "pgstat",
  "predicate",
  "relation_seams",
  "snapmgr",
@@ -10511,6 +10512,7 @@ dependencies = [
  "types_storage",
  "varlena",
  "waitevent",
+ "xlogprefetcher_seams",
 ]
 
 [[package]]

@@ -375,7 +375,7 @@ pub fn index_getbitmap<'mcx>(
 ) -> PgResult<i64> {
     scan.kill_prior_tuple = false;
     let ntids = am_getbitmap(scan, bitmap)?;
-    scan.xs_pgstat_index_tuples += ntids as u64;
+    pgstat_count_index_tuples(scan, ntids as u64);
     Ok(ntids)
 }
 
@@ -446,6 +446,15 @@ pub fn index_rescan<'mcx>(
 }
 
 pub fn index_endscan(mut scan: IndexScanDescData<'_>) -> PgResult<()> {
+    // Drain of the per-scan batched pgstat counters (C counts per call via
+    // the pgstat.h macros; increments gate on pgstat_enabled).
+    pgstat::relation::pgstat_count_index_scan_batched(
+        scan.indexRelation.rd_id,
+        scan.indexRelation.rd_rel.relisshared,
+        scan.xs_pgstat_index_scans,
+        scan.xs_pgstat_index_tuples,
+        scan.xs_pgstat_heap_fetches,
+    );
     if let Some(heapfetch) = scan.xs_heapfetch.take() {
         fetch::end(heapfetch);
     }

@@ -415,8 +415,9 @@ pub fn fc_pg_stat_reset_shared(
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_BGWRITER);
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER);
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_IO);
-        // C also calls XLogPrefetchResetStats; the recovery-prefetch read
-        // surface is unported, so resetting those counters is vacuous.
+        if xlogprefetcher_seams::xlog_prefetch_reset_stats::is_installed() {
+            xlogprefetcher_seams::xlog_prefetch_reset_stats::call();
+        }
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU);
         pgstat::pgstat_reset_of_kind(PGSTAT_KIND_WAL);
         return Ok(Datum::from_usize(0));
@@ -426,9 +427,11 @@ pub fn fc_pg_stat_reset_shared(
         "bgwriter" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_BGWRITER),
         "checkpointer" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_CHECKPOINTER),
         "io" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_IO),
-        // C calls XLogPrefetchResetStats; the recovery-prefetch read surface
-        // is unported, so resetting those counters is vacuous.
-        "recovery_prefetch" => {}
+        "recovery_prefetch" => {
+            if xlogprefetcher_seams::xlog_prefetch_reset_stats::is_installed() {
+                xlogprefetcher_seams::xlog_prefetch_reset_stats::call();
+            }
+        }
         "slru" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_SLRU),
         "wal" => pgstat::pgstat_reset_of_kind(PGSTAT_KIND_WAL),
         target => {

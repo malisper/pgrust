@@ -100,6 +100,7 @@ pub fn pgstat_fetch_stat_checkpointer() -> PgStat_CheckpointerStats {
 }
 
 pub(crate) fn pgstat_checkpointer_snapshot_build() {
+    crate::shmem::consume_forced_snapshot_clear();
     if crate::pgstat_fetch_consistency() == crate::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT {
         crate::shmem::build_snapshot();
         return;
