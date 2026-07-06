@@ -5394,8 +5394,12 @@ fn exec_insert<'mcx>(
 
     {
         // Copy-out RTE/perminfo handles for the cold partition-constraint
-        // error path (the destructure below pins *estate).
-        let target_rte = estate.es_range_table[(mt.rels[mt.cur].rti - 1) as usize];
+        // error path (the destructure below pins *estate). The perminfo RTE
+        // is the routing target's: during a cross-partition UPDATE's
+        // re-routed INSERT, rels[cur] is the SOURCE partition, whose RTE
+        // carries no perminfo (execUtils.c GetResultRTEPermissionInfo via
+        // ri_RootResultRelInfo).
+        let target_rte = estate.es_range_table[(mt.rel().rti - 1) as usize];
         let perminfos = estate.es_rteperminfos;
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
         let ModifyTableState {
@@ -5410,7 +5414,10 @@ fn exec_insert<'mcx>(
             ..
         } = &mut *mt;
         let root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
-        let r = if *insert_target_root && leaf_idx.is_none() {
+        // On insert_target_root a routed leaf's errors report through the
+        // root too (its on-the-fly ResultRelInfo has ri_RootResultRelInfo
+        // set, execPartition.c ExecFindPartition) — no leaf_idx guard.
+        let r = if *insert_target_root {
             root.as_mut().unwrap_or(&mut rels[0])
         } else {
             &mut rels[*cur]
