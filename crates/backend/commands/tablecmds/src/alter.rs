@@ -6646,6 +6646,14 @@ fn ATExecAddIndexConstraint<'mcx>(
     debug_assert!(index_oid != InvalidOid);
     debug_assert!(stmt.isconstraint);
 
+    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+        return Err(PgError::error(
+            "ALTER TABLE / ADD CONSTRAINT USING INDEX is not supported on partitioned tables",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into());
+    }
+
     let index_rel = indexam::index_open(mcx, index_oid, types_rel::AccessShareLock)?;
     let index_name = index_rel.name().to_string();
     let index_info = execindexing::BuildIndexInfo(mcx, &index_rel)?;
