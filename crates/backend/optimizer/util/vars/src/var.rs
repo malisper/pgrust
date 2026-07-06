@@ -16,13 +16,23 @@ pub const PVC_RECURSE_WINDOWFUNCS: u32 = 0x0008;
 pub const PVC_INCLUDE_PLACEHOLDERS: u32 = 0x0010;
 pub const PVC_RECURSE_PLACEHOLDERS: u32 = 0x0020;
 
-struct PullVarnos<'mcx> {
+/// Level-zero PlaceHolderVar override for pull_varnos: returns the varnos the
+/// PHV contributes (exclusive of phnullingrels, which the walker always
+/// adds), or None for the syntactic phrels fallback. C's pull_varnos_walker
+/// consults root->placeholder_array here (var.c pull_varnos_walker PHV arm);
+/// this hook carries that consultation without a root in this crate.
+pub type PhvVarnosHook<'a, 'mcx> = &'a mut dyn FnMut(
+    &types_nodes::primnodes::PlaceHolderVar<'mcx>,
+) -> PgResult<Option<Bitmapset<'mcx>>>;
+
+struct PullVarnos<'a, 'mcx> {
     mcx: Mcx<'mcx>,
     varnos: Bitmapset<'mcx>,
     sublevels_up: i64,
+    phv_hook: Option<PhvVarnosHook<'a, 'mcx>>,
 }
 
-impl<'mcx> NodeWalker<'mcx> for PullVarnos<'mcx> {
+impl<'a, 'mcx> NodeWalker<'mcx> for PullVarnos<'a, 'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         match node.node_tag() {
             NodeTag::T_Var => {
@@ -43,10 +53,19 @@ impl<'mcx> NodeWalker<'mcx> for PullVarnos<'mcx> {
             NodeTag::T_PlaceHolderVar => {
                 let phv = node.as_place_holder_var().unwrap();
                 if phv.phlevelsup as i64 == self.sublevels_up {
-                    // DIVERGENCE: C consults root->placeholder_array and uses
-                    // ph_eval_at once PlaceHolderInfos exist; no root here, so
-                    // this is C's no-phinfo fallback (phrels) in all phases.
-                    self.varnos.add_members(self.mcx, &phv.phrels)?;
+                    // C consults the phinfo only for phlevelsup == 0 PHVs.
+                    let hooked = if phv.phlevelsup == 0 {
+                        match self.phv_hook.as_mut() {
+                            Some(h) => h(phv)?,
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match hooked {
+                        Some(v) => self.varnos.add_members(self.mcx, &v)?,
+                        None => self.varnos.add_members(self.mcx, &phv.phrels)?,
+                    }
                     self.varnos.add_members(self.mcx, &phv.phnullingrels)?;
                     return Ok(false);
                 }
@@ -82,8 +101,36 @@ pub fn pull_varnos_of_level<'mcx>(
     node: Node<'mcx>,
     levelsup: i32,
 ) -> PgResult<Bitmapset<'mcx>> {
-    let mut cx = PullVarnos { mcx, varnos: Bitmapset::empty(), sublevels_up: levelsup as i64 };
+    let mut cx = PullVarnos {
+        mcx,
+        varnos: Bitmapset::empty(),
+        sublevels_up: levelsup as i64,
+        phv_hook: None,
+    };
     // A top-level Query does not bump sublevels_up.
+    match node.as_query() {
+        Some(q) => {
+            query_tree_walker(q, &mut cx, 0)?;
+        }
+        None => {
+            cx.visit(node)?;
+        }
+    }
+    Ok(cx.varnos)
+}
+
+/// pull_varnos with a PlaceHolderVar override (C's root-carrying form).
+pub fn pull_varnos_with_phv_hook<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    phv_hook: PhvVarnosHook<'a, 'mcx>,
+) -> PgResult<Bitmapset<'mcx>> {
+    let mut cx = PullVarnos {
+        mcx,
+        varnos: Bitmapset::empty(),
+        sublevels_up: 0,
+        phv_hook: Some(phv_hook),
+    };
     match node.as_query() {
         Some(q) => {
             query_tree_walker(q, &mut cx, 0)?;

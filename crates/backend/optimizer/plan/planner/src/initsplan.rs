@@ -1339,7 +1339,11 @@ fn deconstruct_recurse<'mcx>(
                         },
                         quals: j.quals,
                         qualscope: relids_copy(mcx, &qualscope),
-                        jdomain: parent_domain,
+                        // C: a LEFT/ANTI join's own quals belong to the new
+                        // child domain (initsplan.c deconstruct_recurse,
+                        // jtitem->jdomain = child_domain), scoping ECs from
+                        // degenerate ON quals below the null extension.
+                        jdomain: child_domain,
                         left_rels: relids_copy(mcx, &l_relids),
                         right_rels: relids_copy(mcx, &r_relids),
                         inner_join_rels: relids_copy(mcx, &inner_join_rels),
@@ -1991,7 +1995,45 @@ pub(crate) fn pull_varnos_relids<'mcx>(
     node: Node<'mcx>,
 ) -> PgResult<types_pathnodes::Relids<'mcx>> {
     let mcx = run.mcx;
-    let bms = vars::pull_varnos(mcx, node)?;
+    // C's pull_varnos PHV arm (var.c pull_varnos_walker): once a
+    // PlaceHolderInfo exists, a PHV contributes ph_eval_at (translated for
+    // appendrel-child copies whose phrels differ), not its syntactic phrels.
+    // Join removal scrubs only the phinfo relid sets, so the phrels fallback
+    // would resurrect removed relids from clause-embedded PHVs.
+    let root = &run.root;
+    let mut hook = |phv: &types_nodes::primnodes::PlaceHolderVar<'mcx>| -> PgResult<
+        Option<types_nodes::Bitmapset<'mcx>>,
+    > {
+        let Some(Some(id)) = root.placeholder_array.get(phv.phid as usize).copied() else {
+            return Ok(None);
+        };
+        let phinfo = root.phinfo(id);
+        let mut phv_phrels: types_pathnodes::Relids<'mcx> = None;
+        for m in phv.phrels.iter() {
+            phv_phrels = relids_add_member(mcx, &phv_phrels, m as u32);
+        }
+        let contributed = if types_pathnodes::relids::relids_equal(
+            &phv_phrels,
+            &phinfo.ph_var_phrels,
+        ) {
+            relids_copy(mcx, &phinfo.ph_eval_at)
+        } else {
+            // Translated (appendrel-child) PHV: translate ph_eval_at to match.
+            let delta = relids_difference(mcx, &phinfo.ph_var_phrels, &phv_phrels);
+            let mut newevalat = relids_difference(mcx, &phinfo.ph_eval_at, &delta);
+            if !types_pathnodes::relids::relids_equal(&newevalat, &phinfo.ph_eval_at) {
+                let added = relids_difference(mcx, &phv_phrels, &phinfo.ph_var_phrels);
+                newevalat = relids_union(mcx, &newevalat, &added);
+            }
+            newevalat
+        };
+        let mut out = types_nodes::Bitmapset::empty();
+        for m in relids_members(&contributed) {
+            out.add_member(mcx, m)?;
+        }
+        Ok(Some(out))
+    };
+    let bms = vars::pull_varnos_with_phv_hook(mcx, node, &mut hook)?;
     let mut out: types_pathnodes::Relids<'mcx> = None;
     for x in bms.iter() {
         out = relids_union(mcx, &out, &relids_singleton(mcx, x as u32));
