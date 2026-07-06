@@ -571,6 +571,7 @@ members = [
     "crates/backend/access/gin/gin",
     "crates/backend/access/gin/gin_xlog",
     "crates/backend/access/gin/ginbuild",
+    "crates/backend/access/gin/gin_funcs",
     "crates/_support/types/gist",
     "crates/backend/access/gist/gist",
     "crates/backend/access/gist/gistbuild",

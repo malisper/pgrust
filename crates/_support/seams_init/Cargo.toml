@@ -275,6 +275,7 @@ relpath = { path = "../../common/relpath" }
 aio_config = { path = "../../backend/storage/aio/aio_config" }
 aio_uring = { path = "../../backend/storage/aio/aio_uring" }
 gin = { path = "../../backend/access/gin/gin" }
+gin_funcs = { path = "../../backend/access/gin/gin_funcs" }
 types_fmgr = { path = "../types/fmgr" }
 format_type = { path = "../../backend/utils/adt/format_type" }
 ruleutils = { path = "../../backend/utils/adt/ruleutils" }
