@@ -4290,6 +4290,16 @@ pub fn expand_virtual_generated_columns<'mcx>(
                 }
                 _ => {}
             }
+            // range_table_mutator also rewrites RTE securityQuals (RLS quals
+            // referencing virtual generated columns).
+            if !orte.securityQuals.is_nil() {
+                if let Some(l) = clauses::walker::mutate_list(mcx, &orte.securityQuals, &mut |n| {
+                    replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
+                })? {
+                    // SAFETY: pre-seal tree owned by this planner invocation.
+                    unsafe { rte_node2.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = l) };
+                }
+            }
         }
     }
     run.glob.last_ph_id = last_ph_id.get();
