@@ -1058,7 +1058,52 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         // SAFETY: same exclusive plan-tree ownership as the prologue above.
         unsafe { plan.with_plan_mut(|p| p.righttree = Some(new_child)) }.expect("plan node");
     }
+    #[cfg(debug_assertions)]
+    audit_no_phv(plan);
     Ok(plan)
+}
+
+// C's post-fix invariant (fix_scan_expr_walker's Assert, setrefs.c): no
+// PlaceHolderVar survives into the finished plan's expressions.
+#[cfg(debug_assertions)]
+fn audit_no_phv(plan: Node<'_>) {
+    struct PhvAudit {
+        tag: NodeTag,
+        field: &'static str,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for PhvAudit {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(phv) = node.as_place_holder_var() {
+                panic!(
+                    "setrefs audit: PlaceHolderVar phid={} phexpr={:?} survived in {:?} {}",
+                    phv.phid,
+                    phv.phexpr.node_tag(),
+                    self.tag,
+                    self.field,
+                );
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let base = plan.as_plan().expect("plan node");
+    for (field, list) in [("targetlist", &base.targetlist), ("qual", &base.qual)] {
+        let mut w = PhvAudit { tag: plan.node_tag(), field };
+        for n in list {
+            let _ = nodes_core::expression_tree_walker(n, &mut w);
+        }
+    }
+    let joinqual = match plan.node_tag() {
+        NodeTag::T_NestLoop => Some(plan.as_nest_loop().unwrap().join.joinqual.clone()),
+        NodeTag::T_MergeJoin => Some(plan.as_merge_join().unwrap().join.joinqual.clone()),
+        NodeTag::T_HashJoin => Some(plan.as_hash_join().unwrap().join.joinqual.clone()),
+        _ => None,
+    };
+    if let Some(list) = joinqual {
+        let mut w = PhvAudit { tag: plan.node_tag(), field: "joinqual" };
+        for n in &list {
+            let _ = nodes_core::expression_tree_walker(n, &mut w);
+        }
+    }
 }
 
 // set_upper_references (setrefs.c): retarget an upper node's tlist at its
