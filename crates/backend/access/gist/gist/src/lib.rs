@@ -27,7 +27,7 @@ pub use get::{gistgetbitmap, gistgettuple};
 pub use insert::gistdoinsert;
 pub use scan::{gistbeginscan, gistcanreturn, gistendscan, gistrescan};
 pub use state::{initGISTstate, GistState};
-pub use vacuum::gistbulkdelete_collect;
+pub use vacuum::{gistbulkdelete, gistbulkdelete_collect, gistvacuumcleanup};
 
 #[cold]
 #[inline(never)]
@@ -109,26 +109,6 @@ pub fn gistinsert<'mcx>(
     }
     cache.temp.reset();
     Ok(false)
-}
-
-/// gistbulkdelete: named LOUD lane.
-pub fn gistbulkdelete(rel: &Relation<'_>) -> PgResult<()> {
-    panic!(
-        "unported: gistbulkdelete for index \"{}\" (gistvacuum.c lane)",
-        rel.name()
-    );
-}
-
-/// gistvacuumcleanup: named LOUD lane (C always runs gistvacuumscan here
-/// unless analyze-only).
-pub fn gistvacuumcleanup(rel: &Relation<'_>, analyze_only: bool) -> PgResult<()> {
-    if analyze_only {
-        return Ok(());
-    }
-    panic!(
-        "unported: gistvacuumcleanup for index \"{}\" (gistvacuum.c lane)",
-        rel.name()
-    );
 }
 
 /// gist_translate_cmptype_common's RT-strategy table (gistutil.c), used by

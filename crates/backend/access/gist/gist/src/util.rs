@@ -659,7 +659,7 @@ pub fn gistNewBuffer<'mcx>(
                 return Ok(pin);
             }
             gistcheckpage(r, &pin)?;
-            if gistPageRecyclable(&page)? {
+            if gistPageRecyclable(heaprel, &page)? {
                 if transam_xlog_seams::xlog_standby_info_active::call()
                     && crate::relation_needs_wal(r)
                 {
@@ -683,15 +683,21 @@ pub fn gistNewBuffer<'mcx>(
     Ok(BufferPin::adopt(buf).expect("ExtendBufferedRelBy returned InvalidBuffer"))
 }
 
-/// gistPageRecyclable.
-pub fn gistPageRecyclable(page: &PageRef<'_>) -> PgResult<bool> {
+/// gistPageRecyclable. C passes NULL rel to GlobalVisCheckRemovableFullXid;
+/// the seam takes the heap relation, whose horizon is what the deleteXid
+/// stamp guards.
+pub fn gistPageRecyclable(
+    heaprel: &::types_rel::RelationData<'_>,
+    page: &PageRef<'_>,
+) -> PgResult<bool> {
     if page.is_new() {
         return Ok(true);
     }
     if GistPageIsDeleted(page) {
-        // Deleted pages only exist once gistvacuum (LOUD lane) has run.
-        panic!(
-            "unported: gist deleted-page recycling              (GlobalVisCheckRemovableFullXid; gistvacuum lane)"
+        let deletexid_full = ::types_gist::GistPageGetDeleteXid(page);
+        return procarray_seams::global_vis_check_removable_full_xid::call(
+            heaprel,
+            deletexid_full,
         );
     }
     Ok(false)
