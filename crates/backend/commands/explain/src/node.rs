@@ -1169,13 +1169,29 @@ pub fn ExplainNode<'mcx>(
         | NodeTag::T_LockRows | NodeTag::T_BitmapAnd | NodeTag::T_BitmapOr
         | NodeTag::T_ProjectSet | NodeTag::T_RecursiveUnion => {}
         // show_modifytable_info: FDW/ON CONFLICT legs absent (asserted at the
-        // name arm); the labeltargets loop reads the plan node in place of
-        // C's mtstate (no executor result-rel pruning yet).
+        // name arm). C reads mtstate->resultRelInfo; the filter below rebuilds
+        // it from the plan list minus initially-pruned rels, keeping the first
+        // if all were pruned (nodeModifyTable.c:4676).
         NodeTag::T_ModifyTable => {
             let mt = node.as_modify_table().unwrap();
-            let nrels = mt.resultRelations.len();
+            let unpruned = |rti: i32| -> bool {
+                es.qd.is_null()
+                    || execmain_seams::query_desc_rti_unpruned::call(es.qd, rti).unwrap_or(true)
+            };
+            let total_nrels = mt.resultRelations.len();
+            let mut result_rtis: Vec<i32> = Vec::with_capacity(total_nrels);
+            for (i, rti) in mt.resultRelations.iter().enumerate() {
+                if unpruned(rti) {
+                    result_rtis.push(rti);
+                } else if i == total_nrels - 1 && result_rtis.is_empty() {
+                    result_rtis.push(mt.resultRelations.nth(0));
+                }
+            }
+            let nrels = result_rtis.len();
             let labeltargets = nrels > 1
-                || (nrels == 1 && mt.resultRelations.nth(0) != mt.nominalRelation as i32);
+                || (nrels == 1
+                    && result_rtis[0] != mt.nominalRelation as i32
+                    && unpruned(result_rtis[0]));
             if labeltargets {
                 let opname = match mt.operation {
                     types_nodes::CmdType::CMD_INSERT => "Insert",
@@ -1184,7 +1200,7 @@ pub fn ExplainNode<'mcx>(
                     types_nodes::CmdType::CMD_MERGE => "Merge",
                     _ => "???",
                 };
-                for rti in mt.resultRelations.iter() {
+                for &rti in &result_rtis {
                     crate::format::ExplainIndentText(es);
                     append!(es, "{opname}");
                     ExplainTargetRel(rti as types_core::Index, es)?;

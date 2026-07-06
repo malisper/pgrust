@@ -341,6 +341,13 @@ pub(crate) fn query_desc_prune_result_seam(
     })
 }
 
+pub(crate) fn query_desc_rti_unpruned_seam(h: QueryDescHandle, rti: i32) -> Option<bool> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_ref()?;
+        exec.with(|d| Some(d.estate.es_unpruned_relids.is_member(rti)))
+    })
+}
+
 pub(crate) fn query_desc_agg_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

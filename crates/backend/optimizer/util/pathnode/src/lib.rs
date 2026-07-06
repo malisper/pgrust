@@ -2686,10 +2686,17 @@ pub fn create_append_path<'mcx>(
     rows: f64,
 ) -> PgResult<PathId> {
     debug_assert!(!parallel_aware || parallel_workers > 0);
+    // Baserel appendrels take the full baserel PPI (pathnode.c:1330): its
+    // ppi_clauses feed exec-time pruning via make_partition_pruneinfo.
+    let param_info = if run.root.rel(rel_id).reloptkind == types_pathnodes::RELOPT_BASEREL
+        && !subpaths.is_empty()
+    {
+        get_baserel_parampathinfo(run, rel_id, required_outer)?
+    } else {
+        get_appendrel_parampathinfo(run, rel_id, required_outer)
+    };
     let mut path = base_path(run, NodeTag::T_AppendPath, NodeTag::T_Append, rel_id);
-    // C: appendrels are never SJE removal targets, so the appendrel
-    // parampathinfo variant applies unconditionally here.
-    path.param_info = get_appendrel_parampathinfo(run, rel_id, required_outer);
+    path.param_info = param_info;
     path.parallel_aware = parallel_aware;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     path.parallel_workers = parallel_workers;

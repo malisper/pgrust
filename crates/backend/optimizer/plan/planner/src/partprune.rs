@@ -88,10 +88,7 @@ pub(crate) struct GenCtx<'mcx> {
     has_default: bool,
 }
 
-// gen_partprune_steps (partprune.c). DIVERGENCE (predtest unported): C first
-// tries predicate_refuted_by(partition_qual, clauses) for defaulted
-// sub-partitions; skipping only leaves the default partition un-pruned in
-// that narrow case (rows identical, EXPLAIN differs).
+// gen_partprune_steps (partprune.c).
 pub(crate) fn gen_partprune_steps<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
@@ -372,6 +369,20 @@ fn gen_partprune_steps_internal<'mcx>(
     clauses: &[Node<'mcx>],
 ) -> PgResult<NodeList<'mcx>> {
     let mcx = run.mcx;
+    // A defaulted sub-partitioned rel whose partition constraint is refuted
+    // by the clauses scans nothing; steps can't prune its default partition
+    // (partprune.c:1013).
+    if ctx.has_default && !run.root.rel(ctx.rel).partition_qual.is_empty() {
+        let mut partqual: Vec<Node<'mcx>> = Vec::new();
+        for i in 0..run.root.rel(ctx.rel).partition_qual.len() {
+            let id = run.root.rel(ctx.rel).partition_qual[i];
+            partqual.push(*run.root.expr_node(id));
+        }
+        if crate::predtest::predicate_refuted_by(mcx, &partqual, clauses, false)? {
+            ctx.contradictory = true;
+            return Ok(NodeList::nil());
+        }
+    }
     let mut keyclauses: [Vec<PartClauseInfo<'mcx>>; PARTITION_MAX_KEYS] =
         core::array::from_fn(|_| Vec::new());
     let mut nullkeys = Bitmapset::empty();
@@ -1554,14 +1565,24 @@ fn make_partitionedrel_pruneinfo<'mcx>(
         let partprunequal: Vec<Node<'mcx>>;
         if targetpart.is_none() {
             targetpart = Some(subpart);
+            // prunequal arrives phrased for parentrel; a UNION ALL or
+            // partitionwise parent needs a translation down to the target
+            // partitioned rel, kept in prunequal_tr for the later children
+            // (partprune.c:510).
             if !crate::relnode::relids_equal(
                 &run.root.rel(parentrel).relids,
                 &run.root.rel(subpart).relids,
             ) {
-                panic!(
-                    "make_partitionedrel_pruneinfo (partprune.c): UNION ALL / \
-                     partitionwise parent translation unported"
-                );
+                let relids =
+                    crate::relnode::relids_copy(mcx, &run.root.rel(subpart).relids);
+                let appinfos = crate::inherit::find_appinfos_by_relids(run, &relids);
+                let mut translated = Vec::with_capacity(prunequal_tr.len());
+                for q in prunequal_tr {
+                    translated.push(crate::inherit::adjust_appendrel_attrs_multi(
+                        run, q, &appinfos,
+                    )?);
+                }
+                prunequal_tr = translated;
             }
             partprunequal = prunequal_tr.clone();
         } else {
