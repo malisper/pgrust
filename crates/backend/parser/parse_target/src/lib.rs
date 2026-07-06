@@ -890,6 +890,50 @@ fn ExpandColumnRefStar<'mcx>(
         cref.location,
         Some(&mut levels_up),
     )?;
+
+    // The columnref-hook legs of C's ExpandColumnRefStar: a plpgsql rec.*
+    // resolves to a whole-row Param, expanded per field.
+    let plpgsql_hooks = pstate.p_ref_hook_state.as_plpgsql_params().copied();
+    if let Some(st) = &plpgsql_hooks {
+        let skip = match st.resolve_option {
+            parser_small1::PlpgsqlResolveOption::Variable => false,
+            parser_small1::PlpgsqlResolveOption::Column => nsitem.is_some(),
+            _ => false,
+        };
+        // C: variable-precedence runs as the PRE hook (before the RTE
+        // lookup); the shared resolver is order-insensitive here because a
+        // hook hit under Variable precedence returns before ambiguity checks.
+        if !skip {
+            if let Some(node) = plpgsql_star_ref(mcx, pstate, st, fields, cref.location)? {
+                if nsitem.is_some()
+                    && st.resolve_option != parser_small1::PlpgsqlResolveOption::Variable
+                {
+                    use types_error::{ErrorLocation, ERRCODE_AMBIGUOUS_COLUMN, ERROR};
+                    return Err(Box::new(
+                        elog::ereport(ERROR)
+                            .errcode(ERRCODE_AMBIGUOUS_COLUMN)
+                            .errmsg(format!(
+                                "column reference \"{}\" is ambiguous",
+                                name_list_to_string(&cref.fields)
+                            ))
+                            .errposition(parser_small1::parser_errposition(
+                                pstate,
+                                cref.location,
+                                mbutils::GetDatabaseEncoding(),
+                            ))
+                            .into_error()
+                            .with_error_location(ErrorLocation::new(
+                                "parse_target.c",
+                                0,
+                                "ExpandColumnRefStar",
+                            )),
+                    ));
+                }
+                return ExpandRowReference(mcx, pstate, node, make_target_entry);
+            }
+        }
+    }
+
     let Some(nsitem) = nsitem else {
         let rv = Node::mk_mut(
             mcx,
@@ -905,6 +949,54 @@ fn ExpandColumnRefStar<'mcx>(
     };
 
     ExpandSingleTable(mcx, pstate, nsitem, levels_up, cref.location, make_target_entry)
+}
+
+// resolve_column_ref's whole-row arms (pl_comp.c): the trailing A_Star maps
+// to "*" (blocks scalar matches, keeps the valueless-rec 55000 arm), then a
+// rec-gated prefix lookup returns the whole-row Param.
+fn plpgsql_star_ref<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    st: &parser_small1::PlpgsqlHookState<'_>,
+    fields: &[Node<'mcx>],
+    location: types_core::ParseLoc,
+) -> PgResult<Option<Node<'mcx>>> {
+    let n = fields.len();
+    if !(2..=3).contains(&n) || fields[n - 1].node_tag() != NodeTag::T_A_Star {
+        return Ok(None);
+    }
+    let mut names: [&str; 3] = [""; 3];
+    for (i, f) in fields[..n - 1].iter().enumerate() {
+        match f.as_string() {
+            Some(s) => names[i] = s.sval,
+            None => return Ok(None),
+        }
+    }
+    names[n - 1] = "*";
+    if let Some(node) = parser_small1::plpgsql_resolve_column_ref(
+        mcx,
+        pstate,
+        st,
+        &names[..n],
+        location,
+        false,
+        mbutils::GetDatabaseEncoding(),
+    )? {
+        return Ok(Some(node));
+    }
+    let prefix = names[..n - 1].join(".").to_ascii_lowercase();
+    if !st.recs.iter().any(|r| *r == prefix) {
+        return Ok(None);
+    }
+    parser_small1::plpgsql_resolve_column_ref(
+        mcx,
+        pstate,
+        st,
+        &names[..n - 1],
+        location,
+        false,
+        mbutils::GetDatabaseEncoding(),
+    )
 }
 
 // C NameListToString (namespace.c): dotted join, A_Star renders as "*".
