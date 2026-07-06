@@ -715,7 +715,8 @@ fn attach_compile_context(
     e
 }
 
-// add_parameter_name (pl_comp.c).
+// add_parameter_name (pl_comp.c); itemtype NSTYPE_VAR for scalar params,
+// NSTYPE_REC for composite/record params (pl_comp.c:341-349).
 fn add_parameter_name(comp: &mut CompState, dno: Dno, name: &str) -> PgResult<()> {
     if comp.ns_lookup(comp.ns_top, true, name, None, None).is_some() {
         return Err(crate::exec::exec_err(
@@ -723,7 +724,12 @@ fn add_parameter_name(comp: &mut CompState, dno: Dno, name: &str) -> PgResult<()
             format!("parameter name \"{name}\" used more than once"),
         ));
     }
-    comp.ns_additem(NsType::Var, dno, name);
+    let itemtype = match &comp.datums[dno as usize] {
+        PlDatum::Var(_) => NsType::Var,
+        PlDatum::Rec(_) => NsType::Rec,
+        _ => unreachable!("parameter datum is Var or Rec (pl_comp.c:341-349)"),
+    };
+    comp.ns_additem(itemtype, dno, name);
     Ok(())
 }
 
