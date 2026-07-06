@@ -149,6 +149,10 @@ pub struct ModifyTableState<'mcx> {
     // C ExecInitPartitionInfo's ri_onConflictArbiterIndexes: the root arbiter
     // index OIDs mapped to this leaf's own index children.
     leaf_arbiters: Vec<Option<mcx::PgVec<'mcx, Oid>>>,
+    // C ExecInitPartitionInfo's per-leaf oc_Existing (table_slot_create on the
+    // leaf rel); the root's existing slot is Virtual when the target is
+    // partitioned and cannot feed the heap AM lock/fetch callbacks.
+    leaf_existing: Vec<Option<ExecSlotId>>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -561,6 +565,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_slots: Vec::new(),
         leaf_partition_check: Vec::new(),
         leaf_arbiters: Vec::new(),
+        leaf_existing: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
@@ -2354,6 +2359,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_generated.clear();
     mt.leaf_slots.clear();
     mt.leaf_partition_check.clear();
+    mt.leaf_existing.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -4276,6 +4282,7 @@ fn exec_insert<'mcx>(
                 mt.leaf_slots.push(None);
                 mt.leaf_partition_check.push(None);
                 mt.leaf_arbiters.push(None);
+                mt.leaf_existing.push(None);
             }
             Some(idx)
         } else {
@@ -4472,7 +4479,7 @@ fn exec_insert<'mcx>(
                 mt.leaf_arbiters[idx] = Some(mapped);
             }
         }
-        let existing_id = mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
+        let existing_id = resolve_existing_slot(mt, estate, leaf_idx);
         // vlock:
         loop {
             let mut conflict_tid = ItemPointerData::default();
@@ -4670,10 +4677,10 @@ fn exec_on_conflict_update<'mcx>(
 ) -> PgResult<OnConflictOutcome> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
-    let (existing_id, setvals_id, proj_id) = {
+    let existing_id = resolve_existing_slot(mt, estate, leaf);
+    let (setvals_id, proj_id) = {
         let oc = mt.on_conflict.as_ref().expect("on_conflict state");
         (
-            oc.existing_slot,
             oc.setvals_slot.expect("DO UPDATE state"),
             oc.proj_slot.expect("DO UPDATE state"),
         )
@@ -4889,6 +4896,27 @@ fn exec_on_conflict_update<'mcx>(
     Ok(OnConflictOutcome::Done(if modified { Some(proj_id) } else { None }))
 }
 
+// ExecInitPartitionInfo's per-leaf oc_Existing (execPartition.c):
+// table_slot_create on the routed leaf; the shared root slot is Virtual when
+// the target is partitioned, which the heap AM lock/fetch callbacks reject.
+fn resolve_existing_slot<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    leaf: Option<usize>,
+) -> ExecSlotId {
+    let Some(idx) = leaf else {
+        return mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
+    };
+    if mt.leaf_existing[idx].is_none() {
+        let (kind, desc) = {
+            let rel = mt.router.as_ref().expect("routed").leaf_rel(idx);
+            (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+        };
+        mt.leaf_existing[idx] = Some(estate.exec_init_extra_tuple_slot(Some(desc), kind));
+    }
+    mt.leaf_existing[idx].expect("just built")
+}
+
 // ExecInitPartitionInfo's arbiter mapping (nodeModifyTable.c side of
 // execPartition.c): each root arbiter index resolves to the routed leaf's own
 // index child (pg_inherits ancestry over index partition trees).
@@ -5071,7 +5099,7 @@ fn exec_check_tid_visible<'mcx>(
     if !xact::IsolationUsesXactSnapshot() {
         return Ok(());
     }
-    let existing_id = mt.on_conflict.as_ref().expect("on_conflict state").existing_slot;
+    let existing_id = resolve_existing_slot(mt, estate, leaf);
     let found = {
         let EStateData { es_relations, es_tupleTable, es_query_cxt, .. } = &mut *estate;
         let rel = match leaf {
@@ -5789,7 +5817,7 @@ mcx::forget_safe_struct!(
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
-        leaf_slots, leaf_partition_check, leaf_arbiters,
+        leaf_slots, leaf_partition_check, leaf_arbiters, leaf_existing,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },
