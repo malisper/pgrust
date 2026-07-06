@@ -148,14 +148,23 @@ pub fn ReadBufferExtended(
             .with_error_location(ErrorLocation::new("bufmgr.c", 0, "ReadBufferExtended")),
         ));
     }
-    read::ReadBuffer_common(
+    let (buffer, hit) = read::ReadBuffer_common(
         rel_locator_backend(rel),
         rel.rd_rel.relpersistence,
         forknum,
         block_num,
         mode,
         strategy,
-    )
+    )?;
+    // bufmgr.c:1166-1168: per-relation blocks_fetched/blocks_hit; the
+    // pgstat_enabled Cell is C's pgstat_should_count_relation.
+    if rel.pgstat_enabled.get() {
+        pgstat::relation::pgstat_count_buffer_read(rel.rd_id, rel.rd_rel.relisshared);
+        if hit {
+            pgstat::relation::pgstat_count_buffer_hit(rel.rd_id, rel.rd_rel.relisshared);
+        }
+    }
+    Ok(buffer)
 }
 
 /// Sequential-batch ReadBuffer (StartReadBuffers collapsed): see
@@ -176,13 +185,20 @@ pub fn ReadBufferBatched(
             .with_error_location(ErrorLocation::new("bufmgr.c", 0, "ReadBufferExtended")),
         ));
     }
-    read::ReadBuffer_batched(
+    let (buffer, hit) = read::ReadBuffer_batched(
         rel_locator_backend(rel),
         rel.rd_rel.relpersistence,
         block_num,
         nblocks_hint,
         strategy,
-    )
+    )?;
+    if rel.pgstat_enabled.get() {
+        pgstat::relation::pgstat_count_buffer_read(rel.rd_id, rel.rd_rel.relisshared);
+        if hit {
+            pgstat::relation::pgstat_count_buffer_hit(rel.rd_id, rel.rd_rel.relisshared);
+        }
+    }
+    Ok(buffer)
 }
 
 /// Same-block fastpath keeps the pin (heapam's re-read path).

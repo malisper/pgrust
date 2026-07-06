@@ -95,7 +95,7 @@ pub fn ReadBufferWithoutRelcache(
     } else {
         RELPERSISTENCE_UNLOGGED
     };
-    ReadBuffer_common(smgr, persistence, forknum, blkno, mode, strategy)
+    ReadBuffer_common(smgr, persistence, forknum, blkno, mode, strategy).map(|(b, _)| b)
 }
 
 /// Single-block synchronous core: PG18's StartReadBuffer/WaitReadBuffers pgaio
@@ -107,7 +107,7 @@ pub fn ReadBuffer_common(
     blkno: BlockNumber,
     mode: ReadBufferMode,
     strategy: BufferAccessStrategy,
-) -> PgResult<Buffer> {
+) -> PgResult<(Buffer, bool)> {
     if blkno == P_NEW {
         panic!("unported callee reached from bufmgr.c ReadBuffer_common: ExtendBufferedRel (P_NEW back-compat path)");
     }
@@ -117,14 +117,15 @@ pub fn ReadBuffer_common(
     ) {
         let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
         ZeroAndLockBuffer(buffer, mode, found)?;
-        return Ok(buffer);
+        return Ok((buffer, found));
     }
     let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
+    let mut hit = found;
     if !found {
         // C consults zero_damaged_pages only on the miss/completion side.
         let zero_on_error =
             mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages();
-        complete_read_sync(
+        hit = complete_read_sync(
             smgr,
             forknum,
             blkno,
@@ -133,7 +134,7 @@ pub fn ReadBuffer_common(
             IOContextForStrategy(&strategy),
         )?;
     }
-    Ok(buffer)
+    Ok((buffer, hit))
 }
 
 fn PinBufferForBlock(
@@ -430,7 +431,7 @@ fn complete_read_local(
     blkno: BlockNumber,
     buffer: Buffer,
     zero_on_error: bool,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     if !crate::localbuf::StartLocalBufferIO(buffer, true) {
         counters::local_hit();
         pgstat_count_io_op(
@@ -440,7 +441,7 @@ fn complete_read_local(
             1,
             0,
         );
-        return Ok(());
+        return Ok(true);
     }
     let blk = crate::localbuf::local_block_ptr(buffer);
     // SAFETY: pinned local block, single thread; image not yet valid.
@@ -479,7 +480,7 @@ fn complete_read_local(
         }
     }
     crate::localbuf::TerminateLocalBufferIO(buffer, false, BM_VALID);
-    Ok(())
+    Ok(false)
 }
 
 fn complete_read_sync(
@@ -489,7 +490,7 @@ fn complete_read_sync(
     buffer: Buffer,
     zero_on_error: bool,
     io_context: IOContext,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     if buffer < 0 {
         return complete_read_local(smgr, forknum, blkno, buffer, zero_on_error);
     }
@@ -499,7 +500,7 @@ fn complete_read_sync(
         // (C WaitReadBuffers' already-valid arm).
         counters::hit();
         pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
-        return Ok(());
+        return Ok(true);
     }
     let blk = BufferGetBlockPtr(buffer);
     // SAFETY: pinned + BM_IO_IN_PROGRESS: we own the (not yet valid) page image.
@@ -542,7 +543,7 @@ fn complete_read_sync(
         }
     }
     TerminateBufferIO(desc, false, BM_VALID, true);
-    Ok(())
+    Ok(false)
 }
 
 // Stack-array bound for one batched read; io_combine_limit is clamped into it
@@ -562,7 +563,7 @@ pub(crate) fn ReadBuffer_batched(
     blkno: BlockNumber,
     nblocks_hint: BlockNumber,
     strategy: BufferAccessStrategy,
-) -> PgResult<Buffer> {
+) -> PgResult<(Buffer, bool)> {
     let forknum = ForkNumber::MAIN_FORKNUM;
     if persistence == RELPERSISTENCE_TEMP {
         // Local buffers keep the single-block path.
@@ -578,13 +579,13 @@ pub(crate) fn ReadBuffer_batched(
     let io_context = IOContextForStrategy(&strategy);
     let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
     if found {
-        return Ok(buffer);
+        return Ok((buffer, true));
     }
     if !StartBufferIO(GetBufferDescriptor(buffer - 1), true, false, true)? {
         // Another backend completed the read (C WaitReadBuffers' already-valid arm).
         counters::hit();
         pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
-        return Ok(buffer);
+        return Ok((buffer, true));
     }
     let seg_left = (types_storage::smgr::RELSEG_SIZE - (blkno % types_storage::smgr::RELSEG_SIZE))
         as usize;
@@ -691,7 +692,7 @@ pub(crate) fn ReadBuffer_batched(
     for i in 1..n {
         UnpinBuffer(GetBufferDescriptor(bufs[i] - 1));
     }
-    Ok(buffer)
+    Ok((buffer, false))
 }
 
 /// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends

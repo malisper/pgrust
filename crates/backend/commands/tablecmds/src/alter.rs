@@ -7021,7 +7021,7 @@ fn index_copy_data(
         backend: rel.rd_backend,
     };
     smgr::smgropen(src.locator, src.backend)?;
-    bufmgr_seams::flush_relations_all_buffers::call(&[src])?;
+    bufmgr_seams::flush_relation_buffers::call(src)?;
     let persistence = rel.rd_rel.relpersistence;
     let dstrel = catalog_storage::RelationCreateStorage(newrlocator, persistence, true)?;
     use types_core::primitive::ForkNumber;
