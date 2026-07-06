@@ -532,6 +532,13 @@ fn run_value_per_call<'mcx, const N: usize>(
 
     let mut store = Tuplestore::begin_heap(random_access, false, work_mem);
     if all_null_skip {
+        // execSRF.c no_function_result: a strict function skipped for a NULL
+        // argument acts like it returned NULL — for a set-returning function
+        // that's an empty result, but a non-set function still contributes
+        // one all-nulls row (expectedDesc-shaped).
+        if !setexpr.returns_set {
+            put_composite_row(&mut store, expected_desc, ::datum::Datum::null(), true, estate)?;
+        }
         return Ok(store);
     }
 

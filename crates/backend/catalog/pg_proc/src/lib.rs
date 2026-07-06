@@ -125,6 +125,8 @@ pub struct ProcedureCreateArgs<'a> {
     pub proconfig: Option<&'a [String]>,
     pub procost: f32,
     pub prorows: f32,
+    // OID of a planner support function, or InvalidOid.
+    pub prosupport: Oid,
     // nodeToString image of the input-parameter defaults List and its length
     // (pg_proc.proargdefaults / pronargdefaults); caller serializes because
     // pg_proc sits below outfuncs.
@@ -352,7 +354,7 @@ pub fn ProcedureCreate<'mcx>(
     set(&mut values, Anum_pg_proc_procost, Datum::from_f32(a.procost));
     set(&mut values, Anum_pg_proc_prorows, Datum::from_f32(a.prorows));
     set(&mut values, Anum_pg_proc_provariadic, Datum::from_oid(variadicType));
-    set(&mut values, Anum_pg_proc_prosupport, Datum::from_oid(InvalidOid));
+    set(&mut values, Anum_pg_proc_prosupport, Datum::from_oid(a.prosupport));
     set(&mut values, Anum_pg_proc_prokind, Datum::from_char(a.prokind));
     set(&mut values, Anum_pg_proc_prosecdef, Datum::from_bool(a.security_definer));
     set(&mut values, Anum_pg_proc_proleakproof, Datum::from_bool(a.isLeakProof));
@@ -839,12 +841,16 @@ pub fn ProcedureCreate<'mcx>(
     let dep_param_types = a.allParameterTypes.unwrap_or(a.parameterTypes);
     let myself = ObjectAddress::set(PROCEDURE_RELATION_ID, retval);
     let mut referenced: mcx::PgVec<'mcx, ObjectAddress> =
-        mcx::vec_with_capacity_in(mcx, 3 + dep_param_types.len())?;
+        mcx::vec_with_capacity_in(mcx, 4 + dep_param_types.len())?;
     referenced.push(ObjectAddress::set(NAMESPACE_RELATION_ID, a.procNamespace));
     referenced.push(ObjectAddress::set(LANGUAGE_RELATION_ID, a.languageObjectId));
     referenced.push(ObjectAddress::set(TYPE_RELATION_ID, a.returnType));
     for &argtype in dep_param_types {
         referenced.push(ObjectAddress::set(TYPE_RELATION_ID, argtype));
+    }
+    // dependency on support function, if any
+    if OidIsValid(a.prosupport) {
+        referenced.push(ObjectAddress::set(PROCEDURE_RELATION_ID, a.prosupport));
     }
     pg_depend::record_object_address_dependencies(
         mcx,

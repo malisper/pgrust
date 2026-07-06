@@ -94,6 +94,7 @@ struct FunctionAttrs<'mcx> {
     proconfig: Option<Vec<String>>,
     procost: f32,
     prorows: f32,
+    support: Oid,
     parallel: i8,
 }
 
@@ -154,6 +155,31 @@ fn interpret_func_parallel(defel: &DefElem<'_>) -> PgResult<i8> {
     }
 }
 
+// interpret_func_support (functioncmds.c): support functions always take one
+// INTERNAL argument and return INTERNAL; superuser-only (privilege on the
+// support function itself is moot since only superuser may name one).
+fn interpret_func_support(mcx: Mcx<'_>, defel: &DefElem<'_>) -> PgResult<Oid> {
+    let proc_name = commands_define::defGetQualifiedName(mcx, defel)?;
+    let arg_types = [types_core::INTERNALOID];
+    let proc_oid = parse_func::LookupFuncName(proc_name, 1, &arg_types, false)?;
+    if lsyscache::get_func_rettype(proc_oid)? != types_core::INTERNALOID {
+        return Err(err(
+            format!(
+                "support function {} must return type internal",
+                catalog_objectaddress::NameListToString(proc_name)
+            ),
+            types_error::ERRCODE_INVALID_OBJECT_DEFINITION,
+        ));
+    }
+    if !superuser::superuser()? {
+        return Err(err(
+            "must be superuser to specify a support function".to_string(),
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+        ));
+    }
+    Ok(proc_oid)
+}
+
 // update_proconfig_value (functioncmds.c:660): None <=> C's NULL array.
 fn update_proconfig_value(
     mut a: Option<Vec<String>>,
@@ -184,6 +210,7 @@ fn set_item_of<'mcx>(defel: &DefElem<'mcx>) -> &'mcx VariableSetStmt<'mcx> {
 
 // compute_function_attributes + compute_common_attribute (functioncmds.c).
 fn compute_function_attributes<'mcx>(
+    mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt<'mcx>,
     source_text: &str,
 ) -> PgResult<FunctionAttrs<'mcx>> {
@@ -195,6 +222,7 @@ fn compute_function_attributes<'mcx>(
     let mut leakproof_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut cost_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut rows_item: Option<&'mcx DefElem<'mcx>> = None;
+    let mut support_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut parallel_item: Option<&'mcx DefElem<'mcx>> = None;
     let mut set_items: Vec<&VariableSetStmt<'_>> = Vec::new();
 
@@ -228,7 +256,7 @@ fn compute_function_attributes<'mcx>(
             "leakproof" => &mut leakproof_item,
             "cost" => &mut cost_item,
             "rows" => &mut rows_item,
-            "support" => unported("SUPPORT option"),
+            "support" => &mut support_item,
             "parallel" => &mut parallel_item,
             other => panic!("option \"{other}\" not recognized"),
         };
@@ -281,6 +309,10 @@ fn compute_function_attributes<'mcx>(
         proconfig,
         procost,
         prorows,
+        support: match support_item {
+            Some(d) => interpret_func_support(mcx, d)?,
+            None => InvalidOid,
+        },
         parallel: match parallel_item {
             Some(d) => interpret_func_parallel(d)?,
             None => PROPARALLEL_UNSAFE,
@@ -962,7 +994,7 @@ pub fn CreateFunction<'mcx>(
         aclchk_seams::aclcheck_error::call(aclresult, ObjectType::OBJECT_SCHEMA as i32, &nspname)?;
     }
 
-    let attrs = compute_function_attributes(stmt, source_text)?;
+    let attrs = compute_function_attributes(mcx, stmt, source_text)?;
 
     let language = match attrs.language {
         Some(l) => l,
@@ -1163,6 +1195,7 @@ pub fn CreateFunction<'mcx>(
             proconfig: attrs.proconfig.as_deref(),
             procost,
             prorows,
+            prosupport: attrs.support,
             parameterDefaults: argdefaults_str.as_deref(),
             numDefaults: params.parameter_defaults.len() as i16,
         },
@@ -1219,7 +1252,7 @@ pub fn AlterFunction<'mcx>(
         Anum_pg_proc_procost, Anum_pg_proc_proconfig, Anum_pg_proc_proisstrict,
         Anum_pg_proc_prokind, Anum_pg_proc_proleakproof, Anum_pg_proc_proparallel,
         Anum_pg_proc_proretset, Anum_pg_proc_prorows, Anum_pg_proc_prosecdef,
-        Anum_pg_proc_provolatile, Natts_pg_proc, PROKIND_AGGREGATE,
+        Anum_pg_proc_prosupport, Anum_pg_proc_provolatile, Natts_pg_proc, PROKIND_AGGREGATE,
     };
 
     let func = stmt.func.expect("AlterFunctionStmt.func");
@@ -1272,6 +1305,7 @@ pub fn AlterFunction<'mcx>(
     let mut leakproof_item: Option<&DefElem<'mcx>> = None;
     let mut cost_item: Option<&DefElem<'mcx>> = None;
     let mut rows_item: Option<&DefElem<'mcx>> = None;
+    let mut support_item: Option<&DefElem<'mcx>> = None;
     let mut parallel_item: Option<&DefElem<'mcx>> = None;
     let mut set_items: Vec<&VariableSetStmt<'_>> = Vec::new();
 
@@ -1298,7 +1332,7 @@ pub fn AlterFunction<'mcx>(
             "leakproof" => &mut leakproof_item,
             "cost" => &mut cost_item,
             "rows" => &mut rows_item,
-            "support" => unported("ALTER FUNCTION SUPPORT (interpret_func_support)"),
+            "support" => &mut support_item,
             "parallel" => &mut parallel_item,
             other => panic!("option \"{other}\" not recognized"),
         };
@@ -1383,6 +1417,37 @@ pub fn AlterFunction<'mcx>(
             ));
         }
         set(&mut values, &mut repl_repl, Anum_pg_proc_prorows, datum::Datum::from_f32(v));
+    }
+    if let Some(d) = support_item {
+        // interpret_func_support handles the privilege check.
+        let newsupport = interpret_func_support(mcx, d)?;
+        let old_support = getattr(Anum_pg_proc_prosupport).0.as_oid();
+        if types_core::OidIsValid(old_support) {
+            if pg_depend::changeDependencyFor(
+                mcx,
+                PROCEDURE_RELATION_ID,
+                funcOid,
+                PROCEDURE_RELATION_ID,
+                old_support,
+                newsupport,
+            )? != 1
+            {
+                panic!("could not change support dependency for function {funcOid}");
+            }
+        } else {
+            pg_depend::recordDependencyOn(
+                mcx,
+                &address,
+                &pg_proc::ObjectAddress::set(PROCEDURE_RELATION_ID, newsupport),
+                pg_depend::DependencyType::Normal,
+            )?;
+        }
+        set(
+            &mut values,
+            &mut repl_repl,
+            Anum_pg_proc_prosupport,
+            datum::Datum::from_oid(newsupport),
+        );
     }
     if let Some(d) = parallel_item {
         set(
