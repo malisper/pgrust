@@ -52,29 +52,57 @@ pub fn remove_useless_result_rtes<'mcx>(
     // computes PHVs needed by a sibling must stay (C's
     // find_dependent_phvs_in_jointree gate against the whole FromExpr).
     if f.fromlist.iter().all(|n| n.node_tag() == NodeTag::T_RangeTblRef) {
-        let f_node = Node::mk(mcx, FromExpr { fromlist: f.fromlist.clone_in(mcx)?, quals: f.quals })?;
         let total = f.fromlist.len();
+        // The dependent-PHV gate is C's lastPHId != 0 dynamic gate; its check
+        // node is built lazily so SELECT 1 (and every no-join query) pays
+        // nothing extra here.
+        let mut f_node: Option<Node<'mcx>> = None;
         let mut dropped: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
         let mut fromlist = NodeList::nil();
         for n in &f.fromlist {
-            let varno = get_result_relid(parse, n);
-            if total - dropped.len() > 1
-                && varno != 0
-                && !crate::prepjointree::find_dependent_phvs_in_jointree(
-                    run, parse, f_node, varno,
-                )?
-            {
-                dropped.push(varno);
-                continue;
+            if total - dropped.len() > 1 {
+                let varno = get_result_relid(parse, n);
+                if varno != 0 {
+                    let dependent = if run.glob.last_ph_id == 0 {
+                        false
+                    } else {
+                        let fnode = match f_node {
+                            Some(x) => x,
+                            None => {
+                                let x = Node::mk(
+                                    mcx,
+                                    FromExpr {
+                                        fromlist: f.fromlist.clone_in(mcx)?,
+                                        quals: f.quals,
+                                    },
+                                )?;
+                                f_node = Some(x);
+                                x
+                            }
+                        };
+                        crate::prepjointree::find_dependent_phvs_in_jointree(
+                            run, parse, fnode, varno,
+                        )?
+                    };
+                    if !dependent {
+                        dropped.push(varno);
+                        continue;
+                    }
+                }
             }
             fromlist.lappend(mcx, n)?;
         }
         if !dropped.is_empty() {
-            let new_f = Node::mk(mcx, FromExpr { fromlist, quals: f.quals })?;
-            for &varno in dropped.iter() {
-                crate::prepjointree::remove_result_refs(run, parse, varno, new_f)?;
+            if run.glob.last_ph_id != 0 {
+                let new_f_node = Node::mk(
+                    mcx,
+                    FromExpr { fromlist: fromlist.clone_in(mcx)?, quals: f.quals },
+                )?;
+                for &varno in dropped.iter() {
+                    crate::prepjointree::remove_result_refs(run, parse, varno, new_f_node)?;
+                }
             }
-            parse.jointree = Some(new_f.as_from_expr().expect("just built"));
+            parse.jointree = Some(alloc_leak_in(mcx, FromExpr { fromlist, quals: f.quals })?);
             check_rowmarks_on_result(run, parse);
         }
         return Ok(());
@@ -157,15 +185,18 @@ fn drop_result_children<'mcx>(
         if varno == 0 {
             continue;
         }
-        // C checks against f as it currently stands (already-dropped RESULT
-        // siblings excluded; they carry no expressions anyway).
-        let mut cur = NodeList::nil();
-        for c in children.iter().flatten() {
-            cur.lappend(mcx, *c)?;
-        }
-        let f_node = Node::mk(mcx, FromExpr { fromlist: cur, quals })?;
-        if crate::prepjointree::find_dependent_phvs_in_jointree(run, parse, f_node, varno)? {
-            continue;
+        // C's dependent-PHV gate against f as it currently stands
+        // (already-dropped RESULT siblings excluded; they carry no
+        // expressions anyway), built only when PHVs exist (lastPHId != 0).
+        if run.glob.last_ph_id != 0 {
+            let mut cur = NodeList::nil();
+            for c in children.iter().flatten() {
+                cur.lappend(mcx, *c)?;
+            }
+            let f_node = Node::mk(mcx, FromExpr { fromlist: cur, quals })?;
+            if crate::prepjointree::find_dependent_phvs_in_jointree(run, parse, f_node, varno)? {
+                continue;
+            }
         }
         remaining -= 1;
         dropped.push(varno);
@@ -175,7 +206,7 @@ fn drop_result_children<'mcx>(
     for c in children.iter().flatten() {
         fromlist.lappend(mcx, *c)?;
     }
-    if !dropped.is_empty() {
+    if !dropped.is_empty() && run.glob.last_ph_id != 0 {
         let new_f = Node::mk(mcx, FromExpr { fromlist: fromlist.clone_in(mcx)?, quals })?;
         for &varno in dropped.iter() {
             crate::prepjointree::remove_result_refs(run, parse, varno, new_f)?;
