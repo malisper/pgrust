@@ -243,14 +243,15 @@ impl Default for OpFamilyMember {
 
 // C resolves any pg_am row through its amhandler; the closed IndexAmKind set
 // gives non-builtin AMs (CREATE ACCESS METHOD over a builtin handler) a
-// registry plus a lazy resolver (amapi's pg_am.amhandler lookup, installed at
-// seams init) so any from_relam site covers them regardless of call order.
+// per-thread registry plus a lazy resolver (amapi's pg_am.amhandler lookup).
+// INVARIANT (set-once): the resolver slot is written during single-threaded
+// startup, before any session thread calls from_relam (seam_core's model).
 thread_local! {
     static REGISTERED_INDEX_AMS: std::cell::RefCell<Vec<(Oid, IndexAmKind)>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    static INDEX_AM_RESOLVER: std::cell::Cell<Option<fn(Oid) -> Option<IndexAmKind>>> =
-        const { std::cell::Cell::new(None) };
 }
+
+static INDEX_AM_RESOLVER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub fn register_index_am(relam: Oid, kind: IndexAmKind) {
     REGISTERED_INDEX_AMS.with(|v| {
@@ -262,7 +263,7 @@ pub fn register_index_am(relam: Oid, kind: IndexAmKind) {
 }
 
 pub fn set_index_am_resolver(f: fn(Oid) -> Option<IndexAmKind>) {
-    INDEX_AM_RESOLVER.with(|c| c.set(Some(f)));
+    INDEX_AM_RESOLVER.store(f as usize, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cold]
@@ -273,9 +274,14 @@ fn registered_index_am(relam: Oid) -> IndexAmKind {
     {
         return k;
     }
-    if let Some(k) = INDEX_AM_RESOLVER.with(std::cell::Cell::get).and_then(|f| f(relam)) {
-        register_index_am(relam, k);
-        return k;
+    let raw = INDEX_AM_RESOLVER.load(std::sync::atomic::Ordering::Relaxed);
+    if raw != 0 {
+        // SAFETY: set-once invariant above — always a valid resolver fn.
+        let f: fn(Oid) -> Option<IndexAmKind> = unsafe { std::mem::transmute(raw) };
+        if let Some(k) = f(relam) {
+            register_index_am(relam, k);
+            return k;
+        }
     }
     unported_index_am(relam)
 }

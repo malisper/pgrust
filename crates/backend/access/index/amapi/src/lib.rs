@@ -208,10 +208,53 @@ pub fn am_adjust_members(
             spgist_validate::spgadjustmembers(opfamilyoid, opclassoid, operators, functions)
         }
         IndexAmKind::Gist => gistadjustmembers(opfamilyoid, opclassoid, operators, functions),
+        IndexAmKind::Gin => ginadjustmembers(opfamilyoid, opclassoid, operators, functions),
         // C brinhandler sets amadjustmembers = NULL.
         IndexAmKind::Brin => Ok(()),
+        #[allow(unreachable_patterns)]
         other => panic!("unported: amadjustmembers for index AM {other:?}"),
     }
+}
+
+// ginadjustmembers (ginvalidate.c:269): same shape as gistadjustmembers with
+// GIN's required (extractValue/extractQuery) vs optional support set.
+fn ginadjustmembers(
+    opfamilyoid: Oid,
+    _opclassoid: Oid,
+    operators: &mut [types_relscan::OpFamilyMember],
+    functions: &mut [types_relscan::OpFamilyMember],
+) -> PgResult<()> {
+    for op in operators.iter_mut() {
+        op.ref_is_hard = false;
+        op.ref_is_family = true;
+        op.refobjid = opfamilyoid;
+    }
+    for op in functions.iter_mut() {
+        match op.number as u16 {
+            gin_vocab::GIN_EXTRACTVALUE_PROC | gin_vocab::GIN_EXTRACTQUERY_PROC => {
+                op.ref_is_hard = true;
+            }
+            gin_vocab::GIN_COMPARE_PROC
+            | gin_vocab::GIN_CONSISTENT_PROC
+            | gin_vocab::GIN_COMPARE_PARTIAL_PROC
+            | gin_vocab::GIN_TRICONSISTENT_PROC
+            | gin_vocab::GIN_OPTIONS_PROC => {
+                op.ref_is_hard = false;
+                op.ref_is_family = true;
+                op.refobjid = opfamilyoid;
+            }
+            _ => {
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "support function number {} is invalid for access method {}",
+                        op.number, "gin"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // gistadjustmembers (gistvalidate.c:288): operators always get soft opfamily

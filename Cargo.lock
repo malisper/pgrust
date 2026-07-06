@@ -1264,6 +1264,7 @@ dependencies = [
  "catcache",
  "datum",
  "fmgr_core",
+ "gin_vocab",
  "hash_validate",
  "heaptuple",
  "mcx",

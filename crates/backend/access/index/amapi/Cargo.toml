@@ -12,6 +12,7 @@ types_scan = { path = "../../../../_support/types/types_scan" }
 types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_relscan = { path = "../relscan" }
 types_gist = { path = "../../../../_support/types/gist" }
+gin_vocab = { path = "../../gin/gin_vocab" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
 nbt_validate = { path = "../../nbtree/nbt_validate" }
 hash_validate = { path = "../../hash/hash_validate" }
