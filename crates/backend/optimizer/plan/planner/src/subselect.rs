@@ -695,7 +695,10 @@ fn convert_exists_sublink_to_join<'mcx>(
         assert!(
             matches!(
                 srte.rtekind,
-                RTEKind::RTE_RELATION | RTEKind::RTE_SUBQUERY | RTEKind::RTE_JOIN
+                RTEKind::RTE_RELATION
+                    | RTEKind::RTE_SUBQUERY
+                    | RTEKind::RTE_JOIN
+                    | RTEKind::RTE_FUNCTION
             ),
             "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
             srte.rtekind
@@ -739,6 +742,40 @@ fn convert_exists_sublink_to_join<'mcx>(
                     })
                 };
             }
+        }
+        if srte.rtekind == RTEKind::RTE_FUNCTION {
+            // OffsetVarNodes/IncrementVarSublevelsUp over the whole subselect
+            // reach each RangeTblFunction's funcexpr the same way it reaches
+            // joinaliasvars above; the shared list stays unwritten.
+            let mut functions = NodeList::nil();
+            for f in &srte.functions {
+                let rtfunc = f.as_range_tbl_function().expect("functions holds RangeTblFunction");
+                let funcexpr = match rtfunc.funcexpr {
+                    Some(fexpr) => Some(offset_and_pull_down(mcx, fexpr, rtoffset)?),
+                    None => None,
+                };
+                functions.lappend(
+                    mcx,
+                    Node::mk(
+                        mcx,
+                        types_nodes::parsenodes::RangeTblFunction {
+                            funcexpr,
+                            funccolcount: rtfunc.funccolcount,
+                            funccolnames: rtfunc.funccolnames.clone_in(mcx)?,
+                            funccoltypes: rtfunc.funccoltypes.clone_in(mcx)?,
+                            funccoltypmods: rtfunc.funccoltypmods.clone_in(mcx)?,
+                            funccolcollations: rtfunc.funccolcollations.clone_in(mcx)?,
+                            funcparams: rtfunc.funcparams.clone_in(mcx)?,
+                        },
+                    )?,
+                )?;
+            }
+            // SAFETY: exclusive pre-seal fixup of the fresh copy.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.functions = functions
+                })
+            };
         }
         parse.rtable.lappend(mcx, copy)?;
     }
