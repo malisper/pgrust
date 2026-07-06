@@ -266,6 +266,9 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_PlaceHolderVar => {
+            preprocess_aggrefs_walker(run, node.as_place_holder_var().unwrap().phexpr)
+        }
         other => panic!(
             "preprocess_aggrefs_walker (prepagg.c): {other:?}; M3 expression lane"
         ),
