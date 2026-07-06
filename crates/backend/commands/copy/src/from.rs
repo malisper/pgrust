@@ -562,6 +562,7 @@ fn copy_from_body<'mcx>(
                     false,
                     None,
                     &[],
+                    false,
                 )?
             } else {
                 PgVec::new_in(mcx)
@@ -845,6 +846,7 @@ fn copy_from_partitioned_body<'mcx>(
                     false,
                     None,
                     &[],
+                    false,
                 )?;
             }
             processed += 1;
@@ -1015,6 +1017,7 @@ fn flush_multi_insert<'mcx>(
                     false,
                     None,
                     &[],
+                    false,
                 )?
             } else {
                 PgVec::new_in(mcx)

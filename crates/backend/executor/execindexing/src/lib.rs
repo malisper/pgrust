@@ -266,7 +266,8 @@ pub fn BuildDummyIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResu
         ii_Unique: indexstruct.indisunique,
         ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
         ii_ReadyForInserts: indexstruct.indisready,
-        ii_Summarizing: false,
+        ii_Summarizing: ::types_relscan::IndexAmKind::from_relam(index.rd_rel.relam)
+            .amsummarizing(),
         ii_Concurrent: false,
         ii_BrokenHotChain: false,
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
@@ -311,7 +312,8 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
         ii_NullsNotDistinct: indexstruct.indnullsnotdistinct,
         // indisready only (index.c:2452): invalid-but-ready still gets inserts.
         ii_ReadyForInserts: indexstruct.indisready,
-        ii_Summarizing: false, // btree only (relam gates in indexam)
+        ii_Summarizing: ::types_relscan::IndexAmKind::from_relam(index.rd_rel.relam)
+            .amsummarizing(),
         ii_Concurrent: false,
         ii_BrokenHotChain: false,
         ii_UniqueOps: [0; INDEX_MAX_KEYS as usize],
@@ -502,8 +504,8 @@ pub fn index_predicate_passes<'mcx>(
     execexpr::exec_qual(indexInfo.ii_PredicateState.as_deref_mut(), &mut slots)
 }
 
-/// ExecInsertIndexTuples, INSERT + ON CONFLICT arms (`update`/
-/// `onlySummarizing` are the UPDATE-hint and BRIN lanes). With `noDupErr`,
+/// ExecInsertIndexTuples, INSERT + ON CONFLICT + summarizing-only UPDATE arms
+/// (the `update` indexUnchanged hint is the UPDATE-hint lane). With `noDupErr`,
 /// arbiter (or all, if `arbiter_indexes` is empty) unique indexes get
 /// UNIQUE_CHECK_PARTIAL and a potential conflict sets `*spec_conflict`
 /// instead of erroring. Returns C's recheck-oid list (deferred-exclusion
@@ -517,6 +519,7 @@ pub fn ExecInsertIndexTuples<'mcx>(
     noDupErr: bool,
     mut spec_conflict: Option<&mut bool>,
     arbiter_indexes: &[Oid],
+    only_summarizing: bool,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     let tupleid = slot.base().tts_tid;
     debug_assert!(ItemPointerIsValid(&tupleid));
@@ -529,6 +532,10 @@ pub fn ExecInsertIndexTuples<'mcx>(
     for i in 0..state.descs.len() {
         let indexInfo = &mut state.infos[i];
         if !indexInfo.ii_ReadyForInserts {
+            continue;
+        }
+
+        if only_summarizing && !indexInfo.ii_Summarizing {
             continue;
         }
 

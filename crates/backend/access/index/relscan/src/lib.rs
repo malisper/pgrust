@@ -67,6 +67,19 @@ impl IndexAmKind {
         }
     }
 
+    pub const fn amsummarizing(self) -> bool {
+        match self {
+            IndexAmKind::Btree => false,
+            IndexAmKind::Hash => false,
+            IndexAmKind::Gin => false,
+            IndexAmKind::Gist => false,
+            IndexAmKind::Spgist => false,
+            IndexAmKind::Brin => true,
+            #[cfg(feature = "mock")]
+            IndexAmKind::Mock => false,
+        }
+    }
+
     pub const fn amsearcharray(self) -> bool {
         match self {
             IndexAmKind::Btree => true,
