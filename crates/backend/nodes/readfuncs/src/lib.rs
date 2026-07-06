@@ -414,6 +414,8 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             b"MINMAXEXPR" => self.read_min_max_expr(),
             b"SCALARARRAYOPEXPR" => self.read_scalar_array_op_expr(),
             b"SUBLINK" => self.read_sub_link(),
+            b"SUBPLAN" => self.read_sub_plan(),
+            b"ALTERNATIVESUBPLAN" => self.read_alternative_sub_plan(),
             b"PARAM" => self.read_param(),
             b"ARRAYEXPR" => self.read_array_expr(),
             b"SETTODEFAULT" => self.read_set_to_default(),
@@ -1643,6 +1645,51 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             self.mcx,
             SubLink { subLinkType, subLinkId, testexpr, operName, subselect, location },
         )
+    }
+
+    fn read_sub_plan(&mut self) -> PgResult<Node<'mcx>> {
+        let subLinkType = sub_link_type(self.read_u32("subLinkType"));
+        let testexpr = self.read_node("testexpr")?;
+        let paramIds = self.read_int_list("paramIds")?;
+        let plan_id = self.read_i32("plan_id");
+        let plan_name = self.read_str("plan_name")?;
+        let firstColType = self.read_u32("firstColType");
+        let firstColTypmod = self.read_i32("firstColTypmod");
+        let firstColCollation = self.read_u32("firstColCollation");
+        let useHashTable = self.read_bool("useHashTable");
+        let unknownEqFalse = self.read_bool("unknownEqFalse");
+        let parallel_safe = self.read_bool("parallel_safe");
+        let setParam = self.read_int_list("setParam")?;
+        let parParam = self.read_int_list("parParam")?;
+        let args = self.read_node_list("args")?;
+        let startup_cost = self.read_f64("startup_cost");
+        let per_call_cost = self.read_f64("per_call_cost");
+        Node::mk(
+            self.mcx,
+            types_nodes::primnodes::SubPlan {
+                subLinkType,
+                testexpr,
+                paramIds,
+                plan_id,
+                plan_name,
+                firstColType,
+                firstColTypmod,
+                firstColCollation,
+                useHashTable,
+                unknownEqFalse,
+                parallel_safe,
+                setParam,
+                parParam,
+                args,
+                startup_cost,
+                per_call_cost,
+            },
+        )
+    }
+
+    fn read_alternative_sub_plan(&mut self) -> PgResult<Node<'mcx>> {
+        let subplans = self.read_node_list("subplans")?;
+        Node::mk(self.mcx, types_nodes::primnodes::AlternativeSubPlan { subplans })
     }
 
     fn read_param(&mut self) -> PgResult<Node<'mcx>> {

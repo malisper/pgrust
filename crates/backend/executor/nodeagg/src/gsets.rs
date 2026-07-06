@@ -76,6 +76,19 @@ pub(crate) struct HashSetsState<'mcx> {
     current_set: usize,
 }
 
+impl GroupingSetsState<'_> {
+    pub(crate) fn collect_param_deps(&self, deps: &mut Vec<u32>) {
+        for ph in self.phases.iter() {
+            deps.extend_from_slice(ph.evaltrans.param_exec_deps());
+        }
+        if let Some(h) = self.hash.as_ref() {
+            if let Some(et) = h.evaltrans.as_deref() {
+                deps.extend_from_slice(et.param_exec_deps());
+            }
+        }
+    }
+}
+
 pub(crate) struct GroupingSetsState<'mcx> {
     phases: PgVec<'mcx, PerPhaseData<'mcx>>,
     current_phase: usize,
@@ -84,7 +97,7 @@ pub(crate) struct GroupingSetsState<'mcx> {
     all_grouped_cols_desc: PgVec<'mcx, i16>,
     _pergroups: PgVec<'mcx, PgVec<'mcx, AggPerGroup>>,
     pergroup_bases: PgVec<'mcx, NonNull<AggPerGroup>>,
-    first_slot: SlotData<'mcx>,
+    pub(crate) first_slot: SlotData<'mcx>,
     first_stored: bool,
     pending_slot: SlotData<'mcx>,
     have_pending: bool,
