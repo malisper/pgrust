@@ -85,6 +85,22 @@ pub struct ParallelExecutorInfo {
     pub reader: Vec<tqueue::TupleQueueReader>,
     pub finished: bool,
     instrumented: bool,
+    // Gather subtree plan_node_ids (ExecParallelRetrieveInstrumentation's
+    // walk scope): worker_instrument attaches only to these nodes.
+    subtree_ids: Vec<i32>,
+}
+
+fn collect_plan_node_ids(node: Option<Node<'_>>, out: &mut Vec<i32>) {
+    let Some(node) = node else { return };
+    let plan = plan_of_node(node);
+    out.push(plan.plan_node_id);
+    collect_plan_node_ids(plan.lefttree, out);
+    collect_plan_node_ids(plan.righttree, out);
+    for child in node_child_lists(node) {
+        for sub in child.iter() {
+            collect_plan_node_ids(Some(sub), out);
+        }
+    }
 }
 
 fn walk_parallel_aware(node: Option<Node<'_>>) {
@@ -415,6 +431,8 @@ pub fn exec_init_parallel_plan<'mcx>(
     let tqueue = setup_tuple_queues(&shared, nworkers);
     parallel::set_private(pcxt, Arc::clone(&shared) as Arc<dyn Any + Send + Sync>);
 
+    let mut subtree_ids = Vec::new();
+    collect_plan_node_ids(Some(child_plan), &mut subtree_ids);
     Ok(ParallelExecutorInfo {
         pcxt,
         shared,
@@ -422,6 +440,7 @@ pub fn exec_init_parallel_plan<'mcx>(
         reader: Vec::new(),
         finished: false,
         instrumented,
+        subtree_ids,
     })
 }
 
@@ -532,7 +551,11 @@ fn retrieve_instrumentation(
         let mut instrument = PgVec::new_in(mcx);
         instrument.try_reserve_exact(w.instrument.len()).map_err(|_| mcx.oom(1))?;
         instrument.extend(w.instrument.iter().copied());
+        let mut node_ids = PgVec::new_in(mcx);
+        node_ids.try_reserve_exact(pei.subtree_ids.len()).map_err(|_| mcx.oom(1))?;
+        node_ids.extend(pei.subtree_ids.iter().copied());
         let mut wi = WorkerInstr {
+            node_ids,
             instrument,
             sort: PgVec::new_in(mcx),
             incsort: PgVec::new_in(mcx),

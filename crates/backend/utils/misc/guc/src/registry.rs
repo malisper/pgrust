@@ -830,6 +830,47 @@ pub fn reset_value_string(record: &GucVariable) -> Option<String> {
     })
 }
 
+// get_explain_guc_options (guc.c): GUC_EXPLAIN vars whose current value
+// differs from boot_val, as (name, GetConfigOptionByName value). C walks
+// guc_nondef_list in hash order; table order here — EXPLAIN (SETTINGS)
+// consumers are order-insensitive (regress greps the line / extracts JSON
+// keys). `visible` is ConfigOptionIsVisible (lives with the ACL deps).
+pub fn get_explain_guc_options(
+    reg: &GucRegistry,
+    visible: &mut dyn FnMut(&GucVariable) -> PgResult<bool>,
+) -> PgResult<Vec<(&'static str, Option<String>)>> {
+    let mut out = Vec::new();
+    for conf in reg.iter() {
+        let gen = conf.gen();
+        if gen.flags & types_guc::GUC_EXPLAIN == 0 {
+            continue;
+        }
+        // guc_nondef_list membership: only sources beyond the default.
+        if gen.source == PGC_S_DEFAULT {
+            continue;
+        }
+        if !visible(conf)? {
+            continue;
+        }
+        let modified = match conf {
+            GucVariable::Bool(c) => current_bool(c) != c.boot_val,
+            GucVariable::Int(c) => current_int(c) != c.boot_val,
+            GucVariable::Real(c) => current_real(c) != c.boot_val,
+            GucVariable::String(c) => match (&c.boot_val, current_string(c)) {
+                (None, None) => false,
+                (None, Some(_)) | (Some(_), None) => true,
+                (Some(b), Some(v)) => *b != v,
+            },
+            GucVariable::Enum(c) => current_enum(c) != c.boot_val,
+        };
+        if !modified {
+            continue;
+        }
+        out.push((gen.name, Some(show_guc_option(conf, true))));
+    }
+    Ok(out)
+}
+
 pub fn get_config_option_by_name(
     reg: &GucRegistry,
     name: &str,

@@ -30,6 +30,7 @@ exectuples_output = { path = "../../executor/exectuples_output" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
+guc_seams = { path = "../../utils/misc/guc_seams" }
 queryjumble = { path = "../../nodes/queryjumble" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 keywords = { path = "../../../common/keywords" }

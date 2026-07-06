@@ -607,21 +607,32 @@ fn transformExplainStmt<'mcx>(
     explain_node: Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     let stmt = explain_node.as_explain_stmt().unwrap();
+    let mut generic_plan = false;
     if matches!(pstate.p_ref_hook_state, parser_small1::ParseRefHookState::None) {
         for opt in stmt.options.iter() {
             let opt = opt.as_def_elem().expect("EXPLAIN options are DefElems");
-            // C checks defGetBoolean; GENERIC_PLAN in any form is loud here.
             if opt.defname == Some("generic_plan") {
-                panic!(
-                    "transformExplainStmt (analyze.c): GENERIC_PLAN variable-parameter \
-                     setup unported"
-                );
+                generic_plan = define::defGetBoolean(opt)?;
             }
+            // no break: C wants the last value.
+        }
+        if generic_plan {
+            parser_small1::setup_parse_variable_parameters(
+                pstate,
+                parser_small1::VarParamState::new(),
+            );
         }
     }
     let inner = stmt.query.expect("ExplainStmt has a query");
     let analyzed = transformOptionalSelectInto(mcx, pstate, inner)?;
     let query_node = Node::mk(mcx, analyzed)?;
+    if generic_plan {
+        parser_small1::check_variable_parameters(
+            pstate,
+            query_node.as_query().expect("built as Query above"),
+            mbutils::GetDatabaseEncoding(),
+        )?;
+    }
     // SAFETY: raw tree owned by this analysis; no derived reference is live.
     unsafe {
         explain_node

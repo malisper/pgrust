@@ -344,4 +344,14 @@ pub fn ConfigOptionIsVisible(conf: &GucVariable) -> PgResult<bool> {
     }
 }
 
-pub fn init_seams() {}
+// get_explain_guc_options (guc.c) with the visibility filter bound.
+pub fn get_explain_guc_options() -> PgResult<Vec<(&'static str, Option<String>)>> {
+    guc::store::with_store(|reg| {
+        guc::registry::get_explain_guc_options(reg, &mut |conf| ConfigOptionIsVisible(conf))
+    })
+    .expect("GUC store not initialized")
+}
+
+pub fn init_seams() {
+    guc_seams::get_explain_guc_options::set(get_explain_guc_options);
+}

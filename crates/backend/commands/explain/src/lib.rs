@@ -168,23 +168,67 @@ pub fn standard_ExplainOneQuery<'mcx>(
     params: ParamListHandle,
     query_env: QueryEnvHandle,
 ) -> PgResult<()> {
-    if es.memory {
-        panic!(
-            "standard_ExplainOneQuery (explain.c): MEMORY needs \
-             MemoryContextMemConsumed accounting (mcxt lane)"
-        );
-    }
+    // C plans inside a dedicated "explain analyze planner context" AllocSet
+    // and reads MemoryContextMemConsumed; the arena analogue is a stats delta
+    // over the statement context across planning (values diverge from C's
+    // palloc numbers — regress masks them via explain_filter).
+    let mem_before = if es.memory { Some(mem_snapshot(mcx)) } else { None };
     let bufusage_start = if es.buffers { Some(instrument::pg_buffer_usage()) } else { None };
     let planstart = Instant::now();
     let plan = postgres::simple_query::pg_plan_query(mcx, query, query_string, cursor_options, params)?
         .expect("planner will not cope with utility statements");
     let planduration = planstart.elapsed();
+    let mem_counters = mem_before.map(|b| mem_counters_since(mcx, b));
     let bufusage = bufusage_start.map(|start| {
         let mut b = BufferUsage::default();
         instrument::buffer_usage_accum_diff(&mut b, &instrument::pg_buffer_usage(), &start);
         b
     });
-    ExplainOnePlan(mcx, plan, into, es, query_string, params, query_env, planduration, bufusage.as_ref())
+    ExplainOnePlan(
+        mcx,
+        plan,
+        into,
+        es,
+        query_string,
+        params,
+        query_env,
+        planduration,
+        bufusage.as_ref(),
+        mem_counters.as_ref(),
+    )
+}
+
+// MemoryContextCounters (memutils.h) projection: (totalspace, totalspace -
+// freespace) come from the statement arena's (footprint, subtree_used) delta.
+pub struct MemCounters {
+    totalspace: u64,
+    freespace: u64,
+}
+
+fn mem_snapshot(mcx: Mcx<'_>) -> (usize, usize) {
+    let s = mcx.context().stats();
+    (s.subtree_used, s.arena_footprint)
+}
+
+fn mem_counters_since(mcx: Mcx<'_>, before: (usize, usize)) -> MemCounters {
+    let (used0, foot0) = before;
+    let (used1, foot1) = mem_snapshot(mcx);
+    let used = used1.saturating_sub(used0) as u64;
+    let totalspace = (foot1.saturating_sub(foot0) as u64).max(used);
+    MemCounters { totalspace, freespace: totalspace - used }
+}
+
+// explain.c show_memory_counters.
+fn show_memory_counters(es: &mut ExplainState<'_>, mem_counters: &MemCounters) {
+    let mem_used_kb = bytes_to_kilobytes(mem_counters.totalspace - mem_counters.freespace);
+    let mem_allocated_kb = bytes_to_kilobytes(mem_counters.totalspace);
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        ExplainIndentText(es);
+        append!(es, "Memory: used={mem_used_kb}kB  allocated={mem_allocated_kb}kB\n");
+    } else {
+        ExplainPropertyUInteger("Memory Used", Some("kB"), mem_used_kb, es);
+        ExplainPropertyUInteger("Memory Allocated", Some("kB"), mem_allocated_kb, es);
+    }
 }
 
 // "into" is None unless explaining the contents of a CreateTableAsStmt.
@@ -260,24 +304,27 @@ fn ExplainOneUtility<'mcx>(
             .flatten()
             .expect("EXPLAIN DECLARE CURSOR without analyzed query");
             // SAFETY: as above.
-            let query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
-                .expect("DECLARE CURSOR query is not an analyzed Query");
+            let mut query: Query<'mcx> =
+                unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
+                    .expect("DECLARE CURSOR query is not an analyzed Query");
+            if queryjumble::IsQueryIdEnabled() {
+                queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
+            }
+            // post_parse_analyze_hook: no plugin surface exists.
             let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
             assert!(rewritten.len() == 1, "DECLARE rewrite yielded {} queries", rewritten.len());
             let query = rewritten.into_iter().next().expect("len == 1");
             return ExplainOneQuery(mcx, query, options, None, es, query_string, params, query_env);
         }
         NodeTag::T_ExecuteStmt => {
-            if es.memory {
-                panic!(
-                    "ExplainOneUtility (explain.c): MEMORY needs \
-                     MemoryContextMemConsumed accounting (mcxt lane)"
-                );
-            }
             let exec_stmt = stmt.as_execute_stmt().expect("tag checked");
+            // C meters GetCachedPlan inside ExplainExecuteQuery; the delta
+            // here also spans parameter evaluation (value divergence only).
+            let mem_before = if es.memory { Some(mem_snapshot(mcx)) } else { None };
             let bufusage_start =
                 if es.buffers { Some(instrument::pg_buffer_usage()) } else { None };
             let mut bufusage: Option<BufferUsage> = None;
+            let mut mem_counters: Option<MemCounters> = None;
             return prepare::ExplainExecuteQuery(
                 mcx,
                 exec_stmt,
@@ -306,6 +353,9 @@ fn ExplainOneUtility<'mcx>(
                             b
                         });
                     }
+                    if mem_counters.is_none() {
+                        mem_counters = mem_before.map(|b| mem_counters_since(mcx, b));
+                    }
                     ExplainOnePlanRef(
                         mcx,
                         pstmt,
@@ -316,6 +366,7 @@ fn ExplainOneUtility<'mcx>(
                         query_env,
                         planduration,
                         bufusage.as_ref(),
+                        mem_counters.as_ref(),
                     )?;
                     if !is_last {
                         ExplainSeparatePlans(es)?;
@@ -375,9 +426,21 @@ pub fn ExplainOnePlan<'mcx>(
     query_env: QueryEnvHandle,
     planduration: std::time::Duration,
     bufusage: Option<&BufferUsage>,
+    mem_counters: Option<&MemCounters>,
 ) -> PgResult<()> {
     let pstmt: &'mcx PlannedStmt<'mcx> = mcx::alloc_leak_in(mcx, plan)?;
-    ExplainOnePlanRef(mcx, pstmt, into, es, query_string, params, query_env, planduration, bufusage)
+    ExplainOnePlanRef(
+        mcx,
+        pstmt,
+        into,
+        es,
+        query_string,
+        params,
+        query_env,
+        planduration,
+        bufusage,
+        mem_counters,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -391,6 +454,7 @@ fn ExplainOnePlanRef<'mcx>(
     query_env: QueryEnvHandle,
     planduration: std::time::Duration,
     bufusage: Option<&BufferUsage>,
+    mem_counters: Option<&MemCounters>,
 ) -> PgResult<()> {
     debug_assert!(pstmt.commandType != CmdType::CMD_UTILITY);
 
@@ -483,14 +547,19 @@ fn ExplainOnePlanRef<'mcx>(
     ExplainPrintPlan(mcx, es, pstmt)?;
     es.qd = types_portal::QueryDescHandle::NULL;
 
-    if bufusage.is_some_and(|bu| peek_buffer_usage(es, bu)) {
+    if bufusage.is_some_and(|bu| peek_buffer_usage(es, bu)) || mem_counters.is_some() {
         ExplainOpenGroup("Planning", Some("Planning"), true, es);
         if es.format == EXPLAIN_FORMAT_TEXT {
             ExplainIndentText(es);
             es.str.append_str("Planning:\n")?;
             es.indent += 1;
         }
-        show_buffer_usage(es, bufusage.expect("peeked above"));
+        if let Some(bu) = bufusage {
+            show_buffer_usage(es, bu);
+        }
+        if let Some(mc) = mem_counters {
+            show_memory_counters(es, mc);
+        }
         if es.format == EXPLAIN_FORMAT_TEXT {
             es.indent -= 1;
         }
