@@ -207,6 +207,22 @@ fn install_xact_periphery_seams() {
     trigger_seams::after_trigger_begin_xact::set(|| Ok(()));
     trigger_seams::after_trigger_end_xact::set(|_| Ok(()));
     trigger_seams::after_trigger_fire_deferred::set(|| Ok(()));
+    // CheckCmdReplicaIdentity (execReplication.c), C-faithful under the
+    // rig's ground truth: no pg_publication rows exist, so PublicationDesc
+    // is all-valid with every pubaction false — rf/cols/gencols checks pass
+    // and publishes=false admits UPDATE/DELETE without a replica identity.
+    // C's early exits are kept explicit; the catalog-backed middle cannot
+    // run against this rig's seamed syscache.
+    execreplication_seams::check_cmd_replica_identity::set(|_mcx, rel, cmd| {
+        use types_nodes::nodes_enums::CmdType;
+        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+            return Ok(());
+        }
+        if cmd != CmdType::CMD_UPDATE && cmd != CmdType::CMD_DELETE {
+            return Ok(());
+        }
+        Ok(())
+    });
     async_seams::pre_commit_notify::set(|| Ok(()));
     async_seams::at_commit_notify::set(|| Ok(()));
     async_seams::at_abort_notify::set(|| {});

@@ -125,6 +125,7 @@ timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam = { path = "../../access/transam/transam" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 trigger_seams = { path = "../../commands/trigger_seams" }
+execreplication_seams = { path = "../execreplication_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 types_rel = { path = "../../../_support/types/rel" }
 types_storage = { path = "../../../_support/types/types_storage" }
