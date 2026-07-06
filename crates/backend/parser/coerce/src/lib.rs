@@ -2175,6 +2175,11 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
                 || rc.rargs.iter().any(expression_returns_set)
         }
         NodeTag::T_FieldSelect => expression_returns_set(node.as_field_select().unwrap().arg),
+        // expression_tree_walker (nodeFuncs.c) recurses into phexpr; planner
+        // callers (make_sort et al.) can see PlaceHolderVars.
+        NodeTag::T_PlaceHolderVar => {
+            expression_returns_set(node.as_place_holder_var().unwrap().phexpr)
+        }
         NodeTag::T_Const
         | NodeTag::T_Param
         | NodeTag::T_Var

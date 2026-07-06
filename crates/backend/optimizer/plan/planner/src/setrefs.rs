@@ -3452,8 +3452,10 @@ fn set_join_references<'mcx>(
                 let nlp = nlp_node.as_nest_loop_param().expect("nestParams cell");
                 let mut single = NodeList::nil();
                 single.lappend(mcx, nlp.paramval)?;
+                // C uses NRM_SUBSET here: unreparameterized paths' Vars/PHVs
+                // may carry a nullingrels subset of the outer side's.
                 let fixed = fix_join_expr_list(
-                    run, &single, outer_tlist, &empty, rtoffset, NrmMatch::Equal, 0,
+                    run, &single, outer_tlist, &empty, rtoffset, NrmMatch::Subset, 0,
                     base.plan_rows,
                 )?;
                 let paramval = fixed.nth(0);
@@ -3558,10 +3560,11 @@ fn set_join_references<'mcx>(
     Ok(())
 }
 
-// setrefs.c NullingRelsMatch; NRM_SUBSET has no consumer on this lane.
+// setrefs.c NullingRelsMatch.
 #[derive(Clone, Copy, PartialEq)]
 enum NrmMatch {
     Equal,
+    Subset,
     Superset,
 }
 
@@ -4450,6 +4453,7 @@ fn search_join_tlist_for_var<'mcx>(
             assert!(
                 var.varattno <= 0
                     || match nrm_match {
+                        NrmMatch::Subset => var.varnullingrels.is_subset(&sub.varnullingrels),
                         NrmMatch::Superset => sub.varnullingrels.is_subset(&var.varnullingrels),
                         NrmMatch::Equal => sub.varnullingrels.equal(&var.varnullingrels),
                     },
@@ -4497,6 +4501,7 @@ fn search_tlist_for_phv<'mcx>(
         }
         assert!(
             match nrm_match {
+                NrmMatch::Subset => phv.phnullingrels.is_subset(&sub.phnullingrels),
                 NrmMatch::Superset => sub.phnullingrels.is_subset(&phv.phnullingrels),
                 NrmMatch::Equal => sub.phnullingrels.equal(&phv.phnullingrels),
             },
