@@ -1257,6 +1257,17 @@ fn pull_up_simple_subquery<'mcx>(
                 // SAFETY: exclusive pre-seal fixup of the fresh copy.
                 unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.joinaliasvars = off_aliasvars) };
             }
+            // range_table_entry_walker (nodeFuncs.c) walks rte->tablesample
+            // for RTE_RELATION: a LATERAL tablesample argument carries Vars
+            // (own rel: varno offset; lateral uplevel: varlevelsup -1).
+            RTEKind::RTE_RELATION if !pre_adjusted => {
+                if let Some(tsc) = crte.tablesample {
+                    if let Some(off) = offset_expr(mcx, tsc, rtoffset)? {
+                        // SAFETY: exclusive pre-seal fixup of the fresh copy.
+                        unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(off)) };
+                    }
+                }
+            }
             RTEKind::RTE_FUNCTION => {
                 let off = if pre_adjusted {
                     crte.functions.clone_in(mcx)?
