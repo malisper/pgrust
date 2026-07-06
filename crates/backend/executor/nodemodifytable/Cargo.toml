@@ -40,6 +40,7 @@ types_core = { path = "../../../_support/types/types_core" }
 datum = { path = "../../../_support/types/datum" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
 execscan = { path = "../execscan" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 
 [dev-dependencies]
 transam_seams = { path = "../../access/transam/transam_seams" }
