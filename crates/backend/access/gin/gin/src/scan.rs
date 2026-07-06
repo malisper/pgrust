@@ -1,4 +1,4 @@
-//! ginscan.c: scan setup. Single key column.
+//! ginscan.c: scan setup.
 
 use ::bufmgr_seams as bm;
 use ::datum::Datum;
@@ -62,6 +62,7 @@ fn fill_scan_entry(
                 && prev.attnum == attnum
                 && ginCompareEntries(
                     state,
+                    attnum,
                     prev.queryKey,
                     prev.queryCategory,
                     query_key,
@@ -226,19 +227,22 @@ pub(crate) fn ginNewScanKey(
     so.isVoidRes = false;
 
     let mut has_null_query = false;
-    let mut attr_has_normal_scan = false;
+    let mut attr_has_normal_scan = [false; GIN_MAX_KEY_COLS];
 
     for skey in keys {
         if skey.sk_flags & SK_ISNULL != 0 {
             so.isVoidRes = true;
             break;
         }
-        debug_assert!(skey.sk_attno == 1);
 
         // SAFETY: query values stored in work (kcx contract).
         let kcx = unsafe { work.kcx() };
-        let extracted =
-            crate::opclass::extract_query(kcx, &state, skey.sk_argument, skey.sk_strategy)?;
+        let extracted = crate::opclass::extract_query(
+            kcx,
+            state.col(skey.sk_attno as OffsetNumber),
+            skey.sk_argument,
+            skey.sk_strategy,
+        )?;
         let crate::opclass::ExtractedQuery {
             entries: query_values,
             search_mode: mut search_mode,
@@ -284,7 +288,7 @@ pub(crate) fn ginNewScanKey(
         )?;
 
         if search_mode != GIN_SEARCH_MODE_ALL {
-            attr_has_normal_scan = true;
+            attr_has_normal_scan[skey.sk_attno as usize - 1] = true;
         }
     }
 
@@ -294,10 +298,11 @@ pub(crate) fn ginNewScanKey(
         if work.keys[i].searchMode != GIN_SEARCH_MODE_ALL {
             continue;
         }
-        if !attr_has_normal_scan {
+        let a = work.keys[i].attnum as usize - 1;
+        if !attr_has_normal_scan[a] {
             work.keys[i].excludeOnly = false;
             add_hidden_entry(&state, &mut work, i, GIN_CAT_EMPTY_QUERY)?;
-            attr_has_normal_scan = true;
+            attr_has_normal_scan[a] = true;
         } else {
             num_exclude_only += 1;
         }

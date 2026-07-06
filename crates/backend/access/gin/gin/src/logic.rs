@@ -25,7 +25,7 @@ pub(crate) fn bool_consistent(
     let mut recheck = true;
     let res = opclass::consistent(
         tmp.mcx(),
-        state,
+        state.col(key.attnum),
         key.entryRes.as_slice(),
         key.strategy,
         key.query,
@@ -52,7 +52,7 @@ pub(crate) fn tri_consistent(
     }
     let res = opclass::tri_consistent(
         tmp.mcx(),
-        state,
+        state.col(key.attnum),
         key.entryRes.as_slice(),
         key.strategy,
         key.query,

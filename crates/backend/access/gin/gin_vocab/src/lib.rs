@@ -244,14 +244,33 @@ pub struct JspGinOp {
     pub val: u32,
 }
 
+/// Per-key-column resolved opclass state (C GinState's per-attnum arrays).
 #[derive(Clone, Copy, Debug)]
-pub struct GinState {
+pub struct GinColState {
     pub opclass: GinOpclass,
     pub elem_cmp: GinElemCmp,
     pub support_collation: Oid,
     pub can_partial_match: bool,
     pub key_byval: bool,
     pub key_len: i16,
+}
+
+/// INDEX_MAX_KEYS.
+pub const GIN_MAX_KEY_COLS: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+pub struct GinState {
+    pub natts: u16,
+    pub one_col: bool,
+    pub cols: [GinColState; GIN_MAX_KEY_COLS],
+}
+
+impl GinState {
+    #[inline]
+    pub fn col(&self, attnum: OffsetNumber) -> &GinColState {
+        debug_assert!(attnum >= 1 && (attnum as u16) <= self.natts);
+        &self.cols[attnum as usize - 1]
+    }
 }
 
 // Scan opaque: entry sharing is u32 handles into GinScanWork.entries (C

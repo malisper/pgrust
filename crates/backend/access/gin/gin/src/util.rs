@@ -5,7 +5,7 @@ use ::bufmgr_seams as bm;
 use ::datum::Datum;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, PgVec};
-use ::types_core::{Buffer, ForkNumber, InvalidBlockNumber, InvalidOid, BLCKSZ};
+use ::types_core::{Buffer, ForkNumber, InvalidBlockNumber, InvalidOid, OffsetNumber, BLCKSZ};
 use ::types_error::PgResult;
 use ::types_rel::Relation;
 use ::types_storage::bufpage::PageMut;
@@ -17,15 +17,34 @@ use crate::{
     write_meta_to, write_opaque_to, RM_GIN,
 };
 
-/// initGinState. Closed set: single key column, jsonb_ops / jsonb_path_ops /
-/// tsvector_ops / array_ops. Anything else panics loudly (multicol / unknown).
+/// initGinState. Closed opclass set per column: jsonb_ops / jsonb_path_ops /
+/// tsvector_ops / array_ops; anything else panics loudly.
 pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     let natts = rel.rd_att.natts;
-    if natts != 1 {
-        unported("multicolumn GIN index (initGinState)");
+    if natts < 1 || natts as usize > GIN_MAX_KEY_COLS {
+        unported(&format!("GIN index with {natts} key columns (initGinState)"));
     }
-    let opcintype = rel.rd_opcintype[0];
-    let opfamily = rel.rd_opfamily[0];
+    let mut cols = [GinColState {
+        opclass: GinOpclass::JsonbOps,
+        elem_cmp: GinElemCmp::None,
+        support_collation: InvalidOid,
+        can_partial_match: false,
+        key_byval: false,
+        key_len: 0,
+    }; GIN_MAX_KEY_COLS];
+    for i in 0..natts as usize {
+        cols[i] = init_gin_col(rel, i)?;
+    }
+    Ok(GinState {
+        natts: natts as u16,
+        one_col: natts == 1,
+        cols,
+    })
+}
+
+fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
+    let opcintype = rel.rd_opcintype[i];
+    let opfamily = rel.rd_opfamily[i];
 
     let extract =
         lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_EXTRACTVALUE_PROC as i16)?;
@@ -40,7 +59,7 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
     // type's default btree comparator via typcache. The index tupdesc attr
     // is the element type (opckeytype anyelement, ConstructTupleDescriptor).
     let elem_cmp = if opclass == GinOpclass::ArrayOps {
-        match rel.rd_att.attr(0).atttypid {
+        match rel.rd_att.attr(i).atttypid {
             ::types_core::INT2OID => GinElemCmp::Int2,
             ::types_core::INT4OID => GinElemCmp::Int4,
             ::types_core::INT8OID => GinElemCmp::Int8,
@@ -74,12 +93,12 @@ pub fn initGinState(rel: &Relation<'_>) -> PgResult<GinState> {
         other => unported(&format!("GIN comparePartialFn {other}")),
     };
 
-    let attr = rel.rd_att.compact_attr(0);
-    Ok(GinState {
+    let attr = rel.rd_att.compact_attr(i);
+    Ok(GinColState {
         opclass,
         elem_cmp,
-        support_collation: if rel.rd_indcollation[0] != InvalidOid {
-            rel.rd_indcollation[0]
+        support_collation: if rel.rd_indcollation[i] != InvalidOid {
+            rel.rd_indcollation[i]
         } else {
             ::types_core::catalog::DEFAULT_COLLATION_OID
         },
@@ -223,6 +242,7 @@ pub(crate) fn set_meta_pd_lower(bytes: &mut [u8]) {
 /// ginCompareEntries.
 pub(crate) fn ginCompareEntries(
     state: &GinState,
+    attnum: OffsetNumber,
     a: Datum,
     category_a: GinNullCategory,
     b: Datum,
@@ -234,7 +254,23 @@ pub(crate) fn ginCompareEntries(
     if category_a != GIN_CAT_NORM_KEY {
         return 0;
     }
-    opclass::compare(state, a, b)
+    opclass::compare(state.col(attnum), a, b)
+}
+
+/// ginCompareAttEntries: attribute number dominates.
+pub(crate) fn ginCompareAttEntries(
+    state: &GinState,
+    attnum_a: OffsetNumber,
+    a: Datum,
+    category_a: GinNullCategory,
+    attnum_b: OffsetNumber,
+    b: Datum,
+    category_b: GinNullCategory,
+) -> i32 {
+    if attnum_a != attnum_b {
+        return if attnum_a < attnum_b { -1 } else { 1 };
+    }
+    ginCompareEntries(state, attnum_a, a, category_a, b, category_b)
 }
 
 /// ginExtractEntries: keys sorted + de-duplicated, with null categories.
@@ -243,6 +279,7 @@ pub(crate) fn ginCompareEntries(
 pub fn ginExtractEntries<'mcx>(
     mcx: Mcx<'mcx>,
     state: &GinState,
+    attnum: OffsetNumber,
     value: Datum,
     is_null: bool,
 ) -> PgResult<(PgVec<'mcx, Datum>, PgVec<'mcx, GinNullCategory>)> {
@@ -255,7 +292,7 @@ pub fn ginExtractEntries<'mcx>(
         return Ok((entries, categories));
     }
 
-    let (mut entries, null_flags) = opclass::extract_value(mcx, state, value)?;
+    let (mut entries, null_flags) = opclass::extract_value(mcx, state.col(attnum), value)?;
 
     if entries.is_empty() {
         entries.try_reserve(1).map_err(|_| crate::oom(8))?;
@@ -286,7 +323,7 @@ pub fn ginExtractEntries<'mcx>(
         }
         let mut have_dups = false;
         keydata.sort_by(|a, b| {
-            let r = ginCompareEntries(state, a.0, a.1, b.0, b.1);
+            let r = ginCompareEntries(state, attnum, a.0, a.1, b.0, b.1);
             if r == 0 {
                 have_dups = true;
             }
@@ -295,7 +332,7 @@ pub fn ginExtractEntries<'mcx>(
         if have_dups {
             let mut j = 0usize;
             for i in 1..keydata.len() {
-                if ginCompareEntries(state, keydata[j].0, keydata[j].1, keydata[i].0, keydata[i].1)
+                if ginCompareEntries(state, attnum, keydata[j].0, keydata[j].1, keydata[i].0, keydata[i].1)
                     != 0
                 {
                     j += 1;

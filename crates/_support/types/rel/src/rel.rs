@@ -87,9 +87,9 @@ pub struct RdIndexList {
 
 pub type RdAmCacheBtree = BTMetaPageData;
 
-/// GIN's resolved opclass state (gin's GinState mirror).
+/// GIN's resolved per-column opclass state (gin's GinColState mirror).
 #[derive(Clone, Copy, Debug)]
-pub struct RdAmCacheGin {
+pub struct RdAmCacheGinCol {
     pub opclass: u8,
     /// array_ops element comparator tag (gin's GinElemCmp mirror).
     pub elem_cmp: u8,
@@ -97,6 +97,13 @@ pub struct RdAmCacheGin {
     pub can_partial_match: bool,
     pub key_byval: bool,
     pub key_len: i16,
+}
+
+/// GIN's resolved opclass state (gin's GinState mirror; INDEX_MAX_KEYS slots).
+#[derive(Clone, Copy, Debug)]
+pub struct RdAmCacheGin {
+    pub natts: u16,
+    pub cols: [RdAmCacheGinCol; 32],
 }
 
 impl<'mcx> RelationData<'mcx> {

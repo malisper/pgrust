@@ -11,7 +11,8 @@ use ::types_error::PgResult;
 use ::types_tuple::itemptr::ItemPointerData;
 use ::types_tuple::varatt;
 
-use crate::util::ginCompareEntries;
+use crate::util::ginCompareAttEntries;
+use ::types_core::OffsetNumber;
 
 const DEF_NPTR: usize = 5;
 const DEF_NENTRY: usize = 2048;
@@ -31,6 +32,7 @@ fn chunk_space(sz: usize) -> usize {
 
 #[derive(Clone, Copy)]
 struct KeyRef {
+    attnum: OffsetNumber,
     category: GinNullCategory,
     /// Value bytes of the copied key (accumulator-owned; null for categories).
     ptr: *const u8,
@@ -49,18 +51,22 @@ impl KeyRef {
 
 impl PartialEq for KeyRef {
     fn eq(&self, other: &Self) -> bool {
-        self.category == other.category && self.bytes() == other.bytes()
+        self.attnum == other.attnum
+            && self.category == other.category
+            && self.bytes() == other.bytes()
     }
 }
 impl Eq for KeyRef {}
 impl core::hash::Hash for KeyRef {
     fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.attnum.hash(h);
         self.category.hash(h);
         self.bytes().hash(h);
     }
 }
 
 pub struct EntryAcc<'s> {
+    pub attnum: OffsetNumber,
     pub key: Datum,
     pub category: GinNullCategory,
     should_sort: bool,
@@ -77,11 +83,11 @@ pub struct BuildAccumulator<'s> {
     dump_pos: usize,
 }
 
-fn key_value_bytes(state: &GinState, key: Datum) -> (*const u8, u32) {
-    if state.key_byval {
+fn key_value_bytes(col: &GinColState, key: Datum) -> (*const u8, u32) {
+    if col.key_byval {
         // By-value keys hash as the 8-byte word; KeyRef points nowhere.
         (core::ptr::null(), 0)
-    } else if state.key_len == -1 {
+    } else if col.key_len == -1 {
         // SAFETY: non-null varlena key datum.
         unsafe {
             let p = key.as_usize() as *const u8;
@@ -95,7 +101,7 @@ fn key_value_bytes(state: &GinState, key: Datum) -> (*const u8, u32) {
             }
         }
     } else {
-        (key.as_usize() as *const u8, state.key_len as u32)
+        (key.as_usize() as *const u8, col.key_len as u32)
     }
 }
 
@@ -114,15 +120,16 @@ impl<'s> BuildAccumulator<'s> {
     }
 
     /// getDatumCopy: copy a by-ref key into the accumulator context.
-    fn key_copy(&mut self, key: Datum) -> PgResult<Datum> {
-        if self.state.key_byval {
+    fn key_copy(&mut self, attnum: OffsetNumber, key: Datum) -> PgResult<Datum> {
+        let col = self.state.col(attnum);
+        if col.key_byval {
             return Ok(key);
         }
-        let len = if self.state.key_len == -1 {
+        let len = if col.key_len == -1 {
             // SAFETY: non-null varlena key datum.
             unsafe { varatt::varsize_any(key.as_usize() as *const u8) }
         } else {
-            self.state.key_len as usize
+            col.key_len as usize
         };
         let mut buf: PgVec<'s, u8> = mcx::vec_with_capacity_in(self.mcx, len)?;
         // SAFETY: len bytes of the live key image.
@@ -139,17 +146,20 @@ impl<'s> BuildAccumulator<'s> {
     fn insert_entry(
         &mut self,
         heapptr: &ItemPointerData,
+        attnum: OffsetNumber,
         key: Datum,
         category: GinNullCategory,
     ) -> PgResult<()> {
+        let key_byval = self.state.col(attnum).key_byval;
         let (ptr, len) = if category == GIN_CAT_NORM_KEY {
-            key_value_bytes(&self.state, key)
+            key_value_bytes(self.state.col(attnum), key)
         } else {
             (core::ptr::null(), 0)
         };
         let probe = KeyRef {
+            attnum,
             category,
-            ptr: if self.state.key_byval && category == GIN_CAT_NORM_KEY {
+            ptr: if key_byval && category == GIN_CAT_NORM_KEY {
                 // By-value word: hash the datum bytes through a stable copy.
                 core::ptr::null()
             } else {
@@ -160,9 +170,10 @@ impl<'s> BuildAccumulator<'s> {
 
         // By-value keys fold the word into the map key via a synthetic ref.
         let byval_word;
-        let probe = if self.state.key_byval && category == GIN_CAT_NORM_KEY {
+        let probe = if key_byval && category == GIN_CAT_NORM_KEY {
             byval_word = key.as_u64().to_ne_bytes();
             KeyRef {
+                attnum,
                 category,
                 ptr: byval_word.as_ptr(),
                 len: 8,
@@ -192,7 +203,7 @@ impl<'s> BuildAccumulator<'s> {
 
         // New entry: permanent key copy + fresh list.
         let key_copied = if category == GIN_CAT_NORM_KEY {
-            self.key_copy(key)?
+            self.key_copy(attnum, key)?
         } else {
             Datum::null()
         };
@@ -207,13 +218,14 @@ impl<'s> BuildAccumulator<'s> {
 
         let idx = self.entries.len() as u32;
         self.entries.push(EntryAcc {
+            attnum,
             key: key_copied,
             category,
             should_sort: false,
             list,
         });
         let stored = if category == GIN_CAT_NORM_KEY {
-            let (p, l) = if self.state.key_byval {
+            let (p, l) = if key_byval {
                 // Point at the entry's stored 8-byte word (stable: Datum is
                 // stored by value; use a copy in the accumulator arena).
                 let mut w: PgVec<'s, u8> = mcx::vec_with_capacity_in(self.mcx, 8)?;
@@ -222,15 +234,17 @@ impl<'s> BuildAccumulator<'s> {
                 core::mem::forget(w);
                 (p, 8u32)
             } else {
-                key_value_bytes(&self.state, key_copied)
+                key_value_bytes(self.state.col(attnum), key_copied)
             };
             KeyRef {
+                attnum,
                 category,
                 ptr: p,
                 len: l,
             }
         } else {
             KeyRef {
+                attnum,
                 category,
                 ptr: core::ptr::null(),
                 len: 0,
@@ -244,11 +258,12 @@ impl<'s> BuildAccumulator<'s> {
     pub fn insert_entries(
         &mut self,
         heapptr: &ItemPointerData,
+        attnum: OffsetNumber,
         entries: &[Datum],
         categories: &[GinNullCategory],
     ) -> PgResult<()> {
         for (i, key) in entries.iter().enumerate() {
-            self.insert_entry(heapptr, *key, categories[i])?;
+            self.insert_entry(heapptr, attnum, *key, categories[i])?;
         }
         Ok(())
     }
@@ -267,7 +282,15 @@ impl<'s> BuildAccumulator<'s> {
         self.dump_order.sort_by(|&a, &b| {
             let ea = &entries[a as usize];
             let eb = &entries[b as usize];
-            let c = ginCompareEntries(&state, ea.key, ea.category, eb.key, eb.category);
+            let c = ginCompareAttEntries(
+                &state,
+                ea.attnum,
+                ea.key,
+                ea.category,
+                eb.attnum,
+                eb.key,
+                eb.category,
+            );
             if c == 0 {
                 // Byte-dedup missed a compareFn-equal pair: silent index
                 // corruption vs C — refuse.
@@ -280,7 +303,9 @@ impl<'s> BuildAccumulator<'s> {
     }
 
     /// ginGetBAEntry.
-    pub fn next_entry(&mut self) -> Option<(Datum, GinNullCategory, &[ItemPointerData])> {
+    pub fn next_entry(
+        &mut self,
+    ) -> Option<(OffsetNumber, Datum, GinNullCategory, &[ItemPointerData])> {
         if self.dump_pos >= self.dump_order.len() {
             return None;
         }
@@ -294,7 +319,7 @@ impl<'s> BuildAccumulator<'s> {
                 r.cmp(&0)
             });
         }
-        Some((e.key, e.category, e.list.as_slice()))
+        Some((e.attnum, e.key, e.category, e.list.as_slice()))
     }
 
     pub fn nentries(&self) -> usize {

@@ -6,9 +6,9 @@ use ::bufmgr_seams as bm;
 use ::datum::Datum;
 use ::gin_vocab::*;
 use ::mcx::{Mcx, MemoryContext};
-use ::types_core::Buffer;
+use ::types_core::{Buffer, OffsetNumber};
 use ::types_error::PgResult;
-use ::types_rel::{RdAmCacheGin, Relation};
+use ::types_rel::{RdAmCacheGin, RdAmCacheGinCol, Relation};
 use ::types_tuple::itemptr::ItemPointerData;
 
 use crate::btree::{ginFindLeafPage, ginInsertValue};
@@ -48,49 +48,78 @@ pub(crate) fn with_insert_scratch<R>(
 /// statement in ii_AmCache, the relcache slot has the same invalidation).
 pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
     if let Some(g) = rel.rd_amcache_gin.get() {
+        let mut cols = [GinColState {
+            opclass: GinOpclass::JsonbOps,
+            elem_cmp: GinElemCmp::None,
+            support_collation: ::types_core::InvalidOid,
+            can_partial_match: false,
+            key_byval: false,
+            key_len: 0,
+        }; GIN_MAX_KEY_COLS];
+        for (i, c) in g.cols.iter().enumerate().take(g.natts as usize) {
+            cols[i] = GinColState {
+                opclass: match c.opclass {
+                    0 => GinOpclass::JsonbOps,
+                    1 => GinOpclass::JsonbPathOps,
+                    2 => GinOpclass::TsvectorOps,
+                    3 => GinOpclass::ArrayOps,
+                    other => unported(&format!("rd_amcache gin opclass tag {other}")),
+                },
+                elem_cmp: match c.elem_cmp {
+                    0 => GinElemCmp::None,
+                    1 => GinElemCmp::Int2,
+                    2 => GinElemCmp::Int4,
+                    3 => GinElemCmp::Int8,
+                    4 => GinElemCmp::Oid,
+                    5 => GinElemCmp::Text,
+                    other => unported(&format!("rd_amcache gin elem_cmp tag {other}")),
+                },
+                support_collation: c.support_collation,
+                can_partial_match: c.can_partial_match,
+                key_byval: c.key_byval,
+                key_len: c.key_len,
+            };
+        }
         return Ok(GinState {
-            opclass: match g.opclass {
-                0 => GinOpclass::JsonbOps,
-                1 => GinOpclass::JsonbPathOps,
-                2 => GinOpclass::TsvectorOps,
-                3 => GinOpclass::ArrayOps,
-                other => unported(&format!("rd_amcache gin opclass tag {other}")),
-            },
-            elem_cmp: match g.elem_cmp {
-                0 => GinElemCmp::None,
-                1 => GinElemCmp::Int2,
-                2 => GinElemCmp::Int4,
-                3 => GinElemCmp::Int8,
-                4 => GinElemCmp::Oid,
-                5 => GinElemCmp::Text,
-                other => unported(&format!("rd_amcache gin elem_cmp tag {other}")),
-            },
-            support_collation: g.support_collation,
-            can_partial_match: g.can_partial_match,
-            key_byval: g.key_byval,
-            key_len: g.key_len,
+            natts: g.natts,
+            one_col: g.natts == 1,
+            cols,
         });
     }
     let state = initGinState(rel)?;
+    let mut cached_cols = [RdAmCacheGinCol {
+        opclass: 0,
+        elem_cmp: 0,
+        support_collation: ::types_core::InvalidOid,
+        can_partial_match: false,
+        key_byval: false,
+        key_len: 0,
+    }; GIN_MAX_KEY_COLS];
+    for (i, col) in state.cols.iter().enumerate().take(state.natts as usize) {
+        cached_cols[i] = RdAmCacheGinCol {
+            opclass: match col.opclass {
+                GinOpclass::JsonbOps => 0,
+                GinOpclass::JsonbPathOps => 1,
+                GinOpclass::TsvectorOps => 2,
+                GinOpclass::ArrayOps => 3,
+            },
+            elem_cmp: match col.elem_cmp {
+                GinElemCmp::None => 0,
+                GinElemCmp::Int2 => 1,
+                GinElemCmp::Int4 => 2,
+                GinElemCmp::Int8 => 3,
+                GinElemCmp::Oid => 4,
+                GinElemCmp::Text => 5,
+            },
+            support_collation: col.support_collation,
+            can_partial_match: col.can_partial_match,
+            key_byval: col.key_byval,
+            key_len: col.key_len,
+        };
+    }
     rel.rd_amcache_gin.set(Some(RdAmCacheGin {
-        opclass: match state.opclass {
-            GinOpclass::JsonbOps => 0,
-            GinOpclass::JsonbPathOps => 1,
-            GinOpclass::TsvectorOps => 2,
-            GinOpclass::ArrayOps => 3,
-        },
-        elem_cmp: match state.elem_cmp {
-            GinElemCmp::None => 0,
-            GinElemCmp::Int2 => 1,
-            GinElemCmp::Int4 => 2,
-            GinElemCmp::Int8 => 3,
-            GinElemCmp::Oid => 4,
-            GinElemCmp::Text => 5,
-        },
-        support_collation: state.support_collation,
-        can_partial_match: state.can_partial_match,
-        key_byval: state.key_byval,
-        key_len: state.key_len,
+        natts: state.natts,
+        cols: cached_cols,
     }));
     Ok(state)
 }
@@ -106,13 +135,14 @@ fn addItemPointersToLeafTuple<'s>(
     buffer: Buffer,
 ) -> PgResult<::nbtree::itup::ItupBuf<'s>> {
     // SAFETY: pin + exclusive lock held on the entry leaf.
-    let (key, category, old_items) = unsafe {
+    let (attnum, key, category, old_items) = unsafe {
         debug_assert!(!gin_is_posting_tree(old));
+        let attnum = crate::entrypage::gintuple_get_attrnum(state, old);
         let mut category = GIN_CAT_NORM_KEY;
-        let key = crate::entrypage::gintuple_get_key(rel, old, &mut category);
+        let key = crate::entrypage::gintuple_get_key(mcx, rel, state, old, &mut category)?;
         let mut old_items = mcx::vec_new_in(mcx);
         ginReadTuple(mcx, old, &mut old_items)?;
-        (key, category, old_items)
+        (attnum, key, category, old_items)
     };
 
     let new_items = ginMergeItemPointers(mcx, items, old_items.as_slice())?;
@@ -123,6 +153,8 @@ fn addItemPointersToLeafTuple<'s>(
         if let Some(res) = GinFormTuple(
             mcx,
             rel,
+            state,
+            attnum,
             key,
             category,
             &compressed,
@@ -143,7 +175,8 @@ fn addItemPointersToLeafTuple<'s>(
         buffer,
     )?;
     ginInsertItemPointers(mcx, rel, posting_root, items, buildStats)?;
-    let mut res = GinFormTuple(mcx, rel, key, category, &[], 0, 0, true)?.expect("errorTooBig");
+    let mut res =
+        GinFormTuple(mcx, rel, state, attnum, key, category, &[], 0, 0, true)?.expect("errorTooBig");
     // SAFETY: owned tuple image.
     unsafe { gin_set_posting_tree(res.as_mut_ptr(), posting_root) };
     Ok(res)
@@ -154,18 +187,20 @@ fn buildFreshLeafTuple<'s>(
     mcx: Mcx<'s>,
     rel: &Relation<'_>,
     state: &GinState,
+    attnum: OffsetNumber,
     key: Datum,
     category: GinNullCategory,
     items: &[ItemPointerData],
     buildStats: Option<&mut GinStatsData>,
     buffer: Buffer,
 ) -> PgResult<::nbtree::itup::ItupBuf<'s>> {
-    let _ = state;
     let (compressed, npacked) = ginCompressPostingList(mcx, items, GinMaxItemSize)?;
     if npacked == items.len() {
         if let Some(res) = GinFormTuple(
             mcx,
             rel,
+            state,
+            attnum,
             key,
             category,
             &compressed,
@@ -177,7 +212,8 @@ fn buildFreshLeafTuple<'s>(
         }
     }
 
-    let mut res = GinFormTuple(mcx, rel, key, category, &[], 0, 0, true)?.expect("errorTooBig");
+    let mut res =
+        GinFormTuple(mcx, rel, state, attnum, key, category, &[], 0, 0, true)?.expect("errorTooBig");
     let posting_root = createPostingTree(mcx, rel, items, buildStats, buffer)?;
     // SAFETY: owned tuple image.
     unsafe { gin_set_posting_tree(res.as_mut_ptr(), posting_root) };
@@ -221,12 +257,13 @@ pub fn ginEntryInsert<'s>(
     mcx: Mcx<'s>,
     rel: &Relation<'_>,
     state: &GinState,
+    attnum: OffsetNumber,
     key: Datum,
     category: GinNullCategory,
     items: &[ItemPointerData],
     mut buildStats: Option<&mut GinStatsData>,
 ) -> PgResult<()> {
-    let mut btree = EntryBtree::new(rel, state, key, category, mcx);
+    let mut btree = EntryBtree::new(rel, state, attnum, key, category, mcx);
     btree.is_build = buildStats.is_some();
 
     let mut stack = ginFindLeafPage(mcx, rel, &mut btree, false, false)?;
@@ -277,6 +314,7 @@ pub fn ginEntryInsert<'s>(
             mcx,
             rel,
             state,
+            attnum,
             key,
             category,
             items,
@@ -300,16 +338,18 @@ fn ginHeapTupleInsert<'s>(
     mcx: Mcx<'s>,
     rel: &Relation<'_>,
     state: &GinState,
+    attnum: OffsetNumber,
     value: Datum,
     is_null: bool,
     item: &ItemPointerData,
 ) -> PgResult<()> {
-    let (entries, categories) = ginExtractEntries(mcx, state, value, is_null)?;
+    let (entries, categories) = ginExtractEntries(mcx, state, attnum, value, is_null)?;
     for (i, key) in entries.iter().enumerate() {
         ginEntryInsert(
             mcx,
             rel,
             state,
+            attnum,
             *key,
             categories[i],
             core::slice::from_ref(item),
@@ -334,18 +374,31 @@ pub fn gininsert<'mcx>(
     with_insert_scratch(|scratch| {
         if gin_use_fastupdate(rel) {
             let mut collector = crate::fast::GinTupleCollector::new(scratch);
-            crate::fast::ginHeapTupleFastCollect(
-                scratch,
-                rel,
-                &state,
-                &mut collector,
-                values[0],
-                isnull[0],
-                ht_ctid,
-            )?;
+            for i in 0..state.natts as usize {
+                crate::fast::ginHeapTupleFastCollect(
+                    scratch,
+                    rel,
+                    &state,
+                    &mut collector,
+                    (i + 1) as ::types_core::OffsetNumber,
+                    values[i],
+                    isnull[i],
+                    ht_ctid,
+                )?;
+            }
             crate::fast::ginHeapTupleFastInsert(scratch, rel, &state, &mut collector)?;
         } else {
-            ginHeapTupleInsert(scratch, rel, &state, values[0], isnull[0], ht_ctid)?;
+            for i in 0..state.natts as usize {
+                ginHeapTupleInsert(
+                    scratch,
+                    rel,
+                    &state,
+                    (i + 1) as ::types_core::OffsetNumber,
+                    values[i],
+                    isnull[i],
+                    ht_ctid,
+                )?;
+            }
         }
         Ok(())
     })?;

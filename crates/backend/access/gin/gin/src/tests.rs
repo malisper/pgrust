@@ -104,18 +104,24 @@ fn wal_record_image_sizes_match_c() {
     assert_eq!(GinListPageSize, 8192 - 24 - 8);
 }
 
+fn one_col_state(col: GinColState) -> GinState {
+    let mut cols = [col; GIN_MAX_KEY_COLS];
+    cols[0] = col;
+    GinState { natts: 1, one_col: true, cols }
+}
+
 #[test]
 fn build_accumulator_dump_order_and_tids() {
     let ctx = MemoryContext::new_bump("t");
     let mcx = ctx.mcx();
-    let state = GinState {
+    let state = one_col_state(GinColState {
         opclass: GinOpclass::JsonbOps,
         elem_cmp: GinElemCmp::None,
         support_collation: 100,
         can_partial_match: false,
         key_byval: false,
         key_len: -1,
-    };
+    });
     // Keys as 4-byte-header text images (jsonb_ops key form).
     fn key(mcx: ::mcx::Mcx<'_>, s: &[u8]) -> ::datum::Datum {
         let total = 4 + s.len();
@@ -134,23 +140,23 @@ fn build_accumulator_dump_order_and_tids() {
     let mut acc = crate::bulk::BuildAccumulator::new(mcx, state);
     let kb = key(mcx, b"\x01bbb");
     let ka = key(mcx, b"\x01aaa");
-    acc.insert_entries(&tid(1, 1), &[kb, ka], &[GIN_CAT_NORM_KEY, GIN_CAT_NORM_KEY])
+    acc.insert_entries(&tid(1, 1), 1, &[kb, ka], &[GIN_CAT_NORM_KEY, GIN_CAT_NORM_KEY])
         .unwrap();
-    acc.insert_entries(&tid(1, 2), &[ka], &[GIN_CAT_NORM_KEY]).unwrap();
-    acc.insert_entries(&tid(2, 1), &[kb], &[GIN_CAT_NORM_KEY]).unwrap();
+    acc.insert_entries(&tid(1, 2), 1, &[ka], &[GIN_CAT_NORM_KEY]).unwrap();
+    acc.insert_entries(&tid(2, 1), 1, &[kb], &[GIN_CAT_NORM_KEY]).unwrap();
     // A null-item placeholder sorts after normal keys.
-    acc.insert_entries(&tid(3, 1), &[::datum::Datum::null()], &[GIN_CAT_NULL_ITEM])
+    acc.insert_entries(&tid(3, 1), 1, &[::datum::Datum::null()], &[GIN_CAT_NULL_ITEM])
         .unwrap();
 
     acc.begin_scan().unwrap();
-    let (k1, c1, l1) = acc.next_entry().map(|(k, c, l)| (k, c, l.to_vec())).unwrap();
+    let (k1, c1, l1) = acc.next_entry().map(|(_, k, c, l)| (k, c, l.to_vec())).unwrap();
     assert_eq!(c1, GIN_CAT_NORM_KEY);
     let (_, _, _) = (k1, c1, &l1);
     assert_eq!(l1, vec![tid(1, 1), tid(1, 2)]); // "aaa" first, TIDs sorted
-    let (_, c2, l2) = acc.next_entry().map(|(k, c, l)| (k, c, l.to_vec())).unwrap();
+    let (_, c2, l2) = acc.next_entry().map(|(_, k, c, l)| (k, c, l.to_vec())).unwrap();
     assert_eq!(c2, GIN_CAT_NORM_KEY);
     assert_eq!(l2, vec![tid(1, 1), tid(2, 1)]);
-    let (_, c3, l3) = acc.next_entry().map(|(k, c, l)| (k, c, l.to_vec())).unwrap();
+    let (_, c3, l3) = acc.next_entry().map(|(_, k, c, l)| (k, c, l.to_vec())).unwrap();
     assert_eq!(c3, GIN_CAT_NULL_ITEM);
     assert_eq!(l3, vec![tid(3, 1)]);
     assert!(acc.next_entry().is_none());
@@ -159,21 +165,21 @@ fn build_accumulator_dump_order_and_tids() {
 
 #[test]
 fn compare_entries_category_order() {
-    let state = GinState {
+    let state = one_col_state(GinColState {
         opclass: GinOpclass::JsonbOps,
         elem_cmp: GinElemCmp::None,
         support_collation: 100,
         can_partial_match: false,
         key_byval: false,
         key_len: -1,
-    };
+    });
     use crate::util::ginCompareEntries;
     let d = ::datum::Datum::null();
-    assert!(ginCompareEntries(&state, d, GIN_CAT_EMPTY_QUERY, d, GIN_CAT_NORM_KEY) < 0);
-    assert!(ginCompareEntries(&state, d, GIN_CAT_NULL_KEY, d, GIN_CAT_NORM_KEY) > 0);
-    assert!(ginCompareEntries(&state, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_EMPTY_ITEM) > 0);
+    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_EMPTY_QUERY, d, GIN_CAT_NORM_KEY) < 0);
+    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_NULL_KEY, d, GIN_CAT_NORM_KEY) > 0);
+    assert!(ginCompareEntries(&state, 1, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_EMPTY_ITEM) > 0);
     assert_eq!(
-        ginCompareEntries(&state, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_NULL_ITEM),
+        ginCompareEntries(&state, 1, d, GIN_CAT_NULL_ITEM, d, GIN_CAT_NULL_ITEM),
         0
     );
 }
