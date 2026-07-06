@@ -1726,25 +1726,46 @@ fn constraint_name_exists(mcx: Mcx<'_>, name: &str, namespaceid: Oid) -> PgResul
     Ok(found)
 }
 
-// makeObjectName without the truncation lane (loud on overflow).
+// makeObjectName (indexcmds.c:2518-2577): truncate the longer of name1/name2
+// (multibyte-aware) until "name1[_name2]_label" fits in NAMEDATALEN-1 bytes.
 fn make_object_name<'mcx>(
     mcx: Mcx<'mcx>,
     name1: &str,
     name2: Option<&str>,
     label: &str,
 ) -> PgResult<PgString<'mcx>> {
-    let mut s = PgString::from_str_in(name1, mcx)?;
+    let mut overhead = label.len() + 1;
+    if name2.is_some() {
+        overhead += 1;
+    }
+    assert!(NAMEDATALEN as usize - 1 > overhead, "makeObjectName label too long ({label:?})");
+    let availchars = NAMEDATALEN as usize - 1 - overhead;
+    let mut name1chars = name1.len();
+    let mut name2chars = name2.map_or(0, str::len);
+    while name1chars + name2chars > availchars {
+        if name1chars > name2chars {
+            name1chars -= 1;
+        } else {
+            name2chars -= 1;
+        }
+    }
+    name1chars = mbutils_seams::pg_mbcliplen::call(
+        name1.as_bytes(),
+        name1chars as i32,
+        name1chars as i32,
+    ) as usize;
+    let mut s = PgString::from_str_in(&name1[..name1chars], mcx)?;
     if let Some(n2) = name2 {
+        name2chars = mbutils_seams::pg_mbcliplen::call(
+            n2.as_bytes(),
+            name2chars as i32,
+            name2chars as i32,
+        ) as usize;
         s.try_push_str("_")?;
-        s.try_push_str(n2)?;
+        s.try_push_str(&n2[..name2chars])?;
     }
     s.try_push_str("_")?;
     s.try_push_str(label)?;
-    assert!(
-        s.len() < NAMEDATALEN as usize,
-        "makeObjectName (indexcmds.c): identifier truncation unported ({:?})",
-        s.as_str()
-    );
     Ok(s)
 }
 

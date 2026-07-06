@@ -960,25 +960,46 @@ pub fn ChooseConstraintName<'mcx>(
     Ok(conname)
 }
 
-// makeObjectName without the truncation lane (loud on overflow).
+// makeObjectName (indexcmds.c:2518-2577): truncate the longer of name1/name2
+// (multibyte-aware) until "name1[_name2]_label" fits in NAMEDATALEN-1 bytes.
 fn make_object_name<'mcx>(
     mcx: Mcx<'mcx>,
     name1: &str,
     name2: Option<&str>,
     label: &str,
 ) -> PgResult<mcx::PgString<'mcx>> {
-    let mut s = mcx::PgString::from_str_in(name1, mcx)?;
+    let mut overhead = label.len() + 1;
+    if name2.is_some() {
+        overhead += 1;
+    }
+    assert!(NAMEDATALEN as usize - 1 > overhead, "makeObjectName label too long ({label:?})");
+    let availchars = NAMEDATALEN as usize - 1 - overhead;
+    let mut name1chars = name1.len();
+    let mut name2chars = name2.map_or(0, str::len);
+    while name1chars + name2chars > availchars {
+        if name1chars > name2chars {
+            name1chars -= 1;
+        } else {
+            name2chars -= 1;
+        }
+    }
+    name1chars = mbutils_seams::pg_mbcliplen::call(
+        name1.as_bytes(),
+        name1chars as i32,
+        name1chars as i32,
+    ) as usize;
+    let mut s = mcx::PgString::from_str_in(&name1[..name1chars], mcx)?;
     if let Some(n2) = name2 {
+        name2chars = mbutils_seams::pg_mbcliplen::call(
+            n2.as_bytes(),
+            name2chars as i32,
+            name2chars as i32,
+        ) as usize;
         s.try_push_str("_")?;
-        s.try_push_str(n2)?;
+        s.try_push_str(&n2[..name2chars])?;
     }
     s.try_push_str("_")?;
     s.try_push_str(label)?;
-    assert!(
-        s.len() < NAMEDATALEN as usize,
-        "makeObjectName (indexcmds.c): identifier truncation unported ({:?})",
-        s.as_str()
-    );
     Ok(s)
 }
 
@@ -1769,4 +1790,38 @@ mod tests {
 // the projection seam).
 pub fn init_seams() {
     syscache_seams::pg_constraint_primary_key_attnos::set(get_primary_key_attnos);
+}
+mod truncation_tests {
+    static SETUP: std::sync::Once = std::sync::Once::new();
+
+    fn setup() {
+        SETUP.call_once(|| {
+            // UTF-8 boundary clip, enough for the test inputs.
+            mbutils_seams::pg_mbcliplen::set(|s, len, limit| {
+                let mut l = (limit as usize).min(len as usize);
+                while l > 0 && s[l] & 0xC0 == 0x80 {
+                    l -= 1;
+                }
+                l as i32
+            });
+        });
+    }
+
+    // foreign_key.out oracle: three FKs on fktable2 over a 51-char column.
+    #[test]
+    fn make_object_name_matches_c_truncation() {
+        setup();
+        let ctx = mcx::MemoryContext::new("t");
+        let long = "very_very_long_column_name_to_exceed_63_characters";
+        let a_long = format!("a_{long}");
+        for (name2, label, want) in [
+            (long, "fkey", "fktable2_very_very_long_column_name_to_exceed_63_character_fkey"),
+            (a_long.as_str(), "fkey", "fktable2_a_very_very_long_column_name_to_exceed_63_charact_fkey"),
+            (a_long.as_str(), "fkey1", "fktable2_a_very_very_long_column_name_to_exceed_63_charac_fkey1"),
+        ] {
+            let got = super::make_object_name(ctx.mcx(), "fktable2", Some(name2), label).unwrap();
+            assert_eq!(got.as_str(), want);
+            assert!(got.len() < super::NAMEDATALEN as usize);
+        }
+    }
 }

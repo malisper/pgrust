@@ -9,6 +9,7 @@ name = "indexcmds"
 path = "src/lib.rs"
 
 [dependencies]
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 reloptions = { path = "../../access/common/reloptions" }
 commands_comment = { path = "../comment" }
 coerce = { path = "../../parser/coerce" }
