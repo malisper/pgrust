@@ -1799,7 +1799,7 @@ mod truncation_tests {
             // UTF-8 boundary clip, enough for the test inputs.
             mbutils_seams::pg_mbcliplen::set(|s, len, limit| {
                 let mut l = (limit as usize).min(len as usize);
-                while l > 0 && s[l] & 0xC0 == 0x80 {
+                while l > 0 && l < s.len() && s[l] & 0xC0 == 0x80 {
                     l -= 1;
                 }
                 l as i32
