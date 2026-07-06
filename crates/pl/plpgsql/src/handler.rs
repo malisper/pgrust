@@ -71,12 +71,12 @@ struct FuncCacheEntry {
 }
 
 std::thread_local! {
-    // Keyed by (fn_oid, input_collation, is_trigger, trigger oid, resolved
-    // input argtypes): funccache.c compute_function_hashkey — per-trigger
-    // entries allow different relation rowtypes per usage; the argtypes
-    // component separates polymorphic/RECORD instantiations and stays empty
-    // for signatures that cannot vary.
-    static FUNC_CACHE: core::cell::RefCell<FxHashMap<(Oid, Oid, bool, Oid, Vec<Oid>), FuncCacheEntry>> =
+    // Keyed by (fn_oid, input_collation, is_trigger, trigger oid,
+    // is_event_trigger, resolved input argtypes): funccache.c
+    // compute_function_hashkey — per-trigger entries allow different relation
+    // rowtypes per usage; the argtypes component separates polymorphic/RECORD
+    // instantiations and stays empty for signatures that cannot vary.
+    static FUNC_CACHE: core::cell::RefCell<FxHashMap<(Oid, Oid, bool, Oid, bool, Vec<Oid>), FuncCacheEntry>> =
         core::cell::RefCell::new(FxHashMap::default());
 }
 
@@ -84,6 +84,7 @@ std::thread_local! {
 enum CallKind {
     Function,
     Trigger(Oid),
+    EventTrigger,
 }
 
 pub fn init_seams() {
@@ -104,11 +105,14 @@ fn plpgsql_compile(
 ) -> PgResult<FuncCacheEntry> {
     let (cur_xmin, cur_tid, key_argtypes) =
         proc_call_stamp(fn_oid, call_expr, for_validator)?;
-    let (is_trigger, trig_oid) = match kind {
-        CallKind::Function => (false, types_core::InvalidOid),
-        CallKind::Trigger(oid) => (true, oid),
+    // C hashkey carries isTrigger AND isEventTrigger (funccache.c) — the same
+    // OID called in different contexts compiles separately.
+    let (is_trigger, trig_oid, is_event_trigger) = match kind {
+        CallKind::Function => (false, types_core::InvalidOid, false),
+        CallKind::Trigger(oid) => (true, oid, false),
+        CallKind::EventTrigger => (false, types_core::InvalidOid, true),
     };
-    let key = (fn_oid, fn_collation, is_trigger, trig_oid, key_argtypes);
+    let key = (fn_oid, fn_collation, is_trigger, trig_oid, is_event_trigger, key_argtypes);
     let cached = FUNC_CACHE.with(|c| c.borrow().get(&key).cloned());
     if let Some(entry) = cached {
         if entry.func.fn_xmin == cur_xmin && entry.func.fn_tid == cur_tid {
@@ -132,6 +136,7 @@ fn plpgsql_compile(
         cur_tid,
         for_validator,
         is_trigger,
+        is_event_trigger,
         call_expr,
     )?);
     let entry = FuncCacheEntry { func, use_count: Rc::new(core::cell::Cell::new(0)) };
@@ -360,6 +365,7 @@ fn varlena_bytes<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<PgVec<'mcx, u8>> {
 }
 
 // do_compile / plpgsql_compile_callback (pl_comp.c).
+#[allow(clippy::too_many_arguments)]
 fn do_compile(
     fn_oid: Oid,
     fn_collation: Oid,
@@ -367,6 +373,7 @@ fn do_compile(
     fn_tid: (u32, u16),
     for_validator: bool,
     is_dml_trigger: bool,
+    is_event_trigger: bool,
     call_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<PlFunction> {
     let mut proc = read_proc_row(fn_oid)?;
@@ -376,7 +383,11 @@ fn do_compile(
         attach_compile_context(e, &proc.proname, 1, for_validator, &proc.prosrc)
     };
 
-    if !is_dml_trigger && proc.rettype == TRIGGEROID {
+    // C rejects these in the plain branch's pseudotype check (pl_comp.c:388);
+    // hoisted here with the same message and errcode.
+    if (!is_dml_trigger && proc.rettype == TRIGGEROID)
+        || (!is_event_trigger && proc.rettype == EVENT_TRIGGEROID)
+    {
         return Err(hdr_ctx(crate::exec::exec_err(
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
             "trigger functions can only be called as triggers".to_string(),
@@ -448,7 +459,7 @@ fn do_compile(
             }
         }
         fn_is_trigger = FnTrigger::DmlTrigger;
-    } else if proc.rettype == EVENT_TRIGGEROID {
+    } else if is_event_trigger {
         if !proc.argtypes.is_empty() {
             return Err(crate::exec::exec_err(
                 types_error::ERRCODE_INVALID_FUNCTION_DEFINITION,
@@ -785,9 +796,10 @@ fn plpgsql_call_handler(
         // live TriggerData for this call (ExecCallTriggerFunc).
         let trigdata: Option<&types_trigger_call::TriggerData<'_, '_>> =
             unsafe { types_trigger_call::trigger_data_from_fcinfo(fcinfo) };
-        let kind = match trigdata {
-            Some(td) => CallKind::Trigger(td.tg_trigger.tgoid),
-            None => CallKind::Function,
+        let kind = match (trigdata, &evtrigdata) {
+            (Some(td), None) => CallKind::Trigger(td.tg_trigger.tgoid),
+            (None, Some(_)) => CallKind::EventTrigger,
+            _ => CallKind::Function,
         };
         let call_expr = flinfo.as_ref().and_then(|f| f.fn_expr);
         let entry = plpgsql_compile(fn_oid, fcinfo.fncollation, false, kind, call_expr)?;
@@ -957,6 +969,8 @@ fn plpgsql_validator(
     }
     let kind = if is_dml_trigger {
         CallKind::Trigger(types_core::InvalidOid)
+    } else if info.rettype == EVENT_TRIGGEROID {
+        CallKind::EventTrigger
     } else {
         CallKind::Function
     };

@@ -41,7 +41,10 @@ fn eq_key(attno: AttrNumber, func: RegProcedure, arg: Datum) -> ScanKeyData {
     key
 }
 
-pub fn CommentObject<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult<()> {
+pub fn CommentObject<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CommentStmt<'mcx>,
+) -> PgResult<objectaddress_seams::ObjectAddr> {
     let object = stmt.object.expect("grammar always supplies the object");
 
     // pg_restore replays COMMENT ON DATABASE under the dump-time name;
@@ -53,7 +56,12 @@ pub fn CommentObject<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult
                 PgError::new(WARNING, format!("database \"{database}\" does not exist"))
                     .with_sqlstate(ERRCODE_UNDEFINED_DATABASE),
             )?;
-            return Ok(());
+            // C: returns the zero-initialized (invalid) address on this arm.
+            return Ok(objectaddress_seams::ObjectAddr {
+                classId: InvalidOid,
+                objectId: InvalidOid,
+                objectSubId: 0,
+            });
         }
     }
 
@@ -110,7 +118,7 @@ pub fn CommentObject<'mcx>(mcx: Mcx<'mcx>, stmt: &CommentStmt<'mcx>) -> PgResult
     if let Some(rel) = relation {
         rel.close(NoLock)?;
     }
-    Ok(())
+    Ok(address)
 }
 
 pub fn CreateComments<'mcx>(

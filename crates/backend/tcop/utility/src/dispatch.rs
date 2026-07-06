@@ -960,11 +960,21 @@ fn slow_switch<'mcx>(
                     }
                     T_IndexStmt => exec_index_stmt(mcx, stmt, source_text, is_top_level)?,
                     T_CommentStmt => {
-                        collect_gap("COMMENT (in CREATE TABLE)");
+                        // C recurses through ProcessUtility; the inner
+                        // ProcessUtilitySlow collects address = CommentObject.
                         let cstmt = stmt
                             .as_variant::<types_nodes::parsenodes::CommentStmt>()
                             .expect("CommentStmt");
-                        commands_comment::CommentObject(mcx, cstmt)?;
+                        let addr = commands_comment::CommentObject(mcx, cstmt)?;
+                        event_trigger::EventTriggerCollectSimpleCommand(
+                            ObjectAddress {
+                                classId: addr.classId,
+                                objectId: addr.objectId,
+                                objectSubId: addr.objectSubId,
+                            },
+                            INVALID_OBJECT_ADDRESS,
+                            crate::consts::CMDTAG_COMMENT,
+                        );
                     }
                     // C recurses through ProcessUtility for the serial
                     // blist/alist statements; the wrapper adds nothing here.
@@ -1204,11 +1214,9 @@ fn slow_switch<'mcx>(
         }
 
         T_CommentStmt => {
-            // C: address = CommentObject; the ported CommentObject returns
-            // no address yet.
-            collect_gap("COMMENT");
-            exec_comment_stmt(mcx, parsetree)?;
-            Ok(None)
+            // C: address = CommentObject (comment.c).
+            let address = exec_comment_stmt(mcx, parsetree)?;
+            Ok(Some(address))
         }
 
         T_SecLabelStmt => {
@@ -1591,8 +1599,8 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::parsenodes::CreateOpClassStmt>()
                 .expect("CreateOpClassStmt");
-            // C: address = DefineOpClass; the ported form returns no address.
-            collect_gap("CREATE OPERATOR CLASS");
+            // C: command is stashed in DefineOpClass (EventTriggerCollect-
+            // CreateOpClass; the implicit family collects in CreateOpFamily).
             opclasscmds::DefineOpClass(mcx, stmt)?;
             Ok(None)
         }
@@ -1602,8 +1610,8 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::parsenodes::CreateOpFamilyStmt>()
                 .expect("CreateOpFamilyStmt");
-            // C: address = DefineOpFamily; the ported form returns no address.
-            collect_gap("CREATE OPERATOR FAMILY");
+            // C: command is stashed in DefineOpFamily (via CreateOpFamily's
+            // EventTriggerCollectSimpleCommand).
             opclasscmds::DefineOpFamily(mcx, stmt)?;
             Ok(None)
         }
@@ -1785,7 +1793,7 @@ fn exec_drop_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>, is_top_level: bool)
     Ok(())
 }
 
-fn exec_comment_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
+fn exec_comment_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<ObjectAddress> {
     let stmt = parsetree.as_comment_stmt().unwrap();
     // Retention contract as unify_stmt_lifetime.
     let stmt = unsafe {
@@ -1794,7 +1802,8 @@ fn exec_comment_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> 
             &types_nodes::parsenodes::CommentStmt<'mcx>,
         >(stmt)
     };
-    commands_comment::CommentObject(mcx, stmt)
+    let addr = commands_comment::CommentObject(mcx, stmt)?;
+    Ok(ObjectAddress { classId: addr.classId, objectId: addr.objectId, objectSubId: addr.objectSubId })
 }
 
 fn exec_seclabel_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
