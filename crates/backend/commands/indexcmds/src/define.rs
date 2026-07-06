@@ -539,10 +539,13 @@ pub fn DefineIndex<'mcx>(
 
     match rel.rd_rel.relkind {
         RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_PARTITIONED_TABLE => {}
-        _ => {
-            return Err(err(
-                format!("cannot create index on relation \"{}\"", rel.name()),
-                ERRCODE_WRONG_OBJECT_TYPE,
+        other => {
+            return Err(Box::new(
+                (*err(
+                    format!("cannot create index on relation \"{}\"", rel.name()),
+                    ERRCODE_WRONG_OBJECT_TYPE,
+                ))
+                .with_detail(pg_class_seams::errdetail_relkind_not_supported::call(other)?),
             ))
         }
     }
@@ -985,7 +988,30 @@ pub fn DefineIndex<'mcx>(
                 let child_save_nestlevel = guc::NewGUCNestLevel();
                 guc::RestrictSearchPath()?;
 
-                // Foreign-table partitions cannot exist (no FDW lane).
+                // Foreign-table partitions get no index: skip for a plain
+                // index, fail for a constraint index (indexcmds.c:1390-1409).
+                if childrel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                    if stmt.unique || stmt.primary {
+                        return Err(Box::new(
+                            (*err(
+                                format!(
+                                    "cannot create unique index on partitioned table \"{}\"",
+                                    rel.name()
+                                ),
+                                ERRCODE_WRONG_OBJECT_TYPE,
+                            ))
+                            .with_detail(format!(
+                                "Table \"{}\" contains partitions that are foreign tables.",
+                                rel.name()
+                            )),
+                        ));
+                    }
+                    guc::AtEOXact_GUC(false, child_save_nestlevel);
+                    child_guard.restore();
+                    childrel.close(lockmode)?;
+                    continue;
+                }
+
                 let childidxs = relcache::RelationGetIndexList(mcx, childRelid)?;
                 let attmap = tupdesc::build_attrmap_by_name(mcx, childrel.descr(), rel.descr())?;
 

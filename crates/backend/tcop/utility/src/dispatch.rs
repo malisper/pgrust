@@ -2137,11 +2137,28 @@ fn exec_index_stmt<'mcx>(
             if relkind != types_rel::RELKIND_RELATION
                 && relkind != types_rel::RELKIND_MATVIEW
                 && relkind != types_rel::RELKIND_PARTITIONED_TABLE
+                && relkind != types_rel::RELKIND_FOREIGN_TABLE
             {
                 panic!(
                     "unexpected relkind \"{}\" on partition \"{}\"",
                     relkind as char, rv.relname
                 );
+            }
+            if relkind == types_rel::RELKIND_FOREIGN_TABLE && (stmt.unique || stmt.primary) {
+                return Err(Box::new(
+                    types_error::PgError::new(
+                        types_error::ERROR,
+                        format!(
+                            "cannot create unique index on partitioned table \"{}\"",
+                            rv.relname
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .with_detail(format!(
+                        "Table \"{}\" contains partitions that are foreign tables.",
+                        rv.relname
+                    )),
+                ));
             }
         }
     }

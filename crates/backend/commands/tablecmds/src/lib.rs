@@ -509,6 +509,47 @@ pub fn DefineRelation<'mcx>(
                         .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
                 ));
             }
+            // MergeAttributes persistence checks (tablecmds.c:2700-2730).
+            if parent.rd_rel.relpersistence != types_core::RELPERSISTENCE_TEMP
+                && relpersistence == types_core::RELPERSISTENCE_TEMP
+            {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot create a temporary relation as partition of permanent relation \"{}\"",
+                            parent.name()
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
+            if relpersistence != types_core::RELPERSISTENCE_TEMP
+                && parent.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+            {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cannot create a permanent relation as partition of temporary relation \"{}\"",
+                            parent.name()
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
+            if parent.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+                && !parent.rd_islocaltemp
+            {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        "cannot create as partition of temporary relation of another session"
+                            .to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE),
+                ));
+            }
             // newattmap: parent attno (1-based) -> child attno, 0 for
             // dropped parent columns (C MergeAttributes newattmap).
             let mut newattmap: mcx::PgVec<'mcx, AttrNumber> =
@@ -875,6 +916,28 @@ pub fn DefineRelation<'mcx>(
         let idxlist = relcache::RelationGetIndexList(mcx, parent_oid)?;
         for &idxoid in idxlist.iter() {
             let idx_rel = indexam::index_open(mcx, idxoid, types_rel::AccessShareLock)?;
+            // A foreign partition gets no index: skip, or fail on a unique
+            // parent index (tablecmds.c:1279-1295).
+            if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                if idx_rel.rd_index.as_ref().expect("rd_index").indisunique {
+                    return Err(Box::new(
+                        PgError::new(
+                            ERROR,
+                            format!(
+                                "cannot create foreign partition of partitioned table \"{}\"",
+                                parent.name()
+                            ),
+                        )
+                        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                        .with_detail(format!(
+                            "Table \"{}\" contains indexes that are unique.",
+                            parent.name()
+                        )),
+                    ));
+                }
+                indexam::index_close(idx_rel, types_rel::AccessShareLock)?;
+                continue;
+            }
             let attmap = tupdesc::build_attrmap_by_name(mcx, rel.descr(), parent.descr())?;
             let (idxstmt, constraint_oid) =
                 parse_utilcmd::generateClonedIndexStmt(mcx, None, &idx_rel, &attmap)?;
