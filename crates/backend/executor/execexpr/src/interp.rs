@@ -2926,16 +2926,43 @@ pub unsafe fn agg_datum_copy(
     Ok(Datum::from_usize(dst.as_ptr() as usize))
 }
 
+// CheckVarSlotCompatibility (execExprInterp.c): C-exact messages.
 #[cold]
 #[inline(never)]
-fn var_slot_mismatch(attnum: u16, why: &str) -> Box<PgError> {
+fn var_slot_dropped(attnum: u16, tdtypeid: ::types_core::Oid) -> Box<PgError> {
+    let t = format_type::format_type_be(tdtypeid).unwrap_or_else(|_| tdtypeid.to_string());
     Box::new(
-        PgError::error(format!(
-            "attribute {} of the evaluated slot is not compatible: {why}",
-            attnum + 1
-        ))
-        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH),
+        PgError::error(format!("attribute {} of type {t} has been dropped", attnum + 1))
+            .with_sqlstate(::types_error::ERRCODE_UNDEFINED_COLUMN),
     )
+}
+
+#[cold]
+#[inline(never)]
+fn var_slot_wrong_type(
+    attnum: u16,
+    tdtypeid: ::types_core::Oid,
+    tabletype: ::types_core::Oid,
+    vartype: ::types_core::Oid,
+) -> Box<PgError> {
+    let f = |o: ::types_core::Oid| {
+        format_type::format_type_be(o).unwrap_or_else(|_| o.to_string())
+    };
+    Box::new(
+        PgError::error(format!("attribute {} of type {} has wrong type", attnum + 1, f(tdtypeid)))
+            .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+            .with_detail(format!(
+                "Table has type {}, but query expects {}.",
+                f(tabletype),
+                f(vartype)
+            )),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn var_slot_out_of_range(attnum: u16, natts: i32) -> ! {
+    panic!("attribute number {} exceeds number of columns {natts}", attnum + 1);
 }
 
 // C CheckExprStillValid/CheckVarSlotCompatibility: first-evaluation check of
@@ -3003,14 +3030,15 @@ fn check_still_valid_slow<'mcx>(
             .as_ref()
             .expect("var evaluation against a descriptor-less slot");
         if (attnum as i32) >= desc.natts {
-            return Err(var_slot_mismatch(attnum, "attribute number out of range"));
+            // C: elog(ERROR) — "should never happen".
+            var_slot_out_of_range(attnum, desc.natts);
         }
         let attr = &desc.attrs[attnum as usize];
         if attr.attisdropped {
-            return Err(var_slot_mismatch(attnum, "attribute has been dropped"));
+            return Err(var_slot_dropped(attnum, desc.tdtypeid));
         }
         if attr.atttypid != vartype {
-            return Err(var_slot_mismatch(attnum, "attribute type mismatch"));
+            return Err(var_slot_wrong_type(attnum, desc.tdtypeid, attr.atttypid, vartype));
         }
     }
     state.flags |= EEO_FLAG_STILL_VALID_CHECKED;
