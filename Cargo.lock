@@ -8969,6 +8969,7 @@ dependencies = [
  "nodes_core",
  "parse_clause_seams",
  "parser_small1",
+ "pg_constraint",
  "types_core",
  "types_error",
  "types_nodes",

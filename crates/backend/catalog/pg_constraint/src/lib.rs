@@ -1193,6 +1193,88 @@ pub fn get_relation_constraint_attnos<'mcx>(
     Ok((constraint_oid, conattnos))
 }
 
+// get_primary_key_attnos (pg_constraint.c:1450): the rel's PK column attnums
+// and constraint OID, or None when there is no usable PK (a deferrable PK
+// stops the search when deferrable_ok is false — a table has at most one PK).
+pub fn get_primary_key_attnos<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    deferrable_ok: bool,
+) -> PgResult<Option<(PgVec<'mcx, i16>, Oid)>> {
+    let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let keys = conrelid_scan_keys(relid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &con_rel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+    let mut result = None;
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let contype = getattr(&con_rel, tup, Anum_pg_constraint_contype).0.as_i8() as u8;
+        if contype != CONSTRAINT_PRIMARY {
+            continue;
+        }
+        let condeferrable = getattr(&con_rel, tup, Anum_pg_constraint_condeferrable).0.as_bool();
+        if condeferrable && !deferrable_ok {
+            break;
+        }
+        let con_oid = getattr(&con_rel, tup, Anum_pg_constraint_oid).0.as_oid();
+        let img = fk_array_image(mcx, tup, con_rel.descr(), Anum_pg_constraint_conkey)?
+            .unwrap_or_else(|| panic!("null conkey for constraint {con_oid}"));
+        let mut out = [0i16; INDEX_MAX_KEYS];
+        let n = fk_i16_array(&img, "conkey is not a 1-D smallint array", &mut out);
+        let mut pkattnos: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+        pkattnos.extend_from_slice(&out[..n]);
+        result = Some((pkattnos, con_oid));
+        break;
+    }
+    genam::systable_endscan(mcx, scan)?;
+    con_rel.close(AccessShareLock)?;
+    Ok(result)
+}
+
+// check_functional_grouping (pg_constraint.c:1740): can every column of relid
+// be proven functionally dependent on grouping_columns? Only a non-deferrable
+// PK that is a subset of the grouping columns qualifies; the proof's
+// constraint OID is appended to constraint_deps.
+pub fn check_functional_grouping<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    varno: i32,
+    varlevelsup: types_core::Index,
+    grouping_columns: &[types_nodes::Node<'mcx>],
+    constraint_deps: &mut PgVec<'mcx, Oid>,
+) -> PgResult<bool> {
+    let Some((pkattnos, constraint_oid)) = get_primary_key_attnos(mcx, relid, false)? else {
+        return Ok(false);
+    };
+    if pk_subset_of_grouping_columns(&pkattnos, varno, varlevelsup, grouping_columns) {
+        constraint_deps.push(constraint_oid);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+// The catalog-free core of check_functional_grouping: pkattnos ⊆ the attnos
+// of grouping_columns Vars matching (varno, varlevelsup).
+fn pk_subset_of_grouping_columns(
+    pkattnos: &[i16],
+    varno: i32,
+    varlevelsup: types_core::Index,
+    grouping_columns: &[types_nodes::Node<'_>],
+) -> bool {
+    pkattnos.iter().all(|&pkatt| {
+        grouping_columns.iter().any(|gcol| {
+            gcol.as_var().is_some_and(|gvar| {
+                gvar.varno == varno && gvar.varlevelsup == varlevelsup && gvar.varattno == pkatt
+            })
+        })
+    })
+}
+
 pub fn get_constraint_deferrability<'mcx>(mcx: Mcx<'mcx>, con_id: Oid) -> PgResult<(bool, bool)> {
     let con_rel = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let keys = [eq_key(Anum_pg_constraint_oid, F_OIDEQ, Datum::from_oid(con_id))];
@@ -1648,4 +1730,35 @@ pub fn FindFKPeriodOpers(opclass: Oid) -> PgResult<(Oid, Oid, Oid)> {
         _ => OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP,
     };
     Ok((containedbyoperoid, aggedcontainedbyoperoid, intersectoperoid))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pk_subset_of_grouping_columns;
+    use mcx::MemoryContext;
+    use types_core::catalog::INT4OID;
+    use types_core::InvalidOid;
+    use types_nodes::Node;
+
+    #[test]
+    fn pk_subset_matches_only_full_pk_at_varno_level() {
+        let cx = MemoryContext::new("t");
+        let mcx = cx.mcx();
+        // GROUP BY t1.a, t1.b, t2.a  (varno 1 attnos {1,2}; varno 2 attno 1)
+        let cols = [
+            Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 0).unwrap(),
+            Node::mk_var(mcx, 1, 2, INT4OID, -1, InvalidOid, 0).unwrap(),
+            Node::mk_var(mcx, 2, 1, INT4OID, -1, InvalidOid, 0).unwrap(),
+        ];
+        // PK(a) and PK(a,b) of varno 1 are covered.
+        assert!(pk_subset_of_grouping_columns(&[1], 1, 0, &cols));
+        assert!(pk_subset_of_grouping_columns(&[1, 2], 1, 0, &cols));
+        // Partial coverage fails: PK(a,b,c) of varno 1, PK(a,b) of varno 2.
+        assert!(!pk_subset_of_grouping_columns(&[1, 2, 3], 1, 0, &cols));
+        assert!(!pk_subset_of_grouping_columns(&[1, 2], 2, 0, &cols));
+        // A grouping Var of another level does not count.
+        let upper = [Node::mk_var(mcx, 1, 1, INT4OID, -1, InvalidOid, 1).unwrap()];
+        assert!(!pk_subset_of_grouping_columns(&[1], 1, 0, &upper));
+        assert!(pk_subset_of_grouping_columns(&[1], 1, 1, &upper));
+    }
 }
