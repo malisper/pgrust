@@ -1266,7 +1266,14 @@ fn init_perhash<'mcx>(
     let outer_tlist = &outer_plan.targetlist;
     let outer_natts = outer_tlist.len();
     let num_cols = node.numCols as usize;
-    assert!(num_cols > 0 && node.grpColIdx.len() == num_cols);
+    assert!(
+        num_cols > 0 && node.grpColIdx.len() == num_cols,
+        "init_perhash: numCols {} grpColIdx.len {} strategy {} gsets {}",
+        num_cols,
+        node.grpColIdx.len(),
+        node.aggstrategy,
+        node.groupingSets.len()
+    );
     assert!(node.numGroups > 0, "Agg.numGroups unset (planner must estimate it)");
 
     let mut base_cols: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, outer_natts)?;
