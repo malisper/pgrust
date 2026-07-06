@@ -1233,5 +1233,8 @@ pub(crate) fn has_useful_pathkeys(run: &crate::run::PlannerRun<'_>, rel: types_p
     if !run.root.rel(rel).joininfo.is_empty() || run.root.rel(rel).has_eclass_joins {
         return true;
     }
+    if !run.root.group_pathkeys.is_empty() {
+        return true;
+    }
     !run.root.query_pathkeys.is_empty()
 }

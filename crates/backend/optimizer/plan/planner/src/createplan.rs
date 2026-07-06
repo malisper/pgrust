@@ -2706,6 +2706,25 @@ pub(crate) fn apply_tlist_labeling<'mcx>(plan: Node<'mcx>, src_tlist: &NodeList<
     }
 }
 
+// IS_OTHER_REL(best_path->subpath->parent) ? best_path->path.parent->relids
+// : NULL (create_sort_plan / create_incrementalsort_plan, createplan.c).
+fn sort_relids_for_child_ec<'mcx>(
+    run: &PlannerRun<'mcx>,
+    path_id: PathId,
+    subpath_id: PathId,
+) -> types_pathnodes::Relids<'mcx> {
+    let subparent = run.root.path(subpath_id).base().parent;
+    match run.root.rel(subparent).reloptkind {
+        types_pathnodes::RELOPT_OTHER_MEMBER_REL
+        | types_pathnodes::RELOPT_OTHER_JOINREL
+        | types_pathnodes::RELOPT_OTHER_UPPER_REL => {
+            let parent = run.root.path(path_id).base().parent;
+            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(parent).relids)
+        }
+        _ => None,
+    }
+}
+
 // create_sort_plan + make_sort_from_pathkeys + make_sort (createplan.c).
 fn create_sort_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -2721,17 +2740,10 @@ fn create_sort_plan<'mcx>(
     };
     // Sort can't project: request a tlist without excess columns.
     let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
-    // Child sorts resolve pathkey EC members through the child rel's relids.
-    let relids = {
-        let subparent = run.root.path(subpath_id).base().parent;
-        if types_pathnodes::relids::relids_is_empty(&run.root.rel(subparent).top_parent_relids)
-        {
-            None
-        } else {
-            let parent = run.root.path(path_id).base().parent;
-            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(parent).relids)
-        }
-    };
+    // Child sorts resolve pathkey EC members through the child rel's relids;
+    // IS_OTHER_REL covers other-upper child grouping rels (reloptkind, not
+    // top_parent_relids, which upper rels never set).
+    let relids = sort_relids_for_child_ec(run, path_id, subpath_id);
     let plan = make_sort_from_pathkeys(run, subplan, &pathkeys, &relids)?;
     copy_generic_path_info_node(run, plan, path_id);
     Ok(plan)
@@ -3153,16 +3165,7 @@ fn create_incremental_sort_plan<'mcx>(
         )
     };
     let subplan = create_plan_recurse(run, subpath_id, flags | CP_SMALL_TLIST)?;
-    let relids = {
-        let subparent = run.root.path(subpath_id).base().parent;
-        if types_pathnodes::relids::relids_is_empty(&run.root.rel(subparent).top_parent_relids)
-        {
-            None
-        } else {
-            let parent = run.root.path(path_id).base().parent;
-            types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(parent).relids)
-        }
-    };
+    let relids = sort_relids_for_child_ec(run, path_id, subpath_id);
     let plan = make_incrementalsort_from_pathkeys(run, subplan, &pathkeys, &relids, n_presorted)?;
     copy_generic_path_info_node(run, plan, path_id);
     Ok(plan)
