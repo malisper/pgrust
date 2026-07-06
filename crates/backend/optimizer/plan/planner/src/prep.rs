@@ -855,20 +855,17 @@ fn add_row_identity_columns<'mcx>(
 ) -> PgResult<NodeList<'mcx>> {
     // Non-target auto rowmarks (preprocess_rowmarks) coexist with the row
     // identity; C's add_row_identity_columns has no rowMarks interaction.
-    if rel.rd_rel.relkind == types_rel::RELKIND_VIEW {
-        // INSTEAD OF views: the rewriter already appended the wholerow junk
-        // TLE; no ctid exists (appendinfo.c adds nothing for views).
-        return tlist.clone_in(mcx);
+    if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        panic!("add_row_identity_columns (appendinfo.c): FDW row identity; FDW lane");
     }
     if rel.rd_rel.relkind != types_rel::RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_MATVIEW
         && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
     {
-        panic!(
-            "add_row_identity_columns (appendinfo.c): relkind '{}' (wholerow/FDW \
-             row identity); M4 lane",
-            rel.rd_rel.relkind as char
-        );
+        // Other relkinds (views, toast tables, sequences) fall through with
+        // no row identity; C adds nothing and any error surfaces later
+        // (e.g. the executor permission check for toast-table DML).
+        return tlist.clone_in(mcx);
     }
     let var = Node::mk_var(
         mcx,
