@@ -773,7 +773,19 @@ pub fn exec_init_node<'mcx>(
                 .unwrap_or_else(|| {
                     panic!("ExecInitLimit (nodeLimit.c): Limit without an outer plan")
                 });
-            let state = ::nodelimit::exec_init_limit(limit_plan, estate, eflags)?;
+            // WITH TIES needs the outer result type for its tie-equality
+            // program (C: ExecGetResultType(outerPlanState)).
+            let outer_desc = if limit_plan.limitOption
+                == ::types_nodes::LimitOption::LIMIT_OPTION_WITH_TIES
+            {
+                Some(outer.exec_get_result_type(
+                    limit_plan.plan.lefttree.unwrap().as_plan().unwrap(),
+                )?)
+            } else {
+                None
+            };
+            let state =
+                ::nodelimit::exec_init_limit(limit_plan, estate, eflags, outer_desc.as_ref())?;
             PlanStateNode::Limit(LimitNode {
                 state,
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,

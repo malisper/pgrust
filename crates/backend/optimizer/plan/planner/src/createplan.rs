@@ -2659,16 +2659,27 @@ fn create_upper_unique_plan<'mcx>(
             break;
         }
         let ec = pathkey.pk_eclass.expect("canonical pathkey has an eclass");
-        assert!(
-            !run.root.ec(ec).ec_has_volatile,
-            "make_unique_from_pathkeys (createplan.c): volatile sortref leg; M2 lane"
-        );
         let mut found: Option<(i16, u32)> = None;
-        for tle_node in &tlist {
-            let tle = tle_node.as_target_entry().expect("TargetEntry");
-            if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, &None) {
-                found = Some((tle.resno, run.root.em(em_id).em_datatype));
-                break;
+        if run.root.ec(ec).ec_has_volatile {
+            // A volatile EC came from an ORDER BY clause: match that same
+            // targetlist entry via its sortref (get_sortgroupref_tle).
+            let sortref = run.root.ec(ec).ec_sortref;
+            assert!(sortref != 0, "volatile EquivalenceClass has no sortref");
+            let tle = tlist
+                .iter()
+                .map(|n| n.as_target_entry().expect("TargetEntry"))
+                .find(|tle| tle.ressortgroupref == sortref)
+                .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
+            debug_assert_eq!(run.root.ec(ec).ec_members.len(), 1);
+            let em_id = run.root.ec(ec).ec_members[0];
+            found = Some((tle.resno, run.root.em(em_id).em_datatype));
+        } else {
+            for tle_node in &tlist {
+                let tle = tle_node.as_target_entry().expect("TargetEntry");
+                if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, &None) {
+                    found = Some((tle.resno, run.root.em(em_id).em_datatype));
+                    break;
+                }
             }
         }
         let Some((resno, pk_datatype)) = found else {
@@ -3269,7 +3280,8 @@ fn copy_generic_path_info_node<'mcx>(run: &PlannerRun<'mcx>, plan: Node<'mcx>, p
     .expect("plan node embeds a Plan base");
 }
 
-// create_limit_plan + make_limit (createplan.c); WITH TIES is loud.
+// create_limit_plan + make_limit (createplan.c): WITH TIES pulls its tie
+// columns from parse->sortClause resolved against parse->targetList.
 fn create_limit_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -3285,12 +3297,37 @@ fn create_limit_plan<'mcx>(
             lp.limitOption,
         )
     };
-    assert!(
-        limit_option == types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT as u32,
-        "create_limit_plan (createplan.c): WITH TIES uniq keys; M2 ties lane"
-    );
     // Limit doesn't project, so tlist requirements pass through.
     let subplan = create_plan_recurse(run, subpath_id, flags)?;
+
+    let with_ties =
+        limit_option == types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_WITH_TIES as u32;
+    let (uniq_num_cols, uniq_col_idx, uniq_operators, uniq_collations) = if with_ties {
+        let parse = run.parse();
+        let mut idx: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+        let mut ops: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+        let mut colls: mcx::PgVec<'mcx, types_core::Oid> = mcx::PgVec::new_in(mcx);
+        for sgc_node in &parse.sortClause {
+            let sgc = sgc_node.as_sort_group_clause().expect("SortGroupClause");
+            let tle = parse
+                .targetList
+                .iter()
+                .map(|n| n.as_target_entry().expect("tlist cell"))
+                .find(|tle| tle.ressortgroupref == sgc.tleSortGroupRef)
+                .unwrap_or_else(|| panic!("ORDER/GROUP BY expression not found in targetlist"));
+            idx.push(tle.resno);
+            ops.push(sgc.eqop);
+            colls.push(expr_collation(tle.expr));
+        }
+        (
+            idx.len() as i32,
+            mcx::vec_borrow_in(mcx, idx)?,
+            mcx::vec_borrow_in(mcx, ops)?,
+            mcx::vec_borrow_in(mcx, colls)?,
+        )
+    } else {
+        (0, &[][..], &[][..], &[][..])
+    };
 
     let mut plan = Node::build::<types_nodes::plannodes::Limit>(mcx)?;
     plan.plan.targetlist =
@@ -3299,7 +3336,15 @@ fn create_limit_plan<'mcx>(
     plan.plan.lefttree = Some(subplan);
     plan.limitOffset = limit_offset;
     plan.limitCount = limit_count;
-    plan.limitOption = types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT;
+    plan.limitOption = if with_ties {
+        types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_WITH_TIES
+    } else {
+        types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT
+    };
+    plan.uniqNumCols = uniq_num_cols;
+    plan.uniqColIdx = uniq_col_idx;
+    plan.uniqOperators = uniq_operators;
+    plan.uniqCollations = uniq_collations;
     copy_generic_path_info(run, &mut plan.plan, path_id);
     Ok(plan.seal())
 }

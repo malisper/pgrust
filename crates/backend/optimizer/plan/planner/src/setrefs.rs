@@ -725,7 +725,6 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             if let Some(cnt) = l.limitCount {
                 fix_scan_expr_walker(run, cnt)?;
             }
-            debug_assert!(l.uniqNumCols == 0);
         }
         NodeTag::T_NestLoop => {
             set_join_references(run, plan, rtoffset)?;
