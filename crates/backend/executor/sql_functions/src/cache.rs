@@ -450,15 +450,15 @@ fn build_query_plansource(
         let psrc;
         if let Some(body) = s.sqlbody.as_ref() {
             let scratch = MemoryContext::new("sqlfn tag");
-            let q0 = {
+            psrc = {
                 let qs = sqlbody_queries(scratch.mcx(), body.as_str())?;
                 let tagq = &qs[qindex];
-                match tagq.utilityStmt {
+                let q0 = match tagq.utilityStmt {
                     Some(u) => utility_seams::create_command_tag::call(u),
                     None => crate::query_command_tag(tagq.commandType),
-                }
+                };
+                plancache::CreateCachedPlanForQuery(tagq, s.src.as_str(), q0)?
             };
-            psrc = plancache::CreateCachedPlan(None, s.src.as_str(), q0)?;
             let build = (|| -> PgResult<()> {
                 let qmcx = plancache::SourceQueryMcx(psrc);
                 let queries = sqlbody_queries(qmcx, body.as_str())?;

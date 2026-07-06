@@ -220,7 +220,7 @@ pub fn CreateCachedPlan(
     query_string: &str,
     commandTag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
-    let (requires_reval, requires_snapshot, is_xact_exit_stmt) = match raw_parse_tree {
+    let flags = match raw_parse_tree {
         Some(raw) => (
             parser_analyze::stmt_requires_parse_analysis(raw),
             parser_analyze::analyze_requires_snapshot(raw),
@@ -228,7 +228,26 @@ pub fn CreateCachedPlan(
         ),
         None => (false, false, false),
     };
+    create_cached_plan_flags(flags, query_string, commandTag)
+}
 
+// CreateCachedPlanForQuery (plancache.c): entry created from an analyzed
+// Query (SQL-function prosqlbody); revalidation/snapshot flags come from
+// query_requires_rewrite_plan, not the raw-tree probe.
+pub fn CreateCachedPlanForQuery(
+    analyzed: &Query<'_>,
+    query_string: &str,
+    commandTag: CommandTag,
+) -> PgResult<CachedPlanSourceHandle> {
+    let reval = parser_analyze::query_requires_rewrite_plan(analyzed);
+    create_cached_plan_flags((reval, reval, false), query_string, commandTag)
+}
+
+fn create_cached_plan_flags(
+    (requires_reval, requires_snapshot, is_xact_exit_stmt): (bool, bool, bool),
+    query_string: &str,
+    commandTag: CommandTag,
+) -> PgResult<CachedPlanSourceHandle> {
     let source_ctx = leak_ctx("CachedPlanSource");
     let query_ctx = leak_ctx("CachedPlanQuery");
     let mcx = ctx_mcx(source_ctx);

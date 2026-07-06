@@ -1949,11 +1949,10 @@ fn exec_merge_matched_scan<'mcx>(
             } else {
                 WCOKind::WCO_RLS_MERGE_DELETE_CHECK
             };
+            let ecxt = mt.node_ecxt;
             let ModifyTableState { rels, cur, .. } = &mut *mt;
             let r = &mut rels[*cur];
-            pre_eval_wco_param_deps(&r.wco_exprs, kind, estate)?;
-            let old_slot = &mut estate.es_tupleTable[old_id.0 as usize];
-            exec_with_check_options(&mut r.wco_exprs, kind, old_slot)?;
+            exec_with_check_options(estate, ecxt, &mut r.wco_exprs, kind, old_id)?;
         }
 
         mt.merge_active_cmd = Some(command_type);
@@ -2339,7 +2338,7 @@ fn merge_update_act<'mcx>(
         // here, exactly as in ExecUpdateAct (C 2210-2213).
         if !mt.rel().wco_exprs.is_empty() {
             let r = &mut mt.rels[mt.cur];
-            exec_with_check_options(&mut r.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
+            exec_with_check_options_basic(&mut r.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
         }
 
         {
@@ -3141,7 +3140,7 @@ fn exec_update<'mcx>(
             if !mt.rel_mut().wco_exprs.is_empty() {
                 // C skips these when the partition constraint failed; that
                 // path errored just above, so this only runs on success.
-                exec_with_check_options(&mut mt.rel_mut().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
+                exec_with_check_options_basic(&mut mt.rel_mut().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
             }
             {
                 let r = &mut mt.rels[mt.cur];
@@ -4999,34 +4998,7 @@ fn exec_insert<'mcx>(
     }
 
     {
-        let wco_kind = if mt.operation == CmdType::CMD_UPDATE
-            || (mt.operation == CmdType::CMD_MERGE
-                && mt.merge_active_cmd == Some(CmdType::CMD_UPDATE))
-        {
-            WCOKind::WCO_RLS_UPDATE_CHECK
-        } else {
-            WCOKind::WCO_RLS_INSERT_CHECK
-        };
-        let wcos = match leaf_idx {
-            Some(idx) => mt.leaf_wco[idx].as_ref(),
-            None if mt.insert_target_root => {
-                Some(&mt.root.as_ref().unwrap_or(&mt.rels[0]).wco_exprs)
-            }
-            None => Some(&mt.rels[mt.cur].wco_exprs),
-        };
-        if let Some(wcos) = wcos {
-            pre_eval_wco_param_deps(wcos, wco_kind, estate)?;
-        }
-    }
-
-    {
-        // Copy-out RTE/perminfo handles for the cold partition-constraint
-        // error path (the destructure below pins *estate).
-        let target_rte = estate.es_range_table[(mt.rels[mt.cur].rti - 1) as usize];
-        let perminfos = estate.es_rteperminfos;
         let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let operation = mt.operation;
-        let merge_active_cmd = mt.merge_active_cmd;
         let ModifyTableState {
             rels,
             root,
@@ -5034,11 +5006,7 @@ fn exec_insert<'mcx>(
             insert_target_root,
             router,
             leaf_indexes,
-            leaf_checks,
-            leaf_virtual_nn,
             leaf_generated,
-            leaf_partition_check,
-            leaf_wco,
             ..
         } = &mut *mt;
         // A MERGE root INSERT over an inherited target runs entirely against
@@ -5049,24 +5017,18 @@ fn exec_insert<'mcx>(
         } else {
             &mut rels[*cur]
         };
-        let (rel, indexes, check_exprs, virtual_nn_exprs, gen_exprs, pcheck) = match leaf_idx {
+        let (rel, indexes, gen_exprs) = match leaf_idx {
             Some(idx) => (
                 router.as_ref().unwrap().leaf_rel(idx),
                 &mut leaf_indexes[idx],
-                &mut leaf_checks[idx],
-                &mut leaf_virtual_nn[idx],
                 &mut leaf_generated[idx],
-                &mut leaf_partition_check[idx],
             ),
             None => (
                 es_relations[(r.rti - 1) as usize]
                     .as_ref()
                     .expect("result relation opened"),
                 &mut r.indexes,
-                &mut r.check_exprs,
-                &mut r.virtual_nn_exprs,
                 &mut r.generated_exprs,
-                &mut r.partition_check,
             ),
         };
         let remapped = work_slot != slot_id;
@@ -5090,30 +5052,84 @@ fn exec_insert<'mcx>(
         if rel.rd_rel.relhasindex && indexes.is_none() {
             *indexes = Some(execindexing::ExecOpenIndices(mcx, rel, onconflict != 0)?);
         }
+    }
 
-        // A routed leaf checks its own translated WCO list over the
-        // leaf-format tuple, post BR triggers (C ExecInsert -> ri_WithCheckOptions
-        // built by ExecInitPartitionInfo).
+    // A routed leaf checks its own translated WCO list over the leaf-format
+    // tuple, post BR triggers (C ExecInsert -> ri_WithCheckOptions built by
+    // ExecInitPartitionInfo). Runs with `estate` whole: policy quals carry
+    // SubPlans/initplans (executils subplan driver).
+    {
+        let ecxt = mt.node_ecxt;
+        // Cross-partition-moving UPDATE (or MERGE UPDATE action) checks the
+        // target's UPDATE policies through the routed insert (C
+        // nodeModifyTable.c:1067-1090).
+        let wco_kind = if mt.operation == CmdType::CMD_UPDATE
+            || (mt.operation == CmdType::CMD_MERGE
+                && mt.merge_active_cmd == Some(CmdType::CMD_UPDATE))
+        {
+            WCOKind::WCO_RLS_UPDATE_CHECK
+        } else {
+            WCOKind::WCO_RLS_INSERT_CHECK
+        };
+        let ModifyTableState { rels, root, cur, insert_target_root, leaf_wco, .. } = &mut *mt;
         let wcos = match leaf_idx {
             Some(idx) => leaf_wco[idx].as_mut(),
-            None => Some(&mut r.wco_exprs),
+            None => {
+                let r = if *insert_target_root {
+                    root.as_mut().unwrap_or(&mut rels[0])
+                } else {
+                    &mut rels[*cur]
+                };
+                Some(&mut r.wco_exprs)
+            }
         };
         if let Some(wcos) = wcos {
             if !wcos.is_empty() {
-                // Cross-partition-moving UPDATE (or MERGE UPDATE action) checks
-                // the target's UPDATE policies through the routed insert
-                // (C nodeModifyTable.c:1067-1090).
-                let wco_kind = if operation == CmdType::CMD_UPDATE
-                    || (operation == CmdType::CMD_MERGE
-                        && merge_active_cmd == Some(CmdType::CMD_UPDATE))
-                {
-                    WCOKind::WCO_RLS_UPDATE_CHECK
-                } else {
-                    WCOKind::WCO_RLS_INSERT_CHECK
-                };
-                exec_with_check_options(wcos, wco_kind, slot)?;
+                exec_with_check_options(estate, ecxt, wcos, wco_kind, work_slot)?;
             }
         }
+    }
+
+    {
+        // Copy-out RTE/perminfo handles for the cold partition-constraint
+        // error path (the destructure below pins *estate).
+        let target_rte = estate.es_range_table[(mt.rels[mt.cur].rti - 1) as usize];
+        let perminfos = estate.es_rteperminfos;
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ModifyTableState {
+            rels,
+            root,
+            cur,
+            insert_target_root,
+            router,
+            leaf_checks,
+            leaf_virtual_nn,
+            leaf_partition_check,
+            ..
+        } = &mut *mt;
+        let r = if *insert_target_root && leaf_idx.is_none() {
+            root.as_mut().unwrap_or(&mut rels[0])
+        } else {
+            &mut rels[*cur]
+        };
+        let (rel, check_exprs, virtual_nn_exprs, pcheck) = match leaf_idx {
+            Some(idx) => (
+                router.as_ref().unwrap().leaf_rel(idx),
+                &mut leaf_checks[idx],
+                &mut leaf_virtual_nn[idx],
+                &mut leaf_partition_check[idx],
+            ),
+            None => (
+                es_relations[(r.rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened"),
+                &mut r.check_exprs,
+                &mut r.virtual_nn_exprs,
+                &mut r.partition_check,
+            ),
+        };
+        let remapped = work_slot != slot_id;
+        let slot = &mut es_tupleTable[work_slot.0 as usize];
 
         // ri_RootResultRelInfo: a routed leaf's constraint errors report
         // the failing row in the root's rowtype (execMain.c).
@@ -5558,9 +5574,18 @@ fn exec_on_conflict_update<'mcx>(
             };
             if let Some(wcos) = wcos {
                 if !wcos.is_empty() {
-                    pre_eval_wco_param_deps(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, estate)?;
-                    let scan = &mut estate.es_tupleTable[existing_id.0 as usize];
-                    exec_with_check_options(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+                    exec_with_check_options(
+                        estate,
+                        Some(ec),
+                        wcos,
+                        WCOKind::WCO_RLS_CONFLICT_CHECK,
+                        existing_id,
+                    )?;
+                    // Restore the qual/projection bindings the WCO eval reset.
+                    let e = estate.ecxt_mut(ec);
+                    e.ecxt_scantuple = Some(existing_id);
+                    e.ecxt_innertuple = Some(excluded_id);
+                    e.ecxt_outertuple = None;
                 }
             }
         }
@@ -5631,7 +5656,7 @@ fn exec_on_conflict_update<'mcx>(
         if let Some(wcos) = wcos {
             if !wcos.is_empty() {
                 let scan = slots.scan.take().expect("scan slot");
-                exec_with_check_options(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+                exec_with_check_options_basic(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
                 slots.scan = Some(scan);
             }
         }
@@ -6211,8 +6236,9 @@ fn copy_by_ref_datum<'mcx>(mcx: mcx::Mcx<'mcx>, d: Datum, attlen: i16) -> PgResu
 }
 
 // ExecWithCheckOptions (execMain.c): NULL or false qual = violation for
-// every kind (ExecQual semantics).
-fn exec_with_check_options<'mcx>(
+// every kind (ExecQual semantics). Callers inside an EStateData destructure
+// use this variant; policy SubPlans/initplans need `exec_with_check_options`.
+fn exec_with_check_options_basic<'mcx>(
     wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     kind: WCOKind,
     slot: &mut SlotData<'mcx>,
@@ -6223,6 +6249,42 @@ fn exec_with_check_options<'mcx>(
         }
         let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
         if !execexpr::exec_qual(Some(&mut *w.state), &mut slots)? {
+            return Err(wco_violation(w));
+        }
+    }
+    Ok(())
+}
+
+// ExecWithCheckOptions with the executils subplan driver: policy quals carry
+// SubPlans/initplans (exec_view_check_options shape).
+fn exec_with_check_options<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    ecxt: Option<executils::EcxtId>,
+    wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
+    kind: WCOKind,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    for w in wcos.iter_mut() {
+        if w.kind != kind {
+            continue;
+        }
+        pre_eval_param_deps(Some(&*w.state), estate)?;
+        let ok = if w.state.has_subplan() {
+            let ec = ecxt.expect("node ecxt created with WCO");
+            estate.reset_expr_context(ec);
+            {
+                let e = estate.ecxt_mut(ec);
+                e.ecxt_scantuple = Some(slot_id);
+                e.ecxt_innertuple = None;
+                e.ecxt_outertuple = None;
+            }
+            executils::exec_qual_with_subplans(Some(&mut *w.state), estate, ec)?
+        } else {
+            let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+            let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+            execexpr::exec_qual(Some(&mut *w.state), &mut slots)?
+        };
+        if !ok {
             return Err(wco_violation(w));
         }
     }
