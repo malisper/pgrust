@@ -126,8 +126,8 @@ pub fn CheckIndexCompatible<'mcx>(
         unported("CheckIndexCompatible: exclusion / WITHOUT OVERLAPS constraints");
     }
     let relationId = catalog_index::IndexGetRelation(mcx, old_id, false)?;
-    let (accessMethodId, amname, amcanorder, _, _, _) =
-        resolve_index_am(Some(access_method_name))?;
+    let am = resolve_index_am(Some(access_method_name))?;
+    let (accessMethodId, amname, amcanorder) = (am.oid, am.name.as_str(), am.amcanorder);
 
     let numberOfAttributes = attribute_list.len();
     debug_assert!(numberOfAttributes > 0 && numberOfAttributes <= INDEX_MAX_KEYS as usize);
@@ -250,38 +250,100 @@ pub fn CheckIndexCompatible<'mcx>(
     Ok(ret)
 }
 
-// Closed-set AM name resolution (C: get_index_am_oid + GetIndexAmRoutine);
-// tuple is (oid, name, amcanorder, amcanunique, amcanmulticol, amcaninclude).
-// "rtree" substitutes gist with a NOTICE (indexcmds.c:848-854).
-fn resolve_index_am(name: Option<&str>) -> PgResult<(Oid, &'static str, bool, bool, bool, bool)> {
-    if name == Some("rtree") {
-        elog::ereport(types_error::NOTICE)
-            .errmsg("substituting access method \"gist\" for obsolete method \"rtree\"")
-            .finish(types_error::ErrorLocation::new("indexcmds.c", 0, "DefineIndex"))?;
-        return resolve_index_am(Some("gist"));
+struct IndexAmInfo {
+    oid: Oid,
+    name: String,
+    kind: types_relscan::IndexAmKind,
+    amcanorder: bool,
+    amcanunique: bool,
+    amcanmulticol: bool,
+    amcaninclude: bool,
+}
+
+// DefineIndex's AM lookup (indexcmds.c:840-901): pg_am AMNAME probe with the
+// rtree->gist substitution hack; capability flags per each builtin handler's
+// IndexAmRoutine (nbtree.c:122, hash.c:65, ginutil.c:45, gist.c:66,
+// spgutils.c:51, brin.c:257).
+fn resolve_index_am(name: Option<&str>) -> PgResult<IndexAmInfo> {
+    let Some(mut name) = name else {
+        unported("DefineIndex: access method None (AMNAME lookup)");
+    };
+    let mut probe = index_am_probe(name)?;
+    if probe.is_none() && name == "rtree" {
+        elog_seams::ereport_msg::call(
+            types_error::NOTICE,
+            "substituting access method \"gist\" for obsolete method \"rtree\"".to_string(),
+            None,
+        )?;
+        name = "gist";
+        probe = index_am_probe(name)?;
     }
-    Ok(match name {
-        Some("btree") => (BTREE_AM_OID, "btree", true, true, true, true),
-        Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false, false),
-        Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true, false),
-        Some("gist") => (catalog_index::GIST_AM_OID, "gist", false, false, true, true),
-        Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true, true),
-        Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true, false),
-        other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
+    let Some((oid, amhandler)) = probe else {
+        return Err(err(
+            format!("access method \"{name}\" does not exist"),
+            ERRCODE_UNDEFINED_OBJECT,
+        ));
+    };
+    let kind = amapi::GetIndexAmRoutine(amhandler);
+    let (amcanorder, amcanunique, amcanmulticol, amcaninclude) = index_am_flags(kind);
+    Ok(IndexAmInfo {
+        oid,
+        name: name.to_string(),
+        kind,
+        amcanorder,
+        amcanunique,
+        amcanmulticol,
+        amcaninclude,
     })
 }
 
-// Closed-set get_am_name (pg_am.dat) for error details.
-fn get_am_name_closed(amid: Oid) -> &'static str {
-    match amid {
-        BTREE_AM_OID => "btree",
-        catalog_index::HASH_AM_OID => "hash",
-        catalog_index::GIN_AM_OID => "gin",
-        catalog_index::GIST_AM_OID => "gist",
-        types_core::SPGIST_AM_OID => "spgist",
-        types_core::BRIN_AM_OID => "brin",
-        _ => "???",
+// (amcanorder, amcanunique, amcanmulticol, amcaninclude) per builtin handler.
+fn index_am_flags(kind: types_relscan::IndexAmKind) -> (bool, bool, bool, bool) {
+    use types_relscan::IndexAmKind::*;
+    match kind {
+        Btree => (true, true, true, true),
+        Hash => (false, false, false, false),
+        Gin => (false, false, true, false),
+        Gist => (false, false, true, true),
+        Spgist => (false, false, false, true),
+        Brin => (false, false, true, false),
     }
+}
+
+// pg_am AMNAME probe: (oid, amhandler); None if no such access method.
+fn index_am_probe(amname: &str) -> PgResult<Option<(Oid, Oid)>> {
+    const Anum_pg_am_oid: i32 = 1;
+    const Anum_pg_am_amhandler: i32 = 3;
+    let Some(tup) = SearchSysCache1(cache_syscache::cacheinfo::AMNAME, SysCacheKey::Str(amname))?
+    else {
+        return Ok(None);
+    };
+    let notnull = |anum: i32| -> PgResult<Datum> {
+        cache_syscache::SysCacheGetAttrNotNull(cache_syscache::cacheinfo::AMNAME, &tup, anum)
+    };
+    let oid = notnull(Anum_pg_am_oid)?.as_oid();
+    let amhandler = notnull(Anum_pg_am_amhandler)?.as_oid();
+    ReleaseSysCache(tup);
+    Ok(Some((oid, amhandler)))
+}
+
+// get_am_name (amcmds.c) for error details.
+fn get_am_name(amid: Oid) -> String {
+    const Anum_pg_am_amname: i32 = 2;
+    let Ok(Some(tup)) =
+        SearchSysCache1(cache_syscache::cacheinfo::AMOID, SysCacheKey::Value(Datum::from_oid(amid)))
+    else {
+        return "???".to_string();
+    };
+    let name = cache_syscache::SysCacheGetAttrNotNull(cache_syscache::cacheinfo::AMOID, &tup, Anum_pg_am_amname)
+        .map(|d| {
+            // SAFETY: amname is the row's inline NameData column.
+            let nd = unsafe { *(d.as_usize() as *const types_tuple::NameData) };
+            core::str::from_utf8(nd.name_str()).unwrap_or("???").to_string()
+        })
+        .unwrap_or_else(|_| "???".to_string());
+    ReleaseSysCache(tup);
+    name
 }
 
 // GetOperatorFromCompareType (indexcmds.c): equality/overlaps/contained-by
@@ -331,7 +393,7 @@ pub fn GetOperatorFromCompareType<'mcx>(
                 format!(
                     "Could not translate compare type {cmptype} for operator family \"{}\" of access method \"{}\".",
                     famname.as_str(),
-                    get_am_name_closed(amid)
+                    get_am_name(amid)
                 ),
             )?);
         }
@@ -351,7 +413,7 @@ pub fn GetOperatorFromCompareType<'mcx>(
             opcintype,
             format!(
                 "There is no suitable operator in operator family \"{famname}\" for access method \"{}\".",
-                get_am_name_closed(amid)
+                get_am_name(amid)
             ),
         )?);
     }
@@ -388,22 +450,39 @@ pub fn DefineIndex<'mcx>(
         )?;
     }
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
-    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) =
-        resolve_index_am(stmt.accessMethod)?;
+    let am = resolve_index_am(stmt.accessMethod)?;
+    let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) = (
+        am.oid,
+        am.name.as_str(),
+        am.amcanorder,
+        am.amcanunique,
+        am.amcanmulticol,
+        am.amcaninclude,
+    );
     if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {
         return Err(err(
             format!("access method \"{amname}\" does not support unique indexes"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
     }
-    if !stmt.indexIncludingParams.is_nil() && !amcaninclude {
-        return Err(err(
-            format!("access method \"{amname}\" does not support included columns"),
-            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-        ));
+    if !stmt.indexIncludingParams.is_nil() {
+        if !amcaninclude {
+            return Err(err(
+                format!("access method \"{amname}\" does not support included columns"),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
+        }
+        // NARROWED: gist truncates nonkey atts off internal tuples via a
+        // separate nonLeafTupdesc (initGISTstate louds); spgist's INCLUDE
+        // leaf-tuple lane is unverified. Both stay loud.
+        if am.kind != types_relscan::IndexAmKind::Btree {
+            unported(&format!("DefineIndex: INCLUDE columns on {amname}"));
+        }
     }
     // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
-    if exclusion && matches!(amname, "gin" | "brin") {
+    if exclusion
+        && matches!(am.kind, types_relscan::IndexAmKind::Gin | types_relscan::IndexAmKind::Brin)
+    {
         return Err(err(
             format!("access method \"{amname}\" does not support exclusion constraints"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -1779,19 +1858,31 @@ fn name_arg<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, u8>> {
 
 #[cfg(test)]
 mod tests {
-    // pg_am.dat amcaninclude via each AM handler (PG18): btree/gist/spgist
-    // true, hash/gin/brin false.
+    use types_relscan::IndexAmKind::*;
+
+    // Each AM handler's IndexAmRoutine flags (PG18): amcaninclude true for
+    // btree/gist/spgist; amcanmulticol false for hash/spgist.
     #[test]
-    fn resolve_index_am_include_flags_match_pg_am() {
-        for (name, caninclude) in [
-            ("btree", true),
-            ("hash", false),
-            ("gin", false),
-            ("gist", true),
-            ("spgist", true),
-            ("brin", false),
+    fn index_am_flags_match_handlers() {
+        for (kind, caninclude) in [
+            (Btree, true),
+            (Hash, false),
+            (Gin, false),
+            (Gist, true),
+            (Spgist, true),
+            (Brin, false),
         ] {
-            assert_eq!(super::resolve_index_am(Some(name)).unwrap().5, caninclude, "{name}");
+            assert_eq!(super::index_am_flags(kind).3, caninclude, "{kind:?}");
+        }
+        for (kind, canmulticol) in [
+            (Btree, true),
+            (Hash, false),
+            (Gin, true),
+            (Gist, true),
+            (Spgist, false),
+            (Brin, true),
+        ] {
+            assert_eq!(super::index_am_flags(kind).2, canmulticol, "{kind:?}");
         }
     }
 }
