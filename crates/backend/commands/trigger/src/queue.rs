@@ -16,9 +16,9 @@ use types_rel::{NoLock, Relation, RELKIND_PARTITIONED_TABLE};
 use types_snapshot::{SnapshotData, SNAPSHOT_ANY};
 use types_trigger::{
     Trigger, TriggerDesc, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED, RI_TRIGGER_FK,
-    RI_TRIGGER_NONE, RI_TRIGGER_PK, TRIGGER_DISABLED, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT,
+    RI_TRIGGER_NONE, RI_TRIGGER_PK, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT,
     TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, TRIGGER_EVENT_TRUNCATE, TRIGGER_EVENT_UPDATE,
-    TRIGGER_FIRES_ON_REPLICA, TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT,
+    TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT,
     TRIGGER_TYPE_LEVEL_MASK, TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TIMING_MASK,
     TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_UPDATE,
 };
@@ -52,6 +52,8 @@ struct AfterTriggerEvent {
     // ctid1/ctid2 point into for a cross-partition update event on the root.
     src_part: Oid,
     dst_part: Oid,
+    // C ats_rolid: role to execute the trigger (trigger.c:3699, 6535).
+    rolid: Oid,
 }
 
 pub(crate) struct TransTable {
@@ -60,6 +62,12 @@ pub(crate) struct TransTable {
     closed: bool,
     old_ts: TuplestoreHandle,
     new_ts: TuplestoreHandle,
+    // C AfterTriggersTableData.before_trig_done / after_trig_done +
+    // after_trig_events (trigger.c:3919-3921): statement-trigger firing
+    // state rides the open table so a closed table lets a fresh set queue.
+    before_trig_done: bool,
+    after_trig_done: bool,
+    after_trig_pos: usize,
 }
 
 // C TransitionCaptureState: need flags + AfterTriggersTableData references
@@ -104,6 +112,9 @@ fn get_transition_table(depth: usize, relid: Oid, cmd: CmdType) -> u32 {
             closed: false,
             old_ts: TuplestoreHandle::NULL,
             new_ts: TuplestoreHandle::NULL,
+            before_trig_done: false,
+            after_trig_done: false,
+            after_trig_pos: 0,
         });
         (tables.len() - 1) as u32
     })
@@ -318,23 +329,33 @@ thread_local! {
     static XACT_EVENTS: RefCell<Vec<AfterTriggerEvent>> = const { RefCell::new(Vec::new()) };
     static CON_STATE: RefCell<Option<SetConstraintState>> = const { RefCell::new(None) };
     static TRANS_STACK: RefCell<Vec<SavedTrans>> = const { RefCell::new(Vec::new()) };
-    // AfterTriggersTableData.before_trig_done, flattened to (depth, rel, op).
-    static BEFORE_TRIG_DONE: RefCell<Vec<(i32, Oid, u32)>> = const { RefCell::new(Vec::new()) };
     // AfterTriggersQueryData.tables, per query depth.
     static TRANS_TABLES: RefCell<Vec<Vec<TransTable>>> = const { RefCell::new(Vec::new()) };
 }
 
-// before_stmt_triggers_fired (trigger.c): check-and-mark, once per rel+op per
-// query level.
+fn stmt_cmd_type(op: u32) -> CmdType {
+    match op {
+        TRIGGER_EVENT_INSERT => CmdType::CMD_INSERT,
+        TRIGGER_EVENT_UPDATE => CmdType::CMD_UPDATE,
+        TRIGGER_EVENT_DELETE => CmdType::CMD_DELETE,
+        other => panic!("stmt_cmd_type: unexpected trigger event {other:#x}"),
+    }
+}
+
+// before_stmt_triggers_fired (trigger.c:2896): check-and-mark on the open
+// AfterTriggersTableData, so a closed table lets BS triggers fire again.
 pub fn before_stmt_triggers_fired(relid: Oid, cmd_event: u32) -> bool {
     let depth = QUERY_DEPTH.with(|c| c.get());
-    BEFORE_TRIG_DONE.with(|b| {
-        let mut done = b.borrow_mut();
-        if done.iter().any(|&(d, r, e)| d == depth && r == relid && e == cmd_event) {
-            return true;
-        }
-        done.push((depth, relid, cmd_event));
-        false
+    if depth < 0 {
+        return false;
+    }
+    let idx = get_transition_table(depth as usize, relid, stmt_cmd_type(cmd_event));
+    TRANS_TABLES.with(|t| {
+        let mut tt = t.borrow_mut();
+        let tb = &mut tt[depth as usize][idx as usize];
+        let done = tb.before_trig_done;
+        tb.before_trig_done = true;
+        done
     })
 }
 
@@ -442,6 +463,7 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> bool {
                         table_idx: ev.table_idx,
                         src_part: ev.src_part,
                         dst_part: ev.dst_part,
+                        rolid: ev.rolid,
                     });
                     ev.flags |= AFTER_TRIGGER_DONE;
                 }
@@ -475,18 +497,21 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
                 if ev.flags & AFTER_TRIGGER_IN_PROGRESS != 0 && ev.firing_id == firing_id {
                     return Some((
                         ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx,
-                        ev.src_part, ev.dst_part,
+                        ev.src_part, ev.dst_part, ev.rolid,
                     ));
                 }
                 i += 1;
             }
             None
         });
-        let Some((ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part)) = next
+        let Some((ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid)) =
+            next
         else {
             break;
         };
-        AfterTriggerExecute(mcx, ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part)?;
+        AfterTriggerExecute(
+            mcx, ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid,
+        )?;
         with_list(sel, |evs| {
             let ev = &mut evs[i];
             ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
@@ -545,7 +570,6 @@ pub fn AfterTriggerEndQuery() -> PgResult<()> {
         st.truncate(d);
     });
     free_tables_at_depth(d);
-    BEFORE_TRIG_DONE.with(|b| b.borrow_mut().retain(|&(dd, _, _)| dd < depth));
     QUERY_DEPTH.with(|c| c.set(depth - 1));
     Ok(())
 }
@@ -586,7 +610,6 @@ pub fn AfterTriggerEndXact(_is_commit: bool) -> PgResult<()> {
     QUERY_STACK.with(|s| s.borrow_mut().clear());
     CON_STATE.with(|c| *c.borrow_mut() = None);
     TRANS_STACK.with(|s| s.borrow_mut().clear());
-    BEFORE_TRIG_DONE.with(|b| b.borrow_mut().clear());
     QUERY_DEPTH.with(|c| c.set(-1));
     Ok(())
 }
@@ -646,7 +669,6 @@ pub fn AfterTriggerEndSubXact(is_commit: bool) -> PgResult<()> {
     for d in keep..ndepths {
         free_tables_at_depth(d);
     }
-    BEFORE_TRIG_DONE.with(|b| b.borrow_mut().retain(|&(dd, _, _)| dd <= saved.query_depth));
     XACT_EVENTS.with(|s| s.borrow_mut().truncate(saved.events_len));
     if saved.state_saved {
         CON_STATE.with(|c| *c.borrow_mut() = saved.state);
@@ -721,6 +743,7 @@ fn AfterTriggerExecute<'mcx>(
     table_idx: u32,
     src_part: Oid,
     dst_part: Oid,
+    rolid: Oid,
 ) -> PgResult<()> {
     let Some(trigdesc) = relcache::RelationGetTriggerDesc(relid)? else {
         return Ok(());
@@ -759,8 +782,10 @@ fn AfterTriggerExecute<'mcx>(
         tdata.tg_oldtable = tg_oldtable.0;
         tdata.tg_newtable = tg_newtable.0;
         // AFTER triggers: any returned tuple is discarded (C L4559-4567).
+        let restore = become_queuing_role(rolid);
         let result =
             crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ());
+        restore_role(restore);
         rel.close(NoLock)?;
         return result;
     }
@@ -830,6 +855,7 @@ fn AfterTriggerExecute<'mcx>(
     };
 
     let tg_event = event & (TRIGGER_EVENT_OPMASK | TRIGGER_EVENT_ROW);
+    let restore = become_queuing_role(rolid);
     let result = if ri_trigger_kind(trigger.tgfoid) == RI_TRIGGER_NONE {
         let mut finfo = fmgr_seams::fmgr_info::call(trigger.tgfoid)?;
         let mut tdata = types_trigger_call::TriggerData::new(
@@ -853,6 +879,7 @@ fn AfterTriggerExecute<'mcx>(
         };
         ri_triggers_seams::ri_fkey_trigger::call(mcx, trigger.tgfoid, &data)
     };
+    restore_role(restore);
     if let Some((s, d)) = cp_rels {
         s.close(NoLock)?;
         d.close(NoLock)?;
@@ -862,8 +889,7 @@ fn AfterTriggerExecute<'mcx>(
 }
 
 fn trigger_enabled(t: &Trigger<'_>) -> bool {
-    // SESSION_REPLICATION_ROLE_ORIGIN (the only ported role).
-    t.tgenabled != TRIGGER_DISABLED && t.tgenabled != TRIGGER_FIRES_ON_REPLICA
+    crate::exec::TriggerEnabled(t)
 }
 
 fn trigger_type_matches(tgtype: i16, event: i16) -> bool {
@@ -1001,29 +1027,51 @@ fn after_trigger_save_event<'mcx>(
                 table_idx,
                 src_part,
                 dst_part,
+                rolid: miscinit::GetUserId(),
             });
         });
     }
     Ok(())
 }
 
-// cancel_prior_stmt_triggers (trigger.c): a re-queued statement-trigger set
-// replaces the earlier unfired set for the same rel+op at this query level.
+// cancel_prior_stmt_triggers (trigger.c:2929-3010): cancel the AS set this
+// table's last save queued (even mid-firing — C clears IN_PROGRESS), then
+// record the insertion point for the set about to queue. The state rides the
+// open AfterTriggersTableData: once an AS trigger fires and closes the table,
+// later sub-statements queue a fresh set against fresh transition tables.
 fn cancel_prior_stmt_triggers(relid: Oid, op: u32) {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
         return;
     }
-    with_list(EvList::Query(depth as usize), |evs| {
-        for ev in evs.iter_mut() {
-            if ev.relid == relid
-                && ev.event & TRIGGER_EVENT_OPMASK == op
-                && ev.event & TRIGGER_EVENT_ROW == 0
-                && ev.flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS) == 0
-            {
+    let d = depth as usize;
+    let idx = get_transition_table(d, relid, stmt_cmd_type(op)) as usize;
+    let after_done = TRANS_TABLES.with(|t| {
+        let tt = t.borrow();
+        let tb = &tt[d][idx];
+        tb.after_trig_done.then_some(tb.after_trig_pos)
+    });
+    let new_pos = with_list(EvList::Query(d), |evs| {
+        if let Some(pos) = after_done {
+            let start = pos.min(evs.len());
+            for ev in evs[start..].iter_mut() {
+                if ev.relid != relid
+                    || ev.event & TRIGGER_EVENT_OPMASK != op
+                    || ev.event & TRIGGER_EVENT_ROW != 0
+                {
+                    break;
+                }
+                ev.flags &= !AFTER_TRIGGER_IN_PROGRESS;
                 ev.flags |= AFTER_TRIGGER_DONE;
             }
         }
+        evs.len()
+    });
+    TRANS_TABLES.with(|t| {
+        let mut tt = t.borrow_mut();
+        let tb = &mut tt[d][idx];
+        tb.after_trig_done = true;
+        tb.after_trig_pos = new_pos;
     });
 }
 
@@ -1089,6 +1137,7 @@ fn save_stmt_event<'mcx>(
                 table_idx,
                 src_part: Oid::default(),
                 dst_part: Oid::default(),
+                rolid: miscinit::GetUserId(),
             });
         });
     }
@@ -1210,7 +1259,7 @@ pub fn ExecARInsertTriggers<'mcx>(
 pub fn ExecARDeleteTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    trigdesc: &TriggerDesc<'static>,
+    trigdesc: Option<&TriggerDesc<'static>>,
     old_tid: ItemPointerData,
     transition_capture: Option<&TransitionCaptureState>,
     when: Option<&mut TriggerWhenEval<'_, 'mcx>>,
@@ -1219,12 +1268,13 @@ pub fn ExecARDeleteTriggers<'mcx>(
     is_crosspart_update: bool,
     child_to_root: Option<&ChildToRoot<'_, 'mcx>>,
 ) -> PgResult<()> {
+    let after_row = trigdesc.is_some_and(|td| td.trig_delete_after_row);
     let capture = transition_capture.filter(|tc| tc.tcs_delete_old_table);
-    if !trigdesc.trig_delete_after_row && capture.is_none() {
+    if !after_row && capture.is_none() {
         return Ok(());
     }
-    let need_tuple =
-        capture.is_some() || trigdesc.triggers.iter().any(|t| t.tgqual.is_some());
+    let need_tuple = capture.is_some()
+        || trigdesc.is_some_and(|td| td.triggers.iter().any(|t| t.tgqual.is_some()));
     let snap = SnapshotData::sentinel(mcx, SNAPSHOT_ANY);
     let mut r_old = None;
     if need_tuple {
@@ -1245,14 +1295,14 @@ pub fn ExecARDeleteTriggers<'mcx>(
             child_to_root,
             None,
         )?;
-        if !trigdesc.trig_delete_after_row {
+        if !after_row {
             return Ok(());
         }
     }
     after_trigger_save_event(
         mcx,
         rel,
-        trigdesc,
+        trigdesc.expect("after_row implies a trigdesc"),
         TRIGGER_EVENT_DELETE,
         TRIGGER_TYPE_DELETE,
         old_tid,
@@ -1362,6 +1412,28 @@ pub fn ExecARUpdateTriggers<'mcx>(
         is_crosspart_update,
         src_rel.zip(dst_rel).map(|(s, d)| (s.rd_id, d.rd_id)),
     )
+}
+
+// AfterTriggerExecute's queued-role swap (trigger.c:4550-4571): become the
+// role active when the trigger was queued; a mismatch restores after the
+// call. Error paths abort the (sub)transaction, which restores userid state.
+fn become_queuing_role(rolid: Oid) -> Option<(Oid, i32)> {
+    let (save_rolid, save_sec) = miscinit::GetUserIdAndSecContext();
+    if save_rolid != rolid {
+        miscinit::SetUserIdAndSecContext(
+            rolid,
+            save_sec | types_core::SECURITY_LOCAL_USERID_CHANGE,
+        );
+        Some((save_rolid, save_sec))
+    } else {
+        None
+    }
+}
+
+fn restore_role(restore: Option<(Oid, i32)>) {
+    if let Some((rolid, sec)) = restore {
+        miscinit::SetUserIdAndSecContext(rolid, sec);
+    }
 }
 
 #[cold]

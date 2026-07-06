@@ -12,7 +12,7 @@ use types_rel::Relation;
 use types_slot::SlotData;
 use types_trigger::{
     Trigger, TRIGGER_DISABLED, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_UPDATE,
-    TRIGGER_FIRES_ON_REPLICA,
+    TRIGGER_FIRES_ON_ORIGIN, TRIGGER_FIRES_ON_REPLICA,
 };
 use types_trigger_call::TriggerData;
 use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
@@ -37,10 +37,16 @@ impl TriggerFmgrCache {
     }
 }
 
-// TriggerEnabled's tgenabled gate (SESSION_REPLICATION_ROLE_ORIGIN, the only
-// ported role); tgattr/tgqual are the caller's to handle.
+// TriggerEnabled's tgenabled gate (trigger.c:3488-3500); tgattr/tgqual are
+// the caller's to handle.
 pub fn TriggerEnabled(t: &Trigger<'_>) -> bool {
-    t.tgenabled != TRIGGER_DISABLED && t.tgenabled != TRIGGER_FIRES_ON_REPLICA
+    if (guc_tables::vars::SessionReplicationRole.get().get)()
+        == guc_tables::consts::SESSION_REPLICATION_ROLE_REPLICA
+    {
+        t.tgenabled != TRIGGER_DISABLED && t.tgenabled != TRIGGER_FIRES_ON_ORIGIN
+    } else {
+        t.tgenabled != TRIGGER_DISABLED && t.tgenabled != TRIGGER_FIRES_ON_REPLICA
+    }
 }
 
 // build_generation_expression (rewriteHandler.c:4520), adbin-direct copy
