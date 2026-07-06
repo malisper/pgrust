@@ -888,7 +888,7 @@ fn am_insert<'mcx>(
             // (ResultRelIndexState holds the relation open).
             let slot: &mut Option<gist::GistInsertAmCache<'mcx>> =
                 unsafe { core::mem::transmute(slot) };
-            gist::gistinsert(indexRelation, values, isnull, heap_t_ctid, heapRelation, slot)
+            gist::gistinsert(mcx, indexRelation, values, isnull, heap_t_ctid, heapRelation, slot)
         }
         IndexAmKind::Spgist => {
             debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);

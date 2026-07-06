@@ -33,7 +33,7 @@ pub fn gistbeginscan<'mcx>(
         panic!("unported: gist ordered (KNN) scans (distance/pairing-heap lane)");
     }
 
-    let mut giststate = initGISTstate(r)?;
+    let mut giststate = initGISTstate(mcx, r)?;
     // gistscan.c:180-203 (in C, lazily under gistrescan's xs_want_itup arm;
     // rescan here has no mcx, so the divergent-type descriptor is built at
     // beginscan — same contents, once per scan either way). Key columns get

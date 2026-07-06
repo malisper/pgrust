@@ -50,7 +50,7 @@ pub fn gistbuild<'mcx>(
     let hasallsortsupports =
         (0..nkeys).all(|i| index_getprocid(index, i, GIST_SORTSUPPORT_PROC) != 0);
 
-    let mut giststate = initGISTstate(index)?;
+    let mut giststate = initGISTstate(mcx, index)?;
     let mut temp = MemoryContext::new_bump("GiST temporary context");
 
     if hasallsortsupports {

@@ -1,5 +1,6 @@
 //! initGISTstate (gist.c): resolve the per-column opclass support procs
 //! from the relcache rd_support preload onto a GistState carrier.
+use ::mcx::Mcx;
 use ::types_core::catalog::DEFAULT_COLLATION_OID;
 use ::types_core::fmgr::INDEX_MAX_KEYS;
 use ::types_core::Oid;
@@ -52,19 +53,27 @@ pub fn index_getprocid(index: &Relation<'_>, attno_0based: usize, procnum: u16) 
 
 
 /// initGISTstate; scan-lifetime data lives with the returned owner value.
-pub fn initGISTstate<'mcx>(index: &Relation<'mcx>) -> PgResult<GistState<'mcx>> {
+/// `mcx` must outlive the state (holds the truncated nonLeafTupdesc when the
+/// index has INCLUDE columns).
+pub fn initGISTstate<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<GistState<'mcx>> {
     let natts = index.rd_att.natts;
     if natts > INDEX_MAX_KEYS as i32 {
         panic!("numberOfAttributes {natts} > {INDEX_MAX_KEYS}");
     }
     let n = natts as usize;
     let nkeys = index.indnkeyatts() as usize;
-    if n != nkeys {
-        panic!("unported: gist INCLUDE columns (truncated nonLeafTupdesc lane)");
-    }
 
     let leafTupdesc = index.rd_att.clone();
-    let nonLeafTupdesc = index.rd_att.clone();
+    // gist.c:1572: internal-page tuples drop the INCLUDE attributes.
+    let nonLeafTupdesc = if nkeys == n {
+        index.rd_att.clone()
+    } else {
+        std::rc::Rc::new(tupdesc::CreateTupleDescTruncatedCopy(
+            mcx,
+            &index.rd_att,
+            nkeys as i32,
+        )?)
+    };
 
     let mut st = GistState {
         leafTupdesc,
