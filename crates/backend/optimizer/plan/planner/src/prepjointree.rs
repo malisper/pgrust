@@ -395,7 +395,12 @@ fn find_pullable_subquery<'mcx>(
         NodeTag::T_RangeTblRef => {
             let rti = node.as_range_tbl_ref().expect("RangeTblRef").rtindex;
             let rte = parse.rtable.nth(rti as usize - 1).as_range_tbl_entry().expect("rtable cell");
-            if rte.rtekind == RTEKind::RTE_SUBQUERY && !kept.contains(&rti) {
+            // inh on a subquery RTE means pull_up_simple_union_all already
+            // flattened it (possibly inside a pulled-up child, then spliced
+            // here). C's single-pass recursion never revisits an RTR; this
+            // rescanning driver must skip it or the appendrel leaves get
+            // duplicated.
+            if rte.rtekind == RTEKind::RTE_SUBQUERY && !rte.inh && !kept.contains(&rti) {
                 *target = Some((rti, lowest_outer_join));
             }
         }

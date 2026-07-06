@@ -4912,6 +4912,70 @@ mod setops {
         }
     }
 
+    // Wrap a query one level: `SELECT x FROM (<inner>) <name>`.
+    fn wrap_subquery<'mcx>(mcx: Mcx<'mcx>, inner: Query<'mcx>, name: &'mcx str) -> Query<'mcx> {
+        let rtable = NodeList::make1(mcx, subquery_rte(mcx, inner, name, &["x"])).unwrap();
+        let jointree = alloc_leak_in(
+            mcx,
+            FromExpr {
+                fromlist: NodeList::make1(mcx, Node::mk_range_tbl_ref(mcx, 1).unwrap()).unwrap(),
+                quals: None,
+            },
+        )
+        .unwrap();
+        let x = Node::mk_var(mcx, 1, 1, 23, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, x, 1, Some("x"), false).unwrap();
+        Query {
+            commandType: CmdType::CMD_SELECT,
+            canSetTag: true,
+            jointree: Some(jointree),
+            rtable,
+            targetList: NodeList::make1(mcx, tle).unwrap(),
+            stmt_location: 0,
+            stmt_len: 80,
+            ..Query::default()
+        }
+    }
+
+    // info-schema lane r6 panic shape (data_type_privileges/element_types):
+    // the UNION ALL sits INSIDE a pulled-up FROM subquery (the
+    // pull_up_simple_union_all path, not top-level flatten), and every member
+    // wraps a join subquery, so each member's pullup is declined by the
+    // post-recursion recheck and the members plan as retained subquery
+    // leaves via set_subquery_pathlist.
+    #[test]
+    fn nested_union_all_of_join_subquery_members_plans() {
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        if !guc_tables::vars::work_mem.installed() {
+            init_small::init_seams();
+        }
+        let mcx = cx.mcx();
+        let setop = setop_query(
+            mcx,
+            SetOperation::SETOP_UNION,
+            true,
+            wrapped_join_subquery_query(mcx),
+            wrapped_join_subquery_query(mcx),
+            1,
+            &["x"],
+        );
+        let parse = wrap_subquery(mcx, wrap_subquery(mcx, setop, "u"), "q");
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT x FROM (SELECT x FROM ((join-sub) UNION ALL (join-sub)) u) q",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+        let mut plan = stmt.planTree.unwrap();
+        while plan.node_tag() != NodeTag::T_Append {
+            plan = plan.as_plan().unwrap().lefttree.expect("Append below unary nodes");
+        }
+        assert_eq!(plan.as_append().unwrap().appendplans.len(), 2);
+    }
+
     // info-schema lane r4/r5 e2e panic shape: after the recursive pull-up the
     // UNION ALL member's jointree holds two rels + quals, so the
     // post-recursion is_safe_append_member recheck must decline the pullup
