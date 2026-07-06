@@ -1055,6 +1055,14 @@ pub fn exec_modify_table<'mcx>(
                 let slot = &mut estate.es_tupleTable[plan_slot.0 as usize];
                 exectuples::slot_getattr(slot, mt.result_oid_attno as i32, &mut isnull)
             };
+            merge_dbg(|| {
+                format!(
+                    "dispatch datum={:#x} isnull={} last_result_oid={}",
+                    datum.as_usize(),
+                    isnull,
+                    mt.last_result_oid
+                )
+            });
             if isnull {
                 if mt.operation == CmdType::CMD_MERGE {
                     mt.cur = 0;
