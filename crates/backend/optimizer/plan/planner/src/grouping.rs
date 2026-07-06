@@ -765,12 +765,24 @@ fn make_group_input_target<'mcx>(
     let mut tlist = types_nodes::list::NodeList::nil();
     let mut group_exprs: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
     let mut vars: mcx::PgVec<'mcx, types_nodes::Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    // The input target sits logically below the grouping step: under
+    // grouping sets its expressions shed the grouping RT index
+    // (planner.c:5558-5568, 5601-5612).
+    let strip_rt = if run.parse().hasGroupRTE && !run.parse().groupingSets.is_nil() {
+        debug_assert!(run.root.group_rtindex > 0);
+        Some(run.root.group_rtindex)
+    } else {
+        None
+    };
     let n = run.root.pathtarget(final_target).exprs.len();
     for i in 0..n {
         let ft = run.root.pathtarget(final_target);
-        let expr = *run.root.expr_node(ft.exprs[i]);
+        let mut expr = *run.root.expr_node(ft.exprs[i]);
         let sgref = ft.sortgrouprefs.get(i).copied().unwrap_or(0);
         if target_sgref_in_group_clause(run, sgref) {
+            if let Some(rt) = strip_rt {
+                expr = crate::flatten_group::strip_group_nulling(mcx, expr, rt)?.unwrap_or(expr);
+            }
             let tle = types_nodes::Node::mk(
                 mcx,
                 types_nodes::primnodes::TargetEntry {
@@ -791,6 +803,13 @@ fn make_group_input_target<'mcx>(
     }
     if let Some(having) = run.parse().havingQual {
         pull_agg_input_vars(having, &mut vars);
+    }
+    if let Some(rt) = strip_rt {
+        for v in vars.iter_mut() {
+            if let Some(new) = crate::flatten_group::strip_group_nulling(mcx, *v, rt)? {
+                *v = new;
+            }
+        }
     }
 
     // add_new_columns_to_pathtarget: dedupe by equal().
@@ -1179,15 +1198,76 @@ fn create_grouping_paths<'mcx>(
     let grouped_rel =
         make_grouping_rel(run, input_rel, grouping_target, target_parallel_safe, parse.havingQual)?;
 
-    // is_degenerate_grouping: HAVING with no aggs and no GROUP BY.
+    // is_degenerate_grouping: HAVING with no aggs and no GROUP BY yields one
+    // Result row per grouping set (create_degenerate_grouping_paths,
+    // planner.c:3966-4013), filtered by HAVING as gating quals.
     if (run.root.hasHavingQual || !parse.groupingSets.is_nil())
         && !parse.hasAggs
         && parse.groupClause.is_nil()
     {
-        panic!(
-            "create_degenerate_grouping_paths (planner.c): HAVING without \
-             aggregates/GROUP BY (GroupResultPath quals); M3 lane"
-        );
+        let nrows = parse.groupingSets.len().max(1);
+        let mut quals: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
+        if let Some(hq) = parse.havingQual {
+            for clause in hq.as_list().expect("preprocessed havingQual is a list") {
+                quals.push(run.intern_expr(clause));
+            }
+        }
+        let mut qual_cost = types_pathnodes::QualCost::default();
+        if let Some(hq) = parse.havingQual {
+            qual_cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), hq)?;
+        }
+        let target_id = run.rel_reltarget_id(grouped_rel);
+        let parallel_safe = run.root.rel(grouped_rel).consider_parallel;
+        let tcost = run.root.pathtarget(target_id).cost;
+        let startup_cost =
+            tcost.startup + if parse.havingQual.is_some() { qual_cost.startup + qual_cost.per_tuple } else { 0.0 };
+        let total_cost = tcost.startup + crate::gucs::cpu_tuple_cost() + tcost.per_tuple
+            + if parse.havingQual.is_some() { qual_cost.startup + qual_cost.per_tuple } else { 0.0 };
+        let mk_result = |run: &mut PlannerRun<'mcx>, quals: mcx::PgVec<'mcx, types_pathnodes::NodeId>| {
+            let path = types_pathnodes::PathNode::GroupResultPath(types_pathnodes::GroupResultPath {
+                path: types_pathnodes::Path {
+                    type_: crate::pathnode::tag16(types_nodes::NodeTag::T_GroupResultPath),
+                    pathtype: crate::pathnode::tag16(types_nodes::NodeTag::T_Result),
+                    parent: grouped_rel,
+                    pathtarget_id: Some(target_id),
+                    param_info: None,
+                    parallel_aware: false,
+                    parallel_safe,
+                    parallel_workers: 0,
+                    rows: 1.0,
+                    disabled_nodes: 0,
+                    startup_cost,
+                    total_cost,
+                    pathkeys: mcx::PgVec::new_in(run.mcx),
+                },
+                quals,
+            });
+            run.root.alloc_path(path)
+        };
+        let pid = if nrows > 1 {
+            let mut subpaths: mcx::PgVec<'_, types_pathnodes::PathId> = mcx::PgVec::new_in(run.mcx);
+            for _ in 0..nrows {
+                let q2 = {
+                    let mut v: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
+                    v.extend_from_slice(&quals);
+                    v
+                };
+                subpaths.push(mk_result(run, q2));
+            }
+            crate::pathnode::create_append_path(
+                run,
+                grouped_rel,
+                subpaths,
+                mcx::PgVec::new_in(run.mcx),
+                &None,
+                -1.0,
+            )?
+        } else {
+            mk_result(run, quals)
+        };
+        crate::pathnode::add_path(run, grouped_rel, pid);
+        crate::pathnode::set_cheapest(run, grouped_rel)?;
+        return Ok(grouped_rel);
     }
 
     let can_sort = run.gset_data.as_ref().is_some_and(|gd| !gd.rollups.is_empty())
