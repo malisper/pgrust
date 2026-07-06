@@ -3662,7 +3662,13 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     let mut ext0 = Bitmapset::empty();
     ext0.add_member(mcx, 0).unwrap();
 
-    // subplans[1] (InitPlan 2): SeqScan t1, qual f1 = $0, tlist [f1].
+    // subplans[0] (InitPlan 1): Limit 1 -> SeqScan t1 (qual f1 = $0), the
+    // planagg minmax shape. The Limit matters: heapam auto-rewinds a spent
+    // scan (rs_inited resets at EOF) but LimitState's position does not, so
+    // a missed initplan rescan replays doneness (zero rows -> NULL param),
+    // not the new param. The planner emits nested initplans before the
+    // bodies that reference them, so plan_id order is initplan first
+    // (InitPlan's init loop fills es_subplanstates in that order).
     let inner_var = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
     let inner_tle = Node::mk_target_entry(mcx, inner_var, 1, Some("f1"), false).unwrap();
     let qual_var = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
@@ -3696,15 +3702,26 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
         },
     )
     .unwrap();
+    let limit_var =
+        Node::mk_var(mcx, ::types_nodes::primnodes::OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+    let limit_tle = Node::mk_target_entry(mcx, limit_var, 1, Some("f1"), false).unwrap();
+    let mut init_limit = Node::build::<::types_nodes::plannodes::Limit>(mcx).unwrap();
+    init_limit.plan.targetlist = NodeList::make1(mcx, limit_tle).unwrap();
+    init_limit.plan.lefttree = Some(init_scan);
+    init_limit.plan.extParam = ext0.clone_in(mcx).unwrap();
+    init_limit.plan.allParam = ext0.clone_in(mcx).unwrap();
+    init_limit.limitCount =
+        Some(Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(1), false, true).unwrap());
+    let init_top = init_limit.seal();
 
-    // subplans[0] (SubPlan 1's body): Result projecting $1, initPlan carrying
-    // plan_id 2 with setParam [$1].
+    // subplans[1] (SubPlan 2's body): Result projecting $1, initPlan carrying
+    // plan_id 1 with setParam [$1].
     let initplan_ref = Node::mk(
         mcx,
         SubPlan {
             subLinkType: SubLinkType::EXPR_SUBLINK,
-            plan_id: 2,
-            plan_name: Some("InitPlan 2"),
+            plan_id: 1,
+            plan_name: Some("InitPlan 1"),
             firstColType: INT4OID,
             firstColTypmod: -1,
             setParam: IntList::make1(mcx, 1).unwrap(),
@@ -3722,13 +3739,13 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     body.plan.allParam = all01;
     let body = body.seal();
 
-    // Outer: SeqScan t0 projecting [f1, SubPlan 1(parParam [$0] <- t0.f1)].
+    // Outer: SeqScan t0 projecting [f1, SubPlan 2(parParam [$0] <- t0.f1)].
     let subplan_expr = Node::mk(
         mcx,
         SubPlan {
             subLinkType: SubLinkType::EXPR_SUBLINK,
-            plan_id: 1,
-            plan_name: Some("SubPlan 1"),
+            plan_id: 2,
+            plan_name: Some("SubPlan 2"),
             firstColType: INT4OID,
             firstColTypmod: -1,
             parParam: IntList::make1(mcx, 0).unwrap(),
@@ -3760,7 +3777,7 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     pstmt.commandType = CmdType::CMD_SELECT;
     pstmt.canSetTag = true;
     pstmt.planTree = Some(outer);
-    pstmt.subplans = NodeList::make2(mcx, body, init_scan).unwrap();
+    pstmt.subplans = NodeList::make2(mcx, init_top, body).unwrap();
     pstmt.paramExecTypes = OidList::make2(mcx, INT4OID, INT4OID).unwrap();
     pstmt.rtable = rtable;
     pstmt.permInfos = perms;
@@ -3823,7 +3840,7 @@ fn correlated_subplan_reruns_nested_initplan_per_outer_row() {
     let mcx = leaked_mcx();
     let (t0, t1) = (70140u32, 70141u32);
     scanfix::register_table(t0, &[&[10, 20, 30]]);
-    scanfix::register_table(t1, &[&[10, 20, 30]]);
+    scanfix::register_table(t1, &[&[10, 10, 20, 20, 30, 30]]);
     let rows = run_two_col_pstmt(mk_correlated_initplan_in_subplan_pstmt(mcx, t0, t1));
     assert_eq!(rows, vec![(10, Some(10)), (20, Some(20)), (30, Some(30))]);
     scanfix::quiesced();
@@ -3837,7 +3854,7 @@ fn correlated_subplan_nested_initplan_null_and_refill_transitions() {
     let mcx = leaked_mcx();
     let (t0, t1) = (70142u32, 70143u32);
     scanfix::register_table(t0, &[&[10, 20, 30]]);
-    scanfix::register_table(t1, &[&[20]]);
+    scanfix::register_table(t1, &[&[20, 20]]);
     let rows = run_two_col_pstmt(mk_correlated_initplan_in_subplan_pstmt(mcx, t0, t1));
     assert_eq!(rows, vec![(10, None), (20, Some(20)), (30, None)]);
     scanfix::quiesced();
