@@ -5922,11 +5922,11 @@ impl<'mcx> Parser<'mcx> {
                 n.objtype = ObjectType::OBJECT_TABLE;
                 if rule == 279 {
                     n.new_tablespacename = Some(view.v(9).str_val());
-                    n.nowait = view.v(10).boolean();
+                    n.nowait = view.v(10).ival() != 0;
                 } else {
                     n.roles = view.v(9).list();
                     n.new_tablespacename = Some(view.v(12).str_val());
-                    n.nowait = view.v(13).boolean();
+                    n.nowait = view.v(13).ival() != 0;
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
@@ -5945,11 +5945,11 @@ impl<'mcx> Parser<'mcx> {
                 n.objtype = ObjectType::OBJECT_INDEX;
                 if rule == 284 {
                     n.new_tablespacename = Some(view.v(9).str_val());
-                    n.nowait = view.v(10).boolean();
+                    n.nowait = view.v(10).ival() != 0;
                 } else {
                     n.roles = view.v(9).list();
                     n.new_tablespacename = Some(view.v(12).str_val());
-                    n.nowait = view.v(13).boolean();
+                    n.nowait = view.v(13).ival() != 0;
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
@@ -6005,11 +6005,11 @@ impl<'mcx> Parser<'mcx> {
                 n.objtype = ObjectType::OBJECT_MATVIEW;
                 if rule == 292 {
                     n.new_tablespacename = Some(view.v(10).str_val());
-                    n.nowait = view.v(11).boolean();
+                    n.nowait = view.v(11).ival() != 0;
                 } else {
                     n.roles = view.v(10).list();
                     n.new_tablespacename = Some(view.v(13).str_val());
-                    n.nowait = view.v(14).boolean();
+                    n.nowait = view.v(14).ival() != 0;
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
