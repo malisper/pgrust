@@ -156,7 +156,7 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             let PartitionTupleRouting { dispatches, root_check, .. } = &mut *self;
             let rel = &dispatches[0].rel;
             if !exec_partition_check(mcx, root_check, rel, slot)? {
-                return Err(partition_constraint_violation(mcx, rel, slot, None));
+                return Err(partition_constraint_violation(mcx, rel, slot, None, None));
             }
         }
         let mut values = [Datum::null(); PARTITION_MAX_KEYS];
@@ -339,7 +339,7 @@ fn check_default_partition<'mcx>(
     let r = execexpr::exec_eval_expr(state, &mut slots)?;
     // ExecCheck: NULL passes.
     if !r.isnull && !r.value.as_bool() {
-        return Err(partition_constraint_violation(mcx, target, slot, None));
+        return Err(partition_constraint_violation(mcx, target, slot, None, None));
     }
     Ok(())
 }
@@ -396,6 +396,7 @@ pub fn partition_constraint_violation<'mcx>(
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+    root_rel: Option<&Relation<'mcx>>,
 ) -> Box<PgError> {
     let table = rel.name().to_string();
     let mut e = PgError::new(
@@ -411,7 +412,18 @@ pub fn partition_constraint_violation<'mcx>(
             .unwrap_or_default(),
     )
     .with_table_name(table);
-    if let Ok(Some(desc)) = slot_value_description(mcx, rel, slot, modified_cols) {
+    // ExecPartitionCheckEmitError: a routed leaf's row is reported in the
+    // root's rowtype; modified_cols is root-numbered then.
+    let desc = match root_rel {
+        Some(root) if root.rd_id != rel.rd_id => {
+            match tupdesc::build_attrmap_by_name_if_req(mcx, &rel.rd_att, &root.rd_att, false) {
+                Ok(map) => slot_value_description(mcx, root, slot, modified_cols, map.as_deref()),
+                Err(e) => Err(e),
+            }
+        }
+        _ => slot_value_description(mcx, rel, slot, modified_cols, None),
+    };
+    if let Ok(Some(desc)) = desc {
         e = e.with_detail(format!("Failing row contains {desc}."));
     }
     Box::new(e)
@@ -421,11 +433,14 @@ pub fn partition_constraint_violation<'mcx>(
 // only columns the user provided (modified_cols, rel-numbered offset by
 // FirstLowInvalidHeapAttributeNumber) or can read are shown, prefixed by
 // their name list; None elides the DETAIL entirely.
+// rev_map[rel_attno-1] = the slot's attno for that column (a routed leaf's
+// row read through the root's tupdesc).
 pub fn slot_value_description<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
     modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
+    rev_map: Option<&[i16]>,
 ) -> PgResult<Option<String>> {
     const MAX_FIELD_LEN: usize = 64;
     const ACL_SELECT: u64 = 1 << 1;
@@ -475,6 +490,10 @@ pub fn slot_value_description<'mcx>(
             buf.push_str(", ");
         }
         write_comma = true;
+        let i = match rev_map {
+            Some(map) => map[i] as usize - 1,
+            None => i,
+        };
         let base = slot.base();
         if base.tts_isnull[i] {
             buf.push_str("null");

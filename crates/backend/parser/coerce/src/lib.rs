@@ -90,8 +90,9 @@ fn unported(what: &str) -> ! {
     panic!("{what} unported — unit backend-parser-coerce")
 }
 
+// ISCOMPLEX (parse_type.h): typeOrDomainTypeRelid drills through domains.
 fn is_complex(typid: Oid) -> PgResult<bool> {
-    Ok(OidIsValid(lsyscache::get_typ_typrelid(typid)?))
+    Ok(OidIsValid(lsyscache::get_typ_typrelid(lsyscache::getBaseType(typid)?)?))
 }
 
 fn is_complex_array(typid: Oid) -> PgResult<bool> {

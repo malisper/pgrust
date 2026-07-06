@@ -279,6 +279,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     }
 
     let mut pstate = parser_small1::make_parsestate(mcx, None);
+    pstate.p_sourcetext = Some(query_string.as_bytes());
     let bound = crate::partition::transformPartitionBound(
         mcx,
         &mut pstate,

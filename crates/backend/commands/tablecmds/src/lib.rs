@@ -776,13 +776,13 @@ pub fn DefineRelation<'mcx>(
         };
         let rel = table::table_open(mcx, relation_id, types_rel::AccessExclusiveLock)?;
         let mut pstate = parser_small1::make_parsestate(mcx, None);
+        pstate.p_sourcetext = Some(query_string.as_bytes());
         let bound = partition::transformPartitionBound(
             mcx,
             &mut pstate,
             &parent,
             bound_spec_node,
         )?;
-        let _ = query_string;
         {
             let key = partcache::RelationGetPartitionKey(&parent)?;
             let spec = bound
