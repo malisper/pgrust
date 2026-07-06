@@ -1686,7 +1686,7 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for SetVarReturningTypeWalker {
 // SetVarReturningType (rewriteManip.c); mutates Vars in place — the given
 // tree must be a fresh copy.
 #[allow(non_snake_case)]
-fn SetVarReturningType(
+pub fn SetVarReturningType(
     node: Node<'_>,
     result_relation: i32,
     sublevels_up: u32,

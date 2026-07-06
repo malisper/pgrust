@@ -1101,6 +1101,7 @@ fn pull_up_simple_subquery<'mcx>(
         sub_relids: &full_relids,
         eref: rte.eref,
         nullinfo: nullinfo.as_deref(),
+        result_relation: 0,
     };
 
     // OffsetVarNodes/IncrementVarSublevelsUp over the subroot's
@@ -1978,6 +1979,10 @@ pub(crate) struct PullupPhCtx<'a, 'mcx> {
     // query's jointree, indexed by rti ([0] unused; length = outer rtable
     // length + 1). Set only when the target RTE is lateral, like C.
     nullinfo: Option<&'a [types_nodes::Bitmapset<'mcx>]>,
+    // C rcon->result_relation: nonzero only under
+    // expand_virtual_generated_columns (prepjointree.c:1041), where OLD/NEW
+    // RETURNING Vars over the expanded relation can appear.
+    result_relation: i32,
 }
 
 // get_nullingrels (prepjointree.c): for each leaf RTE of the outer query,
@@ -2132,9 +2137,19 @@ fn replace_var_expr_su<'mcx>(
                             });
                             colnames.lappend(mcx, rewrite_manip::copy_node(mcx, name)?)?;
                         }
-                        args.lappend(mcx, copy_expr(mcx, tle.expr, 0)?)?;
+                        // Per-field OLD/NEW handling: C's expandRTE puts the
+                        // returning type on each field Var, and the per-field
+                        // ReplaceVarFromTargetList recursion applies the leg.
+                        let field = apply_var_returning_type(
+                            mcx,
+                            copy_expr(mcx, tle.expr, 0)?,
+                            v.varreturningtype,
+                            ph.map_or(0, |p| p.result_relation),
+                            false,
+                        )?;
+                        args.lappend(mcx, field)?;
                     }
-                    Node::mk(
+                    let rowexpr = Node::mk(
                         mcx,
                         types_nodes::RowExpr {
                             args,
@@ -2143,13 +2158,26 @@ fn replace_var_expr_su<'mcx>(
                             colnames,
                             location: v.location,
                         },
+                    )?;
+                    apply_var_returning_type(
+                        mcx,
+                        rowexpr,
+                        v.varreturningtype,
+                        ph.map_or(0, |p| p.result_relation),
+                        true,
                     )?
                 } else {
                     let Some(tle) = get_tle_by_resno(tlist, v.varattno) else {
                         return Err(missing_attribute(v.varattno));
                     };
                     debug_assert!(!tle.resjunk);
-                    copy_expr(mcx, tle.expr, 0)?
+                    apply_var_returning_type(
+                        mcx,
+                        copy_expr(mcx, tle.expr, 0)?,
+                        v.varreturningtype,
+                        ph.map_or(0, |p| p.result_relation),
+                        false,
+                    )?
                 };
                 if need_phv {
                     // C rcon->nullinfo, reachable only under a lateral target
@@ -3475,6 +3503,46 @@ pub(crate) fn add_nulling_relids_expr<'mcx>(
 
 #[cold]
 #[inline(never)]
+// ReplaceVarFromTargetList's OLD/NEW leg (rewriteManip.c:1926-1955): copy the
+// returning type onto result-relation Vars in the replacement, then wrap it
+// in a ReturningExpr unless it is a bare level-0 Var of the result relation.
+// force_wrap is the whole-row arm (rewriteManip.c:1850), which always wraps.
+fn apply_var_returning_type<'mcx>(
+    mcx: Mcx<'mcx>,
+    newnode: Node<'mcx>,
+    rettype: types_nodes::primnodes::VarReturningType,
+    result_relation: i32,
+    force_wrap: bool,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::primnodes::VarReturningType;
+    if rettype == VarReturningType::VAR_RETURNING_DEFAULT {
+        return Ok(newnode);
+    }
+    if result_relation == 0 {
+        return Err(Box::new(
+            PgError::error("variable returning old/new found outside RETURNING list".to_string())
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+        ));
+    }
+    rewrite_manip::SetVarReturningType(newnode, result_relation, 0, rettype)?;
+    let wrap = force_wrap
+        || match newnode.as_var() {
+            Some(nv) => nv.varno != result_relation || nv.varlevelsup != 0,
+            None => true,
+        };
+    if wrap {
+        return Node::mk(
+            mcx,
+            types_nodes::primnodes::ReturningExpr {
+                retlevelsup: 0,
+                retold: rettype == VarReturningType::VAR_RETURNING_OLD,
+                retexpr: newnode,
+            },
+        );
+    }
+    Ok(newnode)
+}
+
 fn missing_attribute(attno: i16) -> Box<PgError> {
     Box::new(
         PgError::error(format!("could not find attribute {attno} in subquery targetlist"))
@@ -4202,6 +4270,7 @@ pub fn expand_virtual_generated_columns<'mcx>(
             // Relation-backed expansion: whole-row Vars are named rowtypes.
             eref: None,
             nullinfo: None,
+            result_relation: parse.resultRelation,
         };
         if let Some(l) = clauses::walker::mutate_list(mcx, &parse.targetList, &mut |n| {
             replace_var_expr(mcx, n, varno, &tlist, false, Some(&phc))
