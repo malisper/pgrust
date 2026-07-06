@@ -258,6 +258,9 @@ fn pull_window_input_vars<'mcx>(node: Node<'mcx>, out: &mut PgVec<'_, Node<'mcx>
     match node.node_tag() {
         NodeTag::T_Var => out.push(node),
         NodeTag::T_Aggref => out.push(node),
+        // PVC_INCLUDE_PLACEHOLDERS (var.c:371): take the PHV whole, without
+        // looking into the contained expression.
+        NodeTag::T_PlaceHolderVar => out.push(node),
         NodeTag::T_Const => {}
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();

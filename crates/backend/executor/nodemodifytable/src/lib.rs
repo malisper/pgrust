@@ -4116,7 +4116,7 @@ fn row_triggers_common<'mcx>(
         } else {
             0
         };
-        let ret = {
+        let (ret, rel_tupdesc) = {
             let ModifyTableState { rels, cur, leaf_trig_fmgr, router, .. } = &mut *mt;
             let cur_rti = rels[*cur].rti;
             let finfo = match leaf {
@@ -4131,11 +4131,12 @@ fn row_triggers_common<'mcx>(
                     router.as_ref().expect("routed insert has a router").leaf_rel(ix)
                 }
             };
+            let tupdesc = rel.rd_att.clone();
             let mut tdata = types_trigger_call::TriggerData::from_raw(
                 tg_event, rel, trig_nn, newtup_nn, trigger,
             );
             tdata.tg_updatedcols = updatedcols_ptr;
-            ::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?
+            (::trigger::ExecCallTriggerFunc(mcx, &mut tdata, finfo)?, tupdesc)
         };
         match ret {
             None => return Ok(false),
@@ -4149,6 +4150,12 @@ fn row_triggers_common<'mcx>(
                 // SAFETY: p is the trigger's returned tuple, live in the
                 // per-call context; copied into the slot before reuse.
                 let returned = unsafe { p.as_ref() };
+                // check_modified_virtual_generated (trigger.c:6735), applied
+                // before the store (trigger.c:2513, 3108): a trigger-set
+                // non-null value in a virtual generated column reverts to
+                // null so it is never stored.
+                let nulled = check_modified_virtual_generated(mcx, &rel_tupdesc, returned)?;
+                let returned = nulled.as_ref().map_or(returned, |t| t.as_tuple());
                 let img = unsafe {
                     core::slice::from_raw_parts(returned.header_ptr(), returned.t_len as usize)
                 };
@@ -6700,6 +6707,37 @@ fn exec_not_null_constraints<'mcx>(
 }
 
 const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+
+// check_modified_virtual_generated (trigger.c:6735): a trigger-returned tuple
+// must not carry a non-null value in a virtual generated column; offending
+// columns revert to null. None means the tuple was already clean.
+fn check_modified_virtual_generated<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tupdesc: &TupleDescData<'mcx>,
+    tuple: &types_tuple::HeapTupleData<'_>,
+) -> PgResult<Option<heaptuple::HeapTuple<'mcx>>> {
+    if !tupdesc.constr.as_deref().is_some_and(|c| c.has_generated_virtual) {
+        return Ok(None);
+    }
+    let mut cols: mcx::PgVec<'_, i32> = mcx::PgVec::new_in(mcx);
+    for i in 0..tupdesc.natts as usize {
+        if tupdesc.attr(i).attgenerated == VIRTUAL_GEN
+            && !types_tuple::heap_attisnull(tuple, i as i32 + 1, Some(tupdesc))
+        {
+            cols.push(i as i32 + 1);
+        }
+    }
+    if cols.is_empty() {
+        return Ok(None);
+    }
+    let mut values: mcx::PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    let mut isnull: mcx::PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    for _ in 0..cols.len() {
+        values.push(Datum::null());
+        isnull.push(true);
+    }
+    heaptuple::heap_modify_tuple_by_cols(mcx, tuple, tupdesc, &cols, &values, &isnull).map(Some)
+}
 
 // build_generation_expression (rewriteHandler.c:4520), adbin-direct copy: the
 // rewrite_handler home is unreachable (planner -> execmain -> this crate

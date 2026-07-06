@@ -1721,8 +1721,12 @@ fn ATRewriteTable<'mcx>(
         PgVec::new_in(mcx);
     for (i, con) in tab.constraints.iter().enumerate() {
         needscan = true;
+        // C verifies the qual with virtual generated columns expanded
+        // (tablecmds.c:6193).
+        let qual =
+            planner::prepjointree::expand_generated_columns_in_expr(mcx, con.qual, &oldrel, 1)?;
         // ExecPrepareExpr: expression_planner + init.
-        let planned = clauses::eval_const_expressions(mcx, con.qual)?;
+        let planned = clauses::eval_const_expressions(mcx, qual)?;
         let mut state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
             .expect("check constraint expr");
         state.arm_result_mcx(mcx);
@@ -2765,6 +2769,7 @@ fn ATExecColumnDefault<'mcx>(
     }
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, cmd.def.is_some())?;
     if let Some(def) = cmd.def {
+        // C queryString: NULL (tablecmds.c:8196).
         crate::constraints::add_relation_new_constraints(
             mcx,
             rel,
@@ -2876,6 +2881,7 @@ fn ATExecSetExpression<'mcx>(
     RemoveAttrDefault(mcx, rel.rd_id, attnum, false, false)?;
 
     let newexpr = cmd.def.expect("AT_SetExpression expression");
+    // C queryString: NULL (tablecmds.c:8721).
     crate::constraints::add_relation_new_constraints(
         mcx,
         rel,
