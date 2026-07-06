@@ -3613,7 +3613,7 @@ pub(crate) fn copy_PlannedStmt<'d>(mcx: Mcx<'d>, s: &PlannedStmt<'_>) -> PgResul
         permInfos: copy_node_list(mcx, &s.permInfos)?,
         resultRelations: IntList::from_slice(mcx, s.resultRelations.as_slice())?,
         appendRelations: copy_node_list(mcx, &s.appendRelations)?,
-        subplans: copy_node_list(mcx, &s.subplans)?,
+        subplans: copy_opt_node_list(mcx, &s.subplans)?,
         rewindPlanIDs: copy_bms(mcx, &s.rewindPlanIDs)?,
         rowMarks: copy_node_list(mcx, &s.rowMarks)?,
         relationOids: OidList::from_slice(mcx, s.relationOids.as_slice())?,

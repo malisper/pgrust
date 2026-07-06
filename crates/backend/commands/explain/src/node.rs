@@ -100,7 +100,7 @@ pub fn ExplainPrintPlan<'mcx>(
 fn ExplainPreScanNode<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
-    subplans: &NodeList<'mcx>,
+    subplans: &types_nodes::list::OptNodeList<'mcx>,
     qd: types_portal::QueryDescHandle,
     rels_used: &mut Bitmapset<'mcx>,
 ) -> PgResult<()> {
@@ -221,11 +221,13 @@ fn ExplainPreScanNode<'mcx>(
     // rels_used, as C's NULLed glob->subplans cells do.
     for sp_node in plan.initPlan.iter() {
         let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
-        let child = subplans.nth(sp.plan_id as usize - 1);
+        let child =
+            subplans.nth(sp.plan_id as usize - 1).expect("EXPLAIN pstmt has no subplan holes");
         ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
     }
     for sp in collect_node_subplans(mcx, node)?.iter() {
-        let child = subplans.nth(sp.plan_id as usize - 1);
+        let child =
+            subplans.nth(sp.plan_id as usize - 1).expect("EXPLAIN pstmt has no subplan holes");
         ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
     }
     if let Some(l) = plan.lefttree {
@@ -1268,7 +1270,8 @@ fn explain_sub_plan<'mcx>(
         .pstmt
         .expect("ExplainNode before ExplainPrintPlan")
         .subplans
-        .nth(sp.plan_id as usize - 1);
+        .nth(sp.plan_id as usize - 1)
+        .expect("EXPLAIN pstmt has no subplan holes");
     let sub = Ancestors { entry: AncestorEntry::Sub(sp), parent: Some(pushed) };
     ExplainNode(child, Some(relationship), sp.plan_name, Some(&sub), es)
 }

@@ -434,7 +434,15 @@ pub fn standard_planner<'mcx>(
         permInfos: glob.finalrteperminfos,
         resultRelations: glob.result_relations,
         appendRelations: glob.append_relations,
-        subplans: glob.subplans,
+        // The planner never leaves holes; NULL cells appear only in
+        // ExecSerializePlan's worker copy.
+        subplans: {
+            let mut sp = types_nodes::list::OptNodeList::nil();
+            for p in glob.subplans.iter() {
+                sp.lappend(mcx, Some(p))?;
+            }
+            sp
+        },
         rewindPlanIDs: glob.rewind_plan_ids,
         rowMarks: glob.finalrowmarks,
         relationOids: glob.relation_oids,
