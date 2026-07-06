@@ -4077,6 +4077,32 @@ fn exec_insert<'mcx>(
         }
     }
 
+    // ExecFindPartition first checks the routing root's own partition
+    // constraint when the root is itself a partition (execPartition.c): no
+    // point routing a tuple that doesn't belong in the root table itself —
+    // e.g. a cross-partition UPDATE on a sub-partitioned parent whose new
+    // row leaves the parent's own bounds errors here, not "no partition".
+    {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ModifyTableState { rels, root, cur, insert_target_root, .. } = &mut *mt;
+        let r = if *insert_target_root {
+            root.as_mut().unwrap_or(&mut rels[0])
+        } else {
+            &mut rels[*cur]
+        };
+        let target = es_relations[(r.rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        if target.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+            && target.rd_rel.relispartition
+        {
+            let slot = &mut es_tupleTable[slot_id.0 as usize];
+            if !execpartition::exec_partition_check(mcx, &mut r.partition_check, target, slot)? {
+                return Err(execpartition::partition_constraint_violation(mcx, target, slot));
+            }
+        }
+    }
+
     // ExecPrepareTupleRouting: partitioned targets route to a leaf; slots are
     // shared unconverted (attno-remapped children are loud in the router).
     let leaf_idx = {
