@@ -257,6 +257,11 @@ pub fn postmaster_child_launch(
         .spawn(move || {
             inherited.apply();
 
+            // Before the first GUC write: routes this thread's backing-var
+            // writes into per-thread override slots (C fork gives children a
+            // private copy; shared statics must not see child writes).
+            guc_tables::session::mark_session_thread();
+
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
 
