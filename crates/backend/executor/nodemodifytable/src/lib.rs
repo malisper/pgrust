@@ -1951,6 +1951,7 @@ fn exec_merge_matched_scan<'mcx>(
             };
             let ModifyTableState { rels, cur, .. } = &mut *mt;
             let r = &mut rels[*cur];
+            pre_eval_wco_param_deps(&r.wco_exprs, kind, estate)?;
             let old_slot = &mut estate.es_tupleTable[old_id.0 as usize];
             exec_with_check_options(&mut r.wco_exprs, kind, old_slot)?;
         }
@@ -2300,6 +2301,7 @@ fn merge_update_act<'mcx>(
     let mut update_indexes = TU_UpdateIndexes::TU_None;
 
     let mut cross_part = false;
+    pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
     let result = {
         let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
@@ -3094,6 +3096,7 @@ fn exec_update<'mcx>(
     loop {
         let mcx = estate.es_query_cxt;
         let mut cross_part = false;
+        pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
         let result = {
             let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
             let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
@@ -4365,6 +4368,22 @@ fn pre_eval_param_deps(
     Ok(())
 }
 
+// RLS WCO quals can reference initplan params (policy with an uncorrelated
+// sublink); resolve them while `estate` is still whole — the eval sites sit
+// inside EStateData destructures (execscan note).
+fn pre_eval_wco_param_deps(
+    wcos: &mcx::PgVec<'_, WcoExpr<'_>>,
+    kind: WCOKind,
+    estate: &mut EStateData<'_>,
+) -> PgResult<()> {
+    for w in wcos.iter() {
+        if w.kind == kind {
+            pre_eval_param_deps(Some(&*w.state), estate)?;
+        }
+    }
+    Ok(())
+}
+
 // ExecProcessReturning (nodeModifyTable.c): scan slot = the returned tuple,
 // outer slot = the plan tuple, projected into the node's virtual result slot
 // (C's econtext scantuple/outertuple + ExecProject).
@@ -4980,6 +4999,27 @@ fn exec_insert<'mcx>(
     }
 
     {
+        let wco_kind = if mt.operation == CmdType::CMD_UPDATE
+            || (mt.operation == CmdType::CMD_MERGE
+                && mt.merge_active_cmd == Some(CmdType::CMD_UPDATE))
+        {
+            WCOKind::WCO_RLS_UPDATE_CHECK
+        } else {
+            WCOKind::WCO_RLS_INSERT_CHECK
+        };
+        let wcos = match leaf_idx {
+            Some(idx) => mt.leaf_wco[idx].as_ref(),
+            None if mt.insert_target_root => {
+                Some(&mt.root.as_ref().unwrap_or(&mt.rels[0]).wco_exprs)
+            }
+            None => Some(&mt.rels[mt.cur].wco_exprs),
+        };
+        if let Some(wcos) = wcos {
+            pre_eval_wco_param_deps(wcos, wco_kind, estate)?;
+        }
+    }
+
+    {
         // Copy-out RTE/perminfo handles for the cold partition-constraint
         // error path (the destructure below pins *estate).
         let target_rte = estate.es_range_table[(mt.rels[mt.cur].rti - 1) as usize];
@@ -5518,6 +5558,7 @@ fn exec_on_conflict_update<'mcx>(
             };
             if let Some(wcos) = wcos {
                 if !wcos.is_empty() {
+                    pre_eval_wco_param_deps(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, estate)?;
                     let scan = &mut estate.es_tupleTable[existing_id.0 as usize];
                     exec_with_check_options(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
                 }
@@ -5545,6 +5586,15 @@ fn exec_on_conflict_update<'mcx>(
             Some(idx) => leaf_on_conflict[idx].as_mut(),
             None => None,
         };
+        {
+            let wcos = match leaf {
+                Some(idx) => leaf_wco[idx].as_ref(),
+                None => Some(&r.wco_exprs),
+            };
+            if let Some(wcos) = wcos {
+                pre_eval_wco_param_deps(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, estate)?;
+            }
+        }
         let EStateData { es_tupleTable, .. } = &mut *estate;
         let (e, x, v) = (
             existing_id.0 as usize,

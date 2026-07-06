@@ -12603,6 +12603,7 @@ dependencies = [
 name = "ri_triggers"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "cache_syscache",
  "coerce",
  "datum",
@@ -12616,6 +12617,7 @@ dependencies = [
  "miscinit",
  "pg_constraint",
  "ri_triggers_seams",
+ "rls_seams",
  "ruleutils",
  "snapmgr",
  "spi",
@@ -12626,6 +12628,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_guc",
+ "types_nodes",
  "types_rel",
  "types_snapshot",
  "types_trigger",

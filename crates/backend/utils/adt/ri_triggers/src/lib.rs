@@ -1421,6 +1421,9 @@ fn match_full_mixing_error<'mcx>(
 }
 
 #[cold]
+// aclchk.c ACLCHECK_OK.
+const ACLCHECK_OK: i32 = 0;
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn ri_ReportViolation<'mcx>(
@@ -1442,27 +1445,64 @@ fn ri_ReportViolation<'mcx>(
     };
     let desc = tupdesc.unwrap_or(&rel.rd_att);
 
-    // has_perm: superuser fast path (RLS + ACL walks unported).
+    // Omit the key values from the detail when the user could not SELECT
+    // them: RLS enabled on the rel, or no table- nor column-level SELECT
+    // privilege (C ri_triggers.c:2690).
+    let has_perm = if partgone {
+        true
+    } else {
+        (|| -> PgResult<bool> {
+            if rls_seams::check_enable_rls::call(rel.rd_id, types_core::InvalidOid, true)?
+                == rls_seams::CheckEnableRls::RlsEnabled
+            {
+                return Ok(false);
+            }
+            let (aclresult, _) = aclchk_seams::pg_class_aclcheck_ext::call(
+                rel.rd_id,
+                miscinit::GetUserId(),
+                types_nodes::parsenodes::ACL_SELECT,
+            )?;
+            if aclresult == ACLCHECK_OK {
+                return Ok(true);
+            }
+            for idx in 0..riinfo.nkeys {
+                let aclresult = aclchk_seams::pg_attribute_aclcheck::call(
+                    rel.rd_id,
+                    attnums[idx],
+                    miscinit::GetUserId(),
+                    types_nodes::parsenodes::ACL_SELECT,
+                )?;
+                if aclresult != ACLCHECK_OK {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })()
+        .unwrap_or(false)
+    };
     let mut key_names = String::new();
     let mut key_values = String::new();
-    for idx in 0..riinfo.nkeys {
-        let fnum = attnums[idx];
-        let att = desc.attr(fnum as usize - 1);
-        let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
-        let mut isnull = false;
-        // SAFETY: live user column of the violator's descriptor.
-        let d = unsafe { types_tuple::heap_getattr(violator, fnum as i32, desc, &mut isnull) };
-        let val = if isnull {
-            "null".to_string()
-        } else {
-            datum_output_text(mcx, att.atttypid, d).unwrap_or_else(|_| "???".to_string())
-        };
-        if idx > 0 {
-            key_names.push_str(", ");
-            key_values.push_str(", ");
+    if has_perm {
+        for idx in 0..riinfo.nkeys {
+            let fnum = attnums[idx];
+            let att = desc.attr(fnum as usize - 1);
+            let name = core::str::from_utf8(att.attname.name_str()).expect("attname UTF-8");
+            let mut isnull = false;
+            // SAFETY: live user column of the violator's descriptor.
+            let d =
+                unsafe { types_tuple::heap_getattr(violator, fnum as i32, desc, &mut isnull) };
+            let val = if isnull {
+                "null".to_string()
+            } else {
+                datum_output_text(mcx, att.atttypid, d).unwrap_or_else(|_| "???".to_string())
+            };
+            if idx > 0 {
+                key_names.push_str(", ");
+                key_values.push_str(", ");
+            }
+            key_names.push_str(name);
+            key_values.push_str(&val);
         }
-        key_names.push_str(name);
-        key_values.push_str(&val);
     }
 
     let conname = conname_str(riinfo);
@@ -1496,10 +1536,14 @@ fn ri_ReportViolation<'mcx>(
                 ),
             )
             .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
-            .with_detail(format!(
-                "Key ({key_names})=({key_values}) is not present in table \"{}\".",
-                pk_rel.name()
-            )),
+            .with_detail(if has_perm {
+                format!(
+                    "Key ({key_names})=({key_values}) is not present in table \"{}\".",
+                    pk_rel.name()
+                )
+            } else {
+                format!("Key is not present in table \"{}\".", pk_rel.name())
+            }),
         )
     } else if is_restrict {
         Box::new(
@@ -1513,10 +1557,14 @@ fn ri_ReportViolation<'mcx>(
                 ),
             )
             .with_sqlstate(ERRCODE_RESTRICT_VIOLATION)
-            .with_detail(format!(
-                "Key ({key_names})=({key_values}) is referenced from table \"{}\".",
-                fk_rel.name()
-            )),
+            .with_detail(if has_perm {
+                format!(
+                    "Key ({key_names})=({key_values}) is referenced from table \"{}\".",
+                    fk_rel.name()
+                )
+            } else {
+                format!("Key is referenced from table \"{}\".", fk_rel.name())
+            }),
         )
     } else {
         Box::new(
@@ -1530,10 +1578,14 @@ fn ri_ReportViolation<'mcx>(
                 ),
             )
             .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
-            .with_detail(format!(
-                "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
-                fk_rel.name()
-            )),
+            .with_detail(if has_perm {
+                format!(
+                    "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
+                    fk_rel.name()
+                )
+            } else {
+                format!("Key is still referenced from table \"{}\".", fk_rel.name())
+            }),
         )
     }
 }

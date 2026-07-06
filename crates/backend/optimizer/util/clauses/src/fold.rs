@@ -319,19 +319,31 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
         }
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
-            match mutate_list(cx.mcx, &r.args, &mut |n| ece_mutator(n, cx))? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    cx.mcx,
-                    types_nodes::primnodes::RowExpr {
-                        args,
-                        row_typeid: r.row_typeid,
-                        row_format: r.row_format,
-                        colnames: r.colnames.clone_in(cx.mcx)?,
-                        location: r.location,
-                    },
-                )?)),
+            let new_args = mutate_list(cx.mcx, &r.args, &mut |n| ece_mutator(n, cx))?;
+            let all_const =
+                new_args.as_ref().unwrap_or(&r.args).iter().all(|e| e.as_const().is_some());
+            if !all_const && new_args.is_none() {
+                return Ok(None);
             }
+            let args = match new_args {
+                Some(a) => a,
+                None => r.args.clone_in(cx.mcx)?,
+            };
+            let new_node = Node::mk(
+                cx.mcx,
+                types_nodes::primnodes::RowExpr {
+                    args,
+                    row_typeid: r.row_typeid,
+                    row_format: r.row_format,
+                    colnames: r.colnames.clone_in(cx.mcx)?,
+                    location: r.location,
+                },
+            )?;
+            if all_const {
+                return clauses_seams::evaluate_expr::call(cx.mcx, new_node, r.row_typeid, -1, 0)
+                    .map(Some);
+            }
+            Ok(Some(new_node))
         }
         NodeTag::T_ArrayExpr => {
             use types_nodes::primnodes::ArrayExpr;

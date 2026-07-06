@@ -38,3 +38,6 @@ snapmgr = { path = "../../time/snapmgr" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
 ruleutils = { path = "../ruleutils" }
+rls_seams = { path = "../../misc/rls_seams" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+types_nodes = { path = "../../../../_support/types/nodes" }
