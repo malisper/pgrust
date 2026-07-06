@@ -455,10 +455,12 @@ pub fn DefineRelation<'mcx>(
     let mut partition_raw_defaults: mcx::PgVec<'mcx, (AttrNumber, types_nodes::Node<'mcx>, u8)> =
         mcx::PgVec::new_in(mcx);
     let descriptor = match parent_oid {
-        // MergeAttributes, partition arm: the partition's columns are exactly
-        // the parent's (attislocal=false, attinhcount=1), so parent CHECK
-        // ccbin and generation expressions ride unmapped. Any tableElts are
-        // column options merged below (tablecmds.c:3031 saved_columns loop).
+        // MergeAttributes, partition arm (tablecmds.c:2652-2967): the
+        // partition's schema is the parent's NON-dropped columns, compactly
+        // renumbered (attislocal=false, attinhcount=1); CHECK ccbin and
+        // default/generation expressions are attno-mapped through newattmap.
+        // Any tableElts are column options merged below (tablecmds.c:3031
+        // saved_columns loop).
         Some(parent_oid) => {
             // C's duplicate-name scan (tablecmds.c:2589) precedes parent
             // processing, so it outranks the "is not partitioned" error.
@@ -471,6 +473,17 @@ pub fn DefineRelation<'mcx>(
                         .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
                 ));
             }
+            // newattmap: parent attno (1-based) -> child attno, 0 for
+            // dropped parent columns (C MergeAttributes newattmap).
+            let mut newattmap: mcx::PgVec<'mcx, AttrNumber> =
+                mcx::vec_from_elem_in(mcx, 0i16, parent.rd_att.natts as usize);
+            let mut child_natts: i32 = 0;
+            for i in 0..parent.rd_att.natts as usize {
+                if !parent.rd_att.attr(i).attisdropped {
+                    child_natts += 1;
+                    newattmap[i] = child_natts as AttrNumber;
+                }
+            }
             if let Some(constr) = parent.rd_att.constr.as_deref() {
                 for check in constr.check.iter() {
                     if check.ccnoinherit {
@@ -482,10 +495,31 @@ pub fn DefineRelation<'mcx>(
                         // SAFETY: byte-for-byte copy of a &str.
                         unsafe { core::str::from_utf8_unchecked(bytes) }
                     };
-                    let expr = readfuncs::stringToNode(
+                    let raw = readfuncs::stringToNode(
                         mcx,
                         check.ccbin.as_ref().expect("check ccbin").as_str(),
                     )?;
+                    let (expr, found_whole_row) = rewrite_manip::map_variable_attnos(
+                        mcx,
+                        raw,
+                        1,
+                        0,
+                        &newattmap,
+                        types_core::InvalidOid,
+                    )?;
+                    if found_whole_row {
+                        return Err(Box::new(
+                            PgError::new(
+                                ERROR,
+                                "cannot convert whole-row table reference".to_string(),
+                            )
+                            .with_detail(format!(
+                                "Constraint \"{name}\" contains a whole-row reference to table \"{}\".",
+                                parent.name()
+                            ))
+                            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                        ));
+                    }
                     partition_checks.push(inheritance::InheritedCheck {
                         name,
                         expr,
@@ -496,7 +530,7 @@ pub fn DefineRelation<'mcx>(
                 }
             }
             // The parent's catalogued not-null constraints ride to the
-            // partition (identical attnos: the descriptor is a full copy).
+            // partition with their attnos mapped through newattmap.
             for cnode in pg_constraint::RelationGetNotNullConstraints(mcx, &parent, false)?.iter()
             {
                 let c = cnode
@@ -505,29 +539,59 @@ pub fn DefineRelation<'mcx>(
                 let colname = c.keys.nth(0).as_string().expect("nn keys").sval;
                 let attnum = (0..parent.rd_att.natts as usize)
                     .find(|&i| parent.rd_att.attr(i).attname.name_str() == colname.as_bytes())
-                    .map(|i| (i + 1) as AttrNumber)
+                    .map(|i| newattmap[i])
                     .unwrap_or_else(|| panic!("not-null column {colname:?} not found"));
                 partition_notnulls.push(inheritance::InheritedNotNull {
                     name: c.conname.expect("catalogued nn constraint has a name"),
                     attnum,
                 });
             }
-            let mut desc = tupdesc::CreateTupleDescCopy(mcx, parent.descr())?;
-            for i in 0..desc.natts as usize {
-                let parent_att = parent.rd_att.attr(i);
-                if parent_att.attisdropped {
+            let mut desc = tupdesc::CreateTemplateTupleDesc(mcx, child_natts)?;
+            for i in 0..parent.rd_att.natts as usize {
+                let child_attno = newattmap[i];
+                if child_attno == 0 {
                     continue;
                 }
+                let parent_att = parent.rd_att.attr(i);
+                tupdesc::TupleDescCopyEntry(
+                    &mut desc,
+                    child_attno,
+                    parent.descr(),
+                    (i + 1) as AttrNumber,
+                );
                 if parent_att.atthasdef {
                     let adbin =
                         pg_attrdef::GetAttrDefaultBin(mcx, parent_oid, (i + 1) as AttrNumber)?
                             .unwrap_or_else(|| {
                                 panic!("default expression not found for attribute {}", i + 1)
                             });
-                    let expr = readfuncs::stringToNode(mcx, &adbin)?;
-                    partition_gendefs.push(((i + 1) as AttrNumber, expr));
+                    let raw = readfuncs::stringToNode(mcx, &adbin)?;
+                    let (expr, found_whole_row) = rewrite_manip::map_variable_attnos(
+                        mcx,
+                        raw,
+                        1,
+                        0,
+                        &newattmap,
+                        types_core::InvalidOid,
+                    )?;
+                    if found_whole_row {
+                        return Err(Box::new(
+                            PgError::new(
+                                ERROR,
+                                "cannot convert whole-row table reference".to_string(),
+                            )
+                            .with_detail(format!(
+                                "Generation expression for column \"{}\" contains a whole-row reference to table \"{}\".",
+                                String::from_utf8_lossy(parent_att.attname.name_str()),
+                                parent.name()
+                            ))
+                            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                        ));
+                    }
+                    partition_gendefs.push((child_attno, expr));
                 }
-                let att = desc.attr_mut(i);
+                let j = child_attno as usize - 1;
+                let att = desc.attr_mut(j);
                 att.attnotnull = parent_att.attnotnull;
                 att.attgenerated = parent_att.attgenerated;
                 // Partitions are an integral part of the parent and inherit
@@ -535,7 +599,7 @@ pub fn DefineRelation<'mcx>(
                 att.attidentity = parent_att.attidentity;
                 att.attislocal = false;
                 att.attinhcount = 1;
-                tupdesc::populate_compact_attribute(&mut desc, i);
+                tupdesc::populate_compact_attribute(&mut desc, j);
             }
             parent.close(types_rel::NoLock)?;
             desc
