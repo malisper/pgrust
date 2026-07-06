@@ -806,6 +806,7 @@ fn copy_from_partitioned_body<'mcx>(
                 &mut None,
                 lrel,
                 use_slot,
+                Some(rel),
             )?;
             tableam::table_tuple_insert(
                 mcx,
