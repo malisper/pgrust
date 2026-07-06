@@ -1268,7 +1268,15 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
         eref_colnames.lappend(mcx, tf.colnames.nth(i))?;
     }
     if numaliases > ncolumns {
-        return Err(tablefunc_too_many_aliases(ncolumns, numaliases));
+        return Err(tablefunc_too_many_aliases(
+            if tf.functype == types_nodes::primnodes::TableFuncType::TFT_XMLTABLE {
+                "XMLTABLE"
+            } else {
+                "JSON_TABLE"
+            },
+            ncolumns,
+            numaliases,
+        ));
     }
     let eref = Node::mk_mut(mcx, Alias { aliasname: Some(refname), colnames: eref_colnames })?
         .seal_ref();
@@ -1359,12 +1367,12 @@ fn too_many_tablefunc_columns(
 
 #[cold]
 #[inline(never)]
-fn tablefunc_too_many_aliases(available: usize, specified: usize) -> Box<PgError> {
+fn tablefunc_too_many_aliases(func: &str, available: usize, specified: usize) -> Box<PgError> {
     Box::new(
         elog::ereport(ERROR)
             .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
             .errmsg(format!(
-                "XMLTABLE function has {available} columns available but {specified} \
+                "{func} function has {available} columns available but {specified} \
                  columns specified"
             ))
             .into_error()

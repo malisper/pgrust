@@ -1124,17 +1124,22 @@ fn run_program<'mcx>(
                 let r = read_out(*src);
                 write_out(*out, r.value, r.isnull);
             }
-            Step::DomainNotNull { resulttype, out } => {
+            Step::DomainNotNull { resulttype, escontext, out } => {
                 if read_out(*out).isnull {
-                    return Err(domain_not_null_violation(*resulttype));
+                    // SAFETY: escontext points at the owning JsonExprState's
+                    // node, live for the program.
+                    errsave(*escontext, || domain_not_null_violation(*resulttype))?;
                 }
             }
-            Step::DomainCheck { resulttype, name, check } => {
+            Step::DomainCheck { resulttype, name, check, escontext } => {
                 // SAFETY: compile-allocated scratch, live for 'mcx.
                 let r = unsafe { check.read() };
                 if !r.isnull && !r.value.as_bool() {
-                    // SAFETY: name is a compile-copied &'mcx str.
-                    return Err(domain_check_violation(*resulttype, unsafe { name.as_ref() }));
+                    // SAFETY: name is a compile-copied &'mcx str; escontext as
+                    // in DomainNotNull.
+                    errsave(*escontext, || {
+                        domain_check_violation(*resulttype, unsafe { name.as_ref() })
+                    })?;
                 }
             }
             Step::AggStrictInputCheck { args, nargs, jumpnull } => {
@@ -3282,6 +3287,26 @@ pub(crate) fn exec_type_set_col_names(
     }
 }
 
+// C errsave (miscnodes.h): with a soft context the error is recorded (details
+// only when wanted) and evaluation continues; without one it throws.
+fn errsave(
+    escontext: Option<core::ptr::NonNull<::types_fmgr::ErrorSaveNode>>,
+    err: impl FnOnce() -> Box<PgError>,
+) -> PgResult<()> {
+    let Some(esc) = escontext else {
+        return Err(err());
+    };
+    // SAFETY: caller contract — the node outlives the program and no other
+    // reference is live during this step.
+    let ctx = unsafe { &mut (*esc.as_ptr()).ctx };
+    if ctx.details_wanted() {
+        ctx.save(*err());
+    } else {
+        ctx.mark_error_occurred();
+    }
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 pub(crate) fn domain_not_null_violation(typid: u32) -> Box<PgError> {
@@ -4205,17 +4230,22 @@ pub(crate) fn exec_one_step<'mcx>(
             let r = read_out(src);
             write_out(out, r.value, r.isnull);
         }
-        Step::DomainNotNull { resulttype, out } => {
+        Step::DomainNotNull { resulttype, escontext, out } => {
             if read_out(out).isnull {
-                return Err(domain_not_null_violation(resulttype));
+                // SAFETY: escontext points at the owning JsonExprState's node,
+                // live for the program.
+                errsave(escontext, || domain_not_null_violation(resulttype))?;
             }
         }
-        Step::DomainCheck { resulttype, name, check } => {
+        Step::DomainCheck { resulttype, name, check, escontext } => {
             // SAFETY: compile-allocated scratch, live for 'mcx.
             let r = unsafe { check.read() };
             if !r.isnull && !r.value.as_bool() {
-                // SAFETY: name is a compile-copied &'mcx str.
-                return Err(domain_check_violation(resulttype, unsafe { name.as_ref() }));
+                // SAFETY: name is a compile-copied &'mcx str; escontext as in
+                // DomainNotNull.
+                errsave(escontext, || {
+                    domain_check_violation(resulttype, unsafe { name.as_ref() })
+                })?;
             }
         }
         Step::ArrayExprEval { state: aes, out } => {

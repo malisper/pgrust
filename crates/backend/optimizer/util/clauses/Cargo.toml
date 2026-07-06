@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_json = { path = "../../../utils/adt/json" }
+adt_jsonpath = { path = "../../../utils/adt/jsonpath" }
 adt_jsonb = { path = "../../../utils/adt/jsonb" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }

@@ -230,9 +230,20 @@ pub enum Step {
     // EEOP_MAKE_READONLY: emitted only for typlen -1 domain-check inputs.
     MakeReadonlyOut { src: OutRef, out: OutRef },
     DomainTestval { src: OutRef, out: OutRef },
-    DomainNotNull { resulttype: Oid, out: OutRef },
+    // escontext: C d.domaincheck.escontext — behavior-expr domain checks
+    // under a JsonExprState errsave instead of throwing.
+    DomainNotNull {
+        resulttype: Oid,
+        escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
+        out: OutRef,
+    },
     // name/check: compile-allocated in 'mcx (BoolAndStep anynull precedent).
-    DomainCheck { resulttype: Oid, name: NonNull<str>, check: NonNull<NullableDatum> },
+    DomainCheck {
+        resulttype: Oid,
+        name: NonNull<str>,
+        check: NonNull<NullableDatum>,
+        escontext: Option<NonNull<::types_fmgr::ErrorSaveNode>>,
+    },
     JumpIfNull { jumpdone: u32, out: OutRef },
     ArrayExprEval { state: NonNull<crate::arrayops::ArrayExprState>, out: OutRef },
     XmlExprEval { state: NonNull<crate::xmlops::XmlExprState>, out: OutRef },

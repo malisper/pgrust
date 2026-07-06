@@ -92,6 +92,12 @@ fn fetch_format(fmt: &[u8], std: bool) -> PgResult<Rc<[FormatNode]>> {
     }
 }
 
+// C datetime_format_has_tz (formatting.c:4366).
+pub fn datetime_format_has_tz(fmt: &[u8]) -> PgResult<bool> {
+    let format = fetch_format(fmt, false)?;
+    Ok(dch_datetime_type(&format) & DCH_ZONED != 0)
+}
+
 fn datetime_to_char_body<'mcx>(
     mcx: Mcx<'mcx>,
     tmtc: &TmToChar,

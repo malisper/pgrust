@@ -9,6 +9,7 @@ name = "adt_jsonpath"
 path = "src/lib.rs"
 
 [dependencies]
+adt_formatting = { path = "../formatting" }
 adt_json = { path = "../json" }
 adt_numeric = { path = "../numeric" }
 datum = { path = "../../../../_support/types/datum" }
