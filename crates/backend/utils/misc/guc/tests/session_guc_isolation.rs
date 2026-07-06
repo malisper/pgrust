@@ -42,6 +42,9 @@ fn spawn_session(
     body: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // SetConfigOption derives srole via GetUserId, which a bare thread
+        // never initializes (real backends do so in InitPostgres).
+        miscinit::SetUserIdAndSecContext(10, 0);
         guc::store::initialize_guc_options_for_child(&snapshot).unwrap();
         guc::store::restore_nondefault_variables(&snapshot).unwrap();
         body();

@@ -13,6 +13,9 @@ fn set_globals() {
     g::SetMaxConnections(MAX_CONNECTIONS);
     g::set_max_worker_processes(MAX_WORKER_PROCESSES);
     g::SetMaxBackends(MAX_BACKENDS);
+    // Per-session backing: every thread that reports activity must enable
+    // tracking for itself (a real backend inherits it via GUC bring-up).
+    guc_tables::vars::pgstat_track_activities.write(true);
 }
 
 fn bringup() -> MutexGuard<'static, ()> {
@@ -60,7 +63,6 @@ fn bringup() -> MutexGuard<'static, ()> {
             fastpath_lock_groups_per_backend: 1,
         });
         procarray::ProcArrayShmemInit();
-        guc_tables::vars::pgstat_track_activities.write(true);
         backend_status_seams::backend_status_shmem_init::call().unwrap();
     });
     set_globals();
