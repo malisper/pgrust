@@ -623,8 +623,35 @@ fn relation_is_local(rel: &RelationData<'_>) -> bool {
     rel.rd_islocaltemp || rel.rd_createSubid.get() != types_core::InvalidSubTransactionId
 }
 
-pub fn brin_page_cleanup(_idxrel: &Relation<'_>, _buf: Buffer) -> ! {
-    panic!("unported: brin_page_cleanup (brin_pageops.c; vacuum lane)")
+/// brin_page_cleanup. Caller holds only a pin; the momentary extension lock
+/// orders us after any concurrent extender's initialization.
+pub fn brin_page_cleanup(idxrel: &Relation<'_>, buf: Buffer) -> PgResult<()> {
+    // SAFETY: pinned; unlocked PageIsNew probe, as C.
+    if unsafe { page_ref(buf) }.is_new() {
+        lmgr::LockRelationForExtension(idxrel, ::types_rel::ShareLock)?;
+        lmgr::UnlockRelationForExtension(idxrel, ::types_rel::ShareLock)?;
+
+        lock_buffer::call(buf, BUFFER_LOCK_EXCLUSIVE)?;
+        // SAFETY: pinned + exclusively locked.
+        if unsafe { page_ref(buf) }.is_new() {
+            brin_initialize_empty_new_buffer(idxrel, buf)?;
+            lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+            return Ok(());
+        }
+        lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+    }
+
+    // SAFETY: pinned; special-space flags are stable for an initialized page.
+    let page = unsafe { page_ref(buf) };
+    if BRIN_IS_META_PAGE(&page) || BRIN_IS_REVMAP_PAGE(&page) {
+        return Ok(());
+    }
+
+    freespace::RecordPageWithFreeSpace(
+        idxrel,
+        buffer_get_block_number::call(buf),
+        br_page_get_freespace(&page),
+    )
 }
 
 

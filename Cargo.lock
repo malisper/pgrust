@@ -1935,8 +1935,11 @@ dependencies = [
  "datum",
  "execindexing",
  "freespace",
+ "indexam_seams",
  "init_small",
  "mcx",
+ "postgres_seams",
+ "table",
  "types_brin",
  "types_core",
  "types_error",
@@ -6536,6 +6539,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -12941,6 +12945,7 @@ dependencies = [
  "bgworker",
  "bgwriter",
  "brin_bloom",
+ "brin_build",
  "brin_funcs",
  "brin_minmax_multi",
  "bufmgr",

@@ -8,6 +8,7 @@ pub fn init_all() {
     heapam_visibility::init_seams();
     genam::init_seams();
     indexam::init_seams();
+    brin_build::init_seams();
     table::init_seams();
     tableam::init_seams();
     vacuumlazy::init_seams();

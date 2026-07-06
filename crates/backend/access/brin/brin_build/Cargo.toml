@@ -21,3 +21,6 @@ freespace = { path = "../../../storage/freespace/freespace" }
 execindexing = { path = "../../../executor/execindexing" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 init_small = { path = "../../../utils/init/init_small" }
+table = { path = "../../table/table" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+indexam_seams = { path = "../../index/indexam_seams" }

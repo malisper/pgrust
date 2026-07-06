@@ -1,5 +1,5 @@
 use mcx::Mcx;
-use types_core::Oid;
+use types_core::{BlockNumber, Oid};
 use types_error::PgResult;
 use types_rel::{Relation, LOCKMODE};
 
@@ -15,6 +15,18 @@ seam_core::seam!(
     // index_can_return (indexam.c): amcanreturn dispatch; opens the index
     // with AccessShareLock as C's amutils fallback does.
     pub fn index_can_return(mcx: Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // brinvacuumcleanup's body (brin.c), minus the analyze_only early return
+    // the dispatch keeps. Homed in brin_build — it needs the heap
+    // build-range scan, and indexam cannot depend on it (execindexing ->
+    // indexam). Returns (num_pages, increment to num_index_tuples).
+    pub fn brin_vacuum_cleanup<'a, 'mcx>(
+        mcx: Mcx<'mcx>,
+        index: &'a Relation<'mcx>,
+        strategy: types_storage::buf::BufferAccessStrategy,
+    ) -> PgResult<(BlockNumber, f64)>
 );
 
 seam_core::seam!(

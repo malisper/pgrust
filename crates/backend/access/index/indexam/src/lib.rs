@@ -192,7 +192,9 @@ pub fn index_bulk_delete<'mcx>(
             spgist::spgbulkdelete(info.index)?;
             Ok(istat.unwrap_or_default())
         }
-        IndexAmKind::Brin => brin::brinbulkdelete(),
+        // brinbulkdelete: BRIN has no per-heap-tuple entries; stats
+        // allocation is the whole body.
+        IndexAmKind::Brin => Ok(istat.unwrap_or_default()),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(istat.unwrap_or_default()),
         #[allow(unreachable_patterns)]
@@ -245,7 +247,15 @@ pub fn index_vacuum_cleanup<'mcx>(
             if info.analyze_only {
                 Ok(istat)
             } else {
-                brin::brinvacuumcleanup()
+                let mut stats = istat.unwrap_or_default();
+                let (num_pages, ntuples) = indexam_seams::brin_vacuum_cleanup::call(
+                    mcx,
+                    info.index,
+                    info.strategy.clone(),
+                )?;
+                stats.num_pages = num_pages;
+                stats.num_index_tuples += ntuples;
+                Ok(Some(stats))
             }
         }
         #[cfg(test)]
