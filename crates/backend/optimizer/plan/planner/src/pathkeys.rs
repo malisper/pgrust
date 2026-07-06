@@ -62,13 +62,15 @@ pub fn make_pathkeys_for_sortclauses<'mcx>(
 }
 
 /// The `_extended` form over interned SortGroupClause ids (GROUP BY/DISTINCT
-/// lanes); returns (pathkeys, sortable). `remove_group_rtindex` is dead (no
-/// RTE_GROUP on this lane, loud upstream).
+/// lanes); returns (pathkeys, sortable). `remove_group_rtindex`: the
+/// groupClause sits logically below the grouping step, so its sort
+/// expressions shed the grouping RT index first (pathkeys.c:1405-1412).
 pub fn make_pathkeys_for_sortclauses_extended<'mcx>(
     run: &mut PlannerRun<'mcx>,
     sortclauses: &mut PgVec<'mcx, types_pathnodes::NodeId>,
     tlist: &NodeList<'mcx>,
     remove_redundant: bool,
+    remove_group_rtindex: bool,
     set_ec_sortref: bool,
 ) -> PgResult<(PgVec<'mcx, PathKey>, bool)> {
     let mut pathkeys: PgVec<'mcx, PathKey> = PgVec::new_in(run.mcx);
@@ -80,11 +82,20 @@ pub fn make_pathkeys_for_sortclauses_extended<'mcx>(
             .expr_node(sortclauses[i])
             .as_sort_group_clause()
             .expect("sortclause cell");
-        let sortkey = get_sortgroupclause_expr(&sortcl, tlist);
+        let mut sortkey = get_sortgroupclause_expr(&sortcl, tlist);
         if sortcl.sortop == 0 {
             sortable = false;
             i += 1;
             continue;
+        }
+        if remove_group_rtindex {
+            assert!(run.root.group_rtindex > 0);
+            sortkey = crate::flatten_group::strip_group_nulling(
+                run.mcx,
+                sortkey,
+                run.root.group_rtindex,
+            )?
+            .unwrap_or(sortkey);
         }
         let pathkey = make_pathkey_from_sortop(
             run,

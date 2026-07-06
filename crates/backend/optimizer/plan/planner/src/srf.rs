@@ -24,6 +24,7 @@ type SpItem<'mcx> = (Node<'mcx>, u32);
 struct SplitContext<'mcx> {
     mcx: Mcx<'mcx>,
     input_target_exprs: PgVec<'mcx, Node<'mcx>>,
+    sanitize_group_rtindex: Option<i32>,
     level_srfs: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
     level_input_vars: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
     level_input_srfs: PgVec<'mcx, PgVec<'mcx, SpItem<'mcx>>>,
@@ -36,8 +37,15 @@ struct SplitContext<'mcx> {
 impl<'mcx> nodes_core::NodeWalker<'mcx> for SplitContext<'mcx> {
     fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
         // An expression already computed in input_target acts like a Var
-        // (setrefs replaces it with one); ignore its substructure.
-        if self.input_target_exprs.iter().any(|&e| types_nodes::equal(e, node)) {
+        // (setrefs replaces it with one); ignore its substructure. Matching
+        // ignores the grouping nulling bit when crossing that boundary.
+        let cmp_node = match self.sanitize_group_rtindex {
+            Some(rt) => {
+                crate::flatten_group::strip_group_nulling(self.mcx, node, rt)?.unwrap_or(node)
+            }
+            None => node,
+        };
+        if self.input_target_exprs.iter().any(|&e| types_nodes::equal(e, cmp_node)) {
             self.current_input_vars.push((node, self.current_sgref));
             return Ok(false);
         }
@@ -117,15 +125,16 @@ fn split_pathtarget_at_srfs_extended<'mcx>(
         contain_srfs.push(false);
         return Ok((targets, contain_srfs));
     }
-    if is_grouping_target
+    // Crossing the grouping boundary: strip the grouping RT index before
+    // matching input_target, as set_upper_references does (tlist.c:1151-1165).
+    let sanitize_group_rtindex = if is_grouping_target
         && run.parse().hasGroupRTE
         && !run.parse().groupingSets.is_nil()
     {
-        panic!(
-            "split_pathtarget_walker (tlist.c): remove_nulling_relids over group_rtindex \
-             requires hasGroupRTE, unported"
-        );
-    }
+        Some(run.root.group_rtindex)
+    } else {
+        None
+    };
     let mut input_target_exprs: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     if let Some(it) = input_target {
         for i in 0..run.root.pathtarget(it).exprs.len() {
@@ -136,6 +145,7 @@ fn split_pathtarget_at_srfs_extended<'mcx>(
     let mut ctx = SplitContext {
         mcx,
         input_target_exprs,
+        sanitize_group_rtindex,
         level_srfs: PgVec::new_in(mcx),
         level_input_vars: PgVec::new_in(mcx),
         level_input_srfs: PgVec::new_in(mcx),

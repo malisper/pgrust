@@ -2995,15 +2995,20 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
 
     if run.gset_data.is_some() {
         // Grouping sets: the first RollupData's groupClause, with C's
-        // remove_redundant=false, set_ec_sortref=false (hasGroupRTE is always
-        // false on this port, so remove_group_rtindex is dead).
+        // remove_redundant=false, set_ec_sortref=false.
         let mut clauses = match run.gset_data.as_ref().unwrap().rollups.first() {
             Some(r) => crate::relnode::pgvec_clone_shallow(run.mcx, &r.groupClause),
             None => mcx::PgVec::new_in(run.mcx),
         };
+        let has_group_rte = parse.hasGroupRTE;
         if grouping_is_sortable(run, &clauses) {
             let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
-                run, &mut clauses, tlist, false, false,
+                run,
+                &mut clauses,
+                tlist,
+                false,
+                has_group_rte,
+                false,
             )?;
             assert!(sortable);
             run.root.num_groupby_pathkeys = pathkeys.len() as i32;
@@ -3018,7 +3023,7 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
             mcx::PgVec::new_in(run.mcx),
         );
         let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
-            run, &mut clauses, tlist, true, true,
+            run, &mut clauses, tlist, true, false, true,
         )?;
         run.root.processed_groupClause = clauses;
         if sortable {
@@ -3044,7 +3049,7 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
             clauses.push(run.intern_expr(n));
         }
         let (pathkeys, sortable) = crate::pathkeys::make_pathkeys_for_sortclauses_extended(
-            run, &mut clauses, tlist, true, false,
+            run, &mut clauses, tlist, true, false, false,
         )?;
         run.root.processed_distinctClause = clauses;
         run.root.distinct_pathkeys =
@@ -3072,6 +3077,7 @@ fn standard_qp_callback<'mcx>(run: &mut PlannerRun<'mcx>) -> PgResult<()> {
                 run,
                 &mut group_clauses,
                 tlist,
+                false,
                 false,
                 false,
             )?;

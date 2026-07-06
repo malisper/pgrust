@@ -490,6 +490,7 @@ pub(crate) fn make_pathkeys_for_window<'mcx>(
             tlist,
             true,
             false,
+            false,
         )?;
         debug_assert!(ok);
         if clause_ids.len() != before {

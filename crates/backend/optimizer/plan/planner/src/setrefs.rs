@@ -1145,6 +1145,39 @@ fn set_upper_references<'mcx>(
     rtoffset: i32,
 ) -> PgResult<()> {
     let mcx = run.mcx;
+    // A grouping-sets Agg's tlist/qual Vars and PHVs carry the grouping
+    // step's RT index in their nullingrels; drop it first so the subplan
+    // matches are exact (setrefs.c:2490-2510).
+    if plan.node_tag() == types_nodes::NodeTag::T_Agg && run.root.group_rtindex > 0 {
+        let agg = plan.as_agg().expect("Agg");
+        if !agg.groupingSets.is_nil() {
+            let p = plan.as_plan().expect("plan node");
+            let new_tlist = crate::flatten_group::strip_group_nulling_list(
+                mcx,
+                &p.targetlist,
+                run.root.group_rtindex,
+            )?;
+            let new_qual = crate::flatten_group::strip_group_nulling_list(
+                mcx,
+                &p.qual,
+                run.root.group_rtindex,
+            )?;
+            if new_tlist.is_some() || new_qual.is_some() {
+                // SAFETY: exclusive plan-tree ownership.
+                unsafe {
+                    plan.with_plan_mut(|pm| {
+                        if let Some(t) = new_tlist {
+                            pm.targetlist = t;
+                        }
+                        if let Some(q) = new_qual {
+                            pm.qual = q;
+                        }
+                    })
+                }
+                .expect("plan node");
+            }
+        }
+    }
     let base = plan.as_plan().expect("plan node");
     let subplan = base.lefttree.expect("upper node has a subplan");
     let subplan_tlist = &subplan.as_plan().expect("plan node").targetlist;

@@ -26,6 +26,7 @@ pub const EXPRKIND_TABLEFUNC_LATERAL: i32 = 9;
 pub const EXPRKIND_ARBITER_ELEM: i32 = 10;
 pub const EXPRKIND_PHV: i32 = 11;
 pub const EXPRKIND_TABLESAMPLE: i32 = 12;
+pub const EXPRKIND_GROUPEXPR: i32 = 13;
 
 // Top-level arm plus the make_subplan recursion (run.push_root pre-sets the
 // child root's query_level).
@@ -233,7 +234,22 @@ pub fn subquery_planner<'mcx>(
             // C's default arm: an ENR RTE carries no preprocessable exprs.
             RTEKind::RTE_NAMEDTUPLESTORE => {}
             RTEKind::RTE_GROUP => {
-                panic!("subquery_planner (planner.c): RTE_GROUP survey; M2 grouping lane")
+                debug_assert!(parse.hasGroupRTE);
+                run.root.group_rtindex = rti0 as i32 + 1;
+                let exprs = preprocess_expression_list(
+                    run,
+                    &parse.rtable,
+                    parse.jointree,
+                    rte.groupexprs.clone_in(mcx)?,
+                    EXPRKIND_GROUPEXPR,
+                    parse.hasSubLinks,
+                )?;
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.groupexprs = exprs
+                    })
+                };
             }
         }
         if rte.lateral {
@@ -419,8 +435,15 @@ pub fn subquery_planner<'mcx>(
         }
     }
 
+    // GROUP Vars in the targetlist and HAVING give way to the preprocessed
+    // grouping expressions (planner.c:1096-1103), varnullingrels preserved.
     if parse.hasGroupRTE {
-        panic!("flatten_group_exprs (var.c): M2 grouping lane");
+        parse.targetList =
+            crate::flatten_group::flatten_group_exprs_list(run, &parse, &parse.targetList)?;
+        if let Some(hq) = parse.havingQual {
+            parse.havingQual =
+                Some(crate::flatten_group::flatten_group_exprs_node(run, &parse, hq)?);
+        }
     }
     if parse.hasTargetSRFs {
         let mut still_has = false;
@@ -450,16 +473,21 @@ pub fn subquery_planner<'mcx>(
         parse.groupingSets = list;
     }
     if let Some(hq) = parse.havingQual {
-        // The groupClause-and-groupingSets pull_varnos leg tests
-        // root->group_rtindex; dead here (hasGroupRTE always false).
         let first_gset_nonempty = parse.groupingSets.is_nil()
             || crate::groupingsets::grouping_set_nonempty(parse.groupingSets.nth(0));
         let havinglist = hq.as_list().expect("preprocessed havingQual is a list");
         let mut new_having = NodeList::nil();
         for hc in havinglist {
+            // A clause referencing columns nullable by grouping sets stays in
+            // HAVING: their nulled values do not exist before grouping
+            // (planner.c:1160-1168, the group_rtindex pull_varnos member
+            // test).
             if clauses::contain_agg_clause(hc)?
                 || clauses::contain_volatile_functions(hc)?
                 || clauses::contain_subplans(hc)?
+                || (!parse.groupClause.is_nil()
+                    && !parse.groupingSets.is_nil()
+                    && vars::pull_varnos(mcx, hc)?.is_member(run.root.group_rtindex))
             {
                 new_having.lappend(mcx, hc)?;
             } else if !parse.groupClause.is_nil() && first_gset_nonempty {

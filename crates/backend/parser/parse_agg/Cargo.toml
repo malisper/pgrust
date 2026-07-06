@@ -14,6 +14,8 @@ nodes_core = { path = "../../nodes/nodes_core" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 parse_clause_seams = { path = "../parse_clause_seams" }
+parse_relation = { path = "../parse_relation" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 parser_small1 = { path = "../parser_small1" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 types_core = { path = "../../../_support/types/types_core" }

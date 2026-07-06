@@ -753,13 +753,9 @@ pub fn contain_windowfuncs(node: Node<'_>) -> bool {
     matches!(nodes_core::NodeWalker::visit(&mut W, node), Ok(true))
 }
 
-/// DIVERGENCE from C 18.3: substitute_grouped_columns' RTE_GROUP rewrite
-/// (grouped Vars retargeted at an RTE_GROUP entry, qry.hasGroupRTE) is not
-/// performed — the Query keeps the pre-18 direct-Var shape and the planner's
-/// grouping arm consumes it directly; the 42803 checks are C-equivalent.
 pub fn parseCheckAggregates<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
     qry: &mut Query<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(
@@ -769,8 +765,9 @@ pub fn parseCheckAggregates<'mcx>(
             || !qry.groupingSets.is_nil()
     );
 
-    // gset_common (intersection seeded with the first set) limits which
-    // grouping Vars can prove functional dependencies (groupClauseCommonVars).
+    // gset_common: intersection of all expanded sets, seeded with the
+    // smallest; restricts which grouping Vars can prove functional
+    // dependencies.
     let mut gset_common: PgVec<'_, i32> = PgVec::new_in(mcx);
     if !qry.groupingSets.is_nil() {
         // The 4096 limit is arbitrary, bounding pathological constructs.
@@ -809,8 +806,12 @@ pub fn parseCheckAggregates<'mcx>(
 
     // Group-clause exprs, join-alias-flattened as C's groupClauses list; hnvg
     // is decided on the flattened form (a merged FULL USING column is a
-    // COALESCE, not a Var).
+    // COALESCE, not a Var). common_vars is C's groupClauseCommonVars: grouping
+    // Vars present in every grouping set, the only ones usable for
+    // functional-dependency proofs.
     let mut grp: PgVec<'_, (Node<'mcx>, Index)> = PgVec::new_in(mcx);
+    let mut common_vars: PgVec<'_, Node<'mcx>> = PgVec::new_in(mcx);
+    let mut group_tles = NodeList::nil();
     let mut hnvg = false;
     for gc_node in &qry.groupClause {
         let gc = gc_node.as_sort_group_clause().expect("groupClause cell");
@@ -829,47 +830,98 @@ pub fn parseCheckAggregates<'mcx>(
         }
         if expr.as_var().is_none() {
             hnvg = true;
+        } else if qry.groupingSets.is_nil()
+            || gset_common.contains(&(tle.ressortgroupref as i32))
+        {
+            common_vars.push(expr);
         }
+        group_tles.lappend(
+            mcx,
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::TargetEntry {
+                    expr,
+                    resno: (grp.len() + 1) as i16,
+                    resname: tle.resname,
+                    ressortgroupref: tle.ressortgroupref,
+                    resorigtbl: 0,
+                    resorigcol: 0,
+                    resjunk: false,
+                },
+            )?,
+        )?;
         grp.push((expr, tle.ressortgroupref));
     }
 
     let hnvg = hnvg;
     let grp = grp.as_slice();
-    // groupClauseCommonVars: grouping Vars present in every grouping set —
-    // the only ones usable for functional-dependency proofs.
-    let mut common_vars: PgVec<'_, Node<'mcx>> = PgVec::new_in(mcx);
-    for (expr, sgref) in grp.iter() {
-        if expr.as_var().is_some()
-            && (qry.groupingSets.is_nil() || gset_common.contains(&(*sgref as i32)))
-        {
-            common_vars.push(*expr);
-        }
+
+    // The RTE_GROUP entry + nsitem for the grouping step's output; the rtable
+    // has already moved onto qry, so it is loaned back around the call.
+    if !grp.is_empty() {
+        pstate.p_rtable = core::mem::take(&mut qry.rtable);
+        let nsitem = parse_relation::addRangeTableEntryForGroup(mcx, pstate, &group_tles)?;
+        pstate.p_grouping_nsitem = Some(nsitem);
+        qry.rtable = core::mem::take(&mut pstate.p_rtable);
+        qry.hasGroupRTE = true;
     }
-    let mut cuc = CucState {
-        func_grouped_rels: PgVec::new_in(mcx),
-        constraint_deps: PgVec::new_in(mcx),
-    };
+
     for tle in &qry.targetList {
         finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, tle)?;
     }
-    for tle in &qry.targetList {
-        let clause = if has_join_rtes {
-            vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, None, tle)?
-        } else {
-            tle
-        };
-        check_ungrouped_columns(mcx, pstate, qry, grp, &common_vars, hnvg, 0, false, &mut cuc, clause)?;
-    }
     if let Some(having) = qry.havingQual {
         finalize_grouping_exprs(mcx, pstate, qry, grp, has_join_rtes, hnvg, 0, having)?;
-        let clause = if has_join_rtes {
-            vars::flatten_join_alias_vars(mcx, &qry.rtable, qry.jointree, None, having)?
-        } else {
-            having
-        };
-        check_ungrouped_columns(mcx, pstate, qry, grp, &common_vars, hnvg, 0, false, &mut cuc, clause)?;
     }
-    for &dep in cuc.constraint_deps.iter() {
+    let mut constraint_deps: PgVec<'_, Oid> = PgVec::new_in(mcx);
+    let (new_tlist, new_having) = {
+        let mut ctx = SgcCtx {
+            mcx,
+            pstate: &*pstate,
+            qry: &*qry,
+            grp,
+            gset_common: gset_common.as_slice(),
+            has_grouping_sets: !qry.groupingSets.is_nil(),
+            hnvg,
+            nsitem: pstate.p_grouping_nsitem,
+            common_vars: common_vars.as_slice(),
+            func_grouped_rels: PgVec::new_in(mcx),
+            constraint_deps: PgVec::new_in(mcx),
+            sublevels_up: 0,
+            in_agg_direct_args: false,
+        };
+        let mut new_tlist = NodeList::nil();
+        for tle in &ctx.qry.targetList {
+            let clause = if has_join_rtes {
+                vars::flatten_join_alias_vars(mcx, &ctx.qry.rtable, ctx.qry.jointree, None, tle)?
+            } else {
+                tle
+            };
+            let substituted = sgc_mutate(&mut ctx, clause)?.unwrap_or(clause);
+            new_tlist.lappend(mcx, substituted)?;
+        }
+        let new_having = match ctx.qry.havingQual {
+            None => None,
+            Some(having) => {
+                let clause = if has_join_rtes {
+                    vars::flatten_join_alias_vars(
+                        mcx,
+                        &ctx.qry.rtable,
+                        ctx.qry.jointree,
+                        None,
+                        having,
+                    )?
+                } else {
+                    having
+                };
+                Some(sgc_mutate(&mut ctx, clause)?.unwrap_or(clause))
+            }
+        };
+        constraint_deps.extend_from_slice(&ctx.constraint_deps);
+        (new_tlist, new_having)
+    };
+    qry.targetList = new_tlist;
+    qry.havingQual = new_having;
+    for &dep in constraint_deps.iter() {
         qry.constraintDeps.lappend(mcx, dep)?;
     }
 
@@ -1207,227 +1259,515 @@ fn grouping_arg_location(node: Node<'_>) -> ParseLoc {
     }
 }
 
-// is_var_grouped: the substitute_grouped_columns Var match, direct-Var shape.
-fn is_var_grouped(grp: &[(Node<'_>, Index)], var: &types_nodes::primnodes::Var<'_>) -> bool {
-    for (gexpr, _) in grp {
-        if let Some(gvar) = gexpr.as_var() {
-            if gvar.varno == var.varno
-                && gvar.varattno == var.varattno
-                && gvar.varlevelsup == 0
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-// func_grouped_rels + the constraintDeps accumulator, shared across the
-// whole substitute_grouped_columns recursion (targetList and HAVING both).
-struct CucState<'mcx> {
-    func_grouped_rels: PgVec<'mcx, i32>,
-    constraint_deps: PgVec<'mcx, Oid>,
-}
-
-struct CucWalker<'a, 'b, 'g, 'p, 's, 'mcx> {
+// substitute_grouped_columns (parse_agg.c:1335-1590): grouped expressions in
+// the targetlist and HAVING become Vars referencing the RTE_GROUP entry
+// (varnullingrels marked for columns absent from some grouping set);
+// ungrouped local Vars are an error unless functionally dependent on the
+// common grouping Vars.
+struct SgcCtx<'a, 'g, 'p, 'mcx> {
     mcx: Mcx<'mcx>,
     pstate: &'a ParseState<'p, 'mcx>,
-    qry: &'b Query<'mcx>,
+    qry: &'a Query<'mcx>,
     grp: &'g [(Node<'mcx>, Index)],
+    gset_common: &'g [i32],
+    has_grouping_sets: bool,
+    hnvg: bool,
+    nsitem: Option<&'mcx parser_small1::ParseNamespaceItem<'mcx>>,
     common_vars: &'g [Node<'mcx>],
-    hnvg: bool,
+    func_grouped_rels: PgVec<'mcx, i32>,
+    constraint_deps: PgVec<'mcx, Oid>,
     sublevels_up: i32,
     in_agg_direct_args: bool,
-    cuc: &'s mut CucState<'mcx>,
 }
 
-impl<'mcx> nodes_core::NodeWalker<'mcx> for CucWalker<'_, '_, '_, '_, '_, 'mcx> {
-    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        check_ungrouped_columns(
-            self.mcx,
-            self.pstate,
-            self.qry,
-            self.grp,
-            self.common_vars,
-            self.hnvg,
-            self.sublevels_up,
-            self.in_agg_direct_args,
-            self.cuc,
-            node,
-        )?;
-        Ok(false)
-    }
-    fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
-        cuc_query(
-            self.mcx,
-            self.pstate,
-            self.qry,
-            self.grp,
-            self.common_vars,
-            self.hnvg,
-            self.sublevels_up,
-            self.in_agg_direct_args,
-            self.cuc,
-            q,
-        )?;
-        Ok(false)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn cuc_query<'mcx>(
-    mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
-    qry: &Query<'mcx>,
-    grp: &[(Node<'mcx>, Index)],
-    common_vars: &[Node<'mcx>],
-    hnvg: bool,
-    sublevels_up: i32,
-    in_agg_direct_args: bool,
-    cuc: &mut CucState<'mcx>,
-    q: &'mcx Query<'mcx>,
-) -> PgResult<()> {
-    let mut w = CucWalker {
-        mcx,
-        pstate,
-        qry,
-        grp,
-        common_vars,
-        hnvg,
-        sublevels_up: sublevels_up + 1,
-        in_agg_direct_args,
-        cuc,
+// buildGroupedVar (parse_agg.c:1595-1621).
+fn build_grouped_var<'mcx>(
+    ctx: &SgcCtx<'_, '_, '_, 'mcx>,
+    attnum: usize,
+    sortgroupref: Index,
+) -> PgResult<Node<'mcx>> {
+    let nsitem = ctx.nsitem.expect("grouping nsitem built");
+    let nscol = &nsitem.p_nscolumns[attnum - 1];
+    debug_assert!(nscol.p_varno == nsitem.p_rtindex as Index);
+    debug_assert!(nscol.p_varattno as usize == attnum);
+    let varnullingrels = if ctx.has_grouping_sets
+        && !ctx.gset_common.contains(&(sortgroupref as i32))
+    {
+        types_nodes::Bitmapset::make_singleton(ctx.mcx, nsitem.p_rtindex)?
+    } else {
+        types_nodes::Bitmapset::empty()
     };
-    nodes_core::query_tree_walker(q, &mut w, 0)?;
-    Ok(())
+    Node::mk(
+        ctx.mcx,
+        types_nodes::primnodes::Var {
+            varno: nscol.p_varno as i32,
+            varattno: nscol.p_varattno,
+            vartype: nscol.p_vartype,
+            vartypmod: nscol.p_vartypmod,
+            varcollid: nscol.p_varcollid,
+            varnullingrels,
+            varlevelsup: ctx.sublevels_up as Index,
+            varreturningtype: nscol.p_varreturningtype,
+            varnosyn: nscol.p_varnosyn,
+            varattnosyn: nscol.p_varattnosyn,
+            location: -1,
+        },
+    )
 }
 
-// substitute_grouped_columns_mutator's 42803 check (all grouping exprs are
-// Vars on this lane): an original-level Var outside an aggregate must be
-// grouped.
-#[allow(clippy::too_many_arguments)]
-fn check_ungrouped_columns<'mcx>(
-    mcx: Mcx<'mcx>,
-    pstate: &ParseState<'_, 'mcx>,
-    qry: &Query<'mcx>,
-    grp: &[(Node<'mcx>, Index)],
-    common_vars: &[Node<'mcx>],
-    hnvg: bool,
-    sublevels_up: i32,
-    in_agg_direct_args: bool,
-    cuc: &mut CucState<'mcx>,
+/// None = unchanged (caller keeps the original list).
+fn sgc_list<'mcx>(
+    ctx: &mut SgcCtx<'_, '_, '_, 'mcx>,
+    list: &NodeList<'mcx>,
+) -> PgResult<Option<NodeList<'mcx>>> {
+    let mut changed = false;
+    let mut out: Vec<Node<'mcx>> = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        match sgc_mutate(ctx, item)? {
+            Some(new) => {
+                changed = true;
+                out.push(new);
+            }
+            None => out.push(item),
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let mut l = NodeList::nil();
+    for n in out {
+        l.lappend(ctx.mcx, n)?;
+    }
+    Ok(Some(l))
+}
+
+fn sgc_mutate_opt<'mcx>(
+    ctx: &mut SgcCtx<'_, '_, '_, 'mcx>,
+    node: Option<Node<'mcx>>,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node {
+        None => Ok(None),
+        Some(n) => sgc_mutate(ctx, n),
+    }
+}
+
+// substitute_grouped_columns_mutator (parse_agg.c:1380-1590); None =
+// unchanged. Sub-Queries are rewritten in place (exclusive parse tree), so
+// their handles never change.
+fn sgc_mutate<'mcx>(
+    ctx: &mut SgcCtx<'_, '_, '_, 'mcx>,
     node: Node<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Option<Node<'mcx>>> {
     // C order: Aggref/GroupingFunc level gates first, then the hnvg equal()
     // match (outer query level only), then Const/Param, then the Var check.
     match node.node_tag() {
         NodeTag::T_Aggref => {
             let agg = node.as_aggref().unwrap();
             let agglevelsup = agg.agglevelsup as i32;
-            if agglevelsup == sublevels_up {
-                debug_assert!(!in_agg_direct_args);
-                for arg in &agg.aggdirectargs {
-                    check_ungrouped_columns(
-                        mcx, pstate, qry, grp, common_vars, hnvg, sublevels_up, true, cuc, arg,
-                    )?;
+            if agglevelsup == ctx.sublevels_up {
+                // Same-level agg: only direct arguments carry grouped Vars.
+                debug_assert!(!ctx.in_agg_direct_args);
+                ctx.in_agg_direct_args = true;
+                let new_direct = sgc_list(ctx, &agg.aggdirectargs)?;
+                ctx.in_agg_direct_args = false;
+                if let Some(l) = new_direct {
+                    // SAFETY: exclusive parse tree; no derived refs live.
+                    unsafe { node.with_mut::<Aggref, _>(|a| a.aggdirectargs = l) }
+                        .expect("Aggref");
                 }
-                return Ok(());
+                return Ok(None);
             }
-            if agglevelsup > sublevels_up {
-                return Ok(());
+            if agglevelsup > ctx.sublevels_up {
+                return Ok(None);
             }
         }
-        // C's mutator skips a current-or-higher-level GroupingFunc entirely:
-        // its arguments are not evaluated, so they are not checked here.
+        // A current-or-higher-level GroupingFunc's arguments are not
+        // evaluated; not recursed into.
         NodeTag::T_GroupingFunc => {
-            if node.as_grouping_func().unwrap().agglevelsup as i32 >= sublevels_up {
-                return Ok(());
+            if node.as_grouping_func().unwrap().agglevelsup as i32 >= ctx.sublevels_up {
+                return Ok(None);
             }
         }
         _ => {}
     }
-    if hnvg && sublevels_up == 0 {
-        for (gexpr, _) in grp {
+    if ctx.hnvg && ctx.sublevels_up == 0 {
+        for (attnum0, (gexpr, sortgroupref)) in ctx.grp.iter().enumerate() {
             if types_nodes::equal(*gexpr, node) {
-                return Ok(());
+                return Ok(Some(build_grouped_var(ctx, attnum0 + 1, *sortgroupref)?));
             }
         }
     }
     match node.node_tag() {
-        NodeTag::T_Const | NodeTag::T_Param => Ok(()),
+        NodeTag::T_Const | NodeTag::T_Param => Ok(None),
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
-            if var.varlevelsup as i32 != sublevels_up {
-                return Ok(());
+            if var.varlevelsup as i32 != ctx.sublevels_up {
+                return Ok(None);
             }
-            if (!hnvg || sublevels_up != 0) && is_var_grouped(grp, var) {
-                return Ok(());
+            if !ctx.hnvg || ctx.sublevels_up != 0 {
+                for (attnum0, (gexpr, sortgroupref)) in ctx.grp.iter().enumerate() {
+                    if let Some(gvar) = gexpr.as_var() {
+                        if gvar.varno == var.varno
+                            && gvar.varattno == var.varattno
+                            && gvar.varlevelsup == 0
+                        {
+                            return Ok(Some(build_grouped_var(
+                                ctx,
+                                attnum0 + 1,
+                                *sortgroupref,
+                            )?));
+                        }
+                    }
+                }
             }
-            // Last-ditch check before erroring: a Var functionally dependent
-            // on the grouped columns (rel PK ⊆ GROUP BY) is acceptable; the
-            // proof is cached per RTE and its constraint OID recorded so the
-            // query is invalidated if the constraint is dropped.
-            if cuc.func_grouped_rels.contains(&var.varno) {
-                return Ok(());
+            // Functional-dependency escape (last-ditch before erroring): a
+            // rel whose PK is a subset of the common grouping Vars may expose
+            // any column; the proof's PK constraint joins constraintDeps.
+            if ctx.func_grouped_rels.contains(&var.varno) {
+                return Ok(None);
             }
-            let rte = qry
+            let rte = ctx
+                .qry
                 .rtable
                 .nth(var.varno as usize - 1)
                 .as_range_tbl_entry()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "check_ungrouped_columns (parse_agg.c): varno {} has no RTE",
-                        var.varno
-                    )
-                });
+                .expect("varno has an RTE");
             // The relid guard keeps synthetic catalog-less RTEs (unit-test
-            // fixtures) away from the pg_constraint scan; a real RTE_RELATION
-            // always carries a valid relid.
+            // fixtures) away from the pg_constraint scan.
             if rte.rtekind == RTEKind::RTE_RELATION
                 && rte.relid != types_core::InvalidOid
                 && pg_constraint::check_functional_grouping(
-                    mcx,
+                    ctx.mcx,
                     rte.relid,
                     var.varno,
                     0,
-                    common_vars,
-                    &mut cuc.constraint_deps,
+                    ctx.common_vars,
+                    &mut ctx.constraint_deps,
                 )?
             {
-                cuc.func_grouped_rels.push(var.varno);
-                return Ok(());
+                ctx.func_grouped_rels.push(var.varno);
+                return Ok(None);
             }
-            Err(ungrouped_var_error(pstate, qry, var, in_agg_direct_args, sublevels_up))
+            Err(ungrouped_var_error(
+                ctx.pstate,
+                ctx.qry,
+                var,
+                ctx.in_agg_direct_args,
+                ctx.sublevels_up,
+            ))
         }
-        NodeTag::T_Query => cuc_query(
-            mcx,
-            pstate,
-            qry,
-            grp,
-            common_vars,
-            hnvg,
-            sublevels_up,
-            in_agg_direct_args,
-            cuc,
-            node.as_query().expect("tag checked"),
-        ),
-        _ => {
-            let mut w = CucWalker {
-                mcx,
-                pstate,
-                qry,
-                grp,
-                common_vars,
-                hnvg,
-                sublevels_up,
-                in_agg_direct_args,
-                cuc,
-            };
-            nodes_core::expression_tree_walker(node, &mut w)?;
-            Ok(())
+        NodeTag::T_Query => {
+            ctx.sublevels_up += 1;
+            sgc_query_inplace(ctx, node)?;
+            ctx.sublevels_up -= 1;
+            Ok(None)
+        }
+        // The generic engine keeps SubLink.subselect shared; grouped outer
+        // Vars inside are rewritten in place before testexpr goes through it.
+        NodeTag::T_SubLink => {
+            let sl = node.as_sub_link().unwrap();
+            debug_assert!(sl.subselect.node_tag() == NodeTag::T_Query);
+            ctx.sublevels_up += 1;
+            sgc_query_inplace(ctx, sl.subselect)?;
+            ctx.sublevels_up -= 1;
+            nodes_core::expression_tree_mutator(ctx.mcx, node, &mut |n| sgc_mutate(ctx, n))
+        }
+        _ => nodes_core::expression_tree_mutator(ctx.mcx, node, &mut |n| sgc_mutate(ctx, n)),
+    }
+}
+
+struct QueryNews<'mcx> {
+    target: Option<NodeList<'mcx>>,
+    returning: Option<NodeList<'mcx>>,
+    having: Option<Node<'mcx>>,
+    limit_off: Option<Node<'mcx>>,
+    limit_cnt: Option<Node<'mcx>>,
+    setops: Option<Node<'mcx>>,
+    merge_join_cond: Option<Node<'mcx>>,
+    jointree: Option<&'mcx types_nodes::primnodes::FromExpr<'mcx>>,
+}
+
+impl<'mcx> QueryNews<'mcx> {
+    fn any(&self) -> bool {
+        self.target.is_some()
+            || self.returning.is_some()
+            || self.having.is_some()
+            || self.limit_off.is_some()
+            || self.limit_cnt.is_some()
+            || self.setops.is_some()
+            || self.merge_join_cond.is_some()
+            || self.jointree.is_some()
+    }
+    fn apply(self, qm: &mut Query<'mcx>) {
+        if let Some(t) = self.target {
+            qm.targetList = t;
+        }
+        if let Some(r) = self.returning {
+            qm.returningList = r;
+        }
+        if self.having.is_some() {
+            qm.havingQual = self.having;
+        }
+        if self.limit_off.is_some() {
+            qm.limitOffset = self.limit_off;
+        }
+        if self.limit_cnt.is_some() {
+            qm.limitCount = self.limit_cnt;
+        }
+        if self.setops.is_some() {
+            qm.setOperations = self.setops;
+        }
+        if self.merge_join_cond.is_some() {
+            qm.mergeJoinCondition = self.merge_join_cond;
+        }
+        if let Some(jt) = self.jointree {
+            qm.jointree = Some(jt);
         }
     }
 }
+
+// The sub-Query arm of substitute_grouped_columns_mutator: C's
+// query_tree_mutator (nodeFuncs.c, flags 0) applied through the Query node
+// handle; nested structures rewrite in place through their own nodes.
+fn sgc_query_inplace<'mcx>(
+    ctx: &mut SgcCtx<'_, '_, '_, 'mcx>,
+    qnode: Node<'mcx>,
+) -> PgResult<()> {
+    let q = qnode.as_query().expect("Query");
+    let news = sgc_query_news(ctx, q)?;
+    if news.any() {
+        // SAFETY: exclusive parse tree; no derived refs live.
+        unsafe { qnode.with_mut::<Query, _>(|qm| news.apply(qm)) }.expect("Query");
+    }
+    Ok(())
+}
+
+fn sgc_query_news<'mcx>(
+    ctx: &mut SgcCtx<'_, '_, '_, 'mcx>,
+    q: &'mcx Query<'mcx>,
+) -> PgResult<QueryNews<'mcx>> {
+    let mcx = ctx.mcx;
+    let new_target = sgc_list(ctx, &q.targetList)?;
+    let new_returning = sgc_list(ctx, &q.returningList)?;
+    let new_having = sgc_mutate_opt(ctx, q.havingQual)?;
+    let new_limit_off = sgc_mutate_opt(ctx, q.limitOffset)?;
+    let new_limit_cnt = sgc_mutate_opt(ctx, q.limitCount)?;
+    let new_setops = sgc_mutate_opt(ctx, q.setOperations)?;
+    let new_merge_join_cond = sgc_mutate_opt(ctx, q.mergeJoinCondition)?;
+    for wco_node in &q.withCheckOptions {
+        let wco = wco_node.as_with_check_option().expect("withCheckOptions cell");
+        if let Some(new_qual) = sgc_mutate_opt(ctx, wco.qual)? {
+            // SAFETY: exclusive parse tree; no derived refs live.
+            unsafe {
+                wco_node.with_mut::<types_nodes::parsenodes::WithCheckOption, _>(|w| {
+                    w.qual = Some(new_qual)
+                })
+            }
+            .expect("WithCheckOption");
+        }
+    }
+    for action_node in &q.mergeActionList {
+        let action = action_node.as_merge_action().expect("mergeActionList cell");
+        let new_qual = sgc_mutate_opt(ctx, action.qual)?;
+        let new_tlist = sgc_list(ctx, &action.targetList)?;
+        if new_qual.is_some() || new_tlist.is_some() {
+            // SAFETY: as above.
+            unsafe {
+                action_node.with_mut::<types_nodes::primnodes::MergeAction, _>(|a| {
+                    if new_qual.is_some() {
+                        a.qual = new_qual;
+                    }
+                    if let Some(t) = new_tlist {
+                        a.targetList = t;
+                    }
+                })
+            }
+            .expect("MergeAction");
+        }
+    }
+    if let Some(oc_node) = q.onConflict {
+        let oc = oc_node.as_on_conflict_expr().expect("onConflict");
+        let new_arbiter = sgc_list(ctx, &oc.arbiterElems)?;
+        let new_arb_where = sgc_mutate_opt(ctx, oc.arbiterWhere)?;
+        let new_set = sgc_list(ctx, &oc.onConflictSet)?;
+        let new_where = sgc_mutate_opt(ctx, oc.onConflictWhere)?;
+        let new_excl = sgc_list(ctx, &oc.exclRelTlist)?;
+        if new_arbiter.is_some()
+            || new_arb_where.is_some()
+            || new_set.is_some()
+            || new_where.is_some()
+            || new_excl.is_some()
+        {
+            // SAFETY: as above.
+            unsafe {
+                oc_node.with_mut::<types_nodes::primnodes::OnConflictExpr, _>(|o| {
+                    if let Some(l) = new_arbiter {
+                        o.arbiterElems = l;
+                    }
+                    if new_arb_where.is_some() {
+                        o.arbiterWhere = new_arb_where;
+                    }
+                    if let Some(l) = new_set {
+                        o.onConflictSet = l;
+                    }
+                    if new_where.is_some() {
+                        o.onConflictWhere = new_where;
+                    }
+                    if let Some(l) = new_excl {
+                        o.exclRelTlist = l;
+                    }
+                })
+            }
+            .expect("OnConflictExpr");
+        }
+    }
+    for wc_node in &q.windowClause {
+        let wc = wc_node.as_window_clause().expect("windowClause cell");
+        if sgc_mutate_opt(ctx, wc.startOffset)?.is_some()
+            || sgc_mutate_opt(ctx, wc.endOffset)?.is_some()
+        {
+            panic!(
+                "substitute_grouped_columns (parse_agg.c): grouped outer Var inside \
+                 a window frame offset (WindowClause rebuild unported)"
+            );
+        }
+    }
+    let new_jointree = match q.jointree {
+        None => None,
+        Some(jt) => {
+            let fl = sgc_list(ctx, &jt.fromlist)?;
+            let quals = sgc_mutate_opt(ctx, jt.quals)?;
+            if fl.is_some() || quals.is_some() {
+                Some(mcx::alloc_leak_in(
+                    mcx,
+                    types_nodes::primnodes::FromExpr {
+                        fromlist: match fl {
+                            Some(l) => l,
+                            None => jt.fromlist.clone_in(mcx)?,
+                        },
+                        quals: match quals {
+                            Some(qu) => Some(qu),
+                            None => jt.quals,
+                        },
+                    },
+                )?)
+            } else {
+                None
+            }
+        }
+    };
+    for cte_node in &q.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        if let Some(cq) = cte.ctequery {
+            debug_assert!(cq.node_tag() == NodeTag::T_Query);
+            // Route through the mutator: the Query arm rewrites in place.
+            let unchanged = sgc_mutate(ctx, cq)?.is_none();
+            debug_assert!(unchanged);
+        }
+    }
+    for rte_node in &q.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        match rte.rtekind {
+            RTEKind::RTE_SUBQUERY => {
+                if let Some(subq) = rte.subquery {
+                    ctx.sublevels_up += 1;
+                    let news = sgc_query_news(ctx, subq)?;
+                    ctx.sublevels_up -= 1;
+                    if news.any() {
+                        // The RTE holds a bare &Query (no node handle), so a
+                        // changed sub-Query is re-allocated, not written over.
+                        let mut nq = rewrite_manip::flat_copy_query(mcx, subq)?;
+                        news.apply(&mut nq);
+                        let nref: &'mcx Query<'mcx> = mcx::leak_in(mcx::alloc_in(mcx, nq)?);
+                        // SAFETY: exclusive parse tree; no derived refs live.
+                        unsafe {
+                            rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(
+                                |r| r.subquery = Some(nref),
+                            )
+                        }
+                        .expect("RangeTblEntry");
+                    }
+                }
+            }
+            RTEKind::RTE_JOIN => {
+                if let Some(l) = sgc_list(ctx, &rte.joinaliasvars)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.joinaliasvars = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_FUNCTION => {
+                if let Some(l) = sgc_list(ctx, &rte.functions)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.functions = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                if let Some(tf) = sgc_mutate_opt(ctx, rte.tablefunc)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.tablefunc = Some(tf)
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_VALUES => {
+                if let Some(l) = sgc_list(ctx, &rte.values_lists)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.values_lists = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_GROUP => {
+                if let Some(l) = sgc_list(ctx, &rte.groupexprs)? {
+                    // SAFETY: as above.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.groupexprs = l
+                        })
+                    }
+                    .expect("RangeTblEntry");
+                }
+            }
+            _ => {}
+        }
+        if let Some(l) = sgc_list(ctx, &rte.securityQuals)? {
+            // SAFETY: as above.
+            unsafe {
+                rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.securityQuals = l
+                })
+            }
+            .expect("RangeTblEntry");
+        }
+    }
+    Ok(QueryNews {
+        target: new_target,
+        returning: new_returning,
+        having: new_having,
+        limit_off: new_limit_off,
+        limit_cnt: new_limit_cnt,
+        setops: new_setops,
+        merge_join_cond: new_merge_join_cond,
+        jointree: new_jointree,
+    })
+}
+
 
 /// C `expand_groupingset_node`: one GroupingSet into its list of integer
 /// grouping sets (EMPTY -> [()], SIMPLE -> [content], ROLLUP/CUBE -> the

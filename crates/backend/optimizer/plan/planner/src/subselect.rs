@@ -1708,8 +1708,20 @@ fn simplify_exists_query<'mcx>(run: &mut PlannerRun<'mcx>, query: &mut Query<'mc
     query.distinctClause = NodeList::nil();
     query.sortClause = NodeList::nil();
     query.hasDistinctOn = false;
+    // The GROUP BY clauses are gone; drop the RTE_GROUP entry too
+    // (subselect.c:1691-1711).
     if query.hasGroupRTE {
-        panic!("simplify_EXISTS_query (subselect.c): RTE_GROUP removal; M2 grouping lane");
+        let mut new_rtable = NodeList::nil();
+        for rte_node in &query.rtable {
+            if rte_node.as_range_tbl_entry().expect("rtable cell").rtekind
+                == types_nodes::parsenodes::RTEKind::RTE_GROUP
+            {
+                continue;
+            }
+            new_rtable.lappend(run.mcx, rte_node)?;
+        }
+        query.rtable = new_rtable;
+        query.hasGroupRTE = false;
     }
     Ok(true)
 }
