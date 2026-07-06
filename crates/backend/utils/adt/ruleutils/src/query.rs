@@ -90,6 +90,7 @@ pub(crate) fn deparse_context_for<'mcx>(
     rte.relid = relid;
     rte.relkind = b'r';
     rte.rellockmode = 1;
+    rte.alias = Some(alias_ref);
     rte.eref = Some(alias_ref);
     rte.inFromCl = true;
     let rte_ref = rte.seal_ref();
