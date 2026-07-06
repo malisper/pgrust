@@ -83,6 +83,9 @@ pub struct ResultRelExec<'mcx> {
     trig_when: ::trigger::TriggerWhenCache<'mcx>,
     // ExecGetAllUpdatedCols, resolved once (C caches in ri_all_updated_cols).
     all_updated_cols: Option<types_nodes::Bitmapset<'mcx>>,
+    // C ri_ChildToRootMap + ri_ChildToRootMapValid (ExecGetChildToRootMap):
+    // outer None = unresolved, inner None = no conversion needed.
+    child_to_root: Option<Option<mcx::PgVec<'mcx, i16>>>,
     // ri_GeneratedExprsI/U collapsed to one set: the UPDATE updatedCols skip
     // is perf-only (values are immutable functions of non-generated columns).
     generated_exprs: Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>,
@@ -153,6 +156,12 @@ pub struct ModifyTableState<'mcx> {
     // leaf rel); the root's existing slot is Virtual when the target is
     // partitioned and cannot feed the heap AM lock/fetch callbacks.
     leaf_existing: Vec<Option<ExecSlotId>>,
+    // C ri_ChildToRootMap per routed leaf (ExecGetChildToRootMap); outer
+    // Option = resolved yet, inner None = no conversion needed.
+    leaf_child_to_root: Vec<Option<Option<mcx::PgVec<'mcx, i16>>>>,
+    // C ExecInitPartitionInfo's per-leaf ri_WithCheckOptions: the first WCO
+    // list translated to the leaf's attnos via map_variable_attnos.
+    leaf_wco: Vec<Option<mcx::PgVec<'mcx, WcoExpr<'mcx>>>>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -451,35 +460,9 @@ pub fn exec_init_modify_table<'mcx>(
         }
     }
 
-    // C converts child-format tuples to the root format for transition
-    // tables (ri_ChildToRootMap); only layout-identical children ride without
-    // it, others are loud until the map leg lands.
-    if transition_capture.is_some() || oc_transition_capture.is_some() {
-        if let Some(root_exec) = &root {
-            let root_desc = estate.es_relations[(root_exec.rti - 1) as usize]
-                .as_ref()
-                .expect("root relation opened")
-                .rd_att
-                .clone();
-            for r in &rels {
-                let child = estate.es_relations[(r.rti - 1) as usize]
-                    .as_ref()
-                    .expect("result relation opened");
-                if tupdesc::build_attrmap_by_name_if_req(
-                    estate.es_query_cxt,
-                    &root_desc,
-                    &child.rd_att,
-                    !child.rd_rel.relispartition,
-                )?
-                .is_some()
-                {
-                    panic!(
-                        "ExecSetupTransitionCaptureState (nodeModifyTable.c): transition                          capture over an attno-remapped child (ExecGetChildToRootMap) not ported"
-                    );
-                }
-            }
-        }
-    }
+    // Child-format tuples are converted to the root format for transition
+    // tables per C's ri_ChildToRootMap; the maps resolve lazily at the AR
+    // trigger sites (ensure_child_to_root / ensure_leaf_child_to_root).
 
     // mt_resultOidAttno: the inherited/partitioned-target dispatch column.
     let subplan_tlist = &node
@@ -631,6 +614,8 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_partition_check: Vec::new(),
         leaf_arbiters: Vec::new(),
         leaf_existing: Vec::new(),
+        leaf_child_to_root: Vec::new(),
+        leaf_wco: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
@@ -972,6 +957,7 @@ fn init_result_rel<'mcx>(
         trig_old_slot: None,
         trig_when: ::trigger::TriggerWhenCache::default(),
         all_updated_cols: None,
+        child_to_root: None,
         generated_exprs: None,
         virtual_nn_exprs: None,
         merge,
@@ -2243,6 +2229,8 @@ fn merge_update_act<'mcx>(
             ensure_all_updated_cols(mt, estate, false)?;
         }
         let result_rti = mt.rel().rti;
+        ensure_child_to_root(mt, estate)?;
+        let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let ModifyTableState {
             rels, cur, transition_capture, oc_transition_capture, operation, ..
         } = mt;
@@ -2262,9 +2250,15 @@ fn merge_update_act<'mcx>(
         let rel = estate.es_relations[(result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
+        let root_rel = root_rti.map(|rti| {
+            estate.es_relations[(rti - 1) as usize]
+                .as_ref()
+                .expect("root relation opened")
+        });
+        let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, Some(&td), None, None, Some(*tupleid), Some(ar_new_tid),
-            &recheck_indexes, tc, Some(&mut when), false,
+            &recheck_indexes, tc, Some(&mut when), false, conv.as_ref(), conv.as_ref(),
         )?;
     }
 
@@ -2306,20 +2300,26 @@ fn merge_delete_act<'mcx>(
     }
     if let Some(td) = mt.rel().trigdesc.clone() {
         let result_rti = mt.rel().rti;
+        ensure_child_to_root(mt, estate)?;
+        let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let ModifyTableState { rels, cur, transition_capture, .. } = mt;
-        let trig_when = &mut rels[*cur].trig_when;
+        let r = &mut rels[*cur];
         let EStateData { es_relations, es_query_cxt, .. } = &*estate;
         let rel = es_relations[(result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
+        let root_rel = root_rti.map(|rti| {
+            es_relations[(rti - 1) as usize].as_ref().expect("root relation opened")
+        });
+        let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
         let mut when = ::trigger::TriggerWhenEval {
             mcx: *es_query_cxt,
-            cache: trig_when,
+            cache: &mut r.trig_when,
             modified_cols: None,
         };
         ::trigger::ExecARDeleteTriggers(
             *es_query_cxt, rel, &td, *tupleid, transition_capture.as_ref(), Some(&mut when),
-            false,
+            false, conv.as_ref(),
         )?;
     }
     Ok(TM_Result::TM_Ok)
@@ -2507,6 +2507,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
         r.wco_exprs.clear();
         r.trigdesc = None;
         r.trig_fmgr = ::trigger::TriggerFmgrCache::default();
+        r.child_to_root = None;
         r.generated_exprs = None;
         r.virtual_nn_exprs = None;
         r.merge = None;
@@ -2526,6 +2527,8 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_slots.clear();
     mt.leaf_partition_check.clear();
     mt.leaf_existing.clear();
+    mt.leaf_child_to_root.clear();
+    mt.leaf_wco.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -3087,6 +3090,8 @@ fn exec_update<'mcx>(
             ensure_all_updated_cols(mt, estate, false)?;
         }
         let result_rti = mt.rel().rti;
+        ensure_child_to_root(mt, estate)?;
+        let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let ModifyTableState {
             rels, cur, transition_capture, oc_transition_capture, operation, ..
         } = mt;
@@ -3106,9 +3111,15 @@ fn exec_update<'mcx>(
         let rel = estate.es_relations[(result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
+        let root_rel = root_rti.map(|rti| {
+            estate.es_relations[(rti - 1) as usize]
+                .as_ref()
+                .expect("root relation opened")
+        });
+        let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, Some(&td), None, None, Some(*tupleid), Some(ar_new_tid),
-            &recheck_indexes, tc, Some(&mut when), false,
+            &recheck_indexes, tc, Some(&mut when), false, conv.as_ref(), conv.as_ref(),
         )?;
     }
 
@@ -3431,23 +3442,23 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
         .expect("root relation opened");
     let dst_rel = router.as_ref().expect("routed insert has a router").leaf_rel(dst_idx);
 
-    // The queued event's tuples must be in the root's format (C converts via
-    // ExecGetChildToRootMap before the RI checks); attno-remapped leaves need
-    // that conversion, which the port does not carry here — loud.
-    if tupdesc::build_attrmap_by_name_if_req(mcx, &src_rel.rd_att, &root_rel.rd_att, false)?
-        .is_some()
-        || tupdesc::build_attrmap_by_name_if_req(mcx, &dst_rel.rd_att, &root_rel.rd_att, false)?
-            .is_some()
-    {
-        return Err(Box::new(
-            PgError::error(
-                "ExecCrossPartitionUpdateForeignKey (nodeModifyTable.c): FK enforcement \
-                 across attno-remapped partitions not ported"
-                    .to_string(),
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
+    // The queued event's tuples must be in the root's format: C converts via
+    // ExecGetChildToRootMap before the RI checks (AfterTriggerSaveEvent,
+    // trigger.c:6384-6410); the specs carry the leaf->root maps.
+    let src_map =
+        tupdesc::build_attrmap_by_name_if_req(mcx, &src_rel.rd_att, &root_rel.rd_att, false)?;
+    let dst_map =
+        tupdesc::build_attrmap_by_name_if_req(mcx, &dst_rel.rd_att, &root_rel.rd_att, false)?;
+    let src_conv = src_map.as_deref().map(|map| ::trigger::ChildToRoot {
+        map,
+        child_desc: src_rel.rd_att.as_ref(),
+        root_desc: root_rel.rd_att.as_ref(),
+    });
+    let dst_conv = dst_map.as_deref().map(|map| ::trigger::ChildToRoot {
+        map,
+        child_desc: dst_rel.rd_att.as_ref(),
+        root_desc: root_rel.rd_att.as_ref(),
+    });
 
     let mut when = ::trigger::TriggerWhenEval {
         mcx,
@@ -3466,6 +3477,8 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
         None,
         Some(&mut when),
         true,
+        src_conv.as_ref(),
+        dst_conv.as_ref(),
     )
 }
 
@@ -3600,27 +3613,34 @@ fn exec_delete<'mcx>(
     if mt.rel().trigdesc.is_some() || moved_capture {
         let td = mt.rel().trigdesc.clone();
         let result_rti = mt.rel().rti;
+        ensure_child_to_root(mt, estate)?;
+        let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let ModifyTableState { rels, cur, transition_capture, .. } = mt;
-        let trig_when = &mut rels[*cur].trig_when;
+        let r = &mut rels[*cur];
         let EStateData { es_relations, es_query_cxt, .. } = &*estate;
         let rel = es_relations[(result_rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
+        let root_rel = root_rti.map(|rti| {
+            es_relations[(rti - 1) as usize].as_ref().expect("root relation opened")
+        });
+        let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
         let mut when = ::trigger::TriggerWhenEval {
             mcx: *es_query_cxt,
-            cache: trig_when,
+            cache: &mut r.trig_when,
             modified_cols: None,
         };
         if moved_capture {
             ::trigger::ExecARUpdateTriggers(
                 *es_query_cxt, rel, td.as_deref(), None, None, Some(*tupleid), None,
-                &[], transition_capture.as_ref(), Some(&mut when), false,
+                &[], transition_capture.as_ref(), Some(&mut when), false, conv.as_ref(), None,
             )?;
         }
         let ar_tcs = if moved_capture { None } else { transition_capture.as_ref() };
         if let Some(td) = td.as_deref() {
             ::trigger::ExecARDeleteTriggers(
                 *es_query_cxt, rel, td, *tupleid, ar_tcs, Some(&mut when), changing_part,
+                conv.as_ref(),
             )?;
         }
     }
@@ -4357,6 +4377,143 @@ fn resolve_leaf_trigdesc<'mcx>(
     Ok(mt.leaf_trigdesc[idx].clone().expect("just resolved"))
 }
 
+// ExecGetChildToRootMap (execUtils.c:1300): resolve and cache the current
+// result relation's child->root attmap; the root itself (and layout-matched
+// children) resolve to None.
+fn ensure_child_to_root<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<()> {
+    if mt.rel().child_to_root.is_some() {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let map = match (&mt.root, mt.insert_target_root) {
+        (Some(root), false) => {
+            let child = estate.es_relations[(mt.rels[mt.cur].rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let root_rel = estate.es_relations[(root.rti - 1) as usize]
+                .as_ref()
+                .expect("root relation opened");
+            tupdesc::build_attrmap_by_name_if_req(mcx, &child.rd_att, &root_rel.rd_att, false)?
+        }
+        _ => None,
+    };
+    mt.rel_mut().child_to_root = Some(map);
+    Ok(())
+}
+
+// The routed-leaf leg of ExecGetChildToRootMap: leaves route from mt.rel()
+// (the root target, or the CP update's re-route root).
+fn ensure_leaf_child_to_root<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<()> {
+    if mt.leaf_child_to_root[idx].is_some() {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let map = {
+        let root = estate.es_relations[(mt.rel().rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let leaf = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+        tupdesc::build_attrmap_by_name_if_req(mcx, &leaf.rd_att, &root.rd_att, false)?
+    };
+    mt.leaf_child_to_root[idx] = Some(map);
+    Ok(())
+}
+
+// ExecInitPartitionInfo's WCO leg (execPartition.c:556-615): the first WCO
+// list's Vars translated to the routed leaf's attnos (map_variable_attnos
+// over build_attrmap_by_name(leaf, first)) and compiled against the leaf
+// layout — the check runs on the leaf-format tuple, so the failing-row
+// DETAIL prints in the leaf's column order as C's does.
+fn resolve_leaf_wco<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<()> {
+    if mt.leaf_wco[idx].is_some() {
+        return Ok(());
+    }
+    let node = mt.plan;
+    let mcx = estate.es_query_cxt;
+    let mut wcos: mcx::PgVec<'mcx, WcoExpr<'mcx>> = mcx::PgVec::new_in(mcx);
+    if !node.withCheckOptionLists.is_nil() {
+        let first_rti = mt.rels[0].rti;
+        let (leaf_reltype, attmap) = {
+            let first = estate.es_relations[(first_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let leaf = mt.router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+            let attmap = tupdesc::build_attrmap_by_name_if_req(
+                mcx,
+                &leaf.rd_att,
+                &first.rd_att,
+                false,
+            )?;
+            (leaf.rd_rel.reltype, attmap)
+        };
+        let params = estate.param_bind();
+        let wlist = node
+            .withCheckOptionLists
+            .nth(0)
+            .as_list()
+            .expect("withCheckOptionLists cell is a List");
+        for wco_node in wlist {
+            let wco = wco_node.as_with_check_option().expect("WCO cell");
+            let qual = wco
+                .qual
+                .expect("planned WCO has a qual")
+                .as_list()
+                .expect("WCO qual is an implicit-AND List after preprocessing");
+            let mut mapped = types_nodes::list::NodeList::nil();
+            for q in qual {
+                let n = match &attmap {
+                    None => q,
+                    Some(map) => {
+                        rewrite_manip::map_variable_attnos(
+                            mcx, q, first_rti as i32, 0, map, leaf_reltype,
+                        )?
+                        .0
+                    }
+                };
+                mapped.lappend(mcx, n)?;
+            }
+            let state = execexpr::exec_init_qual(mcx, &mapped, params)?
+                .expect("planner dropped constant-true WCO quals");
+            wcos.push(WcoExpr {
+                kind: wco.kind,
+                relname: wco.relname.expect("WCO relname"),
+                polname: wco.polname,
+                state,
+            });
+        }
+    }
+    mt.leaf_wco[idx] = Some(wcos);
+    Ok(())
+}
+
+// Assemble the trigger crate's conversion spec from a resolved cache slot.
+#[inline]
+fn child_to_root_spec<'a, 'mcx>(
+    cache: &'a Option<Option<mcx::PgVec<'mcx, i16>>>,
+    child: &'a Relation<'mcx>,
+    root: Option<&'a Relation<'mcx>>,
+) -> Option<::trigger::ChildToRoot<'a, 'mcx>> {
+    match (cache.as_ref().expect("child_to_root resolved"), root) {
+        (Some(map), Some(root_rel)) => Some(::trigger::ChildToRoot {
+            map,
+            child_desc: child.rd_att.as_ref(),
+            root_desc: root_rel.rd_att.as_ref(),
+        }),
+        _ => None,
+    }
+}
+
 // The ExecARInsertTriggers call of ExecInsert: routed inserts fire the leaf's
 // (cloned) triggers with the leaf relation (C: resultRelInfo is the leaf);
 // transition capture always uses the root's state.
@@ -4377,20 +4534,36 @@ fn ar_insert_triggers<'mcx>(
     }
     let new_tid = estate.es_tupleTable[slot_id.0 as usize].base().tts_tid;
     let result_rti = mt.rel().rti;
+    match leaf {
+        Some(ix) => ensure_leaf_child_to_root(mt, estate, ix)?,
+        None => ensure_child_to_root(mt, estate)?,
+    }
+    let root_rti = mt.root.as_ref().map(|r| r.rti);
     let ModifyTableState {
-        rels, cur, leaf_trig_when, transition_capture, router, operation, ..
+        rels, cur, leaf_trig_when, leaf_child_to_root, transition_capture, router, operation, ..
     } = mt;
-    let (rel, cache) = match leaf {
-        None => (
-            estate.es_relations[(result_rti - 1) as usize]
+    let (rel, cache, conv) = match leaf {
+        None => {
+            let r = &mut rels[*cur];
+            let rel = estate.es_relations[(result_rti - 1) as usize]
                 .as_ref()
-                .expect("result relation opened"),
-            &mut rels[*cur].trig_when,
-        ),
-        Some(ix) => (
-            router.as_ref().expect("routed insert has a router").leaf_rel(ix),
-            &mut leaf_trig_when[ix],
-        ),
+                .expect("result relation opened");
+            let root_rel = root_rti.map(|rti| {
+                estate.es_relations[(rti - 1) as usize]
+                    .as_ref()
+                    .expect("root relation opened")
+            });
+            let conv = child_to_root_spec(&r.child_to_root, rel, root_rel);
+            (rel, &mut r.trig_when, conv)
+        }
+        Some(ix) => {
+            let rel = router.as_ref().expect("routed insert has a router").leaf_rel(ix);
+            let root_rel = estate.es_relations[(result_rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let conv = child_to_root_spec(&leaf_child_to_root[ix], rel, Some(root_rel));
+            (rel, &mut leaf_trig_when[ix], conv)
+        }
     };
     let mut when = ::trigger::TriggerWhenEval { mcx, cache, modified_cols: None };
     // The INSERT half of a cross-partition UPDATE files the row into the
@@ -4402,7 +4575,7 @@ fn ar_insert_triggers<'mcx>(
     {
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, td.as_deref(), None, None, None, Some(new_tid), &[],
-            transition_capture.as_ref(), Some(&mut when), false,
+            transition_capture.as_ref(), Some(&mut when), false, None, conv.as_ref(),
         )?;
         ar_tcs = None;
     }
@@ -4414,6 +4587,7 @@ fn ar_insert_triggers<'mcx>(
         recheck_indexes,
         ar_tcs,
         Some(&mut when),
+        conv.as_ref(),
     )
 }
 
@@ -4518,6 +4692,8 @@ fn exec_insert<'mcx>(
                 mt.leaf_partition_check.push(None);
                 mt.leaf_arbiters.push(None);
                 mt.leaf_existing.push(None);
+                mt.leaf_child_to_root.push(None);
+                mt.leaf_wco.push(None);
             }
             Some(idx)
         } else {
@@ -4582,6 +4758,14 @@ fn exec_insert<'mcx>(
         }
     }
 
+    // Routed leaves check the first WCO list translated to their own attnos
+    // (C ExecInitPartitionInfo builds ri_WithCheckOptions per leaf).
+    if let Some(idx) = leaf_idx {
+        if !mt.plan.withCheckOptionLists.is_nil() {
+            resolve_leaf_wco(mt, estate, idx)?;
+        }
+    }
+
     {
         // Copy-out RTE/perminfo handles for the cold partition-constraint
         // error path (the destructure below pins *estate).
@@ -4601,6 +4785,7 @@ fn exec_insert<'mcx>(
             leaf_virtual_nn,
             leaf_generated,
             leaf_partition_check,
+            leaf_wco,
             ..
         } = &mut *mt;
         // A MERGE root INSERT over an inherited target runs entirely against
@@ -4653,33 +4838,27 @@ fn exec_insert<'mcx>(
             *indexes = Some(execindexing::ExecOpenIndices(mcx, rel, onconflict != 0)?);
         }
 
-        if !r.wco_exprs.is_empty() {
-            // A cross-partition-moving UPDATE (or MERGE UPDATE action)
-            // checks the target's UPDATE policies through the routed insert
-            // (C nodeModifyTable.c:1067-1090).
-            let wco_kind = if operation == CmdType::CMD_UPDATE
-                || (operation == CmdType::CMD_MERGE
-                    && merge_active_cmd == Some(CmdType::CMD_UPDATE))
-            {
-                WCOKind::WCO_RLS_UPDATE_CHECK
-            } else {
-                WCOKind::WCO_RLS_INSERT_CHECK
-            };
-            if remapped {
-                // The WCO programs are root-compiled; the pre-conversion
-                // root-format image at slot_id carries the same values —
-                // unless a leaf BR trigger rewrote the leaf tuple.
-                if leaf_has_br_insert {
-                    panic!(
-                        "ExecInsert: WCOs after a leaf BR trigger on an \
-                         attno-remapped partition not ported"
-                    );
-                }
-                let root_slot = &mut es_tupleTable[slot_id.0 as usize];
-                exec_with_check_options(&mut r.wco_exprs, wco_kind, root_slot)?;
-            } else {
-                let slot = &mut es_tupleTable[work_slot.0 as usize];
-                exec_with_check_options(&mut r.wco_exprs, wco_kind, slot)?;
+        // A routed leaf checks its own translated WCO list over the
+        // leaf-format tuple, post BR triggers (C ExecInsert -> ri_WithCheckOptions
+        // built by ExecInitPartitionInfo).
+        let wcos = match leaf_idx {
+            Some(idx) => leaf_wco[idx].as_mut(),
+            None => Some(&mut r.wco_exprs),
+        };
+        if let Some(wcos) = wcos {
+            if !wcos.is_empty() {
+                // Cross-partition-moving UPDATE (or MERGE UPDATE action) checks
+                // the target's UPDATE policies through the routed insert
+                // (C nodeModifyTable.c:1067-1090).
+                let wco_kind = if operation == CmdType::CMD_UPDATE
+                    || (operation == CmdType::CMD_MERGE
+                        && merge_active_cmd == Some(CmdType::CMD_UPDATE))
+                {
+                    WCOKind::WCO_RLS_UPDATE_CHECK
+                } else {
+                    WCOKind::WCO_RLS_INSERT_CHECK
+                };
+                exec_with_check_options(wcos, wco_kind, slot)?;
             }
         }
 
@@ -4907,26 +5086,31 @@ fn exec_insert<'mcx>(
         estate.es_tupleTable[slot_id.0 as usize].base_mut().tts_tid = tid;
     }
 
-    if work_slot != slot_id && mt.transition_capture.is_some() {
-        panic!(
-            "ExecInsert: transition capture on an attno-remapped partition \
-             (child-to-root map) not ported"
-        );
-    }
     let ar_leaf = leaf_idx;
     ar_insert_triggers(mt, estate, work_slot, &recheck_indexes, ar_leaf)?;
 
     // Parent-view CHECK OPTIONs are checked after inserting (the qual must see
-    // the actual row, post defaults/triggers).
-    if !mt.rel().wco_exprs.is_empty() {
-        let mcx = estate.es_query_cxt;
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-        let r = &mut mt.rels[mt.cur];
-        let rel = es_relations[(r.rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
+    // the actual row, post defaults/triggers); a routed leaf checks its
+    // translated list over the leaf-format tuple (C's leaf resultRelInfo).
+    match leaf_idx {
+        Some(idx) if mt.leaf_wco[idx].as_ref().is_some_and(|w| !w.is_empty()) => {
+            let mcx = estate.es_query_cxt;
+            let ModifyTableState { router, leaf_wco, .. } = &mut *mt;
+            let rel = router.as_ref().expect("routed insert has a router").leaf_rel(idx);
+            let slot = &mut estate.es_tupleTable[work_slot.0 as usize];
+            exec_view_check_options(mcx, leaf_wco[idx].as_mut().expect("checked"), rel, slot)?;
+        }
+        None if !mt.rel().wco_exprs.is_empty() => {
+            let mcx = estate.es_query_cxt;
+            let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+            let r = &mut mt.rels[mt.cur];
+            let rel = es_relations[(r.rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let slot = &mut es_tupleTable[slot_id.0 as usize];
+            exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot)?;
+        }
+        _ => {}
     }
 
     if mt.canSetTag {
@@ -4948,6 +5132,14 @@ fn exec_on_conflict_update<'mcx>(
 ) -> PgResult<OnConflictOutcome> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
+    // A routed leaf's WCOs are the first list translated to the leaf's
+    // attnos (C ExecInitPartitionInfo); layouts always match here (remapped
+    // ON CONFLICT is loud in the router).
+    if let Some(idx) = leaf {
+        if !mt.plan.withCheckOptionLists.is_nil() {
+            resolve_leaf_wco(mt, estate, idx)?;
+        }
+    }
     let existing_id = resolve_existing_slot(mt, estate, leaf);
     let (setvals_id, proj_id) = {
         let oc = mt.on_conflict.as_ref().expect("on_conflict state");
@@ -5063,11 +5255,18 @@ fn exec_on_conflict_update<'mcx>(
             clear_slot(estate, existing_id);
             return Ok(OnConflictOutcome::Done(None));
         }
-        if !mt.rel().wco_exprs.is_empty() {
-            let ModifyTableState { rels, cur, .. } = &mut *mt;
-            let r = &mut rels[*cur];
-            let scan = &mut estate.es_tupleTable[existing_id.0 as usize];
-            exec_with_check_options(&mut r.wco_exprs, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+        {
+            let ModifyTableState { rels, cur, leaf_wco, .. } = &mut *mt;
+            let wcos = match leaf {
+                Some(idx) => leaf_wco[idx].as_mut(),
+                None => Some(&mut rels[*cur].wco_exprs),
+            };
+            if let Some(wcos) = wcos {
+                if !wcos.is_empty() {
+                    let scan = &mut estate.es_tupleTable[existing_id.0 as usize];
+                    exec_with_check_options(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+                }
+            }
         }
         {
             let oc = mt.on_conflict.as_mut().expect("on_conflict state");
@@ -5075,7 +5274,7 @@ fn exec_on_conflict_update<'mcx>(
             executils::exec_project_with_subplans(set_proj, estate, ec, setvals_id)?;
         }
     } else {
-        let ModifyTableState { rels, cur, on_conflict, .. } = &mut *mt;
+        let ModifyTableState { rels, cur, on_conflict, leaf_wco, .. } = &mut *mt;
         let r = &mut rels[*cur];
         let oc = on_conflict.as_mut().expect("on_conflict state");
         let EStateData { es_tupleTable, .. } = &mut *estate;
@@ -5101,15 +5300,18 @@ fn exec_on_conflict_update<'mcx>(
             return Ok(OnConflictOutcome::Done(None));
         }
 
-        if !r.wco_exprs.is_empty() {
-            if leaf.is_some() {
-                // C translates the WCOs to the leaf's ResultRelInfo
-                // (ExecInitPartitionInfo); the routed-WCO map is unported.
-                panic!("ExecOnConflictUpdate: WCOs on a routed partition not ported");
+        // C evaluates the leaf's translated WCOs (ExecInitPartitionInfo)
+        // over the existing tuple.
+        let wcos = match leaf {
+            Some(idx) => leaf_wco[idx].as_mut(),
+            None => Some(&mut r.wco_exprs),
+        };
+        if let Some(wcos) = wcos {
+            if !wcos.is_empty() {
+                let scan = slots.scan.take().expect("scan slot");
+                exec_with_check_options(wcos, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
+                slots.scan = Some(scan);
             }
-            let scan = slots.scan.take().expect("scan slot");
-            exec_with_check_options(&mut r.wco_exprs, WCOKind::WCO_RLS_CONFLICT_CHECK, scan)?;
-            slots.scan = Some(scan);
         }
 
         let set_proj = oc.set_proj.as_deref_mut().expect("DO UPDATE projection");
@@ -5331,6 +5533,8 @@ fn exec_leaf_conflict_update<'mcx>(
             panic!("ExecOnConflictUpdate leaf update: UPDATE OF column triggers not ported");
         }
         let ar_new_tid = estate.es_tupleTable[proj_id.0 as usize].base().tts_tid;
+        // ON CONFLICT on attno-remapped leaves is loud upstream (ExecInsert's
+        // router), so this leaf's child->root map is always identity here.
         let ModifyTableState { router, leaf_trig_when, oc_transition_capture, .. } = &mut *mt;
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
         let mut when = ::trigger::TriggerWhenEval {
@@ -5350,6 +5554,8 @@ fn exec_leaf_conflict_update<'mcx>(
             oc_transition_capture.as_ref(),
             Some(&mut when),
             false,
+            None,
+            None,
         )?;
     }
 
@@ -6081,15 +6287,15 @@ mcx::forget_safe_struct!(
         ri_ReturningSlot, ri_AllNullSlot, ri_projectNewInfoValid, ri_RowIdAttNo,
         update_cols, update_colnos;
         indexes, project_returning, check_exprs, partition_check, trigdesc,
-        trig_fmgr, trig_old_slot, trig_when, all_updated_cols, generated_exprs,
-        virtual_nn_exprs, wco_exprs, merge },
+        trig_fmgr, trig_old_slot, trig_when, all_updated_cols, child_to_root,
+        generated_exprs, virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
-        leaf_slots, leaf_partition_check, leaf_arbiters, leaf_existing,
+        leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco, leaf_existing,
         leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },

@@ -1985,7 +1985,7 @@ fn finalize_plan<'mcx>(
                 finalize_primnode(run, root, rcq, &mut paramids)?;
             }
         }
-        NodeTag::T_SeqScan => {
+        NodeTag::T_SeqScan | NodeTag::T_NamedTuplestoreScan => {
             paramids.add_members(mcx, scan_params)?;
         }
         // Agg skips C's AGG_HASHED aggParams scan: no executor consumer yet.
