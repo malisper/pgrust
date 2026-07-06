@@ -353,7 +353,13 @@ pub fn worker_bgwhandle(
 
 pub fn ReinitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     WaitForParallelWorkersToFinish(id)?;
-    with_pcxt(id, |p| wait_for_workers_to_exit(p))?;
+    // The handles come out under a short borrow: the shutdown wait services
+    // interrupts, and ProcessParallelMessages walks pcxt_list — C's
+    // WaitForParallelWorkersToExit holds no lock here (parallel.c:904).
+    let handles: Vec<_> = with_pcxt(id, |p| {
+        p.workers.iter_mut().filter_map(|w| w.bgwhandle.take()).collect()
+    });
+    wait_for_workers_to_exit(handles)?;
 
     with_pcxt(id, |p| {
         let shared = p.shared.as_ref().expect("InitializeParallelDSM not run");
@@ -587,9 +593,10 @@ pub fn WaitForParallelWorkersToFinish(id: ParallelContextId) -> PgResult<()> {
     Ok(())
 }
 
-fn wait_for_workers_to_exit(pcxt: &mut ParallelContext) -> PgResult<()> {
-    for w in pcxt.workers.iter_mut() {
-        let Some(handle) = w.bgwhandle.take() else { continue };
+// Callers must NOT hold the PCXT_LIST borrow: the shutdown wait services
+// interrupts, which re-enter pcxt_list via ProcessParallelMessages.
+fn wait_for_workers_to_exit(handles: Vec<bgworker::BackgroundWorkerHandle>) -> PgResult<()> {
+    for handle in handles {
         match bgworker::WaitForBackgroundWorkerShutdown(&handle)? {
             bgworker::BgwHandleStatus::BGWH_POSTMASTER_DIED => {
                 return ereport(FATAL)
@@ -630,8 +637,9 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
             .retain(|(k, _)| *k != key);
     }
 
+    let handles: Vec<_> = pcxt.workers.iter_mut().filter_map(|w| w.bgwhandle.take()).collect();
     g::HoldInterrupts();
-    let result = wait_for_workers_to_exit(&mut pcxt);
+    let result = wait_for_workers_to_exit(handles);
     g::ResumeInterrupts();
     result
 }
