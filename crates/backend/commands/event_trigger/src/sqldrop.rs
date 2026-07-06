@@ -73,7 +73,16 @@ pub fn EventTriggerSQLDropAddObject(
             }
         }
     } else if object.classId == POLICY_RELATION_ID {
-        panic!("EventTriggerSQLDropAddObject: policies unported (rls lane)");
+        // C: a policy is temp if its table is temp; polrelid fetched the hard
+        // way (no lsyscache support), then namespace-only via subId 1.
+        let relid = policy_get_relid(mcx, object.objectId)?;
+        if OidIsValid(relid) {
+            let mut relobject = ObjectAddress::set(types_core::RELATION_RELATION_ID, relid);
+            relobject.objectSubId = 1;
+            if !obtain_object_name_namespace(mcx, &relobject, &mut obj)? {
+                return Ok(());
+            }
+        }
     } else if !obtain_object_name_namespace(mcx, object, &mut obj)? {
         return Ok(());
     }
@@ -241,6 +250,41 @@ fn trigger_get_relid(mcx: Mcx<'_>, trigger_oid: Oid) -> PgResult<Oid> {
         // SAFETY: fixed NOT NULL pg_trigger.tgrelid under its descriptor.
         relid = unsafe {
             types_tuple::heap_getattr(tup, Anum_pg_trigger_tgrelid as i32, rel.descr(), &mut isnull)
+        }
+        .as_oid();
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(types_rel::AccessShareLock)?;
+    Ok(relid)
+}
+
+const POLICY_OID_INDEX_ID: Oid = 3257;
+const Anum_pg_policy_oid: AttrNumber = 1;
+const Anum_pg_policy_polrelid: AttrNumber = 3;
+
+fn policy_get_relid(mcx: Mcx<'_>, policy_oid: Oid) -> PgResult<Oid> {
+    let rel = table::table_open(mcx, POLICY_RELATION_ID, types_rel::AccessShareLock)?;
+    let mut key = ScanKeyData::empty();
+    key.sk_attno = Anum_pg_policy_oid;
+    key.sk_strategy = BTEqualStrategyNumber;
+    key.sk_collation = types_core::C_COLLATION_OID;
+    key.sk_func = fmgr_seams::fmgr_info::call(types_core::fmgr::F_OIDEQ)
+        .unwrap_or_else(|e| panic!("fmgr_info(F_OIDEQ) failed: {e:?}"));
+    key.sk_argument = Datum::from_oid(policy_oid);
+    let mut scan = genam::systable_beginscan(
+        mcx,
+        &rel,
+        POLICY_OID_INDEX_ID,
+        true,
+        None,
+        core::slice::from_ref(&key),
+    )?;
+    let mut relid = types_core::InvalidOid;
+    if let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let mut isnull = false;
+        // SAFETY: fixed NOT NULL pg_policy.polrelid under its descriptor.
+        relid = unsafe {
+            types_tuple::heap_getattr(tup, Anum_pg_policy_polrelid as i32, rel.descr(), &mut isnull)
         }
         .as_oid();
     }

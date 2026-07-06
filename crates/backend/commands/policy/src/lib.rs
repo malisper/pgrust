@@ -307,7 +307,7 @@ fn stored_qual_rtable<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<No
     Ok(pstate.p_rtable)
 }
 
-pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgResult<()> {
+pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgResult<ObjectAddress> {
     let polcmd = parse_policy_command(stmt.cmd_name)?;
 
     if (polcmd == ACL_SELECT_CHR || polcmd == ACL_DELETE_CHR) && stmt.with_check.is_some() {
@@ -402,7 +402,7 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
 
     target_table.close(NoLock)?;
     pg_policy_rel.close(RowExclusiveLock)?;
-    Ok(())
+    Ok(myself)
 }
 
 fn record_role_dependencies<'mcx>(
@@ -453,7 +453,7 @@ fn policy_scan_exists<'mcx>(
     Ok(found)
 }
 
-pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResult<()> {
+pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResult<ObjectAddress> {
     let mut role_oids: Vec<Oid> = Vec::new();
     let replace_roles = !stmt.roles.is_nil();
     if replace_roles {
@@ -599,10 +599,10 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
 
     target_table.close(NoLock)?;
     pg_policy_rel.close(RowExclusiveLock)?;
-    Ok(())
+    Ok(myself)
 }
 
-pub fn rename_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
+pub fn rename_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<ObjectAddress> {
     let table_id = lock_table_for_policy(stmt.relation.expect("RenameStmt.relation"))?;
     let target_table = table::table_open(mcx, table_id, NoLock)?;
     let pg_policy_rel = table::table_open(mcx, POLICY_RELATION_ID, RowExclusiveLock)?;
@@ -635,6 +635,8 @@ pub fn rename_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<
         return Err(policy_not_found(subname, target_table.name()));
     };
     let td = pg_policy_rel.descr();
+    let (poid_d, _) = getattr(td, policy_tuple, Anum_pg_policy_oid);
+    let opoloid = poid_d.as_oid();
 
     let natts = td.natts as usize;
     let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
@@ -658,7 +660,7 @@ pub fn rename_policy<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<
 
     pg_policy_rel.close(RowExclusiveLock)?;
     target_table.close(NoLock)?;
-    Ok(())
+    Ok(ObjectAddress::set(POLICY_RELATION_ID, opoloid))
 }
 
 pub fn RemovePolicyById<'mcx>(mcx: Mcx<'mcx>, policy_id: Oid) -> PgResult<()> {
