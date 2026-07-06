@@ -242,14 +242,18 @@ pub fn RelationGetPartitionQual<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
 ) -> PgResult<NodeList<'mcx>> {
-    let _ = mcx;
     if !rel.rd_rel.relispartition {
         return Ok(NodeList::nil());
     }
     let q = generate_partition_qual(rel)?;
-    // SAFETY: the qual is a caller-owned clone in the leaked (never-freed)
+    // SAFETY: the cached qual lives in the leaked (never-freed)
     // PartDescContext, so shortening 'static to 'mcx only narrows the view.
-    Ok(unsafe { core::mem::transmute::<NodeList<'static>, NodeList<'mcx>>(q) })
+    let q = unsafe { core::mem::transmute::<NodeList<'static>, NodeList<'mcx>>(q) };
+    // C copyObject at every exit (partcache.c:352-353, 420): callers scribble
+    // varnos in place (plancat's ChangeVarNodes); a shallow clone lets that
+    // corrupt the cache, and map_partition_varattnos then skips the
+    // non-varno-1 ancestor Vars of every descendant's qual generated later.
+    rewrite_manip::copy_node_list(mcx, &q)
 }
 
 fn generate_partition_qual<'mcx>(rel: &Relation<'mcx>) -> PgResult<NodeList<'static>> {
