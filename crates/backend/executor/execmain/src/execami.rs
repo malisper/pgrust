@@ -375,7 +375,7 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
     }
     let chg: &types_nodes::bitmapset::Bitmapset<'mcx> = chg_owned.as_ref().unwrap_or(chg);
     if !estate.es_subplan_expr_states.is_empty() {
-        crate::nodesubplan::mark_hashed_subplans_stale(estate, chg);
+        crate::nodesubplan::mark_hashed_subplans_stale(estate, chg)?;
     }
 
     if let Some(id) = node.ps_expr_context() {
