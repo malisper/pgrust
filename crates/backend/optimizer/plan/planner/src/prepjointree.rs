@@ -1023,7 +1023,19 @@ fn pull_up_simple_subquery<'mcx>(
             run.root.append_rel_list.truncate(appinfo_snap);
             return Ok(false);
         }
-        (mcx::alloc_leak_in(mcx, sub_local)?, false)
+        if sub_local.hasSubLinks {
+            // Nested pull-ups hoisted sublink-bearing quals to this level;
+            // the functional offset passes below do not descend into SubLink
+            // bodies, so take the sealed in-place route (deep copy first: the
+            // cells copy still shares expression nodes with the plancache).
+            let sealed = Node::mk(mcx, sub_local)?;
+            let deep = rewrite_manip::copy_query_node(mcx, sealed.as_query().expect("Query"))?;
+            rewrite_manip::OffsetVarNodes(mcx, deep, rtoffset, 0)?;
+            rewrite_manip::IncrementVarSublevelsUp(deep, -1, 1)?;
+            (deep.as_query().expect("Query"), true)
+        } else {
+            (mcx::alloc_leak_in(mcx, sub_local)?, false)
+        }
     } else {
         (shared_sub, false)
     };

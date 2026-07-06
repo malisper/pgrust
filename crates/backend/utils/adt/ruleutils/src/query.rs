@@ -177,6 +177,11 @@ pub(crate) fn set_deparse_for_query<'mcx>(
         .iter()
         .map(|n| n.as_common_table_expr().expect("cteList entry"))
         .collect();
+    {
+        let mut ps = dpns.plan.borrow_mut();
+        ps.ret_old_alias = query.returningOldAlias;
+        ps.ret_new_alias = query.returningNewAlias;
+    }
     set_rtable_names(mcx, &mut dpns, parents, None)?;
     for _ in 0..dpns.rtable.len() {
         dpns.rtable_columns.push(DeparseColumns::default());
