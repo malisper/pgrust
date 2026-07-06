@@ -12,6 +12,7 @@ use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATA
 pub mod extended_query;
 pub mod main_loop;
 pub mod simple_query;
+pub mod stmt_trace;
 pub mod switches;
 #[cfg(test)]
 mod session_tests;
