@@ -4862,7 +4862,6 @@ fn exec_insert<'mcx>(
             }
         }
 
-        let slot = &mut es_tupleTable[work_slot.0 as usize];
         // ri_RootResultRelInfo: a routed leaf's constraint errors report
         // the failing row in the root's rowtype (execMain.c).
         let err_root_rel = match leaf_idx {
