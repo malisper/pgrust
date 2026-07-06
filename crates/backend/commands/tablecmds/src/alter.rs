@@ -5106,8 +5106,10 @@ fn ATTypedTableRecursion<'mcx>(
     Ok(())
 }
 
-// ATColumnChangeRequiresRewrite; the timestamptz<->timestamp UTC fastpath is
-// not carried (FuncExpr always rewrites, a strict superset of C's rewrites).
+// ATColumnChangeRequiresRewrite (tablecmds.c:14679).
+const F_TIMESTAMPTZ_TIMESTAMP: types_core::Oid = 2027;
+const F_TIMESTAMP_TIMESTAMPTZ: types_core::Oid = 2028;
+
 fn at_column_change_requires_rewrite(expr: Node<'_>, varattno: AttrNumber) -> PgResult<bool> {
     let mut e = expr;
     loop {
@@ -5124,6 +5126,18 @@ fn at_column_change_requires_rewrite(expr: Node<'_>, varattno: AttrNumber) -> Pg
             }
             e = d.arg;
             continue;
+        }
+        if let Some(f) = e.as_func_expr() {
+            match f.funcid {
+                F_TIMESTAMPTZ_TIMESTAMP | F_TIMESTAMP_TIMESTAMPTZ => {
+                    if adt_timestamp::TimestampTimestampTzRequiresRewrite() {
+                        return Ok(true);
+                    }
+                    e = f.args.nth(0);
+                    continue;
+                }
+                _ => return Ok(true),
+            }
         }
         return Ok(true);
     }

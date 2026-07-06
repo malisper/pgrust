@@ -984,10 +984,46 @@ fc_num_unary_res! {
     fc_numeric_inc: numeric_inc;
 }
 
-// C's numeric_support folds no-op typmod coercions into RelabelType; this
-// port answers NULL (plans keep the coercion FuncExpr — recorded divergence;
-// simplify_function's rewrite plumbing is live, see varchar_support).
-pub fn fc_numeric_support(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+// numeric_support (numeric.c): SupportRequestSimplify only — an unconstrained
+// destination typmod, or same-scale non-decreasing precision, becomes a
+// RelabelType (no rewrite).
+pub fn fc_numeric_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("numeric_support: SupportRequestSimplify without a FuncExpr"));
+    assert!(fexpr.args.len() >= 2);
+    let Some(c) = fexpr.args.nth(1).as_const() else {
+        return Ok(Datum::from_usize(0));
+    };
+    if c.constisnull {
+        return Ok(Datum::from_usize(0));
+    }
+    let source = fexpr.args.nth(0);
+    let old_typmod = nodes_core::expr_typmod(source);
+    let new_typmod = c.constvalue.as_i32();
+    let old_scale = crate::ops::numeric_typmod_scale(old_typmod);
+    let new_scale = crate::ops::numeric_typmod_scale(new_typmod);
+    let old_precision = crate::ops::numeric_typmod_precision(old_typmod);
+    let new_precision = crate::ops::numeric_typmod_precision(new_typmod);
+    if !crate::ops::is_valid_numeric_typmod(new_typmod)
+        || (crate::ops::is_valid_numeric_typmod(old_typmod)
+            && new_scale == old_scale
+            && new_precision >= old_precision)
+    {
+        let mcx = req.mcx.expect("numeric_support: request carries an mcx");
+        let ret = nodes_core::relabel_to_typmod(mcx, source, new_typmod)?;
+        return Ok(Datum::from_usize(ret.as_raw().as_ptr() as usize));
+    }
     Ok(Datum::from_usize(0))
 }
 

@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 types_relscan = { path = "../../access/index/relscan" }
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 rewrite_define = { path = "../../rewrite/rewrite_define" }
 reloptions = { path = "../../access/common/reloptions" }
 mcx = { path = "../../../_support/mcx" }
