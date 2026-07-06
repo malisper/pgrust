@@ -686,11 +686,14 @@ pub fn deconstruct_jointree<'mcx>(
     let no_incompat: types_pathnodes::Relids<'mcx> = None;
     for idx in 0..items.len() {
         let pending = core::mem::replace(&mut lateral_pending[idx], PgVec::new_in(mcx));
-        // C folds these into my_quals, so make_outerjoininfo's semijoin
-        // analysis sees postponed lateral clauses too.
+        // At a JoinExpr, C folds lateral_clauses into my_quals (initsplan.c
+        // deconstruct_distribute) so they are distributed as join quals with
+        // the join's sjinfo/ojscope/nonnullable — LEFT-join lateral
+        // correlation quals must become join clauses, not pushed-down
+        // filters above the join. Only FromExpr items distribute them plain.
         let mut pending_for_sjinfo: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
         pending_for_sjinfo.extend(pending.iter().copied());
-        if !pending.is_empty() {
+        if !pending.is_empty() && !matches!(&items[idx], JtItem::Sj { .. }) {
             let (qualscope, jdomain) = match &items[idx] {
                 JtItem::Plain { qualscope, jdomain, .. }
                 | JtItem::SecQuals { qualscope, jdomain, .. }
@@ -772,7 +775,7 @@ pub fn deconstruct_jointree<'mcx>(
                 inner_join_rels,
                 rtindex,
             } => {
-                let sjinfo_quals = if pending_for_sjinfo.is_empty() {
+                let my_quals = if pending_for_sjinfo.is_empty() {
                     *quals
                 } else {
                     let mut l = types_nodes::list::NodeList::nil();
@@ -798,7 +801,7 @@ pub fn deconstruct_jointree<'mcx>(
                     inner_join_rels,
                     *jointype,
                     *rtindex,
-                    sjinfo_quals,
+                    my_quals,
                 )?;
                 // Semijoins build an sjinfo but distribute their quals with
                 // ojscope = NULL and no nonnullable side (C's hybrid case).
@@ -830,7 +833,7 @@ pub fn deconstruct_jointree<'mcx>(
                 }
                 distribute_quals_to_rels(
                     run,
-                    *quals,
+                    my_quals,
                     qualscope,
                     &ojscope,
                     nonnullable,
