@@ -524,6 +524,7 @@ pub fn maybe_start_bgworkers() {
         if bgworker_should_start_now(bgworker::rw_start_time(idx)) {
             bgworker::set_rw_crashed_at(idx, 0);
 
+            bgworker::gtrace("pm.spawn.begin");
             if !StartBackgroundWorker(idx) {
                 with_pm(|pm| pm.start_worker_needed = true);
                 return;

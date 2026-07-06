@@ -269,7 +269,9 @@ fn gather_readnext(
 
 pub(crate) fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = init_small::globals::MyLatch().expect("gather leader without MyLatch");
+    ::parallel::gtrace("l.wait.begin");
     latch::WaitLatch(Some(latch), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event)?;
+    ::parallel::gtrace("l.wait.end");
     latch::ResetLatch(latch);
     Ok(())
 }

@@ -709,7 +709,7 @@ fn fatal_exit(e: &PgError) -> ! {
 
 // Launch-path phase timestamp, PGRUST_GATHER_TRACE-gated (duplicated from
 // parallel::gtrace — this crate sits below parallel in the dep graph).
-fn gtrace(phase: &str) {
+pub fn gtrace(phase: &str) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
         return;
