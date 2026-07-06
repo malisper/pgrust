@@ -137,6 +137,10 @@ enum SortVariant {
         enforce_unique: bool,
         unique_nulls_not_distinct: bool,
         index_name: std::rc::Rc<str>,
+        // Lifetime-erased like tup_desc: the caller keeps the index open for
+        // the life of the sort (unique-violation errdetail deparse); None in
+        // relation-less unit tests.
+        index_rel: Option<std::rc::Rc<types_rel::RelationData<'static>>>,
     },
     // tuplesort_begin_index_hash: (bucket, hash, TID) ordering off datum1.
     IndexHash {
@@ -421,6 +425,7 @@ impl CmpCtx<'_> {
             enforce_unique,
             unique_nulls_not_distinct,
             index_name,
+            index_rel,
         } = self.variant
         else {
             unreachable!()
@@ -452,8 +457,9 @@ impl CmpCtx<'_> {
         if *enforce_unique && !(!unique_nulls_not_distinct && equal_hasnull) {
             debug_assert!(!core::ptr::eq(tuple1, tuple2));
             let prev = self.unique_violation.take();
-            self.unique_violation
-                .set(Some(prev.unwrap_or_else(|| unique_violation_error(index_name))));
+            self.unique_violation.set(Some(prev.unwrap_or_else(|| {
+                unique_violation_error(index_name, index_rel.as_deref(), tup_desc, tuple1)
+            })));
         }
 
         // SAFETY: t_tid header read of live images (contract above).
@@ -464,15 +470,44 @@ impl CmpCtx<'_> {
     }
 }
 
-// BuildIndexValueDescription wiring deferred here (ported in genam): C's
-// key_desc==NULL arm ("Duplicate keys exist.") is emitted instead.
+// comparetup_index_btree (tuplesortvariants.c): errdetail via the
+// BuildIndexValueDescription seam; C's key_desc==NULL arm ("Duplicate keys
+// exist.") covers the hidden-key gates and the uninstalled-seam test paths.
 #[cold]
 #[inline(never)]
-fn unique_violation_error(index_name: &str) -> Box<PgError> {
+fn unique_violation_error(
+    index_name: &str,
+    index_rel: Option<&types_rel::RelationData<'static>>,
+    tup_desc: &TupleDescData<'static>,
+    tuple: nbtree::itup::ITup,
+) -> Box<PgError> {
+    let key_desc = index_rel
+        .filter(|_| genam_seams::build_index_value_description::is_installed())
+        .and_then(|rel| {
+            let natts = tup_desc.natts as usize;
+            let mut values = [Datum::null(); types_core::INDEX_MAX_KEYS as usize];
+            let mut isnull = [false; types_core::INDEX_MAX_KEYS as usize];
+            for i in 0..natts {
+                // SAFETY: live tuplecontext image formed under this descriptor.
+                values[i] = unsafe {
+                    nbtree::itup::index_getattr(tuple, (i + 1) as i16, tup_desc, &mut isnull[i])
+                };
+            }
+            genam_seams::build_index_value_description::call(
+                rel,
+                &values[..natts],
+                &isnull[..natts],
+            )
+            .unwrap_or(None)
+        });
+    let detail = match key_desc {
+        Some(desc) => format!("Key {desc} is duplicated."),
+        None => "Duplicate keys exist.".to_string(),
+    };
     Box::new(
         PgError::error(format!("could not create unique index \"{index_name}\""))
             .with_sqlstate(ERRCODE_UNIQUE_VIOLATION)
-            .with_detail("Duplicate keys exist.".to_string()),
+            .with_detail(detail),
     )
 }
 
@@ -716,11 +751,13 @@ impl Tuplesort {
                 comparator,
             });
         }
-        // SAFETY: lifetime erasure on the relcache tupdesc; the caller keeps
-        // the index relation open for the life of the sort (C's implicit
-        // contract — nbtsort holds it open across the whole build).
+        // SAFETY (both): lifetime erasure on the relcache tupdesc/entry; the
+        // caller keeps the index relation open for the life of the sort (C's
+        // implicit contract — nbtsort holds it open across the whole build).
         let tup_desc: std::rc::Rc<TupleDescData<'static>> =
             unsafe { mem::transmute(index_rel.rd_att.clone()) };
+        let index_rel_erased: std::rc::Rc<types_rel::RelationData<'static>> =
+            unsafe { mem::transmute(index_rel.data_rc().clone()) };
         Ok(Self::begin_index_with_keys(
             tup_desc,
             &keys,
@@ -728,6 +765,7 @@ impl Tuplesort {
             enforce_unique,
             unique_nulls_not_distinct,
             index_rel.name(),
+            Some(index_rel_erased),
             work_mem,
             sortopt,
         ))
@@ -758,11 +796,13 @@ impl Tuplesort {
                 comparator,
             });
         }
-        // SAFETY: lifetime erasure on the relcache tupdesc; the caller keeps
-        // the index relation open for the life of the sort (gistbuild holds
-        // it open across the whole build, as C does).
+        // SAFETY (both): lifetime erasure on the relcache tupdesc/entry; the
+        // caller keeps the index relation open for the life of the sort
+        // (gistbuild holds it open across the whole build, as C does).
         let tup_desc: std::rc::Rc<TupleDescData<'static>> =
             unsafe { mem::transmute(index_rel.rd_att.clone()) };
+        let index_rel_erased: std::rc::Rc<types_rel::RelationData<'static>> =
+            unsafe { mem::transmute(index_rel.data_rc().clone()) };
         Ok(Self::begin_index_with_keys(
             tup_desc,
             &keys,
@@ -770,6 +810,7 @@ impl Tuplesort {
             false,
             false,
             index_rel.name(),
+            Some(index_rel_erased),
             work_mem,
             sortopt,
         ))
@@ -853,6 +894,7 @@ impl Tuplesort {
         enforce_unique: bool,
         unique_nulls_not_distinct: bool,
         index_name: &str,
+        index_rel: Option<std::rc::Rc<types_rel::RelationData<'static>>>,
         work_mem: i32,
         sortopt: i32,
     ) -> Tuplesort {
@@ -869,6 +911,7 @@ impl Tuplesort {
                 enforce_unique,
                 unique_nulls_not_distinct,
                 index_name: std::rc::Rc::from(index_name),
+                index_rel,
             },
         )
     }

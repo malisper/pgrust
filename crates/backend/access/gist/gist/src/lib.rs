@@ -74,8 +74,10 @@ pub struct GistInsertAmCache<'mcx> {
 }
 
 /// gistinsert. `amcache` is the C ii_AmCache slot: the caller owns one
-/// Option per index per statement and passes it back on every call.
+/// Option per index per statement and passes it back on every call; `mcx`
+/// must outlive it (C ii_Context; holds INCLUDE indexes' truncated tupdesc).
 pub fn gistinsert<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
     r: &Relation<'mcx>,
     values: &[Datum],
     isnull: &[bool],
@@ -85,7 +87,7 @@ pub fn gistinsert<'mcx>(
 ) -> PgResult<bool> {
     if amcache.is_none() {
         *amcache = Some(GistInsertAmCache {
-            giststate: initGISTstate(r)?,
+            giststate: initGISTstate(mcx, r)?,
             temp: MemoryContext::new_bump("GiST temporary context"),
         });
     }

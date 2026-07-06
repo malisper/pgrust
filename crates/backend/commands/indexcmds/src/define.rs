@@ -1,6 +1,6 @@
 // DefineIndex (partitioned recursion included) + ComputeIndexAttrs +
 // CheckPredicate + ChooseIndex*Name* + IndexSetParentIndex (indexcmds.c).
-// Loud: CONCURRENTLY, non-btree INCLUDE, named opclasses, WITH options,
+// Loud: CONCURRENTLY, named opclasses, WITH options,
 // exclusion/WITHOUT OVERLAPS, index detach.
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, INDEXRELID};
 use catalog_index::{
@@ -127,7 +127,7 @@ pub fn CheckIndexCompatible<'mcx>(
     }
     let relationId = catalog_index::IndexGetRelation(mcx, old_id, false)?;
     let (accessMethodId, amname, amcanorder, _, _, _) =
-        resolve_index_am(Some(access_method_name));
+        resolve_index_am(Some(access_method_name))?;
 
     let numberOfAttributes = attribute_list.len();
     debug_assert!(numberOfAttributes > 0 && numberOfAttributes <= INDEX_MAX_KEYS as usize);
@@ -252,8 +252,15 @@ pub fn CheckIndexCompatible<'mcx>(
 
 // Closed-set AM name resolution (C: get_index_am_oid + GetIndexAmRoutine);
 // tuple is (oid, name, amcanorder, amcanunique, amcanmulticol, amcaninclude).
-fn resolve_index_am(name: Option<&str>) -> (Oid, &'static str, bool, bool, bool, bool) {
-    match name {
+// "rtree" substitutes gist with a NOTICE (indexcmds.c:848-854).
+fn resolve_index_am(name: Option<&str>) -> PgResult<(Oid, &'static str, bool, bool, bool, bool)> {
+    if name == Some("rtree") {
+        elog::ereport(types_error::NOTICE)
+            .errmsg("substituting access method \"gist\" for obsolete method \"rtree\"")
+            .finish(types_error::ErrorLocation::new("indexcmds.c", 0, "DefineIndex"))?;
+        return resolve_index_am(Some("gist"));
+    }
+    Ok(match name {
         Some("btree") => (BTREE_AM_OID, "btree", true, true, true, true),
         Some("hash") => (catalog_index::HASH_AM_OID, "hash", false, false, false, false),
         Some("gin") => (catalog_index::GIN_AM_OID, "gin", false, false, true, false),
@@ -261,7 +268,7 @@ fn resolve_index_am(name: Option<&str>) -> (Oid, &'static str, bool, bool, bool,
         Some("spgist") => (types_core::SPGIST_AM_OID, "spgist", false, false, true, true),
         Some("brin") => (types_core::BRIN_AM_OID, "brin", false, false, true, false),
         other => unported(&format!("DefineIndex: access method {other:?} (AMNAME lookup)")),
-    }
+    })
 }
 
 // Closed-set get_am_name (pg_am.dat) for error details.
@@ -382,26 +389,18 @@ pub fn DefineIndex<'mcx>(
     }
     let exclusion = !stmt.excludeOpNames.is_nil() || stmt.iswithoutoverlaps;
     let (accessMethodId, amname, amcanorder, amcanunique, amcanmulticol, amcaninclude) =
-        resolve_index_am(stmt.accessMethod);
+        resolve_index_am(stmt.accessMethod)?;
     if stmt.unique && !stmt.iswithoutoverlaps && !amcanunique {
         return Err(err(
             format!("access method \"{amname}\" does not support unique indexes"),
             types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
         ));
     }
-    if !stmt.indexIncludingParams.is_nil() {
-        if !amcaninclude {
-            return Err(err(
-                format!("access method \"{amname}\" does not support included columns"),
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-            ));
-        }
-        // NARROWED: gist truncates nonkey atts off internal tuples via a
-        // separate nonLeafTupdesc (initGISTstate louds); spgist's INCLUDE
-        // leaf-tuple lane is unverified. Both stay loud.
-        if amname != "btree" {
-            unported(&format!("DefineIndex: INCLUDE columns on {amname}"));
-        }
+    if !stmt.indexIncludingParams.is_nil() && !amcaninclude {
+        return Err(err(
+            format!("access method \"{amname}\" does not support included columns"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     }
     // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
     if exclusion && matches!(amname, "gin" | "brin") {
@@ -1792,7 +1791,7 @@ mod tests {
             ("spgist", true),
             ("brin", false),
         ] {
-            assert_eq!(super::resolve_index_am(Some(name)).5, caninclude, "{name}");
+            assert_eq!(super::resolve_index_am(Some(name)).unwrap().5, caninclude, "{name}");
         }
     }
 }

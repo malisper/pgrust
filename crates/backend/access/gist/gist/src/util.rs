@@ -282,12 +282,15 @@ pub fn gistFormTuple<'mcx>(
     let mut compatt = [Datum::null(); ::types_core::fmgr::INDEX_MAX_KEYS as usize];
     gistCompressValues(mcx, giststate, r, attdata, isnull, isleaf, &mut compatt[..natts])?;
 
+    // Non-leaf tuples form over the truncated descriptor: INCLUDE attrs are
+    // dropped (gistutil.c:583-585).
     let tupdesc = if isleaf {
         giststate.leafTupdesc.clone()
     } else {
         giststate.nonLeafTupdesc.clone()
     };
-    let mut res = index_form_tuple(mcx, &tupdesc, &compatt[..natts], isnull)?;
+    let n = tupdesc.natts as usize;
+    let mut res = index_form_tuple(mcx, &tupdesc, &compatt[..n], &isnull[..n])?;
     // SAFETY: fresh owned image, in-bounds 2-byte store at t_tid.ip_posid.
     unsafe {
         res.as_mut_ptr()

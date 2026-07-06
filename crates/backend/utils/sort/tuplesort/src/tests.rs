@@ -509,7 +509,7 @@ fn index_sort_int4_key_then_tid_with_nulls() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplesort::begin_index_with_keys(
-        desc.clone(), &[int32_key(1, false, false)], 1, false, false, "t_a_idx", 1024,
+        desc.clone(), &[int32_key(1, false, false)], 1, false, false, "t_a_idx", None, 1024,
         TUPLESORT_NONE,
     );
     let mut seed = 3u64;
@@ -541,7 +541,7 @@ fn index_sort_two_keys_then_tid() {
     let desc = int4_desc(mcx, 2);
     let keys = [int32_key(1, false, false), int32_key(2, false, false)];
     let mut ts = Tuplesort::begin_index_with_keys(
-        desc.clone(), &keys, 2, false, false, "t_ab_idx", 1024, TUPLESORT_NONE,
+        desc.clone(), &keys, 2, false, false, "t_ab_idx", None, 1024, TUPLESORT_NONE,
     );
     let mut seed = 9u64;
     let mut oracle = Vec::new();
@@ -563,7 +563,7 @@ fn index_sort_unique_violation_is_23505() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplesort::begin_index_with_keys(
-        desc, &[int32_key(1, false, false)], 1, true, false, "t_a_key", 1024, TUPLESORT_NONE,
+        desc, &[int32_key(1, false, false)], 1, true, false, "t_a_key", None, 1024, TUPLESORT_NONE,
     );
     for i in 0..10u16 {
         ts.putindextuplevalues(tid(0, i + 1), &[Datum::from_i32((i % 9) as i32)], &[false])
@@ -580,7 +580,7 @@ fn index_sort_unique_null_keys_do_not_collide() {
     let mcx = leaked_mcx();
     let desc = int4_desc(mcx, 1);
     let mut ts = Tuplesort::begin_index_with_keys(
-        desc.clone(), &[int32_key(1, false, false)], 1, true, false, "t_a_key", 1024,
+        desc.clone(), &[int32_key(1, false, false)], 1, true, false, "t_a_key", None, 1024,
         TUPLESORT_NONE,
     );
     for i in 0..8u16 {
@@ -629,7 +629,7 @@ fn index_sort_text_c_collation_memcmp_order() {
         comparator: SortComparator::TextC,
     };
     let mut ts = Tuplesort::begin_index_with_keys(
-        desc.clone(), &[key], 1, false, false, "t_txt_idx", 1024, TUPLESORT_NONE,
+        desc.clone(), &[key], 1, false, false, "t_txt_idx", None, 1024, TUPLESORT_NONE,
     );
     let words: Vec<&[u8]> = vec![
         b"pear", b"apple", b"Banana", b"apples", b"app", b"zebra", b"", b"apple", b"\xc3\xa9clair",

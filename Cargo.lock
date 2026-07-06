@@ -15312,6 +15312,7 @@ dependencies = [
  "exectuples",
  "fd",
  "fmgr_seams",
+ "genam_seams",
  "guc_tables",
  "heaptuple",
  "init_small",
