@@ -332,7 +332,10 @@ pub fn CopyFrom<'mcx>(
     rel: &Relation<'mcx>,
 ) -> PgResult<u64> {
     let relkind = rel.rd_rel.relkind;
-    if relkind != RELKIND_RELATION && relkind != types_rel::RELKIND_PARTITIONED_TABLE {
+    if relkind != RELKIND_RELATION
+        && relkind != types_rel::RELKIND_FOREIGN_TABLE
+        && relkind != types_rel::RELKIND_PARTITIONED_TABLE
+    {
         return Err(cannot_copy_to_relkind(rel));
     }
     // New-in-transaction storage: probing the FSM is a waste of time
@@ -350,6 +353,12 @@ pub fn CopyFrom<'mcx>(
         if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
             return Err(Box::new(
                 PgError::error("cannot perform COPY FREEZE on a partitioned table")
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+            return Err(Box::new(
+                PgError::error("cannot perform COPY FREEZE on a foreign table")
                     .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
@@ -372,6 +381,10 @@ pub fn CopyFrom<'mcx>(
             ));
         }
         ti_options |= tableam_vocab::TABLE_INSERT_FROZEN;
+    }
+    // C dispatches through ri_FdwRoutine here (BeginForeignInsert).
+    if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        unported("FROM into foreign tables (FDW lane)");
     }
     let trigdesc = if rel.rd_hastriggers {
         relcache::RelationGetTriggerDesc(rel.rd_id)?
@@ -1140,7 +1153,6 @@ fn cannot_copy_to_relkind(rel: &Relation<'_>) -> Box<PgError> {
         ),
         b'm' => (format!("cannot copy to materialized view \"{name}\""), None),
         b'S' => (format!("cannot copy to sequence \"{name}\""), None),
-        b'f' => unported("FROM into foreign tables (FDW lane)"),
         _ => (format!("cannot copy to non-table relation \"{name}\""), None),
     };
     let mut e = PgError::error(msg).with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE);
