@@ -10,9 +10,14 @@ use types_rel::AccessShareLock;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::NameData;
 
-// C's PG_VERSION_STR carries platform/compiler detail; the version core is
-// the parity-relevant fragment. main_entry.rs's banner should reference this.
-pub const PG_VERSION_STR: &str = "PostgreSQL 18.3 (pgrust)";
+// Shaped like C's PG_VERSION_STR ("PostgreSQL <ver> on <triple>, ..."):
+// collate.linux.utf8 and infinite_recurse gate on version() ~ platform
+// regexes ('linux-gnu'), so the target triple must appear.
+pub const PG_VERSION_STR: &str = concat!(
+    "PostgreSQL 18.3 (pgrust) on ",
+    env!("PGRUST_TARGET_TRIPLE"),
+    ", 64-bit"
+);
 
 const DESCRIPTION_RELATION_ID: Oid = 2609;
 const DESCRIPTION_OBJ_INDEX_ID: Oid = 2675;
