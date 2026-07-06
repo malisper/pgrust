@@ -13936,6 +13936,7 @@ dependencies = [
  "elog",
  "execmain",
  "execmain_seams",
+ "execreplication_seams",
  "exectuples",
  "fd",
  "fmgr_core",
