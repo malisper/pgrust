@@ -2292,6 +2292,19 @@ fn replace_var_expr_su<'mcx>(
                 },
             )?))
         }
+        NodeTag::T_CurrentOfExpr => {
+            let c = node.as_current_of_expr().expect("CurrentOfExpr");
+            if sublevels_up == 0 && c.cvarno == varno as u32 {
+                // C replace_rte_variables_mutator (rewriteManip.c): a WHERE
+                // CURRENT OF that turns out to apply to a view being pulled up.
+                return Err(types_error::PgError::error(
+                    "WHERE CURRENT OF on a view is not implemented".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .into());
+            }
+            Ok(None)
+        }
         NodeTag::T_Query if sublevels_up > 0 => panic!(
             "replace_rte_variables (rewriteManip.c): bare Query expression \
              during pull-up; sublevel-tracking arm unported"
