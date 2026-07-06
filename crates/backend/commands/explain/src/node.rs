@@ -65,6 +65,8 @@ pub fn ExplainPrintPlan<'mcx>(
     }
     es.rtable_names = names;
     es.deparse_cxt = Some(ruleutils::deparse_context_for_plan_tree(mcx, pstmt, rtable_names)?);
+    // plan_ids are per-PlannedStmt: a rewrite product restarts the dedup set.
+    es.printed_subplans = Bitmapset::empty();
     es.rtable_size = pstmt.rtable.len() as i32;
     for rte in pstmt.rtable.iter() {
         if rte.as_range_tbl_entry().expect("rtable holds RTEs").rtekind == RTEKind::RTE_GROUP {
