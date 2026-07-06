@@ -133,6 +133,13 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                         })
                     };
                 }
+                types_nodes::JoinType::JOIN_FULL => {
+                    // can't do anything with full-join quals
+                    // SAFETY: as above.
+                    unsafe {
+                        newj.with_mut::<types_nodes::JoinExpr, _>(|nj| nj.quals = j.quals)
+                    };
+                }
                 other => panic!(
                     "pull_up_sublinks_jointree_recurse (prepjointree.c): {other:?} arm"
                 ),
@@ -1243,7 +1250,10 @@ fn build_subplan<'mcx>(
         // (SS_replace_correlation_vars leaves their arguments alone).
         let arg = if matches!(
             arg.node_tag(),
-            NodeTag::T_PlaceHolderVar | NodeTag::T_Aggref | NodeTag::T_GroupingFunc
+            NodeTag::T_PlaceHolderVar
+                | NodeTag::T_Aggref
+                | NodeTag::T_GroupingFunc
+                | NodeTag::T_ReturningExpr
         ) {
             ss_process_sublinks(run, arg, false)?
         } else {
@@ -1813,6 +1823,15 @@ fn replace_correlation_vars_mutator<'mcx>(
     if let Some(g) = node.as_grouping_func() {
         if g.agglevelsup > 0 {
             return Ok(Some(crate::paramassign::replace_outer_grouping(run, g, node)?));
+        }
+    }
+    if let Some(r) = node.as_returning_expr() {
+        if r.retlevelsup > 0 {
+            return Ok(Some(crate::paramassign::replace_outer_returning(
+                run,
+                r.retlevelsup as u32,
+                node,
+            )?));
         }
     }
     if let Some(m) = node.as_merge_support_func() {

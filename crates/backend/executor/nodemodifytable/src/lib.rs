@@ -508,6 +508,7 @@ pub fn exec_init_modify_table<'mcx>(
     if !node.returningLists.is_nil()
         || node.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
         || !node.mergeActionLists.is_nil()
+        || !node.withCheckOptionLists.is_nil()
     {
         node_ecxt = Some(estate.create_expr_context());
     }
@@ -1257,13 +1258,17 @@ pub fn exec_modify_table<'mcx>(
                     // triggers (C ExecUpdateEpilogue's WCO_VIEW_CHECK leg).
                     if !mt.rel().wco_exprs.is_empty() {
                         let mcx = estate.es_query_cxt;
-                        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                        let ecxt = mt.node_ecxt;
                         let r = &mut mt.rels[mt.cur];
-                        let rel = es_relations[(r.rti - 1) as usize]
-                            .as_ref()
-                            .expect("result relation opened");
-                        let s = &mut es_tupleTable[slot.0 as usize];
-                        exec_view_check_options(mcx, &mut r.wco_exprs, rel, s, None)?;
+                        let rti = r.rti;
+                        exec_view_check_options(
+                            mcx,
+                            estate,
+                            ecxt,
+                            &mut r.wco_exprs,
+                            slot,
+                            WcoRel::Rti { rti, root_rti: None },
+                        )?;
                     }
                     if mt.canSetTag {
                         estate.es_processed += 1;
@@ -1973,13 +1978,17 @@ fn exec_merge_matched_scan<'mcx>(
                     return Ok(MergeMatchedOutcome::Done(None));
                 }
                 if !mt.rel().wco_exprs.is_empty() {
-                    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+                    let ecxt = mt.node_ecxt;
                     let r = &mut mt.rels[mt.cur];
-                    let rel = es_relations[(r.rti - 1) as usize]
-                        .as_ref()
-                        .expect("result relation opened");
-                    let slot = &mut es_tupleTable[new_id.0 as usize];
-                    exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, None)?;
+                    let rti = r.rti;
+                    exec_view_check_options(
+                        mcx,
+                        estate,
+                        ecxt,
+                        &mut r.wco_exprs,
+                        new_id,
+                        WcoRel::Rti { rti, root_rti: None },
+                    )?;
                 }
                 TM_Result::TM_Ok
             }
@@ -2428,17 +2437,18 @@ fn merge_update_act<'mcx>(
     // Parent-view CHECK OPTIONs are checked after updating (the qual must see
     // the actual row, post defaults/triggers) — C's shared WCO_VIEW_CHECK leg.
     if !mt.rel().wco_exprs.is_empty() {
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ecxt = mt.node_ecxt;
         let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let r = &mut mt.rels[mt.cur];
-        let rel = es_relations[(r.rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let root_rel = root_rti.map(|rti| {
-            es_relations[(rti - 1) as usize].as_ref().expect("root relation opened")
-        });
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, root_rel)?;
+        let rti = r.rti;
+        exec_view_check_options(
+            mcx,
+            estate,
+            ecxt,
+            &mut r.wco_exprs,
+            slot_id,
+            WcoRel::Rti { rti, root_rti },
+        )?;
     }
     Ok(MergeUpdActRes::Tm(TM_Result::TM_Ok))
 }
@@ -3290,17 +3300,18 @@ fn exec_update<'mcx>(
     // the actual row, post defaults/triggers).
     if !mt.rel().wco_exprs.is_empty() {
         let mcx = estate.es_query_cxt;
-        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ecxt = mt.node_ecxt;
         let root_rti = mt.root.as_ref().map(|rr| rr.rti);
         let r = &mut mt.rels[mt.cur];
-        let rel = es_relations[(r.rti - 1) as usize]
-            .as_ref()
-            .expect("result relation opened");
-        let root_rel = root_rti.map(|rti| {
-            es_relations[(rti - 1) as usize].as_ref().expect("root relation opened")
-        });
-        let slot = &mut es_tupleTable[slot_id.0 as usize];
-        exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, root_rel)?;
+        let rti = r.rti;
+        exec_view_check_options(
+            mcx,
+            estate,
+            ecxt,
+            &mut r.wco_exprs,
+            slot_id,
+            WcoRel::Rti { rti, root_rti },
+        )?;
     }
 
     if mt.canSetTag {
@@ -4661,8 +4672,10 @@ fn resolve_leaf_wco<'mcx>(
                 };
                 mapped.lappend(mcx, n)?;
             }
-            let state = execexpr::exec_init_qual(mcx, &mapped, params)?
-                .expect("planner dropped constant-true WCO quals");
+            let state = executils::with_subplan_compile_env(estate, |env| {
+                execexpr::exec_init_qual_subplans(mcx, &mapped, params, env)
+            })?
+            .expect("planner dropped constant-true WCO quals");
             wcos.push(WcoExpr {
                 kind: wco.kind,
                 relname: wco.relname.expect("WCO relname"),
@@ -4794,13 +4807,17 @@ fn exec_insert<'mcx>(
         // Parent-view CHECK OPTIONs still apply after INSTEAD OF triggers
         // (C ExecInsert's shared WCO_VIEW_CHECK leg).
         if !mt.rel().wco_exprs.is_empty() {
-            let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+            let ecxt = mt.node_ecxt;
             let r = &mut mt.rels[mt.cur];
-            let rel = es_relations[(r.rti - 1) as usize]
-                .as_ref()
-                .expect("result relation opened");
-            let slot = &mut es_tupleTable[slot_id.0 as usize];
-            exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, None)?;
+            let rti = r.rti;
+            exec_view_check_options(
+                mcx,
+                estate,
+                ecxt,
+                &mut r.wco_exprs,
+                slot_id,
+                WcoRel::Rti { rti, root_rti: None },
+            )?;
         }
         if mt.canSetTag {
             estate.es_processed += 1;
@@ -5290,29 +5307,31 @@ fn exec_insert<'mcx>(
         Some(idx) if mt.leaf_wco[idx].as_ref().is_some_and(|w| !w.is_empty()) => {
             let mcx = estate.es_query_cxt;
             let target_rti = mt.rel().rti;
+            let ecxt = mt.node_ecxt;
             let ModifyTableState { router, leaf_wco, .. } = &mut *mt;
             let rel = router.as_ref().expect("routed insert has a router").leaf_rel(idx);
-            let root_rel = estate.es_relations[(target_rti - 1) as usize]
-                .as_ref()
-                .expect("result relation opened");
-            let slot = &mut estate.es_tupleTable[work_slot.0 as usize];
             exec_view_check_options(
                 mcx,
+                estate,
+                ecxt,
                 leaf_wco[idx].as_mut().expect("checked"),
-                rel,
-                slot,
-                Some(root_rel),
+                work_slot,
+                WcoRel::Leaf { rel, root_rti: target_rti },
             )?;
         }
         None if !mt.rel().wco_exprs.is_empty() => {
             let mcx = estate.es_query_cxt;
-            let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+            let ecxt = mt.node_ecxt;
             let r = &mut mt.rels[mt.cur];
-            let rel = es_relations[(r.rti - 1) as usize]
-                .as_ref()
-                .expect("result relation opened");
-            let slot = &mut es_tupleTable[slot_id.0 as usize];
-            exec_view_check_options(mcx, &mut r.wco_exprs, rel, slot, None)?;
+            let rti = r.rti;
+            exec_view_check_options(
+                mcx,
+                estate,
+                ecxt,
+                &mut r.wco_exprs,
+                slot_id,
+                WcoRel::Rti { rti, root_rti: None },
+            )?;
         }
         _ => {}
     }
@@ -6157,28 +6176,69 @@ fn exec_with_check_options<'mcx>(
     Ok(())
 }
 
-// ExecWithCheckOptions (execMain.c), WCO_VIEW_CHECK arm: needs the result
-// relation for the failing-row detail.
+// ExecWithCheckOptions WCO_VIEW_CHECK (execMain.c): a child result rel's
+// failing row is reported in the ROOT's rowtype (ri_RootResultRelInfo
+// reverse-attmap leg, as ExecConstraints).
+enum WcoRel<'a, 'mcx> {
+    Rti { rti: u32, root_rti: Option<u32> },
+    Leaf { rel: &'a Relation<'mcx>, root_rti: u32 },
+}
+
+// ExecWithCheckOptions (execMain.c), WCO_VIEW_CHECK arm.
 fn exec_view_check_options<'mcx>(
     mcx: mcx::Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: Option<executils::EcxtId>,
     wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
-    rel: &Relation<'mcx>,
-    slot: &mut SlotData<'mcx>,
-    // ExecWithCheckOptions WCO_VIEW_CHECK (execMain.c): a child result rel's
-    // failing row is reported in the ROOT's rowtype (ri_RootResultRelInfo
-    // reverse-attmap leg, as ExecConstraints).
-    root_rel: Option<&Relation<'mcx>>,
+    slot_id: ExecSlotId,
+    rel: WcoRel<'_, 'mcx>,
 ) -> PgResult<()> {
-    for w in wcos.iter_mut() {
+    let mut failing = None;
+    for (i, w) in wcos.iter_mut().enumerate() {
         if w.kind != WCOKind::WCO_VIEW_CHECK {
             continue;
         }
-        let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
-        if !execexpr::exec_qual(Some(&mut *w.state), &mut slots)? {
-            return Err(view_wco_violation(mcx, w.relname, rel, slot, root_rel));
+        pre_eval_param_deps(Some(&*w.state), estate)?;
+        let ok = if w.state.has_subplan() {
+            let ec = ecxt.expect("node ecxt created with WCO");
+            estate.reset_expr_context(ec);
+            {
+                let e = estate.ecxt_mut(ec);
+                e.ecxt_scantuple = Some(slot_id);
+                e.ecxt_innertuple = None;
+                e.ecxt_outertuple = None;
+            }
+            executils::exec_qual_with_subplans(Some(&mut *w.state), estate, ec)?
+        } else {
+            let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+            let mut slots = EvalSlots { scan: Some(slot), inner: None, outer: None };
+            execexpr::exec_qual(Some(&mut *w.state), &mut slots)?
+        };
+        if !ok {
+            failing = Some(i);
+            break;
         }
     }
-    Ok(())
+    let Some(i) = failing else { return Ok(()) };
+    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+    let (vrel, root_rel) = match rel {
+        WcoRel::Rti { rti, root_rti } => (
+            es_relations[(rti - 1) as usize].as_ref().expect("result relation opened"),
+            root_rti.map(|r| {
+                es_relations[(r - 1) as usize].as_ref().expect("root relation opened")
+            }),
+        ),
+        WcoRel::Leaf { rel, root_rti } => (
+            rel,
+            Some(
+                es_relations[(root_rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened"),
+            ),
+        ),
+    };
+    let slot = &mut es_tupleTable[slot_id.0 as usize];
+    Err(view_wco_violation(mcx, wcos[i].relname, vrel, slot, root_rel))
 }
 
 #[cold]
