@@ -29,7 +29,7 @@ fn check_can_set_role(mcx: Mcx<'_>, member: Oid, role: Oid) -> PgResult<()> {
             PgError::new(
                 ERROR,
                 format!(
-                    "permission denied to set role \"{}\"",
+                    "must be able to SET ROLE \"{}\"",
                     miscinit::GetUserNameFromId(mcx, role, false)?
                         .expect("noerr=false")
                         .as_str()

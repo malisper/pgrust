@@ -1437,7 +1437,7 @@ fn AlterPublicationOwner_internal<'mcx>(
                 .expect("noerr=false yields a name");
             return Err(simple_err(
                 ERRCODE_INSUFFICIENT_PRIVILEGE,
-                format!("permission denied to set role \"{}\"", rolename.as_str()),
+                format!("must be able to SET ROLE \"{}\"", rolename.as_str()),
             ));
         }
 
