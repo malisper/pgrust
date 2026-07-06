@@ -86,13 +86,6 @@ pub(crate) fn exec_init_sub_plan<'mcx>(
             subplan.subLinkType
         );
     }
-    if subplan.subLinkType == SubLinkType::ARRAY_SUBLINK {
-        assert!(
-            ::lsyscache::get_element_type(subplan.firstColType)? == 0,
-            "initArrayResultAny (arrayfuncs.c): array-of-arrays accumulation \
-             (ArrayBuildStateArr) not ported"
-        );
-    }
     let cell = estate
         .es_subplanstates
         .get((subplan.plan_id - 1) as usize)
@@ -207,7 +200,7 @@ fn run_subplan<'mcx>(
     let mut found = false;
     let mut values: PgVec<'mcx, NullableDatum> = PgVec::new_in(mcx);
     let mut astate = if sstate.sub_link_type == SubLinkType::ARRAY_SUBLINK {
-        Some(::arrayfuncs::build::init_array_result(mcx, sstate.first_col_type, true)?)
+        Some(::arrayfuncs::build::init_array_result_any(mcx, sstate.first_col_type, true)?)
     } else {
         None
     };
@@ -223,7 +216,7 @@ fn run_subplan<'mcx>(
                 let slot = estate.slot_mut(slot_id);
                 let mut disnull = false;
                 let dvalue = exectuples::slot_getattr(slot, 1, &mut disnull);
-                astate = Some(::arrayfuncs::build::accum_array_result(
+                astate = Some(::arrayfuncs::build::accum_array_result_any(
                     mcx,
                     astate.take(),
                     dvalue,
@@ -267,8 +260,10 @@ fn run_subplan<'mcx>(
             prm.isnull = false;
         }
         SubLinkType::ARRAY_SUBLINK => {
-            let bytes =
-                ::arrayfuncs::build::make_array_result(mcx, &astate.expect("astate initialized"))?;
+            let bytes = ::arrayfuncs::build::make_array_result_any(
+                mcx,
+                &astate.expect("astate initialized"),
+            )?;
             let prm = &mut estate.es_param_exec_vals[sstate.set_param[0] as usize];
             prm.exec_plan = false;
             prm.value = Datum::from_usize(bytes.leak().as_ptr() as usize);
@@ -453,14 +448,6 @@ fn exec_init_sub_plan_expr<'mcx>(
             subplan.subLinkType
         );
     }
-    if subplan.subLinkType == SubLinkType::ARRAY_SUBLINK {
-        assert!(
-            ::lsyscache::get_element_type(subplan.firstColType)? == 0,
-            "initArrayResultAny (arrayfuncs.c): array-of-arrays accumulation \
-             (ArrayBuildStateArr) not ported"
-        );
-    }
-
     let params = estate.param_bind();
     let nested_rtable = ::executils::subplan_env_rtable(estate);
     let nested_env = ::execexpr::SubplanCompileEnv {
@@ -947,11 +934,11 @@ fn scan_array_sub_plan<'mcx>(
     {
         let SubPlanExprState { array_ctx, cur_buf, .. } = &mut *sstate;
         let amcx = array_ctx.as_ref().expect("ARRAY scratch context").mcx();
-        let mut astate = ::arrayfuncs::build::init_array_result(amcx, first_col_type, true)?;
+        let mut astate = ::arrayfuncs::build::init_array_result_any(amcx, first_col_type, true)?;
         while let Some(slot_id) = exec_proc_node(ps, estate)? {
             let mut disnull = false;
             let dvalue = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut disnull);
-            astate = ::arrayfuncs::build::accum_array_result(
+            astate = ::arrayfuncs::build::accum_array_result_any(
                 amcx,
                 Some(astate),
                 dvalue,
@@ -959,7 +946,7 @@ fn scan_array_sub_plan<'mcx>(
                 first_col_type,
             )?;
         }
-        let bytes = ::arrayfuncs::build::make_array_result(amcx, &astate)?;
+        let bytes = ::arrayfuncs::build::make_array_result_any(amcx, &astate)?;
         cur_buf.clear();
         cur_buf
             .try_reserve(bytes.len())

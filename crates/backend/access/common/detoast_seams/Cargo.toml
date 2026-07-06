@@ -8,3 +8,5 @@ publish.workspace = true
 seam_core = { path = "../../../../_support/seam_core" }
 mcx = { path = "../../../../_support/mcx" }
 types_error = { path = "../../../../_support/types/types_error" }
+datum = { path = "../../../../_support/types/datum" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }

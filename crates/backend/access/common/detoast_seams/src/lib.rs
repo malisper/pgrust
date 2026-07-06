@@ -19,3 +19,13 @@ seam_core::seam!(
         slicelength: i32,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
+
+// Owner: heaptoast (heaptoast.c toast_flatten_tuple_to_datum). Hosted here so
+// heaptuple's heap_copy_tuple_as_datum can reach it without a crate cycle.
+seam_core::seam!(
+    pub fn toast_flatten_tuple_to_datum<'mcx>(
+        mcx: Mcx<'mcx>,
+        tup: &types_tuple::HeapTupleData<'_>,
+        tuple_desc: &types_tuple::TupleDescData<'_>,
+    ) -> PgResult<datum::Datum>
+);

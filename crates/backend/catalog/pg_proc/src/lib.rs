@@ -944,7 +944,10 @@ pub fn function_parse_error_transpose(e: &mut types_error::PgError, prosrc: &str
             None => return false,
         },
     };
+    // C requires ActivePortal->status == PORTAL_ACTIVE before trusting
+    // sourceText.
     let query = pquery::ActivePortal()
+        .filter(|p| p.borrow().status == types_portal::PortalStatus::PORTAL_ACTIVE)
         .and_then(|p| p.borrow().sourceText.as_ref().map(|s| s.as_str().to_string()));
     if let Some(q) = query {
         let newpos = match_prosrc_to_query(prosrc, &q, origpos);

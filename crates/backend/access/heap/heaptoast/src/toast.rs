@@ -239,6 +239,72 @@ pub fn toast_flatten_tuple<'mcx>(
     Ok(new_tuple)
 }
 
+/// C `toast_flatten_tuple_to_datum`: composite-type Datums must not carry
+/// external TOAST pointers; inline them (decompressing compressed fields too)
+/// and return the tuple as a Datum with the composite header set.
+pub fn toast_flatten_tuple_to_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    tup: &HeapTupleData<'_>,
+    tuple_desc: &TupleDescData<'_>,
+) -> PgResult<Datum> {
+    let num_attrs = tuple_desc.natts as usize;
+    let (mut toast_values, toast_isnull) = deform(mcx, tup, tuple_desc);
+
+    let mut has_nulls = false;
+    for i in 0..num_attrs {
+        if toast_isnull[i] {
+            has_nulls = true;
+        } else if tuple_desc.compact_attrs[i].attlen == -1 {
+            // SAFETY: non-null deformed varlena datum.
+            let v = unsafe { va_slice(toast_values[i]) };
+            if crate::helper::is_external(v) || crate::helper::is_compressed(v) {
+                let flat = detoast::detoast_attr(mcx, v)?;
+                toast_values[i] = crate::helper::leak_datum(flat);
+            }
+        }
+    }
+
+    let mut new_header_len = SizeofHeapTupleHeader;
+    if has_nulls {
+        new_header_len += BITMAPLEN(num_attrs as i32) as usize;
+    }
+    let new_header_len = MAXALIGN(new_header_len);
+    let new_data_len = heap_compute_data_size(tuple_desc, &toast_values, &toast_isnull);
+    let new_tuple_len = new_header_len + new_data_len;
+
+    let mut result = HeapTuple::alloc_zeroed(mcx, new_tuple_len)?;
+    // SAFETY: tup header is SizeofHeapTupleHeader readable bytes.
+    let old_header =
+        unsafe { core::slice::from_raw_parts(tup.header_ptr(), SizeofHeapTupleHeader) };
+    result.image_mut()[..SizeofHeapTupleHeader].copy_from_slice(old_header);
+    {
+        let hdr = result.as_tuple_mut().t_data_mut();
+        hdr.set_natts(num_attrs as u16);
+        hdr.t_hoff = new_header_len as u8;
+        hdr.set_datum_length(new_tuple_len as u32);
+        hdr.set_type_id(tuple_desc.tdtypeid);
+        hdr.set_typmod(tuple_desc.tdtypmod);
+    }
+
+    let image = result.as_tuple_mut().t_data_mut() as *mut _ as *mut u8;
+    // SAFETY: fresh owned image, values/isnull sized to the descriptor.
+    unsafe {
+        heap_fill_tuple(
+            tuple_desc,
+            &toast_values,
+            &toast_isnull,
+            image.add(new_header_len),
+            new_data_len,
+            &mut result.as_tuple_mut().t_data_mut().t_infomask,
+            has_nulls.then(|| image.add(SizeofHeapTupleHeader)),
+        );
+    }
+
+    let d = Datum::from_usize(result.image().as_ptr() as usize);
+    core::mem::forget(result);
+    Ok(d)
+}
+
 /// C `toast_build_flattened_tuple`: heap_form_tuple with external pointers
 /// expanded first.
 pub fn toast_build_flattened_tuple<'mcx>(

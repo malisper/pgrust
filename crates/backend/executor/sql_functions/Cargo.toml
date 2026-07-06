@@ -55,6 +55,7 @@ nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }
 sql_functions_seams = { path = "../sql_functions_seams" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
+pg_proc = { path = "../../catalog/pg_proc" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 execscan = { path = "../execscan" }
 tupdesc = { path = "../../access/common/tupdesc" }

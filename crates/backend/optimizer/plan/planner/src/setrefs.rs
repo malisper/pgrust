@@ -4670,6 +4670,28 @@ fn fix_join_expr_mutator<'mcx>(
                 },
             )
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            let mut largs = NodeList::nil();
+            for arg in &rc.largs {
+                largs.lappend(mcx, fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?)?;
+            }
+            let mut rargs = NodeList::nil();
+            for arg in &rc.rargs {
+                rargs.lappend(mcx, fix_join_expr_mutator(run, arg, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::RowCompareExpr {
+                    cmptype: rc.cmptype,
+                    opnos: rc.opnos.clone_in(mcx)?,
+                    opfamilies: rc.opfamilies.clone_in(mcx)?,
+                    inputcollids: rc.inputcollids.clone_in(mcx)?,
+                    largs,
+                    rargs,
+                },
+            )
+        }
         other => panic!("fix_join_expr_mutator (setrefs.c): {other:?}; M2 expression lane"),
     }
 }

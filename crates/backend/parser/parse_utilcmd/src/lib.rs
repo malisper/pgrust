@@ -3244,6 +3244,7 @@ pub fn init_seams() {
     parse_utilcmd_seams::LookupTypeNameOid::set(LookupTypeNameOid);
     parse_utilcmd_seams::parseTypeString::set(parseTypeString);
     parse_utilcmd_seams::typename_type_id_and_mod::set(typenameTypeIdAndMod);
+    parse_utilcmd_seams::typename_type_id_and_mod_any::set(typenameTypeIdAndModAllowComposite);
     regproc_seams::parse_type_string::set(parseTypeStringEsc);
 }
 

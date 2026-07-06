@@ -257,9 +257,10 @@ fn shim_cmp(shim: ShimCmp, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> 
     });
     match call {
         Ok(d) => d.as_i32(),
-        // The comparator sits under infallible qsort plumbing; a failing
-        // btree proc is C's ereport-out-of-sort, surfaced here as a panic.
-        Err(e) => panic!("sort comparison proc {} failed: {}", shim.fn_oid, e.message()),
+        // The comparator sits under infallible qsort plumbing; C's
+        // ereport-out-of-sort unwinds here as a PgError panic so the original
+        // error (e.g. array_cmp's missing-comparison-proc) surfaces verbatim.
+        Err(e) => std::panic::panic_any(e),
     }
 }
 

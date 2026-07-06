@@ -1316,6 +1316,25 @@ fn FuncNameAsType(parts: &[&str]) -> PgResult<Oid> {
     }
 }
 
+// exprType over the node families proargdefaults carries (system_functions
+// defaults are Consts, occasionally coerced).
+fn default_expr_type(node: Node<'_>) -> Oid {
+    match node.node_tag() {
+        NodeTag::T_Const => node.as_const().unwrap().consttype,
+        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
+        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
+        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
+        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
+        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
+        NodeTag::T_ArrayExpr => node.as_array_expr().unwrap().array_typeid,
+        NodeTag::T_RowExpr => node.as_row_expr().unwrap().row_typeid,
+        NodeTag::T_CoalesceExpr => node.as_coalesce_expr().unwrap().coalescetype,
+        NodeTag::T_MinMaxExpr => node.as_min_max_expr().unwrap().minmaxtype,
+        NodeTag::T_CoerceToDomain => node.as_coerce_to_domain().unwrap().resulttype,
+        tag => panic!("default_expr_type: node family {tag:?} not ported"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,

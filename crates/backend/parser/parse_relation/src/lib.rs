@@ -1031,8 +1031,14 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                             n.location,
                         ));
                     }
-                    let (attrtype, attrtypmod) =
-                        parse_utilcmd_seams::typename_type_id_and_mod::call(mcx, Some(pstate), tn)?;
+                    // C typenameTypeIdAndMod has no typtype gate; record and
+                    // record[] pass here, checked below by
+                    // CheckAttributeNamesTypes(CHKATYPE_ANYRECORD).
+                    let (attrtype, attrtypmod) = parse_utilcmd_seams::typename_type_id_and_mod_any::call(
+                        mcx,
+                        Some(pstate),
+                        tn,
+                    )?;
                     let attrcollation = GetColumnDefCollation(pstate, n, attrtype)?;
                     let attno = (i + 1) as AttrNumber;
                     tupdesc::TupleDescInitEntry(
