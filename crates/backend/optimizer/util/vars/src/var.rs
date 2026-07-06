@@ -90,8 +90,8 @@ impl<'a, 'mcx> NodeWalker<'mcx> for PullVarnos<'a, 'mcx> {
     }
 }
 
-/// C's `root` feeds only the PlaceHolderVar arm (deferred loud); the
-/// parameter returns with that vocabulary.
+/// C's `root` feeds only the PlaceHolderVar arm; rootless callers get the
+/// phrels fallback, planner callers pass [`pull_varnos_with_phv_hook`].
 pub fn pull_varnos<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Bitmapset<'mcx>> {
     pull_varnos_of_level(mcx, node, 0)
 }
@@ -1473,4 +1473,47 @@ fn fge_opt<'mcx>(
         None => Ok(None),
         Some(n) => fge_mutate(mcx, query, n),
     }
+}
+
+struct ContainNoopPhv {
+    found: bool,
+}
+
+impl<'mcx> NodeWalker<'mcx> for ContainNoopPhv {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(phv) = node.as_place_holder_var() {
+            if phv.phnullingrels.is_empty() {
+                self.found = true;
+                return Ok(true);
+            }
+        }
+        expression_tree_walker(node, self)
+    }
+}
+
+fn strip_noop_phvs_mutator<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    if let Some(phv) = node.as_place_holder_var() {
+        if phv.phnullingrels.is_empty() {
+            return Ok(Some(
+                strip_noop_phvs_mutator(mcx, phv.phexpr)?.unwrap_or(phv.phexpr),
+            ));
+        }
+    }
+    nodes_core::expression_tree_mutator(mcx, node, &mut |n| strip_noop_phvs_mutator(mcx, n))
+}
+
+/// strip_noop_phvs (placeholder.c): remove PlaceHolderVars whose
+/// phnullingrels is empty — no-ops in a scan-level expression (the caller
+/// guarantees scan level). Walker-gated so the common no-PHV case does not
+/// copy.
+pub fn strip_noop_phvs<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'mcx>> {
+    let mut cx = ContainNoopPhv { found: false };
+    cx.visit(node)?;
+    if !cx.found {
+        return Ok(node);
+    }
+    Ok(strip_noop_phvs_mutator(mcx, node)?.unwrap_or(node))
 }
