@@ -1,42 +1,44 @@
 //! Cost parameters + enable_* flags (owned by costsize.c in C).
 //! All PGC_USERSET: backings are session-scoped (guc_tables::session).
 
-use guc_tables::{session_guc_bool as bool_guc, session_guc_int as int_guc, session_guc_real as real_guc};
+use guc_tables::session_guc_cluster;
 
-real_guc!(CPU_TUPLE_COST, cpu_tuple_cost, set_cpu_tuple_cost, guc_tables::consts::DEFAULT_CPU_TUPLE_COST);
-real_guc!(SEQ_PAGE_COST, seq_page_cost, set_seq_page_cost, guc_tables::consts::DEFAULT_SEQ_PAGE_COST);
-real_guc!(RANDOM_PAGE_COST, random_page_cost, set_random_page_cost, guc_tables::consts::DEFAULT_RANDOM_PAGE_COST);
-real_guc!(CPU_INDEX_TUPLE_COST, cpu_index_tuple_cost, set_cpu_index_tuple_cost, guc_tables::consts::DEFAULT_CPU_INDEX_TUPLE_COST);
-real_guc!(CPU_OPERATOR_COST, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST);
-real_guc!(RECURSIVE_WORKTABLE_FACTOR, recursive_worktable_factor, set_recursive_worktable_factor, guc_tables::consts::DEFAULT_RECURSIVE_WORKTABLE_FACTOR);
-real_guc!(PARALLEL_TUPLE_COST, parallel_tuple_cost, set_parallel_tuple_cost, guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST);
-real_guc!(PARALLEL_SETUP_COST, parallel_setup_cost, set_parallel_setup_cost, guc_tables::consts::DEFAULT_PARALLEL_SETUP_COST);
-int_guc!(EFFECTIVE_CACHE_SIZE, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE);
-bool_guc!(ENABLE_SEQSCAN, enable_seqscan, set_enable_seqscan, true);
-bool_guc!(ENABLE_TIDSCAN, enable_tidscan, set_enable_tidscan, true);
-bool_guc!(ENABLE_INDEXSCAN, enable_indexscan, set_enable_indexscan, true);
-bool_guc!(ENABLE_INDEXONLYSCAN, enable_indexonlyscan, set_enable_indexonlyscan, true);
-bool_guc!(ENABLE_BITMAPSCAN, enable_bitmapscan, set_enable_bitmapscan, true);
-bool_guc!(ENABLE_HASHAGG, enable_hashagg, set_enable_hashagg, true);
-bool_guc!(ENABLE_SORT, enable_sort, set_enable_sort, true);
-bool_guc!(ENABLE_NESTLOOP, enable_nestloop, set_enable_nestloop, true);
-bool_guc!(ENABLE_HASHJOIN, enable_hashjoin, set_enable_hashjoin, true);
-bool_guc!(ENABLE_MERGEJOIN, enable_mergejoin, set_enable_mergejoin, true);
-bool_guc!(ENABLE_MATERIAL, enable_material, set_enable_material, true);
-bool_guc!(ENABLE_MEMOIZE, enable_memoize, set_enable_memoize, true);
-bool_guc!(ENABLE_INCREMENTAL_SORT, enable_incremental_sort, set_enable_incremental_sort, true);
-bool_guc!(ENABLE_GROUP_BY_REORDERING, enable_group_by_reordering, set_enable_group_by_reordering, true);
-bool_guc!(ENABLE_DISTINCT_REORDERING, enable_distinct_reordering, set_enable_distinct_reordering, true);
-bool_guc!(ENABLE_PRESORTED_AGGREGATE, enable_presorted_aggregate, set_enable_presorted_aggregate, true);
-bool_guc!(ENABLE_PARTITION_PRUNING, enable_partition_pruning, set_enable_partition_pruning, true);
-bool_guc!(ENABLE_PARTITIONWISE_JOIN, enable_partitionwise_join, set_enable_partitionwise_join, false);
-bool_guc!(ENABLE_PARTITIONWISE_AGGREGATE, enable_partitionwise_aggregate, set_enable_partitionwise_aggregate, false);
-bool_guc!(ENABLE_GATHERMERGE, enable_gathermerge, set_enable_gathermerge, true);
-bool_guc!(ENABLE_PARALLEL_HASH, enable_parallel_hash, set_enable_parallel_hash, true);
+session_guc_cluster!(CostsizeGucs, COSTSIZE_GUCS:
+    (cpu_tuple_cost_cell, f64, cpu_tuple_cost, set_cpu_tuple_cost, guc_tables::consts::DEFAULT_CPU_TUPLE_COST as f64),
+    (seq_page_cost_cell, f64, seq_page_cost, set_seq_page_cost, guc_tables::consts::DEFAULT_SEQ_PAGE_COST as f64),
+    (random_page_cost_cell, f64, random_page_cost, set_random_page_cost, guc_tables::consts::DEFAULT_RANDOM_PAGE_COST as f64),
+    (cpu_index_tuple_cost_cell, f64, cpu_index_tuple_cost, set_cpu_index_tuple_cost, guc_tables::consts::DEFAULT_CPU_INDEX_TUPLE_COST as f64),
+    (cpu_operator_cost_cell, f64, cpu_operator_cost, set_cpu_operator_cost, guc_tables::consts::DEFAULT_CPU_OPERATOR_COST as f64),
+    (recursive_worktable_factor_cell, f64, recursive_worktable_factor, set_recursive_worktable_factor, guc_tables::consts::DEFAULT_RECURSIVE_WORKTABLE_FACTOR as f64),
+    (parallel_tuple_cost_cell, f64, parallel_tuple_cost, set_parallel_tuple_cost, guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST as f64),
+    (parallel_setup_cost_cell, f64, parallel_setup_cost, set_parallel_setup_cost, guc_tables::consts::DEFAULT_PARALLEL_SETUP_COST as f64),
+    (effective_cache_size_cell, i32, effective_cache_size, set_effective_cache_size, guc_tables::consts::DEFAULT_EFFECTIVE_CACHE_SIZE),
+    (enable_seqscan_cell, bool, enable_seqscan, set_enable_seqscan, true),
+    (enable_tidscan_cell, bool, enable_tidscan, set_enable_tidscan, true),
+    (enable_indexscan_cell, bool, enable_indexscan, set_enable_indexscan, true),
+    (enable_indexonlyscan_cell, bool, enable_indexonlyscan, set_enable_indexonlyscan, true),
+    (enable_bitmapscan_cell, bool, enable_bitmapscan, set_enable_bitmapscan, true),
+    (enable_hashagg_cell, bool, enable_hashagg, set_enable_hashagg, true),
+    (enable_sort_cell, bool, enable_sort, set_enable_sort, true),
+    (enable_nestloop_cell, bool, enable_nestloop, set_enable_nestloop, true),
+    (enable_hashjoin_cell, bool, enable_hashjoin, set_enable_hashjoin, true),
+    (enable_mergejoin_cell, bool, enable_mergejoin, set_enable_mergejoin, true),
+    (enable_material_cell, bool, enable_material, set_enable_material, true),
+    (enable_memoize_cell, bool, enable_memoize, set_enable_memoize, true),
+    (enable_incremental_sort_cell, bool, enable_incremental_sort, set_enable_incremental_sort, true),
+    (enable_group_by_reordering_cell, bool, enable_group_by_reordering, set_enable_group_by_reordering, true),
+    (enable_distinct_reordering_cell, bool, enable_distinct_reordering, set_enable_distinct_reordering, true),
+    (enable_presorted_aggregate_cell, bool, enable_presorted_aggregate, set_enable_presorted_aggregate, true),
+    (enable_partition_pruning_cell, bool, enable_partition_pruning, set_enable_partition_pruning, true),
+    (enable_partitionwise_join_cell, bool, enable_partitionwise_join, set_enable_partitionwise_join, false),
+    (enable_partitionwise_aggregate_cell, bool, enable_partitionwise_aggregate, set_enable_partitionwise_aggregate, false),
+    (enable_gathermerge_cell, bool, enable_gathermerge, set_enable_gathermerge, true),
+    (enable_parallel_hash_cell, bool, enable_parallel_hash, set_enable_parallel_hash, true),
+    (parallel_leader_participation_backing_cell, bool, parallel_leader_participation_backing, set_parallel_leader_participation_backing, true),
+);
 
 // Read through the slot: execmain install_if_absent's a stand-in accessor,
 // whichever install wins must serve every reader.
-bool_guc!(PARALLEL_LEADER_PARTICIPATION, parallel_leader_participation_backing, set_parallel_leader_participation_backing, true);
 
 pub fn parallel_leader_participation() -> bool {
     guc_tables::vars::parallel_leader_participation.read()

@@ -83,3 +83,30 @@ macro_rules! session_guc_string {
         }
     };
 }
+
+// Hot clusters: one thread_local struct per owner so a function reading N
+// vars computes the TLS base once (mrs+add) and does N field-offset loads —
+// bare per-var TLS statics measured +30 instr/q on select1 (one base
+// recomputation per read; dualprof: LocalKey::with dominated the tip delta).
+#[macro_export]
+macro_rules! session_guc_cluster {
+    ($cluster:ident, $tls:ident: $( ($field:ident, $ty:ty, $get:ident, $set:ident, $boot:expr) ),+ $(,)?) => {
+        struct $cluster {
+            $( $field: ::core::cell::Cell<$ty>, )+
+        }
+        ::std::thread_local! {
+            static $tls: $cluster = const { $cluster {
+                $( $field: ::core::cell::Cell::new($boot), )+
+            } };
+        }
+        $(
+            #[inline]
+            pub fn $get() -> $ty {
+                $tls.with(|c| c.$field.get())
+            }
+            pub fn $set(v: $ty) {
+                $tls.with(|c| c.$field.set(v));
+            }
+        )+
+    };
+}

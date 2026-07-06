@@ -81,22 +81,36 @@ const PGJIT_DEFORM: i32 = 1 << 4;
 
 // GUC backing this crate reads (double-install panics flag future homes).
 pub mod gucs {
-    use guc_tables::{session_guc_bool as bool_guc, session_guc_int as int_guc, session_guc_real as real_guc};
+    guc_tables::session_guc_cluster!(PlannerGucs, PLANNER_GUCS:
+        (cursor_tuple_fraction_cell, f64, cursor_tuple_fraction, set_cursor_tuple_fraction, (0.1) as f64),
+        (jit_above_cost_cell, f64, jit_above_cost, set_jit_above_cost, (100000.0) as f64),
+        (jit_optimize_above_cost_cell, f64, jit_optimize_above_cost, set_jit_optimize_above_cost, (500000.0) as f64),
+        (jit_inline_above_cost_cell, f64, jit_inline_above_cost, set_jit_inline_above_cost, (500000.0) as f64),
+        (from_collapse_limit_cell, i32, from_collapse_limit, set_from_collapse_limit, 8),
+        (join_collapse_limit_cell, i32, join_collapse_limit, set_join_collapse_limit, 8),
+        (constraint_exclusion_cell, i32, constraint_exclusion, set_constraint_exclusion, guc_tables::consts::CONSTRAINT_EXCLUSION_PARTITION),
+        (debug_parallel_query_cell, i32, debug_parallel_query, set_debug_parallel_query, guc_tables::consts::DEBUG_PARALLEL_OFF),
+        (max_parallel_workers_per_gather_cell, i32, max_parallel_workers_per_gather, set_max_parallel_workers_per_gather, 2),
+        (jit_enabled_cell, bool, jit_enabled, set_jit_enabled, true),
+        (enable_self_join_elimination_cell, bool, enable_self_join_elimination, set_enable_self_join_elimination, true),
+        (jit_expressions_cell, bool, jit_expressions, set_jit_expressions, true),
+        (jit_tuple_deforming_cell, bool, jit_tuple_deforming, set_jit_tuple_deforming, true),
+    );
 
     pub use ::costsize::gucs::*;
-    real_guc!(CURSOR_TUPLE_FRACTION, cursor_tuple_fraction, set_cursor_tuple_fraction, 0.1);
-    real_guc!(JIT_ABOVE_COST, jit_above_cost, set_jit_above_cost, 100000.0);
-    real_guc!(JIT_OPTIMIZE_ABOVE_COST, jit_optimize_above_cost, set_jit_optimize_above_cost, 500000.0);
-    real_guc!(JIT_INLINE_ABOVE_COST, jit_inline_above_cost, set_jit_inline_above_cost, 500000.0);
-    int_guc!(FROM_COLLAPSE_LIMIT, from_collapse_limit, set_from_collapse_limit, 8);
-    int_guc!(JOIN_COLLAPSE_LIMIT, join_collapse_limit, set_join_collapse_limit, 8);
-    int_guc!(CONSTRAINT_EXCLUSION, constraint_exclusion, set_constraint_exclusion, guc_tables::consts::CONSTRAINT_EXCLUSION_PARTITION);
-    int_guc!(DEBUG_PARALLEL_QUERY, debug_parallel_query, set_debug_parallel_query, guc_tables::consts::DEBUG_PARALLEL_OFF);
-    int_guc!(MAX_PARALLEL_WORKERS_PER_GATHER, max_parallel_workers_per_gather, set_max_parallel_workers_per_gather, 2);
-    bool_guc!(JIT_ENABLED, jit_enabled, set_jit_enabled, true);
-    bool_guc!(ENABLE_SELF_JOIN_ELIMINATION, enable_self_join_elimination, set_enable_self_join_elimination, true);
-    bool_guc!(JIT_EXPRESSIONS, jit_expressions, set_jit_expressions, true);
-    bool_guc!(JIT_TUPLE_DEFORMING, jit_tuple_deforming, set_jit_tuple_deforming, true);
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 }
 
 pub fn init_seams() {
