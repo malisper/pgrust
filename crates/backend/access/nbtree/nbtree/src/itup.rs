@@ -230,18 +230,42 @@ impl<'mcx> ItupBuf<'mcx> {
     }
 }
 
+// VARATT_IS_COMPRESSED (varatt.h) on a 4B varlena header.
+// SAFETY: p live, at least 1 readable byte.
+unsafe fn varatt_is_compressed(p: *const u8) -> bool {
+    if cfg!(target_endian = "little") {
+        (*p & 0x03) == 0x02
+    } else {
+        (*p & 0xC0) == 0x40
+    }
+}
+
+// SAFETY: p is a live non-external varlena.
+unsafe fn varlena_image<'a>(p: *const u8) -> &'a [u8] {
+    use ::types_tuple::varatt::varsize_any;
+    core::slice::from_raw_parts(p, varsize_any(p))
+}
+
 /// index_form_tuple (indextuple.c), MAXALIGNed image in an mcx-backed buffer.
-/// The TOAST_INDEX_HACK external/compress arms are the toast lane.
+/// TOAST_INDEX_HACK: detoast external attrs, then in-line-compress anything
+/// still over TOAST_INDEX_TARGET (extended/main storage only) so wide values
+/// don't inflate the index tuple.
 pub fn index_form_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     tupdesc: &TupleDescData<'_>,
     values: &[Datum],
     isnull: &[bool],
 ) -> PgResult<ItupBuf<'mcx>> {
-    use ::types_tuple::varatt::{varatt_is_1b_e, varsize_any};
+    use ::types_tuple::varatt::{varatt_is_1b, varatt_is_1b_e, varsize_any};
+    use ::types_tuple::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
     let natts = tupdesc.natts as usize;
     debug_assert!(natts <= INDEX_MAX_KEYS as usize);
+
+    let mut untoasted: [Datum; INDEX_MAX_KEYS as usize] = [Datum::from_usize(0); INDEX_MAX_KEYS as usize];
+    untoasted[..natts].copy_from_slice(&values[..natts]);
+
+    const TOAST_INDEX_TARGET: usize = 8160 / 4; // MaximumBytesPerTuple(4)
 
     for i in 0..natts {
         let att = tupdesc.compact_attr(i);
@@ -250,16 +274,28 @@ pub fn index_form_tuple<'mcx>(
         }
         // SAFETY: non-null varlena datums carry live pointers (caller contract).
         unsafe {
-            let p = values[i].as_usize() as *const u8;
+            let mut p = untoasted[i].as_usize() as *const u8;
             if varatt_is_1b_e(p) {
-                crate::unported_phase2("index_form_tuple TOAST_INDEX_HACK (detoast lane)");
+                let flat = ::detoast::detoast_external_attr(mcx, varlena_image(p))?;
+                untoasted[i] = Datum::from_usize(flat.leak().as_ptr() as usize);
+                p = untoasted[i].as_usize() as *const u8;
             }
-            const TOAST_INDEX_TARGET: usize = 8160 / 4; // MaximumBytesPerTuple(4)
-            if varsize_any(p) > TOAST_INDEX_TARGET {
-                crate::unported_phase2("index_form_tuple in-line compression (toast lane)");
+            if !varatt_is_1b(p) && !varatt_is_compressed(p) && varsize_any(p) > TOAST_INDEX_TARGET {
+                let storage = tupdesc.attr(i).attstorage;
+                if storage == TYPSTORAGE_EXTENDED || storage == TYPSTORAGE_MAIN {
+                    let compression = tupdesc.attr(i).attcompression;
+                    if let Some(cvalue) = ::heaptoast_seams::toast_compress_datum::call(
+                        mcx,
+                        varlena_image(p),
+                        compression,
+                    )? {
+                        untoasted[i] = Datum::from_usize(cvalue.leak().as_ptr() as usize);
+                    }
+                }
             }
         }
     }
+    let values = &untoasted[..natts];
 
     let hasnull = isnull[..natts].contains(&true);
     let mut infomask: u16 = if hasnull { INDEX_NULL_MASK } else { 0 };
