@@ -710,6 +710,30 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
         };
         crate::finalize_aggregates(node, estate, pergroup)?;
 
+        // Qual/tlist SubPlans need the suspension drivers (node-ecxt), same
+        // as the plain and sorted retrieval paths.
+        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            let ecxt = node.ps_ExprContext;
+            let result = node.ps_ResultTupleSlot;
+            let AggStateData { gsets, qual, proj, .. } = node;
+            let h = gsets.as_mut().unwrap().hash.as_mut().unwrap();
+            if !::executils::exec_qual_with_subplans_outer(
+                qual.as_deref_mut(),
+                &mut h.hash_first_slot,
+                estate,
+                ecxt,
+            )? {
+                continue;
+            }
+            ::executils::exec_project_with_subplans_outer(
+                proj,
+                &mut h.hash_first_slot,
+                estate,
+                ecxt,
+                result,
+            )?;
+            return Ok(Some(result));
+        }
         {
             let AggStateData { gsets, qual, .. } = node;
             let h = gsets.as_mut().unwrap().hash.as_mut().unwrap();
@@ -991,6 +1015,30 @@ where
         let pergroup = node.gsets.as_ref().unwrap().pergroup_bases[current_set];
         crate::finalize_aggregates(node, estate, pergroup)?;
 
+        // Qual/tlist SubPlans need the suspension drivers (node-ecxt), same
+        // as the plain and sorted retrieval paths.
+        if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            let ecxt = node.ps_ExprContext;
+            let result = node.ps_ResultTupleSlot;
+            let AggStateData { gsets, qual, proj, .. } = node;
+            let gs = gsets.as_mut().unwrap();
+            if !::executils::exec_qual_with_subplans_outer(
+                qual.as_deref_mut(),
+                &mut gs.first_slot,
+                estate,
+                ecxt,
+            )? {
+                continue;
+            }
+            ::executils::exec_project_with_subplans_outer(
+                proj,
+                &mut gs.first_slot,
+                estate,
+                ecxt,
+                result,
+            )?;
+            return Ok(Some(result));
+        }
         {
             let AggStateData { gsets, qual, .. } = node;
             let gs = gsets.as_mut().unwrap();
