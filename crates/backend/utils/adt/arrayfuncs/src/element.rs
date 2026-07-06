@@ -86,14 +86,17 @@ fn nelems_size(
     seek(array, pos, offset, bitmap_off, nitems, typlen, typalign) - pos
 }
 
-// array_bitmap_copy; src bitmap absent = all-non-NULL ones.
+// array_bitmap_copy; src bitmap absent = all-non-NULL ones. Byte-advance
+// reads are guarded on items remaining and the final writeback on a partial
+// byte (per C): a copy ending exactly on a byte boundary of an exactly-sized
+// bitmap must not touch the byte past it.
 pub fn array_bitmap_copy(
     dest: &mut [u8],
     dest_bitmap_off: usize,
     destoffset: i32,
     src: Option<(&[u8], usize)>,
     srcoffset: i32,
-    nitems: i32,
+    mut nitems: i32,
 ) {
     if nitems <= 0 {
         return;
@@ -106,7 +109,8 @@ pub fn array_bitmap_copy(
             let mut sb = sbo + srcoffset as usize / 8;
             let mut smask = 1u8 << (srcoffset % 8);
             let mut sval = s[sb];
-            for _ in 0..nitems {
+            while nitems > 0 {
+                nitems -= 1;
                 if sval & smask != 0 {
                     dval |= dmask;
                 } else {
@@ -116,34 +120,43 @@ pub fn array_bitmap_copy(
                     dest[db] = dval;
                     db += 1;
                     dmask = 1;
-                    dval = dest[db];
+                    if nitems > 0 {
+                        dval = dest[db];
+                    }
                 } else {
                     dmask <<= 1;
                 }
                 if smask == 0x80 {
                     sb += 1;
                     smask = 1;
-                    sval = s[sb];
+                    if nitems > 0 {
+                        sval = s[sb];
+                    }
                 } else {
                     smask <<= 1;
                 }
             }
         }
         None => {
-            for _ in 0..nitems {
+            while nitems > 0 {
+                nitems -= 1;
                 dval |= dmask;
                 if dmask == 0x80 {
                     dest[db] = dval;
                     db += 1;
                     dmask = 1;
-                    dval = dest[db];
+                    if nitems > 0 {
+                        dval = dest[db];
+                    }
                 } else {
                     dmask <<= 1;
                 }
             }
         }
     }
-    dest[db] = dval;
+    if dmask != 1 {
+        dest[db] = dval;
+    }
 }
 
 #[cold]
