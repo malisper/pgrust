@@ -290,48 +290,51 @@ fn rescan_mark_initplans<'mcx>(
             // NULL hole (an unsafe reference errors at ExecInitSubPlan).
             .expect("initPlan references a transferred subplan");
         let ext = &init_plan.as_plan().expect("plan node").extParam;
-        if sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK {
-            if chg.overlap(ext) {
-                // ExecReScanSetParamPlan: cteParam joins chgParam, no
-                // execPlan mark; the deferred CTE rescan runs eagerly.
-                let mcx = estate.es_query_cxt;
-                let owned = match chg_owned.as_mut() {
-                    Some(o) => o,
-                    None => {
-                        *chg_owned = Some(chg.clone_in(mcx)?);
-                        chg_owned.as_mut().unwrap()
-                    }
-                };
-                for pid in sp.setParam.iter() {
-                    owned.add_member(mcx, pid)?;
-                }
-                let cell = estate.es_subplanstates[(sp.plan_id - 1) as usize];
-                // SAFETY: cell installed by InitPlan on this estate.
-                let slot =
-                    unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'mcx>>>().as_ptr() };
-                let mut ps = slot.take().unwrap_or_else(|| {
-                    panic!("recursive CTE plan execution (nodeCtescan.c)")
-                });
-                let r = exec_re_scan_with_chg(&mut ps, init_plan, estate, chg);
-                *slot = Some(ps);
-                r?;
-            }
+        // C tests against node->chgParam mid-walk, so an initplan that reads
+        // an earlier sibling's output param sees that param as changed (the
+        // one-pass ordering caveat in ExecReScan's comment).
+        if !chg_owned.as_ref().unwrap_or(chg).overlap(ext) {
             continue;
         }
-        if chg.overlap(ext) {
-            let mcx = estate.es_query_cxt;
-            let owned = match chg_owned.as_mut() {
-                Some(o) => o,
-                None => {
-                    *chg_owned = Some(chg.clone_in(mcx)?);
-                    chg_owned.as_mut().unwrap()
-                }
-            };
-            for pid in sp.setParam.iter() {
+        // C: UpdateChangedParamSet(splan, chgParam) sets splan->chgParam; the
+        // rescan itself is deferred to ExecSetParamPlan's (or nodeCtescan's)
+        // first ExecProcNode. The param values are already bound here, so the
+        // eager rescan is the same rescan one call earlier. C snapshots
+        // splan->chgParam BEFORE this initplan's own setParams join
+        // node->chgParam, hence rescan-then-mark order.
+        {
+            let cell = estate.es_subplanstates[(sp.plan_id - 1) as usize];
+            // SAFETY: cell installed by InitPlan on this estate.
+            let slot = unsafe { &mut *cell.0.cast::<Option<PlanStateNode<'mcx>>>().as_ptr() };
+            let mut ps = slot
+                .take()
+                .unwrap_or_else(|| panic!("recursive initplan execution (nodeSubplan.c)"));
+            let r = exec_re_scan_with_chg(
+                &mut ps,
+                init_plan,
+                estate,
+                chg_owned.as_ref().unwrap_or(chg),
+            );
+            *slot = Some(ps);
+            r?;
+        }
+        let mcx = estate.es_query_cxt;
+        let owned = match chg_owned.as_mut() {
+            Some(o) => o,
+            None => {
+                *chg_owned = Some(chg.clone_in(mcx)?);
+                chg_owned.as_mut().unwrap()
+            }
+        };
+        // ExecReScanSetParamPlan: setParams join chgParam; the execPlan mark
+        // skips CTE_SUBLINK (nodeCtescan runs those, not param recalc).
+        let is_cte = sp.subLinkType == ::types_nodes::primnodes::SubLinkType::CTE_SUBLINK;
+        for pid in sp.setParam.iter() {
+            if !is_cte {
                 estate.es_param_exec_vals[pid as usize].exec_plan = true;
                 debug_assert!(estate.es_param_subplans[pid as usize].is_some());
-                owned.add_member(mcx, pid)?;
             }
+            owned.add_member(mcx, pid)?;
         }
     }
     Ok(())

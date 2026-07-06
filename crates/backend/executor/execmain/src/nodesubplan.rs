@@ -174,8 +174,9 @@ pub(crate) unsafe fn subplan_hook(
 
 // ExecSetParamPlan (nodeSubplan.c), EXISTS/EXPR arms. Divergence: C copies the
 // whole result tuple (curTuple, freed per re-run); with one setParam column a
-// datumCopy of that column into es_query_cxt is the same boundary, and re-runs
-// (chgParam rescans) don't exist on this lane so nothing accumulates.
+// datumCopy of that column into es_query_cxt is the same boundary. Re-runs
+// (execami rescan_mark_initplans' eager rescan + exec_plan re-mark) leak the
+// prior copy into the query arena until executor end, bounded by rescan count.
 fn exec_set_param_plan<'mcx>(
     sstate: &SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,

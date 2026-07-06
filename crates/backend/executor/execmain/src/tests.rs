@@ -3626,3 +3626,219 @@ fn correlated_multiexpr_empty_subplan_sets_params_null() {
         .unwrap();
     run_multiexpr_case(mk_multiexpr_pstmt(mcx, Some(qual)), None);
 }
+
+// Correlated EXPR SubPlan whose subplan body carries its own correlated
+// initplan — the C plan shape of `select f1, (select distinct min(t1.f1)
+// from int4_tbl t1 where t1.f1 = t0.f1) from int4_tbl t0` (planagg turns the
+// min into an InitPlan inside the SubPlan; distilled here to the Result that
+// projects the initplan's output param). Every outer row's rescan must
+// propagate chgParam into the initplan (C ExecReScan's initPlan walk +
+// ExecSetParamPlan's first-ExecProcNode rescan); without it the initplan's
+// scan stays exhausted and rows after the first read a stale NULL param.
+fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    t0: u32,
+    t1: u32,
+) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::list::{IntList, OidList};
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    use ::types_nodes::primnodes::{Param, ParamKind, SubLinkType, SubPlan};
+
+    let mk_exec_param = |paramid: i32| {
+        Node::mk(
+            mcx,
+            Param {
+                paramkind: ParamKind::PARAM_EXEC,
+                paramid,
+                paramtype: INT4OID,
+                paramtypmod: -1,
+                paramcollid: 0,
+                location: -1,
+            },
+        )
+        .unwrap()
+    };
+    let mut ext0 = Bitmapset::empty();
+    ext0.add_member(mcx, 0).unwrap();
+
+    // subplans[1] (InitPlan 2): SeqScan t1, qual f1 = $0, tlist [f1].
+    let inner_var = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
+    let inner_tle = Node::mk_target_entry(mcx, inner_var, 1, Some("f1"), false).unwrap();
+    let qual_var = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
+    let qual = Node::mk(
+        mcx,
+        ::types_nodes::OpExpr {
+            opno: INT4_EQ,
+            opfuncid: 65,
+            opresulttype: BOOLOID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, qual_var, mk_exec_param(0)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let init_scan = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make1(mcx, inner_tle).unwrap(),
+                    qual: NodeList::make1(mcx, qual).unwrap(),
+                    extParam: ext0.clone_in(mcx).unwrap(),
+                    allParam: ext0.clone_in(mcx).unwrap(),
+                    ..Default::default()
+                },
+                scanrelid: 2,
+            },
+        },
+    )
+    .unwrap();
+
+    // subplans[0] (SubPlan 1's body): Result projecting $1, initPlan carrying
+    // plan_id 2 with setParam [$1].
+    let initplan_ref = Node::mk(
+        mcx,
+        SubPlan {
+            subLinkType: SubLinkType::EXPR_SUBLINK,
+            plan_id: 2,
+            plan_name: Some("InitPlan 2"),
+            firstColType: INT4OID,
+            firstColTypmod: -1,
+            setParam: IntList::make1(mcx, 1).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let body_tle = Node::mk_target_entry(mcx, mk_exec_param(1), 1, Some("min"), false).unwrap();
+    let mut all01 = ext0.clone_in(mcx).unwrap();
+    all01.add_member(mcx, 1).unwrap();
+    let mut body = Node::build::<ResultPlan>(mcx).unwrap();
+    body.plan.targetlist = NodeList::make1(mcx, body_tle).unwrap();
+    body.plan.initPlan = NodeList::make1(mcx, initplan_ref).unwrap();
+    body.plan.extParam = ext0.clone_in(mcx).unwrap();
+    body.plan.allParam = all01;
+    let body = body.seal();
+
+    // Outer: SeqScan t0 projecting [f1, SubPlan 1(parParam [$0] <- t0.f1)].
+    let subplan_expr = Node::mk(
+        mcx,
+        SubPlan {
+            subLinkType: SubLinkType::EXPR_SUBLINK,
+            plan_id: 1,
+            plan_name: Some("SubPlan 1"),
+            firstColType: INT4OID,
+            firstColTypmod: -1,
+            parParam: IntList::make1(mcx, 0).unwrap(),
+            args: NodeList::make1(mcx, Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap())
+                .unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let out_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let out_tle1 = Node::mk_target_entry(mcx, out_var, 1, Some("f1"), false).unwrap();
+    let out_tle2 = Node::mk_target_entry(mcx, subplan_expr, 2, Some("min"), false).unwrap();
+    let outer = Node::mk(
+        mcx,
+        SeqScan {
+            scan: Scan {
+                plan: Plan {
+                    targetlist: NodeList::make2(mcx, out_tle1, out_tle2).unwrap(),
+                    ..Default::default()
+                },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    let (rtable, perms, unpruned) = mk_two_rel_pstmt_parts(mcx, t0, t1);
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(outer);
+    pstmt.subplans = NodeList::make2(mcx, body, init_scan).unwrap();
+    pstmt.paramExecTypes = OidList::make2(mcx, INT4OID, INT4OID).unwrap();
+    pstmt.rtable = rtable;
+    pstmt.permInfos = perms;
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
+fn run_two_col_pstmt(
+    pstmt: &'static PlannedStmt<'static>,
+) -> Vec<(i32, Option<i32>)> {
+    let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+    let snapshot: snapmgr::Snapshot = std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+        snap_ctx.mcx(),
+        ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+    ));
+    with_exec_data(pstmt, |data, pstmt| {
+        data.estate.es_snapshot = Some(snapshot);
+        {
+            let n = pstmt.paramExecTypes.len();
+            let es = &mut data.estate;
+            es.es_param_exec_vals.extend(core::iter::repeat_n(
+                ::types_portal::params::ParamExecData::EMPTY,
+                n,
+            ));
+            es.es_param_subplans.extend(core::iter::repeat_n(None, n));
+        }
+        crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+
+        let ExecData { estate, planstate } = data;
+        let ps = planstate.as_mut().unwrap();
+        let mut out = Vec::new();
+        while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            let second =
+                if base.tts_isnull[1] { None } else { Some(base.tts_values[1].as_i32()) };
+            out.push((base.tts_values[0].as_i32(), second));
+        }
+        crate::exec_end_node(ps, estate).unwrap();
+        for i in 0..estate.es_subplanstates.len() {
+            let cell = estate.es_subplanstates[i];
+            // SAFETY: init_plan's arena cell (standard_executor_end's shape).
+            let slot = unsafe {
+                &mut *cell.0.cast::<Option<crate::PlanStateNode<'_>>>().as_ptr()
+            };
+            if let Some(mut sub) = slot.take() {
+                crate::exec_end_node(&mut sub, estate).unwrap();
+            }
+        }
+        estate.exec_reset_tuple_table(false);
+        estate.exec_close_range_table_relations().unwrap();
+        out
+    })
+}
+
+#[test]
+fn correlated_subplan_reruns_nested_initplan_per_outer_row() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t0, t1) = (70140u32, 70141u32);
+    scanfix::register_table(t0, &[&[10, 20, 30]]);
+    scanfix::register_table(t1, &[&[10, 20, 30]]);
+    let rows = run_two_col_pstmt(mk_correlated_initplan_in_subplan_pstmt(mcx, t0, t1));
+    assert_eq!(rows, vec![(10, Some(10)), (20, Some(20)), (30, Some(30))]);
+    scanfix::quiesced();
+}
+
+#[test]
+fn correlated_subplan_nested_initplan_null_and_refill_transitions() {
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+    let (t0, t1) = (70142u32, 70143u32);
+    scanfix::register_table(t0, &[&[10, 20, 30]]);
+    scanfix::register_table(t1, &[&[20]]);
+    let rows = run_two_col_pstmt(mk_correlated_initplan_in_subplan_pstmt(mcx, t0, t1));
+    assert_eq!(rows, vec![(10, None), (20, Some(20)), (30, None)]);
+    scanfix::quiesced();
+}
