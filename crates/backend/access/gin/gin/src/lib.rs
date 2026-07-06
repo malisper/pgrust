@@ -27,6 +27,7 @@ use ::types_core::{Buffer, BLCKSZ};
 use ::types_rel::Relation;
 use ::types_storage::bufpage::{PageMut, PageRef};
 
+pub use fast::ginInsertCleanup;
 pub use get::gingetbitmap;
 pub use insert::{ginEntryInsert, gininsert};
 pub use scan::{ginbeginscan, ginendscan, ginrescan};

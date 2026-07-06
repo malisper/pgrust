@@ -5693,6 +5693,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gin_funcs"
+version = "0.1.0"
+dependencies = [
+ "aclchk",
+ "datum",
+ "elog",
+ "fmgr_core",
+ "gin",
+ "indexam_seams",
+ "mcx",
+ "miscinit",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+]
+
+[[package]]
 name = "gin_vocab"
 version = "0.1.0"
 dependencies = [
@@ -12939,6 +12959,7 @@ dependencies = [
  "genam",
  "genfile",
  "gin",
+ "gin_funcs",
  "gistproc",
  "guc",
  "guc_file",

@@ -555,7 +555,7 @@ fn process_pending_page(
 /// ginInsertCleanup. Page-level heavyweight lock arbitration is a no-op in
 /// the single-backend model; forceCleanup callers (vacuum lane) are loud at
 /// their entry points.
-pub(crate) fn ginInsertCleanup<'s>(
+pub fn ginInsertCleanup<'s>(
     _outer: Mcx<'s>,
     rel: &Relation<'_>,
     state: &GinState,

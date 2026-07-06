@@ -266,6 +266,7 @@ pub fn init_all() {
     guc_funcs::init_seams();
     variable::init_seams();
     gin::init_seams();
+    gin_funcs::init_seams();
     user::init_seams();
     ps_status::init_seams();
     queryenvironment::init_seams();
