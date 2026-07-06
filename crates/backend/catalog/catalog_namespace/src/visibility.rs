@@ -238,6 +238,10 @@ pub fn StatisticsObjIsVisibleExt(stxid: Oid) -> PgResult<Option<bool>> {
     // earlier in the path.
     for i in 0..base_path_len() {
         let namespace_id = base_path_nth(i);
+        if namespace_id == crate::my_temp_namespace() {
+            // namespace.c:2690: do not look in temp namespace.
+            continue;
+        }
         if namespace_id == stxnamespace {
             return Ok(Some(true));
         }
