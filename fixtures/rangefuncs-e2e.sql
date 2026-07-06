@@ -4,6 +4,10 @@
 select row_to_json(s.*) from generate_series(11,14) with ordinality s;
 select row_to_json(s.*) from generate_series(11,12) s;
 select row_to_json(s.*) from (values (3),(4)) s(x);
+explain (verbose, costs off) select row_to_json(s.*) from generate_series(11,14) with ordinality s;
+select row_to_json(s.*) from rows from(generate_series(1,2), generate_series(5,6)) s;
+select row_to_json(s.*) from unnest(array[7,8]) with ordinality s;
+select row_to_json(s.*) from generate_series(11,12) with ordinality s(a,b);
 create function ats(anyarray) returns setof record as $$
   select i AS "index", $1[i] AS "value" from generate_subscripts($1, 1) i
 $$ language sql strict immutable;

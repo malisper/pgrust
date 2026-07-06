@@ -272,6 +272,32 @@ fn resolve_argtypes(
     Ok(out)
 }
 
+fn rettupdesc_is_current(entry: &Rc<SqlFnEntry>) -> PgResult<bool> {
+    entry.owned.with(|s| -> PgResult<bool> {
+        let Some(d) = s.rettupdesc.as_ref() else { return Ok(true) };
+        if d.tdtypeid == types_core::catalog::RECORDOID {
+            return Ok(true);
+        }
+        let scratch = MemoryContext::new("sqlfn revalidate");
+        let fresh =
+            typcache_seams::lookup_rowtype_tupdesc_copy::call(scratch.mcx(), d.tdtypeid, -1)?;
+        if fresh.natts != d.natts {
+            return Ok(false);
+        }
+        for i in 0..d.natts as usize {
+            let (a, b) = (d.attr(i), fresh.attr(i));
+            if a.attname.name_str() != b.attname.name_str()
+                || a.atttypid != b.atttypid
+                || a.atttypmod != b.atttypmod
+                || a.attisdropped != b.attisdropped
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
+}
+
 pub(crate) fn cached_sql_function(
     flinfo: &fmgr::FmgrInfo,
     input_collation: Oid,
@@ -297,7 +323,10 @@ pub(crate) fn cached_sql_function(
     let key = FnKey { fn_oid, collation: input_collation, argtypes, nargs: nargs as u8 };
 
     if let Some(hit) = SQL_FN_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        if hit.stamp == stamp {
+        // The pg_proc stamp misses ALTERs of a composite rettype's relation
+        // (C rebuilds the fcache with the plan, so it re-resolves there);
+        // revalidate the resolved rettupdesc against the current rowtype.
+        if hit.stamp == stamp && rettupdesc_is_current(&hit)? {
             return Ok(hit);
         }
         SQL_FN_CACHE.with(|c| {
