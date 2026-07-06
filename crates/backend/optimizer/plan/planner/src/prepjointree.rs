@@ -1804,6 +1804,26 @@ fn splice_and_replace<'mcx>(
                             };
                         }
                     }
+                    RTEKind::RTE_TABLEFUNC => {
+                        let tf = other.tablefunc.expect("TABLEFUNC RTE has tablefunc");
+                        if let Some(n) = replace_var_expr(mcx, tf, varno, tlist, lateral, ph)? {
+                            // SAFETY: as above.
+                            unsafe {
+                                other_node.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(n))
+                            };
+                        }
+                    }
+                    RTEKind::RTE_RELATION => {
+                        // C replace_vars_in_jointree: a LATERAL relation RTE
+                        // carries its refs in the tablesample clause.
+                        let tsc = other.tablesample.expect("LATERAL relation has a tablesample");
+                        if let Some(n) = replace_var_expr(mcx, tsc, varno, tlist, lateral, ph)? {
+                            // SAFETY: as above.
+                            unsafe {
+                                other_node.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(n))
+                            };
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2546,6 +2566,18 @@ fn replace_vars_in_query_value<'mcx>(
                     // SAFETY: as above.
                     unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(n)) };
                     replacement = Some(copy);
+                }
+            }
+            RTEKind::RTE_RELATION => {
+                // range_table_mutator (rewriteManip.c) walks rte->tablesample:
+                // a sampled relation's arguments carry level-su references.
+                if let Some(tsc) = srte.tablesample {
+                    if let Some(n) = replace_var_expr_su(mcx, tsc, varno, tlist, lateral, ph, su)? {
+                        let copy = rte_copy_with_perminfoindex(mcx, srte, srte.perminfoindex)?;
+                        // SAFETY: as above.
+                        unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(n)) };
+                        replacement = Some(copy);
+                    }
                 }
             }
             _ => {}

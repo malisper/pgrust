@@ -26,7 +26,8 @@ pub use case::{
     str_tolower, suff_search,
 };
 pub use dch_entry::{
-    parse_datetime, timestamp_to_char, timestamptz_to_char, to_date, to_timestamp, ParsedDatetime,
+    datetime_format_has_tz, parse_datetime, timestamp_to_char, timestamptz_to_char, to_date,
+    to_timestamp, ParsedDatetime,
 };
 pub use fmgr_builtins::FORMATTING_BUILTINS;
 pub use num_entry::{

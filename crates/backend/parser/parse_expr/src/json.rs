@@ -374,7 +374,10 @@ fn transformJsonOutput<'mcx>(
 
     let tn_node = output.typeName.expect("typeName");
     let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
-    let (typid, typmod) = parse_utilcmd::typenameTypeIdAndMod(mcx, Some(&*pstate), tn)?;
+    // C typenameTypeIdAndMod (parse_type.c) has no typtype gate; the
+    // pseudo-type rejection below owns that error (parse_expr.c:3551).
+    let (typid, typmod) =
+        parse_utilcmd::typenameTypeIdAndModAllowComposite(mcx, Some(&*pstate), tn)?;
 
     if tn.setof {
         return Err(err(

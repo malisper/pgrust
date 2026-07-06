@@ -112,6 +112,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_SubqueryScan) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
+        t if t == tag16(NodeTag::T_TableFuncScan) => true,
         t if t == tag16(NodeTag::T_SetOp) => false,
         t if t == tag16(NodeTag::T_Sort) => false,
         t if t == tag16(NodeTag::T_IncrementalSort) => false,

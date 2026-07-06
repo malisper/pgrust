@@ -3491,7 +3491,15 @@ fn init_coerce_to_domain<'mcx>(
     for con in cref.constraints() {
         match con.constrainttype {
             typcache::DomConstraintType::NotNull => {
-                push_step(state, mcx, Step::DomainNotNull { resulttype: cd.resulttype, out })?;
+                push_step(
+                    state,
+                    mcx,
+                    Step::DomainNotNull {
+                        resulttype: cd.resulttype,
+                        escontext: state.escontext,
+                        out,
+                    },
+                )?;
             }
             typcache::DomConstraintType::Check => {
                 let check = match check_slot {
@@ -3537,6 +3545,7 @@ fn init_coerce_to_domain<'mcx>(
                         resulttype: cd.resulttype,
                         name: NonNull::from(name),
                         check,
+                        escontext: state.escontext,
                     },
                 )?;
             }

@@ -104,10 +104,41 @@ impl<'mcx> NodeWalker<'mcx> for ContainMutable {
                 }
                 expression_tree_walker(node, self)
             }
-            // jspIsMutable (jsonpath.c) is jsonpath-lane scope: constant
-            // immutable paths are conservatively treated as mutable until it
-            // lands (C clauses.c:416; blocks const-folding only).
-            NodeTag::T_JsonExpr => Ok(true),
+            // C clauses.c:416: a non-Const path is mutable; a null path const
+            // is immutable with no subnode recursion; else jspIsMutable over
+            // the PASSING variables' expression types.
+            NodeTag::T_JsonExpr => {
+                let je = node.as_json_expr().unwrap();
+                let path = je.path_spec.expect("JsonExpr.path_spec");
+                let Some(cnst) = path.as_const() else {
+                    return Ok(true);
+                };
+                debug_assert_eq!(cnst.consttype, 4072, "path_spec is a jsonpath Const");
+                if cnst.constisnull {
+                    return Ok(false);
+                }
+                let p = cnst.constvalue.as_usize() as *const u8;
+                // Parse-built jsonpath Consts are plain 4B varlenas
+                // (jsonpath_in output; never short/toast).
+                assert!(
+                    // SAFETY: live by-ref varlena datum, header readable.
+                    unsafe { *p } & 0x03 == 0,
+                    "jsonpath Const with a non-4B varlena header"
+                );
+                // SAFETY: 4B-header varlena readable for its VARSIZE.
+                let image = unsafe { datum::VarlenaRef::from_ptr(p) }.as_bytes();
+                let mut vars: Vec<(&[u8], Oid)> = Vec::with_capacity(je.passing_names.len());
+                for (name, value) in je.passing_names.iter().zip(je.passing_values.iter()) {
+                    vars.push((
+                        name.as_string().expect("passing name is a String node").sval.as_bytes(),
+                        nodes_core::node_funcs::expr_type(value),
+                    ));
+                }
+                if adt_jsonpath::mutability::jsp_is_mutable(image, &vars)? {
+                    return Ok(true);
+                }
+                expression_tree_walker(node, self)
+            }
             // All SQLValueFunction variants are stable; NextValueExpr volatile.
             NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => Ok(true),
             NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),

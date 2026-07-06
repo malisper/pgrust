@@ -895,6 +895,9 @@ unsafe fn expr_set_collation(node: Node<'_>, coll: Oid) {
             NodeTag::T_FuncExpr => {
                 node.with_mut::<types_nodes::FuncExpr, _>(|f| f.funccollid = coll).unwrap()
             }
+            NodeTag::T_OpExpr => {
+                node.with_mut::<types_nodes::OpExpr, _>(|o| o.opcollid = coll).unwrap()
+            }
             NodeTag::T_RelabelType => node
                 .with_mut::<types_nodes::RelabelType, _>(|r| r.resultcollid = coll)
                 .unwrap(),
