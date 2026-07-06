@@ -767,8 +767,19 @@ fn copy_from_partitioned_body<'mcx>(
             if lrel.rd_rel.relkind != RELKIND_RELATION {
                 panic!("CopyFrom: foreign-table partition as COPY target not ported (FDW lane)");
             }
+            // rd_hastriggers is a stale-true proxy (DROP TRIGGER never clears
+            // relhastriggers, trigger.c:1350); C keys off the leaf's real
+            // ri_TrigDesc, so only a live insert row trigger is loud (B9).
             if lrel.rd_hastriggers {
-                panic!("CopyFrom: triggers on a routed-into partition not ported");
+                if let Some(td) = relcache::RelationGetTriggerDesc(lrel.rd_id)? {
+                    if td.trig_insert_before_row
+                        || td.trig_insert_instead_row
+                        || td.trig_insert_after_row
+                        || td.trig_insert_new_table
+                    {
+                        panic!("CopyFrom: triggers on a routed-into partition not ported");
+                    }
+                }
             }
             if lrel
                 .rd_att
