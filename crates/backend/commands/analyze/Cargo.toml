@@ -50,6 +50,8 @@ relcache_seams = { path = "../../utils/cache/relcache_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 vacuum_seams = { path = "../vacuum_seams" }
 commands_vacuum = { path = "../vacuum" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
 commands_analyze_seams = { path = "../commands_analyze_seams" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 types_storage = { path = "../../../_support/types/types_storage" }

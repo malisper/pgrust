@@ -61,6 +61,10 @@ pg_database = { path = "../../catalog/pg_database" }
 types_guc = { path = "../../../_support/types/types_guc" }
 guc = { path = "../../utils/misc/guc" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
+aclchk = { path = "../../catalog/aclchk" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+parser_small1 = { path = "../../parser/parser_small1" }
+mbutils = { path = "../../utils/mb/mbutils" }
 
 parallel_seams = { path = "../../access/transam/parallel_seams" }
 [dev-dependencies]
@@ -108,7 +112,6 @@ lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 lock_seams = { path = "../../storage/lmgr/lock_seams" }
 logical_seams = { path = "../../replication/logical_seams" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
-miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 multixact_seams = { path = "../../access/transam/multixact_seams" }
 nodeseqscan = { path = "../../executor/nodeseqscan" }
 origin_seams = { path = "../../replication/origin_seams" }

@@ -120,9 +120,52 @@ pub fn set_in_vacuum(v: bool) {
     IN_VACUUM.set(v);
 }
 
+// MIN_BAS_VAC_RING_SIZE_KB (miscadmin.h:278); MAX in guc_tables consts.
+const MIN_BAS_VAC_RING_SIZE_KB: i32 = 128;
+const MAX_BAS_VAC_RING_SIZE_KB: i32 = 16 * 1024 * 1024;
+
+fn errpos(src: &str, location: ::types_core::ParseLoc) -> i32 {
+    parser_small1::parser_errposition_source(
+        Some(src.as_bytes()),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )
+}
+
+/// ExecVacuum's BUFFER_USAGE_LIMIT arm (vacuum.c), shared with the ANALYZE
+/// entry in commands_analyze.
+pub fn exec_vacuum_buffer_usage_limit<'mcx>(
+    mcx: Mcx<'mcx>,
+    opt: &types_nodes::parsenodes::DefElem<'_>,
+) -> PgResult<i32> {
+    let vac_buffer_size = explain::defGetString(mcx, opt)?;
+    let (result, hint) = match guc::units::parse_int(vac_buffer_size, ::types_guc::GUC_UNIT_KB) {
+        guc::units::ParseNum::Ok(v) => (Some(v), None),
+        guc::units::ParseNum::Err { hint } => (None, hint),
+    };
+    match result {
+        Some(v) if v == 0 || (MIN_BAS_VAC_RING_SIZE_KB..=MAX_BAS_VAC_RING_SIZE_KB).contains(&v) => {
+            Ok(v)
+        }
+        _ => {
+            let mut e = ereport(ERROR)
+                .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg(format!(
+                    "BUFFER_USAGE_LIMIT option must be 0 or between \
+                     {MIN_BAS_VAC_RING_SIZE_KB} kB and {MAX_BAS_VAC_RING_SIZE_KB} kB"
+                ));
+            if let Some(h) = hint {
+                e = e.errhint(h);
+            }
+            Err(e.into_error().into())
+        }
+    }
+}
+
 pub fn ExecVacuum<'mcx>(
     mcx: Mcx<'mcx>,
     vacstmt: &VacuumStmt<'mcx>,
+    source_text: &str,
     is_top_level: bool,
 ) -> PgResult<()> {
     let mut params = VacuumParams {
@@ -151,9 +194,6 @@ pub fn ExecVacuum<'mcx>(
     let mut skip_database_stats = false;
     let mut only_database_stats = false;
     let mut ring_size: i32 = -1;
-    // MIN_BAS_VAC_RING_SIZE_KB (miscadmin.h:278); MAX in guc_tables consts.
-    const MIN_BAS_VAC_RING_SIZE_KB: i32 = 128;
-    const MAX_BAS_VAC_RING_SIZE_KB: i32 = 16 * 1024 * 1024;
     for opt_node in vacstmt.options.iter() {
         let opt = opt_node.as_def_elem().expect("VacuumStmt option is DefElem");
         match opt.defname.unwrap_or("") {
@@ -197,6 +237,7 @@ pub fn ExecVacuum<'mcx>(
                             "parallel option requires a value between 0 and {MAX_PARALLEL_WORKER_LIMIT}"
                         ))
                         .into_error()
+                        .with_cursor_position(errpos(source_text, opt.location))
                         .into());
                 }
                 let nworkers = commands_define::defGetInt32(opt)?;
@@ -207,44 +248,18 @@ pub fn ExecVacuum<'mcx>(
                             "parallel workers for vacuum must be between 0 and {MAX_PARALLEL_WORKER_LIMIT}"
                         ))
                         .into_error()
+                        .with_cursor_position(errpos(source_text, opt.location))
                         .into());
                 }
                 params.nworkers = if nworkers == 0 { -1 } else { nworkers };
             }
-            "buffer_usage_limit" => {
-                let vac_buffer_size = explain::defGetString(mcx, opt)?;
-                let (result, hint) =
-                    match guc::units::parse_int(vac_buffer_size, ::types_guc::GUC_UNIT_KB) {
-                        guc::units::ParseNum::Ok(v) => (Some(v), None),
-                        guc::units::ParseNum::Err { hint } => (None, hint),
-                    };
-                match result {
-                    Some(v)
-                        if v == 0
-                            || (MIN_BAS_VAC_RING_SIZE_KB..=MAX_BAS_VAC_RING_SIZE_KB)
-                                .contains(&v) =>
-                    {
-                        ring_size = v;
-                    }
-                    _ => {
-                        let mut e = ereport(ERROR)
-                            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-                            .errmsg(format!(
-                                "BUFFER_USAGE_LIMIT option must be 0 or between \
-                                 {MIN_BAS_VAC_RING_SIZE_KB} kB and {MAX_BAS_VAC_RING_SIZE_KB} kB"
-                            ));
-                        if let Some(h) = hint {
-                            e = e.errhint(h);
-                        }
-                        return Err(e.into_error().into());
-                    }
-                }
-            }
+            "buffer_usage_limit" => ring_size = exec_vacuum_buffer_usage_limit(mcx, opt)?,
             name => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_SYNTAX_ERROR)
                     .errmsg(format!("unrecognized VACUUM option \"{name}\""))
                     .into_error()
+                    .with_cursor_position(errpos(source_text, opt.location))
                     .into())
             }
         }
@@ -266,22 +281,6 @@ pub fn ExecVacuum<'mcx>(
         | (if skip_database_stats { VACOPT_SKIP_DATABASE_STATS } else { 0 })
         | (if only_database_stats { VACOPT_ONLY_DATABASE_STATS } else { 0 });
 
-    if full && disable_page_skipping {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL")
-            .into_error()
-            .into());
-    }
-
-    if full && !process_toast {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("PROCESS_TOAST required with VACUUM FULL")
-            .into_error()
-            .into());
-    }
-
     if full && params.nworkers > 0 {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -300,6 +299,61 @@ pub fn ExecVacuum<'mcx>(
             .errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL")
             .into_error()
             .into());
+    }
+
+    if params.options & VACOPT_ANALYZE == 0 {
+        for vrel_node in vacstmt.rels.iter() {
+            let vrel = vrel_node
+                .as_vacuum_relation()
+                .expect("vacuum relation list holds VacuumRelation");
+            if !vrel.va_cols.is_nil() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("ANALYZE option must be specified when a column list is provided")
+                    .into_error()
+                    .into());
+            }
+        }
+    }
+
+    if full && disable_page_skipping {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL")
+            .into_error()
+            .into());
+    }
+
+    if full && !process_toast {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("PROCESS_TOAST required with VACUUM FULL")
+            .into_error()
+            .into());
+    }
+
+    if params.options & VACOPT_ONLY_DATABASE_STATS != 0 {
+        if !vacstmt.rels.is_nil() {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("ONLY_DATABASE_STATS cannot be specified with a list of tables")
+                .into_error()
+                .into());
+        }
+        if params.options
+            & !(VACOPT_VACUUM
+                | VACOPT_VERBOSE
+                | VACOPT_PROCESS_MAIN
+                | VACOPT_PROCESS_TOAST
+                | VACOPT_ONLY_DATABASE_STATS)
+            != 0
+        {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")
+                .into_error()
+                .into());
+        }
     }
 
     if freeze {
@@ -359,26 +413,18 @@ pub fn vacuum<'mcx>(
             .into());
     }
 
-    if params.options & VACOPT_ONLY_DATABASE_STATS != 0 {
-        unported("vacuum: ONLY_DATABASE_STATS");
-    }
     let mut vacrels: ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>> = ::mcx::PgVec::new_in(mcx);
-    if !relations.is_nil() {
+    if params.options & VACOPT_ONLY_DATABASE_STATS != 0 {
+        debug_assert!(relations.is_nil());
+    } else if !relations.is_nil() {
         for vrel_node in relations.iter() {
             let vrel = vrel_node
                 .as_vacuum_relation()
                 .expect("vacuum relation list holds VacuumRelation");
-            if !vrel.va_cols.is_nil() && params.options & VACOPT_ANALYZE == 0 {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_SYNTAX_ERROR)
-                    .errmsg("ANALYZE option must be specified when column lists are provided")
-                    .into_error()
-                    .into());
-            }
             expand_vacuum_rel(mcx, vrel, params.options, &mut vacrels)?;
         }
     } else {
-        get_all_vacuum_rels(mcx, &mut vacrels)?;
+        get_all_vacuum_rels(mcx, params.options, &mut vacrels)?;
     }
 
     if snapmgr::ActiveSnapshotSet() {
@@ -447,10 +493,40 @@ pub struct ExpandedVacRel<'mcx> {
     pub va_cols: &'mcx NodeList<'mcx>,
 }
 
+/// vacuum_is_permitted_for_relation (vacuum.c): db owner (non-shared rel) or
+/// MAINTAIN privilege; WARNING + false otherwise. `relid` may be the TOAST
+/// parent while `relname` names the relation being processed (vacuum_rel).
+pub fn vacuum_is_permitted_for_relation(
+    relid: Oid,
+    relname: &str,
+    relisshared: bool,
+    options: u32,
+) -> PgResult<bool> {
+    debug_assert!(options & (VACOPT_VACUUM | VACOPT_ANALYZE) != 0);
+    let roleid = miscinit_seams::get_user_id::call();
+    if (aclchk::object_ownercheck(
+        ::types_core::catalog::DATABASE_RELATION_ID,
+        init_small::globals::MyDatabaseId(),
+        roleid,
+    )? && !relisshared)
+        || aclchk::pg_class_aclcheck(
+            relid,
+            roleid,
+            types_nodes::parsenodes::ACL_MAINTAIN as u64,
+        )? == aclchk::ACLCHECK_OK
+    {
+        return Ok(true);
+    }
+    let verb = if options & VACOPT_VACUUM != 0 { "vacuum" } else { "analyze" };
+    ereport(WARNING)
+        .errmsg(format!("permission denied to {verb} \"{relname}\", skipping it"))
+        .finish(loc("vacuum_is_permitted_for_relation"))?;
+    Ok(false)
+}
+
 /// expand_vacuum_rel (vacuum.c): resolve the named table and, unless ONLY,
 /// append its partitions/inheritance children. The transient AccessShareLock
-/// is released before return, C-exact. vacuum_is_permitted_for_relation is
-/// skipped (single-user milestone).
+/// is released before return, C-exact.
 pub fn expand_vacuum_rel<'mcx>(
     mcx: Mcx<'mcx>,
     vrel: &'mcx types_nodes::parsenodes::VacuumRelation<'mcx>,
@@ -480,10 +556,12 @@ pub fn expand_vacuum_rel<'mcx>(
         AccessShareLock,
         false,
     )?;
-    let class_shape = syscache_seams::lookup_pg_class_ls_shape::call(relid)?
+    let class_shape = syscache_seams::lookup_pg_class_by_relid::call(relid)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
 
-    vacrels.push(ExpandedVacRel { oid: relid, relname: Some(relname), va_cols: &vrel.va_cols });
+    if vacuum_is_permitted_for_relation(relid, relname, class_shape.relisshared, options)? {
+        vacrels.push(ExpandedVacRel { oid: relid, relname: Some(relname), va_cols: &vrel.va_cols });
+    }
 
     let include_children = rv.inh;
     let is_partitioned_table =
@@ -508,11 +586,11 @@ pub fn expand_vacuum_rel<'mcx>(
     Ok(())
 }
 
-/// get_all_vacuum_rels (vacuum.c): every vacuumable rel in the database.
-/// vacuum_is_permitted_for_relation is skipped (single-user milestone),
-/// matching expand_vacuum_rel.
+/// get_all_vacuum_rels (vacuum.c): every vacuumable rel in the database the
+/// user has privileges for.
 fn get_all_vacuum_rels<'mcx>(
     mcx: Mcx<'mcx>,
+    options: u32,
     vacrels: &mut ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>>,
 ) -> PgResult<()> {
     let nil_cols = ::mcx::alloc_leak_in(mcx, NodeList::nil())?;
@@ -525,6 +603,16 @@ fn get_all_vacuum_rels<'mcx>(
             continue;
         }
         let relid = getattr(tup, Anum_pg_class_oid, desc).as_oid();
+        let relname = name_from_datum(getattr(tup, Anum_pg_class_relname, desc));
+        let relisshared = getattr(tup, Anum_pg_class_relisshared, desc).as_bool();
+        if !vacuum_is_permitted_for_relation(
+            relid,
+            core::str::from_utf8(relname.name_str()).unwrap_or(""),
+            relisshared,
+            options,
+        )? {
+            continue;
+        }
         vacrels.push(ExpandedVacRel { oid: relid, relname: None, va_cols: nil_cols });
     }
     genam::systable_endscan(mcx, scan)?;
@@ -565,6 +653,25 @@ fn vacuum_rel<'mcx>(
             return Ok(false);
         }
     };
+
+    // vacuum.c:2119: privileges are re-checked per relation because VACUUM
+    // spans transactions; priv_relid is the TOAST parent when recursing.
+    let priv_relid = if params.toast_parent != InvalidOid {
+        params.toast_parent
+    } else {
+        rel.rd_id
+    };
+    if !vacuum_is_permitted_for_relation(
+        priv_relid,
+        rel.name(),
+        rel.rd_rel.relisshared,
+        params.options & !VACOPT_ANALYZE,
+    )? {
+        rel.close(lmode)?;
+        snapmgr::PopActiveSnapshot()?;
+        xact::CommitTransactionCommand()?;
+        return Ok(false);
+    }
 
     if !matches!(
         rel.rd_rel.relkind,
@@ -879,6 +986,8 @@ const RelationRelationId: Oid = 1259;
 const ClassOidIndexId: Oid = 2662;
 const Natts_pg_class: usize = 34;
 const DatabaseRelationId: Oid = 1262;
+const Anum_pg_class_relname: usize = 2;
+const Anum_pg_class_relisshared: usize = 16;
 const Anum_pg_class_relkind: usize = 18;
 const Anum_pg_class_relfrozenxid: usize = 30;
 const Anum_pg_class_relminmxid: usize = 31;
@@ -891,6 +1000,11 @@ const Anum_pg_class_relhasindex: usize = 15;
 const Anum_pg_class_relhasrules: usize = 21;
 const Anum_pg_class_relhastriggers: usize = 22;
 const RowExclusiveLock: LOCKMODE = 3;
+
+fn name_from_datum(d: ::datum::Datum) -> ::types_tuple::NameData {
+    // SAFETY: name column datum points at an in-tuple NameData image.
+    unsafe { core::ptr::read_unaligned(d.as_usize() as *const ::types_tuple::NameData) }
+}
 
 fn getattr(
     tup: &::types_tuple::HeapTupleData<'_>,

@@ -26,6 +26,7 @@ use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
 const VACOPT_VACUUM: i32 = 0x01;
 const VACOPT_ANALYZE: i32 = 0x02;
 const VACOPT_VERBOSE: i32 = 0x04;
+const VACOPT_SKIP_LOCKED: i32 = 0x08;
 
 const STATISTIC_RELATION_ID: Oid = 2619;
 const STATISTIC_NUM_SLOTS: usize = 5;
@@ -113,26 +114,42 @@ pub(crate) struct VacAttrStats<'mcx> {
 pub fn ExecVacuum<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &'mcx VacuumStmt<'mcx>,
+    source_text: &str,
     is_top_level: bool,
 ) -> PgResult<()> {
     if stmt.is_vacuumcmd {
         panic!("ExecVacuum (vacuum.c): VACUUM lane (commands_vacuum unit)");
     }
     let mut verbose = false;
+    let mut skip_locked = false;
+    // BUFFER_USAGE_LIMIT is validated C-exactly; the ANALYZE path has no
+    // buffer-strategy plumbing yet, so the accepted value is unused.
+    let mut _ring_size: i32 = -1;
     for opt in stmt.options.iter() {
         let d = opt.as_def_elem().expect("utility option DefElem");
         match d.defname.expect("option name") {
             "verbose" => verbose = def_get_boolean(d)?,
+            "skip_locked" => skip_locked = def_get_boolean(d)?,
+            "buffer_usage_limit" => {
+                _ring_size = commands_vacuum::exec_vacuum_buffer_usage_limit(mcx, d)?
+            }
             other => {
-                return Err(PgError::error(format!(
-                    "unrecognized ANALYZE option \"{other}\""
+                return Err(Box::new(
+                    PgError::error(format!("unrecognized ANALYZE option \"{other}\""))
+                        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
+                        .with_cursor_position(parser_small1::parser_errposition_source(
+                            Some(source_text.as_bytes()),
+                            d.location,
+                            mbutils::GetDatabaseEncoding(),
+                        )),
                 ))
-                .into())
             }
         }
     }
     let params = VacuumParams {
-        options: VACOPT_ANALYZE | if verbose { VACOPT_VERBOSE } else { 0 },
+        options: VACOPT_ANALYZE
+            | if verbose { VACOPT_VERBOSE } else { 0 }
+            | if skip_locked { VACOPT_SKIP_LOCKED } else { 0 },
     };
     vacuum(mcx, &stmt.rels, &params, is_top_level)
 }
@@ -238,6 +255,15 @@ pub fn analyze_rel(
     else {
         return Ok(());
     };
+    if !commands_vacuum::vacuum_is_permitted_for_relation(
+        onerel.rd_id,
+        onerel.name(),
+        onerel.rd_rel.relisshared,
+        (params.options & !VACOPT_VACUUM) as u32,
+    )? {
+        onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        return Ok(());
+    }
     if onerel.rd_id == STATISTIC_RELATION_ID {
         onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
         return Ok(());
