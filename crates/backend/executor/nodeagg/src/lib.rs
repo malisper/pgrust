@@ -48,6 +48,7 @@ pub fn init_seams() {}
 mod tests;
 
 mod gsets;
+mod merge;
 
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
@@ -76,6 +77,7 @@ pub struct AggStateData<'mcx> {
     skip_final: bool,
     numtrans: usize,
     perhash: Option<PerHashData<'mcx>>,
+    merge: Option<merge::FinalizeMerge<'mcx>>,
     persort: Option<PerSortData<'mcx>>,
     gsets: Option<PgBox<'mcx, gsets::GroupingSetsState<'mcx>>>,
     pertrans_sort: PgVec<'mcx, PerTransSortData<'mcx>>,
@@ -967,6 +969,11 @@ pub fn exec_init_agg<'mcx>(
             cur_agg,
         });
     }
+    let merge_outer_desc = if !has_grouping_sets && node.aggstrategy == AGG_HASHED {
+        outer_desc.clone()
+    } else {
+        None
+    };
     let (mut evaltrans, perhash, persort, gs) = if has_grouping_sets {
         let gs = gsets::init_grouping_sets(
             node, estate, outer_desc, &specs, numtrans, fm_agg_node, params, tmpcontext,
@@ -1035,6 +1042,25 @@ pub fn exec_init_agg<'mcx>(
         let qual = exec_build_agg_qual_subplans(mcx, &node.plan.qual, bind, params, env)?;
         Ok((proj, qual))
     })?;
+    let merge = match (&perhash, &evaltrans, &merge_outer_desc) {
+        (Some(ph), Some(et), Some(od)) => {
+            let has_subplan = et.has_subplan()
+                || proj.has_subplan()
+                || qual.as_deref().is_some_and(|q| q.has_subplan());
+            merge::init_finalize_merge(
+                node,
+                estate,
+                &trans_fnoid,
+                &trans_typ,
+                &trans_aggref,
+                pertrans_sort.is_empty(),
+                has_subplan,
+                ph,
+                Some(od),
+            )?
+        }
+        _ => None,
+    };
     let mut qual = qual;
     if let Some(q) = qual.as_mut() {
         // HAVING callees allocate by-ref results through the frame's result
@@ -1064,6 +1090,7 @@ pub fn exec_init_agg<'mcx>(
         skip_final,
         numtrans,
         perhash,
+        merge,
         persort,
         gsets: gs,
         pertrans_sort,
@@ -2569,6 +2596,9 @@ where
         if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
             agg_fill_hash_table(node, estate, &mut fetch_outer)?;
         }
+        if node.merge.as_ref().is_some_and(|m| m.has_run()) {
+            return merge::agg_retrieve_merged(node, estate);
+        }
         return agg_retrieve_hash_table(node, estate);
     }
     if node.plan.aggstrategy == AGG_SORTED {
@@ -2664,6 +2694,7 @@ pub trait AggBatchSource<'mcx> {
 /// per-tuple drive otherwise.
 pub fn agg_batch_drainable(node: &AggStateData<'_>) -> bool {
     node.gsets.is_none()
+        && node.merge.is_none()
         && node.pertrans_sort.is_empty()
         && (node.plan.aggstrategy == AGG_PLAIN || node.plan.aggstrategy == AGG_HASHED)
         && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
@@ -2782,6 +2813,7 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
         }
     }
     hashagg_finish_initial_spills(node, estate)?;
+    merge::maybe_install_handoff(node, estate);
     let ph = node.perhash.as_mut().unwrap();
     ph.table_filled = true;
     ph.hashiter = 0;
@@ -3093,7 +3125,9 @@ where
         }
         estate.reset_expr_context(node.tmpcontext);
     }
+    merge::consume_handoff(node, estate)?;
     hashagg_finish_initial_spills(node, estate)?;
+    merge::maybe_install_handoff(node, estate);
     let ph = node.perhash.as_mut().unwrap();
     ph.table_filled = true;
     ph.hashiter = 0;
@@ -3297,6 +3331,7 @@ fn agg_retrieve_hash_table<'mcx>(
 /// are freed with the EState).
 pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     node.qual = None;
+    node.merge = None;
     if let Some(ph) = node.perhash.as_mut() {
         hashagg_reset_spill_state(ph, node.plan.numGroups as f64);
     }
@@ -3321,6 +3356,7 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
 pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
+    merge::reset_merge_for_rescan(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -3357,6 +3393,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
 pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
+    // Merged results combine into the handed buffers in place, so a rescan
+    // rebuilds from a fresh worker run instead of reusing the filled table.
+    let merged = merge::reset_merge_for_rescan(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -3377,7 +3416,7 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         return;
     }
     if let Some(ph) = node.perhash.as_mut() {
-        if !ph.spill.ever_spilled {
+        if !ph.spill.ever_spilled && !merged {
             // C's no-chgParam arm: the filled table is reused, only the
             // iterator resets (the caller's child rescan is then redundant
             // but harmless).
@@ -3475,6 +3514,6 @@ mcx::forget_safe_struct!(
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans;
-        ps_ResultTupleDesc, proj, evaltrans, perhash, persort, gsets,
+        ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual },
 );
