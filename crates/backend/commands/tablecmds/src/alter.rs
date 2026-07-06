@@ -1482,7 +1482,17 @@ fn ATRewriteCatalogs<'mcx>(
                 }
                 // Phase-2 arm only fires for partitioned relkinds (no
                 // storage); phase 3 does the work otherwise.
-                AlterTableType::AT_SetTableSpace => {}
+                AlterTableType::AT_SetTableSpace => {
+                    if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+                        || rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_INDEX
+                    {
+                        ATExecSetTableSpaceNoStorage(
+                            mcx,
+                            &rel,
+                            wqueue[tabidx].new_tablespace,
+                        )?;
+                    }
+                }
                 AlterTableType::AT_SetAccessMethod => {
                     if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE
                         && wqueue[tabidx].chg_access_method
@@ -6716,8 +6726,10 @@ fn CheckRelationTableSpaceMove(rel: &Relation<'_>, new_tablespace_id: Oid) -> Pg
     {
         return Ok(false);
     }
-    // RelationIsMapped: mapped relations carry relfilenode 0.
-    if rel.rd_rel.relfilenode == InvalidOid {
+    // RelationIsMapped: storage-bearing relations with relfilenode 0.
+    if types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind)
+        && rel.rd_rel.relfilenode == InvalidOid
+    {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -7082,7 +7094,27 @@ fn SetRelationTableSpace<'mcx>(
     let otid = tup.t_self;
     genam::systable_endscan(mcx, scan)?;
     catalog_indexing::CatalogTupleUpdate(mcx, &pg_class, &otid, &mut newtup)?;
+    // Tablespace dependency is only recorded for storage-less relations
+    // (tablecmds.c:3782).
+    if !types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind) {
+        pg_shdepend::changeDependencyOnTablespace(mcx, RELATION_RELATION_ID, reloid, stored_spc)?;
+    }
     pg_class.close(RowExclusiveLock)
+}
+
+// ATExecSetTableSpaceNoStorage (tablecmds.c:16997): catalog-only
+// reltablespace change for partitioned tables and indexes.
+fn ATExecSetTableSpaceNoStorage<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    new_tablespace: Oid,
+) -> PgResult<()> {
+    debug_assert!(!types_rel::RELKIND_HAS_STORAGE(rel.rd_rel.relkind));
+    if !CheckRelationTableSpaceMove(rel, new_tablespace)? {
+        return Ok(());
+    }
+    SetRelationTableSpace(mcx, rel, new_tablespace, InvalidOid)?;
+    xact::CommandCounterIncrement()
 }
 
 // ATPrepSetAccessMethod (tablecmds.c:16491).

@@ -571,9 +571,17 @@ pub fn generateClonedIndexStmt<'mcx>(
         3580 => "brin",
         other => unported(&format!("generateClonedIndexStmt: index AM {other}")),
     };
-    if source_idx.rd_rel.reltablespace != InvalidOid {
-        unported("generateClonedIndexStmt: TABLESPACE");
-    }
+    let table_space = if source_idx.rd_rel.reltablespace != InvalidOid {
+        let spc = source_idx.rd_rel.reltablespace;
+        let name = tablespace_seams::get_tablespace_name::call(mcx, spc)?
+            .unwrap_or_else(|| panic!("cache lookup failed for tablespace {spc}"));
+        Some(str_in(
+            mcx,
+            std::str::from_utf8(name.name_str()).expect("tablespace name is utf8"),
+        )?)
+    } else {
+        None
+    };
     if source_idx.rd_options.is_some() {
         unported("generateClonedIndexStmt: index reloptions (untransformRelOptions)");
     }
@@ -593,6 +601,7 @@ pub fn generateClonedIndexStmt<'mcx>(
     let mut stmt = IndexStmt {
         relation: heap_rel,
         accessMethod: Some(amname),
+        tableSpace: table_space,
         unique: idxrec.indisunique,
         nulls_not_distinct: idxrec.indnullsnotdistinct,
         primary: idxrec.indisprimary,

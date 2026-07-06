@@ -1023,16 +1023,26 @@ pub fn pg_get_constraintdef_command(mcx: Mcx<'_>, constraint_id: Oid) -> PgResul
             quote_identifier(&conname)
         )
     };
-    let body = pg_get_constraintdef_worker(mcx, constraint_id, 0, false)?
+    let body = pg_get_constraintdef_worker_full(mcx, constraint_id, true, 0, false)?
         .expect("missing_ok=false returns Some");
     Ok(prefix + &body)
 }
 
-// Divergence from C: pg_get_constraintdef_worker scans pg_constraint under a
-// fresh MVCC snapshot; this reads the CONSTROID syscache.
 pub fn pg_get_constraintdef_worker(
     mcx: Mcx<'_>,
     constraint_id: Oid,
+    pretty_flags: i32,
+    missing_ok: bool,
+) -> PgResult<Option<String>> {
+    pg_get_constraintdef_worker_full(mcx, constraint_id, false, pretty_flags, missing_ok)
+}
+
+// Divergence from C: pg_get_constraintdef_worker scans pg_constraint under a
+// fresh MVCC snapshot; this reads the CONSTROID syscache.
+fn pg_get_constraintdef_worker_full(
+    mcx: Mcx<'_>,
+    constraint_id: Oid,
+    full_command: bool,
     pretty_flags: i32,
     missing_ok: bool,
 ) -> PgResult<Option<String>> {
@@ -1131,6 +1141,22 @@ pub fn pg_get_constraintdef_worker(
                     buf.push_str(&quote_identifier(colname.as_str()));
                 }
                 buf.push(')');
+            }
+            if full_command && conindid != InvalidOid {
+                if let Some(options) = flatten_reloptions(conindid)? {
+                    buf.push_str(&format!(" WITH ({options})"));
+                }
+                // The tablespace, unless database default: ALTER TABLE's
+                // re-add path needs it to recreate exact catalog state.
+                let tblspc = lsyscache::get_rel_tablespace(conindid)?;
+                if tblspc != InvalidOid {
+                    let spcname = get_tablespace_name(tblspc)?
+                        .unwrap_or_else(|| panic!("cache lookup failed for tablespace {tblspc}"));
+                    buf.push_str(&format!(
+                        " USING INDEX TABLESPACE {}",
+                        quote_identifier(&spcname)
+                    ));
+                }
             }
         }
         CONSTRAINT_CHECK => {
