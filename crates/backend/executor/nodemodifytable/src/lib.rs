@@ -154,6 +154,9 @@ pub struct ModifyTableState<'mcx> {
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
     leaf_trig_fmgr: Vec<::trigger::TriggerFmgrCache>,
     leaf_trig_when: Vec<::trigger::TriggerWhenCache<'mcx>>,
+    // C ExecInsert's *insert_destrel out-param (routed leaf of the last
+    // insert; None = unrouted), for the cross-partition FK update event.
+    last_insert_leaf: Option<usize>,
 }
 
 impl<'mcx> ModifyTableState<'mcx> {
@@ -561,6 +564,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
+        last_insert_leaf: None,
     })
 }
 
@@ -2111,7 +2115,8 @@ fn merge_update_act<'mcx>(
             .as_ref()
             .expect("result relation opened");
         ::trigger::ExecARUpdateTriggers(
-            mcx, rel, &td, *tupleid, ar_new_tid, &recheck_indexes, tc, Some(&mut when),
+            mcx, rel, Some(&td), None, None, Some(*tupleid), Some(ar_new_tid),
+            &recheck_indexes, tc, Some(&mut when), false,
         )?;
     }
 
@@ -2166,6 +2171,7 @@ fn merge_delete_act<'mcx>(
         };
         ::trigger::ExecARDeleteTriggers(
             *es_query_cxt, rel, &td, *tupleid, transition_capture.as_ref(), Some(&mut when),
+            false,
         )?;
     }
     Ok(TM_Result::TM_Ok)
@@ -2929,7 +2935,8 @@ fn exec_update<'mcx>(
             .as_ref()
             .expect("result relation opened");
         ::trigger::ExecARUpdateTriggers(
-            mcx, rel, &td, *tupleid, ar_new_tid, &recheck_indexes, tc, Some(&mut when),
+            mcx, rel, Some(&td), None, None, Some(*tupleid), Some(ar_new_tid),
+            &recheck_indexes, tc, Some(&mut when), false,
         )?;
     }
 
@@ -2965,43 +2972,17 @@ fn exec_cross_partition_update<'mcx>(
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<UpdateResult> {
     let mcx = estate.es_query_cxt;
-
-    // C captures the moved row into the UPDATE transition tables (delete as
-    // OLD, insert as NEW: ExecDeleteEpilogue's tcs_update_old_table leg);
-    // the port's capture would misfile them as DELETE/INSERT — loud instead
-    // of silently wrong.
-    if mt.transition_capture.is_some() {
-        return Err(Box::new(
-            PgError::error(
-                "ExecCrossPartitionUpdate (nodeModifyTable.c): transition-table capture \
-                 of a moved row (UPDATE OLD/NEW filing) not ported"
-                    .to_string(),
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
-    }
+    let old_tid = *tupleid;
 
     // Row movement, part 1: delete, marking the tuple moved (changingPart).
+    // The delete epilogue files the row into the UPDATE OLD transition table;
+    // the insert epilogue files the new row as UPDATE NEW.
     if !exec_delete(mt, estate, tupleid, epq_eval, true)? {
         // C re-checks a concurrently-updated row via the EPQ slot and
         // retries the UPDATE; the port's delete leg cannot return one (loud
         // at init), so a vanished/blocked tuple skips the INSERT like C's
         // TupIsNull(epqslot) arm — never turning one row into two.
         return Ok(UpdateResult::CrossPart(None));
-    }
-
-    // ExecCrossPartitionUpdateForeignKey: when the source partition carries
-    // AR UPDATE triggers (RI enforcement on FK-referenced tables), C queues
-    // root-level update events; silently skipping would break FK checks.
-    if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_after_row) {
-        return Err(Box::new(
-            PgError::error(
-                "ExecCrossPartitionUpdateForeignKey (nodeModifyTable.c): cross-partition \
-                 UPDATE over a source partition with AR UPDATE triggers not ported"
-                    .to_string(),
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
     }
 
     // Part 2: convert to the root layout (ExecGetChildToRootMap +
@@ -3043,6 +3024,15 @@ fn exec_cross_partition_update<'mcx>(
     let inserted = exec_insert(mt, estate, work_slot, epq_eval);
     mt.insert_target_root = false;
     let inserted = inserted?;
+
+    // ExecUpdateAct's post-move FK leg: if the source partition carries AR
+    // UPDATE triggers (RI enforcement on the referenced root), queue the
+    // root-table UPDATE event; leaf AR triggers alone cannot see the move.
+    if inserted.is_some()
+        && mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_after_row)
+    {
+        exec_cross_partition_update_foreign_key(mt, estate, old_tid, work_slot)?;
+    }
 
     Ok(UpdateResult::CrossPart(inserted))
 }
@@ -3196,6 +3186,117 @@ fn exec_cross_part_returning<'mcx>(
     out
 }
 
+// ExecCrossPartitionUpdateForeignKey (nodeModifyTable.c): queue an UPDATE
+// event on the root partitioned table so foreign keys pointing into it are
+// enforced across the row movement; an FK pointing at a non-root ancestor of
+// the source partition cannot be enforced this way (C's error).
+fn exec_cross_partition_update_foreign_key<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    old_tid: ItemPointerData,
+    inserted_slot: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let src_rti = mt.rel().rti;
+    let src_oid = mt.rel().rd_id;
+    let root_rti = mt.root_rel().rti;
+    let root_oid = mt.root_rel().rd_id;
+
+    // ExecGetAncestorResultRels: the source partition's ancestors up to the
+    // query's target root; the root's own triggers are processed below.
+    for anc in pg_inherits::get_partition_ancestors(mcx, src_oid)?.iter() {
+        if *anc == root_oid {
+            break;
+        }
+        let Some(td) = relcache::RelationGetTriggerDesc(*anc)? else {
+            continue;
+        };
+        if td.trig_update_after_row
+            && td.triggers.iter().any(|t| {
+                !t.tgisclone
+                    && ::trigger::ri_trigger_kind(t.tgfoid) == types_trigger::RI_TRIGGER_PK
+            })
+        {
+            let anc_name = lsyscache::relation::get_rel_name(mcx, *anc)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            let root_name = lsyscache::relation::get_rel_name(mcx, root_oid)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            return Err(Box::new(
+                PgError::error(
+                    "cannot move tuple across partitions when a non-root ancestor \
+                     of the source partition is directly referenced in a foreign key"
+                        .to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail(format!(
+                    "A foreign key points to ancestor \"{anc_name}\" but not the \
+                     root ancestor \"{root_name}\"."
+                ))
+                .with_hint(format!(
+                    "Consider defining the foreign key on table \"{root_name}\"."
+                )),
+            ));
+        }
+    }
+
+    let dst_idx = mt
+        .last_insert_leaf
+        .expect("cross-partition insert routed to a leaf");
+    let Some(root_td) = mt.root_rel().trigdesc.clone() else {
+        return Ok(());
+    };
+    let new_tid = estate.es_tupleTable[inserted_slot.0 as usize].base().tts_tid;
+    let ModifyTableState { root, rels, router, .. } = &mut *mt;
+    let root_r = root.as_mut().unwrap_or(&mut rels[0]);
+    let EStateData { es_relations, .. } = &*estate;
+    let src_rel = es_relations[(src_rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let root_rel = es_relations[(root_rti - 1) as usize]
+        .as_ref()
+        .expect("root relation opened");
+    let dst_rel = router.as_ref().expect("routed insert has a router").leaf_rel(dst_idx);
+
+    // The queued event's tuples must be in the root's format (C converts via
+    // ExecGetChildToRootMap before the RI checks); attno-remapped leaves need
+    // that conversion, which the port does not carry here — loud.
+    if tupdesc::build_attrmap_by_name_if_req(mcx, &src_rel.rd_att, &root_rel.rd_att, false)?
+        .is_some()
+        || tupdesc::build_attrmap_by_name_if_req(mcx, &dst_rel.rd_att, &root_rel.rd_att, false)?
+            .is_some()
+    {
+        return Err(Box::new(
+            PgError::error(
+                "ExecCrossPartitionUpdateForeignKey (nodeModifyTable.c): FK enforcement \
+                 across attno-remapped partitions not ported"
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    let mut when = ::trigger::TriggerWhenEval {
+        mcx,
+        cache: &mut root_r.trig_when,
+        modified_cols: None,
+    };
+    ::trigger::ExecARUpdateTriggers(
+        mcx,
+        root_rel,
+        Some(&root_td),
+        Some(src_rel),
+        Some(dst_rel),
+        Some(old_tid),
+        Some(new_tid),
+        &[],
+        None,
+        Some(&mut when),
+        true,
+    )
+}
+
 // ExecDelete + ExecDeletePrologue/Act/Epilogue (nodeModifyTable.c), plain-heap
 // arm; concurrent TM_Updated runs the EPQ recheck (ldelete loop).
 fn exec_delete<'mcx>(
@@ -3317,7 +3418,15 @@ fn exec_delete<'mcx>(
         }
     }
 
-    if let Some(td) = mt.rel().trigdesc.clone() {
+    // ExecDeleteEpilogue: a row moved out by a cross-partition UPDATE is
+    // captured into the UPDATE OLD transition table (old-only
+    // ExecARUpdateTriggers), and the AR DELETE triggers then run without the
+    // capture state so they don't re-file it as a DELETE.
+    let moved_capture = changing_part
+        && mt.operation == CmdType::CMD_UPDATE
+        && mt.transition_capture.as_ref().is_some_and(|tc| tc.tcs_update_old_table);
+    if mt.rel().trigdesc.is_some() || moved_capture {
+        let td = mt.rel().trigdesc.clone();
         let result_rti = mt.rel().rti;
         let ModifyTableState { rels, cur, transition_capture, .. } = mt;
         let trig_when = &mut rels[*cur].trig_when;
@@ -3330,9 +3439,18 @@ fn exec_delete<'mcx>(
             cache: trig_when,
             modified_cols: None,
         };
-        ::trigger::ExecARDeleteTriggers(
-            *es_query_cxt, rel, &td, *tupleid, transition_capture.as_ref(), Some(&mut when),
-        )?;
+        if moved_capture {
+            ::trigger::ExecARUpdateTriggers(
+                *es_query_cxt, rel, td.as_deref(), None, None, Some(*tupleid), None,
+                &[], transition_capture.as_ref(), Some(&mut when), false,
+            )?;
+        }
+        let ar_tcs = if moved_capture { None } else { transition_capture.as_ref() };
+        if let Some(td) = td.as_deref() {
+            ::trigger::ExecARDeleteTriggers(
+                *es_query_cxt, rel, td, *tupleid, ar_tcs, Some(&mut when), changing_part,
+            )?;
+        }
     }
 
     if mt.canSetTag && !changing_part {
@@ -4019,7 +4137,7 @@ fn ar_insert_triggers<'mcx>(
     let new_tid = estate.es_tupleTable[slot_id.0 as usize].base().tts_tid;
     let result_rti = mt.rel().rti;
     let ModifyTableState {
-        rels, cur, leaf_trig_when, transition_capture, router, ..
+        rels, cur, leaf_trig_when, transition_capture, router, operation, ..
     } = mt;
     let (rel, cache) = match leaf {
         None => (
@@ -4034,13 +4152,26 @@ fn ar_insert_triggers<'mcx>(
         ),
     };
     let mut when = ::trigger::TriggerWhenEval { mcx, cache, modified_cols: None };
+    // The INSERT half of a cross-partition UPDATE files the row into the
+    // UPDATE NEW transition table (new-only ExecARUpdateTriggers); AR INSERT
+    // triggers then run without the capture state (C's ar_insert_trig_tcs).
+    let mut ar_tcs = transition_capture.as_ref();
+    if *operation == CmdType::CMD_UPDATE
+        && transition_capture.as_ref().is_some_and(|tc| tc.tcs_update_new_table)
+    {
+        ::trigger::ExecARUpdateTriggers(
+            mcx, rel, td.as_deref(), None, None, None, Some(new_tid), &[],
+            transition_capture.as_ref(), Some(&mut when), false,
+        )?;
+        ar_tcs = None;
+    }
     ::trigger::ExecARInsertTriggers(
         mcx,
         rel,
         td.as_deref(),
         new_tid,
         recheck_indexes,
-        transition_capture.as_ref(),
+        ar_tcs,
         Some(&mut when),
     )
 }
@@ -4151,6 +4282,10 @@ fn exec_insert<'mcx>(
             None
         }
     };
+    // C ExecInsert's *inserted_tuple/*insert_destrel out-params: the caller
+    // (cross-partition update) needs the destination leaf for the root FK
+    // update event.
+    mt.last_insert_leaf = leaf_idx;
 
     // ExecPrepareTupleRouting: an attno-remapped leaf takes the tuple
     // converted into its own layout in a dedicated estate slot BEFORE any
@@ -4874,12 +5009,15 @@ fn exec_leaf_conflict_update<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx,
             rel,
-            &td,
-            *tupleid,
-            ar_new_tid,
+            Some(&td),
+            None,
+            None,
+            Some(*tupleid),
+            Some(ar_new_tid),
             &recheck_indexes,
             oc_transition_capture.as_ref(),
             Some(&mut when),
+            false,
         )?;
     }
 
@@ -5587,7 +5725,7 @@ mcx::forget_safe_struct!(
         virtual_nn_exprs, wco_exprs, merge },
     ModifyTableState<'_> { plan, canSetTag, mt_done, fireBSTriggers, cur,
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
-        node_ecxt, oc_old_slot, cross_part_root_slot;
+        node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf;
         operation, rels, root, snapshot_any, on_conflict,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters,
