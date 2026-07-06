@@ -117,23 +117,6 @@ pub fn subquery_planner<'mcx>(
                         })
                     };
                 }
-                if rte.tablesample.is_some() {
-                    let ts = preprocess_expression(
-                        run,
-                        &parse.rtable,
-                        parse.jointree,
-                        rte.tablesample,
-                        EXPRKIND_TABLESAMPLE,
-                        parse.hasSubLinks,
-                    )?;
-                    // SAFETY: pre-seal Query owned by this invocation; the
-                    // shared `rte` borrow is not read past this write.
-                    unsafe {
-                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                            r.tablesample = ts
-                        })
-                    };
-                }
             }
             RTEKind::RTE_RESULT => has_result_rtes = true,
             RTEKind::RTE_JOIN => {
@@ -148,92 +131,9 @@ pub fn subquery_planner<'mcx>(
                 // recursively in set_subquery_pathlist (their expressions are
                 // preprocessed inside that subroot, never here — C matches).
             }
-            RTEKind::RTE_FUNCTION => {
-                // FUNCTION RTEs that preprocess_function_rtes inlined are
-                // RTE_SUBQUERY by now. C preprocesses non-lateral functions
-                // too — uplevel correlation Vars appear without LATERAL and
-                // must become Params here — and its eval_const_expressions
-                // pass is mandatory: it inserts default arguments and converts
-                // named notation to positional. EXPRKIND_RTFUNC skips the
-                // second eval inside preprocess_expression, as in C.
-                {
-                    let kind = if rte.lateral {
-                        EXPRKIND_RTFUNC_LATERAL
-                    } else {
-                        EXPRKIND_RTFUNC
-                    };
-                    let mut new_functions = NodeList::nil();
-                    for f_node in &rte.functions {
-                        let f = f_node.as_range_tbl_function().expect("functions cell");
-                        let funcexpr = match f.funcexpr {
-                            Some(e) => Some(clauses::eval_const_expressions_with_params(
-                                mcx,
-                                e,
-                                run.glob.bound_params,
-                            )?),
-                            None => None,
-                        };
-                        let funcexpr = preprocess_expression(
-                            run,
-                            &parse.rtable,
-                            parse.jointree,
-                            funcexpr,
-                            kind,
-                            parse.hasSubLinks,
-                        )?;
-                        new_functions.lappend(
-                            mcx,
-                            Node::mk(
-                                mcx,
-                                types_nodes::parsenodes::RangeTblFunction {
-                                    funcexpr,
-                                    funccolcount: f.funccolcount,
-                                    funccolnames: f.funccolnames.clone_in(mcx)?,
-                                    funccoltypes: f.funccoltypes.clone_in(mcx)?,
-                                    funccoltypmods: f.funccoltypmods.clone_in(mcx)?,
-                                    funccolcollations: f.funccolcollations.clone_in(mcx)?,
-                                    funcparams: f.funcparams.clone_in(mcx)?,
-                                },
-                            )?,
-                        )?;
-                    }
-                    // SAFETY: as the RTE_RELATION arm above.
-                    unsafe {
-                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                            r.functions = new_functions
-                        })
-                    };
-                }
-            }
-            RTEKind::RTE_VALUES => {
-                let kind =
-                    if rte.lateral { EXPRKIND_VALUES_LATERAL } else { EXPRKIND_VALUES };
-                let lists = preprocess_expression_list(
-                    run,
-                    &parse.rtable,
-                    parse.jointree,
-                    rte.values_lists.clone_in(mcx)?,
-                    kind,
-                    parse.hasSubLinks,
-                )?;
-                // SAFETY: as the RTE_RELATION arm above.
-                unsafe {
-                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                        r.values_lists = lists
-                    })
-                };
-            }
-            RTEKind::RTE_TABLEFUNC => {
-                let kind =
-                    if rte.lateral { EXPRKIND_TABLEFUNC_LATERAL } else { EXPRKIND_TABLEFUNC };
-                let tf =
-                    preprocess_expression(run, &parse.rtable, parse.jointree, rte.tablefunc, kind, parse.hasSubLinks)?;
-                // SAFETY: as the RTE_RELATION arm above.
-                unsafe {
-                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                        r.tablefunc = tf
-                    })
-                };
+            RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_TABLEFUNC => {
+                // Expression preprocessing happens in the post-tlist rtable
+                // pass below (planner.c:1007) so SubPlan numbering matches C.
             }
             RTEKind::RTE_CTE => {
                 // A self-reference is only legal under a recursive-union level
@@ -249,47 +149,14 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_GROUP => {
                 debug_assert!(parse.hasGroupRTE);
                 run.root.group_rtindex = rti0 as i32 + 1;
-                let exprs = preprocess_expression_list(
-                    run,
-                    &parse.rtable,
-                    parse.jointree,
-                    rte.groupexprs.clone_in(mcx)?,
-                    EXPRKIND_GROUPEXPR,
-                    parse.hasSubLinks,
-                )?;
-                // SAFETY: as the RTE_RELATION arm above.
-                unsafe {
-                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                        r.groupexprs = exprs
-                    })
-                };
             }
         }
         if rte.lateral {
             run.root.hasLateralRTEs = true;
         }
-        // C splits this across two rtable loops (planner.c:834, :1050); no
-        // preprocessing here reads qual_security_level, so one pass is safe.
         if !rte.securityQuals.is_nil() {
             run.root.qual_security_level =
                 run.root.qual_security_level.max(rte.securityQuals.len() as u32);
-            let has_sublinks = parse.hasSubLinks;
-            let mut quals = types_nodes::list::NodeList::nil();
-            for sq in &rte.securityQuals {
-                // A constant-true element preprocesses to None; keep an empty
-                // sublist so per-element security levels stay aligned.
-                let one = match preprocess_expression(run, &parse.rtable, parse.jointree, Some(sq), EXPRKIND_QUAL, has_sublinks)? {
-                    Some(n) => n,
-                    None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
-                };
-                quals.lappend(mcx, one)?;
-            }
-            // SAFETY: as the RTE_RELATION arm above.
-            unsafe {
-                rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
-                    r.securityQuals = quals
-                })
-            };
         }
         // View perminfos flow through unchanged: ExecCheckOneRelPerms'
         // relation-level object_aclcheck arm covers relkind 'v'.
@@ -434,7 +301,152 @@ pub fn subquery_planner<'mcx>(
             run.root.append_rel_list[ai].translated_vars[j] = nid;
         }
     }
-    // Per-RTE expression preprocessing: expression-bearing RTEs panicked above.
+    // Per-RTE expression preprocessing runs after the top-level lists
+    // (planner.c:1007) so SubPlan numbering matches C.
+    for rte_node in &parse.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        match rte.rtekind {
+            RTEKind::RTE_RELATION => {
+                if rte.tablesample.is_some() {
+                    let ts = preprocess_expression(
+                        run,
+                        &parse.rtable,
+                        parse.jointree,
+                        rte.tablesample,
+                        EXPRKIND_TABLESAMPLE,
+                        parse.hasSubLinks,
+                    )?;
+                    // SAFETY: pre-seal Query owned by this invocation; the
+                    // shared `rte` borrow is not read past this write.
+                    unsafe {
+                        rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.tablesample = ts
+                        })
+                    };
+                }
+            }
+            RTEKind::RTE_FUNCTION => {
+                // FUNCTION RTEs that preprocess_function_rtes inlined are
+                // RTE_SUBQUERY by now. C preprocesses non-lateral functions
+                // too — uplevel correlation Vars appear without LATERAL and
+                // must become Params here — and its eval_const_expressions
+                // pass is mandatory: it inserts default arguments and converts
+                // named notation to positional. EXPRKIND_RTFUNC skips the
+                // second eval inside preprocess_expression, as in C.
+                let kind = if rte.lateral {
+                    EXPRKIND_RTFUNC_LATERAL
+                } else {
+                    EXPRKIND_RTFUNC
+                };
+                let mut new_functions = NodeList::nil();
+                for f_node in &rte.functions {
+                    let f = f_node.as_range_tbl_function().expect("functions cell");
+                    let funcexpr = match f.funcexpr {
+                        Some(e) => Some(clauses::eval_const_expressions_with_params(
+                            mcx,
+                            e,
+                            run.glob.bound_params,
+                        )?),
+                        None => None,
+                    };
+                    let funcexpr = preprocess_expression(
+                        run,
+                        &parse.rtable,
+                        parse.jointree,
+                        funcexpr,
+                        kind,
+                        parse.hasSubLinks,
+                    )?;
+                    new_functions.lappend(
+                        mcx,
+                        Node::mk(
+                            mcx,
+                            types_nodes::parsenodes::RangeTblFunction {
+                                funcexpr,
+                                funccolcount: f.funccolcount,
+                                funccolnames: f.funccolnames.clone_in(mcx)?,
+                                funccoltypes: f.funccoltypes.clone_in(mcx)?,
+                                funccoltypmods: f.funccoltypmods.clone_in(mcx)?,
+                                funccolcollations: f.funccolcollations.clone_in(mcx)?,
+                                funcparams: f.funcparams.clone_in(mcx)?,
+                            },
+                        )?,
+                    )?;
+                }
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.functions = new_functions
+                    })
+                };
+            }
+            RTEKind::RTE_VALUES => {
+                let kind =
+                    if rte.lateral { EXPRKIND_VALUES_LATERAL } else { EXPRKIND_VALUES };
+                let lists = preprocess_expression_list(
+                    run,
+                    &parse.rtable,
+                    parse.jointree,
+                    rte.values_lists.clone_in(mcx)?,
+                    kind,
+                    parse.hasSubLinks,
+                )?;
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.values_lists = lists
+                    })
+                };
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                let kind =
+                    if rte.lateral { EXPRKIND_TABLEFUNC_LATERAL } else { EXPRKIND_TABLEFUNC };
+                let tf =
+                    preprocess_expression(run, &parse.rtable, parse.jointree, rte.tablefunc, kind, parse.hasSubLinks)?;
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.tablefunc = tf
+                    })
+                };
+            }
+            RTEKind::RTE_GROUP => {
+                let exprs = preprocess_expression_list(
+                    run,
+                    &parse.rtable,
+                    parse.jointree,
+                    rte.groupexprs.clone_in(mcx)?,
+                    EXPRKIND_GROUPEXPR,
+                    parse.hasSubLinks,
+                )?;
+                // SAFETY: as the RTE_RELATION arm above.
+                unsafe {
+                    rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                        r.groupexprs = exprs
+                    })
+                };
+            }
+            _ => {}
+        }
+        if !rte.securityQuals.is_nil() {
+            let mut quals = types_nodes::list::NodeList::nil();
+            for sq in &rte.securityQuals {
+                // A constant-true element preprocesses to None; keep an empty
+                // sublist so per-element security levels stay aligned.
+                let one = match preprocess_expression(run, &parse.rtable, parse.jointree, Some(sq), EXPRKIND_QUAL, has_sublinks)? {
+                    Some(n) => n,
+                    None => Node::mk_list(mcx, types_nodes::list::NodeList::nil())?,
+                };
+                quals.lappend(mcx, one)?;
+            }
+            // SAFETY: as the RTE_RELATION arm above.
+            unsafe {
+                rte_node.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.securityQuals = quals
+                })
+            };
+        }
+    }
 
     // planner.c:1069: joinaliasvars no longer match the preprocessed
     // expressions; get rid of them so later tree scans (including the
