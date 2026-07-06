@@ -765,4 +765,5 @@ pub const PGSTATFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     nonstrict(1136, "pg_stat_get_wal", 0, stats::fc_pg_stat_get_wal),
     b(6313, "pg_stat_get_backend_wal", 1, stats::fc_pg_stat_get_backend_wal),
     srf_nonstrict(2306, "pg_stat_get_slru", 0, stats::fc_pg_stat_get_slru),
+    nonstrict(3317, "pg_stat_get_wal_receiver", 0, stats::fc_pg_stat_get_wal_receiver),
 ];

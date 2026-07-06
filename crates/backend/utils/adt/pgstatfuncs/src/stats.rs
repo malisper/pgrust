@@ -395,6 +395,23 @@ fn xfn_str(buf: &[u8]) -> &str {
     core::str::from_utf8(&buf[..len]).expect("WAL file names are ASCII")
 }
 
+const PG_STAT_GET_WAL_RECEIVER_COLS: usize = 16;
+
+// walreceiverfuncs.c:pg_stat_get_wal_receiver — no WalRcv shared state is
+// ported (no walreceiver process exists in this build), so walRcvState is
+// permanently WALRCV_STOPPED and C's early PG_RETURN_NULL() applies; the
+// view (system_views.sql) filters `WHERE s.pid IS NOT NULL`, so an
+// all-null record yields zero rows exactly like the real stopped state.
+pub fn fc_pg_stat_get_wal_receiver(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_stat_get_wal_receiver: resolved FmgrInfo required");
+    let values = [Datum::from_usize(0); PG_STAT_GET_WAL_RECEIVER_COLS];
+    let nulls = [true; PG_STAT_GET_WAL_RECEIVER_COLS];
+    record_datum(flinfo, fcinfo, &values, &nulls)
+}
+
 pub fn fc_pg_stat_get_archiver(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
