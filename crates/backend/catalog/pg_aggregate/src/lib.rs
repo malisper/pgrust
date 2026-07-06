@@ -535,6 +535,7 @@ pub fn AggregateCreate<'mcx>(
             proconfig: None,
             procost: 1.0,
             prorows: 0.0,
+            prosupport: InvalidOid,
             parameterDefaults: None,
             numDefaults: 0,
         },
