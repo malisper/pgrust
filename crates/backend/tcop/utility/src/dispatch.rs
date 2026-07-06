@@ -1395,6 +1395,16 @@ fn slow_switch<'mcx>(
                     )?;
                     parser_small1::free_parsestate(pstate)?;
                 }
+                types_nodes::parsenodes::ObjectType::OBJECT_TSPARSER => {
+                    // C: address = DefineTSParser; the ported form returns no address.
+                    collect_gap("CREATE TEXT SEARCH PARSER");
+                    tsearchcmds::DefineTSParser(mcx, stmt)?;
+                }
+                types_nodes::parsenodes::ObjectType::OBJECT_TSTEMPLATE => {
+                    // C: address = DefineTSTemplate; the ported form returns no address.
+                    collect_gap("CREATE TEXT SEARCH TEMPLATE");
+                    tsearchcmds::DefineTSTemplate(mcx, stmt)?;
+                }
                 types_nodes::parsenodes::ObjectType::OBJECT_TSDICTIONARY => {
                     // C: address = DefineTSDictionary; the ported form returns no address.
                     collect_gap("CREATE TEXT SEARCH DICTIONARY");

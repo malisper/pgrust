@@ -48,7 +48,7 @@ pub(crate) fn add_relation_new_constraints<'mcx>(
     rel: &Relation<'mcx>,
     new_col_defaults: &[(AttrNumber, Node<'mcx>, u8)],
     new_constraints: &NodeList<'mcx>,
-    query_string: &str,
+    query_string: Option<&str>,
 ) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
     add_relation_new_constraints_ext(
         mcx,
@@ -68,7 +68,7 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
     new_constraints: &NodeList<'mcx>,
     allow_merge: bool,
     is_local: bool,
-    query_string: &str,
+    query_string: Option<&str>,
 ) -> PgResult<PgVec<'mcx, CookedCon<'mcx>>> {
     let numoldchecks = match rel.rd_att.constr.as_deref() {
         Some(c) => c.num_check as i16,
@@ -76,7 +76,10 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
     };
 
     let mut pstate = make_parsestate(mcx, None);
-    pstate.p_sourcetext = Some(bytes_in(mcx, query_string.as_bytes())?);
+    pstate.p_sourcetext = match query_string {
+        Some(q) => Some(bytes_in(mcx, q.as_bytes())?),
+        None => None,
+    };
     let nsitem = parse_relation::addRangeTableEntryForRelation(
         mcx,
         &mut pstate,

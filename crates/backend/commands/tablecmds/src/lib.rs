@@ -143,11 +143,21 @@ fn aclcheck_error_type(aclerr: i32, type_oid: Oid) -> PgResult<()> {
 
 // GetColumnDefCollation (parse_type.c).
 fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid> {
+    GetColumnDefCollationPos(None, coldef, type_oid)
+}
+
+fn GetColumnDefCollationPos(
+    source: Option<&[u8]>,
+    coldef: &ColumnDef<'_>,
+    type_oid: Oid,
+) -> PgResult<Oid> {
     let typcollation = syscache_seams::lookup_pg_type_shape::call(type_oid)?
         .expect("pg_type row vanished")
         .typcollation;
+    let mut location = coldef.location;
     let result = if let Some(cc) = coldef.collClause {
         let cc = cc.as_collate_clause().expect("CollateClause");
+        location = cc.location;
         catalog_namespace::get_collation_oid_list(&cc.collname, false)?
     } else if coldef.collOid != types_core::InvalidOid {
         coldef.collOid
@@ -155,12 +165,20 @@ fn GetColumnDefCollation(coldef: &ColumnDef<'_>, type_oid: Oid) -> PgResult<Oid>
         typcollation
     };
     if result != types_core::InvalidOid && typcollation == types_core::InvalidOid {
-        return Err(types_error::PgError::error(format!(
+        let mut e = types_error::PgError::error(format!(
             "collations are not supported by type {}",
             format_type::format_type_be(type_oid)?
         ))
-        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
-        .into());
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH);
+        let pos = parser_small1::parser_errposition_source(
+            source,
+            location,
+            mbutils::GetDatabaseEncoding(),
+        );
+        if pos > 0 {
+            e = e.with_cursor_position(pos);
+        }
+        return Err(Box::new(e));
     }
     Ok(result)
 }
@@ -906,7 +924,7 @@ pub fn DefineRelation<'mcx>(
                 &rel,
                 &raw_defaults,
                 &types_nodes::NodeList::nil(),
-                query_string,
+                Some(query_string),
             )?;
             xact::CommandCounterIncrement()?;
         }
@@ -922,7 +940,7 @@ pub fn DefineRelation<'mcx>(
                 &stmt.constraints,
                 true,
                 true,
-                query_string,
+                Some(query_string),
             )?;
             for con in conlist.iter() {
                 connames.push(con.name);

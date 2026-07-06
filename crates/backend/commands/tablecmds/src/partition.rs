@@ -404,7 +404,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
     match strategy {
         b'l' => {
             if spec.strategy != b'l' {
-                return Err(invalid_bound_spec("list"));
+                return Err(invalid_bound_spec("list", pstate, spec.location));
             }
             let (colname, coltype, coltypmod, partcollation) = colinfo(0)?;
             let mut listdatums = NodeList::nil();
@@ -430,7 +430,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
         }
         b'r' => {
             if spec.strategy != b'r' {
-                return Err(invalid_bound_spec("range"));
+                return Err(invalid_bound_spec("range", pstate, spec.location));
             }
             let partnatts = key.partnatts as usize;
             if spec.lowerdatums.len() != partnatts {
@@ -503,7 +503,7 @@ pub(crate) fn transformPartitionBound<'mcx>(
         }
         b'h' => {
             if spec.strategy != b'h' {
-                return Err(invalid_bound_spec("hash"));
+                return Err(invalid_bound_spec("hash", pstate, spec.location));
             }
             if spec.modulus <= 0 {
                 return Err(hash_bound_error(
@@ -590,11 +590,22 @@ fn transformPartitionBoundValue<'mcx>(
 
 #[cold]
 #[inline(never)]
-fn invalid_bound_spec(kind: &str) -> Box<PgError> {
-    Box::new(
-        PgError::new(ERROR, format!("invalid bound specification for a {kind} partition"))
-            .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION),
-    )
+fn invalid_bound_spec(
+    kind: &str,
+    pstate: &parser_small1::ParseState<'_, '_>,
+    location: i32,
+) -> Box<PgError> {
+    let mut e = PgError::new(ERROR, format!("invalid bound specification for a {kind} partition"))
+        .with_sqlstate(types_error::ERRCODE_INVALID_TABLE_DEFINITION);
+    let pos = parser_small1::parser_errposition_source(
+        pstate.p_sourcetext,
+        location,
+        mbutils::GetDatabaseEncoding(),
+    );
+    if pos > 0 {
+        e = e.with_cursor_position(pos);
+    }
+    Box::new(e)
 }
 
 #[cold]

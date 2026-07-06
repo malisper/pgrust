@@ -15369,6 +15369,7 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit",
+ "parse_func_seams",
  "pg_depend",
  "rel_vocab",
  "superuser",

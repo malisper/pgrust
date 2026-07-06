@@ -2633,11 +2633,26 @@ fn ApplyRetrieveRule<'mcx>(
         .iter()
         .filter(|te| !te.as_target_entry().expect("tlist cell").resjunk)
         .count();
+    // CREATE OR REPLACE VIEW can have added columns since this RTE was made;
+    // pad eref->colnames with "?column?" up to the clean tlist length (C).
     if rte.eref.map_or(0, |e| e.colnames.len()) < num_cols {
-        panic!(
-            "ApplyRetrieveRule (rewriteHandler.c): eref colnames patch \
-             (CREATE OR REPLACE VIEW added columns) not ported"
-        );
+        let old = rte.eref;
+        let mut colnames = NodeList::nil();
+        if let Some(e) = old {
+            for n in e.colnames.iter() {
+                colnames.lappend(mcx, n)?;
+            }
+        }
+        while colnames.len() < num_cols {
+            colnames.lappend(mcx, Node::mk_string(mcx, "?column?")?)?;
+        }
+        let new_eref = Node::mk_mut(
+            mcx,
+            types_nodes::primnodes::Alias { aliasname: old.and_then(|e| e.aliasname), colnames },
+        )?
+        .seal_ref();
+        // SAFETY: single-threaded rewrite; no live borrow of rte across this.
+        unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.eref = Some(new_eref)) };
     }
 
     let security_barrier = view_opts.is_some_and(|v| v.security_barrier);
