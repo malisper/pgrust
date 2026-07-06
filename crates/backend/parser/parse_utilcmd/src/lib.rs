@@ -1051,7 +1051,7 @@ fn transformColumnDefinition<'mcx>(
                 saw_identity = true;
                 if !saw_nullable {
                     need_notnull = true;
-                } else if !column.is_not_null {
+                } else if !col_not_null {
                     return Err(column_syntax_error(
                         format_args!(
                             "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",

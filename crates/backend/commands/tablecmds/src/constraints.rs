@@ -270,7 +270,9 @@ pub(crate) fn add_relation_new_constraints_ext<'mcx>(
                     }
                 }
                 if single {
-                    if let Some(attno) = unique_attno {
+                    // C get_attname(..., missing_ok=true): a whole-row Var's
+                    // attno 0 yields no column name.
+                    if let Some(attno) = unique_attno.filter(|&a| a >= 1) {
                         let att = rel.rd_att.attr(attno as usize - 1);
                         colname =
                             Some(core::str::from_utf8(att.attname.name_str()).expect("attname"));

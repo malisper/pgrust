@@ -17,7 +17,7 @@ use stringinfo::StringInfo;
 use types_core::Oid;
 use types_dest::CommandDest;
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_NOT_NULL_VIOLATION, ERRCODE_UNDEFINED_FUNCTION,
+    ErrorLocation, PgError, PgResult, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_fmgr::FmgrInfo;
@@ -332,9 +332,18 @@ pub fn CopyFrom<'mcx>(
     rel: &Relation<'mcx>,
 ) -> PgResult<u64> {
     let relkind = rel.rd_rel.relkind;
+    let trigdesc = if rel.rd_hastriggers {
+        relcache::RelationGetTriggerDesc(rel.rd_id)?
+    } else {
+        None
+    };
+    let has_instead = trigdesc.as_ref().is_some_and(|td| td.trig_insert_instead_row);
+    // A non-table target is allowed only with an INSTEAD OF INSERT row
+    // trigger (copyfrom.c:809-841).
     if relkind != RELKIND_RELATION
         && relkind != types_rel::RELKIND_FOREIGN_TABLE
         && relkind != types_rel::RELKIND_PARTITIONED_TABLE
+        && !has_instead
     {
         return Err(cannot_copy_to_relkind(rel));
     }
@@ -386,11 +395,6 @@ pub fn CopyFrom<'mcx>(
     if relkind == types_rel::RELKIND_FOREIGN_TABLE {
         unported("FROM into foreign tables (FDW lane)");
     }
-    let trigdesc = if rel.rd_hastriggers {
-        relcache::RelationGetTriggerDesc(rel.rd_id)?
-    } else {
-        None
-    };
     // BEFORE/INSTEAD/AFTER row triggers and transition tables on a
     // partitioned target route through leaf resultRelInfos (B9 charter).
     if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
@@ -431,6 +435,7 @@ pub fn CopyFrom<'mcx>(
             td,
             tc: transition_capture.as_ref(),
             when: &mut trig_when,
+            fmgr: &mut trig_fmgr,
         });
         copy_from_body(mcx, cstate, rel, ti_options, trig.as_mut())
     };
@@ -448,12 +453,13 @@ pub fn CopyFrom<'mcx>(
     }
 }
 
-// The AR-trigger slice of C's resultRelInfo that CopyMultiInsertBufferFlush
-// touches.
+// The row-trigger slice of C's resultRelInfo that the insert loop and
+// CopyMultiInsertBufferFlush touch.
 struct CopyTrig<'a, 'mcx> {
     td: &'a types_trigger::TriggerDesc<'static>,
     tc: Option<&'a trigger::TransitionCaptureState>,
     when: &'a mut trigger::TriggerWhenCache<'mcx>,
+    fmgr: &'a mut trigger::TriggerFmgrCache,
 }
 
 fn copy_from_body<'mcx>(
@@ -468,10 +474,15 @@ fn copy_from_body<'mcx>(
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 
     let mut qualexpr = init_where_qual(mcx, cstate)?;
-    // CIM_SINGLE arms of copyfrom.c:1028-1052: volatile expressions may query
-    // the table mid-load, so every row must be visible as soon as stored.
-    let single_insert = cstate.volatile_defexprs || where_clause_volatile(cstate)?;
+    let has_br = trig.as_ref().is_some_and(|t| t.td.trig_insert_before_row);
+    let has_ir = trig.as_ref().is_some_and(|t| t.td.trig_insert_instead_row);
+    // CIM_SINGLE arms of copyfrom.c:996-1052: BEFORE/INSTEAD row triggers and
+    // volatile expressions may query the table mid-load, so every row must be
+    // visible as soon as stored.
+    let single_insert =
+        cstate.volatile_defexprs || where_clause_volatile(cstate)? || has_br || has_ir;
     let mut single_eval_cx = MemoryContext::new_bump("CopySingleInsertEval");
+    let mut check_exprs = None;
 
     let has_generated_stored =
         rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored);
@@ -530,28 +541,43 @@ fn copy_from_body<'mcx>(
             }
         }
 
+        // BEFORE ROW INSERT triggers (copyfrom.c:1327-1331); a NULL return
+        // suppresses the row and it is not counted.
+        if has_br {
+            let t = trig.as_deref_mut().expect("has_br implies trig");
+            let mut when =
+                trigger::TriggerWhenEval { mcx, cache: &mut *t.when, modified_cols: None };
+            if !trigger::ExecBRInsertTriggers(mcx, rel, t.td, t.fmgr, &mut when, slot)? {
+                continue;
+            }
+        }
+
+        // An INSTEAD OF INSERT row trigger owns the row; nothing is stored
+        // (copyfrom.c:1340-1343).
+        if has_ir {
+            let t = trig.as_deref_mut().expect("has_ir implies trig");
+            let mut when =
+                trigger::TriggerWhenEval { mcx, cache: &mut *t.when, modified_cols: None };
+            trigger::ExecIRInsertTriggers(mcx, rel, t.td, t.fmgr, &mut when, slot)?;
+            processed += 1;
+            flushed += 1;
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
+            continue;
+        }
+
         if has_generated_stored {
             nodemodifytable::exec_compute_stored_generated(mcx, &mut generated_exprs, rel, slot)?;
         }
 
-        if let Some(constr) = rel.rd_att.constr.as_deref() {
-            if constr.num_check > 0 || !constr.check.is_empty() {
-                panic!("ExecConstraints (execMain.c): CHECK constraints not ported");
-            }
-            if constr.has_not_null {
-                not_null_constraints(rel, slot)?;
-                if constr.has_generated_virtual {
-                    if let Some(i) = nodemodifytable::exec_rel_gen_virtual_notnull(
-                        mcx,
-                        &mut virtual_nn_exprs,
-                        rel,
-                        slot,
-                    )? {
-                        return Err(not_null_violation(rel, i));
-                    }
-                }
-            }
-        }
+        // ExecConstraints (copyfrom.c:1352-1358): NOT NULL + CHECK.
+        nodemodifytable::exec_constraints(
+            mcx,
+            &mut check_exprs,
+            &mut virtual_nn_exprs,
+            rel,
+            slot,
+            None,
+        )?;
 
         if single_insert {
             single_eval_cx.reset();
@@ -637,7 +663,11 @@ fn copy_from_body<'mcx>(
         pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
     }
 
-    tableam::table_finish_bulk_insert(rel, ti_options)?;
+    // A view target (INSTEAD OF INSERT trigger) has no table AM; C never
+    // reaches table AM calls on that path (copyfrom.c:1340-1343).
+    if rel.rd_rel.relkind == RELKIND_RELATION {
+        tableam::table_finish_bulk_insert(rel, ti_options)?;
+    }
 
     skipped_rows_notice(cstate)?;
     Ok(processed)
@@ -1111,36 +1141,6 @@ pub(crate) fn limit_printout_length(bytes: &[u8]) -> String {
     let mut s = String::from_utf8_lossy(&bytes[..len]).into_owned();
     s.push_str("...");
     s
-}
-
-fn not_null_constraints<'mcx>(
-    rel: &Relation<'mcx>,
-    slot: &mut types_slot::SlotData<'mcx>,
-) -> PgResult<()> {
-    for i in 0..rel.rd_att.natts as usize {
-        let att = rel.rd_att.attr(i);
-        if att.attgenerated == types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8 {
-            continue;
-        }
-        if att.attnotnull && exectuples::slot_attisnull(slot, i as i32 + 1) {
-            return Err(not_null_violation(rel, i));
-        }
-    }
-    Ok(())
-}
-
-#[cold]
-#[inline(never)]
-fn not_null_violation(rel: &Relation<'_>, attidx: usize) -> Box<PgError> {
-    let att = rel.rd_att.attr(attidx);
-    let col = String::from_utf8_lossy(att.attname.name_str()).into_owned();
-    Box::new(
-        PgError::error(format!(
-            "null value in column \"{col}\" of relation \"{}\" violates not-null constraint",
-            rel.name()
-        ))
-        .with_sqlstate(ERRCODE_NOT_NULL_VIOLATION),
-    )
 }
 
 /// `EndCopyFrom` (copyfrom.c).

@@ -1411,7 +1411,7 @@ fn ATRewriteCatalogs<'mcx>(
                     debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
                     debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
-                    ATExecAddIdentity(mcx, &rel, cmd)?;
+                    ATExecAddIdentity(mcx, &rel, cmd, lockmode)?;
                 }
                 AlterTableType::AT_SetIdentity => {
                     let relname = rel.name().to_string();
@@ -1421,7 +1421,7 @@ fn ATRewriteCatalogs<'mcx>(
                     debug_assert!(cxt.ckconstraints.is_nil() && cxt.nnconstraints.is_nil());
                     debug_assert!(cxt.ixstmts.is_nil() && cxt.fkconstraints.is_nil());
                     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
-                    ATExecSetIdentity(mcx, &rel, cmd)?;
+                    ATExecSetIdentity(mcx, &rel, cmd, lockmode)?;
                 }
                 AlterTableType::AT_DropIdentity => {
                     ATExecDropIdentity(
@@ -3068,6 +3068,7 @@ fn ATExecAddIdentity<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     let col_name = cmd.name.expect("AT_AddIdentity name");
     let cdef = cmd
@@ -3075,8 +3076,31 @@ fn ATExecAddIdentity<'mcx>(
         .expect("AT_AddIdentity ColumnDef")
         .as_variant::<ColumnDef>()
         .expect("ColumnDef");
+    add_identity_internal(mcx, rel, col_name, cdef.identity as i8, lockmode, cmd.recurse, false)
+}
+
+fn add_identity_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    col_name: &str,
+    identity: i8,
+    lockmode: LOCKMODE,
+    recurse: bool,
+    recursing: bool,
+) -> PgResult<()> {
     let relname = rel.name().to_string();
-    if rel.rd_rel.relispartition {
+    let ispartitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    if ispartitioned && !recurse {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot add identity to a column of only the partitioned table".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+            .with_hint("Do not specify the ONLY keyword."),
+        ));
+    }
+    if rel.rd_rel.relispartition && !recursing {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -3151,24 +3175,57 @@ fn ATExecAddIdentity<'mcx>(
             .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
         ));
     }
-    // C recurses into partitions only; regular inheritance children are
-    // deliberately skipped (identity is not inherited).
     update_pg_attribute(
         mcx,
         rel.rd_id,
         attnum,
-        &[(Anum_pg_attribute_attidentity, Datum::from_i8(cdef.identity as i8))],
-    )
+        &[(Anum_pg_attribute_attidentity, Datum::from_i8(identity))],
+    )?;
+
+    // Identity is not inherited in regular inheritance children; recurse to
+    // partitions only (tablecmds.c:8345-8362).
+    if recurse && ispartitioned {
+        let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+        for &childoid in children.iter() {
+            let childrel = table::table_open(mcx, childoid, NoLock)?;
+            add_identity_internal(mcx, &childrel, col_name, identity, lockmode, recurse, true)?;
+            childrel.close(NoLock)?;
+        }
+    }
+    Ok(())
 }
 
 fn ATExecSetIdentity<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    set_identity_internal(mcx, rel, cmd, lockmode, cmd.recurse, false)
+}
+
+fn set_identity_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
+    recurse: bool,
+    recursing: bool,
 ) -> PgResult<()> {
     let col_name = cmd.name.expect("AT_SetIdentity name");
     let relname = rel.name().to_string();
-    if rel.rd_rel.relispartition {
+    let ispartitioned = rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    if ispartitioned && !recurse {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "cannot change identity column of only the partitioned table".to_string(),
+            )
+            .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION)
+            .with_hint("Do not specify the ONLY keyword."),
+        ));
+    }
+    if rel.rd_rel.relispartition && !recursing {
         return Err(Box::new(
             PgError::new(
                 ERROR,
@@ -3216,6 +3273,17 @@ fn ATExecSetIdentity<'mcx>(
             attnum,
             &[(Anum_pg_attribute_attidentity, Datum::from_i8(v as i8))],
         )?;
+
+        // Identity is not inherited in regular inheritance children; recurse
+        // to partitions only (tablecmds.c:8462-8479).
+        if recurse && ispartitioned {
+            let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+            for &childoid in children.iter() {
+                let childrel = table::table_open(mcx, childoid, NoLock)?;
+                set_identity_internal(mcx, &childrel, cmd, lockmode, recurse, true)?;
+                childrel.close(NoLock)?;
+            }
+        }
     }
     Ok(())
 }
