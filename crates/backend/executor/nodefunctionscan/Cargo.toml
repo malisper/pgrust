@@ -25,6 +25,7 @@ funcapi = { path = "../../utils/fmgr/funcapi" }
 init_small = { path = "../../utils/init/init_small" }
 tupdesc = { path = "../../access/common/tupdesc" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 exectuples = { path = "../exectuples" }
 
