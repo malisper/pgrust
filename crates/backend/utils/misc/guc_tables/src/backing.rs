@@ -386,3 +386,13 @@ string_var!(
     set_SSLECDHCurve,
     Some("X25519:prime256v1")
 );
+
+// TLS-lowering probe: fixed-name objdump target (fleet run-select1-objdump)
+// proving what a clustered session-GUC read compiles to on the ship binary
+// (direct tpidr-relative loads vs an unrelaxed TLSDESC call). Three reads
+// from one cluster also expose whether the TLS base is shared.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn pgrust_guc_tls_probe() -> i32 {
+    log_statement() + Debug_print_plan() as i32 + log_duration() as i32
+}
