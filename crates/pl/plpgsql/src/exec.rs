@@ -563,7 +563,10 @@ impl<'a> Estate<'a> {
                     Some((t.typoid, t.atttypmod, t.collation))
                 }
                 PlDatum::RecField(f) => self.recfield_type(f)?,
-                PlDatum::Rec(r) => Some((self.rec_param_type(r.dno), -1, types_core::InvalidOid)),
+                PlDatum::Rec(r) => {
+                    let (t, m) = self.rec_param_type_mod(r.dno)?;
+                    Some((t, m, types_core::InvalidOid))
+                }
                 _ => None,
             });
         }
@@ -588,13 +591,8 @@ impl<'a> Estate<'a> {
                 NsType::Rec => {
                     let recname = item.name.to_ascii_lowercase();
                     let recno = item.itemno;
-                    let marker = (
-                        recname.clone(),
-                        recno,
-                        self.rec_param_type(recno),
-                        -1,
-                        types_core::InvalidOid,
-                    );
+                    let (rec_t, rec_m) = self.rec_param_type_mod(recno)?;
+                    let marker = (recname.clone(), recno, rec_t, rec_m, types_core::InvalidOid);
                     if !have(&names, &recname) {
                         names.push(marker.clone());
                     }
@@ -666,6 +664,34 @@ impl<'a> Estate<'a> {
     // exec_get_datum_type_info REC arm: the declared rectypeid, typmod -1.
     fn rec_param_type(&self, recno: Dno) -> Oid {
         self.rec_meta(recno).rectypeid
+    }
+
+    // C exec_get_datum_type_info REC arm: a RECORD-declared rec with a value
+    // reports the value's registered rowtype (erh->er_typeid/er_typmod);
+    // assign_record_type_typmod dedups by shape, so this matches the header
+    // rec_as_composite_datum stamps at eval.
+    fn rec_param_type_mod(&mut self, recno: Dno) -> PgResult<(Oid, i32)> {
+        let rectypeid = self.rec_meta(recno).rectypeid;
+        if rectypeid != RECORDOID {
+            return Ok((rectypeid, -1));
+        }
+        let DatumVal::Rec(Some(rv)) = &self.datums[recno as usize] else {
+            return Ok((RECORDOID, -1));
+        };
+        if rv.empty {
+            return Ok((RECORDOID, -1));
+        }
+        let src = rv.src_desc.clone().expect("RecValue carries its source tupdesc");
+        if src.tdtypeid == RECORDOID && src.tdtypmod >= 0 {
+            return Ok((RECORDOID, src.tdtypmod));
+        }
+        let mcx = self.eval_ctx.mcx();
+        let mut td = tupdesc::CreateTupleDescCopy(mcx, &src)?;
+        td.tdtypeid = RECORDOID;
+        if td.tdtypmod < 0 {
+            typcache::assign_record_type_typmod(&mut td)?;
+        }
+        Ok((RECORDOID, td.tdtypmod))
     }
 
     // exec_eval_datum REC arm: materialize the record as a composite Datum in
