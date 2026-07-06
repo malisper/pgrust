@@ -425,6 +425,7 @@ pub fn init_seams() {
     bufmgr_seams::drop_relation_buffers::set(drop_buffers::DropRelationBuffers);
     bufmgr_seams::drop_relations_all_buffers::set(drop_buffers::DropRelationsAllBuffers);
     bufmgr_seams::flush_relations_all_buffers::set(write::FlushRelationsAllBuffers);
+    bufmgr_seams::flush_relation_buffers::set(FlushRelationBuffers);
     bufmgr_seams::mark_buffer_dirty_hint::set(MarkBufferDirtyHint);
     bufmgr_seams::buffer_is_permanent::set(BufferIsPermanent);
     bufmgr_seams::buffer_get_lsn_atomic::set(BufferGetLSNAtomic);

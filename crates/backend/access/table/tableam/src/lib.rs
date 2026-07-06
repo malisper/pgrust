@@ -453,15 +453,12 @@ mod heap {
         rel: &Relation<'_>,
         newrlocator: &RelFileLocator,
     ) -> PgResult<()> {
-        if rel.rd_backend != ::types_core::INVALID_PROC_NUMBER {
-            unported("heapam_relation_copy_data temp-relation lane");
-        }
         let src = ::types_storage::RelFileLocatorBackend {
             locator: rel.rd_locator.get(),
             backend: rel.rd_backend,
         };
         smgr::smgropen(src.locator, src.backend)?;
-        ::bufmgr_seams::flush_relations_all_buffers::call(&[src])?;
+        ::bufmgr_seams::flush_relation_buffers::call(src)?;
         let persistence = rel.rd_rel.relpersistence;
         let dstrel = catalog_storage::RelationCreateStorage(*newrlocator, persistence, true)?;
         catalog_storage::RelationCopyStorage(

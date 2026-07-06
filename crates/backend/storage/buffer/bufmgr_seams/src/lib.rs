@@ -207,6 +207,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // FlushRelationBuffers(rel) (bufmgr.c) — local-buffer arm included.
+    pub fn flush_relation_buffers(rlocator: RelFileLocatorBackend) -> PgResult<()>
+);
+
+seam_core::seam!(
     // MarkBufferDirtyHint(buffer, buffer_std) (bufmgr.c); can ereport via
     // XLogSaveBufferForHint.
     pub fn mark_buffer_dirty_hint(buffer: Buffer, buffer_std: bool) -> PgResult<()>
