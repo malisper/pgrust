@@ -1286,7 +1286,6 @@ fn set_indexonlyscan_references<'mcx>(
     let (stripped, tlist, qual, recheckqual) = {
         let s = plan.as_index_only_scan().expect("IndexOnlyScan node");
         debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
-        debug_assert!(s.indexorderby.is_nil());
         let mut stripped = NodeList::nil();
         for tle_node in &s.indextlist {
             if !tle_node.as_target_entry().expect("TargetEntry").resjunk {
@@ -1330,10 +1329,11 @@ fn set_indexonlyscan_references<'mcx>(
     for qual_node in &recheckqual {
         new_recheck.lappend(mcx, fix_upper_expr(run, qual_node, &stripped, rtoffset, INDEX_VAR, 2.0 * plan_rows)?)?;
     }
-    let (iq, itl) = {
+    let (iq, iob, itl) = {
         let s = plan.as_index_only_scan().unwrap();
         (
             fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
+            fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
             fix_scan_list(run, &s.indextlist, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
         )
     };
@@ -1346,6 +1346,9 @@ fn set_indexonlyscan_references<'mcx>(
             s.recheckqual = new_recheck;
             if let Some(v) = iq {
                 s.indexqual = v;
+            }
+            if let Some(v) = iob {
+                s.indexorderby = v;
             }
             if let Some(v) = itl {
                 s.indextlist = v;

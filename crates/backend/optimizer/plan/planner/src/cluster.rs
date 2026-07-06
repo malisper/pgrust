@@ -98,6 +98,8 @@ pub fn plan_cluster_use_sort<'mcx>(
         index,
         mcx::PgVec::new_in(mcx),
         mcx::PgVec::new_in(mcx),
+        mcx::PgVec::new_in(mcx),
+        mcx::PgVec::new_in(mcx),
         1, // ForwardScanDirection
         false,
         &None,

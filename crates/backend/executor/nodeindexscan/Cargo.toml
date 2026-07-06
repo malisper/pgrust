@@ -20,6 +20,11 @@ datum = { path = "../../../_support/types/datum" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 detoast = { path = "../../access/common/detoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
+pairingheap = { path = "../../lib/pairingheap" }
+tuplesort = { path = "../../utils/sort/tuplesort" }
+nodes_core = { path = "../../nodes/nodes_core" }
+heaptuple = { path = "../../access/common/heaptuple" }
+adt_scalar = { path = "../../utils/adt/scalar" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
 executils = { path = "../executils" }

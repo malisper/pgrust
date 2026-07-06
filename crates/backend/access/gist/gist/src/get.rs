@@ -6,7 +6,10 @@ use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{InvalidBlockNumber, OffsetNumber};
 use ::types_error::PgResult;
-use ::types_gist::state::{GISTScanOpaqueData, GISTSearchHeapItem, GISTSearchItem};
+use ::types_gist::state::{
+    GISTScanOpaqueData, GISTSearchHeapItem, GISTSearchItem, GISTSearchQueueHeapItem,
+    IndexOrderByDistance, ReconTup,
+};
 use ::types_gist::{
     page_opaque, GistFollowRight, GistPageGetNSN, GistPageIsDeleted, GistPageIsLeaf,
     GIST_ROOT_BLKNO,
@@ -75,26 +78,35 @@ fn gistkillitems(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
 }
 
 // gistindex_keytest, driven per tuple in so.temp (reset by caller batch-wise).
+// Ordered scans: fills `distances` (C so->distances) on a match; returns
+// (match, recheck, recheck_distances).
 #[allow(clippy::too_many_arguments)]
 fn gistindex_keytest(
     mcx: Mcx<'_>,
     giststate: &mut ::types_gist::state::GistState<'_>,
     keys: &mut [::types_scan::scankey::ScanKeyData],
-    norderbys: i32,
+    orderbys: &mut [::types_scan::scankey::ScanKeyData],
+    distances: &mut [IndexOrderByDistance],
     rel_name: &str,
     tuple: ITup,
     page_is_leaf: bool,
     offset: OffsetNumber,
-) -> PgResult<(bool, bool)> {
+) -> PgResult<(bool, bool, bool)> {
     let mut recheck_out = false;
+    let mut recheck_distances_out = false;
 
     // SAFETY: tuple is a live page item under the caller's content lock.
     if unsafe { gist_tuple_is_invalid(tuple) } {
         if page_is_leaf {
             panic!("invalid GiST tuple found on leaf page");
         }
-        debug_assert!(norderbys == 0);
-        return Ok((true, false));
+        // pre-9.1 invalid tuple: minimum possible distances so it's always
+        // followed (gistget.c:147-157).
+        for d in distances.iter_mut() {
+            d.value = f64::NEG_INFINITY;
+            d.isnull = false;
+        }
+        return Ok((true, false, false));
     }
 
     for key in keys.iter_mut() {
@@ -103,16 +115,16 @@ fn gistindex_keytest(
         if key.sk_flags & SK_ISNULL != 0 {
             if key.sk_flags & SK_SEARCHNULL != 0 {
                 if page_is_leaf && !is_null {
-                    return Ok((false, false));
+                    return Ok((false, false, false));
                 }
             } else {
                 debug_assert!(key.sk_flags & SK_SEARCHNOTNULL != 0);
                 if is_null {
-                    return Ok((false, false));
+                    return Ok((false, false, false));
                 }
             }
         } else if is_null {
-            return Ok((false, false));
+            return Ok((false, false, false));
         } else {
             let de = gistdentryinit(
                 mcx,
@@ -140,20 +152,59 @@ fn gistindex_keytest(
             let _ = rel_name;
 
             if !test {
-                return Ok((false, false));
+                return Ok((false, false, false));
             }
             recheck_out |= recheck;
         }
     }
 
-    Ok((true, recheck_out))
+    // Passed the quals — compute the ORDER BY distances (gistget.c:238-297).
+    for (key, distance) in orderbys.iter_mut().zip(distances.iter_mut()) {
+        let (datum, is_null) = gist_index_getattr(tuple, key.sk_attno as usize, giststate);
+
+        if key.sk_flags & SK_ISNULL != 0 || is_null {
+            distance.value = 0.0;
+            distance.isnull = true;
+        } else {
+            let de = gistdentryinit(
+                mcx,
+                giststate,
+                key.sk_attno as usize - 1,
+                datum,
+                offset,
+                false,
+                page_is_leaf,
+                is_null,
+            )?;
+            let mut recheck = false;
+            let dist = giststate.call_distance(
+                mcx,
+                &mut key.sk_func,
+                key.sk_collation,
+                &de,
+                key.sk_argument,
+                key.sk_strategy,
+                key.sk_subtype,
+                &mut recheck,
+            )?;
+            recheck_distances_out |= recheck;
+            distance.value = dist;
+            distance.isnull = false;
+        }
+    }
+    let _ = rel_name;
+
+    Ok((true, recheck_out, recheck_distances_out))
 }
 
 // gistScanPage. `tbm`: bitmap-scan output; counts returned in ntids.
+// `my_distances`: the queue item's distances (empty at the root), reused for
+// a concurrent-split right sibling.
 fn gist_scan_page(
     scan: &mut IndexScanDescData<'_>,
     page_item_blkno: ::types_core::BlockNumber,
     parentlsn: ::types_core::XLogRecPtr,
+    my_distances: &[IndexOrderByDistance],
     mut tbm: Option<&mut tidbitmap::TIDBitmap<'_>>,
 ) -> PgResult<i64> {
     let rel = scan.index_rel().alias();
@@ -183,10 +234,12 @@ fn gist_scan_page(
         && (GistFollowRight(&page) || parentlsn < GistPageGetNSN(&page))
         && opaque.rightlink != InvalidBlockNumber
     {
-        // concurrent split: queue the right sibling
+        // concurrent split: queue the right sibling with this page's distances
         so.queue.add(GISTSearchItem {
             blkno: opaque.rightlink,
             parentlsn,
+            heap: None,
+            distances: my_distances.to_vec(),
         });
     }
 
@@ -211,12 +264,13 @@ fn gist_scan_page(
         }
         let it = page.item_raw(iid).0;
 
-        let (matched, recheck) = {
+        let (matched, recheck, recheck_distances) = {
             let out = gistindex_keytest(
                 so.temp.mcx(),
                 &mut so.giststate,
                 scan.keyData.as_mut_slice(),
-                norderbys,
+                scan.orderByData.as_mut_slice(),
+                so.distances.as_mut_slice(),
                 rel.name(),
                 it,
                 page_is_leaf,
@@ -238,9 +292,8 @@ fn gist_scan_page(
                 ntids += 1;
                 continue;
             }
-        } else if page_is_leaf {
+        } else if page_is_leaf && norderbys == 0 {
             // non-ordered scan: report tuples in pageData
-            debug_assert!(norderbys == 0);
             // SAFETY: page item under our content lock.
             let tid = unsafe { itup_get_tid(it) };
             let mut item = GISTSearchHeapItem {
@@ -258,6 +311,28 @@ fn gist_scan_page(
             so.pageData[so.nPageData] = item;
             so.nPageData += 1;
             continue;
+        } else if page_is_leaf {
+            // ordered scan: heap tuples go through the search queue with
+            // their distances (gistget.c:477-505)
+            // SAFETY: page item under our content lock.
+            let tid = unsafe { itup_get_tid(it) };
+            let recontup = if want_itup {
+                Some(fetch_recontup_owned(so, &rel, it)?)
+            } else {
+                None
+            };
+            so.queue.add(GISTSearchItem {
+                blkno: InvalidBlockNumber,
+                parentlsn: 0,
+                heap: Some(GISTSearchQueueHeapItem {
+                    heapPtr: tid,
+                    recheck,
+                    recheck_distances,
+                    recontup,
+                }),
+                distances: so.distances.clone(),
+            });
+            continue;
         }
 
         if !page_is_leaf {
@@ -267,6 +342,8 @@ fn gist_scan_page(
             so.queue.add(GISTSearchItem {
                 blkno: child,
                 parentlsn: so.curPageLSN,
+                heap: None,
+                distances: so.distances.clone(),
             });
         }
     }
@@ -314,8 +391,132 @@ fn fetch_recontup(
     Ok((off, len))
 }
 
+// Ordered-scan recontup: queue items outlive the page (and fetch_buf's
+// per-page lifetime), so each carries an owned aligned image.
+fn fetch_recontup_owned(
+    so: &mut GISTScanOpaqueData<'_>,
+    rel: &Relation<'_>,
+    it: ITup,
+) -> PgResult<ReconTup> {
+    const K: usize = ::types_core::fmgr::INDEX_MAX_KEYS as usize;
+    let natts = rel.rd_att.natts as usize;
+    let mut fetchatt = [Datum::null(); K];
+    let mut isnull = [false; K];
+    let out = {
+        let mcx = so.temp.mcx();
+        gistFetchTupleValues(mcx, &mut so.giststate, rel, it, &mut fetchatt[..natts], &mut isnull[..natts])?;
+        let tupdesc = so
+            .giststate
+            .fetchTupdesc
+            .clone()
+            .expect("gistrescan set fetchTupdesc for IOS");
+        let formed =
+            ::nbtree::itup::index_form_tuple(mcx, &tupdesc, &fetchatt[..natts], &isnull[..natts])?;
+        // SAFETY: formed owned image of formed.size() bytes.
+        let img = unsafe { core::slice::from_raw_parts(formed.as_ptr(), formed.size()) };
+        ReconTup::from_bytes(img)
+    };
+    so.temp.reset();
+    Ok(out)
+}
+
 fn get_next_search_item(so: &mut GISTScanOpaqueData<'_>) -> Option<GISTSearchItem> {
     so.queue.remove_first()
+}
+
+// index_store_float8_orderby_distances (indexam.c:975): convert the AM's
+// float8 distances to the ordering operators' result types in
+// xs_orderbyvals/xs_orderbynulls.
+fn store_orderby_distances(
+    scan: &mut IndexScanDescData<'_>,
+    distances: &[IndexOrderByDistance],
+    recheck_orderby: bool,
+) -> PgResult<()> {
+    let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
+        crate::non_gist_opaque()
+    };
+    scan.xs_recheckorderby = recheck_orderby;
+    for i in 0..scan.numberOfOrderBys as usize {
+        let d = distances.get(i);
+        match so.orderByTypes[i] {
+            ::types_core::FLOAT8OID => match d {
+                Some(d) if !d.isnull => {
+                    scan.xs_orderbyvals[i] = Datum::from_f64(d.value);
+                    scan.xs_orderbynulls[i] = false;
+                }
+                _ => {
+                    scan.xs_orderbyvals[i] = Datum::null();
+                    scan.xs_orderbynulls[i] = true;
+                }
+            },
+            ::types_core::FLOAT4OID => match d {
+                Some(d) if !d.isnull => {
+                    scan.xs_orderbyvals[i] = Datum::from_f32(d.value as f32);
+                    scan.xs_orderbynulls[i] = false;
+                }
+                _ => {
+                    scan.xs_orderbyvals[i] = Datum::null();
+                    scan.xs_orderbynulls[i] = true;
+                }
+            },
+            _ => {
+                // only float distances are convertible; a lossy distance
+                // with another ordering type cannot be rechecked
+                if scan.xs_recheckorderby {
+                    return Err(Box::new(::types_error::PgError::error(
+                        "ORDER BY operator must return float8 or float4 if the distance function is lossy"
+                            .to_string(),
+                    )));
+                }
+                scan.xs_orderbynulls[i] = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+// getNextNearest (gistget.c:497).
+fn get_next_nearest(scan: &mut IndexScanDescData<'_>) -> PgResult<bool> {
+    scan.xs_itup = None;
+    {
+        let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
+            crate::non_gist_opaque()
+        };
+        so.cur_recontup = None;
+    }
+
+    loop {
+        let next = {
+            let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
+                crate::non_gist_opaque()
+            };
+            get_next_search_item(so)
+        };
+        let Some(mut item) = next else {
+            return Ok(false);
+        };
+
+        if item.is_heap() {
+            let heap = item.heap.take().expect("heap search item payload");
+            scan.xs_heaptid = heap.heapPtr;
+            scan.xs_recheck = heap.recheck;
+            store_orderby_distances(scan, &item.distances, heap.recheck_distances)?;
+            if scan.xs_want_itup {
+                let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
+                    crate::non_gist_opaque()
+                };
+                so.cur_recontup = heap.recontup;
+                scan.xs_itup = so
+                    .cur_recontup
+                    .as_ref()
+                    .map(|t| core::ptr::NonNull::new(t.as_ptr() as *mut u8).expect("recontup ptr"));
+            }
+            return Ok(true);
+        }
+
+        crate::check_for_interrupts();
+        gist_scan_page(scan, item.blkno, item.parentlsn, &item.distances, None)?;
+    }
 }
 
 fn record_killed(so: &mut GISTScanOpaqueData<'_>, offnum: OffsetNumber) {
@@ -353,7 +554,6 @@ pub fn gistgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgR
     if dir != ::types_scan::sdir::ForwardScanDirection {
         panic!("GiST only supports forward scan direction");
     }
-    debug_assert!(scan.numberOfOrderBys == 0);
 
     {
         let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
@@ -380,7 +580,12 @@ pub fn gistgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgR
         scan.xs_pgstat_index_scans += 1;
         scan.xs_nsearches += 1;
         scan.xs_itup = None;
-        gist_scan_page(scan, GIST_ROOT_BLKNO, 0, None)?;
+        gist_scan_page(scan, GIST_ROOT_BLKNO, 0, &[], None)?;
+    }
+
+    if scan.numberOfOrderBys > 0 {
+        // ordered scan: strict distance order via the search queue
+        return get_next_nearest(scan);
     }
 
     loop {
@@ -437,7 +642,7 @@ pub fn gistgettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgR
                 so.curBlkno = item.blkno;
             }
 
-            gist_scan_page(scan, item.blkno, item.parentlsn, None)?;
+            gist_scan_page(scan, item.blkno, item.parentlsn, &[], None)?;
 
             let has_data = {
                 let IndexScanOpaque::Gist(so) = &mut scan.opaque else {
@@ -471,7 +676,7 @@ pub fn gistgetbitmap(
     scan.xs_nsearches += 1;
     scan.xs_itup = None;
 
-    let mut ntids = gist_scan_page(scan, GIST_ROOT_BLKNO, 0, Some(tbm))?;
+    let mut ntids = gist_scan_page(scan, GIST_ROOT_BLKNO, 0, &[], Some(tbm))?;
 
     loop {
         let next = {
@@ -484,7 +689,7 @@ pub fn gistgetbitmap(
             break;
         };
         crate::check_for_interrupts();
-        ntids += gist_scan_page(scan, item.blkno, item.parentlsn, Some(tbm))?;
+        ntids += gist_scan_page(scan, item.blkno, item.parentlsn, &[], Some(tbm))?;
     }
 
     Ok(ntids)

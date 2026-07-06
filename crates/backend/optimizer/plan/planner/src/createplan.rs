@@ -1084,21 +1084,29 @@ fn create_indexscan_plan<'mcx>(
     indexonly: bool,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (indexoid, indexscandir, baserelid, indexclause_rinfos) = {
+    let (indexoid, indexscandir, baserelid, indexclause_rinfos, orderby_ids, orderby_cols, orderby_pathkeys) = {
         let PathNode::IndexPath(p) = run.root.path(best_path) else {
             panic!("create_indexscan_plan: not an IndexPath")
         };
-        debug_assert!(p.indexorderbys.is_empty());
         let mut rids = mcx::PgVec::new_in(mcx);
         for ic in p.indexclauses.iter() {
             let rid = ic.rinfo.expect("IndexClause rinfo");
             rids.push((rid, ic.lossy, run.root.rinfo(rid).parent_ec));
         }
+        let mut ob_ids: mcx::PgVec<'mcx, types_pathnodes::NodeId> = mcx::PgVec::new_in(mcx);
+        ob_ids.extend(p.indexorderbys.iter().copied());
+        let mut ob_cols: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+        ob_cols.extend(p.indexorderbycols.iter().copied());
+        let mut ob_pks: mcx::PgVec<'mcx, types_pathnodes::PathKey> = mcx::PgVec::new_in(mcx);
+        ob_pks.extend(p.path.pathkeys.iter().copied());
         (
             p.indexinfo.as_ref().expect("indexinfo set").indexoid,
             p.indexscandir,
             p.path.parent,
             rids,
+            ob_ids,
+            ob_cols,
+            ob_pks,
         )
     };
     let scan_relid = run.root.rel(baserelid).relid;
@@ -1106,6 +1114,22 @@ fn create_indexscan_plan<'mcx>(
     debug_assert!(indexscandir == 1 || indexscandir == -1);
 
     let (stripped_indexquals, fixed_indexquals) = fix_indexqual_references(run, best_path)?;
+
+    // fix_indexorderby_references (createplan.c).
+    let mut indexorderbys = NodeList::nil();
+    let mut fixed_indexorderbys = NodeList::nil();
+    {
+        let index = {
+            let PathNode::IndexPath(p) = run.root.path(best_path) else { unreachable!() };
+            p.indexinfo.expect("indexinfo set")
+        };
+        debug_assert!(orderby_ids.len() == orderby_cols.len());
+        for (&nid, &col) in orderby_ids.iter().zip(orderby_cols.iter()) {
+            let clause = *run.root.expr_node(nid);
+            indexorderbys.lappend(mcx, clause)?;
+            fixed_indexorderbys.lappend(mcx, fix_indexqual_clause(run, &index, col, clause)?)?;
+        }
+    }
 
     let mut qpqual_rinfos: mcx::PgVec<'mcx, RinfoId> = mcx::PgVec::new_in(mcx);
     for &rid in scan_clauses.iter() {
@@ -1135,9 +1159,34 @@ fn create_indexscan_plan<'mcx>(
     let mut qpqual = extract_actual_clauses(run, &ordered);
 
     let mut stripped_indexquals = stripped_indexquals;
+    let mut indexorderbys = indexorderbys;
     if run.root.path(best_path).base().param_info.is_some() {
         stripped_indexquals = replace_nestloop_params_list(run, &stripped_indexquals)?;
         qpqual = replace_nestloop_params_list(run, &qpqual)?;
+        indexorderbys = replace_nestloop_params_list(run, &indexorderbys)?;
+    }
+
+    // Sort operators for the ORDER BY expressions' result types: the pathkey
+    // has the btree opfamily; the datatype completes the lookup.
+    let mut indexorderbyops = types_nodes::list::OidList::nil();
+    if !indexorderbys.is_nil() {
+        debug_assert!(orderby_pathkeys.len() == indexorderbys.len());
+        for (pathkey, expr) in orderby_pathkeys.iter().zip(indexorderbys.iter()) {
+            let exprtype = nodes_core::node_funcs::expr_type(expr);
+            let sortop = lsyscache::get_opfamily_member_for_cmptype(
+                pathkey.pk_opfamily,
+                exprtype,
+                exprtype,
+                pathkey.pk_cmptype,
+            )?;
+            assert!(
+                sortop != 0,
+                "missing operator {}({exprtype},{exprtype}) in opfamily {}",
+                pathkey.pk_cmptype,
+                pathkey.pk_opfamily
+            );
+            indexorderbyops.lappend(mcx, sortop)?;
+        }
     }
 
     if indexonly {
@@ -1149,7 +1198,7 @@ fn create_indexscan_plan<'mcx>(
         plan.indexid = indexoid;
         plan.indexqual = fixed_indexquals;
         plan.recheckqual = stripped_indexquals;
-        plan.indexorderby = NodeList::nil();
+        plan.indexorderby = fixed_indexorderbys;
         plan.indextlist = indextlist;
         plan.indexorderdir = indexscandir;
         copy_generic_path_info(run, &mut plan.scan.plan, best_path);
@@ -1163,9 +1212,9 @@ fn create_indexscan_plan<'mcx>(
     plan.indexid = indexoid;
     plan.indexqual = fixed_indexquals;
     plan.indexqualorig = stripped_indexquals;
-    plan.indexorderby = NodeList::nil();
-    plan.indexorderbyorig = NodeList::nil();
-    plan.indexorderbyops = types_nodes::list::OidList::nil();
+    plan.indexorderby = fixed_indexorderbys;
+    plan.indexorderbyorig = indexorderbys;
+    plan.indexorderbyops = indexorderbyops;
     plan.indexorderdir = indexscandir;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())

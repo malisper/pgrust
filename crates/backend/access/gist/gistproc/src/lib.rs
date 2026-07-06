@@ -1,8 +1,8 @@
 //! gistproc.c: GiST support procs for 2-D objects. Live: box_ops
 //! (consistent/union/penalty/picksplit/same), point_ops compress/fetch/
 //! consistent (all strategy groups), poly_ops and circle_ops
-//! compress/consistent. LOUD: distance procs (KNN lane), sortsupport
-//! (sorted-build lane).
+//! compress/consistent, distance procs (point exact; box/poly/circle bbox
+//! lower bounds, poly/circle lossy). LOUD: sortsupport (sorted-build lane).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -719,12 +719,83 @@ fn fc_gist_point_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(Datum::from_bool(result))
 }
 
-fn fc_gist_box_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_box_distance (KNN ordered-scan lane)")
+// computeDistance (gistproc.c:1221): point-to-box distance; on a leaf the box
+// is degenerate (low == high == the point).
+fn compute_distance(is_leaf: bool, b: &BOX, point: &Point) -> PgResult<f64> {
+    if is_leaf {
+        return ::adt_geo::point_dt(point, &b.low);
+    }
+    if point.x <= b.high.x && point.x >= b.low.x && point.y <= b.high.y && point.y >= b.low.y {
+        return Ok(0.0);
+    }
+    if point.x <= b.high.x && point.x >= b.low.x {
+        if point.y > b.high.y {
+            return ::adt_float::float8_mi(point.y, b.high.y);
+        }
+        if point.y < b.low.y {
+            return ::adt_float::float8_mi(b.low.y, point.y);
+        }
+        return Err(Box::new(PgError::error("inconsistent point values".to_string())));
+    }
+    if point.y <= b.high.y && point.y >= b.low.y {
+        if point.x > b.high.x {
+            return ::adt_float::float8_mi(point.x, b.high.x);
+        }
+        if point.x < b.low.x {
+            return ::adt_float::float8_mi(b.low.x, point.x);
+        }
+        return Err(Box::new(PgError::error("inconsistent point values".to_string())));
+    }
+    // closest point is a vertex
+    let mut result = ::adt_geo::point_dt(point, &b.low)?;
+    for p in [
+        b.high,
+        Point { x: b.low.x, y: b.high.y },
+        Point { x: b.high.x, y: b.low.y },
+    ] {
+        let sub = ::adt_geo::point_dt(point, &p)?;
+        if result > sub {
+            result = sub;
+        }
+    }
+    Ok(result)
 }
 
-fn fc_gist_point_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_point_distance (KNN ordered-scan lane)")
+// gist_bbox_distance (gistproc.c:1479).
+fn gist_bbox_distance(entry: &GISTENTRY, query: Datum, strategy: u16) -> PgResult<f64> {
+    match strategy / GeoStrategyNumberOffset {
+        0 => {
+            // SAFETY: point-group query arg is a point datum.
+            let query = unsafe { point_at(query) }.expect("point query");
+            let key = unsafe { box_at(entry.key) }.expect("bbox key");
+            compute_distance(false, &key, &query)
+        }
+        _ => Err(unrecognized_strategy(strategy)),
+    }
+}
+
+fn fc_gist_box_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    let strategy = fcinfo.arg(2).as_u16();
+    let distance = gist_bbox_distance(entry, fcinfo.arg(1), strategy)?;
+    Ok(Datum::from_f64(distance))
+}
+
+fn fc_gist_point_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    let strategy = fcinfo.arg(2).as_u16();
+    let distance = match strategy / GeoStrategyNumberOffset {
+        0 => {
+            // SAFETY: point-group query arg is a point datum.
+            let query = unsafe { point_at(fcinfo.arg(1)) }.expect("point query");
+            let key = unsafe { box_at(entry.key) }.expect("point key box");
+            compute_distance(entry.page_is_leaf, &key, &query)?
+        }
+        _ => return Err(unrecognized_strategy(strategy)),
+    };
+    Ok(Datum::from_f64(distance))
 }
 
 // gistproc.c:1745-1761: C fills the SortSupport fn pointers; here the sorted
@@ -773,8 +844,17 @@ fn fc_gist_poly_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     Ok(Datum::from_bool(r))
 }
 
-fn fc_gist_poly_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_poly_distance (geo_ops polygon lane)")
+// gist_poly_distance: keys are bounding boxes, so the distance is a lower
+// bound — always lossy (*recheck = true).
+fn fc_gist_poly_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    let strategy = fcinfo.arg(2).as_u16();
+    let recheck = fcinfo.arg(4).as_usize() as *mut bool;
+    let distance = gist_bbox_distance(entry, fcinfo.arg(1), strategy)?;
+    // SAFETY: recheck out-param live in the caller frame.
+    unsafe { *recheck = true };
+    Ok(Datum::from_f64(distance))
 }
 
 // gist_circle_compress: represent a circle by its bounding box.
@@ -813,8 +893,16 @@ fn fc_gist_circle_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
     Ok(Datum::from_bool(r))
 }
 
-fn fc_gist_circle_distance(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: gist_circle_distance (geo_ops circle lane)")
+// gist_circle_distance: as gist_poly_distance — bbox lower bound, lossy.
+fn fc_gist_circle_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: gist fmgr protocol.
+    let entry = unsafe { entry_arg(fcinfo, 0) };
+    let strategy = fcinfo.arg(2).as_u16();
+    let recheck = fcinfo.arg(4).as_usize() as *mut bool;
+    let distance = gist_bbox_distance(entry, fcinfo.arg(1), strategy)?;
+    // SAFETY: recheck out-param live in the caller frame.
+    unsafe { *recheck = true };
+    Ok(Datum::from_f64(distance))
 }
 
 fn fc_gist_translate_cmptype_common(

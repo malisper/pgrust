@@ -1,31 +1,36 @@
 // nodeIndexscan.c: Var-op-Const quals become ScanKeys at init (rule 5);
 // runtime keys (indexkey op expression, incl. SK_SEARCHARRAY arrays)
-// re-evaluate into the same ScanKeys at rescan. Non-amsearcharray array keys,
-// RowCompare, and ORDER BY (reorder-queue) arms loud-panic pending their
-// lanes. EPQ arms loud-panic pending EPQState.
+// re-evaluate into the same ScanKeys at rescan. Non-amsearcharray array keys
+// and RowCompare loud-panic pending their lanes. EPQ arms loud-panic pending
+// EPQState.
 #![allow(non_snake_case)]
 
 extern crate alloc;
 
+use ::datum::Datum;
 use ::execexpr::{
     exec_eval_expr, exec_init_expr, exec_init_qual, exec_qual, EvalSlots, ExprState, ParamBind,
     INDEX_VAR,
 };
 use ::execscan::{ScanNode, ScanState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::heaptuple::HeapTuple;
 use ::indexam::{
     index_beginscan, index_close, index_endscan, index_getnext_slot, index_getnext_tid,
     index_markpos, index_rescan, index_restrpos, IndexScanDescData,
 };
 use ::mcx::{Mcx, PgBox, PgVec};
+use ::pairingheap::PairingHeap;
 use ::tableam::table_slot_callbacks;
-use ::types_error::PgResult;
+use ::tuplesort::{apply_cmp, prepare_sort_support_from_ordering_op, SortSupport, SortSupportInit};
+use ::types_error::{PgError, PgResult};
 use ::types_nodes::list::NodeList;
 use ::types_nodes::plannodes::IndexScan;
 use ::types_nodes::NodeTag;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::{
-    ScanKeyData, StrategyNumber, SK_ISNULL, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
+    ScanKeyData, StrategyNumber, SK_ISNULL, SK_ORDER_BY, SK_SEARCHARRAY, SK_SEARCHNOTNULL,
+    SK_SEARCHNULL,
 };
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
 
@@ -36,6 +41,9 @@ mod tests;
 
 pub struct IndexRuntimeKeyInfo<'mcx> {
     pub scan_key: usize,
+    // Which key array scan_key indexes: quals or ORDER BY keys (C stores a
+    // pointer into the respective array).
+    pub orderby: bool,
     pub key_expr: PgBox<'mcx, ExprState<'mcx>>,
     pub key_toastable: bool,
 }
@@ -46,6 +54,31 @@ pub struct RuntimeKeysState<'mcx> {
     pub ecxt: EcxtId,
 }
 
+// nodeIndexscan.c ReorderTuple: heap copy + datumCopy'd distances, allocated
+// in the query context, live until popped.
+pub struct ReorderTuple<'mcx> {
+    htup: HeapTuple<'mcx>,
+    orderbyvals: PgVec<'mcx, Datum>,
+    orderbynulls: PgVec<'mcx, bool>,
+}
+
+type ReorderCmp<'mcx> = Box<dyn Fn(&ReorderTuple<'mcx>, &ReorderTuple<'mcx>) -> i32 + 'mcx>;
+
+/// ORDER BY (amcanorderbyop) scan state: C's iss_OrderByKeys/iss_SortSupport/
+/// iss_OrderByTypByVals/iss_OrderByTypLens/iss_OrderByValues/iss_OrderByNulls/
+/// iss_ReorderQueue/iss_ReachedEnd, boxed as one arm.
+pub struct OrderByState<'mcx> {
+    pub keys: PgVec<'mcx, ScanKeyData>,
+    pub orderbyorig: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>,
+    pub sort_support: PgVec<'mcx, SortSupport>,
+    pub typbyvals: PgVec<'mcx, bool>,
+    pub typlens: PgVec<'mcx, i16>,
+    pub values: PgVec<'mcx, Datum>,
+    pub nulls: PgVec<'mcx, bool>,
+    pub queue: PairingHeap<ReorderTuple<'mcx>, ReorderCmp<'mcx>>,
+    pub reached_end: bool,
+}
+
 pub struct IndexScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     pub indexqualorig: Option<PgBox<'mcx, ExprState<'mcx>>>,
@@ -53,12 +86,37 @@ pub struct IndexScanState<'mcx> {
     pub iss_RelationDesc: Option<Relation<'mcx>>,
     pub iss_ScanKeys: PgVec<'mcx, ScanKeyData>,
     pub iss_Runtime: Option<PgBox<'mcx, RuntimeKeysState<'mcx>>>,
+    pub iss_OrderBy: Option<PgBox<'mcx, OrderByState<'mcx>>>,
     pub iss_OrderDir: ScanDirection,
     pub iss_PlanNodeId: i32,
     pub iss_ParallelAware: bool,
     // Plan's indexid, kept for skeleton re-open (iss_RelationDesc is closed
     // while parked).
     pub iss_IndexOid: ::types_core::Oid,
+}
+
+/// `cmp_orderbyvals` (nodeIndexscan.c): raw ssup comparator, NULLS LAST only
+/// (match_pathkeys_to_index builds nothing else).
+fn cmp_orderbyvals(
+    adist: &[Datum],
+    anulls: &[bool],
+    bdist: &[Datum],
+    bnulls: &[bool],
+    sort_support: &[SortSupport],
+) -> i32 {
+    for (i, ssup) in sort_support.iter().enumerate() {
+        match (anulls[i], bnulls[i]) {
+            (true, false) => return 1,
+            (false, true) => return -1,
+            (true, true) => continue,
+            (false, false) => {}
+        }
+        let result = apply_cmp(ssup.comparator, adist[i], bdist[i]);
+        if result != 0 {
+            return result;
+        }
+    }
+    0
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
@@ -87,8 +145,12 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
         Ok(passes)
     }
 
-    /// `IndexNext`.
+    /// `IndexNext`; `IndexNextWithReorder` when ORDER BY keys exist (C
+    /// ExecIndexScan dispatches on iss_NumOrderByKeys > 0).
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        if self.iss_OrderBy.is_some() {
+            return self.index_next_with_reorder(estate);
+        }
         let mcx = estate.es_query_cxt;
         let direction = ScanDirectionCombine(estate.es_direction, self.iss_OrderDir);
 
@@ -152,14 +214,211 @@ impl<'mcx> IndexScanState<'mcx> {
             self.iss_RelationDesc.as_ref().expect("index relation open"),
             snapshot,
             self.iss_ScanKeys.len() as i32,
-            0,
+            self.iss_OrderBy.as_deref().map_or(0, |ob| ob.keys.len() as i32),
         )?;
         if self.iss_Runtime.as_deref().is_none_or(|r| r.ready) {
-            index_rescan(&mut scandesc, Some(&self.iss_ScanKeys), None)?;
+            index_rescan(
+                &mut scandesc,
+                Some(&self.iss_ScanKeys),
+                self.iss_OrderBy.as_deref().map(|ob| &ob.keys[..]),
+            )?;
         }
         // C's palloc'd IndexScanDesc: state holds a pointer, not the value.
         self.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
         Ok(())
+    }
+
+    /// `IndexNextWithReorder` (nodeIndexscan.c:169): tuples whose index-
+    /// reported distance was inexact (or that arrived behind a smaller queued
+    /// tuple) go through the pairing-heap reorder queue.
+    fn index_next_with_reorder(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        let mcx = estate.es_query_cxt;
+        // C asserts: reordering supports forward scans only (no AM has both
+        // amcanorderbyop and amcanbackward).
+        debug_assert!(!matches!(self.iss_OrderDir, ScanDirection::BackwardScanDirection));
+        debug_assert!(matches!(
+            estate.es_direction,
+            ScanDirection::ForwardScanDirection
+        ));
+
+        if self.iss_ScanDesc.is_none() {
+            self.open_scandesc(estate)?;
+        }
+        let slot_id = self.ss.ss_ScanTupleSlot;
+        let ecxt = self.ss.ps_ExprContext;
+        let plan_node_id = self.iss_PlanNodeId;
+        let IndexScanState {
+            iss_ScanDesc,
+            iss_OrderBy,
+            indexqualorig,
+            ..
+        } = self;
+        // SAFETY: written by open_scandesc when None.
+        let scandesc = unsafe { iss_ScanDesc.as_deref_mut().unwrap_unchecked() };
+        let ob = iss_OrderBy.as_deref_mut().expect("reorder path has ORDER BY state");
+
+        loop {
+            check_for_interrupts()?;
+
+            // Return the queue top if it sorts at or before the last
+            // index-returned distance (or the index is exhausted).
+            if let Some(topmost) = ob.queue.first() {
+                if ob.reached_end
+                    || cmp_orderbyvals(
+                        &topmost.orderbyvals,
+                        &topmost.orderbynulls,
+                        &scandesc.xs_orderbyvals,
+                        &scandesc.xs_orderbynulls,
+                        &ob.sort_support,
+                    ) <= 0
+                {
+                    let rt = ob.queue.remove_first().expect("non-empty queue");
+                    exectuples::exec_force_store_heap_tuple_owned(
+                        rt.htup,
+                        estate.slot_mut(slot_id),
+                        mcx,
+                    )?;
+                    return Ok(true);
+                }
+            } else if ob.reached_end {
+                exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
+                return Ok(false);
+            }
+
+            // next_indextuple: fetch, rechecking lossy index quals.
+            let fetched = loop {
+                if !index_getnext_slot(
+                    mcx,
+                    scandesc,
+                    ScanDirection::ForwardScanDirection,
+                    estate.slot_mut(slot_id),
+                )? {
+                    break false;
+                }
+                if estate.es_instrument != 0 {
+                    let n = scandesc.xs_nsearches;
+                    estate.instr_set_index_nsearches(plan_node_id, n);
+                }
+                if scandesc.xs_recheck {
+                    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
+                    let passes = {
+                        let mut slots = EvalSlots {
+                            scan: Some(estate.slot_mut(slot_id)),
+                            inner: None,
+                            outer: None,
+                        };
+                        exec_qual(indexqualorig.as_deref_mut(), &mut slots)?
+                    };
+                    estate.ecxt_mut(ecxt).reset();
+                    if !passes {
+                        check_for_interrupts()?;
+                        continue;
+                    }
+                }
+                break true;
+            };
+            if !fetched {
+                // Index exhausted; drain the queue.
+                ob.reached_end = true;
+                continue;
+            }
+
+            // Recompute distances from the heap tuple when the AM's were
+            // lower-bound estimates (xs_recheckorderby).
+            let (was_exact, use_node_vals) = if scandesc.xs_recheckorderby {
+                estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
+                estate.ecxt_mut(ecxt).reset();
+                // EvalOrderByExpressions: values land in per-tuple memory,
+                // datumCopy'd below if queued.
+                for (i, expr) in ob.orderbyorig.iter_mut().enumerate() {
+                    // SAFETY: the per-tuple context object outlives the plan
+                    // (reset-only).
+                    unsafe { expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+                    let nd = {
+                        let mut slots = EvalSlots {
+                            scan: Some(estate.slot_mut(slot_id)),
+                            inner: None,
+                            outer: None,
+                        };
+                        exec_eval_expr(expr, &mut slots)?
+                    };
+                    ob.values[i] = nd.value;
+                    ob.nulls[i] = nd.isnull;
+                }
+                let cmp = cmp_orderbyvals(
+                    &ob.values,
+                    &ob.nulls,
+                    &scandesc.xs_orderbyvals,
+                    &scandesc.xs_orderbynulls,
+                    &ob.sort_support,
+                );
+                if cmp < 0 {
+                    return Err(Box::new(PgError::error(
+                        "index returned tuples in wrong order",
+                    )));
+                }
+                (cmp == 0, true)
+            } else {
+                (true, false)
+            };
+
+            let needs_queue = !was_exact || {
+                match ob.queue.first() {
+                    Some(topmost) => {
+                        let (lv, ln): (&[Datum], &[bool]) = if use_node_vals {
+                            (&ob.values, &ob.nulls)
+                        } else {
+                            (&scandesc.xs_orderbyvals, &scandesc.xs_orderbynulls)
+                        };
+                        cmp_orderbyvals(
+                            lv,
+                            ln,
+                            &topmost.orderbyvals,
+                            &topmost.orderbynulls,
+                            &ob.sort_support,
+                        ) > 0
+                    }
+                    None => false,
+                }
+            };
+            if !needs_queue {
+                return Ok(true);
+            }
+
+            // reorderqueue_push: heap copy + datumCopy'd distances into the
+            // query context.
+            let rt = {
+                let htup =
+                    exectuples::exec_copy_slot_heap_tuple(estate.slot_mut(slot_id), mcx, mcx)?;
+                let (vals, nulls): (&[Datum], &[bool]) = if use_node_vals {
+                    (&ob.values, &ob.nulls)
+                } else {
+                    (&scandesc.xs_orderbyvals, &scandesc.xs_orderbynulls)
+                };
+                let n = ob.sort_support.len();
+                let mut orderbyvals: PgVec<'mcx, Datum> = PgVec::new_in(mcx);
+                let mut orderbynulls: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+                for i in 0..n {
+                    if nulls[i] {
+                        orderbyvals.push(Datum::null());
+                    } else {
+                        orderbyvals.push(::adt_scalar::datum_copy(
+                            mcx,
+                            vals[i],
+                            ob.typbyvals[i],
+                            ob.typlens[i],
+                        )?);
+                    }
+                    orderbynulls.push(nulls[i]);
+                }
+                ReorderTuple {
+                    htup,
+                    orderbyvals,
+                    orderbynulls,
+                }
+            };
+            ob.queue.add(rt);
+        }
     }
 }
 
@@ -274,12 +533,20 @@ pub fn exec_init_index_scan_rel<'mcx>(
     })?;
     let indexqualorig = exec_init_qual(mcx, &node.indexqualorig, params)?;
 
-    if !node.indexorderby.is_nil() || !node.indexorderbyorig.is_nil() {
-        orderby_unported();
-    }
-
-    let (iss_ScanKeys, runtime_keys) =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params)?;
+    let mut runtime_keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>> = PgVec::new_in(mcx);
+    let iss_ScanKeys =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys)?;
+    // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
+    let orderby_keys =
+        exec_index_build_scan_keys(mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys)?;
+    let iss_OrderBy = if orderby_keys.is_empty() {
+        None
+    } else {
+        Some(::mcx::alloc_in(
+            mcx,
+            init_orderby_state(mcx, node, params, orderby_keys)?,
+        )?)
+    };
     // C keeps ps_ExprContext as the standard econtext and gives runtime keys
     // their own, reset per rescan.
     let iss_Runtime = if runtime_keys.is_empty() {
@@ -303,9 +570,71 @@ pub fn exec_init_index_scan_rel<'mcx>(
         iss_RelationDesc: Some(index_rel),
         iss_ScanKeys,
         iss_Runtime,
+        iss_OrderBy,
         iss_OrderDir: order_dir(node.indexorderdir),
         iss_PlanNodeId: node.scan.plan.plan_node_id,
         iss_ParallelAware: node.scan.plan.parallel_aware,
+    })
+}
+
+/// ExecInitIndexScan's ORDER BY section (nodeIndexscan.c:1016-1070): sort
+/// support from indexorderbyops, type len/byval from the original exprs, the
+/// reorder pairing heap (reorderqueue_cmp inverts cmp_orderbyvals — the heap
+/// surfaces its greatest element, KNN wants ascending).
+fn init_orderby_state<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &IndexScan<'mcx>,
+    params: ParamBind<'mcx>,
+    orderby_keys: PgVec<'mcx, ScanKeyData>,
+) -> PgResult<OrderByState<'mcx>> {
+    let n = orderby_keys.len();
+    debug_assert_eq!(n, node.indexorderbyops.len());
+    debug_assert_eq!(n, node.indexorderbyorig.len());
+    let mut sort_support: PgVec<'mcx, SortSupport> = PgVec::new_in(mcx);
+    let mut typbyvals: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    let mut typlens: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    let mut orderbyorig: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
+    for (orderbyop, orderbyexpr) in node.indexorderbyops.iter().zip(node.indexorderbyorig.iter()) {
+        let init = SortSupportInit {
+            ssup_collation: ::nodes_core::node_funcs::expr_collation(orderbyexpr),
+            // cmp_orderbyvals supports NULLS LAST only.
+            ssup_nulls_first: false,
+            ssup_attno: 0,
+        };
+        sort_support.push(prepare_sort_support_from_ordering_op(orderbyop, &init)?);
+        let (typlen, typbyval) =
+            lsyscache::get_typlenbyval(::nodes_core::node_funcs::expr_type(orderbyexpr))?;
+        typlens.push(typlen);
+        typbyvals.push(typbyval);
+        orderbyorig.push(
+            exec_init_expr(mcx, Some(orderbyexpr), params)?.expect("orderby expr compiles"),
+        );
+    }
+    let mut values: PgVec<'mcx, Datum> = PgVec::new_in(mcx);
+    values.resize(n, Datum::null());
+    let mut nulls: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+    nulls.resize(n, true);
+    let mut cmp_ssup: PgVec<'mcx, SortSupport> = PgVec::new_in(mcx);
+    cmp_ssup.extend(sort_support.iter().copied());
+    let cmp: ReorderCmp<'mcx> = Box::new(move |a, b| {
+        cmp_orderbyvals(
+            &b.orderbyvals,
+            &b.orderbynulls,
+            &a.orderbyvals,
+            &a.orderbynulls,
+            &cmp_ssup,
+        )
+    });
+    Ok(OrderByState {
+        keys: orderby_keys,
+        orderbyorig,
+        sort_support,
+        typbyvals,
+        typlens,
+        values,
+        nulls,
+        queue: PairingHeap::new(cmp),
+        reached_end: false,
     })
 }
 
@@ -320,12 +649,6 @@ fn order_dir(dir: i32) -> ScanDirection {
 
 #[cold]
 #[inline(never)]
-fn orderby_unported() -> ! {
-    panic!("nodeindexscan: indexorderby (IndexNextWithReorder/pairingheap KNN lane) not ported")
-}
-
-#[cold]
-#[inline(never)]
 fn scankey_case_unported(what: &str) -> ! {
     panic!("nodeindexscan: ExecIndexBuildScanKeys {what} not ported")
 }
@@ -334,19 +657,19 @@ fn scankey_case_unported(what: &str) -> ! {
 /// 4 (amsearcharray ScalarArrayOp, Const or runtime array), and 5 (NullTest).
 /// RowCompare and non-amsearcharray ScalarArrayOp loud-panic (the planner
 /// only builds saop index quals on amsearcharray AMs — plancat sets it for
-/// btree only); the isorderby leg is cut off at init (orderby_unported).
+/// btree only). `isorderby` is the ORDER BY (amcanorderbyop) leg: ordering-op
+/// strategy lookup + SK_ORDER_BY, cases 1 and 2 only. `runtime_keys` is
+/// shared across the indexqual and indexorderby calls (C's resized array).
 pub fn exec_index_build_scan_keys<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     quals: &NodeList<'mcx>,
     params: ParamBind<'mcx>,
-) -> PgResult<(
-    PgVec<'mcx, ScanKeyData>,
-    PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
-)> {
+    isorderby: bool,
+    runtime_keys: &mut PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+) -> PgResult<PgVec<'mcx, ScanKeyData>> {
     let indnkeyatts = index.indnkeyatts();
     let mut scan_keys: PgVec<'mcx, ScanKeyData> = PgVec::new_in(mcx);
-    let mut runtime_keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>> = PgVec::new_in(mcx);
     scan_keys
         .try_reserve_exact(quals.len())
         .map_err(|_| Box::new(mcx.oom(quals.len() * core::mem::size_of::<ScanKeyData>())))?;
@@ -357,6 +680,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
             NodeTag::T_RowCompareExpr => scankey_case_unported("RowCompareExpr"),
             NodeTag::T_ScalarArrayOpExpr => {
                 let saop = clause.as_scalar_array_op_expr().unwrap();
+                debug_assert!(!isorderby);
                 debug_assert!(saop.useOr);
                 if !::indexam::IndexAmKind::from_relam(index.rd_rel.relam).amsearcharray() {
                     scankey_case_unported("ScalarArrayOpExpr on a non-amsearcharray AM");
@@ -389,6 +713,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
                     None => {
                         runtime_keys.push(IndexRuntimeKeyInfo {
                             scan_key: scan_keys.len(),
+                            orderby: false,
                             key_expr: exec_init_expr(mcx, Some(rightop), params)?
                                 .expect("runtime key expr compiles"),
                             // The expr yields an array of op_righttype, not
@@ -411,6 +736,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 continue;
             }
             NodeTag::T_NullTest => {
+                debug_assert!(!isorderby);
                 let nt = clause.as_null_test().unwrap();
                 let var = nt
                     .arg
@@ -451,25 +777,31 @@ pub fn exec_index_build_scan_keys<'mcx>(
             panic!("bogus index qualification");
         }
 
-        // Strategy lookup cross-checks that the operator matches the index.
+        // Strategy lookup cross-checks that the operator matches the index
+        // (ordering operators live in a different amop shelf: isorderby).
         let opfamily = index.rd_opfamily[varattno as usize - 1];
         let (op_strategy, _op_lefttype, op_righttype) =
-            lsyscache::get_op_opfamily_properties(op.opno, opfamily, false)?;
+            lsyscache::get_op_opfamily_properties(op.opno, opfamily, isorderby)?;
+        let orderby_flag = if isorderby { SK_ORDER_BY } else { 0 };
 
         let mut rightop = rightop.unwrap_or_else(|| panic!("indexqual OpExpr missing right arg"));
         if rightop.node_tag() == NodeTag::T_RelabelType {
             rightop = rightop.as_relabel_type().unwrap().arg;
         }
         let (flags, scanvalue) = match rightop.as_const() {
-            Some(con) => (if con.constisnull { SK_ISNULL } else { 0 }, con.constvalue),
+            Some(con) => (
+                orderby_flag | if con.constisnull { SK_ISNULL } else { 0 },
+                con.constvalue,
+            ),
             None => {
                 runtime_keys.push(IndexRuntimeKeyInfo {
                     scan_key: scan_keys.len(),
+                    orderby: isorderby,
                     key_expr: exec_init_expr(mcx, Some(rightop), params)?
                         .expect("runtime key expr compiles"),
                     key_toastable: lsyscache::get_typlen(op_righttype)? == -1,
                 });
-                (0, ::datum::Datum::from_usize(0))
+                (orderby_flag, ::datum::Datum::from_usize(0))
             }
         };
 
@@ -485,7 +817,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
         scan_keys.push(key);
     }
 
-    Ok((scan_keys, runtime_keys))
+    Ok(scan_keys)
 }
 
 /// `ExecEndIndexScan`; the parallel-worker instrumentation copy-back arm
@@ -500,6 +832,7 @@ pub fn exec_end_index_scan(node: &mut IndexScanState<'_>) -> PgResult<()> {
     node.indexqualorig = None;
     node.iss_ScanKeys.clear();
     node.iss_Runtime = None;
+    node.iss_OrderBy = None;
     Ok(())
 }
 
@@ -551,25 +884,44 @@ pub fn skeleton_rebind<'mcx>(
     Ok(())
 }
 
-/// `ExecReScanIndexScan`; the reorder-queue flush arm is unreachable (ORDER
-/// BY loud-panics at init).
+/// `ExecReScanIndexScan`: runtime keys, reorder-queue flush, index_rescan.
 pub fn exec_rescan_index_scan<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     if let Some(rt) = node.iss_Runtime.as_deref_mut() {
         estate.reset_expr_context(rt.ecxt);
-        exec_index_eval_runtime_keys(estate, rt.ecxt, &mut rt.keys, &mut node.iss_ScanKeys)?;
+        let (scan_keys, orderby_keys) = (
+            &mut node.iss_ScanKeys,
+            node.iss_OrderBy.as_deref_mut().map(|ob| &mut ob.keys),
+        );
+        exec_index_eval_runtime_keys(
+            estate,
+            rt.ecxt,
+            &mut rt.keys,
+            scan_keys,
+            orderby_keys.map_or(&mut [][..], |k| &mut k[..]),
+        )?;
         rt.ready = true;
     }
     let IndexScanState {
         iss_ScanDesc,
         iss_ScanKeys,
+        iss_OrderBy,
         ss,
         ..
     } = node;
+    if let Some(ob) = iss_OrderBy.as_deref_mut() {
+        // C pops and frees each queued tuple; dropping the slots frees ours.
+        ob.queue.reset();
+        ob.reached_end = false;
+    }
     if let Some(scandesc) = iss_ScanDesc.as_deref_mut() {
-        index_rescan(scandesc, Some(iss_ScanKeys), None)?;
+        index_rescan(
+            scandesc,
+            Some(iss_ScanKeys),
+            iss_OrderBy.as_deref().map(|ob| &ob.keys[..]),
+        )?;
     }
     execscan::exec_scan_rescan(ss, estate);
     Ok(())
@@ -595,11 +947,13 @@ pub fn exec_index_restr_pos(node: &mut IndexScanState<'_>) -> PgResult<()> {
 
 /// `ExecIndexEvalRuntimeKeys`; caller resets the runtime econtext first, so
 /// key values (and forced detoasts) live until the next rescan.
+/// `orderby_keys` receives the ORDER BY runtime keys (rk.orderby).
 pub fn exec_index_eval_runtime_keys<'mcx>(
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
     runtime_keys: &mut [IndexRuntimeKeyInfo<'mcx>],
     scan_keys: &mut [ScanKeyData],
+    orderby_keys: &mut [ScanKeyData],
 ) -> PgResult<()> {
     for rk in runtime_keys.iter_mut() {
         // ExecEvalParamExec pending-initplan arm, hoisted per repo convention.
@@ -618,7 +972,11 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
             outer: None,
         };
         let nd = exec_eval_expr(&mut rk.key_expr, &mut slots)?;
-        let key = &mut scan_keys[rk.scan_key];
+        let key = if rk.orderby {
+            &mut orderby_keys[rk.scan_key]
+        } else {
+            &mut scan_keys[rk.scan_key]
+        };
         if nd.isnull {
             key.sk_argument = nd.value;
             key.sk_flags |= SK_ISNULL;
@@ -685,11 +1043,15 @@ pub fn exec_index_scan_initialize_dsm<'mcx>(
         heap,
         index,
         node.iss_ScanKeys.len() as i32,
-        0,
+        node.iss_OrderBy.as_deref().map_or(0, |ob| ob.keys.len() as i32),
         std::sync::Arc::clone(&pscan),
     )?;
     if node.iss_Runtime.as_deref().is_none_or(|r| r.ready) {
-        index_rescan(&mut scandesc, Some(&node.iss_ScanKeys), None)?;
+        index_rescan(
+            &mut scandesc,
+            Some(&node.iss_ScanKeys),
+            node.iss_OrderBy.as_deref().map(|ob| &ob.keys[..]),
+        )?;
     }
     debug_assert!(node.iss_ScanDesc.is_none());
     node.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
@@ -723,11 +1085,15 @@ pub fn exec_index_scan_initialize_worker<'mcx>(
         heap,
         index,
         node.iss_ScanKeys.len() as i32,
-        0,
+        node.iss_OrderBy.as_deref().map_or(0, |ob| ob.keys.len() as i32),
         pscan,
     )?;
     if node.iss_Runtime.as_deref().is_none_or(|r| r.ready) {
-        index_rescan(&mut scandesc, Some(&node.iss_ScanKeys), None)?;
+        index_rescan(
+            &mut scandesc,
+            Some(&node.iss_ScanKeys),
+            node.iss_OrderBy.as_deref().map(|ob| &ob.keys[..]),
+        )?;
     }
     debug_assert!(node.iss_ScanDesc.is_none());
     node.iss_ScanDesc = Some(::mcx::alloc_in(mcx, scandesc)?);
@@ -740,5 +1106,5 @@ const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
     IndexScanState<'_> { ss, iss_PlanNodeId, iss_ParallelAware, iss_IndexOid;
         indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_Runtime,
-        iss_OrderDir },
+        iss_OrderBy, iss_OrderDir },
 );

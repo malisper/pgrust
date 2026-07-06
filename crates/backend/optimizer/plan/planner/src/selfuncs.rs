@@ -1926,19 +1926,20 @@ fn genericcostestimate(
     loop_count: f64,
     costs: &mut GenericCosts,
 ) -> PgResult<()> {
-    let (index_quals, has_orderbys, index_pages, index_tuples, index_rel, reltablespace) = {
+    let (index_quals, index_orderbys, index_pages, index_tuples, index_rel, reltablespace) = {
         let PathNode::IndexPath(ip) = run.root.path(path_id) else { unreachable!() };
         let index = ip.indexinfo.as_ref().expect("indexinfo set");
+        let mut orderbys: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
+        orderbys.extend(ip.indexorderbys.iter().copied());
         (
             get_quals_from_indexclauses(run, path_id),
-            !ip.indexorderbys.is_empty(),
+            orderbys,
             index.pages,
             index.tuples,
             index.rel.expect("index rel set"),
             index.reltablespace,
         )
     };
-    assert!(!has_orderbys, "genericcostestimate (selfuncs.c): indexorderbys; M2 amcanorderbyop lane");
     let index_rel_relid = run.root.rel(index_rel).relid as i32;
     let index_rel_tuples = run.root.rel(index_rel).tuples;
 
@@ -1987,8 +1988,10 @@ fn genericcostestimate(
         num_index_pages * spc_random_page_cost
     };
 
-    let qual_arg_cost = index_other_operands_eval_cost(run, &index_quals)?;
-    let qual_op_cost = gucs::cpu_operator_cost() * index_quals.len() as f64;
+    let qual_arg_cost = index_other_operands_eval_cost(run, &index_quals)?
+        + index_orderby_operands_eval_cost(run, &index_orderbys)?;
+    let qual_op_cost =
+        gucs::cpu_operator_cost() * (index_quals.len() + index_orderbys.len()) as f64;
 
     let index_startup_cost = qual_arg_cost;
     index_total_cost += qual_arg_cost;
@@ -2044,6 +2047,25 @@ fn index_other_operands_eval_cost(
             let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), op)?;
             qual_arg_cost += cost.startup + cost.per_tuple;
         }
+    }
+    Ok(qual_arg_cost)
+}
+
+// index_other_operands_eval_cost (selfuncs.c), indexorderbys leg: bare
+// OpExprs with the index key on the left.
+fn index_orderby_operands_eval_cost(
+    run: &mut PlannerRun<'_>,
+    index_orderbys: &[types_pathnodes::NodeId],
+) -> PgResult<f64> {
+    let mut qual_arg_cost = 0.0;
+    for &nid in index_orderbys {
+        let clause = *run.root.expr_node(nid);
+        let other_operand = match clause.node_tag() {
+            NodeTag::T_OpExpr => clause.as_op_expr().unwrap().args.nth(1),
+            other => panic!("index_other_operands_eval_cost (selfuncs.c): {other:?} orderby"),
+        };
+        let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), other_operand)?;
+        qual_arg_cost += cost.startup + cost.per_tuple;
     }
     Ok(qual_arg_cost)
 }

@@ -1375,6 +1375,132 @@ pub fn match_index_to_operand(
     false
 }
 
+// match_pathkeys_to_index (indxpath.c): ORDER BY expressions of the form
+// "indexedcol operator pseudoconstant" for a prefix of query_pathkeys, plus
+// the zero-based index columns each one uses.
+fn match_pathkeys_to_index<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    index: &IndexOptInfo<'mcx>,
+) -> PgResult<(PgVec<'mcx, types_pathnodes::NodeId>, PgVec<'mcx, i32>)> {
+    let mcx = run.mcx;
+    let mut orderby_clauses: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let mut clause_columns: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    debug_assert!(index.amcanorderbyop);
+    let rel = index.rel.expect("index rel set");
+    let rel_relids = types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).relids);
+    let mut pathkeys: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
+    pathkeys.extend(run.root.query_pathkeys.iter().copied());
+    for pathkey in pathkeys.iter() {
+        if pathkey.pk_cmptype != types_pathnodes::COMPARE_LT || pathkey.pk_nulls_first {
+            return Ok((orderby_clauses, clause_columns));
+        }
+        let ec = pathkey.pk_eclass.expect("pathkey eclass set");
+        if run.root.ec(ec).ec_has_volatile {
+            return Ok((orderby_clauses, clause_columns));
+        }
+        // Any index column may match each pathkey, not just left-to-right:
+        // correct for GiST, moot for single-column SP-GiST.
+        let mut found = false;
+        for em in equivclass::ec_members_for_relids(run, ec, &rel_relids).iter() {
+            if !types_pathnodes::relids::relids_equal(&run.root.em(*em).em_relids, &rel_relids) {
+                continue;
+            }
+            let member_expr = *run.root.expr_node(run.root.em(*em).em_expr);
+            for indexcol in 0..index.nkeycolumns as usize {
+                if let Some(expr) = match_clause_to_ordering_op(
+                    run,
+                    index,
+                    indexcol,
+                    member_expr,
+                    pathkey.pk_opfamily,
+                )? {
+                    let expr_id = run.intern_expr(expr);
+                    orderby_clauses.push(expr_id);
+                    clause_columns.push(indexcol as i32);
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        if !found {
+            return Ok((orderby_clauses, clause_columns));
+        }
+    }
+    Ok((orderby_clauses, clause_columns))
+}
+
+// match_clause_to_ordering_op (indxpath.c): (indexkey op const) or the
+// commuted form, where op is an ordering operator of the column's opfamily
+// whose sortfamily is the pathkey's opfamily.
+fn match_clause_to_ordering_op<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    index: &IndexOptInfo<'mcx>,
+    indexcol: usize,
+    clause: Node<'mcx>,
+    pk_opfamily: u32,
+) -> PgResult<Option<Node<'mcx>>> {
+    debug_assert!(indexcol < index.nkeycolumns as usize);
+    let opfamily = index.opfamily[indexcol];
+    let idxcollation = index.indexcollations[indexcol];
+    let Some(op) = clause.as_op_expr() else {
+        return Ok(None);
+    };
+    if op.args.len() != 2 {
+        return Ok(None);
+    }
+    let leftop = op.args.nth(0);
+    let rightop = op.args.nth(1);
+    let mut expr_op = op.opno;
+    if !index_coll_matches_expr_coll(idxcollation, op.inputcollid) {
+        return Ok(None);
+    }
+
+    let commuted;
+    if match_index_to_operand(run, leftop, indexcol, index)
+        && !vars::contain_var_clause(rightop)?
+        && !clauses::contain_volatile_functions(rightop)?
+    {
+        commuted = false;
+    } else if match_index_to_operand(run, rightop, indexcol, index)
+        && !vars::contain_var_clause(leftop)?
+        && !clauses::contain_volatile_functions(leftop)?
+    {
+        expr_op = lsyscache::get_commutator(expr_op)?;
+        if expr_op == 0 {
+            return Ok(None);
+        }
+        commuted = true;
+    } else {
+        return Ok(None);
+    }
+
+    let sortfamily = lsyscache::get_op_opfamily_sortfamily(expr_op, opfamily)?;
+    if sortfamily != pk_opfamily {
+        return Ok(None);
+    }
+
+    if !commuted {
+        return Ok(Some(clause));
+    }
+    let newclause = types_nodes::Node::mk(
+        run.mcx,
+        types_nodes::primnodes::OpExpr {
+            opno: expr_op,
+            opfuncid: 0,
+            opresulttype: op.opresulttype,
+            opretset: op.opretset,
+            opcollid: op.opcollid,
+            inputcollid: op.inputcollid,
+            args: types_nodes::list::NodeList::make2(run.mcx, rightop, leftop)?,
+            location: op.location,
+        },
+    )?;
+    Ok(Some(newclause))
+}
+
 // get_index_paths (indxpath.c). btree has amhasgettuple; the bitmap
 // collection feeds create_index_paths' (deferred) bitmap arm.
 fn get_index_paths<'mcx>(
@@ -1480,8 +1606,7 @@ fn build_index_paths<'mcx>(
     let cur_relid = run.root.rel(rel).relid;
     let loop_count = get_loop_count(run, cur_relid, &outer_relids)?;
 
-    // has_useful_pathkeys (allpaths.c); amcanorderbyop is false for btree so
-    // the match_pathkeys_to_index arm is dead. Bitmap scans never provide
+    // has_useful_pathkeys (allpaths.c). Bitmap scans never provide
     // ordering (C ST_BITMAPSCAN: useful_pathkeys = NIL).
     let pathkeys_possibly_useful = !bitmap
         && (!run.root.rel(rel).joininfo.is_empty()
@@ -1489,6 +1614,8 @@ fn build_index_paths<'mcx>(
             || !run.root.group_pathkeys.is_empty()
             || !run.root.query_pathkeys.is_empty());
     let index_is_ordered = !index.sortopfamily.is_empty();
+    let mut orderbyclauses: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+    let mut orderbyclausecols: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     let useful_pathkeys: PgVec<'mcx, types_pathnodes::PathKey> =
         if index_is_ordered && pathkeys_possibly_useful {
             let index_pathkeys = planner_seams::build_index_pathkeys::call(
@@ -1497,6 +1624,13 @@ fn build_index_paths<'mcx>(
                 types_pathnodes::ForwardScanDirection,
             )?;
             planner_seams::truncate_useless_pathkeys::call(run, rel, &index_pathkeys)?
+        } else if index.amcanorderbyop && pathkeys_possibly_useful {
+            // A prefix match of query_pathkeys still allows incremental sort
+            // over the partially sorted output (C build_index_paths step 2).
+            (orderbyclauses, orderbyclausecols) = match_pathkeys_to_index(run, index)?;
+            let mut v: PgVec<'mcx, types_pathnodes::PathKey> = PgVec::new_in(mcx);
+            v.extend(run.root.query_pathkeys.iter().take(orderbyclauses.len()).copied());
+            v
         } else {
             PgVec::new_in(mcx)
         };
@@ -1533,10 +1667,30 @@ fn build_index_paths<'mcx>(
             v.extend(useful_pathkeys.iter().copied());
             v
         });
+        let clone_ints = |src: &PgVec<'mcx, i32>| {
+            let mut v: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+            v.extend(src.iter().copied());
+            v
+        };
+        let clone_orderbys = |src: &PgVec<'mcx, types_pathnodes::NodeId>| {
+            let mut v: PgVec<'mcx, types_pathnodes::NodeId> = PgVec::new_in(mcx);
+            v.extend(src.iter().copied());
+            v
+        };
+        let (forward_orderbys, forward_orderbycols) = if parallel_arm {
+            (clone_orderbys(&orderbyclauses), clone_ints(&orderbyclausecols))
+        } else {
+            (
+                core::mem::replace(&mut orderbyclauses, PgVec::new_in(mcx)),
+                core::mem::replace(&mut orderbyclausecols, PgVec::new_in(mcx)),
+            )
+        };
         let ipath = pathnode::create_index_path(
             run,
             index,
             forward_clauses,
+            forward_orderbys,
+            forward_orderbycols,
             useful_pathkeys,
             types_pathnodes::ForwardScanDirection,
             index_only_scan,
@@ -1551,6 +1705,8 @@ fn build_index_paths<'mcx>(
                 run,
                 index,
                 clone_clauses(&index_clauses),
+                orderbyclauses,
+                orderbyclausecols,
                 pathkeys,
                 types_pathnodes::ForwardScanDirection,
                 index_only_scan,
@@ -1588,6 +1744,8 @@ fn build_index_paths<'mcx>(
                 run,
                 index,
                 backward_clauses,
+                PgVec::new_in(mcx),
+                PgVec::new_in(mcx),
                 useful_pathkeys,
                 types_pathnodes::BackwardScanDirection,
                 index_only_scan,
@@ -1602,6 +1760,8 @@ fn build_index_paths<'mcx>(
                     run,
                     index,
                     index_clauses,
+                    PgVec::new_in(mcx),
+                    PgVec::new_in(mcx),
                     pathkeys,
                     types_pathnodes::BackwardScanDirection,
                     index_only_scan,

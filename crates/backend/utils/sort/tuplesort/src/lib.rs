@@ -40,7 +40,7 @@ pub(crate) mod testhooks {
 
 pub use abbrev::AbbrevState;
 pub use ssup::{
-    apply_sort_comparator_in, comparator_for_index_col,
+    apply_cmp, apply_sort_comparator_in, comparator_for_index_col,
     comparator_for_opfamily,
     prepare_sort_support_abbrev, prepare_sort_support_from_ordering_op, AbbrevArm, AbbrevKind,
     SortComparator, SortSupport, SortSupportInit,

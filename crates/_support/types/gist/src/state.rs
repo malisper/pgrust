@@ -187,27 +187,146 @@ impl<'mcx> GistState<'mcx> {
         let r = finfo.invoke(&mut self.frame5)?;
         Ok(r.as_bool())
     }
+
+    // FunctionCall5Coll(distance-proc via scankey, …) — gistindex_keytest's
+    // isorderby arm; recheck is initialized false by the caller (pre-9.5
+    // distance fns never set it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_distance(
+        &mut self,
+        mcx: Mcx<'_>,
+        finfo: &mut FmgrInfo,
+        collation: Oid,
+        de: &GISTENTRY,
+        query: Datum,
+        strategy: u16,
+        subtype: Oid,
+        recheck: &mut bool,
+    ) -> PgResult<f64> {
+        self.frame5.rearm(collation);
+        // SAFETY: as call_compress.
+        unsafe { self.frame5.set_result_mcx(mcx) };
+        self.frame5
+            .set_arg(0, Datum::from_usize(de as *const GISTENTRY as usize));
+        self.frame5.set_arg(1, query);
+        self.frame5.set_arg(2, Datum::from_i16(strategy as i16));
+        self.frame5.set_arg(3, Datum::from_oid(subtype));
+        self.frame5
+            .set_arg(4, Datum::from_usize(recheck as *mut bool as usize));
+        let r = finfo.invoke(&mut self.frame5)?;
+        Ok(r.as_f64())
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Scan opaque (gist_private.h GISTScanOpaqueData), KNN-free rendering: ordered
-// scans are a LOUD lane, so queue items carry no distances and heap items
-// never enter the queue.
+// Scan opaque (gist_private.h GISTScanOpaqueData).
 // ---------------------------------------------------------------------------
 
 use ::mcx::MemoryContext;
-use ::types_core::{BlockNumber, OffsetNumber, XLogRecPtr};
+use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, XLogRecPtr};
 use ::types_tuple::itemptr::ItemPointerData;
 
-#[derive(Clone, Copy, Debug)]
+// IndexOrderByDistance (access/genam.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IndexOrderByDistance {
+    pub value: f64,
+    pub isnull: bool,
+}
+
+// Ordered-scan reconstructed index tuple: an owned 8-aligned image (itup
+// deform requires MAXALIGN), living as long as its queue item + one
+// getNextNearest return.
+#[derive(Clone, Debug)]
+pub struct ReconTup(Box<[u64]>);
+
+impl ReconTup {
+    pub fn from_bytes(b: &[u8]) -> Self {
+        let mut v = vec![0u64; b.len().div_ceil(8)];
+        // SAFETY: the u64 buffer spans >= b.len() bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(b.as_ptr(), v.as_mut_ptr().cast::<u8>(), b.len());
+        }
+        ReconTup(v.into_boxed_slice())
+    }
+    pub fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr().cast()
+    }
+}
+
+// Ordered-scan leaf payload (C GISTSearchItem.data.heap).
+#[derive(Clone, Debug, Default)]
+pub struct GISTSearchQueueHeapItem {
+    pub heapPtr: ItemPointerData,
+    pub recheck: bool,
+    pub recheck_distances: bool,
+    pub recontup: Option<ReconTup>,
+}
+
+// GISTSearchItem (gist_private.h): blkno == InvalidBlockNumber marks a heap
+// item (C GISTSearchItemIsHeap). distances is empty for non-ordered scans.
+#[derive(Clone, Debug)]
 pub struct GISTSearchItem {
     pub blkno: BlockNumber,
     pub parentlsn: XLogRecPtr,
+    pub heap: Option<GISTSearchQueueHeapItem>,
+    pub distances: Vec<IndexOrderByDistance>,
 }
 
-// zero-orderby pairingheap_GISTSearchItem_cmp: no distances, no heap items —
-// all entries compare equal; visit order is the heap mechanics (C-exact).
-pub fn gist_search_item_cmp(_a: &GISTSearchItem, _b: &GISTSearchItem) -> i32 {
+impl GISTSearchItem {
+    pub fn page(blkno: BlockNumber, parentlsn: XLogRecPtr) -> Self {
+        GISTSearchItem { blkno, parentlsn, heap: None, distances: Vec::new() }
+    }
+    #[inline]
+    pub fn is_heap(&self) -> bool {
+        self.blkno == InvalidBlockNumber
+    }
+}
+
+// float8_cmp_internal (float.h): NaN sorts greater than all non-NaNs.
+fn float8_cmp(a: f64, b: f64) -> i32 {
+    if a.is_nan() {
+        if b.is_nan() { 0 } else { 1 }
+    } else if b.is_nan() {
+        -1
+    } else if a > b {
+        1
+    } else if a < b {
+        -1
+    } else {
+        0
+    }
+}
+
+// pairingheap_GISTSearchItem_cmp (gistscan.c:29). C reads
+// scan->numberOfOrderBys; both items carry vectors of exactly that length
+// (non-ordered scans: both empty), so min(len) is the same bound. NULL
+// distances sort last (max-heap root = smallest distance is popped first via
+// the negated comparison); heap items outrank inner pages at equal distance
+// for depth-first behavior.
+pub fn gist_search_item_cmp(a: &GISTSearchItem, b: &GISTSearchItem) -> i32 {
+    let n = a.distances.len().min(b.distances.len());
+    for i in 0..n {
+        let da = a.distances[i];
+        let db = b.distances[i];
+        if da.isnull {
+            if !db.isnull {
+                return -1;
+            }
+        } else if db.isnull {
+            return 1;
+        } else {
+            let cmp = -float8_cmp(da.value, db.value);
+            if cmp != 0 {
+                return cmp;
+            }
+        }
+    }
+    if a.is_heap() && !b.is_heap() {
+        return 1;
+    }
+    if !a.is_heap() && b.is_heap() {
+        return -1;
+    }
     0
 }
 
@@ -227,6 +346,14 @@ pub struct GISTScanOpaqueData<'mcx> {
     pub queue: crate::pairingheap::PairingHeap<GISTSearchItem, fn(&GISTSearchItem, &GISTSearchItem) -> i32>,
     pub qual_ok: bool,
     pub firstCall: bool,
+
+    // Ordered scans: per-tuple distance workspace (C so->distances) and the
+    // ordering operators' result types (C so->orderByTypes, gistrescan).
+    pub distances: Vec<IndexOrderByDistance>,
+    pub orderByTypes: Vec<::types_core::Oid>,
+    // The recontup of the most recently returned nearest item; xs_itup points
+    // in here, valid until the next getNextNearest / rescan / endscan.
+    pub cur_recontup: Option<ReconTup>,
 
     pub killedItems: Option<Vec<OffsetNumber>>,
     pub numKilled: i32,
