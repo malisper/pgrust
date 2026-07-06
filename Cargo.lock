@@ -13586,6 +13586,7 @@ dependencies = [
  "tidbitmap",
  "transam_xlog",
  "transam_xlog_seams",
+ "tupdesc",
  "types_core",
  "types_error",
  "types_fmgr",

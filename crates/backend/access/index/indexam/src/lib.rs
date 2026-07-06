@@ -905,7 +905,7 @@ fn am_insert<'mcx>(
             // SAFETY: same relcache-outlives-slot argument as the gist arm.
             let slot: &mut Option<spgist::SpgInsertAmCache<'mcx>> =
                 unsafe { core::mem::transmute(slot) };
-            spgist::spginsert(indexRelation, values, isnull, heap_t_ctid, slot)
+            spgist::spginsert(mcx, indexRelation, values, isnull, heap_t_ctid, slot)
         }
         IndexAmKind::Brin => {
             if am_cache.is_none() {

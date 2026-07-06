@@ -11,7 +11,7 @@ pub mod scan;
 pub mod utils;
 
 use ::datum::Datum;
-use ::mcx::MemoryContext;
+use ::mcx::{Mcx, MemoryContext};
 use ::types_error::PgResult;
 use ::types_rel::Relation;
 use ::types_spgist::state::SpGistState;
@@ -48,6 +48,7 @@ pub struct SpgInsertAmCache<'mcx> {
 
 /// spginsert.
 pub fn spginsert<'mcx>(
+    mcx: Mcx<'mcx>,
     r: &Relation<'mcx>,
     values: &[Datum],
     isnull: &[bool],
@@ -56,7 +57,7 @@ pub fn spginsert<'mcx>(
 ) -> PgResult<bool> {
     if amcache.is_none() {
         *amcache = Some(SpgInsertAmCache {
-            state: initSpGistState(r)?,
+            state: initSpGistState(mcx, r)?,
             temp: MemoryContext::new_bump("SP-GiST insert temporary context"),
         });
     }
