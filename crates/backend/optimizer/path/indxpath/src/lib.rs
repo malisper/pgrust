@@ -53,12 +53,15 @@ pub fn check_index_predicates<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> P
             clause_rids.push(rid);
         }
     }
-    assert!(
-        run.root.rel(rel).reloptkind != types_pathnodes::RELOPT_OTHER_MEMBER_REL,
-        "check_index_predicates (indxpath.c): child rel; appendrel EC lane"
-    );
+    // A child rel subtracts its parents' relids from all_query_rels, since
+    // ECs and join clauses are stated in terms of the parents.
+    let subtract = if run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+        types_pathnodes::relids::find_childrel_parents(&run.root, rel)
+    } else {
+        types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).relids)
+    };
     let mut otherrels =
-        types_pathnodes::relids::relids_difference(mcx, &run.root.all_query_rels, &run.root.rel(rel).relids);
+        types_pathnodes::relids::relids_difference(mcx, &run.root.all_query_rels, &subtract);
     otherrels =
         types_pathnodes::relids::relids_difference(mcx, &otherrels, &run.root.rel(rel).nulling_relids);
     if !types_pathnodes::relids::relids_is_empty(&otherrels) {

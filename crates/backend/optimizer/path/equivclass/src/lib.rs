@@ -14,9 +14,9 @@ use types_pathnodes::{
 };
 
 use types_pathnodes::relids::{
-    find_base_rel, pgvec_clone_shallow, relids_add_member, relids_copy, relids_equal,
-    relids_is_empty, relids_is_member, relids_is_subset, relids_members, relids_num_members,
-    relids_overlap, relids_union,
+    find_base_rel, find_childrel_parents, pgvec_clone_shallow, relids_add_member, relids_copy,
+    relids_equal, relids_is_empty, relids_is_member, relids_is_subset, relids_members,
+    relids_num_members, relids_overlap, relids_union,
 };
 use types_pathnodes::run::PlannerRun;
 
@@ -26,10 +26,12 @@ fn live_ec(run: &PlannerRun<'_>, id: EcId) -> bool {
     run.root.ec(id).ec_merged.is_none()
 }
 
+// C's `Assert(ec->ec_childmembers == NULL)` sites: these phases all run
+// before add_child_rel_equivalences can have added any child members.
 fn assert_no_child_members(run: &PlannerRun<'_>, ec: EcId) {
     assert!(
         run.root.ec(ec).ec_childmembers.is_empty(),
-        "eclass_member_iterator (equivclass.c): child EC members; appendrel EC lane"
+        "child EC members exist before appendrel expansion (equivclass.c)"
     );
 }
 
@@ -1127,11 +1129,17 @@ fn generate_join_implied_equalities_broken<'mcx>(
             result.push(rinfo);
         }
     }
-    assert!(
-        relids_is_empty(&run.root.rel(inner_rel).top_parent_relids) || result.is_empty(),
-        "generate_join_implied_equalities_broken (equivclass.c): child translation; \
-         appendrel EC lane"
-    );
+    // ec_sources clauses are stated in parent Vars; brute-force translate for
+    // a child inner rel, possibly through multiple appendrel levels. The
+    // translated RestrictInfos are not registered in ec_derives (C comment:
+    // narrow corner case, no duplication expected).
+    if !relids_is_empty(&run.root.rel(inner_rel).top_parent_relids) && !result.is_empty() {
+        let top = run.root.rel(inner_rel).top_parent.expect("other rel has a top_parent");
+        for i in 0..result.len() {
+            result[i] =
+                planner_seams::adjust_child_rinfo_multilevel::call(run, result[i], inner_rel, top)?;
+        }
+    }
     Ok(result)
 }
 
@@ -1778,22 +1786,9 @@ where
     debug_assert!(run.root.ec_merging_done);
     let is_child_rel =
         run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL;
-    // find_childrel_parents (relnode.c): all ancestor relids, to skip useless
-    // joins from a child to its own parents.
-    let parent_relids = if is_child_rel {
-        let mut acc: Relids<'mcx> = None;
-        let mut cur = rel;
-        while let Some(p) = run.root.rel(cur).parent {
-            acc = relids_union(mcx, &acc, &run.root.rel(p).relids);
-            if run.root.rel(p).reloptkind == RELOPT_BASEREL {
-                break;
-            }
-            cur = p;
-        }
-        acc
-    } else {
-        None
-    };
+    // Ancestor relids, to skip useless joins from a child to its own parents.
+    let parent_relids =
+        if is_child_rel { find_childrel_parents(&run.root, rel) } else { None };
 
     let eclass_indexes = relids_copy(mcx, &run.root.rel(rel).eclass_indexes);
     for i in relids_members(&eclass_indexes) {
