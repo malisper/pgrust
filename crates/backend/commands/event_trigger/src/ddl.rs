@@ -352,6 +352,90 @@ pub fn AlterEventTrigger<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterEventTrigStmt<'mcx>) 
     Ok(trigoid)
 }
 
+// AlterEventTriggerOwner + AlterEventTriggerOwner_internal (event_trigger.c).
+pub fn AlterEventTriggerOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    newOwnerId: Oid,
+) -> PgResult<ObjectAddress> {
+    let rel = table::table_open(mcx, EVENT_TRIGGER_RELATION_ID, RowExclusiveLock)?;
+    let Some(tup) = cache_syscache::SearchSysCacheCopy(
+        mcx,
+        cache_syscache::EVENTTRIGGERNAME,
+        cache_syscache::SysCacheKey::Str(name),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(elog::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("event trigger \"{name}\" does not exist"))
+            .into_error()
+            .into());
+    };
+
+    let descr = rel.descr();
+    let mut isnull = false;
+    // SAFETY (each): fixed NOT NULL pg_event_trigger columns (pg_event_trigger.h).
+    let evt_oid = unsafe {
+        types_tuple::heap_getattr(&tup, Anum_pg_event_trigger_oid as i32, descr, &mut isnull)
+    }
+    .as_oid();
+    let evtowner = unsafe {
+        types_tuple::heap_getattr(
+            &tup,
+            cache_evtcache::Anum_pg_event_trigger_evtowner as i32,
+            descr,
+            &mut isnull,
+        )
+    }
+    .as_oid();
+
+    if evtowner != newOwnerId {
+        // object_ownercheck: event-trigger owners are always superusers, and
+        // superusers pass every ownercheck; a non-superuser caller cannot own one.
+        if !superuser::superuser_arg(miscinit::GetUserId())? {
+            panic!("AlterEventTriggerOwner: object_ownercheck for non-superusers (acl lane)");
+        }
+        if !superuser::superuser_arg(newOwnerId)? {
+            return Err(elog::ereport(ERROR)
+                .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+                .errmsg(format!(
+                    "permission denied to change owner of event trigger \"{name}\""
+                ))
+                .errhint("The owner of an event trigger must be a superuser.")
+                .into_error()
+                .into());
+        }
+
+        let natts = descr.natts as usize;
+        let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        repl_values.resize(natts, Datum::null());
+        repl_isnull.resize(natts, false);
+        repl.resize(natts, false);
+        repl_values[cache_evtcache::Anum_pg_event_trigger_evtowner as usize - 1] =
+            Datum::from_oid(newOwnerId);
+        repl[cache_evtcache::Anum_pg_event_trigger_evtowner as usize - 1] = true;
+        let mut newtup =
+            heaptuple::heap_modify_tuple(mcx, &tup, descr, &repl_values, &repl_isnull, &repl)?;
+        let otid = tup.t_self;
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut newtup)?;
+
+        pg_shdepend::changeDependencyOnOwner(
+            mcx,
+            EVENT_TRIGGER_RELATION_ID,
+            evt_oid,
+            newOwnerId,
+        )?;
+    }
+
+    rel.close(RowExclusiveLock)?;
+    Ok(ObjectAddress::set(EVENT_TRIGGER_RELATION_ID, evt_oid))
+}
+
 // SetDatabaseHasLoginEventTriggers (event_trigger.c): the shared-object lock
 // is a custom tag serializing this against EventTriggerOnLogin's flag reset;
 // SearchSysCacheLockedCopy1 is composed from Locked1 + copytuple here.

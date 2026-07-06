@@ -771,7 +771,10 @@ fn user_mapping_ddl_aclcheck(umuserid: Oid, serverid: Oid, servername: &str) -> 
     Ok(())
 }
 
-pub fn CreateUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateUserMappingStmt<'mcx>) -> PgResult<()> {
+pub fn CreateUserMapping<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &CreateUserMappingStmt<'mcx>,
+) -> PgResult<ObjectAddress> {
     let servername = stmt.servername.expect("CreateUserMappingStmt.servername");
     let rel = table::table_open(mcx, USER_MAPPING_RELATION_ID, RowExclusiveLock)?;
 
@@ -788,7 +791,9 @@ pub fn CreateUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateUserMappingStmt<'mcx
                     MappingUserName(mcx, use_id)?
                 ))
                 .finish(types_error::ErrorLocation::new("foreigncmds.c", 0, "CreateUserMapping"))?;
-            return rel.close(RowExclusiveLock);
+            rel.close(RowExclusiveLock)?;
+            // C: return InvalidObjectAddress on the IF NOT EXISTS skip.
+            return Ok(ObjectAddress::set(InvalidOid, InvalidOid));
         }
         return Err(err(
             ERRCODE_DUPLICATE_OBJECT,
@@ -839,7 +844,8 @@ pub fn CreateUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateUserMappingStmt<'mcx
     // No recordDependencyOnCurrentExtension: user mappings are not extension
     // members (C comment, foreigncmds.c:1217).
 
-    rel.close(RowExclusiveLock)
+    rel.close(RowExclusiveLock)?;
+    Ok(myself)
 }
 
 pub fn AlterUserMapping<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterUserMappingStmt<'mcx>) -> PgResult<()> {

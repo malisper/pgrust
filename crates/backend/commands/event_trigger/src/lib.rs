@@ -14,7 +14,9 @@ mod sqldrop;
 mod srf;
 
 pub use cache_evtcache::EVENT_TRIGGER_RELATION_ID;
-pub use ddl::{get_event_trigger_oid, AlterEventTrigger, CreateEventTrigger};
+pub use ddl::{
+    get_event_trigger_oid, AlterEventTrigger, AlterEventTriggerOwner, CreateEventTrigger,
+};
 pub use sqldrop::EventTriggerSQLDropAddObject;
 
 const TRIGGER_FIRES_ON_ORIGIN: i8 = b'O' as i8;

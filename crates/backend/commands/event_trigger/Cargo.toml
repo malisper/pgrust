@@ -46,3 +46,4 @@ fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 pg_attrdef = { path = "../../catalog/pg_attrdef" }
 elog = { path = "../../utils/error/elog" }
 event_trigger_seams = { path = "../event_trigger_seams" }
+pg_shdepend = { path = "../../catalog/pg_shdepend" }

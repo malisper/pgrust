@@ -1109,14 +1109,18 @@ fn slow_switch<'mcx>(
         }
 
         T_RenameStmt => {
+            // C: address = ExecRenameStmt (alter.c); arms without a ported
+            // address surface stay loud under active collection.
             let stmt = parsetree
                 .as_variant::<types_nodes::parsenodes::RenameStmt>()
                 .expect("RenameStmt");
-            // C: address = ExecRenameStmt; the ported renames return no
-            // address yet.
-            collect_gap("RENAME");
-            exec_rename_stmt_inner(mcx, stmt)?;
-            Ok(None)
+            match exec_rename_stmt_inner(mcx, stmt)? {
+                Some(address) => Ok(Some(address)),
+                None => {
+                    collect_gap("RENAME");
+                    Ok(None)
+                }
+            }
         }
 
         T_DropStmt => {
@@ -1167,9 +1171,9 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateUserMappingStmt>()
                 .expect("CreateUserMappingStmt");
-            collect_gap("CREATE USER MAPPING");
-            foreigncmds::CreateUserMapping(mcx, stmt)?;
-            Ok(None)
+            // C: address = CreateUserMapping (foreigncmds.c).
+            let address = foreigncmds::CreateUserMapping(mcx, stmt)?;
+            Ok(Some(address))
         }
         T_AlterUserMappingStmt => {
             let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
@@ -1564,10 +1568,9 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::CreatePolicyStmt<'mcx>,
                 >(stmt)
             };
-            // C: address = CreatePolicy; the ported form returns no address.
-            collect_gap("CREATE POLICY");
-            commands_policy::CreatePolicy(mcx, stmt)?;
-            Ok(None)
+            // C: address = CreatePolicy (policy.c).
+            let address = commands_policy::CreatePolicy(mcx, stmt)?;
+            Ok(Some(address))
         }
         T_AlterPolicyStmt => {
             let stmt = parsetree.as_alter_policy_stmt().unwrap();
@@ -1578,10 +1581,9 @@ fn slow_switch<'mcx>(
                     &types_nodes::parsenodes::AlterPolicyStmt<'mcx>,
                 >(stmt)
             };
-            // C: address = AlterPolicy; the ported form returns no address.
-            collect_gap("ALTER POLICY");
-            commands_policy::AlterPolicy(mcx, stmt)?;
-            Ok(None)
+            // C: address = AlterPolicy (policy.c).
+            let address = commands_policy::AlterPolicy(mcx, stmt)?;
+            Ok(Some(address))
         }
 
         T_CreateOpClassStmt => {
@@ -1826,6 +1828,21 @@ fn exec_alter_owner_non_et<'mcx>(
                 aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
             commands_tablespace::AlterTableSpaceOwner(mcx, name, newowner)
         }
+        types_nodes::parsenodes::ObjectType::OBJECT_EVENT_TRIGGER => {
+            // C: ExecAlterOwnerStmt case OBJECT_EVENT_TRIGGER (alter.c) ->
+            // AlterEventTriggerOwner (event_trigger.c). Address is dropped:
+            // event triggers are not event-trigger-supported objects, so this
+            // path never collects.
+            let name = stmt
+                .object
+                .expect("AlterOwnerStmt.object")
+                .as_string()
+                .expect("event trigger name String")
+                .sval;
+            let newowner =
+                aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
+            event_trigger::AlterEventTriggerOwner(mcx, name, newowner).map(|_| ())
+        }
         other => panic!("unported: ExecAlterOwnerStmt {other:?}"),
     }
 }
@@ -1834,13 +1851,16 @@ fn exec_rename_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()> {
     let stmt = parsetree
         .as_variant::<types_nodes::parsenodes::RenameStmt>()
         .expect("RenameStmt");
-    exec_rename_stmt_inner(mcx, stmt)
+    exec_rename_stmt_inner(mcx, stmt).map(|_| ())
 }
 
+// C ExecRenameStmt returns the renamed object's address for the collection
+// tail; arms whose ports do not surface an address yet return None (the
+// T_RenameStmt dispatch arm stays loud for those under active collection).
 fn exec_rename_stmt_inner<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &types_nodes::parsenodes::RenameStmt<'_>,
-) -> PgResult<()> {
+) -> PgResult<Option<ObjectAddress>> {
     match stmt.renameType {
         types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
             dbcommands::RenameDatabase(
@@ -1863,7 +1883,7 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            commands_policy::rename_policy(mcx, stmt)?;
+            return Ok(Some(commands_policy::rename_policy(mcx, stmt)?));
         }
         types_nodes::parsenodes::ObjectType::OBJECT_TRIGGER => {
             // Retention contract as unify_stmt_lifetime.
@@ -1928,7 +1948,7 @@ fn exec_rename_stmt_inner<'mcx>(
                     &types_nodes::parsenodes::RenameStmt<'mcx>,
                 >(stmt)
             };
-            commands_alter::ExecRenameStmt_generic(mcx, stmt)?;
+            return Ok(Some(commands_alter::ExecRenameStmt_generic(mcx, stmt)?));
         }
         types_nodes::parsenodes::ObjectType::OBJECT_INDEX
         | types_nodes::parsenodes::ObjectType::OBJECT_SEQUENCE
@@ -1977,7 +1997,7 @@ fn exec_rename_stmt_inner<'mcx>(
         }
         other => panic!("unported: ExecRenameStmt {other:?}"),
     }
-    Ok(())
+    Ok(None)
 }
 
 fn exec_create_stats_stmt<'mcx>(
