@@ -46,7 +46,14 @@ pub(crate) fn clauselist_selectivity_ext<'mcx>(
     use_extended_stats: bool,
 ) -> PgResult<f64> {
     if clauses.len() == 1 {
-        return clause_selectivity(run, clauses[0], varrelid, jointype, sjinfo);
+        return clause_selectivity_rinfo_ext(
+            run,
+            clauses[0],
+            varrelid,
+            jointype,
+            sjinfo,
+            use_extended_stats,
+        );
     }
     let mut s1 = 1.0;
     let mut estimated: PgVec<'_, bool> = mcx::vec_from_elem_in(run.mcx, false, clauses.len());
@@ -68,7 +75,8 @@ pub(crate) fn clauselist_selectivity_ext<'mcx>(
         if estimated[i] {
             continue;
         }
-        let s2 = clause_selectivity(run, rid, varrelid, jointype, sjinfo)?;
+        let s2 =
+            clause_selectivity_rinfo_ext(run, rid, varrelid, jointype, sjinfo, use_extended_stats)?;
         if run.root.rinfo(rid).pseudoconstant {
             s1 *= s2;
             continue;
@@ -86,17 +94,62 @@ fn clauselist_selectivity_nodes<'mcx>(
     varrelid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    use_extended_stats: bool,
 ) -> PgResult<f64> {
     if clauses.len() == 1 {
-        return clause_selectivity_node(run, clauses[0], varrelid, jointype, sjinfo);
+        return clause_selectivity_node_ext(
+            run,
+            clauses[0],
+            varrelid,
+            jointype,
+            sjinfo,
+            use_extended_stats,
+        );
     }
     let mut s1 = 1.0;
     let mut rqlist: PgVec<'mcx, RangeQueryClause<'mcx>> = PgVec::new_in(run.mcx);
     for &clause in clauses {
-        let s2 = clause_selectivity_node(run, clause, varrelid, jointype, sjinfo)?;
+        let s2 =
+            clause_selectivity_node_ext(run, clause, varrelid, jointype, sjinfo, use_extended_stats)?;
         merge_clause(run, None, clause, s2, &mut s1, &mut rqlist)?;
     }
     merge_range_pairs(run, &rqlist, varrelid, &mut s1)?;
+    Ok(s1)
+}
+
+// clauselist_selectivity_or (clausesel.c), bare-node form (C's OR args are
+// sub-RestrictInfos on rinfo->orclause; the port keeps them as bare nodes).
+pub(crate) fn clauselist_selectivity_or_nodes<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clauses: &[Node<'mcx>],
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    use_extended_stats: bool,
+) -> PgResult<f64> {
+    let mut s1 = 0.0;
+    let mut estimated: PgVec<'_, bool> = mcx::vec_from_elem_in(run.mcx, false, clauses.len());
+    if use_extended_stats {
+        if let Some(rel) =
+            crate::extended_stats::find_single_rel_for_clause_nodes(run, clauses)?
+        {
+            if run.root.rel(rel).rtekind == types_pathnodes::RTE_RELATION
+                && !run.root.rel(rel).statlist.is_empty()
+            {
+                s1 = crate::extended_stats::statext_clauselist_selectivity_or_nodes(
+                    run, clauses, varrelid, jointype, sjinfo, rel, &mut estimated,
+                )?;
+            }
+        }
+    }
+    for (i, &clause) in clauses.iter().enumerate() {
+        if estimated[i] {
+            continue;
+        }
+        let s2 =
+            clause_selectivity_node_ext(run, clause, varrelid, jointype, sjinfo, use_extended_stats)?;
+        s1 = s1 + s2 - s1 * s2;
+    }
     Ok(s1)
 }
 
@@ -226,6 +279,18 @@ pub fn clause_selectivity<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
 ) -> PgResult<f64> {
+    clause_selectivity_rinfo_ext(run, rinfo, varrelid, jointype, sjinfo, true)
+}
+
+// clause_selectivity_ext (clausesel.c), RestrictInfo arm.
+fn clause_selectivity_rinfo_ext<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    use_extended_stats: bool,
+) -> PgResult<f64> {
     if run.root.rinfo(rinfo).pseudoconstant
         && run.root.expr_node(run.root.rinfo(rinfo).clause).node_tag() != NodeTag::T_Const
     {
@@ -269,7 +334,7 @@ pub fn clause_selectivity<'mcx>(
                 crate::plancat::restriction_selectivity(run, opno, &args, inputcollid, varrelid)?
             }
         }
-        _ => clause_selectivity_node(run, clause, varrelid, jointype, sjinfo)?,
+        _ => clause_selectivity_node_ext(run, clause, varrelid, jointype, sjinfo, use_extended_stats)?,
     };
 
     if cacheable {
@@ -282,13 +347,24 @@ pub fn clause_selectivity<'mcx>(
     Ok(s1)
 }
 
-// clause_selectivity_ext (clausesel.c), bare-node arms.
 pub(crate) fn clause_selectivity_node<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clause: Node<'mcx>,
     varrelid: i32,
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+) -> PgResult<f64> {
+    clause_selectivity_node_ext(run, clause, varrelid, jointype, sjinfo, true)
+}
+
+// clause_selectivity_ext (clausesel.c), bare-node arms.
+pub(crate) fn clause_selectivity_node_ext<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clause: Node<'mcx>,
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    use_extended_stats: bool,
 ) -> PgResult<f64> {
     match clause.node_tag() {
         NodeTag::T_Var => {
@@ -304,35 +380,43 @@ pub(crate) fn clause_selectivity_node<'mcx>(
             let c = clause.as_const().unwrap();
             Ok(if c.constisnull || !c.constvalue.as_bool() { 0.0 } else { 1.0 })
         }
-        NodeTag::T_RelabelType => clause_selectivity_node(
+        NodeTag::T_RelabelType => clause_selectivity_node_ext(
             run,
             clause.as_relabel_type().unwrap().arg,
             varrelid,
             jointype,
             sjinfo,
+            use_extended_stats,
         ),
         NodeTag::T_BoolExpr => {
             use types_nodes::primnodes::BoolExprType;
             let b = clause.as_bool_expr().unwrap();
             match b.boolop {
                 BoolExprType::NOT_EXPR => Ok(1.0
-                    - clause_selectivity_node(run, b.args.nth(0), varrelid, jointype, sjinfo)?),
+                    - clause_selectivity_node_ext(
+                        run,
+                        b.args.nth(0),
+                        varrelid,
+                        jointype,
+                        sjinfo,
+                        use_extended_stats,
+                    )?),
                 BoolExprType::AND_EXPR => clauselist_selectivity_nodes(
                     run,
                     b.args.as_slice(),
                     varrelid,
                     jointype,
                     sjinfo,
+                    use_extended_stats,
                 ),
-                BoolExprType::OR_EXPR => {
-                    let mut s1 = 0.0;
-                    for arg in &b.args {
-                        let s2 =
-                            clause_selectivity_node(run, arg, varrelid, jointype, sjinfo)?;
-                        s1 = s1 + s2 - s1 * s2;
-                    }
-                    Ok(s1)
-                }
+                BoolExprType::OR_EXPR => clauselist_selectivity_or_nodes(
+                    run,
+                    b.args.as_slice(),
+                    varrelid,
+                    jointype,
+                    sjinfo,
+                    use_extended_stats,
+                ),
             }
         }
         NodeTag::T_OpExpr => {

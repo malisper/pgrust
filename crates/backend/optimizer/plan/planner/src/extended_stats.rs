@@ -159,8 +159,43 @@ pub fn find_single_rel_for_clauses<'mcx>(
     None
 }
 
+// find_single_rel_for_clauses (clausesel.c), bare-node form: C's OR args are
+// sub-RestrictInfos carrying clause_relids; the port pulls varnos instead.
+pub fn find_single_rel_for_clause_nodes<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clauses: &[Node<'mcx>],
+) -> PgResult<Option<RelId>> {
+    let mut lastrelid: i32 = 0;
+    for &clause in clauses {
+        let bms = vars::pull_varnos(run.mcx, clause)?;
+        let mut relid: i32 = 0;
+        for r in bms.iter() {
+            if relids_is_member(r, &run.root.outer_join_rels) {
+                continue;
+            }
+            if relid == 0 {
+                relid = r;
+            } else if r != relid {
+                return Ok(None);
+            }
+        }
+        if relid == 0 {
+            continue;
+        }
+        if lastrelid == 0 {
+            lastrelid = relid;
+        } else if relid != lastrelid {
+            return Ok(None);
+        }
+    }
+    if lastrelid != 0 {
+        return Ok(run.root.simple_rel_array.get(lastrelid as usize).copied().flatten());
+    }
+    Ok(None)
+}
+
 // statext_clauselist_selectivity (extended_stats.c), AND-list leg (the OR
-// entry is unwired: OR clauses take the per-clause path, as before).
+// leg is statext_clauselist_selectivity_or_nodes below).
 pub fn statext_clauselist_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
     clauses: &[RinfoId],
@@ -174,6 +209,22 @@ pub fn statext_clauselist_selectivity<'mcx>(
         statext_mcv_clauselist_selectivity(run, clauses, varrelid, jointype, sjinfo, rel, estimated)?;
     sel *= dependencies_clauselist_selectivity(run, clauses, varrelid, jointype, sjinfo, rel, estimated)?;
     Ok(sel)
+}
+
+// statext_clauselist_selectivity (extended_stats.c), is_or=true leg: MCV
+// only — functional dependencies apply to ANDed lists only.
+pub fn statext_clauselist_selectivity_or_nodes<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clauses: &[Node<'mcx>],
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    rel: RelId,
+    estimated: &mut [bool],
+) -> PgResult<f64> {
+    statext_mcv_clauselist_selectivity_or_nodes(
+        run, clauses, varrelid, jointype, sjinfo, rel, estimated,
+    )
 }
 
 // statext_is_compatible_clause_internal (bare node): collects referenced
@@ -304,6 +355,39 @@ fn statext_is_compatible_clause<'mcx>(
         }
     }
     let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+    compatible_clause_tail(run, clause, relid)
+}
+
+// statext_is_compatible_clause (extended_stats.c), bare-node form: the
+// sub-RestrictInfo relid check becomes a pull_varnos singleton probe.
+fn statext_is_compatible_clause_node<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clause: Node<'mcx>,
+    relid: i32,
+) -> PgResult<Option<(Relids<'mcx>, Vec<Node<'mcx>>)>> {
+    let bms = vars::pull_varnos(run.mcx, clause)?;
+    let mut clause_relid: i32 = 0;
+    for r in bms.iter() {
+        if relids_is_member(r, &run.root.outer_join_rels) {
+            continue;
+        }
+        if clause_relid == 0 {
+            clause_relid = r;
+        } else if r != clause_relid {
+            return Ok(None);
+        }
+    }
+    if clause_relid != relid {
+        return Ok(None);
+    }
+    compatible_clause_tail(run, clause, relid)
+}
+
+fn compatible_clause_tail<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clause: Node<'mcx>,
+    relid: i32,
+) -> PgResult<Option<(Relids<'mcx>, Vec<Node<'mcx>>)>> {
     let mut attnums: Relids<'mcx> = None;
     let mut exprs: Vec<Node<'mcx>> = Vec::new();
     let mut leakproof = true;
@@ -494,6 +578,114 @@ fn statext_mcv_clauselist_selectivity<'mcx>(
             mcv_clauselist_selectivity(run, stat_oid, inh, &stat_keys, &sexprs, &stat_clauses)?;
         let stat_sel = mcv_combine_selectivities(simple_sel, mcv_sel, mcv_basesel, mcv_totalsel);
         sel *= stat_sel;
+    }
+    Ok(sel)
+}
+
+// statext_mcv_clauselist_selectivity (extended_stats.c), is_or=true form,
+// with mcv_clause_selectivity_or (mcv.c:2127) inlined over the shared
+// or_matches bitmap.
+fn statext_mcv_clauselist_selectivity_or_nodes<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    clauses: &[Node<'mcx>],
+    varrelid: i32,
+    jointype: JoinType,
+    sjinfo: Option<&SpecialJoinInfo<'mcx>>,
+    rel: RelId,
+    estimated: &mut [bool],
+) -> PgResult<f64> {
+    let mut sel = 0.0f64;
+    if !has_stats_of_kind(run, rel, STATS_EXT_MCV) {
+        return Ok(sel);
+    }
+    let relid = run.root.rel(rel).relid as i32;
+    let inh = run.rte(relid as usize).inh;
+
+    let mut clause_data: Vec<Option<(Relids<'mcx>, Vec<Node<'mcx>>)>> =
+        Vec::with_capacity(clauses.len());
+    for (i, &clause) in clauses.iter().enumerate() {
+        if estimated[i] {
+            clause_data.push(None);
+        } else {
+            clause_data.push(statext_is_compatible_clause_node(run, clause, relid)?);
+        }
+    }
+
+    loop {
+        let Some(si) = choose_best_statistics(run, rel, STATS_EXT_MCV, inh, &clause_data)
+        else {
+            break;
+        };
+        let stat_id = run.root.rel(rel).statlist[si];
+        let sexprs = stat_exprs(run, stat_id);
+        let (stat_oid, stat_keys) = {
+            let info = run.root.statistic_ext(stat_id);
+            (info.stat_oid, clone_relids(run, &info.keys))
+        };
+
+        let mut stat_clauses: Vec<Node<'mcx>> = Vec::new();
+        let mut simple_clauses: Vec<bool> = Vec::new();
+        for (i, &clause) in clauses.iter().enumerate() {
+            let Some((ca, ce)) = &clause_data[i] else { continue };
+            if !relids_is_subset(ca, &stat_keys)
+                || !stat_covers_expressions(&sexprs, ce, None)
+            {
+                continue;
+            }
+            simple_clauses.push(
+                (ca.is_none() && ce.len() == 1)
+                    || (ce.is_empty() && relids_num_members(ca) == 1),
+            );
+            stat_clauses.push(clause);
+            estimated[i] = true;
+            clause_data[i] = None;
+        }
+
+        let mcv = load_mcv(run, stat_oid, inh)?;
+        let mut or_matches: Vec<bool> = vec![false; mcv.items.len()];
+        let mut simple_or_sel = 0.0f64;
+        let mut stat_sel = 0.0f64;
+        for (listidx, &clause) in stat_clauses.iter().enumerate() {
+            let simple_sel = crate::clausesel::clause_selectivity_node_ext(
+                run, clause, varrelid, jointype, sjinfo, false,
+            )?;
+            let overlap_simple_sel = simple_or_sel * simple_sel;
+            simple_or_sel = clamp_probability(simple_or_sel + simple_sel - overlap_simple_sel);
+
+            let new_matches =
+                mcv_get_match_bitmap(run, &[clause], &stat_keys, &sexprs, &mcv, false)?;
+            let mut mcv_sel = 0.0;
+            let mut mcv_basesel = 0.0;
+            let mut overlap_mcvsel = 0.0;
+            let mut overlap_basesel = 0.0;
+            let mut mcv_totalsel = 0.0;
+            for (i, item) in mcv.items.iter().enumerate() {
+                mcv_totalsel += item.frequency;
+                if new_matches[i] {
+                    mcv_sel += item.frequency;
+                    mcv_basesel += item.base_frequency;
+                    if or_matches[i] {
+                        overlap_mcvsel += item.frequency;
+                        overlap_basesel += item.base_frequency;
+                    }
+                }
+                or_matches[i] = or_matches[i] || new_matches[i];
+            }
+
+            let clause_sel = if simple_clauses[listidx] {
+                simple_sel
+            } else {
+                mcv_combine_selectivities(simple_sel, mcv_sel, mcv_basesel, mcv_totalsel)
+            };
+            let overlap_sel = mcv_combine_selectivities(
+                overlap_simple_sel,
+                overlap_mcvsel,
+                overlap_basesel,
+                mcv_totalsel,
+            );
+            stat_sel = clamp_probability(stat_sel + clause_sel - overlap_sel);
+        }
+        sel = sel + stat_sel - sel * stat_sel;
     }
     Ok(sel)
 }
