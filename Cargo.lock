@@ -10904,6 +10904,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "miscinit_seams",
+ "nodes_params",
  "parallel_seams",
  "parse_expr",
  "parser_analyze",

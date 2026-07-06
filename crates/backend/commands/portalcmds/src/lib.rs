@@ -59,11 +59,16 @@ pub fn PerformCursorOpen(
     // same snapshot yields the identical plan; the analysis re-run is the
     // once-per-DECLARE cost of the missing copyObject. C's error order is
     // preserved (rewrite/plan errors fire before CreatePortal's 42P03).
-    assert!(
-        params.is_null(),
-        "PerformCursorOpen: DECLARE with outer params needs copyParamList + the \
-         plansource retention lane (re-analysis rejects $n with no param types)"
-    );
+    // The re-analysis divergence needs the param TYPES for $n: take them from
+    // the live outer param list — they are the types the outer analysis
+    // resolved (C skips this: it receives the analyzed query and only copies
+    // the VALUES, below). Identical text + identical types + same snapshot
+    // yields the identical query.
+    let param_types: Vec<_> = if params.is_null() {
+        Vec::new()
+    } else {
+        types_portal::params::with(params, |src| src.iter().map(|p| p.ptype).collect())
+    };
 
     let plan_ctx = Box::new(MemoryContext::new_bump("PortalPlanContext"));
     // SAFETY: the Box gives the context a stable address; PortalDrop reclaims
@@ -77,7 +82,7 @@ pub fn PerformCursorOpen(
         pmcx,
         &raw[0],
         stmt_text,
-        &[],
+        &param_types,
         types_portal::QueryEnvHandle::NULL,
     )?;
     assert!(queries.len() == 1, "DECLARE analysis yielded {} queries", queries.len());
@@ -137,8 +142,23 @@ pub fn PerformCursorOpen(
 
     portalmem::PortalAttachPlanContext(&portal, plan_ctx);
 
-    // C: params = copyParamList(params) into portalContext — NULL-asserted
-    // above until the plansource retention lane.
+    // C: params = copyParamList(params) into portalContext (portalcmds.c):
+    // the copy (values in plan_ctx) outlives the outer execution that owns
+    // the incoming list — FETCH runs after the declaring call returned.
+    let params = if params.is_null() {
+        params
+    } else {
+        let copied =
+            types_portal::params::with(params, |src| nodes_params::copy_param_list(pmcx, src))?;
+        let copied: &'static [types_portal::params::ParamExternData] = copied.leak();
+        // SAFETY: the slice and its by-ref datums live in plan_ctx, which the
+        // portal owns until PortalDrop; PortalDrop frees the handle first.
+        let h = unsafe { types_portal::params::register(copied) };
+        // Stored now so an error before PortalStart reaches PortalDrop's
+        // registry cleanup (extended_query precedent).
+        portal.borrow_mut().portalParams = h;
+        h
+    };
 
     {
         let mut p = portal.borrow_mut();

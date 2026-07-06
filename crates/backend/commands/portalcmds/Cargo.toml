@@ -21,6 +21,7 @@ portalcmds_seams = { path = "../portalcmds_seams" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 resowner_seams = { path = "../../utils/resowner/resowner_seams" }
 types_resowner = { path = "../../../_support/types/types_resowner" }
+nodes_params = { path = "../../nodes/params" }
 postgres = { path = "../../tcop/postgres" }
 pquery = { path = "../../tcop/pquery" }
 queryjumble = { path = "../../nodes/queryjumble" }
