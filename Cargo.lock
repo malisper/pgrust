@@ -6599,6 +6599,7 @@ dependencies = [
  "types_guc",
  "types_nodes",
  "types_rel",
+ "types_relscan",
  "types_scan",
  "types_storage",
  "types_tuple",

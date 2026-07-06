@@ -22,6 +22,7 @@ genam = { path = "../../access/index/genam" }
 indexcmds_seams = { path = "../indexcmds_seams" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 amapi = { path = "../../access/index/amapi" }
+types_relscan = { path = "../../access/index/relscan" }
 parse_oper = { path = "../../parser/parse_oper" }
 parser_small1 = { path = "../../parser/parser_small1" }
 regproc = { package = "adt_regproc", path = "../../utils/adt/regproc" }
