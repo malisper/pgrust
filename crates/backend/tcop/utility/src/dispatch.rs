@@ -512,9 +512,9 @@ fn dispatch_switch<'mcx>(
             // half in commands_analyze (each panics on the other's lane).
             let stmt = parsetree.as_vacuum_stmt().unwrap();
             if stmt.is_vacuumcmd {
-                commands_vacuum::ExecVacuum(mcx, stmt, is_top_level)?;
+                commands_vacuum::ExecVacuum(mcx, stmt, source_text, is_top_level)?;
             } else {
-                commands_analyze::ExecVacuum(mcx, stmt, is_top_level)?;
+                commands_analyze::ExecVacuum(mcx, stmt, source_text, is_top_level)?;
             }
         }
         T_ExplainStmt => {

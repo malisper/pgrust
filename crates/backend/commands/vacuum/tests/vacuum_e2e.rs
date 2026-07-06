@@ -362,6 +362,17 @@ fn install_xact_periphery_seams() {
             relhassubclass: false,
         }))
     });
+    syscache_seams::lookup_pg_class_by_relid::set(|relid| {
+        Ok(Some(types_storage::inval::PgClassShape {
+            oid: relid,
+            relnamespace: 2200,
+            relfilenode: relid,
+            reltablespace: 0,
+            relisshared: false,
+            relpersistence: b'p' as i8,
+            relkind: b'r' as i8,
+        }))
+    });
     namespace_seams::range_var_get_relid::set(|_mcx, rv, _lockmode, missing_ok| {
         if rv.relname == "t" {
             Ok(REL_OID)

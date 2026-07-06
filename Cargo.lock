@@ -3068,6 +3068,7 @@ dependencies = [
  "logical_worker_seams",
  "lsyscache",
  "lwlock",
+ "mbutils",
  "mcx",
  "miscinit",
  "miscinit_seams",
@@ -3077,6 +3078,7 @@ dependencies = [
  "nodes_core",
  "origin_seams",
  "parallel_seams",
+ "parser_small1",
  "pg_enum_seams",
  "pg_inherits",
  "pg_prng",
@@ -3573,6 +3575,7 @@ dependencies = [
 name = "commands_vacuum"
 version = "0.0.0"
 dependencies = [
+ "aclchk",
  "aclchk_seams",
  "adt_bool",
  "adt_float",
@@ -3633,6 +3636,7 @@ dependencies = [
  "logical_seams",
  "logical_worker_seams",
  "lwlock",
+ "mbutils",
  "mcx",
  "miscinit",
  "miscinit_seams",
@@ -3647,6 +3651,7 @@ dependencies = [
  "parser_analyze",
  "parser_driver",
  "parser_seams",
+ "parser_small1",
  "pg_database",
  "pg_enum_seams",
  "pg_inherits",
