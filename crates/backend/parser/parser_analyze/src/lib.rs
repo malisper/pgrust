@@ -1953,7 +1953,15 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
             parse_relation::attnameAttNum(rel, colname, true)
         };
         if attrno == 0 {
-            return Err(undefined_update_column(pstate, colname, orig_target.location));
+            let qualified_hint = !orig_target.indirection.is_nil()
+                && pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem").p_names.aliasname
+                    == Some(colname);
+            return Err(undefined_update_column(
+                pstate,
+                colname,
+                orig_target.location,
+                qualified_hint,
+            ));
         }
 
         parse_target::updateTargetListEntry(
@@ -1987,6 +1995,7 @@ fn undefined_update_column(
     pstate: &ParseState<'_, '_>,
     colname: &str,
     location: i32,
+    qualified_hint: bool,
 ) -> Box<types_error::PgError> {
     use types_error::{ErrorLocation, ERRCODE_UNDEFINED_COLUMN, ERROR};
     let relname = pstate
@@ -1994,12 +2003,14 @@ fn undefined_update_column(
         .as_ref()
         .map(|r| std::string::String::from_utf8_lossy(r.rd_rel.relname.name_str()).into_owned())
         .unwrap_or_default();
+    let mut builder = elog::ereport(ERROR)
+        .errcode(ERRCODE_UNDEFINED_COLUMN)
+        .errmsg(format!("column \"{colname}\" of relation \"{relname}\" does not exist"));
+    if qualified_hint {
+        builder = builder.errhint("SET target columns cannot be qualified with the relation name.");
+    }
     Box::new(
-        elog::ereport(ERROR)
-            .errcode(ERRCODE_UNDEFINED_COLUMN)
-            .errmsg(format!(
-                "column \"{colname}\" of relation \"{relname}\" does not exist"
-            ))
+        builder
             .errposition(parser_small1::parser_errposition(
                 pstate,
                 location,

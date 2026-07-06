@@ -1633,16 +1633,22 @@ fn transformRowExpr<'mcx>(
     allow_default: bool,
 ) -> PgResult<Node<'mcx>> {
     let r = expr.as_row_expr().unwrap();
-    // C transformExpressionList: per-item transformExpr at the current
-    // p_expr_kind; allowDefault keeps SetToDefault items untransformed
-    // (multiassign UPDATE SET (a, b) = ROW(...)).
+    // C transformExpressionList: "something.*" args expand into multiple
+    // items (ExpandColumnRefStar/ExpandIndirectionStar); allowDefault keeps
+    // SetToDefault items untransformed (multiassign UPDATE SET (a,b) = ROW(...)).
     let mut args = types_nodes::NodeList::nil();
     for e in r.args.iter() {
         if allow_default && e.node_tag() == NodeTag::T_SetToDefault {
             args.lappend(mcx, e)?;
-        } else {
-            args.lappend(mcx, transformExprRecurse(mcx, pstate, e)?)?;
+            continue;
         }
+        if let Some(star_items) =
+            parse_func_seams::expandExpressionListStar::call(mcx, pstate, e, pstate.p_expr_kind)?
+        {
+            args.concat(mcx, &star_items)?;
+            continue;
+        }
+        args.lappend(mcx, transformExprRecurse(mcx, pstate, e)?)?;
     }
     if args.len() > types_tuple::htup::MaxTupleAttributeNumber as usize {
         return Err(too_many_row_entries(pstate, r.location));

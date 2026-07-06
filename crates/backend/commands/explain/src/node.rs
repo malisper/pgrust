@@ -296,6 +296,23 @@ fn collect_node_subplans<'mcx>(
             walk_list(&mut out, joinqual);
             walk_list(&mut out, &plan.targetlist);
         }
+        // ExecInitModifyTable additionally compiles onConflictSet/Where and
+        // returningLists; those exprs can carry their own SubPlans (e.g. an
+        // ON CONFLICT ... WHERE EXISTS (subquery) arbiter/DO UPDATE filter).
+        NodeTag::T_ModifyTable => {
+            let mt = node.as_modify_table().unwrap();
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &mt.onConflictSet);
+            if let Some(w) = mt.onConflictWhere {
+                collect_subplans_expr(w, &mut out);
+            }
+            for rl in &mt.returningLists {
+                if let Some(l) = rl.as_list() {
+                    walk_list(&mut out, l);
+                }
+            }
+        }
         NodeTag::T_Result => {
             walk_list(&mut out, &plan.targetlist);
             walk_list(&mut out, &plan.qual);
@@ -331,6 +348,14 @@ fn collect_subplans_expr<'mcx>(
         return;
     }
     match node.node_tag() {
+        // onConflictWhere carries an implicit-AND List (qual convention).
+        NodeTag::T_List => {
+            if let Some(l) = node.as_list() {
+                for e in l {
+                    collect_subplans_expr(e, out);
+                }
+            }
+        }
         NodeTag::T_TargetEntry => {
             collect_subplans_expr(node.as_target_entry().unwrap().expr, out)
         }

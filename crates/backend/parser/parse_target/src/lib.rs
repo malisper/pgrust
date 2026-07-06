@@ -16,6 +16,27 @@ use types_nodes::{CoercionForm, Node, NodeList, NodeTag, RTEKind, TargetEntry};
 
 pub fn init_seams() {
     parse_func_seams::expandRecordVariable::set(expandRecordVariable);
+    parse_func_seams::expandExpressionListStar::set(expandExpressionListStar);
+}
+
+// The "something.*" detection half of transformExpressionList (parse_target.c);
+// used by transformRowExpr (parse_expr.c) via the parse_func_seams indirection.
+fn expandExpressionListStar<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    raw_node: Node<'mcx>,
+    exprKind: ParseExprKind,
+) -> PgResult<Option<NodeList<'mcx>>> {
+    if let Some(cref) = raw_node.as_column_ref() {
+        if cref.fields.last().is_some_and(|f| f.node_tag() == NodeTag::T_A_Star) {
+            return Ok(Some(ExpandColumnRefStar(mcx, pstate, cref, false)?));
+        }
+    } else if let Some(ind) = raw_node.as_a_indirection() {
+        if ind.indirection.last().is_some_and(|n| n.node_tag() == NodeTag::T_A_Star) {
+            return Ok(Some(ExpandIndirectionStar(mcx, pstate, ind, false, exprKind)?));
+        }
+    }
+    Ok(None)
 }
 
 pub fn transformTargetList<'mcx>(

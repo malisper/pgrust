@@ -25,6 +25,8 @@ pg_constraint = { path = "../../catalog/pg_constraint" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
 analyze_seams = { path = "../analyze_seams" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+opclasscmds_seams = { path = "../../commands/opclasscmds_seams" }
 parse_clause_seams = { path = "../parse_clause_seams" }
 parse_agg = { path = "../parse_agg" }
 parse_expr = { path = "../parse_expr" }
