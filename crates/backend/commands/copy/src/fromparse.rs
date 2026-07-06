@@ -211,6 +211,10 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
         self.raw_buf[nbytes] = 0;
         self.raw_buf_len = nbytes;
         self.bytes_processed += inbytes as u64;
+        backend_progress::pgstat_progress_update_param(
+            backend_progress::progress::PROGRESS_COPY_BYTES_PROCESSED,
+            self.bytes_processed as i64,
+        );
         Ok(())
     }
 

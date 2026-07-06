@@ -63,6 +63,7 @@ tcop_dest = { path = "../../tcop/dest" }
 copy_seams = { path = "../copy_seams" }
 execmain_seams = { path = "../../executor/execmain_seams" }
 types_portal = { path = "../../../_support/types/portal" }
+backend_progress = { path = "../../utils/activity/backend_progress" }
 libc = "0.2"
 
 [dev-dependencies]

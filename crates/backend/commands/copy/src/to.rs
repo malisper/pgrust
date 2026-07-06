@@ -5,6 +5,15 @@
 use core::ffi::CStr;
 use std::rc::Rc;
 
+use backend_progress::progress::{
+    PROGRESS_COPY_BYTES_PROCESSED, PROGRESS_COPY_COMMAND, PROGRESS_COPY_COMMAND_TO,
+    PROGRESS_COPY_TUPLES_PROCESSED, PROGRESS_COPY_TYPE, PROGRESS_COPY_TYPE_FILE,
+    PROGRESS_COPY_TYPE_PIPE,
+};
+use backend_progress::{
+    pgstat_progress_end_command, pgstat_progress_start_command, pgstat_progress_update_multi_param,
+    pgstat_progress_update_param, PROGRESS_COMMAND_COPY,
+};
 use datum::Datum;
 use elog::ereport;
 use mcx::{Mcx, MemoryContext, PgVec};
@@ -158,6 +167,19 @@ pub fn BeginCopyTo<'mcx, 's>(
             CopyDest::Frontend
         }
     };
+
+    pgstat_progress_start_command(
+        PROGRESS_COMMAND_COPY,
+        rel.map(|r| r.rd_id).unwrap_or(InvalidOid),
+    );
+    let progress_type = match dest {
+        CopyDest::File { .. } => PROGRESS_COPY_TYPE_FILE,
+        CopyDest::Frontend => PROGRESS_COPY_TYPE_PIPE,
+    };
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_COPY_COMMAND, PROGRESS_COPY_TYPE],
+        &[PROGRESS_COPY_COMMAND_TO, progress_type],
+    );
 
     Ok(CopyToState {
         fe_msgbuf: StringInfo::new_in(mcx)?,
@@ -358,6 +380,7 @@ pub fn DoCopyTo<'mcx>(
                 exectuples::slot_getallattrs(&mut slot);
                 CopyOneRowTo(cstate, &mut slot, &mut out_functions)?;
                 processed += 1;
+                pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, processed as i64);
             }
 
             tableam::table_endscan(scandesc)?;
@@ -411,6 +434,7 @@ pub(crate) fn copy_dest_receive<'mcx>(
     exectuples::slot_getallattrs(slot);
     CopyOneRowTo(frame.cstate, slot, frame.out_functions)?;
     state.processed += 1;
+    pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, state.processed as i64);
     Ok(true)
 }
 
@@ -569,6 +593,10 @@ fn send_end_of_row(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
         CopyDest::Frontend => {
             pqcomm::pq_putmessage(b'd', cstate.fe_msgbuf.as_bytes())?;
             cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
+            pgstat_progress_update_param(
+                PROGRESS_COPY_BYTES_PROCESSED,
+                cstate.bytes_processed as i64,
+            );
             cstate.fe_msgbuf.reset();
         }
     }
@@ -599,6 +627,7 @@ fn flush_to_file(cstate: &mut CopyToState<'_, '_>) -> PgResult<()> {
         None => panic!("COPY TO: AllocateFile index {fd} vanished"),
     }
     cstate.bytes_processed += cstate.fe_msgbuf.len() as u64;
+    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, cstate.bytes_processed as i64);
     cstate.fe_msgbuf.reset();
     Ok(())
 }
@@ -621,6 +650,7 @@ pub fn EndCopyTo(mut cstate: CopyToState<'_, '_>) -> PgResult<()> {
                 .finish(loc("EndCopy"))?;
         }
     }
+    pgstat_progress_end_command();
     Ok(())
 }
 

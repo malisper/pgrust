@@ -2,6 +2,15 @@
 // (heap_multi_insert buffering with a shared BulkInsertState, matching C's
 // default insert method and its bulk relation-extension page geometry).
 
+use backend_progress::progress::{
+    PROGRESS_COPY_BYTES_TOTAL, PROGRESS_COPY_COMMAND, PROGRESS_COPY_COMMAND_FROM,
+    PROGRESS_COPY_TUPLES_EXCLUDED, PROGRESS_COPY_TUPLES_PROCESSED, PROGRESS_COPY_TUPLES_SKIPPED,
+    PROGRESS_COPY_TYPE, PROGRESS_COPY_TYPE_FILE, PROGRESS_COPY_TYPE_PIPE,
+};
+use backend_progress::{
+    pgstat_progress_end_command, pgstat_progress_start_command, pgstat_progress_update_multi_param,
+    pgstat_progress_update_param, PROGRESS_COMMAND_COPY,
+};
 use elog::ereport;
 use mcx::{vec_from_elem_in, Mcx, MemoryContext, PgVec};
 use stringinfo::StringInfo;
@@ -195,6 +204,9 @@ pub fn BeginCopyFrom<'mcx, 's>(
     if volatile_defexprs {
         unported("FROM with volatile default expressions (CIM_SINGLE lane)");
     }
+    pgstat_progress_start_command(PROGRESS_COMMAND_COPY, rel.rd_id);
+    let mut progress_type = PROGRESS_COPY_TYPE_PIPE;
+    let mut progress_bytes_total: i64 = 0;
     let src = match filename {
         Some(filename) => {
             let fd = fd::AllocateFile(filename, "rb")?;
@@ -209,16 +221,18 @@ pub fn BeginCopyFrom<'mcx, 's>(
                     )
                     .finish(loc("BeginCopyFrom"))?;
             }
-            let is_dir = fd::with_allocated_stdio(fd, |f| {
-                f.metadata().map(|m| m.is_dir()).unwrap_or(false)
+            progress_type = PROGRESS_COPY_TYPE_FILE;
+            let (is_dir, size) = fd::with_allocated_stdio(fd, |f| {
+                f.metadata().map(|m| (m.is_dir(), m.len())).unwrap_or((false, 0))
             })
-            .unwrap_or(false);
+            .unwrap_or((false, 0));
             if is_dir {
                 return Err(Box::new(
                     PgError::error(format!("\"{filename}\" is a directory"))
                         .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
                 ));
             }
+            progress_bytes_total = size as i64;
             CopySrc::File { fd, filename }
         }
         None => {
@@ -228,6 +242,10 @@ pub fn BeginCopyFrom<'mcx, 's>(
             receive_copy_begin(mcx, attnumlist.len(), opts.binary)?
         }
     };
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_COPY_COMMAND, PROGRESS_COPY_TYPE, PROGRESS_COPY_BYTES_TOTAL],
+        &[PROGRESS_COPY_COMMAND_FROM, progress_type, progress_bytes_total],
+    );
 
     let max_fields = attnumlist.len();
     let opts_on_error = opts.on_error;
@@ -396,6 +414,8 @@ fn copy_from_body<'mcx>(
     let mut buffered_bytes = 0usize;
 
     let mut processed: u64 = 0;
+    let mut excluded: i64 = 0;
+    let mut flushed: i64 = 0;
     loop {
         postgres_seams::check_for_interrupts::call()?;
 
@@ -417,6 +437,7 @@ fn copy_from_body<'mcx>(
         }
         if cstate.escontext.as_ref().is_some_and(|n| n.ctx.error_occurred()) {
             cstate.escontext.as_mut().unwrap().ctx.reset_error_occurred();
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_SKIPPED, cstate.num_errors as i64);
             if cstate.opts.reject_limit > 0 && cstate.num_errors > cstate.opts.reject_limit as u64
             {
                 return Err(reject_limit_exceeded(cstate.opts.reject_limit));
@@ -430,6 +451,8 @@ fn copy_from_body<'mcx>(
         if qualexpr.is_some() {
             let mut eval = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
             if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+                excluded += 1;
+                pgstat_progress_update_param(PROGRESS_COPY_TUPLES_EXCLUDED, excluded);
                 continue;
             }
         }
@@ -475,6 +498,8 @@ fn copy_from_body<'mcx>(
                 &mut bistate,
                 &mut index_state,
             )?;
+            flushed += nused as i64;
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
             nused = 0;
             buffered_bytes = 0;
         }
@@ -492,6 +517,8 @@ fn copy_from_body<'mcx>(
             &mut bistate,
             &mut index_state,
         )?;
+        flushed += nused as i64;
+        pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
     }
 
     tableam::table_finish_bulk_insert(rel, ti_options)?;
@@ -575,6 +602,8 @@ fn copy_from_partitioned_body<'mcx>(
     let mut buffered_tuples = 0usize;
     let mut buffered_bytes = 0usize;
     let mut processed: u64 = 0;
+    let mut excluded: i64 = 0;
+    let mut flushed: i64 = 0;
 
     loop {
         postgres_seams::check_for_interrupts::call()?;
@@ -588,6 +617,7 @@ fn copy_from_partitioned_body<'mcx>(
         }
         if cstate.escontext.as_ref().is_some_and(|n| n.ctx.error_occurred()) {
             cstate.escontext.as_mut().unwrap().ctx.reset_error_occurred();
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_SKIPPED, cstate.num_errors as i64);
             if cstate.opts.reject_limit > 0 && cstate.num_errors > cstate.opts.reject_limit as u64
             {
                 return Err(reject_limit_exceeded(cstate.opts.reject_limit));
@@ -602,6 +632,8 @@ fn copy_from_partitioned_body<'mcx>(
             let mut eval =
                 execexpr::EvalSlots { scan: Some(&mut rootslot), inner: None, outer: None };
             if !execexpr::exec_qual(qualexpr.as_deref_mut(), &mut eval)? {
+                excluded += 1;
+                pgstat_progress_update_param(PROGRESS_COPY_TUPLES_EXCLUDED, excluded);
                 continue;
             }
         }
@@ -672,7 +704,7 @@ fn copy_from_partitioned_body<'mcx>(
         processed += 1;
 
         if buffered_tuples >= MAX_BUFFERED_TUPLES || buffered_bytes >= MAX_BUFFERED_BYTES {
-            flush_part_buffers(
+            flushed += flush_part_buffers(
                 mcx,
                 cstate,
                 &router,
@@ -681,6 +713,7 @@ fn copy_from_partitioned_body<'mcx>(
                 mycid,
                 ti_options,
             )?;
+            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
             buffered_tuples = 0;
             buffered_bytes = 0;
             while buffers.len() > MAX_PARTITION_BUFFERS {
@@ -694,7 +727,7 @@ fn copy_from_partitioned_body<'mcx>(
         }
     }
 
-    flush_part_buffers(
+    flushed += flush_part_buffers(
         mcx,
         cstate,
         &router,
@@ -703,6 +736,7 @@ fn copy_from_partitioned_body<'mcx>(
         mycid,
         ti_options,
     )?;
+    pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
     for buf in buffers.iter() {
         tableam::table_finish_bulk_insert(router.leaf_rel(buf.leaf), ti_options)?;
     }
@@ -720,7 +754,8 @@ fn flush_part_buffers<'mcx>(
     leaf_indexes: &mut [Option<execindexing::ResultRelIndexState<'mcx>>],
     mycid: types_core::CommandId,
     ti_options: i32,
-) -> PgResult<()> {
+) -> PgResult<i64> {
+    let mut flushed: i64 = 0;
     for buf in buffers.iter_mut() {
         if buf.nused == 0 {
             continue;
@@ -741,9 +776,10 @@ fn flush_part_buffers<'mcx>(
             &mut buf.bistate,
             index_state,
         )?;
+        flushed += buf.nused as i64;
         buf.nused = 0;
     }
-    Ok(())
+    Ok(flushed)
 }
 
 // CopyMultiInsertBufferFlush (copyfrom.c), single non-partitioned table.
@@ -895,6 +931,7 @@ pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
                 .finish(loc("EndCopyFrom"))?;
         }
     }
+    pgstat_progress_end_command();
     Ok(())
 }
 
