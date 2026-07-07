@@ -6083,6 +6083,61 @@ mod srf_split {
         let sscan = sort.as_sort().unwrap().plan.lefttree.unwrap();
         assert_eq!(sscan.node_tag(), NodeTag::T_SeqScan);
     }
+
+    #[test]
+    fn srf_with_degenerate_order_by_keeps_const_above_physical_scan() {
+        // C: SELECT 'foo', generate_series(1,2) FROM t ORDER BY 1
+        //    -> ProjectSet -> Seq Scan (redundant const pathkey, no Sort).
+        //    The scan keeps its physical tlist and the ProjectSet recomputes
+        //    the Const: search_indexed_tlist_for_non_var never replaces a
+        //    Const with a Var (setrefs.c).
+        let _guc = crate::tests::GUC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cx = cx();
+        let mcx = cx.mcx();
+        let mut parse = table_query(mcx, None);
+        let konst =
+            Node::mk_const(mcx, 23, -1, 0, 4, Datum::from_i32(42), false, true).unwrap();
+        let tle1 = Node::mk(
+            mcx,
+            types_nodes::primnodes::TargetEntry {
+                expr: konst,
+                resno: 1,
+                resname: Some("f"),
+                ressortgroupref: 1,
+                resorigtbl: 0,
+                resorigcol: 0,
+                resjunk: false,
+            },
+        )
+        .unwrap();
+        let mut tlist = NodeList::make1(mcx, tle1).unwrap();
+        tlist.lappend(mcx, srf_tle(mcx, 2)).unwrap();
+        parse.targetList = tlist;
+        parse.hasTargetSRFs = true;
+        parse.sortClause = NodeList::make1(mcx, val_sgc(mcx)).unwrap();
+        let stmt = planner(
+            mcx,
+            parse,
+            "SELECT 42 AS f, generate_series(1,2) FROM t ORDER BY 1",
+            CURSOR_OPT_PARALLEL_OK,
+            ParamListHandle::NULL,
+        )
+        .unwrap();
+
+        let plan = stmt.planTree.unwrap();
+        let ps = plan.as_project_set().expect("ProjectSet root");
+        assert_eq!(ps.plan.targetlist.len(), 2);
+        let f = ps.plan.targetlist.nth(0).as_target_entry().unwrap();
+        assert_eq!(f.expr.node_tag(), NodeTag::T_Const, "Const recomputed, not read from below");
+        let sscan = ps.plan.lefttree.unwrap();
+        assert_eq!(sscan.node_tag(), NodeTag::T_SeqScan);
+        let scan_tlist = &sscan.as_plan().unwrap().targetlist;
+        assert_eq!(scan_tlist.len(), 2, "physical tlist (pk, val), not the const");
+        for tle in scan_tlist.iter() {
+            let tle = tle.as_target_entry().unwrap();
+            assert_eq!(tle.expr.node_tag(), NodeTag::T_Var);
+        }
+    }
 }
 
 mod pull_var_walker_vocab {
