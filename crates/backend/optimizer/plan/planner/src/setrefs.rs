@@ -48,11 +48,25 @@ pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -
 
 // Top-level flat copy with sub-structure zapped; alias/eref stay by ref.
 fn add_rtes_to_flat_rtable(run: &mut PlannerRun<'_>) -> PgResult<()> {
-    add_rtes_to_flat_rtable_recursing(run, false)
+    let parse = run.parse();
+    let mut saw_subquery = false;
+    for rte_node in &parse.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        saw_subquery |= rte.rtekind == RTEKind::RTE_SUBQUERY;
+        add_rte_to_flat_rtable(run, &parse.rteperminfos, rte)?;
+    }
+    // Subquery-free queries never reach the dead-subquery pass (outlined off
+    // the set_plan_references hot body — select1 instruction bracket).
+    if saw_subquery {
+        dead_subquery_pass(run, false)?;
+    }
+    Ok(())
 }
 
 // C's `recursing` mode keeps only relation RTEs (and former relations);
 // live subqueries flatten through the SubqueryScan plan walk instead.
+#[cold]
+#[inline(never)]
 fn add_rtes_to_flat_rtable_recursing(run: &mut PlannerRun<'_>, recursing: bool) -> PgResult<()> {
     let parse = run.parse();
     for rte_node in &parse.rtable {
@@ -64,11 +78,18 @@ fn add_rtes_to_flat_rtable_recursing(run: &mut PlannerRun<'_>, recursing: bool) 
             add_rte_to_flat_rtable(run, &parse.rteperminfos, rte)?;
         }
     }
-    // C's dead-subquery pass: subqueries not referenced by the plan tree must
-    // contribute their RTEs anyway so the executor still checks permissions.
-    // No subroot = never planned (self-contradictory constraints); a subroot
-    // whose FINAL rel is dummy planned to nothing and never gets a
-    // SubqueryScan walk.
+    dead_subquery_pass(run, recursing)
+}
+
+// C's dead-subquery pass: subqueries not referenced by the plan tree must
+// contribute their RTEs anyway so the executor still checks permissions.
+// No subroot = never planned (self-contradictory constraints); a subroot
+// whose FINAL rel is dummy planned to nothing and never gets a
+// SubqueryScan walk.
+#[cold]
+#[inline(never)]
+fn dead_subquery_pass(run: &mut PlannerRun<'_>, recursing: bool) -> PgResult<()> {
+    let parse = run.parse();
     for (i, rte_node) in parse.rtable.iter().enumerate() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         let rti = (i + 1) as i32;

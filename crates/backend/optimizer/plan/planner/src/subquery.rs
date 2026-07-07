@@ -306,33 +306,8 @@ pub fn subquery_planner<'mcx>(
         }
     }
 
-    // C subquery_planner: view permissions are checked at planner startup
-    // (other relations wait for executor startup) so selectivity estimation
-    // can't leak statistics that only the view owner may read —
-    // all_rows_selectable checks view-owner ACLs, not the current user's.
-    const RELKIND_VIEW: u8 = b'v';
-    for rte_node in &parse.rtable {
-        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        if rte.perminfoindex != 0 && rte.relkind == RELKIND_VIEW {
-            let perminfo = parse
-                .rteperminfos
-                .nth(rte.perminfoindex as usize - 1)
-                .as_rte_permission_info()
-                .expect("rteperminfos cell");
-            if !execmain::exec_check_one_rel_perms(perminfo)? {
-                const ACLCHECK_NO_PRIV: i32 = 1;
-                let name = syscache_seams::pg_class_relname::call(perminfo.relid)?;
-                let name = name
-                    .as_ref()
-                    .map(|n| core::str::from_utf8(n.name_str()).unwrap_or(""))
-                    .unwrap_or("");
-                aclchk_seams::aclcheck_error::call(
-                    ACLCHECK_NO_PRIV,
-                    types_nodes::parsenodes::ObjectType::OBJECT_VIEW as i32,
-                    name,
-                )?;
-            }
-        }
+    if !parse.rtable.is_nil() {
+        check_view_perms_at_planner_startup(parse)?;
     }
 
     preprocess_rowmarks(run, &*parse)?;
@@ -811,5 +786,40 @@ fn assert_no_join_alias_vars<'mcx>(
     }
     let mut w = W { join_rtes };
     nodes_core::query_tree_walker(sealed, &mut w, 0)?;
+    Ok(())
+}
+
+// C subquery_planner: view permissions are checked at planner startup
+// (other relations wait for executor startup) so selectivity estimation
+// can't leak statistics that only the view owner may read —
+// all_rows_selectable checks view-owner ACLs, not the current user's.
+// Outlined off subquery_planner's hot body (select1 instruction bracket).
+#[cold]
+#[inline(never)]
+fn check_view_perms_at_planner_startup(parse: &types_nodes::parsenodes::Query<'_>) -> PgResult<()> {
+    const RELKIND_VIEW: u8 = b'v';
+    for rte_node in &parse.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        if rte.perminfoindex != 0 && rte.relkind == RELKIND_VIEW {
+            let perminfo = parse
+                .rteperminfos
+                .nth(rte.perminfoindex as usize - 1)
+                .as_rte_permission_info()
+                .expect("rteperminfos cell");
+            if !execmain::exec_check_one_rel_perms(perminfo)? {
+                const ACLCHECK_NO_PRIV: i32 = 1;
+                let name = syscache_seams::pg_class_relname::call(perminfo.relid)?;
+                let name = name
+                    .as_ref()
+                    .map(|n| core::str::from_utf8(n.name_str()).unwrap_or(""))
+                    .unwrap_or("");
+                aclchk_seams::aclcheck_error::call(
+                    ACLCHECK_NO_PRIV,
+                    types_nodes::parsenodes::ObjectType::OBJECT_VIEW as i32,
+                    name,
+                )?;
+            }
+        }
+    }
     Ok(())
 }
