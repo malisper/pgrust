@@ -3149,6 +3149,17 @@ pub(crate) fn copy_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_CollateExpr => {
+            let c = node.as_collate_expr().expect("CollateExpr");
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::CollateExpr {
+                    arg: copy_expr(mcx, c.arg, levels_delta)?,
+                    collOid: c.collOid,
+                    location: c.location,
+                },
+            )
+        }
         // C copyObject + IncrementVarSublevelsUp(newnode, sublevels_up, 0):
         // the out/read round trip is the deep copy, and the in-place level
         // shift is safe on it (exclusive tree).

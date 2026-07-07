@@ -98,12 +98,26 @@ pub fn fc_hashvarlenaextended(
     Ok(Datum::from_u64(::hashfn::hash_bytes_extended(key.data(), seed)))
 }
 
+#[cold]
+#[inline(never)]
+fn hash_collation_err() -> Box<PgError> {
+    Box::new(
+        PgError::error("could not determine which collation to use for string hashing")
+            .with_sqlstate(types_error::ERRCODE_INDETERMINATE_COLLATION)
+            .with_hint("Use the COLLATE clause to set the collation explicitly."),
+    )
+}
+
 fn hashtext_nondeterministic(
     collid: types_core::Oid,
     data: &[u8],
     seed: Option<u64>,
 ) -> PgResult<Option<u64>> {
-    crate::check_collation_set_pub(collid)?;
+    // hashtext (hashfunc.c) raises its own hashing-specific
+    // indeterminate-collation message, not check_collation_set's.
+    if !types_core::OidIsValid(collid) {
+        return Err(hash_collation_err());
+    }
     if crate::collation_is_c_known_pub(collid) {
         return Ok(None);
     }

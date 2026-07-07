@@ -27,7 +27,8 @@ mod setup;
 #[cfg(test)]
 mod tests;
 
-pub use icu::{icu_language_tag, icu_validate_locale};
+pub use icu::{icu_language_tag, icu_validate_locale, icu_wc_isclass, icu_wc_tolower,
+    icu_wc_toupper};
 pub use chklocale::pg_get_encoding_from_locale;
 pub use lconv::{pglc_localeconv, PgLconv, CHAR_MAX};
 pub use locale_time::{cache_locale_time, LocalizedTimeNames};

@@ -1895,6 +1895,7 @@ fn lookup_pg_collation_shape(
         collname: unsafe {
             *(getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLNAME).as_usize() as *const NameData)
         },
+        collnamespace: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLNAMESPACE).as_oid(),
         collisdeterministic: getattr(&t, COLLOID, ANUM_PG_COLLATION_COLLISDETERMINISTIC)
             .as_bool(),
     };

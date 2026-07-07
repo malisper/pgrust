@@ -160,6 +160,18 @@ pub struct IcuApi {
         unsafe extern "C" fn(iter: *mut UCharIterator, s: *const c_char, length: i32),
     pub uiter_setString:
         unsafe extern "C" fn(iter: *mut UCharIterator, s: *const UChar, length: i32),
+    // uchar.h ctype/case surface (regc_pg_locale.c ICU arms); UChar32 args.
+    pub u_isdigit: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_isalpha: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_isalnum: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_isupper: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_islower: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_isgraph: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_isprint: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_ispunct: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_isspace: unsafe extern "C" fn(c: i32) -> UBool,
+    pub u_toupper: unsafe extern "C" fn(c: i32) -> i32,
+    pub u_tolower: unsafe extern "C" fn(c: i32) -> i32,
 }
 
 pub fn u_errorName_str(api: &IcuApi, status: UErrorCode) -> String {
@@ -276,5 +288,16 @@ fn resolve_all(handle: *mut c_void, suffix: i32) -> Result<IcuApi, String> {
         uloc_getAvailable: resolve!(uloc_getAvailable),
         uiter_setUTF8: resolve!(uiter_setUTF8),
         uiter_setString: resolve!(uiter_setString),
+        u_isdigit: resolve!(u_isdigit),
+        u_isalpha: resolve!(u_isalpha),
+        u_isalnum: resolve!(u_isalnum),
+        u_isupper: resolve!(u_isupper),
+        u_islower: resolve!(u_islower),
+        u_isgraph: resolve!(u_isgraph),
+        u_isprint: resolve!(u_isprint),
+        u_ispunct: resolve!(u_ispunct),
+        u_isspace: resolve!(u_isspace),
+        u_toupper: resolve!(u_toupper),
+        u_tolower: resolve!(u_tolower),
     })
 }

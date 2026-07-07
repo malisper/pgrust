@@ -406,6 +406,7 @@ fn install() {
         s::lookup_pg_collation_shape::set(|colloid| {
             Ok((colloid == 100).then_some(PgCollationShape {
                 collname: name("default"),
+                collnamespace: 11,
                 collisdeterministic: true,
             }))
         });
