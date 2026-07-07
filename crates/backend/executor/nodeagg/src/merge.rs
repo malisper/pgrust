@@ -5,18 +5,20 @@
 // re-hashing per-row. Engagement is leader-decided at ExecInitAgg from the
 // plan shape; anything outside it runs the classic row path unchanged.
 
+use core::cell::UnsafeCell;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
-use ::datum::NullableDatum;
+use ::datum::{Datum, NullableDatum};
 use ::execexpr::{exec_eval_expr, AggPerGroup, EvalSlots};
 use ::execgrouping::TupleHashEntryData;
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
-use ::types_error::PgResult;
-use ::types_fmgr::{AggStateNode, FmgrInfo, LocalFcinfo};
+use ::types_error::{PgError, PgResult};
+use ::types_fmgr::{AggStateNode, FmgrInfo, LocalFcinfo, PGFunction};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Agg;
 use ::types_nodes::primnodes::Aggref;
@@ -24,7 +26,14 @@ use ::types_nodes::NodeTag;
 use ::types_pathnodes::{AGGSPLIT_FINAL_DESERIAL, AGGSPLIT_INITIAL_SERIAL, AGG_HASHED};
 use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tuple::htup::MinimalTupleData;
-use ::types_tuple::TupleDescData;
+use ::types_tuple::tupmacs::{att_isnull, att_nominal_alignby, att_pointer_alignby, fetch_att};
+use ::types_tuple::varatt::{
+    varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b, varsize_any,
+    VARHDRSZ, VARHDRSZ_SHORT,
+};
+use ::types_tuple::{
+    TupleDescData, HEAP_HASNULL, MINIMAL_TUPLE_OFFSET, SizeofMinimalTupleHeader,
+};
 
 use crate::{
     collect_base_var_cols, finalize_aggregates, lookup_hash_entry, AggStateData, PerHashData,
@@ -128,6 +137,44 @@ struct MergeCombine {
     collation: Oid,
 }
 
+// Grouping-equality fns whose semantics the parallel claim path can evaluate
+// thread-natively: bit-equality of the deformed datum for fixed byval keys,
+// payload memcmp for texteq. (oid, name): 60 booleq, 61 chareq, 63 int2eq,
+// 65 int4eq, 184 oideq, 467 int8eq; 67 texteq (deterministic collations only
+// — default/C/POSIX; nondeterministic ones need varstr_cmp).
+const EQ_FIXED_WHITELIST: &[Oid] = &[60, 61, 63, 65, 184, 467];
+const EQ_TEXT: Oid = 67;
+const DETERMINISTIC_COLLATIONS: &[Oid] = &[100, 950, 951];
+
+// One key column of the thread-native deform/compare plan (the hash_desc
+// prefix: increment 1 proves keys are the first numCols attrs on both the
+// finalize's and the workers' stored tuples, with identical source types).
+#[derive(Clone, Copy)]
+struct KeyAtt {
+    attlen: i16,
+    attbyval: bool,
+    attalignby: u8,
+    memcmp_payload: bool,
+}
+
+// The combine reduced to what the whitelist fns actually read: fn pointer,
+// strictness, collation. They never touch flinfo, fcinfo.context, or the
+// result mcx (byval results), so threads call the pointer bare.
+#[derive(Clone, Copy)]
+struct ParCombine {
+    func: PGFunction,
+    strict: bool,
+    collation: Oid,
+}
+
+// Present iff every key column and combine qualifies for bucket-parallel
+// finalize; otherwise the increment-1 serial bucket merge runs unchanged.
+struct ParSpec {
+    atts: Vec<KeyAtt>,
+    combines: Vec<ParCombine>,
+    has_varlena: bool,
+}
+
 pub(crate) struct FinalizeMerge<'mcx> {
     handoff: Arc<AggTableHandoff>,
     registry_key: usize,
@@ -137,6 +184,7 @@ pub(crate) struct FinalizeMerge<'mcx> {
     replay_slot: ExecSlotId,
     // hash_desc-shaped minimal slot: probe/deform side of entry tuples.
     key_slot: SlotData<'mcx>,
+    par: Option<ParSpec>,
     run: Option<MergeRun>,
 }
 
@@ -201,6 +249,16 @@ struct MergeRun {
     out_pos: usize,
     // Open-addressed (hash, out index) probe over the current bucket.
     probe: Vec<(u32, u32)>,
+    // Bucket-parallel results (increment 2): all 256 buckets merged up front
+    // by the claimer pool; retrieval drains them in bucket order.
+    pre: Option<Vec<Vec<TupleHashEntryData>>>,
+}
+
+// PGRUST_AGG_MERGE_NO_PARALLEL triage kill-switch: forces the increment-1
+// serial bucket merge on otherwise parallel-qualified shapes.
+fn parallel_merge_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("PGRUST_AGG_MERGE_NO_PARALLEL").is_some())
 }
 
 // C advance_combine semantics for a byval transition, one incoming partial
@@ -428,6 +486,47 @@ pub(crate) fn init_finalize_merge<'mcx>(
         combines.push(MergeCombine { flinfo, strict, collation: aggref.inputcollid });
     }
 
+    // Bucket-parallel qualification (increment 2): every key column's
+    // grouping equality must be evaluable thread-natively. Failing columns
+    // leave the engagement intact on the serial bucket merge.
+    let par = 'par: {
+        let mut atts = Vec::with_capacity(num_cols);
+        let mut has_varlena = false;
+        for i in 0..num_cols {
+            let eqfn = lsyscache::get_opcode(node.grpOperators[i])?;
+            let a = hash_desc.compact_attr(i);
+            let memcmp_payload = if EQ_FIXED_WHITELIST.contains(&eqfn)
+                && a.attbyval
+                && a.attlen > 0
+            {
+                false
+            } else if eqfn == EQ_TEXT
+                && a.attlen == -1
+                && DETERMINISTIC_COLLATIONS.contains(&node.grpCollations[i])
+            {
+                has_varlena = true;
+                true
+            } else {
+                break 'par None;
+            };
+            atts.push(KeyAtt {
+                attlen: a.attlen,
+                attbyval: a.attbyval,
+                attalignby: a.attalignby,
+                memcmp_payload,
+            });
+        }
+        let par_combines = combines
+            .iter()
+            .map(|c| ParCombine {
+                func: c.flinfo.fn_addr,
+                strict: c.strict,
+                collation: c.collation,
+            })
+            .collect();
+        Some(ParSpec { atts, combines: par_combines, has_varlena })
+    };
+
     let replay_slot = {
         // 'static desc narrows into the query lifetime (procnode's
         // exec_type_from_tl carriers are 'static-typed the same way).
@@ -448,6 +547,7 @@ pub(crate) fn init_finalize_merge<'mcx>(
         state_cols,
         replay_slot,
         key_slot,
+        par,
         run: None,
     }))
 }
@@ -536,6 +636,12 @@ pub(crate) fn consume_handoff<'mcx>(
         debug_assert!(t.additionalsize == additionalsize);
         parts.push(partition_entries(&t.entries));
     }
+    let pre = match &m.par {
+        Some(spec) if !parallel_merge_disabled() => {
+            parallel_merge(spec, ph.hashtable.entries(), &tables, &parts, additionalsize)?
+        }
+        _ => None,
+    };
     node.merge.as_mut().unwrap().run = Some(MergeRun {
         tables,
         parts,
@@ -544,6 +650,7 @@ pub(crate) fn consume_handoff<'mcx>(
         out: Vec::new(),
         out_pos: 0,
         probe: Vec::new(),
+        pre,
     });
     Ok(())
 }
@@ -693,6 +800,13 @@ fn next_merged_group<'mcx>(
             if run.bucket >= 256 {
                 return Ok(None);
             }
+            if let Some(pre) = run.pre.as_mut() {
+                let b = run.bucket;
+                run.bucket += 1;
+                run.out = core::mem::take(&mut pre[b]);
+                run.out_pos = 0;
+                continue;
+            }
         }
         merge_next_bucket(node, estate)?;
     }
@@ -779,6 +893,388 @@ fn merge_next_bucket<'mcx>(
         }
     }
     Ok(())
+}
+
+// --- Bucket-parallel finalize merge (increment 2) ---
+//
+// Parallelism source: a scoped claimer pool at the leader's merge boundary —
+// the Gather's workers have already exited their plans by the time the
+// finalize consumes the handoff (tables install at worker fill completion),
+// so the pool is sized to the handed-table count (the launched worker count
+// on the engaged path) with the leader participating as one more claimer
+// (parallel_leader_participation's spirit). No parallel/lib.rs surface is
+// touched. Claimers take buckets 0..255 from an atomic counter after a
+// barrier (so multi-claimer participation is deterministic, not a race with
+// spawn latency) and run the same source-major first-seen merge as the
+// serial path: identical bucket order, identical within-bucket order,
+// identical combine application order — byte-identical output.
+
+// Deform of the key prefix (first atts.len() attrs) of a stored entry tuple.
+// The increment-1 engagement proof guarantees both the finalize's and the
+// workers' tuples lead with the grouping keys under identical source types,
+// so one KeyAtt plan walks both. No attcacheoff (Cell — not thread-safe).
+//
+// # Safety
+// `tuple` is a live, complete minimal-tuple image whose leading attributes
+// match `atts`; values/isnull have at least atts.len() slots.
+unsafe fn deform_key_prefix(
+    tuple: NonNull<MinimalTupleData>,
+    atts: &[KeyAtt],
+    values: &mut [Datum],
+    isnull: &mut [bool],
+) {
+    // SAFETY: caller contract — live minimal tuple.
+    let mt = unsafe { tuple.as_ref() };
+    let base = tuple.as_ptr().cast::<u8>();
+    // SAFETY: in-bounds offsets of the tuple image.
+    let tp = unsafe { base.add(mt.t_hoff as usize - MINIMAL_TUPLE_OFFSET) };
+    // SAFETY: as above.
+    let bp = unsafe { base.add(SizeofMinimalTupleHeader) };
+    let hasnulls = (mt.t_infomask & HEAP_HASNULL) != 0;
+    let tuple_natts = mt.natts() as usize;
+    let mut off = 0usize;
+    for (i, a) in atts.iter().enumerate() {
+        // SAFETY: i < tuple_natts, so the null bitmap covers bit i.
+        if i >= tuple_natts || (hasnulls && unsafe { att_isnull(i, bp) }) {
+            values[i] = Datum::null();
+            isnull[i] = true;
+            continue;
+        }
+        isnull[i] = false;
+        // SAFETY: the walk visits attributes present in the tuple in order
+        // (slot_deform_heap_tuple's contract, cacheoff branch dropped).
+        unsafe {
+            if a.attlen == -1 {
+                off = att_pointer_alignby(off, a.attalignby, -1, tp.add(off));
+            } else {
+                off = att_nominal_alignby(off, a.attalignby);
+            }
+            values[i] = fetch_att(tp.add(off), a.attbyval, a.attlen as i32);
+            if a.attlen > 0 {
+                off += a.attlen as usize;
+            } else {
+                debug_assert!(a.attlen == -1);
+                off += varsize_any(tp.add(off));
+            }
+        }
+    }
+}
+
+// texteq's deterministic-collation core over pre-validated plain varlena
+// (short or uncompressed 4B header): payload length + bytes.
+//
+// # Safety
+// Both datums point at live varlena images that are 1b-short or
+// 4b-uncompressed (the consume-time validation pass rejects everything else).
+unsafe fn var_payload_eq(a: Datum, b: Datum) -> bool {
+    // SAFETY: caller contract.
+    unsafe {
+        let (pa, la) = var_payload(a.as_usize() as *const u8);
+        let (pb, lb) = var_payload(b.as_usize() as *const u8);
+        la == lb && core::slice::from_raw_parts(pa, la) == core::slice::from_raw_parts(pb, lb)
+    }
+}
+
+/// # Safety
+/// As [`var_payload_eq`], one side.
+unsafe fn var_payload(p: *const u8) -> (*const u8, usize) {
+    // SAFETY: caller contract — plain short or 4B-uncompressed image.
+    unsafe {
+        if varatt_is_1b(p) {
+            (p.add(VARHDRSZ_SHORT), varsize_1b(p) - VARHDRSZ_SHORT)
+        } else {
+            (p.add(VARHDRSZ), varsize_4b(p) - VARHDRSZ)
+        }
+    }
+}
+
+fn keys_equal(
+    atts: &[KeyAtt],
+    group_keys: &[Datum],
+    group_nulls: &[bool],
+    oix: u32,
+    inv: &[Datum],
+    invn: &[bool],
+) -> bool {
+    let base = oix as usize * atts.len();
+    for (i, a) in atts.iter().enumerate() {
+        let (n1, n2) = (group_nulls[base + i], invn[i]);
+        if n1 != n2 {
+            return false;
+        }
+        if n1 {
+            continue;
+        }
+        if a.memcmp_payload {
+            // SAFETY: consume-time validation proved plain representations.
+            if unsafe { !var_payload_eq(group_keys[base + i], inv[i]) } {
+                return false;
+            }
+        } else if group_keys[base + i].as_u64() != inv[i].as_u64() {
+            return false;
+        }
+    }
+    true
+}
+
+// combine_one's thread-native twin: bare fn-pointer call. The whitelist fns
+// read only their args (no flinfo, no fcinfo.context, byval result — the
+// result mcx stays unarmed) so semantics match the serial invoke exactly.
+fn combine_one_par(c: &ParCombine, dst: &mut AggPerGroup, src: &AggPerGroup) -> PgResult<()> {
+    if c.strict {
+        if src.trans_value_is_null {
+            return Ok(());
+        }
+        if dst.trans_value_is_null {
+            dst.trans_value = src.trans_value;
+            dst.trans_value_is_null = false;
+            dst.no_trans_value = false;
+            return Ok(());
+        }
+    }
+    let mut fcinfo = LocalFcinfo::<2>::fresh(c.collation);
+    fcinfo.args[0] = NullableDatum { value: dst.trans_value, isnull: dst.trans_value_is_null };
+    fcinfo.args[1] = NullableDatum { value: src.trans_value, isnull: src.trans_value_is_null };
+    let value = (c.func)(None, &mut fcinfo)?;
+    dst.trans_value = value;
+    dst.trans_value_is_null = fcinfo.isnull;
+    dst.no_trans_value = false;
+    Ok(())
+}
+
+// Per-claimer reusable buffers: the bucket probe, the merged groups' deformed
+// keys (stride = numCols, parallel to the bucket's out vec), and the incoming
+// entry's deformed keys.
+struct ParScratch {
+    probe: Vec<(u32, u32)>,
+    group_keys: Vec<Datum>,
+    group_nulls: Vec<bool>,
+    inv: Vec<Datum>,
+    invn: Vec<bool>,
+}
+
+impl ParScratch {
+    fn new(ncols: usize) -> ParScratch {
+        ParScratch {
+            probe: Vec::new(),
+            group_keys: Vec::new(),
+            group_nulls: Vec::new(),
+            inv: vec![Datum::null(); ncols],
+            invn: vec![false; ncols],
+        }
+    }
+}
+
+struct ParCtx<'a> {
+    spec: &'a ParSpec,
+    leader: &'a [TupleHashEntryData],
+    tables: &'a [HandedAggTable],
+    parts: &'a [Partition],
+    additionalsize: usize,
+    next: AtomicUsize,
+    barrier: Barrier,
+    // 256 bucket outputs; slot b is written only by the claimer that took b.
+    out: Vec<UnsafeCell<Vec<TupleHashEntryData>>>,
+}
+
+// SAFETY: shared read-only entry/tuple images (leader table + handed bufs)
+// stay live and unmoved for the scope (no arena allocation happens inside);
+// the only mutation is (a) each claimer's exclusive `out[b]` slot — bucket b
+// is handed to exactly one claimer by the fetch_add — and (b) pergroup
+// payloads behind entry pointers, which partition by bucket (an entry's
+// bucket is a pure function of its hash), so claimers never alias them.
+unsafe impl Sync for ParCtx<'_> {}
+
+fn claim_loop(ctx: &ParCtx<'_>, scratch: &mut ParScratch) -> PgResult<usize> {
+    ctx.barrier.wait();
+    let mut merged = 0usize;
+    loop {
+        let b = ctx.next.fetch_add(1, Ordering::Relaxed);
+        if b >= 256 {
+            return Ok(merged);
+        }
+        let out = merge_bucket_par(ctx, b, scratch)?;
+        if !out.is_empty() {
+            merged += 1;
+        }
+        // SAFETY: bucket b was claimed exclusively via the counter.
+        unsafe { *ctx.out[b].get() = out };
+    }
+}
+
+// merge_next_bucket's thread-native twin: same source-major first-seen order,
+// same probe scheme, structural key equality, bare-pointer combines.
+fn merge_bucket_par(
+    ctx: &ParCtx<'_>,
+    b: usize,
+    s: &mut ParScratch,
+) -> PgResult<Vec<TupleHashEntryData>> {
+    let ncols = ctx.spec.atts.len();
+    let mut total = 0usize;
+    for p in ctx.parts {
+        total += (p.starts[b + 1] - p.starts[b]) as usize;
+    }
+    let mut out = Vec::new();
+    if total == 0 {
+        return Ok(out);
+    }
+    let cap = (total * 2).next_power_of_two().max(16);
+    s.probe.clear();
+    s.probe.resize(cap, (0, PROBE_EMPTY));
+    s.group_keys.clear();
+    s.group_nulls.clear();
+    let mask = (cap - 1) as u32;
+
+    for (src, part) in ctx.parts.iter().enumerate() {
+        let lo = part.starts[b] as usize;
+        let hi = part.starts[b + 1] as usize;
+        for &eix in &part.idx[lo..hi] {
+            let e = if src == 0 {
+                ctx.leader[eix as usize]
+            } else {
+                ctx.tables[src - 1].entries[eix as usize]
+            };
+            // SAFETY: entry images live for the run (handed buffers / the
+            // node's table context), leading attrs match the KeyAtt plan.
+            unsafe { deform_key_prefix(e.tuple(), &ctx.spec.atts, &mut s.inv, &mut s.invn) };
+            let mut pos = e.hash() & mask;
+            loop {
+                let (h, oix) = s.probe[pos as usize];
+                if oix == PROBE_EMPTY {
+                    s.probe[pos as usize] = (e.hash(), out.len() as u32);
+                    s.group_keys.extend_from_slice(&s.inv[..ncols]);
+                    s.group_nulls.extend_from_slice(&s.invn[..ncols]);
+                    out.push(e);
+                    break;
+                }
+                if h == e.hash()
+                    && keys_equal(&ctx.spec.atts, &s.group_keys, &s.group_nulls, oix, &s.inv, &s.invn)
+                {
+                    let cand = out[oix as usize];
+                    let dst = cand.additional(ctx.additionalsize).map(|p| p.cast::<AggPerGroup>());
+                    let sp = e.additional(ctx.additionalsize).map(|p| p.cast::<AggPerGroup>());
+                    if let (Some(dst), Some(sp)) = (dst, sp) {
+                        for (transno, c) in ctx.spec.combines.iter().enumerate() {
+                            // SAFETY: additionalsize holds numtrans pergroups
+                            // on both sides; dst is uniquely reachable through
+                            // this claimer's bucket.
+                            unsafe {
+                                combine_one_par(
+                                    c,
+                                    &mut *dst.as_ptr().add(transno),
+                                    &*sp.as_ptr().add(transno),
+                                )?;
+                            }
+                        }
+                    }
+                    break;
+                }
+                pos = (pos + 1) & mask;
+            }
+        }
+    }
+    Ok(out)
+}
+
+// The parallel run at the consume boundary. Ok(None) = fell back to the
+// serial bucket merge (a varlena key datum with a compressed/external
+// representation, which the thread comparator must not touch — detoast needs
+// the executor). The validation pass mutates nothing, so falling back is
+// clean.
+fn parallel_merge(
+    spec: &ParSpec,
+    leader: &[TupleHashEntryData],
+    tables: &[HandedAggTable],
+    parts: &[Partition],
+    additionalsize: usize,
+) -> PgResult<Option<Vec<Vec<TupleHashEntryData>>>> {
+    let ncols = spec.atts.len();
+    if spec.has_varlena {
+        let mut values = vec![Datum::null(); ncols];
+        let mut isnull = vec![false; ncols];
+        let mut check = |entries: &[TupleHashEntryData]| -> bool {
+            for e in entries {
+                // SAFETY: live entry images under the KeyAtt plan (as the
+                // merge itself).
+                unsafe { deform_key_prefix(e.tuple(), &spec.atts, &mut values, &mut isnull) };
+                for (i, a) in spec.atts.iter().enumerate() {
+                    if !a.memcmp_payload || isnull[i] {
+                        continue;
+                    }
+                    let p = values[i].as_usize() as *const u8;
+                    // SAFETY: non-null varlena datum in a live image.
+                    let plain = unsafe {
+                        (varatt_is_1b(p) && !varatt_is_1b_e(p)) || varatt_is_4b_u(p)
+                    };
+                    if !plain {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+        if !check(leader) || !tables.iter().all(|t| check(&t.entries)) {
+            if merge_stats_enabled() {
+                eprintln!("AGG_MERGE_STATS parallel-fallback: non-plain varlena key");
+            }
+            return Ok(None);
+        }
+    }
+
+    let nthreads = tables.len();
+    let claimers = nthreads + 1;
+    let ctx = ParCtx {
+        spec,
+        leader,
+        tables,
+        parts,
+        additionalsize,
+        next: AtomicUsize::new(0),
+        barrier: Barrier::new(claimers),
+        out: (0..256).map(|_| UnsafeCell::new(Vec::new())).collect(),
+    };
+    let mut claims: Vec<usize> = Vec::with_capacity(claimers);
+    let mut first_err: Option<Box<PgError>> = None;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..nthreads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut s = ParScratch::new(ncols);
+                    claim_loop(&ctx, &mut s)
+                })
+            })
+            .collect();
+        let leader_res = {
+            let mut s = ParScratch::new(ncols);
+            claim_loop(&ctx, &mut s)
+        };
+        for res in core::iter::once(leader_res)
+            .chain(handles.into_iter().map(|h| h.join().expect("merge claimer panicked")))
+        {
+            match res {
+                Ok(n) => claims.push(n),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+    });
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    let pre: Vec<Vec<TupleHashEntryData>> =
+        ctx.out.into_iter().map(UnsafeCell::into_inner).collect();
+    if merge_stats_enabled() {
+        eprintln!(
+            "AGG_MERGE_STATS parallel: claimers={} claims={:?} groups={}",
+            claimers,
+            claims,
+            pre.iter().map(Vec::len).sum::<usize>(),
+        );
+    }
+    Ok(Some(pre))
 }
 
 // Rescan: merged results reference handed buffers mutated in place by the
