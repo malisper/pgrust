@@ -3678,6 +3678,48 @@ fn fix_join_expr_list<'mcx>(
     Ok(out)
 }
 
+// search_indexed_tlist_for_non_var (setrefs.c), join leg: whole-expression
+// match against a subplan tlist entry. Consts are excluded (C: replacing one
+// could confuse the Const-mutation exemption); the emitted Var clears
+// varnosyn/varattnosyn (was never a plain Var).
+fn search_join_tlist_for_non_var<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    node: Node<'mcx>,
+    subplan_tlist: &NodeList<'mcx>,
+    newvarno: i32,
+) -> PgResult<Option<Node<'mcx>>> {
+    if node.node_tag() == NodeTag::T_Const {
+        return Ok(None);
+    }
+    for tle_node in subplan_tlist {
+        let tle = tle_node.as_target_entry().expect("TargetEntry");
+        if matches!(tle.expr.node_tag(), NodeTag::T_Var | NodeTag::T_PlaceHolderVar) {
+            continue;
+        }
+        if types_nodes::equal(tle.expr, node) {
+            let (vartype, vartypmod) = crate::costsize::expr_type_typmod(node);
+            return Ok(Some(Node::mk(
+                mcx,
+                types_nodes::primnodes::Var {
+                    varno: newvarno,
+                    varattno: tle.resno,
+                    vartype,
+                    vartypmod,
+                    varcollid: exprs_collation(node),
+                    varnullingrels: types_nodes::bitmapset::Bitmapset::empty(),
+                    varlevelsup: 0,
+                    varreturningtype:
+                        types_nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+                    varnosyn: 0,
+                    varattnosyn: 0,
+                    location: expr_location(node),
+                },
+            )?));
+        }
+    }
+    Ok(None)
+}
+
 // fix_join_expr_mutator (setrefs.c) over the shapes this lane can carry.
 // fix_join_expr_mutator's acceptable_rel arm (C copyVar; keeps nullingrels).
 fn fix_join_acceptable_rel_var<'mcx>(
@@ -3719,6 +3761,28 @@ fn fix_join_expr_mutator<'mcx>(
     num_exec: f64,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
+    // C probes search_indexed_tlist_for_non_var on every non-Var/PHV node
+    // before the per-tag recursion (setrefs.c fix_join_expr_mutator): a
+    // whole subexpression the subplan already computes is consumed as an
+    // OUTER/INNER Var instead of being re-evaluated at the join.
+    if !matches!(node.node_tag(), NodeTag::T_Var | NodeTag::T_PlaceHolderVar) {
+        if let Some(new) = search_join_tlist_for_non_var(
+            mcx,
+            node,
+            outer_tlist,
+            types_nodes::primnodes::OUTER_VAR,
+        )? {
+            return Ok(new);
+        }
+        if let Some(new) = search_join_tlist_for_non_var(
+            mcx,
+            node,
+            inner_tlist,
+            types_nodes::primnodes::INNER_VAR,
+        )? {
+            return Ok(new);
+        }
+    }
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
