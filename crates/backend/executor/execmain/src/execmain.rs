@@ -225,6 +225,11 @@ pub(crate) fn executor_rearm_seam(
         let mut exec = qd.exec.take().expect("executor_rearm on a QueryDesc with no executor");
         let reused = skeleton_rearm_exec(qd, &mut exec);
         qd.exec = Some(exec);
+        if let Ok(false) = reused {
+            // Fallback path releases this QueryDesc without FreeQueryDesc:
+            // drop the registration taken above.
+            snapmgr::UnregisterSnapshot(qd.snapshot.take().as_ref());
+        }
         reused
     })
 }
