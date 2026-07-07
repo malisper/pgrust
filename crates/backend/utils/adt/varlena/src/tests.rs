@@ -1028,10 +1028,10 @@ mod string_agg_fns {
     }
 
     #[test]
-    #[should_panic(expected = "parallel (partial) aggregation unported")]
-    fn string_agg_combine_is_loud() {
+    fn string_agg_combine_rejects_non_aggregate_context() {
         let mut fcinfo = LocalFcinfo::<2>::new(0);
-        let _ = fc_string_agg_combine(None, &mut fcinfo);
+        let err = fc_string_agg_combine(None, &mut fcinfo).unwrap_err();
+        assert!(err.message().contains("aggregate function called in non-aggregate context"));
     }
 }
 
