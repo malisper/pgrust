@@ -559,6 +559,11 @@ pub fn ReplicationSlotRelease() -> PgResult<()> {
 pub fn ReplicationSlotCleanup(synced_only: bool) -> PgResult<()> {
     assert!(MyReplicationSlot().is_none());
 
+    // No slot array (test harnesses / slot-less boots): nothing to clean.
+    if REPLICATION_SLOT_CTL.get().is_none() {
+        return Ok(());
+    }
+
     'restart: loop {
         lw(control_lock(), LW_SHARED)?;
         for s in ReplicationSlotCtl() {

@@ -463,7 +463,7 @@ fn typmod_coercion_skips_when_typmod_matches() {
 }
 
 #[test]
-fn negative_typmod_is_noop_for_const() {
+fn negative_typmod_retypes_const_to_unspecified_typmod() {
     install_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -480,12 +480,16 @@ fn negative_typmod_is_noop_for_const() {
         false,
     )
     .unwrap();
-    // C coerce_type_typmod: targetTypMod < 0 is a no-op.
-    assert!(out.ptr_eq(node));
+    // C coerce_type_typmod: targetTypMod < 0 takes the applyRelabelType leg,
+    // which rewrites a Const in place of wrapping it.
+    let c = out.as_const().unwrap();
+    assert_eq!(c.consttype, BPCHAROID);
+    assert_eq!(c.consttypmod, -1);
+    assert_eq!(c.constcollid, 100);
 }
 
 #[test]
-fn negative_typmod_is_noop_for_var() {
+fn negative_typmod_relabels_var_to_unspecified_typmod() {
     install_fixture();
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
@@ -501,5 +505,10 @@ fn negative_typmod_is_noop_for_var() {
         false,
     )
     .unwrap();
-    assert!(out.ptr_eq(var));
+    let r = out.as_relabel_type().unwrap();
+    assert!(r.arg.ptr_eq(var));
+    assert_eq!(r.resulttype, BPCHAROID);
+    assert_eq!(r.resulttypmod, -1);
+    assert_eq!(r.resultcollid, 100);
+    assert_eq!(r.relabelformat, CoercionForm::COERCE_EXPLICIT_CAST);
 }
