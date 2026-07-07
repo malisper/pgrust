@@ -1606,9 +1606,10 @@ pub fn ReleasePredicateLocks(mut isCommit: bool, isReadOnlySafe: bool) -> PgResu
 
         // Non-serializable fast path (every commit/abort lands here): with no
         // sxact and no leader stash, C's worker and leader arms are both
-        // no-ops, so skip the is_parallel_worker seam call.
-        if MySerializableXact() == InvalidSerializableXact
-            && SAVED_SERIALIZABLE_XACT.with(|c| c.get()) == InvalidSerializableXact
+        // no-ops, so skip the is_parallel_worker seam call. Single fused
+        // branch: both cells live in one thread_local block.
+        if (MySerializableXact() as usize | SAVED_SERIALIZABLE_XACT.with(|c| c.get()) as usize)
+            == 0
         {
             debug_assert!(LocalPredicateLockHash().is_null());
             return Ok(());
