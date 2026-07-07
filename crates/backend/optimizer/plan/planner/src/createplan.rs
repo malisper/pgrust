@@ -1578,7 +1578,14 @@ fn fix_indexqual_clause<'mcx>(
                 mcx,
                 OpExpr {
                     opno: o.opno,
-                    opfuncid: o.opfuncid,
+                    // C's later fix_expr_common fills InvalidOid via
+                    // set_opfuncid (setrefs.c); our read-only walker cannot,
+                    // so resolve at the rebuild (ordering ops arrive unset).
+                    opfuncid: if o.opfuncid != 0 {
+                        o.opfuncid
+                    } else {
+                        lsyscache::get_opcode(o.opno)?
+                    },
                     opresulttype: o.opresulttype,
                     opretset: o.opretset,
                     opcollid: o.opcollid,
