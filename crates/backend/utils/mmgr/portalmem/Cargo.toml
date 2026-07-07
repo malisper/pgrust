@@ -23,6 +23,7 @@ plancache_portal_seams = { path = "../../cache/plancache_portal_seams" }
 portalcmds_seams = { path = "../../../commands/portalcmds_seams" }
 pquery_seams = { path = "../../../tcop/pquery_seams" }
 resowner_portal_seams = { path = "../../resowner/resowner_portal_seams" }
+resowner_seams = { path = "../../resowner/resowner_seams" }
 snapmgr_portal_seams = { path = "../../time/snapmgr_portal_seams" }
 tuplestore_hold_seams = { path = "../../sort/tuplestore_hold_seams" }
 xact_portal_seams = { path = "../../../access/transam/xact_portal_seams" }

@@ -19,8 +19,9 @@ use ::types_error::{
     ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
 };
 use ::types_portal::{
-    CachedPlanHandle, ParamListHandle, Portal, PortalCleanupHook, PortalData, QueryCompletion,
-    QueryDescHandle, QueryEnvHandle, StmtListHandle, TuplestoreHandle, CMDTAG_UNKNOWN,
+    CachedPlanHandle, ParamListHandle, PlanSourceHandle, Portal, PortalCleanupHook, PortalData,
+    QueryCompletion, QueryDescHandle, QueryEnvHandle, StmtListHandle, TuplestoreHandle,
+    CMDTAG_UNKNOWN,
     CURSOR_OPT_BINARY, CURSOR_OPT_HOLD, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
     MAX_PORTALNAME_LEN, PORTAL_ACTIVE, PORTAL_DEFINED, PORTAL_DONE, PORTAL_FAILED,
     PORTAL_MULTI_QUERY, PORTAL_NEW, PORTAL_ONE_SELECT, PORTAL_READY,
@@ -99,6 +100,10 @@ struct PortalManager {
     // slots park for overwrite (C's pfree into the TopPortalContext freelist).
     free_contexts: Vec<PgBox<'static, MemoryContext>>,
     free_portals: Vec<Portal<'static>>,
+    // Parked portal shells, keyed by the CachedPlanSource they executed (the
+    // retained execution rebinds only against the same still-valid generic
+    // plan). Each shell pins its cplan with a plancache refcount.
+    parked: Vec<(PlanSourceHandle, Portal<'static>)>,
 }
 
 thread_local! {
@@ -149,6 +154,7 @@ pub fn EnablePortalManager() {
             unnamed_counter: 0,
             free_contexts: Vec::new(),
             free_portals: Vec::new(),
+            parked: Vec::new(),
         }));
     });
 }
@@ -221,6 +227,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             qc: QueryCompletion::default(),
             stmts: StmtListHandle::NULL,
             cplan: CachedPlanHandle::NULL,
+            plansource: PlanSourceHandle::NULL,
             planContext: core::ptr::null_mut(),
             portalParams: ParamListHandle::NULL,
             queryEnv: QueryEnvHandle::NULL,
@@ -447,6 +454,10 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         }
     }
 
+    if try_park(portal, isTopCommit)? {
+        return Ok(());
+    }
+
     run_cleanup_hook(portal)?;
 
     let (query_desc, stmts, params, cplan, plan_ctx, resowner, hold_snapshot, hold_store, status, key) = {
@@ -555,6 +566,295 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         }
     });
     Ok(())
+}
+
+
+// One parked shell per plansource; small cap bounds the plancache refcount
+// pins dead plans can hold (DropCachedPlan discards its shell eagerly).
+const PARKED_PORTAL_MAX: usize = 8;
+
+fn remove_from_table(key: &PortalName) -> Option<Portal<'static>> {
+    with_mgr(|m| {
+        let i = m.index.remove(key)?;
+        let last = m.entries.len() - 1;
+        let removed = m.entries.swap_remove(i as usize);
+        if (i as usize) != last {
+            let moved = PortalName::new(&m.entries[i as usize].borrow().name);
+            m.index.insert(moved, i);
+        }
+        Some(removed)
+    })
+    .flatten()
+}
+
+// Portal retention (no C counterpart): a completed unnamed cached-plan SELECT
+// portal parks whole — context, resowner-free shell, QueryDesc with its
+// initialized executor — instead of dropping. Reuse (TakeParkedPortal)
+// happens only after GetCachedPlan returned the SAME still-valid generic
+// plan, so RevalidateCachedQuery's contract decides retention; everything
+// per-execution (locks, snapshot, params, scans, permissions) is re-derived
+// at rearm.
+fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
+    {
+        let p = portal.borrow();
+        if p.plansource.is_null()
+            || !p.name.is_empty()
+            || p.cplan.is_null()
+            || p.queryDesc.is_null()
+            || p.strategy != PORTAL_ONE_SELECT
+            || p.status != PORTAL_READY
+            || p.cleanup != PortalCleanupHook::PortalCleanup
+            || !p.holdStore.is_null()
+            || p.holdContext.is_some()
+            || p.autoHeld
+            || !p.queryEnv.is_null()
+            || !p.planContext.is_null()
+            || p.portalSnapshot.is_some()
+            || p.tupDesc.is_none()
+        {
+            return Ok(false);
+        }
+    }
+    // Test fixtures shim only the seams they use.
+    if !execmain_seams::executor_finish_and_park::is_installed() {
+        return Ok(false);
+    }
+
+    let query_desc = portal.borrow().queryDesc;
+    // PortalCleanup's resowner discipline around the executor shutdown.
+    let save_owner = resowner_seams::current_resource_owner::call();
+    let portal_owner = portal.borrow().resowner;
+    if !portal_owner.is_null() {
+        resowner_seams::set_current_resource_owner::call(portal_owner);
+    }
+    let parked = execmain_seams::executor_finish_and_park::call(query_desc);
+    resowner_seams::set_current_resource_owner::call(save_owner);
+    // Success or not, the executor shutdown ran: the cleanup hook is consumed.
+    portal.borrow_mut().cleanup = PortalCleanupHook::None;
+    let parked = match parked {
+        Ok(parked) => parked,
+        Err(e) => {
+            // Shutdown error mid-hook: the QueryDesc may already be gone;
+            // drop our reference and let the normal error path unwind
+            // (PortalCleanup's error contract).
+            portal.borrow_mut().queryDesc = QueryDescHandle::NULL;
+            return Err(e);
+        }
+    };
+    if !parked {
+        // executor_finish_and_park ran ExecutorEnd + FreeQueryDesc.
+        portal.borrow_mut().queryDesc = QueryDescHandle::NULL;
+        return Ok(false);
+    }
+
+    let (params, resowner, key, psrc) = {
+        let mut p = portal.borrow_mut();
+        (
+            core::mem::replace(&mut p.portalParams, ParamListHandle::NULL),
+            core::mem::replace(&mut p.resowner, ResourceOwner::NULL),
+            PortalName::new(&p.name),
+            p.plansource,
+        )
+    };
+    if remove_from_table(&key).is_none() {
+        elog(WARNING, "trying to park portal name that does not exist")?;
+    }
+    types_portal::params::free(params);
+    // Top-commit drops leave the resowner to the transaction machinery
+    // (PortalDrop's isTopCommit arm); displacement drops release it here.
+    if !resowner.is_null() && !isTopCommit {
+        for phase in [
+            RESOURCE_RELEASE_BEFORE_LOCKS,
+            RESOURCE_RELEASE_LOCKS,
+            RESOURCE_RELEASE_AFTER_LOCKS,
+        ] {
+            resowner_portal_seams::resource_owner_release::call(resowner, phase, true, false);
+        }
+        resowner_portal_seams::resource_owner_delete::call(resowner);
+    }
+    // The per-execution allocations (bind params) die with the context,
+    // exactly as PortalDrop: park it empty or drop it whole; TakeParkedPortal
+    // re-attaches a pooled one (CreatePortal parity).
+    let ctx = portal.borrow_mut().portalContext.take();
+    let parked_ctx = ctx.and_then(|mut cb| {
+        if cb.used() == 0 {
+            cb.reset();
+            cb.set_ident(None);
+            Some(cb)
+        } else {
+            None
+        }
+    });
+    {
+        let mut p = portal.borrow_mut();
+        p.status = PORTAL_NEW;
+        p.qc = QueryCompletion { commandTag: p.commandTag, nprocessed: 0 };
+        p.atStart = true;
+        p.atEnd = true;
+        p.portalPos = 0;
+        p.createSubid = InvalidSubTransactionId;
+        p.activeSubid = InvalidSubTransactionId;
+        p.createLevel = 0;
+    }
+    let displaced = with_mgr(|m| {
+        if let Some(cb) = parked_ctx {
+            if m.free_contexts.len() < PORTAL_POOL_MAX {
+                m.free_contexts.push(cb);
+            }
+        }
+        let mut displaced = Vec::new();
+        if let Some(i) = m.parked.iter().position(|(k, _)| *k == psrc) {
+            displaced.push(m.parked.remove(i).1);
+        }
+        while m.parked.len() >= PARKED_PORTAL_MAX {
+            displaced.push(m.parked.remove(0).1);
+        }
+        m.parked.push((psrc, portal.clone()));
+        displaced
+    })
+    .unwrap_or_default();
+    for shell in displaced {
+        discard_shell(&shell);
+    }
+    Ok(true)
+}
+
+// Frees a parked shell: the retained execution drops on its normal path, the
+// plan pin releases, and the empty context/slot park in the reuse pools
+// (PortalDrop's tail).
+fn discard_shell(shell: &Portal<'static>) {
+    let (query_desc, stmts, cplan, ctx) = {
+        let mut p = shell.borrow_mut();
+        p.tupDesc = None;
+        (
+            core::mem::replace(&mut p.queryDesc, QueryDescHandle::NULL),
+            core::mem::replace(&mut p.stmts, StmtListHandle::NULL),
+            core::mem::replace(&mut p.cplan, CachedPlanHandle::NULL),
+            p.portalContext.take(),
+        )
+    };
+    if !query_desc.is_null() {
+        execmain_seams::release_query_desc::call(query_desc);
+    }
+    if !stmts.is_null() {
+        pquery_seams::stmt_list_free::call(stmts);
+    }
+    if !cplan.is_null() {
+        plancache_portal_seams::release_cached_plan::call(cplan);
+    }
+    let parked_ctx = ctx.and_then(|mut cb| {
+        if cb.used() == 0 {
+            cb.reset();
+            cb.set_ident(None);
+            Some(cb)
+        } else {
+            None
+        }
+    });
+    with_mgr(|m| {
+        if let Some(cb) = parked_ctx {
+            if m.free_contexts.len() < PORTAL_POOL_MAX {
+                m.free_contexts.push(cb);
+            }
+        }
+        if m.free_portals.len() < PORTAL_POOL_MAX {
+            m.free_portals.push(shell.clone());
+        }
+    });
+}
+
+/// Take the parked shell for `plansource`, re-initialized as this cycle's
+/// unnamed portal (CreatePortal parity) and re-entered in the portal table.
+/// Caller contract: no live unnamed portal exists (drop it first), and the
+/// caller verifies the shell's cplan against this bind's GetCachedPlan result
+/// before reusing the retained execution.
+pub fn TakeParkedPortal(plansource: PlanSourceHandle) -> PgResult<Option<Portal<'static>>> {
+    let Some(shell) = with_mgr(|m| {
+        let i = m.parked.iter().position(|(k, _)| *k == plansource)?;
+        Some(m.parked.remove(i).1)
+    })
+    .flatten() else {
+        return Ok(None);
+    };
+    let resowner = resowner_portal_seams::resource_owner_create_portal::call();
+    let create_subid = xact_seams::get_current_sub_transaction_id::call();
+    let create_level = xact_seams::get_current_transaction_nest_level::call();
+    let creation_time = xact_portal_seams::get_current_statement_start_timestamp::call();
+    let portal_context = mgr("TakeParkedPortal", |m| match m.free_contexts.pop() {
+        Some(ctx) => {
+            ctx.set_name("PortalContext");
+            ctx
+        }
+        None => PgBox::new_in(m.top.new_child("PortalContext"), m.top.mcx()),
+    })?;
+    {
+        let mut p = shell.borrow_mut();
+        debug_assert!(p.name.is_empty() && p.status == PORTAL_NEW);
+        debug_assert!(p.portalContext.is_none());
+        p.portalContext = Some(portal_context);
+        p.resowner = resowner;
+        p.createSubid = create_subid;
+        p.activeSubid = create_subid;
+        p.createLevel = create_level;
+        p.creation_time = creation_time;
+        // The hook stays disarmed until PortalStartParked rearms the retained
+        // executor (es_finished is still set from the park-time finish); an
+        // error before then drops the shell via release_query_desc.
+        p.cleanup = PortalCleanupHook::None;
+        p.status = PORTAL_DEFINED;
+    }
+    mgr("TakeParkedPortal", |m| {
+        let key = PortalName::new("");
+        debug_assert!(!m.index.contains_key(&key), "unnamed portal already exists");
+        let i = m.entries.len() as u32;
+        m.entries.push(shell.clone());
+        m.index.insert(key, i);
+    })?;
+    Ok(Some(shell))
+}
+
+/// The taken shell's plan no longer matches this bind's GetCachedPlan result
+/// (revalidation replanned): shed the retained execution and hand the shell
+/// back as a plain just-created portal (status PORTAL_NEW) for the normal
+/// PortalDefineQuery + PortalStart path.
+pub fn ShedRetainedExecution(portal: &Portal<'static>) {
+    let (query_desc, stmts, cplan) = {
+        let mut p = portal.borrow_mut();
+        p.tupDesc = None;
+        p.status = PORTAL_NEW;
+        p.cleanup = PortalCleanupHook::PortalCleanup;
+        (
+            core::mem::replace(&mut p.queryDesc, QueryDescHandle::NULL),
+            core::mem::replace(&mut p.stmts, StmtListHandle::NULL),
+            core::mem::replace(&mut p.cplan, CachedPlanHandle::NULL),
+        )
+    };
+    if !query_desc.is_null() {
+        execmain_seams::release_query_desc::call(query_desc);
+    }
+    if !stmts.is_null() {
+        pquery_seams::stmt_list_free::call(stmts);
+    }
+    if !cplan.is_null() {
+        plancache_portal_seams::release_cached_plan::call(cplan);
+    }
+}
+
+// DropCachedPlan's parked-shell discard (DEALLOCATE / DISCARD ALL / re-PREPARE
+// of the unnamed statement): eager, so dead plans do not stay pinned.
+fn discard_parked_portal_seam(plansource: PlanSourceHandle) {
+    let shell = with_mgr(|m| {
+        let i = m.parked.iter().position(|(k, _)| *k == plansource)?;
+        Some(m.parked.remove(i).1)
+    })
+    .flatten();
+    if let Some(shell) = shell {
+        discard_shell(&shell);
+    }
+}
+
+pub fn init_seams() {
+    plancache_portal_seams::discard_parked_portal::set(discard_parked_portal_seam);
 }
 
 /// portalcmds.c:109's copy-into-portalContext analog: the portal owns the plan's arena.
