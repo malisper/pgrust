@@ -402,6 +402,7 @@ fn make_portal(mcx: Mcx<'_>) -> Portal<'_> {
         name: mcx::PgString::new_in(mcx),
         prepStmtName: None,
         portalContext: None,
+        plansource: ::types_portal::PlanSourceHandle::NULL,
         planContext: core::ptr::null_mut(),
         resowner: Default::default(),
         cleanup: PortalCleanupHook::None,
