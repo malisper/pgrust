@@ -179,6 +179,15 @@ pub fn index_bulk_delete<'mcx>(
     istat: Option<IndexBulkDeleteResult>,
     dead_items: &[ItemPointerData],
 ) -> PgResult<IndexBulkDeleteResult> {
+    // Test-only wedge probe: the ambulkdelete twin of the
+    // index_vacuum_cleanup injection (unported-loud incident state).
+    #[cfg(debug_assertions)]
+    if std::env::var("PGRUST_TEST_VACUUM_PANIC_INDEX").as_deref() == Ok(info.index.name()) {
+        panic!(
+            "injected bulk-delete panic for index \"{}\" (av wedge containment test)",
+            info.index.name()
+        );
+    }
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
