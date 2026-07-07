@@ -113,8 +113,6 @@ fn create_toast_table<'mcx>(
             relkind: RELKIND_TOASTVALUE,
             relpersistence: rel.rd_rel.relpersistence,
             reloftype: InvalidOid,
-            // "It's mapped if and only if its parent is, too" (toasting.c:244).
-            mapped: rel.is_mapped(),
             allow_system_table_mods: true,
             reloptions,
         },

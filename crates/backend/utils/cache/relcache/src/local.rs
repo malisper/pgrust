@@ -31,9 +31,9 @@ pub fn RelationBuildLocalRelation(
     relpersistence: u8,
     relkind: u8,
 ) -> PgResult<Rc<RelationData<'static>>> {
-    if shared_relation {
+    if shared_relation || mapped_relation {
         panic!(
-            "RelationBuildLocalRelation (relcache.c): shared relation \
+            "RelationBuildLocalRelation (relcache.c): shared/mapped relation \
              creation unported (relid {relid})"
         );
     }
@@ -90,9 +90,7 @@ pub fn RelationBuildLocalRelation(
         reltype,
         relowner: InvalidOid,
         relam: accessmtd,
-        // Mapped relations keep relfilenode 0; RelationInitPhysicalAddr
-        // consults the map (relcache.c RelationBuildLocalRelation).
-        relfilenode: if mapped_relation { types_core::InvalidRelFileNumber } else { relfilenumber },
+        relfilenode: relfilenumber,
         reltablespace,
         // C's palloc0 leaves relpages/reltuples/relallvisible zero; the pokes
         // in AddNewRelationTuple (tables: reltuples -1) happen at insert time.
@@ -153,14 +151,6 @@ pub fn RelationBuildLocalRelation(
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,
     };
-    if mapped_relation {
-        relmapper_seams::relation_map_update_map::call(
-            relid,
-            relfilenumber,
-            shared_relation,
-            true,
-        )?;
-    }
     RelationInitPhysicalAddr(&data)?;
     RelationInitTableAccessMethod(relkind, accessmtd)?;
 

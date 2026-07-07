@@ -1,7 +1,6 @@
 // cluster.c ALTER TABLE + CLUSTER/VACUUM FULL rewrite slice: make_new_heap /
 // swap_relation_files / finish_heap_swap. Toast swaps by content (CLUSTER) or
-// by links (ALTER TABLE rewrites). Mapped relations (VACUUM FULL
-// pg_class/pg_database) swap via the relation mapper.
+// by links (ALTER TABLE rewrites). LOUD: mapped relations, reloptions copy.
 #![allow(non_snake_case, non_upper_case_globals)]
 
 mod command;
@@ -18,7 +17,7 @@ use types_error::PgResult;
 use types_rel::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE, RELKIND_INDEX, RELKIND_TOASTVALUE};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
-const Anum_pg_class_relnamespace: usize = 3;
+const Anum_pg_class_relnamespace: usize = 2;
 const Anum_pg_class_relam: usize = 7;
 const Anum_pg_class_relfilenode: usize = 8;
 const Anum_pg_class_reltablespace: usize = 9;
@@ -27,7 +26,6 @@ const Anum_pg_class_reltuples: usize = 11;
 const Anum_pg_class_relallvisible: usize = 12;
 const Anum_pg_class_relallfrozen: usize = 13;
 const Anum_pg_class_reltoastrelid: usize = 14;
-const Anum_pg_class_relisshared: usize = 16;
 const Anum_pg_class_relpersistence: usize = 17;
 const Anum_pg_class_relkind: usize = 18;
 const Anum_pg_class_relrewrite: usize = 29;
@@ -82,10 +80,6 @@ pub fn make_new_heap<'mcx>(
             relkind: types_rel::RELKIND_RELATION,
             relpersistence: persistence,
             reloftype: types_core::InvalidOid,
-            // "the new heap is not a shared relation, even if we are
-            // rebuilding a shared rel. However, we do make the new heap
-            // mapped if the source is mapped" (cluster.c:751-756).
-            mapped: old_heap.is_mapped(),
             allow_system_table_mods: true,
             reloptions: reloptions.as_deref(),
         },
@@ -154,16 +148,13 @@ pub fn finish_heap_swap<'mcx>(
     cutoff_multi: types_core::primitive::MultiXactId,
     newrelpersistence: u8,
 ) -> PgResult<()> {
-    let mut mapped_tables: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let (toast1, toast2) = swap_relation_files(
         mcx,
         old_heap_oid,
         new_heap_oid,
-        old_heap_oid == RELATION_RELATION_ID,
         swap_toast_by_content,
         frozen_xid,
         cutoff_multi,
-        &mut mapped_tables,
     )?;
 
     if is_system_catalog {
@@ -195,41 +186,7 @@ pub fn finish_heap_swap<'mcx>(
         }
     }
 
-    // Rebuilding pg_class: swap_relation_files couldn't touch pg_class's own
-    // row, so relfrozenxid wasn't updated — do it now that the new relation
-    // is reachable through its rebuilt indexes (cluster.c:1522-1556).
-    if old_heap_oid == RELATION_RELATION_ID {
-        let rel_relation = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
-        let desc = rel_relation.descr();
-        let natts = desc.natts as usize;
-        let key = oid_key(1, old_heap_oid);
-        let mut scan = genam::systable_beginscan(
-            mcx,
-            &rel_relation,
-            catalog::ClassOidIndexId,
-            true,
-            None,
-            &[key],
-        )?;
-        let tup = genam::systable_getnext(mcx, &mut scan)?
-            .unwrap_or_else(|| panic!("cache lookup failed for relation {old_heap_oid}"));
-        let mut repl_values: PgVec<'_, Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut repl_isnull: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut repl: PgVec<'_, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-        repl_values.resize(natts, Datum::null());
-        repl_isnull.resize(natts, false);
-        repl.resize(natts, false);
-        repl_values[Anum_pg_class_relfrozenxid - 1] = Datum::from_transaction_id(frozen_xid);
-        repl[Anum_pg_class_relfrozenxid - 1] = true;
-        repl_values[Anum_pg_class_relminmxid - 1] = Datum::from_u32(cutoff_multi);
-        repl[Anum_pg_class_relminmxid - 1] = true;
-        let mut newtup =
-            heaptuple::heap_modify_tuple(mcx, tup, desc, &repl_values, &repl_isnull, &repl)?;
-        let otid = tup.t_self;
-        genam::systable_endscan(mcx, scan)?;
-        catalog_indexing::CatalogTupleUpdate(mcx, &rel_relation, &otid, &mut newtup)?;
-        rel_relation.close(RowExclusiveLock)?;
-    }
+    debug_assert!(old_heap_oid != RELATION_RELATION_ID);
 
     let object = pg_depend::ObjectAddress::set(RELATION_RELATION_ID, new_heap_oid);
     catalog_dependency::performDeletion(
@@ -238,13 +195,6 @@ pub fn finish_heap_swap<'mcx>(
         types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
         catalog_dependency::PERFORM_DELETION_INTERNAL,
     )?;
-
-    // Drop the transient tables' relation-map entries before commit; the
-    // relmapper rejects new permanent map entries post-bootstrap
-    // (cluster.c:1568-1575).
-    for &oid in mapped_tables.iter() {
-        relmapper::RelationMapRemoveMapping(oid)?;
-    }
 
     // Toast-by-links rename: the surviving toast (swapped onto the old heap)
     // carries the transient name; rename it and its index, reset relrewrite.
@@ -290,21 +240,16 @@ fn tablecmds_rename_seam<'mcx>(
     tablecmds_seams::rename_relation_internal::call(mcx, relid, newname, is_index)
 }
 
-// swap_relation_files; returns both reltoastrelid values as seen before the
-// swap. By-content recursion (CLUSTER/VACUUM FULL) swaps the toast tables and
-// their valid indexes in place of the link swap. Mapped relations swap their
-// relation-map entries instead of the pg_class physical columns, and each
-// mapped r2 (the transient side) is appended to mapped_tables for
-// finish_heap_swap's RelationMapRemoveMapping pass (cluster.c:1056-1186).
+// swap_relation_files, non-mapped arm; returns both reltoastrelid values as
+// seen before the swap. By-content recursion (CLUSTER/VACUUM FULL) swaps the
+// toast tables and their valid indexes in place of the link swap.
 fn swap_relation_files<'mcx>(
     mcx: Mcx<'mcx>,
     r1: Oid,
     r2: Oid,
-    target_is_pg_class: bool,
     swap_toast_by_content: bool,
     frozen_xid: types_core::primitive::TransactionId,
     cutoff_multi: types_core::primitive::MultiXactId,
-    mapped_tables: &mut PgVec<'mcx, Oid>,
 ) -> PgResult<(Oid, Oid)> {
     let rel_relation = table::table_open(mcx, RELATION_RELATION_ID, RowExclusiveLock)?;
     let desc = rel_relation.descr();
@@ -319,7 +264,6 @@ fn swap_relation_files<'mcx>(
         relam: Oid,
         relpersistence: i8,
         relkind: i8,
-        relisshared: bool,
         reltoastrelid: Oid,
         relpages: Datum,
         reltuples: Datum,
@@ -353,7 +297,6 @@ fn swap_relation_files<'mcx>(
             relam: get(Anum_pg_class_relam).as_oid(),
             relpersistence: get(Anum_pg_class_relpersistence).as_i8(),
             relkind: get(Anum_pg_class_relkind).as_i8(),
-            relisshared: get(Anum_pg_class_relisshared).as_bool(),
             reltoastrelid: get(Anum_pg_class_reltoastrelid).as_oid(),
             relpages: get(Anum_pg_class_relpages),
             reltuples: get(Anum_pg_class_reltuples),
@@ -366,82 +309,49 @@ fn swap_relation_files<'mcx>(
 
     let mut row1 = read_row(r1)?;
     let mut row2 = read_row(r2)?;
-
-    if row1.relfilenode != InvalidOid && row2.relfilenode != InvalidOid {
-        // Normal non-mapped relations: swap relfilenumbers, reltablespaces,
-        // relam, relpersistence (cluster.c:1101-1134).
-        debug_assert!(!target_is_pg_class);
-        row1.vals.push((Anum_pg_class_relfilenode, Datum::from_oid(row2.relfilenode)));
-        row1.vals.push((Anum_pg_class_reltablespace, Datum::from_oid(row2.reltablespace)));
-        row1.vals.push((Anum_pg_class_relam, Datum::from_oid(row2.relam)));
-        row1.vals.push((Anum_pg_class_relpersistence, Datum::from_i8(row2.relpersistence)));
-        row2.vals.push((Anum_pg_class_relfilenode, Datum::from_oid(row1.relfilenode)));
-        row2.vals.push((Anum_pg_class_reltablespace, Datum::from_oid(row1.reltablespace)));
-        row2.vals.push((Anum_pg_class_relam, Datum::from_oid(row1.relam)));
-        row2.vals.push((Anum_pg_class_relpersistence, Datum::from_i8(row1.relpersistence)));
-        if !swap_toast_by_content {
-            row1.vals.push((Anum_pg_class_reltoastrelid, Datum::from_oid(row2.reltoastrelid)));
-            row2.vals.push((Anum_pg_class_reltoastrelid, Datum::from_oid(row1.reltoastrelid)));
-        }
-    } else {
-        // Mapped-relation case (cluster.c:1135-1186): swap the relation-map
-        // entries instead of the pg_class physical columns. Both must be
-        // mapped; the equality checks are C's non-user-facing backstops.
-        assert!(
-            row1.relfilenode == InvalidOid && row2.relfilenode == InvalidOid,
-            "cannot swap mapped relation {r1} with non-mapped relation"
-        );
-        assert!(
-            row1.reltablespace == row2.reltablespace,
-            "cannot change tablespace of mapped relation {r1}"
-        );
-        assert!(
-            row1.relpersistence == row2.relpersistence,
-            "cannot change persistence of mapped relation {r1}"
-        );
-        assert!(
-            row1.relam == row2.relam,
-            "cannot change access method of mapped relation {r1}"
-        );
-        assert!(
-            swap_toast_by_content
-                || (row1.reltoastrelid == InvalidOid && row2.reltoastrelid == InvalidOid),
-            "cannot swap toast by links for mapped relation {r1}"
-        );
-        let n1 = relmapper::RelationMapOidToFilenumber(r1, row1.relisshared);
-        assert!(
-            n1 != types_core::InvalidRelFileNumber,
-            "could not find relation mapping for relation {r1}"
-        );
-        let n2 = relmapper::RelationMapOidToFilenumber(r2, row2.relisshared);
-        assert!(
-            n2 != types_core::InvalidRelFileNumber,
-            "could not find relation mapping for relation {r2}"
-        );
-        // Replacement mappings take effect at CommandCounterIncrement.
-        relmapper::RelationMapUpdateMap(r1, n2, row1.relisshared, false)?;
-        relmapper::RelationMapUpdateMap(r2, n1, row2.relisshared, false)?;
-        mapped_tables.push(r2);
-    }
+    assert!(
+        row1.relfilenode != InvalidOid && row2.relfilenode != InvalidOid,
+        "unported: swap_relation_files mapped relations"
+    );
 
     // C's rd_createSubid/rd_*RelfilelocatorSubid transfer +
     // RelationAssumeNewRelfilelocator(rel1) (cluster.c:1188-1205) is not
     // ported: heapam never WAL-skips permanent rels and bulkwrite/nbtree
     // smgrimmedsync eagerly, so no deferred pendingSyncs read those fields.
     // Load-bearing the day a WAL-skip (wal_level=minimal) lane lands.
+    for pair in [
+        (Anum_pg_class_relfilenode, Datum::from_oid(row2.relfilenode)),
+        (Anum_pg_class_reltablespace, Datum::from_oid(row2.reltablespace)),
+        (Anum_pg_class_relam, Datum::from_oid(row2.relam)),
+        (Anum_pg_class_relpersistence, Datum::from_i8(row2.relpersistence)),
+        (Anum_pg_class_relpages, row2.relpages),
+        (Anum_pg_class_reltuples, row2.reltuples),
+        (Anum_pg_class_relallvisible, row2.relallvisible),
+        (Anum_pg_class_relallfrozen, row2.relallfrozen),
+    ] {
+        row1.vals.push(pair);
+    }
+    if !swap_toast_by_content {
+        row1.vals.push((Anum_pg_class_reltoastrelid, Datum::from_oid(row2.reltoastrelid)));
+    }
     if row1.relkind != RELKIND_INDEX as i8 {
         row1.vals.push((Anum_pg_class_relfrozenxid, Datum::from_transaction_id(frozen_xid)));
         row1.vals.push((Anum_pg_class_relminmxid, Datum::from_u32(cutoff_multi)));
     }
-    // Swap size statistics too, since new rel has freshly-updated stats.
-    for (anum, a, b) in [
-        (Anum_pg_class_relpages, row2.relpages, row1.relpages),
-        (Anum_pg_class_reltuples, row2.reltuples, row1.reltuples),
-        (Anum_pg_class_relallvisible, row2.relallvisible, row1.relallvisible),
-        (Anum_pg_class_relallfrozen, row2.relallfrozen, row1.relallfrozen),
+    for pair in [
+        (Anum_pg_class_relfilenode, Datum::from_oid(row1.relfilenode)),
+        (Anum_pg_class_reltablespace, Datum::from_oid(row1.reltablespace)),
+        (Anum_pg_class_relam, Datum::from_oid(row1.relam)),
+        (Anum_pg_class_relpersistence, Datum::from_i8(row1.relpersistence)),
+        (Anum_pg_class_relpages, row1.relpages),
+        (Anum_pg_class_reltuples, row1.reltuples),
+        (Anum_pg_class_relallvisible, row1.relallvisible),
+        (Anum_pg_class_relallfrozen, row1.relallfrozen),
     ] {
-        row1.vals.push((anum, a));
-        row2.vals.push((anum, b));
+        row2.vals.push(pair);
+    }
+    if !swap_toast_by_content {
+        row2.vals.push((Anum_pg_class_reltoastrelid, Datum::from_oid(row1.reltoastrelid)));
     }
 
     for (relid, row) in [(r1, &row1), (r2, &row2)] {
@@ -470,14 +380,7 @@ fn swap_relation_files<'mcx>(
             heaptuple::heap_modify_tuple(mcx, tup, desc, &repl_values, &repl_isnull, &repl)?;
         let otid = row.tid;
         genam::systable_endscan(mcx, scan)?;
-        if !target_is_pg_class {
-            catalog_indexing::CatalogTupleUpdate(mcx, &rel_relation, &otid, &mut newtup)?;
-        } else {
-            // Updating pg_class's own rows would scribble on the old data
-            // we're about to throw away; the map change is the real work.
-            // Relcache inval is still required (cluster.c:1248-1273).
-            inval::invalidate::CacheInvalidateRelcacheByTuple(newtup.as_tuple())?;
-        }
+        catalog_indexing::CatalogTupleUpdate(mcx, &rel_relation, &otid, &mut newtup)?;
     }
     rel_relation.close(RowExclusiveLock)?;
 
@@ -513,11 +416,9 @@ fn swap_relation_files<'mcx>(
                 mcx,
                 row1.reltoastrelid,
                 row2.reltoastrelid,
-                target_is_pg_class,
                 true,
                 frozen_xid,
                 cutoff_multi,
-                mapped_tables,
             )?;
         } else {
             // Link swap: rewire the INTERNAL toast->owner dependencies.
@@ -566,16 +467,7 @@ fn swap_relation_files<'mcx>(
     {
         let toast_index1 = heaptoast::toast_get_valid_index(mcx, r1, AccessExclusiveLock)?;
         let toast_index2 = heaptoast::toast_get_valid_index(mcx, r2, AccessExclusiveLock)?;
-        swap_relation_files(
-            mcx,
-            toast_index1,
-            toast_index2,
-            target_is_pg_class,
-            true,
-            0,
-            0,
-            mapped_tables,
-        )?;
+        swap_relation_files(mcx, toast_index1, toast_index2, true, 0, 0)?;
     }
 
     Ok((row1.reltoastrelid, row2.reltoastrelid))

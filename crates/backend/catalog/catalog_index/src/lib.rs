@@ -656,9 +656,6 @@ pub fn index_create<'mcx>(
         &indexTupDesc,
         relkind,
         relpersistence,
-        // mapped_relation = RelationIsMapped(heapRelation) (index.c:786);
-        // indexes on mapped catalogs are themselves mapped.
-        heapRelation.is_mapped(),
         extra.allow_system_table_mods,
     )?;
     debug_assert!(relfrozenxid == 0 && relminmxid == 0);

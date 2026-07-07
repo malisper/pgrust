@@ -3238,7 +3238,6 @@ dependencies = [
  "procarray",
  "rel_vocab",
  "relcache",
- "relmapper",
  "reloptions",
  "rewriteheap",
  "snapmgr",

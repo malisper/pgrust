@@ -239,7 +239,6 @@ pub fn heap_create<'mcx>(
     tupdesc: &TupleDescData<'_>,
     relkind: u8,
     relpersistence: u8,
-    mapped_relation: bool,
     allow_system_table_mods: bool,
 ) -> PgResult<(Rc<RelationData<'static>>, TransactionId, MultiXactId)> {
     if ((catalog::IsCatalogNamespace(relnamespace) && relkind != types_rel::RELKIND_INDEX)
@@ -293,7 +292,7 @@ pub fn heap_create<'mcx>(
         relfilenumber,
         reltablespace,
         false,
-        mapped_relation,
+        false,
         relpersistence,
         relkind,
     )?;
@@ -575,9 +574,6 @@ pub struct HeapCreateParams<'a> {
     pub relkind: u8,
     pub relpersistence: u8,
     pub reloftype: Oid,
-    // RelationIsMapped(source): CLUSTER/VACUUM FULL transient heaps for
-    // mapped catalogs must themselves be mapped (cluster.c make_new_heap).
-    pub mapped: bool,
     pub allow_system_table_mods: bool,
     pub reloptions: Option<&'a [u8]>,
 }
@@ -692,7 +688,6 @@ pub fn heap_create_with_catalog<'mcx>(
         tupdesc,
         p.relkind,
         p.relpersistence,
-        p.mapped,
         p.allow_system_table_mods,
     )?;
 

@@ -66,6 +66,5 @@ types_snapshot = { path = "../../../_support/types/snapshot" }
 init_small = { path = "../../utils/init/init_small" }
 guc = { path = "../../utils/misc/guc" }
 inval = { path = "../../utils/cache/inval" }
-relmapper = { path = "../../utils/cache/relmapper" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pg_rusage = { path = "../../utils/misc/pg_rusage" }
