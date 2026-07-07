@@ -106,7 +106,7 @@ pub fn PrepareQuery(
     let tag = utility_seams::create_command_tag::call(query);
     let plansource = plancache::CreateCachedPlan(Some(&rawstmt), source_text, tag)?;
 
-    let filled = fill_plansource(plansource, source_text, stmt_location);
+    let filled = fill_plansource(plansource, source_text, stmt);
     if let Err(e) = filled {
         // C leaves the transient plansource to transaction-abort cleanup; the
         // registry has no abort hook yet, so reclaim it here.
@@ -119,79 +119,29 @@ pub fn PrepareQuery(
         plancache::DropCachedPlan(plansource);
         return Err(e);
     }
-    plancache::SetCachedPlanReanalyze(plansource, reanalyze_prepared, stmt_location);
+    // Revalidation is plancache's fixedparams default on the retained inner
+    // query tree, with the resolved param types (C's parserSetup == NULL arm).
     Ok(())
-}
-
-// C retains the raw parse tree and re-analyzes with the resolved (fixed)
-// param types; here the retained query_string re-parses to the same tree.
-fn reanalyze_prepared(
-    qmcx: Mcx<'static>,
-    query_string: &'static str,
-    param_types: &'static [types_core::Oid],
-    stmt_location: i32,
-) -> PgResult<mcx::PgVec<'static, types_nodes::parsenodes::Query<'static>>> {
-    let raw_list = parser_seams::raw_parser::call(
-        qmcx,
-        query_string,
-        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-    )?;
-    let reparsed = raw_list
-        .iter()
-        .find(|r| {
-            r.stmt_location == stmt_location
-                && r.stmt.map(|s| s.node_tag()) == Some(types_nodes::NodeTag::T_PrepareStmt)
-        })
-        .and_then(|r| r.stmt)
-        .and_then(|s| s.as_prepare_stmt())
-        .expect("re-parse reproduces the PREPARE statement");
-    let inner = RawStmt {
-        stmt: Some(reparsed.query.expect("PREPARE has a query")),
-        stmt_location,
-        stmt_len: 0,
-    };
-    postgres::pg_analyze_and_rewrite_fixedparams(
-        qmcx,
-        &inner,
-        query_string,
-        param_types,
-        QueryEnvHandle::NULL,
-    )
 }
 
 fn fill_plansource(
     plansource: CachedPlanSourceHandle,
     source_text: &str,
-    stmt_location: ParseLoc,
+    stmt: &PrepareStmt<'_>,
 ) -> PgResult<()> {
-    // C copyObject-retains the message-arena raw tree; here the statement is
-    // re-parsed into the plansource's query arena (once per PREPARE, cold).
+    // C analyzes the message-arena inner tree in place; here analysis
+    // scribbles query-arena pointers into its input, so the plansource's
+    // retained copy is copied once more into the query arena (no re-lex: a
+    // second lex re-emits scanner warnings C doesn't).
     let qmcx = plancache::SourceQueryMcx(plansource);
-    let raw_list = parser_seams::raw_parser::call(
-        qmcx,
-        source_text,
-        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-    )?;
-    let reparsed = raw_list
-        .iter()
-        .find(|r| {
-            r.stmt_location == stmt_location
-                && r.stmt.map(|s| s.node_tag()) == Some(types_nodes::NodeTag::T_PrepareStmt)
-        })
-        .and_then(|r| r.stmt)
-        .and_then(|s| s.as_prepare_stmt())
-        .expect("re-parse reproduces the PREPARE statement");
-    let inner = RawStmt {
-        stmt: Some(reparsed.query.expect("PREPARE has a query")),
-        stmt_location,
-        stmt_len: 0,
-    };
+    let inner = plancache::CachedPlanRawParseTreeCopy(qmcx, plansource)?
+        .expect("created with a raw tree");
 
     let mut pstate = parser_small1::make_parsestate(qmcx, None);
     pstate.p_sourcetext = Some(mcx::slice_in(qmcx, source_text.as_bytes())?.leak());
     let mut argtypes: mcx::PgVec<'_, types_core::Oid> =
-        mcx::vec_with_capacity_in(qmcx, reparsed.argtypes.len())?;
-    for tn_node in reparsed.argtypes.iter() {
+        mcx::vec_with_capacity_in(qmcx, stmt.argtypes.len())?;
+    for tn_node in stmt.argtypes.iter() {
         let tn = tn_node.as_type_name().expect("PREPARE argtypes are TypeNames");
         argtypes.push(parse_utilcmd::typenameTypeId(qmcx, Some(&pstate), tn)?);
     }
@@ -199,7 +149,7 @@ fn fill_plansource(
 
     let (query_list, resolved) = postgres::pg_analyze_and_rewrite_varparams(
         qmcx,
-        &inner,
+        inner,
         source_text,
         &argtypes,
         QueryEnvHandle::NULL,

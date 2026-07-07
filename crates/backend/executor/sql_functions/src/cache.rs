@@ -517,12 +517,10 @@ fn build_query_plansource(
             let build = (|| -> PgResult<()> {
                 let qmcx = plancache::SourceQueryMcx(psrc);
                 let src = plancache::CachedPlanQueryString(psrc);
-                let reparsed = parser_seams::raw_parser::call(
-                    qmcx,
-                    src,
-                    parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-                )?;
-                let raw2 = reparsed.get(qindex).expect("re-parse reproduces the statement");
+                // Retained-tree copy, not a re-parse: a second lex re-emits
+                // scanner warnings C doesn't.
+                let raw2 = plancache::CachedPlanRawParseTreeCopy(qmcx, psrc)?
+                    .expect("created with a raw tree");
                 let mut name_refs: PgVec<'_, &str> = PgVec::new_in(qmcx);
                 name_refs
                     .try_reserve_exact(s.argnames.len())
@@ -577,9 +575,29 @@ fn build_query_plansource(
                 plancache::DropCachedPlan(psrc);
                 return Err(e);
             }
+            // Bar plancache's fixedparams default: it would skip the sql-fn
+            // parameter hooks and the last-query retval munging. Loud, and
+            // reachable only by an invalidation landing between the
+            // revalidate_query probe and GetCachedPlan.
+            plancache::SetCachedPlanReanalyze(psrc, reanalyze_sql_fn_unported, 0);
         }
         Ok(psrc)
     }
+}
+
+fn reanalyze_sql_fn_unported(
+    _qmcx: Mcx<'static>,
+    _raw: &'static types_nodes::rawnodes::RawStmt<'static>,
+    _query_string: &'static str,
+    _param_types: &'static [Oid],
+    _query_env: QueryEnvHandle,
+    _arg: i32,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    panic!(
+        "RevalidateCachedQuery (plancache.c): SQL-function source invalidated between the \
+         revalidate_query probe and GetCachedPlan; in-plancache sql_fn_parser_setup \
+         re-analysis is the sql_functions lane"
+    );
 }
 
 #[cfg(test)]

@@ -127,6 +127,71 @@ struct PlanEntry {
     plan: SpiPlanPtr,
     paramnos: Vec<Dno>,
     argtypes: Vec<Oid>,
+    // Owned copy of the parser-hook tables the plan was prepared under, for
+    // plancache revalidation (C: parserSetup + expr->func->cur_estate). Types
+    // are as-of the last prepare; a between-executions change re-prepares via
+    // the ensure_plan probe first, so revalidation only ever sees the tables
+    // of the in-flight execution.
+    hooks: std::rc::Rc<HookSnapshot>,
+}
+
+struct HookSnapshot {
+    names: Vec<(String, Dno, Oid, i32, Oid)>,
+    params_by_dno: Vec<Option<(Oid, i32, Oid)>>,
+    arg_dnos: Vec<Dno>,
+    recs: Vec<String>,
+    valueless: Vec<String>,
+    resolve_option: parser_small1::PlpgsqlResolveOption,
+}
+
+// RevalidateCachedQuery's re-analysis arm for a plpgsql expression source
+// (C: plpgsql_parser_setup with parserSetupArg = expr): re-analyze the
+// retained raw tree under the hook tables the plan was prepared with.
+fn reanalyze_plpgsql_expr(
+    qmcx: Mcx<'static>,
+    raw: &'static types_nodes::rawnodes::RawStmt<'static>,
+    query_string: &'static str,
+    _param_types: &[Oid],
+    query_env: types_portal::QueryEnvHandle,
+    arg: i32,
+) -> PgResult<mcx::PgVec<'static, types_nodes::parsenodes::Query<'static>>> {
+    let expr_id = arg as u32;
+    let snap = EXPR_PLANS
+        .with(|t| t.borrow().get(&expr_id).map(|e| std::rc::Rc::clone(&e.hooks)))
+        .expect("reanalyze_plpgsql_expr: plan entry lives while its source does");
+    let used = core::cell::RefCell::new(Vec::new());
+    let name_entries: Vec<parser_small1::PlpgsqlNameEntry> = snap
+        .names
+        .iter()
+        .map(|(key, dno, t, m, c)| parser_small1::PlpgsqlNameEntry {
+            key,
+            dno: *dno,
+            typoid: *t,
+            typmod: *m,
+            collation: *c,
+        })
+        .collect();
+    let rec_names: Vec<&str> = snap.recs.iter().map(|s| s.as_str()).collect();
+    let valueless_names: Vec<&str> = snap.valueless.iter().map(|s| s.as_str()).collect();
+    let hooks = parser_small1::PlpgsqlHookState {
+        names: &name_entries,
+        params_by_dno: &snap.params_by_dno,
+        arg_dnos: &snap.arg_dnos,
+        recs: &rec_names,
+        valueless_recs: &valueless_names,
+        resolve_option: snap.resolve_option,
+        used: &used,
+    };
+    let query =
+        analyze_seams::parse_analyze_plpgsql::call(qmcx, raw, query_string, &hooks, query_env)?;
+    if query.commandType == types_nodes::nodes_enums::CmdType::CMD_UTILITY {
+        let mut v = mcx::PgVec::new_in(qmcx);
+        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+        v.push(query);
+        Ok(v)
+    } else {
+        rewrite_handler_seams::query_rewrite::call(qmcx, query)
+    }
 }
 
 std::thread_local! {
@@ -481,10 +546,12 @@ impl<'a> Estate<'a> {
         };
         match stale {
             Some(false) => return Ok(()),
-            // C's RevalidateCachedQuery re-analyzes the retained raw tree in
-            // place; this port re-prepares from the retained query text (same
-            // text, fresh analysis) whenever the source would need re-analysis
-            // (invalidation, search_path mismatch, RLS environment change).
+            // C's RevalidateCachedQuery re-analyzes in place; this port
+            // re-prepares whenever the probe says the source needs re-analysis
+            // (invalidation, search_path mismatch, RLS environment change) so
+            // the hook tables refresh against current datum/tupdesc types. An
+            // invalidation landing after the probe (lock-time sinval) is
+            // covered by the installed reanalyze_plpgsql_expr hook instead.
             Some(true) => {
                 // Release this estate's simple-expr pin before the source is
                 // dropped (handles are generation-checked; a stale probe
@@ -517,19 +584,18 @@ impl<'a> Estate<'a> {
             .collect();
         let rec_names: Vec<&str> = recs.iter().map(|s| s.as_str()).collect();
         let valueless_names: Vec<&str> = valueless.iter().map(|s| s.as_str()).collect();
+        let resolve_option = match self.func.resolve_option {
+            crate::comp::PLPGSQL_RESOLVE_VARIABLE => parser_small1::PlpgsqlResolveOption::Variable,
+            crate::comp::PLPGSQL_RESOLVE_COLUMN => parser_small1::PlpgsqlResolveOption::Column,
+            _ => parser_small1::PlpgsqlResolveOption::Error,
+        };
         let hooks = parser_small1::PlpgsqlHookState {
             names: &name_entries,
             params_by_dno: &params_by_dno,
             arg_dnos: &self.func.fn_argvarnos,
             recs: &rec_names,
             valueless_recs: &valueless_names,
-            resolve_option: match self.func.resolve_option {
-                crate::comp::PLPGSQL_RESOLVE_VARIABLE => {
-                    parser_small1::PlpgsqlResolveOption::Variable
-                }
-                crate::comp::PLPGSQL_RESOLVE_COLUMN => parser_small1::PlpgsqlResolveOption::Column,
-                _ => parser_small1::PlpgsqlResolveOption::Error,
-            },
+            resolve_option,
             used: &used,
         };
         // Warnings emitted during parse/analysis (scanner escape warnings)
@@ -542,14 +608,25 @@ impl<'a> Estate<'a> {
         if spi::SPI_keepplan(plan) != 0 {
             panic!("plpgsql exec_prepare_plan: SPI_keepplan failed");
         }
+        if let Some((psrc, _)) = spi::SPI_plan_single_source(plan) {
+            plancache::SetCachedPlanReanalyze(psrc, reanalyze_plpgsql_expr, expr.expr_id as i32);
+        }
         let mut paramnos = used.into_inner();
         paramnos.sort_unstable();
         let argtypes: Vec<Oid> = params_by_dno
             .iter()
             .map(|s| s.map(|(t, _, _)| t).unwrap_or(types_core::InvalidOid))
             .collect();
+        let hooks = std::rc::Rc::new(HookSnapshot {
+            names: hooks_names,
+            params_by_dno,
+            arg_dnos: self.func.fn_argvarnos.clone(),
+            recs,
+            valueless,
+            resolve_option,
+        });
         EXPR_PLANS.with(|t| {
-            t.borrow_mut().insert(expr.expr_id, PlanEntry { plan, paramnos, argtypes })
+            t.borrow_mut().insert(expr.expr_id, PlanEntry { plan, paramnos, argtypes, hooks })
         });
         Ok(())
     }

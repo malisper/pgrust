@@ -52,13 +52,14 @@ fn analyze_and_rewrite(
     raw: &types_nodes::rawnodes::RawStmt<'static>,
     src: &str,
     argtypes: &[Oid],
+    query_env: types_portal::QueryEnvHandle,
 ) -> PgResult<PgVec<'static, Query<'static>>> {
     let query = analyze_seams::parse_analyze_fixedparams::call(
         qmcx,
         raw,
         src,
         argtypes,
-        crate::current_query_env(),
+        query_env,
     )?;
     if query.commandType == CmdType::CMD_UTILITY {
         let mut v = PgVec::new_in(qmcx);
@@ -70,9 +71,10 @@ fn analyze_and_rewrite(
     }
 }
 
-// One-shot completion (C's in-_SPI_execute_plan parse-analysis arm); the raw
-// tree is re-parsed into the plansource's query arena (extended_query
-// lifetime-laundering precedent).
+// One-shot completion (C's in-_SPI_execute_plan parse-analysis arm); analysis
+// scribbles query-arena pointers into its input, so the plansource's retained
+// raw tree is copied into the query arena (no re-lex: a second lex re-emits
+// scanner warnings C doesn't).
 pub(crate) fn complete_source(
     psrc: plancache::CachedPlanSourceHandle,
     stmt_index: usize,
@@ -81,35 +83,26 @@ pub(crate) fn complete_source(
 ) -> PgResult<()> {
     let src = plancache::CachedPlanQueryString(psrc);
     let qmcx = plancache::SourceQueryMcx(psrc);
-    let raw_list = parser_seams::raw_parser::call(
-        qmcx,
-        src,
-        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-    )?;
-    let raw = raw_list.get(stmt_index).expect("re-parse reproduces the statement");
-    let query_list =
-        analyze_and_rewrite(qmcx, raw, src, argtypes).map_err(|e| spi_error_transpose(src, e))?;
+    let raw = plancache::CachedPlanRawParseTreeCopy(qmcx, psrc)?.expect("created with a raw tree");
+    let query_list = analyze_and_rewrite(qmcx, raw, src, argtypes, crate::current_query_env())
+        .map_err(|e| spi_error_transpose(src, e))?;
     plancache::CompleteCachedPlan(psrc, query_list, argtypes, cursor_options, false)?;
     plancache::SetCachedPlanReanalyze(psrc, reanalyze_spi_source, stmt_index as i32);
     Ok(())
 }
 
 // C revalidates fixed-param SPI sources via pg_analyze_and_rewrite_fixedparams
-// on the retained raw tree (plancache.c:810-814); here the retained source
-// text re-parses and `arg` re-locates this source's statement.
+// on the retained raw tree (plancache.c:810-814), under _SPI_error_callback;
+// the transpose is the callback, `arg` (the statement index) is unused.
 fn reanalyze_spi_source(
     qmcx: Mcx<'static>,
+    raw: &'static types_nodes::rawnodes::RawStmt<'static>,
     query_string: &'static str,
     param_types: &'static [Oid],
-    arg: i32,
+    query_env: types_portal::QueryEnvHandle,
+    _arg: i32,
 ) -> PgResult<PgVec<'static, Query<'static>>> {
-    let raw_list = parser_seams::raw_parser::call(
-        qmcx,
-        query_string,
-        parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
-    )?;
-    let raw = raw_list.get(arg as usize).expect("re-parse reproduces the statement");
-    analyze_and_rewrite(qmcx, raw, query_string, param_types)
+    analyze_and_rewrite(qmcx, raw, query_string, param_types, query_env)
         .map_err(|e| spi_error_transpose(query_string, e))
 }
 
@@ -275,8 +268,10 @@ pub fn SPI_prepare_plpgsql(
                 sources.push((psrc, i));
                 let qmcx = plancache::SourceQueryMcx(psrc);
                 let qsrc = plancache::CachedPlanQueryString(psrc);
-                let qraw_list = parser_seams::raw_parser::call(qmcx, qsrc, parse_mode)?;
-                let qraw = qraw_list.get(i).expect("re-parse reproduces the statement");
+                // Retained-tree copy, not a re-parse: a second lex re-emits
+                // scanner warnings C doesn't (plpgsql strtest).
+                let qraw = plancache::CachedPlanRawParseTreeCopy(qmcx, psrc)?
+                    .expect("created with a raw tree");
                 let query = analyze_seams::parse_analyze_plpgsql::call(
                     qmcx,
                     qraw,

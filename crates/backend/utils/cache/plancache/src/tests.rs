@@ -89,6 +89,8 @@ fn install() {
         lock_seams::mark_lock_clear::set(|_, _| {});
         xact_seams::get_current_transaction_nest_level::set(|| 1);
         catalog_seams::is_shared_relation::set(|_| false);
+        analyze_seams::parse_analyze_fixedparams::set(stub_parse_analyze_fixedparams);
+        rewrite_handler_seams::query_rewrite::set(stub_query_rewrite);
         {
             guc_tables::vars::plan_cache_mode.install_if_absent(guc_tables::GucVarAccessors {
                 get: || PLAN_CACHE_MODE_VAR.with(Cell::get),
@@ -128,7 +130,7 @@ fn select_raw(mcx: mcx::Mcx<'static>) -> RawStmt<'static> {
     }
 }
 
-fn select_query(mcx: mcx::Mcx<'static>, with_rel: bool) -> Query<'static> {
+fn select_query<'m>(mcx: mcx::Mcx<'m>, with_rel: bool) -> Query<'m> {
     let konst = Node::mk(
         mcx,
         Const {
@@ -316,28 +318,87 @@ fn reset_plan_cache_skips_non_revalidatable_sources() {
     DropCachedPlan(h_sel);
 }
 
+// A revalidatable source with no retained raw tree (the sqlbody-style
+// CreateCachedPlanForQuery shape) cannot re-analyze: loud.
 #[test]
 #[should_panic(expected = "RevalidateCachedQuery (plancache.c)")]
-fn invalidated_source_replan_arm_is_loud() {
+fn invalidated_source_without_raw_tree_is_loud() {
     install();
     push_snapshot();
-    let h = make_saved_source(false);
+    let scratch = test_mcx();
+    let analyzed = select_query(scratch, false);
+    let h = CreateCachedPlanForQuery(&analyzed, "SELECT 1", CommandTag::SELECT).unwrap();
+    let qmcx = SourceQueryMcx(h);
+    let mut qlist = PgVec::new_in(qmcx);
+    qlist.push(select_query(qmcx, false));
+    CompleteCachedPlan(h, qlist, &[], types_portal::CURSOR_OPT_PARALLEL_OK, true).unwrap();
+    SaveCachedPlan(h).unwrap();
     PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
     assert!(!CachedPlanIsValid(h));
     let _ = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL);
 }
 
+// Sinval flushes the querytree; with no installed hook the next fetch
+// re-analyzes a copy of the retained raw tree via the fixedparams default.
+#[test]
+fn invalidated_source_reanalyzes_via_fixedparams_default() {
+    install();
+    push_snapshot();
+    DEFAULT_ANALYZE_CALLS.with(|c| c.set(0));
+    let h = make_saved_source(false);
+
+    let p1 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(DEFAULT_ANALYZE_CALLS.with(Cell::get), 0);
+    ReleaseCachedPlan(p1);
+
+    PlanCacheSysCallback(Datum::from_oid(InvalidOid), NAMESPACEOID, 0);
+    assert!(!CachedPlanIsValid(h));
+
+    let p2 = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    assert_eq!(DEFAULT_ANALYZE_CALLS.with(Cell::get), 1);
+    assert!(CachedPlanIsValid(h));
+    assert_eq!(CachedPlanStmtList(p2).len(), 1);
+    ReleaseCachedPlan(p2);
+    DropCachedPlan(h);
+}
+
 thread_local! {
     static REANALYZE_CALLS: Cell<u32> = const { Cell::new(0) };
+    static DEFAULT_ANALYZE_CALLS: Cell<u32> = const { Cell::new(0) };
+}
+
+fn stub_parse_analyze_fixedparams<'a, 'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    raw: &'a RawStmt<'mcx>,
+    _source_text: &'a str,
+    _param_types: &'a [Oid],
+    _query_env: QueryEnvHandle,
+) -> PgResult<Query<'mcx>> {
+    // The default arm hands over a copy of the retained tree.
+    assert!(raw.stmt.is_some_and(|s| s.as_select_stmt().is_some()));
+    DEFAULT_ANALYZE_CALLS.with(|c| c.set(c.get() + 1));
+    Ok(select_query(mcx, false))
+}
+
+fn stub_query_rewrite<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    query: Query<'mcx>,
+) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
+    let mut v = PgVec::new_in(mcx);
+    v.push(query);
+    Ok(v)
 }
 
 fn stub_reanalyze(
     qmcx: mcx::Mcx<'static>,
+    raw: &'static RawStmt<'static>,
     _query_string: &'static str,
     _param_types: &'static [Oid],
+    _query_env: QueryEnvHandle,
     arg: i32,
 ) -> PgResult<PgVec<'static, Query<'static>>> {
     assert_eq!(arg, 7);
+    assert!(raw.stmt.is_some_and(|s| s.as_select_stmt().is_some()));
     REANALYZE_CALLS.with(|c| c.set(c.get() + 1));
     let mut v = PgVec::new_in(qmcx);
     v.push(select_query(qmcx, false));

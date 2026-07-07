@@ -37,6 +37,8 @@ nodes_core = { path = "../../backend/nodes/nodes_core" }
 parse_utilcmd = { path = "../../backend/parser/parse_utilcmd" }
 parser_seams = { path = "../../backend/parser/parser_seams" }
 parser_small1 = { path = "../../backend/parser/parser_small1" }
+analyze_seams = { path = "../../backend/parser/analyze_seams" }
+rewrite_handler_seams = { path = "../../backend/rewrite/rewrite_handler_seams" }
 pg_proc = { path = "../../backend/catalog/pg_proc" }
 plancache = { path = "../../backend/utils/cache/plancache" }
 portalmem = { path = "../../backend/utils/mmgr/portalmem" }
