@@ -52,6 +52,18 @@ const BTREE_AM_OID: Oid = 403;
 const HASH_AM_OID: Oid = 405;
 const MAX_ATTS: usize = 1600;
 
+
+// PGRUST_GATHER_TRACE sub-attribution of RelationCacheInitializePhase3's
+// cost (the §2 table's 2.1ms line): which of file-load / critical-index /
+// finish / warm+write burns it decides the P-share-lite retention shape.
+fn gtrace_us(label: &str, t0: std::time::Instant) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
+        return;
+    }
+    eprintln!("GTRACE relcache3.{label} dt_us={}", t0.elapsed().as_micros());
+}
+
 pub fn RelationCacheInitialize() {
     // The hash table is created eagerly by the state cell (INITRELCACHESIZE).
     with_state(|_| ());
@@ -76,15 +88,20 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
     relmapper_seams::relation_map_initialize_phase3::call()?;
 
     let bootstrap = miscinit_seams::is_bootstrap_processing_mode::call();
+    let t0 = std::time::Instant::now();
     if bootstrap || !load_relcache_init_file(false)? {
         need_new_cache_file = true;
         for cat in LOCAL_BOOTSTRAP_CATALOGS {
             build::formrdesc(cat)?;
         }
+        gtrace_us("formrdesc", t0);
+    } else {
+        gtrace_us("initfile_load", t0);
     }
     if bootstrap {
         return Ok(());
     }
+    let t0 = std::time::Instant::now();
 
     // Critical indexes break the relcache-load recursion: until they're
     // nailed, ScanPgRelation heapscans (criticalRelcachesBuilt gates index_ok).
@@ -109,8 +126,13 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
         with_state(|st| st.critical_shared_relcaches_built = true);
     }
 
-    finish_relcache_entries()?;
+    gtrace_us("critical_indexes", t0);
 
+    let t0 = std::time::Instant::now();
+    finish_relcache_entries()?;
+    gtrace_us("finish_entries", t0);
+
+    let t0 = std::time::Instant::now();
     if need_new_cache_file {
         // Without this pre-warm the lazy relcache builds of syscache
         // catalogs land inside the first planning window and EXPLAIN
@@ -118,6 +140,7 @@ pub fn RelationCacheInitializePhase3() -> PgResult<()> {
         syscache_seams::init_catalog_cache_phase2::call()?;
         write_relcache_init_file(true)?;
         write_relcache_init_file(false)?;
+        gtrace_us("warm_and_write", t0);
     }
     Ok(())
 }
