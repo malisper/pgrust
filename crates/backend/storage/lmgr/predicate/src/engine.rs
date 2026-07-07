@@ -631,12 +631,60 @@ pub fn GetSerializableTransactionSnapshot<'m>(
     }
 
     if xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call() {
-        panic!(
-            "predicate.c GetSafeSnapshot: READ ONLY DEFERRABLE safe-snapshot machinery not ported"
-        );
+        return GetSafeSnapshot(snapshot, mcx);
     }
 
     GetSerializableTransactionSnapshotInt(snapshot, mcx)
+}
+
+// PG_WAIT_IPC | SafeSnapshot's index in wait_event_names.txt's IPC section.
+const WAIT_EVENT_SAFE_SNAPSHOT: u32 = 0x0800_0000 | 51;
+
+// GetSafeSnapshot (predicate.c:1558): obtain and register a snapshot for a
+// READ ONLY DEFERRABLE transaction, waiting out (and if flagged unsafe,
+// retrying past) concurrent read-write serializable transactions.
+fn GetSafeSnapshot<'m>(snapshot: &mut SnapshotData<'m>, mcx: mcx::Mcx<'m>) -> PgResult<()> {
+    debug_assert!(xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call());
+
+    loop {
+        GetSerializableTransactionSnapshotInt(snapshot, mcx)?;
+
+        if MySerializableXact() == InvalidSerializableXact {
+            return Ok(()); // no concurrent r/w xacts; it's safe
+        }
+
+        let procno = my_procno();
+        LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+
+        // SAFETY: MySerializableXact is our own active sxact; flag and list
+        // mutations happen under SerializableXactHashLock exclusive.
+        unsafe {
+            let mysx = MySerializableXact();
+            (*mysx).flags |= SXACT_FLAG_DEFERRABLE_WAITING;
+            while !(dlist_is_empty(&raw const (*mysx).possibleUnsafeConflicts)
+                || SxactIsROUnsafe(mysx))
+            {
+                LWLockRelease(SerializableXactHashLock())?;
+                lmgr_proc::ProcWaitForSignal(WAIT_EVENT_SAFE_SNAPSHOT);
+                LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+            }
+            (*mysx).flags &= !SXACT_FLAG_DEFERRABLE_WAITING;
+
+            if !SxactIsROUnsafe(mysx) {
+                LWLockRelease(SerializableXactHashLock())?;
+                break; // success
+            }
+        }
+
+        LWLockRelease(SerializableXactHashLock())?;
+
+        // Snapshot was unsafe; release and retry with a new one.
+        ReleasePredicateLocks(false, false)?;
+    }
+
+    debug_assert!(unsafe { SxactIsROSafe(MySerializableXact()) });
+    ReleasePredicateLocks(false, true)?;
+    Ok(())
 }
 
 fn GetSerializableTransactionSnapshotInt<'m>(
@@ -1648,9 +1696,12 @@ pub fn ReleasePredicateLocks(mut isCommit: bool, isReadOnlySafe: bool) -> PgResu
                     }
                 }
 
-                if SxactIsDeferrableWaiting(roXact) {
-                    // DEFERRABLE waiters can't exist: GetSafeSnapshot is loud.
-                    panic!("predicate.c: DEFERRABLE waiter found but GetSafeSnapshot is not ported");
+                // Wake a waiting DEFERRABLE transaction once it's known safe
+                // or conflicted (predicate.c:3616).
+                if SxactIsDeferrableWaiting(roXact)
+                    && (SxactIsROUnsafe(roXact) || SxactIsROSafe(roXact))
+                {
+                    lmgr_proc::ProcSendSignal((*roXact).pgprocno)?;
                 }
                 cur = next;
             }
