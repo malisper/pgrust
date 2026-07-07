@@ -1616,8 +1616,7 @@ fn fix_indexqual_operand<'mcx>(
     panic!("index key does not match expected index column");
 }
 
-// use_physical_tlist is false on every reachable input: the parent rel is
-// never a physical scan rel here (C ignores flags in this function too).
+// create_projection_plan (createplan.c).
 fn create_projection_plan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     path_id: PathId,
@@ -1638,6 +1637,32 @@ fn create_projection_plan<'mcx>(
         ),
         _ => unreachable!(),
     };
+    if use_physical_tlist(run, path_id, flags) {
+        // C: the caller doesn't care what tlist comes back, so don't
+        // project — the subplan keeps its own (physical) tlist and only the
+        // costs are relabeled.
+        let subplan = create_plan_recurse(run, subpath_id, 0)?;
+        if flags & CP_LABEL_TLIST != 0 {
+            apply_pathtarget_labeling_to_tlist(
+                run,
+                &subplan.as_plan().expect("plan node").targetlist,
+                target_id,
+            );
+        }
+        let width = run.root.pathtarget(target_id).width;
+        // SAFETY: subplan was created above; no other handle to it exists yet.
+        unsafe {
+            subplan.with_plan_mut(|p| {
+                p.startup_cost = path_costs.0;
+                p.total_cost = path_costs.1;
+                p.plan_rows = path_costs.2;
+                p.plan_width = width;
+                p.parallel_safe = path_costs.3;
+            })
+        }
+        .expect("subplan embeds a Plan base");
+        return Ok(subplan);
+    }
     if !is_projection_capable_pathtype(run.root.path(subpath_id).base().pathtype) {
         // Result arm (projection-incapable subplan, e.g. Append).
         let subplan = create_plan_recurse(run, subpath_id, 0)?;
