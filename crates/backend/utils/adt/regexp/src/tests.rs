@@ -741,17 +741,21 @@ fn generated_adversarial_parity() {
 
     let mut rng = Lcg(0x5eed_2026_0707);
     let haystacks: Vec<String> = (0..8).map(|_| gen_haystack(&mut rng)).collect();
+    // Large generated patterns overflow the classifier's complexity budget
+    // and fail closed — parity must hold either way, but the run is only
+    // meaningful if most of the corpus actually dispatches to RE2.
+    let mut admitted = 0u32;
     for _ in 0..300 {
         let p = gen_pattern(&mut rng);
-        assert!(
-            regexp_alt::re2_compatible(p.as_bytes(), REG_ADVANCED),
-            "generator escaped the compatible class: {p:?}"
-        );
+        if regexp_alt::re2_compatible(p.as_bytes(), REG_ADVANCED) {
+            admitted += 1;
+        }
         for s in &haystacks {
             assert_engine_parity(m, s.as_bytes(), p.as_bytes());
         }
         assert_engine_parity(m, b"", p.as_bytes());
     }
+    assert!(admitted >= 200, "only {admitted}/300 generated patterns dispatched to re2");
 }
 
 // Dispatch-overhead microbench (run with --ignored --nocapture): the auto
