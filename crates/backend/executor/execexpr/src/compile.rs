@@ -115,7 +115,9 @@ fn grow_steps(state: &mut ExprState<'_>, mcx: Mcx<'_>) -> PgResult<()> {
 #[derive(Clone, Copy)]
 pub struct SubplanCompileEnv {
     pub estate: NonNull<()>,
-    pub init: for<'x> unsafe fn(NonNull<()>, Node<'x>, Option<AggBind>) -> PgResult<NonNull<()>>,
+    /// None when the query has no subplans (the env still carries the
+    /// rtable/junk-tlist legs); a SubPlan node reaching compile then louds.
+    pub init: Option<for<'x> unsafe fn(NonNull<()>, Node<'x>, Option<AggBind>) -> PgResult<NonNull<()>>>,
     /// Parent Agg's result-array binding: Aggrefs inside the SubPlan's
     /// testexpr/args compile against the owning AggState (C parent PlanState).
     pub agg: Option<AggBind>,
@@ -1311,7 +1313,14 @@ fn init_subplan_expr<'mcx>(
     };
     // SAFETY: env.estate is the caller's live estate (SubplanCompileEnv
     // contract: no aliasing borrows during compile).
-    let sstate = unsafe { (env.init)(env.estate, node, aggbind) }?;
+    let init = env.init.unwrap_or_else(|| {
+        panic!(
+            "ExecInitSubPlanExpr (execExpr.c): SubPlan {:?} (plan_id {}) compiled in a \
+             query whose PlannedStmt has no subplans",
+            sp.plan_name, sp.plan_id
+        )
+    });
+    let sstate = unsafe { init(env.estate, node, aggbind) }?;
     state.flags |= crate::steps::EEO_FLAG_HAS_SUBPLAN;
     push_step(state, mcx, Step::SubPlan { sstate, out })
 }

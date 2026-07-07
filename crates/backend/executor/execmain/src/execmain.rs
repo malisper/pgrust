@@ -647,18 +647,14 @@ pub(crate) fn init_plan<'mcx>(
             *cell = Some(erm);
         }
     }
-    // Hooks are unconditional: with_subplan_compile_env* gates the whole
-    // compile env (rtable, whole-row junk tlist) on the init hook, and C's
-    // ExecInitWholeRowVar parent walk exists whether or not the query has
-    // subplans.
-    data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
-    data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
-    data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
-    data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
     if !pstmt.subplans.is_nil() {
         // Hooks precede the subplan-init loop: a subplan's own tree can hold
         // nested SubPlan expressions (plan_id strictly below its own, so the
         // es_subplanstates lookup mirrors C's incremental lappend order).
+        data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
+        data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
+        data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
+        data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
         for (i, subplan) in pstmt.subplans.iter().enumerate() {
             let mut sp_eflags = eflags
                 & !(types_slot::EXEC_FLAG_REWIND

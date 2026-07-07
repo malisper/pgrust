@@ -168,12 +168,18 @@ pub fn with_subplan_compile_env_parent<'mcx, R>(
             core::ptr::NonNull<types_nodes::list::NodeList<'static>>,
         >(core::ptr::NonNull::from(t))
     });
-    let env = estate.es_subplan_init_hook.map(|init| execexpr::SubplanCompileEnv {
-        estate: core::ptr::NonNull::from(&mut *estate).cast(),
-        init,
-        agg: None,
-        rtable: Some(rtable),
-        parent_subplan_tlist,
+    // The env exists when SubPlans can appear (init hook set) or when the
+    // whole-row junk-filter leg needs the parent subplan tlist; subplan-free
+    // plain compiles keep the pre-env cost (C's ExprState.parent is free).
+    let init = estate.es_subplan_init_hook;
+    let env = (init.is_some() || parent_subplan_tlist.is_some()).then(|| {
+        execexpr::SubplanCompileEnv {
+            estate: core::ptr::NonNull::from(&mut *estate).cast(),
+            init,
+            agg: None,
+            rtable: Some(rtable),
+            parent_subplan_tlist,
+        }
     });
     f(env)
 }
