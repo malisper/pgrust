@@ -98,6 +98,8 @@ pub struct HashJoinState<'mcx> {
     outer_saved_scratch: PgVec<'mcx, u64>,
     inner_saved_scratch: PgVec<'mcx, u64>,
     hash_instr: Option<u32>,
+    // InstrCountFiltered1/2 slot for this join node (nodeHashjoin.c).
+    js_instr: Option<u32>,
     dense_cols: Option<DenseCols>,
     dense_on: bool,
     hj_CurDense: u32,
@@ -284,6 +286,12 @@ pub fn exec_init_hash_join<'mcx>(
     } else {
         None
     };
+    // This node's own slot is init'ed by the Instrumented wrapper.
+    let js_instr = if estate.es_instrument != 0 {
+        Some(u32::try_from(node.join.plan.plan_node_id).expect("plan_node_id is non-negative"))
+    } else {
+        None
+    };
 
     let dense_cols = HashJoinState::dense_cols_of(hashclauses.as_deref(), &*outer_hash_expr);
     let hjstate = HashJoinState {
@@ -312,6 +320,7 @@ pub fn exec_init_hash_join<'mcx>(
         outer_saved_scratch: PgVec::new_in(mcx),
         inner_saved_scratch: PgVec::new_in(mcx),
         hash_instr,
+        js_instr,
         dense_cols,
         dense_on: false,
         hj_CurDense: ::nodehash::DENSE_END,
@@ -512,6 +521,9 @@ where
                     if pass {
                         return Ok(Some(project_result(node, inner_id, estate)?));
                     }
+                    estate.instr_count_filtered2(node.js_instr);
+                } else {
+                    estate.instr_count_filtered1(node.js_instr);
                 }
             }
             HJ_FILL_OUTER_TUPLE => {
@@ -525,6 +537,7 @@ where
                     if pass {
                         return Ok(Some(project_result(node, null_inner, estate)?));
                     }
+                    estate.instr_count_filtered2(node.js_instr);
                 }
             }
             HJ_FILL_INNER_TUPLES => {
@@ -541,6 +554,7 @@ where
                 if pass {
                     return Ok(Some(project_result(node, inner_id, estate)?));
                 }
+                estate.instr_count_filtered2(node.js_instr);
             }
             HJ_NEED_NEW_BATCH => {
                 if !new_batch(node, hash_state, estate)? {
@@ -1149,7 +1163,7 @@ mcx::forget_safe_struct!(
         js_single_match, hj_fill_outer, hj_fill_inner, hj_NullInnerTupleSlot,
         hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
         hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
-        outer_saved_scratch, inner_saved_scratch, hash_instr,
+        outer_saved_scratch, inner_saved_scratch, hash_instr, js_instr,
         dense_cols, dense_on, hj_CurDense;
         ps_ResultTupleDesc, proj, hashclauses, joinqual, otherqual,
         outer_hash_expr },

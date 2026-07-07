@@ -1311,12 +1311,12 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
         PlanStateNode::NamedTuplestoreScan(nts) => Some(&mut nts.ss),
+        PlanStateNode::SubqueryScan(s) => Some(&mut s.ss),
         PlanStateNode::IndexScan(is) => Some(&mut is.ss),
         PlanStateNode::TidScan(ts) => Some(&mut ts.ss),
         PlanStateNode::TidRangeScan(ts) => Some(&mut ts.ss),
         PlanStateNode::IndexOnlyScan(ios) => Some(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => Some(&mut b.scan.ss),
-        PlanStateNode::SubqueryScan(sq) => Some(&mut sq.ss),
         _ => None,
     }
 }

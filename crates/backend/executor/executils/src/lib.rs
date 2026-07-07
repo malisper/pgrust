@@ -367,6 +367,39 @@ pub fn exec_project_with_subplans_outer<'mcx>(
     }
 }
 
+/// [`exec_eval_expr_with_subplans`] over an es_tupleTable slot bound as the
+/// INNER input (hash-key evaluation with SubPlan keys; nodeHash.c /
+/// nodeHashjoin.c ExecHashGetHashValue). The state's result mcx must already
+/// be armed by the caller.
+pub fn exec_eval_expr_with_subplans_hashkey<'mcx>(
+    state: &mut execexpr::ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    slot_id: ExecSlotId,
+) -> PgResult<::datum::NullableDatum> {
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
+            let mut slots =
+                execexpr::EvalSlots { scan: None, inner: Some(slot), outer: None };
+            execexpr::exec_eval_expr_outcome(state, &mut slots, r)?
+        };
+        match outcome {
+            execexpr::EvalOutcome::Done(nd) => return Ok(nd),
+            execexpr::EvalOutcome::Suspended(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
 pub fn exec_eval_expr_with_subplans<'mcx>(
     state: &mut execexpr::ExprState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -718,6 +751,23 @@ pub struct EpqSubs<'mcx> {
 }
 
 impl<'mcx> EStateData<'mcx> {
+    /// `InstrCountFiltered1` (execnodes.h); idx is the node's
+    /// es_instrumentation slot, None when not instrumented.
+    #[inline]
+    pub fn instr_count_filtered1(&mut self, idx: Option<u32>) {
+        if let Some(ix) = idx {
+            self.es_instrumentation[ix as usize].nfiltered1 += 1.0;
+        }
+    }
+
+    /// `InstrCountFiltered2` (execnodes.h).
+    #[inline]
+    pub fn instr_count_filtered2(&mut self, idx: Option<u32>) {
+        if let Some(ix) = idx {
+            self.es_instrumentation[ix as usize].nfiltered2 += 1.0;
+        }
+    }
+
     /// C `scan->instrument->nsearches`, republished per node; ANALYZE-only.
     #[cold]
     pub fn instr_set_index_nsearches(&mut self, plan_node_id: i32, nsearches: u64) {

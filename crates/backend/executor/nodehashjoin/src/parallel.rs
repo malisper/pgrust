@@ -203,6 +203,9 @@ where
                     if pass {
                         return Ok(Some(project_result(node, inner_id, estate)?));
                     }
+                    estate.instr_count_filtered2(node.js_instr);
+                } else {
+                    estate.instr_count_filtered1(node.js_instr);
                 }
             }
             HJ_FILL_OUTER_TUPLE => {
@@ -216,6 +219,7 @@ where
                     if pass {
                         return Ok(Some(project_result(node, null_inner, estate)?));
                     }
+                    estate.instr_count_filtered2(node.js_instr);
                 }
             }
             HJ_FILL_INNER_TUPLES => {
@@ -232,6 +236,7 @@ where
                 if pass {
                     return Ok(Some(project_result(node, inner_id, estate)?));
                 }
+                estate.instr_count_filtered2(node.js_instr);
             }
             HJ_NEED_NEW_BATCH => {
                 if !parallel_new_batch(hash_state)? {
@@ -264,6 +269,16 @@ fn parallel_outer_get_tuple<'mcx, O: HashJoinOuter<'mcx>>(
             }
             let h = match outer.staged_hash() {
                 Some(h) => h,
+                None if node.outer_hash_expr.has_subplan() => {
+                    ::executils::exec_eval_expr_with_subplans_hashkey(
+                        &mut node.outer_hash_expr,
+                        estate,
+                        ecxt,
+                        slot_id,
+                    )?
+                    .value
+                    .as_u32()
+                }
                 None => {
                     let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
                     let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
@@ -315,6 +330,16 @@ fn partition_outer<'mcx, O: HashJoinOuter<'mcx>>(
         }
         let hashvalue = match outer.staged_hash() {
             Some(h) => h,
+            None if node.outer_hash_expr.has_subplan() => {
+                ::executils::exec_eval_expr_with_subplans_hashkey(
+                    &mut node.outer_hash_expr,
+                    estate,
+                    ecxt,
+                    slot_id,
+                )?
+                .value
+                .as_u32()
+            }
             None => {
                 let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
                 let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
