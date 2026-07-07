@@ -2654,10 +2654,20 @@ impl<'a> Estate<'a> {
             // (nothing runs after RC_RETURN).
             return Ok(());
         }
-        // RETURN without expr in a void function (or procedure).
-        self.retval = Datum::null();
-        self.retisnull = true;
-        self.rettype = types_core::InvalidOid;
+        // RETURN without expr in a void function (or procedure). C returns a
+        // non-null VOID datum for functions (pl_exec.c:3303-3314); procedures
+        // stay null.
+        const VOIDOID: Oid = 2278;
+        const PROKIND_PROCEDURE: i8 = b'p' as i8;
+        if self.func.fn_rettype == VOIDOID && self.func.fn_prokind != PROKIND_PROCEDURE {
+            self.retval = Datum::from_usize(0);
+            self.retisnull = false;
+            self.rettype = VOIDOID;
+        } else {
+            self.retval = Datum::null();
+            self.retisnull = true;
+            self.rettype = types_core::InvalidOid;
+        }
         Ok(())
     }
 
