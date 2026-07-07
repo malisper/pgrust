@@ -585,11 +585,18 @@ pub fn preprocess_expression<'mcx>(
         run.glob.last_ph_id = last_ph_id.get();
     }
     if kind != EXPRKIND_RTFUNC {
-        expr = clauses::eval_const_expressions_with_params(
+        // root != NULL in C: folded constraint-less domains are recorded as
+        // plan type dependencies (clauses.c:3630).
+        let mut type_deps: Vec<types_core::Oid> = Vec::new();
+        expr = clauses::fold::eval_const_expressions_planner(
             run.mcx,
             expr,
             run.glob.bound_params,
+            &mut type_deps,
         )?;
+        for typid in type_deps {
+            crate::setrefs::record_plan_type_dependency(run, typid)?;
+        }
     }
     if kind == EXPRKIND_QUAL {
         expr = crate::prepqual::canonicalize_qual(run.mcx, expr, false)?;
