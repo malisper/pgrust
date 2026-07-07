@@ -338,7 +338,7 @@ fn similar_escape_family() {
 
 #[test]
 fn count_instr_like() {
-    utf8();
+    full_setup();
     let cx = MemoryContext::new("test");
     let m = cx.mcx();
     use crate::matches::{regexp_count, regexp_instr, regexp_like};
@@ -374,7 +374,7 @@ fn count_instr_like() {
 
 #[test]
 fn match_and_matches() {
-    utf8();
+    full_setup();
     let cx = MemoryContext::new("test");
     let m = cx.mcx();
     use crate::matches::{
@@ -414,7 +414,7 @@ fn match_and_matches() {
 
 #[test]
 fn substr_and_split() {
-    utf8();
+    full_setup();
     let cx = MemoryContext::new("test");
     let m = cx.mcx();
     use crate::matches::{build_regexp_split_result, regexp_split_setup, regexp_substr};
@@ -449,18 +449,139 @@ fn substr_and_split() {
     assert!(sqlstate(&err).contains("regexp_split_to_array() does not support the \"global\" option"));
 }
 
-// regex-engine-ab experiment: the alternate engines must agree with Spencer
-// on backref-free, all-greedy patterns (the compatible subset the GUC is
-// documented for); Q29's pattern is the anchor case.
+
+// regex_engine differential corpus: at engine=auto, classifier-admitted
+// patterns run RE2 in POSIX longest-match mode; every regexp entry point
+// must agree byte-for-byte (results AND errors) with a forced-spencer run.
+// Classifier-rejected patterns dispatch to Spencer and agree trivially, so
+// the same assertions ride for both kinds.
+
+fn engine_snapshot(m: Mcx<'_>, s: &[u8], p: &[u8]) -> String {
+    use crate::matches::{
+        build_regexp_match_result, build_regexp_split_result, regexp_count, regexp_instr,
+        regexp_like, regexp_match, regexp_matches_setup, regexp_split_setup, regexp_substr,
+    };
+    use core::fmt::Write;
+
+    let mut out = String::new();
+    macro_rules! snap {
+        ($tag:expr, $e:expr) => {
+            match $e {
+                Ok(v) => writeln!(out, "{}: {:?}", $tag, v).unwrap(),
+                Err(e) => writeln!(out, "{}: ERR {}", $tag, e.message).unwrap(),
+            }
+        };
+    }
+
+    snap!("eq", textregexeq(m, s, p, C));
+    snap!(
+        "substr_op",
+        textregexsubstr(m, s, p, C).map(|o| o.map(|v| v.as_slice().to_vec()))
+    );
+    snap!(
+        "replace_g",
+        textregexreplace(m, s, p, b"<\\1>", b"g", C).map(|v| v.as_slice().to_vec())
+    );
+    snap!(
+        "replace_1",
+        textregexreplace_noopt(m, s, p, b"X", C).map(|v| v.as_slice().to_vec())
+    );
+    snap!(
+        "replace_s2n2",
+        textregexreplace_extended(m, s, p, b"[\\&]", Some(2), Some(2), None, C)
+            .map(|v| v.as_slice().to_vec())
+    );
+    snap!("like", regexp_like(m, s, p, None, C));
+    snap!("count", regexp_count(m, s, p, None, None, C));
+    snap!("count_s3", regexp_count(m, s, p, Some(3), None, C));
+    for n in 1..=3 {
+        for endopt in [0, 1] {
+            for sub in [None, Some(1)] {
+                snap!(
+                    format!("instr n{n} e{endopt} sub{sub:?}"),
+                    regexp_instr(m, s, p, None, Some(n), Some(endopt), None, sub, C)
+                );
+            }
+        }
+    }
+    for n in 1..=2 {
+        for sub in [None, Some(1)] {
+            snap!(
+                format!("substr n{n} sub{sub:?}"),
+                regexp_substr(m, s, p, None, Some(n), None, sub, C)
+                    .map(|o| o.map(|v| v.as_slice().to_vec()))
+            );
+        }
+    }
+
+    let rows = |ctx: &crate::matches::RegexpMatchesCtx<'_, '_>| {
+        let mut row: Vec<Option<Vec<u8>>> = Vec::new();
+        build_regexp_match_result(ctx, |e| {
+            row.push(e.map(|v| v.as_slice().to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        row
+    };
+    match regexp_match(m, s, p, None, C) {
+        Ok(None) => writeln!(out, "match: NULL").unwrap(),
+        Ok(Some(ctx)) => writeln!(out, "match: {:?}", rows(&ctx)).unwrap(),
+        Err(e) => writeln!(out, "match: ERR {}", e.message).unwrap(),
+    }
+    match regexp_matches_setup(m, s, p, Some(b"g"), C) {
+        Ok(mut ctx) => {
+            let mut all = Vec::new();
+            while ctx.next_match < ctx.nmatches {
+                all.push(rows(&ctx));
+                ctx.next_match += 1;
+            }
+            writeln!(out, "matches_g: {all:?}").unwrap();
+        }
+        Err(e) => writeln!(out, "matches_g: ERR {}", e.message).unwrap(),
+    }
+    match regexp_split_setup(m, s, p, None, C, "regexp_split_to_array()") {
+        Ok(mut ctx) => {
+            let mut parts = Vec::new();
+            while ctx.next_match <= ctx.nmatches {
+                match build_regexp_split_result(&ctx) {
+                    Ok(v) => parts.push(v.as_slice().to_vec()),
+                    Err(e) => {
+                        writeln!(out, "split_part: ERR {}", e.message).unwrap();
+                        break;
+                    }
+                }
+                ctx.next_match += 1;
+            }
+            writeln!(out, "split: {parts:?}").unwrap();
+        }
+        Err(e) => writeln!(out, "split: ERR {}", e.message).unwrap(),
+    }
+    out
+}
+
+fn assert_engine_parity(m: Mcx<'_>, s: &[u8], p: &[u8]) {
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_SPENCER);
+    let spencer = engine_snapshot(m, s, p);
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+    let auto = engine_snapshot(m, s, p);
+    assert_eq!(
+        spencer,
+        auto,
+        "auto diverges from spencer: pattern {:?} input {:?}",
+        String::from_utf8_lossy(p),
+        String::from_utf8_lossy(s)
+    );
+}
+
 #[test]
-fn alt_engine_parity_with_spencer() {
+fn auto_vs_spencer_differential() {
     full_setup();
+    if !regexp_alt::re2_available() {
+        return;
+    }
     let cx = MemoryContext::new("test");
     let m = cx.mcx();
-    let mut engines = vec![regexp_alt::REGEX_ENGINE_RUST];
-    if regexp_alt_have_re2() {
-        engines.push(regexp_alt::REGEX_ENGINE_RE2);
-    }
+
     let corpus: &[&str] = &[
         "http://www.example.com/path/x?y=1",
         "https://sub.host.ru/",
@@ -470,46 +591,157 @@ fn alt_engine_parity_with_spencer() {
         "https://www.xn--80ak6aa92e.com/страница/1",
         "a1b2c3 déf gh",
         "aaa bbb aaa",
+        "line one\nline two\n",
+        "ab",
+        "aab aab",
+        ",,a,,b,,",
     ];
-    let cases: &[(&str, &str, &str)] = &[
-        (r"^https?://(?:www\.)?([^/]+)/.*$", r"\1", ""),
-        (r"^https?://(?:www\.)?([^/]+)/.*$", r"\1", "g"),
-        (r"a+", "[&]", "g"),
-        // NOT \w: shorthand-class ctype is a known divergence (Spencer
-        // follows the collation -- ASCII-only under C collation; rust/re2
-        // are Unicode-aware regardless).
-        (r"([a-z0-9]+) ([a-z0-9]+)", r"\2 \1", ""),
-        (r"x*", "-", "g"),
-        (r"[0-9]", "#", "g"),
+    // Compatible class (must actually dispatch) plus known-incompatible
+    // patterns (must fail closed and agree trivially).
+    let compatible: &[&str] = &[
+        r"^https?://(?:www\.)?([^/]+)/.*$",
+        "",
+        "a",
+        "a+",
+        "a|ab",
+        "(a+|a)(b?)",
+        "([a-z0-9]+) ([a-z0-9]+)",
+        "x*",
+        "[0-9]",
+        "((a)(b))",
+        "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)",
+        "^",
+        "$",
+        "^$",
+        ".",
+        "a{2}",
+        "a{2,}",
+        "a{0,3}b",
+        "[^,]+",
+        "[é]",
+        "é+",
+        "(?:aa|bb)+",
+        "b[^b]+",
+        r"\.",
+        "a\nb",
     ];
-    for (p, r, opt) in cases {
+    let incompatible: &[&str] =
+        &[r"(a)\1", r"\w+", r"\bword\b", "a*?", "[[:alpha:]]", r"\d", r"[\d]", "(?i)a"];
+
+    for p in compatible {
+        regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+        assert!(
+            regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED).unwrap().is_some(),
+            "expected {p:?} to dispatch to re2"
+        );
         for s in corpus {
-            let spencer =
-                textregexreplace(m, s.as_bytes(), p.as_bytes(), r.as_bytes(), opt.as_bytes(), C)
-                    .unwrap();
-            let flags = parse_re_flags(Some(opt.as_bytes())).unwrap();
-            let n = if flags.glob { 0 } else { 1 };
-            for &e in &engines {
-                let alt = regexp_alt::replace_text_regexp_alt(
-                    m, s.as_bytes(), p.as_bytes(), r.as_bytes(), flags.cflags, C, 0, n, e,
-                )
-                .unwrap();
-                assert_eq!(
-                    spencer.as_slice(),
-                    alt.as_slice(),
-                    "engine {e} diverges: pattern {p:?} repl {r:?} opt {opt:?} input {s:?}"
-                );
-            }
+            assert_engine_parity(m, s.as_bytes(), p.as_bytes());
+        }
+    }
+    for p in incompatible {
+        regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+        assert!(
+            regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED).unwrap().is_none(),
+            "expected {p:?} to fail closed to spencer"
+        );
+        for s in corpus {
+            assert_engine_parity(m, s.as_bytes(), p.as_bytes());
         }
     }
 }
 
-fn regexp_alt_have_re2() -> bool {
-    let cx = MemoryContext::new("probe");
-    let ok = regexp_alt::replace_text_regexp_alt(
-        cx.mcx(), b"a", b"a", b"b", REG_ADVANCED, C, 0, 1,
-        regexp_alt::REGEX_ENGINE_RE2,
-    )
-    .is_ok();
-    ok
+// Generated adversarial patterns within the compatible class: a seeded
+// grammar over greedy quantifiers, classes, groups, alternation and anchors;
+// every generated pattern must both classify compatible and agree with
+// Spencer across generated haystacks.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, bound: usize) -> usize {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((self.0 >> 33) as usize) % bound
+    }
+}
+
+fn gen_atom(rng: &mut Lcg, depth: u32, out: &mut String) {
+    match rng.next(if depth == 0 { 6 } else { 8 }) {
+        0 => out.push(['a', 'b', 'c', '0', '/'][rng.next(5)]),
+        1 => out.push('.'),
+        2 => out.push_str(["[ab]", "[^a]", "[a-c0-9]", "[^/,]", "[é]"][rng.next(5)]),
+        3 => out.push('é'),
+        4 => out.push_str(["\\.", "\\*", "\\n"][rng.next(3)]),
+        5 => out.push(['x', ' ', ','][rng.next(3)]),
+        6 => {
+            out.push('(');
+            gen_alt(rng, depth - 1, out);
+            out.push(')');
+        }
+        _ => {
+            out.push_str("(?:");
+            gen_alt(rng, depth - 1, out);
+            out.push(')');
+        }
+    }
+}
+
+fn gen_concat(rng: &mut Lcg, depth: u32, out: &mut String) {
+    for _ in 0..rng.next(4) + 1 {
+        gen_atom(rng, depth, out);
+        match rng.next(8) {
+            0 => out.push('*'),
+            1 => out.push('+'),
+            2 => out.push('?'),
+            3 => out.push_str(["{2}", "{1,3}", "{0,2}", "{2,}"][rng.next(4)]),
+            _ => {}
+        }
+    }
+}
+
+fn gen_alt(rng: &mut Lcg, depth: u32, out: &mut String) {
+    gen_concat(rng, depth, out);
+    for _ in 0..rng.next(3) {
+        out.push('|');
+        gen_concat(rng, depth, out);
+    }
+}
+
+fn gen_pattern(rng: &mut Lcg) -> String {
+    let mut p = String::new();
+    if rng.next(4) == 0 {
+        p.push('^');
+    }
+    gen_alt(rng, 2, &mut p);
+    if rng.next(4) == 0 {
+        p.push('$');
+    }
+    p
+}
+
+fn gen_haystack(rng: &mut Lcg) -> String {
+    const CHARS: &[char] = &['a', 'b', 'c', '0', '1', '/', ',', ' ', '\n', 'é', 'x'];
+    (0..rng.next(13)).map(|_| CHARS[rng.next(CHARS.len())]).collect()
+}
+
+#[test]
+fn generated_adversarial_parity() {
+    full_setup();
+    if !regexp_alt::re2_available() {
+        return;
+    }
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+
+    let mut rng = Lcg(0x5eed_2026_0707);
+    let haystacks: Vec<String> = (0..8).map(|_| gen_haystack(&mut rng)).collect();
+    for _ in 0..300 {
+        let p = gen_pattern(&mut rng);
+        assert!(
+            regexp_alt::re2_compatible(p.as_bytes(), REG_ADVANCED),
+            "generator escaped the compatible class: {p:?}"
+        );
+        for s in &haystacks {
+            assert_engine_parity(m, s.as_bytes(), p.as_bytes());
+        }
+        assert_engine_parity(m, b"", p.as_bytes());
+    }
 }

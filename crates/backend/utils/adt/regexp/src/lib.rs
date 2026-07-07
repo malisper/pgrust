@@ -153,6 +153,11 @@ pub fn RE_compile_and_execute(
 ) -> PgResult<bool> {
     if pmatch.len() < 2 {
         cflags |= REG_NOSUB;
+        // regex_engine dispatch: boolean matches (~, ~*, regexp_like) on
+        // RE2-compatible patterns skip the wchar conversion entirely.
+        if let Some(re) = regexp_alt::dispatch(pattern, cflags)? {
+            return Ok(re.is_match(dat, 0));
+        }
     }
     let re = RE_compile_and_cache(mcx, pattern, cflags, collation)?;
     RE_execute(mcx, &re, dat, pmatch)
@@ -274,6 +279,20 @@ pub fn textregexsubstr<'mcx>(
     p: &[u8],
     collation: Oid,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    if let Some(re) = regexp_alt::dispatch(p, REG_ADVANCED)? {
+        let mut groups = [(-1i64, -1i64); 2];
+        let want = if re.ngroups() > 0 { 2 } else { 1 };
+        if !re.exec(s, 0, &mut groups[..want]) {
+            return Ok(None);
+        }
+        let (so, eo) = groups[want - 1];
+        // 'foo(bar)?' matches 'foo' with no subexpression match.
+        if so < 0 || eo < 0 {
+            return Ok(None);
+        }
+        return Ok(Some(slice_in(mcx, &s[so as usize..eo as usize])?));
+    }
+
     let re = RE_compile_and_cache(mcx, p, REG_ADVANCED, collation)?;
 
     let mut pmatch = [RegMatch::UNSET; 2];

@@ -16,6 +16,21 @@ pub struct RegexpMatchesCtx<'a, 'mcx> {
     match_locs: PgVec<'mcx, i32>,
     pub next_match: i32,
     wide_str: Option<PgVec<'mcx, PgWChar>>,
+    // RE2 path: match_locs holds byte offsets (wide_str stays None; byte
+    // slicing is then exactly right for fetch_chars, but 1-based character
+    // positions need conversion — see one_based_position).
+    byte_offsets: bool,
+}
+
+impl RegexpMatchesCtx<'_, '_> {
+    // Converts a match_locs offset to the 1-based character position the
+    // regexp_instr contract requires.
+    fn one_based_position(&self, loc: i32) -> PgResult<i32> {
+        if !self.byte_offsets || mbutils::pg_database_encoding_max_length() == 1 {
+            return Ok(loc + 1);
+        }
+        Ok(mbutils::pg_mbstrlen_with_len(&self.orig_str[..loc as usize])? + 1)
+    }
 }
 
 // C: setup_regexp_matches — all the matching in one swoop; match_locs holds
@@ -31,6 +46,20 @@ pub fn setup_regexp_matches<'a, 'mcx>(
     mut use_subpatterns: bool,
     ignore_degenerate: bool,
 ) -> PgResult<RegexpMatchesCtx<'a, 'mcx>> {
+    // regex_engine dispatch: RE2-compatible patterns take the byte-offset
+    // path; everything else runs the untouched Spencer path below.
+    if let Some(re) = regexp_alt::dispatch(pattern, re_flags.cflags)? {
+        return setup_regexp_matches_re2(
+            mcx,
+            orig_str,
+            &re,
+            re_flags,
+            start_search,
+            use_subpatterns,
+            ignore_degenerate,
+        );
+    }
+
     let eml = mbutils::pg_database_encoding_max_length();
 
     let wide_str = mbutils::pg_mb2wchar_with_len(mcx, orig_str)?;
@@ -112,7 +141,109 @@ pub fn setup_regexp_matches<'a, 'mcx>(
 
     let wide_str = if eml > 1 { Some(wide_str) } else { None };
 
-    Ok(RegexpMatchesCtx { mcx, orig_str, nmatches, npatterns, match_locs, next_match: 0, wide_str })
+    Ok(RegexpMatchesCtx {
+        mcx,
+        orig_str,
+        nmatches,
+        npatterns,
+        match_locs,
+        next_match: 0,
+        wide_str,
+        byte_offsets: false,
+    })
+}
+
+// The RE2 arm of setup_regexp_matches: identical control flow driven by byte
+// offsets; match_locs holds byte offsets and the trailing sentinel is the
+// byte length.
+fn setup_regexp_matches_re2<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    orig_str: &'a [u8],
+    re: &regexp_alt::Re2Pattern,
+    re_flags: &PgReFlags,
+    start_search: i32,
+    mut use_subpatterns: bool,
+    ignore_degenerate: bool,
+) -> PgResult<RegexpMatchesCtx<'a, 'mcx>> {
+    let len = orig_str.len();
+
+    let npatterns: i32;
+    let ngroups: usize;
+    if use_subpatterns && re.ngroups() > 0 {
+        npatterns = re.ngroups() as i32;
+        ngroups = re.ngroups() + 1;
+    } else {
+        use_subpatterns = false;
+        npatterns = 1;
+        ngroups = 1;
+    }
+
+    let mut groups: PgVec<'_, (i64, i64)> = vec_with_capacity_in(mcx, ngroups)?;
+    groups.resize(ngroups, (-1, -1));
+
+    let mut array_len: i32 = if re_flags.glob { 255 } else { 31 };
+    let mut match_locs: PgVec<'mcx, i32> = vec_with_capacity_in(mcx, array_len as usize)?;
+    match_locs.resize(array_len as usize, 0);
+    let mut array_idx: usize = 0;
+    let mut nmatches: i32 = 0;
+
+    let mut search_pos = regexp_alt::char_off_to_byte(orig_str, start_search);
+    let mut prev_match_end: i64 = 0;
+    while search_pos <= len {
+        postgres_seams::check_for_interrupts::call()?;
+        if !re.exec(orig_str, search_pos, &mut groups) {
+            break;
+        }
+        if !ignore_degenerate || (groups[0].0 < len as i64 && groups[0].1 > prev_match_end) {
+            while array_idx + (npatterns as usize) * 2 + 1 > array_len as usize {
+                array_len += array_len + 1;
+                if array_len as usize > MAX_ALLOC_SIZE / core::mem::size_of::<i32>() {
+                    return Err(too_many_matches().into());
+                }
+                let extra = array_len as usize - match_locs.len();
+                match_locs
+                    .try_reserve(extra)
+                    .map_err(|_| mcx.oom(array_len as usize * core::mem::size_of::<i32>()))?;
+                match_locs.resize(array_len as usize, 0);
+            }
+
+            if use_subpatterns {
+                for g in &groups[1..] {
+                    match_locs[array_idx] = g.0 as i32;
+                    match_locs[array_idx + 1] = g.1 as i32;
+                    array_idx += 2;
+                }
+            } else {
+                match_locs[array_idx] = groups[0].0 as i32;
+                match_locs[array_idx + 1] = groups[0].1 as i32;
+                array_idx += 2;
+            }
+            nmatches += 1;
+        }
+        prev_match_end = groups[0].1;
+
+        if !re_flags.glob {
+            break;
+        }
+
+        search_pos = prev_match_end as usize;
+        if groups[0].0 == groups[0].1 {
+            search_pos = regexp_alt::advance_one_char(orig_str, search_pos);
+        }
+    }
+
+    match_locs[array_idx] = len as i32;
+
+    Ok(RegexpMatchesCtx {
+        mcx,
+        orig_str,
+        nmatches,
+        npatterns,
+        match_locs,
+        next_match: 0,
+        wide_str: None,
+        byte_offsets: true,
+    })
 }
 
 #[cold]
@@ -264,7 +395,7 @@ pub fn regexp_instr(
     }
 
     if matchctx.match_locs[pos as usize] >= 0 {
-        Ok(matchctx.match_locs[pos as usize] + 1)
+        matchctx.one_based_position(matchctx.match_locs[pos as usize])
     } else {
         Ok(0)
     }
