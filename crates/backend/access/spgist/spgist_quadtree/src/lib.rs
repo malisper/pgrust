@@ -47,6 +47,49 @@ pub(crate) fn form_point_datum(mcx: Mcx<'_>, p: &Point) -> PgResult<Datum> {
     Ok(Datum::from_usize(ptr))
 }
 
+// BoxPGetDatum of a fresh box: 8-aligned like C's palloc'd BOX.
+pub(crate) fn form_box_datum(mcx: Mcx<'_>, b: &BOX) -> PgResult<Datum> {
+    let mut buf: ::mcx::PgVec<'_, f64> = ::mcx::vec_with_capacity_in(mcx, 4)?;
+    buf.push(b.high.x);
+    buf.push(b.high.y);
+    buf.push(b.low.x);
+    buf.push(b.low.y);
+    let ptr = buf.as_ptr() as usize;
+    core::mem::forget(buf);
+    Ok(Datum::from_usize(ptr))
+}
+
+// The KNN traversal bounding box: infinite at the root, else the box saved
+// in the parent's traversalValue.
+pub(crate) fn orderby_traversal_bbox(input: &spgInnerConsistentIn<'_>) -> BOX {
+    if input.level == 0 {
+        let inf = f64::INFINITY;
+        BOX { high: Point { x: inf, y: inf }, low: Point { x: -inf, y: -inf } }
+    } else {
+        debug_assert!(input.traversalValue != 0);
+        // SAFETY: the parent stored a box in traversalValue on this path.
+        unsafe { box_at(Datum::from_usize(input.traversalValue)) }
+    }
+}
+
+// Child-box traversalValue (in the scan-lifetime traversal context) plus its
+// distances row (in the armed per-call mcx).
+pub(crate) fn orderby_node_outputs(
+    result_mcx: Mcx<'_>,
+    input: &spgInnerConsistentIn<'_>,
+    child_box: &BOX,
+) -> PgResult<(usize, *const f64)> {
+    let box_datum = form_box_datum(input.traversalMemoryContext, child_box)?;
+    // SAFETY: norderbys orderby scankeys per protocol.
+    let orderbys = unsafe {
+        core::slice::from_raw_parts(input.orderbys, input.norderbys.max(0) as usize)
+    };
+    let row = ::spgist_proc::spg_key_orderbys_distances(result_mcx, box_datum, false, orderbys)?;
+    let row_ptr = row.as_ptr();
+    core::mem::forget(row);
+    Ok((box_datum.as_usize(), row_ptr))
+}
+
 pub fn getQuadrant(centroid: &Point, tst: &Point) -> i16 {
     if (point_above(tst, centroid) || point_horiz(tst, centroid))
         && (point_right(tst, centroid) || point_vert(tst, centroid))
@@ -181,8 +224,6 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     // SAFETY: point-typed prefix per config.
     let centroid = unsafe { point_at(input.prefixDatum) };
 
-    // C's norderbys>0 legs (traversal boxes + distances) are unreachable: the
-    // scan core rejects ordered scans loudly before any opclass call.
     if input.allTheSame {
         let n = input.nNodes as usize;
         let mut nums: ::mcx::PgVec<'_, i32> = ::mcx::vec_with_capacity_in(mcx, n)?;
@@ -192,6 +233,21 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
         out.nNodes = input.nNodes;
         out.nodeNumbers = nums.as_ptr();
         core::mem::forget(nums);
+        if input.norderbys > 0 {
+            // Use the parent quadrant box as every child's traversalValue.
+            let bbox = orderby_traversal_bbox(input);
+            let mut tvals: ::mcx::PgVec<'_, usize> = ::mcx::vec_with_capacity_in(mcx, n)?;
+            let mut rows: ::mcx::PgVec<'_, *const f64> = ::mcx::vec_with_capacity_in(mcx, n)?;
+            for _ in 0..n {
+                let (tv, row) = orderby_node_outputs(mcx, input, &bbox)?;
+                tvals.push(tv);
+                rows.push(row);
+            }
+            out.traversalValues = tvals.as_ptr();
+            core::mem::forget(tvals);
+            out.distances = rows.as_ptr();
+            core::mem::forget(rows);
+        }
         return Ok(Datum::null());
     }
 
@@ -258,15 +314,30 @@ fn fc_spg_quad_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
     out.levelAdds = level_adds.as_ptr();
     core::mem::forget(level_adds);
 
+    let bbox = if input.norderbys > 0 { Some(orderby_traversal_bbox(input)) } else { None };
     let mut nums: ::mcx::PgVec<'_, i32> = ::mcx::vec_with_capacity_in(mcx, 4)?;
+    let mut tvals: ::mcx::PgVec<'_, usize> = ::mcx::vec_with_capacity_in(mcx, 4)?;
+    let mut rows: ::mcx::PgVec<'_, *const f64> = ::mcx::vec_with_capacity_in(mcx, 4)?;
     for i in 1..=4 {
         if which & (1 << i) != 0 {
             nums.push(i - 1);
+            if let Some(bbox) = &bbox {
+                let quadrant = getQuadrantArea(bbox, &centroid, i);
+                let (tv, row) = orderby_node_outputs(mcx, input, &quadrant)?;
+                tvals.push(tv);
+                rows.push(row);
+            }
         }
     }
     out.nNodes = nums.len() as i32;
     out.nodeNumbers = nums.as_ptr();
     core::mem::forget(nums);
+    if input.norderbys > 0 {
+        out.traversalValues = tvals.as_ptr();
+        core::mem::forget(tvals);
+        out.distances = rows.as_ptr();
+        core::mem::forget(rows);
+    }
     Ok(Datum::null())
 }
 
@@ -304,6 +375,22 @@ fn fc_spg_quad_leaf_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
         if !res {
             break;
         }
+    }
+
+    if res && input.norderbys > 0 {
+        // it passes -> compute the distances
+        // SAFETY: norderbys orderby scankeys per protocol.
+        let orderbys = unsafe {
+            core::slice::from_raw_parts(input.orderbys, input.norderbys.max(0) as usize)
+        };
+        let row = ::spgist_proc::spg_key_orderbys_distances(
+            fcinfo.result_mcx(),
+            input.leafDatum,
+            true,
+            orderbys,
+        )?;
+        out.distances = row.as_ptr();
+        core::mem::forget(row);
     }
     Ok(Datum::from_bool(res))
 }

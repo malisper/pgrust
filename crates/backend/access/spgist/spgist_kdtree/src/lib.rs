@@ -225,17 +225,75 @@ fn fc_spg_kd_inner_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         return Ok(Datum::null());
     }
 
-    // C's norderbys>0 legs (split bboxes + distances) are unreachable: the
-    // scan core rejects ordered scans loudly before any opclass call.
+    // Split bounding boxes for the two children (KNN traversal values).
+    let bboxes = if input.norderbys > 0 {
+        use ::types_core::geo::BOX;
+        let area = if input.level == 0 {
+            let inf = f64::INFINITY;
+            BOX {
+                high: Point { x: inf, y: inf },
+                low: Point { x: -inf, y: -inf },
+            }
+        } else {
+            debug_assert!(input.traversalValue != 0);
+            // SAFETY: the parent stored a box in traversalValue on this path.
+            unsafe { box_at(Datum::from_usize(input.traversalValue)) }
+        };
+        let mut b0 = BOX { high: area.high, low: area.low };
+        let mut b1 = BOX { high: area.high, low: area.low };
+        if by_x {
+            b0.high.x = coord;
+            b1.low.x = coord;
+        } else {
+            b0.high.y = coord;
+            b1.low.y = coord;
+        }
+        Some([b0, b1])
+    } else {
+        None
+    };
+
     let mut nums: ::mcx::PgVec<'_, i32> = ::mcx::vec_with_capacity_in(mcx, 2)?;
+    let mut tvals: ::mcx::PgVec<'_, usize> = ::mcx::vec_with_capacity_in(mcx, 2)?;
+    let mut rows: ::mcx::PgVec<'_, *const f64> = ::mcx::vec_with_capacity_in(mcx, 2)?;
     for i in 1..=2 {
         if which & (1 << i) != 0 {
             nums.push(i - 1);
+            if let Some(bboxes) = &bboxes {
+                let b = &bboxes[(i - 1) as usize];
+                let mut buf: ::mcx::PgVec<'_, f64> =
+                    ::mcx::vec_with_capacity_in(input.traversalMemoryContext, 4)?;
+                buf.push(b.high.x);
+                buf.push(b.high.y);
+                buf.push(b.low.x);
+                buf.push(b.low.y);
+                let box_datum = Datum::from_usize(buf.as_ptr() as usize);
+                core::mem::forget(buf);
+                // SAFETY: norderbys orderby scankeys per protocol.
+                let orderbys = unsafe {
+                    core::slice::from_raw_parts(
+                        input.orderbys,
+                        input.norderbys.max(0) as usize,
+                    )
+                };
+                let row = ::spgist_proc::spg_key_orderbys_distances(
+                    mcx, box_datum, false, orderbys,
+                )?;
+                tvals.push(box_datum.as_usize());
+                rows.push(row.as_ptr());
+                core::mem::forget(row);
+            }
         }
     }
     out.nNodes = nums.len() as i32;
     out.nodeNumbers = nums.as_ptr();
     core::mem::forget(nums);
+    if input.norderbys > 0 {
+        out.traversalValues = tvals.as_ptr();
+        core::mem::forget(tvals);
+        out.distances = rows.as_ptr();
+        core::mem::forget(rows);
+    }
 
     let mut level_adds: ::mcx::PgVec<'_, i32> = ::mcx::vec_with_capacity_in(mcx, 2)?;
     level_adds.resize(2, 1);
