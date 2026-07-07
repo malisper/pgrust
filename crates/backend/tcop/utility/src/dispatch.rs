@@ -485,11 +485,12 @@ fn dispatch_switch<'mcx>(
             }
         }
 
-        // load_file: no dynamic loader exists; every linked library is
-        // "already loaded", which C treats as silent success. A filename that
-        // C would dlopen diverges (notes/divergences).
+        // load_file over dfmgr's builtin registry: no dlopen exists, so an
+        // unregistered filename is C's file-access error. C's !superuser()
+        // path restriction is skipped (no filesystem paths to restrict).
         T_LoadStmt => {
-            let _ = parsetree.as_load_stmt().expect("LoadStmt");
+            let stmt = parsetree.as_load_stmt().expect("LoadStmt");
+            dfmgr::load_file(stmt.filename)?;
         }
         T_CallStmt => {
             let stmt = parsetree.as_call_stmt().expect("CallStmt");

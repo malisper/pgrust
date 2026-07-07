@@ -93,6 +93,17 @@ pub fn init_seams() {
         plpgsql_inline_handler,
         plpgsql_validator,
     );
+    // plpgsql _PG_init (pl_handler.c) runs at LOAD: MarkGUCPrefixReserved
+    // after defining its custom GUCs. Those GUC definitions are unported
+    // (compile options read C-source defaults), so only the reservation runs.
+    dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
+        name: "plpgsql",
+        lookup: |_| None,
+        pg_init: Some(|| {
+            guc::MarkGUCPrefixReserved("plpgsql");
+            Ok(())
+        }),
+    });
 }
 
 // plpgsql_compile (pl_comp.c) with funccache.c's xmin/tid staleness rule.

@@ -190,11 +190,40 @@ impl GucRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &GucVariable> {
-        self.vars.iter()
+        self.vars.iter().filter(|v| v.gen().status & crate::model::GUC_REMOVED == 0)
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut GucVariable> {
-        self.vars.iter_mut()
+        self.vars.iter_mut().filter(|v| v.gen().status & crate::model::GUC_REMOVED == 0)
+    }
+
+    // MarkGUCPrefixReserved's placeholder purge (guc.c:5285): C removes the
+    // guc_hashtab entry and unlinks the var from all lists; our vars slot must
+    // keep its index, so it stays behind as a GUC_REMOVED tombstone that
+    // find_index/iter can no longer reach. Returns the removed names.
+    pub fn remove_reserved_placeholders(&mut self, class_name: &str) -> Vec<&'static str> {
+        let mut removed = Vec::new();
+        for idx in 0..self.vars.len() {
+            let g = self.vars[idx].gen();
+            let name = g.name;
+            if g.flags & types_guc::GUC_CUSTOM_PLACEHOLDER == 0
+                || g.status & crate::model::GUC_REMOVED != 0
+                || name.len() <= class_name.len()
+                || !name.starts_with(class_name)
+                || name.as_bytes()[class_name.len()] != b'.'
+            {
+                continue;
+            }
+            self.index.remove(fold_name(name).as_str());
+            self.stacked.retain(|&i| i != idx);
+            self.reported.retain(|&i| i != idx);
+            self.nondef.retain(|&i| i != idx);
+            let g = self.vars[idx].gen_mut();
+            g.status &= !GUC_NEEDS_REPORT;
+            g.status |= crate::model::GUC_REMOVED;
+            removed.push(name);
+        }
+        removed
     }
 
     pub fn len(&self) -> usize {

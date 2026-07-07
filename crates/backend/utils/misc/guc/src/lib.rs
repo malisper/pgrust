@@ -81,6 +81,9 @@ thread_local! {
     static GUC_CHECK_ERROR: RefCell<GucCheckError> = RefCell::new(GucCheckError::default());
     // static int GUCNestLevel = 0 (guc.c:231).
     static GUC_NEST_LEVEL: Cell<i32> = const { Cell::new(0) };
+    // static List *reserved_class_prefix (guc.c:78); per-backend in C, so
+    // session-scoped TLS here.
+    static RESERVED_CLASS_PREFIX: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn reset_guc_check_error() {
@@ -296,11 +299,9 @@ pub fn valid_custom_variable_name(name: &str) -> bool {
     !name_start && saw_sep
 }
 
-// assignable_custom_variable_name (guc.c:1121). reserved_class_prefix is
-// populated only by MarkGUCPrefixReserved (extension API, deferred), so the
-// prefix loop has no iterations.
+// assignable_custom_variable_name (guc.c:1121).
 pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResult<bool> {
-    if name.contains(GUC_QUALIFIER_SEPARATOR) {
+    if let Some(class_len) = name.find(GUC_QUALIFIER_SEPARATOR) {
         if !valid_custom_variable_name(name) {
             if !skip_errors {
                 return Err(ereport(ERROR)
@@ -314,6 +315,20 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
             }
             return Ok(false);
         }
+        let reserved = RESERVED_CLASS_PREFIX.with(|s| {
+            s.borrow().iter().find(|p| p.len() == class_len && name.starts_with(p.as_str())).cloned()
+        });
+        if let Some(rcprefix) = reserved {
+            if !skip_errors {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INVALID_NAME)
+                    .errmsg(format!("invalid configuration parameter name \"{name}\""))
+                    .errdetail(format!("\"{rcprefix}\" is a reserved prefix."))
+                    .into_error()
+                    .into());
+            }
+            return Ok(false);
+        }
         return Ok(true);
     }
 
@@ -321,6 +336,27 @@ pub fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResul
         return Err(unrecognized(name).into());
     }
     Ok(false)
+}
+
+// MarkGUCPrefixReserved (guc.c:5285): purge existing placeholders under the
+// prefix (WARNING each), then reserve the prefix against future placeholders.
+pub fn MarkGUCPrefixReserved(class_name: &str) {
+    let removed =
+        store::with_store_mut(|reg| reg.remove_reserved_placeholders(class_name)).unwrap_or_default();
+    for name in removed {
+        let e = ereport(WARNING)
+            .errcode(types_error::ERRCODE_INVALID_NAME)
+            .errmsg(format!("invalid configuration parameter name \"{name}\", removing it"))
+            .errdetail(format!("\"{class_name}\" is now a reserved prefix."))
+            .into_error();
+        elog::emit_error_report_for(&e);
+    }
+    RESERVED_CLASS_PREFIX.with(|s| {
+        let mut prefixes = s.borrow_mut();
+        if !prefixes.iter().any(|p| p == class_name) {
+            prefixes.push(class_name.to_string());
+        }
+    });
 }
 
 // check_GUC_name_for_parameter_acl (guc.c:1410).
