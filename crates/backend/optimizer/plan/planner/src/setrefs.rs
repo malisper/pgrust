@@ -1439,8 +1439,9 @@ fn fix_upper_expr<'mcx>(
     }
     // search_indexed_tlist_for_non_var: an upper node consuming a value the
     // subplan already computed (Aggref/WindowFunc in a lower tlist) reads it
-    // as an OUTER Var instead of re-evaluating.
-    if node.node_tag() != NodeTag::T_Var {
+    // as an OUTER Var instead of re-evaluating. Consts are never replaced
+    // (setrefs.c search_indexed_tlist_for_non_var).
+    if node.node_tag() != NodeTag::T_Var && node.node_tag() != NodeTag::T_Const {
         for tle_node in subplan_tlist {
             let tle = tle_node.as_target_entry().expect("TargetEntry");
             if types_nodes::equal(tle.expr, node) {
