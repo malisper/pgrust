@@ -2156,7 +2156,8 @@ fn build_paths_for_or<'mcx>(
         for &r in clauses {
             match_clause_to_index(run, r, index, &mut clauseset)?;
         }
-        if !clauseset.nonempty {
+        // C keeps a clause-less index when its predicate covers the arm.
+        if !clauseset.nonempty && !useful_predicate {
             continue;
         }
         for &r in other_clauses {

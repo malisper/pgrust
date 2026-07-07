@@ -7,10 +7,10 @@ use ::adt_geo::boxes::{
     box_above, box_below, box_contain, box_contained, box_left, box_overabove, box_overbelow,
     box_overlap, box_overleft, box_overright, box_right, box_same,
 };
-use ::adt_geo::{FPge, FPgt, FPle, FPlt};
+use ::adt_geo::{pg_hypot, FPge, FPgt, FPle, FPlt};
 use ::datum::Datum;
 use ::mcx::Mcx;
-use ::types_core::geo::BOX;
+use ::types_core::geo::{Point, BOX};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
@@ -29,6 +29,8 @@ use ::types_spgist::state::{
 const BOXOID: Oid = 603;
 const POLYGONOID: Oid = 604;
 const VOIDOID: Oid = 2278;
+// fmgroids.h F_DIST_POLYP (dist_polyp).
+const F_DIST_POLYP: Oid = 3292;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -57,6 +59,52 @@ pub struct RectBox {
 #[inline]
 unsafe fn box_at(d: Datum) -> BOX {
     BOX::from_datum_bytes(core::slice::from_raw_parts(d.as_usize() as *const u8, 32))
+}
+
+// SAFETY: datum points at a live 16-byte point image (orderby argument).
+#[inline]
+unsafe fn point_at(d: Datum) -> Point {
+    Point::from_datum_bytes(core::slice::from_raw_parts(d.as_usize() as *const u8, 16))
+}
+
+// geo_spgist.c pointToRectBoxDistance (no NaN leg, as in C).
+fn pointToRectBoxDistance(point: &Point, rect_box: &RectBox) -> PgResult<f64> {
+    let dx = if point.x < rect_box.range_box_x.left.low {
+        rect_box.range_box_x.left.low - point.x
+    } else if point.x > rect_box.range_box_x.right.high {
+        point.x - rect_box.range_box_x.right.high
+    } else {
+        0.0
+    };
+    let dy = if point.y < rect_box.range_box_y.left.low {
+        rect_box.range_box_y.left.low - point.y
+    } else if point.y > rect_box.range_box_y.right.high {
+        point.y - rect_box.range_box_y.right.high
+    } else {
+        0.0
+    };
+    pg_hypot(dx, dy)
+}
+
+// One per-node distances row for an ordered scan, in the armed mcx.
+fn inner_distances_row(
+    mcx: Mcx<'_>,
+    input: &spgInnerConsistentIn,
+    rect_box: &RectBox,
+) -> PgResult<*const f64> {
+    // SAFETY: norderbys orderby scankeys per protocol.
+    let orderbys = unsafe {
+        core::slice::from_raw_parts(input.orderbys, input.norderbys.max(0) as usize)
+    };
+    let mut row: ::mcx::PgVec<'_, f64> = ::mcx::vec_with_capacity_in(mcx, orderbys.len())?;
+    for sk in orderbys {
+        // SAFETY: point-typed orderby argument.
+        let pt = unsafe { point_at(sk.sk_argument) };
+        row.push(pointToRectBoxDistance(&pt, rect_box)?);
+    }
+    let p = row.as_ptr();
+    core::mem::forget(row);
+    Ok(p)
 }
 
 // BoxPGetDatum of a fresh box: 8-aligned like C's palloc'd BOX.
@@ -334,8 +382,6 @@ fn fc_spg_box_quad_inner_consistent(
     let out = unsafe { &mut *(fcinfo.arg(1).as_usize() as *mut spgInnerConsistentOut) };
     let mcx = fcinfo.result_mcx();
 
-    // C's norderbys>0 legs (per-node distances) are unreachable: the scan core
-    // rejects ordered scans loudly before any opclass call.
     let rect_box = if input.traversalValue != 0 {
         // SAFETY: traversal value written by a previous call below, still live
         // in traversalMemoryContext.
@@ -353,6 +399,14 @@ fn fc_spg_box_quad_inner_consistent(
         out.nNodes = input.nNodes;
         out.nodeNumbers = nums.as_ptr();
         core::mem::forget(nums);
+        if input.norderbys > 0 && n > 0 {
+            let mut rows: ::mcx::PgVec<'_, *const f64> = ::mcx::vec_with_capacity_in(mcx, n)?;
+            for _ in 0..n {
+                rows.push(inner_distances_row(mcx, input, &rect_box)?);
+            }
+            out.distances = rows.as_ptr();
+            core::mem::forget(rows);
+        }
         return Ok(Datum::null());
     }
 
@@ -370,6 +424,7 @@ fn fc_spg_box_quad_inner_consistent(
     let n_nodes = input.nNodes.max(0) as usize;
     let mut nums: ::mcx::PgVec<'_, i32> = ::mcx::vec_with_capacity_in(mcx, n_nodes)?;
     let mut traversals: ::mcx::PgVec<'_, usize> = ::mcx::vec_with_capacity_in(mcx, n_nodes)?;
+    let mut rows: ::mcx::PgVec<'_, *const f64> = ::mcx::vec_with_capacity_in(mcx, n_nodes)?;
 
     for quadrant in 0..n_nodes as u8 {
         let next_rect_box = nextRectBox(&rect_box, &centroid, quadrant);
@@ -407,6 +462,9 @@ fn fc_spg_box_quad_inner_consistent(
             core::mem::forget(tv);
             traversals.push(ptr);
             nums.push(quadrant as i32);
+            if input.norderbys > 0 {
+                rows.push(inner_distances_row(mcx, input, &next_rect_box)?);
+            }
         }
     }
 
@@ -415,6 +473,10 @@ fn fc_spg_box_quad_inner_consistent(
     core::mem::forget(nums);
     out.traversalValues = traversals.as_ptr();
     core::mem::forget(traversals);
+    if input.norderbys > 0 {
+        out.distances = rows.as_ptr();
+        core::mem::forget(rows);
+    }
     Ok(Datum::null())
 }
 
@@ -442,8 +504,6 @@ fn fc_spg_box_quad_leaf_consistent(
         // SAFETY: nkeys scankeys per protocol.
         unsafe { core::slice::from_raw_parts(input.scankeys, input.nkeys.max(0) as usize) };
 
-    // C's norderbys>0 leg (spg_key_orderbys_distances) is unreachable: ordered
-    // scans are rejected loudly by the scan core.
     let mut flag = true;
     for sk in scankeys {
         let query = scankey_bbox(mcx, sk, Some(&mut out.recheck))?;
@@ -465,6 +525,20 @@ fn fc_spg_box_quad_leaf_consistent(
         if !flag {
             break;
         }
+    }
+
+    if flag && input.norderbys > 0 {
+        // SAFETY: norderbys orderby scankeys per protocol.
+        let orderbys = unsafe {
+            core::slice::from_raw_parts(input.orderbys, input.norderbys.max(0) as usize)
+        };
+        // The leaf key is a box even for the polygon opclass, hence is_leaf=false.
+        let row =
+            ::spgist_proc::spg_key_orderbys_distances(mcx, input.leafDatum, false, orderbys)?;
+        out.distances = row.as_ptr();
+        core::mem::forget(row);
+        // Recheck is necessary when computing distance to a polygon (F_DIST_POLYP).
+        out.recheckDistances = orderbys[0].sk_func.fn_oid == F_DIST_POLYP;
     }
     Ok(Datum::from_bool(flag))
 }
