@@ -5630,6 +5630,56 @@ fn exec_insert<'mcx>(
     Ok(Some(slot_id))
 }
 
+// ExecUpdateLockMode (execMain.c): the conflicting row takes the weaker
+// NoKeyExclusive lock when the DO UPDATE SET columns don't overlap any key
+// column (ExecGetAllUpdatedCols vs INDEX_ATTR_BITMAP_KEY). Routed leaves map
+// the root's updated columns through the root->leaf attrmap; leaf-local
+// generated-column extras aren't recomputed (the root's, mapped, stand in).
+fn on_conflict_update_lock_mode<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    leaf: Option<usize>,
+) -> PgResult<LockTupleMode> {
+    const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let mcx = estate.es_query_cxt;
+    ensure_all_updated_cols(mt, estate, false)?;
+    let rti = mt.rel().rti;
+    let rel = estate.es_relations[(rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let mut cols = mt
+        .rel()
+        .all_updated_cols
+        .as_ref()
+        .expect("resolved above")
+        .clone_in(mcx)?;
+    let rel_id = match leaf {
+        None => rel.rd_id,
+        Some(idx) => {
+            let leaf_rel = mt.router.as_ref().expect("routed").leaf_rel(idx);
+            if let Some(map) = tupdesc::build_attrmap_by_name_if_req(
+                mcx,
+                &rel.rd_att,
+                &leaf_rel.rd_att,
+                !leaf_rel.rd_rel.relispartition,
+            )? {
+                cols = execute_attr_map_cols(mcx, &map, &cols)?;
+            }
+            leaf_rel.rd_id
+        }
+    };
+    let bitmaps = ::relcache_seams::relation_get_index_attr_bitmap::call(rel_id)?;
+    let key_updated = bitmaps
+        .key
+        .iter()
+        .any(|&attno| cols.is_member(attno as i32 - FLIHAN));
+    Ok(if key_updated {
+        LockTupleMode::LockTupleExclusive
+    } else {
+        LockTupleMode::LockTupleNoKeyExclusive
+    })
+}
+
 // ExecOnConflictUpdate (nodeModifyTable.c): lock the conflict tuple, verify
 // visibility, apply the DO UPDATE WHERE qual and SET projection, then run the
 // plain UPDATE path against the locked tuple.
@@ -5669,8 +5719,7 @@ fn exec_on_conflict_update<'mcx>(
     };
 
     let mut tmfd = TM_FailureData::default();
-    // ExecUpdateLockMode: the UPDATE path always takes LockTupleExclusive
-    // (NoKeyExclusive needs the unchanged-key-columns analysis, unported).
+    let lockmode = on_conflict_update_lock_mode(mt, estate, leaf)?;
     let lock_result = {
         let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
@@ -5687,7 +5736,7 @@ fn exec_on_conflict_update<'mcx>(
             snapshot,
             &mut es_tupleTable[existing_id.0 as usize],
             output_cid,
-            LockTupleMode::LockTupleExclusive,
+            lockmode,
             LockWaitPolicy::LockWaitBlock,
             0,
             &mut tmfd,

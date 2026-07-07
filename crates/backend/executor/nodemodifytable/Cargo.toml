@@ -39,6 +39,7 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 types_core = { path = "../../../_support/types/types_core" }
 datum = { path = "../../../_support/types/datum" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+relcache_seams = { path = "../../utils/cache/relcache_seams" }
 execscan = { path = "../execscan" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 
@@ -53,7 +54,6 @@ sync_seams = { path = "../../storage/sync/sync_seams" }
 adt_float = { path = "../../utils/adt/float" }
 adt_bool = { path = "../../utils/adt/bool" }
 guc = { path = "../../utils/misc/guc" }
-relcache_seams = { path = "../../utils/cache/relcache_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 aio_seams = { path = "../../storage/aio/aio_seams" }
 async_seams = { path = "../../commands/async_seams" }

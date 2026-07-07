@@ -2991,6 +2991,49 @@ fn unported_ret(typlen: i32) -> ! {
 /// `heap_lock_updated_tuple` (heapam.c): lock all descendant versions of an
 /// updated tuple so the acquired mode survives the chain. LOUD in the rec:
 /// MultiXact member scans and all-visible VM maintenance.
+/// `test_lockmode_for_conflict` (heapam.c): can we lock this chain member
+/// given its held (multixact-status-encoded) lock, or must we wait/fail?
+enum LockmodeTest {
+    SelfModified,
+    Wait,
+    Proceed,
+    ConflictCommitted,
+}
+
+fn test_lockmode_for_conflict(
+    status: MultiXactStatus,
+    xid: TransactionId,
+    mode: LockTupleMode,
+) -> PgResult<LockmodeTest> {
+    let wanted = get_mxact_status_for_lock(mode, false)?;
+    let conflicts = || {
+        ::lock_seams::do_lock_modes_conflict::call(
+            tuple_lock_hwlock(TUPLOCK_from_mxstatus(status)),
+            tuple_lock_hwlock(TUPLOCK_from_mxstatus(wanted)),
+        )
+    };
+    if xact_seams::transaction_id_is_current_transaction_id::call(xid) {
+        Ok(LockmodeTest::SelfModified)
+    } else if procarray_seams::transaction_id_is_in_progress::call(xid)? {
+        if conflicts() {
+            Ok(LockmodeTest::Wait)
+        } else {
+            Ok(LockmodeTest::Proceed)
+        }
+    } else if transam_seams::transaction_id_did_abort::call(xid)? {
+        Ok(LockmodeTest::Proceed)
+    } else if transam_seams::transaction_id_did_commit::call(xid)? {
+        if ISUPDATE_from_mxstatus(status) && conflicts() {
+            Ok(LockmodeTest::ConflictCommitted)
+        } else {
+            Ok(LockmodeTest::Proceed)
+        }
+    } else {
+        // not in progress, not aborted, not committed: crashed; locks gone
+        Ok(LockmodeTest::Proceed)
+    }
+}
+
 fn heap_lock_updated_tuple(
     relation: &RelationData<'_>,
     prior_infomask: u16,
@@ -3084,62 +3127,82 @@ fn heap_lock_updated_tuple_rec(
             let mut stamp = true;
 
             if (old_infomask & HEAP_XMAX_INVALID) == 0 {
+                // wait_on set = C's goto l4 after XactLockTableWait; conflict
+                // Updated/Deleted mapping (C's out_locked) stays with mytup.
+                let mut wait_on = None;
                 if (old_infomask & HEAP_XMAX_IS_MULTI) != 0 {
-                    unported("GetMultiXactIdMembers (heap_lock_updated_tuple_rec, multixact.c)");
-                }
-                let held_locked_only = HEAP_XMAX_IS_LOCKED_ONLY(old_infomask);
-                let held_mode = if held_locked_only {
-                    if HEAP_XMAX_IS_KEYSHR_LOCKED(old_infomask) {
-                        LockTupleMode::LockTupleKeyShare
-                    } else if HEAP_XMAX_IS_SHR_LOCKED(old_infomask) {
-                        LockTupleMode::LockTupleShare
-                    } else if HEAP_XMAX_IS_EXCL_LOCKED(old_infomask) {
-                        if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
-                            LockTupleMode::LockTupleExclusive
-                        } else {
-                            LockTupleMode::LockTupleNoKeyExclusive
+                    // Chain members postdate the caller's snapshot, so no
+                    // pg_upgrade'd (HEAP_LOCKED_UPGRADED) multis here.
+                    debug_assert!(!HEAP_LOCKED_UPGRADED(old_infomask));
+                    let members =
+                        collect_multixact_members(xmax, HEAP_XMAX_IS_LOCKED_ONLY(old_infomask))?;
+                    for m in &members {
+                        match test_lockmode_for_conflict(m.status, m.xid, mode)? {
+                            LockmodeTest::SelfModified => {
+                                // Already locked by us in a previous pass over
+                                // this chain: skip stamping, keep following.
+                                stamp = false;
+                                break;
+                            }
+                            LockmodeTest::Wait => {
+                                wait_on = Some(m.xid);
+                                break;
+                            }
+                            LockmodeTest::ConflictCommitted => {
+                                if mytup.t_self != mytup.t_data().t_ctid {
+                                    done!(TM_Result::TM_Updated);
+                                }
+                                done!(TM_Result::TM_Deleted);
+                            }
+                            LockmodeTest::Proceed => {}
                         }
-                    } else {
-                        return Err(Box::new(PgError::error("invalid lock status in tuple")));
                     }
-                } else if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
-                    LockTupleMode::LockTupleExclusive
                 } else {
-                    LockTupleMode::LockTupleNoKeyExclusive
-                };
-                // test_lockmode_for_conflict (heapam.c), single-xact form.
-                if xact_seams::transaction_id_is_current_transaction_id::call(xmax) {
-                    stamp = false;
-                } else if procarray_seams::transaction_id_is_in_progress::call(xmax)? {
-                    if ::lock_seams::do_lock_modes_conflict::call(
-                        tuple_lock_hwlock(held_mode),
-                        tuple_lock_hwlock(mode),
-                    ) {
-                        bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
-                        lmgr::XactLockTableWait(
-                            xmax,
-                            Some(relation),
-                            Some(&mytup.t_self),
-                            ::types_storage::lock::XLTW_Oper::LockUpdated,
-                        )?;
-                        continue 'l4;
-                    }
-                } else if transam_seams::transaction_id_did_abort::call(xmax)? {
-                    // lock gone with the aborted xact
-                } else if transam_seams::transaction_id_did_commit::call(xmax)? {
-                    if !held_locked_only
-                        && ::lock_seams::do_lock_modes_conflict::call(
-                            tuple_lock_hwlock(held_mode),
-                            tuple_lock_hwlock(mode),
-                        )
-                    {
-                        if mytup.t_self != mytup.t_data().t_ctid {
-                            done!(TM_Result::TM_Updated);
+                    let status = if HEAP_XMAX_IS_LOCKED_ONLY(old_infomask) {
+                        if HEAP_XMAX_IS_KEYSHR_LOCKED(old_infomask) {
+                            MultiXactStatus::MultiXactStatusForKeyShare
+                        } else if HEAP_XMAX_IS_SHR_LOCKED(old_infomask) {
+                            MultiXactStatus::MultiXactStatusForShare
+                        } else if HEAP_XMAX_IS_EXCL_LOCKED(old_infomask) {
+                            if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                                MultiXactStatus::MultiXactStatusForUpdate
+                            } else {
+                                MultiXactStatus::MultiXactStatusForNoKeyUpdate
+                            }
+                        } else {
+                            return Err(Box::new(PgError::error("invalid lock status in tuple")));
                         }
-                        done!(TM_Result::TM_Deleted);
+                    } else if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                        MultiXactStatus::MultiXactStatusUpdate
+                    } else {
+                        MultiXactStatus::MultiXactStatusNoKeyUpdate
+                    };
+                    match test_lockmode_for_conflict(status, xmax, mode)? {
+                        LockmodeTest::SelfModified => {
+                            stamp = false;
+                        }
+                        LockmodeTest::Wait => {
+                            wait_on = Some(xmax);
+                        }
+                        LockmodeTest::ConflictCommitted => {
+                            if mytup.t_self != mytup.t_data().t_ctid {
+                                done!(TM_Result::TM_Updated);
+                            }
+                            done!(TM_Result::TM_Deleted);
+                        }
+                        LockmodeTest::Proceed => {}
                     }
                 }
-                // else: crashed — locks are gone
+                if let Some(xid) = wait_on {
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+                    lmgr::XactLockTableWait(
+                        xid,
+                        Some(relation),
+                        Some(&mytup.t_self),
+                        ::types_storage::lock::XLTW_Oper::LockUpdated,
+                    )?;
+                    continue 'l4;
+                }
             }
 
             if stamp {
