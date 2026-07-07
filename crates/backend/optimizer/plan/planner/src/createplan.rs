@@ -1637,7 +1637,9 @@ fn create_projection_plan<'mcx>(
         ),
         _ => unreachable!(),
     };
-    if use_physical_tlist(run, path_id, flags) {
+    // The flags check is hoisted out of use_physical_tlist so the dominant
+    // CP_EXACT_TLIST callers skip the call.
+    if flags & (CP_EXACT_TLIST | CP_SMALL_TLIST) == 0 && use_physical_tlist(run, path_id, flags) {
         // C: the caller doesn't care what tlist comes back, so don't
         // project — the subplan keeps its own (physical) tlist and only the
         // costs are relabeled.
