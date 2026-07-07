@@ -619,8 +619,11 @@ pub fn InitProcessPhase2() -> PgResult<()> {
 pub fn ReattachRetainedProc(backend_type: BackendType) -> PgResult<()> {
     let procno = my_proc_required();
     let proc = GetPGProcByNumber(procno);
-    if proc.pid.load(Relaxed) != g::MyProcPid() {
-        panic!("ReattachRetainedProc: retained PGPROC pid mismatch");
+    // proc.pid still holds the PREVIOUS task's synthetic pid (tasks get
+    // fresh pids; the park keeps the PGPROC); ownership is structural (same
+    // thread, MY_PROC TLS). init_my_proc_common below stores the new pid.
+    if proc.pid.load(Relaxed) == 0 {
+        panic!("ReattachRetainedProc: retained PGPROC was released");
     }
     debug_assert_eq!(g::MyProcNumber(), procno);
     debug_assert_eq!(proc.lockGroupLeader.load(Relaxed), INVALID_PROC_NUMBER);
