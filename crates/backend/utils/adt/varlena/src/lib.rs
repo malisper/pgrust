@@ -324,7 +324,7 @@ pub fn text_substring<'mcx>(
     assert!(eml > 1, "invalid backend encoding: encoding max length < 1");
 
     let slice_start = 0i32;
-    let (slice_size, mut l1);
+    let (slice_size, l1);
     if length_not_specified {
         slice_size = -1;
         l1 = -1;
@@ -337,17 +337,11 @@ pub fn text_substring<'mcx>(
                 l1 = -1;
             }
             Some(e) => {
-                if e < 1 {
+                if e <= 1 {
                     return cstring_to_text(mcx, b"");
                 }
                 l1 = e - s1;
-                match e.checked_mul(eml) {
-                    Some(sz) => slice_size = sz,
-                    None => {
-                        slice_size = -1;
-                        l1 = -1;
-                    }
-                }
+                slice_size = (e - 1).checked_mul(eml).unwrap_or(-1);
             }
         }
     }
@@ -367,7 +361,14 @@ pub fn text_substring<'mcx>(
     if data.is_empty() {
         return cstring_to_text(mcx, b"");
     }
-    let slice_strlen = mbutils_seams::pg_mbstrlen_with_len::call(data)?;
+    // Validation must stop at the substring's last character: a char cut off
+    // by the slice fetch past that point is not diagnosable (varlena.c
+    // pg_mbcharcliplen_chars). When slice_size != -1, s1 + l1 - 1 == E - 1.
+    let slice_strlen = if slice_size == -1 {
+        mbutils_seams::pg_mbstrlen_with_len::call(data)?
+    } else {
+        pg_mbcharcliplen_chars(data, s1 + l1 - 1)?
+    };
     if s1 > slice_strlen {
         return cstring_to_text(mcx, b"");
     }
@@ -388,6 +389,24 @@ pub fn text_substring<'mcx>(
     }
 
     cstring_to_text(mcx, &data[sstart..p])
+}
+
+// C: pg_mbcharcliplen_chars (varlena.c) — pg_mbcharcliplen with the return
+// unit in chars; stops counting (and validating) once `limit` chars are seen.
+fn pg_mbcharcliplen_chars(mbstr: &[u8], limit: i32) -> PgResult<i32> {
+    debug_assert!(!mbstr.is_empty());
+    debug_assert!(limit > 0);
+    let mut nch = 0;
+    let mut pos = 0usize;
+    while pos < mbstr.len() && mbstr[pos] != 0 {
+        let l = mbutils_seams::pg_mblen_range::call(&mbstr[pos..])?;
+        nch += 1;
+        if nch == limit {
+            break;
+        }
+        pos += l as usize;
+    }
+    Ok(nch)
 }
 
 pub fn text_catenate<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8]) -> PgResult<Varlena<'mcx>> {

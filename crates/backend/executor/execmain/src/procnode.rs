@@ -1316,6 +1316,7 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::TidRangeScan(ts) => Some(&mut ts.ss),
         PlanStateNode::IndexOnlyScan(ios) => Some(&mut ios.ss),
         PlanStateNode::BitmapHeapScan(b) => Some(&mut b.scan.ss),
+        PlanStateNode::SubqueryScan(sq) => Some(&mut sq.ss),
         _ => None,
     }
 }

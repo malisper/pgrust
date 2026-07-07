@@ -4616,12 +4616,17 @@ fn create_subqueryscan_plan<'mcx>(
     let mut qual = extract_actual_clauses(run, &ordered);
 
     if run.root.path(best_path).base().param_info.is_some() {
-        qual = replace_nestloop_params_list(run, &qual)?;
+        // Subquery lateral params first (createplan.c): they carry fixed
+        // param IDs, and replace_nestloop_params then reuses them for the
+        // same Var in scan_clauses — a second ID for one Var would land in
+        // the child's chgParam but not Memoize's keyparamids, purging the
+        // cache on every rescan.
         let subplan_params = crate::relnode::pgvec_clone_shallow(
             mcx,
             &run.root.rel(rel_id).subplan_params,
         );
         crate::paramassign::process_subquery_nestloop_params(run, &subplan_params)?;
+        qual = replace_nestloop_params_list(run, &qual)?;
     }
 
     let mut plan = Node::build::<SubqueryScan<'mcx>>(mcx)?;
