@@ -48,7 +48,8 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
             continue;
         }
 
-        let subquery = crate::subselect::query_cells_copy(mcx, ctequery)?;
+        let subquery =
+            mcx::leak_in(mcx::alloc_in(mcx, crate::subselect::query_cells_copy(mcx, ctequery)?)?);
 
         debug_assert!(run.root.plan_params.is_empty());
         run.push_root()?;

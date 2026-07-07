@@ -204,7 +204,7 @@ pub(crate) fn execute_sql_string(sql: &str, filename: &str) -> PgResult<()> {
                 } else {
                     stmt_list.push(planner_seams::planner::call(
                         mcx,
-                        query,
+                        mcx::leak_in(mcx::alloc_in(mcx, query)?),
                         sql_ref,
                         CURSOR_OPT_PARALLEL_OK,
                         ParamListHandle::NULL,

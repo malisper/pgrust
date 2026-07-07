@@ -239,7 +239,7 @@ pub fn init_seams() {
 // planner_hook is absent by design.
 pub fn planner<'mcx>(
     mcx: Mcx<'mcx>,
-    parse: Query<'mcx>,
+    parse: &'mcx mut Query<'mcx>,
     query_string: &str,
     cursor_options: i32,
     bound_params: ParamListHandle,
@@ -251,7 +251,7 @@ pub fn planner<'mcx>(
 
 pub fn standard_planner<'mcx>(
     mcx: Mcx<'mcx>,
-    parse: Query<'mcx>,
+    parse: &'mcx mut Query<'mcx>,
     _query_string: &str,
     cursor_options: i32,
     bound_params: ParamListHandle,
@@ -409,7 +409,7 @@ pub fn standard_planner<'mcx>(
     }
 
     let glob = core::mem::replace(&mut run.glob, run::Glob::new());
-    Ok(PlannedStmt {
+    let stmt = PlannedStmt {
         commandType: parse.commandType,
         queryId: parse.queryId,
         planId: 0,
@@ -444,7 +444,8 @@ pub fn standard_planner<'mcx>(
         utilityStmt: parse.utilityStmt,
         stmt_location: parse.stmt_location,
         stmt_len: parse.stmt_len,
-    })
+    };
+    Ok(stmt)
 }
 
 fn is_parallel_worker() -> bool {

@@ -963,7 +963,13 @@ fn make_subplan<'mcx>(
 
     debug_assert!(run.root.plan_params.is_empty());
     run.push_root()?;
-    crate::subquery::subquery_planner(run, subquery, false, tuple_fraction, None)?;
+    crate::subquery::subquery_planner(
+        run,
+        mcx::leak_in(mcx::alloc_in(mcx, subquery)?),
+        false,
+        tuple_fraction,
+        None,
+    )?;
 
     let final_rel = fetch_final_rel(run);
     let best_path = get_cheapest_fractional_path(run, final_rel, tuple_fraction);
@@ -991,7 +997,13 @@ fn make_subplan<'mcx>(
             convert_exists_to_any(run, subquery)?
         {
             run.push_root()?;
-            crate::subquery::subquery_planner(run, subquery, false, 0.0, None)?;
+            crate::subquery::subquery_planner(
+                run,
+                mcx::leak_in(mcx::alloc_in(mcx, subquery)?),
+                false,
+                0.0,
+                None,
+            )?;
             let final_rel = fetch_final_rel(run);
             let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
             let hashable = {

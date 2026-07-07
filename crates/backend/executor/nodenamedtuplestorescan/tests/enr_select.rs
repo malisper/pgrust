@@ -120,7 +120,7 @@ fn select_from_enr_scans_registered_tuplestore() {
     let mut rewritten = rewrite_handler::QueryRewrite(mcx, query).unwrap();
     assert_eq!(rewritten.len(), 1);
     let query = rewritten.pop().unwrap();
-    let pstmt = planner::planner(mcx, query, sql, 0, ParamListHandle::NULL).unwrap();
+    let pstmt = planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()), sql, 0, ParamListHandle::NULL).unwrap();
     let pstmt: &'static PlannedStmt<'static> = mcx::leak_in(mcx::alloc_in(mcx, pstmt).unwrap());
 
     let scan = pstmt.planTree.expect("planned SELECT has a plan tree");

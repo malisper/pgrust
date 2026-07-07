@@ -73,7 +73,8 @@ fn recurse_set_operations<'mcx>(
         debug_assert!(run.root.plan_params.is_empty());
 
         let tuple_fraction = run.root.tuple_fraction;
-        let sub_parse = crate::subselect::query_cells_copy(run.mcx, subquery)?;
+        let sub_parse =
+            mcx::leak_in(mcx::alloc_in(run.mcx, crate::subselect::query_cells_copy(run.mcx, subquery)?)?);
         run.push_root()?;
         crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, parent_op)?;
         let child_tlist = run.processed_tlist();

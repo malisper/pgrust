@@ -170,7 +170,7 @@ pub fn standard_ExplainOneQuery<'mcx>(
     let mem_before = if es.memory { Some(mem_snapshot(mcx)) } else { None };
     let bufusage_start = if es.buffers { Some(instrument::pg_buffer_usage()) } else { None };
     let planstart = Instant::now();
-    let plan = postgres::simple_query::pg_plan_query(mcx, query, query_string, cursor_options, params)?
+    let plan = postgres::simple_query::pg_plan_query(mcx, mcx::leak_in(mcx::alloc_in(mcx, query)?), query_string, cursor_options, params)?
         .expect("planner will not cope with utility statements");
     let planduration = planstart.elapsed();
     let mem_counters = mem_before.map(|b| mem_counters_since(mcx, b));

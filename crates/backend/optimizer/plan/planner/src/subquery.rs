@@ -32,7 +32,7 @@ pub const EXPRKIND_GROUPEXPR: i32 = 13;
 // child root's query_level).
 pub fn subquery_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
-    mut parse: Query<'mcx>,
+    parse: &'mcx mut Query<'mcx>,
     has_recursion: bool,
     tuple_fraction: f64,
     setops: Option<&'mcx types_nodes::parsenodes::SetOperationStmt<'mcx>>,
@@ -56,12 +56,12 @@ pub fn subquery_planner<'mcx>(
     run.root.join_domains.push(JoinDomain::default());
 
     if !parse.cteList.is_nil() {
-        crate::cte::ss_process_ctes(run, &parse)?;
+        crate::cte::ss_process_ctes(run, &*parse)?;
     }
-    crate::prepjointree::transform_MERGE_to_join(mcx, &mut parse)?;
-    replace_empty_jointree(mcx, &mut parse)?;
+    crate::prepjointree::transform_MERGE_to_join(mcx, &mut *parse)?;
+    replace_empty_jointree(mcx, &mut *parse)?;
     if parse.hasSubLinks {
-        crate::subselect::pull_up_sublinks(run, &mut parse)?;
+        crate::subselect::pull_up_sublinks(run, &mut *parse)?;
     }
     // One scan feeds both triggers: preprocess_function_rtes (prepjointree.c)
     // loops the rtable and no-ops without an RTE_FUNCTION entry, so gating the
@@ -81,19 +81,19 @@ pub fn subquery_planner<'mcx>(
         }
     }
     if has_function_rte {
-        crate::prepjointree::preprocess_function_rtes(run, &mut parse)?;
+        crate::prepjointree::preprocess_function_rtes(run, &mut *parse)?;
     }
     if has_pullup_rte {
-        crate::prepjointree::pull_up_subqueries(run, &mut parse)?;
+        crate::prepjointree::pull_up_subqueries(run, &mut *parse)?;
     }
     if parse.setOperations.is_some() {
-        crate::prepjointree::flatten_simple_union_all(run, &mut parse)?;
+        crate::prepjointree::flatten_simple_union_all(run, &mut *parse)?;
     }
     if parse.rtable.iter().any(|n| {
         let r = n.as_range_tbl_entry().expect("rtable cell");
         r.rtekind == RTEKind::RTE_RELATION && matches!(r.relkind, b'r' | b'p')
     }) {
-        crate::prepjointree::expand_virtual_generated_columns(run, &mut parse)?;
+        crate::prepjointree::expand_virtual_generated_columns(run, &mut *parse)?;
     }
 
     let mut has_outer_joins = false;
@@ -306,12 +306,13 @@ pub fn subquery_planner<'mcx>(
         }
     }
 
-    preprocess_rowmarks(run, &parse)?;
+    preprocess_rowmarks(run, &*parse)?;
     run.root.hasHavingQual = parse.havingQual.is_some();
 
     let has_sublinks = parse.hasSubLinks;
+    let tlist = core::mem::replace(&mut parse.targetList, NodeList::nil());
     parse.targetList =
-        preprocess_expression_list(run, &parse.rtable, parse.jointree, parse.targetList, EXPRKIND_TARGET, has_sublinks)?;
+        preprocess_expression_list(run, &parse.rtable, parse.jointree, tlist, EXPRKIND_TARGET, has_sublinks)?;
     if !parse.withCheckOptions.is_nil() {
         let mut new_wcos = NodeList::nil();
         for wco_node in &parse.withCheckOptions {
@@ -329,9 +330,10 @@ pub fn subquery_planner<'mcx>(
         }
         parse.withCheckOptions = new_wcos;
     }
+    let rlist = core::mem::replace(&mut parse.returningList, NodeList::nil());
     parse.returningList =
-        preprocess_expression_list(run, &parse.rtable, parse.jointree, parse.returningList, EXPRKIND_TARGET, has_sublinks)?;
-    preprocess_qual_conditions(run, &mut parse, has_sublinks)?;
+        preprocess_expression_list(run, &parse.rtable, parse.jointree, rlist, EXPRKIND_TARGET, has_sublinks)?;
+    preprocess_qual_conditions(run, &mut *parse, has_sublinks)?;
     parse.havingQual =
         preprocess_expression(run, &parse.rtable, parse.jointree, parse.havingQual, EXPRKIND_QUAL, has_sublinks)?;
     for wc_node in &parse.windowClause {
@@ -504,11 +506,11 @@ pub fn subquery_planner<'mcx>(
             {
                 new_having.lappend(mcx, hc)?;
             } else if !parse.groupClause.is_nil() && first_gset_nonempty {
-                move_qual_to_where(run, &mut parse, hc)?;
+                move_qual_to_where(run, &mut *parse, hc)?;
             } else {
                 // Degenerate grouping: a copy goes to WHERE, the clause stays
                 // in HAVING (C copyObject; the arena share is our copy model).
-                move_qual_to_where(run, &mut parse, hc)?;
+                move_qual_to_where(run, &mut *parse, hc)?;
                 new_having.lappend(mcx, hc)?;
             }
         }
@@ -519,18 +521,19 @@ pub fn subquery_planner<'mcx>(
         };
     }
     if has_outer_joins {
-        crate::prepjointree::reduce_outer_joins(run, &mut parse)?;
+        crate::prepjointree::reduce_outer_joins(run, &mut *parse)?;
     }
     // C gates this on hasResultRTEs || hasOuterJoins (planner.c:1215): the
     // pass also flattens single-child FromExprs under outer joins, folding
     // their quals into the upper join's ON list so make_outerjoininfo sees
     // identity-3 ordering constraints from intermediate degenerate quals.
     if has_result_rtes || has_outer_joins {
-        remove_useless_result_rtes(run, &mut parse)?;
+        remove_useless_result_rtes(run, &mut *parse)?;
     }
 
-    // Mutation done; seal the Query (C shares root->parse by pointer).
-    let sealed: &'mcx Query<'mcx> = alloc_leak_in(mcx, parse)?;
+    // Mutation done; seal the Query by reference (C shares root->parse by
+    // pointer; parse is already arena-resident).
+    let sealed: &'mcx Query<'mcx> = parse;
     run.root.parse = run.intern_query(sealed);
 
     if run.root.hasJoinRTEs {

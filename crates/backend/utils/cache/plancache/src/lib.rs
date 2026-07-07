@@ -933,7 +933,7 @@ fn build_stmt_list(
                     ..PlannedStmt::default()
                 });
             } else {
-                let input = copy_query_in(mcx, q)?;
+                let input = mcx::leak_in(mcx::alloc_in(mcx, copy_query_in(mcx, q)?)?);
                 stmts.push(planner_seams::planner::call(
                     mcx,
                     input,

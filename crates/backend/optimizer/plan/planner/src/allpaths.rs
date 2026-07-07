@@ -149,7 +149,8 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
 
     // The copy keeps planning (and qual pushdown) off the RTE contents.
-    let mut sub_parse = crate::subselect::query_cells_copy(run.mcx, orig)?;
+    let sub_parse =
+        mcx::leak_in(mcx::alloc_in(run.mcx, crate::subselect::query_cells_copy(run.mcx, orig)?)?);
     let mut run_cond_attrs = types_nodes::Bitmapset::empty();
     crate::pushdown::pushdown_quals_into_subquery(
         run,
@@ -157,10 +158,10 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         rti,
         rte,
         orig,
-        &mut sub_parse,
+        sub_parse,
         &mut run_cond_attrs,
     )?;
-    crate::pushdown::remove_unused_subquery_outputs(run, rel, &mut sub_parse, run_cond_attrs)?;
+    crate::pushdown::remove_unused_subquery_outputs(run, rel, sub_parse, run_cond_attrs)?;
 
     let parse = run.parse();
     let mut n_baserels = 0;

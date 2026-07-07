@@ -594,7 +594,7 @@ fn run_stmt(sql: &'static str) -> (CmdType, u64, &'static PlannedStmt<'static>) 
     assert_eq!(rewritten.len(), 1);
     let query = rewritten.pop().unwrap();
     let pstmt =
-        planner::planner(mcx, query, sql, 0, types_portal::ParamListHandle::NULL).unwrap();
+        planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()), sql, 0, types_portal::ParamListHandle::NULL).unwrap();
     let pstmt: &'static PlannedStmt<'static> = mcx::leak_in(mcx::alloc_in(mcx, pstmt).unwrap());
 
     let snapshot = snapmgr::GetTransactionSnapshot().unwrap();
@@ -633,7 +633,7 @@ fn explain_stmt(sql: &'static str) -> String {
         parser_analyze::parse_analyze_fixedparams(mcx, raw, sql, &[], Default::default()).unwrap();
     let mut rewritten = rewrite_handler::QueryRewrite(mcx, query).unwrap();
     let query = rewritten.pop().unwrap();
-    let pstmt = planner::planner(mcx, query, sql, 0, types_portal::ParamListHandle::NULL).unwrap();
+    let pstmt = planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()), sql, 0, types_portal::ParamListHandle::NULL).unwrap();
 
     let snapshot = snapmgr::GetTransactionSnapshot().unwrap();
     snapmgr::PushActiveSnapshot(&snapshot).unwrap();

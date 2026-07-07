@@ -118,7 +118,7 @@ pub fn PerformCursorOpen(
         return Err(non_select_in_declare());
     }
 
-    let plan = postgres::pg_plan_query(pmcx, query, source_text, cstmt.options, params)?
+    let plan = postgres::pg_plan_query(pmcx, mcx::leak_in(mcx::alloc_in(pmcx, query)?), source_text, cstmt.options, params)?
         .expect("planner output for a SELECT");
 
     let portal = portalmem::CreatePortal(name, false, false)?;
