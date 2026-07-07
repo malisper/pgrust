@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn missing_symbol() {
-        register_builtin_library(BuiltinLibraryEntry { name: "tlib", lookup: |_| None });
+        register_builtin_library(BuiltinLibraryEntry { name: "tlib", lookup: |_| None, pg_init: None });
         let err = load_external_function("$libdir/tlib", "nosuchsymbol", true).unwrap_err();
         assert!(err
             .message()
