@@ -13,6 +13,22 @@ seam_core::seam!(
     ) -> PgResult<Oid>
 );
 
+// RangeVarGetRelidExtended flags (namespace.h).
+pub const RVR_MISSING_OK: u32 = 1 << 0;
+pub const RVR_NOWAIT: u32 = 1 << 1;
+pub const RVR_SKIP_LOCKED: u32 = 1 << 2;
+
+seam_core::seam!(
+    // RangeVarGetRelidExtended (namespace.c), callback-free callers.
+    // RVR_SKIP_LOCKED returns InvalidOid when the lock is unavailable.
+    pub fn range_var_get_relid_extended(
+        mcx: Mcx<'_>,
+        relation: &RangeVar,
+        lockmode: LOCKMODE,
+        flags: u32,
+    ) -> PgResult<Oid>
+);
+
 seam_core::seam!(
     // get_ts_parser_oid (namespace.c) — wparser_def byname entries resolve
     // parser names (a direct wparser_def -> catalog_namespace dep would cycle

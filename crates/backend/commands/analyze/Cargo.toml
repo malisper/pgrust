@@ -63,11 +63,11 @@ nodes_core = { path = "../../nodes/nodes_core" }
 pgstat = { path = "../../utils/activity/pgstat" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
+tableam_vocab = { path = "../../access/table/tableam_vocab" }
 
 [dev-dependencies]
 heapam = { path = "../../access/heap/heapam" }
 miscinit = { path = "../../utils/init/miscinit" }
-tableam_vocab = { path = "../../access/table/tableam_vocab" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_float = { path = "../../utils/adt/float" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

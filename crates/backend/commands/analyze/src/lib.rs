@@ -23,10 +23,10 @@ use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_slot::SlotData;
 use types_tuple::{FormData_pg_attribute, HeapTupleData, TupleDescData};
 
-const VACOPT_VACUUM: i32 = 0x01;
-const VACOPT_ANALYZE: i32 = 0x02;
-const VACOPT_VERBOSE: i32 = 0x04;
-const VACOPT_SKIP_LOCKED: i32 = 0x08;
+const VACOPT_VACUUM: i32 = tableam_vocab::VACOPT_VACUUM as i32;
+const VACOPT_ANALYZE: i32 = tableam_vocab::VACOPT_ANALYZE as i32;
+const VACOPT_VERBOSE: i32 = tableam_vocab::VACOPT_VERBOSE as i32;
+const VACOPT_SKIP_LOCKED: i32 = tableam_vocab::VACOPT_SKIP_LOCKED as i32;
 
 const STATISTIC_RELATION_ID: Oid = 2619;
 const STATISTIC_NUM_SLOTS: usize = 5;

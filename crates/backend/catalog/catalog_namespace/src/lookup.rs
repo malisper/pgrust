@@ -10,9 +10,7 @@ use types_rel::{NoLock, LOCKMODE};
 use crate::path::recomputeNamespacePath;
 use crate::{base_path_len, base_path_nth, my_temp_namespace, OidIsValid};
 
-pub const RVR_MISSING_OK: u32 = 1 << 0;
-pub const RVR_NOWAIT: u32 = 1 << 1;
-pub const RVR_SKIP_LOCKED: u32 = 1 << 2;
+pub use namespace_seams::{RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED};
 
 // parsenodes.h ObjectType, verified against REL_18_3.
 const OBJECT_SCHEMA: i32 = 36;
