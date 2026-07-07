@@ -167,10 +167,10 @@ fn preprocess_aggrefs_walker<'mcx>(
         }
         NodeTag::T_SubscriptingRef => {
             let sref = node.as_subscripting_ref().unwrap();
-            for a in &sref.refupperindexpr {
+            for a in sref.refupperindexpr.iter().flatten() {
                 preprocess_aggrefs_walker(run, a)?;
             }
-            for a in &sref.reflowerindexpr {
+            for a in sref.reflowerindexpr.iter().flatten() {
                 preprocess_aggrefs_walker(run, a)?;
             }
             if let Some(e) = sref.refexpr {
