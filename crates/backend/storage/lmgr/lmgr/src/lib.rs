@@ -107,6 +107,15 @@ fn absorb_inval_and_clear(tag: LOCKTAG, lockmode: LOCKMODE, res: LockAcquireResu
 // Per-open hot at M2. The per-backend fastpath C leans on lives in lock.c's
 // LockAcquireExtended (fpInfoLock fast-path slots), not in this layer.
 pub fn LockRelationOid(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
+    // TEMP P1 FORENSICS: pg_class-index lock taken without pg_class held.
+    if relid == 2662
+        && !lock_seams::lock_held_by_me::call(SetLocktagRelationOid(1259), 1, true)
+    {
+        eprintln!(
+            "LOCKORDER: 2662 mode {lockmode} without 1259; backtrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
     let tag = SetLocktagRelationOid(relid);
     let res = acquire(tag, lockmode, false)?;
     absorb_inval_and_clear(tag, lockmode, res)
