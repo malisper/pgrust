@@ -241,6 +241,8 @@ struct CollationCache {
 
 thread_local! {
     static DEFAULT_LOCALE: Cell<Option<&'static PgLocale>> = const { Cell::new(None) };
+    // Database DEFAULT_LOCALE was built for (retention sanity check only).
+    static DEFAULT_LOCALE_DB: Cell<Oid> = const { Cell::new(0) };
     static COLLATION_CACHE: RefCell<Option<CollationCache>> = const { RefCell::new(None) };
     static LAST_COLLATION_CACHE: Cell<Option<(Oid, &'static PgLocale)>> = const { Cell::new(None) };
 }
@@ -479,12 +481,17 @@ fn create_pg_locale_libc(collate: &str, ctype: &str) -> PgResult<PgLocale> {
 }
 
 pub fn init_database_collation() -> PgResult<()> {
-    debug_assert!(
-        DEFAULT_LOCALE.with(Cell::get).is_none(),
-        "init_database_collation called twice"
-    );
+    // Retention (wretain): a retained pool thread reruns InitPostgres per
+    // claim against the SAME database (dispatch pins it); the default locale
+    // it built the first time is that database's, so keep it — C's semantics
+    // are once-per-backend-lifetime anyway.
+    if DEFAULT_LOCALE.with(Cell::get).is_some() {
+        debug_assert_eq!(DEFAULT_LOCALE_DB.get(), init_small::globals::MyDatabaseId());
+        return Ok(());
+    }
 
     let dboid = init_small::globals::MyDatabaseId();
+    DEFAULT_LOCALE_DB.set(dboid);
     let ctx = MemoryContext::new("init_database_collation");
     let row = pg_database_seams::search_database_syscache::call(ctx.mcx(), dboid)?
         .ok_or_else(|| PgError::error(format!("cache lookup failed for database {dboid}")))?;

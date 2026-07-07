@@ -423,13 +423,16 @@ pub fn InitTemporaryFileAccess() -> PgResult<()> {
     Ok(())
 }
 
-/// Retention claim (wretain): the VFD cache survived the park (only temp
-/// files were closed by the exit callback); re-arm that callback for the new
-/// task's teardown.
+/// Retention claim (wretain): the VFD cache survived the park; the park's
+/// exit callback closed temp files and cleared temporary_files_allowed, so
+/// re-arm the callback and re-allow temp files (InitTemporaryFileAccess
+/// minus its call-me-once assert).
 pub fn ReattachRetainedFileAccess() -> PgResult<()> {
     debug_assert!(with_fd(|fd| fd.size_vfd_cache() != 0));
-    debug_assert!(with_fd(|fd| fd.temporary_files_allowed));
-    ipc_seams::before_shmem_exit::call(before_shmem_exit_files_cb, datum::Datum::from_i32(0))
+    debug_assert!(!with_fd(|fd| fd.temporary_files_allowed));
+    ipc_seams::before_shmem_exit::call(before_shmem_exit_files_cb, datum::Datum::from_i32(0))?;
+    with_fd(|fd| fd.temporary_files_allowed = true);
+    Ok(())
 }
 
 fn before_shmem_exit_files_cb(code: i32, arg: datum::Datum) -> PgResult<()> {
