@@ -1146,6 +1146,12 @@ pub struct CapturedGuc {
     srole: Oid,
 }
 
+impl CapturedGuc {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 fn current_value(record: &GucVariable) -> config_var_val {
     match record {
         GucVariable::Bool(c) => config_var_val::Boolval(current_bool(c)),

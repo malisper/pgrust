@@ -660,8 +660,16 @@ fn session_bind_matches_string_restore_end_state() {
     let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(set_session("work_mem", Some("8MB")).unwrap(), 1);
     assert_eq!(set_session("application_name", Some("bindcheck")).unwrap(), 1);
-    let caps = crate::store::capture_session_gucs();
-    let strings = crate::store::capture_nondefault_variables();
+    // Restrict both legs to the vars this test set: the unit-test env lacks
+    // the owning units of several always-nondefault vars (external enum
+    // options slots), which the string-restore leg would have to re-parse.
+    let touched = ["work_mem", "application_name"];
+    let mut caps = crate::store::capture_session_gucs();
+    caps.retain(|c| touched.contains(&c.name()));
+    let mut strings = crate::store::capture_nondefault_variables();
+    strings.retain(|v| touched.contains(&v.name.as_str()));
+    assert_eq!(caps.len(), 2);
+    assert_eq!(strings.len(), 2);
     let bound = std::thread::spawn(move || {
         setup();
         let _binding = crate::store::bind_session_gucs(&caps).unwrap();
