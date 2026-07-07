@@ -759,7 +759,7 @@ pub(crate) fn ginInsertValue<'r, T: GinBt<'r>>(
     stack: &mut GinStack<'_>,
     mut buildStats: Option<&mut GinStatsData>,
 ) -> PgResult<()> {
-    check_for_interrupts();
+    check_for_interrupts()?;
     let buffer = stack.top().buffer;
     // SAFETY: pin + exclusive lock held (ginFindLeafPage !searchMode).
     if GinPageIsIncompleteSplit(&page_opaque(&unsafe { page_ref(buffer) })) {

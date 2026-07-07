@@ -65,10 +65,11 @@ pub(crate) fn oom(n: usize) -> Box<::types_error::PgError> {
     )))
 }
 
-pub fn check_for_interrupts() {
+pub fn check_for_interrupts() -> ::types_error::PgResult<()> {
     if init_small::globals::InterruptPending() {
-        unported("ProcessInterrupts (tcop/postgres.c)");
+        return ::postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 // RelationNeedsWAL (rel.h), as nbtree/hash render it.
@@ -227,7 +228,7 @@ pub(crate) fn vec_append<'mcx, T: Copy>(
     Ok(())
 }
 
-pub use vacuum::{ginbulkdelete, ginvacuumcleanup};
+pub use vacuum::{ginbulkdelete, ginbulkdelete_collect, ginvacuumcleanup};
 
 /// GUC storage owned by this unit (C: ginfast.c gin_pending_list_limit,
 /// ginget.c GinFuzzySearchLimit).

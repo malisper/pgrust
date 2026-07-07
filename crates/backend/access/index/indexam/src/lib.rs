@@ -182,7 +182,7 @@ pub fn index_bulk_delete<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete(mcx, info, istat, dead_items),
-        IndexAmKind::Hash => panic!("unported: hashbulkdelete (hash vacuum lane)"),
+        IndexAmKind::Hash => hash::hashbulkdelete(info, istat, dead_items),
         IndexAmKind::Gin => gin::ginbulkdelete(mcx, info, istat, dead_items),
         IndexAmKind::Gist => gist::gistbulkdelete(info, istat, dead_items),
         IndexAmKind::Spgist => {
@@ -208,8 +208,13 @@ pub fn index_bulk_delete_collect<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btbulkdelete_collect(mcx, info, callback),
+        IndexAmKind::Hash => hash::hashbulkdelete_collect(info, callback),
+        IndexAmKind::Gin => gin::ginbulkdelete_collect(mcx, info, callback),
         IndexAmKind::Gist => gist::gistbulkdelete_collect(info, callback),
-        _ => panic!("unported: ambulkdelete TID-collect beyond btree (validate_index)"),
+        // brinbulkdelete never invokes the callback: BRIN has no
+        // per-heap-tuple entries to report.
+        IndexAmKind::Brin => Ok(IndexBulkDeleteResult::default()),
+        _ => panic!("unported: ambulkdelete TID-collect beyond btree/hash/gin/gist/brin (validate_index)"),
     }
 }
 
@@ -222,15 +227,7 @@ pub fn index_vacuum_cleanup<'mcx>(
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btvacuumcleanup(mcx, info, istat),
-        // hashvacuumcleanup: C returns NULL when stats is NULL (the ANALYZE
-        // call); the stats-bearing path is the hash vacuum lane.
-        IndexAmKind::Hash => {
-            if istat.is_none() {
-                Ok(None)
-            } else {
-                panic!("unported: hashvacuumcleanup with stats (hash vacuum lane)")
-            }
-        }
+        IndexAmKind::Hash => hash::hashvacuumcleanup(info, istat),
         IndexAmKind::Gin => gin::ginvacuumcleanup(mcx, info, istat),
         IndexAmKind::Gist => gist::gistvacuumcleanup(info, istat),
         IndexAmKind::Spgist => {

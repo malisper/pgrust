@@ -5,6 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_core = { path = "../../../../_support/types/types_core" }
