@@ -25,3 +25,4 @@ funcapi_srf = { path = "../../fmgr/funcapi_srf" }
 [dev-dependencies]
 wchar = { path = "../../../../common/wchar" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+regexp_alt = { path = "../regexp_alt" }

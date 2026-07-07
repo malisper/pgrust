@@ -325,6 +325,12 @@ pub static xmloption_options: &[config_enum_entry] = &[
     config_enum_entry { name: "document", val: XMLOPTION_DOCUMENT, hidden: false },
 ];
 
+pub static regex_engine_options: &[config_enum_entry] = &[
+    config_enum_entry { name: "spencer", val: REGEX_ENGINE_SPENCER, hidden: false },
+    config_enum_entry { name: "re2", val: REGEX_ENGINE_RE2, hidden: false },
+    config_enum_entry { name: "rust", val: REGEX_ENGINE_RUST, hidden: false },
+];
+
 pub static backslash_quote_options: &[config_enum_entry] = &[
     config_enum_entry { name: "safe_encoding", val: BACKSLASH_QUOTE_SAFE_ENCODING, hidden: false },
     config_enum_entry { name: "on", val: BACKSLASH_QUOTE_ON, hidden: false },
@@ -903,5 +909,6 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "ssl_max_protocol_version", context: PGC_SIGHUP, group: CONN_AUTH_SSL, short_desc: Some("Sets the maximum SSL/TLS protocol version to use."), long_desc: None, flags: GUC_SUPERUSER_ONLY, variable: &vars::ssl_max_protocol_version, boot_val: GucDefaultValue::Enum(PG_TLS_ANY), options: GucEnumOptions::Inline(ssl_protocol_versions_info), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "recovery_init_sync_method", context: PGC_SIGHUP, group: ERROR_HANDLING_OPTIONS, short_desc: Some("Sets the method for synchronizing the data directory before crash recovery."), long_desc: None, flags: 0, variable: &vars::recovery_init_sync_method, boot_val: GucDefaultValue::Enum(DATA_DIR_SYNC_METHOD_FSYNC), options: GucEnumOptions::Inline(recovery_init_sync_method_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "debug_logical_replication_streaming", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Forces immediate streaming or serialization of changes in large transactions."), long_desc: Some("On the publisher, it allows streaming or serializing each change in logical decoding. On the subscriber, it allows serialization of all changes to files and notifies the parallel apply workers to read and apply them at the end of the transaction."), flags: GUC_NOT_IN_SAMPLE, variable: &vars::debug_logical_replication_streaming, boot_val: GucDefaultValue::Enum(DEBUG_LOGICAL_REP_STREAMING_BUFFERED), options: GucEnumOptions::Inline(debug_logical_replication_streaming_options), check_hook: None, assign_hook: None, show_hook: None },
+    GucEnumSetting { name: "regex_engine", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Selects the regexp engine used by regexp_replace (A/B experiment)."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::regex_engine, boot_val: GucDefaultValue::Enum(REGEX_ENGINE_SPENCER), options: GucEnumOptions::Inline(regex_engine_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "io_method", context: PGC_POSTMASTER, group: RESOURCES_IO, short_desc: Some("Selects the method for executing asynchronous I/O."), long_desc: None, flags: 0, variable: &vars::io_method, boot_val: GucDefaultValue::Enum(IOMETHOD_WORKER), options: GucEnumOptions::External(&option_sets::io_method_options), check_hook: None, assign_hook: Some(&hooks::assign_io_method), show_hook: None },
 ];

@@ -221,6 +221,7 @@ pub static jit_profiling_support: GucBoolVar = GucSlot::new("jit_profiling_suppo
 pub static jit_provider: GucStringVar = GucSlot::new("jit_provider");
 pub static jit_tuple_deforming: GucBoolVar = GucSlot::new("jit_tuple_deforming");
 pub static join_collapse_limit: GucIntVar = GucSlot::new("join_collapse_limit");
+pub static regex_engine: GucEnumVar = GucSlot::new("regex_engine");
 pub static lo_compat_privileges: GucBoolVar = GucSlot::new("lo_compat_privileges");
 pub static local_preload_libraries_string: GucStringVar = GucSlot::new("local_preload_libraries_string");
 pub static locale_messages: GucStringVar = GucSlot::new("locale_messages");
