@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use ::execexpr::{
     exec_build_hash32_from_exprs, exec_build_projection_info_subplans, exec_init_qual_subplans,
-    exec_project, exec_eval_expr, exec_qual, EvalSlots, ExprState,
+    exec_project, exec_qual, EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{PgBox, PgVec};
@@ -728,11 +728,14 @@ fn get_outer_tuple<'mcx, O: HashJoinOuter<'mcx>>(
         }
         let h = match outer.staged_hash() {
             Some(h) => h,
-            None => {
-                let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-                let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-                exec_eval_expr(&mut node.outer_hash_expr, &mut slots)?.value.as_u32()
-            }
+            None => ::executils::exec_eval_expr_with_subplans_inner_slot(
+                &mut node.outer_hash_expr,
+                estate,
+                ecxt,
+                slot_id,
+            )?
+            .value
+            .as_u32(),
         };
         node.hj_OuterNotEmpty = true;
         Ok(Some(h))
