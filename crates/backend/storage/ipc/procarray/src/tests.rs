@@ -383,3 +383,68 @@ fn proc_number_transaction_ids_and_pid_lookup() {
     proc.subxidStatus.set(Default::default());
     other_proc_end(other, 700);
 }
+
+#[test]
+fn lock_free_reuse_republishes_xmin_at_statement_boundary() {
+    let _g = test_lock();
+    let me = my_backend();
+    let mcx = leaked_mcx();
+    let proc = GetPGProcByNumber(me);
+
+    let mut snap = fresh_snapshot(mcx);
+    take_snapshot(&mut snap, mcx);
+    let hits0 = snapshot_reuse_hits();
+
+    // Statement boundary in READ COMMITTED: snapmgr cleared the proc xmin.
+    proc.xmin.value.store(InvalidTransactionId, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+
+    // Reuse hit must republish the snapshot's xmin (publish-then-verify).
+    take_snapshot(&mut snap, mcx);
+    assert_eq!(snapshot_reuse_hits(), hits0 + 1);
+    assert_eq!(proc.xmin.read(), snap.xmin);
+    assert_eq!(TransactionXmin(), snap.xmin);
+    assert_eq!(RecentXmin(), snap.xmin);
+
+    // Miss (counter moved): the speculative publish is retracted, then the
+    // full build under the lock republishes the fresh xmin.
+    proc.xmin.value.store(InvalidTransactionId, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+    let other = claim_other();
+    other_proc_running(other, snap.xmax);
+    other_proc_end(other, snap.xmax);
+    take_snapshot(&mut snap, mcx);
+    assert_eq!(snapshot_reuse_hits(), hits0 + 1);
+    assert_eq!(proc.xmin.read(), snap.xmin);
+    assert_eq!(TransactionXmin(), snap.xmin);
+
+    proc.xmin.value.store(0, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+}
+
+#[test]
+fn lock_free_reuse_keeps_older_valid_xmin() {
+    let _g = test_lock();
+    let me = my_backend();
+    let mcx = leaked_mcx();
+    let proc = GetPGProcByNumber(me);
+
+    let mut snap = fresh_snapshot(mcx);
+    take_snapshot(&mut snap, mcx);
+    let hits0 = snapshot_reuse_hits();
+
+    // A registered older snapshot still pins a lower xmin: reuse must not
+    // raise it (C: only set when invalid).
+    let older = if snap.xmin > 2 { snap.xmin - 1 } else { snap.xmin };
+    proc.xmin.value.store(older, Relaxed);
+    set_transaction_xmin(older);
+
+    take_snapshot(&mut snap, mcx);
+    assert_eq!(snapshot_reuse_hits(), hits0 + 1);
+    assert_eq!(proc.xmin.read(), older);
+    assert_eq!(TransactionXmin(), older);
+    assert_eq!(RecentXmin(), snap.xmin);
+
+    proc.xmin.value.store(0, Relaxed);
+    set_transaction_xmin(InvalidTransactionId);
+}

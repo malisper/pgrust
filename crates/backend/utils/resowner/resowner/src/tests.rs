@@ -558,3 +558,60 @@ fn panic_inside_with_arena_does_not_poison_the_session() {
     let o = owner("post-panic");
     ResourceOwnerDelete(o);
 }
+
+#[test]
+fn recycle_resets_released_owner_and_keeps_handle_valid() {
+    setup();
+    let o = owner("TopTransaction");
+    remember(o, 41, &PIN_DESC);
+    release_all_phases(o, true);
+    let _ = released();
+
+    // Drained, parentless, childless, no heap hash: recycle succeeds and the
+    // same handle behaves like a freshly created owner.
+    assert!(ResourceOwnerRecycle(o));
+    with_arena(|a| {
+        let d = a.data(o);
+        assert!(!d.releasing);
+        assert!(!d.sorted);
+        assert_eq!(d.narr, 0);
+        assert_eq!(d.nlocks, 0);
+    });
+    remember(o, 42, &PIN_DESC);
+    release_all_phases(o, true);
+    assert_eq!(released(), vec![("pin", 42)]);
+    assert!(ResourceOwnerRecycle(o));
+    ResourceOwnerDelete(o);
+}
+
+#[test]
+fn recycle_refuses_children_parents_and_spilled_hash() {
+    setup();
+    // Child present: refuse.
+    let parent = owner("parent");
+    let child = ResourceOwnerCreate(parent, "child").unwrap();
+    assert!(!ResourceOwnerRecycle(parent));
+    // Parent link present: refuse.
+    assert!(!ResourceOwnerRecycle(child));
+    ResourceOwnerDelete(parent);
+
+    // Spilled-to-hash owner keeps heap capacity after release: refuse so the
+    // real Delete preserves C's pfree.
+    let o = owner("spilled");
+    for v in 0..(RESOWNER_ARRAY_SIZE + 1) {
+        remember(o, v, &PIN_DESC);
+    }
+    assert!(capacity(o) > 0);
+    release_all_phases(o, true);
+    let _ = released();
+    assert!(!ResourceOwnerRecycle(o));
+    ResourceOwnerDelete(o);
+
+    // Retained items: refuse.
+    let o2 = owner("live");
+    remember(o2, 7, &PIN_DESC);
+    assert!(!ResourceOwnerRecycle(o2));
+    release_all_phases(o2, true);
+    let _ = released();
+    ResourceOwnerDelete(o2);
+}
