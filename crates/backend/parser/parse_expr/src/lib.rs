@@ -631,8 +631,12 @@ fn transformIndirection<'mcx>(
                     subscripts = types_nodes::NodeList::nil();
                 }
                 let argtype = expr_type(result);
+                // C ISCOMPLEX (parse_type.h): typeOrDomainTypeRelid looks
+                // through domains over composites.
                 let could_be_projection = argtype == types_core::catalog::RECORDOID
-                    || types_core::OidIsValid(lsyscache::get_typ_typrelid(argtype)?);
+                    || types_core::OidIsValid(lsyscache::get_typ_typrelid(
+                        lsyscache::getBaseType(argtype)?,
+                    )?);
                 let projected = if could_be_projection {
                     parse_func::ParseComplexProjection(mcx, pstate, name, result, location)?
                 } else {
@@ -703,8 +707,11 @@ fn unknown_attribute(
             .errmsg(format!("column {alias}.{attname} does not exist"))
     } else {
         let rel_type_id = expr_type(relref);
+        // C ISCOMPLEX: domain-aware.
         let is_complex = types_core::OidIsValid(
-            lsyscache::get_typ_typrelid(rel_type_id).unwrap_or(types_core::InvalidOid),
+            lsyscache::getBaseType(rel_type_id)
+                .and_then(lsyscache::get_typ_typrelid)
+                .unwrap_or(types_core::InvalidOid),
         );
         let tyname = format_type::format_type_be(rel_type_id)
             .unwrap_or_else(|_| std::string::String::from("???"));

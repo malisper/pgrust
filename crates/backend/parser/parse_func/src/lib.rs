@@ -664,7 +664,7 @@ pub fn ParseFuncOrColumn<'mcx>(
 // C ISCOMPLEX (parse_type.h): typeOrDomainTypeRelid(typeid) != InvalidOid,
 // i.e. the type (or its base, for a domain) has a backing pg_class row.
 fn is_complex(typid: Oid) -> PgResult<bool> {
-    Ok(OidIsValid(lsyscache::get_typ_typrelid(typid)?))
+    Ok(OidIsValid(lsyscache::get_typ_typrelid(lsyscache::getBaseType(typid)?)?))
 }
 
 // C: ParseFuncOrColumn's shared variadic packing — the trailing nvargs
