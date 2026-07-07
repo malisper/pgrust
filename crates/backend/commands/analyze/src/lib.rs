@@ -178,9 +178,6 @@ fn vacuum<'mcx>(
     params: &VacuumParams,
     is_top_level: bool,
 ) -> PgResult<()> {
-    if rels.is_nil() {
-        panic!("vacuum (vacuum.c): get_all_vacuum_rels (database-wide ANALYZE lane)");
-    }
     if commands_vacuum::in_vacuum() {
         return Err(PgError::error("ANALYZE cannot be executed from VACUUM or ANALYZE")
             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -190,9 +187,13 @@ fn vacuum<'mcx>(
 
     let mut vacrels: mcx::PgVec<'mcx, commands_vacuum::ExpandedVacRel<'mcx>> =
         mcx::PgVec::new_in(mcx);
-    for reln in rels.iter() {
-        let vrel: &VacuumRelation<'_> = reln.as_vacuum_relation().expect("VacuumRelation");
-        commands_vacuum::expand_vacuum_rel(mcx, vrel, params.options as u32, &mut vacrels)?;
+    if rels.is_nil() {
+        commands_vacuum::get_all_vacuum_rels(mcx, params.options as u32, &mut vacrels)?;
+    } else {
+        for reln in rels.iter() {
+            let vrel: &VacuumRelation<'_> = reln.as_vacuum_relation().expect("VacuumRelation");
+            commands_vacuum::expand_vacuum_rel(mcx, vrel, params.options as u32, &mut vacrels)?;
+        }
     }
 
     let use_own_xacts = !in_outer_xact && vacrels.len() > 1;

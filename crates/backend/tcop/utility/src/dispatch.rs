@@ -1298,7 +1298,6 @@ fn slow_switch<'mcx>(
             let stmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::RefreshMatViewStmt>()
                 .expect("RefreshMatViewStmt");
-            collect_gap("REFRESH MATERIALIZED VIEW");
             event_trigger::EventTriggerInhibitCommandCollection();
             let res = matview_seams::exec_refresh_mat_view::call(
                 mcx,
@@ -1307,8 +1306,8 @@ fn slow_switch<'mcx>(
                 qc.as_deref_mut(),
             );
             event_trigger::EventTriggerUndoInhibitCommandCollection();
-            res?;
-            Ok(None)
+            let matview_oid = res?;
+            Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, matview_oid)))
         }
         T_CreateSeqStmt => {
             let stmt_node =
@@ -1875,12 +1874,27 @@ fn exec_seclabel_stmt<'mcx>(mcx: Mcx<'mcx>, parsetree: Node<'_>) -> PgResult<()>
 }
 
 // ExecAlterOwnerStmt (alter.c) for the object types without event-trigger
-// support (only OBJECT_TABLESPACE is ported).
+// support.
 fn exec_alter_owner_non_et<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &types_nodes::parsenodes::AlterOwnerStmt<'_>,
 ) -> PgResult<()> {
     match stmt.objectType {
+        types_nodes::parsenodes::ObjectType::OBJECT_DATABASE => {
+            // C: ExecAlterOwnerStmt case OBJECT_DATABASE (alter.c) ->
+            // AlterDatabaseOwner (dbcommands.c). Address is dropped: databases
+            // are not event-trigger-supported objects, so this path never
+            // collects.
+            let name = stmt
+                .object
+                .expect("AlterOwnerStmt.object")
+                .as_string()
+                .expect("database name String")
+                .sval;
+            let newowner =
+                aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
+            dbcommands::AlterDatabaseOwner(mcx, name, newowner).map(|_| ())
+        }
         types_nodes::parsenodes::ObjectType::OBJECT_TABLESPACE => {
             let name = stmt
                 .object

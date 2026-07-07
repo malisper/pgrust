@@ -67,7 +67,7 @@ pub fn ExecRefreshMatView<'mcx>(
     stmt: &RefreshMatViewStmt<'mcx>,
     query_string: &str,
     qc: Option<&mut QueryCompletion>,
-) -> PgResult<()> {
+) -> PgResult<Oid> {
     let lockmode = if stmt.concurrent { ExclusiveLock } else { AccessExclusiveLock };
     let rv_node = stmt.relation.expect("RefreshMatViewStmt.relation");
     let rv = rel_vocab::RangeVar {
@@ -83,7 +83,8 @@ pub fn ExecRefreshMatView<'mcx>(
     };
     let matview_oid =
         catalog_namespace::RangeVarGetRelidExtended(&rv, lockmode, 0, Some(&mut cb))?;
-    RefreshMatViewByOid(mcx, matview_oid, false, stmt.skipData, stmt.concurrent, query_string, qc)
+    RefreshMatViewByOid(mcx, matview_oid, false, stmt.skipData, stmt.concurrent, query_string, qc)?;
+    Ok(matview_oid)
 }
 
 pub fn RefreshMatViewByOid<'mcx>(
