@@ -288,16 +288,17 @@ mod wretain_state {
         wretain::begin_task(true);
         assert!(wretain::warm_claim());
 
-        // Partial park (one arm missed): not parked, retained flags exposed
-        // for the repair path, identity dropped.
+        // Partial park (one arm missed): not parked; identity marks stay for
+        // the release path (which ends with clear_identity).
         wretain::request_park(4);
         wretain::note_proc_retained();
         assert!(!wretain::confirm_parked());
         assert!(wretain::proc_retained());
         assert!(!wretain::sinval_retained());
+        assert!(wretain::identity_held());
+        wretain::clear_identity();
         assert!(!wretain::identity_held());
         assert_eq!(wretain::retained_db(), InvalidOid);
-        wretain::clear_identity();
 
         // Retention disabled at begin_task: never a warm claim, never parks.
         wretain::begin_task(false);

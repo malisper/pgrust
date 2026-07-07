@@ -783,6 +783,35 @@ pub fn ProcReleaseLocks(isCommit: bool) -> PgResult<()> {
     lock_seams::lock_release_all::call(USER_LOCKMETHOD, false)
 }
 
+/// Retention retire (wretain): release a PARKED retained PGPROC. The park
+/// arm already ran ProcKill's session-scoped half (locks, lock group, LWLock
+/// release, latch switch-back + disown), so only the identity release
+/// remains; running full ProcKill here would double the latch switch-back.
+/// Ownership is structural (same thread, MY_PROC TLS retained); MyProcPid may
+/// already be the NEXT task's pid when a claim dies before reattach.
+pub fn KillRetainedProc() {
+    let hdr = ProcGlobal();
+    let procno = my_proc_required();
+    let proc = GetPGProcByNumber(procno);
+    if proc.pid.load(Relaxed) == 0 {
+        panic!("KillRetainedProc: PGPROC already released");
+    }
+    debug_assert_eq!(proc.lockGroupLeader.load(Relaxed), INVALID_PROC_NUMBER);
+    debug_assert!(plist_is_empty(&proc.lockGroupMembers));
+
+    MY_PROC.set(INVALID_PROC_NUMBER);
+    g::SetMyProcNumber(INVALID_PROC_NUMBER);
+
+    proc.pid.store(0, Relaxed);
+    proc.vxid.procNumber.store(INVALID_PROC_NUMBER, Relaxed);
+    proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
+
+    let list = proc.procgloballist.get().expect("proc freelist");
+    spin_acquire(&ProcStructLock);
+    plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
+    ProcStructLock.unlock();
+}
+
 pub fn RemoveProcFromArray(_code: i32, _arg: usize) {
     let procno = my_proc_required();
     procarray_seams::proc_array_remove::call(procno, InvalidTransactionId)
