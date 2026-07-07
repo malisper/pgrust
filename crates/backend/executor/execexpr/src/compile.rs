@@ -1644,7 +1644,13 @@ fn init_whole_row<'mcx>(
     let desc_ptr: Option<NonNull<::types_tuple::TupleDescData<'static>>> = if record {
         None
     } else {
-        let desc = typcache::lookup_rowtype_tupdesc_copy(mcx, variable.vartype, -1)?;
+        // C ExecEvalWholeRowVar uses lookup_rowtype_tupdesc_domain: vartype
+        // can be a domain over composite (execExprInterp.c:5431).
+        let desc = typcache::lookup_rowtype_tupdesc_copy(
+            mcx,
+            lsyscache::getBaseType(variable.vartype)?,
+            -1,
+        )?;
         let desc_layout = core::alloc::Layout::new::<::types_tuple::TupleDescData<'static>>();
         let p: NonNull<::types_tuple::TupleDescData<'static>> =
             mcx.allocate(desc_layout).map_err(|_| mcx.oom(desc_layout.size()))?.cast();

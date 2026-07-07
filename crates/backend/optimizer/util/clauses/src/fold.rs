@@ -2065,7 +2065,13 @@ fn rowtype_field_matches(
     if rowtypeid == types_core::catalog::RECORDOID {
         return Ok(true);
     }
-    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(mcx, rowtypeid, -1)?;
+    // C uses lookup_rowtype_tupdesc_domain: a whole-row Var can be a domain
+    // over composite.
+    let tupdesc = typcache_seams::lookup_rowtype_tupdesc_copy::call(
+        mcx,
+        lsyscache::getBaseType(rowtypeid)?,
+        -1,
+    )?;
     if fieldnum <= 0 || fieldnum > tupdesc.natts {
         return Ok(false);
     }

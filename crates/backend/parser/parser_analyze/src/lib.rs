@@ -766,9 +766,12 @@ fn transformPLAssignStmt<'mcx>(
 
     pstate.p_expr_kind = ParseExprKind::EXPR_KIND_UPDATE_TARGET;
 
+    // C analyze.c:2872 ISCOMPLEX: domain-aware.
     let composite = |t: Oid| -> PgResult<bool> {
         Ok(t == types_core::catalog::RECORDOID
-            || types_core::OidIsValid(lsyscache::typ::get_typ_typrelid(t)?))
+            || types_core::OidIsValid(lsyscache::typ::get_typ_typrelid(
+                lsyscache::typ::getBaseType(t)?,
+            )?))
     };
     if !indirection.is_nil() {
         let orig_expr = tle.as_variant::<TargetEntry>().expect("TargetEntry").expr;
