@@ -4364,7 +4364,11 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
 }
 
-fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
+// RowCompareStep carries two jump fields (jumpnull, jumpdone) unlike every
+// other stepped jump; visit-all rather than Option<&mut> so fuse_program's
+// is_target/remap passes don't silently drop one (jit.rs's jump_targets
+// covers both fields for the same reason).
+fn for_each_jump_field_mut(step: &mut Step, mut f: impl FnMut(&mut u32)) {
     match step {
         Step::Qual { jumpdone }
         | Step::Jump { jumpdone }
@@ -4381,11 +4385,15 @@ fn jump_field_mut(step: &mut Step) -> Option<&mut u32> {
         | Step::FuncStrict2QualThin { jumpdone, .. }
         | Step::NotDistinctQual { jumpdone, .. }
         | Step::NotDistinctQualThin { jumpdone, .. }
-        | Step::ReturningExprStep { jumpdone, .. } => Some(jumpdone),
+        | Step::ReturningExprStep { jumpdone, .. } => f(jumpdone),
         Step::AggStrictInputCheck { jumpnull, .. }
         | Step::AggStrictInputCheck1 { jumpnull, .. }
-        | Step::AggStrictDeserialize { jumpnull, .. } => Some(jumpnull),
-        _ => None,
+        | Step::AggStrictDeserialize { jumpnull, .. } => f(jumpnull),
+        Step::RowCompareStep { jumpnull, jumpdone, .. } => {
+            f(jumpnull);
+            f(jumpdone);
+        }
+        _ => {}
     }
 }
 
@@ -4596,9 +4604,7 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     is_target.resize(len, false);
     for s in steps {
         let mut s = *s;
-        if let Some(j) = jump_field_mut(&mut s) {
-            is_target[*j as usize] = true;
-        }
+        for_each_jump_field_mut(&mut s, |j| is_target[*j as usize] = true);
     }
     let mut map = ::mcx::vec_with_capacity_in_infallible::<u32>(mcx, len);
     let mut out = ::mcx::vec_with_capacity_in_infallible::<Step>(mcx, len);
@@ -4618,9 +4624,7 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     }
     debug_assert_eq!(map.len(), len);
     for s in out.iter_mut() {
-        if let Some(j) = jump_field_mut(s) {
-            *j = map[*j as usize];
-        }
+        for_each_jump_field_mut(s, |j| *j = map[*j as usize]);
     }
     state.steps = out;
 }

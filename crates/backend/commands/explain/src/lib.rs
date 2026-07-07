@@ -654,33 +654,60 @@ fn ExplainPrintJIT(
 
     ExplainOpenGroup("JIT", Some("JIT"), true, es);
 
-    ExplainIndentText(es);
-    es.str.append_str("JIT:\n").expect("explain output append");
-    es.indent += 1;
+    if es.format == EXPLAIN_FORMAT_TEXT {
+        ExplainIndentText(es);
+        es.str.append_str("JIT:\n").expect("explain output append");
+        es.indent += 1;
 
-    ExplainPropertyInteger("Functions", None, created_functions as i64, es);
+        ExplainPropertyInteger("Functions", None, created_functions as i64, es);
 
-    ExplainIndentText(es);
-    append!(
-        es,
-        "Options: Inlining {}, Optimization {}, Expressions {}, Deforming {}\n",
-        onoff(jit_flags & PGJIT_INLINE != 0),
-        onoff(jit_flags & PGJIT_OPT3 != 0),
-        onoff(jit_flags & PGJIT_EXPR != 0),
-        onoff(jit_flags & PGJIT_DEFORM != 0),
-    );
-
-    if es.analyze && es.timing {
         ExplainIndentText(es);
         append!(
             es,
-            "Timing: Generation {generation_ms:.3} ms (Deform 0.000 ms), \
-             Inlining 0.000 ms, Optimization 0.000 ms, Emission 0.000 ms, \
-             Total {generation_ms:.3} ms\n",
+            "Options: Inlining {}, Optimization {}, Expressions {}, Deforming {}\n",
+            onoff(jit_flags & PGJIT_INLINE != 0),
+            onoff(jit_flags & PGJIT_OPT3 != 0),
+            onoff(jit_flags & PGJIT_EXPR != 0),
+            onoff(jit_flags & PGJIT_DEFORM != 0),
         );
-    }
 
-    es.indent -= 1;
+        if es.analyze && es.timing {
+            ExplainIndentText(es);
+            append!(
+                es,
+                "Timing: Generation {generation_ms:.3} ms (Deform 0.000 ms), \
+                 Inlining 0.000 ms, Optimization 0.000 ms, Emission 0.000 ms, \
+                 Total {generation_ms:.3} ms\n",
+            );
+        }
+
+        es.indent -= 1;
+    } else {
+        ExplainPropertyInteger("Functions", None, created_functions as i64, es);
+
+        ExplainOpenGroup("Options", Some("Options"), true, es);
+        ExplainPropertyBool("Inlining", jit_flags & PGJIT_INLINE != 0, es);
+        ExplainPropertyBool("Optimization", jit_flags & PGJIT_OPT3 != 0, es);
+        ExplainPropertyBool("Expressions", jit_flags & PGJIT_EXPR != 0, es);
+        ExplainPropertyBool("Deforming", jit_flags & PGJIT_DEFORM != 0, es);
+        ExplainCloseGroup("Options", Some("Options"), true, es);
+
+        if es.analyze && es.timing {
+            ExplainOpenGroup("Timing", Some("Timing"), true, es);
+
+            ExplainOpenGroup("Generation", Some("Generation"), true, es);
+            ExplainPropertyFloat("Deform", Some("ms"), 0.0, 3, es);
+            ExplainPropertyFloat("Total", Some("ms"), generation_ms, 3, es);
+            ExplainCloseGroup("Generation", Some("Generation"), true, es);
+
+            ExplainPropertyFloat("Inlining", Some("ms"), 0.0, 3, es);
+            ExplainPropertyFloat("Optimization", Some("ms"), 0.0, 3, es);
+            ExplainPropertyFloat("Emission", Some("ms"), 0.0, 3, es);
+            ExplainPropertyFloat("Total", Some("ms"), generation_ms, 3, es);
+
+            ExplainCloseGroup("Timing", Some("Timing"), true, es);
+        }
+    }
     ExplainCloseGroup("JIT", Some("JIT"), true, es);
 }
 
