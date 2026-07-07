@@ -150,23 +150,29 @@ enum SortVariant {
         max_buckets: u32,
     },
     // CLUSTER: full heap-tuple images sorted by btree index keys; attnums
-    // are the heap attnos of the index key columns (expression columns are
-    // rejected upstream by BuildIndexInfo).
+    // are the heap attnos of the index key columns. index_desc is armed for
+    // expression indexes (any key attnum == 0): the caller forms the index
+    // key tuple per heap tuple (C instead evaluates FormIndexDatum inside
+    // the comparator) and comparisons read it via index_getattr.
     Cluster {
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
         attnums: [i16; 32],
         nkeys: u16,
+        index_desc: Option<std::rc::Rc<TupleDescData<'static>>>,
     },
 }
 
 // Blob prefix for SortVariant::Cluster images (t_self survives the sort for
-// the rewrite ctid-chain mapping); image starts MAXALIGNed at +16.
+// the rewrite ctid-chain mapping); image starts MAXALIGNed at +16. With the
+// expression-index lane armed, the formed index key tuple (itup_len bytes)
+// follows at maxalign(16 + t_len).
 #[repr(C)]
 struct ClusterTupleHeader {
     t_len: u32,
     blk: u32,
     pos: u16,
-    _pad: [u16; 3],
+    _pad: u16,
+    itup_len: u32,
 }
 const _: () = assert!(mem::size_of::<ClusterTupleHeader>() == 16);
 
@@ -386,9 +392,10 @@ impl CmpCtx<'_> {
             SortVariant::Index { .. } => self.comparetup_index_btree_tiebreak(a, b),
             SortVariant::IndexHash { .. } => unreachable!("comparetup dispatches IndexHash whole"),
             // Index/cluster sorts never arm abbrev (index-build abbrev lane).
-            SortVariant::Cluster { tup_desc, attnums, nkeys } => {
+            SortVariant::Cluster { tup_desc, attnums, nkeys, index_desc } => {
                 debug_assert!(self.abbrev.is_none());
-                // comparetup_cluster_tiebreak, simple-column haveDatum1 lane;
+                // comparetup_cluster_tiebreak, haveDatum1 lane (datum1 always
+                // precomputed here, C's evaluate-in-comparator lane included);
                 // no TID tiebreak (C leaves equal keys in qsort order).
                 let (ta, tb) = unsafe {
                     (cluster_tuple_of(a.tuple), cluster_tuple_of(b.tuple))
@@ -396,12 +403,22 @@ impl CmpCtx<'_> {
                 for nkey in 1..*nkeys as usize {
                     let key = &self.keys[nkey];
                     let (mut isnull1, mut isnull2) = (false, false);
-                    // SAFETY: blobs written by putheaptuple under this descriptor.
+                    // SAFETY: blobs written by putheaptuple under these descriptors.
                     let (datum1, datum2) = unsafe {
-                        (
-                            ::types_tuple::heap_getattr(&ta, attnums[nkey] as i32, tup_desc, &mut isnull1),
-                            ::types_tuple::heap_getattr(&tb, attnums[nkey] as i32, tup_desc, &mut isnull2),
-                        )
+                        match index_desc {
+                            Some(idesc) => (
+                                nbtree::itup::index_getattr(
+                                    cluster_itup_of(a.tuple), (nkey + 1) as i16, idesc, &mut isnull1,
+                                ),
+                                nbtree::itup::index_getattr(
+                                    cluster_itup_of(b.tuple), (nkey + 1) as i16, idesc, &mut isnull2,
+                                ),
+                            ),
+                            None => (
+                                ::types_tuple::heap_getattr(&ta, attnums[nkey] as i32, tup_desc, &mut isnull1),
+                                ::types_tuple::heap_getattr(&tb, attnums[nkey] as i32, tup_desc, &mut isnull2),
+                            ),
+                        }
                     };
                     let compare = ssup::apply_sort_comparator_in(
                         self.mcx, datum1, isnull1, datum2, isnull2, key,
@@ -857,7 +874,15 @@ impl Tuplesort {
         assert!(nkeys > 0 && nkeys <= index_attnums.len());
         let mut attnums = [0i16; 32];
         attnums[..nkeys].copy_from_slice(&index_attnums[..nkeys]);
-        assert!(attnums[..nkeys].iter().all(|&a| a > 0), "expression index columns");
+        assert!(attnums[..nkeys].iter().all(|&a| a >= 0), "system-attribute index columns");
+        // SAFETY: lifetime erasure as for heap_tup_desc; the caller keeps the
+        // index relation open for the life of the sort.
+        let index_desc: Option<std::rc::Rc<TupleDescData<'static>>> =
+            if attnums[..nkeys].contains(&0) {
+                Some(unsafe { mem::transmute(index_rel.rd_att.clone()) })
+            } else {
+                None
+            };
         let mut keys = Vec::with_capacity(nkeys);
         for i in 0..nkeys {
             let indoption = index_rel.rd_indoption[i];
@@ -881,7 +906,7 @@ impl Tuplesort {
             &keys,
             false,
             None,
-            SortVariant::Cluster { tup_desc: heap_tup_desc, attnums, nkeys: nkeys as u16 },
+            SortVariant::Cluster { tup_desc: heap_tup_desc, attnums, nkeys: nkeys as u16, index_desc },
         ))
     }
 
@@ -1161,26 +1186,38 @@ impl Tuplesort {
         })
     }
 
-    /// `tuplesort_putheaptuple` (cluster variant).
-    pub fn putheaptuple(&mut self, tup: &::types_tuple::htup::HeapTupleData<'_>) -> PgResult<()> {
+    /// `tuplesort_putheaptuple` (cluster variant). `itup` carries the formed
+    /// index key tuple image; required iff the expression-index lane is armed.
+    pub fn putheaptuple(
+        &mut self,
+        tup: &::types_tuple::htup::HeapTupleData<'_>,
+        itup: Option<&[u8]>,
+    ) -> PgResult<()> {
         self.0.with_mut(|st| {
-            let SortVariant::Cluster { tup_desc, attnums, .. } = &st.variant else {
+            let SortVariant::Cluster { tup_desc, attnums, index_desc, .. } = &st.variant else {
                 panic!("tuplesort_putheaptuple on a non-cluster tuplesort")
             };
+            assert!(itup.is_some() == index_desc.is_some());
             let t_len = tup.t_len as usize;
-            let words = (16 + t_len).div_ceil(8);
+            let itup_len = itup.map_or(0, |i| i.len());
+            let itup_off = maxalign(16 + t_len);
+            let words = (itup_off + itup_len).div_ceil(8);
             let mut blob: PgVec<'_, u64> =
                 ::mcx::vec_with_capacity_in(st.tuplecontext.mcx(), words)?;
             blob.resize(words, 0);
             let base = blob.as_mut_ptr().cast::<u8>();
-            // SAFETY: fresh words*8 >= 16+t_len byte buffer; source image is
-            // live for t_len bytes (HeapTupleData invariant).
+            // SAFETY: fresh words*8 >= itup_off+itup_len byte buffer; source
+            // image is live for t_len bytes (HeapTupleData invariant).
             unsafe {
                 let hdr = base.cast::<ClusterTupleHeader>();
                 (*hdr).t_len = tup.t_len;
                 (*hdr).blk = ::types_tuple::ItemPointerGetBlockNumberNoCheck(&tup.t_self);
                 (*hdr).pos = tup.t_self.ip_posid;
+                (*hdr).itup_len = itup_len as u32;
                 core::ptr::copy_nonoverlapping(tup.header_ptr(), base.add(16), t_len);
+                if let Some(itup) = itup {
+                    core::ptr::copy_nonoverlapping(itup.as_ptr(), base.add(itup_off), itup_len);
+                }
             }
             mem::forget(blob);
 
@@ -1194,15 +1231,29 @@ impl Tuplesort {
                 )
             };
             let mut isnull1 = false;
-            // SAFETY: live image; attnums[0] is a valid user attno.
+            // SAFETY: live images; attnums[0] is a valid user attno on the
+            // non-expression lane.
             let datum1 = unsafe {
-                ::types_tuple::heap_getattr(&stored, attnums[0] as i32, tup_desc, &mut isnull1)
+                match index_desc {
+                    Some(idesc) => nbtree::itup::index_getattr(
+                        base.add(itup_off).cast_const().cast(),
+                        1,
+                        idesc,
+                        &mut isnull1,
+                    ),
+                    None => ::types_tuple::heap_getattr(
+                        &stored,
+                        attnums[0] as i32,
+                        tup_desc,
+                        &mut isnull1,
+                    ),
+                }
             };
             st.puttuple_common(
                 base.cast::<MinimalTupleData>(),
                 datum1,
                 isnull1,
-                maxalign(16 + t_len) as i64,
+                (itup_off + maxalign(itup_len)) as i64,
             )
         })
     }
@@ -2397,4 +2448,14 @@ unsafe fn cluster_tuple_of(p: *mut MinimalTupleData) -> ::types_tuple::htup::Hea
         ::types_tuple::ItemPointerData::new((*hdr).blk, (*hdr).pos),
         ::types_core::InvalidOid,
     )
+}
+
+/// # Safety
+/// `p` must be a live cluster blob written by `putheaptuple` with the
+/// expression-index lane armed (itup_len != 0).
+unsafe fn cluster_itup_of(p: *mut MinimalTupleData) -> nbtree::itup::ITup {
+    let base = p.cast_const().cast::<u8>();
+    let hdr = base.cast::<ClusterTupleHeader>();
+    debug_assert!((*hdr).itup_len != 0);
+    base.add(maxalign(16 + (*hdr).t_len as usize)).cast()
 }

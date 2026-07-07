@@ -638,18 +638,23 @@ pub(crate) fn writetup(
                 tapeset.write(tape, &tuplen.to_ne_bytes())?;
             }
         }
-        SortVariant::Cluster { .. } => {
+        SortVariant::Cluster { index_desc, .. } => {
             // SAFETY: cluster blob written by putheaptuple/readtup_cluster.
-            let (t_len, tid, body) = unsafe {
+            let (t_len, tid, body, itup_len) = unsafe {
                 let base = stup.tuple.cast_const().cast::<u8>();
                 let hdr = base.cast::<ClusterTupleHeader>();
                 (
                     (*hdr).t_len as usize,
                     ItemPointerData::new((*hdr).blk, (*hdr).pos),
                     base.add(16),
+                    (*hdr).itup_len as usize,
                 )
             };
-            let tuplen = (t_len + mem::size_of::<ItemPointerData>() + LEN_WORD) as u32;
+            // Expression-index lane record: [t_len u32][heap image][itup]
+            // after the tid; the plain lane keeps [heap image] only.
+            debug_assert!((itup_len != 0) == index_desc.is_some());
+            let extra = if index_desc.is_some() { 4 + itup_len } else { 0 };
+            let tuplen = (t_len + extra + mem::size_of::<ItemPointerData>() + LEN_WORD) as u32;
             tapeset.write(tape, &tuplen.to_ne_bytes())?;
             // SAFETY: ItemPointerData is a 6-byte repr(C) POD.
             tapeset.write(tape, unsafe {
@@ -658,8 +663,20 @@ pub(crate) fn writetup(
                     mem::size_of::<ItemPointerData>(),
                 )
             })?;
+            if index_desc.is_some() {
+                tapeset.write(tape, &(t_len as u32).to_ne_bytes())?;
+            }
             // SAFETY: t_len-byte live image at +16.
             tapeset.write(tape, unsafe { core::slice::from_raw_parts(body, t_len) })?;
+            if index_desc.is_some() {
+                // SAFETY: itup_len-byte live image at maxalign(16 + t_len).
+                tapeset.write(tape, unsafe {
+                    core::slice::from_raw_parts(
+                        body.sub(16).add(crate::maxalign(16 + t_len)),
+                        itup_len,
+                    )
+                })?;
+            }
             if random {
                 tapeset.write(tape, &tuplen.to_ne_bytes())?;
             }
@@ -736,19 +753,34 @@ fn readtup<'m>(
             };
             SortTuple { tuple, datum1, isnull1 }
         }
-        SortVariant::Cluster { tup_desc, attnums, .. } => {
-            let t_len = len as usize - mem::size_of::<ItemPointerData>() - LEN_WORD;
-            let p = ts.readtup_alloc(mcx, 16 + t_len)?;
+        SortVariant::Cluster { tup_desc, attnums, index_desc, .. } => {
             let mut tid = [0u8; 6];
             ts.tape_read_exact(tape, &mut tid)?;
-            // SAFETY: fresh 16+t_len allocation; blob layout per putheaptuple.
+            let (t_len, itup_len) = if index_desc.is_some() {
+                let mut tl = [0u8; 4];
+                ts.tape_read_exact(tape, &mut tl)?;
+                let t_len = u32::from_ne_bytes(tl) as usize;
+                (t_len, len as usize - mem::size_of::<ItemPointerData>() - LEN_WORD - 4 - t_len)
+            } else {
+                (len as usize - mem::size_of::<ItemPointerData>() - LEN_WORD, 0)
+            };
+            let itup_off = crate::maxalign(16 + t_len);
+            let p = ts.readtup_alloc(mcx, itup_off + itup_len)?;
+            // SAFETY: fresh allocation; blob layout per putheaptuple.
             let stored = unsafe {
                 let tidv = tid.as_ptr().cast::<ItemPointerData>().read_unaligned();
                 let hdr = p.cast::<ClusterTupleHeader>();
                 (*hdr).t_len = t_len as u32;
                 (*hdr).blk = ::types_tuple::ItemPointerGetBlockNumberNoCheck(&tidv);
                 (*hdr).pos = tidv.ip_posid;
+                (*hdr).itup_len = itup_len as u32;
                 ts.tape_read_exact(tape, core::slice::from_raw_parts_mut(p.add(16), t_len))?;
+                if itup_len != 0 {
+                    ts.tape_read_exact(
+                        tape,
+                        core::slice::from_raw_parts_mut(p.add(itup_off), itup_len),
+                    )?;
+                }
                 ::types_tuple::htup::HeapTupleData::from_raw_parts(
                     p.add(16),
                     t_len as u32,
@@ -757,9 +789,19 @@ fn readtup<'m>(
                 )
             };
             let mut isnull1 = false;
-            // SAFETY: image just read under the heap descriptor.
+            // SAFETY: images just read under their descriptors.
             let datum1 = unsafe {
-                ::types_tuple::heap_getattr(&stored, attnums[0] as i32, tup_desc, &mut isnull1)
+                match index_desc {
+                    Some(idesc) => nbtree::itup::index_getattr(
+                        p.add(itup_off).cast_const().cast(),
+                        1,
+                        idesc,
+                        &mut isnull1,
+                    ),
+                    None => {
+                        ::types_tuple::heap_getattr(&stored, attnums[0] as i32, tup_desc, &mut isnull1)
+                    }
+                }
             };
             SortTuple { tuple: p.cast(), datum1, isnull1 }
         }

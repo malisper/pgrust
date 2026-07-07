@@ -117,7 +117,18 @@ pub fn cluster<'mcx>(
             let params = ClusterParams { options };
             return cluster_rel(mcx, rel, index_oid, &params);
         }
-        unported("cluster: partitioned tables (get_tables_to_cluster_partitioned)");
+
+        // Partitioned table: an index name was given, so indisclustered
+        // needs no recheck, but the index must be clusterable.
+        xact::PreventInTransactionBlock(is_top_level, "CLUSTER")?;
+        options |= CLUOPT_RECHECK;
+        check_index_is_clusterable(mcx, &rel, index_oid, AccessShareLock)?;
+        let rtcs = get_tables_to_cluster_partitioned(mcx, index_oid)?;
+        rel.close(AccessExclusiveLock)?;
+        let params = ClusterParams { options };
+        cluster_multiple_rels(mcx, &rtcs, &params)?;
+        xact::StartTransactionCommand()?;
+        return Ok(());
     }
 
     // Multi-relation CLUSTER: each table in its own transaction.
@@ -567,6 +578,26 @@ fn get_tables_to_cluster<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, RelT
     }
     genam::systable_endscan(mcx, scan)?;
     ind_relation.close(AccessShareLock)?;
+    Ok(rtcs)
+}
+
+fn get_tables_to_cluster_partitioned<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_oid: Oid,
+) -> PgResult<mcx::PgVec<'mcx, RelToCluster>> {
+    // Children stay unlocked until each is processed.
+    let inhoids = pg_inherits::find_all_inheritors(mcx, index_oid, NoLock)?;
+    let mut rtcs: mcx::PgVec<'mcx, RelToCluster> = mcx::PgVec::new_in(mcx);
+    for &indexrelid in inhoids.iter() {
+        if lsyscache::get_rel_relkind(indexrelid)? as u8 != types_rel::RELKIND_INDEX {
+            continue;
+        }
+        let relid = catalog_index::IndexGetRelation(mcx, indexrelid, false)?;
+        if !cluster_is_permitted_for_relation(mcx, relid, miscinit::GetUserId())? {
+            continue;
+        }
+        rtcs.push(RelToCluster { table_oid: relid, index_oid: indexrelid });
+    }
     Ok(rtcs)
 }
 

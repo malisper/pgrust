@@ -56,6 +56,7 @@ pg_attrdef = { path = "../../catalog/pg_attrdef" }
 varlena = { path = "../../utils/adt/varlena" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 pg_inherits = { path = "../../catalog/pg_inherits" }
+pg_publication = { path = "../../catalog/pg_publication" }
 pg_constraint = { path = "../../catalog/pg_constraint" }
 readfuncs = { path = "../../nodes/readfuncs" }
 copyfuncs = { path = "../../nodes/copyfuncs" }

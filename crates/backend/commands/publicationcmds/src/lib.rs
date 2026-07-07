@@ -24,7 +24,7 @@ use types_nodes::parsenodes::{
     AlterPublicationAction, AlterPublicationStmt, CreatePublicationStmt, DefElem, DropBehavior,
     ObjectType, PublicationObjSpec, PublicationObjSpecType, PublicationTable,
 };
-use types_nodes::primnodes::{DistinctExpr, OpExpr, ScalarArrayOpExpr, Var};
+use types_nodes::primnodes::{DistinctExpr, NullIfExpr, OpExpr, RowCompareExpr, ScalarArrayOpExpr, Var};
 use types_nodes::{Node, NodeList, NodeTag};
 use types_rel::pg_class::{REPLICA_IDENTITY_FULL, RELKIND_PARTITIONED_TABLE};
 use types_rel::{
@@ -475,10 +475,17 @@ impl<'s, 'mcx> NodeWalker<'mcx> for RowFilterWalker<'s> {
                     errdetail_msg = Some("User-defined operators are not allowed.");
                 }
             }
-            NodeTag::T_NullIfExpr | NodeTag::T_RowCompareExpr => panic!(
-                "check_simple_rowfilter_expr_walker (publicationcmds.c): {:?} node unported",
-                node.node_tag()
-            ),
+            NodeTag::T_NullIfExpr => {
+                if node.as_variant::<NullIfExpr>().unwrap().opno >= FirstNormalObjectId {
+                    errdetail_msg = Some("User-defined operators are not allowed.");
+                }
+            }
+            NodeTag::T_RowCompareExpr => {
+                let rc = node.as_variant::<RowCompareExpr>().unwrap();
+                if rc.opnos.iter().any(|opno| opno >= FirstNormalObjectId) {
+                    errdetail_msg = Some("User-defined operators are not allowed.");
+                }
+            }
             NodeTag::T_ScalarArrayOpExpr => {
                 if node.as_variant::<ScalarArrayOpExpr>().unwrap().opno >= FirstNormalObjectId {
                     errdetail_msg = Some("User-defined operators are not allowed.");
@@ -536,6 +543,80 @@ fn check_simple_rowfilter_expr(node: Node<'_>, source: &str) -> PgResult<bool> {
     walker.visit(node)
 }
 
+// expand_generated_columns_in_expr (rewriteHandler.c:4493) at rt_index 1: Vars
+// naming a virtual generated column of rel become the generation expression,
+// whose Vars are already at varno 1.
+fn expand_generated_columns_in_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    const VIRTUAL_GEN: i8 = types_core::catalog::ATTRIBUTE_GENERATED_VIRTUAL as i8;
+    if !rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_virtual) {
+        return Ok(None);
+    }
+    if let Some(v) = node.as_var() {
+        if v.varlevelsup != 0 || v.varno != 1 {
+            return Ok(None);
+        }
+        if v.varattno == 0 {
+            // ReplaceVarsFromTargetList whole-row arm (rewriteManip.c:1801):
+            // RowExpr over per-field Vars, dropped columns as NULL int4
+            // consts, virtual columns as their generation expressions.
+            let mut args = types_nodes::list::NodeList::nil();
+            for i in 0..rel.rd_att.natts as usize {
+                let att = rel.rd_att.attr(i);
+                let field = if att.attisdropped {
+                    Node::mk_const(
+                        mcx,
+                        types_core::catalog::INT4OID,
+                        -1,
+                        0,
+                        4,
+                        Datum::null(),
+                        true,
+                        true,
+                    )?
+                } else if att.attgenerated == VIRTUAL_GEN {
+                    rewrite_handler::build_generation_expression(mcx, rel, i + 1)?
+                } else {
+                    Node::mk_var(
+                        mcx,
+                        1,
+                        (i + 1) as i16,
+                        att.atttypid,
+                        att.atttypmod,
+                        att.attcollation,
+                        0,
+                    )?
+                };
+                args.lappend(mcx, field)?;
+            }
+            return Ok(Some(Node::mk(
+                mcx,
+                types_nodes::RowExpr {
+                    args,
+                    row_typeid: v.vartype,
+                    row_format: types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                    colnames: types_nodes::list::NodeList::nil(),
+                    location: v.location,
+                },
+            )?));
+        }
+        if rel.rd_att.attr(v.varattno as usize - 1).attgenerated != VIRTUAL_GEN {
+            return Ok(None);
+        }
+        return Ok(Some(rewrite_handler::build_generation_expression(
+            mcx,
+            rel,
+            v.varattno as usize,
+        )?));
+    }
+    nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+        expand_generated_columns_in_expr(mcx, n, rel)
+    })
+}
+
 fn TransformPubWhereClauses<'mcx>(
     mcx: Mcx<'mcx>,
     rels: &mut [PubRelOpen<'mcx>],
@@ -587,18 +668,8 @@ fn TransformPubWhereClauses<'mcx>(
 
         assign_expr_collations(mcx, &pstate, whereclause)?;
 
-        if pri
-            .relation
-            .descr()
-            .constr
-            .as_ref()
-            .is_some_and(|c| c.has_generated_virtual)
-        {
-            panic!(
-                "TransformPubWhereClauses (publicationcmds.c): \
-                 expand_generated_columns_in_expr unported for virtual generated columns"
-            );
-        }
+        let whereclause = expand_generated_columns_in_expr(mcx, whereclause, &pri.relation)?
+            .unwrap_or(whereclause);
 
         check_simple_rowfilter_expr(whereclause, query_string)?;
 

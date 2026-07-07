@@ -17,10 +17,11 @@ use types_core::{
     BOOLOID, INT2OID, INT4OID, INT8OID, RELATION_RELATION_ID,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    PgError, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::DefElem;
 use types_nodes::rawnodes::{ColumnDef, CreateSeqStmt, CreateStmt};
@@ -178,10 +179,14 @@ pub fn init_seams() {
     sequence_seams::lastval_internal::set(lastval_internal);
     sequence_seams::do_setval::set(do_setval_entry);
     sequence_seams::delete_sequence_tuple::set(delete_sequence_tuple_entry);
-    sequence_seams::define_sequence::set(DefineSequence);
+    sequence_seams::define_sequence::set(define_sequence_entry);
     sequence_seams::alter_sequence::set(AlterSequence);
     sequence_seams::reset_sequence::set(ResetSequence);
     sequence_seams::sequence_change_persistence::set(SequenceChangePersistence);
+}
+
+fn define_sequence_entry<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResult<Oid> {
+    DefineSequence(mcx, None, seq)
 }
 
 fn my_lxid() -> LocalTransactionId {
@@ -195,10 +200,14 @@ fn my_lxid() -> LocalTransactionId {
 fn sequence_open<'mcx>(mcx: Mcx<'mcx>, relid: Oid, lockmode: i32) -> PgResult<Relation<'mcx>> {
     let r = relation::relation_open(mcx, relid, lockmode)?;
     if r.rd_rel.relkind != RELKIND_SEQUENCE {
-        return Err(err(
+        let mut e = err(
             format!("cannot open relation \"{}\"", r.name()),
             ERRCODE_WRONG_OBJECT_TYPE,
-        ));
+        );
+        e.detail = Some(pg_class_seams::errdetail_relkind_not_supported::call(
+            r.rd_rel.relkind as u8,
+        )?);
+        return Err(e);
     }
     Ok(r)
 }
@@ -420,6 +429,7 @@ struct InitParamsOut<'mcx> {
 
 fn init_params<'mcx>(
     mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
     options: &NodeList<'mcx>,
     for_identity: bool,
     is_init: bool,
@@ -484,7 +494,7 @@ fn init_params<'mcx>(
 
     if let Some(d) = as_type {
         let tn = d.arg.expect("AS arg").as_variant::<TypeName>().expect("AS TypeName");
-        let (newtypid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, None, tn)?;
+        let (newtypid, _) = parse_utilcmd::typenameTypeIdAndMod(mcx, pstate, tn)?;
         if newtypid != INT2OID && newtypid != INT4OID && newtypid != INT8OID {
             return Err(err(
                 if for_identity {
@@ -689,11 +699,35 @@ fn make_column_def<'mcx>(mcx: Mcx<'mcx>, colname: &'mcx str, typid: Oid) -> PgRe
     Ok(cd.seal())
 }
 
-pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResult<Oid> {
-    if seq.if_not_exists {
-        unported("CREATE SEQUENCE IF NOT EXISTS");
-    }
+pub fn DefineSequence<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    seq: &CreateSeqStmt<'mcx>,
+) -> PgResult<Oid> {
     let rv = seq.sequence.expect("CreateSeqStmt.sequence");
+    if seq.if_not_exists {
+        let rvv = rel_vocab::RangeVar {
+            catalogname: rv.catalogname,
+            schemaname: rv.schemaname,
+            relname: rv.relname.expect("RangeVar.relname"),
+            inh: rv.inh,
+            relpersistence: rv.relpersistence,
+            location: rv.location,
+        };
+        let nspid = catalog_namespace::RangeVarGetCreationNamespace(mcx, &rvv)?;
+        if lsyscache::get_relname_relid(rvv.relname, nspid)? != types_core::InvalidOid {
+            // checkMembershipInCurrentExtension only bites inside an
+            // extension script (parse_utilcmd CREATE TABLE INE precedent).
+            if pg_depend::creating_extension() {
+                unported("CREATE SEQUENCE IF NOT EXISTS inside an extension script");
+            }
+            elog::ereport(NOTICE)
+                .errcode(ERRCODE_DUPLICATE_TABLE)
+                .errmsg(format!("relation \"{}\" already exists, skipping", rvv.relname))
+                .finish(types_error::ErrorLocation::new("sequence.c", 0, "DefineSequence"))?;
+            return Ok(types_core::InvalidOid);
+        }
+    }
 
     let mut form = SeqFormLocal {
         seqtypid: INT8OID,
@@ -705,7 +739,7 @@ pub fn DefineSequence<'mcx>(mcx: Mcx<'mcx>, seq: &CreateSeqStmt<'mcx>) -> PgResu
         seqcycle: false,
     };
     let mut dataform = SeqDataFormLocal { last_value: 0, log_cnt: 0, is_called: false };
-    let p = init_params(mcx, &seq.options, seq.for_identity, true, &mut form, &mut dataform)?;
+    let p = init_params(mcx, pstate, &seq.options, seq.for_identity, true, &mut form, &mut dataform)?;
 
     let mut elts = NodeList::make1(mcx, make_column_def(mcx, "last_value", INT8OID)?)?;
     elts.lappend(mcx, make_column_def(mcx, "log_cnt", INT8OID)?)?;
@@ -846,7 +880,7 @@ pub fn AlterSequence<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterSeqStmt<'mcx>) -> PgResul
     };
     bufmgr::UnlockReleaseBuffer(buf)?;
 
-    let p = init_params(mcx, &stmt.options, stmt.for_identity, false, &mut form, &mut dataform)?;
+    let p = init_params(mcx, None, &stmt.options, stmt.for_identity, false, &mut form, &mut dataform)?;
 
     if p.need_seq_rewrite {
         if relation_needs_wal(&seqrel) {
@@ -1006,10 +1040,14 @@ fn process_owned_by<'mcx>(
             trel.rd_rel.relkind,
             RELKIND_RELATION | RELKIND_FOREIGN_TABLE | RELKIND_VIEW | RELKIND_PARTITIONED_TABLE
         ) {
-            return Err(err(
+            let mut e = err(
                 format!("sequence cannot be owned by relation \"{}\"", trel.name()),
                 ERRCODE_WRONG_OBJECT_TYPE,
-            ));
+            );
+            e.detail = Some(pg_class_seams::errdetail_relkind_not_supported::call(
+                trel.rd_rel.relkind as u8,
+            )?);
+            return Err(e);
         }
 
         if seqrel.rd_rel.relowner != trel.rd_rel.relowner {
@@ -1110,8 +1148,9 @@ pub fn nextval_internal(mcx: Mcx<'_>, relid: Oid, check_permissions: bool) -> Pg
         ));
     }
 
-    // rd_islocaltemp is always false here (temp sequences are loud).
-    xact::PreventCommandIfReadOnly("nextval()")?;
+    if !seqrel.rd_islocaltemp {
+        xact::PreventCommandIfReadOnly("nextval()")?;
+    }
     xact::PreventCommandIfParallelMode("nextval()")?;
 
     let (last0, cached0) = with_elm(relid, |e| (e.last, e.cached));
@@ -1338,7 +1377,9 @@ pub fn do_setval(mcx: Mcx<'_>, relid: Oid, next: i64, iscalled: bool) -> PgResul
     let form = pgs_form(relid)?;
     let (maxv, minv) = (form.seqmax, form.seqmin);
 
-    xact::PreventCommandIfReadOnly("setval()")?;
+    if !seqrel.rd_islocaltemp {
+        xact::PreventCommandIfReadOnly("setval()")?;
+    }
     xact::PreventCommandIfParallelMode("setval()")?;
 
     let (buf, seq) = read_seq_tuple(&seqrel)?;
@@ -1469,7 +1510,7 @@ mod tests {
             seqcycle: false,
         };
         let mut dataform = SeqDataFormLocal { last_value: 0, log_cnt: 0, is_called: false };
-        init_params(mcx, opts, false, true, &mut form, &mut dataform)?;
+        init_params(mcx, None, opts, false, true, &mut form, &mut dataform)?;
         Ok((form, dataform))
     }
 
@@ -1549,7 +1590,7 @@ mod tests {
             seqcycle: false,
         };
         let mut dataform = SeqDataFormLocal { last_value: 7, log_cnt: 5, is_called: true };
-        let p = init_params(mcx, &opts, true, false, &mut form, &mut dataform).unwrap();
+        let p = init_params(mcx, None, &opts, true, false, &mut form, &mut dataform).unwrap();
         assert!(p.need_seq_rewrite);
         assert_eq!(form.seqtypid, INT2OID);
         assert_eq!(form.seqmax, i16::MAX as i64);
@@ -1574,7 +1615,7 @@ mod tests {
             seqcycle: false,
         };
         let mut dataform2 = SeqDataFormLocal { last_value: 1, log_cnt: 0, is_called: false };
-        let e = init_params(mcx, &opts2, true, false, &mut form2, &mut dataform2)
+        let e = init_params(mcx, None, &opts2, true, false, &mut form2, &mut dataform2)
             .err()
             .expect("error expected");
         assert!(e.message().contains("MAXVALUE (100000) is out of range"), "{}", e.message());

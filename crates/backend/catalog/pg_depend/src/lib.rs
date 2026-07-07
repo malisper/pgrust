@@ -380,10 +380,11 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
             // built-in pinned result types, no dependency recorded.
             // The SQL/JSON node set likewise has no dependency.c case:
             // contained coercions carry the deps via the default recursion.
+            // XmlExpr likewise has no dependency.c case: default recursion.
             T_BoolExpr | T_NullTest | T_BooleanTest | T_CaseExpr | T_CaseWhen
             | T_CaseTestExpr | T_CoalesceExpr | T_MinMaxExpr | T_ArrayExpr | T_List
-            | T_SQLValueFunction | T_JsonExpr | T_JsonValueExpr | T_JsonConstructorExpr
-            | T_JsonIsPredicate | T_JsonBehavior => {}
+            | T_SQLValueFunction | T_XmlExpr | T_JsonExpr | T_JsonValueExpr
+            | T_JsonConstructorExpr | T_JsonIsPredicate | T_JsonBehavior => {}
             other => panic!(
                 "find_expr_references_walker (dependency.c): {other:?}; unported lane"
             ),
