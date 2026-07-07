@@ -767,9 +767,8 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_CteScan {
         ExplainScanTarget(node.as_cte_scan().unwrap().scan.scanrelid, es)?;
     }
-    if node.node_tag() == NodeTag::T_NamedTuplestoreScan {
-        ExplainScanTarget(node.as_named_tuplestore_scan().unwrap().scan.scanrelid, es)?;
-    }
+    // T_NamedTuplestoreScan is absent from C's scan-target dispatch
+    // (explain.c:1655-1668): no " on <enrname>" suffix.
     if node.node_tag() == NodeTag::T_WorkTableScan {
         ExplainScanTarget(node.as_work_table_scan().unwrap().scan.scanrelid, es)?;
     }
