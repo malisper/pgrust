@@ -173,6 +173,9 @@ struct CastEntry {
     // PlanCacheInvalCounter at build; any bump forces a rebuild (coarse
     // stand-in for C's per-CachedExpression is_valid, pl_exec.c:7982).
     inval_gen: u64,
+    // C cast_lxid: the ExprState is rebuilt each transaction so baked-in
+    // domain constraint sets stay fresh (get_cast_hashentry, pl_exec.c:8109).
+    lxid: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1123,8 +1126,9 @@ impl<'a> Estate<'a> {
     ) -> PgResult<Datum> {
         let key = (valtype, valtypmod, reqtype, reqtypmod);
         let cur_gen = plancache::PlanCacheInvalCounter();
+        let cur_lxid = current_lxid();
         let stale = match self.cast_cache.get(&key) {
-            Some(e) => e.inval_gen != cur_gen,
+            Some(e) => e.inval_gen != cur_gen || e.lxid != cur_lxid,
             None => true,
         };
         if stale {
@@ -1226,12 +1230,12 @@ impl<'a> Estate<'a> {
         parser_small1::free_parsestate(pstate)?;
 
         let Some(cast_expr) = cast_expr else {
-            return Ok(CastEntry { state: None, param, inval_gen });
+            return Ok(CastEntry { state: None, param, inval_gen, lxid: current_lxid() });
         };
         // No-op relabeling of the bare placeholder: skip evaluation.
         if let Some(r) = cast_expr.as_relabel_type() {
             if r.arg.as_variant::<Param>().is_some() {
-                return Ok(CastEntry { state: None, param, inval_gen });
+                return Ok(CastEntry { state: None, param, inval_gen, lxid: current_lxid() });
             }
         }
 
@@ -1245,10 +1249,10 @@ impl<'a> Estate<'a> {
             n_exec: 0,
         };
         let Some(mut state) = execexpr::exec_init_expr(mcx, Some(cast_expr), bind)? else {
-            return Ok(CastEntry { state: None, param, inval_gen });
+            return Ok(CastEntry { state: None, param, inval_gen, lxid: current_lxid() });
         };
         state.arm_result_mcx(self.eval_ctx.mcx());
-        Ok(CastEntry { state: Some(state), param, inval_gen })
+        Ok(CastEntry { state: Some(state), param, inval_gen, lxid: current_lxid() })
     }
 
     // convert_value_to_string: type output function in eval scratch.
@@ -4222,11 +4226,12 @@ fn frame_context_line_of(frame: &FrameShared) -> String {
             }
             _ => format!("PL/pgSQL function {sig} {t}"),
         }
-    } else if let Some((lineno, typename)) = frame.stmt.get() {
-        if lineno > 0 {
-            format!("PL/pgSQL function {sig} line {lineno} at {typename}")
-        } else {
-            format!("PL/pgSQL function {sig}")
+    } else if let Some((_, typename)) = frame.stmt.get() {
+        match lineno {
+            Some(lineno) if lineno > 0 => {
+                format!("PL/pgSQL function {sig} line {lineno} at {typename}")
+            }
+            _ => format!("PL/pgSQL function {sig}"),
         }
     } else {
         format!("PL/pgSQL function {sig}")
