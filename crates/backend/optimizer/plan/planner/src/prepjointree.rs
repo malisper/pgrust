@@ -421,7 +421,12 @@ fn find_pullable_subquery<'mcx>(
     match node.node_tag() {
         NodeTag::T_RangeTblRef => {
             let rti = node.as_range_tbl_ref().expect("RangeTblRef").rtindex;
-            let rte = parse.rtable.nth(rti as usize - 1).as_range_tbl_entry().expect("rtable cell");
+            let rte = parse.rtable.nth(rti as usize - 1).as_range_tbl_entry().unwrap_or_else(|| {
+                // Known failure signature of a layout-sensitive mcx arena
+                // stomp (equivclass 3-way UNION ALL pull-up overwrites a live
+                // RTE's tag): P1 memory-safety charter, not a planner bug.
+                panic!("rtable cell: rti={rti} rtable_len={}", parse.rtable.len())
+            });
             // inh on a subquery RTE means pull_up_simple_union_all already
             // flattened it (possibly inside a pulled-up child, then spliced
             // here). C's single-pass recursion never revisits an RTR; this
