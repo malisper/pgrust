@@ -634,7 +634,10 @@ fn auto_vs_spencer_differential() {
     let whole_match_only: &[&str] = &[
         "(a)+",
         "(x*)+y",
+        "^(foo|bar)$",
+        "(é|.[^a])",
         r"(.?|é|(?:0{2,}|é[^a][^/,]+ ?|\*)+é(?:c?0|\n{2})+)+|[a-c0-9]?|[ab]0+",
+        r"\*{0,2}(.|\n*,*)|(é|[ab]?/+(?:0x,\.?|é|é,? *\n{1,3}){2}|.(?:0éé*|é)*[^a]).*",
     ];
 
     for p in compatible {

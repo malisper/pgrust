@@ -18,10 +18,13 @@
 //! - inline option/director groups (`(?i)`, `***:`);
 //! - non-UTF8 databases and patterns that are not valid UTF-8;
 //! Additionally, capture POSITIONS are only trusted ("capture-safe") when
-//! no quantifier applies to a subtree containing a capturing group: RE2's
-//! longest-match submatch resolution and Spencer's iteration rules disagree
-//! on the last-iteration capture of shapes like `(x?|...)+` (found by the
-//! adversarial corpus). Non-capture-safe patterns still dispatch for
+//! (a) no quantifier applies to a subtree containing a capturing group —
+//! RE2's longest-match submatch resolution and Spencer's iteration rules
+//! disagree on the last-iteration capture of shapes like `(x?|...)+` — and
+//! (b) the pattern has no alternation anywhere when it has captures:
+//! overlapping branches make branch selection (and thus captures) diverge
+//! even under identical whole-match spans, e.g. `(é|.[^a])` (both found by
+//! the adversarial corpus). Non-capture-safe patterns still dispatch for
 //! whole-match-only uses — leftmost-longest whole-match spans are uniquely
 //! defined and agree — but every submatch-consuming call falls to Spencer.
 //!
@@ -197,6 +200,8 @@ fn scan_are(pat: &[u8]) -> Compat {
     let mut i = 0usize;
     let mut nquant = 0u32;
     let mut capture_safe = true;
+    let mut has_capture = false;
+    let mut has_alternation = false;
     // True when the previous item is an atom a quantifier may apply to.
     let mut quantifiable = false;
     // Did the just-closed atom's subtree contain a capturing group? A
@@ -237,6 +242,7 @@ fn scan_are(pat: &[u8]) -> Compat {
                     i += 3;
                 } else {
                     capturing = true;
+                    has_capture = true;
                     i += 1;
                 }
                 if depth >= MAX_GROUP_DEPTH {
@@ -300,6 +306,7 @@ fn scan_are(pat: &[u8]) -> Compat {
                 last_atom_captures = false;
             }
             b'|' => {
+                has_alternation = true;
                 i += 1;
                 quantifiable = false;
                 last_atom_captures = false;
@@ -328,7 +335,7 @@ fn scan_are(pat: &[u8]) -> Compat {
     if depth != 0 {
         return Compat::Incompatible;
     }
-    if capture_safe {
+    if capture_safe && !(has_capture && has_alternation) {
         Compat::CaptureSafe
     } else {
         Compat::WholeMatch
@@ -448,9 +455,14 @@ mod tests {
         // Unquantified captures (Q29's shape) stay capture-safe.
         assert_eq!(tier(r"^https?://(?:www\.)?([^/]+)/.*$"), Compat::CaptureSafe);
         assert_eq!(tier("(a)(b)(c)"), Compat::CaptureSafe);
-        assert_eq!(tier("^(foo|bar)$"), Compat::CaptureSafe);
         // Quantified non-capturing subtrees stay capture-safe.
         assert_eq!(tier("(?:ab)+(c)"), Compat::CaptureSafe);
+        // Alternation without captures stays capture-safe (nothing to
+        // misreport); alternation WITH captures is whole-match only.
+        assert_eq!(tier("a|ab|abc"), Compat::CaptureSafe);
+        assert_eq!(tier("^(foo|bar)$"), Compat::WholeMatch);
+        assert_eq!(tier("(a)|b"), Compat::WholeMatch);
+        assert_eq!(tier("(é|.[^a])"), Compat::WholeMatch);
         // A quantifier over a capture-bearing subtree: whole-match only
         // (the adversarial corpus found last-iteration capture divergence).
         assert_eq!(tier("(a)+"), Compat::WholeMatch);
