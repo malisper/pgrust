@@ -346,6 +346,11 @@ pub fn postmaster_child_launch(
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
         .spawn(move || {
+            // Thread-scoped (a retained thread reuses its slot across tasks):
+            // the local latch slab slot returns on every thread exit —
+            // announce fallthrough and panic unwind alike.
+            let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+
             inherited.apply();
 
             // C records the stack base once in main(); each thread owns its own.
@@ -512,6 +517,9 @@ pub mod wpool {
                     }
                 }
                 let _charge = PopulationCharge;
+                // Thread-scoped, not per-task: a parked standby keeps its
+                // local latch slot warm; only thread exit returns it.
+                let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)

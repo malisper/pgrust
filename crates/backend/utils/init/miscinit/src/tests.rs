@@ -184,9 +184,14 @@ fn client_connection_info_roundtrip() {
     assert_eq!(client_connection_info().0, None);
 }
 
+// Serializes the tests that touch the process-global local-latch free list,
+// so slot-reuse assertions can't race another test's allocation.
+static LATCH_SLAB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn local_latch_home() {
     setup();
+    let _g = LATCH_SLAB_LOCK.lock().unwrap();
     assert!(init_small::globals::MyLatch().is_none());
     InitProcessLocalLatch();
     let first = init_small::globals::MyLatch().unwrap();
@@ -197,6 +202,42 @@ fn local_latch_home() {
     assert!(latch::latch_ref(first).is_set());
     latch::InitLatch(first);
     assert!(!latch::latch_ref(first).is_set());
+}
+
+#[test]
+fn local_latch_release_guard_recycles_slot() {
+    setup();
+    let _g = LATCH_SLAB_LOCK.lock().unwrap();
+
+    let backend = || {
+        std::thread::spawn(|| {
+            let _release = LocalLatchReleaseGuard::new();
+            InitProcessLocalLatch();
+            init_small::globals::MyLatch().unwrap()
+        })
+        .join()
+        .unwrap()
+    };
+
+    // Normal exit returns the slot; the next backend thread reuses it.
+    let first = backend();
+    assert_eq!(backend(), first);
+
+    // Panic unwind returns the slot too.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let crashed = std::thread::spawn(move || {
+        let _release = LocalLatchReleaseGuard::new();
+        InitProcessLocalLatch();
+        tx.send(init_small::globals::MyLatch().unwrap()).unwrap();
+        panic!("simulated backend crash");
+    });
+    assert!(crashed.join().is_err());
+    assert_eq!(rx.recv().unwrap(), first);
+    assert_eq!(backend(), first);
+
+    // A guard on a thread that never allocated is a no-op.
+    std::thread::spawn(|| drop(LocalLatchReleaseGuard::new())).join().unwrap();
+    assert_eq!(backend(), first);
 }
 
 fn fatals(f: impl FnOnce() -> PgResult<()>) -> bool {
