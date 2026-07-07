@@ -185,7 +185,10 @@ pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
         IndexAmKind::Hash => hash_validate::hashvalidate(opclassoid),
         IndexAmKind::Spgist => spgist_validate::spgvalidate(opclassoid),
         IndexAmKind::Brin => brin_validate::brinvalidate(opclassoid),
-        other => panic!("unported: amvalidate for index AM {other:?} (gist/gin validate lanes)"),
+        IndexAmKind::Gist => gist_validate::gistvalidate(opclassoid),
+        IndexAmKind::Gin => gin_validate::ginvalidate(opclassoid),
+        #[allow(unreachable_patterns)]
+        other => panic!("unported: amvalidate for index AM {other:?}"),
     }
 }
 

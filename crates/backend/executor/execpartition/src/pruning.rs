@@ -275,34 +275,40 @@ fn init_prune_context<'mcx>(
     ctx.exprstates.resize_with(n_steps * partnatts, || None);
     ctx.cmpfuncs.resize_with(n_steps * partnatts, || None);
     let params = estate.param_bind();
-    for step in steps.iter() {
-        let Some(op) = step.as_partition_prune_step_op() else { continue };
-        debug_assert!(op.exprs.len() <= partnatts);
-        let mut it = op.exprs.iter().zip(op.cmpfns.iter());
-        for keyno in 0..partnatts {
-            if op.nullkeys.is_member(keyno as i32) {
-                continue;
-            }
-            if let Some((expr, cmpfn)) = it.next() {
-                let stateidx = op.step_id as usize * partnatts + keyno;
-                debug_assert!(cmpfn != InvalidOid);
-                ctx.cmpfuncs[stateidx] = Some(
-                    fmgr_core::fmgr_info(cmpfn)
-                        .unwrap_or_else(|e| panic!("fmgr_info({cmpfn}) failed: {e:?}")),
-                );
-                if expr.node_tag() != NodeTag::T_Const {
-                    let mut state = execexpr::exec_init_expr(mcx, Some(expr), params)?;
-                    if let Some(st) = state.as_mut() {
-                        // By-ref step-expr results land in the query mcx (C:
-                        // node econtext per-tuple; pruning runs per rescan,
-                        // not per row — bounded growth).
-                        st.arm_result_mcx(mcx);
+    // C compiles exec-pruning step exprs against the parent planstate
+    // (execPartition.c:2311); SubPlans in step exprs need the env.
+    ::executils::with_subplan_compile_env(estate, |env| -> PgResult<()> {
+        for step in steps.iter() {
+            let Some(op) = step.as_partition_prune_step_op() else { continue };
+            debug_assert!(op.exprs.len() <= partnatts);
+            let mut it = op.exprs.iter().zip(op.cmpfns.iter());
+            for keyno in 0..partnatts {
+                if op.nullkeys.is_member(keyno as i32) {
+                    continue;
+                }
+                if let Some((expr, cmpfn)) = it.next() {
+                    let stateidx = op.step_id as usize * partnatts + keyno;
+                    debug_assert!(cmpfn != InvalidOid);
+                    ctx.cmpfuncs[stateidx] = Some(
+                        fmgr_core::fmgr_info(cmpfn)
+                            .unwrap_or_else(|e| panic!("fmgr_info({cmpfn}) failed: {e:?}")),
+                    );
+                    if expr.node_tag() != NodeTag::T_Const {
+                        let mut state =
+                            execexpr::exec_init_expr_subplans(mcx, Some(expr), params, env)?;
+                        if let Some(st) = state.as_mut() {
+                            // By-ref step-expr results land in the query mcx (C:
+                            // node econtext per-tuple; pruning runs per rescan,
+                            // not per row — bounded growth).
+                            st.arm_result_mcx(mcx);
+                        }
+                        ctx.exprstates[stateidx] = state;
                     }
-                    ctx.exprstates[stateidx] = state;
                 }
             }
         }
-    }
+        Ok(())
+    })?;
     Ok(ctx)
 }
 

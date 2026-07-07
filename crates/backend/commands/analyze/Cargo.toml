@@ -64,6 +64,8 @@ pgstat = { path = "../../utils/activity/pgstat" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
+guc = { path = "../../utils/misc/guc" }
+miscinit = { path = "../../utils/init/miscinit" }
 
 [dev-dependencies]
 heapam = { path = "../../access/heap/heapam" }

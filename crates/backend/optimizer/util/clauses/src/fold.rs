@@ -1942,7 +1942,9 @@ pub fn negate_clause<'mcx>(mcx: Mcx<'mcx>, node: Node<'mcx>) -> PgResult<Node<'m
                     mcx,
                     ScalarArrayOpExpr {
                         opno: negator,
-                        opfuncid: 0,
+                        // Same eager get_opcode as the OpExpr arm above (no
+                        // lazy set_sa_opfuncid memo on sealed shared nodes).
+                        opfuncid: lsyscache::get_opcode(negator)?,
                         hashfuncid: 0,
                         negfuncid: 0,
                         useOr: !sa.useOr,

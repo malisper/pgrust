@@ -1267,7 +1267,9 @@ dependencies = [
  "catcache",
  "datum",
  "fmgr_core",
+ "gin_validate",
  "gin_vocab",
+ "gist_validate",
  "hash_validate",
  "heaptuple",
  "mcx",
@@ -5759,6 +5761,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gin_validate"
+version = "0.1.0"
+dependencies = [
+ "adt_regproc",
+ "elog",
+ "format_type",
+ "gin_vocab",
+ "index_amvalidate",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "gin_vocab"
 version = "0.1.0"
 dependencies = [
@@ -5839,6 +5857,22 @@ dependencies = [
  "xact",
  "xloginsert",
  "xloginsert_seams",
+]
+
+[[package]]
+name = "gist_validate"
+version = "0.1.0"
+dependencies = [
+ "adt_regproc",
+ "elog",
+ "format_type",
+ "index_amvalidate",
+ "lsyscache",
+ "mcx",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_gist",
 ]
 
 [[package]]

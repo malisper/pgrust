@@ -18,6 +18,8 @@ nbt_validate = { path = "../../nbtree/nbt_validate" }
 hash_validate = { path = "../../hash/hash_validate" }
 spgist_validate = { path = "../../spgist/spgist_validate" }
 brin_validate = { path = "../../brin/brin_validate" }
+gist_validate = { path = "../../gist/gist_validate" }
+gin_validate = { path = "../../gin/gin_validate" }
 cache_syscache = { path = "../../../utils/cache/cache_syscache" }
 catcache = { path = "../../../utils/cache/catcache" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }

@@ -766,7 +766,7 @@ fn runtime_key_qual_builds_deferred_scan_key() {
         let quals = NodeList::make1(mcx, op).unwrap();
         let mut runtime = ::mcx::PgVec::new_in(mcx);
         let keys =
-            exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE, false, &mut runtime)
+            exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE, false, &mut runtime, None)
                 .unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(runtime.len(), 1);
@@ -805,7 +805,7 @@ fn saop_runtime_array_qual_builds_deferred_search_array_key() {
         let quals = NodeList::make1(mcx, saop).unwrap();
         let mut runtime = ::mcx::PgVec::new_in(mcx);
         let keys =
-            exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE, false, &mut runtime)
+            exec_index_build_scan_keys(mcx, &index_rel, &quals, ParamBind::NONE, false, &mut runtime, None)
                 .unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(runtime.len(), 1);
