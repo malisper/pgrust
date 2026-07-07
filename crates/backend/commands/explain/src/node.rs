@@ -378,6 +378,18 @@ fn collect_node_subplans<'mcx>(
                 }
             }
         }
+        // C ExecInitValuesScan: projection, qual, then the per-row
+        // exprstatelists — SubPlans inside VALUES rows land on the scan's
+        // subPlan list.
+        NodeTag::T_ValuesScan => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            for row in &node.as_values_scan().unwrap().values_lists {
+                if let Some(l) = row.as_list() {
+                    walk_list(&mut out, l);
+                }
+            }
+        }
         // Scans: projection compiles before the qual (C ExecInitSeqScan).
         _ => {
             walk_list(&mut out, &plan.targetlist);
