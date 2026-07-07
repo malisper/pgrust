@@ -197,11 +197,8 @@ impl<'mcx> PlannerRun<'mcx> {
             rowmarks: PgVec::new_in(mcx),
             gset_data: None,
             pending_part_prune_infos: NodeList::nil(),
-<<<<<<< HEAD
             cte_subpath_infos: PgVec::new_in(mcx),
-=======
             swapped_parent_subroot: None,
->>>>>>> 80d6c3de5 (setop child estimate keeps parent level visible for uplevel CTE refs)
         }
     }
 
