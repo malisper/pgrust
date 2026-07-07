@@ -1305,14 +1305,33 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
                     2
                 }
                 SubLinkType::EXPR_SUBLINK => {
-                    // The sub-select reaches here already transformed; use
-                    // its single output column's name (C same).
+                    // C sees the transformed Query here because
+                    // transformSubLink scribbles it into the raw SubLink in
+                    // place; our transform builds a fresh node, so a SubLink
+                    // nested under indirection/casts is still raw and the
+                    // raw leg derives the resname transformTargetEntry would
+                    // have assigned.
                     if let Some(q) = sl.subselect.as_query() {
                         if let Some(te) =
                             q.targetList.first().and_then(|n| n.as_target_entry())
                         {
                             if let Some(resname) = te.resname {
                                 *name = Some(resname);
+                                return 2;
+                            }
+                        }
+                    } else if let Some(ss) = sl.subselect.as_select_stmt() {
+                        if let Some(rt) =
+                            ss.targetList.first().and_then(|n| n.as_res_target())
+                        {
+                            if let Some(n) = rt.name {
+                                *name = Some(n);
+                                return 2;
+                            }
+                            if let Some(val) = rt.val {
+                                let mut inner = None;
+                                FigureColnameInternal(val, &mut inner);
+                                *name = Some(inner.unwrap_or("?column?"));
                                 return 2;
                             }
                         }
