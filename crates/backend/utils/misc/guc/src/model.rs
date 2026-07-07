@@ -10,6 +10,10 @@ use types_guc::{config_enum_entry, config_group, config_type, GucContext, GucSou
 pub const GUC_IS_IN_FILE: i32 = 0x0001;
 pub const GUC_PENDING_RESTART: i32 = 0x0002;
 pub const GUC_NEEDS_REPORT: i32 = 0x0004;
+// Rust-only status bit: placeholder purged by MarkGUCPrefixReserved. C frees
+// the guc_hashtab entry; our registry Vec keeps the slot as a tombstone so
+// existing indices stay valid.
+pub const GUC_REMOVED: i32 = 0x8000;
 
 pub type GucStackState = u32;
 pub const GUC_SAVE: GucStackState = 0;
