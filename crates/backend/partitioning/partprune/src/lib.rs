@@ -140,7 +140,12 @@ pub fn bms_add_range<'mcx>(
     lo: i32,
     hi: i32,
 ) -> PgResult<()> {
-    debug_assert!(lo >= 0 && hi >= lo);
+    // C bms_add_range (bitmapset.c:1029) treats an inverted range as a no-op
+    // before any validity check; partprune's callers rely on that for empty
+    // pruning results.
+    if hi < lo {
+        return Ok(());
+    }
     for x in lo..=hi {
         set.add_member(mcx, x)?;
     }

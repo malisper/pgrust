@@ -252,3 +252,43 @@ fn combine_union_and_intersect() {
     assert_eq!(members(&all.bound_offsets), [0, 1, 2]);
     assert!(all.scan_default && all.scan_null);
 }
+
+// LIST bounds with no datums: NULL partition (-> 0) + DEFAULT (-> 1) only,
+// as C builds for `FOR VALUES IN (NULL)` + DEFAULT (exists_tbl, subselect
+// suite). The empty-source combine step then calls bms_add_range(0, -1),
+// which C's bitmapset.c makes a no-op.
+#[test]
+fn combine_empty_sources_zero_datums_is_noop_range() {
+    let mcx = static_mcx();
+    let bi = partbounds::PartitionBoundInfoData {
+        strategy: b'l' as i8,
+        ndatums: 0,
+        width: 1,
+        datums: mcx::PgVec::new_in(mcx),
+        kind: mcx::PgVec::new_in(mcx),
+        indexes: mcx::PgVec::new_in(mcx),
+        null_index: 0,
+        default_index: 1,
+    };
+    let all = perform_pruning_combine_step(
+        mcx,
+        &bi,
+        PARTPRUNE_COMBINE_UNION,
+        0,
+        core::iter::empty(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(members(&all.bound_offsets), [] as [i32; 0]);
+    assert!(all.scan_default && all.scan_null);
+}
+
+#[test]
+fn bms_add_range_inverted_is_noop() {
+    let mcx = static_mcx();
+    let mut b = Bitmapset::empty();
+    bms_add_range(mcx, &mut b, 0, -1).unwrap();
+    assert!(b.is_empty());
+    bms_add_range(mcx, &mut b, 5, 3).unwrap();
+    assert!(b.is_empty());
+}
