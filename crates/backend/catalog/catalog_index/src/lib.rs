@@ -783,7 +783,6 @@ pub fn index_create<'mcx>(
                 &myself,
                 &mut addrs,
                 pg_depend::DependencyType::Auto,
-                false,
             )?;
         }
 
