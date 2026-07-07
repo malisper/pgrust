@@ -611,6 +611,54 @@ pub fn InitProcessPhase2() -> PgResult<()> {
     Ok(())
 }
 
+/// Retention claim (wretain): re-arm the per-task half of InitProcess for a
+/// thread whose PGPROC survived a park. Freelist allocation and
+/// once-per-thread TLS init (LWLock access, deadlock workspace) are
+/// deliberately absent; the exit callback is re-registered because the park
+/// teardown consumed it.
+pub fn ReattachRetainedProc(backend_type: BackendType) -> PgResult<()> {
+    let procno = my_proc_required();
+    let proc = GetPGProcByNumber(procno);
+    if proc.pid.load(Relaxed) != g::MyProcPid() {
+        panic!("ReattachRetainedProc: retained PGPROC pid mismatch");
+    }
+    debug_assert_eq!(g::MyProcNumber(), procno);
+    debug_assert_eq!(proc.lockGroupLeader.load(Relaxed), INVALID_PROC_NUMBER);
+    debug_assert!(plist_is_empty(&proc.lockGroupMembers));
+
+    if g::IsUnderPostmaster() {
+        pmsignal_seams::register_postmaster_child_active::call();
+    }
+
+    init_my_proc_common(proc, procno);
+    proc.isRegularBackend
+        .store(backend_type == BackendType::Backend, Relaxed);
+    if backend_type == BackendType::AutovacWorker {
+        proc.statusFlags.store(PROC_IS_AUTOVACUUM, Relaxed);
+    }
+    proc.recoveryConflictPending.store(false, Relaxed);
+    proc.waitLSN.store(0, Relaxed);
+    proc.syncRepState.set(SYNC_REP_NOT_WAITING);
+    proc.syncRepLinks.set(proclist_node::detached());
+    proc.procArrayGroupMember.store(false, Relaxed);
+    proc.procArrayGroupMemberXid
+        .store(InvalidTransactionId, Relaxed);
+    proc.wait_event_info.store(0, Relaxed);
+    proc.clogGroupMember.store(false, Relaxed);
+    proc.clogGroupMemberXid.store(InvalidTransactionId, Relaxed);
+    proc.clogGroupMemberXidStatus
+        .store(TRANSACTION_STATUS_IN_PROGRESS, Relaxed);
+    proc.clogGroupMemberPage.store(-1, Relaxed);
+    proc.clogGroupMemberLsn.store(0, Relaxed);
+
+    latch_seams::own_latch::call(&proc.procLatch);
+    miscinit_seams::switch_to_shared_latch::call();
+    waitevent_seams::pgstat_set_wait_event_storage::call(&proc.wait_event_info);
+    pg_sema_seams::pg_semaphore_reset::call(procno);
+    ipc_seams::on_shmem_exit::call(ProcKill, 0);
+    Ok(())
+}
+
 pub fn InitAuxiliaryProcess() -> PgResult<()> {
     let hdr = ProcGlobal();
     if MyProc().is_some() {
@@ -791,6 +839,17 @@ pub fn ProcKill(_code: i32, _arg: usize) {
 
     miscinit_seams::switch_back_to_local_latch::call();
     waitevent_seams::pgstat_reset_wait_event_storage::call();
+
+    if init_small::wretain::parking() {
+        // Retention park (wretain): session-scoped state above is released
+        // (locks, lock group, LWLocks, latch switch); the PGPROC itself —
+        // pid, MyProcNumber, freelist slot — stays ours for the next claim
+        // (ReattachRetainedProc).
+        latch_seams::disown_latch::call(&proc.procLatch);
+        proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
+        init_small::wretain::note_proc_retained();
+        return;
+    }
 
     MY_PROC.set(INVALID_PROC_NUMBER);
     g::SetMyProcNumber(INVALID_PROC_NUMBER);

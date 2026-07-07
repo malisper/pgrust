@@ -56,6 +56,11 @@ pub struct ParallelShared {
     pub temp_namespace_id: Oid,
     pub temp_toast_namespace_id: Oid,
     pub last_xlog_end: AtomicU64,
+    // Retention (wretain): the leader's transaction holds invalidation
+    // messages not yet broadcast (uncommitted DDL); a retained worker's
+    // sinval drain cannot see them, so it must fall back to C's
+    // fresh-process InvalidateSystemCaches.
+    leader_pending_invals: bool,
     guc_state: Vec<guc::store::NondefaultGuc>,
     // §3.4 P-guc: typed leader capture; when session_guc_bind_enabled() this
     // carries the GUC transfer and guc_state stays empty (and vice versa).
@@ -308,6 +313,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         temp_namespace_id: temp_ns,
         temp_toast_namespace_id: temp_toast_ns,
         last_xlog_end: AtomicU64::new(0),
+        leader_pending_invals: inval::TransactionHasPendingInvalidationMessages(),
         guc_state: if guc::store::session_guc_bind_enabled() {
             Vec::new()
         } else {
@@ -984,7 +990,18 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     snapmgr::RestoreTransactionSnapshot(tsource, shared.parallel_leader_proc_number)?;
     snapmgr::PushActiveSnapshot(&asnapshot)?;
 
-    inval::local::InvalidateSystemCaches()?;
+    if init_small::wretain::warm_claim() && !shared.leader_pending_invals {
+        // Retention warm claim: caches were drained against the shared queue
+        // at InitPostgres (postinit warm arm); a second cheap drain here
+        // covers messages that arrived since. C's blanket invalidation is
+        // only needed for a fresh process's incidentally-mistimed cache
+        // loads — or for the leader's own uncommitted DDL, which forces the
+        // fallback arm below.
+        inval::local::AcceptInvalidationMessages()?;
+        gtrace("w.retain.inval.drained");
+    } else {
+        inval::local::InvalidateSystemCaches()?;
+    }
     gtrace("w.inval.done");
 
     let _guc_binding = if guc::store::session_guc_bind_enabled() {

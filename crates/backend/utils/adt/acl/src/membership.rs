@@ -53,13 +53,23 @@ pub fn initialize_acl() -> PgResult<()> {
             SysCacheKey::UNUSED,
             SysCacheKey::UNUSED,
         )?);
-        for cacheid in [AUTHMEMROLEMEM, AUTHOID, DATABASEOID] {
-            inval::invalidate::CacheRegisterSyscacheCallback(
-                cacheid,
-                RoleMembershipCacheCallback,
-                Datum::null(),
-            )?;
+        // Registered once per thread: a retained pool standby (wretain) runs
+        // initialize_acl once per claim, and the callback tables are
+        // fixed-capacity. The membership cache itself resets per claim.
+        thread_local! {
+            static CALLBACKS_REGISTERED: Cell<bool> = const { Cell::new(false) };
         }
+        if !CALLBACKS_REGISTERED.get() {
+            for cacheid in [AUTHMEMROLEMEM, AUTHOID, DATABASEOID] {
+                inval::invalidate::CacheRegisterSyscacheCallback(
+                    cacheid,
+                    RoleMembershipCacheCallback,
+                    Datum::null(),
+                )?;
+            }
+            CALLBACKS_REGISTERED.set(true);
+        }
+        CACHE.with(|c| c.borrow_mut().role = [InvalidOid; 3]);
     }
     Ok(())
 }

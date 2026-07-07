@@ -123,6 +123,15 @@ pub fn pgstat_initialize() -> types_error::PgResult<()> {
     Ok(())
 }
 
+/// Retention claim (wretain): pgstat TLS survived the park (the shutdown
+/// hook flushed pending stats and dropped the per-backend entry); re-arm the
+/// hook and re-baseline the WAL usage deltas for the new task.
+pub fn pgstat_reattach_retained_backend() -> types_error::PgResult<()> {
+    debug_assert!(IS_INITIALIZED.with(|c| c.get()));
+    wal::pgstat_wal_init_backend_cb();
+    ipc_seams::before_shmem_exit::call(pgstat_shutdown_hook, datum::Datum::from_usize(0))
+}
+
 fn pgstat_shutdown_hook(_code: i32, _arg: datum::Datum) -> types_error::PgResult<()> {
     debug_assert!(IS_INITIALIZED.with(|c| c.get()));
     if init_small::globals::MyDatabaseId() != types_core::InvalidOid {
@@ -135,6 +144,7 @@ fn pgstat_shutdown_hook(_code: i32, _arg: datum::Datum) -> types_error::PgResult
 
 pub fn init_seams() {
     pgstat_seams::pgstat_initialize::set(pgstat_initialize);
+    pgstat_seams::pgstat_reattach_retained_backend::set(pgstat_reattach_retained_backend);
     pgstat_seams::pgstat_set_session_end_cause_fatal::set(
         database::pgstat_set_session_end_cause_fatal,
     );

@@ -28,6 +28,20 @@ pub fn GetUserId() -> Oid {
     CURRENT_USER_ID.get()
 }
 
+/// Retention park (wretain): clear the per-session identity TLS so a parked
+/// pool standby carries no session identity (zero-leak) and the next claim's
+/// set-once asserts (SetAuthenticatedUserId, InitializeSystemUser) hold.
+pub fn ResetSessionIdentityForRetainedPark() {
+    AUTHENTICATED_USER_ID.set(InvalidOid);
+    SESSION_USER_ID.set(InvalidOid);
+    OUTER_USER_ID.set(InvalidOid);
+    CURRENT_USER_ID.set(InvalidOid);
+    SESSION_USER_IS_SUPERUSER.set(false);
+    SECURITY_RESTRICTION_CONTEXT.set(0);
+    SET_ROLE_IS_ACTIVE.set(false);
+    SYSTEM_USER.set(None);
+}
+
 pub fn GetOuterUserId() -> Oid {
     debug_assert_ne!(OUTER_USER_ID.get(), InvalidOid);
     OUTER_USER_ID.get()

@@ -6973,6 +6973,7 @@ dependencies = [
  "ipc",
  "libc",
  "libpq_pqsignal",
+ "lmgr_proc",
  "miscinit",
  "pgarch",
  "pmchild_seams",
@@ -6981,6 +6982,7 @@ dependencies = [
  "pqcomm_seams",
  "procsignal",
  "scalar_seams",
+ "sinval",
  "stack_depth",
  "syslogger_seams",
  "timestamp_seams",
@@ -11211,6 +11213,7 @@ dependencies = [
  "guc_tables",
  "hba_seams",
  "init_small",
+ "inval_seams",
  "ipc_seams",
  "latch",
  "libc",
@@ -11240,6 +11243,7 @@ dependencies = [
  "sinval",
  "slot_seams",
  "smgr",
+ "smgr_seams",
  "snapmgr",
  "superuser_seams",
  "sync_seams",
@@ -11331,6 +11335,7 @@ name = "postmaster_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
 ]
 
 [[package]]

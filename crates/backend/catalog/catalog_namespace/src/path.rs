@@ -403,26 +403,36 @@ pub fn InitializeSearchPath() -> PgResult<()> {
         NAMESPACE_USER.with(|c| c.set(miscinit_seams::get_user_id::call()));
         ACTIVE_PATH_GENERATION.with(|c| c.set(c.get() + 1));
     } else {
-        inval::invalidate::CacheRegisterSyscacheCallback(
-            NAMESPACEOID,
-            InvalidationCallback,
-            datum::Datum::null(),
-        )?;
-        inval::invalidate::CacheRegisterSyscacheCallback(
-            AUTHOID,
-            InvalidationCallback,
-            datum::Datum::null(),
-        )?;
-        inval::invalidate::CacheRegisterSyscacheCallback(
-            AUTHMEMROLEMEM,
-            InvalidationCallback,
-            datum::Datum::null(),
-        )?;
-        inval::invalidate::CacheRegisterSyscacheCallback(
-            DATABASEOID,
-            InvalidationCallback,
-            datum::Datum::null(),
-        )?;
+        // Registered once per thread: a retained pool standby (wretain) runs
+        // InitializeSearchPath once per claim, and the callback tables are
+        // fixed-capacity.
+        thread_local! {
+            static CALLBACKS_REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !CALLBACKS_REGISTERED.get() {
+            inval::invalidate::CacheRegisterSyscacheCallback(
+                NAMESPACEOID,
+                InvalidationCallback,
+                datum::Datum::null(),
+            )?;
+            inval::invalidate::CacheRegisterSyscacheCallback(
+                AUTHOID,
+                InvalidationCallback,
+                datum::Datum::null(),
+            )?;
+            inval::invalidate::CacheRegisterSyscacheCallback(
+                AUTHMEMROLEMEM,
+                InvalidationCallback,
+                datum::Datum::null(),
+            )?;
+            inval::invalidate::CacheRegisterSyscacheCallback(
+                DATABASEOID,
+                InvalidationCallback,
+                datum::Datum::null(),
+            )?;
+            CALLBACKS_REGISTERED.set(true);
+        }
 
         BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
         SEARCH_PATH_CACHE_VALID.with(|c| c.set(false));

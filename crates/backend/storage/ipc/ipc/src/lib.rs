@@ -61,6 +61,24 @@ pub fn shmem_exit_inprogress() -> bool {
     SHMEM_EXIT_INPROGRESS.with(Cell::get)
 }
 
+/// Retention park (wretain): proc_exit_prepare committed this thread to
+/// "exiting" (exit flags, ERROR->FATAL promotion, held interrupts, suppressed
+/// statement logging); a parked standby lives on and must return to the
+/// fresh-thread baseline before its next claim. Exit-callback lists were
+/// fully drained by the teardown, so only the flags need resetting.
+pub fn reset_exit_state_for_retained_park() {
+    debug_assert_eq!(ON_PROC_EXIT_INDEX.with(Cell::get), 0);
+    debug_assert_eq!(ON_SHMEM_EXIT_INDEX.with(Cell::get), 0);
+    debug_assert_eq!(BEFORE_SHMEM_EXIT_INDEX.with(Cell::get), 0);
+    PROC_EXIT_INPROGRESS.with(|c| c.set(false));
+    SHMEM_EXIT_INPROGRESS.with(|c| c.set(false));
+    elog::config::set_proc_exit_inprogress(false);
+    init_small::globals::SetInterruptHoldoffCount(0);
+    init_small::globals::SetCritSectionCount(0);
+    elog::config::set_crit_section_count(0);
+    elog::reset_statement_suppressed();
+}
+
 pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     // C's `MyProcPid != getpid()` guard, thread-model form.
     if my_pid != init_small::globals::MyProcPid() {

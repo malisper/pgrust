@@ -80,7 +80,7 @@ pub(crate) fn HandleFatalError(
     debug_assert!(with_pm(|pm| !pm.fatal_error));
     debug_assert!(with_pm(|pm| pm.shutdown != ImmediateShutdown));
 
-    launch_backend::wpool::flush();
+    launch_backend::wpool::flush_for_crash();
 
     pmsignal::SetQuitSignalReason(reason);
 

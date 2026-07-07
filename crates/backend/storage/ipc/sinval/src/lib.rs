@@ -318,7 +318,43 @@ pub fn SharedInvalBackendInit(sendOnly: bool) -> PgResult<()> {
 }
 
 fn cleanup_invalidation_state_callback(_code: i32, _arg: usize) {
+    // Retention park (wretain): the slot stays registered so DDL between
+    // tasks accumulates against our nextMsgNum (drained at the next claim by
+    // AcceptInvalidationMessages; SICleanupQueue's resetState arm covers a
+    // long park). ReattachRetainedBackend re-arms this callback.
+    if init_small::wretain::parking() {
+        init_small::wretain::note_sinval_retained();
+        return;
+    }
     CleanupInvalidationState().expect("CleanupInvalidationState failed");
+}
+
+/// Retention claim (wretain): the retained slot is live; refresh its pid
+/// (per-task synthetic pids — catchup signals must target the live one),
+/// re-register the exit callback the park teardown consumed, and
+/// sanity-check ownership.
+pub fn ReattachRetainedBackend() -> PgResult<()> {
+    let seg = current_seg();
+    let my = MyProcNumber();
+    let cached = LOCAL.with(|st| st.my_procno.get());
+    if cached != my || my < 0 {
+        return Err(Box::new(PgError::new(
+            PANIC,
+            format!("retained sinval slot procno mismatch: cached {cached}, MyProcNumber {my}"),
+        )));
+    }
+    let state = &seg.proc_states()[my as usize];
+    if state.procPid.load(Relaxed) == 0 {
+        return Err(Box::new(PgError::new(
+            PANIC,
+            format!("retained sinval slot {my} is not registered"),
+        )));
+    }
+    // Plain store, no lock: concurrent SICleanupQueue readers only use this
+    // for the catchup SendProcSignal target; either pid value is benign.
+    state.procPid.store(MyProcPid(), Relaxed);
+    ipc_seams::on_shmem_exit::call(cleanup_invalidation_state_callback, 0);
+    Ok(())
 }
 
 pub fn CleanupInvalidationState() -> PgResult<()> {
