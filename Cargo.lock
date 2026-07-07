@@ -10642,9 +10642,11 @@ name = "plancache"
 version = "0.1.0"
 dependencies = [
  "aclchk_seams",
+ "analyze_seams",
  "cache_syscache",
  "catalog_namespace",
  "catalog_seams",
+ "copyfuncs",
  "datum",
  "elog",
  "execscan",
@@ -10663,6 +10665,7 @@ dependencies = [
  "planner_seams",
  "pquery_seams",
  "readfuncs",
+ "rewrite_handler_seams",
  "snapmgr",
  "syscache_seams",
  "tupdesc",
@@ -10812,6 +10815,7 @@ dependencies = [
 name = "plpgsql"
 version = "0.0.0"
 dependencies = [
+ "analyze_seams",
  "arrayfuncs",
  "cache_syscache",
  "catalog_namespace",
@@ -10842,6 +10846,7 @@ dependencies = [
  "portalmem",
  "rel_vocab",
  "resowner",
+ "rewrite_handler_seams",
  "rustc-hash",
  "scan_fgram",
  "snapmgr",

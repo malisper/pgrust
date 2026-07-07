@@ -1,13 +1,15 @@
 // plancache.c. Sources/plans live in per-entry leaked MemoryContexts, reclaimed
 // on drop; registry handles are generation-checked (C's dangling pointer made
-// loud). CachedPlan.refcount IS C's refcount. Divergences (each loud or
-// vacuously equal until its lane lands): raw parse trees are not retained
-// (classification bits captured at create; the invalidated-replan arm re-parses
-// via the source's installed ReanalyzeFn, and panics when none is installed),
-// query-side (source) invalItems are not collected — the generic plan's
-// invalItems (recorded by setrefs) carry the function dependency and drive
-// PlanCacheObjectCallback's generic-plan arm; source invalidation would force
-// re-analysis (the replan arm), RLS fields are constant-false.
+// loud). CachedPlan.refcount IS C's refcount. The raw parse tree is retained on
+// the source (C's copyObject into source_context) and the invalidated-replan
+// arm re-analyzes a per-attempt copy of it: through the installed ReanalyzeFn
+// when the owner's analysis needs parse hooks (C's parserSetup), else through
+// the fixedparams default (C plancache.c:793-814). Divergences (each loud or
+// vacuously equal until its lane lands): query-side (source) invalItems are not
+// collected — the generic plan's invalItems (recorded by setrefs) carry the
+// function dependency and drive PlanCacheObjectCallback's generic-plan arm;
+// source invalidation would force re-analysis (the replan arm), RLS fields are
+// constant-false.
 #![allow(non_snake_case)]
 
 use core::cell::RefCell;
@@ -43,12 +45,16 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CachedPlanSourceHandle(pub u64);
 
-/// Analyze-and-rewrite the source's statement into `qmcx` with the resolved
-/// param types; `arg` is C's parserSetupArg.
+/// Analyze-and-rewrite `raw` (a per-attempt copy of the retained raw parse
+/// tree, allocated in `qmcx`; analysis may scribble on it) into `qmcx`;
+/// `arg` is C's parserSetupArg. Install only when analysis needs parse hooks
+/// the fixedparams default cannot carry (C's parserSetup != NULL arm).
 pub type ReanalyzeFn = fn(
     qmcx: Mcx<'static>,
+    raw: &'static RawStmt<'static>,
     query_string: &'static str,
     param_types: &'static [Oid],
+    query_env: QueryEnvHandle,
     arg: i32,
 ) -> PgResult<PgVec<'static, Query<'static>>>;
 
@@ -66,6 +72,9 @@ struct CachedPlanSource {
     requires_reval: bool,
     requires_snapshot: bool,
     is_xact_exit_stmt: bool,
+    // Lives in source_ctx (C: copyObject into source_context); handed out
+    // only as copies because analysis scribbles on its input.
+    raw_parse_tree: Option<&'static RawStmt<'static>>,
     reanalyze: Option<(ReanalyzeFn, i32)>,
     query_list: &'static [Query<'static>],
     relation_oids: &'static [Oid],
@@ -230,7 +239,7 @@ pub fn CreateCachedPlan(
         ),
         None => (false, false, false),
     };
-    create_cached_plan_flags(flags, query_string, commandTag)
+    create_cached_plan_flags(raw_parse_tree, flags, query_string, commandTag)
 }
 
 // CreateCachedPlanForQuery (plancache.c): entry created from an analyzed
@@ -242,10 +251,11 @@ pub fn CreateCachedPlanForQuery(
     commandTag: CommandTag,
 ) -> PgResult<CachedPlanSourceHandle> {
     let reval = parser_analyze::query_requires_rewrite_plan(analyzed);
-    create_cached_plan_flags((reval, reval, false), query_string, commandTag)
+    create_cached_plan_flags(None, (reval, reval, false), query_string, commandTag)
 }
 
 fn create_cached_plan_flags(
+    raw_parse_tree: Option<&RawStmt<'_>>,
     (requires_reval, requires_snapshot, is_xact_exit_stmt): (bool, bool, bool),
     query_string: &str,
     commandTag: CommandTag,
@@ -255,6 +265,20 @@ fn create_cached_plan_flags(
     let mcx = ctx_mcx(source_ctx);
     let qs = mcx::slice_borrow_in(mcx, query_string.as_bytes())?;
     let query_string: &'static str = core::str::from_utf8(qs).expect("query_string is UTF-8");
+    let raw_parse_tree = match raw_parse_tree {
+        Some(raw) => {
+            let copied = copy_raw_stmt_in(mcx, raw);
+            match copied {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    reclaim_ctx(query_ctx);
+                    reclaim_ctx(source_ctx);
+                    return Err(e);
+                }
+            }
+        }
+        None => None,
+    };
 
     Ok(with_cache(|pc| {
         pc.handle_gen = pc.handle_gen.wrapping_add(1);
@@ -268,6 +292,7 @@ fn create_cached_plan_flags(
             requires_reval,
             requires_snapshot,
             is_xact_exit_stmt,
+            raw_parse_tree,
             reanalyze: None,
             query_list: &[],
             relation_oids: &[],
@@ -574,7 +599,7 @@ pub fn GetCachedPlan(
         );
     }
 
-    RevalidateCachedQuery(h, queryEnv)?;
+    RevalidateCachedQuery(h, queryEnv, true)?;
 
     let mut customplan = choose_custom_plan(h, boundParams);
     let mut plan: Option<CachedPlanHandle> = None;
@@ -627,7 +652,11 @@ pub fn GetCachedPlan(
     Ok(plan)
 }
 
-fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -> PgResult<()> {
+fn RevalidateCachedQuery(
+    h: CachedPlanSourceHandle,
+    queryEnv: QueryEnvHandle,
+    release_generic: bool,
+) -> PgResult<()> {
     // One borrow per phase; the catalog probe and lock calls run outside.
     let (requires_reval, is_valid, mut matcher) = with_source(h, |src| {
         let take = src.requires_reval && src.is_valid;
@@ -677,17 +706,21 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         AcquirePlannerLocks(query_list, false)?;
     }
 
-    let Some((reanalyze, arg)) = with_source(h, |src| src.reanalyze) else {
+    let (reanalyze, raw_parse_tree) =
+        with_source(h, |src| (src.reanalyze, src.raw_parse_tree));
+    let Some(raw_parse_tree) = raw_parse_tree else {
         panic!(
-            "RevalidateCachedQuery (plancache.c): plan for {:?} was invalidated; re-analysis \
-             needs a retained raw parse tree (analyze-rewrite hooks lane)",
+            "RevalidateCachedQuery (plancache.c): revalidatable source for {:?} retains no \
+             raw parse tree (CreateCachedPlanForQuery re-analysis is the sqlbody lane)",
             with_source(h, |src| src.commandTag)
         );
     };
 
     // An analysis error below leaves the source invalid with empty lists
     // (retried on the next fetch), exactly as C's longjmp.
-    ReleaseGenericPlan(h);
+    if release_generic {
+        ReleaseGenericPlan(h);
+    }
     let (old_qctx, query_string, param_types, fixed_result, source_ctx) = with_cache(|pc| {
         let src = source_mut(pc, h);
         src.is_valid = false;
@@ -705,7 +738,17 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
         snapshot_set = true;
     }
     let new_qctx = leak_ctx("CachedPlanQuery");
-    let analyzed = reanalyze(ctx_mcx(new_qctx), query_string, param_types, arg);
+    // Per-attempt copy of the retained tree (C's copyObject): analysis
+    // scribbles on its input, and a failed attempt must not poison the
+    // retained original.
+    let analyzed = copy_raw_stmt_in(ctx_mcx(new_qctx), raw_parse_tree).and_then(|raw| {
+        match reanalyze {
+            Some((f, arg)) => f(ctx_mcx(new_qctx), raw, query_string, param_types, queryEnv, arg),
+            None => {
+                reanalyze_fixedparams(ctx_mcx(new_qctx), raw, query_string, param_types, queryEnv)
+            }
+        }
+    });
     if snapshot_set {
         if let Err(e) = snapmgr::PopActiveSnapshot() {
             drop(analyzed);
@@ -776,6 +819,58 @@ fn RevalidateCachedQuery(h: CachedPlanSourceHandle, _queryEnv: QueryEnvHandle) -
     Ok(())
 }
 
+// copyObject(raw_parse_tree): the RawStmt shell plus its full statement tree.
+fn copy_raw_stmt_in<'mcx>(mcx: Mcx<'mcx>, raw: &RawStmt<'_>) -> PgResult<&'mcx RawStmt<'mcx>> {
+    let stmt = match raw.stmt {
+        Some(s) => Some(copyfuncs::copy_object(mcx, s)?),
+        None => None,
+    };
+    mcx::alloc_leak_in(
+        mcx,
+        RawStmt { stmt, stmt_location: raw.stmt_location, stmt_len: raw.stmt_len },
+    )
+}
+
+/// Copy of the source's retained raw parse tree into `mcx`; None for sources
+/// created without one (empty statements, CreateCachedPlanForQuery). Copies
+/// only — analysis scribbles on its input (C reads plansource->raw_parse_tree
+/// and copyObjects before use).
+pub fn CachedPlanRawParseTreeCopy<'mcx>(
+    mcx: Mcx<'mcx>,
+    h: CachedPlanSourceHandle,
+) -> PgResult<Option<&'mcx RawStmt<'mcx>>> {
+    match with_source(h, |src| src.raw_parse_tree) {
+        Some(raw) => Ok(Some(copy_raw_stmt_in(mcx, raw)?)),
+        None => Ok(None),
+    }
+}
+
+// pg_analyze_and_rewrite_fixedparams (tcop/postgres.c) via the seams, the
+// parserSetup == NULL revalidation arm (C plancache.c:807-814).
+fn reanalyze_fixedparams(
+    qmcx: Mcx<'static>,
+    raw: &RawStmt<'static>,
+    query_string: &'static str,
+    param_types: &'static [Oid],
+    query_env: QueryEnvHandle,
+) -> PgResult<PgVec<'static, Query<'static>>> {
+    let query = analyze_seams::parse_analyze_fixedparams::call(
+        qmcx,
+        raw,
+        query_string,
+        param_types,
+        query_env,
+    )?;
+    if query.commandType == CmdType::CMD_UTILITY {
+        let mut v = PgVec::new_in(qmcx);
+        v.try_reserve_exact(1).map_err(|_| qmcx.oom(1))?;
+        v.push(query);
+        Ok(v)
+    } else {
+        rewrite_handler_seams::query_rewrite::call(qmcx, query)
+    }
+}
+
 fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
     let user = miscinit::GetUserId();
     let Some((gplan, mut is_valid, stmt_list)) = with_cache(|pc| {
@@ -817,24 +912,17 @@ fn CheckCachedPlan(h: CachedPlanSourceHandle) -> PgResult<bool> {
 fn BuildCachedPlan(
     h: CachedPlanSourceHandle,
     boundParams: ParamListHandle,
-    _queryEnv: QueryEnvHandle,
+    queryEnv: QueryEnvHandle,
 ) -> PgResult<CachedPlanHandle> {
-    let (query_list, query_string, cursor_options, requires_snapshot, is_valid) =
-        with_source(h, |src| {
-            (
-                src.query_list,
-                src.query_string,
-                src.cursor_options,
-                src.requires_snapshot,
-                src.is_valid,
-            )
-        });
-    if !is_valid {
-        panic!(
-            "BuildCachedPlan (plancache.c): invalidated while building (sinval-reset race); \
-             re-revalidation needs the analyze-rewrite hooks lane"
-        );
+    // Invalidated since GetCachedPlan's revalidation (sinval-reset race):
+    // re-analyze, without releasing the generic plan the caller may hold (C
+    // plancache.c BuildCachedPlan's release_generic = false).
+    if !with_source(h, |src| src.is_valid) {
+        RevalidateCachedQuery(h, queryEnv, false)?;
     }
+    let (query_list, query_string, cursor_options, requires_snapshot) = with_source(h, |src| {
+        (src.query_list, src.query_string, src.cursor_options, src.requires_snapshot)
+    });
 
     let plan_ctx = leak_ctx("CachedPlan");
     let result = build_stmt_list(
@@ -1464,8 +1552,8 @@ fn plan_cache_compute_result_desc(
     }
 }
 
-// IsTransactionExitStmt (postgres.c), captured at create because the raw
-// parse tree is not retained.
+// IsTransactionExitStmt (postgres.c), captured at create (C recomputes from
+// the retained raw tree on each read; the answer never changes).
 fn is_transaction_exit_stmt(raw: &RawStmt<'_>) -> bool {
     use types_nodes::parsenodes::TransactionStmtKind::*;
     match raw.stmt.and_then(|node| node.as_transaction_stmt()) {
@@ -1489,7 +1577,7 @@ pub fn CachedPlanGetTargetList<'mcx>(
         return Ok(out);
     }
 
-    RevalidateCachedQuery(h, queryEnv)?;
+    RevalidateCachedQuery(h, queryEnv, true)?;
 
     let query_list = with_source(h, |src| src.query_list);
     let primary = query_list

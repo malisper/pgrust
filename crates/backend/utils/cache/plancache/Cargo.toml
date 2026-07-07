@@ -29,6 +29,9 @@ guc_tables = { path = "../../misc/guc_tables" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 miscinit = { path = "../../init/miscinit" }
 parser_analyze = { path = "../../../parser/parser_analyze" }
+analyze_seams = { path = "../../../parser/analyze_seams" }
+copyfuncs = { path = "../../../nodes/copyfuncs" }
+rewrite_handler_seams = { path = "../../../rewrite/rewrite_handler_seams" }
 planner_seams = { path = "../../../optimizer/plan/planner_seams" }
 pquery_seams = { path = "../../../tcop/pquery_seams" }
 snapmgr = { path = "../../time/snapmgr" }
