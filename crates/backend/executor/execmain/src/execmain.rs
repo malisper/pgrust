@@ -244,7 +244,7 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
         ::trigger::AfterTriggerEndQuery()?;
     }
     let parked = querydesc::with_qd(h, |qd| -> PgResult<bool> {
-        if !skeleton_disarm_in_place(qd)? {
+        if skeleton_disarm_in_place(qd)?.is_none() {
             standard_executor_end(qd)?;
             return Ok(false);
         }
@@ -262,7 +262,7 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
 
 // Park-side disarm on the QueryDesc's own executor: the eligibility gates and
 // per-run-state release of standard_executor_end's TLS-park branch, in place.
-fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<bool> {
+fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
     if qd.cplan.is_null()
         || qd.operation != CmdType::CMD_SELECT
         || qd.instrument_options != 0
@@ -270,10 +270,10 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<bool> {
         || qd.crosscheck_snapshot.is_some()
         || qd.tup_desc.is_none()
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let Some(exec) = qd.exec.as_mut() else { return Ok(false) };
-    exec.with_mut(|data| -> PgResult<bool> {
+    let Some(exec) = qd.exec.as_mut() else { return Ok(None) };
+    exec.with_mut(|data| -> PgResult<Option<i32>> {
         let ExecData { estate, planstate } = data;
         let eligible = planstate.is_some()
             && estate.es_subplanstates.is_empty()
@@ -289,7 +289,7 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<bool> {
             && estate.es_crosscheck_snapshot.is_none()
             && skeleton_parkable(planstate.as_ref().expect("probed above"));
         if !eligible {
-            return Ok(false);
+            return Ok(None);
         }
         skeleton_park_tree(planstate.as_mut().expect("probed above"))?;
         // Relations close per run, exactly as C's ExecutorEnd (locks are
@@ -306,7 +306,7 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<bool> {
         // The source text lives in the portal, freed before the skeleton
         // is reused; never hold it across the park.
         estate.es_sourceText = None;
-        Ok(true)
+        Ok(Some(estate.es_top_eflags))
     })
 }
 
@@ -1023,9 +1023,8 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,
     // relation pins, snapshot, source text — is released here).
-    if skeleton_disarm_in_place(qd)? {
-        let mut exec = qd.exec.take().expect("disarm probed the executor");
-        let eflags = exec.with_mut(|data| data.estate.es_top_eflags);
+    if let Some(eflags) = skeleton_disarm_in_place(qd)? {
+        let exec = qd.exec.take().expect("disarm probed the executor");
         let tup_desc = qd.tup_desc.take().expect("finished query has a tupdesc");
         exec_skeleton::park(exec_skeleton::Skeleton {
             pstmt: qd.plannedstmt() as *const _ as *const (),
