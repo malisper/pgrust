@@ -112,7 +112,7 @@ pub fn ginbuild<'mcx>(
                     let Some((attnum, key, category, list)) = accum.next_entry() else {
                         break;
                     };
-                    check_for_interrupts();
+                    check_for_interrupts()?;
                     let dump_ctx = MemoryContext::new_bump("gin build dump scratch");
                     ginEntryInsert(
                         dump_ctx.mcx(),
@@ -138,7 +138,7 @@ pub fn ginbuild<'mcx>(
         let Some((attnum, key, category, list)) = accum.next_entry() else {
             break;
         };
-        check_for_interrupts();
+        check_for_interrupts()?;
         let dump_ctx = MemoryContext::new_bump("gin build dump scratch");
         ginEntryInsert(
             dump_ctx.mcx(),

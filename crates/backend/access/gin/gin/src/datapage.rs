@@ -1268,7 +1268,7 @@ pub(crate) fn ginScanBeginPostingTree<'s>(
 /// posting-tree leaf, recompress in place, WAL-log the actions.
 pub(crate) fn ginVacuumPostingTreeLeaf<'s>(
     scratch: Mcx<'s>,
-    gvs: &mut crate::vacuum::GinVacuumState<'_, '_, '_>,
+    gvs: &mut crate::vacuum::GinVacuumState<'_, '_, '_, '_>,
     buffer: Buffer,
 ) -> PgResult<()> {
     let rel = gvs.rel;

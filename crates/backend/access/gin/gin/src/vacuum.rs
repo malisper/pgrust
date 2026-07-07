@@ -36,10 +36,17 @@ use crate::{
 
 pub use ::nbtree::IndexVacuumInfo;
 
-pub(crate) struct GinVacuumState<'a, 'r, 'st> {
+// The bulkdelete callback, monomorphized to its two producers: vac_tid_reaped
+// (sorted dead-TID slice) and validate_index's never-delete collector.
+pub(crate) enum GinVacDelete<'a> {
+    DeadItems(&'a [ItemPointerData]),
+    Collect(&'a mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + 'a)),
+}
+
+pub(crate) struct GinVacuumState<'a, 'cb, 'r, 'st> {
     pub rel: &'a Relation<'r>,
     pub state: &'st GinState,
-    pub dead_items: &'a [ItemPointerData],
+    pub delete: GinVacDelete<'cb>,
     pub stats: &'a mut IndexBulkDeleteResult,
 }
 
@@ -48,7 +55,7 @@ fn am_autovacuum_worker() -> bool {
 }
 
 fn vacuum_delay_point() -> PgResult<()> {
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
     if init_small::globals::VacuumCostActive() {
         vacuum_seams::vacuum_delay_point::call(false)?;
     }
@@ -66,12 +73,19 @@ fn tid_is_dead(dead_items: &[ItemPointerData], tid: &ItemPointerData) -> bool {
 /// surviving items (possibly empty).
 pub(crate) fn ginVacuumItemPointers<'s>(
     mcx: Mcx<'s>,
-    gvs: &mut GinVacuumState<'_, '_, '_>,
+    gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     items: &[ItemPointerData],
 ) -> PgResult<Option<PgVec<'s, ItemPointerData>>> {
     let mut tmpitems: Option<PgVec<'s, ItemPointerData>> = None;
     for (i, item) in items.iter().enumerate() {
-        if tid_is_dead(gvs.dead_items, item) {
+        let dead = match &mut gvs.delete {
+            GinVacDelete::DeadItems(dead_items) => tid_is_dead(dead_items, item),
+            GinVacDelete::Collect(callback) => {
+                callback(item)?;
+                false
+            }
+        };
+        if dead {
             gvs.stats.tuples_removed += 1.0;
             if tmpitems.is_none() {
                 let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
@@ -113,7 +127,7 @@ fn xlog_vacuum_page(rel: &Relation<'_>, buffer: Buffer) -> PgResult<()> {
 /// ginDeletePage. All three pages are already exclusively locked by
 /// ginScanToDelete's stack; this function adds pins only.
 fn ginDeletePage(
-    gvs: &mut GinVacuumState<'_, '_, '_>,
+    gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     delete_blkno: BlockNumber,
     left_blkno: BlockNumber,
     parent_blkno: BlockNumber,
@@ -199,7 +213,7 @@ struct DeleteLevel {
 
 /// ginScanToDelete at one page; returns true when the page was deleted.
 fn ginScanToDelete(
-    gvs: &mut GinVacuumState<'_, '_, '_>,
+    gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     blkno: BlockNumber,
     depth: usize,
     levels: &mut Vec<DeleteLevel>,
@@ -306,7 +320,7 @@ fn ginScanToDelete(
 /// ginVacuumPostingTreeLeaves: leftmost descent, then rightlink walk vacuuming
 /// each leaf. Returns true when at least one leaf came out empty.
 fn ginVacuumPostingTreeLeaves(
-    gvs: &mut GinVacuumState<'_, '_, '_>,
+    gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     root_blkno: BlockNumber,
 ) -> PgResult<bool> {
     let rel = gvs.rel;
@@ -368,7 +382,7 @@ fn ginVacuumPostingTreeLeaves(
 
 /// ginVacuumPostingTree.
 fn ginVacuumPostingTree(
-    gvs: &mut GinVacuumState<'_, '_, '_>,
+    gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     root_blkno: BlockNumber,
 ) -> PgResult<()> {
     if !ginVacuumPostingTreeLeaves(gvs, root_blkno)? {
@@ -392,7 +406,7 @@ fn ginVacuumPostingTree(
 /// posting-tree roots for deferred processing. None when nothing changed.
 fn ginVacuumEntryPage<'s>(
     scratch: Mcx<'s>,
-    gvs: &mut GinVacuumState<'_, '_, '_>,
+    gvs: &mut GinVacuumState<'_, '_, '_, '_>,
     buffer: Buffer,
     roots: &mut Vec<BlockNumber>,
 ) -> PgResult<Option<PageTemp>> {
@@ -509,6 +523,24 @@ pub fn ginbulkdelete<'mcx>(
     stats: Option<IndexBulkDeleteResult>,
     dead_items: &[ItemPointerData],
 ) -> PgResult<IndexBulkDeleteResult> {
+    ginbulkdelete_guts(mcx, info, stats, GinVacDelete::DeadItems(dead_items))
+}
+
+/// ginbulkdelete with C's collect-only callback shape (validate_index).
+pub fn ginbulkdelete_collect<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    callback: &mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + '_),
+) -> PgResult<IndexBulkDeleteResult> {
+    ginbulkdelete_guts(mcx, info, None, GinVacDelete::Collect(callback))
+}
+
+fn ginbulkdelete_guts<'mcx>(
+    mcx: Mcx<'mcx>,
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    stats: Option<IndexBulkDeleteResult>,
+    delete: GinVacDelete<'_>,
+) -> PgResult<IndexBulkDeleteResult> {
     let rel = info.index;
     let state = initGinState(rel)?;
 
@@ -534,7 +566,7 @@ pub fn ginbulkdelete<'mcx>(
     let mut gvs = GinVacuumState {
         rel,
         state: &state,
-        dead_items,
+        delete,
         stats: &mut stats,
     };
 

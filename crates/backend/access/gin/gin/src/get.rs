@@ -404,7 +404,7 @@ fn start_scan_key(state: &GinState, work: &mut GinScanWork, key_idx: usize) -> P
                 last_required = pos;
                 break;
             }
-            check_for_interrupts();
+            check_for_interrupts()?;
         }
         // Restore entryRes (consistent calls scribbled on it).
         for i in 0..nentries {
@@ -843,7 +843,7 @@ fn scan_get_item(
 ) -> PgResult<Option<bool>> {
     let mut advance_past = *advance_past;
     loop {
-        check_for_interrupts();
+        check_for_interrupts()?;
         item_pointer_set_min(item);
         let mut match_ = true;
         for i in 0..work.keys.len() {

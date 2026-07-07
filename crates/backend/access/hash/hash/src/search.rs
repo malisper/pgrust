@@ -102,7 +102,7 @@ fn _hash_readnext(ctx: &mut HashScanCtx<'_, '_>, buf: &mut Buffer) -> PgResult<(
         _hash_relbuf(*buf)?;
     }
     *buf = InvalidBuffer;
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
 
     if blkno != InvalidBlockNumber {
         *buf = _hash_getbuf(ctx.rel, blkno, HASH_READ, LH_OVERFLOW_PAGE)?;
@@ -136,7 +136,7 @@ fn _hash_readprev(ctx: &mut HashScanCtx<'_, '_>, buf: &mut Buffer) -> PgResult<(
         haveprevblk = true;
     }
     *buf = InvalidBuffer;
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
 
     if haveprevblk {
         debug_assert!(blkno != InvalidBlockNumber);

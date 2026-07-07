@@ -297,7 +297,7 @@ pub fn _hash_init(
     bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
 
     for i in 0..num_buckets {
-        crate::check_for_interrupts();
+        crate::check_for_interrupts()?;
         let blkno = with_meta(metabuf, |m| m.bucket_to_blkno(i));
         let buf = _hash_getnewbuf(rel, blkno, fork_num)?;
         let maxbucket = with_meta(metabuf, |m| m.hashm_maxbucket);
