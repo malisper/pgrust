@@ -3113,7 +3113,7 @@ fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
         };
         let env = crate::compile::SubplanCompileEnv {
             estate: NonNull::<u8>::dangling().cast(),
-            init: stub_init,
+            init: Some(stub_init),
             agg: None,
             rtable: None,
             parent_subplan_tlist: None,
