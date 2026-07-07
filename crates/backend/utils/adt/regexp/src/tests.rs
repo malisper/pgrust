@@ -745,3 +745,62 @@ fn generated_adversarial_parity() {
         assert_engine_parity(m, b"", p.as_bytes());
     }
 }
+
+// Dispatch-overhead microbench (run with --ignored --nocapture): the auto
+// probe on a Spencer-class pattern must be ~zero next to the Spencer match
+// itself — one TLS read plus one cached-verdict probe.
+#[test]
+#[ignore]
+fn dispatch_overhead_microbench() {
+    full_setup();
+    let cx = MemoryContext::new("bench");
+    let m = cx.mcx();
+    // \w+ classifies incompatible: auto pays the dispatch probe and then
+    // runs the identical Spencer path.
+    let pat = br"\w+ \w+";
+    let hay = b"lorem ipsum dolor sit amet consectetur adipiscing elit";
+
+    let time = |engine: i32| -> f64 {
+        regexp_alt::set_regex_engine(engine);
+        let iters = 200_000u32;
+        // Warm both caches.
+        for _ in 0..1000 {
+            assert!(RE_compile_and_execute(m, pat, hay, REG_ADVANCED, C, &mut []).unwrap());
+        }
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            assert!(RE_compile_and_execute(m, pat, hay, REG_ADVANCED, C, &mut []).unwrap());
+        }
+        t0.elapsed().as_nanos() as f64 / iters as f64
+    };
+
+    let spencer = time(regexp_alt::REGEX_ENGINE_SPENCER);
+    let auto = time(regexp_alt::REGEX_ENGINE_AUTO);
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+    println!(
+        "spencer-class bool match: spencer={spencer:.1}ns auto={auto:.1}ns overhead={:.1}ns ({:+.2}%)",
+        auto - spencer,
+        (auto / spencer - 1.0) * 100.0
+    );
+
+    let time_replace = |engine: i32| -> f64 {
+        regexp_alt::set_regex_engine(engine);
+        let iters = 50_000u32;
+        for _ in 0..1000 {
+            textregexreplace_noopt(m, hay, pat, b"x", C).unwrap();
+        }
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            textregexreplace_noopt(m, hay, pat, b"x", C).unwrap();
+        }
+        t0.elapsed().as_nanos() as f64 / iters as f64
+    };
+    let spencer = time_replace(regexp_alt::REGEX_ENGINE_SPENCER);
+    let auto = time_replace(regexp_alt::REGEX_ENGINE_AUTO);
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+    println!(
+        "spencer-class replace: spencer={spencer:.1}ns auto={auto:.1}ns overhead={:.1}ns ({:+.2}%)",
+        auto - spencer,
+        (auto / spencer - 1.0) * 100.0
+    );
+}
