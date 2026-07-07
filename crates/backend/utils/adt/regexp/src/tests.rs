@@ -448,3 +448,68 @@ fn substr_and_split() {
     let err = regexp_split_setup(m, b"x", b"x", Some(b"g"), C, "regexp_split_to_array()").map(|_| ()).unwrap_err();
     assert!(sqlstate(&err).contains("regexp_split_to_array() does not support the \"global\" option"));
 }
+
+// regex-engine-ab experiment: the alternate engines must agree with Spencer
+// on backref-free, all-greedy patterns (the compatible subset the GUC is
+// documented for); Q29's pattern is the anchor case.
+#[test]
+fn alt_engine_parity_with_spencer() {
+    full_setup();
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+    let mut engines = vec![regexp_alt::REGEX_ENGINE_RUST];
+    if regexp_alt_have_re2() {
+        engines.push(regexp_alt::REGEX_ENGINE_RE2);
+    }
+    let corpus: &[&str] = &[
+        "http://www.example.com/path/x?y=1",
+        "https://sub.host.ru/",
+        "http://hostonly.com",
+        "not-a-url",
+        "",
+        "https://www.xn--80ak6aa92e.com/страница/1",
+        "a1b2c3 déf gh",
+        "aaa bbb aaa",
+    ];
+    let cases: &[(&str, &str, &str)] = &[
+        (r"^https?://(?:www\.)?([^/]+)/.*$", r"\1", ""),
+        (r"^https?://(?:www\.)?([^/]+)/.*$", r"\1", "g"),
+        (r"a+", "[&]", "g"),
+        // NOT \w: shorthand-class ctype is a known divergence (Spencer
+        // follows the collation -- ASCII-only under C collation; rust/re2
+        // are Unicode-aware regardless).
+        (r"([a-z0-9]+) ([a-z0-9]+)", r"\2 \1", ""),
+        (r"x*", "-", "g"),
+        (r"[0-9]", "#", "g"),
+    ];
+    for (p, r, opt) in cases {
+        for s in corpus {
+            let spencer =
+                textregexreplace(m, s.as_bytes(), p.as_bytes(), r.as_bytes(), opt.as_bytes(), C)
+                    .unwrap();
+            let flags = parse_re_flags(Some(opt.as_bytes())).unwrap();
+            let n = if flags.glob { 0 } else { 1 };
+            for &e in &engines {
+                let alt = regexp_alt::replace_text_regexp_alt(
+                    m, s.as_bytes(), p.as_bytes(), r.as_bytes(), flags.cflags, C, 0, n, e,
+                )
+                .unwrap();
+                assert_eq!(
+                    spencer.as_slice(),
+                    alt.as_slice(),
+                    "engine {e} diverges: pattern {p:?} repl {r:?} opt {opt:?} input {s:?}"
+                );
+            }
+        }
+    }
+}
+
+fn regexp_alt_have_re2() -> bool {
+    let cx = MemoryContext::new("probe");
+    let ok = regexp_alt::replace_text_regexp_alt(
+        cx.mcx(), b"a", b"a", b"b", REG_ADVANCED, C, 0, 1,
+        regexp_alt::REGEX_ENGINE_RE2,
+    )
+    .is_ok();
+    ok
+}

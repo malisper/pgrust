@@ -20,6 +20,7 @@ mbutils = { path = "../../mb/mbutils" }
 regex = { path = "../../../../_support/types/regex" }
 regex_core_seams = { path = "../../../regex/regex_core_seams" }
 regexp_seams = { path = "../regexp_seams" }
+regexp_alt = { path = "../regexp_alt" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 pg_locale_seams = { path = "../pg_locale_seams" }

@@ -878,6 +878,7 @@ pub fn init_seams() {
         get: get_bytea_output,
         set: set_bytea_output,
     });
+    regexp_alt::install();
 }
 
 // SplitIdentifierString (varlena.c). Owned std strings: cold GUC-list parsing,
