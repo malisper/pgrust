@@ -238,6 +238,9 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
         }
     };
 
+    // C: detectNewRows must be true when a partitioned table is on the
+    // referenced side — the snapshot must be fresh for the
+    // find_inheritance_children() hack to work.
     ri_PerformCheck(
         mcx,
         &riinfo,
@@ -248,7 +251,7 @@ fn RI_FKey_check<'mcx>(mcx: Mcx<'mcx>, tgdata: &RiTriggerData<'_, 'mcx>) -> PgRe
         None,
         Some(newtup),
         false,
-        false,
+        pk_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE,
         spi::SPI_OK_SELECT,
     )?;
 
