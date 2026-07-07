@@ -90,6 +90,23 @@ thread_local! {
     static SNAPSHOT_FULL_BUILDS: Cell<u64> = const { Cell::new(0) };
 }
 
+// PGRUST_SNAPSHOT_REUSE_TRACE=1 (debug builds): one stderr line per snapshot
+// build/reuse for the visibility e2e's "reuse engages" assertion.
+#[cfg(debug_assertions)]
+fn reuse_trace(event: &'static str) {
+    thread_local! {
+        static ON: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+    let on = ON.get().unwrap_or_else(|| {
+        let v = std::env::var_os("PGRUST_SNAPSHOT_REUSE_TRACE").is_some_and(|v| v == "1");
+        ON.set(Some(v));
+        v
+    });
+    if on {
+        eprintln!("SNAPREUSE {event}");
+    }
+}
+
 #[cfg(debug_assertions)]
 pub fn snapshot_reuse_hits() -> u64 {
     SNAPSHOT_REUSE_HITS.get()
@@ -713,6 +730,23 @@ fn MaintainLatestCompletedXid(latestXid: TransactionId) {
     }
 }
 
+// C's GetSnapshotDataReuse runs under ProcArrayLock (its comment: the lock
+// "very likely can be evolved to not need ProcArrayLock held"); this is that
+// evolution, lock-free via publish-then-verify. Soundness constraints:
+// 1. MyProc->xmin is published BEFORE the xactCompletionCount verify-load
+//    (SeqCst fence between them). Completions bump the counter under
+//    ProcArrayLock exclusive; ComputeXidHorizons reads xmins under the lock.
+//    If our verify-load does not observe a completion's bump then (ARMv8
+//    multi-copy atomicity + the fence) the xmin store is globally ordered
+//    before that bump, so any horizon computation that counts the completion
+//    also observes our xmin and cannot advance past snapshot.xmin. A horizon
+//    computed before the completion is bounded by that xact's still-running
+//    xid. Either way no row visible under the reused snapshot is removable.
+// 2. If MyProc->xmin is already valid it is <= snapshot.xmin (every snapshot
+//    built at the same counter has identical xmin; registered older ones are
+//    older), so the horizon was never past snapshot.xmin — no publish needed.
+// 3. On verify failure a speculative publish is retracted; a transiently
+//    published too-old xmin only makes concurrent horizons conservative.
 fn GetSnapshotDataReuse(
     snapshot: &mut SnapshotData<'_>,
     my_proc: &PGPROC,
@@ -721,14 +755,23 @@ fn GetSnapshotDataReuse(
     if snapshot.snapXactCompletionCount == 0 {
         return false;
     }
-    let cur_count = tv.xactCompletionCount.load(Relaxed);
-    if cur_count != snapshot.snapXactCompletionCount {
+
+    let published = if !TransactionIdIsValid(my_proc.xmin.read()) {
+        my_proc.xmin.value.store(snapshot.xmin, Relaxed);
+        true
+    } else {
+        false
+    };
+    fence(Ordering::SeqCst);
+    if tv.xactCompletionCount.load(Relaxed) != snapshot.snapXactCompletionCount {
+        if published {
+            my_proc.xmin.value.store(InvalidTransactionId, Relaxed);
+        }
         return false;
     }
 
     // Same count => the running-xid set cannot have changed (transam/README).
-    if !TransactionIdIsValid(my_proc.xmin.read()) {
-        my_proc.xmin.value.store(snapshot.xmin, Relaxed);
+    if published {
         TRANSACTION_XMIN.set(snapshot.xmin);
     }
     RECENT_XMIN.set(snapshot.xmin);
@@ -742,7 +785,10 @@ fn GetSnapshotDataReuse(
     snapshot.copied = false;
 
     #[cfg(debug_assertions)]
-    SNAPSHOT_REUSE_HITS.set(SNAPSHOT_REUSE_HITS.get() + 1);
+    {
+        SNAPSHOT_REUSE_HITS.set(SNAPSHOT_REUSE_HITS.get() + 1);
+        reuse_trace("hit");
+    }
 
     true
 }
@@ -762,13 +808,12 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
         reserve_exact(&mut snapshot.subxip, GetMaxSnapshotSubxidCount(), mcx)?;
     }
 
-    LWLockAcquire(pa_lock, LW_SHARED, myprocno)?;
-
     if GetSnapshotDataReuse(snapshot, my_proc, tv) {
-        LWLockRelease(pa_lock)?;
         snapshot.curcid.set(xact::GetCurrentCommandId(false)?);
         return Ok(());
     }
+
+    LWLockAcquire(pa_lock, LW_SHARED, myprocno)?;
 
     let latest_completed = FullTransactionId::from_u64(tv.latestCompletedXid.load(Relaxed));
     let mypgxactoff = my_proc.pgxactoff.load(Relaxed) as usize;
@@ -939,7 +984,10 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
     snapshot.copied = false;
 
     #[cfg(debug_assertions)]
-    SNAPSHOT_FULL_BUILDS.set(SNAPSHOT_FULL_BUILDS.get() + 1);
+    {
+        SNAPSHOT_FULL_BUILDS.set(SNAPSHOT_FULL_BUILDS.get() + 1);
+        reuse_trace("full");
+    }
 
     Ok(())
 }

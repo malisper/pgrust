@@ -797,6 +797,35 @@ pub fn ResourceOwnerReleaseAllOfKind(
     Ok(())
 }
 
+// Reset-and-reuse arm of Delete + Create for the per-statement session owner
+// (per-statement-path.md §3.3 pooling). Equivalent to ResourceOwnerDelete
+// followed by ResourceOwnerCreate(NULL, same name) — the handle stays valid
+// because the slot generation does not move. Only a fully drained, parentless,
+// childless owner with no heap hash qualifies; anything else must take the
+// real Delete so C's pfree shape is preserved.
+pub fn ResourceOwnerRecycle(owner: ResourceOwner) -> bool {
+    debug_assert_ne!(owner, CurrentResourceOwner());
+    with_arena(|a| {
+        let d = a.data_mut(owner);
+        if !d.parent.is_null()
+            || !d.firstchild.is_null()
+            || d.narr != 0
+            || d.nhash != 0
+            || d.capacity != 0
+            || !d.aio_handles.is_empty()
+        {
+            return false;
+        }
+        // Delete's own precondition: nlocks is 0 or the overflow sentinel.
+        debug_assert!(d.nlocks == 0 || d.nlocks == MAX_RESOWNER_LOCKS + 1);
+        d.nextchild = ResourceOwner::NULL;
+        d.releasing = false;
+        d.sorted = false;
+        d.nlocks = 0;
+        true
+    })
+}
+
 // Caller must have already released all resources in the object tree.
 pub fn ResourceOwnerDelete(owner: ResourceOwner) {
     debug_assert_ne!(owner, CurrentResourceOwner());

@@ -607,14 +607,26 @@ pub(crate) fn AtStart_Memory(xp: XsPtr) {
     });
 }
 
+// Session pool for the per-statement TopTransaction owner: delete becomes
+// recycle when the owner drained clean, start reuses it (per-statement-path.md
+// §3.3). Holds at most one owner; NULL when unpooled.
+thread_local! {
+    static POOLED_TOP_OWNER: core::cell::Cell<types_resowner::ResourceOwner> =
+        const { core::cell::Cell::new(types_resowner::ResourceOwner::NULL) };
+}
+
 pub(crate) fn AtStart_ResourceOwner(xp: XsPtr) -> PgResult<()> {
     xp.with(|s| {
         debug_assert!(!s.current().has_resource_owner);
         s.current_mut().has_resource_owner = true;
     });
     debug_assert!(resowner::TopTransactionResourceOwner().is_null());
-    let owner =
-        resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "TopTransaction")?;
+    let pooled = POOLED_TOP_OWNER.replace(types_resowner::ResourceOwner::NULL);
+    let owner = if !pooled.is_null() {
+        pooled
+    } else {
+        resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "TopTransaction")?
+    };
     resowner::SetTopTransactionResourceOwner(owner);
     resowner::SetCurTransactionResourceOwner(owner);
     resowner::SetCurrentResourceOwner(owner);
@@ -687,7 +699,11 @@ pub(crate) fn release_subxact_owner_locks(is_commit: bool) -> PgResult<()> {
 pub(crate) fn delete_transaction_owner() -> PgResult<()> {
     let owner = resowner::TopTransactionResourceOwner();
     if !owner.is_null() {
-        resowner::ResourceOwnerDelete(owner);
+        if POOLED_TOP_OWNER.get().is_null() && resowner::ResourceOwnerRecycle(owner) {
+            POOLED_TOP_OWNER.set(owner);
+        } else {
+            resowner::ResourceOwnerDelete(owner);
+        }
     }
     resowner::SetCurTransactionResourceOwner(types_resowner::ResourceOwner::NULL);
     resowner::SetTopTransactionResourceOwner(types_resowner::ResourceOwner::NULL);
