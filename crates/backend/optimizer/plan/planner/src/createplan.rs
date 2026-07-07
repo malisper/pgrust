@@ -4743,6 +4743,33 @@ fn reparameterize_path_by_child<'mcx>(
             );
             let new = adjust_rinfos(run, &list, child_rel, top_parent)?;
             run.root.rel_mut(parent).baserestrictinfo = new;
+            // SampleScan: the sampled rel's RTE carries the tablesample
+            // clause whose args may reference the joining rel's parent;
+            // translate them to the child (pathnode.c:4464-4477).
+            if run.root.path(path).base().pathtype
+                == crate::pathnode::tag16(NodeTag::T_SampleScan)
+            {
+                let scan_relid = run.root.rel(parent).relid;
+                debug_assert!(scan_relid > 0);
+                let rte_cell = run.rte_cell(scan_relid as usize);
+                let rte =
+                    rte_cell.as_range_tbl_entry().expect("rtable cell is a RangeTblEntry");
+                debug_assert!(rte.rtekind == types_nodes::RTEKind::RTE_RELATION);
+                let tsc = rte.tablesample.expect("sampled rel has a tablesample clause");
+                let adjusted = crate::inherit::adjust_appendrel_attrs_multilevel(
+                    run, tsc, child_rel, top_parent,
+                )?;
+                // SAFETY: planning is single-threaded and no derived ref to
+                // this RTE's tablesample outlives the write (C mutates the
+                // RTE in place at the same point, pathnode.c:4476).
+                unsafe {
+                    rte_cell
+                        .with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                            r.tablesample = Some(adjusted)
+                        })
+                        .expect("RangeTblEntry");
+                }
+            }
         }
         Snap::Index { indexinfo, indexclauses } => {
             let old = indexinfo.indrestrictinfo.borrow().clone();

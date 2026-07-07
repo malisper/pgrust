@@ -2309,12 +2309,10 @@ fn show_sortorder_options(
     Ok(())
 }
 
-// exprType over the sort-key shapes this display lane can carry.
+// exprType (nodeFuncs.c) over sort keys; non-Var keys (e.g. Const sort keys
+// under a MergeAppend child Sort) resolve through the shared accessor.
 fn execscan_expr_type(node: Node<'_>) -> types_core::primitive::Oid {
-    match node.as_var() {
-        Some(v) => v.vartype,
-        None => node_gap("exprType", "non-Var sort key (nodeFuncs lane)"),
-    }
+    nodes_core::node_funcs::expr_type(node)
 }
 
 // show_upper_qual on Result.resconstantqual: an implicit-AND List, deparsed

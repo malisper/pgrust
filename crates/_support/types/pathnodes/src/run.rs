@@ -419,6 +419,18 @@ impl<'mcx> PlannerRun<'mcx> {
         }
     }
 
+    // The rtable Node cell itself, for the few C sites that scribble on an
+    // RTE during planning (e.g. reparameterize_path_by_child's tablesample
+    // translation, pathnode.c:4464-4477).
+    pub fn rte_cell(&self, varno: usize) -> types_nodes::Node<'mcx> {
+        match self.root.simple_rte_array[varno] {
+            RangeTblEntryId::Parse { query, index } => {
+                self.queries[query.0 as usize].rtable.nth(index as usize)
+            }
+            other => panic!("rte_cell({varno}): unresolvable {other:?}"),
+        }
+    }
+
     pub fn intern_expr(&mut self, node: types_nodes::Node<'mcx>) -> NodeId {
         self.root.alloc_expr_node(node)
     }

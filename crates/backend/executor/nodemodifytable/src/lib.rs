@@ -2375,8 +2375,14 @@ fn merge_update_act<'mcx>(
         }
 
         {
+            // C sets ri_RootResultRelInfo on every child result rel of the
+            // initial query (nodeModifyTable.c:4811-4822); constraint errors
+            // report the failing row in the root's rowtype (execMain.c).
+            let err_root_rel = mt.root.as_ref().map(|rr| {
+                es_relations[(rr.rti - 1) as usize].as_ref().expect("root relation opened")
+            });
             let r = &mut mt.rels[mt.cur];
-            exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, None)?;
+            exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, err_root_rel)?;
         }
 
         tableam::table_tuple_update(
@@ -3178,8 +3184,15 @@ fn exec_update<'mcx>(
                 exec_with_check_options_basic(&mut mt.rel_mut().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
             }
             {
+                // C sets ri_RootResultRelInfo on every child result rel of
+                // the initial query (nodeModifyTable.c:4811-4822); constraint
+                // errors report the failing row in the root's rowtype
+                // (execMain.c).
+                let err_root_rel = mt.root.as_ref().map(|rr| {
+                    es_relations[(rr.rti - 1) as usize].as_ref().expect("root relation opened")
+                });
                 let r = &mut mt.rels[mt.cur];
-                exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, None)?;
+                exec_constraints(mcx, &mut r.check_exprs, &mut r.virtual_nn_exprs, rel, slot, err_root_rel)?;
             }
 
             tableam::table_tuple_update(
@@ -5301,6 +5314,7 @@ fn exec_insert<'mcx>(
             leaf_partition_check,
             ..
         } = &mut *mt;
+        let root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
         let r = if *insert_target_root && leaf_idx.is_none() {
             root.as_mut().unwrap_or(&mut rels[0])
         } else {
@@ -5326,9 +5340,13 @@ fn exec_insert<'mcx>(
         let slot = &mut es_tupleTable[work_slot.0 as usize];
 
         // ri_RootResultRelInfo: a routed leaf's constraint errors report
-        // the failing row in the root's rowtype (execMain.c).
+        // the failing row in the root's rowtype (execMain.c). Routing always
+        // starts at the routing root — for a cross-partition UPDATE's
+        // re-routed INSERT that is mt.root, not the update's child result
+        // rel (C ExecCrossPartitionUpdate inserts via rootResultRelInfo,
+        // nodeModifyTable.c:2070).
         let err_root_rel = match leaf_idx {
-            Some(_) => es_relations[(r.rti - 1) as usize].as_ref(),
+            Some(_) => es_relations[(root_rti - 1) as usize].as_ref(),
             None => None,
         };
         exec_constraints(mcx, check_exprs, virtual_nn_exprs, rel, slot, err_root_rel)?;
@@ -6123,10 +6141,11 @@ fn exec_leaf_conflict_update<'mcx>(
     let mut update_indexes = TU_UpdateIndexes::TU_None;
     let result = {
         let ModifyTableState {
-            router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check, ..
+            rels, root, router, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_partition_check, ..
         } = &mut *mt;
+        let root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
-        let EStateData { es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
         let slot = &mut es_tupleTable[proj_id.0 as usize];
 
@@ -6145,7 +6164,11 @@ fn exec_leaf_conflict_update<'mcx>(
             return Err(invalid_on_update_specification());
         }
 
-        exec_constraints(mcx, &mut leaf_checks[idx], &mut leaf_virtual_nn[idx], rel, slot, None)?;
+        // The routed leaf's ri_RootResultRelInfo is the routing root:
+        // constraint errors report the failing row in the root's rowtype
+        // (execMain.c).
+        let err_root_rel = es_relations[(root_rti - 1) as usize].as_ref();
+        exec_constraints(mcx, &mut leaf_checks[idx], &mut leaf_virtual_nn[idx], rel, slot, err_root_rel)?;
 
         tableam::table_tuple_update(
             mcx,

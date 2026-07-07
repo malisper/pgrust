@@ -2965,8 +2965,8 @@ fn init_row_compare<'mcx>(
     Ok(())
 }
 
-// C ExecInitExprRec T_RowExpr, anonymous-RECORD leg (named-rowtype casts are
-// unported loud); the blessed tupdesc is built once at compile.
+// C ExecInitExprRec T_RowExpr (execExpr.c:1969-2056); the tupdesc (blessed
+// RECORD or named-rowtype copy) is built once at compile.
 #[allow(clippy::too_many_arguments)]
 fn init_row_expr<'mcx>(
     r: &::types_nodes::primnodes::RowExpr<'mcx>,
@@ -2977,7 +2977,7 @@ fn init_row_expr<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
-    let nelems = r.args.len();
+    let mut nelems = r.args.len();
     let desc = if r.row_typeid == ::types_core::catalog::RECORDOID {
         let mut desc = ::tupdesc::CreateTemplateTupleDesc(mcx, nelems as i32)?;
         for (i, e) in r.args.iter().enumerate() {
@@ -3001,8 +3001,12 @@ fn init_row_expr<'mcx>(
         ::typcache::assign_record_type_typmod(&mut desc)?;
         desc
     } else {
+        // Named type: the tupdesc can have MORE columns than the args list
+        // (columns added since the ROW() was parsed); extras read as NULLs
+        // (execExpr.c:1990-1998).
         let desc = ::typcache::lookup_rowtype_tupdesc_copy(mcx, r.row_typeid, -1)?;
-        assert_eq!(desc.natts as usize, nelems, "RowExpr args do not match named rowtype");
+        assert!(nelems <= desc.natts as usize, "RowExpr args exceed named rowtype");
+        nelems = nelems.max(desc.natts as usize);
         desc
     };
 
@@ -3010,6 +3014,17 @@ fn init_row_expr<'mcx>(
         .expect("elem scratch layout");
     let elems: NonNull<::datum::NullableDatum> =
         mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?.cast();
+    // Dropped-column and extra-column slots are never written by a step;
+    // preset every slot to NULL (C memsets elemnulls true, execExpr.c:2013).
+    for i in 0..nelems.max(1) {
+        // SAFETY: i < nelems.max(1) slots of the fresh scratch allocation.
+        unsafe {
+            elems
+                .as_ptr()
+                .add(i)
+                .write(::datum::NullableDatum { value: ::datum::Datum::null(), isnull: true });
+        }
+    }
 
     // An argless frame whose armed fcinfo supplies the per-eval result mcx.
     let frame_ix = state.frames.len() as u32;
@@ -3018,6 +3033,26 @@ fn init_row_expr<'mcx>(
     state.frames.push(frame);
 
     for (i, e) in r.args.iter().enumerate() {
+        let att = &desc.attrs[i];
+        if att.attisdropped {
+            // C substitutes an int4 NULL Const (execExpr.c:2038-2045); the
+            // preset-NULL slot is never written, same result.
+            continue;
+        }
+        // Guard against ALTER COLUMN TYPE on the rowtype since the RowExpr
+        // was created (execExpr.c:2024-2035).
+        if expr_type(e) != att.atttypid {
+            let have = ::format_type::format_type_be(expr_type(e))
+                .unwrap_or_else(|_| expr_type(e).to_string());
+            let want = ::format_type::format_type_be(att.atttypid)
+                .unwrap_or_else(|_| att.atttypid.to_string());
+            return Err(Box::new(
+                PgError::error(format!(
+                    "ROW() column has type {have} instead of type {want}"
+                ))
+                .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH),
+            ));
+        }
         // SAFETY: i < nelems slots of the fresh scratch allocation.
         let slot = unsafe { NonNull::new_unchecked(elems.as_ptr().add(i)) };
         init_expr_rec(e, state, mcx, OutRef(slot), agg, params, sub)?;

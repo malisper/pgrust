@@ -270,9 +270,8 @@ pub fn build_joinrel_partition_info<'mcx>(
     Ok(())
 }
 
-// have_partkey_equi_join (relnode.c). The exprs_known_equal EC fallback is
-// structurally dead here: eclass-lite ECs are single-expression and never
-// merged, so no two distinct exprs are ever EC-proven equal.
+// have_partkey_equi_join (relnode.c), including the exprs_known_equal EC
+// fallback for partially-redundant join clauses (relnode.c:2201-2295).
 fn have_partkey_equi_join<'mcx>(
     run: &mut crate::run::PlannerRun<'mcx>,
     joinrel: RelId,
@@ -358,6 +357,67 @@ fn have_partkey_equi_join<'mcx>(
         num_equal_pks += 1;
         if num_equal_pks == partnatts {
             return Ok(true);
+        }
+    }
+
+    // Keys not proved equal by a join clause may still be known equal by
+    // equivclass.c — the EC's generated clause can constrain other members
+    // than the partition keys (relnode.c:2201-2295).
+    for ipk in 0..partnatts {
+        if pk_known_equal[ipk] {
+            continue;
+        }
+        // equivclass.c wants a btree opfamily; for hash partitioning, map
+        // the hash equality operator to some btree opfamily it belongs to.
+        let btree_opfamily = if strategy == PARTITION_STRATEGY_HASH {
+            let (opfam, opcintype) = {
+                let scheme = run.root.rel(rel1).part_scheme.as_ref().unwrap();
+                (scheme.partopfamily[ipk], scheme.partopcintype[ipk])
+            };
+            let eq_op = lsyscache::get_opfamily_member(
+                opfam,
+                opcintype,
+                opcintype,
+                ::partprune::HTEqualStrategyNumber as i16,
+            )?;
+            if eq_op == 0 {
+                break;
+            }
+            let eq_opfamilies = lsyscache::get_mergejoin_opfamilies(mcx, eq_op)?;
+            match eq_opfamilies.first() {
+                Some(&f) => f,
+                None => break,
+            }
+        } else {
+            run.root.rel(rel1).part_scheme.as_ref().unwrap().partopfamily[ipk]
+        };
+
+        // Only non-nullable partition keys: nullable ones are not in the
+        // same equivalence classes as non-nullable ones.
+        let partcoll1 = run.root.rel(rel1).part_scheme.as_ref().unwrap().partcollation[ipk];
+        'exprs: for i1 in 0..run.root.rel(rel1).partexprs[ipk].len() {
+            let e1_id = run.root.rel(rel1).partexprs[ipk][i1];
+            let expr1 = *run.root.expr_node(e1_id);
+            let exprcoll1 = crate::pathkeys::expr_collation(expr1);
+            for i2 in 0..run.root.rel(rel2).partexprs[ipk].len() {
+                let e2_id = run.root.rel(rel2).partexprs[ipk][i2];
+                let expr2 = *run.root.expr_node(e2_id);
+                if crate::equivclass::exprs_known_equal(run, expr1, expr2, btree_opfamily)
+                    && partcoll1 == exprcoll1
+                {
+                    pk_known_equal[ipk] = true;
+                    break 'exprs;
+                }
+            }
+        }
+
+        if pk_known_equal[ipk] {
+            num_equal_pks += 1;
+            if num_equal_pks == partnatts {
+                return Ok(true);
+            }
+        } else {
+            break;
         }
     }
     Ok(false)

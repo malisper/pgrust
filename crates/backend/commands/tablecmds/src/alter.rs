@@ -5094,12 +5094,26 @@ fn ATPrepAlterColumnType<'mcx>(
                 true,
             )?;
             parse_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, false, true, true)?;
-            Some(parse_expr::transformExpr(
+            let transformed = parse_expr::transformExpr(
                 mcx,
                 &mut pstate,
                 raw,
                 parser_small1::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM,
-            )?)
+            )?;
+            // C transforms USING once against the altered table and stores
+            // it in cooked_default (parse_utilcmd.c:3643-3648); recursion
+            // maps the transformed tree per child (tablecmds.c:14626-14646,
+            // incl. the whole-row reject) — never re-parses raw against a
+            // child whose column set differs.
+            // SAFETY: defnode is this command's own tree; the `def` shared
+            // ref is not used after this point in this scope's reads of
+            // raw/cooked_default.
+            unsafe {
+                defnode
+                    .with_mut::<ColumnDef, _>(|d| d.cooked_default = Some(transformed))
+                    .expect("ColumnDef");
+            }
+            Some(transformed)
         }
         (None, Some(cooked)) => Some(cooked),
         (None, None) => None,
