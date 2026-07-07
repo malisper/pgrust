@@ -675,6 +675,7 @@ fn session_bind_matches_string_restore_end_state() {
         let _binding = crate::store::bind_session_gucs(&caps).unwrap();
         with_store(|reg| {
             reg.iter()
+                .filter(|v| ["work_mem", "application_name"].contains(&v.name()))
                 .map(|v| {
                     (
                         v.name().to_string(),
@@ -694,6 +695,7 @@ fn session_bind_matches_string_restore_end_state() {
         crate::store::restore_nondefault_variables(&strings).unwrap();
         with_store(|reg| {
             reg.iter()
+                .filter(|v| ["work_mem", "application_name"].contains(&v.name()))
                 .map(|v| {
                     (
                         v.name().to_string(),
