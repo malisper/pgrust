@@ -16,13 +16,25 @@
 //!   elements, equivalence classes, non-ASCII range endpoints;
 //! - repeat bounds above 255 (Spencer's DUPMAX) or malformed bounds;
 //! - inline option/director groups (`(?i)`, `***:`);
-//! - non-UTF8 databases and patterns that are not valid UTF-8.
+//! - non-UTF8 databases and patterns that are not valid UTF-8;
+//! - patterns beyond the complexity budget (MAX_PATTERN_BYTES /
+//!   MAX_QUANTIFIERS): Spencer enforces NFA state/arc limits ("regular
+//!   expression is too complex") that RE2 does not share, so a large
+//!   admitted pattern could succeed under RE2 where Spencer errors (caught
+//!   live by the regex regress suite's repeat('x*y*z*', 1000) case). The
+//!   budget keeps admitted patterns far below Spencer's limits.
 
 use ::regex_spencer::{REG_ADVANCED, REG_NOSUB, REG_QUOTE};
 
 const PG_UTF8: i32 = wchar::PG_UTF8;
 
+const MAX_PATTERN_BYTES: usize = 256;
+const MAX_QUANTIFIERS: u32 = 32;
+
 pub fn re2_compatible(pattern: &[u8], cflags: i32) -> bool {
+    if pattern.len() > MAX_PATTERN_BYTES {
+        return false;
+    }
     if mbutils::GetDatabaseEncoding() != PG_UTF8 {
         return false;
     }
@@ -162,6 +174,7 @@ fn parse_bracket(pat: &[u8], mut i: usize) -> Option<usize> {
 fn scan_are(pat: &[u8]) -> bool {
     let mut i = 0usize;
     let mut depth = 0i32;
+    let mut nquant = 0u32;
     // True when the previous item is an atom a quantifier may apply to.
     let mut quantifiable = false;
 
@@ -207,6 +220,10 @@ fn scan_are(pat: &[u8]) -> bool {
                 if !quantifiable {
                     return false;
                 }
+                nquant += 1;
+                if nquant > MAX_QUANTIFIERS {
+                    return false;
+                }
                 i += 1;
                 if i < pat.len() && pat[i] == b'?' {
                     return false;
@@ -215,6 +232,10 @@ fn scan_are(pat: &[u8]) -> bool {
             }
             b'{' => {
                 if !quantifiable {
+                    return false;
+                }
+                nquant += 1;
+                if nquant > MAX_QUANTIFIERS {
                     return false;
                 }
                 match parse_bound(pat, i) {
@@ -355,5 +376,21 @@ mod tests {
     fn rejects_non_utf8_pattern() {
         setup_utf8();
         assert!(!re2_compatible(b"a\xffb", REG_ADVANCED));
+    }
+
+    #[test]
+    fn rejects_beyond_complexity_budget() {
+        setup_utf8();
+        // The regex regress suite's Spencer-ETOOBIG case: RE2 compiles it,
+        // Spencer errors — must never be admitted.
+        assert!(!ok(&"x*y*z*".repeat(1000)));
+        // Length budget (also applies to quoted literals: Spencer states
+        // scale with literal length).
+        assert!(!ok(&"a".repeat(MAX_PATTERN_BYTES + 1)));
+        assert!(ok(&"a".repeat(MAX_PATTERN_BYTES)));
+        assert!(!re2_compatible("a".repeat(MAX_PATTERN_BYTES + 1).as_bytes(), REG_QUOTE));
+        // Quantifier budget.
+        assert!(!ok(&"x*".repeat(MAX_QUANTIFIERS as usize + 1)));
+        assert!(ok(&"x*".repeat(MAX_QUANTIFIERS as usize)));
     }
 }

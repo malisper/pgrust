@@ -648,6 +648,14 @@ fn auto_vs_spencer_differential() {
             assert_engine_parity(m, s.as_bytes(), p.as_bytes());
         }
     }
+
+    // Spencer-ETOOBIG class (regex suite): RE2 would compile this, Spencer
+    // errors "regular expression is too complex" — the complexity budget
+    // must fail it closed so the error surface stays Spencer's.
+    let toobig = "x*y*z*".repeat(1000);
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+    assert!(regexp_alt::dispatch(toobig.as_bytes(), REG_ADVANCED).unwrap().is_none());
+    assert_engine_parity(m, b"x", toobig.as_bytes());
 }
 
 // Generated adversarial patterns within the compatible class: a seeded
