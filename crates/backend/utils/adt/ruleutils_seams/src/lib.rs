@@ -20,3 +20,13 @@ seam_core::seam!(
         relid: Oid,
     ) -> PgResult<Option<String>>
 );
+
+seam_core::seam!(
+    // get_const_expr with showtype -1 (ruleutils.c get_range_partbound_string
+    // datum leg) for partbounds' empty-range errdetail; ruleutils depends on
+    // partbounds, so this edge is a seam.
+    pub fn deparse_partbound_const<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        expr: types_nodes::Node<'mcx>,
+    ) -> PgResult<String>
+);

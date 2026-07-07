@@ -98,22 +98,34 @@ pub(crate) fn compute_partition_key<'mcx>(
                 }
                 ty
             };
+            // C SearchSysCacheAttName sees system columns too; the compact
+            // descriptor scan above cannot (tablecmds.c:19811-19823).
+            if attnum == 0 && catalog_heap::SystemAttributeByName(name).is_some() {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!("cannot use system column \"{name}\" in partition key"),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .with_cursor_position(parser_small1::parser_errposition_source(
+                        Some(query_string.as_bytes()),
+                        pelem.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
+                ));
+            }
             if attnum == 0 {
                 return Err(Box::new(
                     PgError::new(
                         ERROR,
                         format!("column \"{name}\" named in partition key does not exist"),
                     )
-                    .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
-                ));
-            }
-            if attnum < 0 {
-                return Err(Box::new(
-                    PgError::new(
-                        ERROR,
-                        format!("cannot use system column \"{name}\" in partition key"),
-                    )
-                    .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+                    .with_sqlstate(ERRCODE_UNDEFINED_COLUMN)
+                    .with_cursor_position(parser_small1::parser_errposition_source(
+                        Some(query_string.as_bytes()),
+                        pelem.location,
+                        mbutils::GetDatabaseEncoding(),
+                    )),
                 ));
             }
             info.partattrs.push(attnum);
@@ -553,7 +565,7 @@ fn transformPartitionBoundValue<'mcx>(
         -1,
     )?;
     let Some(mut value) = value else {
-        return Err(cannot_cast_bound(mcx, col_type, col_name));
+        return Err(cannot_cast_bound(mcx, pstate, col_type, col_name, parse_expr::expr_location(val)));
     };
     if value.as_variant::<types_nodes::primnodes::Const>().is_none() {
         parse_collate::assign_expr_collations(mcx, pstate, value)?;
@@ -677,7 +689,13 @@ fn infinite_bounds_error(
 
 #[cold]
 #[inline(never)]
-fn cannot_cast_bound(mcx: Mcx<'_>, col_type: Oid, col_name: &str) -> Box<PgError> {
+fn cannot_cast_bound(
+    mcx: Mcx<'_>,
+    pstate: &parser_small1::ParseState<'_, '_>,
+    col_type: Oid,
+    col_name: &str,
+    location: i32,
+) -> Box<PgError> {
     let _ = mcx;
     let tn = format_type::format_type_be(col_type)
         .unwrap_or_else(|_| format!("type {col_type}"));
@@ -688,7 +706,13 @@ fn cannot_cast_bound(mcx: Mcx<'_>, col_type: Oid, col_name: &str) -> Box<PgError
                 "specified value cannot be cast to type {tn} for column \"{col_name}\""
             ),
         )
-        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+        // C parse_utilcmd.c:4623: parser_errposition(pstate, exprLocation(val)).
+        .with_cursor_position(parser_small1::parser_errposition(
+            pstate,
+            location,
+            mbutils::GetDatabaseEncoding(),
+        )),
     )
 }
 

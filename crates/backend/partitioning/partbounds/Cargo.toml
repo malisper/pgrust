@@ -33,6 +33,7 @@ copyfuncs = { path = "../../nodes/copyfuncs" }
 tupdesc = { path = "../../access/common/tupdesc" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 detoast_seams = { path = "../../access/common/detoast_seams" }
+ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
 coerce = { path = "../../parser/coerce" }

@@ -295,6 +295,15 @@ pub fn DefineRelation<'mcx>(
     let relkind = if partitioned { types_rel::RELKIND_PARTITIONED_TABLE } else { relkind };
     let rv = stmt.relation.expect("CreateStmt.relation");
     let relname = truncate_name(mcx, rv.relname.expect("RangeVar.relname"))?;
+    // Pre-adjustment persistence, like C (tablecmds.c:816-820).
+    if relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        && rv.relpersistence == types_core::RELPERSISTENCE_UNLOGGED
+    {
+        return Err(Box::new(
+            PgError::new(ERROR, "partitioned tables cannot be unlogged".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     let reloptions = reloptions::transformRelOptions(
         mcx,
         None,
@@ -502,6 +511,9 @@ pub fn DefineRelation<'mcx>(
             // processing, so it outranks the "is not partitioned" error.
             inheritance::partition_column_dup_scan(&stmt.tableElts)?;
             let parent = table::table_open(mcx, parent_oid, types_rel::NoLock)?;
+            // C MergeAttributes (tablecmds.c:2675-2676): an enclosing command
+            // still scanning the parent must not see its partition set grow.
+            catalog_heap::CheckTableNotInUse(&parent, "CREATE TABLE .. PARTITION OF")?;
             if parent.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE {
                 let pname = parent.name().to_string();
                 return Err(Box::new(
