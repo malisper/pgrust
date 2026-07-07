@@ -480,6 +480,17 @@ fn copy_from_body<'mcx>(
 
     let mut index_state = execindexing::ExecOpenIndices(mcx, rel, false)?;
 
+    // The DoCopy perminfo's insertedCols (copy.c): constraint-error DETAILs
+    // always include the columns the user provided data for (execMain.c
+    // ExecBuildSlotValueDescription).
+    let inserted_cols = {
+        const FLIHAN: i32 = types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+        let mut b = types_nodes::Bitmapset::empty();
+        for &a in cstate.attnumlist.iter() {
+            b.add_member(mcx, a as i32 - FLIHAN)?;
+        }
+        b
+    };
     let mut qualexpr = init_where_qual(mcx, cstate)?;
     let has_br = trig.as_ref().is_some_and(|t| t.td.trig_insert_before_row);
     let has_ir = trig.as_ref().is_some_and(|t| t.td.trig_insert_instead_row);
@@ -584,6 +595,7 @@ fn copy_from_body<'mcx>(
             rel,
             slot,
             None,
+            Some(&inserted_cols),
         )?;
 
         if single_insert {

@@ -50,8 +50,6 @@ namespace_seams = { path = "../../catalog/namespace_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
-dbcommands_seams = { path = "../../commands/dbcommands_seams" }
-init_small = { path = "../../utils/init/init_small" }
 
 [features]
 bench-internals = []
