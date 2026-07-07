@@ -25,7 +25,7 @@ use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
 pub use guc_tables::consts::{REGEX_ENGINE_AUTO, REGEX_ENGINE_RE2, REGEX_ENGINE_SPENCER};
 
 mod classify;
-pub use classify::re2_compatible;
+pub use classify::{classify as classify_pattern, re2_compatible, Compat};
 
 guc_tables::session_guc_cluster!(RegexpAltGucs, REGEXP_ALT_GUCS:
     (regex_engine_cell, i32, regex_engine, set_regex_engine, guc_tables::consts::REGEX_ENGINE_AUTO),
@@ -57,6 +57,7 @@ pub struct Re2Pattern {
     // Debug elides the compiled automaton.
     #[allow(dead_code)]
     inner: Rc<re2::Re2Re>,
+    capture_safe: bool,
 }
 
 impl core::fmt::Debug for Re2Pattern {
@@ -66,6 +67,14 @@ impl core::fmt::Debug for Re2Pattern {
 }
 
 impl Re2Pattern {
+    // Whether capture POSITIONS are proven to match Spencer's. Callers that
+    // consume submatches (\N replacement escapes, regexp_match arrays,
+    // subexpr arguments, substring(from)-group-1) must fall back to Spencer
+    // when this is false; whole-match spans are safe regardless.
+    pub fn capture_safe(&self) -> bool {
+        self.capture_safe
+    }
+
     // Capture group count, excluding group 0.
     pub fn ngroups(&self) -> usize {
         #[cfg(have_re2)]
@@ -216,15 +225,15 @@ fn re2_escape(pattern: &[u8]) -> Vec<u8> {
 // The auto path: classifier-admitted patterns only, so the flag mapping is
 // fixed — ARE with PG's newline-insensitive default ((?s)), or pure literal.
 #[cfg(have_re2)]
-fn compile_auto(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
+fn compile_auto(pattern: &[u8], cflags: i32, capture_safe: bool) -> PgResult<Re2Pattern> {
     let quoted = (cflags & !REG_NOSUB) == REG_QUOTE;
     if quoted {
-        return Ok(Re2Pattern { inner: Rc::new(re2::compile(pattern, true)?) });
+        return Ok(Re2Pattern { inner: Rc::new(re2::compile(pattern, true)?), capture_safe });
     }
     let mut full = Vec::with_capacity(pattern.len() + 4);
     full.extend_from_slice(b"(?s)");
     full.extend_from_slice(pattern);
-    Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false)?) })
+    Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false)?), capture_safe })
 }
 
 // The forced path (regex_engine=re2): no classifier; ICASE/NLSTOP/NLANCH map
@@ -254,7 +263,7 @@ fn compile_forced(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
             return Err(re2_error("pattern is not valid UTF-8").into());
         }
         if quoted && cflags & REG_ICASE == 0 {
-            return Ok(Re2Pattern { inner: Rc::new(re2::compile(pattern, true)?) });
+            return Ok(Re2Pattern { inner: Rc::new(re2::compile(pattern, true)?), capture_safe: true });
         }
         let mut full = Vec::with_capacity(pattern.len() + 12);
         if cflags & REG_ICASE != 0 {
@@ -271,7 +280,9 @@ fn compile_forced(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
         } else {
             full.extend_from_slice(pattern);
         }
-        Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false)?) })
+        // Forced mode is the testing knob: it exposes RE2 semantics whole,
+        // capture handling included.
+        Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false)?), capture_safe: true })
     }
 }
 
@@ -332,22 +343,21 @@ pub fn dispatch(pattern: &[u8], cflags: i32) -> PgResult<Option<Re2Pattern>> {
     }
     let verdict = if forced {
         Some(compile_forced(pattern, cflags)?)
-    } else if re2_compatible(pattern, cflags) {
-        #[cfg(have_re2)]
-        {
-            compile_auto(pattern, cflags).ok()
-        }
-        #[cfg(not(have_re2))]
-        None
     } else {
-        None
+        match classify_pattern(pattern, cflags) {
+            Compat::Incompatible => None,
+            #[cfg(have_re2)]
+            tier => compile_auto(pattern, cflags, tier == Compat::CaptureSafe).ok(),
+            #[cfg(not(have_re2))]
+            _ => None,
+        }
     };
     cache_put(pattern, cflags, forced, verdict.clone());
     Ok(verdict)
 }
 
 // 0: no backslash escapes; 1: escapes but no \1..\9 submatch; 2: submatch.
-fn check_replace_text_has_escape(replace_text: &[u8]) -> i32 {
+pub fn check_replace_text_has_escape(replace_text: &[u8]) -> i32 {
     let mut result = 0;
     let mut i = 0usize;
     let len = replace_text.len();

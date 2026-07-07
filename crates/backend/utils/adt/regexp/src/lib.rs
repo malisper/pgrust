@@ -279,7 +279,9 @@ pub fn textregexsubstr<'mcx>(
     p: &[u8],
     collation: Oid,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
-    if let Some(re) = regexp_alt::dispatch(p, REG_ADVANCED)? {
+    if let Some(re) = regexp_alt::dispatch(p, REG_ADVANCED)?
+        .filter(|re| re.capture_safe() || re.ngroups() == 0)
+    {
         let mut groups = [(-1i64, -1i64); 2];
         let want = if re.ngroups() > 0 { 2 } else { 1 };
         if !re.exec(s, 0, &mut groups[..want]) {
