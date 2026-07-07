@@ -1344,6 +1344,16 @@ fn extract_query_relation_deps(
                     out,
                 )?;
             }
+            // A transition-table RTE carries the base relation's OID
+            // (addRangeTableEntryForENR: rte->relid = enrmd->reliddesc) so
+            // ALTERing that table invalidates dependent plans
+            // (setrefs.c:3720-3724).
+            RTEKind::RTE_NAMEDTUPLESTORE => {
+                if rte.relid != InvalidOid {
+                    out.try_reserve(1).map_err(|_| mcx_oom(out))?;
+                    out.push(rte.relid);
+                }
+            }
             _ => {}
         }
     }
