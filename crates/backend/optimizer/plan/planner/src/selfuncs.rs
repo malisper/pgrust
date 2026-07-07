@@ -1329,7 +1329,6 @@ fn examine_expression_index_stats<'mcx>(
 // chain is suspended_roots; drilled subroots hang off the root that owns
 // their RTE (rel_subroots) or the resolved cteroot (glob subroots).
 #[derive(Clone, Copy)]
-#[derive(Clone, Copy)]
 enum RootAncestors<'a, 'mcx> {
     Suspended(&'a [crate::run::SubrootState<'mcx>]),
     Link {
