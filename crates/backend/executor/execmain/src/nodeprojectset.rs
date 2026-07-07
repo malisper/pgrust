@@ -78,25 +78,26 @@ pub fn exec_init_project_set<'mcx>(
             .as_target_entry()
             .expect("targetlist cell is a TargetEntry");
         let expr = tle.expr;
-        if let Some(oe) = expr.as_op_expr() {
-            if oe.opretset {
-                panic!(
-                    "ExecInitFunctionResultSet (execSRF.c): set-returning operator \
-                     unported — unit backend-executor-execSRF"
-                );
-            }
-        }
-        let elem = match expr.as_func_expr() {
-            Some(fe) if fe.funcretset => {
-                if fe.args.len() > PROJECT_SET_MAX_ARGS {
+        // C ExecInitFunctionResultSet (execSRF.c) takes FuncExpr and OpExpr
+        // alike: (funcid, args, inputcollid) feed the same init_sexpr.
+        let srf_parts = if let Some(fe) = expr.as_func_expr() {
+            fe.funcretset.then(|| (fe.funcid, &fe.args, fe.inputcollid))
+        } else if let Some(oe) = expr.as_op_expr() {
+            oe.opretset.then(|| (oe.opfuncid, &oe.args, oe.inputcollid))
+        } else {
+            None
+        };
+        let elem = match srf_parts {
+            Some((srf_funcid, srf_args, srf_inputcollid)) => {
+                if srf_args.len() > PROJECT_SET_MAX_ARGS {
                     panic!(
                         "ExecInitFunctionResultSet: {}-argument SRF — widen the fcinfo \
                          frame",
-                        fe.args.len()
+                        srf_args.len()
                     );
                 }
                 let mut args: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> = PgVec::new_in(mcx);
-                for arg in &fe.args {
+                for arg in srf_args {
                     // Query-context args replace C's argContext: by-ref arg
                     // datums must outlive per-tuple resets between rows.
                     let mut state = exec_init_expr(mcx, Some(arg), estate.param_bind())?
@@ -104,13 +105,13 @@ pub fn exec_init_project_set<'mcx>(
                     state.arm_result_mcx(mcx);
                     args.push(state);
                 }
-                let mut flinfo = fmgr_core::fmgr_info(fe.funcid)?;
+                let mut flinfo = fmgr_core::fmgr_info(srf_funcid)?;
                 // C init_sexpr: fmgr_info_set_expr — get_fn_expr_argtype
                 // consumers read arg types off the call expression.
                 flinfo.fn_expr = Some(::execexpr::erase_fn_expr(mcx, expr)?);
                 debug_assert!(flinfo.fn_retset);
-                let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(fe.inputcollid);
-                fcinfo.nargs = fe.args.len() as i16;
+                let mut fcinfo = LocalFcinfo::<PROJECT_SET_MAX_ARGS>::new(srf_inputcollid);
+                fcinfo.nargs = srf_args.len() as i16;
                 let resolved = funcapi::get_expr_result_type(mcx, Some(expr))?;
                 let (result_desc, returns_tuple) = match resolved.class {
                     funcapi::TypeFuncClass::Composite
