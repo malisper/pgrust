@@ -35,6 +35,8 @@ use types_portal::{
 use types_resowner::ResourceOwner;
 use types_tuple::TupleDescData;
 
+const REGCLASSOID: Oid = 2205;
+
 #[cfg(test)]
 mod tests;
 
@@ -1246,23 +1248,36 @@ fn walk_sublink_queries<F>(query: &Query<'static>, f: &mut F) -> PgResult<()>
 where
     F: FnMut(&Query<'static>) -> PgResult<()>,
 {
+    walk_query_expr_nodes(query, &mut |node| {
+        if let Some(sl) = node.as_sub_link() {
+            f(sl.subselect.as_query().expect("analyzed sublink sub-select"))?;
+        }
+        Ok(())
+    })
+}
+
+// query_tree_walker's expression leg: the callback sees every expression node
+// in the query's expression-bearing fields (rtable/CTE subqueries are the
+// callers' own loops).
+fn walk_query_expr_nodes<F>(query: &Query<'static>, f: &mut F) -> PgResult<()>
+where
+    F: FnMut(types_nodes::Node<'static>) -> PgResult<()>,
+{
     struct W<'a, F> {
         f: &'a mut F,
     }
     impl<F> nodes_core::NodeWalker<'static> for W<'_, F>
     where
-        F: FnMut(&Query<'static>) -> PgResult<()>,
+        F: FnMut(types_nodes::Node<'static>) -> PgResult<()>,
     {
         fn visit(&mut self, node: types_nodes::Node<'static>) -> PgResult<bool> {
-            if let Some(sl) = node.as_sub_link() {
-                (self.f)(sl.subselect.as_query().expect("analyzed sublink sub-select"))?;
-            }
+            (self.f)(node)?;
             nodes_core::expression_tree_walker(node, self)
         }
     }
     fn walk_jt<F>(node: types_nodes::Node<'static>, w: &mut W<'_, F>) -> PgResult<()>
     where
-        F: FnMut(&Query<'static>) -> PgResult<()>,
+        F: FnMut(types_nodes::Node<'static>) -> PgResult<()>,
     {
         use nodes_core::NodeWalker as _;
         match node.node_tag() {
@@ -1284,7 +1299,7 @@ where
                     w.visit(q)?;
                 }
             }
-            other => panic!("walk_sublink_queries (plancache.c): {other:?} jointree arm"),
+            other => panic!("walk_query_expr_nodes (plancache.c): {other:?} jointree arm"),
         }
         Ok(())
     }
@@ -1327,9 +1342,25 @@ fn extract_query_relation_deps(
         let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
         extract_query_relation_deps(ctequery, out)?;
     }
-    if query.hasSubLinks {
-        walk_sublink_queries(query, &mut |sub| extract_query_relation_deps(sub, out))?;
-    }
+    // extract_query_dependencies_walker runs fix_expr_common on every node:
+    // a regclass Const is a relation dependency (ISREGCLASSCONST accepts
+    // OIDOID because oideq-style folding coerces regclass Consts to it).
+    walk_query_expr_nodes(query, &mut |node| {
+        if let Some(c) = node.as_const() {
+            if (c.consttype == REGCLASSOID || c.consttype == types_core::OIDOID)
+                && !c.constisnull
+            {
+                out.try_reserve(1).map_err(|_| mcx_oom(out))?;
+                out.push(c.constvalue.as_u32());
+            }
+        } else if let Some(sl) = node.as_sub_link() {
+            extract_query_relation_deps(
+                sl.subselect.as_query().expect("analyzed sublink sub-select"),
+                out,
+            )?;
+        }
+        Ok(())
+    })?;
     for rte_node in query.rtable.iter() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable holds RangeTblEntry");
         match rte.rtekind {

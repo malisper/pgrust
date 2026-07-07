@@ -1439,7 +1439,7 @@ pub fn cost_material(
     )
 }
 
-// cost_tidscan (costsize.c); param_info and CurrentOfExpr are loud upstream.
+// cost_tidscan (costsize.c).
 pub fn cost_tidscan(
     run: &mut PlannerRun<'_>,
     path_id: PathId,
@@ -1457,11 +1457,11 @@ pub fn cost_tidscan(
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
     debug_assert!(!tidquals.is_empty());
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_tidscan (costsize.c): parameterized path; M2 lateral lane"
-    );
-    run.root.path_mut(path_id).base_mut().rows = base_rows;
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
+    run.root.path_mut(path_id).base_mut().rows = rows;
 
     let mut ntuples = 0.0f64;
     for &rid in tidquals {
@@ -1501,7 +1501,7 @@ pub fn cost_tidscan(
     Ok(())
 }
 
-// cost_tidrangescan (costsize.c); param_info is loud upstream.
+// cost_tidrangescan (costsize.c).
 pub fn cost_tidrangescan(
     run: &mut PlannerRun<'_>,
     path_id: PathId,
@@ -1520,11 +1520,11 @@ pub fn cost_tidrangescan(
         )
     };
     debug_assert!(relid > 0 && rtekind == RTE_RELATION);
-    assert!(
-        run.root.path(path_id).base().param_info.is_none(),
-        "cost_tidrangescan (costsize.c): parameterized path; M2 lateral lane"
-    );
-    run.root.path_mut(path_id).base_mut().rows = base_rows;
+    let rows = match run.root.path(path_id).base().param_info.as_deref() {
+        Some(ppi) => ppi.ppi_rows,
+        None => base_rows,
+    };
+    run.root.path_mut(path_id).base_mut().rows = rows;
 
     let mut quals: PgVec<'_, RinfoId> = PgVec::new_in(run.mcx);
     quals.extend(tidrangequals.iter().copied());

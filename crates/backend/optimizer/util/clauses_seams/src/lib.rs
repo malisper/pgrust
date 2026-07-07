@@ -52,6 +52,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // inline_set_returning_function's parser-dependent middle (clauses.c body
+    // fetch/parse/rewrite + functions.c check_sql_fn_retval + the
+    // substitute_actual_srf_parameters pass); None = C's `goto fail` decline.
+    // Installed by sql_functions (a clauses->parser dep cycles); rte is the
+    // gate-cleared RTE_FUNCTION RangeTblEntry node.
+    pub fn inline_set_returning_sql_body<'mcx>(
+        mcx: Mcx<'mcx>,
+        rte: Node<'mcx>,
+        prokind: i8,
+    ) -> PgResult<Option<&'mcx types_nodes::parsenodes::Query<'mcx>>>
+);
+
+seam_core::seam!(
     // recheck_cast_function_args' parser leg (parse_func make_fn_arguments,
     // null pstate); installed by parse_func — a clauses->parse_func dep
     // cycles via catalog_namespace->catalog_indexing->execindexing.

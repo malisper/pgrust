@@ -10238,6 +10238,7 @@ dependencies = [
  "cache_syscache",
  "catalog",
  "catalog_indexing",
+ "catalog_seams",
  "datum",
  "dependency_seams",
  "dfmgr",
@@ -14116,6 +14117,7 @@ version = "0.1.0"
 dependencies = [
  "analyze_seams",
  "cache_syscache",
+ "catalog_seams",
  "clauses",
  "clauses_seams",
  "cmdtag",
@@ -14142,6 +14144,7 @@ dependencies = [
  "planner",
  "readfuncs",
  "rewrite_handler_seams",
+ "rewrite_manip",
  "rustc-hash",
  "snapmgr",
  "sql_functions_seams",

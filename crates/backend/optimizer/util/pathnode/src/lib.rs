@@ -1394,13 +1394,16 @@ pub fn create_recursiveunion_path<'mcx>(
     id
 }
 
-// create_tidscan_path (pathnode.c); required_outer is empty on this lane.
+// create_tidscan_path (pathnode.c).
 pub fn create_tidscan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     tidquals: PgVec<'mcx, RinfoId>,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_TidPath, NodeTag::T_TidScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &tidquals);
@@ -1411,13 +1414,16 @@ pub fn create_tidscan_path<'mcx>(
     Ok(id)
 }
 
-// create_tidrangescan_path (pathnode.c); required_outer is empty on this lane.
+// create_tidrangescan_path (pathnode.c).
 pub fn create_tidrangescan_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
     tidrangequals: PgVec<'mcx, RinfoId>,
+    required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<PathId> {
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
     let mut path = base_path(run, NodeTag::T_TidRangePath, NodeTag::T_TidRangeScan, rel_id);
+    path.param_info = param_info;
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
     let quals = types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &tidrangequals);

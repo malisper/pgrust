@@ -687,9 +687,8 @@ fn pull_up_simple_values<'mcx>(
 
 // preprocess_function_rtes (prepjointree.c): const-simplify FUNCTION RTE
 // expressions between pull_up_sublinks and pull_up_subqueries so that
-// pull_up_constant_function sees Consts. inline_set_returning_function
-// (SQL-language SRF inlining) is unported; C returns NULL for every other
-// function class, so skipping it only forgoes that inlining.
+// pull_up_constant_function sees Consts, then attempt to inline set-returning
+// SQL functions, converting a successful RTE to RTE_SUBQUERY.
 pub fn preprocess_function_rtes<'mcx>(
     run: &mut crate::run::PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
@@ -705,6 +704,36 @@ pub fn preprocess_function_rtes<'mcx>(
         })? {
             // SAFETY: pre-seal Query owned by this planner invocation.
             unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.functions = l) };
+        }
+        if let Some(funcquery) = clauses::inline_set_returning_function(mcx, rte_node)? {
+            let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+            let func_oid = rte
+                .functions
+                .nth(0)
+                .as_range_tbl_function()
+                .expect("functions cell")
+                .funcexpr
+                .and_then(|f| f.as_func_expr())
+                .expect("inlined RTE holds a single FuncExpr")
+                .funcid;
+            // C leaves rte->functions filled in for makeWholeRowVar; only the
+            // fields that must not be set in a subquery RTE are cleared.
+            // SAFETY: pre-seal Query owned by this planner invocation.
+            unsafe {
+                rte_node.with_mut::<RangeTblEntry, _>(|r| {
+                    r.rtekind = RTEKind::RTE_SUBQUERY;
+                    r.subquery = Some(funcquery);
+                    r.security_barrier = false;
+                    r.funcordinality = false;
+                })
+            };
+            // No trace of the function remains in the plan tree, so record
+            // the plan's dependency on it explicitly; inserted RLS quals add
+            // a dependency on the calling role.
+            crate::setrefs::record_plan_function_dependency(run, func_oid)?;
+            if funcquery.hasRowSecurity {
+                run.glob.depends_on_role = true;
+            }
         }
     }
     Ok(())

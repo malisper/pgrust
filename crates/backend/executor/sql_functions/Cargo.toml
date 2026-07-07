@@ -48,6 +48,8 @@ tuplestore = { path = "../../utils/sort/tuplestore" }
 array = { package = "types_array", path = "../../../_support/types/array" }
 clauses = { path = "../../optimizer/util/clauses" }
 clauses_seams = { path = "../../optimizer/util/clauses_seams" }
+catalog_seams = { path = "../../catalog/catalog_seams" }
+rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 planner = { path = "../../optimizer/plan/planner" }
 nodes_core = { path = "../../nodes/nodes_core" }
 readfuncs = { path = "../../nodes/readfuncs" }

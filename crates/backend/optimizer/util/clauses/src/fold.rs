@@ -1361,7 +1361,7 @@ fn func_expr_typmod(f: &FuncExpr<'_>) -> i32 {
 }
 
 #[cold]
-fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
+pub(crate) fn func_lookup_failed(funcid: Oid) -> Box<PgError> {
     Box::new(PgError::error(format!("cache lookup failed for function {funcid}")))
 }
 
