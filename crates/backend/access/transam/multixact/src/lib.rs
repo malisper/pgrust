@@ -2086,6 +2086,8 @@ pub fn init_seams() {
     multixact_seams::get_multi_xact_id_members::set(GetMultiXactIdMembers);
     multixact_seams::multi_xact_id_is_running::set(MultiXactIdIsRunning);
     multixact_seams::multi_xact_id_create_from_members::set(MultiXactIdCreateFromMembers);
+    multixact_seams::multi_xact_id_create::set(MultiXactIdCreate);
+    multixact_seams::multi_xact_id_expand::set(MultiXactIdExpand);
     multixact_seams::multi_xact_id_set_oldest_member::set(MultiXactIdSetOldestMember);
     multixact_seams::startup_multixact::set(StartupMultiXact);
     multixact_seams::trim_multixact::set(TrimMultiXact);

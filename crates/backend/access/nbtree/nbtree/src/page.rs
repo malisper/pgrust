@@ -383,6 +383,50 @@ pub(crate) fn bt_getroot<'mcx>(
     Ok(Some(rootpin))
 }
 
+/// _bt_gettrueroot: BT_READ root via the true-root link. `None` for an empty
+/// index. Flushes the amcache — this path implies it's stale.
+pub(crate) fn bt_gettrueroot(rel: &Relation<'_>) -> PgResult<Option<BufferPin>> {
+    rel.rd_amcache.set(None);
+
+    let metapin = bt_getbuf(rel, BTREE_METAPAGE, BT_READ)?;
+    let metad = bt_getmeta(rel, &metapin)?;
+
+    if metad.btm_root == P_NONE {
+        bt_relbuf(rel, metapin)?;
+        return Ok(None);
+    }
+
+    let rootlevel = metad.btm_level;
+    let mut rootblkno = metad.btm_root;
+    let mut rootpin = metapin;
+    let rootopaque = loop {
+        rootpin = bt_relandgetbuf(rel, Some(rootpin), rootblkno, BT_READ)?;
+        let opaque = page_opaque(&rootpin.page());
+        if !P_IGNORE(&opaque) {
+            break opaque;
+        }
+        if P_RIGHTMOST(&opaque) {
+            return Err(Box::new(PgError::error(format!(
+                "no live root page found in index \"{}\"",
+                rel.name()
+            ))));
+        }
+        rootblkno = opaque.btpo_next;
+    };
+
+    if rootopaque.btpo_level != rootlevel {
+        return Err(Box::new(PgError::error(format!(
+            "root page {} of index \"{}\" has level {}, expected {}",
+            rootblkno,
+            rel.name(),
+            rootopaque.btpo_level,
+            rootlevel
+        ))));
+    }
+
+    Ok(Some(rootpin))
+}
+
 fn prime_amcache(rel: &Relation<'_>) -> PgResult<Option<BTMetaPageData>> {
     if rel.rd_amcache.get().is_none() {
         let metapin = bt_getbuf(rel, BTREE_METAPAGE, BT_READ)?;

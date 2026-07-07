@@ -1795,12 +1795,6 @@ unsafe fn bt_insert_parent<'mcx>(
         return Ok(());
     }
 
-    if stack.is_empty() {
-        // C re-finds the parent level via _bt_get_endpoint after a concurrent
-        // root split; unreachable with one backend per thread of control.
-        unported_phase2("concurrent-root-split parent re-descent (_bt_insert_parent NULL stack)");
-    }
-
     let bknum = buf.block_number();
     let rbknum = rbuf.block_number();
 
@@ -1812,7 +1806,23 @@ unsafe fn bt_insert_parent<'mcx>(
         c
     };
 
-    let (top, parent_stack) = stack.split_last_mut().expect("non-empty");
+    // No descent stack (concurrent root split, or _bt_finish_split with a
+    // stackless caller): phony entry at the leftmost page one level up;
+    // bt_getstackbuf corrects blkno/offset. C's elog(DEBUG2) elided.
+    let mut fakestack = StackEntry { blkno: InvalidBlockNumber, offset: InvalidOffsetNumber };
+    let mut empty: [StackEntry; 0] = [];
+    let (top, parent_stack) = if stack.is_empty() {
+        let opaque = page_opaque(&buf.page());
+        // fastpath never splits the rightmost leaf without a stack
+        debug_assert!(!(P_ISLEAF(&opaque) && target_block(rel) != InvalidBlockNumber));
+        let pbuf = crate::search::bt_get_endpoint(rel, opaque.btpo_level + 1, false)?
+            .expect("split page implies a non-empty index");
+        fakestack.blkno = pbuf.block_number();
+        bt_relbuf(rel, pbuf)?;
+        (&mut fakestack, &mut empty[..])
+    } else {
+        stack.split_last_mut().expect("non-empty")
+    };
     let pbuf = bt_getstackbuf(rel, heaprel, frame, top, parent_stack, bknum)?;
 
     bt_relbuf(rel, rbuf)?;
