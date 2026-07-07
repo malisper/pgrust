@@ -937,6 +937,11 @@ fn eq_qual<'mcx>(mcx: Mcx<'mcx>, attno: i16, value: i32) -> Node<'mcx> {
     .unwrap()
 }
 
+// tests: planner entry now takes the Query by arena reference.
+fn leak_q<'mcx>(mcx: Mcx<'mcx>, q: types_nodes::parsenodes::Query<'mcx>) -> &'mcx mut types_nodes::parsenodes::Query<'mcx> {
+    mcx::leak_in(mcx::alloc_in(mcx, q).unwrap())
+}
+
 #[test]
 fn point_select_plans_to_index_scan() {
     let cx = cx();
@@ -944,7 +949,7 @@ fn point_select_plans_to_index_scan() {
     let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
     let stmt = planner(
         mcx,
-        parse,
+        leak_q(mcx, parse),
         "SELECT * FROM t WHERE pk = 42",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -994,7 +999,7 @@ fn bitmap_heap_path_plans_to_bitmap_scan_nodes() {
     let mcx = cx.mcx();
     let parse = table_query(mcx, Some(eq_qual(mcx, 1, 42)));
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, false, 0.0, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, leak_q(mcx, parse), false, 0.0, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     // The bitmap heap path was generated but is dominated by the plain index
     // scan (as C); rebuild one over the surviving index path to plan it.
@@ -1061,7 +1066,7 @@ fn select_star_plans_to_seqscan() {
     let cx = cx();
     let mcx = cx.mcx();
     let parse = table_query(mcx, None);
-    let stmt = planner(mcx, parse, "SELECT * FROM t", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+    let stmt = planner(mcx, leak_q(mcx, parse), "SELECT * FROM t", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
         .unwrap();
 
     let plan = stmt.planTree.unwrap();
@@ -1085,7 +1090,7 @@ fn competing_paths_pick_cheapest_total_and_startup() {
     // tuple_fraction > 0 sets consider_startup: the seqscan (startup 0) and
     // the index scan (cheaper total) both survive add_path's fuzzy compare.
     let mut run = crate::run::PlannerRun::new(mcx);
-    crate::subquery::subquery_planner(&mut run, parse, false, 0.1, None).unwrap();
+    crate::subquery::subquery_planner(&mut run, leak_q(mcx, parse), false, 0.1, None).unwrap();
     let final_rel = crate::planmain::fetch_final_rel(&mut run);
     let rel = run.root.rel(final_rel);
     assert_eq!(rel.pathlist.len(), 2);
@@ -1109,7 +1114,7 @@ fn non_index_qual_plans_to_seqscan_with_qual() {
     let parse = table_query(mcx, Some(eq_qual(mcx, 2, 7)));
     let stmt = planner(
         mcx,
-        parse,
+        leak_q(mcx, parse),
         "SELECT * FROM t WHERE val = 7",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -1154,7 +1159,7 @@ fn select_1_plans_to_a_result_node() {
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
-        select_1_query(mcx),
+        leak_q(mcx, select_1_query(mcx)),
         "SELECT 1",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -1204,7 +1209,7 @@ fn seam_routes_to_standard_planner() {
     let mcx = cx.mcx();
     let stmt = planner_seams::planner::call(
         mcx,
-        select_1_query(mcx),
+        leak_q(mcx, select_1_query(mcx)),
         "SELECT 1",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -1238,7 +1243,7 @@ fn select_arithmetic_folds_before_planning() {
     parse.targetList = NodeList::make1(mcx, tle).unwrap();
 
     // int4pl is strict with a NULL arg: folds to a NULL Const, no executor.
-    let stmt = planner(mcx, parse, "SELECT 1 + NULL", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+    let stmt = planner(mcx, leak_q(mcx, parse), "SELECT 1 + NULL", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
         .unwrap();
     let plan = stmt.planTree.unwrap();
     let tle = plan.as_result().unwrap().plan.targetlist.nth(0).as_target_entry().unwrap();
@@ -1336,7 +1341,7 @@ fn single_ref_cte_inlines_to_plain_scan() {
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
-        with_cte_query(mcx, 1),
+        leak_q(mcx, with_cte_query(mcx, 1)),
         "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -1356,7 +1361,7 @@ fn with_cte_plans_to_ctescan_over_an_initplan_subplan() {
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
-        with_cte_query(mcx, 2),
+        leak_q(mcx, with_cte_query(mcx, 2)),
         "WITH x AS (SELECT pk, val FROM t) SELECT pk, val FROM x",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -1396,7 +1401,7 @@ fn unreferenced_select_cte_is_skipped() {
         alloc_leak_in(mcx, FromExpr { fromlist: NodeList::nil(), quals: None }).unwrap();
     parse.jointree = Some(jointree);
     let stmt =
-        planner(mcx, parse, "WITH x AS (...) SELECT 1", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+        planner(mcx, leak_q(mcx, parse), "WITH x AS (...) SELECT 1", CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
             .unwrap();
     assert!(stmt.subplans.is_nil());
     assert_eq!(stmt.planTree.unwrap().node_tag(), NodeTag::T_Result);
@@ -1486,7 +1491,7 @@ mod agg {
         let parse = agg_query(mcx, &[(count_star_aggref(mcx), "count")]);
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT count(*) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1538,7 +1543,7 @@ mod agg {
         let parse = agg_query(mcx, &[(sum_val_aggref(mcx), "sum")]);
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT sum(val) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1576,7 +1581,7 @@ mod agg {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT count(*), sum(val) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1604,7 +1609,7 @@ mod agg {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT count(*), count(*) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1630,7 +1635,7 @@ mod agg {
         let parse = agg_query(mcx, &[(first_val_aggref(mcx), "first_val")]);
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT first_val(val) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1687,7 +1692,7 @@ fn insert_values_plans_to_modifytable_over_result() {
     let parse = insert_query(mcx);
     let stmt = planner(
         mcx,
-        parse,
+        leak_q(mcx, parse),
         "INSERT INTO t (pk) VALUES (7)",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -1780,7 +1785,7 @@ mod on_conflict {
     ) -> &'mcx types_nodes::plannodes::ModifyTable<'mcx> {
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "INSERT INTO t (pk) VALUES (7) ON CONFLICT ...",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1844,7 +1849,7 @@ mod on_conflict {
         );
         let err = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "INSERT INTO t (pk) VALUES (7) ON CONFLICT (val) DO NOTHING",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -1962,7 +1967,7 @@ mod minmax_agg {
         install_fixtures();
         planner(
             mcx,
-            minmax_query(mcx, fnoid, attno),
+            leak_q(mcx, minmax_query(mcx, fnoid, attno)),
             "SELECT max(pk) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2110,7 +2115,7 @@ mod group_by_hashed {
         let parse = grouped_count_query(mcx);
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT pk, count(*) FROM t GROUP BY pk",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2200,7 +2205,7 @@ mod shared_aggrefs {
 
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT sum(pk), sum(pk) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2268,7 +2273,7 @@ mod sort_limit {
         .unwrap();
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT 1 ORDER BY 1",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2339,7 +2344,7 @@ mod sort_limit {
         let parse = order_by_limit_query(mcx);
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT pk FROM t ORDER BY val LIMIT 2",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2404,7 +2409,7 @@ mod sort_limit {
         parse.limitCount = None;
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT pk FROM t ORDER BY val",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2512,7 +2517,7 @@ mod join {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            join_query(mcx),
+            leak_q(mcx, join_query(mcx)),
             "SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2586,7 +2591,7 @@ mod join {
         crate::gucs::set_enable_mergejoin(false);
         let stmt = planner(
             mcx,
-            join_query_rels(mcx, JT3, JT4),
+            leak_q(mcx, join_query_rels(mcx, JT3, JT4)),
             "SELECT * FROM jt3, jt4 WHERE jt3.a = jt4.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2639,7 +2644,7 @@ mod join {
         crate::gucs::set_enable_hashjoin(false);
         let stmt = planner(
             mcx,
-            join_query(mcx),
+            leak_q(mcx, join_query(mcx)),
             "SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2695,7 +2700,7 @@ mod join {
         crate::gucs::set_enable_hashjoin(false);
         let again = planner(
             mcx,
-            join_query(mcx),
+            leak_q(mcx, join_query(mcx)),
             "SELECT * FROM jt1, jt2 WHERE jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2779,7 +2784,7 @@ mod join {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            join_on_query(mcx),
+            leak_q(mcx, join_on_query(mcx)),
             "SELECT * FROM jt1 JOIN jt2 ON jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2901,7 +2906,7 @@ mod join {
         }
         let stmt = planner(
             mcx,
-            outer_join_query(mcx, types_nodes::JoinType::JOIN_FULL, None),
+            leak_q(mcx, outer_join_query(mcx, types_nodes::JoinType::JOIN_FULL, None)),
             "SELECT * FROM jt1 FULL JOIN jt2 ON jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2933,7 +2938,7 @@ mod join {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, None),
+            leak_q(mcx, outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, None)),
             "SELECT * FROM jt1 LEFT JOIN jt2 ON jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -2969,7 +2974,7 @@ mod join {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            outer_join_query(mcx, types_nodes::JoinType::JOIN_RIGHT, None),
+            leak_q(mcx, outer_join_query(mcx, types_nodes::JoinType::JOIN_RIGHT, None)),
             "SELECT * FROM jt1 RIGHT JOIN jt2 ON jt1.a = jt2.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3035,7 +3040,7 @@ mod join {
         .unwrap();
         let stmt = planner(
             mcx,
-            outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, Some(where_qual)),
+            leak_q(mcx, outer_join_query(mcx, types_nodes::JoinType::JOIN_LEFT, Some(where_qual))),
             "SELECT * FROM jt1 LEFT JOIN jt2 ON jt1.a = jt2.a WHERE jt2.pad = 5",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3085,7 +3090,7 @@ mod join {
         }
         let stmt = planner(
             mcx,
-            q,
+            leak_q(mcx, q),
             "SELECT * FROM jt3 LEFT JOIN jt4 ON jt3.a = jt4.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3307,7 +3312,7 @@ mod join {
         }
         let stmt = planner(
             mcx,
-            many_comma_join_query(mcx, 9),
+            leak_q(mcx, many_comma_join_query(mcx, 9)),
             "SELECT a1.a FROM jt1 a1, ..., jt1 a9 WHERE chained equijoins",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3332,7 +3337,7 @@ mod join {
 
         let default_stmt = planner(
             mcx,
-            join_chain_query(mcx),
+            leak_q(mcx, join_chain_query(mcx)),
             "SELECT jt1.a FROM jt3 JOIN jt4 ON jt3.a = jt4.a JOIN jt1 ON jt4.a = jt1.a",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3347,7 +3352,7 @@ mod join {
         crate::gucs::set_join_collapse_limit(1);
         let stmt = planner(
             mcx,
-            join_chain_query(mcx),
+            leak_q(mcx, join_chain_query(mcx)),
             "SET join_collapse_limit = 1; same query",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3407,7 +3412,7 @@ mod join {
         crate::gucs::set_from_collapse_limit(2);
         let stmt = planner(
             mcx,
-            query(mcx),
+            leak_q(mcx, query(mcx)),
             "SET from_collapse_limit = 2; SELECT ... FROM (jt3 JOIN jt4 ON ...), jt1",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3476,7 +3481,7 @@ mod stats_arms {
 
     fn plan_rows(mcx: Mcx<'_>, opno: u32, opfuncid: u32, constval: i32, sql: &'static str) -> f64 {
         let stmt =
-            planner(mcx, stt_query(mcx, opno, opfuncid, constval), sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
+            planner(mcx, leak_q(mcx, stt_query(mcx, opno, opfuncid, constval)), sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL)
                 .unwrap();
         let scan = stmt.planTree.unwrap().as_seq_scan().expect("SeqScan");
         scan.scan.plan.plan_rows
@@ -3556,7 +3561,7 @@ mod pattern_saop_arms {
 
     fn plan_rows<'a>(mcx: Mcx<'a>, q: Query<'a>, sql: &'static str) -> f64 {
         let stmt =
-            planner(mcx, q, sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL).unwrap();
+            planner(mcx, leak_q(mcx, q), sql, CURSOR_OPT_PARALLEL_OK, ParamListHandle::NULL).unwrap();
         let scan = stmt.planTree.unwrap().as_seq_scan().expect("SeqScan");
         scan.scan.plan.plan_rows
     }
@@ -3754,7 +3759,7 @@ mod having_distinct_sorted {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            grouped_count_query(mcx, true),
+            leak_q(mcx, grouped_count_query(mcx, true)),
             "SELECT pk, count(*) FROM t GROUP BY pk HAVING count(*) > 1",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3784,7 +3789,7 @@ mod having_distinct_sorted {
         crate::gucs::set_enable_hashagg(false);
         let stmt = planner(
             mcx,
-            grouped_count_query(mcx, true),
+            leak_q(mcx, grouped_count_query(mcx, true)),
             "SELECT pk, count(*) FROM t GROUP BY pk HAVING count(*) > 1",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3849,7 +3854,7 @@ mod having_distinct_sorted {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            distinct_query(mcx),
+            leak_q(mcx, distinct_query(mcx)),
             "SELECT DISTINCT pk FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3886,7 +3891,7 @@ mod having_distinct_sorted {
         crate::gucs::set_enable_hashagg(false);
         let stmt = planner(
             mcx,
-            distinct_query(mcx),
+            leak_q(mcx, distinct_query(mcx)),
             "SELECT DISTINCT pk FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -3976,7 +3981,7 @@ fn expr_sublink_plans_to_initplan_param() {
 
     let stmt = planner(
         mcx,
-        parse,
+        leak_q(mcx, parse),
         "SELECT * FROM t WHERE pk = (SELECT pk FROM t)",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -4089,7 +4094,7 @@ fn uncorrelated_exists_plans_to_gating_result_over_initplan() {
 
     let stmt = planner(
         mcx,
-        parse,
+        leak_q(mcx, parse),
         "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM t)",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -4168,7 +4173,7 @@ fn multi_row_values_plans_to_values_scan() {
     let mcx = cx.mcx();
     let stmt = planner(
         mcx,
-        values_query(mcx),
+        leak_q(mcx, values_query(mcx)),
         "VALUES (3), (1), (2)",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -4293,7 +4298,7 @@ fn from_values_subquery_pulls_up_to_values_scan() {
 
     let stmt = planner(
         mcx,
-        parse,
+        leak_q(mcx, parse),
         "SELECT * FROM (VALUES (2, 6), (1, 7)) v(a, b)",
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,
@@ -4404,7 +4409,7 @@ mod window {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            window_query(mcx),
+            leak_q(mcx, window_query(mcx)),
             "SELECT pk, row_number() OVER (PARTITION BY val ORDER BY val) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -4552,7 +4557,7 @@ mod window {
 
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val, sum(val) OVER (PARTITION BY pk), rank() OVER (ORDER BY val) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -4656,7 +4661,7 @@ mod dummy_rel {
         .unwrap();
         let stmt = planner(
             mcx,
-            table_query(mcx, Some(qual)),
+            leak_q(mcx, table_query(mcx, Some(qual))),
             "SELECT * FROM t WHERE pk IS NULL",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -4672,7 +4677,7 @@ mod dummy_rel {
         let qual = clauses::make_bool_const(mcx, false, false).unwrap();
         let stmt = planner(
             mcx,
-            table_query(mcx, Some(qual)),
+            leak_q(mcx, table_query(mcx, Some(qual))),
             "SELECT * FROM t WHERE 1 = 2",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -4693,7 +4698,7 @@ mod dummy_rel {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT 1 WHERE 1 = 2",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -4973,7 +4978,7 @@ mod setops {
         let parse = wrap_subquery(mcx, wrap_subquery(mcx, setop, "u"), "q");
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT x FROM (SELECT x FROM ((join-sub) UNION ALL (join-sub)) u) q",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5009,7 +5014,7 @@ mod setops {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT x FROM (SELECT a.pk AS x FROM t a, t b WHERE a.pk = b.pk) s \
              UNION ALL SELECT 99",
             CURSOR_OPT_PARALLEL_OK,
@@ -5036,7 +5041,7 @@ mod setops {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT 1 UNION ALL SELECT 2",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5077,7 +5082,7 @@ mod setops {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT 1 UNION SELECT 2",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5141,7 +5146,7 @@ mod setops {
             Some(Node::mk_const(mcx, 20, -1, 0, 8, Datum::from_i64(5), false, true).unwrap());
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val FROM t UNION ALL SELECT val FROM t ORDER BY 1 LIMIT 5",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5176,7 +5181,7 @@ mod setops {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val FROM t UNION SELECT val FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5214,7 +5219,7 @@ mod setops {
         );
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val FROM t INTERSECT SELECT val FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5450,7 +5455,7 @@ mod grouping_sets {
         crate::gucs::set_enable_hashagg(false);
         let stmt = planner(
             mcx,
-            rollup_val_query(mcx),
+            leak_q(mcx, rollup_val_query(mcx)),
             "SELECT val, grouping(val), count(*) FROM t GROUP BY ROLLUP(val)",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5501,7 +5506,7 @@ mod grouping_sets {
         let mcx = cx.mcx();
         let stmt = planner(
             mcx,
-            rollup_val_query(mcx),
+            leak_q(mcx, rollup_val_query(mcx)),
             "SELECT val, grouping(val), count(*) FROM t GROUP BY ROLLUP(val)",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5585,7 +5590,7 @@ mod grouping_sets {
         crate::gucs::set_enable_hashagg(false);
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val, pk, count(*) FROM t GROUP BY GROUPING SETS ((val),(pk))",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5658,7 +5663,7 @@ mod grouping_sets {
 
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT count(*) FROM t GROUP BY ()",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5893,7 +5898,7 @@ mod srf_split {
         };
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT generate_series(1,3)+1",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -5979,7 +5984,7 @@ mod srf_split {
         parse.groupClause = NodeList::make1(mcx, val_sgc(mcx)).unwrap();
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val, generate_series(1,2) FROM t GROUP BY val",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6034,7 +6039,7 @@ mod srf_split {
         parse.windowClause = NodeList::make1(mcx, wc).unwrap();
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT count(*) OVER (), generate_series(1,2) FROM t",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6066,7 +6071,7 @@ mod srf_split {
         parse.sortClause = NodeList::make1(mcx, val_sgc(mcx)).unwrap();
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT val, generate_series(1,2) FROM t ORDER BY val",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6117,7 +6122,7 @@ mod srf_split {
         parse.sortClause = NodeList::make1(mcx, val_sgc(mcx)).unwrap();
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT 42 AS f, generate_series(1,2) FROM t ORDER BY 1",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6330,7 +6335,7 @@ mod lateral_pullup {
         };
         let stmt = planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT ss.y FROM t a, t b, LATERAL (VALUES (a.pk)) ss(y) WHERE b.pk = ss.y",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6406,7 +6411,7 @@ mod lateral_pullup {
         };
         planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT ss2.y FROM (SELECT a.pk AS x FROM t a) ss1, LATERAL (VALUES (ss1.x)) ss2(y)",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6560,7 +6565,7 @@ mod lateral_pullup {
         };
         planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT ss1.x, ss2.y, ss3.z FROM (SELECT 1 AS x) ss1 LEFT JOIN (SELECT 2 AS y) ss2 \
              ON true, LATERAL (SELECT ss2.y LIMIT 1) ss3(z)",
             CURSOR_OPT_PARALLEL_OK,
@@ -6657,7 +6662,7 @@ mod lateral_pullup {
         };
         planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT v.vx FROM t a, LATERAL (SELECT a.pk UNION ALL SELECT a.val) v(vx)",
             CURSOR_OPT_PARALLEL_OK,
             ParamListHandle::NULL,
@@ -6782,7 +6787,7 @@ mod lateral_pullup {
         };
         planner(
             mcx,
-            parse,
+            leak_q(mcx, parse),
             "SELECT v.vx FROM (SELECT 1 AS x) ss1 LEFT JOIN (SELECT 2 AS y) ss2 ON true, \
              LATERAL (SELECT ss1.x UNION ALL SELECT ss2.y) v(vx)",
             CURSOR_OPT_PARALLEL_OK,

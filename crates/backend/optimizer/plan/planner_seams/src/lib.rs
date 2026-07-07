@@ -11,9 +11,12 @@ use types_core::Oid;
 use datum::Datum;
 
 seam_core::seam!(
+    // parse is arena-resident and mutated in place (C mutates the Query and
+    // shares root->parse by pointer); by-value transit paid two ~Query-sized
+    // copies per statement on the trivial-plan path.
     pub fn planner<'a, 'mcx>(
         mcx: Mcx<'mcx>,
-        parse: Query<'mcx>,
+        parse: &'mcx mut Query<'mcx>,
         query_string: &'a str,
         cursor_options: i32,
         bound_params: ParamListHandle,

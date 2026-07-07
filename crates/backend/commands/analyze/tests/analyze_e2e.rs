@@ -990,7 +990,7 @@ fn plan_rows(qual: PlanQual) -> f64 {
         stmt_len: 30,
         ..Query::default()
     };
-    let stmt = planner::planner(mcx, parse, "test", 0, types_portal::ParamListHandle::NULL).unwrap();
+    let stmt = planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, parse).unwrap()), "test", 0, types_portal::ParamListHandle::NULL).unwrap();
     let plan = stmt.planTree.unwrap();
     let rows = plan.as_seq_scan().map(|s| s.scan.plan.plan_rows).unwrap_or_else(|| {
         panic!("expected SeqScan plan, got {:?}", plan.node_tag())

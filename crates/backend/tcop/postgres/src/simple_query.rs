@@ -95,7 +95,7 @@ pub fn pg_rewrite_query<'mcx>(mcx: Mcx<'mcx>, query: Query<'mcx>) -> PgResult<Pg
 
 pub fn pg_plan_query<'mcx>(
     mcx: Mcx<'mcx>,
-    querytree: Query<'mcx>,
+    querytree: &'mcx mut Query<'mcx>,
     query_string: &str,
     cursor_options: i32,
     bound_params: ParamListHandle,
@@ -132,6 +132,10 @@ pub fn pg_plan_queries<'mcx>(
         .try_reserve_exact(querytrees.len())
         .map_err(|_| mcx.oom(querytrees.len()))?;
 
+    // The analyzed Queries already live in arena memory; plan each in place
+    // (C mutates the Query and shares the pointer) instead of moving it
+    // through the call chain and copying it back into the arena at seal.
+    let querytrees: &'mcx mut [Query<'mcx>] = querytrees.leak();
     for query in querytrees {
         if query.commandType == CmdType::CMD_UTILITY {
             stmt_list.push(PlannedStmt {

@@ -249,7 +249,7 @@ fn begin_copy_query<'mcx>(
 
     let plan = postgres::simple_query::pg_plan_query(
         mcx,
-        query,
+        mcx::leak_in(mcx::alloc_in(mcx, query)?),
         query_string,
         CURSOR_OPT_PARALLEL_OK,
         ParamListHandle::NULL,

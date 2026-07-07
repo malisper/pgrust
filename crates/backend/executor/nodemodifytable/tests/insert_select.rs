@@ -500,7 +500,7 @@ fn run_stmt(sql: &'static str) -> (CmdType, u64) {
     let mut rewritten = rewrite_handler::QueryRewrite(mcx, query).unwrap();
     assert_eq!(rewritten.len(), 1);
     let query = rewritten.pop().unwrap();
-    let pstmt = planner::planner(mcx, query, sql, 0, types_portal::ParamListHandle::NULL)
+    let pstmt = planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()), sql, 0, types_portal::ParamListHandle::NULL)
         .unwrap();
     let pstmt: &'static types_nodes::plannodes::PlannedStmt<'static> =
         mcx::leak_in(mcx::alloc_in(mcx, pstmt).unwrap());

@@ -384,7 +384,7 @@ mod e2e {
         let mcx = leaked_mcx();
         let query = select_1_query(mcx);
         let pstmt =
-            planner::planner(mcx, query, "SELECT 1", 0, ParamListHandle::NULL).unwrap();
+            planner::planner(mcx, mcx::leak_in(mcx::alloc_in(mcx, query).unwrap()), "SELECT 1", 0, ParamListHandle::NULL).unwrap();
         let stmts: &'static [PlannedStmt<'static>] = Vec::leak(vec![pstmt]);
         // SAFETY: stmts is leaked 'static.
         let h = unsafe { stmt_list::register(stmts) };

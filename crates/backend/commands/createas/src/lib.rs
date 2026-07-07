@@ -132,7 +132,7 @@ pub fn ExecCreateTableAs<'mcx>(
 
     let plan = postgres::simple_query::pg_plan_query(
         mcx,
-        query,
+        mcx::leak_in(mcx::alloc_in(mcx, query)?),
         source_text,
         CURSOR_OPT_PARALLEL_OK,
         params,
