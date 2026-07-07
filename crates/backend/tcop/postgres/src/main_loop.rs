@@ -207,6 +207,7 @@ fn start_idle_in_transaction_timer(state: &mut LoopState) -> PgResult<()> {
 
 fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
     use backend_status_seams::BackendState;
+    crate::stmt_trace::probe("ready.begin");
 
     if xact::IsAbortedTransactionBlockState() {
         ps_status_seams::set_ps_display::call("idle in transaction (aborted)");
@@ -256,6 +257,7 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
     guc::report::report_changed_guc_options();
 
 
+    crate::stmt_trace::probe("ready.pre_rfq");
     tcop_dest::ReadyForQuery(mcx, elog::config::where_to_send_output())?;
     crate::stmt_trace::probe("rfq.flushed");
     crate::stmt_trace::flush();
@@ -680,7 +682,9 @@ fn run_one_iteration_inner<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgRes
         return Ok(());
     }
 
-    dispatch_message(mcx, firstchar, &mut input_message, state)
+    let r = dispatch_message(mcx, firstchar, &mut input_message, state);
+    crate::stmt_trace::probe("cycle.end");
+    r
 }
 
 fn types_guc_context_sighup() -> types_guc::GucContext {
