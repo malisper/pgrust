@@ -40,7 +40,11 @@ pub fn fc_unique_key_recheck(
         return Err(protocol_err("must be fired for INSERT or UPDATE"));
     };
     // SAFETY: live tuple per the trigger call contract.
-    let mut tmptid = unsafe { new_row.expect("trigger row").as_ref() }.t_self;
+    let checktid = unsafe { new_row.expect("trigger row").as_ref() }.t_self;
+    // table_index_fetch_tuple advances this to the live HOT member; the
+    // unique arm must keep probing with the original TID — that is the one
+    // the index knows about (constraint.c:169-176).
+    let mut tmptid = checktid;
 
     let mcx = fcinfo.result_mcx();
     let trig_rel = td.tg_relation;
@@ -75,7 +79,7 @@ pub fn fc_unique_key_recheck(
     let index_rel = indexam::index_open(
         mcx,
         td.tg_trigger.tgconstrindid,
-        ::types_rel::RowShareLock,
+        ::types_rel::RowExclusiveLock,
     )?;
     let mut index_info = execindexing::BuildIndexInfo(mcx, &index_rel)?;
 
@@ -104,7 +108,7 @@ pub fn fc_unique_key_recheck(
             &index_rel,
             &values[..n],
             &isnull[..n],
-            &tmptid,
+            &checktid,
             trig_rel,
             ::types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_EXISTING,
             false,
@@ -116,7 +120,7 @@ pub fn fc_unique_key_recheck(
     // slot pins a heap buffer; the success path must release it.
     exectuples::exec_clear_tuple(&mut slot, mcx);
 
-    indexam::index_close(index_rel, ::types_rel::RowShareLock)?;
+    indexam::index_close(index_rel, ::types_rel::RowExclusiveLock)?;
     Ok(Datum::from_usize(0))
 }
 
