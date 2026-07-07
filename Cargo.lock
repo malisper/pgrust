@@ -1208,6 +1208,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aio_funcs"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "funcapi",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "aio_seams"
 version = "0.0.0"
 dependencies = [
@@ -3396,6 +3406,7 @@ dependencies = [
  "commands_cluster",
  "datum",
  "elog",
+ "execindexing",
  "execmain_seams",
  "fd",
  "fmgr_seams",
@@ -10855,6 +10866,7 @@ dependencies = [
 name = "plpgsql"
 version = "0.0.0"
 dependencies = [
+ "adt_regproc",
  "analyze_seams",
  "arrayfuncs",
  "cache_syscache",
@@ -13062,6 +13074,7 @@ dependencies = [
  "adt_tsvector_stat",
  "adt_xml",
  "aio_config",
+ "aio_funcs",
  "aio_uring",
  "allpaths",
  "amapi",
@@ -13513,11 +13526,14 @@ version = "0.0.0"
 dependencies = [
  "datum",
  "elog",
+ "funcapi",
+ "mcx",
  "s_lock",
  "s_lock_seams",
  "shmem_seams",
  "types_error",
  "types_fmgr",
+ "varlena",
  "waitevent_seams",
 ]
 
@@ -16180,6 +16196,7 @@ dependencies = [
  "pg_db_role_setting",
  "pg_shdepend",
  "superuser",
+ "syscache_seams",
  "table",
  "types_core",
  "types_error",
