@@ -98,8 +98,10 @@ fn create_toast_table<'mcx>(
         PG_TOAST_NAMESPACE
     };
 
-    if rel.rd_rel.relisshared || rel.is_mapped() {
-        unported("create_toast_table: shared/mapped parent relations");
+    // Mapped parents are supported (the CLUSTER/VACUUM FULL transient heap
+    // for a mapped catalog); shared toast creation only happens in bootstrap.
+    if rel.rd_rel.relisshared {
+        unported("create_toast_table: shared parent relations");
     }
 
     let toast_relid = catalog_heap::heap_create_with_catalog(
