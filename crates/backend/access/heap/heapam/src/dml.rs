@@ -765,10 +765,58 @@ fn DoesMultiXactIdConflict(
     Ok(out)
 }
 
-/// `MultiXactIdWait` (`Do_MultiXactIdWait`, nowait=false; `remaining` has no
-/// caller here): sleep on each member whose status conflicts. Own-xact
-/// members are never waited on (XactLockTableWait asserts against it). The
-/// Conditional variant lives behind the LOUD wait-policy seam.
+/// `Do_MultiXactIdWait`: sleep on (or, `nowait`, conditionally probe) each
+/// member whose status conflicts. Own-xact members are never waited on
+/// (XactLockTableWait asserts against it). Returns false only when `nowait`
+/// and a conflicting member's xact lock was unavailable; `remaining` receives
+/// the count of members still running (not to be trusted on a false return).
+fn Do_MultiXactIdWait(
+    multi: MultiXactId,
+    status: MultiXactStatus,
+    infomask: u16,
+    nowait: bool,
+    relation: &RelationData<'_>,
+    ctid: Option<&ItemPointerData>,
+    oper: ::types_storage::lock::XLTW_Oper,
+    remaining: Option<&mut i32>,
+    log_lock_failure: bool,
+) -> PgResult<bool> {
+    let mut result = true;
+    let mut remain = 0;
+    if !HEAP_LOCKED_UPGRADED(infomask) {
+        for m in collect_multixact_members(multi, HEAP_XMAX_IS_LOCKED_ONLY(infomask))? {
+            if xact_seams::transaction_id_is_current_transaction_id::call(m.xid) {
+                remain += 1;
+                continue;
+            }
+            if !::lock_seams::do_lock_modes_conflict::call(
+                tuple_lock_hwlock(TUPLOCK_from_mxstatus(m.status)),
+                tuple_lock_hwlock(TUPLOCK_from_mxstatus(status)),
+            ) {
+                if remaining.is_some()
+                    && procarray_seams::transaction_id_is_in_progress::call(m.xid)?
+                {
+                    remain += 1;
+                }
+                continue;
+            }
+            if nowait {
+                result = lmgr::ConditionalXactLockTableWait(m.xid, log_lock_failure)?;
+                if !result {
+                    break;
+                }
+            } else {
+                lmgr::XactLockTableWait(m.xid, Some(relation), ctid, oper)?;
+            }
+        }
+    }
+    if let Some(r) = remaining {
+        *r = remain;
+    }
+    Ok(result)
+}
+
+/// `MultiXactIdWait`.
 fn MultiXactIdWait(
     multi: MultiXactId,
     status: MultiXactStatus,
@@ -776,23 +824,33 @@ fn MultiXactIdWait(
     relation: &RelationData<'_>,
     ctid: Option<&ItemPointerData>,
     oper: ::types_storage::lock::XLTW_Oper,
+    remaining: Option<&mut i32>,
 ) -> PgResult<()> {
-    if HEAP_LOCKED_UPGRADED(infomask) {
-        return Ok(());
-    }
-    for m in collect_multixact_members(multi, HEAP_XMAX_IS_LOCKED_ONLY(infomask))? {
-        if xact_seams::transaction_id_is_current_transaction_id::call(m.xid) {
-            continue;
-        }
-        if !::lock_seams::do_lock_modes_conflict::call(
-            tuple_lock_hwlock(TUPLOCK_from_mxstatus(m.status)),
-            tuple_lock_hwlock(TUPLOCK_from_mxstatus(status)),
-        ) {
-            continue;
-        }
-        lmgr::XactLockTableWait(m.xid, Some(relation), ctid, oper)?;
-    }
+    Do_MultiXactIdWait(multi, status, infomask, false, relation, ctid, oper, remaining, false)?;
     Ok(())
+}
+
+/// `ConditionalMultiXactIdWait`: as above, but only lock if we can get each
+/// member's lock without blocking. True = the multixact is now all gone.
+fn ConditionalMultiXactIdWait(
+    multi: MultiXactId,
+    status: MultiXactStatus,
+    infomask: u16,
+    relation: &RelationData<'_>,
+    remaining: Option<&mut i32>,
+    log_lock_failure: bool,
+) -> PgResult<bool> {
+    Do_MultiXactIdWait(
+        multi,
+        status,
+        infomask,
+        true,
+        relation,
+        None,
+        ::types_storage::lock::XLTW_Oper::None,
+        remaining,
+        log_lock_failure,
+    )
 }
 
 /// `compute_new_xmax_infomask`: (new_xmax, new_infomask, new_infomask2).
@@ -969,6 +1027,16 @@ fn update_xmax_hint_bits(
     Ok(())
 }
 
+fn could_not_obtain_row_lock(relation: &RelationData<'_>) -> Box<PgError> {
+    Box::new(
+        PgError::error(std::format!(
+            "could not obtain lock on row in relation \"{}\"",
+            relation.name()
+        ))
+        .with_sqlstate(::types_error::ERRCODE_LOCK_NOT_AVAILABLE),
+    )
+}
+
 /// `heap_acquire_tuplock`.
 fn heap_acquire_tuplock(
     relation: &RelationData<'_>,
@@ -991,13 +1059,7 @@ fn heap_acquire_tuplock(
         }
         LockWaitPolicy::LockWaitError => {
             if !lmgr::ConditionalLockTuple(relation, tid, tuple_lock_hwlock(mode), false)? {
-                return Err(Box::new(
-                    PgError::error(std::format!(
-                        "could not obtain lock on row in relation \"{}\"",
-                        relation.name()
-                    ))
-                    .with_sqlstate(::types_error::ERRCODE_LOCK_NOT_AVAILABLE),
-                ));
+                return Err(could_not_obtain_row_lock(relation));
             }
         }
     }
@@ -1202,7 +1264,42 @@ pub fn heap_delete(
             let infomask = tp.t_data().t_infomask;
 
             if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
-                unported("DoesMultiXactIdConflict/MultiXactIdWait (heap_delete, multixact.c)");
+                let conf =
+                    DoesMultiXactIdConflict(xwait, infomask, LockTupleMode::LockTupleExclusive, true)?;
+                if conf.conflict {
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+
+                    // Skip the tuple lock when we're already a member of the
+                    // multi (avoids deadlock).
+                    if !conf.current_is_member {
+                        heap_acquire_tuplock(
+                            relation,
+                            &tp.t_self,
+                            LockTupleMode::LockTupleExclusive,
+                            LockWaitPolicy::LockWaitBlock,
+                            &mut have_tuple_lock,
+                        )?;
+                    }
+                    MultiXactIdWait(
+                        xwait,
+                        MultiXactStatus::MultiXactStatusUpdate,
+                        infomask,
+                        relation,
+                        Some(&tp.t_self),
+                        ::types_storage::lock::XLTW_Oper::Delete,
+                        None,
+                    )?;
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+
+                    if (!vmb.is_valid() && pin.page().is_all_visible())
+                        || xmax_infomask_changed(tp.t_data().t_infomask, infomask)
+                        || tp.t_data().xmax_raw() != xwait
+                    {
+                        continue 'l1;
+                    }
+                }
+                // Surviving members (our own xact or its subxacts) are legal
+                // here; the xmax is about to be overwritten, so no hint bits.
             } else if !xact_seams::transaction_id_is_current_transaction_id::call(xwait) {
                 bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
                 heap_acquire_tuplock(
@@ -1652,10 +1749,28 @@ pub fn heap_lock_tuple(
                                     relation,
                                     Some(&tp.t_self),
                                     ::types_storage::lock::XLTW_Oper::Lock,
+                                    None,
                                 )?;
                             }
-                            LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
-                                unported("heap_lock_tuple NOWAIT/SKIP LOCKED wait branch")
+                            LockWaitPolicy::LockWaitSkip => {
+                                if !ConditionalMultiXactIdWait(
+                                    xwait, status, infomask, relation, None, false,
+                                )? {
+                                    // C's goto failed expects the buffer lock held.
+                                    bufmgr_seams::lock_buffer::call(
+                                        pin.buffer(),
+                                        BUFFER_LOCK_EXCLUSIVE,
+                                    )?;
+                                    relock_tp!();
+                                    break 'l3 TM_Result::TM_WouldBlock;
+                                }
+                            }
+                            LockWaitPolicy::LockWaitError => {
+                                if !ConditionalMultiXactIdWait(
+                                    xwait, status, infomask, relation, None, false,
+                                )? {
+                                    return Err(could_not_obtain_row_lock(relation));
+                                }
                             }
                         }
                         // Survivors are preserved: light-mode lockers and our
@@ -1670,8 +1785,21 @@ pub fn heap_lock_tuple(
                                     ::types_storage::lock::XLTW_Oper::Lock,
                                 )?;
                             }
-                            LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
-                                unported("heap_lock_tuple NOWAIT/SKIP LOCKED wait branch")
+                            LockWaitPolicy::LockWaitSkip => {
+                                if !lmgr::ConditionalXactLockTableWait(xwait, false)? {
+                                    // C's goto failed expects the buffer lock held.
+                                    bufmgr_seams::lock_buffer::call(
+                                        pin.buffer(),
+                                        BUFFER_LOCK_EXCLUSIVE,
+                                    )?;
+                                    relock_tp!();
+                                    break 'l3 TM_Result::TM_WouldBlock;
+                                }
+                            }
+                            LockWaitPolicy::LockWaitError => {
+                                if !lmgr::ConditionalXactLockTableWait(xwait, false)? {
+                                    return Err(could_not_obtain_row_lock(relation));
+                                }
                             }
                         }
                     }
@@ -2207,10 +2335,17 @@ pub fn heap_update(
             None => (false, false, false, false, false),
         };
     let key_intact = !key_modified;
-    *lockmode = if key_intact {
-        LockTupleMode::LockTupleNoKeyExclusive
+    let mxact_status;
+    (*lockmode, mxact_status) = if key_intact {
+        (
+            LockTupleMode::LockTupleNoKeyExclusive,
+            MultiXactStatus::MultiXactStatusNoKeyUpdate,
+        )
     } else {
-        LockTupleMode::LockTupleExclusive
+        (
+            LockTupleMode::LockTupleExclusive,
+            MultiXactStatus::MultiXactStatusUpdate,
+        )
     };
     multixact_seams::multi_xact_id_set_oldest_member::call()?;
 
@@ -2258,7 +2393,56 @@ pub fn heap_update(
             let mut can_continue = false;
 
             if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
-                unported("DoesMultiXactIdConflict/MultiXactIdWait (heap_update, multixact.c)");
+                let conf = DoesMultiXactIdConflict(xwait, infomask, *lockmode, true)?;
+                if conf.conflict {
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+
+                    // Skip the tuple lock when we're already a member of the
+                    // multi (avoids deadlock).
+                    if !conf.current_is_member {
+                        heap_acquire_tuplock(
+                            relation,
+                            &oldtup.t_self,
+                            *lockmode,
+                            LockWaitPolicy::LockWaitBlock,
+                            &mut have_tuple_lock,
+                        )?;
+                    }
+                    let mut remain = 0;
+                    MultiXactIdWait(
+                        xwait,
+                        mxact_status,
+                        infomask,
+                        relation,
+                        Some(&oldtup.t_self),
+                        ::types_storage::lock::XLTW_Oper::Update,
+                        Some(&mut remain),
+                    )?;
+                    checked_lockers = true;
+                    locker_remains = remain != 0;
+                    bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
+
+                    if xmax_infomask_changed(oldtup.t_data().t_infomask, infomask)
+                        || oldtup.t_data().xmax_raw() != xwait
+                    {
+                        continue 'l2;
+                    }
+                }
+
+                // Surviving members (our own (sub)xacts, key-share lockers
+                // under NoKeyExclusive) are preserved in the new xmax. An
+                // in-progress updater can't be in the multi anymore after
+                // MultiXactIdWait, so committed-vs-aborted decides.
+                let update_xact = if !HEAP_XMAX_IS_LOCKED_ONLY(oldtup.t_data().t_infomask) {
+                    HeapTupleHeaderGetUpdateXid(oldtup.t_data())?
+                } else {
+                    InvalidTransactionId
+                };
+                if !TransactionIdIsValid(update_xact)
+                    || transam_seams::transaction_id_did_abort::call(update_xact)?
+                {
+                    can_continue = true;
+                }
             } else if xact_seams::transaction_id_is_current_transaction_id::call(xwait) {
                 checked_lockers = true;
                 locker_remains = true;

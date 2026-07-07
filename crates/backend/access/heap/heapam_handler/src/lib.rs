@@ -512,11 +512,21 @@ pub fn heapam_tuple_lock<'mcx>(
                                     ::types_storage::lock::XLTW_Oper::FetchUpdated,
                                 )?;
                             }
-                            LockWaitPolicy::LockWaitSkip | LockWaitPolicy::LockWaitError => {
-                                panic!(
-                                    "heapam_tuple_lock (heapam_handler.c): NOWAIT/SKIP LOCKED \
-                                     chase wait not ported (FOR UPDATE lane)"
-                                );
+                            LockWaitPolicy::LockWaitSkip => {
+                                if !lmgr::ConditionalXactLockTableWait(dirty.xmax, false)? {
+                                    return Ok(TM_Result::TM_WouldBlock);
+                                }
+                            }
+                            LockWaitPolicy::LockWaitError => {
+                                if !lmgr::ConditionalXactLockTableWait(dirty.xmax, false)? {
+                                    return Err(Box::new(
+                                        ::types_error::PgError::error(std::format!(
+                                            "could not obtain lock on row in relation \"{}\"",
+                                            relation.name()
+                                        ))
+                                        .with_sqlstate(::types_error::ERRCODE_LOCK_NOT_AVAILABLE),
+                                    ));
+                                }
                             }
                         }
                         continue;
