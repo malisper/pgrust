@@ -1019,6 +1019,9 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
 
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is
 /// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
+// inline: the second caller (executor_finish_and_park's refusal arm) must not
+// cost the per-query seam its base inlining (select1 attribution, +42/q).
+#[inline]
 pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,
