@@ -558,6 +558,12 @@ fn collect_aggrefs<'mcx>(
                 collect_aggrefs(a, out);
             }
         }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            for a in x.named_args.iter().chain(x.args.iter()) {
+                collect_aggrefs(a, out);
+            }
+        }
         tag => panic!("ExecInitAgg (nodeAgg.c): Agg tlist node family {tag:?} not ported"),
     }
 }
