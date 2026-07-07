@@ -845,7 +845,7 @@ mod text_surface {
         assert!(!text_position_next(&mut state).unwrap());
         text_position_reset(&mut state);
         assert!(text_position_next(&mut state).unwrap());
-        assert_eq!(text_position_get_match_pos(&mut state), 1);
+        assert_eq!(text_position_get_match_pos(&mut state).unwrap(), 1);
     }
 
     #[test]

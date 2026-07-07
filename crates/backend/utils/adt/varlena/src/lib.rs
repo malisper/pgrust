@@ -259,9 +259,9 @@ pub fn btvarstrequalimage(collid: Oid) -> PgResult<bool> {
     collation_is_deterministic(collid)
 }
 
-pub fn text_length(t: &[u8]) -> i32 {
+pub fn text_length(t: &[u8]) -> PgResult<i32> {
     if mbutils_seams::pg_database_encoding_max_length::call() == 1 {
-        t.len() as i32
+        Ok(t.len() as i32)
     } else {
         mbutils_seams::pg_mbstrlen_with_len::call(t)
     }
@@ -367,7 +367,7 @@ pub fn text_substring<'mcx>(
     if data.is_empty() {
         return cstring_to_text(mcx, b"");
     }
-    let slice_strlen = mbutils_seams::pg_mbstrlen_with_len::call(data);
+    let slice_strlen = mbutils_seams::pg_mbstrlen_with_len::call(data)?;
     if s1 > slice_strlen {
         return cstring_to_text(mcx, b"");
     }
@@ -694,11 +694,11 @@ pub fn text_position_get_match_len(state: &TextPositionState<'_>) -> usize {
     state.last_match_len
 }
 
-pub fn text_position_get_match_pos(state: &mut TextPositionState<'_>) -> i32 {
+pub fn text_position_get_match_pos(state: &mut TextPositionState<'_>) -> PgResult<i32> {
     let m = state.last_match.expect("no match recorded");
-    state.refpos += mbutils::pg_mbstrlen_with_len(&state.str1[state.refpoint..m]);
+    state.refpos += mbutils::pg_mbstrlen_with_len(&state.str1[state.refpoint..m])?;
     state.refpoint = m;
-    state.refpos + 1
+    Ok(state.refpos + 1)
 }
 
 pub fn text_position_reset(state: &mut TextPositionState<'_>) {
@@ -720,7 +720,7 @@ pub fn text_position(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {
     if !text_position_next(&mut state)? {
         return Ok(0);
     }
-    Ok(text_position_get_match_pos(&mut state))
+    text_position_get_match_pos(&mut state)
 }
 
 pub fn textpos(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<i32> {

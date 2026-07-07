@@ -376,7 +376,7 @@ fn append_padded(out: &mut PgVec<'_, u8>, s: &[u8], flags: i32, mut width: i32) 
     } else if flags & TEXT_FORMAT_FLAG_MINUS != 0 {
         align_to_left = true;
     }
-    let len = mbutils_seams::pg_mbstrlen_with_len::call(s);
+    let len = mbutils_seams::pg_mbstrlen_with_len::call(s)?;
     let pad = (width - len).max(0) as usize;
     if align_to_left {
         mcx::vec_append_bytes(out, s)?;

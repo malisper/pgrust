@@ -126,11 +126,28 @@ fn mbcharcliplen_counts_characters() {
 fn mbstrlen_variants() {
     SetDatabaseEncoding(PG_UTF8).unwrap();
     let s = "a\u{00e9}\u{4e16}".as_bytes(); // 1 + 2 + 3 bytes, 3 chars
-    assert_eq!(pg_mbstrlen_with_len(s), 3);
+    assert_eq!(pg_mbstrlen_with_len(s).unwrap(), 3);
     assert_eq!(pg_mbstrlen(s).unwrap(), 3);
-    assert_eq!(pg_encoding_mbstrlen_with_len(PG_UTF8, &s[..3]), 2);
-    assert_eq!(pg_encoding_mbstrlen_with_len(PG_LATIN1, s), s.len() as i32);
-    assert_eq!(pg_mbstrlen_with_len(b"ab\0cd"), 2);
+    assert_eq!(pg_encoding_mbstrlen_with_len(PG_UTF8, &s[..3]).unwrap(), 2);
+    assert_eq!(
+        pg_encoding_mbstrlen_with_len(PG_LATIN1, s).unwrap(),
+        s.len() as i32
+    );
+    assert_eq!(pg_mbstrlen_with_len(b"ab\0cd").unwrap(), 2);
+}
+
+// encoding.sql "truncated" fixture: a 2-byte UTF8 lead byte with the
+// continuation byte sliced off. C's pg_mbstrlen_with_len -> pg_mblen_with_len
+// ereports "invalid byte sequence for encoding "UTF8": 0xc3".
+#[test]
+fn mbstrlen_with_len_errors_on_truncated_trailing_char() {
+    SetDatabaseEncoding(PG_UTF8).unwrap();
+    let s = b"caf\xc3";
+    let err = pg_mbstrlen_with_len(s).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "invalid byte sequence for encoding \"UTF8\": 0xc3"
+    );
 }
 
 #[test]
@@ -272,6 +289,28 @@ fn mb2wchar_roundtrip_utf8() {
     assert_eq!(&*b, "a\u{00e9}".as_bytes());
 }
 
+// encoding.sql encoding_tests: MULE_INTERNAL LC1 and LC2 roundtrip through
+// pg_encoding_mb2wchar_with_len/pg_encoding_wchar2mb_with_len (regress.c's
+// test_text_to_wchars/test_wchars_to_text path), independent of database
+// encoding since the encoding is threaded explicitly.
+#[test]
+fn mule_internal_lc1_lc2_roundtrip() {
+    let ctx = MemoryContext::new("test");
+    // LC1: \x8182 -> {8454274} -> \x8182 = OK
+    let lc1 = [0x81u8, 0x82];
+    let w = pg_encoding_mb2wchar_with_len(ctx.mcx(), wchar::PG_MULE_INTERNAL, &lc1).unwrap();
+    assert_eq!(&*w, &[8454274]);
+    let b = pg_encoding_wchar2mb_with_len(ctx.mcx(), wchar::PG_MULE_INTERNAL, &w).unwrap();
+    assert_eq!(&*b, &lc1);
+
+    // LC2: \x908283 -> {9470595} -> \x908283 = OK
+    let lc2 = [0x90u8, 0x82, 0x83];
+    let w = pg_encoding_mb2wchar_with_len(ctx.mcx(), wchar::PG_MULE_INTERNAL, &lc2).unwrap();
+    assert_eq!(&*w, &[9470595]);
+    let b = pg_encoding_wchar2mb_with_len(ctx.mcx(), wchar::PG_MULE_INTERNAL, &w).unwrap();
+    assert_eq!(&*b, &lc2);
+}
+
 #[test]
 fn utf8_increment_cases() {
     let mut c = *b"a";
@@ -352,7 +391,7 @@ fn seams_installed() {
     mbutils_seams::initialize_client_encoding::call().unwrap();
     assert!(!mbutils_seams::server_to_client_conversion_needed::call());
     assert_eq!(
-        mbutils_seams::pg_mbstrlen_with_len::call("a\u{00e9}".as_bytes()),
+        mbutils_seams::pg_mbstrlen_with_len::call("a\u{00e9}".as_bytes()).unwrap(),
         2
     );
     assert_eq!(

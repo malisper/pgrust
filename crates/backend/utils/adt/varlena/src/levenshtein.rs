@@ -52,8 +52,8 @@ pub fn varstr_levenshtein_less_equal(
     let slen = source.len() as i32;
     let tlen = target.len() as i32;
 
-    let m0 = mbutils_seams::pg_mbstrlen_with_len::call(source);
-    let n0 = mbutils_seams::pg_mbstrlen_with_len::call(target);
+    let m0 = mbutils_seams::pg_mbstrlen_with_len::call(source)?;
+    let n0 = mbutils_seams::pg_mbstrlen_with_len::call(target)?;
 
     if m0 == 0 {
         return Ok(n0 * ins_c);

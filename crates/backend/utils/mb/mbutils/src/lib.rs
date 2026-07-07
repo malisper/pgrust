@@ -724,10 +724,17 @@ pub fn pg_mblen_range(mbstr: &[u8]) -> PgResult<i32> {
 }
 
 pub fn pg_mblen_with_len(mbstr: &[u8], limit: i32) -> PgResult<i32> {
+    pg_encoding_mblen_with_len(database_encoding(), mbstr, limit)
+}
+
+/// [`pg_mblen_with_len`] parameterized by encoding (mbutils.c
+/// `pg_mblen_with_len`, generalized the way `pg_encoding_mbstrlen_with_len`
+/// generalizes `pg_mbstrlen_with_len`).
+pub fn pg_encoding_mblen_with_len(encoding: pg_enc, mbstr: &[u8], limit: i32) -> PgResult<i32> {
     debug_assert!(limit >= 1);
-    let length = pg_encoding_mblen(database_encoding(), mbstr);
+    let length = pg_encoding_mblen(encoding, mbstr);
     if length > limit {
-        return Err(report_invalid_encoding_db(mbstr, length, limit));
+        return Err(report_invalid_encoding_int(encoding, mbstr, length, limit));
     }
     Ok(length)
 }
@@ -756,27 +763,28 @@ pub fn pg_mbstrlen(mbstr: &[u8]) -> PgResult<i32> {
 }
 
 /// Character count of the slice, stopping at a NUL (C `pg_mbstrlen_with_len`
-/// with `limit` = the slice length). C ereports when the last character's
-/// claimed length overruns `limit`; here the slice bounds the walk and the
-/// overrunning character ends the count — the repo-wide seam contract for
-/// validated storage.
-pub fn pg_mbstrlen_with_len(mbstr: &[u8]) -> i32 {
+/// with `limit` = the slice length). Matches C: ereports if the last
+/// character's claimed length overruns the slice.
+pub fn pg_mbstrlen_with_len(mbstr: &[u8]) -> PgResult<i32> {
     pg_encoding_mbstrlen_with_len(database_encoding(), mbstr)
 }
 
 /// [`pg_mbstrlen_with_len`] parameterized by encoding (parser callers thread
 /// the server encoding explicitly).
-pub fn pg_encoding_mbstrlen_with_len(encoding: pg_enc, mbstr: &[u8]) -> i32 {
+pub fn pg_encoding_mbstrlen_with_len(encoding: pg_enc, mbstr: &[u8]) -> PgResult<i32> {
     if pg_encoding_max_length(encoding) == 1 {
-        return mbstr.len() as i32;
+        return Ok(mbstr.len() as i32);
     }
     let mut len = 0;
     let mut pos = 0usize;
-    while pos < mbstr.len() && mbstr[pos] != 0 {
-        pos += pg_encoding_mblen(encoding, &mbstr[pos..]) as usize;
+    let mut limit = mbstr.len() as i32;
+    while limit > 0 && mbstr[pos] != 0 {
+        let l = pg_encoding_mblen_with_len(encoding, &mbstr[pos..], limit)?;
+        limit -= l;
+        pos += l as usize;
         len += 1;
     }
-    len
+    Ok(len)
 }
 
 pub fn pg_mbcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32 {

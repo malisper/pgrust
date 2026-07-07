@@ -1,9 +1,9 @@
 //! fmgr wrappers (`fc_*`) + the `VARLENA_BUILTINS` table for fmgr-core.
-//! bttextsortsupport and the string_agg combine/serialize/deserialize rows are
-//! registered loud panics (sort lane / parallel agg); value cores live
-//! in the crate root. text/bytea recv/send ride the binary-wire fmgr frame
-//! (types_fmgr::wire). unknownrecv/unknownsend stay value-core-only (unknown is
-//! a pseudo-type; no binary wire registration in pg_proc.dat).
+//! bttextsortsupport is registered as a loud panic (sort lane, unrelated to
+//! aggregation); value cores live in the crate root. text/bytea recv/send
+//! ride the binary-wire fmgr frame (types_fmgr::wire). unknownrecv/unknownsend
+//! stay value-core-only (unknown is a pseudo-type; no binary wire
+//! registration in pg_proc.dat).
 
 use datum::Datum;
 use types_core::Oid;
@@ -325,7 +325,7 @@ pub fn fc_unknownin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
 pub fn fc_textlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null text varlena (strict fn).
     let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
-    Ok(Datum::from_i32(crate::text_length(payload)))
+    Ok(Datum::from_i32(crate::text_length(payload)?))
 }
 
 pub fn fc_textoctetlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -540,10 +540,49 @@ macro_rules! fc_unported {
 }
 
 fc_unported! {
-    fc_string_agg_combine: "string_agg_combine", "parallel (partial) aggregation unported";
-    fc_string_agg_serialize: "string_agg_serialize", "parallel (partial) aggregation unported";
-    fc_string_agg_deserialize: "string_agg_deserialize", "parallel (partial) aggregation unported";
     fc_bttextsortsupport: "bttextsortsupport", "abbreviated-key SortSupport unported (sort lane)";
+}
+
+// string_agg_combine/serialize/deserialize (varlena.c): one C symbol each,
+// shared by string_agg(text) and string_agg(bytea) (both trans to the same
+// StringInfo-backed state).
+pub fn fc_string_agg_combine(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let state = crate::string_agg::string_agg_combine(fcinfo)?;
+    if state.is_null() {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_usize(state as usize))
+}
+
+pub fn fc_string_agg_serialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 is the aggcontext-lived state (transfn/combine
+    // contract), read-only here.
+    let st =
+        unsafe { &*(fcinfo.arg(0).as_usize() as *const crate::string_agg::StringAggState) };
+    let mcx = fcinfo.result_mcx();
+    let out = crate::string_agg::string_agg_serialize(mcx, st)?;
+    Ok(varlena_result(out))
+}
+
+pub fn fc_string_agg_deserialize(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 is a non-null live bytea.
+    let sstate = unsafe { fcinfo.arg_varlena_packed(0)? };
+    // SAFETY: deserial is only ever invoked with a live AggStateNode context
+    // (matches C's Assert(AggCheckCallContext(fcinfo, NULL))).
+    let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
+        panic!("aggregate function called in non-aggregate context");
+    };
+    let state = crate::string_agg::string_agg_deserialize(agg_mcx, sstate.data())?;
+    Ok(Datum::from_usize(state as usize))
 }
 
 pub fn fc_unistr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -664,7 +703,7 @@ pub fn fc_textoverlay_no_len(
     let t1 = unsafe { fcinfo.arg_varlena_raw(0) };
     let t2 = unsafe { fcinfo.arg_varlena_packed(1)? };
     let sp = fcinfo.arg_i32(2);
-    let sl = crate::text_length(t2.data());
+    let sl = crate::text_length(t2.data())?;
     let mcx = fcinfo.result_mcx();
     Ok(varlena_result(crate::text_overlay(mcx, t1, t2.data(), sp, sl)?))
 }

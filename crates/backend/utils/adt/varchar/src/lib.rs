@@ -81,7 +81,7 @@ pub fn bpchar_clip(
     }
     // atttypmod counts characters, not bytes.
     let maxchars = atttypmod as usize - VARHDRSZ;
-    let charlen = mbutils::pg_mbstrlen_with_len(s) as usize;
+    let charlen = mbutils::pg_mbstrlen_with_len(s)? as usize;
     if charlen > maxchars {
         let mbmaxlen = mbutils::pg_mbcharcliplen(s, len as i32, maxchars as i32)? as usize;
         if s[mbmaxlen..].iter().any(|&b| b != b' ') {
@@ -149,7 +149,7 @@ pub fn bpchar<'mcx>(
     }
     let maxchars = maxlen as usize - VARHDRSZ;
     let len = source.len();
-    let charlen = mbutils::pg_mbstrlen_with_len(source) as usize;
+    let charlen = mbutils::pg_mbstrlen_with_len(source)? as usize;
     if charlen == maxchars {
         return Ok(None);
     }
@@ -354,12 +354,12 @@ fn bc_trim(s: &[u8]) -> &[u8] {
     &s[..bpchartruelen(s)]
 }
 
-pub fn bpcharlen(arg: &[u8]) -> i32 {
+pub fn bpcharlen(arg: &[u8]) -> PgResult<i32> {
     let len = bpchartruelen(arg);
     if mbutils::pg_database_encoding_max_length() != 1 {
         mbutils::pg_mbstrlen_with_len(&arg[..len])
     } else {
-        len as i32
+        Ok(len as i32)
     }
 }
 

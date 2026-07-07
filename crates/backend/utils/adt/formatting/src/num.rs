@@ -12,7 +12,7 @@ use crate::parse::is_c_space;
 use crate::tables::*;
 
 fn pg_mbstrlen(s: &[u8]) -> i32 {
-    mbutils::pg_mbstrlen_with_len(s)
+    mbutils::pg_mbstrlen_with_len(s).unwrap_or(s.len() as i32)
 }
 
 fn pg_mblen_range(s: &[u8]) -> i32 {

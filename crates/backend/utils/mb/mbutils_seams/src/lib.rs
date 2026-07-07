@@ -52,7 +52,9 @@ seam_core::seam!(
 
 seam_core::seam!(
     // C: pg_mbstrlen_with_len(mbstr, limit) — the slice carries the limit.
-    pub fn pg_mbstrlen_with_len(s: &[u8]) -> i32
+    // Errors like C when the trailing character's claimed length overruns
+    // the slice.
+    pub fn pg_mbstrlen_with_len(s: &[u8]) -> PgResult<i32>
 );
 
 seam_core::seam!(
