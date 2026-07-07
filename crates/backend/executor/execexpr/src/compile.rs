@@ -1284,8 +1284,9 @@ fn init_subplan_expr<'mcx>(
     let sp = node.as_sub_plan().expect("SubPlan node");
     let Some(env) = sub else {
         panic!(
-            "ExecInitSubPlanExpr (execExpr.c): SubPlan in an expression context \
-             without a subplan driver (owning node not wired)"
+            "ExecInitSubPlanExpr (execExpr.c): SubPlan {:?} (plan_id {}) in an expression \
+             context without a subplan driver (owning node not wired)",
+            sp.plan_name, sp.plan_id
         )
     };
     debug_assert_eq!(sp.parParam.len(), sp.args.len());

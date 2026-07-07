@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::execexpr::{
-    exec_build_projection_info_subplans, exec_eval_expr, exec_init_expr,
+    exec_build_projection_info_subplans, exec_eval_expr, exec_init_expr_subplans,
     exec_init_qual_subplans, exec_project, exec_qual, EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
@@ -276,10 +276,16 @@ fn examine_quals<'mcx>(
         let op = qual.as_op_expr().filter(|o| o.args.len() == 2).unwrap_or_else(|| {
             panic!("MJExamineQuals (nodeMergejoin.c): mergeclause is not a binary OpExpr")
         });
-        let mut lexpr =
-            exec_init_expr(mcx, Some(op.args.nth(0)), params)?.expect("mergeclause left operand");
-        let mut rexpr =
-            exec_init_expr(mcx, Some(op.args.nth(1)), params)?.expect("mergeclause right operand");
+        // C MJExamineQuals compiles the operands with the MergeJoinState
+        // parent, so SubPlans are legal in them.
+        let (mut lexpr, mut rexpr) =
+            ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+                let l = exec_init_expr_subplans(mcx, Some(op.args.nth(0)), params, env)?
+                    .expect("mergeclause left operand");
+                let r = exec_init_expr_subplans(mcx, Some(op.args.nth(1)), params, env)?
+                    .expect("mergeclause right operand");
+                Ok((l, r))
+            })?;
         // C evaluates outer key exprs in mj_OuterEContext's per-tuple memory
         // and inner key exprs in mj_InnerEContext's (MJEvalOuterValues /
         // MJEvalInnerValues); by-ref results ride the armed result mcx.
