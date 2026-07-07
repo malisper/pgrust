@@ -194,13 +194,24 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         if !self.check_syntax {
             return Ok(());
         }
-        match parser_seams::raw_parser::call(self.scratch, query, mode) {
+        // plpgsql_sql_error_callback runs for every elevel: warnings emitted
+        // by the raw parse (scanner escape warnings) get the same
+        // expr-to-function-source cursor remap as the Err path below.
+        let base = self.sc.errposition(location);
+        let cb = elog::push_emit_context_callback(Box::new(move |e| {
+            if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
+                e.cursor_position = Some(base + p - 1);
+            }
+        }));
+        let r = parser_seams::raw_parser::call(self.scratch, query, mode);
+        elog::pop_emit_context_callback(cb);
+        match r {
             Ok(_) => Ok(()),
             Err(mut e) => {
                 // plpgsql_sql_error_callback: expr-relative cursor becomes a
                 // function-source cursor (both 1-based char positions).
                 if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
-                    e.cursor_position = Some(self.sc.errposition(location) + p - 1);
+                    e.cursor_position = Some(base + p - 1);
                 }
                 Err(e)
             }
