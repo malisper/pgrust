@@ -783,7 +783,6 @@ pub fn DefineRelation<'mcx>(
             relkind,
             relpersistence,
             reloftype: of_type_id,
-            mapped: false,
             allow_system_table_mods: false,
             reloptions: reloptions.as_deref(),
         },
