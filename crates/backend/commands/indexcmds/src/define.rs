@@ -474,12 +474,6 @@ pub fn DefineIndex<'mcx>(
                 types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
             ));
         }
-        // NARROWED: gist truncates nonkey atts off internal tuples via a
-        // separate nonLeafTupdesc (initGISTstate louds); spgist's INCLUDE
-        // leaf-tuple lane is unverified. Both stay loud.
-        if am.kind != types_relscan::IndexAmKind::Btree {
-            unported(&format!("DefineIndex: INCLUDE columns on {amname}"));
-        }
     }
     // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
     if exclusion
