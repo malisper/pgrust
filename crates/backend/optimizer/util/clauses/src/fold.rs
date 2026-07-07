@@ -42,6 +42,10 @@ struct EceContext<'mcx> {
     // C context->active_fns: SQL functions currently being inlined
     // (inline_function's recursion guard).
     active_fns: core::cell::RefCell<mcx::PgVec<'mcx, Oid>>,
+    // Domains whose constraint-less CoerceToDomain was folded away; C
+    // record_plan_type_dependency writes them to root->glob->invalItems when
+    // context->root is set (clauses.c:3630). Planner callers harvest these.
+    type_deps: core::cell::RefCell<Vec<Oid>>,
 }
 
 fn ece_context<'mcx>(
@@ -55,6 +59,7 @@ fn ece_context<'mcx>(
         bound_params,
         case_val: core::cell::Cell::new(None),
         active_fns: core::cell::RefCell::new(mcx::PgVec::new_in(mcx)),
+        type_deps: core::cell::RefCell::new(Vec::new()),
     }
 }
 
@@ -69,6 +74,21 @@ pub fn eval_const_expressions_with_params<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     let cx = ece_context(mcx, false, bound_params);
     Ok(ece_mutator(node, &cx)?.unwrap_or(node))
+}
+
+/// The context->root != NULL lane of C eval_const_expressions: folded
+/// constraint-less domains are appended to `type_deps` for the caller's
+/// record_plan_type_dependency (setrefs.c:3594).
+pub fn eval_const_expressions_planner<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    bound_params: ParamListHandle,
+    type_deps: &mut Vec<Oid>,
+) -> PgResult<Node<'mcx>> {
+    let cx = ece_context(mcx, false, bound_params);
+    let r = ece_mutator(node, &cx)?.unwrap_or(node);
+    type_deps.append(&mut cx.type_deps.borrow_mut());
+    Ok(r)
 }
 
 pub fn estimate_expression_value<'mcx>(
@@ -937,9 +957,12 @@ fn ece_mutator<'mcx>(node: Node<'mcx>, cx: &EceContext<'mcx>) -> PgResult<Option
             let cd = node.as_coerce_to_domain().unwrap();
             let arg = ece_mutator(cd.arg, cx)?;
             // C also substitutes when the domain has no constraints, after
-            // record_plan_type_dependency; invalItems recording is not
-            // modeled here (module doc), same gap as function dependencies.
+            // record_plan_type_dependency (clauses.c:3626-3631): the fold is
+            // only plan-safe if ALTER DOMAIN invalidates the cached plan.
             if cx.estimate || !typcache_seams::domain_has_constraints::call(cd.resulttype)? {
+                if !cx.estimate {
+                    cx.type_deps.borrow_mut().push(cd.resulttype);
+                }
                 let eff = arg.unwrap_or(cd.arg);
                 return Ok(Some(apply_relabel_type(
                     cx.mcx,

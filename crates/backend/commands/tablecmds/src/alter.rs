@@ -5900,7 +5900,9 @@ fn ATPostAlterTypeParse<'mcx>(
         def,
         parser_seams::RawParseMode::RAW_PARSE_DEFAULT,
     )?;
-    let rel = table::table_open(mcx, rel_id, NoLock)?;
+    // C relation_open (tablecmds.c:15680): rel_id can be a composite type's
+    // relation when a domain constraint depends on an altered attribute.
+    let rel = relation_seams::relation_open::call(mcx, rel_id, NoLock)?;
     let qidx = ATGetQueueEntry(mcx, wqueue, &rel);
     let tab = &mut wqueue[qidx];
     for rs in raw_list.iter() {

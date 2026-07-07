@@ -11,6 +11,8 @@ const FIRST_UNPINNED_OBJECT_ID: u32 = 12000;
 // syscache.h: PROCOID. record_plan_function_dependency keys PlanInvalItems on
 // it because plancache.c registers PlanCacheObjectCallback for PROCOID.
 const PROCOID: i32 = 47;
+// cache_syscache TYPEOID: record_plan_type_dependency's cache (setrefs.c:3608).
+const TYPEOID: i32 = cache_syscache::cacheinfo::TYPEOID;
 
 // No AlternativeSubPlans.
 pub fn set_plan_references<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>) -> PgResult<Node<'mcx>> {
@@ -3428,6 +3430,24 @@ pub(crate) fn record_plan_function_dependency<'mcx>(
     let item = Node::mk(
         run.mcx,
         types_nodes::plannodes::PlanInvalItem { cacheId: PROCOID, hashValue: hash_value },
+    )?;
+    run.glob.inval_items.lappend(run.mcx, item)?;
+    Ok(())
+}
+
+// record_plan_type_dependency (setrefs.c:3594): folded constraint-less
+// domains; ALTER DOMAIN's manual pg_type sinval rebuilds the plan.
+pub(crate) fn record_plan_type_dependency<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    typid: u32,
+) -> PgResult<()> {
+    if typid < FIRST_UNPINNED_OBJECT_ID {
+        return Ok(());
+    }
+    let hash_value = syscache_seams::syscache_hash_value_typeoid::call(typid)?;
+    let item = Node::mk(
+        run.mcx,
+        types_nodes::plannodes::PlanInvalItem { cacheId: TYPEOID, hashValue: hash_value },
     )?;
     run.glob.inval_items.lappend(run.mcx, item)?;
     Ok(())
