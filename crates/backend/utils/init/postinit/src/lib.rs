@@ -800,7 +800,13 @@ pub fn InitPostgres(
         miscinit::ValidatePgVersion(fullpath.as_str())?;
     }
 
-    miscinit::SetDatabasePath(fullpath.as_str());
+    if warm_claim {
+        // Retained thread: the path was set on the first claim (set-once
+        // global) and the db is pinned.
+        debug_assert_eq!(init_small::globals::DatabasePath(), Some(fullpath.as_str()));
+    } else {
+        miscinit::SetDatabasePath(fullpath.as_str());
+    }
 
     gtrace("p.dbpath");
     if warm_claim {
