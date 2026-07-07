@@ -193,6 +193,11 @@ pub fn init_seams() {
         engine::GetSerializableTransactionSnapshot,
     );
     predicate_seams::release_predicate_locks::set(engine::ReleasePredicateLocks);
+    predicate_seams::share_serializable_xact::set(engine::ShareSerializableXact);
+    predicate_seams::attach_serializable_xact::set(engine::AttachSerializableXact);
+    predicate_seams::set_serializable_transaction_snapshot::set(
+        engine::SetSerializableTransactionSnapshot,
+    );
 
     {
         use guc_tables::GucVarAccessors;

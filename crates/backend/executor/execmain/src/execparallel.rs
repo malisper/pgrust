@@ -396,6 +396,15 @@ pub fn exec_init_parallel_plan<'mcx>(
 
     let pstmt = build_worker_pstmt(estate, child_plan)?;
     let pcxt = parallel::CreateParallelContext("postgres", "ParallelQueryMain", nworkers)?;
+    // Leader-panic containment injection: forced fault during parallel init,
+    // env-gated so the surface is inert in production (crash-restart-design
+    // pattern). The panic must unwind to an ERROR, abort the transaction, and
+    // leave the session usable — never wedge it.
+    if std::env::var_os("PGRUST_CRASH_TEST").is_some()
+        && estate.es_sourceText.unwrap_or("").contains("pgrust:leader-panic-parallel-init")
+    {
+        panic!("injected leader panic (parallel init)");
+    }
     parallel::InitializeParallelDSM(pcxt)?;
     let nworkers = parallel::nworkers(pcxt);
 

@@ -110,3 +110,21 @@ seam_core::seam!(
         rel: &'a RelationData<'mcx>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // ShareSerializableXact (predicate.c): C's SerializableXactHandle is a
+    // SERIALIZABLEXACT* into shared memory; threads share the address space,
+    // so it crosses to workers as a usize (0 = InvalidSerializableXact).
+    pub fn share_serializable_xact() -> usize
+);
+
+seam_core::seam!(
+    pub fn attach_serializable_xact(handle: usize) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // SetSerializableTransactionSnapshot (predicate.c): the parallel-worker
+    // no-op arm and READ ONLY DEFERRABLE rejection are ported; the
+    // snapshot-import arm (SET TRANSACTION SNAPSHOT) stays loud.
+    pub fn set_serializable_transaction_snapshot() -> PgResult<()>
+);

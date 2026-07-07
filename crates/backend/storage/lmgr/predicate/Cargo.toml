@@ -30,6 +30,7 @@ init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
 varsup_seams = { path = "../../../access/transam/varsup_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 

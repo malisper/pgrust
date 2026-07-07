@@ -50,6 +50,9 @@ use crate::serial::{SerialGetMinConflictCommitSeqNo, SerialInit, SerialSetActive
 
 thread_local! {
     static MY_SERIALIZABLE_XACT: Cell<*mut SERIALIZABLEXACT> = const { Cell::new(ptr::null_mut()) };
+    // C's SavedSerializableXact: a leader-stashed partially-released RO_SAFE
+    // sxact awaiting end-of-transaction cleanup (workers may still hold it).
+    static SAVED_SERIALIZABLE_XACT: Cell<*mut SERIALIZABLEXACT> = const { Cell::new(ptr::null_mut()) };
     static MY_XACT_DID_WRITE: Cell<bool> = const { Cell::new(false) };
     static LOCAL_PREDICATE_LOCK_HASH: Cell<*mut HTAB> = const { Cell::new(ptr::null_mut()) };
 
@@ -148,9 +151,8 @@ fn in_parallel_mode() -> bool {
     xact_seams::is_in_parallel_mode::call()
 }
 
-#[cold]
-fn parallel_unported() -> ! {
-    panic!("predicate.c parallel-query arm reached; parallel SSI sharing is not ported")
+fn is_parallel_worker() -> bool {
+    parallel_seams::is_parallel_worker::call()
 }
 
 #[inline]
@@ -637,6 +639,40 @@ pub fn GetSerializableTransactionSnapshot<'m>(
     GetSerializableTransactionSnapshotInt(snapshot, mcx)
 }
 
+// SetSerializableTransactionSnapshot (predicate.c): in a parallel worker the
+// leader's SERIALIZABLEXACT arrives via AttachSerializableXact, so there is
+// nothing to do here. The snapshot-import arm (SET TRANSACTION SNAPSHOT,
+// GetSerializableTransactionSnapshotInt's sourcevxid path) is unported.
+pub fn SetSerializableTransactionSnapshot() -> PgResult<()> {
+    debug_assert!(xact_seams::isolation_is_serializable::call());
+
+    if is_parallel_worker() {
+        return Ok(());
+    }
+
+    if xact_seams::xact_read_only::call() && xact_seams::xact_deferrable::call() {
+        return Err(Box::new(
+            PgError::error("a snapshot-importing transaction must not be READ ONLY DEFERRABLE")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    panic!("predicate.c SetSerializableTransactionSnapshot: snapshot import into a serializable transaction is not ported");
+}
+
+pub fn ShareSerializableXact() -> usize {
+    MySerializableXact() as usize
+}
+
+pub fn AttachSerializableXact(handle: usize) -> PgResult<()> {
+    debug_assert!(MySerializableXact() == InvalidSerializableXact);
+    set_MySerializableXact(handle as *mut SERIALIZABLEXACT);
+    if MySerializableXact() != InvalidSerializableXact {
+        CreateLocalPredicateLockHash()?;
+    }
+    Ok(())
+}
+
 // PG_WAIT_IPC | SafeSnapshot's index in wait_event_names.txt's IPC section.
 const WAIT_EVENT_SAFE_SNAPSHOT: u32 = 0x0800_0000 | 51;
 
@@ -960,7 +996,7 @@ unsafe fn DeleteChildTargetLocks(newtargettag: *const PREDICATELOCKTARGETTAG) ->
     LWLockAcquire(SerializablePredicateListLock(), LW_SHARED, procno)?;
     let sxact = MySerializableXact();
     if in_parallel_mode() {
-        parallel_unported();
+        LWLockAcquire(&(*sxact).perXactPredicateListLock, LW_EXCLUSIVE, procno)?;
     }
 
     let head = &raw mut (*sxact).predicateLocks;
@@ -998,6 +1034,9 @@ unsafe fn DeleteChildTargetLocks(newtargettag: *const PREDICATELOCKTARGETTAG) ->
             DecrementParentLocks(&oldtargettag)?;
         }
         cur = next;
+    }
+    if in_parallel_mode() {
+        LWLockRelease(&(*sxact).perXactPredicateListLock)?;
     }
     LWLockRelease(SerializablePredicateListLock())?;
     Ok(())
@@ -1109,7 +1148,7 @@ unsafe fn CreatePredicateLock(
 
     LWLockAcquire(SerializablePredicateListLock(), LW_SHARED, procno)?;
     if in_parallel_mode() {
-        parallel_unported();
+        LWLockAcquire(&(*sxact).perXactPredicateListLock, LW_EXCLUSIVE, procno)?;
     }
     LWLockAcquire(partition_lock, LW_EXCLUSIVE, procno)?;
 
@@ -1124,6 +1163,9 @@ unsafe fn CreatePredicateLock(
     let target = tp as *mut PREDICATELOCKTARGET;
     if target.is_null() {
         LWLockRelease(partition_lock)?;
+        if in_parallel_mode() {
+            LWLockRelease(&(*sxact).perXactPredicateListLock)?;
+        }
         LWLockRelease(SerializablePredicateListLock())?;
         return Err(out_of_shared_memory());
     }
@@ -1146,6 +1188,9 @@ unsafe fn CreatePredicateLock(
     let lock = lp as *mut PREDICATELOCK;
     if lock.is_null() {
         LWLockRelease(partition_lock)?;
+        if in_parallel_mode() {
+            LWLockRelease(&(*sxact).perXactPredicateListLock)?;
+        }
         LWLockRelease(SerializablePredicateListLock())?;
         return Err(out_of_shared_memory());
     }
@@ -1157,6 +1202,9 @@ unsafe fn CreatePredicateLock(
     }
 
     LWLockRelease(partition_lock)?;
+    if in_parallel_mode() {
+        LWLockRelease(&(*sxact).perXactPredicateListLock)?;
+    }
     LWLockRelease(SerializablePredicateListLock())?;
     Ok(())
 }
@@ -1556,8 +1604,31 @@ pub fn ReleasePredicateLocks(mut isCommit: bool, isReadOnlySafe: bool) -> PgResu
 
         debug_assert!(!(isCommit && isReadOnlySafe));
 
-        // No parallel workers exist in this port (parallel arms are loud), so
-        // C's IsParallelWorker()/SavedSerializableXact restore never fires.
+        // Non-serializable fast path (every commit/abort lands here): with no
+        // sxact and no leader stash, C's worker and leader arms are both
+        // no-ops, so skip the is_parallel_worker seam call.
+        if MySerializableXact() == InvalidSerializableXact
+            && SAVED_SERIALIZABLE_XACT.with(|c| c.get()) == InvalidSerializableXact
+        {
+            debug_assert!(LocalPredicateLockHash().is_null());
+            return Ok(());
+        }
+
+        if !isReadOnlySafe {
+            // Workers must not release predicate locks at end of transaction;
+            // the leader owns that (predicate.c ReleasePredicateLocks).
+            if is_parallel_worker() {
+                ReleasePredicateLocksLocal();
+                return Ok(());
+            }
+
+            if SAVED_SERIALIZABLE_XACT.with(|c| c.get()) != InvalidSerializableXact {
+                debug_assert!(MySerializableXact() == InvalidSerializableXact);
+                set_MySerializableXact(SAVED_SERIALIZABLE_XACT.with(|c| c.get()));
+                SAVED_SERIALIZABLE_XACT.with(|c| c.set(InvalidSerializableXact));
+                debug_assert!(SxactIsPartiallyReleased(MySerializableXact()));
+            }
+        }
 
         if MySerializableXact() == InvalidSerializableXact {
             debug_assert!(LocalPredicateLockHash().is_null());
@@ -1574,6 +1645,11 @@ pub fn ReleasePredicateLocks(mut isCommit: bool, isReadOnlySafe: bool) -> PgResu
         }
 
         if isReadOnlySafe && in_parallel_mode() {
+            // The leader stashes the sxact for full release at end of
+            // transaction; workers may still be referencing it.
+            if !is_parallel_worker() {
+                SAVED_SERIALIZABLE_XACT.with(|c| c.set(mysx));
+            }
             if SxactIsPartiallyReleased(mysx) {
                 LWLockRelease(SerializableXactHashLock())?;
                 ReleasePredicateLocksLocal();
@@ -1850,7 +1926,7 @@ unsafe fn ReleaseOneSerializableXact(
 
     LWLockAcquire(SerializablePredicateListLock(), LW_SHARED, procno)?;
     if in_parallel_mode() {
-        parallel_unported();
+        LWLockAcquire(&(*sxact).perXactPredicateListLock, LW_EXCLUSIVE, procno)?;
     }
 
     let head = &raw mut (*sxact).predicateLocks;
@@ -1890,6 +1966,9 @@ unsafe fn ReleaseOneSerializableXact(
             predlock = pp as *mut PREDICATELOCK;
             if predlock.is_null() {
                 LWLockRelease(partition_lock)?;
+                if in_parallel_mode() {
+                    LWLockRelease(&(*sxact).perXactPredicateListLock)?;
+                }
                 LWLockRelease(SerializablePredicateListLock())?;
                 return Err(out_of_shared_memory());
             }
@@ -1920,6 +1999,9 @@ unsafe fn ReleaseOneSerializableXact(
 
     dlist_init(&raw mut (*sxact).predicateLocks);
 
+    if in_parallel_mode() {
+        LWLockRelease(&(*sxact).perXactPredicateListLock)?;
+    }
     LWLockRelease(SerializablePredicateListLock())?;
 
     let sxidtag = SERIALIZABLEXIDTAG {
@@ -2197,7 +2279,11 @@ unsafe fn CheckTargetForConflictsIn(targettag: *mut PREDICATELOCKTARGETTAG) -> P
     if !mypredlock.is_null() {
         LWLockAcquire(SerializablePredicateListLock(), LW_SHARED, procno)?;
         if in_parallel_mode() {
-            parallel_unported();
+            LWLockAcquire(
+                &(*MySerializableXact()).perXactPredicateListLock,
+                LW_EXCLUSIVE,
+                procno,
+            )?;
         }
         LWLockAcquire(partition_lock, LW_EXCLUSIVE, procno)?;
         LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
@@ -2233,6 +2319,9 @@ unsafe fn CheckTargetForConflictsIn(targettag: *mut PREDICATELOCKTARGETTAG) -> P
 
         LWLockRelease(SerializableXactHashLock())?;
         LWLockRelease(partition_lock)?;
+        if in_parallel_mode() {
+            LWLockRelease(&(*MySerializableXact()).perXactPredicateListLock)?;
+        }
         LWLockRelease(SerializablePredicateListLock())?;
 
         if !rmpredlock.is_null() {

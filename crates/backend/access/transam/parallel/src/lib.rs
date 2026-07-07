@@ -12,7 +12,7 @@ use types_core::{
     CommandId, InvalidOid, Oid, ProcNumber, SubTransactionId, TimestampTz, XLogRecPtr,
 };
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN,
+    ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
@@ -56,6 +56,10 @@ pub struct ParallelShared {
     pub temp_namespace_id: Oid,
     pub temp_toast_namespace_id: Oid,
     pub last_xlog_end: AtomicU64,
+    // ShareSerializableXact handle (SERIALIZABLEXACT* in shared memory as a
+    // usize, 0 = invalid); workers adopt it via AttachSerializableXact so SSI
+    // conflict tracking spans the whole parallel query.
+    serializable_xact_handle: usize,
     // Retention (wretain): the leader's transaction holds invalidation
     // messages not yet broadcast (uncommitted DDL); a retained worker's
     // sinval drain cannot see them, so it must fall back to C's
@@ -254,13 +258,16 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     // Session DSM (C GetSessionDsmHandle nworkers=0 arm): threads share the
     // address space; not transferred (docs/parallel-query-design.md).
 
-    if nworkers > 0 {
-        if xact::IsolationIsSerializable() {
-            panic!("InitializeParallelDSM: serializable leader needs AttachSerializableXact (storage/lmgr/predicate.c) — unported");
-        }
-        if pg_enum::HasUncommittedEnums() {
-            panic!("InitializeParallelDSM: uncommitted enums need SerializeUncommittedEnums (catalog/pg_enum.c) — unported");
-        }
+    // Unported C arm (SerializeUncommittedEnums, catalog/pg_enum.c). A clean
+    // ERROR — not a panic — so the transaction aborts and the session stays
+    // usable (the panic-leaves-session-wedged hazard class).
+    if nworkers > 0 && pg_enum::HasUncommittedEnums() {
+        return ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "cannot start parallel workers with uncommitted enum values: SerializeUncommittedEnums (catalog/pg_enum.c) unported",
+            )
+            .finish(loc(0, "InitializeParallelDSM"));
     }
 
     let (current_user_id, sec_context) = miscinit::GetUserIdAndSecContext();
@@ -313,6 +320,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         temp_namespace_id: temp_ns,
         temp_toast_namespace_id: temp_toast_ns,
         last_xlog_end: AtomicU64::new(0),
+        serializable_xact_handle: predicate_seams::share_serializable_xact::call(),
         leader_pending_invals: inval::TransactionHasPendingInvalidationMessages(),
         guc_state: if guc::store::session_guc_bind_enabled() {
             Vec::new()
@@ -1025,6 +1033,8 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     if miscinit::client_connection_info().0.is_some() {
         panic!("ParallelWorkerMain: InitializeSystemUser (SYSTEM_USER for authenticated identity) unported");
     }
+
+    predicate_seams::attach_serializable_xact::call(shared.serializable_xact_handle)?;
 
     INITIALIZING_PARALLEL_WORKER.with(|c| c.set(false));
     xact::EnterParallelMode();
