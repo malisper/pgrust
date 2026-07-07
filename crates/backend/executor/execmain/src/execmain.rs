@@ -180,7 +180,7 @@ fn skeleton_rebind_tree<'mcx>(
 fn skeleton_rearm_exec(qd: &mut QueryDescData, exec: &mut ExecutorHandle) -> PgResult<bool> {
     // P1: C's InitPlan runs ExecCheckPermissions on every cached-plan
     // execution — reuse must too (REVOKE/SET ROLE between EXECUTEs).
-    exec_check_permissions(&qd.plannedstmt().permInfos)?;
+    exec_check_permissions(qd.plannedstmt())?;
     let source_text = qd.source_text();
     // SAFETY: the registered params live in the portal context, which
     // outlives this execution (values are copied out below).
@@ -402,8 +402,20 @@ fn create_command_name(pstmt: &PlannedStmt<'_>) -> &'static str {
     }
 }
 
-/// `ExecCheckPermissions` (ereport_on_violation arm only; no hook).
-pub(crate) fn exec_check_permissions(perm_infos: &::types_nodes::NodeList<'_>) -> PgResult<()> {
+/// `ExecCheckPermissions` (ereport_on_violation arm only; no hook). Hot path
+/// (InitPlan/skeleton_rearm_exec): a direct `&PlannedStmt` parameter, not the
+/// bare permInfos list, keeps this identical to C's call shape and avoids an
+/// inlining shift from routing every call through the field-extraction seam.
+pub(crate) fn exec_check_permissions(pstmt: &PlannedStmt<'_>) -> PgResult<()> {
+    exec_check_permissions_over_perminfos(&pstmt.permInfos)
+}
+
+/// Bare-permInfos-list variant backing the `execmain_seams::exec_check_permissions`
+/// seam: COPY (copy.c DoCopy) checks per-column privileges without a
+/// PlannedStmt.
+pub(crate) fn exec_check_permissions_over_perminfos(
+    perm_infos: &::types_nodes::NodeList<'_>,
+) -> PgResult<()> {
     for pi_node in perm_infos.iter() {
         let pi = pi_node.as_rte_permission_info().expect("permInfos cell");
         debug_assert!(pi.relid != 0);
@@ -711,7 +723,7 @@ pub(crate) fn init_plan<'mcx>(
     operation: CmdType,
     eflags: i32,
 ) -> PgResult<Rc<TupleDescData<'static>>> {
-    exec_check_permissions(&pstmt.permInfos)?;
+    exec_check_permissions(pstmt)?;
     // C's bms_copy: the estate owns its pruning set (extended by ExecDoInitialPruning).
     let unpruned = pstmt
         .unprunableRelids
