@@ -2091,7 +2091,7 @@ impl<'a> Estate<'a> {
                     ));
                 }
                 let (desc, src, values, nulls) = self.deconstruct_composite(value)?;
-                self.move_rec_from_values(target, &desc, src, &values, &nulls)
+                self.move_rec_from_values(target, &desc, src, &values, &nulls, true)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -2330,12 +2330,15 @@ impl<'a> Estate<'a> {
             PlDatum::Rec(_) => {
                 let (desc, src_desc) = self.rec_desc_of(tuptab)?;
                 let n = desc.types.len();
+                // C's NULL-tuple arm passes tupdesc=NULL to
+                // exec_move_row_from_fields: no strict_multi_assignment.
                 self.move_rec_from_values(
                     var,
                     &desc,
                     src_desc,
                     &vec![Datum::null(); n],
                     &vec![true; n],
+                    false,
                 )
             }
             PlDatum::Row(r) => {
@@ -2365,7 +2368,7 @@ impl<'a> Estate<'a> {
                         nulls[f] = isnull;
                     }
                 });
-                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls)
+                self.move_rec_from_values(var, &desc, src_desc, &values, &nulls, true)
             }
             PlDatum::Row(r) => {
                 let varnos = r.varnos.clone();
@@ -2406,6 +2409,7 @@ impl<'a> Estate<'a> {
         src_tupdesc: std::rc::Rc<types_tuple::TupleDescData<'static>>,
         values: &[Datum],
         nulls: &[bool],
+        sma_check: bool,
     ) -> PgResult<()> {
         let rectypeid = self.rec_meta(recno).rectypeid;
         if rectypeid == RECORDOID {
@@ -2438,8 +2442,11 @@ impl<'a> Estate<'a> {
         // strict_multi_assignment reads the GUCs at execution
         // (pl_exec.c:7196-7202); active only with a source tupdesc, which
         // this arm always has.
-        let sma_level =
-            crate::handler::extra_checks_level(crate::comp::XCHECK_STRICTMULTIASSIGNMENT)?;
+        let sma_level = if sma_check {
+            crate::handler::extra_checks_level(crate::comp::XCHECK_STRICTMULTIASSIGNMENT)?
+        } else {
+            None
+        };
         let mut newvalues = vec![Datum::null(); vtd_natts];
         let mut newnulls = vec![true; vtd_natts];
         let mut anum = 0usize;
