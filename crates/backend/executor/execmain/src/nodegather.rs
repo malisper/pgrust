@@ -71,12 +71,14 @@ pub fn exec_init_gather<'mcx>(
         ::types_nodes::primnodes::OUTER_VAR as u32,
         &tup_desc,
     )?;
-    let (result_desc, result_slot, proj_state) = match proj {
-        Some(p) => {
-            let desc = crate::exec_type_from_tl(&node.plan.targetlist)?;
-            (desc, Some(p.pi_result_slot), Some(p.pi_state))
-        }
-        None => (tup_desc.clone(), None, None),
+    // C ExecInitGather builds the result type from the Gather tlist
+    // (ExecInitResultTypeTL) even without a projection: only the top plan's
+    // tlist carries the labeled resnames RowDescription needs; the outer
+    // scan's descriptor is nameless.
+    let result_desc = crate::exec_type_from_tl(&node.plan.targetlist)?;
+    let (result_slot, proj_state) = match proj {
+        Some(p) => (Some(p.pi_result_slot), Some(p.pi_state)),
+        None => (None, None),
     };
 
     let funnel_slot =
