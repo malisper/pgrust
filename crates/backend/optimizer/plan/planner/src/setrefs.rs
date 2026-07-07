@@ -2207,6 +2207,32 @@ fn fix_upper_expr<'mcx>(
                 },
             )
         }
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            let mut named_args = NodeList::nil();
+            for a in &x.named_args {
+                named_args.lappend(mcx, fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            let mut args = NodeList::nil();
+            for a in &x.args {
+                args.lappend(mcx, fix_upper_expr(run, a, subplan_tlist, rtoffset, newvarno, num_exec)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::primnodes::XmlExpr {
+                    op: x.op,
+                    name: x.name,
+                    named_args,
+                    arg_names: x.arg_names.clone_in(mcx)?,
+                    args,
+                    xmloption: x.xmloption,
+                    indent: x.indent,
+                    r#type: x.r#type,
+                    typmod: x.typmod,
+                    location: x.location,
+                },
+            )
+        }
         other => panic!("fix_upper_expr_mutator (setrefs.c): {other:?}; M3 expression lane"),
     }
 }
