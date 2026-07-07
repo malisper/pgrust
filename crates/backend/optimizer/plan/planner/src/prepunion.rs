@@ -1,7 +1,4 @@
-//! prepunion.c: plan_set_operations and its subroutines. Divergence:
-//! convert_subquery_pathkeys is unported, so SubqueryScanPaths surface with
-//! empty pathkeys and the MergeAppend ordered lane degrades to the
-//! Sort/HashAgg alternatives (the construction arm itself is a loud panic).
+//! prepunion.c: plan_set_operations and its subroutines.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -143,23 +140,33 @@ fn recurse_set_operations<'mcx>(
 }
 
 // Metadata copied out of the subroot arena so the outer path can be costed
-// without holding a cross-root borrow.
-struct ChildCandidate {
+// and its pathkeys converted without holding a cross-root borrow.
+struct ChildCandidate<'mcx> {
     pid: PathId,
     info: SubqueryScanInfo,
+    pathkey_descs: PgVec<'mcx, crate::pathkeys::SubPathKeyDesc<'mcx>>,
+    sub_tlist: PgVec<'mcx, crate::pathkeys::SubTle<'mcx>>,
 }
 
 fn build_setop_child_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
     trivial_tlist: bool,
-    _child_tlist: &NodeList<'mcx>,
-    want_sorted: bool,
+    child_tlist: &NodeList<'mcx>,
+    interesting_pathkeys: &[PathKey],
     want_num_groups: bool,
 ) -> PgResult<Option<f64>> {
     debug_assert!(run.root.rel(rel).rtekind == RTEKind::RTE_SUBQUERY as u32);
-    // add_setop_child_rel_equivalences only feeds convert_subquery_pathkeys
-    // (unported): outer subquery-scan paths always carry empty pathkeys.
+    let want_sorted = !interesting_pathkeys.is_empty();
+
+    if want_sorted {
+        crate::equivclass::add_setop_child_rel_equivalences(
+            run,
+            rel,
+            child_tlist,
+            interesting_pathkeys,
+        );
+    }
 
     crate::costsize::set_subquery_size_estimates(run, rel)?;
 
@@ -187,7 +194,12 @@ fn build_setop_child_paths<'mcx>(
             crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(final_rel).pathlist);
         for &subpath in paths.iter() {
             if subpath == cheapest {
-                candidates.push(ChildCandidate { pid: subpath, info: child_info(run, subpath) });
+                candidates.push(ChildCandidate {
+                    pid: subpath,
+                    info: child_info(run, subpath),
+                    pathkey_descs: crate::pathkeys::extract_subquery_pathkey_descs(run, subpath),
+                    sub_tlist: crate::pathkeys::extract_subquery_tlist(run, subpath),
+                });
             }
             if !want_sorted {
                 continue;
@@ -218,7 +230,12 @@ fn build_setop_child_paths<'mcx>(
                 }
             }
             if sp != cheapest {
-                candidates.push(ChildCandidate { pid: sp, info: child_info(run, sp) });
+                candidates.push(ChildCandidate {
+                    pid: sp,
+                    info: child_info(run, sp),
+                    pathkey_descs: crate::pathkeys::extract_subquery_pathkey_descs(run, sp),
+                    sub_tlist: crate::pathkeys::extract_subquery_tlist(run, sp),
+                });
             }
         }
         Ok(consider_parallel)
@@ -228,13 +245,18 @@ fn build_setop_child_paths<'mcx>(
 
     run.root.rel_mut(rel).consider_parallel = consider_parallel;
     for c in candidates.iter() {
-        // pathkeys stay empty: convert_subquery_pathkeys unported (crate doc).
+        let pathkeys = crate::pathkeys::convert_subquery_pathkeys(
+            run,
+            rel,
+            &c.pathkey_descs,
+            &c.sub_tlist,
+        )?;
         let id = crate::pathnode::create_subqueryscan_path(
             run,
             rel,
             c.pid,
             trivial_tlist,
-            PgVec::new_in(run.mcx),
+            pathkeys,
             &None,
             &c.info,
         )?;
@@ -321,7 +343,7 @@ fn generate_union_paths<'mcx>(
 
     for &(rel, ref child_tlist, trivial) in rellist.iter() {
         if run.root.rel(rel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
-            build_setop_child_paths(run, rel, trivial, child_tlist, try_sorted, false)?;
+            build_setop_child_paths(run, rel, trivial, child_tlist, &union_pathkeys, false)?;
         }
     }
 
@@ -466,7 +488,7 @@ fn generate_recursion_path<'mcx>(
         refnames_tlist,
     )?;
     if run.root.rel(lrel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
-        build_setop_child_paths(run, lrel, ltrivial, &lpath_tlist, false, false)?;
+        build_setop_child_paths(run, lrel, ltrivial, &lpath_tlist, &[], false)?;
     }
     let lpath = run.root.rel(lrel).cheapest_total_path.expect("non-recursive term has a path");
     // The recursive term's worktable scans read this (set_worktable_pathlist).
@@ -480,7 +502,7 @@ fn generate_recursion_path<'mcx>(
         refnames_tlist,
     )?;
     if run.root.rel(rrel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
-        build_setop_child_paths(run, rrel, rtrivial, &rpath_tlist, false, false)?;
+        build_setop_child_paths(run, rrel, rtrivial, &rpath_tlist, &[], false)?;
     }
     let rpath = run.root.rel(rrel).cheapest_total_path.expect("recursive term has a path");
     run.root.non_recursive_path = None;
@@ -592,13 +614,13 @@ fn generate_nonunion_paths<'mcx>(
 
     let mut d_left_groups =
         match run.root.rel(lrel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
-            true => build_setop_child_paths(run, lrel, ltrivial, &lpath_tlist, can_sort, true)?
+            true => build_setop_child_paths(run, lrel, ltrivial, &lpath_tlist, &nonunion_pathkeys, true)?
                 .expect("num groups requested"),
             false => run.root.rel(lrel).rows,
         };
     let mut d_right_groups =
         match run.root.rel(rrel).rtekind == RTEKind::RTE_SUBQUERY as u32 {
-            true => build_setop_child_paths(run, rrel, rtrivial, &rpath_tlist, can_sort, true)?
+            true => build_setop_child_paths(run, rrel, rtrivial, &rpath_tlist, &nonunion_pathkeys, true)?
                 .expect("num groups requested"),
             false => run.root.rel(rrel).rows,
         };

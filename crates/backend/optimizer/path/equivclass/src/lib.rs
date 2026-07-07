@@ -531,6 +531,50 @@ pub fn add_child_join_rel_equivalences<'mcx>(
     Ok(())
 }
 
+// add_setop_child_rel_equivalences (equivclass.c).
+pub fn add_setop_child_rel_equivalences<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    child_rel: RelId,
+    child_tlist: &types_nodes::list::NodeList<'mcx>,
+    setop_pathkeys: &[types_pathnodes::PathKey],
+) {
+    let mcx = run.mcx;
+    let mut pks = setop_pathkeys.iter();
+    for tle_node in child_tlist {
+        let tle = tle_node.as_target_entry().expect("tlist cell");
+        if tle.resjunk {
+            continue;
+        }
+        let pk = pks.next().expect("too few pathkeys for set operation");
+        let ec = pk.pk_eclass.expect("canonical pathkey has an eclass");
+        // generate_union_paths adds the parent member first; its JoinDomain
+        // covers the child member too.
+        let parent_em = run.root.ec(ec).ec_members[0];
+        let em_jdomain = run.root.em(parent_em).em_jdomain;
+        let relids = relids_copy(mcx, &run.root.rel(child_rel).relids);
+        let child_relid = run.root.rel(child_rel).relid as usize;
+        let datatype = costsize::expr_type_typmod(tle.expr).0;
+        add_child_eq_member(
+            run,
+            ec,
+            None,
+            tle.expr,
+            relids,
+            em_jdomain,
+            parent_em,
+            datatype,
+            child_relid,
+        );
+    }
+    // transformSetOperationStmt keeps the tlist resjunk-free, so every EC in
+    // root gained a child member above.
+    let mut idx = relids_copy(mcx, &run.root.rel(child_rel).eclass_indexes);
+    for i in 0..run.root.eq_classes.len() {
+        idx = relids_add_member(mcx, &idx, i as u32);
+    }
+    run.root.rel_mut(child_rel).eclass_indexes = idx;
+}
+
 // jdomain is always the top domain: sort/group expressions are top-level.
 pub fn get_eclass_for_sort_expr<'mcx>(
     run: &mut PlannerRun<'mcx>,
