@@ -148,15 +148,12 @@ pub struct PlannerRun<'mcx> {
     /// Append's part_prune_index indexes here until setrefs registers the
     /// entry into glob.part_prune_infos).
     pub pending_part_prune_infos: NodeList<'mcx>,
-<<<<<<< HEAD
     /// Pathkey inputs per materialized CTE plan (see CteSubpathInfo).
     pub cte_subpath_infos: PgVec<'mcx, CteSubpathInfo<'mcx>>,
-=======
     /// rel_subroots index holding the parent level while its child subroot is
     /// swapped in (C: the child's parent_root link, which selfuncs climbs for
     /// uplevel CTE refs); set only around such re-entries.
     pub swapped_parent_subroot: Option<usize>,
->>>>>>> 80d6c3de5 (setop child estimate keeps parent level visible for uplevel CTE refs)
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -177,12 +174,8 @@ mcx::forget_safe_struct!(
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
-<<<<<<< HEAD
-        rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos },
-=======
-        rowmarks, gset_data, pending_part_prune_infos,
+        rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
         swapped_parent_subroot },
->>>>>>> 80d6c3de5 (setop child estimate keeps parent level visible for uplevel CTE refs)
 );
 
 impl<'mcx> PlannerRun<'mcx> {
