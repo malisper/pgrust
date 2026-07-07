@@ -80,6 +80,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Retention claim (wretain): re-arm the shutdown hook + WAL baseline for
+    // a pooled thread whose pgstat TLS survived a park.
+    pub fn pgstat_reattach_retained_backend() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     // pgstat_before_server_shutdown(code, arg) (pgstat.c), before_shmem_exit shape.
     pub fn pgstat_before_server_shutdown(code: i32) -> types_error::PgResult<()>
 );

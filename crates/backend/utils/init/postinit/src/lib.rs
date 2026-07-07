@@ -398,6 +398,10 @@ pub fn InitializeFastPathLocks() -> i32 {
 pub fn BaseInit() -> PgResult<()> {
     debug_assert!(lmgr_proc::MyProc().is_some());
 
+    if init_small::wretain::warm_claim() {
+        return BaseInitRetained();
+    }
+
     elog::DebugFileOpen()?;
 
     fd::InitFileAccess();
@@ -416,6 +420,18 @@ pub fn BaseInit() -> PgResult<()> {
 
     lock::InitLockManagerAccess();
 
+    slot_seams::replication_slot_initialize::call()?;
+    Ok(())
+}
+
+/// Retention claim (wretain): BaseInit for a thread whose per-thread state
+/// survived a park. Exit callbacks (consumed by the park teardown) are
+/// re-armed and per-task baselines reset; once-per-thread constructions
+/// (VFD cache, sync/xloginsert scratch creation asserts) are skipped.
+fn BaseInitRetained() -> PgResult<()> {
+    pgstat_seams::pgstat_reattach_retained_backend::call()?;
+    aio_seams::pgaio_init_backend::call();
+    fd::ReattachRetainedFileAccess()?;
     slot_seams::replication_slot_initialize::call()?;
     Ok(())
 }
@@ -462,7 +478,15 @@ pub fn InitPostgres(
     }
 
     gtrace("p.beinit");
-    sinval::SharedInvalBackendInit(false)?;
+    let warm_claim = init_small::wretain::warm_claim();
+    if warm_claim {
+        // Retention claim: the sinval slot survived the park; DDL committed
+        // while parked is drained (not nuked) once the startup transaction
+        // exists below.
+        sinval::ReattachRetainedBackend()?;
+    } else {
+        sinval::SharedInvalBackendInit(false)?;
+    }
 
     let cancel_key = init_small::globals::MyCancelKey();
     let cancel_key_len = init_small::globals::MyCancelKeyLength() as usize;
@@ -512,15 +536,17 @@ pub fn InitPostgres(
     }
 
     gtrace("p.timeouts");
-    relcache::RelationCacheInitialize();
-    cache_syscache::InitCatalogCache()?;
-    plancache_portal_seams::init_plan_cache::call()?;
-    gtrace("p.catcache");
+    if !warm_claim {
+        relcache::RelationCacheInitialize();
+        cache_syscache::InitCatalogCache()?;
+        plancache_portal_seams::init_plan_cache::call()?;
+        gtrace("p.catcache");
 
-    portalmem::EnablePortalManager();
+        portalmem::EnablePortalManager();
 
-    relcache::RelationCacheInitializePhase2()?;
-    gtrace("p.relcache2");
+        relcache::RelationCacheInitializePhase2()?;
+        gtrace("p.relcache2");
+    }
 
     ipc_seams::before_shmem_exit::call(shutdown_postgres_cb, datum_null())?;
 
@@ -536,6 +562,21 @@ pub fn InitPostgres(
         xact::SetXactIsoLevel(XACT_READ_COMMITTED);
     }
     gtrace("p.txn");
+
+    if warm_claim {
+        // Barrier work emitted while parked (procsignal slot was released):
+        // the only barrier kind is SMGRRELEASE; apply it before touching any
+        // retained smgr state.
+        if procsignal::SharedBarrierGeneration() != init_small::wretain::parked_barrier_gen() {
+            smgr_seams::process_barrier_smgr_release::call()?;
+        }
+        // Drain the parked slot's accumulated invalidations before the first
+        // catalog access below (pg_authid/pg_database reads must observe all
+        // DDL committed before this claim). A queue overflow while parked
+        // surfaces as resetState -> full InvalidateSystemCaches here.
+        inval_seams::accept_invalidation_messages::call()?;
+        gtrace("p.retained.drain");
+    }
 
     let backend_type = miscinit::GetMyBackendType();
     if bootstrap
@@ -762,7 +803,19 @@ pub fn InitPostgres(
     miscinit::SetDatabasePath(fullpath.as_str());
 
     gtrace("p.dbpath");
-    relcache::RelationCacheInitializePhase3()?;
+    if warm_claim {
+        // Retained caches were built against this database (wpool dispatch
+        // pins standbys by db) and are drained-valid as of the accept above.
+        let retained = init_small::wretain::retained_db();
+        if retained != init_small::globals::MyDatabaseId() {
+            panic!(
+                "retained worker claimed for database {} but caches are for {retained}",
+                init_small::globals::MyDatabaseId()
+            );
+        }
+    } else {
+        relcache::RelationCacheInitializePhase3()?;
+    }
     gtrace("p.relcache3");
 
     acl_seams::initialize_acl::call()?;
@@ -794,7 +847,9 @@ pub fn InitPostgres(
     namespace_seams::initialize_search_path::call()?;
     gtrace("p.searchpath");
 
-    mbutils_seams::initialize_client_encoding::call()?;
+    if !warm_claim {
+        mbutils_seams::initialize_client_encoding::call()?;
+    }
 
     session_seams::initialize_session::call()?;
 

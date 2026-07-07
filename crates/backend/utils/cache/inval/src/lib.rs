@@ -141,6 +141,23 @@ fn init_state(slot: &mut Option<ManuallyDrop<McxOwned<InvalStateTy>>>) {
     *slot = Some(ManuallyDrop::new(owned));
 }
 
+/// True when the current transaction holds registered invalidation messages
+/// not yet broadcast to the shared queue (uncommitted DDL). Retention
+/// (wretain): a pooled parallel worker's sinval drain cannot see these, so a
+/// leader with pending messages flags the launch and workers fall back to
+/// C's fresh-process InvalidateSystemCaches.
+pub fn TransactionHasPendingInvalidationMessages() -> bool {
+    with_state(|state| {
+        state.trans_stack.iter().any(|t| {
+            t.ii.current_cmd_invalid_msgs.num_in_group() > 0
+                || t.prior_cmd_invalid_msgs.num_in_group() > 0
+        }) || state
+            .inplace_info
+            .as_ref()
+            .is_some_and(|i| i.current_cmd_invalid_msgs.num_in_group() > 0)
+    })
+}
+
 pub fn set_debug_discard_caches(value: i32) {
     DEBUG_DISCARD_CACHES.set(value);
 }

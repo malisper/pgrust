@@ -494,6 +494,7 @@ pub fn RegisterDynamicBackgroundWorker(
                     let pid = postmaster_seams::parallel_pool_dispatch::call(
                         slotno as i32,
                         generation,
+                        g::MyDatabaseId(),
                     );
                     if pid == 0 {
                         // Loud by design: a pool miss is a C-parity-preserving
@@ -807,7 +808,19 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
     // sigsetjmp(local_sigjmp_buf) equivalent: an Err out of the body reports
     // to the log (and the parallel leader, once attached) then exits(1).
     match run_worker_body(&worker) {
-        Ok(()) => ipc::proc_exit(0, my_pid),
+        Ok(()) => {
+            // Retention (wretain): a clean pooled task parks the thread with
+            // its PGPROC + sinval slot + warm caches; the exit-callback park
+            // arms (ProcKill, CleanupInvalidationState) key off request_park.
+            // A database-less task (substrate e2e) has no sinval slot and
+            // rotates as before.
+            if init_small::wretain::candidate() && g::MyDatabaseId() != types_core::InvalidOid {
+                init_small::wretain::set_retained_db(g::MyDatabaseId());
+                init_small::wretain::request_park(procsignal::SharedBarrierGeneration());
+                gtrace("w.retain.park");
+            }
+            ipc::proc_exit(0, my_pid)
+        }
         Err(e) => {
             g::HoldInterrupts();
             BackgroundWorkerUnblockSignals();
@@ -818,7 +831,12 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
 }
 
 fn run_worker_body(worker: &BackgroundWorker) -> PgResult<()> {
-    lmgr_proc::InitProcess(BackendType::BgWorker)?;
+    if init_small::wretain::warm_claim() {
+        gtrace("w.retain.claim_warm");
+        lmgr_proc::ReattachRetainedProc(BackendType::BgWorker)?;
+    } else {
+        lmgr_proc::InitProcess(BackendType::BgWorker)?;
+    }
     postinit::BaseInit()?;
     (worker.bgw_main)(worker.bgw_main_arg)
 }

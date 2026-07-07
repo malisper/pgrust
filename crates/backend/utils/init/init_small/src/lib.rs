@@ -2,6 +2,7 @@
 
 pub mod globals;
 pub mod usercontext;
+pub mod wretain;
 
 pub use usercontext::{RestoreUserContext, SwitchToUntrustedUser};
 

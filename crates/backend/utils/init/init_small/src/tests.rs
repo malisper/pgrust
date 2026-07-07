@@ -255,3 +255,54 @@ fn switch_to_untrusted_user_one_way_trust() {
     assert_eq!(CURRENT_USER.get(), (SAVE_USER, 0));
     assert_eq!(LAST_EOXACT.get(), Some((false, NEST_LEVEL)));
 }
+
+mod wretain_state {
+    use crate::wretain;
+    use types_core::InvalidOid;
+
+    // One test fn: TLS state is per-thread and #[test] threads are distinct.
+    #[test]
+    fn park_claim_lifecycle() {
+        // Fresh thread: nothing armed.
+        assert!(!wretain::candidate());
+        assert!(!wretain::warm_claim());
+        assert!(!wretain::identity_held());
+
+        // First task, retention on: cold init.
+        wretain::begin_task(true);
+        assert!(wretain::candidate());
+        assert!(!wretain::warm_claim());
+
+        // Clean park: both arms report retention.
+        wretain::set_retained_db(5);
+        wretain::request_park(3);
+        assert!(wretain::parking());
+        wretain::note_proc_retained();
+        wretain::note_sinval_retained();
+        assert!(wretain::confirm_parked());
+        assert!(wretain::identity_held());
+        assert_eq!(wretain::retained_db(), 5);
+        assert_eq!(wretain::parked_barrier_gen(), 3);
+
+        // Next claim is warm.
+        wretain::begin_task(true);
+        assert!(wretain::warm_claim());
+
+        // Partial park (one arm missed): not parked, retained flags exposed
+        // for the repair path, identity dropped.
+        wretain::request_park(4);
+        wretain::note_proc_retained();
+        assert!(!wretain::confirm_parked());
+        assert!(wretain::proc_retained());
+        assert!(!wretain::sinval_retained());
+        assert!(!wretain::identity_held());
+        assert_eq!(wretain::retained_db(), InvalidOid);
+        wretain::clear_identity();
+
+        // Retention disabled at begin_task: never a warm claim, never parks.
+        wretain::begin_task(false);
+        assert!(!wretain::candidate());
+        assert!(!wretain::warm_claim());
+        assert!(!wretain::confirm_parked());
+    }
+}

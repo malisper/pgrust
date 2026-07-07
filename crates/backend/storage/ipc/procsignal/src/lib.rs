@@ -111,6 +111,13 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("procsignal.c", 0, funcname)
 }
 
+/// Current shared barrier generation. Retention (wretain) records this at
+/// park; a claim-time advance means barrier work was emitted while the
+/// thread's slot was released and must be applied before reuse.
+pub fn SharedBarrierGeneration() -> u64 {
+    proc_signal().psh_barrierGeneration.load(Relaxed)
+}
+
 /// Crash-cycle reset in place to the post-ProcSignalShmemInit image
 /// (notes/crash-restart-design.md); postmaster thread only, all children dead.
 pub fn ProcSignalShmemResetAfterCrash() {

@@ -145,7 +145,13 @@ static CHILD_THREADS: std::sync::Mutex<Vec<(pid_t, std::thread::JoinHandle<()>)>
 
 /// Joins the announced child's thread (TLS destructors included). Announce is
 /// the closure's last act, so this blocks only for teardown, as waitpid does.
+/// A retention park's announce (wretain) is a task end, not a thread end:
+/// the marker set before the announce makes this a no-op and the thread's
+/// CHILD_THREADS entry stays (re-keyed to the next task's pid at claim).
 pub fn join_announced_child(pid: pid_t) {
+    if wpool::take_parked_announce(pid) {
+        return;
+    }
     let handle = {
         let mut t = CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(idx) = t.iter().position(|(p, _)| *p == pid) else { return };
@@ -250,13 +256,20 @@ fn run_child_task(
     }
 
     // ClosePostmasterPorts: no-op, shared fd table (module doc).
-    miscinit::InitPostmasterChild(child_pid)
-        .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
-    // InitPostmasterChild's SIGQUIT default; miscinit can't reach interrupt.
-    procsignal::pqsignal_thread(
-        libc::SIGQUIT,
-        procsignal::ThreadSignalHandler::Simple(default_sigquit_handler),
-    );
+    if init_small::wretain::warm_claim() {
+        // Retained thread (wretain): the once-per-thread half (wait-event
+        // pipe, latch wait set, sigmask, SIGQUIT disposition) survived the
+        // park; only the per-task pid/start-time identity refreshes.
+        miscinit::InitProcessGlobals(child_pid);
+    } else {
+        miscinit::InitPostmasterChild(child_pid)
+            .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
+        // InitPostmasterChild's SIGQUIT default; miscinit can't reach interrupt.
+        procsignal::pqsignal_thread(
+            libc::SIGQUIT,
+            procsignal::ThreadSignalHandler::Simple(default_sigquit_handler),
+        );
+    }
 
     // !shmem_attach detach + context switch: no-ops (module doc).
     init_small::globals::SetMyPMChildSlot(child_slot);
@@ -278,6 +291,16 @@ fn run_child_task(
         .downcast_ref::<ipc::ProcExitThread>()
         .map(|p| p.code << 8)
         .unwrap_or(libc::SIGABRT);
+    // Park in flight (wretain): the reaper must treat this announce as a
+    // task end, not a thread end. Marked before the announce so the reaper
+    // can never observe the announce without the marker.
+    if exitstatus == 0
+        && init_small::wretain::parking()
+        && init_small::wretain::proc_retained()
+        && init_small::wretain::sinval_retained()
+    {
+        wpool::mark_parked_announce(child_pid);
+    }
     if postmaster_seams::announce_child_exit::is_installed() {
         postmaster_seams::announce_child_exit::call(child_pid, exitstatus);
     } else {
@@ -352,24 +375,33 @@ pub fn init_seams() {
 }
 
 pub mod wpool {
-    //! §3.1 P-pool, phase 1: a process-lifetime pool of parked standby threads
-    //! for BGWORKER_CLASS_PARALLEL launches. A standby pre-pays the spawn-path
-    //! fixed costs (thread create, inherited-globals apply, GUC store build +
-    //! postmaster-snapshot restore); a claim hands it the same StartupData the
-    //! postmaster spawn path would build and it runs the unchanged per-task
-    //! child body. Threads rotate — one task per standby, retirement through
-    //! the normal child exit path — so per-task TLS state is byte-identical to
-    //! a postmaster-spawned worker; the postmaster replenishes the pool off
-    //! the query's critical path (ServerLoop maintain()).
+    //! §3.1 P-pool + the phase-4 retention increment: a process-lifetime pool
+    //! of parked standby threads for BGWORKER_CLASS_PARALLEL launches. A
+    //! standby pre-pays the spawn-path fixed costs (thread create,
+    //! inherited-globals apply, GUC store build + postmaster-snapshot
+    //! restore); a claim hands it the same StartupData the postmaster spawn
+    //! path would build and it runs the unchanged per-task child body.
+    //!
+    //! Retention (wretain, PGRUST_NO_RELCACHE_RETAIN kill switch): after a
+    //! clean task a standby parks holding its PGPROC + sinval slot + warm
+    //! relcache/catcache, and later claims skip the cold init (postinit warm
+    //! arm) and drain sinval instead of nuking caches. Parked standbys are
+    //! pinned to the database their caches were built against; dispatch only
+    //! hands them same-db tasks (a miss falls back to the postmaster spawn
+    //! path, which is always correct). Each task runs under a fresh synthetic
+    //! pid so the reaper's async processing of task N's exit announce can
+    //! never touch task N+1's bookkeeping. With retention off, threads rotate
+    //! — one task per standby — exactly as phase 1 shipped.
 
-    use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
-    use std::sync::mpsc::SyncSender;
+    use std::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
+    use std::sync::mpsc::{Receiver, SyncSender};
     use std::sync::Mutex;
 
-    use types_core::{init::BackendType, pid_t};
+    use types_core::{init::BackendType, pid_t, InvalidOid, Oid};
     use types_startup::{BgWorkerStartupData, StartupData};
 
     struct StandbyTask {
+        child_pid: pid_t,
         child_slot: i32,
         startup_data: StartupData,
     }
@@ -377,12 +409,21 @@ pub mod wpool {
     struct Standby {
         pid: pid_t,
         tx: SyncSender<StandbyTask>,
+        // Database the retained caches are pinned to; InvalidOid = fresh
+        // standby, matches any task.
+        db: Oid,
     }
 
     static AVAILABLE: Mutex<Vec<Standby>> = Mutex::new(Vec::new());
-    // Standbys alive (parked or still in their prelude); dispatch and retire
-    // decrement, maintain() tops back up to target.
+    // Standbys alive and not running a task (parked or still in their
+    // prelude); dispatch decrements, park/maintain() restore.
     static POPULATION: AtomicI32 = AtomicI32::new(0);
+    // Task-pids whose exit announce parked the thread; consumed by
+    // join_announced_child. Tiny (<= pool size).
+    static PARKED_ANNOUNCES: Mutex<Vec<pid_t>> = Mutex::new(Vec::new());
+    // Bumped by flush_for_crash: shared memory is about to be reset, so a
+    // woken standby must abandon (not tear down) its retained identity.
+    static CRASH_EPOCH: AtomicU64 = AtomicU64::new(0);
 
     fn available() -> std::sync::MutexGuard<'static, Vec<Standby>> {
         AVAILABLE.lock().unwrap_or_else(|e| e.into_inner())
@@ -393,6 +434,23 @@ pub mod wpool {
             return 0;
         }
         init_small::globals::max_parallel_workers()
+    }
+
+    pub(super) fn mark_parked_announce(pid: pid_t) {
+        PARKED_ANNOUNCES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(pid);
+    }
+
+    pub(super) fn take_parked_announce(pid: pid_t) -> bool {
+        let mut v = PARKED_ANNOUNCES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = v.iter().position(|p| *p == pid) {
+            v.swap_remove(i);
+            true
+        } else {
+            false
+        }
     }
 
     /// Postmaster thread only: Inherited/GUC snapshot capture must match
@@ -410,66 +468,145 @@ pub mod wpool {
         }
     }
 
-    /// Retire every parked standby (config reload / crash reinit): the next
-    /// maintain() respawns with a fresh postmaster GUC snapshot.
+    /// Retire every parked standby (config reload): the next maintain()
+    /// respawns with a fresh postmaster GUC snapshot. Woken standbys with a
+    /// retained identity release it against live shared memory.
     pub fn flush() {
         let drained: Vec<Standby> = available().drain(..).collect();
         POPULATION.fetch_sub(drained.len() as i32, Relaxed);
     }
 
+    /// Crash reinit: shared memory is about to be reset wholesale, so woken
+    /// standbys must NOT touch it — bump the epoch before dropping their
+    /// channels.
+    pub fn flush_for_crash() {
+        CRASH_EPOCH.fetch_add(1, Relaxed);
+        flush();
+    }
+
     fn spawn_standby() -> bool {
-        let child_pid = super::reserve_child_pid();
+        let spawn_pid = super::reserve_child_pid();
         let inherited = super::Inherited::capture();
         let guc_snapshot = guc::store::capture_nondefault_variables();
         let (tx, rx) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
         let spawned = std::thread::Builder::new()
-            .name(format!("pg:standby:{child_pid}"))
+            .name(format!("pg:standby:{spawn_pid}"))
             .spawn(move || {
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
                     .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
                     .unwrap_or_else(|e| panic!("standby GUC restore failed: {e:?}"));
-                match rx.recv() {
-                    Ok(task) => {
-                        bgworker::gtrace("w.pool.task");
-                        // §5 leak guard: a claimed standby must not carry a
-                        // previous session's GUC bind (rotation makes this
-                        // structurally true today; the assert keeps it true
-                        // when threads start being retained across tasks).
-                        debug_assert!(!guc::store::session_bound());
-                        super::run_child_task(
-                            BackendType::BgWorker,
-                            child_pid,
-                            task.child_slot,
-                            task.startup_data,
-                            None,
-                        );
-                    }
-                    Err(_) => {
-                        // Retired unused: nothing announced, so drop our own
-                        // reaper entry.
-                        POPULATION.fetch_sub(1, Relaxed);
-                        let mut t =
-                            super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(i) = t.iter().position(|(p, _)| *p == child_pid) {
-                            t.swap_remove(i);
-                        }
-                    }
-                }
+                standby_loop(spawn_pid, rx);
             });
         match spawned {
             Ok(handle) => {
                 super::CHILD_THREADS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((child_pid, handle));
+                    .push((spawn_pid, handle));
                 POPULATION.fetch_add(1, Relaxed);
-                available().push(Standby { pid: child_pid, tx });
+                available().push(Standby { pid: spawn_pid, tx, db: InvalidOid });
                 true
             }
             Err(_) => false,
         }
+    }
+
+    fn standby_loop(spawn_pid: pid_t, mut rx: Receiver<StandbyTask>) {
+        // CHILD_THREADS key for our JoinHandle; re-keyed to each task's pid
+        // so a rotation exit's announce joins this thread, while a park's
+        // announce (marked) does not.
+        let mut thread_key = spawn_pid;
+        loop {
+            match rx.recv() {
+                Ok(task) => {
+                    bgworker::gtrace("w.pool.task");
+                    rekey_child_thread(thread_key, task.child_pid);
+                    thread_key = task.child_pid;
+                    // §5 leak guard: a claimed standby must not carry a
+                    // previous session's GUC bind.
+                    debug_assert!(!guc::store::session_bound());
+                    init_small::wretain::begin_task(
+                        init_small::wretain::retention_enabled(),
+                    );
+                    super::run_child_task(
+                        BackendType::BgWorker,
+                        task.child_pid,
+                        task.child_slot,
+                        task.startup_data,
+                        None,
+                    );
+                    let park_epoch = CRASH_EPOCH.load(Relaxed);
+                    if init_small::wretain::confirm_parked() {
+                        // Zero-leak: a parked standby carries no session
+                        // identity (GUC bind already dropped by its guard).
+                        miscinit::ResetSessionIdentityForRetainedPark();
+                        // Back to the fresh-thread mode so the next claim's
+                        // init-processing asserts hold.
+                        miscinit::SetProcessingMode(
+                            types_core::init::ProcessingMode::InitProcessing,
+                        );
+                        ipc::reset_exit_state_for_retained_park();
+                        let (tx2, rx2) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
+                        POPULATION.fetch_add(1, Relaxed);
+                        available().push(Standby {
+                            pid: task.child_pid,
+                            tx: tx2,
+                            db: init_small::wretain::retained_db(),
+                        });
+                        rx = rx2;
+                        continue;
+                    }
+                    // Rotation (retention off, task error, or partial park):
+                    // release whatever the park arms retained, then exit; the
+                    // reaper joins us through the announce.
+                    release_retained_identity(park_epoch);
+                    break;
+                }
+                Err(_) => {
+                    // Retired while parked (maintain shrink / flush) or
+                    // never claimed: release any retained identity, drop our
+                    // reaper entry (nothing announced this wake), and exit.
+                    release_retained_identity(CRASH_EPOCH.load(Relaxed));
+                    init_small::wretain::clear_identity();
+                    POPULATION.fetch_sub(1, Relaxed);
+                    let mut t =
+                        super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(i) = t.iter().position(|(p, _)| *p == thread_key) {
+                        t.swap_remove(i);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Population note: a retiring standby that was parked is popped by
+    // maintain/flush (which decrement POPULATION), then wakes here and
+    // decrements again — but its park had incremented once beyond the
+    // dispatch decrement, so the count balances. A never-claimed retiree was
+    // only counted at spawn; maintain/flush's decrement plus this one would
+    // double-count, which the park/dispatch pairing prevents: every pop
+    // (dispatch, maintain, flush) decrements exactly once and every push
+    // (spawn, park) increments exactly once, and this arm runs only after a
+    // pop with no matching push.
+    // Ordering: sinval cleanup keys off MyProcNumber, which ProcKill clears,
+    // so it must run first — same relative order proc_exit's LIFO gives them.
+    fn release_retained_identity(park_epoch: u64) {
+        if CRASH_EPOCH.load(Relaxed) != park_epoch {
+            // Shared memory was (or is being) reset; the slots this identity
+            // points at are reconstructed wholesale. Abandon, don't touch.
+            return;
+        }
+        if init_small::wretain::sinval_retained() || init_small::wretain::identity_held() {
+            sinval::CleanupInvalidationState()
+                .expect("CleanupInvalidationState failed releasing retained identity");
+        }
+        if init_small::wretain::proc_retained() || init_small::wretain::identity_held() {
+            lmgr_proc::ProcKill(0, 0);
+        }
+        init_small::wretain::clear_identity();
     }
 
     /// parallel_pool_dispatch seam impl. Runs on the registering backend's
@@ -477,8 +614,8 @@ pub mod wpool {
     /// into the registry critical section (it would leak the slot's
     /// parallel_register_count admission charge): contain it and report a
     /// miss so the caller takes the postmaster spawn path.
-    pub fn dispatch(slot: i32, generation: u64) -> i32 {
-        match std::panic::catch_unwind(|| dispatch_inner(slot, generation)) {
+    pub fn dispatch(slot: i32, generation: u64, dboid: Oid) -> i32 {
+        match std::panic::catch_unwind(|| dispatch_inner(slot, generation, dboid)) {
             Ok(pid) => pid,
             Err(_) => {
                 eprintln!(
@@ -490,9 +627,22 @@ pub mod wpool {
         }
     }
 
-    fn dispatch_inner(slot: i32, generation: u64) -> i32 {
+    fn dispatch_inner(slot: i32, generation: u64, dboid: Oid) -> i32 {
         loop {
-            let Some(sb) = available().pop() else { return 0 };
+            // Prefer a standby whose retained caches match the task's
+            // database, then a fresh one; a mismatched standby stays parked
+            // (its warmth is only legal for its own db).
+            let sb = {
+                let mut avail = available();
+                let idx = avail
+                    .iter()
+                    .position(|s| s.db == dboid)
+                    .or_else(|| avail.iter().position(|s| s.db == InvalidOid));
+                match idx {
+                    Some(i) => avail.swap_remove(i),
+                    None => return 0,
+                }
+            };
             POPULATION.fetch_sub(1, Relaxed);
             let Some(child_slot) =
                 pmchild_seams::assign_postmaster_child_slot::call(BackendType::BgWorker)
@@ -501,20 +651,35 @@ pub mod wpool {
                 available().push(sb);
                 return 0;
             };
-            pmchild_seams::set_child_pid::call(child_slot, sb.pid);
+            // Fresh per-task pid: the previous task's exit announce may still
+            // be queued at the postmaster; reusing its pid would let the
+            // reaper's cleanup land on the new task.
+            let task_pid = super::reserve_child_pid();
+            pmchild_seams::set_child_pid::call(child_slot, task_pid);
             let task = StandbyTask {
+                child_pid: task_pid,
                 child_slot,
                 startup_data: StartupData::BgWorker(BgWorkerStartupData { slot, generation }),
             };
             match sb.tx.send(task) {
                 Ok(()) => {
                     bgworker::gtrace("w.pool.dispatch");
-                    return sb.pid;
+                    return task_pid;
                 }
                 Err(_) => {
                     pmchild_seams::release_postmaster_child_slot::call(child_slot);
                 }
             }
+        }
+    }
+
+    fn rekey_child_thread(old_pid: pid_t, new_pid: pid_t) {
+        if old_pid == new_pid {
+            return;
+        }
+        let mut t = super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = t.iter_mut().find(|(p, _)| *p == old_pid) {
+            entry.0 = new_pid;
         }
     }
 }

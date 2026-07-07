@@ -35,6 +35,8 @@ snapmgr = { path = "../../time/snapmgr" }
 resowner = { path = "../../resowner/resowner" }
 fd = { path = "../../../storage/file/fd" }
 smgr = { path = "../../../storage/smgr/smgr" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+inval_seams = { path = "../../cache/inval_seams" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 table = { path = "../../../access/table/table" }
 genam = { path = "../../../access/index/genam" }

@@ -30,6 +30,8 @@ postmaster_seams = { path = "../postmaster_seams" }
 interrupt = { path = "../interrupt" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 ipc = { path = "../../storage/ipc/ipc" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+sinval = { path = "../../storage/ipc/sinval" }
 libc = "0.2"
 
 syslogger_seams = { path = "../syslogger_seams" }

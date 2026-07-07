@@ -23,5 +23,5 @@ seam_core::seam!(
     // standby is available (caller falls back to the postmaster spawn path).
     // Called under the bgworker registry lock; lock order registry -> pool ->
     // pmchild matches BackgroundWorkerStateChange's registry -> pmchild.
-    pub fn parallel_pool_dispatch(slot: i32, generation: u64) -> i32
+    pub fn parallel_pool_dispatch(slot: i32, generation: u64, dboid: types_core::Oid) -> i32
 );
