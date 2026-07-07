@@ -115,6 +115,7 @@ pub fn StoreAttrDefault<'mcx>(
         rel.rd_id,
         pg_depend::DependencyType::Normal,
         pg_depend::DependencyType::Normal,
+        false,
     )?;
 
     Ok(attrdef_oid)

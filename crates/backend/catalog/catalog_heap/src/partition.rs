@@ -99,6 +99,8 @@ pub fn StorePartitionKey<'mcx>(
             &referenced,
             &myself,
             pg_depend::DependencyType::Internal,
+            // C StorePartitionKey (heap.c): reverse the self-deps.
+            true,
         )?;
     }
     if let Some(exprs_node) = exprs_node {
@@ -109,6 +111,8 @@ pub fn StorePartitionKey<'mcx>(
             rel.rd_id,
             pg_depend::DependencyType::Normal,
             pg_depend::DependencyType::Internal,
+            // C StorePartitionKey (heap.c): reverse the self-deps.
+            true,
         )?;
     }
 

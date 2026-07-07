@@ -783,6 +783,7 @@ pub fn index_create<'mcx>(
                 &myself,
                 &mut addrs,
                 pg_depend::DependencyType::Auto,
+                false,
             )?;
         }
 
@@ -835,6 +836,7 @@ pub fn index_create<'mcx>(
                 heapRelationId,
                 pg_depend::DependencyType::Normal,
                 pg_depend::DependencyType::Auto,
+                false,
             )?;
         }
         if !indexInfo.ii_Predicate.is_nil() {
@@ -846,6 +848,7 @@ pub fn index_create<'mcx>(
                 heapRelationId,
                 pg_depend::DependencyType::Normal,
                 pg_depend::DependencyType::Auto,
+                false,
             )?;
         }
     } else {

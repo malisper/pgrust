@@ -304,6 +304,7 @@ fn record_check_expr_dependencies<'mcx>(
         relid,
         pg_depend::DependencyType::Normal,
         pg_depend::DependencyType::Normal,
+        false,
     )
 }
 
