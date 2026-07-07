@@ -1031,13 +1031,15 @@ fn build_window_func<'mcx>(
         _ => true,
     };
     if srf_added {
+        // C errpositions at exprLocation(pstate->p_last_srf), the inner SRF.
+        let srf_location = pstate.p_last_srf.map(nodes_core::expr_location).unwrap_or(-1);
         return Err(feature_not_supported(
             pstate,
             "window function calls cannot contain set-returning function calls".into(),
             Some(
                 "You might be able to move the set-returning function into a LATERAL FROM item.",
             ),
-            location,
+            srf_location,
         ));
     }
     if retset {
@@ -1525,9 +1527,8 @@ fn func_get_detail<'mcx>(
     })
 }
 
-// check_srf_call_placement. DIVERGENCE: the nested-SRF errposition points at
-// this call, not the inner SRF (exprLocation walker unported).
-fn check_srf_call_placement(
+// check_srf_call_placement.
+pub fn check_srf_call_placement(
     pstate: &mut ParseState<'_, '_>,
     last_srf: Option<Node<'_>>,
     location: ParseLoc,
@@ -1550,11 +1551,14 @@ fn check_srf_call_placement(
             };
             if !same {
                 let encoding = mbutils::GetDatabaseEncoding();
+                // C errpositions at exprLocation(pstate->p_last_srf), the
+                // inner SRF.
+                let srf_location = pstate.p_last_srf.map(nodes_core::expr_location).unwrap_or(-1);
                 return Err(Box::new(
                     ereport(ERROR)
                         .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("set-returning functions must appear at top level of FROM")
-                        .errposition(parser_errposition(pstate, location, encoding))
+                        .errposition(parser_errposition(pstate, srf_location, encoding))
                         .into_error()
                         .with_error_location(ErrorLocation::new(
                             "parse_func.c",

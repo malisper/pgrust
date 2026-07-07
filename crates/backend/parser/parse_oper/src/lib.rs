@@ -463,18 +463,14 @@ pub fn make_op<'mcx>(
 
     let opretset = lsyscache::get_func_retset(op.shape.oprcode)?;
     if opretset {
-        let _ = last_srf;
-        panic!(
-            "make_op (parse_oper.c): set-returning operator needs check_srf_call_placement \
-             (parse_func.c) — unit backend-parser-func"
-        );
+        parse_func::check_srf_call_placement(pstate, last_srf, location)?;
     }
 
     let args = match ltree {
         Some(l) => NodeList::make2(mcx, l, rtree)?,
         None => NodeList::make1(mcx, rtree)?,
     };
-    Node::mk(
+    let result = Node::mk(
         mcx,
         OpExpr {
             opno: op.oid,
@@ -486,7 +482,11 @@ pub fn make_op<'mcx>(
             args,
             location,
         },
-    )
+    )?;
+    if opretset {
+        pstate.p_last_srf = Some(result);
+    }
+    Ok(result)
 }
 
 fn coerce_arg<'mcx>(
