@@ -186,6 +186,7 @@ fn make_portal<'mcx>(mcx: Mcx<'mcx>, formats: &[i16]) -> Portal<'mcx> {
         name: mcx::PgString::new_in(mcx),
         prepStmtName: None,
         portalContext: None,
+        plansource: ::types_portal::PlanSourceHandle::NULL,
         planContext: core::ptr::null_mut(),
         resowner: ResourceOwner::default(),
         cleanup: PortalCleanupHook::None,
