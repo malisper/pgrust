@@ -970,6 +970,7 @@ pub fn exec_build_hash32_from_exprs<'mcx>(
     collations: &[Oid],
     init_value: u32,
     params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
     let num_cols = hash_exprs.len();
     debug_assert!(hash_fn_oids.len() == num_cols && collations.len() == num_cols);
@@ -1038,7 +1039,9 @@ pub fn exec_build_hash32_from_exprs<'mcx>(
 
         // SAFETY: arg 0 of the frame's freshly allocated 1-arg fcinfo.
         let arg_out = OutRef(unsafe { crate::steps::arg_slot_of(call.fcinfo, 0) });
-        init_expr_rec(k, &mut state, mcx, arg_out, None, params, None)?;
+        // C ExecBuildHash32Expr compiles key exprs with the parent planstate,
+        // so SubPlans are legal in hash keys.
+        init_expr_rec(k, &mut state, mcx, arg_out, None, params, sub)?;
 
         let out = if i == num_cols - 1 {
             state.result_out()

@@ -852,15 +852,19 @@ pub fn exec_init_hash<'mcx>(
     collations: &[Oid],
 ) -> PgResult<HashState<'mcx>> {
     let mcx = estate.es_query_cxt;
-    let hash_expr = exec_build_hash32_from_exprs(
-        mcx,
-        &inner_desc,
-        &node.hashkeys,
-        inner_hashfn_oids,
-        collations,
-        0,
-        estate.param_bind(),
-    )?;
+    let params = estate.param_bind();
+    let hash_expr = ::executils::with_subplan_compile_env(estate, |env| {
+        exec_build_hash32_from_exprs(
+            mcx,
+            &inner_desc,
+            &node.hashkeys,
+            inner_hashfn_oids,
+            collations,
+            0,
+            params,
+            env,
+        )
+    })?;
     let hash_tuple_slot =
         estate.exec_init_extra_tuple_slot(Some(inner_desc.clone()), TupleSlotKind::MinimalTuple);
     let ps_ExprContext = estate.exec_assign_expr_context();
