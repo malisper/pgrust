@@ -465,7 +465,7 @@ fn exec_init_sub_plan_expr<'mcx>(
     let nested_rtable = ::executils::subplan_env_rtable(estate);
     let nested_env = ::execexpr::SubplanCompileEnv {
         estate: NonNull::from(&mut *estate).cast(),
-        init: subplan_expr_init_hook,
+        init: Some(subplan_expr_init_hook),
         agg,
         rtable: Some(nested_rtable),
         parent_subplan_tlist: None,
@@ -625,7 +625,7 @@ fn init_hashed_state<'mcx>(
     let nested_rtable = ::executils::subplan_env_rtable(estate);
     let nested_env = ::execexpr::SubplanCompileEnv {
         estate: NonNull::from(&mut *estate).cast(),
-        init: subplan_expr_init_hook,
+        init: Some(subplan_expr_init_hook),
         agg,
         rtable: Some(nested_rtable),
         parent_subplan_tlist: None,
