@@ -2010,18 +2010,33 @@ fn coerce_type_typmod<'mcx>(
     location: ParseLoc,
     hideInputCoercion: bool,
 ) -> PgResult<Node<'mcx>> {
-    if targetTypMod < 0 || targetTypMod == expr_typmod(node) {
-        return Ok(node);
-    }
-
-    let (pathtype, funcId) = find_typmod_coercion_function(targetTypeId)?;
-    if pathtype == COERCION_PATH_NONE {
+    if targetTypMod == expr_typmod(node) {
         return Ok(node);
     }
 
     if hideInputCoercion {
         hide_coercion_node(node);
     }
+
+    // A negative typmod needs no coercion step, but C still applies a
+    // RelabelType so the expression exposes the intended typmod.
+    let (pathtype, funcId) = if targetTypMod < 0 {
+        (COERCION_PATH_NONE, InvalidOid)
+    } else {
+        find_typmod_coercion_function(targetTypeId)?
+    };
+    if pathtype == COERCION_PATH_NONE {
+        return nodes_core::node_funcs::apply_relabel_type(
+            mcx,
+            node,
+            targetTypeId,
+            targetTypMod,
+            nodes_core::node_funcs::expr_collation(node),
+            cformat,
+            location,
+        );
+    }
+
     build_coercion_expression(
         mcx, node, pathtype, funcId, targetTypeId, targetTypMod, ccontext, cformat, location,
     )

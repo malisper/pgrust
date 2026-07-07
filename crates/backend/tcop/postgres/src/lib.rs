@@ -45,6 +45,65 @@ pub fn init_seams() {
     postgres_seams::set_plan_disabling_options::set(set_plan_disabling_options);
     postgres_seams::get_stats_option_name::set(get_stats_option_name);
     postgres_seams::process_postgres_switches::set(switches::process_postgres_switches);
+    guc_tables::hooks::check_restrict_nonsystem_relation_kind
+        .install(check_restrict_nonsystem_relation_kind);
+    guc_tables::hooks::assign_restrict_nonsystem_relation_kind
+        .install(assign_restrict_nonsystem_relation_kind);
+    guc_tables::vars::restrict_nonsystem_relation_kind_string.install(
+        guc_tables::GucVarAccessors {
+            get: restrict_nonsystem_relation_kind_string_get,
+            set: restrict_nonsystem_relation_kind_string_set,
+        },
+    );
+}
+
+guc_tables::session_guc_string!(
+    RESTRICT_NONSYSTEM_RELATION_KIND_STRING,
+    restrict_nonsystem_relation_kind_string_get,
+    restrict_nonsystem_relation_kind_string_set,
+    Some("")
+);
+
+// GUC check_hook for restrict_nonsystem_relation_kind (postgres.c); the
+// derived flag word lives in guc_tables::backing for the rewriter.
+fn check_restrict_nonsystem_relation_kind(
+    newval: &mut Option<String>,
+    extra: &mut Option<guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    let value = newval.clone().unwrap_or_default();
+    let ctx = mcx::MemoryContext::new("check_restrict_nonsystem_relation_kind");
+    let Some(elemlist) = varlena::split_identifier_string(
+        ctx.mcx(),
+        &value,
+        b',',
+        mbutils::GetDatabaseEncoding(),
+    )?
+    else {
+        guc::GUC_check_errdetail("List syntax is invalid.");
+        return Ok(false);
+    };
+    let mut flags: i32 = 0;
+    for tok in &elemlist {
+        if tok.eq_ignore_ascii_case("view") {
+            flags |= guc_tables::consts::RESTRICT_RELKIND_VIEW;
+        } else if tok.eq_ignore_ascii_case("foreign-table") {
+            flags |= guc_tables::consts::RESTRICT_RELKIND_FOREIGN_TABLE;
+        } else {
+            guc::GUC_check_errdetail(format!("Unrecognized key word: \"{tok}\"."));
+            return Ok(false);
+        }
+    }
+    *extra = Some(Box::new(flags));
+    Ok(true)
+}
+
+fn assign_restrict_nonsystem_relation_kind(
+    _newval: Option<&str>,
+    extra: Option<&guc_tables::GucHookExtra>,
+) {
+    let flags = extra.and_then(|e| e.downcast_ref::<i32>()).copied().unwrap_or(0);
+    guc_tables::backing::set_restrict_nonsystem_relation_kind(flags);
 }
 
 fn postgres_main_seam(dbname: &str, username: &str) -> ! {

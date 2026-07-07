@@ -3627,10 +3627,42 @@ fn step_sql_value_function(
             }
             Datum::from_usize(scratch.as_ptr() as usize)
         }
-        other => panic!(
-            "execexpr EEOP_SQLVALUEFUNCTION: op {other:?} unported \
-             (CURRENT_CATALOG/CURRENT_SCHEMA — dbcommands/namespace lanes)"
-        ),
+        Op::SVFOP_CURRENT_CATALOG => {
+            let dbname = ::dbcommands_seams::get_database_name::call(
+                ::init_small::globals::MyDatabaseId(),
+            )?
+            .expect("current database has a pg_database row");
+            let mut name = ::types_tuple::NameData::default();
+            name.namestrcpy(&dbname);
+            // SAFETY: compile-allocated NameData-sized image slot
+            // owned by this step (steps.rs note).
+            unsafe {
+                scratch.as_ptr().cast::<::types_tuple::NameData>().write(name);
+            }
+            Datum::from_usize(scratch.as_ptr() as usize)
+        }
+        Op::SVFOP_CURRENT_SCHEMA => {
+            // C current_schema (name.c): first search-path schema, or NULL
+            // when the path resolves empty.
+            let cx = ::mcx::MemoryContext::new("current_schema");
+            let path = ::namespace_seams::fetch_search_path::call(cx.mcx(), false)?;
+            let Some(&first) = path.first() else {
+                write_out(out, Datum::null(), true);
+                return Ok(());
+            };
+            let Some(nspname) = ::lsyscache::misc::get_namespace_name(cx.mcx(), first)? else {
+                write_out(out, Datum::null(), true);
+                return Ok(());
+            };
+            let mut name = ::types_tuple::NameData::default();
+            name.namestrcpy(&nspname);
+            // SAFETY: compile-allocated NameData-sized image slot
+            // owned by this step (steps.rs note).
+            unsafe {
+                scratch.as_ptr().cast::<::types_tuple::NameData>().write(name);
+            }
+            Datum::from_usize(scratch.as_ptr() as usize)
+        }
     };
     write_out(out, value, false);
     Ok(())

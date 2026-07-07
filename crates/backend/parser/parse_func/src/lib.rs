@@ -2020,6 +2020,7 @@ fn lookup_func_name_internal(
     parts: &[&str],
     nargs: i16,
     argtypes: &[Oid],
+    include_out_arguments: bool,
     missing_ok: bool,
 ) -> PgResult<Result<Oid, bool>> {
     // Err(true) = ambiguous, Err(false) = no such function.
@@ -2031,13 +2032,17 @@ fn lookup_func_name_internal(
         &[],
         false,
         false,
-        objtype == ObjectType::OBJECT_PROCEDURE,
+        include_out_arguments,
         missing_ok,
     )?;
     let mut result = InvalidOid;
     for cand in clist.iter() {
         if nargs > 0 && cand.args.as_slice()[..nargs as usize] != argtypes[..nargs as usize] {
             continue;
+        }
+        // FuncnameGetCandidates duplicate marker (oid cleared).
+        if !OidIsValid(cand.oid) {
+            return Ok(Err(true));
         }
         let prokind = lsyscache::get_func_prokind(cand.oid)?;
         match objtype {
@@ -2094,7 +2099,7 @@ pub fn LookupFuncName(
 ) -> PgResult<Oid> {
     let mut buf = [""; 4];
     let parts = name_parts(funcname, &mut buf);
-    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, missing_ok)? {
+    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, false, missing_ok)? {
         Ok(oid) => Ok(oid),
         Err(true) => Err(func_name_not_unique(parts)),
         Err(false) => {
@@ -2152,7 +2157,44 @@ pub fn LookupFuncWithArgs(
     // With an argument list the objtype filter is disabled (OBJECT_ROUTINE):
     // "object is of wrong type" beats "object doesn't exist".
     let lookup_objtype = if args_unspecified { objtype } else { OBJECT_ROUTINE };
-    match lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids, missing_ok)? {
+    let mut lookup =
+        lookup_func_name_internal(lookup_objtype, parts, nargs, &argoids, false, missing_ok)?;
+
+    // Second lookup considering all arguments (proallargtypes), for
+    // PROCEDURE/ROUTINE with a mode-markerless argument list.
+    if matches!(objtype, OBJECT_PROCEDURE | OBJECT_ROUTINE)
+        && !func.objfuncargs.is_nil()
+        && lookup != Err(true)
+    {
+        let have_param_mode = func.objfuncargs.iter().any(|n| {
+            n.as_variant::<types_nodes::parsenodes::FunctionParameter>()
+                .expect("objfuncargs holds FunctionParameter nodes")
+                .mode
+                != types_nodes::parsenodes::FunctionParameterMode::FUNC_PARAM_DEFAULT
+        });
+        if !have_param_mode {
+            debug_assert_eq!(func.objfuncargs.len(), argcount);
+            match lookup_func_name_internal(
+                objtype,
+                parts,
+                argcount as i16,
+                &argoids,
+                true,
+                missing_ok,
+            )? {
+                Ok(poid) => {
+                    lookup = match lookup {
+                        Ok(oid) if oid != poid => Err(true),
+                        _ => Ok(poid),
+                    };
+                }
+                Err(true) => lookup = Err(true),
+                Err(false) => {}
+            }
+        }
+    }
+
+    match lookup {
         Ok(oid) => {
             let prokind = lsyscache::get_func_prokind(oid)?;
             match objtype {
@@ -2287,7 +2329,7 @@ fn lookup_func_name_seam(
     argtypes: &[Oid],
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, missing_ok)? {
+    match lookup_func_name_internal(ObjectType::OBJECT_FUNCTION, parts, nargs, argtypes, false, missing_ok)? {
         Ok(oid) => Ok(oid),
         Err(true) => Err(func_name_not_unique(parts)),
         Err(false) => {

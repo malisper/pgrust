@@ -490,22 +490,7 @@ pub fn get_cheapest_parallel_safe_total_inner(
     })
 }
 
-pub struct SubPathKeyDesc<'mcx> {
-    pub has_volatile: bool,
-    pub sortref: u32,
-    pub members: PgVec<'mcx, (Node<'mcx>, u32)>,
-    pub opfamilies: PgVec<'mcx, u32>,
-    pub collation: u32,
-    pub pk_opfamily: u32,
-    pub pk_cmptype: i32,
-    pub pk_nulls_first: bool,
-}
-
-pub struct SubTle<'mcx> {
-    pub expr: Node<'mcx>,
-    pub resno: i32,
-    pub sortgroupref: u32,
-}
+pub use types_pathnodes::run::{SubPathKeyDesc, SubPathKeyMember, SubTle};
 
 // Subquery pathkeys reference the subroot's EC arena; this materializes what
 // convert_subquery_pathkeys reads from them so the conversion can run against
@@ -519,11 +504,14 @@ pub fn extract_subquery_pathkey_descs<'mcx>(
     for pk in run.root.path(subpath).base().pathkeys.iter() {
         let ec_id = pk.pk_eclass.expect("canonical pathkey has an eclass");
         let ec = run.root.ec(ec_id);
-        let mut members: PgVec<'mcx, (Node<'mcx>, u32)> = PgVec::new_in(mcx);
+        let mut members: PgVec<'mcx, SubPathKeyMember<'mcx>> = PgVec::new_in(mcx);
         for &em_id in ec.ec_members.iter() {
             let em = run.root.em(em_id);
             debug_assert!(!em.em_is_child);
-            members.push((*run.root.expr_node(em.em_expr), em.em_datatype));
+            members.push(SubPathKeyMember {
+                expr: *run.root.expr_node(em.em_expr),
+                datatype: em.em_datatype,
+            });
         }
         descs.push(SubPathKeyDesc {
             has_volatile: ec.ec_has_volatile,
@@ -602,7 +590,7 @@ pub fn convert_subquery_pathkeys<'mcx>(
                 .expect("volatile pathkey sortref has a tlist entry");
             if let Some(outer_var) = find_var_for_subquery_tle(run, rel, tle)? {
                 debug_assert_eq!(desc.members.len(), 1);
-                let sub_datatype = desc.members[0].1;
+                let sub_datatype = desc.members[0].datatype;
                 if let Some(outer_ec) = crate::equivclass::get_eclass_for_sort_expr(
                     run,
                     outer_var,
@@ -624,7 +612,8 @@ pub fn convert_subquery_pathkeys<'mcx>(
             }
         } else {
             let mut best_score = -1i64;
-            for &(sub_expr, sub_expr_type) in desc.members.iter() {
+            for m in desc.members.iter() {
+                let (sub_expr, sub_expr_type) = (m.expr, m.datatype);
                 for tle in subquery_tlist {
                     let Some(outer_var) = find_var_for_subquery_tle(run, rel, tle)? else {
                         continue;

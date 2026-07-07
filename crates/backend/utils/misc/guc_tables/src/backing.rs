@@ -7,6 +7,16 @@ use std::sync::RwLock;
 #[allow(unused_imports)]
 use crate::session_guc_string as session_string_var;
 
+// C: int restrict_nonsystem_relation_kind (postgres.c). The string GUC's
+// hooks live in tcop::postgres; the derived flag word lives here so the
+// rewriter reads it without a tcop dependency.
+crate::session_guc_int!(
+    RESTRICT_NONSYSTEM_RELATION_KIND,
+    restrict_nonsystem_relation_kind,
+    set_restrict_nonsystem_relation_kind,
+    0
+);
+
 // Session-settable scalars, one cluster: hot per-query readers (tcop debug/
 // log flags) share a single TLS base per function.
 crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:

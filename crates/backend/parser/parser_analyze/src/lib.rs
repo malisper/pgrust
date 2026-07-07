@@ -267,21 +267,19 @@ fn transformOptionalSelectInto<'mcx>(
         let has_into = leftmost.intoClause.is_some();
         let is_setop = stmt.op != types_nodes::parsenodes::SetOperation::SETOP_NONE;
         if has_into {
-            if is_setop {
+            let into = if is_setop {
                 // C NULLs the leftmost's intoClause through its pointer;
-                // larg is a shared borrow here, so the clear cannot reach it.
-                panic!(
-                    "transformOptionalSelectInto (analyze.c): SELECT INTO on a \
-                     set-operation tree needs mutable larg access — \
-                     unit backend-parser-analyze"
-                );
-            }
-            // SAFETY: raw tree owned by this analysis; no derived reference
-            // is live (leftmost/stmt dropped above).
-            let into = unsafe {
-                parse_tree.with_mut::<SelectStmt, _>(|s| s.intoClause.take())
-            }
-            .expect("node checked as SelectStmt");
+                // larg is a shared borrow here, so the setop transform skips
+                // the consumed IntoClause by node identity instead.
+                let into = leftmost.intoClause.expect("has_into");
+                pstate.p_consumed_into = Some(into);
+                Some(into)
+            } else {
+                // SAFETY: raw tree owned by this analysis; no derived
+                // reference is live (leftmost/stmt dropped above).
+                unsafe { parse_tree.with_mut::<SelectStmt, _>(|s| s.intoClause.take()) }
+                    .expect("node checked as SelectStmt")
+            };
             let mut ctas = Node::build::<types_nodes::rawnodes::CreateTableAsStmt>(mcx)?;
             ctas.query = Some(parse_tree);
             ctas.into = into;
@@ -978,7 +976,9 @@ fn transformSelectStmt<'mcx>(
     }
 
     if let Some(into) = stmt.intoClause {
-        return Err(select_into_error(pstate, into, "SELECT ... INTO is not allowed here"));
+        if !pstate.p_consumed_into.is_some_and(|c| c.ptr_eq(into)) {
+            return Err(select_into_error(pstate, into, "SELECT ... INTO is not allowed here"));
+        }
     }
 
     // C aliases the raw lists into pstate; header-clone until a shared-list

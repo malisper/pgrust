@@ -149,6 +149,10 @@ pub struct ParseState<'p, 'mcx> {
     pub p_last_srf: Option<Node<'mcx>>,
     pub p_ref_hook_state: ParseRefHookState<'p>,
     pub p_pre_columnref_hook: PreColumnRefHook,
+    // C's transformOptionalSelectInto (analyze.c) NULLs the leftmost setop
+    // member's intoClause through its pointer; larg is a shared borrow here,
+    // so the consumed IntoClause is skipped by node identity instead.
+    pub p_consumed_into: Option<Node<'mcx>>,
 }
 
 // C's p_pre_columnref_hook fn pointer as a closed installer set (rule-4
@@ -197,12 +201,14 @@ pub fn make_parsestate<'p, 'mcx>(
         p_last_srf: None,
         p_ref_hook_state: ParseRefHookState::None,
         p_pre_columnref_hook: PreColumnRefHook::None,
+        p_consumed_into: None,
     };
     if let Some(parent) = parent {
         pstate.p_sourcetext = parent.p_sourcetext;
         pstate.p_pre_columnref_hook = parent.p_pre_columnref_hook;
         pstate.p_ref_hook_state = parent.p_ref_hook_state.clone();
         pstate.p_queryEnv = parent.p_queryEnv;
+        pstate.p_consumed_into = parent.p_consumed_into;
     }
     pstate
 }

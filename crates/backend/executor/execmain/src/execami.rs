@@ -7,9 +7,8 @@ use crate::noderesult::ResultState;
 use crate::procnode::PlanStateNode;
 
 /// `ExecSupportsBackwardScan` (execAmi.c). Unlanded node types take C's
-/// default-false arms; the true-returning unlanded ones (Append, TidScan,
-/// SubqueryScan…) cannot appear in a plan today. Material/CteScan match C's
-/// `true`; their runtime backward gaps are loud panics, never silent reads.
+/// default-false arms. Material/CteScan match C's `true`; their runtime
+/// backward gaps are loud panics, never silent reads.
 pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
     let Some(node) = node else { return false };
     let plan = node.as_plan().expect("plan-tree node has a Plan prefix");
@@ -32,7 +31,16 @@ pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
         | NodeTag::T_CteScan
         | NodeTag::T_Material
         | NodeTag::T_Sort => true,
-        NodeTag::T_Limit => exec_supports_backward_scan(plan.lefttree),
+        NodeTag::T_Append => {
+            let a = node.as_append().expect("T_Append");
+            // With async, tuples may be interleaved, so can't back up.
+            a.nasyncplans == 0
+                && a.appendplans.iter().all(|p| exec_supports_backward_scan(Some(p)))
+        }
+        NodeTag::T_SubqueryScan => {
+            exec_supports_backward_scan(node.as_subquery_scan().expect("T_SubqueryScan").subplan)
+        }
+        NodeTag::T_LockRows | NodeTag::T_Limit => exec_supports_backward_scan(plan.lefttree),
         _ => false,
     }
 }

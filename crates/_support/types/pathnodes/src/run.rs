@@ -74,6 +74,41 @@ pub struct SubrootState<'mcx> {
     pub processed_tlist: Option<&'mcx NodeList<'mcx>>,
 }
 
+
+// Materialized subquery-pathkey inputs (planner pathkeys.rs extracts these
+// from a subroot before it is parked; convert_subquery_pathkeys replays them
+// against the outer root — C follows pointers across PlannerInfos instead).
+pub struct SubPathKeyMember<'mcx> {
+    pub expr: types_nodes::Node<'mcx>,
+    pub datatype: u32,
+}
+
+pub struct SubPathKeyDesc<'mcx> {
+    pub has_volatile: bool,
+    pub sortref: u32,
+    pub members: PgVec<'mcx, SubPathKeyMember<'mcx>>,
+    pub opfamilies: PgVec<'mcx, u32>,
+    pub collation: u32,
+    pub pk_opfamily: u32,
+    pub pk_cmptype: i32,
+    pub pk_nulls_first: bool,
+}
+
+pub struct SubTle<'mcx> {
+    pub expr: types_nodes::Node<'mcx>,
+    pub resno: i32,
+    pub sortgroupref: u32,
+}
+
+// Per-CTE-plan pathkey inputs (ctepath->pathkeys + cteplan->targetlist in
+// C's set_cte_pathlist), captured by ss_process_ctes before the CTE's root
+// is parked.
+pub struct CteSubpathInfo<'mcx> {
+    pub plan_id: i32,
+    pub pathkey_descs: PgVec<'mcx, SubPathKeyDesc<'mcx>>,
+    pub tlist: PgVec<'mcx, SubTle<'mcx>>,
+}
+
 pub struct PlannerRun<'mcx> {
     pub mcx: Mcx<'mcx>,
     pub root: PlannerInfo<'mcx>,
@@ -113,6 +148,8 @@ pub struct PlannerRun<'mcx> {
     /// Append's part_prune_index indexes here until setrefs registers the
     /// entry into glob.part_prune_infos).
     pub pending_part_prune_infos: NodeList<'mcx>,
+    /// Pathkey inputs per materialized CTE plan (see CteSubpathInfo).
+    pub cte_subpath_infos: PgVec<'mcx, CteSubpathInfo<'mcx>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -125,10 +162,15 @@ mcx::forget_safe_struct!(
         append_relations, part_prune_infos, relation_oids, inval_items,
         param_exec_types, all_relids, has_alternative_subplans, prunable_relids },
     SubrootState<'_> { root, processed_tlist },
+    SubPathKeyMember<'_> { expr, datatype },
+    SubPathKeyDesc<'_> { has_volatile, sortref, members, opfamilies,
+        collation, pk_opfamily, pk_cmptype, pk_nulls_first },
+    SubTle<'_> { expr, resno, sortgroupref },
+    CteSubpathInfo<'_> { plan_id, pathkey_descs, tlist },
     PlannerRun<'_> { mcx, root, glob, queries, processed_tlist,
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
-        rowmarks, gset_data, pending_part_prune_infos },
+        rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -150,6 +192,7 @@ impl<'mcx> PlannerRun<'mcx> {
             rowmarks: PgVec::new_in(mcx),
             gset_data: None,
             pending_part_prune_infos: NodeList::nil(),
+            cte_subpath_infos: PgVec::new_in(mcx),
         }
     }
 

@@ -107,7 +107,7 @@ fn identify_valid_subplans<'mcx>(
     Ok(())
 }
 
-// choose_next_subplan_locally (nodeAppend.c), forward arm.
+// choose_next_subplan_locally (nodeAppend.c).
 fn choose_next_subplan_locally<'mcx>(
     node: &mut AppendState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -119,7 +119,11 @@ fn choose_next_subplan_locally<'mcx>(
         whichplan = -1;
     }
     debug_assert!(whichplan >= -1 && whichplan <= node.as_nplans as i32);
-    let nextplan = node.as_valid_subplans.next_member(whichplan);
+    let nextplan = if estate.es_direction == ScanDirection::ForwardScanDirection {
+        node.as_valid_subplans.next_member(whichplan)
+    } else {
+        node.as_valid_subplans.prev_member(whichplan)
+    };
     if nextplan < 0 {
         return Ok(false);
     }
@@ -248,8 +252,10 @@ pub fn exec_append<'mcx, F>(
 where
     F: FnMut(&mut EStateData<'mcx>, usize) -> PgResult<Option<ExecSlotId>>,
 {
-    if estate.es_direction != ScanDirection::ForwardScanDirection {
-        panic!("ExecAppend (nodeAppend.c): backward Append scan not ported");
+    if estate.es_direction != ScanDirection::ForwardScanDirection
+        && !matches!(node.mode, ChooseMode::Local)
+    {
+        panic!("ExecAppend (nodeAppend.c): backward scan of a parallel Append");
     }
     if !node.as_begun {
         debug_assert!(node.as_whichplan == INVALID_SUBPLAN_INDEX);

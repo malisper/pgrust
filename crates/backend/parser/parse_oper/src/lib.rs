@@ -101,6 +101,14 @@ pub fn LookupOperName(
         return Ok(result);
     }
     if !noError {
+        if !OidIsValid(oprright) {
+            return Err(Box::new(
+                elog::ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("postfix operators are not supported".to_string())
+                    .into_error(),
+            ));
+        }
         let sig = op_signature_string(parts, oprleft, oprright)?;
         return Err(Box::new(
             elog::ereport(ERROR)

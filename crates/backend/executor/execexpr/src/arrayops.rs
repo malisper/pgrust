@@ -557,16 +557,21 @@ pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<Nul
         }
         let mut slots = crate::interp::EvalSlots::default();
         let r = crate::interp::exec_eval_expr(sub, &mut slots)?;
+        // By-ref results are copied out: builtin out/in scratch buffers
+        // (fc_textin's OutBuf) are overwritten by the next call through the
+        // same flinfo, and this loop accumulates before consuming.
         let v = if r.isnull {
             hasnulls = true;
             Datum::null()
+        } else if st.ret_typbyval {
+            r.value
         } else if st.ret_typlen == -1 {
             // PG_DETOAST_DATUM on the per-element result.
             let p = r.value.as_usize() as *const u8;
             // SAFETY: non-null by-ref varlena result.
             unsafe {
                 if ::types_tuple::varatt::varatt_is_4b_u(p) {
-                    r.value
+                    ::adt_scalar::datum_copy(mcx, r.value, false, -1)?
                 } else {
                     let raw =
                         core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p));
@@ -575,7 +580,7 @@ pub fn eval_array_coerce(st: &mut ArrayCoerceState, arrd: Datum) -> PgResult<Nul
                 }
             }
         } else {
-            r.value
+            ::adt_scalar::datum_copy(mcx, r.value, false, st.ret_typlen)?
         };
         out_values.push(v);
         out_nulls.push(r.isnull);
