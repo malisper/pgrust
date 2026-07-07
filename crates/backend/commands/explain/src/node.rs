@@ -54,7 +54,9 @@ pub fn ExplainPrintPlan<'mcx>(
     es.rtable = Some(&pstmt.rtable);
     let root = pstmt.planTree.expect("ExplainPrintPlan: PlannedStmt without planTree");
     let mut rels_used = Bitmapset::empty();
-    ExplainPreScanNode(mcx, root, &pstmt.subplans, es.qd, &mut rels_used)?;
+    let spctx =
+        SubPlanScanCtx { analyze: es.analyze, part_prune_infos: &pstmt.partPruneInfos };
+    ExplainPreScanNode(mcx, root, &pstmt.subplans, es.qd, spctx, &mut rels_used)?;
     let rtable_names = ruleutils::select_rtable_names_for_explain(mcx, &pstmt.rtable, &rels_used)?;
     let mut names: PgVec<'mcx, Option<&'mcx str>> = PgVec::new_in(mcx);
     for n in &rtable_names {
@@ -129,11 +131,22 @@ fn ExplainPrintSettings(es: &mut ExplainState<'_>) -> PgResult<()> {
     Ok(())
 }
 
+// The slice of ExecInitNode context the Plan-based subPlan reconstruction
+// needs: plain EXPLAIN runs under EXEC_FLAG_EXPLAIN_ONLY (index nodes bail
+// before building runtime keys, so indexqual SubPlans never init), and
+// Append/MergeAppend exec-pruning expressions init on the parent node.
+#[derive(Clone, Copy)]
+struct SubPlanScanCtx<'a, 'mcx> {
+    analyze: bool,
+    part_prune_infos: &'a NodeList<'mcx>,
+}
+
 fn ExplainPreScanNode<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     subplans: &types_nodes::list::OptNodeList<'mcx>,
     qd: types_portal::QueryDescHandle,
+    ctx: SubPlanScanCtx<'_, 'mcx>,
     rels_used: &mut Bitmapset<'mcx>,
 ) -> PgResult<()> {
     match node.node_tag() {
@@ -185,7 +198,7 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_SubqueryScan => {
             let sq = node.as_subquery_scan().unwrap();
             rels_used.add_member(mcx, sq.scan.scanrelid as i32)?;
-            ExplainPreScanNode(mcx, sq.subplan.expect("SubqueryScan subplan"), subplans, qd, rels_used)?;
+            ExplainPreScanNode(mcx, sq.subplan.expect("SubqueryScan subplan"), subplans, qd, ctx, rels_used)?;
         }
         NodeTag::T_ModifyTable => {
             let mt = node.as_modify_table().unwrap();
@@ -222,13 +235,14 @@ fn ExplainPreScanNode<'mcx>(
                             children.nth(i as usize),
                             subplans,
                             qd,
+                            ctx,
                             rels_used,
                         )?;
                     }
                 }
                 None => {
                     for child in children {
-                        ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
+                        ExplainPreScanNode(mcx, child, subplans, qd, ctx, rels_used)?;
                     }
                 }
             }
@@ -236,12 +250,12 @@ fn ExplainPreScanNode<'mcx>(
         // planstate_tree_walker's special-member leg for bitmap combiners.
         NodeTag::T_BitmapAnd => {
             for child in &node.as_bitmap_and().unwrap().bitmapplans {
-                ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
+                ExplainPreScanNode(mcx, child, subplans, qd, ctx, rels_used)?;
             }
         }
         NodeTag::T_BitmapOr => {
             for child in &node.as_bitmap_or().unwrap().bitmapplans {
-                ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
+                ExplainPreScanNode(mcx, child, subplans, qd, ctx, rels_used)?;
             }
         }
         _ => {}
@@ -255,18 +269,18 @@ fn ExplainPreScanNode<'mcx>(
         let sp = sp_node.as_sub_plan().expect("initPlan holds SubPlan nodes");
         let child =
             subplans.nth(sp.plan_id as usize - 1).expect("EXPLAIN pstmt has no subplan holes");
-        ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
+        ExplainPreScanNode(mcx, child, subplans, qd, ctx, rels_used)?;
     }
-    for sp in collect_node_subplans(mcx, node)?.iter() {
+    for sp in collect_node_subplans(mcx, node, ctx)?.iter() {
         let child =
             subplans.nth(sp.plan_id as usize - 1).expect("EXPLAIN pstmt has no subplan holes");
-        ExplainPreScanNode(mcx, child, subplans, qd, rels_used)?;
+        ExplainPreScanNode(mcx, child, subplans, qd, ctx, rels_used)?;
     }
     if let Some(l) = plan.lefttree {
-        ExplainPreScanNode(mcx, l, subplans, qd, rels_used)?;
+        ExplainPreScanNode(mcx, l, subplans, qd, ctx, rels_used)?;
     }
     if let Some(r) = plan.righttree {
-        ExplainPreScanNode(mcx, r, subplans, qd, rels_used)?;
+        ExplainPreScanNode(mcx, r, subplans, qd, ctx, rels_used)?;
     }
     Ok(())
 }
@@ -308,6 +322,7 @@ pub struct Ancestors<'a, 'mcx> {
 fn collect_node_subplans<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
+    ctx: SubPlanScanCtx<'_, 'mcx>,
 ) -> PgResult<PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>>> {
     let plan = plan_of(node);
     let mut out: PgVec<'mcx, &'mcx types_nodes::primnodes::SubPlan<'mcx>> = PgVec::new_in(mcx);
@@ -401,6 +416,73 @@ fn collect_node_subplans<'mcx>(
             for row in &node.as_values_scan().unwrap().values_lists {
                 if let Some(l) = row.as_list() {
                     walk_list(&mut out, l);
+                }
+            }
+        }
+        // ExecInitIndexScan: projection, qual, indexqualorig, indexorderbyorig.
+        // Plain EXPLAIN runs under EXEC_FLAG_EXPLAIN_ONLY and exits before
+        // ExecIndexBuildScanKeys, so indexqual/indexorderby runtime-key
+        // SubPlans init only under ANALYZE.
+        NodeTag::T_IndexScan => {
+            let s = node.as_index_scan().unwrap();
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &s.indexqualorig);
+            walk_list(&mut out, &s.indexorderbyorig);
+            if ctx.analyze {
+                walk_list(&mut out, &s.indexqual);
+                walk_list(&mut out, &s.indexorderby);
+            }
+        }
+        // ExecInitIndexOnlyScan: projection, qual, recheckqual, then the
+        // runtime keys (ANALYZE only, as above).
+        NodeTag::T_IndexOnlyScan => {
+            let s = node.as_index_only_scan().unwrap();
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &s.recheckqual);
+            if ctx.analyze {
+                walk_list(&mut out, &s.indexqual);
+                walk_list(&mut out, &s.indexorderby);
+            }
+        }
+        // ExecInitBitmapIndexScan inits no quals; runtime keys as above.
+        NodeTag::T_BitmapIndexScan => {
+            if ctx.analyze {
+                walk_list(&mut out, &node.as_bitmap_index_scan().unwrap().indexqual);
+            }
+        }
+        NodeTag::T_BitmapHeapScan => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &node.as_bitmap_heap_scan().unwrap().bitmapqualorig);
+        }
+        // ExecInitPartitionExecPruning inits the exec-pruning step exprs on
+        // the parent Append/MergeAppend node; initial steps init parentless
+        // at ExecDoInitialPruning and cannot carry SubPlans. The Append's
+        // own targetlist/qual are never compiled (no projection).
+        NodeTag::T_Append | NodeTag::T_MergeAppend => {
+            let ppi = match node.as_append() {
+                Some(a) => a.part_prune_index,
+                None => node.as_merge_append().unwrap().part_prune_index,
+            };
+            if ppi >= 0 {
+                let pinfo = ctx
+                    .part_prune_infos
+                    .nth(ppi as usize)
+                    .as_partition_prune_info()
+                    .expect("PartitionPruneInfo node");
+                for l in pinfo.prune_infos.iter() {
+                    let prune_infos = l.as_list().expect("prune_infos cell is a List");
+                    for prel_node in prune_infos.iter() {
+                        let prel = prel_node
+                            .as_partitioned_rel_prune_info()
+                            .expect("PartitionedRelPruneInfo node");
+                        for step in prel.exec_pruning_steps.iter() {
+                            let Some(op) = step.as_partition_prune_step_op() else { continue };
+                            walk_list(&mut out, &op.exprs);
+                        }
+                    }
                 }
             }
         }
@@ -1385,7 +1467,12 @@ pub fn ExplainNode<'mcx>(
     }
 
     let pushed = Ancestors { entry: AncestorEntry::Plan(node), parent: ancestors };
-    let member_subplans = collect_node_subplans(es.str.allocator(), node)?;
+    let member_subplans = {
+        let pstmt = es.pstmt.expect("ExplainNode before ExplainPrintPlan");
+        let spctx =
+            SubPlanScanCtx { analyze: es.analyze, part_prune_infos: &pstmt.partPruneInfos };
+        collect_node_subplans(es.str.allocator(), node, spctx)?
+    };
     let haschildren = !plan.initPlan.is_nil()
         || plan.lefttree.is_some()
         || plan.righttree.is_some()
