@@ -167,9 +167,17 @@ pub fn create_projection_path<'mcx>(
     target_id: PtId,
     target_parallel_safe: bool,
 ) -> PathNode<'mcx> {
-    if matches!(run.root.path(subpath_id), PathNode::ProjectionPath(_)) {
-        panic!("create_projection_path (pathnode.c): ProjectionPath stripping; unreachable pre-M2");
-    }
+    // A ProjectionPath directly above another confuses create_projection_plan;
+    // strip the given one off (there can't be more than one, by this rule).
+    let subpath_id = match run.root.path(subpath_id) {
+        PathNode::ProjectionPath(subpp) => {
+            debug_assert_eq!(subpp.path.parent, rel_id);
+            let inner = subpp.subpath.expect("stripped ProjectionPath has a subpath");
+            debug_assert!(!matches!(run.root.path(inner), PathNode::ProjectionPath(_)));
+            inner
+        }
+        _ => subpath_id,
+    };
     let sub = run.root.path(subpath_id).base();
     let old_target_id = sub.pathtarget_id.expect("subpath has a pathtarget");
     let dummypp = is_projection_capable_pathtype(sub.pathtype)

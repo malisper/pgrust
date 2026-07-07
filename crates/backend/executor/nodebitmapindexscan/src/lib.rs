@@ -51,14 +51,18 @@ pub fn exec_init_bitmap_index_scan_rel<'mcx>(
     // thread-native builds a plain arena bitmap and freezes it at
     // tbm_prepare_shared_iterate, so no arm is needed here.
     let mut runtime_keys = ::mcx::PgVec::new_in(mcx);
-    let biss_ScanKeys = exec_index_build_scan_keys(
-        mcx,
-        &index_rel,
-        &node.indexqual,
-        estate.param_bind(),
-        false,
-        &mut runtime_keys,
-    )?;
+    let params = estate.param_bind();
+    let biss_ScanKeys = ::executils::with_subplan_compile_env(estate, |env| {
+        exec_index_build_scan_keys(
+            mcx,
+            &index_rel,
+            &node.indexqual,
+            params,
+            false,
+            &mut runtime_keys,
+            env,
+        )
+    })?;
     let biss_Runtime = if runtime_keys.is_empty() {
         None
     } else {

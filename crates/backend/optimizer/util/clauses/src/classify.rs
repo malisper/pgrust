@@ -159,45 +159,14 @@ pub fn contain_mutable_functions(clause: Node<'_>) -> PgResult<bool> {
     ContainMutable.visit(clause)
 }
 
-// expression_planner reduces to eval_const_expressions on this lane; C also
-// reaches inline_function there, which can flip the mutability verdict in
-// either direction (clauses.c:476-495) — SQL-language functions stay loud.
+// expression_planner reduces to eval_const_expressions on this lane, which
+// reaches inline_function (fold.rs) exactly as C does (clauses.c:488-495).
 pub fn contain_mutable_functions_after_planning<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     expr: Node<'mcx>,
 ) -> PgResult<bool> {
     let planned = crate::eval_const_expressions(mcx, expr)?;
-    ContainSqlLanguageFunc.visit(planned)?;
     contain_mutable_functions(planned)
-}
-
-struct ContainSqlLanguageFunc;
-
-impl<'mcx> NodeWalker<'mcx> for ContainSqlLanguageFunc {
-    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
-        check_functions_in_node(node, &mut |f| {
-            let prolang = syscache_seams::lookup_pg_proc_fmgr::call(f)?.map(|s| s.prolang);
-            if prolang == Some(fmgr_core::SQL_LANGUAGE_ID) {
-                panic!(
-                    "contain_mutable_functions_after_planning: SQL-language function {f} — \
-                     inline_function (clauses.c) unported"
-                );
-            }
-            Ok(false)
-        })?;
-        match node.node_tag() {
-            NodeTag::T_GroupingFunc => walk_grouping_func_args(node, self),
-            NodeTag::T_Query => query_tree_walker(node.as_query().unwrap(), self, 0),
-            _ => expression_tree_walker(node, self),
-        }
-    }
-
-    fn visit_query_ref(
-        &mut self,
-        q: &'mcx types_nodes::parsenodes::Query<'mcx>,
-    ) -> PgResult<bool> {
-        query_tree_walker(q, self, 0)
-    }
 }
 
 struct ContainVolatile {

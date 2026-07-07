@@ -1063,6 +1063,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     pstate,
                     funcname,
                     resolved.result_type_id,
+                    node_funcs::expr_location(funcexpr),
                 ))
             }
         };
@@ -2853,9 +2854,10 @@ fn undefined_table(
 #[cold]
 #[inline(never)]
 fn unsupported_function_return_type(
-    _pstate: &ParseState<'_, '_>,
+    pstate: &ParseState<'_, '_>,
     funcname: &str,
     rettype: Oid,
+    location: ParseLoc,
 ) -> Box<PgError> {
     let typename = format_type::format_type_be(rettype)
         .unwrap_or_else(|_| format!("type {rettype}"));
@@ -2865,6 +2867,7 @@ fn unsupported_function_return_type(
             .errmsg(format!(
                 "function \"{funcname}\" in FROM has unsupported return type {typename}"
             ))
+            .errposition(errpos(pstate, location))
             .into_error()
             .with_error_location(loc("addRangeTableEntryForFunction")),
     )

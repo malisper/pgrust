@@ -728,8 +728,8 @@ fn negate_clause_flips_saop_through_negator() {
     .unwrap();
     let out = eval_const_expressions(mcx, not).unwrap();
     let s = out.as_scalar_array_op_expr().unwrap();
-    // C negate_clause leaves opfuncid for set_sa_opfuncid (main shape).
-    assert_eq!((s.opno, s.opfuncid, s.useOr), (OP_FAKE_NE, 0, false));
+    // Unlike C, negate_clause resolves opfuncid eagerly (no lazy memo).
+    assert_eq!((s.opno, s.opfuncid, s.useOr), (OP_FAKE_NE, F_BOOLEQ, false));
 }
 
 #[test]

@@ -528,17 +528,22 @@ pub fn exec_init_index_scan_rel<'mcx>(
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();
-    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
-        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
-    })?;
-    let indexqualorig = exec_init_qual(mcx, &node.indexqualorig, params)?;
-
-    let mut runtime_keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>> = PgVec::new_in(mcx);
-    let iss_ScanKeys =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys)?;
-    // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
-    let orderby_keys =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys)?;
+    let (qual, indexqualorig, iss_ScanKeys, orderby_keys, runtime_keys) =
+        ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
+            let qual = ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)?;
+            let indexqualorig =
+                ::execexpr::exec_init_qual_subplans(mcx, &node.indexqualorig, params, env)?;
+            let mut runtime_keys: PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>> = PgVec::new_in(mcx);
+            let scan_keys = exec_index_build_scan_keys(
+                mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys, env,
+            )?;
+            // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
+            let orderby_keys = exec_index_build_scan_keys(
+                mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, env,
+            )?;
+            Ok((qual, indexqualorig, scan_keys, orderby_keys, runtime_keys))
+        })?;
+    ss.qual = qual;
     let iss_OrderBy = if orderby_keys.is_empty() {
         None
     } else {
@@ -667,6 +672,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
     params: ParamBind<'mcx>,
     isorderby: bool,
     runtime_keys: &mut PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
+    sub: Option<::execexpr::SubplanCompileEnv>,
 ) -> PgResult<PgVec<'mcx, ScanKeyData>> {
     let indnkeyatts = index.indnkeyatts();
     let mut scan_keys: PgVec<'mcx, ScanKeyData> = PgVec::new_in(mcx);
@@ -714,7 +720,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
                         runtime_keys.push(IndexRuntimeKeyInfo {
                             scan_key: scan_keys.len(),
                             orderby: false,
-                            key_expr: exec_init_expr(mcx, Some(rightop), params)?
+                            key_expr: ::execexpr::exec_init_expr_subplans(mcx, Some(rightop), params, sub)?
                                 .expect("runtime key expr compiles"),
                             // The expr yields an array of op_righttype, not
                             // op_righttype itself; every array type is toastable.
@@ -797,7 +803,7 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 runtime_keys.push(IndexRuntimeKeyInfo {
                     scan_key: scan_keys.len(),
                     orderby: isorderby,
-                    key_expr: exec_init_expr(mcx, Some(rightop), params)?
+                    key_expr: ::execexpr::exec_init_expr_subplans(mcx, Some(rightop), params, sub)?
                         .expect("runtime key expr compiles"),
                     key_toastable: lsyscache::get_typlen(op_righttype)? == -1,
                 });

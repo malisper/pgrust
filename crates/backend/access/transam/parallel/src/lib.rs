@@ -1046,6 +1046,10 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     xact::ExitParallelMode();
     snapmgr::PopActiveSnapshot()?;
     xact::EndParallelWorkerTransaction()?;
+    // A clean task parks this thread (wretain); C's worker process would die
+    // here, taking the temp-namespace TLS with it. Errored tasks rotate the
+    // thread out, so the success path is the only park that needs this.
+    catalog_namespace::ResetTempNamespaceStateForRetainedPark();
     Ok(())
 }
 

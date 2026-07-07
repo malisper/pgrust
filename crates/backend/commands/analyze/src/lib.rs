@@ -320,6 +320,11 @@ fn do_analyze_rel<'mcx>(
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
 
+    // Run index functions as the table owner, locked down (analyze.c:340-344).
+    let guard = miscinit::SecContextGuard::security_restricted(onerel.rd_rel.relowner);
+    let save_nestlevel = guc::NewGUCNestLevel();
+    guc::RestrictSearchPath()?;
+
     let starttime = timestamp_seams::get_current_timestamp::call();
 
     // Partitioned: hasindex only (nothing to open); inh recursion: leave the
@@ -627,6 +632,10 @@ fn do_analyze_rel<'mcx>(
         }
     }
     commands_vacuum::vac_close_indexes(irel, NO_LOCK)?;
+
+    // Roll back GUC changes from index functions; restore userid (analyze.c:850-853).
+    guc::AtEOXact_GUC(false, save_nestlevel);
+    guard.restore();
     Ok(())
 }
 

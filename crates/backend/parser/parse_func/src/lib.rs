@@ -297,7 +297,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 if all_arg_types.len() >= FUNC_MAX_ARGS {
                     return Err(too_many_arguments(pstate, location));
                 }
-                all_arg_types.push(default_expr_type(*d));
+                all_arg_types.push(nodes_core::expr_type(*d));
             }
             let actual_arg_types = all_arg_types.as_slice();
             let rettype = coerce::enforce_generic_type_consistency(
@@ -610,7 +610,7 @@ pub fn ParseFuncOrColumn<'mcx>(
                 if all_arg_types.len() >= FUNC_MAX_ARGS {
                     return Err(too_many_arguments(pstate, location));
                 }
-                all_arg_types.push(default_expr_type(*d));
+                all_arg_types.push(nodes_core::expr_type(*d));
             }
             let actual_arg_types = all_arg_types.as_slice();
             let rettype = coerce::enforce_generic_type_consistency(
@@ -1313,20 +1313,6 @@ fn FuncNameAsType(parts: &[&str]) -> PgResult<Oid> {
         Ok(typoid)
     } else {
         Ok(InvalidOid)
-    }
-}
-
-// exprType over the node families proargdefaults carries (system_functions
-// defaults are Consts, occasionally coerced).
-fn default_expr_type(node: Node<'_>) -> Oid {
-    match node.node_tag() {
-        NodeTag::T_Const => node.as_const().unwrap().consttype,
-        NodeTag::T_FuncExpr => node.as_func_expr().unwrap().funcresulttype,
-        NodeTag::T_CoerceViaIO => node.as_coerce_via_io().unwrap().resulttype,
-        NodeTag::T_ArrayCoerceExpr => node.as_array_coerce_expr().unwrap().resulttype,
-        NodeTag::T_ConvertRowtypeExpr => node.as_convert_rowtype_expr().unwrap().resulttype,
-        NodeTag::T_RelabelType => node.as_relabel_type().unwrap().resulttype,
-        tag => panic!("default_expr_type: node family {tag:?} not ported"),
     }
 }
 

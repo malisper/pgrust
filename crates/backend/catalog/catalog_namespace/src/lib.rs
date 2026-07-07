@@ -193,6 +193,17 @@ pub fn SetTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) {
     path::invalidate_search_path_cache();
 }
 
+// No C counterpart: a C parallel worker's process death clears this state; a
+// pooled worker thread (wretain park) must leave it as a fresh process would,
+// or the next task's SetTempNamespaceState precondition breaks.
+pub fn ResetTempNamespaceStateForRetainedPark() {
+    debug_assert_eq!(MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get), InvalidSubTransactionId);
+    MY_TEMP_NAMESPACE.with(|c| c.set(InvalidOid));
+    MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(InvalidOid));
+    BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
+    path::invalidate_search_path_cache();
+}
+
 pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) {
     if MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get) != InvalidSubTransactionId && !parallel {
         if isCommit {

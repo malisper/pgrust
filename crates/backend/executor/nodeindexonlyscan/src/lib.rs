@@ -457,17 +457,22 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         &tup_desc,
     )?;
     let params = estate.param_bind();
-    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
-        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
-    })?;
-    let recheckqual = exec_init_qual(mcx, &node.recheckqual, params)?;
-
-    let mut runtime_keys = PgVec::new_in(mcx);
-    let ioss_ScanKeys =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys)?;
-    // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
-    let ioss_OrderByKeys =
-        exec_index_build_scan_keys(mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys)?;
+    let (qual, recheckqual, ioss_ScanKeys, ioss_OrderByKeys, runtime_keys) =
+        ::executils::with_subplan_compile_env(estate, |env| -> ::types_error::PgResult<_> {
+            let qual = ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)?;
+            let recheckqual =
+                ::execexpr::exec_init_qual_subplans(mcx, &node.recheckqual, params, env)?;
+            let mut runtime_keys = PgVec::new_in(mcx);
+            let scan_keys = exec_index_build_scan_keys(
+                mcx, &index_rel, &node.indexqual, params, false, &mut runtime_keys, env,
+            )?;
+            // ORDER BY exprs become scankeys the same way (SK_ORDER_BY).
+            let orderby_keys = exec_index_build_scan_keys(
+                mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, env,
+            )?;
+            Ok((qual, recheckqual, scan_keys, orderby_keys, runtime_keys))
+        })?;
+    ss.qual = qual;
     let ioss_Runtime = if runtime_keys.is_empty() {
         None
     } else {
