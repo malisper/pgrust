@@ -464,6 +464,7 @@ pub fn publication_add_relation<'mcx>(
             relid,
             DependencyType::Normal,
             DependencyType::Normal,
+            false,
         )?;
     }
     let mut i = -1;

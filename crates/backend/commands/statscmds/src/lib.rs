@@ -534,6 +534,7 @@ pub fn CreateStatistics<'mcx>(
             relid,
             pg_depend::DependencyType::Normal,
             pg_depend::DependencyType::Auto,
+            false,
         )?;
     }
     let parent = pg_depend::ObjectAddress::set(NAMESPACE_RELATION_ID, namespace_id);

@@ -396,8 +396,8 @@ impl<'mcx> nodes_core::NodeWalker<'mcx> for FindExprRefs<'_, 'mcx> {
     }
 }
 
-// recordDependencyOnSingleRelExpr (dependency.c), reverse_self=false lane over
-// the committed expression node set.
+// recordDependencyOnSingleRelExpr (dependency.c) over the committed
+// expression node set.
 pub fn recordDependencyOnSingleRelExpr<'mcx>(
     mcx: Mcx<'mcx>,
     depender: &ObjectAddress,
@@ -405,12 +405,13 @@ pub fn recordDependencyOnSingleRelExpr<'mcx>(
     rel_id: Oid,
     behavior: DependencyType,
     self_behavior: DependencyType,
+    reverse_self: bool,
 ) -> PgResult<()> {
     let mut addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
     nodes_core::NodeWalker::visit(&mut FindExprRefs { mcx, rel_id, addrs: &mut addrs }, expr)?;
     eliminate_duplicate_dependencies(&mut addrs);
 
-    if behavior != self_behavior && !addrs.is_empty() {
+    if (behavior != self_behavior || reverse_self) && !addrs.is_empty() {
         let mut self_addrs: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
         let mut rest: mcx::PgVec<'mcx, ObjectAddress> = mcx::PgVec::new_in(mcx);
         for a in addrs.iter() {
@@ -420,7 +421,15 @@ pub fn recordDependencyOnSingleRelExpr<'mcx>(
                 rest.push(*a);
             }
         }
-        recordMultipleDependencies(mcx, depender, &self_addrs, self_behavior)?;
+        if reverse_self {
+            // C dependency.c:1656-1671: the referenced columns become
+            // dependent on the whole depender, not the other way around.
+            for a in self_addrs.iter() {
+                recordDependencyOn(mcx, a, depender, self_behavior)?;
+            }
+        } else {
+            recordMultipleDependencies(mcx, depender, &self_addrs, self_behavior)?;
+        }
         return recordMultipleDependencies(mcx, depender, &rest, behavior);
     }
     recordMultipleDependencies(mcx, depender, &addrs, behavior)
