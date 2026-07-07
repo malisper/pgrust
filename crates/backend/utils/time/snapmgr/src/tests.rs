@@ -420,3 +420,27 @@ fn historic_snapshot_short_circuits_acquisition() {
     assert!(!HistoricSnapshotActive());
     drop((got, historic));
 }
+
+#[test]
+fn panic_inside_with_state_does_not_poison_the_session() {
+    let _g = test_lock();
+    my_backend();
+
+    // Wedge regression (d1a86f62f): a converted-panic ERROR raised inside the
+    // with_state closure (the GetSafeSnapshot loud shape) unwinds to the
+    // main-loop catch; every later snapmgr call must still work, or the
+    // session errors "with_state re-entered" forever.
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_state(|_| -> () { panic!("injected loud inside with_state") })
+    }));
+    assert!(unwound.is_err());
+
+    let snap = GetTransactionSnapshot().unwrap();
+    PushActiveSnapshot(&snap).unwrap();
+    drop(snap);
+    PopActiveSnapshot().unwrap();
+
+    AtEOXact_Snapshot(false, true).expect("abort-path AtEOXact_Snapshot");
+    assert!(with_state(|s| s.active.is_empty() && s.registered.is_empty()));
+    assert!(!with_state(|s| s.first_snapshot_set));
+}

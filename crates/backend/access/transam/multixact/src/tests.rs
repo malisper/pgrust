@@ -428,3 +428,35 @@ fn checkpoint_flushes_segments_to_disk() {
     assert!(offsets.len() >= BLCKSZ as u64);
     assert!(mems.len() >= BLCKSZ as u64);
 }
+
+#[test]
+fn panic_in_consume_does_not_wedge_member_scratch() {
+    let _l = test_lock();
+    setup();
+
+    multixact_seams::multi_xact_id_set_oldest_member::call().unwrap();
+    let mut members = [
+        MultiXactMember { xid: 701, status: MultiXactStatusForKeyShare },
+        MultiXactMember { xid: 702, status: MultiXactStatusForShare },
+    ];
+    let multi = MultiXactIdCreateFromMembers(&mut members).unwrap();
+
+    // Wedge regression (with_state class): a panic unwinding out of the
+    // consumer must return the scratch to its slot, or every later call
+    // panics "GetMultiXactIdMembers re-entered from its consumer" forever —
+    // in release builds too.
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        GetMultiXactIdMembers(multi, false, false, &mut |_| {
+            panic!("injected loud inside consume")
+        })
+    }));
+    assert!(unwound.is_err());
+
+    let mut out = Vec::new();
+    let n = GetMultiXactIdMembers(multi, false, false, &mut |ms| {
+        out.extend_from_slice(ms);
+    })
+    .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(out.len(), 2);
+}
