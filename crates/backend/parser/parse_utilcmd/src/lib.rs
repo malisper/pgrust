@@ -1475,11 +1475,23 @@ pub fn transformCreateStmt<'mcx>(
         }
         e
     };
-    let nspid = RangeVarGetCreationNamespace(mcx, relation).map_err(at_rel)?;
-    let adjusted_persistence =
-        catalog_namespace::RangeVarAdjustRelationPersistence(relation.relpersistence, nspid)
-            .map_err(at_rel)?;
+    // Unqualified TEMP targets skip the analysis-time probe: C's call is a
+    // no-op for them beyond creating the temp namespace, a side effect our
+    // cached-plan revalidation lane cannot absorb yet (plancache loud); it
+    // still happens at execution (DefineRelation).
+    let probe = relation.schemaname.is_some()
+        || relation.relpersistence != types_core::RELPERSISTENCE_TEMP;
+    let mut nspid = InvalidOid;
+    let mut adjusted_persistence = relation.relpersistence;
+    if probe {
+        nspid = RangeVarGetCreationNamespace(mcx, relation).map_err(at_rel)?;
+        adjusted_persistence =
+            catalog_namespace::RangeVarAdjustRelationPersistence(relation.relpersistence, nspid)
+                .map_err(at_rel)?;
+    }
     if stmt.if_not_exists {
+        let nspid =
+            if probe { nspid } else { RangeVarGetCreationNamespace(mcx, relation)? };
         if lsyscache::get_relname_relid(relname, nspid)? != InvalidOid {
             // checkMembershipInCurrentExtension only bites inside an
             // extension script (needs getObjectDescription for its report).
