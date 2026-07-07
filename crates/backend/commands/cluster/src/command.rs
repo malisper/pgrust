@@ -506,8 +506,9 @@ fn copy_table_data<'mcx>(
         ))
         .finish(types_error::ErrorLocation::new("cluster.c", 0, "copy_table_data"))?;
 
-    // Update the transient rel's pg_class stats (not for pg_class itself).
-    assert!(old_heap.rd_id != types_core::RELATION_RELATION_ID);
+    // Update the transient rel's pg_class stats. When rebuilding pg_class
+    // itself the update would scribble on the data we're about to discard;
+    // relcache inval alone suffices (cluster.c:1010-1026).
     {
         let rel_relation =
             table::table_open(mcx, types_core::RELATION_RELATION_ID, RowExclusiveLock)?;
@@ -538,7 +539,11 @@ fn copy_table_data<'mcx>(
             heaptuple::heap_modify_tuple(mcx, tup, desc, &values, &isnull, &replace)?;
         let otid = tup.t_self;
         genam::systable_endscan(mcx, scan)?;
-        catalog_indexing::CatalogTupleUpdate(mcx, &rel_relation, &otid, &mut newtup)?;
+        if old_heap.rd_id != types_core::RELATION_RELATION_ID {
+            catalog_indexing::CatalogTupleUpdate(mcx, &rel_relation, &otid, &mut newtup)?;
+        } else {
+            inval::invalidate::CacheInvalidateRelcacheByTuple(newtup.as_tuple())?;
+        }
         rel_relation.close(RowExclusiveLock)?;
     }
     xact::CommandCounterIncrement()?;
