@@ -2142,20 +2142,54 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(1)
     }
 
+    // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec
+    // (execExprInterp.c) via ExecSetParamPlan; this executor hoists instead:
+    // any pending initplan a program depends on runs before the node
+    // evaluates it (nodeagg hoist_pending_initplans pattern). all_first-gated:
+    // a rescan that re-marks exec_plan also resets all_first.
+    fn hoist_pending_initplans(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        debug_assert!(self.all_first);
+        let mut deps: Vec<u32> = Vec::new();
+        for state in [
+            Some(&*self.proj),
+            self.part_eq.as_deref(),
+            self.ord_eq.as_deref(),
+            self.evaltrans.as_deref(),
+            self.runcondition.as_deref(),
+            self.qual.as_deref(),
+            self.start_offset_state.as_deref(),
+            self.end_offset_state.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            deps.extend_from_slice(state.param_exec_deps());
+        }
+        for pf in self.perfunc.iter() {
+            for a in pf.argstates.iter() {
+                deps.extend_from_slice(a.param_exec_deps());
+            }
+        }
+        for pa in self.peragg.iter() {
+            for a in pa.argstates.iter() {
+                deps.extend_from_slice(a.param_exec_deps());
+            }
+            if let Some(f) = pa.filterstate.as_deref() {
+                deps.extend_from_slice(f.param_exec_deps());
+            }
+        }
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, &deps)?;
+        }
+        Ok(())
+    }
+
     // calculate_frame_offsets (nodeWindowAgg.c); by-ref offset values get
     // C's query-lifespan datumCopy (the eval context resets below).
     fn calculate_frame_offsets(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         debug_assert!(self.all_first);
         let fo = self.frameOptions;
         let mcx = estate.es_query_cxt;
-        for state in [self.start_offset_state.as_deref(), self.end_offset_state.as_deref()] {
-            if let Some(state) = state {
-                let deps = state.param_exec_deps();
-                if !deps.is_empty() {
-                    ::executils::exec_eval_param_exec_params(estate, deps)?;
-                }
-            }
-        }
         if fo & FRAMEOPTION_START_OFFSET != 0 {
             let state = self.start_offset_state.as_deref_mut().expect("startOffset ExprState");
             let mut slots = EvalSlots::default();
@@ -3217,6 +3251,7 @@ where
         return Ok(None);
     }
     if state.all_first {
+        state.hoist_pending_initplans(estate)?;
         state.calculate_frame_offsets(estate)?;
     }
     let fetch = &mut fetch_outer;

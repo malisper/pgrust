@@ -377,6 +377,30 @@ pub fn get_call_result_type<'mcx>(
     )
 }
 
+// DatumGetHeapTupleHeader + HeapTupleHeaderGetTypeId/GetTypMod: decode a
+// composite Datum's varlena header without deforming the tuple body.
+fn composite_datum_header(mcx: Mcx<'_>, value: datum::Datum) -> PgResult<(Oid, i32)> {
+    let src = value.as_usize() as *const u8;
+    // SAFETY: `value` is a live composite (RECORDOID) Datum.
+    let (hdrp, detoasted) = unsafe {
+        if types_tuple::varatt::varatt_is_1b(src)
+            || types_tuple::varatt::varatt_is_1b_e(src)
+            || !types_tuple::varatt::varatt_is_4b_u(src)
+        {
+            let image = core::slice::from_raw_parts(src, types_tuple::varatt::varsize_any(src));
+            let flat = detoast_seams::detoast_attr::call(mcx, image)?;
+            (flat.as_ptr(), Some(flat))
+        } else {
+            (src, None)
+        }
+    };
+    // SAFETY: hdrp is a plain composite varlena image whose header the
+    // caller guarantees is fully present.
+    let hdr: types_tuple::HeapTupleHeaderData = unsafe { core::ptr::read_unaligned(hdrp.cast()) };
+    drop(detoasted);
+    Ok((hdr.type_id(), hdr.typmod()))
+}
+
 pub fn get_expr_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     expr: Option<Node<'_>>,
@@ -426,10 +450,24 @@ pub fn get_expr_result_type<'mcx>(
         }
         if let Some(c) = node.as_const() {
             if c.consttype == RECORDOID && !c.constisnull {
-                panic!(
-                    "funcapi get_expr_result_type: RECORD-Const leg not ported \
-                     (composite Datum header decode)"
-                );
+                // C: DatumGetHeapTupleHeader + HeapTupleHeaderGetTypeId/GetTypMod
+                // (funcapi.c get_expr_result_type, the SEARCH/CYCLE Const leg).
+                let (tup_type, tup_typmod) = composite_datum_header(mcx, c.constvalue)?;
+                if tup_type != RECORDOID || tup_typmod >= 0 {
+                    return Ok(ResolvedResultType {
+                        class: TypeFuncClass::Composite,
+                        result_type_id: tup_type,
+                        result_tuple_desc: Some(typcache_seams::lookup_rowtype_tupdesc_copy::call(
+                            mcx, tup_type, tup_typmod,
+                        )?),
+                    });
+                }
+                // Shouldn't really happen.
+                return Ok(ResolvedResultType {
+                    class: TypeFuncClass::Record,
+                    result_type_id: tup_type,
+                    result_tuple_desc: None,
+                });
             }
         }
     }

@@ -207,6 +207,10 @@ pub(crate) fn each_rows(mcx: Mcx<'_>, json: &[u8], as_text: bool) -> PgResult<Sr
     )?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // C: BlessTupleDesc (jsonfuncs.c each_worker, InitMaterializedSRF(fcinfo,
+    // MAT_SRF_BLESS)) — the rows are anonymous record datums; record_out
+    // needs the registered typmod stamped into each tuple header.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
     let mut rows: Vec<Vec<u8>> = Vec::with_capacity(state.pairs.len());
     for (key, val) in &state.pairs {

@@ -1172,7 +1172,9 @@ pub fn ExplainNode<'mcx>(
         }
         NodeTag::T_SubqueryScan => {
             show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
         }
         // Unique, Limit, Append, SetOp, LockRows, ProjectSet show nothing
         // extra without ANALYZE.
@@ -2383,9 +2385,16 @@ fn ExplainIndexScanDetails(
     Ok(())
 }
 
-// show_instrumentation_count (explain.c). Correct only where the executor
-// counts nfiltered — index-recheck (which=2) on btree never filters, so the
-// zero is genuine; the qual lane (which=1) keeps filtered_count_gap instead.
+// show_instrumentation_count (explain.c). which=1 is genuine for every
+// caller here: SampleScan/SeqScan-family/FunctionScan/TidScan/TidRangeScan/
+// BitmapHeapScan/IndexScan/IndexOnlyScan/SubqueryScan are ExecScan-driven
+// (execScan.h's generic InstrCountFiltered1 on qual failure, wired via
+// ScanState.instr_idx); Gather/GatherMerge never carry a qual at all
+// (planner never attaches one — C asserts `!plan->qual`), so their branch
+// is dead code by construction, same as C. which=2 (index recheck) has no
+// counting writer yet; callers of that arm rely on the recheck qual being
+// empty in the covered tests, so the zero is coincidentally correct rather
+// than counted.
 fn show_instrumentation_count(
     qlabel: &str,
     which: i32,
@@ -2567,8 +2576,11 @@ fn show_ctescan_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     }
 }
 
-// show_instrumentation_count's nfiltered read: the executor never counts
-// qual-filtered tuples (InstrCountFiltered, execScan.c), so printing would be
+// show_instrumentation_count's nfiltered read for join/upper nodes: unlike
+// the ExecScan-driven scan family (execScan.h), these count via their own
+// node-specific InstrCountFiltered1/2 calls (e.g. nodeNestloop.c:246,
+// nodeHashjoin.c:596, nodeMergejoin.c:837, nodeAgg.c:1386, nodeGroup.c:96/149,
+// nodeWindowAgg.c:2405), which aren't ported yet, so printing would be
 // silently wrong whenever a filter removed rows.
 fn filtered_count_gap(qual: &NodeList<'_>, es: &ExplainState<'_>) {
     if es.analyze && !qual.is_nil() {
