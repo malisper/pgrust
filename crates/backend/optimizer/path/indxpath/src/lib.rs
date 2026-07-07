@@ -1,5 +1,5 @@
 //! indxpath.c: index path generation over restriction, join, and
-//! EC-derived clauses; SAOP/boolean/RowCompare matching stays loud.
+//! EC-derived clauses; SAOP/boolean/RowCompare matching included.
 
 use mcx::PgVec;
 use types_error::PgResult;
@@ -868,9 +868,246 @@ fn match_clause_to_indexcol<'mcx>(
         NodeTag::T_BoolExpr if clauses::is_orclause(clause) => {
             match_orclause_to_indexcol(run, rinfo, indexcol, index)
         }
-        // RowCompare can't be built by the live qual lane.
+        NodeTag::T_RowCompareExpr => match_rowcompare_to_indexcol(run, rinfo, indexcol, index),
         _ => Ok(None),
     }
+}
+
+// match_rowcompare_to_indexcol (indxpath.c): the first row member must match
+// this index column (btree only); expand_indexqual_rowcompare does the rest.
+fn match_rowcompare_to_indexcol<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    indexcol: usize,
+    index: &IndexOptInfo<'mcx>,
+) -> PgResult<Option<IndexClause<'mcx>>> {
+    if index.relam != types_core::BTREE_AM_OID {
+        return Ok(None);
+    }
+    let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
+    let opfamily = index.opfamily[indexcol];
+    let idxcollation = index.indexcollations[indexcol];
+
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let rc = clause.as_row_compare_expr().expect("RowCompareExpr");
+    let leftop = rc.largs.nth(0);
+    let rightop = rc.rargs.nth(0);
+    let mut expr_op = rc.opnos.nth(0);
+    let expr_coll = rc.inputcollids.nth(0);
+
+    if !index_coll_matches_expr_coll(idxcollation, expr_coll) {
+        return Ok(None);
+    }
+
+    // Match on operator opfamily membership, not the RowCompareExpr's own
+    // opfamilies (reverse-sort families make those a matter of chance).
+    let var_on_left;
+    if match_index_to_operand(run, leftop, indexcol, index)
+        && !vars::pull_varnos(run.mcx, rightop)?.is_member(index_relid as i32)
+        && !clauses::contain_volatile_functions(rightop)?
+    {
+        var_on_left = true;
+    } else if match_index_to_operand(run, rightop, indexcol, index)
+        && !vars::pull_varnos(run.mcx, leftop)?.is_member(index_relid as i32)
+        && !clauses::contain_volatile_functions(leftop)?
+    {
+        expr_op = lsyscache::get_commutator(expr_op)?;
+        if expr_op == 0 {
+            return Ok(None);
+        }
+        var_on_left = false;
+    } else {
+        return Ok(None);
+    }
+
+    match lsyscache::get_op_opfamily_strategy(expr_op, opfamily)? {
+        1 | 2 | 4 | 5 => {
+            // BTLess/BTLessEqual/BTGreaterEqual/BTGreater
+            expand_indexqual_rowcompare(run, rinfo, indexcol, index, expr_op, var_on_left)
+                .map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+// expand_indexqual_rowcompare (indxpath.c): keep the longest prefix of row
+// members matching index columns in the same direction; a lossy prefix keeps
+// all matchable rows by flipping </> to <=/>=.
+fn expand_indexqual_rowcompare<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    indexcol: usize,
+    index: &IndexOptInfo<'mcx>,
+    first_op: types_core::Oid,
+    var_on_left: bool,
+) -> PgResult<IndexClause<'mcx>> {
+    use lsyscache::{
+        BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber, BTLessEqualStrategyNumber,
+        BTLessStrategyNumber,
+    };
+    let mcx = run.mcx;
+    let index_relid = run.root.rel(index.rel.expect("index rel set")).relid;
+    let clause = *run.root.expr_node(run.root.rinfo(rinfo).clause);
+    let rc = clause.as_row_compare_expr().expect("RowCompareExpr");
+    let (var_args, non_var_args) =
+        if var_on_left { (&rc.largs, &rc.rargs) } else { (&rc.rargs, &rc.largs) };
+
+    let (mut op_strategy, op_lefttype, op_righttype) =
+        lsyscache::get_op_opfamily_properties(first_op, index.opfamily[indexcol], false)?;
+
+    let mut indexcols: PgVec<'mcx, i16> = PgVec::new_in(mcx);
+    indexcols.push(indexcol as i16);
+    let mut expr_ops: PgVec<'mcx, types_core::Oid> = PgVec::new_in(mcx);
+    expr_ops.push(first_op);
+    let mut opfamilies: PgVec<'mcx, types_core::Oid> = PgVec::new_in(mcx);
+    opfamilies.push(index.opfamily[indexcol]);
+    let mut lefttypes: PgVec<'mcx, types_core::Oid> = PgVec::new_in(mcx);
+    lefttypes.push(op_lefttype);
+    let mut righttypes: PgVec<'mcx, types_core::Oid> = PgVec::new_in(mcx);
+    righttypes.push(op_righttype);
+
+    let mut matching_cols = 1usize;
+    while matching_cols < var_args.len() {
+        let varop = var_args.nth(matching_cols);
+        let constop = non_var_args.nth(matching_cols);
+        let mut expr_op = rc.opnos.nth(matching_cols);
+        if !var_on_left {
+            expr_op = lsyscache::get_commutator(expr_op)?;
+            if expr_op == 0 {
+                break;
+            }
+        }
+        if vars::pull_varnos(mcx, constop)?.is_member(index_relid as i32) {
+            break;
+        }
+        if clauses::contain_volatile_functions(constop)? {
+            break;
+        }
+
+        // The Var side can match any key column of the index.
+        let mut matched = None;
+        for i in 0..index.nkeycolumns as usize {
+            if match_index_to_operand(run, varop, i, index)
+                && lsyscache::get_op_opfamily_strategy(expr_op, index.opfamily[i])?
+                    == op_strategy
+                && index_coll_matches_expr_coll(
+                    index.indexcollations[i],
+                    rc.inputcollids.nth(matching_cols),
+                )
+            {
+                matched = Some(i);
+                break;
+            }
+        }
+        let Some(i) = matched else { break };
+
+        indexcols.push(i as i16);
+        let (strat, lefttype, righttype) =
+            lsyscache::get_op_opfamily_properties(expr_op, index.opfamily[i], false)?;
+        op_strategy = strat;
+        expr_ops.push(expr_op);
+        opfamilies.push(index.opfamily[i]);
+        lefttypes.push(lefttype);
+        righttypes.push(righttype);
+        matching_cols += 1;
+    }
+
+    let lossy = matching_cols != rc.opnos.len();
+
+    if var_on_left && !lossy {
+        let mut indexquals = PgVec::new_in(mcx);
+        indexquals.push(rinfo);
+        return Ok(IndexClause {
+            rinfo: Some(rinfo),
+            indexquals,
+            lossy: false,
+            indexcol: indexcol as i16,
+            indexcols,
+        });
+    }
+
+    let new_ops: PgVec<'mcx, types_core::Oid> = if !lossy
+        || op_strategy == BTLessEqualStrategyNumber as i32
+        || op_strategy == BTGreaterEqualStrategyNumber as i32
+    {
+        expr_ops
+    } else {
+        op_strategy = match op_strategy {
+            s if s == BTLessStrategyNumber as i32 => BTLessEqualStrategyNumber as i32,
+            s if s == BTGreaterStrategyNumber as i32 => BTGreaterEqualStrategyNumber as i32,
+            other => panic!("unexpected strategy number {other}"),
+        };
+        let mut ops = PgVec::new_in(mcx);
+        for k in 0..matching_cols {
+            let expr_op = lsyscache::get_opfamily_member(
+                opfamilies[k],
+                lefttypes[k],
+                righttypes[k],
+                op_strategy as i16,
+            )?;
+            assert!(
+                expr_op != 0,
+                "missing operator {}({},{}) in opfamily {}",
+                op_strategy,
+                lefttypes[k],
+                righttypes[k],
+                opfamilies[k]
+            );
+            ops.push(expr_op);
+        }
+        ops
+    };
+
+    let new_rinfo = if matching_cols > 1 {
+        let mut opnos = types_nodes::list::OidList::nil();
+        let mut new_opfamilies = types_nodes::list::OidList::nil();
+        let mut inputcollids = types_nodes::list::OidList::nil();
+        let mut largs = types_nodes::NodeList::nil();
+        let mut rargs = types_nodes::NodeList::nil();
+        for k in 0..matching_cols {
+            opnos.lappend(mcx, new_ops[k])?;
+            new_opfamilies.lappend(mcx, rc.opfamilies.nth(k))?;
+            inputcollids.lappend(mcx, rc.inputcollids.nth(k))?;
+            largs.lappend(mcx, var_args.nth(k))?;
+            rargs.lappend(mcx, non_var_args.nth(k))?;
+        }
+        let new_rc = Node::mk(
+            mcx,
+            types_nodes::RowCompareExpr {
+                cmptype: op_strategy,
+                opnos,
+                opfamilies: new_opfamilies,
+                inputcollids,
+                largs,
+                rargs,
+            },
+        )?;
+        planner_seams::make_restrictinfo::call(
+            run, new_rc, true, false, false, false, 0, None, None, None,
+        )?
+    } else {
+        indexcols.clear();
+        let op = planner_seams::make_opclause::call(
+            mcx,
+            new_ops[0],
+            var_args.nth(0),
+            non_var_args.nth(0),
+            rc.inputcollids.nth(0),
+        )?;
+        planner_seams::make_restrictinfo::call(
+            run, op, true, false, false, false, 0, None, None, None,
+        )?
+    };
+
+    let mut indexquals = PgVec::new_in(mcx);
+    indexquals.push(new_rinfo);
+    Ok(IndexClause {
+        rinfo: Some(rinfo),
+        indexquals,
+        lossy,
+        indexcol: indexcol as i16,
+        indexcols,
+    })
 }
 
 // match_opclause_to_indexcol (indxpath.c), indexkey-op-const arm.

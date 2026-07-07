@@ -13,7 +13,9 @@ pub const AMOP_ORDER: u8 = b'o';
 // stratnum.h
 pub const HTEqualStrategyNumber: i16 = 1;
 pub const BTLessStrategyNumber: i16 = 1;
+pub const BTLessEqualStrategyNumber: i16 = 2;
 pub const BTEqualStrategyNumber: i16 = 3;
+pub const BTGreaterEqualStrategyNumber: i16 = 4;
 pub const BTGreaterStrategyNumber: i16 = 5;
 // hash.h
 pub const HASHSTANDARD_PROC: i16 = 1;

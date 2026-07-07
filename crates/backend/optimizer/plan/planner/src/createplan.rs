@@ -1132,10 +1132,13 @@ fn create_indexscan_plan<'mcx>(
             p.indexinfo.expect("indexinfo set")
         };
         debug_assert!(orderby_ids.len() == orderby_cols.len());
+        // ORDER BY clauses are never RowCompare: no per-member indexcolnos.
+        let no_indexcolnos: mcx::PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
         for (&nid, &col) in orderby_ids.iter().zip(orderby_cols.iter()) {
             let clause = *run.root.expr_node(nid);
             indexorderbys.lappend(mcx, clause)?;
-            fixed_indexorderbys.lappend(mcx, fix_indexqual_clause(run, &index, col, clause)?)?;
+            fixed_indexorderbys
+                .lappend(mcx, fix_indexqual_clause(run, &index, col, clause, &no_indexcolnos)?)?;
         }
     }
 
@@ -1546,7 +1549,10 @@ fn fix_indexqual_references<'mcx>(
         for &rid in ic.indexquals.iter() {
             let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
             stripped.lappend(mcx, clause)?;
-            fixed.lappend(mcx, fix_indexqual_clause(run, &index, ic.indexcol as i32, clause)?)?;
+            fixed.lappend(
+                mcx,
+                fix_indexqual_clause(run, &index, ic.indexcol as i32, clause, &ic.indexcols)?,
+            )?;
         }
     }
     Ok((stripped, fixed))
@@ -1559,6 +1565,7 @@ fn fix_indexqual_clause<'mcx>(
     index: &IndexOptInfo<'mcx>,
     indexcol: i32,
     clause: Node<'mcx>,
+    indexcolnos: &mcx::PgVec<'mcx, i16>,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
     let clause = replace_nestloop_params(run, clause)?;
@@ -1578,6 +1585,25 @@ fn fix_indexqual_clause<'mcx>(
                     inputcollid: o.inputcollid,
                     args: NodeList::make2(mcx, fixed_arg, o.args.nth(1))?,
                     location: o.location,
+                },
+            )
+        }
+        NodeTag::T_RowCompareExpr => {
+            let rc = clause.as_row_compare_expr().unwrap();
+            debug_assert!(rc.largs.len() == indexcolnos.len());
+            let mut largs = NodeList::nil();
+            for (arg, &col) in rc.largs.iter().zip(indexcolnos.iter()) {
+                largs.lappend(mcx, fix_indexqual_operand(run, index, col as i32, arg)?)?;
+            }
+            Node::mk(
+                mcx,
+                types_nodes::RowCompareExpr {
+                    cmptype: rc.cmptype,
+                    opnos: rc.opnos.clone_in(mcx)?,
+                    opfamilies: rc.opfamilies.clone_in(mcx)?,
+                    inputcollids: rc.inputcollids.clone_in(mcx)?,
+                    largs,
+                    rargs: rc.rargs.clone_in(mcx)?,
                 },
             )
         }

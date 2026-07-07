@@ -2040,6 +2040,15 @@ fn index_other_operands_eval_cost(
             NodeTag::T_ScalarArrayOpExpr => {
                 Some(clause.as_scalar_array_op_expr().unwrap().args.nth(1))
             }
+            NodeTag::T_RowCompareExpr => {
+                // C costs the whole rargs List; summing per element is the
+                // same walker arithmetic.
+                for arg in &clause.as_row_compare_expr().unwrap().rargs {
+                    let cost = crate::costsize::cost_qual_eval_node(Some(&mut *run), arg)?;
+                    qual_arg_cost += cost.startup + cost.per_tuple;
+                }
+                None
+            }
             NodeTag::T_NullTest => None,
             other => panic!("index_other_operands_eval_cost (selfuncs.c): {other:?}; M2 lane"),
         };
@@ -2258,10 +2267,16 @@ fn btcostestimate(
     let mut eq_qual_here = false;
     let mut found_array = false;
     let mut found_is_null_op = false;
+    let mut found_row_compare = false;
     let mut num_sa_scans = 1.0f64;
 
     'buildquals: for iclause in indexclauses.iter() {
         if indexcol < iclause.indexcol as i32 {
+            // Skip arrays can't be added after a RowCompare input qual
+            // (nbtree limitation; selfuncs.c).
+            if found_row_compare {
+                break 'buildquals;
+            }
             // nbtree backfills skip arrays for index columns lacking an '='
             // qual (selfuncs.c:7397 gap arm).
             let num_sa_scans_prev_cols = num_sa_scans;
@@ -2341,6 +2356,10 @@ fn btcostestimate(
             let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
             let clause_op = match clause.node_tag() {
                 NodeTag::T_OpExpr => clause.as_op_expr().unwrap().opno,
+                NodeTag::T_RowCompareExpr => {
+                    found_row_compare = true;
+                    clause.as_row_compare_expr().unwrap().opnos.nth(0)
+                }
                 NodeTag::T_ScalarArrayOpExpr => {
                     let saop = clause.as_scalar_array_op_expr().unwrap();
                     let alength = estimate_array_length(Some(run), saop.args.nth(1))?;

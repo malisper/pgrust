@@ -71,8 +71,10 @@ pub const SK_BT_DESC: i32 = 0x0001 << SK_BT_INDOPTION_SHIFT;
 pub const SK_BT_NULLS_FIRST: i32 = 0x0002 << SK_BT_INDOPTION_SHIFT;
 
 // C-shaped: for SK_ROW_HEADER keys sk_argument is the pointer word of the
-// arena-owned subsidiary ScanKeyData array, SK_ROW_END-terminated (skey.h);
-// copies share it verbatim, as C's struct assignment does.
+// subsidiary ScanKeyData array (owned by the index scan state's RowSubkeys
+// buffer), SK_ROW_END-terminated (skey.h); copies share it verbatim, as C's
+// struct assignment does, and nbtree preprocessing scribbles flags/strategy
+// on it through the shared pointer.
 #[derive(Clone)]
 pub struct ScanKeyData {
     pub sk_flags: i32,

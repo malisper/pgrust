@@ -1,6 +1,6 @@
 //! nbtpreprocesskeys.c: redundancy elimination + requiredness marking, the
 //! SAOP array arms (deconstruct/sort/merge/shrink), and skip-array generation
-//! (PG 18 skip scan). Row compares are phase 2 — rejected loudly.
+//! (PG 18 skip scan), and the row-comparison arms.
 
 use ::arrayfuncs::foundation as arrfn;
 use ::datum::Datum;
@@ -15,11 +15,10 @@ use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber,
     BTMaxStrategyNumber, SK_BT_DESC, SK_BT_INDOPTION_SHIFT, SK_BT_NULLS_FIRST, SK_BT_REQBKWD,
-    SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNOTNULL,
-    SK_SEARCHNULL,
+    SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER, SK_ROW_MEMBER,
+    SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 
-use crate::unported_phase2;
 
 const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
 
@@ -305,8 +304,33 @@ fn bt_fix_scankey_strategy(skey: &mut ScanKeyData, indoption: &PgVec<'_, i16>) -
     }
     skey.sk_flags |= addflags;
 
+    // Fix row member flags and strategies the same way (the subkey array is
+    // the executor-owned allocation behind sk_argument; C scribbles on it
+    // too, and the fixup is idempotent across rescans).
     if skey.sk_flags & SK_ROW_HEADER != 0 {
-        unported_phase2("row-comparison keys (_bt_fix_scankey_strategy)");
+        // SAFETY: SK_ROW_HEADER contract (scankey.rs): sk_argument is the
+        // live SK_ROW_END-terminated subkey array, disjoint from *skey.
+        unsafe {
+            let mut subkey = skey.sk_argument.as_usize() as *mut ScanKeyData;
+            if (*subkey).sk_flags & SK_ISNULL != 0 {
+                // First row member is NULL: RowCompare is unsatisfiable.
+                debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+                return false;
+            }
+            loop {
+                debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+                let addflags = (indoption[(*subkey).sk_attno as usize - 1] as i32)
+                    << SK_BT_INDOPTION_SHIFT;
+                if addflags & SK_BT_DESC != 0 && (*subkey).sk_flags & SK_BT_DESC == 0 {
+                    (*subkey).sk_strategy = BTCommuteStrategyNumber((*subkey).sk_strategy);
+                }
+                (*subkey).sk_flags |= addflags;
+                if (*subkey).sk_flags & SK_ROW_END != 0 {
+                    break;
+                }
+                subkey = subkey.add(1);
+            }
+        }
     }
 
     true
@@ -321,7 +345,34 @@ fn bt_mark_scankey_required(skey: &mut ScanKeyData) {
         other => panic!("unrecognized StrategyNumber: {other}"),
     };
     skey.sk_flags |= addflags;
-    debug_assert!(skey.sk_flags & SK_ROW_HEADER == 0, "row lane is phase 2");
+
+    // Row members stay required only while adjacent to the header's column
+    // and sorted in the same direction; C scribbles on the shared subkey
+    // array (idempotent across rescans).
+    if skey.sk_flags & SK_ROW_HEADER != 0 {
+        // SAFETY: SK_ROW_HEADER contract (scankey.rs).
+        unsafe {
+            let mut subkey = skey.sk_argument.as_usize() as *mut ScanKeyData;
+            let mut attno = skey.sk_attno;
+            debug_assert!((*subkey).sk_attno == attno);
+            debug_assert!((*subkey).sk_strategy == skey.sk_strategy);
+            loop {
+                debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+                if (*subkey).sk_attno != attno {
+                    break; // non-adjacent key, so not required
+                }
+                if (*subkey).sk_strategy != skey.sk_strategy {
+                    break; // wrong direction, so not required
+                }
+                (*subkey).sk_flags |= addflags;
+                if (*subkey).sk_flags & SK_ROW_END != 0 {
+                    break;
+                }
+                subkey = subkey.add(1);
+                attno += 1;
+            }
+        }
+    }
 }
 
 /// _bt_compare_scankey_args: is "left op right" true? `None` when the
@@ -355,7 +406,12 @@ fn compare_scankey_args(
         return compare_scankey_args_scalar(rel, op, leftarg, rightarg);
     }
 
-    debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_ROW_HEADER == 0);
+    // Redundancy involving a row compare key is undetermined (C returns
+    // "cannot compare" and both keys are kept).
+    if (leftarg.sk_flags | rightarg.sk_flags) & SK_ROW_HEADER != 0 {
+        debug_assert!((leftarg.sk_flags | rightarg.sk_flags) & SK_BT_SKIP == 0);
+        return Ok(None);
+    }
 
     if let Some((array_i, orderproc_i)) = array {
         let leftarray = leftarg.sk_flags & SK_SEARCHARRAY != 0
@@ -810,6 +866,22 @@ fn bt_unmark_keys(so: &mut BTScanOpaqueData<'_>) -> PgResult<()> {
             }
             let mut key = key.clone();
             key.sk_flags &= !(SK_BT_REQFWD | SK_BT_REQBKWD);
+            if key.sk_flags & SK_ROW_HEADER != 0 {
+                // SAFETY: SK_ROW_HEADER contract (scankey.rs); clears the
+                // requiredness flags on the shared subkey array, as C.
+                unsafe {
+                    let mut subkey = key.sk_argument.as_usize() as *mut ScanKeyData;
+                    debug_assert!((*subkey).sk_strategy == key.sk_strategy);
+                    loop {
+                        debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+                        (*subkey).sk_flags &= !(SK_BT_REQFWD | SK_BT_REQBKWD);
+                        if (*subkey).sk_flags & SK_ROW_END != 0 {
+                            break;
+                        }
+                        subkey = subkey.add(1);
+                    }
+                }
+            }
             unmarked.push(key);
         }
     }
