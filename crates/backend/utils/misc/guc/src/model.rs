@@ -22,9 +22,10 @@ pub const GUC_LOCAL: GucStackState = 2;
 pub const GUC_SET_LOCAL: GucStackState = 3;
 
 // C's `void *extra` is one refcounted guc_malloc block whose pointer is shared
-// across gen.extra / reset_extra / stack slots (set_extra_field); Rc is that
-// refcount (one backend = one thread).
-pub type SharedExtra = std::rc::Rc<GucHookExtra>;
+// across gen.extra / reset_extra / stack slots (set_extra_field). Arc, not Rc:
+// a parallel-worker session bind (store.rs) hands the leader's validated
+// extras to the claiming pool thread so check hooks need not rerun there.
+pub type SharedExtra = std::sync::Arc<GucHookExtra>;
 
 #[derive(Clone, Debug)]
 pub enum config_var_val {

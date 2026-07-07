@@ -575,3 +575,130 @@ fn process_guc_array_secdef_pushes_and_nest_pop_restores() {
     AtEOXact_GUC(true, nest);
     assert_eq!(get_int("work_mem"), Some(4096));
 }
+
+#[test]
+fn session_bind_transfers_leader_state() {
+    setup();
+    assert_eq!(set_session("cursor_tuple_fraction", Some("0.25")).unwrap(), 1);
+    assert_eq!(
+        set_config_option_ext(
+            "statement_timeout",
+            Some("7s"),
+            PGC_SIGHUP,
+            PGC_S_FILE,
+            BOOTSTRAP_SUPERUSERID,
+            GUC_ACTION_SET,
+            true,
+            ErrorLevel(0),
+            false,
+        )
+        .unwrap(),
+        1
+    );
+    let caps = crate::store::capture_session_gucs();
+    std::thread::spawn(move || {
+        setup();
+        assert!(!crate::store::session_bound());
+        let binding = crate::store::bind_session_gucs(&caps).unwrap();
+        assert!(crate::store::session_bound());
+        assert_eq!(get_real("cursor_tuple_fraction"), Some(0.25));
+        assert_eq!(get_int("statement_timeout"), Some(7000));
+        // Session-sourced bind resets to the boot default; file-sourced bind
+        // became the reset value (make_default), exactly as restore would.
+        set_config_option_ext(
+            "cursor_tuple_fraction",
+            None,
+            PGC_USERSET,
+            PGC_S_SESSION,
+            BOOTSTRAP_SUPERUSERID,
+            GUC_ACTION_SET,
+            true,
+            ErrorLevel(0),
+            false,
+        )
+        .unwrap();
+        assert_eq!(get_real("cursor_tuple_fraction"), Some(0.1));
+        set_config_option_ext(
+            "statement_timeout",
+            None,
+            PGC_USERSET,
+            PGC_S_SESSION,
+            BOOTSTRAP_SUPERUSERID,
+            GUC_ACTION_SET,
+            true,
+            ErrorLevel(0),
+            false,
+        )
+        .unwrap();
+        assert_eq!(get_int("statement_timeout"), Some(7000));
+        drop(binding);
+        assert!(!crate::store::session_bound());
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn session_bind_guard_rejects_double_bind() {
+    setup();
+    let caps = crate::store::capture_session_gucs();
+    std::thread::spawn(move || {
+        setup();
+        let _binding = crate::store::bind_session_gucs(&caps).unwrap();
+        let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::store::bind_session_gucs(&caps)
+        }));
+        assert!(again.is_err(), "second bind on a bound thread must panic");
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn session_bind_matches_string_restore_end_state() {
+    setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(set_session("work_mem", Some("8MB")).unwrap(), 1);
+    assert_eq!(set_session("application_name", Some("bindcheck")).unwrap(), 1);
+    let caps = crate::store::capture_session_gucs();
+    let strings = crate::store::capture_nondefault_variables();
+    let bound = std::thread::spawn(move || {
+        setup();
+        let _binding = crate::store::bind_session_gucs(&caps).unwrap();
+        with_store(|reg| {
+            reg.iter()
+                .map(|v| {
+                    (
+                        v.name().to_string(),
+                        crate::registry::show_guc_option(v, false),
+                        v.gen().source,
+                        v.gen().scontext,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap()
+    })
+    .join()
+    .unwrap();
+    let restored = std::thread::spawn(move || {
+        setup();
+        crate::store::restore_nondefault_variables(&strings).unwrap();
+        with_store(|reg| {
+            reg.iter()
+                .map(|v| {
+                    (
+                        v.name().to_string(),
+                        crate::registry::show_guc_option(v, false),
+                        v.gen().source,
+                        v.gen().scontext,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(bound, restored);
+}

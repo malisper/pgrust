@@ -57,6 +57,9 @@ pub struct ParallelShared {
     pub temp_toast_namespace_id: Oid,
     pub last_xlog_end: AtomicU64,
     guc_state: Vec<guc::store::NondefaultGuc>,
+    // §3.4 P-guc: typed leader capture; when session_guc_bind_enabled() this
+    // carries the GUC transfer and guc_state stays empty (and vice versa).
+    guc_bind: Vec<guc::store::CapturedGuc>,
     tstate: Vec<u8>,
     combocid: Arc<[(CommandId, CommandId)]>,
     pending_syncs: Vec<(RelFileLocator, bool)>,
@@ -305,7 +308,16 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         temp_namespace_id: temp_ns,
         temp_toast_namespace_id: temp_toast_ns,
         last_xlog_end: AtomicU64::new(0),
-        guc_state: guc::store::capture_nondefault_variables(),
+        guc_state: if guc::store::session_guc_bind_enabled() {
+            Vec::new()
+        } else {
+            guc::store::capture_nondefault_variables()
+        },
+        guc_bind: if guc::store::session_guc_bind_enabled() {
+            guc::store::capture_session_gucs()
+        } else {
+            Vec::new()
+        },
         tstate,
         combocid: combocid::SerializeComboCIDState(),
         pending_syncs: catalog_storage::SerializePendingSyncs(),
@@ -975,7 +987,12 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     inval::local::InvalidateSystemCaches()?;
     gtrace("w.inval.done");
 
-    guc::store::restore_nondefault_variables(&shared.guc_state)?;
+    let _guc_binding = if guc::store::session_guc_bind_enabled() {
+        Some(guc::store::bind_session_gucs(&shared.guc_bind)?)
+    } else {
+        guc::store::restore_nondefault_variables(&shared.guc_state)?;
+        None
+    };
     gtrace("w.guc.done");
 
     miscinit::SetUserIdAndSecContext(shared.current_user_id, shared.sec_context);

@@ -51,6 +51,7 @@ namespace_seams = { path = "../../../catalog/namespace_seams" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 miscinit_seams = { path = "../miscinit_seams" }
+parallel_seams = { path = "../../../access/transam/parallel_seams" }
 acl_seams = { path = "../../adt/acl_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }

@@ -433,6 +433,11 @@ pub mod wpool {
                 match rx.recv() {
                     Ok(task) => {
                         bgworker::gtrace("w.pool.task");
+                        // §5 leak guard: a claimed standby must not carry a
+                        // previous session's GUC bind (rotation makes this
+                        // structurally true today; the assert keeps it true
+                        // when threads start being retained across tasks).
+                        debug_assert!(!guc::store::session_bound());
                         super::run_child_task(
                             BackendType::BgWorker,
                             child_pid,
