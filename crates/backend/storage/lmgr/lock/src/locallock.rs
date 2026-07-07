@@ -37,6 +37,7 @@ thread_local! {
     // UnsafeCell, not RefCell (rule 10): every with_local closure is a leaf
     // (no call back into this module or seams); LOCAL_BUSY enforces in debug.
     static LOCAL: UnsafeCell<Option<ManuallyDrop<LocalState>>> = const { UnsafeCell::new(None) };
+    #[cfg(debug_assertions)]
     static LOCAL_BUSY: Cell<bool> = const { Cell::new(false) };
     static STRONG_LOCK_IN_PROGRESS: Cell<Option<LOCALLOCKTAG>> = const { Cell::new(None) };
     static AWAITED_LOCK: Cell<Option<(LOCALLOCKTAG, u32)>> = const { Cell::new(None) };
@@ -61,19 +62,30 @@ pub fn InitLockManagerAccess() {
 }
 
 pub(crate) fn with_local<R>(f: impl FnOnce(&mut LocalState) -> R) -> R {
-    debug_assert!(!LOCAL_BUSY.replace(true), "with_local re-entered");
+    // Guard module Drop: BUSY must clear on panic unwind or every later call
+    // — including abort cleanup — re-panics and the backend spins (the
+    // snapmgr with_state wedge class).
+    #[cfg(debug_assertions)]
+    struct BusyReset;
+    #[cfg(debug_assertions)]
+    impl Drop for BusyReset {
+        fn drop(&mut self) {
+            LOCAL_BUSY.set(false);
+        }
+    }
+    #[cfg(debug_assertions)]
+    let _busy = {
+        assert!(!LOCAL_BUSY.replace(true), "with_local re-entered");
+        BusyReset
+    };
     // SAFETY: closures are leaves (no re-entry into this module or seams);
     // guarded in debug builds by LOCAL_BUSY.
-    let r = LOCAL.with(|slot| unsafe {
+    LOCAL.with(|slot| unsafe {
         let state = (*slot.get())
             .as_mut()
             .unwrap_or_else(|| panic!("lock manager backend state not initialized"));
         f(state)
-    });
-    if cfg!(debug_assertions) {
-        LOCAL_BUSY.set(false);
-    }
-    r
+    })
 }
 
 pub(crate) fn awaited_lock() -> Option<(LOCALLOCKTAG, u32)> {

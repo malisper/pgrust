@@ -347,6 +347,7 @@ thread_local! {
     // arena-less state leaks at thread exit exactly as C's globals do.
     static STATE: UnsafeCell<ManuallyDrop<XactState>> =
         const { UnsafeCell::new(ManuallyDrop::new(XactState::new())) };
+    #[cfg(debug_assertions)]
     static XS_BUSY: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -366,14 +367,25 @@ pub(crate) struct XsPtr(*mut XactState);
 impl XsPtr {
     #[inline(always)]
     pub(crate) fn with<R>(self, f: impl FnOnce(&mut XactState) -> R) -> R {
-        debug_assert!(!XS_BUSY.replace(true), "xs re-entered");
+        // Guard module Drop: BUSY must clear on panic unwind or every later
+        // call — including abort cleanup — re-panics and the backend spins
+        // (the snapmgr with_state wedge class).
+        #[cfg(debug_assertions)]
+        struct BusyReset;
+        #[cfg(debug_assertions)]
+        impl Drop for BusyReset {
+            fn drop(&mut self) {
+                XS_BUSY.set(false);
+            }
+        }
+        #[cfg(debug_assertions)]
+        let _busy = {
+            assert!(!XS_BUSY.replace(true), "xs re-entered");
+            BusyReset
+        };
         // SAFETY: single-threaded backend TLS, live for the thread lifetime;
         // the leaf invariant excludes a second live &mut (XS_BUSY in debug).
-        let r = f(unsafe { &mut *self.0 });
-        if cfg!(debug_assertions) {
-            XS_BUSY.set(false);
-        }
-        r
+        f(unsafe { &mut *self.0 })
     }
 }
 
