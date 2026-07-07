@@ -395,22 +395,20 @@ pub fn CopyFrom<'mcx>(
     if relkind == types_rel::RELKIND_FOREIGN_TABLE {
         unported("FROM into foreign tables (FDW lane)");
     }
-    // BEFORE/INSTEAD/AFTER row triggers and transition tables on a
-    // partitioned target route through leaf resultRelInfos (B9 charter).
-    if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        if let Some(td) = &trigdesc {
-            if td.trig_insert_before_row
-                || td.trig_insert_instead_row
-                || td.trig_insert_after_row
-                || td.trig_insert_new_table
-            {
-                panic!("CopyFrom: triggers on a partitioned COPY target not ported");
-            }
-        }
-    }
+    // C forces CIM_SINGLE on a partitioned target with BEFORE/INSTEAD row
+    // triggers (copyfrom.c:995-1005) or statement-level transition tables
+    // (copyfrom.c:1016-1027) — the flush path can't fire either correctly.
+    let part_force_single = relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        && trigdesc.as_ref().is_some_and(|td| {
+            td.trig_insert_before_row || td.trig_insert_instead_row || td.trig_insert_new_table
+        });
     // AfterTriggerBeginQuery precedes MakeTransitionCaptureState (copyfrom.c
-    // 961/972): the capture registry keys off the query depth it opens.
-    if trigdesc.is_some() {
+    // 961/972): the capture registry keys off the query depth it opens. A
+    // triggerless partitioned target still needs it — routed-into leaves may
+    // carry their own row triggers.
+    let open_trigger_query =
+        trigdesc.is_some() || relkind == types_rel::RELKIND_PARTITIONED_TABLE;
+    if open_trigger_query {
         trigger::AfterTriggerBeginQuery();
     }
     let transition_capture = match &trigdesc {
@@ -429,7 +427,14 @@ pub fn CopyFrom<'mcx>(
     // path are simply dropped, as C's are (the aborted xact kills flushed
     // ones).
     let body = if relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-        copy_from_partitioned_body(mcx, cstate, rel, ti_options, transition_capture.as_ref())
+        copy_from_partitioned_body(
+            mcx,
+            cstate,
+            rel,
+            ti_options,
+            part_force_single,
+            transition_capture.as_ref(),
+        )
     } else {
         let mut trig = trigdesc.as_ref().map(|td| CopyTrig {
             td,
@@ -445,6 +450,8 @@ pub fn CopyFrom<'mcx>(
                 let mut when =
                     trigger::TriggerWhenEval { mcx, cache: &mut trig_when, modified_cols: None };
                 trigger::ExecASInsertTriggers(rel, td, transition_capture.as_ref(), Some(&mut when))?;
+            }
+            if open_trigger_query {
                 trigger::AfterTriggerEndQuery()?;
             }
             Ok(n)
@@ -727,28 +734,30 @@ struct PartBuffer<'mcx> {
 // copyfrom.c MAX_PARTITION_BUFFERS: trim to this many after each flush.
 const MAX_PARTITION_BUFFERS: usize = 32;
 
-// A routed-into leaf's own trigger state (its TriggerDesc plus the fmgr/WHEN
-// caches ExecBRInsertTriggers/ExecARInsertTriggers key by trigdesc index;
-// distinct per leaf since leaves have distinct trigdescs).
+// The trigger slice of a routed leaf's resultRelInfo (ExecFindPartition's
+// ExecInitPartitionInfo leg): trigdesc, per-rel caches, the leaf->root
+// attmap for transition capture (C ri_ChildToRootMap), and C's
+// leafpart_use_multi_insert (copyfrom.c:1232-1236).
 struct LeafTrig<'mcx> {
-    td: std::rc::Rc<types_trigger::TriggerDesc<'static>>,
+    td: Option<std::rc::Rc<types_trigger::TriggerDesc<'static>>>,
     fmgr: trigger::TriggerFmgrCache,
     when: trigger::TriggerWhenCache<'mcx>,
-    has_br: bool,
-    has_ar: bool,
-    // ExecPartitionCheck's compiled-qual cache (copyfrom.c:1366-1368 re-check
-    // after a BR trigger runs); only ever populated when has_br is set.
-    partcheck: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    c2r: Option<mcx::PgVec<'mcx, i16>>,
+    pcheck: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
+    use_multi: bool,
 }
 
-// CopyFrom, partitioned arm: CIM_MULTI_CONDITIONAL with every CIM_SINGLE
-// fallback loud (triggers, FDW partitions, volatile defaults/WHERE), so each
-// routed leaf batches through its own CopyMultiInsertBuffer.
+// CopyFrom, partitioned arm: CIM_MULTI_CONDITIONAL (each routed leaf batches
+// through its own CopyMultiInsertBuffer) with the CIM_SINGLE fallbacks of
+// copyfrom.c:995-1052 — force_single covers the target's BR/IR triggers and
+// transition tables, volatile defaults/WHERE are computed here, and a leaf
+// with BR/IR triggers takes the single-insert arm per row.
 fn copy_from_partitioned_body<'mcx>(
     mcx: Mcx<'mcx>,
     cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
     ti_options: i32,
+    force_single: bool,
     transition_capture: Option<&trigger::TransitionCaptureState>,
 ) -> PgResult<u64> {
     let mycid = xact::GetCurrentCommandId(true)?;
@@ -763,24 +772,20 @@ fn copy_from_partitioned_body<'mcx>(
     let mut leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>> = Vec::new();
     let mut leaf_checks: Vec<Option<mcx::PgVec<'mcx, nodemodifytable::CheckExpr<'mcx>>>> =
         Vec::new();
-    // A routed-into leaf with its own BEFORE/AFTER ROW insert trigger
-    // (copyfrom.c:1220-1236: has_before_insert_row_trig disables that leaf's
-    // batching; has_after_row just needs firing after each insert).
-    let mut leaf_trig: Vec<Option<LeafTrig<'mcx>>> = Vec::new();
     let mut buffered_tuples = 0usize;
     let mut buffered_bytes = 0usize;
     let mut processed: u64 = 0;
     let mut excluded: i64 = 0;
     let mut flushed: i64 = 0;
-    // CIM_SINGLE arms of copyfrom.c:1028-1052 (single bistate, pin released
-    // on partition switch; C copyfrom.c:1260). C allocates this bistate
-    // unconditionally for every partitioned target (copyfrom.c:1083-1088),
-    // since a leaf's own BR trigger can force the non-batch leg even when
-    // the statement-wide insertMethod isn't CIM_SINGLE.
-    let single_insert = cstate.volatile_defexprs || where_clause_volatile(cstate)?;
+    // CIM_SINGLE arms of copyfrom.c:1028-1052; the non-batch bistate exists
+    // for CIM_MULTI_CONDITIONAL too (copyfrom.c:1083), pin released on
+    // partition switch (copyfrom.c:1258-1260).
+    let single_insert =
+        force_single || cstate.volatile_defexprs || where_clause_volatile(cstate)?;
     let mut single_bistate = heapam::GetBulkInsertState();
     let mut prev_leaf: Option<usize> = None;
     let mut leaf_slots: Vec<Option<types_slot::SlotData<'mcx>>> = Vec::new();
+    let mut leaf_trig: Vec<Option<LeafTrig<'mcx>>> = Vec::new();
 
     loop {
         postgres_seams::check_for_interrupts::call()?;
@@ -820,34 +825,14 @@ fn copy_from_partitioned_body<'mcx>(
         if leaf_checks.len() <= leaf {
             leaf_checks.resize_with(leaf + 1, || None);
             leaf_indexes.resize_with(leaf + 1, || None);
+        }
+        if leaf_trig.len() <= leaf {
             leaf_trig.resize_with(leaf + 1, || None);
+        }
+        if leaf_trig[leaf].is_none() {
             let lrel = router.leaf_rel(leaf);
             if lrel.rd_rel.relkind != RELKIND_RELATION {
                 panic!("CopyFrom: foreign-table partition as COPY target not ported (FDW lane)");
-            }
-            // rd_hastriggers is a stale-true proxy (DROP TRIGGER never clears
-            // relhastriggers, trigger.c:1350); C keys off the leaf's real
-            // ri_TrigDesc, so only a live insert row trigger is loud (B9).
-            if lrel.rd_hastriggers {
-                if let Some(td) = relcache::RelationGetTriggerDesc(lrel.rd_id)? {
-                    // INSTEAD OF triggers can't exist on a table (view-only in
-                    // C's grammar) and transition tables on a routed leaf
-                    // still need the child->root capture map wired through
-                    // (copyfrom.c:1269-1271); leave both unported.
-                    if td.trig_insert_instead_row || td.trig_insert_new_table {
-                        panic!("CopyFrom: INSTEAD OF / transition-table triggers on a routed-into partition not ported");
-                    }
-                    if td.trig_insert_before_row || td.trig_insert_after_row {
-                        leaf_trig[leaf] = Some(LeafTrig {
-                            has_br: td.trig_insert_before_row,
-                            has_ar: td.trig_insert_after_row,
-                            td,
-                            fmgr: trigger::TriggerFmgrCache::default(),
-                            when: trigger::TriggerWhenCache::default(),
-                            partcheck: None,
-                        });
-                    }
-                }
             }
             if lrel
                 .rd_att
@@ -857,18 +842,56 @@ fn copy_from_partitioned_body<'mcx>(
             {
                 panic!("CopyFrom: generated columns on a routed-into partition not ported");
             }
+            let td = if lrel.rd_hastriggers {
+                relcache::RelationGetTriggerDesc(lrel.rd_id)?
+            } else {
+                None
+            };
+            // C leafpart_use_multi_insert (copyfrom.c:1232-1236): a leaf with
+            // BEFORE/INSTEAD row triggers takes the single-insert arm.
+            let use_multi = !td.as_ref().is_some_and(|t| {
+                t.trig_insert_before_row || t.trig_insert_instead_row
+            });
+            let c2r =
+                tupdesc::build_attrmap_by_name_if_req(mcx, &lrel.rd_att, &rel.rd_att, false)?;
+            leaf_trig[leaf] = Some(LeafTrig {
+                td,
+                fmgr: trigger::TriggerFmgrCache::default(),
+                when: trigger::TriggerWhenCache::default(),
+                c2r,
+                pcheck: None,
+                use_multi,
+            });
+        }
+        let leaf_use_multi = !single_insert
+            && leaf_trig[leaf].as_ref().expect("leaf initialized").use_multi;
+
+        if prev_leaf != Some(leaf) {
+            // copyfrom.c:1245-1260: flush pending inserts before a
+            // non-batchable partition's row so its triggers see them, and
+            // release the bistate pin on partition switch.
+            if !leaf_use_multi && buffered_tuples > 0 {
+                flushed += flush_part_buffers(
+                    mcx,
+                    cstate,
+                    &router,
+                    &mut buffers,
+                    &mut leaf_indexes,
+                    &mut leaf_trig,
+                    transition_capture,
+                    mycid,
+                    ti_options,
+                )?;
+                pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, flushed);
+                buffered_tuples = 0;
+                buffered_bytes = 0;
+            }
+            heapam::ReleaseBulkInsertStatePin(&mut single_bistate);
+            prev_leaf = Some(leaf);
         }
 
-        // A leaf's own BEFORE ROW trigger forces the non-batch leg for that
-        // leaf even when the statement-wide insertMethod isn't CIM_SINGLE
-        // (copyfrom.c:1232-1236 leafpart_use_multi_insert).
-        let leaf_has_br = leaf_trig[leaf].as_ref().is_some_and(|t| t.has_br);
-        if single_insert || leaf_has_br {
+        if !leaf_use_multi {
             let lrel = router.leaf_rel(leaf);
-            if prev_leaf != Some(leaf) {
-                heapam::ReleaseBulkInsertStatePin(&mut single_bistate);
-                prev_leaf = Some(leaf);
-            }
             if leaf_slots.len() <= leaf {
                 leaf_slots.resize_with(leaf + 1, || None);
             }
@@ -885,26 +908,25 @@ fn copy_from_partitioned_body<'mcx>(
                 None => &mut rootslot,
             };
             use_slot.base_mut().tts_tableOid = lrel.rd_id;
-
-            // BEFORE ROW INSERT trigger (copyfrom.c:1327-1331); a NULL
-            // return suppresses the row and it is not counted.
-            if let Some(t) = leaf_trig[leaf].as_mut().filter(|t| t.has_br) {
+            let LeafTrig { td, fmgr, when: when_cache, c2r, pcheck, .. } =
+                leaf_trig[leaf].as_mut().expect("leaf initialized");
+            let has_br = td.as_ref().is_some_and(|t| t.trig_insert_before_row);
+            // BEFORE ROW INSERT triggers on the leaf (copyfrom.c:1327-1331);
+            // a NULL return suppresses the row and it is not counted.
+            if has_br {
                 let mut when =
-                    trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
-                if !trigger::ExecBRInsertTriggers(mcx, lrel, t.td.as_ref(), &mut t.fmgr, &mut when, use_slot)?
-                {
+                    trigger::TriggerWhenEval { mcx, cache: &mut *when_cache, modified_cols: None };
+                if !trigger::ExecBRInsertTriggers(
+                    mcx,
+                    lrel,
+                    td.as_deref().expect("has_br implies trigdesc"),
+                    fmgr,
+                    &mut when,
+                    use_slot,
+                )? {
                     continue;
                 }
-                // The trigger may have changed the row; unlike a routed row
-                // with no BR trigger, C re-runs the partition check it
-                // would otherwise skip (copyfrom.c:1366-1368).
-                if !execpartition::exec_partition_check(mcx, &mut t.partcheck, lrel, use_slot)? {
-                    return Err(execpartition::partition_constraint_violation(
-                        mcx, lrel, use_slot, None, Some(rel),
-                    ));
-                }
             }
-
             nodemodifytable::exec_constraints(
                 mcx,
                 &mut leaf_checks[leaf],
@@ -913,6 +935,17 @@ fn copy_from_partitioned_body<'mcx>(
                 use_slot,
                 Some(rel),
             )?;
+            // ExecPartitionCheck (copyfrom.c:1361-1368): a routed row is
+            // re-checked only when a BR trigger could have moved it.
+            if has_br && !execpartition::exec_partition_check(mcx, pcheck, lrel, use_slot)? {
+                return Err(execpartition::partition_constraint_violation(
+                    mcx,
+                    lrel,
+                    use_slot,
+                    None,
+                    Some(rel),
+                ));
+            }
             tableam::table_tuple_insert(
                 mcx,
                 lrel,
@@ -940,21 +973,25 @@ fn copy_from_partitioned_body<'mcx>(
             } else {
                 PgVec::new_in(mcx)
             };
-            if let Some(t) = leaf_trig[leaf].as_mut().filter(|t| t.has_ar) {
+            // AFTER ROW INSERT triggers (copyfrom.c:1441); capture converts
+            // leaf-format tuples through the leaf->root map.
+            if td.is_some() || transition_capture.is_some() {
+                let conv = c2r.as_ref().map(|map| trigger::ChildToRoot {
+                    map,
+                    child_desc: lrel.rd_att.as_ref(),
+                    root_desc: rel.rd_att.as_ref(),
+                });
                 let mut when =
-                    trigger::TriggerWhenEval { mcx, cache: &mut t.when, modified_cols: None };
+                    trigger::TriggerWhenEval { mcx, cache: &mut *when_cache, modified_cols: None };
                 trigger::ExecARInsertTriggers(
                     mcx,
                     lrel,
-                    Some(t.td.as_ref()),
+                    td.as_deref(),
                     use_slot.base().tts_tid,
                     &recheck_indexes,
                     transition_capture,
                     Some(&mut when),
-                    // Transition tables on an attno-remapped routed leaf need
-                    // a child->root map here; unreachable without a NEW
-                    // TABLE trigger on the leaf, which still panics above.
-                    None,
+                    conv.as_ref(),
                 )?;
             }
             processed += 1;
@@ -1052,10 +1089,7 @@ fn copy_from_partitioned_body<'mcx>(
     Ok(processed)
 }
 
-// CopyMultiInsertInfoFlush over every tracked buffer, in creation order. A
-// buffered leaf only ever has an AR-only LeafTrig entry (a BR-triggered leaf
-// never buffers; see leaf_has_br above), so ExecARInsertTriggers's own
-// trig_insert_after_row gate is all that's needed here.
+// CopyMultiInsertInfoFlush over every tracked buffer, in creation order.
 #[allow(clippy::too_many_arguments)]
 fn flush_part_buffers<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1078,12 +1112,13 @@ fn flush_part_buffers<'mcx>(
             leaf_indexes[buf.leaf] = Some(execindexing::ExecOpenIndices(mcx, lrel, false)?);
         }
         let index_state = leaf_indexes[buf.leaf].as_mut().expect("just opened");
-        let mut trig_arg = leaf_trig[buf.leaf].as_mut().map(|t| CopyTrig {
-            td: t.td.as_ref(),
-            tc: transition_capture,
-            when: &mut t.when,
-            fmgr: &mut t.fmgr,
-        });
+        // AFTER ROW triggers on a batchable leaf fire at flush time
+        // (CopyMultiInsertBufferFlush, copyfrom.c:562-598); transition
+        // capture never reaches here — it forces the single-insert arm.
+        let LeafTrig { td, fmgr, when, .. } =
+            leaf_trig[buf.leaf].as_mut().expect("leaf initialized");
+        let mut trig =
+            td.as_deref().map(|td| CopyTrig { td, tc: transition_capture, when, fmgr });
         flush_multi_insert(
             mcx,
             cstate,
@@ -1094,7 +1129,7 @@ fn flush_part_buffers<'mcx>(
             ti_options,
             &mut buf.bistate,
             index_state,
-            trig_arg.as_mut(),
+            trig.as_mut(),
         )?;
         flushed += buf.nused as i64;
         buf.nused = 0;
