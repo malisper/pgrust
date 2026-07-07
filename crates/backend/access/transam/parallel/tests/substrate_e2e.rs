@@ -170,6 +170,8 @@ fn stub_seams() {
     backend_progress_seams::pgstat_progress_end_command::set(|| {});
     predicate_seams::pre_commit_check_for_serialization_failure::set(|| Ok(()));
     predicate_seams::release_predicate_locks::set(|_, _| Ok(()));
+    predicate_seams::share_serializable_xact::set(|| 0);
+    predicate_seams::attach_serializable_xact::set(|_| Ok(()));
     // Every launched worker thread is "postmaster child"-shaped here.
     pmchild_seams::find_postmaster_child_by_pid::set(|pid| {
         Some((pid, types_core::BackendType::Backend))

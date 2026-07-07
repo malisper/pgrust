@@ -75,6 +75,7 @@ fn setup() {
         varsup_seams::read_next_transaction_id::set(|| Ok(NEXT_XID.load(SeqCst)));
 
         xact_seams::is_in_parallel_mode::set(|| false);
+        parallel_seams::is_parallel_worker::set(|| false);
         xact_seams::is_sub_transaction::set(|| false);
         xact_seams::isolation_is_serializable::set(|| true);
         xact_seams::xact_read_only::set(|| false);

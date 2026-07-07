@@ -11530,6 +11530,7 @@ dependencies = [
  "lwlock",
  "mcx",
  "miscinit_seams",
+ "parallel_seams",
  "pg_sema_seams",
  "pmsignal_seams",
  "postgres_seams",

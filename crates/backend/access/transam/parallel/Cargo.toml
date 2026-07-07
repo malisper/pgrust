@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 backend_progress = { path = "../../../utils/activity/backend_progress" }
 parallel_seams = { path = "../parallel_seams" }
+predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
