@@ -275,6 +275,15 @@ fn seam_range_var_get_relid(
     RangeVarGetRelidExtended(relation, lockmode, flags, None)
 }
 
+fn seam_range_var_get_relid_extended(
+    _mcx: Mcx<'_>,
+    relation: &rel_vocab::RangeVar<'_>,
+    lockmode: types_rel::LOCKMODE,
+    flags: u32,
+) -> PgResult<Oid> {
+    RangeVarGetRelidExtended(relation, lockmode, flags, None)
+}
+
 fn namespace_search_path_get() -> Option<String> {
     NAMESPACE_SEARCH_PATH.with(|s| s.borrow().clone())
 }
@@ -299,6 +308,7 @@ fn opername_get_candidate_oids<'mcx>(
 
 pub fn init_seams() {
     namespace_seams::range_var_get_relid::set(seam_range_var_get_relid);
+    namespace_seams::range_var_get_relid_extended::set(seam_range_var_get_relid_extended);
     namespace_seams::get_ts_parser_oid::set(get_ts_parser_oid);
     namespace_seams::at_eoxact_namespace::set(AtEOXact_Namespace);
     namespace_seams::at_eosubxact_namespace::set(AtEOSubXact_Namespace);

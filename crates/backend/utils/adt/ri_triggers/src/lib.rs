@@ -2,9 +2,8 @@
 // ri_restrict (noaction/restrict del/upd), RI_FKey_cascade_del/upd, ri_set
 // (setnull/setdefault del/upd), ri_Check_Pk_Match, RI_Initial_Check, the
 // constraint-info and prepared-plan caches, and the upd_check_required skip
-// tests. LOUD: PERIOD, crosscheck snapshots under
-// detectNewRows, cross-type comparison casts, cross-collation initial-check
-// quals. Divergences: constraint-info cache has no syscache invalidation
+// tests. LOUD: PERIOD, cross-type comparison casts, cross-collation
+// initial-check quals. Divergences: constraint-info cache has no syscache invalidation
 // callback (constraint rows are immutable in the ported DDL surface; DROP
 // removes the triggers that key into it) and the violation DETAIL permission
 // check is the superuser fast path.
@@ -1323,9 +1322,16 @@ fn ri_PerformCheck<'mcx>(
         nargs = riinfo.nkeys;
     }
 
-    if xact::IsolationUsesXactSnapshot() && detect_new_rows {
-        unported("crosscheck snapshots (REPEATABLE READ / SERIALIZABLE RI checks)");
-    }
+    // C: in transaction-snapshot mode with detectNewRows, run under a current
+    // snapshot and have the executor error out on any row that would be
+    // invisible per the transaction snapshot (the crosscheck).
+    let (test_snapshot, crosscheck_snapshot) =
+        if xact::IsolationUsesXactSnapshot() && detect_new_rows {
+            xact::CommandCounterIncrement()?;
+            (Some(snapmgr::GetLatestSnapshot()?), Some(snapmgr::GetTransactionSnapshot()?))
+        } else {
+            (None, None)
+        };
 
     let limit = if expect_ok == spi::SPI_OK_SELECT { 1 } else { 0 };
     let query_rel = if qkey.1 <= RI_PLAN_LAST_ON_PK { pk_rel } else { fk_rel };
@@ -1338,8 +1344,8 @@ fn ri_PerformCheck<'mcx>(
         qplan,
         &vals[..nargs],
         &nulls[..nargs],
-        None,
-        None,
+        test_snapshot,
+        crosscheck_snapshot,
         false,
         false,
         limit,

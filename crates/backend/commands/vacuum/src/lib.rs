@@ -542,8 +542,9 @@ pub fn expand_vacuum_rel<'mcx>(
         .and_then(|n| n.as_range_var())
         .expect("VacuumRelation.relation is RangeVar");
     let relname = rv.relname.expect("RangeVar.relname");
-    // RVR_SKIP_LOCKED elided: single-backend, the lock is always available.
-    let relid = namespace_seams::range_var_get_relid::call(
+    let rvr_opts =
+        if options & VACOPT_SKIP_LOCKED != 0 { namespace_seams::RVR_SKIP_LOCKED } else { 0 };
+    let relid = namespace_seams::range_var_get_relid_extended::call(
         mcx,
         &rel_vocab::RangeVar {
             catalogname: rv.catalogname,
@@ -554,8 +555,18 @@ pub fn expand_vacuum_rel<'mcx>(
             location: rv.location,
         },
         AccessShareLock,
-        false,
+        rvr_opts,
     )?;
+    // C: lock unavailable — emit the same log statement vacuum_rel()/
+    // analyze_rel() would.
+    if relid == InvalidOid {
+        let verb = if options & VACOPT_VACUUM != 0 { "vacuum" } else { "analyze" };
+        ereport(WARNING)
+            .errcode(ERRCODE_LOCK_NOT_AVAILABLE)
+            .errmsg(format!("skipping {verb} of \"{relname}\" --- lock not available"))
+            .finish(loc("expand_vacuum_rel"))?;
+        return Ok(());
+    }
     let class_shape = syscache_seams::lookup_pg_class_by_relid::call(relid)?
         .unwrap_or_else(|| panic!("cache lookup failed for relation {relid}"));
 
