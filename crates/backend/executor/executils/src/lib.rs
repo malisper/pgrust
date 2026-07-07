@@ -386,6 +386,34 @@ pub fn exec_eval_expr_with_subplans<'mcx>(
     }
 }
 
+/// [`exec_eval_expr_with_subplans`] over an explicit inner slot id — hash
+/// key evaluation binds the input tuple as the inner slot (C ExecInitHash's
+/// hash_expr with the parent planstate).
+pub fn exec_eval_expr_with_subplans_inner_slot<'mcx>(
+    state: &mut execexpr::ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    inner: ExecSlotId,
+) -> PgResult<::datum::NullableDatum> {
+    let mut resume: Option<execexpr::Resume> = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let slot = &mut estate.es_tupleTable[inner.0 as usize];
+            let mut slots =
+                execexpr::EvalSlots { scan: None, inner: Some(slot), outer: None };
+            execexpr::exec_eval_expr_outcome(state, &mut slots, r)?
+        };
+        match outcome {
+            execexpr::EvalOutcome::Done(nd) => return Ok(nd),
+            execexpr::EvalOutcome::Suspended(s) => {
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                resume = Some(s.resume_with(r));
+            }
+        }
+    }
+}
+
 pub fn exec_project_with_subplans<'mcx>(
     state: &mut execexpr::ExprState<'mcx>,
     estate: &mut EStateData<'mcx>,

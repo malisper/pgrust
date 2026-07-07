@@ -5,7 +5,7 @@
 use core::ptr::NonNull;
 use std::rc::Rc;
 
-use ::execexpr::{exec_build_hash32_from_exprs, exec_eval_expr, EvalSlots, ExprState};
+use ::execexpr::{exec_build_hash32_from_exprs, EvalSlots, ExprState};
 use ::executils::{AuxCxtId, EStateData, EcxtId, ExecSlotId};
 use ::fd::buffile::BufFile;
 use ::heaptuple::MinimalFormPlan;
@@ -826,9 +826,12 @@ impl<'mcx> HashState<'mcx> {
         slot_id: ExecSlotId,
     ) -> PgResult<u32> {
         estate.reset_expr_context(self.ps_ExprContext);
-        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-        let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-        let r = exec_eval_expr(&mut self.hash_expr, &mut slots)?;
+        let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
+            &mut self.hash_expr,
+            estate,
+            self.ps_ExprContext,
+            slot_id,
+        )?;
         Ok(r.value.as_u32())
     }
     /// Slot deform prefix the build-side hash reads per row (its FETCHSOME
@@ -923,9 +926,12 @@ fn hash_insert_slot<'mcx>(
 ) -> PgResult<()> {
     estate.reset_expr_context(hs.ps_ExprContext);
     let hashvalue = {
-        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-        let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-        let r = exec_eval_expr(&mut hs.hash_expr, &mut slots)?;
+        let r = ::executils::exec_eval_expr_with_subplans_inner_slot(
+            &mut hs.hash_expr,
+            estate,
+            hs.ps_ExprContext,
+            slot_id,
+        )?;
         // Non-strict fold keeps NULL-key tuples: they never match the
         // recheck, so results equal C for every jointype.
         r.value.as_u32()
