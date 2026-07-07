@@ -12,6 +12,9 @@ use crate::run::PlannerRun;
 
 const INT8OID: u32 = 20;
 const INTERNALOID: u32 = 2281;
+const RECORDOID: u32 = 2249;
+const F_ARRAY_AGG_SERIALIZE: u32 = 6294;
+const F_ARRAY_AGG_DESERIALIZE: u32 = 6295;
 const AGGMODIFY_READ_WRITE: i8 = b'w' as i8;
 
 // resolve_aggregate_transtype (parse_agg.c): a polymorphic declared
@@ -37,6 +40,26 @@ fn resolve_aggregate_transtype<'mcx>(
         aggtranstype,
         false,
     )
+}
+
+// agg_args_support_sendreceive (parse_agg.c): every non-byval arg type must
+// have typsend and typreceive.  RECORD is refused outright: record_recv needs
+// the registered typmod of the specific anonymous record type, which
+// array_agg_deserialize cannot supply.
+fn agg_args_support_sendreceive(aggref: &Aggref<'_>) -> PgResult<bool> {
+    for arg in &aggref.args {
+        let tle = arg.as_target_entry().expect("agg arg is a TLE");
+        let argtype = expr_type_typmod(tle.expr).0;
+        if argtype == RECORDOID {
+            return Ok(false);
+        }
+        let ts = syscache_seams::pg_type_io_shape::call(argtype)?
+            .unwrap_or_else(|| panic!("cache lookup failed for type {argtype}"));
+        if !ts.typbyval && (ts.typsend == 0 || ts.typreceive == 0) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn preprocess_aggrefs<'mcx>(
@@ -394,7 +417,8 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
                 ti.initValueIsNull = init_value_is_null;
 
                 let t = run.root.aggtransinfos.len() as i32;
-                let has_serde = ti.serialfn_oid != 0 && ti.deserialfn_oid != 0;
+                let (serialfn_oid, deserialfn_oid) = (ti.serialfn_oid, ti.deserialfn_oid);
+                let has_serde = serialfn_oid != 0 && deserialfn_oid != 0;
                 let no_combine = ti.combinefn_oid == 0;
                 let internal_transtype = ti.aggtranstype == INTERNALOID;
                 let id = run.root.alloc_agg_trans_info(ti);
@@ -402,8 +426,19 @@ fn preprocess_aggref<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> PgRe
                 if !run.root.hasNonPartialAggs {
                     if no_combine {
                         run.root.hasNonPartialAggs = true;
-                    } else if internal_transtype && !has_serde {
-                        run.root.hasNonSerialAggs = true;
+                    } else if internal_transtype {
+                        if !has_serde {
+                            run.root.hasNonSerialAggs = true;
+                        }
+                        // array_agg_serialize/deserialize call the argument
+                        // type's send/receive functions, so they only work
+                        // when every arg type supports them.
+                        if (serialfn_oid == F_ARRAY_AGG_SERIALIZE
+                            || deserialfn_oid == F_ARRAY_AGG_DESERIALIZE)
+                            && !agg_args_support_sendreceive(aggref)?
+                        {
+                            run.root.hasNonSerialAggs = true;
+                        }
                     }
                 }
                 t
