@@ -381,6 +381,34 @@ fn parallel_scan_hash_bucket<'mcx>(
     let hslot = hash_state.hash_tuple_slot;
     let mcx = estate.es_query_cxt;
     let ecxt = node.ps_ExprContext;
+    if node.hashclauses.as_deref().is_some_and(|q| q.has_subplan()) {
+        estate.ecxt_mut(ecxt).ecxt_innertuple = Some(hslot);
+        while !cur.is_null() {
+            // SAFETY: chain entries live in the shared arena for the batch.
+            let hdr = unsafe { &*cur };
+            if hdr.hashvalue() == hashvalue {
+                let tuple = unsafe { HashJoinTupleHdr::mintuple(cur) };
+                // SAFETY: entry image lives until the batch is freed.
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(
+                        &mut estate.es_tupleTable[hslot.0 as usize],
+                        mcx,
+                        tuple,
+                    )
+                };
+                if ::executils::exec_qual_with_subplans(
+                    node.hashclauses.as_deref_mut(),
+                    estate,
+                    ecxt,
+                )? {
+                    node.hj_CurTuple = cur;
+                    return Ok(true);
+                }
+            }
+            cur = hdr.next();
+        }
+        return Ok(false);
+    }
     let outer_id = estate
         .ecxt(ecxt)
         .ecxt_outertuple

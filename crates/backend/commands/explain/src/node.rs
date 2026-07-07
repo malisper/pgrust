@@ -318,15 +318,29 @@ fn collect_node_subplans<'mcx>(
         }
     };
     match node.node_tag() {
-        NodeTag::T_NestLoop | NodeTag::T_MergeJoin | NodeTag::T_HashJoin => {
+        NodeTag::T_NestLoop | NodeTag::T_MergeJoin => {
             walk_list(&mut out, &plan.qual);
             let joinqual = match node.node_tag() {
                 NodeTag::T_NestLoop => &node.as_nest_loop().unwrap().join.joinqual,
-                NodeTag::T_MergeJoin => &node.as_merge_join().unwrap().join.joinqual,
-                _ => &node.as_hash_join().unwrap().join.joinqual,
+                _ => &node.as_merge_join().unwrap().join.joinqual,
             };
             walk_list(&mut out, joinqual);
             walk_list(&mut out, &plan.targetlist);
+        }
+        // ExecInitHashJoin order: projection, outer-hashkey
+        // ExecBuildHash32Expr, then qual/joinqual/hashclauses.
+        NodeTag::T_HashJoin => {
+            let hj = node.as_hash_join().unwrap();
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &hj.hashkeys);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &hj.join.joinqual);
+            walk_list(&mut out, &hj.hashclauses);
+        }
+        // The build-side hash expr is the Hash node's only compiled
+        // expression (ExecInitHashJoin builds it against hashstate).
+        NodeTag::T_Hash => {
+            walk_list(&mut out, &node.as_hash().unwrap().hashkeys);
         }
         // ExecInitModifyTable order: WCO, RETURNING, ON CONFLICT, then
         // ExecInitMerge (per action: WHEN qual then projection); the per-rel

@@ -854,6 +854,9 @@ fn scan_hash_bucket<'mcx>(
     if cur.is_null() {
         return Ok(false);
     }
+    if node.hashclauses.as_deref().is_some_and(|q| q.has_subplan()) {
+        return scan_hash_bucket_subplans(node, hash_state, estate, cur);
+    }
     // Slot pair/ecxt/EvalSlots resolved once per probe row (C's shape).
     let hslot = hash_state.hash_tuple_slot;
     let mcx = estate.es_query_cxt;
@@ -904,6 +907,43 @@ fn scan_hash_bucket<'mcx>(
             // SAFETY: entry images live in the batch arena until reset.
             unsafe { exectuples::exec_store_minimal_tuple_ptr(inner, mcx, tuple) };
             if exec_qual(node.hashclauses.as_deref_mut(), &mut slots)? {
+                node.hj_CurTuple = cur;
+                return Ok(true);
+            }
+        }
+        cur = hdr.next();
+    }
+    Ok(false)
+}
+
+// SubPlan-bearing hashclauses recheck (C evaluates via ExecQual with the
+// hjstate parent's SubPlanStates; the fast lane's split-borrow EvalSlots
+// cannot host the suspended subplan loop).
+#[cold]
+fn scan_hash_bucket_subplans<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hash_state: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut cur: *mut HashJoinTupleHdr,
+) -> PgResult<bool> {
+    let hashvalue = node.hj_CurHashValue;
+    let hslot = hash_state.hash_tuple_slot;
+    let mcx = estate.es_query_cxt;
+    let ecxt = node.ps_ExprContext;
+    estate.ecxt_mut(ecxt).ecxt_innertuple = Some(hslot);
+    while !cur.is_null() {
+        // SAFETY: entry images live in the batch arena until reset.
+        let hdr = unsafe { &*cur };
+        if hdr.hashvalue() == hashvalue {
+            let tuple = unsafe { HashJoinTupleHdr::mintuple(cur) };
+            unsafe {
+                exectuples::exec_store_minimal_tuple_ptr(
+                    &mut estate.es_tupleTable[hslot.0 as usize],
+                    mcx,
+                    tuple,
+                )
+            };
+            if ::executils::exec_qual_with_subplans(node.hashclauses.as_deref_mut(), estate, ecxt)? {
                 node.hj_CurTuple = cur;
                 return Ok(true);
             }
