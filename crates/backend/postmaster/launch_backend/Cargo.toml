@@ -32,6 +32,7 @@ procsignal = { path = "../../storage/ipc/procsignal" }
 ipc = { path = "../../storage/ipc/ipc" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 sinval = { path = "../../storage/ipc/sinval" }
+waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 libc = "0.2"
 
 syslogger_seams = { path = "../syslogger_seams" }
@@ -44,6 +45,5 @@ ip = { path = "../../../common/ip" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
-waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 types_storage = { path = "../../../_support/types/types_storage" }
 libc = "0.2"
