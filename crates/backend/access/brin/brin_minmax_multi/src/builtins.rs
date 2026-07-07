@@ -82,9 +82,22 @@ fn fc_dist_tid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     ret_f64(tid_map(b) - tid_map(a))
 }
 
+// C's PG_GETARG_NUMERIC: a 1B-short image (stored BRIN bounds keep the heap
+// value's packed form, so digits land misaligned) expands into the result mcx.
+// SAFETY: arg i is a live inline numeric varlena image.
+unsafe fn arg_numeric_payload<'a>(fcinfo: &'a Fcinfo, i: usize) -> PgResult<&'a [u8]> {
+    // SAFETY: forwarded caller contract.
+    let v = unsafe { fcinfo.arg_varlena_packed(i)? };
+    if v.is_short() {
+        v.data_expanded(fcinfo.result_mcx())
+    } else {
+        Ok(v.data())
+    }
+}
+
 fn fc_dist_numeric(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: numeric args are live inline varlena images.
-    let (p1, p2) = unsafe { (arg_varlena_payload(fcinfo, 0)?, arg_varlena_payload(fcinfo, 1)?) };
+    let (p1, p2) = unsafe { (arg_numeric_payload(fcinfo, 0)?, arg_numeric_payload(fcinfo, 1)?) };
     let a1 = ::adt_numeric::Num::from_payload(p1);
     let a2 = ::adt_numeric::Num::from_payload(p2);
     let d = ::adt_numeric::ops::numeric_sub_common(a2, a1)?;

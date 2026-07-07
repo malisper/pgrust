@@ -378,6 +378,8 @@ pub fn validate_index<'mcx>(
         &mut state,
     )?;
 
+    indexam::index_insert_cleanup(&indexRelation, &mut indexInfo.ii_AmCache)?;
+
     guc::AtEOXact_GUC(false, save_nestlevel);
     guard.restore();
 
