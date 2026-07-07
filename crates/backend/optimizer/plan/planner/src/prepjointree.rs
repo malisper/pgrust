@@ -3173,6 +3173,9 @@ pub(crate) fn copy_expr<'mcx>(
                     arg: copy_expr(mcx, c.arg, levels_delta)?,
                     collOid: c.collOid,
                     location: c.location,
+                },
+            )
+        }
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().expect("XmlExpr");
             Node::mk(
