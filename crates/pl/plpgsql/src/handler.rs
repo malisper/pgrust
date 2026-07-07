@@ -1152,6 +1152,12 @@ fn plpgsql_exec_function(
     if rc != RC_RETURN {
         debug_assert_eq!(rc, RC_OK);
         if func.fn_rettype == VOIDOID {
+            // C's compiled-in dummy RETURN hits the void hack (pl_exec.c:3303-
+            // 3314): functions return a non-null VOID datum; procedures null.
+            if func.fn_prokind != PROKIND_PROCEDURE {
+                fcinfo.isnull = false;
+                return Ok(Datum::from_usize(0));
+            }
             fcinfo.isnull = true;
             return Ok(Datum::null());
         }
