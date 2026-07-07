@@ -123,21 +123,17 @@ pub fn replace_text_regexp<'mcx>(
     mut search_start: i32,
     n: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    // regex-engine-ab experiment: non-default engines take the byte-offset
-    // alternate path; regex_engine=spencer (the default) falls through to the
-    // untouched C-parity path below.
-    let engine = regexp_alt::regex_engine();
-    if engine != guc_tables::consts::REGEX_ENGINE_SPENCER {
-        return regexp_alt::replace_text_regexp_alt(
+    // regex_engine dispatch: RE2-compatible patterns take the byte-offset
+    // RE2 path; everything else (and regex_engine=spencer) falls through to
+    // the untouched C-parity Spencer path below.
+    if let Some(re) = regexp_alt::dispatch(pattern_text, cflags)? {
+        return regexp_alt::replace_text_regexp_re2(
             mcx,
+            &re,
             src_text,
-            pattern_text,
             replace_text,
-            cflags,
-            collation,
             search_start,
             n,
-            engine,
         );
     }
 

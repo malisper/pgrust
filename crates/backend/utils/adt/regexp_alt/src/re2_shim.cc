@@ -1,6 +1,7 @@
-// Minimal C ABI over RE2 for the regex_engine A/B experiment. Flags ride as
-// inline (?i)(?s)(?m) groups so the shim works across RE2 option-set
-// vintages.
+// Minimal C ABI over RE2 (the product alternate regexp engine). Flags ride
+// as inline (?i)(?s)(?m) groups so the shim works across RE2 option-set
+// vintages; longest selects POSIX leftmost-longest matching, the mode the
+// auto-dispatch compatibility class is proven against.
 #include <re2/re2.h>
 
 #include <cstring>
@@ -9,10 +10,12 @@
 
 extern "C" {
 
-void* pgr_re2_compile(const char* pat, int len, int literal, char* errbuf, int errbuf_len) {
+void* pgr_re2_compile(const char* pat, int len, int literal, int longest, char* errbuf,
+                      int errbuf_len) {
     RE2::Options opts;
     opts.set_log_errors(false);
     opts.set_literal(literal != 0);
+    opts.set_longest_match(longest != 0);
     opts.set_max_mem(64 << 20);
     RE2* re = new RE2(re2::StringPiece(pat, len), opts);
     if (!re->ok()) {

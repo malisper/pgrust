@@ -117,10 +117,11 @@ pub const PLAN_CACHE_MODE_FORCE_GENERIC_PLAN: i32 = 1;
 pub const RECOVERY_PREFETCH_OFF: i32 = 0;
 pub const RECOVERY_PREFETCH_ON: i32 = 1;
 pub const RECOVERY_PREFETCH_TRY: i32 = 2;
-// pgrust-only regex-engine A/B experiment (regex-engine-ab branch).
+// pgrust-only regexp engine dispatch: auto sends provably RE2-compatible
+// patterns to RE2 and everything else to Spencer (fail-closed).
 pub const REGEX_ENGINE_SPENCER: i32 = 0;
 pub const REGEX_ENGINE_RE2: i32 = 1;
-pub const REGEX_ENGINE_RUST: i32 = 2;
+pub const REGEX_ENGINE_AUTO: i32 = 2;
 pub const RECOVERY_TARGET_ACTION_PAUSE: i32 = 0;
 pub const RELSEG_SIZE: i32 = 131072;
 // tcopprot.h restrict_nonsystem_relation_kind flag bits.
