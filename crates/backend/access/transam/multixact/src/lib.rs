@@ -965,14 +965,24 @@ pub fn GetMultiXactIdMembers(
         return Ok(-1);
     }
 
-    let mut scratch = take_member_scratch();
-    let res = get_members_into(multi, is_lock_only, &mut scratch.buf);
-    if let Ok(n) = res {
-        if n > 0 {
-            consume(&scratch.buf);
+    // Guard module Drop: the scratch must return to the slot even when
+    // get_members_into or `consume` panics (converted-panic ERROR), or every
+    // later call panics "re-entered" forever (the snapmgr with_state wedge
+    // class, d1a86f62f) — this one in release builds too.
+    struct PutBack(Option<MemberScratch>);
+    impl Drop for PutBack {
+        fn drop(&mut self) {
+            put_member_scratch(self.0.take().expect("scratch present until drop"));
         }
     }
-    put_member_scratch(scratch);
+    let mut scratch = PutBack(Some(take_member_scratch()));
+    let buf = &mut scratch.0.as_mut().expect("scratch present until drop").buf;
+    let res = get_members_into(multi, is_lock_only, buf);
+    if let Ok(n) = res {
+        if n > 0 {
+            consume(buf);
+        }
+    }
     res
 }
 

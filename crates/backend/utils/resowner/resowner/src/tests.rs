@@ -542,3 +542,19 @@ fn snapshot_seams_track_rc_strong_count() {
     assert_eq!(Rc::strong_count(&snap), 1);
     ResourceOwnerDelete(o);
 }
+
+#[test]
+fn panic_inside_with_arena_does_not_poison_the_session() {
+    setup();
+
+    // Wedge regression (with_state class): a panic unwinding out of the
+    // arena closure must clear ARENA_ENTERED or every later resowner call
+    // asserts "resowner arena re-entered" forever.
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_arena(|_| -> () { panic!("injected loud inside with_arena") })
+    }));
+    assert!(unwound.is_err());
+
+    let o = owner("post-panic");
+    ResourceOwnerDelete(o);
+}

@@ -220,15 +220,26 @@ thread_local! {
 // entry and invokes callbacks with no arena reference held.
 #[inline(always)]
 fn with_arena<R>(f: impl FnOnce(&mut Arena) -> R) -> R {
+    // Guard module Drop: ENTERED must clear on panic unwind or every later
+    // call — including abort cleanup — re-panics and the backend spins (the
+    // snapmgr with_state wedge class, d1a86f62f).
+    #[cfg(debug_assertions)]
+    struct EnteredReset;
+    #[cfg(debug_assertions)]
+    impl Drop for EnteredReset {
+        fn drop(&mut self) {
+            ARENA_ENTERED.with(|e| e.set(false));
+        }
+    }
     ARENA.with(|cell| {
         #[cfg(debug_assertions)]
-        ARENA_ENTERED.with(|e| assert!(!e.replace(true), "resowner arena re-entered"));
+        let _entered = {
+            ARENA_ENTERED.with(|e| assert!(!e.replace(true), "resowner arena re-entered"));
+            EnteredReset
+        };
         // SAFETY: one backend = one thread (TLS), and the single-entry
         // invariant above excludes aliasing &mut.
-        let r = f(unsafe { &mut **cell.get() });
-        #[cfg(debug_assertions)]
-        ARENA_ENTERED.with(|e| e.set(false));
-        r
+        f(unsafe { &mut **cell.get() })
     })
 }
 
