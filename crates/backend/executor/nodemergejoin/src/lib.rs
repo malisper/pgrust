@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use ::datum::Datum;
 use ::execexpr::{
-    exec_build_projection_info_subplans, exec_eval_expr, exec_init_expr_subplans,
+    exec_build_projection_info_subplans, exec_init_expr_subplans,
     exec_init_qual_subplans, exec_project, exec_qual, EvalSlots, ExprState,
 };
 use ::executils::{EStateData, EcxtId, ExecSlotId};
@@ -341,9 +341,12 @@ fn eval_outer_values<'mcx>(
     estate.reset_expr_context(node.mj_OuterEContext);
     let mut result = MJEvalResult::Matchable;
     for i in 0..node.clauses.len() {
-        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(slot) };
-        let v = exec_eval_expr(&mut node.clauses[i].lexpr, &mut slots)?;
+        let v = ::executils::exec_eval_expr_with_subplans_outer_slot(
+            &mut node.clauses[i].lexpr,
+            estate,
+            node.mj_OuterEContext,
+            slot_id,
+        )?;
         node.clauses[i].ldatum = v.value;
         node.clauses[i].lisnull = v.isnull;
         if v.isnull {
@@ -370,9 +373,12 @@ fn eval_inner_values<'mcx>(
     estate.reset_expr_context(node.mj_InnerEContext);
     let mut result = MJEvalResult::Matchable;
     for i in 0..node.clauses.len() {
-        let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
-        let mut slots = EvalSlots { scan: None, inner: Some(slot), outer: None };
-        let v = exec_eval_expr(&mut node.clauses[i].rexpr, &mut slots)?;
+        let v = ::executils::exec_eval_expr_with_subplans_inner_slot(
+            &mut node.clauses[i].rexpr,
+            estate,
+            node.mj_InnerEContext,
+            slot_id,
+        )?;
         node.clauses[i].rdatum = v.value;
         node.clauses[i].risnull = v.isnull;
         if v.isnull {
