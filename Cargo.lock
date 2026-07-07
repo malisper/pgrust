@@ -7833,6 +7833,7 @@ dependencies = [
  "miscinit_seams",
  "pglz",
  "pgstat_seams",
+ "pqformat",
  "resowner",
  "resowner_seams",
  "sort_storage",
