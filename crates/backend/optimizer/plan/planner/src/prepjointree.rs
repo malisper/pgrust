@@ -1356,6 +1356,22 @@ fn pull_up_simple_subquery<'mcx>(
                     })
                 };
             }
+            RTEKind::RTE_TABLEFUNC => {
+                // range_table_entry_walker (nodeFuncs.c) walks rte->tablefunc;
+                // C's lateral-propagation loop (prepjointree.c) marks
+                // TABLEFUNC RTEs lateral unconditionally.
+                if !pre_adjusted {
+                    let tf = crte.tablefunc.expect("TABLEFUNC RTE has tablefunc");
+                    if let Some(off) = offset_expr(mcx, tf, rtoffset)? {
+                        // SAFETY: as above.
+                        unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(off)) };
+                    }
+                }
+                if rte.lateral {
+                    // SAFETY: as above.
+                    unsafe { copy.with_mut::<RangeTblEntry, _>(|r| r.lateral = true) };
+                }
+            }
             RTEKind::RTE_SUBQUERY => {
                 // C's whole-Query OffsetVarNodes / IncrementVarSublevelsUp
                 // (prepjointree.c pull_up_simple_subquery) descend into
@@ -3157,6 +3173,21 @@ pub(crate) fn copy_expr<'mcx>(
                     arg: copy_expr(mcx, c.arg, levels_delta)?,
                     collOid: c.collOid,
                     location: c.location,
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().expect("XmlExpr");
+            Node::mk(
+                mcx,
+                pn::XmlExpr {
+                    op: x.op,
+                    name: x.name,
+                    named_args: copy_list(mcx, &x.named_args)?,
+                    arg_names: x.arg_names.clone_in(mcx)?,
+                    args: copy_list(mcx, &x.args)?,
+                    xmloption: x.xmloption,
+                    indent: x.indent,
+                    r#type: x.r#type,
+                    typmod: x.typmod,
+                    location: x.location,
                 },
             )
         }
