@@ -1132,6 +1132,148 @@ fn boot_default_value(
     }
 }
 
+// One leader GUC captured for a thread-native parallel worker (§3.4 P-guc):
+// the leader-validated value plus its check-hook extra cross by pointer, so
+// the worker never reruns check hooks (C contract: check hooks are pure
+// validators — all session side effects live in the assign hooks, which DO
+// rerun on the worker thread against the shared extra).
+pub struct CapturedGuc {
+    name: String,
+    val: config_var_val,
+    extra: Option<SharedExtra>,
+    scontext: GucContext,
+    source: GucSource,
+    srole: Oid,
+}
+
+fn current_value(record: &GucVariable) -> config_var_val {
+    match record {
+        GucVariable::Bool(c) => config_var_val::Boolval(current_bool(c)),
+        GucVariable::Int(c) => config_var_val::Intval(current_int(c)),
+        GucVariable::Real(c) => config_var_val::Realval(current_real(c)),
+        GucVariable::String(c) => config_var_val::Stringval(current_string(c)),
+        GucVariable::Enum(c) => config_var_val::Enumval(current_enum(c)),
+    }
+}
+
+// SerializeGUCState, typed: same variable set as capture_nondefault_variables
+// (both sides of a launch share the postmaster snapshot as baseline, so
+// nondefault-only transfers the whole leader/worker difference).
+pub(crate) fn capture_session_gucs(reg: &GucRegistry) -> Vec<CapturedGuc> {
+    reg.iter()
+        .filter(|v| v.gen().source != PGC_S_DEFAULT)
+        .map(|v| CapturedGuc {
+            name: v.name().to_string(),
+            val: current_value(v),
+            extra: v.gen().extra.clone(),
+            scontext: v.gen().scontext,
+            source: v.gen().source,
+            srole: v.gen().srole,
+        })
+        .collect()
+}
+
+// RestoreGUCState for one variable, minus only the parse + check-hook rerun:
+// the guard sequence (check_can_set with is_reload semantics, source
+// priority, PGC_POSTMASTER reload prohibition) and the end-state writes
+// (value, extra, source, scontext, srole, reset_* for source <=
+// PGC_S_OVERRIDE, transaction stack push above it, report marking) follow
+// set_config_option(value, GUC_ACTION_SET, is_reload=true) exactly.
+pub(crate) fn bind_captured_guc(
+    reg: &mut GucRegistry,
+    cap: &CapturedGuc,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
+) -> PgResult<()> {
+    let elevel = resolve_elevel(ErrorLevel(0), cap.source);
+    let idx = match reg.find_index(&cap.name) {
+        Some(idx) => idx,
+        None => match crate::assignable_custom_variable_name(&cap.name, false) {
+            Ok(true) => match reg.add_placeholder_variable(&cap.name) {
+                Ok(idx) => idx,
+                Err(e) => return reject(elevel, *e).map(drop),
+            },
+            Ok(false) => return Ok(()),
+            Err(e) => return reject(elevel, *e).map(drop),
+        },
+    };
+
+    match check_can_set(
+        reg.vars[idx].gen(),
+        false,
+        cap.scontext,
+        cap.source,
+        cap.srole,
+        GUC_ACTION_SET,
+        true,
+        true,
+    )? {
+        AccessCheck::Ok => {}
+        AccessCheck::Skip => return Ok(()),
+        AccessCheck::Reject(e) => return reject(elevel, e).map(drop),
+    }
+
+    let make_default = cap.source <= PGC_S_OVERRIDE;
+    let mut change_val = true;
+    if reg.vars[idx].gen().source > cap.source {
+        if !make_default {
+            return Ok(());
+        }
+        change_val = false;
+    }
+
+    if reg.vars[idx].gen().context == PGC_POSTMASTER && cap.scontext == PGC_SIGHUP {
+        if current_value_differs(&reg.vars[idx], &cap.val) {
+            reg.vars[idx].gen_mut().status |= GUC_PENDING_RESTART;
+            return reject(
+                elevel,
+                err(
+                    ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
+                    format!(
+                        "parameter \"{}\" cannot be changed without restarting the server",
+                        cap.name
+                    ),
+                ),
+            )
+            .map(drop);
+        }
+        reg.vars[idx].gen_mut().status &= !GUC_PENDING_RESTART;
+        return Ok(());
+    }
+
+    if change_val {
+        let record = &mut reg.vars[idx];
+        let mut newly_stacked = false;
+        if !make_default {
+            let was_empty = record.gen().stack.is_none();
+            push_old_value(record, GUC_ACTION_SET);
+            newly_stacked = was_empty && record.gen().stack.is_some();
+        }
+        if let Some(hook) =
+            apply_value(record, cap.val.clone(), cap.extra.clone(), cap.scontext, cap.srole)
+        {
+            deferred_hooks.push(hook);
+        }
+        reg.set_source(idx, cap.source);
+        if newly_stacked {
+            reg.note_stacked(idx);
+        }
+    }
+    if make_default {
+        make_default_bookkeeping(
+            &mut reg.vars[idx],
+            &cap.val,
+            cap.extra.clone(),
+            cap.source,
+            cap.scontext,
+            cap.srole,
+        );
+    }
+    if change_val {
+        reg.note_reportable(idx);
+    }
+    Ok(())
+}
+
 fn reset_value_and_extra(record: &GucVariable) -> (config_var_val, Option<SharedExtra>) {
     match record {
         GucVariable::Bool(c) => (config_var_val::Boolval(c.reset_val), c.reset_extra.clone()),
@@ -1471,7 +1613,7 @@ fn restore_stacked_value(
 // C compares extra pointers; Rc gives pointer identity back.
 fn extra_differs(cur: &Option<SharedExtra>, new: &Option<SharedExtra>) -> bool {
     match (cur, new) {
-        (Some(a), Some(b)) => !std::rc::Rc::ptr_eq(a, b),
+        (Some(a), Some(b)) => !std::sync::Arc::ptr_eq(a, b),
         (None, None) => false,
         _ => true,
     }

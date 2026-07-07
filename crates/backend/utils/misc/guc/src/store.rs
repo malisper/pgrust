@@ -21,6 +21,10 @@ thread_local! {
     // (the slow path re-checks the real list).
     static HAS_STACKED_HINT: Cell<bool> = const { Cell::new(false) };
     static REPORT_PENDING_HINT: Cell<bool> = const { Cell::new(false) };
+    // §3.4 binding guard: true while this thread's store holds a leader's
+    // session bind. A pool thread must never claim a task with a live bind
+    // (cross-session GUC leak, the session-clobber P1 class).
+    static SESSION_BOUND: Cell<bool> = const { Cell::new(false) };
 }
 
 #[inline]
@@ -261,6 +265,64 @@ pub fn restore_nondefault_variables(vars: &[NondefaultGuc]) -> PgResult<()> {
         eprintln!("GTRACE guc.restore n={} total_us={}", vars.len(), t0.elapsed().as_micros());
     }
     Ok(())
+}
+
+pub use crate::registry::CapturedGuc;
+
+// PGRUST_NO_GUC_BIND reverts parallel workers to the string
+// serialize/restore path (check hooks rerun per launch) for A/B.
+pub fn session_guc_bind_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PGRUST_NO_GUC_BIND").is_none())
+}
+
+/// Leader side of §3.4 P-guc: typed capture of every nondefault variable with
+/// its validated hook extra.
+pub fn capture_session_gucs() -> Vec<CapturedGuc> {
+    with_store(crate::registry::capture_session_gucs).unwrap_or_default()
+}
+
+/// Claim-side leak check (§5): a standby claiming a task must be bind-free.
+pub fn session_bound() -> bool {
+    SESSION_BOUND.get()
+}
+
+/// Worker-held proof of a live session bind; Drop clears the guard so a
+/// retained pool thread can be asserted clean on its next claim.
+pub struct SessionGucBinding {
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for SessionGucBinding {
+    fn drop(&mut self) {
+        SESSION_BOUND.set(false);
+    }
+}
+
+/// Worker side of §3.4 P-guc: applies the leader's captured session onto this
+/// thread's store. Assign hooks fire per variable in capture order, exactly as
+/// the restore path fires them; check hooks do not rerun.
+pub fn bind_session_gucs(caps: &[CapturedGuc]) -> PgResult<SessionGucBinding> {
+    assert!(
+        !SESSION_BOUND.get(),
+        "bind_session_gucs: thread already carries a session bind"
+    );
+    SESSION_BOUND.set(true);
+    let binding = SessionGucBinding { _not_send: std::marker::PhantomData };
+    let trace = std::env::var_os("PGRUST_GATHER_TRACE").is_some();
+    let t0 = trace.then(std::time::Instant::now);
+    for cap in caps {
+        let mut deferred_hooks: Vec<DeferredAssignHook> = Vec::new();
+        with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred_hooks))
+            .unwrap_or_else(|| store_uninitialized("bind_session_gucs"))?;
+        for hook in deferred_hooks {
+            hook();
+        }
+    }
+    if let Some(t0) = t0 {
+        eprintln!("GTRACE guc.bind n={} total_us={}", caps.len(), t0.elapsed().as_micros());
+    }
+    Ok(binding)
 }
 
 pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {

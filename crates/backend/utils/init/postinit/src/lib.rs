@@ -776,7 +776,17 @@ pub fn InitPostgres(
         process_startup_options(am_superuser)?;
     }
 
-    process_settings(mcx, init_small::globals::MyDatabaseId(), miscinit::GetSessionUserId())?;
+    // A thread-native parallel worker about to take a §3.4 session bind skips
+    // the pg_db_role_setting scan: the leader's captured GUC state already
+    // carries those effects (sources PGC_S_DATABASE/USER/DATABASE_USER/
+    // GLOBAL) and the bind applies them verbatim, so rerunning here only
+    // recomputes state the bind is about to overwrite.
+    let takes_session_bind = guc::store::session_guc_bind_enabled()
+        && parallel_seams::initializing_parallel_worker::is_installed()
+        && parallel_seams::initializing_parallel_worker::call();
+    if !takes_session_bind {
+        process_settings(mcx, init_small::globals::MyDatabaseId(), miscinit::GetSessionUserId())?;
+    }
     gtrace("p.settings");
 
     apply_post_auth_delay();
