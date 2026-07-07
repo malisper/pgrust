@@ -6,6 +6,7 @@ use std::sync::atomic::{
     fence, AtomicUsize,
     Ordering::{Acquire, Relaxed, Release, SeqCst},
 };
+use std::sync::Mutex;
 
 use init_small::globals::{IsUnderPostmaster, MyLatch, MyProcPid};
 use types_core::{pgsocket, PGINVALID_SOCKET};
@@ -27,11 +28,42 @@ const LatchWaitSetPostmasterDeathPos: i32 = 1;
 const LOCAL_LATCH_CAP: usize = 4096;
 static LOCAL_LATCHES: [Latch; LOCAL_LATCH_CAP] = [const { Latch::new(false, 0) }; LOCAL_LATCH_CAP];
 static LOCAL_LATCH_NEXT: AtomicUsize = AtomicUsize::new(0);
+// C's LocalLatchData is per-process storage reclaimed by process death; the
+// thread model reclaims explicitly: backend teardown pushes its slot here and
+// later backends pop before bumping LOCAL_LATCH_NEXT. Startup/teardown paths
+// only — set_latch never touches this lock.
+static LOCAL_LATCH_FREE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 pub fn allocate_local_latch() -> LatchHandle {
+    let recycled = LOCAL_LATCH_FREE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop();
+    if let Some(id) = recycled {
+        return LatchHandle::new(id);
+    }
     let id = LOCAL_LATCH_NEXT.fetch_add(1, Relaxed);
     assert!(id < LOCAL_LATCH_CAP, "local latch slab exhausted");
     LatchHandle::new(id + 1)
+}
+
+pub fn free_local_latch(latch: LatchHandle) {
+    let LatchKind::Local(id) = latch.kind() else {
+        panic!("free_local_latch: not a local latch: {latch:?}")
+    };
+    debug_assert!(id >= 1 && id <= LOCAL_LATCH_NEXT.load(Relaxed));
+    let mut free = LOCAL_LATCH_FREE.lock().unwrap_or_else(|e| e.into_inner());
+    debug_assert!(
+        !free.contains(&id),
+        "free_local_latch: double free of slot {id}"
+    );
+    free.push(id);
+}
+
+// Slots ever bump-allocated: recycling bounds this by peak concurrent
+// backends, not connections served over the postmaster lifetime.
+pub fn local_latch_high_water() -> usize {
+    LOCAL_LATCH_NEXT.load(Relaxed)
 }
 
 pub fn latch_ref(latch: LatchHandle) -> &'static Latch {

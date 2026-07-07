@@ -59,6 +59,41 @@ pub fn InitProcessLocalLatch() {
     latch::InitLatch(l);
 }
 
+// C's LocalLatchData dies with the process; a backend THREAD must hand its
+// slab slot back or ~4k connections exhaust the slab for the postmaster's
+// lifetime. Called only from LocalLatchReleaseGuard at the top of the child
+// thread, after all latch use is unwound.
+fn release_process_local_latch() {
+    let Some(h) = LOCAL_LATCH.take() else { return };
+    if g::MyLatch() == Some(h) {
+        g::SetMyLatch(None);
+    }
+    latch::free_local_latch(h);
+}
+
+/// Backend-thread teardown for the local latch slot: Drop releases on every
+/// exit path — proc_exit unwind and panic alike (SecContextGuard house style).
+#[must_use]
+pub struct LocalLatchReleaseGuard(());
+
+impl LocalLatchReleaseGuard {
+    pub fn new() -> Self {
+        Self(())
+    }
+}
+
+impl Default for LocalLatchReleaseGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for LocalLatchReleaseGuard {
+    fn drop(&mut self) {
+        release_process_local_latch();
+    }
+}
+
 pub fn SwitchToSharedLatch() {
     debug_assert_eq!(g::MyLatch(), Some(local_latch()));
     debug_assert_ne!(g::MyProcNumber(), INVALID_PROC_NUMBER);

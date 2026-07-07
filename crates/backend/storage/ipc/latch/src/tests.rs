@@ -422,6 +422,39 @@ fn recovery_wakeup_handle_panics_loudly() {
     assert!(result.is_err());
 }
 
+#[test]
+fn free_local_latch_recycles_slot() {
+    let _g = TEST_LOCK.lock().unwrap();
+
+    let h = allocate_local_latch();
+    let high = local_latch_high_water();
+    free_local_latch(h);
+    assert_eq!(allocate_local_latch(), h);
+    assert_eq!(local_latch_high_water(), high);
+    free_local_latch(h);
+}
+
+#[test]
+fn free_list_bounds_high_water_across_churn() {
+    let _g = TEST_LOCK.lock().unwrap();
+
+    let h = allocate_local_latch();
+    free_local_latch(h);
+    let high = local_latch_high_water();
+    for _ in 0..3 * LOCAL_LATCH_CAP {
+        let h = allocate_local_latch();
+        free_local_latch(h);
+    }
+    assert_eq!(local_latch_high_water(), high);
+}
+
+#[test]
+fn free_local_latch_rejects_proc_handle() {
+    let _g = TEST_LOCK.lock().unwrap();
+    let result = catch_unwind(|| free_local_latch(LatchHandle::proc(3)));
+    assert!(result.is_err());
+}
+
 static DRAINS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static DRAIN_FAIL_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 

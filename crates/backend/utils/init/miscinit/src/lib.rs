@@ -30,7 +30,7 @@ pub use lockfile::{
 };
 pub use process::{
     ChangeToDataDir, InitPostmasterChild, InitProcessGlobals, InitProcessLocalLatch,
-    SwitchBackToLocalLatch, SwitchToSharedLatch, ValidatePgVersion,
+    LocalLatchReleaseGuard, SwitchBackToLocalLatch, SwitchToSharedLatch, ValidatePgVersion,
 };
 pub use userid::*;
 
