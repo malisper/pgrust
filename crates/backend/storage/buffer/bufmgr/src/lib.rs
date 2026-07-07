@@ -58,7 +58,7 @@ pub use pin::{
 };
 pub use privref::{GetPrivateRefCount, ReservePrivateRefCountEntry};
 pub use localbuf::{
-    AtEOXact_LocalBuffers, AtProcExit_LocalBuffers, DropRelationAllLocalBuffers,
+    n_loc_buffer, AtEOXact_LocalBuffers, AtProcExit_LocalBuffers, DropRelationAllLocalBuffers,
     DropRelationLocalBuffers,
 };
 pub use read::{page_is_verified, relpath_desc, ReadBufferWithoutRelcache, ReadBuffer_common, ReadRecentBuffer};

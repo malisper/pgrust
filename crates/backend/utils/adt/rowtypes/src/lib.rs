@@ -242,9 +242,11 @@ fn hash_record_common(
                 tc.hash_proc_finfo().clone()
             };
             if proc.fn_oid == InvalidOid {
+                let kind = if extended { "an extended hash" } else { "a hash" };
+                let name = ::format_type::format_type_be(column_type)?;
                 return Err(alloc::boxed::Box::new(
                     ::types_error::PgError::error(alloc::format!(
-                        "could not identify a hash function for type {column_type}"
+                        "could not identify {kind} function for type {name}"
                     ))
                     .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
                 ));

@@ -44,7 +44,7 @@ pub fn hashbuild<'mcx>(
     if index.rd_rel.relpersistence != ::types_core::RELPERSISTENCE_TEMP {
         sort_threshold = sort_threshold.min(init_small::globals::NBuffers() as u64);
     } else {
-        panic!("unported: hashbuild on a temp relation (NLocBuffer threshold)");
+        sort_threshold = sort_threshold.min(bufmgr::n_loc_buffer().max(0) as u64);
     }
 
     let mut spool = if num_buckets as u64 >= sort_threshold {

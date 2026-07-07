@@ -79,7 +79,8 @@ fn num_temp_buffers() -> i32 {
     }
 }
 
-pub(crate) fn n_loc_buffer() -> i32 {
+/// NLocBuffer: 0 until local buffers are first initialized (localbuf.c).
+pub fn n_loc_buffer() -> i32 {
     with_inited(0, |lb| lb.descs.len() as i32)
 }
 
