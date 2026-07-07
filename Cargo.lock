@@ -9571,6 +9571,7 @@ dependencies = [
  "pg_inherits",
  "readfuncs",
  "rewrite_manip",
+ "ruleutils_seams",
  "snapmgr",
  "table",
  "tableam",
