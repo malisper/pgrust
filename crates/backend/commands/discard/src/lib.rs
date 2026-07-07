@@ -22,16 +22,13 @@ pub fn DiscardCommand(stmt: &DiscardStmt, is_top_level: bool) -> PgResult<()> {
     }
 }
 
-// C no-ops on empty state; LISTEN is loud-unported so nothing populates it.
-fn Async_UnlistenAll() {}
-
 fn DiscardAll(is_top_level: bool) -> PgResult<()> {
     xact::PreventInTransactionBlock(is_top_level, "DISCARD ALL")?;
     portalmem::PortalHashTableDeleteAll()?;
     guc_funcs::SetPGVariable("session_authorization", None, false)?;
     guc::ResetAllOptions();
     prepare::DropAllPreparedStatements()?;
-    Async_UnlistenAll();
+    commands_async::Async_UnlistenAll()?;
     lock::LockReleaseAll(USER_LOCKMETHOD.into(), true)?;
     plancache::ResetPlanCache();
     catalog_namespace::ResetTempTableNamespace()?;

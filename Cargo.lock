@@ -4301,6 +4301,7 @@ name = "discard"
 version = "0.1.0"
 dependencies = [
  "catalog_namespace",
+ "commands_async",
  "guc",
  "guc_funcs",
  "lock",
@@ -10236,6 +10237,8 @@ dependencies = [
  "fmgr_core",
  "format_type",
  "funcapi",
+ "guc_seams",
+ "guc_tables",
  "heaptuple",
  "lsyscache",
  "mcx",
