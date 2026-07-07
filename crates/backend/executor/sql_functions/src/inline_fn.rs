@@ -30,17 +30,20 @@ pub fn init_seams() {
     clauses_seams::inline_sql_function::set(inline_sql_function);
 }
 
-struct InlineProcRow<'mcx> {
-    proname: PgString<'mcx>,
-    prosrc: PgString<'mcx>,
-    prosqlbody: Option<PgString<'mcx>>,
-    argtypes: PgVec<'mcx, Oid>,
-    argnames: PgVec<'mcx, PgString<'mcx>>,
+pub(crate) struct InlineProcRow<'mcx> {
+    pub(crate) proname: PgString<'mcx>,
+    pub(crate) prosrc: PgString<'mcx>,
+    pub(crate) prosqlbody: Option<PgString<'mcx>>,
+    pub(crate) argtypes: PgVec<'mcx, Oid>,
+    pub(crate) argnames: PgVec<'mcx, PgString<'mcx>>,
     provolatile: i8,
     proisstrict: bool,
 }
 
-fn read_inline_proc_row<'mcx>(mcx: Mcx<'mcx>, funcid: Oid) -> PgResult<InlineProcRow<'mcx>> {
+pub(crate) fn read_inline_proc_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<InlineProcRow<'mcx>> {
     let Some(tup) = SearchSysCache1(PROCOID, SysCacheKey::Value(Datum::from_oid(funcid)))? else {
         return Err(lookup_failed(funcid));
     };
@@ -97,7 +100,11 @@ fn inline_sql_function<'a, 'mcx>(
 // to an internal error report pointing at prosrc; every error gets the
 // during-inlining context line.
 #[cold]
-fn sql_inline_error_callback(e: Box<PgError>, proname: &str, prosrc: &str) -> Box<PgError> {
+pub(crate) fn sql_inline_error_callback(
+    e: Box<PgError>,
+    proname: &str,
+    prosrc: &str,
+) -> Box<PgError> {
     let mut err = *e;
     if let Some(pos) = err.cursor_position() {
         if pos > 0 {
@@ -109,6 +116,41 @@ fn sql_inline_error_callback(e: Box<PgError>, proname: &str, prosrc: &str) -> Bo
     }
     err.add_context_line(format!("SQL function \"{proname}\" during inlining"));
     Box::new(err)
+}
+
+// prepare_sql_fn_parse_info (functions.c): resolve polymorphic declared
+// argtypes to the concrete types of the actual call (get_call_expr_argtype ==
+// exprType of the simplified argument).
+pub(crate) fn resolve_polymorphic_argtypes<'a, 'mcx>(
+    mcx: Mcx<'mcx>,
+    declared_types: &PgVec<'mcx, Oid>,
+    args: &'a NodeList<'mcx>,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let nargs = declared_types.len();
+    let mut argtypes: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nargs)?;
+    for (i, &declared) in declared_types.iter().enumerate() {
+        let t = if clauses::fold::is_polymorphic_type(declared) {
+            let resolved = match args.len() > i {
+                true => nodes_core::node_funcs::expr_type(args.nth(i)),
+                false => InvalidOid,
+            };
+            if !OidIsValid(resolved) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!(
+                        "could not determine actual type of argument declared {}",
+                        format_type::format_type_be(declared)?
+                    ))
+                    .into_error()
+                    .into());
+            }
+            resolved
+        } else {
+            declared
+        };
+        argtypes.push(t);
+    }
+    Ok(argtypes)
 }
 
 fn inline_body<'a, 'mcx>(
@@ -160,33 +202,8 @@ fn inline_body<'a, 'mcx>(
         if raw_list.len() != 1 {
             return Ok(None);
         }
-        // prepare_sql_fn_parse_info (functions.c): resolve polymorphic
-        // declared argtypes to the concrete types of the actual call
-        // (get_call_expr_argtype == exprType of the simplified argument).
+        let argtypes = resolve_polymorphic_argtypes(mcx, &row.argtypes, args)?;
         let nargs = row.argtypes.len();
-        let mut argtypes: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nargs)?;
-        for (i, &declared) in row.argtypes.iter().enumerate() {
-            let t = if clauses::fold::is_polymorphic_type(declared) {
-                let resolved = match args.len() > i {
-                    true => nodes_core::node_funcs::expr_type(args.nth(i)),
-                    false => InvalidOid,
-                };
-                if !OidIsValid(resolved) {
-                    return Err(ereport(ERROR)
-                        .errcode(ERRCODE_DATATYPE_MISMATCH)
-                        .errmsg(format!(
-                            "could not determine actual type of argument declared {}",
-                            format_type::format_type_be(declared)?
-                        ))
-                        .into_error()
-                        .into());
-                }
-                resolved
-            } else {
-                declared
-            };
-            argtypes.push(t);
-        }
         let mut name_refs: PgVec<'mcx, &str> = mcx::vec_with_capacity_in(mcx, nargs)?;
         for n in row.argnames.iter() {
             name_refs.push(n.as_str());

@@ -95,7 +95,10 @@ pub fn parser_errposition_source(
         return 0;
     };
     let limit = (location as usize).min(src.len());
-    mbutils::pg_encoding_mbstrlen_with_len(encoding, &src[..limit]) + 1
+    // Defensive fallback: sourcetext is validated query/command text, so this
+    // should never hit the encoding-error arm; no ereport() to route it to
+    // from inside a cursor-position computation anyway.
+    mbutils::pg_encoding_mbstrlen_with_len(encoding, &src[..limit]).unwrap_or(location) + 1
 }
 
 pub fn transformMergeStmt() -> ! {

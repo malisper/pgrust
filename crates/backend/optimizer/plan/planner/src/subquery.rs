@@ -65,8 +65,9 @@ pub fn subquery_planner<'mcx>(
     }
     // One scan feeds both triggers: preprocess_function_rtes (prepjointree.c)
     // loops the rtable and no-ops without an RTE_FUNCTION entry, so gating the
-    // call is semantics-preserving; it never mutates rtekind, so the pull-up
-    // trigger computed pre-call matches main's post-call scan.
+    // call is semantics-preserving; SRF inlining only turns FUNCTION RTEs into
+    // SUBQUERY ones, and a FUNCTION RTE already sets the pull-up trigger, so
+    // the trigger computed pre-call matches main's post-call scan.
     let mut has_function_rte = false;
     let mut has_pullup_rte = false;
     for n in &parse.rtable {
@@ -148,9 +149,8 @@ pub fn subquery_planner<'mcx>(
                 // preprocessed inside that subroot, never here — C matches).
             }
             RTEKind::RTE_FUNCTION => {
-                // preprocess_function_rtes: inline_set_returning_function is a
-                // no-op for non-SQL-language functions and non-builtins cannot
-                // resolve on this lane. C preprocesses non-lateral functions
+                // FUNCTION RTEs that preprocess_function_rtes inlined are
+                // RTE_SUBQUERY by now. C preprocesses non-lateral functions
                 // too — uplevel correlation Vars appear without LATERAL and
                 // must become Params here — and its eval_const_expressions
                 // pass is mandatory: it inserts default arguments and converts

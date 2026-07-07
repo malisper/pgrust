@@ -935,8 +935,14 @@ pub fn ProcedureCreate<'mcx>(
 // cursor from function-body offsets onto the CREATE statement's literal.
 // Positions are character-based; multibyte-aware via char counting.
 pub fn function_parse_error_transpose(e: &mut types_error::PgError, prosrc: &str) -> bool {
-    let Some(origpos) = e.cursor_position.filter(|&p| p > 0) else {
-        return false;
+    // C: geterrposition(), falling back to getinternalerrposition() for PLs
+    // that report positions as internal errors to begin with.
+    let origpos = match e.cursor_position.filter(|&p| p > 0) {
+        Some(p) => p,
+        None => match e.internal_position.filter(|&p| p > 0) {
+            Some(p) => p,
+            None => return false,
+        },
     };
     let query = pquery::ActivePortal()
         .and_then(|p| p.borrow().sourceText.as_ref().map(|s| s.as_str().to_string()));
@@ -944,6 +950,8 @@ pub fn function_parse_error_transpose(e: &mut types_error::PgError, prosrc: &str
         let newpos = match_prosrc_to_query(prosrc, &q, origpos);
         if newpos > 0 {
             e.cursor_position = Some(newpos);
+            e.internal_position = None;
+            e.internal_query = None;
             return true;
         }
     }
@@ -1062,6 +1070,7 @@ static PG_PROC_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin 
 
 pub fn init_seams() {
     fmgr_core::register_late_builtins(PG_PROC_BUILTINS);
+    catalog_seams::function_parse_error_transpose::set(function_parse_error_transpose);
 }
 
 // IsThereFunctionInNamespace (pg_proc.c) with funcname_signature_string

@@ -6,6 +6,7 @@
 
 pub mod classify;
 pub mod fold;
+pub mod srf_inline;
 pub mod walker;
 
 #[cfg(test)]
@@ -26,6 +27,7 @@ pub use classify::{
     MultiBitmapset,
 };
 pub use fold::negate_clause;
+pub use srf_inline::inline_set_returning_function;
 pub use fold::{
     all_arguments_const, estimate_expression_value, eval_const_expressions,
     eval_const_expressions_with_params, expand_function_arguments, make_bool_const,

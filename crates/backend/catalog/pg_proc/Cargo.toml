@@ -21,6 +21,7 @@ types_fmgr = { path = "../../../_support/types/fmgr" }
 heaptuple = { path = "../../access/common/heaptuple" }
 table = { path = "../../access/table/table" }
 catalog = { path = "../catalog" }
+catalog_seams = { path = "../catalog_seams" }
 catalog_indexing = { path = "../catalog_indexing" }
 pg_depend = { path = "../pg_depend" }
 aclchk_seams = { path = "../aclchk_seams" }

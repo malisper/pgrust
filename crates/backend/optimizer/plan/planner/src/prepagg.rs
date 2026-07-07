@@ -165,6 +165,22 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_SubscriptingRef => {
+            let sref = node.as_subscripting_ref().unwrap();
+            for a in &sref.refupperindexpr {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            for a in &sref.reflowerindexpr {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            if let Some(e) = sref.refexpr {
+                preprocess_aggrefs_walker(run, e)?;
+            }
+            if let Some(e) = sref.refassgnexpr {
+                preprocess_aggrefs_walker(run, e)?;
+            }
+            Ok(())
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             for a in &node.as_scalar_array_op_expr().unwrap().args {
                 preprocess_aggrefs_walker(run, a)?;

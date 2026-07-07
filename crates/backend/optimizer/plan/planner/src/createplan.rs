@@ -717,7 +717,6 @@ fn create_tidscan_plan<'mcx>(
     let scan_relid = run.root.rel(rel_id).relid;
     debug_assert!(scan_relid > 0);
     debug_assert!(run.root.rel(rel_id).rtekind == types_pathnodes::RTE_RELATION);
-    debug_assert!(run.root.path(best_path).base().param_info.is_none());
 
     let tidqual_rids: mcx::PgVec<'mcx, RinfoId> = {
         let PathNode::TidPath(tp) = run.root.path(best_path) else {
@@ -748,7 +747,7 @@ fn create_tidscan_plan<'mcx>(
     };
 
     let ordered = order_qual_clauses(run, &scan_clauses)?;
-    let tidquals = extract_actual_clauses(run, &tidqual_rids);
+    let mut tidquals = extract_actual_clauses(run, &tidqual_rids);
     let mut qpqual = extract_actual_clauses(run, &ordered);
 
     if tidquals.len() > 1 {
@@ -761,6 +760,11 @@ fn create_tidscan_plan<'mcx>(
             }
         }
         qpqual = kept;
+    }
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        tidquals = replace_nestloop_params_list(run, &tidquals)?;
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
     }
 
     let mut plan = Node::build::<types_nodes::TidScan<'mcx>>(mcx)?;
@@ -784,7 +788,6 @@ fn create_tidrangescan_plan<'mcx>(
     let scan_relid = run.root.rel(rel_id).relid;
     debug_assert!(scan_relid > 0);
     debug_assert!(run.root.rel(rel_id).rtekind == types_pathnodes::RTE_RELATION);
-    debug_assert!(run.root.path(best_path).base().param_info.is_none());
 
     let tidrangequal_rids: mcx::PgVec<'mcx, RinfoId> = {
         let PathNode::TidRangePath(tp) = run.root.path(best_path) else {
@@ -807,8 +810,13 @@ fn create_tidrangescan_plan<'mcx>(
     }
 
     let ordered = order_qual_clauses(run, &qpqual_rids)?;
-    let tidrangequals = extract_actual_clauses(run, &tidrangequal_rids);
-    let qpqual = extract_actual_clauses(run, &ordered);
+    let mut tidrangequals = extract_actual_clauses(run, &tidrangequal_rids);
+    let mut qpqual = extract_actual_clauses(run, &ordered);
+
+    if run.root.path(best_path).base().param_info.is_some() {
+        tidrangequals = replace_nestloop_params_list(run, &tidrangequals)?;
+        qpqual = replace_nestloop_params_list(run, &qpqual)?;
+    }
 
     let mut plan = Node::build::<types_nodes::TidRangeScan<'mcx>>(mcx)?;
     plan.scan.plan.targetlist = tlist;

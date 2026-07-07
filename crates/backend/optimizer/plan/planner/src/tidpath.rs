@@ -222,17 +222,62 @@ fn tid_range_qual_from_restrict_info_list<'mcx>(
     Ok(rlst)
 }
 
+// BuildParameterizedTidPaths (tidpath.c). Only TidEqual join clauses are
+// considered; the validity checks must match restrict_info_is_tid_qual.
+fn build_parameterized_tid_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    clauses: &[RinfoId],
+) -> PgResult<()> {
+    use types_pathnodes::relids::{relids_del_member, relids_union};
+    let mcx = run.mcx;
+    for &rid in clauses {
+        if run.root.rinfo(rid).pseudoconstant
+            || !restriction_is_securely_promotable(run, rid, rel)
+            || !is_tid_equal_clause(run, rid, rel)?
+        {
+            continue;
+        }
+        if !crate::indxpath::join_clause_is_movable_to(run, rid, rel) {
+            continue;
+        }
+        let mut tidquals: PgVec<'mcx, RinfoId> = PgVec::new_in(mcx);
+        tidquals.push(rid);
+        let required_outer = relids_union(
+            mcx,
+            &run.root.rinfo(rid).required_relids,
+            &run.root.rel(rel).lateral_relids,
+        );
+        let required_outer =
+            relids_del_member(mcx, &required_outer, run.root.rel(rel).relid as i32);
+        let path = crate::pathnode::create_tidscan_path(run, rel, tidquals, &required_outer)?;
+        add_path(run, rel, path);
+    }
+    Ok(())
+}
+
+// ec_member_matches_ctid (tidpath.c).
+fn ec_member_matches_ctid(
+    run: &PlannerRun<'_>,
+    rel: RelId,
+    _ec: types_pathnodes::EcId,
+    em: types_pathnodes::EmId,
+) -> bool {
+    run.root
+        .expr_node(run.root.em(em).em_expr)
+        .as_var()
+        .is_some_and(|v| is_ctid_var(v, run.root.rel(rel).relid))
+}
+
 // create_tidscan_paths (tidpath.c). True = CurrentOf path forced; caller adds
-// no other paths. DIVERGENCE: EC-derived and loose-join parameterized
-// TidPaths (BuildParameterizedTidPaths) are skipped, mirroring indxpath's
-// match_join_clauses_to_index divergence — every consumer on this lane
-// rejects parameterized paths loudly; plan choice (not results) can differ.
+// no other paths.
 pub fn create_tidscan_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<bool> {
     let mcx = run.mcx;
-    // C walks baserestrictinfo twice unconditionally (TidQualFromRestrictInfoList
-    // + TidRangeQualFromRestrictInfoList); one over-inclusive ctid probe gates
-    // both walks and the RinfoId copy C never makes — any OR or ctid-shaped
-    // clause falls through to the full builders, so path generation is unchanged.
+    // C walks baserestrictinfo, joininfo, and the rel's ECs unconditionally;
+    // one over-inclusive ctid probe gates those walks and the RinfoId copies
+    // C never makes — any OR or ctid-shaped clause, ctid-equal join clause,
+    // or ctid EC member falls through to the full builders, so path
+    // generation is unchanged.
     let mut maybe_tid = false;
     for &rid in run.root.rel(rel).baserestrictinfo.iter() {
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
@@ -246,6 +291,31 @@ pub fn create_tidscan_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgR
         }
     }
     if !maybe_tid {
+        for i in 0..run.root.rel(rel).joininfo.len() {
+            let rid = run.root.rel(rel).joininfo[i];
+            if is_tid_equal_clause(run, rid, rel)? {
+                maybe_tid = true;
+                break;
+            }
+        }
+    }
+    if !maybe_tid && run.root.rel(rel).has_eclass_joins {
+        let eclass_indexes = types_pathnodes::relids::relids_copy(
+            mcx,
+            &run.root.rel(rel).eclass_indexes,
+        );
+        'ecs: for i in types_pathnodes::relids::relids_members(&eclass_indexes) {
+            let ec = types_pathnodes::EcId(i as u32);
+            for m in 0..run.root.ec(ec).ec_members.len() {
+                let em = run.root.ec(ec).ec_members[m];
+                if ec_member_matches_ctid(run, rel, ec, em) {
+                    maybe_tid = true;
+                    break 'ecs;
+                }
+            }
+        }
+    }
+    if !maybe_tid {
         return Ok(false);
     }
 
@@ -256,7 +326,11 @@ pub fn create_tidscan_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgR
         tid_qual_from_restrict_info_list(run, &baserestrictinfo, rel)?;
 
     if !tidquals.is_empty() && (crate::costsize::gucs::enable_tidscan() || is_current_of) {
-        let path = crate::pathnode::create_tidscan_path(run, rel, tidquals)?;
+        // No join clauses, but LATERAL refs in the tlist can still require
+        // parameterization.
+        let required_outer =
+            types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).lateral_relids);
+        let path = crate::pathnode::create_tidscan_path(run, rel, tidquals, &required_outer)?;
         add_path(run, rel, path);
         if is_current_of {
             return Ok(true);
@@ -269,9 +343,31 @@ pub fn create_tidscan_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgR
 
     let tidrangequals = tid_range_qual_from_restrict_info_list(run, &baserestrictinfo, rel)?;
     if !tidrangequals.is_empty() {
-        let path = crate::pathnode::create_tidrangescan_path(run, rel, tidrangequals)?;
+        let required_outer =
+            types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).lateral_relids);
+        let path =
+            crate::pathnode::create_tidrangescan_path(run, rel, tidrangequals, &required_outer)?;
         add_path(run, rel, path);
     }
+
+    // Parameterized TidPaths from EC-derived equalities: simple
+    // "t1.ctid = t2.ctid" clauses turn into ECs.
+    if run.root.rel(rel).has_eclass_joins {
+        let lateral_referencers =
+            types_pathnodes::relids::relids_copy(mcx, &run.root.rel(rel).lateral_referencers);
+        let clauses = crate::equivclass::generate_implied_equalities_for_column(
+            run,
+            rel,
+            ec_member_matches_ctid,
+            &lateral_referencers,
+        )?;
+        build_parameterized_tid_paths(run, rel, &clauses)?;
+    }
+
+    // "Loose" join quals, e.g. ctid equalities that are outer join quals.
+    let joininfo =
+        types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel(rel).joininfo);
+    build_parameterized_tid_paths(run, rel, &joininfo)?;
 
     Ok(false)
 }

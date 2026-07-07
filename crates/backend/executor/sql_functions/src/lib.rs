@@ -11,6 +11,7 @@
 mod cache;
 mod inline_fn;
 mod retval;
+mod srf_inline;
 
 use std::rc::Rc;
 
@@ -62,6 +63,7 @@ pub fn init_seams() {
     fmgr_core::register_late_builtins(FUNCTIONS_BUILTINS);
     sql_functions_seams::sqlfunction_receive::set(sqlfunction_receive);
     inline_fn::init_seams();
+    srf_inline::init_seams();
 }
 
 const fn vb(foid: Oid, name: &'static str, func: fmgr::PGFunction) -> FmgrBuiltin {
@@ -177,18 +179,13 @@ pub(crate) fn startup_error_context(e: Box<PgError>, fname: &str, src: &str) -> 
     Box::new(err)
 }
 
-// sql_function_parse_error_callback (pg_proc.c:1000). C's real
-// function_parse_error_transpose remaps a captured syntax-error position back
-// into the enclosing CREATE FUNCTION source text and suppresses the context
-// line entirely in that case; we don't have that remap, but the plain
-// no-position case (semantic errors like a return-type mismatch) must not say
-// "during startup" — that phrase belongs only to functions.c's execution-time
-// callback, not this compile-time validator.
+// sql_function_parse_error_callback (pg_proc.c:1000): a positioned error is
+// transposed onto the original CREATE FUNCTION text (or demoted to an
+// internal-query report); only position-less errors get the context line.
 #[cold]
 fn validator_error_context(e: Box<PgError>, fname: &str, src: &str) -> Box<PgError> {
-    let had_pos = e.cursor_position().is_some_and(|p| p > 0);
-    let mut err = transpose_position(*e, src);
-    if !had_pos {
+    let mut err = *e;
+    if !catalog_seams::function_parse_error_transpose::call(&mut err, src) {
         err.add_context_line(format!("SQL function \"{fname}\""));
     }
     Box::new(err)

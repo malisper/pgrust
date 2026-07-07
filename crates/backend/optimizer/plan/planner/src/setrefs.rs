@@ -5,6 +5,7 @@ use types_nodes::{Node, NodeTag};
 
 use crate::run::PlannerRun;
 
+const OIDOID: u32 = 26;
 const REGCLASSOID: u32 = 2205;
 const FIRST_UNPINNED_OBJECT_ID: u32 = 12000;
 // syscache.h: PROCOID. record_plan_function_dependency keys PlanInvalItems on
@@ -3126,8 +3127,9 @@ fn fix_scan_expr_walker<'mcx>(run: &mut PlannerRun<'mcx>, node: Node<'mcx>) -> P
         }
         NodeTag::T_Const => {
             let c = node.as_const().unwrap();
-            // fix_expr_common: a regclass Const is a plan dependency.
-            if c.consttype == REGCLASSOID && !c.constisnull {
+            // ISREGCLASSCONST: OIDOID accepted because oideq-style folding
+            // coerces regclass Consts to plain OID.
+            if (c.consttype == REGCLASSOID || c.consttype == OIDOID) && !c.constisnull {
                 run.glob
                     .relation_oids
                     .lappend(run.mcx, c.constvalue.as_u32())?;
@@ -3414,7 +3416,10 @@ fn set_opfuncid(o: &types_nodes::primnodes::OpExpr<'_>) -> PgResult<u32> {
 }
 
 // Built-ins (OID < FirstUnpinnedObjectId) are assumed immutable and untracked.
-fn record_plan_function_dependency<'mcx>(run: &mut PlannerRun<'mcx>, funcid: u32) -> PgResult<()> {
+pub(crate) fn record_plan_function_dependency<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    funcid: u32,
+) -> PgResult<()> {
     if funcid < FIRST_UNPINNED_OBJECT_ID {
         return Ok(());
     }
