@@ -116,11 +116,11 @@ thread_local! {
     // (procarray/xact/resowner callees never re-enter this module);
     // STATE_BUSY enforces in debug.
     static STATE: UnsafeCell<Option<ManuallyDrop<SnapMgrState>>> = const { UnsafeCell::new(None) };
-    static STATE_BUSY: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(debug_assertions)]
 thread_local! {
+    static STATE_BUSY: Cell<bool> = const { Cell::new(false) };
     static STATIC_REPLACED: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -158,20 +158,32 @@ fn init_state(slot: &mut Option<ManuallyDrop<SnapMgrState>>) {
 }
 
 fn with_state<R>(f: impl FnOnce(&mut SnapMgrState) -> R) -> R {
-    debug_assert!(!STATE_BUSY.replace(true), "with_state re-entered");
+    // Guard module Drop (no-drop.md): a named-loud panic unwinding out of the
+    // closure (caught at the main-loop) must clear BUSY, or every later
+    // snapmgr call — including abort cleanup — re-panics and the backend
+    // spins forever.
+    #[cfg(debug_assertions)]
+    struct BusyReset;
+    #[cfg(debug_assertions)]
+    impl Drop for BusyReset {
+        fn drop(&mut self) {
+            STATE_BUSY.set(false);
+        }
+    }
+    #[cfg(debug_assertions)]
+    let _busy = {
+        assert!(!STATE_BUSY.replace(true), "with_state re-entered");
+        BusyReset
+    };
     // SAFETY: closures are leaves (no re-entry into this module); guarded in
     // debug builds by STATE_BUSY.
-    let r = STATE.with(|cell| unsafe {
+    STATE.with(|cell| unsafe {
         let slot = &mut *cell.get();
         if slot.is_none() {
             init_state(slot);
         }
         f(slot.as_mut().unwrap())
-    });
-    if cfg!(debug_assertions) {
-        STATE_BUSY.set(false);
-    }
-    r
+    })
 }
 
 fn my_proc_xmin() -> TransactionId {
