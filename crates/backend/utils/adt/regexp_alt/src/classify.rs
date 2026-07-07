@@ -52,30 +52,44 @@ pub enum Compat {
     CaptureSafe,
 }
 
-pub fn classify(pattern: &[u8], cflags: i32) -> Compat {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Classification {
+    pub tier: Compat,
+    // POSIX longest-match mode is only NEEDED to disambiguate alternation
+    // (`a|ab`); with `|` absent every choice point is a greedy quantifier
+    // and Perl first-match backtracking order IS the leftmost-longest
+    // disambiguation, so the faster first-match engine configuration is
+    // provably identical (and keeps RE2's one-pass capture paths).
+    pub needs_longest: bool,
+}
+
+const INCOMPATIBLE: Classification =
+    Classification { tier: Compat::Incompatible, needs_longest: false };
+
+pub fn classify(pattern: &[u8], cflags: i32) -> Classification {
     if pattern.len() > MAX_PATTERN_BYTES {
-        return Compat::Incompatible;
+        return INCOMPATIBLE;
     }
     if mbutils::GetDatabaseEncoding() != PG_UTF8 {
-        return Compat::Incompatible;
+        return INCOMPATIBLE;
     }
     // REG_NOSUB is an execution hint callers OR in, not a semantic mode.
     let base = cflags & !REG_NOSUB;
     let quoted = base == REG_QUOTE;
     if !quoted && base != REG_ADVANCED {
-        return Compat::Incompatible;
+        return INCOMPATIBLE;
     }
     if core::str::from_utf8(pattern).is_err() {
-        return Compat::Incompatible;
+        return INCOMPATIBLE;
     }
     if quoted {
-        return Compat::CaptureSafe;
+        return Classification { tier: Compat::CaptureSafe, needs_longest: false };
     }
     scan_are(pattern)
 }
 
 pub fn re2_compatible(pattern: &[u8], cflags: i32) -> bool {
-    classify(pattern, cflags) != Compat::Incompatible
+    classify(pattern, cflags).tier != Compat::Incompatible
 }
 
 fn utf8_char_len(b: u8) -> usize {
@@ -196,7 +210,7 @@ fn parse_bracket(pat: &[u8], mut i: usize) -> Option<usize> {
     None
 }
 
-fn scan_are(pat: &[u8]) -> Compat {
+fn scan_are(pat: &[u8]) -> Classification {
     let mut i = 0usize;
     let mut nquant = 0u32;
     let mut capture_safe = true;
@@ -216,7 +230,7 @@ fn scan_are(pat: &[u8]) -> Compat {
         match pat[i] {
             b'\\' => {
                 if i + 1 >= pat.len() || !literal_escape_ok(pat[i + 1]) {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 i += 2;
                 quantifiable = true;
@@ -228,7 +242,7 @@ fn scan_are(pat: &[u8]) -> Compat {
                     quantifiable = true;
                     last_atom_captures = false;
                 }
-                None => return Compat::Incompatible,
+                None => return INCOMPATIBLE,
             },
             b'(' => {
                 let capturing;
@@ -236,7 +250,7 @@ fn scan_are(pat: &[u8]) -> Compat {
                     // Only the non-capturing group; every other (?...) form
                     // (inline options, lookaround, named) is off-list.
                     if i + 2 >= pat.len() || pat[i + 2] != b':' {
-                        return Compat::Incompatible;
+                        return INCOMPATIBLE;
                     }
                     capturing = false;
                     i += 3;
@@ -246,7 +260,7 @@ fn scan_are(pat: &[u8]) -> Compat {
                     i += 1;
                 }
                 if depth >= MAX_GROUP_DEPTH {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 stack[depth] = (capturing, false);
                 depth += 1;
@@ -255,7 +269,7 @@ fn scan_are(pat: &[u8]) -> Compat {
             }
             b')' => {
                 if depth == 0 {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 depth -= 1;
                 let (capturing, contains) = stack[depth];
@@ -268,39 +282,39 @@ fn scan_are(pat: &[u8]) -> Compat {
             }
             b'*' | b'+' | b'?' => {
                 if !quantifiable {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 nquant += 1;
                 if nquant > MAX_QUANTIFIERS {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 if last_atom_captures {
                     capture_safe = false;
                 }
                 i += 1;
                 if i < pat.len() && pat[i] == b'?' {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 quantifiable = false;
                 last_atom_captures = false;
             }
             b'{' => {
                 if !quantifiable {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 nquant += 1;
                 if nquant > MAX_QUANTIFIERS {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 if last_atom_captures {
                     capture_safe = false;
                 }
                 match parse_bound(pat, i) {
                     Some(next) => i = next,
-                    None => return Compat::Incompatible,
+                    None => return INCOMPATIBLE,
                 }
                 if i < pat.len() && pat[i] == b'?' {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 quantifiable = false;
                 last_atom_captures = false;
@@ -324,7 +338,7 @@ fn scan_are(pat: &[u8]) -> Compat {
             b => {
                 let len = utf8_char_len(b);
                 if i + len > pat.len() {
-                    return Compat::Incompatible;
+                    return INCOMPATIBLE;
                 }
                 i += len;
                 quantifiable = true;
@@ -333,13 +347,14 @@ fn scan_are(pat: &[u8]) -> Compat {
         }
     }
     if depth != 0 {
-        return Compat::Incompatible;
+        return INCOMPATIBLE;
     }
-    if capture_safe && !(has_capture && has_alternation) {
+    let tier = if capture_safe && !(has_capture && has_alternation) {
         Compat::CaptureSafe
     } else {
         Compat::WholeMatch
-    }
+    };
+    Classification { tier, needs_longest: has_alternation }
 }
 
 #[cfg(test)]
@@ -451,7 +466,7 @@ mod tests {
     #[test]
     fn capture_safety_tiers() {
         setup_utf8();
-        let tier = |p: &str| classify(p.as_bytes(), REG_ADVANCED);
+        let tier = |p: &str| classify(p.as_bytes(), REG_ADVANCED).tier;
         // Unquantified captures (Q29's shape) stay capture-safe.
         assert_eq!(tier(r"^https?://(?:www\.)?([^/]+)/.*$"), Compat::CaptureSafe);
         assert_eq!(tier("(a)(b)(c)"), Compat::CaptureSafe);
@@ -475,7 +490,18 @@ mod tests {
             Compat::WholeMatch
         );
         // Quoted literals have no captures.
-        assert_eq!(classify(b"a.c", REG_QUOTE), Compat::CaptureSafe);
+        assert_eq!(classify(b"a.c", REG_QUOTE).tier, Compat::CaptureSafe);
+    }
+
+    #[test]
+    fn longest_mode_only_for_alternation() {
+        setup_utf8();
+        let c = |p: &str| classify(p.as_bytes(), REG_ADVANCED);
+        assert!(!c(r"^https?://(?:www\.)?([^/]+)/.*$").needs_longest);
+        assert!(!c("a*b+c{2,3}").needs_longest);
+        assert!(c("a|ab").needs_longest);
+        assert!(c("(?:a|b)c").needs_longest);
+        assert!(!classify(b"a|b", REG_QUOTE).needs_longest);
     }
 
     #[test]
