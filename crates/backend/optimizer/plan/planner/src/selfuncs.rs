@@ -1157,13 +1157,17 @@ pub fn examine_variable<'mcx>(
             vardata.var = Some(node_id);
             vardata.rel = Some(rel);
             vardata.isunique = crate::plancat::has_unique_index(run, rel, var.varattno);
-            let simple = examine_simple_variable(
-                run,
-                RootAncestors::Suspended(&run.suspended_roots),
-                &run.root,
-                var.varno,
-                var.varattno,
-            )?;
+            // A swapped-in rel subroot keeps its parent level visible (C:
+            // the child root's parent_root link).
+            let suspended = RootAncestors::Suspended(&run.suspended_roots);
+            let up = match run.swapped_parent_subroot {
+                Some(i) => RootAncestors::Link {
+                    parent: &run.rel_subroots[i].root,
+                    up: &suspended,
+                },
+                None => suspended,
+            };
+            let simple = examine_simple_variable(run, up, &run.root, var.varno, var.varattno)?;
             vardata.stats = simple.stats;
             vardata.isunique |= simple.force_unique;
             vardata.acl_ok = simple.acl_ok;
@@ -1324,6 +1328,7 @@ fn examine_expression_index_stats<'mcx>(
 // C's parent_root chain for a root under examination: the live planning
 // chain is suspended_roots; drilled subroots hang off the root that owns
 // their RTE (rel_subroots) or the resolved cteroot (glob subroots).
+#[derive(Clone, Copy)]
 #[derive(Clone, Copy)]
 enum RootAncestors<'a, 'mcx> {
     Suspended(&'a [crate::run::SubrootState<'mcx>]),

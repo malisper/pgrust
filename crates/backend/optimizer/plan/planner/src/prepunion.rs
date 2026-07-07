@@ -273,6 +273,9 @@ fn build_setop_child_paths<'mcx>(
         run.root.path(cheapest).base().rows
     };
     run.swap_with_rel_subroot(idx);
+    // C: the child subroot's parent_root chain stays live here; selfuncs
+    // climbs it for the child's uplevel CTE references.
+    run.swapped_parent_subroot = Some(idx);
     let result = (|| -> PgResult<f64> {
         let sub_parse = run.parse();
         if !sub_parse.groupClause.is_nil()
@@ -294,6 +297,7 @@ fn build_setop_child_paths<'mcx>(
         }
         crate::selfuncs::estimate_num_groups(run, &exprs, input_rows)
     })();
+    run.swapped_parent_subroot = None;
     run.swap_with_rel_subroot(idx);
     Ok(Some(result?))
 }
