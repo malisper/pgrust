@@ -139,7 +139,7 @@ pub fn build_simple_rel_child<'mcx>(
     let rtekind = rte.rtekind;
     let eref_max_attr = match rtekind {
         RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES
-        | RTEKind::RTE_CTE | RTEKind::RTE_SUBQUERY => {
+        | RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE | RTEKind::RTE_SUBQUERY => {
             rte.eref.expect("RTE has eref").colnames.len() as i16
         }
         _ => 0,
@@ -166,8 +166,10 @@ pub fn build_simple_rel_child<'mcx>(
             rel.min_attr = 0;
             rel.max_attr = -1;
         }
+        // RTE_NAMEDTUPLESTORE sits in the same case group as RTE_CTE
+        // (relnode.c:151-165); setop pullup can make one a child rel.
         RTEKind::RTE_FUNCTION | RTEKind::RTE_TABLEFUNC | RTEKind::RTE_VALUES
-        | RTEKind::RTE_CTE | RTEKind::RTE_SUBQUERY => {
+        | RTEKind::RTE_CTE | RTEKind::RTE_NAMEDTUPLESTORE | RTEKind::RTE_SUBQUERY => {
             rel.min_attr = 0;
             rel.max_attr = eref_max_attr;
             let span = (rel.max_attr - rel.min_attr + 1) as usize;
