@@ -222,6 +222,15 @@ pub fn index_vacuum_cleanup<'mcx>(
     info: &nbtree::IndexVacuumInfo<'_, 'mcx>,
     istat: Option<IndexBulkDeleteResult>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
+    // Test-only wedge probe: fires with the exact held state of an unported
+    // amvacuumcleanup loud (open transaction, heap+index heavyweight locks).
+    #[cfg(debug_assertions)]
+    if std::env::var("PGRUST_TEST_VACUUM_PANIC_INDEX").as_deref() == Ok(info.index.name()) {
+        panic!(
+            "injected vacuum-cleanup panic for index \"{}\" (av wedge containment test)",
+            info.index.name()
+        );
+    }
     relation_checks(info.index)?;
     match IndexAmKind::from_relam(info.index.rd_rel.relam) {
         IndexAmKind::Btree => nbtree::btvacuumcleanup(mcx, info, istat),
