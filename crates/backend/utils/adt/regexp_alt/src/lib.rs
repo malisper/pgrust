@@ -25,7 +25,7 @@ use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
 pub use guc_tables::consts::{REGEX_ENGINE_AUTO, REGEX_ENGINE_RE2, REGEX_ENGINE_SPENCER};
 
 mod classify;
-pub use classify::{classify as classify_pattern, re2_compatible, Compat};
+pub use classify::{classify as classify_pattern, re2_compatible, Classification, Compat};
 
 guc_tables::session_guc_cluster!(RegexpAltGucs, REGEXP_ALT_GUCS:
     (regex_engine_cell, i32, regex_engine, set_regex_engine, guc_tables::consts::REGEX_ENGINE_AUTO),
@@ -141,16 +141,17 @@ mod re2 {
         }
     }
 
-    // longest selects POSIX leftmost-longest matching — the mode whose
-    // semantics the classifier's compatible class is proven against.
-    pub fn compile(pattern: &[u8], literal: bool) -> PgResult<Re2Re> {
+    // longest selects POSIX leftmost-longest matching — needed only when
+    // alternation exists; without `|` Perl first-match order is identical
+    // and keeps RE2's faster capture paths.
+    pub fn compile(pattern: &[u8], literal: bool, longest: bool) -> PgResult<Re2Re> {
         let mut errbuf = [0u8; 256];
         let ptr = unsafe {
             pgr_re2_compile(
                 pattern.as_ptr().cast(),
                 pattern.len() as c_int,
                 literal as c_int,
-                1,
+                longest as c_int,
                 errbuf.as_mut_ptr().cast(),
                 errbuf.len() as c_int,
             )
@@ -225,15 +226,23 @@ fn re2_escape(pattern: &[u8]) -> Vec<u8> {
 // The auto path: classifier-admitted patterns only, so the flag mapping is
 // fixed — ARE with PG's newline-insensitive default ((?s)), or pure literal.
 #[cfg(have_re2)]
-fn compile_auto(pattern: &[u8], cflags: i32, capture_safe: bool) -> PgResult<Re2Pattern> {
+fn compile_auto(
+    pattern: &[u8],
+    cflags: i32,
+    capture_safe: bool,
+    needs_longest: bool,
+) -> PgResult<Re2Pattern> {
     let quoted = (cflags & !REG_NOSUB) == REG_QUOTE;
     if quoted {
-        return Ok(Re2Pattern { inner: Rc::new(re2::compile(pattern, true)?), capture_safe });
+        return Ok(Re2Pattern {
+            inner: Rc::new(re2::compile(pattern, true, false)?),
+            capture_safe,
+        });
     }
     let mut full = Vec::with_capacity(pattern.len() + 4);
     full.extend_from_slice(b"(?s)");
     full.extend_from_slice(pattern);
-    Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false)?), capture_safe })
+    Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false, needs_longest)?), capture_safe })
 }
 
 // The forced path (regex_engine=re2): no classifier; ICASE/NLSTOP/NLANCH map
@@ -263,7 +272,10 @@ fn compile_forced(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
             return Err(re2_error("pattern is not valid UTF-8").into());
         }
         if quoted && cflags & REG_ICASE == 0 {
-            return Ok(Re2Pattern { inner: Rc::new(re2::compile(pattern, true)?), capture_safe: true });
+            return Ok(Re2Pattern {
+                inner: Rc::new(re2::compile(pattern, true, false)?),
+                capture_safe: true,
+            });
         }
         let mut full = Vec::with_capacity(pattern.len() + 12);
         if cflags & REG_ICASE != 0 {
@@ -281,8 +293,9 @@ fn compile_forced(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
             full.extend_from_slice(pattern);
         }
         // Forced mode is the testing knob: it exposes RE2 semantics whole,
-        // capture handling included.
-        Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false)?), capture_safe: true })
+        // capture handling included; longest mode matches the auto arm's
+        // alternation semantics.
+        Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false, true)?), capture_safe: true })
     }
 }
 
@@ -345,9 +358,10 @@ pub fn dispatch(pattern: &[u8], cflags: i32) -> PgResult<Option<Re2Pattern>> {
         Some(compile_forced(pattern, cflags)?)
     } else {
         match classify_pattern(pattern, cflags) {
-            Compat::Incompatible => None,
+            Classification { tier: Compat::Incompatible, .. } => None,
             #[cfg(have_re2)]
-            tier => compile_auto(pattern, cflags, tier == Compat::CaptureSafe).ok(),
+            c => compile_auto(pattern, cflags, c.tier == Compat::CaptureSafe, c.needs_longest)
+                .ok(),
             #[cfg(not(have_re2))]
             _ => None,
         }
