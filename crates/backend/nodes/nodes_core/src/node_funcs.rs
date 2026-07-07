@@ -450,7 +450,10 @@ pub fn expr_location(node: Node<'_>) -> ParseLoc {
         NodeTag::T_ColumnDef => {
             node.as_variant::<types_nodes::rawnodes::ColumnDef>().unwrap().location
         }
-        NodeTag::T_SubLink => node.as_sub_link().unwrap().location,
+        NodeTag::T_SubLink => {
+            let s = node.as_sub_link().unwrap();
+            leftmost_loc(s.testexpr.map_or(-1, expr_location), s.location)
+        }
         NodeTag::T_SetToDefault => node.as_set_to_default().unwrap().location,
         NodeTag::T_CurrentOfExpr => -1,
         NodeTag::T_CoerceViaIO => {

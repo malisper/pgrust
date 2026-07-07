@@ -974,7 +974,14 @@ fn slow_switch<'mcx>(
                         let seqstmt = stmt
                             .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
                             .expect("CreateSeqStmt");
-                        let seqoid = sequence::DefineSequence(mcx, seqstmt)?;
+                        let mut pstate = parser_small1::make_parsestate(mcx, None);
+                        {
+                            let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                            mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                            pstate.p_sourcetext = Some(v.leak());
+                        }
+                        let seqoid = sequence::DefineSequence(mcx, Some(&pstate), seqstmt)?;
+                        parser_small1::free_parsestate(pstate)?;
                         event_trigger::EventTriggerCollectSimpleCommand(
                             ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid),
                             INVALID_OBJECT_ADDRESS,
@@ -1308,7 +1315,14 @@ fn slow_switch<'mcx>(
             let seqstmt = stmt_node
                 .as_variant::<types_nodes::rawnodes::CreateSeqStmt>()
                 .expect("CreateSeqStmt");
-            let seqoid = sequence::DefineSequence(mcx, seqstmt)?;
+            let mut pstate = parser_small1::make_parsestate(mcx, None);
+            {
+                let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+                mcx::vec_append_bytes(&mut v, source_text.as_bytes())?;
+                pstate.p_sourcetext = Some(v.leak());
+            }
+            let seqoid = sequence::DefineSequence(mcx, Some(&pstate), seqstmt)?;
+            parser_small1::free_parsestate(pstate)?;
             Ok(Some(ObjectAddress::set(types_core::RELATION_RELATION_ID, seqoid)))
         }
         T_AlterSeqStmt => {

@@ -43,6 +43,9 @@ catalog_index = { path = "../../catalog/catalog_index" }
 pg_depend = { path = "../../catalog/pg_depend" }
 tablecmds = { path = "../tablecmds" }
 parse_utilcmd = { path = "../../parser/parse_utilcmd" }
+parser_small1 = { path = "../../parser/parser_small1" }
+catalog_namespace = { path = "../../catalog/catalog_namespace" }
+pg_class_seams = { path = "../../catalog/pg_class_seams" }
 adt_int8 = { path = "../../utils/adt/int8" }
 sequence_xlog = { path = "../sequence_xlog" }
 sequence_seams = { path = "../sequence_seams" }

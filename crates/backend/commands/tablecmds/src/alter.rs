@@ -2854,8 +2854,24 @@ fn ATExecSetExpression<'mcx>(
     if attgenerated == b'v' as i8 && att.attnotnull {
         tab.verify_new_notnull = true;
     }
-    // DIVERGENCE: C rejects virtual columns when GetRelationPublications is
-    // non-empty (0A000 "... part of a publication"); publications unported.
+    // C: a changed expression could inject nodes not permitted in a row filter.
+    if attgenerated == b'v' as i8
+        && !pg_publication::GetRelationPublications(mcx, rel.rd_id)?.is_empty()
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                "ALTER TABLE / SET EXPRESSION is not supported for virtual generated \
+                 columns in tables that are part of a publication"
+                    .to_string(),
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(format!(
+                "Column \"{col_name}\" of relation \"{relname}\" is a virtual generated \
+                 column."
+            )),
+        ));
+    }
     let rewrite = attgenerated == b's' as i8;
 
     if rewrite {

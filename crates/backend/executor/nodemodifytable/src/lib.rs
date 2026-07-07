@@ -171,6 +171,8 @@ pub struct ModifyTableState<'mcx> {
     // for attno-remapped leaves — a non-remapped leaf's projection is
     // identical to the root's.
     leaf_returning: Vec<Option<PgBox<'mcx, ExprState<'mcx>>>>,
+    // C ExecInitPartitionInfo's CheckValidResultRel: once per routed leaf.
+    leaf_ri_checked: Vec<bool>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
     // fields); outer Option = resolved yet.
     leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
@@ -665,6 +667,7 @@ pub fn exec_init_modify_table<'mcx>(
         leaf_wco: Vec::new(),
         leaf_on_conflict: Vec::new(),
         leaf_returning: Vec::new(),
+        leaf_ri_checked: Vec::new(),
         leaf_trigdesc: Vec::new(),
         leaf_trig_fmgr: Vec::new(),
         leaf_trig_when: Vec::new(),
@@ -2742,6 +2745,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     mt.leaf_wco.clear();
     mt.leaf_on_conflict.clear();
     mt.leaf_returning.clear();
+    mt.leaf_ri_checked.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -5095,6 +5099,22 @@ fn exec_insert<'mcx>(
                 mt.leaf_wco.push(None);
                 mt.leaf_returning.push(None);
                 mt.leaf_on_conflict.push(None);
+                mt.leaf_ri_checked.push(false);
+            }
+            // C ExecInitPartitionInfo's CheckValidResultRel(leaf, CMD_INSERT,
+            // onConflictAction): ONCONFLICT_UPDATE requires the leaf to also
+            // support UPDATE; the CMD_INSERT leg is a no-op.
+            if !mt.leaf_ri_checked[idx] {
+                mt.leaf_ri_checked[idx] = true;
+                if mt.plan.onConflictAction
+                    == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
+                {
+                    execreplication_seams::check_cmd_replica_identity::call(
+                        mcx,
+                        mt.router.as_ref().expect("router built above").leaf_rel(idx),
+                        CmdType::CMD_UPDATE,
+                    )?;
+                }
             }
             Some(idx)
         } else {
@@ -7073,7 +7093,7 @@ mcx::forget_safe_struct!(
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
         leaf_on_conflict, leaf_existing,
-        leaf_returning, leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
+        leaf_returning, leaf_ri_checked, leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },
 );

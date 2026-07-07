@@ -45,6 +45,7 @@ varlena = { path = "../../utils/adt/varlena" }
 detoast = { path = "../../access/common/detoast" }
 mbutils = { path = "../../utils/mb/mbutils" }
 readfuncs = { path = "../../nodes/readfuncs" }
+rewrite_handler = { path = "../../rewrite/rewrite_handler" }
 nodes_core = { path = "../../nodes/nodes_core" }
 parser_small1 = { path = "../../parser/parser_small1" }
 parse_relation = { path = "../../parser/parse_relation" }

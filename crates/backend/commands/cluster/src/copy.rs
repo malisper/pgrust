@@ -63,6 +63,27 @@ pub fn copy_for_cluster<'mcx>(
         None
     };
 
+    // Expression-index sort: form the index key tuple per heap tuple for the
+    // sort to compare (C's TuplesortClusterArg estate lane).
+    let mut expr_sort = match (old_index, use_sort) {
+        (Some(index), true)
+            if index
+                .rd_index
+                .as_ref()
+                .expect("index form")
+                .indkey
+                .iter()
+                .take(index.indnkeyatts() as usize)
+                .any(|&a| a == 0) =>
+        {
+            Some((
+                execindexing::BuildIndexInfo(mcx, index)?,
+                mcx::MemoryContext::new_bump("ClusterExprPerTuple"),
+            ))
+        }
+        _ => None,
+    };
+
     let snapshot_any = std::rc::Rc::new(types_snapshot::SnapshotData::sentinel(
         mcx,
         types_snapshot::SnapshotType::SNAPSHOT_ANY,
@@ -158,8 +179,38 @@ pub fn copy_for_cluster<'mcx>(
         }
 
         num_tuples += 1.0;
-        if let Some(ts) = tuplesort.as_mut() {
-            ts.putheaptuple(tuple)?;
+        if tuplesort.is_some() {
+            let itup_buf = match expr_sort.as_mut() {
+                Some((index_info, per_tuple)) => {
+                    per_tuple.reset();
+                    let mut kvalues = [datum::Datum::null(); 32];
+                    let mut kisnull = [false; 32];
+                    execindexing::FormIndexDatum(
+                        mcx,
+                        per_tuple.mcx(),
+                        index_info,
+                        &mut slot,
+                        &mut kvalues,
+                        &mut kisnull,
+                    )?;
+                    Some(nbtree::itup::index_form_tuple(
+                        per_tuple.mcx(),
+                        old_index.expect("expr_sort implies an index").rd_att.as_ref(),
+                        &kvalues,
+                        &kisnull,
+                    )?)
+                }
+                None => None,
+            };
+            let SlotData::BufferHeap(bslot) = &mut slot else {
+                panic!("heap copy_for_cluster requires a BufferHeapTuple slot");
+            };
+            let tuple = bslot.base.tuple.as_ref().expect("buffer slot holds a tuple");
+            // SAFETY: live maxaligned itup image formed above.
+            let itup_bytes = itup_buf
+                .as_ref()
+                .map(|b| unsafe { core::slice::from_raw_parts(b.as_ptr().cast::<u8>(), b.size()) });
+            tuplesort.as_mut().expect("checked").putheaptuple(tuple, itup_bytes)?;
         } else {
             reform_and_rewrite_tuple(
                 mcx,
