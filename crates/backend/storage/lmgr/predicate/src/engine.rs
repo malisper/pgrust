@@ -2235,13 +2235,179 @@ pub fn CheckForSerializableConflictIn(
     }
 }
 
-pub fn TransferPredicateLocksToHeapRelation() -> PgResult<()> {
+pub fn TransferPredicateLocksToHeapRelation(
+    db_id: Oid,
+    rel_id: Oid,
+    heap_id: Oid,
+    uses_local_buffers: bool,
+    is_index: bool,
+) -> PgResult<()> {
+    DropAllPredicateLocksFromTable(db_id, rel_id, heap_id, uses_local_buffers, is_index, true)
+}
+
+// Cannot raise a user-facing error: callers may not be serializable (C's
+// "can't throw an error from here"); scratch-entry removal guarantees the
+// heap-target HASH_ENTER succeeds, and each new lock entry is preceded by a
+// removal so lock_hash cannot overflow.
+fn DropAllPredicateLocksFromTable(
+    db_id: Oid,
+    rel_id: Oid,
+    heap_id: Oid,
+    uses_local_buffers: bool,
+    is_index: bool,
+    transfer: bool,
+) -> PgResult<()> {
     unsafe {
         if !TransactionIdIsValid((*shared().pred_xact).SxactGlobalXmin) {
             return Ok(());
         }
+        if !predicate_locking_needed(rel_id, uses_local_buffers) {
+            return Ok(());
+        }
+        debug_assert!(heap_id != types_core::InvalidOid);
+        debug_assert!(transfer || !is_index);
+
+        let procno = my_procno();
+        LWLockAcquire(SerializablePredicateListLock(), LW_EXCLUSIVE, procno)?;
+        for i in 0..NUM_PREDICATELOCK_PARTITIONS {
+            LWLockAcquire(PredicateLockHashPartitionLockByIndex(i), LW_EXCLUSIVE, procno)?;
+        }
+        LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+
+        if transfer {
+            RemoveScratchTarget(true)?;
+        }
+
+        let mut heaptargettaghash: u32 = 0;
+        let mut heaptarget: *mut PREDICATELOCKTARGET = ptr::null_mut();
+
+        let mut seqstat = HASH_SEQ_STATUS::new();
+        hash_seq_init(&mut seqstat, shared().target_hash)?;
+
+        let mut scan = |seqstat: &mut HASH_SEQ_STATUS| -> PgResult<()> {
+            loop {
+                let p = hash_seq_search(seqstat)?;
+                if p.is_null() {
+                    return Ok(());
+                }
+                let oldtarget = p as *mut PREDICATELOCKTARGET;
+
+                if GET_PREDICATELOCKTARGETTAG_RELATION(&(*oldtarget).tag) != rel_id {
+                    continue;
+                }
+                if GET_PREDICATELOCKTARGETTAG_DB(&(*oldtarget).tag) != db_id {
+                    continue;
+                }
+                if transfer
+                    && !is_index
+                    && GET_PREDICATELOCKTARGETTAG_TYPE(&(*oldtarget).tag) == PREDLOCKTAG_RELATION
+                {
+                    continue;
+                }
+
+                if transfer && heaptarget.is_null() {
+                    let mut heaptargettag = ZERO_TARGET_TAG;
+                    SET_PREDICATELOCKTARGETTAG_RELATION(&mut heaptargettag, db_id, heap_id);
+                    heaptargettaghash = PredicateLockTargetTagHashCode(&heaptargettag);
+                    let mut found = false;
+                    let hp = hash_search_with_hash_value(
+                        shared().target_hash,
+                        &raw const heaptargettag as *const u8,
+                        heaptargettaghash,
+                        HASH_ENTER,
+                        Some(&mut found),
+                    )?;
+                    heaptarget = hp as *mut PREDICATELOCKTARGET;
+                    if !found {
+                        dlist_init(&raw mut (*heaptarget).predicateLocks);
+                    }
+                }
+
+                let head = &raw mut (*oldtarget).predicateLocks;
+                let mut cur = (*head).head.next;
+                while cur != (&raw mut (*head).head) as *mut dlist_node {
+                    let next = (*cur).next;
+                    let oldpredlock = dlist_container!(PREDICATELOCK, targetLink, cur);
+                    let oldCommitSeqNo = (*oldpredlock).commitSeqNo;
+                    let oldXact = (*oldpredlock).tag.myXact;
+
+                    dlist_delete(&raw mut (*oldpredlock).xactLink);
+                    // No targetLink delete: the whole target is removed below.
+                    let mut found = false;
+                    let _ = hash_search(
+                        shared().lock_hash,
+                        &raw const (*oldpredlock).tag as *const u8,
+                        HASH_REMOVE,
+                        Some(&mut found),
+                    )?;
+                    debug_assert!(found);
+
+                    if transfer {
+                        let newpredlocktag = PREDICATELOCKTAG {
+                            myTarget: heaptarget,
+                            myXact: oldXact,
+                        };
+                        let mut found = false;
+                        let npp = hash_search_with_hash_value(
+                            shared().lock_hash,
+                            &raw const newpredlocktag as *const u8,
+                            PredicateLockHashCodeFromTargetHashCode(
+                                &newpredlocktag,
+                                heaptargettaghash,
+                            ),
+                            HASH_ENTER,
+                            Some(&mut found),
+                        )?;
+                        let newpredlock = npp as *mut PREDICATELOCK;
+                        if !found {
+                            dlist_push_tail(
+                                &raw mut (*heaptarget).predicateLocks,
+                                &raw mut (*newpredlock).targetLink,
+                            );
+                            dlist_push_tail(
+                                &raw mut (*oldXact).predicateLocks,
+                                &raw mut (*newpredlock).xactLink,
+                            );
+                            (*newpredlock).commitSeqNo = oldCommitSeqNo;
+                        } else if (*newpredlock).commitSeqNo < oldCommitSeqNo {
+                            (*newpredlock).commitSeqNo = oldCommitSeqNo;
+                        }
+
+                        debug_assert!((*newpredlock).commitSeqNo != 0);
+                        debug_assert!(
+                            (*newpredlock).commitSeqNo == InvalidSerCommitSeqNo
+                                || (*newpredlock).tag.myXact == shared().old_committed_sxact
+                        );
+                    }
+                    cur = next;
+                }
+
+                let mut found = false;
+                let _ = hash_search(
+                    shared().target_hash,
+                    &raw const (*oldtarget).tag as *const u8,
+                    HASH_REMOVE,
+                    Some(&mut found),
+                )?;
+                debug_assert!(found);
+            }
+        };
+        if let Err(e) = scan(&mut seqstat) {
+            let _ = dynahash::hash_seq_term(&mut seqstat);
+            return Err(e);
+        }
+
+        if transfer {
+            RestoreScratchTarget(true)?;
+        }
+
+        LWLockRelease(SerializableXactHashLock())?;
+        for i in (0..NUM_PREDICATELOCK_PARTITIONS).rev() {
+            LWLockRelease(PredicateLockHashPartitionLockByIndex(i))?;
+        }
+        LWLockRelease(SerializablePredicateListLock())?;
+        Ok(())
     }
-    panic!("DropAllPredicateLocksFromTable transfer arm (predicate.c) reached with a live serializable transaction; not ported")
 }
 
 pub fn CheckTableForSerializableConflictIn(
