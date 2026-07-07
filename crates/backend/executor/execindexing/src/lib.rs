@@ -416,7 +416,14 @@ pub fn ExecCloseIndices(mut state: ResultRelIndexState<'_>) -> PgResult<()> {
     for (i, indexDesc) in state.descs.iter().enumerate() {
         indexam::index_insert_cleanup(indexDesc, &mut state.infos[i].ii_AmCache)?;
     }
-    // index_close(RowExclusiveLock): the Relation close hook runs on drop.
+    // Drop the lock acquired by ExecOpenIndices (execIndexing.c). Retaining
+    // it to xact end deadlocks catalog writers against VACUUM FULL pg_class:
+    // the writer's explicit pg_class close releases the heap lock while the
+    // drop hook would keep the index lock, inverting the heap-then-index
+    // order every other locker follows.
+    while let Some(indexDesc) = state.descs.pop() {
+        indexam::index_close(indexDesc, RowExclusiveLock)?;
+    }
     Ok(())
 }
 
