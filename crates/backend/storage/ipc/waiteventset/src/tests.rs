@@ -221,3 +221,33 @@ fn freed_handle_is_invalid() {
     FreeWaitEventSet(set);
     GetNumRegisteredWaitEvents(set);
 }
+
+// wretain warm-claim contract: each task runs under a fresh synthetic pid;
+// the wakeup registry entry must follow it or every cross-thread SetLatch to
+// this thread (shm_mq wakes, CV broadcasts, SendThreadSignal) is lost — the
+// repeated-parallel-query P1 wedge.
+#[test]
+fn rekey_wakeup_registry_follows_task_pid() {
+    fn pipe_byte_pending() -> bool {
+        let mut buf = [0u8; 16];
+        // SAFETY: nonblocking read of this thread's own wakeup pipe.
+        let rc = unsafe { libc::read(wakeup_read_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        rc > 0
+    }
+
+    let first_pid = setup_backend();
+
+    // Warm claim: fresh synthetic pid on the same thread, then the re-key.
+    let second_pid = NEXT_PID.fetch_add(1, SeqCst);
+    g::SetMyProcPid(second_pid);
+    RekeyWakeupRegistry();
+
+    // A wake resolved by the NEW pid must write this thread's pipe (this is
+    // SetLatch's cross-thread path for shm_mq/CV/SendThreadSignal wakes).
+    WakeupOtherProc(second_pid);
+    assert!(pipe_byte_pending(), "wake by the fresh task pid was dropped");
+
+    // The old key is gone: a wake addressed to the dead pid is a no-op.
+    WakeupOtherProc(first_pid);
+    assert!(!pipe_byte_pending(), "wake by the dead pid hit this thread");
+}

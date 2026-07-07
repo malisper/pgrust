@@ -118,6 +118,23 @@ pub fn InitializeWaitEventSupport() -> PgResult<()> {
     Ok(())
 }
 
+/// Retained-thread pid refresh (wretain): a warm-claimed pool standby keeps
+/// its wakeup pipe across tasks but runs each task under a fresh synthetic
+/// MyProcPid, and WakeupOtherProc resolves targets by task pid — the entry
+/// must follow the pid or every cross-thread SetLatch to this thread is lost
+/// (shm_mq wakes, ConditionVariable broadcasts, SendThreadSignal).
+pub fn RekeyWakeupRegistry() {
+    let (_, write_fd) = WAKEUP_PIPE
+        .get()
+        .expect("RekeyWakeupRegistry before InitializeWaitEventSupport");
+    let pid = MyProcPid();
+    let mut registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    match registry.iter_mut().find(|(_, w)| *w == write_fd) {
+        Some(entry) => entry.0 = pid,
+        None => registry.push((pid, write_fd)),
+    }
+}
+
 fn wakeup_read_fd() -> i32 {
     WAKEUP_PIPE
         .get()
@@ -468,4 +485,5 @@ pub fn init_seams() {
     s::free_wait_event_set::set(FreeWaitEventSet);
     s::wakeup_my_proc::set(WakeupMyProc);
     s::wakeup_other_proc::set(WakeupOtherProc);
+    s::rekey_wakeup_registry::set(RekeyWakeupRegistry);
 }
