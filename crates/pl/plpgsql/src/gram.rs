@@ -44,6 +44,10 @@ pub struct Parser<'a, 'mcx> {
     pub fn_is_trigger: bool,
     pub out_param_varno: Dno,
     pub scratch: mcx::Mcx<'mcx>,
+    // Location of the until-token that ended the last read_sql_construct
+    // (C leaves it in *yyllocp; read_cursor_args reports errors there,
+    // pl_gram.y:4022-4035).
+    pub last_endtoken_loc: i32,
 }
 
 type Tok = (i32, Yystype, i32, i32);
@@ -231,6 +235,7 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
             }
             if parenlevel == 0 && (tok == until || (until2 != 0 && tok == until2) || (until3 != 0 && tok == until3)) {
                 tok_final = tok;
+                self.last_endtoken_loc = lloc;
                 break;
             }
             if tok == ('(' as i32) || tok == ('[' as i32) {
@@ -945,6 +950,24 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
         {
             return Err(self.yyerror("duplicate declaration", loc));
         }
+        // Shadowing check (pl_gram.y:726-738): DUPLICATE_ALIAS at ERROR when
+        // extra_errors carries shadowed_variables, WARNING when only
+        // extra_warnings does; both are validator-only (pl_comp.c:249-250).
+        if (self.comp.extra_warnings | self.comp.extra_errors) & crate::comp::XCHECK_SHADOWVAR != 0
+            && self.comp.ns_lookup(self.comp.ns_top, false, &name, None, None).is_some()
+        {
+            let is_error = self.comp.extra_errors & crate::comp::XCHECK_SHADOWVAR != 0;
+            let b = elog::ereport(if is_error { ERROR } else { types_error::WARNING })
+                .errcode(types_error::ERRCODE_DUPLICATE_ALIAS)
+                .errmsg(format!("variable \"{name}\" shadows a previously defined variable"))
+                .errposition(self.sc.errposition(loc));
+            if is_error {
+                return Err(Box::new(b.into_error()));
+            }
+            // The warning's cursor transposes onto the CREATE statement via
+            // the compile-scope emit callback (do_compile).
+            b.finish(types_error::ErrorLocation::new("pl_gram.y", 0, "decl_varname"))?;
+        }
         Ok((name, loc))
     }
 
@@ -1476,14 +1499,14 @@ impl<'a, 'mcx> Parser<'a, 'mcx> {
                 return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     format!("not enough arguments for cursor \"{curname}\""),
-                    arglocation,
+                    self.last_endtoken_loc,
                 ));
             }
             if endtoken == (',' as i32) && argc == nfields - 1 {
                 return Err(self.gram_err_pos(
                     ERRCODE_SYNTAX_ERROR,
                     format!("too many arguments for cursor \"{curname}\""),
-                    arglocation,
+                    self.last_endtoken_loc,
                 ));
             }
         }

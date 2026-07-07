@@ -23,6 +23,12 @@ std::thread_local! {
     static NEXT_EXPR_ID: core::cell::Cell<u32> = const { core::cell::Cell::new(1) };
 }
 
+// PLPGSQL_XCHECK_* (plpgsql.h:1194-1199).
+pub const XCHECK_SHADOWVAR: u32 = 1 << 1;
+pub const XCHECK_TOOMANYROWS: u32 = 1 << 2;
+pub const XCHECK_STRICTMULTIASSIGNMENT: u32 = 1 << 3;
+pub const XCHECK_ALL: u32 = u32::MAX;
+
 pub struct CompState {
     pub datums: Vec<PlDatum>,
     pub ns: Vec<NsItem>,
@@ -32,6 +38,10 @@ pub struct CompState {
     pub nstatements: u32,
     pub resolve_option: i32,
     pub print_strict_params: bool,
+    // Promoted from the GUCs only at CREATE FUNCTION time (pl_comp.c:249-250);
+    // inline blocks and non-validator recompiles keep 0 (pl_comp.c:796-797).
+    pub extra_warnings: u32,
+    pub extra_errors: u32,
     pub out_param_varno: Dno,
     datums_last: usize,
 }
@@ -47,6 +57,8 @@ impl CompState {
             nstatements: 0,
             resolve_option: PLPGSQL_RESOLVE_ERROR,
             print_strict_params: false,
+            extra_warnings: 0,
+            extra_errors: 0,
             out_param_varno: -1,
             datums_last: 0,
         }
