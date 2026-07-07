@@ -378,7 +378,7 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
 // bind_param_error_callback (postgres.c): CONTEXT for an error thrown while
 // processing one bind parameter; the value is quoted and clipped to
 // log_parameter_max_length_on_error bytes (<0 = unclipped), C's
-// appendStringInfoStringQuoted shape (quote doubling, trailing "..." when
+// appendStringInfoStringQuoted shape (quote doubling, in-quote "..." when
 // clipped, clip backed off to a character boundary).
 fn bind_param_error_context(
     mut err: Box<types_error::PgError>,
@@ -406,10 +406,10 @@ fn bind_param_error_context(
                 }
                 quoted.push(c);
             }
-            quoted.push('\'');
             if ellipsis {
                 quoted.push_str("...");
             }
+            quoted.push('\'');
             if portal_name.is_empty() {
                 format!("unnamed portal parameter ${} = {}", paramno + 1, quoted)
             } else {
