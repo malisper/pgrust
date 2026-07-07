@@ -1,5 +1,7 @@
 //! spgscan.c: spgbeginscan / spgrescan / spgendscan / spggettuple /
-//! spggetbitmap. Ordered (KNN) scans are a LOUD lane.
+//! spggetbitmap, including ordered (KNN) scans over the pairing-heap queue.
+
+use ::types_gist::state::IndexOrderByDistance;
 
 use ::bufmgr_seams::{self as bufmgr};
 use ::datum::Datum;
@@ -43,10 +45,6 @@ pub fn spgbeginscan<'mcx>(
     nkeys: i32,
     norderbys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    if norderbys > 0 {
-        panic!("unported: SP-GiST ordered (KNN) scans (distance lane)");
-    }
-
     let state = crate::initSpGistState(mcx, r)?;
     let recon_tup_desc = crate::utils::getSpGistTupleDesc(mcx, r, &state.attType)?;
 
@@ -72,6 +70,13 @@ pub fn spgbeginscan<'mcx>(
         numberOfKeys: 0,
         keyData: Vec::new(),
         indexCollation: index_collation,
+        numberOfOrderBys: 0,
+        numberOfNonNullOrderBys: 0,
+        orderByData: Vec::new(),
+        nonNullOrderByOffsets: vec![0; norderbys.max(0) as usize],
+        orderByTypes: vec![0; norderbys.max(0) as usize],
+        zeroDistances: vec![0.0; norderbys.max(0) as usize],
+        infDistances: vec![f64::INFINITY; norderbys.max(0) as usize],
         innerConsistentFn: inner_fn,
         leafConsistentFn: leaf_fn,
         frame2: ::types_fmgr::LocalFcinfo::<2>::new(0),
@@ -81,6 +86,8 @@ pub fn spgbeginscan<'mcx>(
         iPtr: 0,
         heapPtrs: [ItemPointerData::invalid(); ::types_storage::bufpage::MaxIndexTuplesPerPage],
         recheck: [false; ::types_storage::bufpage::MaxIndexTuplesPerPage],
+        recheckDistances: [false; ::types_storage::bufpage::MaxIndexTuplesPerPage],
+        distances: Vec::new(),
         recon_buf: Vec::new(),
         recon_offs: [0u32; ::types_storage::bufpage::MaxIndexTuplesPerPage],
     };
@@ -104,10 +111,38 @@ pub fn spgbeginscan<'mcx>(
 // spgPrepareScanKeys.
 fn spg_prepare_scan_keys(scan: &mut IndexScanDescData<'_>) {
     let nkeys_in = scan.numberOfKeys;
+    let norderbys_in = scan.numberOfOrderBys;
     let IndexScanOpaque::Spgist(so) = &mut scan.opaque else {
         crate::non_spgist_opaque()
     };
     let so = &mut **so;
+
+    so.numberOfOrderBys = norderbys_in;
+    so.orderByData.clear();
+    if norderbys_in <= 0 {
+        so.numberOfNonNullOrderBys = 0;
+    } else {
+        // Remove all NULL keys, remembering their original offsets.
+        let mut j = 0i32;
+        for (i, skey) in scan.orderByData.iter().enumerate() {
+            if skey.sk_flags & SK_ISNULL != 0 {
+                so.nonNullOrderByOffsets[i] = -1;
+            } else {
+                so.orderByData.push(ScanKeyData {
+                    sk_flags: skey.sk_flags,
+                    sk_attno: skey.sk_attno,
+                    sk_strategy: skey.sk_strategy,
+                    sk_subtype: skey.sk_subtype,
+                    sk_collation: skey.sk_collation,
+                    sk_func: fmgr_info_copy(&skey.sk_func),
+                    sk_argument: skey.sk_argument,
+                });
+                so.nonNullOrderByOffsets[i] = j;
+                j += 1;
+            }
+        }
+        so.numberOfNonNullOrderBys = j;
+    }
 
     if nkeys_in <= 0 {
         so.searchNulls = true;
@@ -161,6 +196,11 @@ fn spg_prepare_scan_keys(scan: &mut IndexScanDescData<'_>) {
 }
 
 fn spg_add_start_item(so: &mut SpGistScanOpaqueData<'_>, isnull: bool) {
+    let distances = if isnull {
+        Vec::new()
+    } else {
+        so.zeroDistances[..so.numberOfNonNullOrderBys.max(0) as usize].to_vec()
+    };
     so.scanQueue.add(SpGistSearchItem {
         value: Datum::null(),
         leafTuple: None,
@@ -173,6 +213,8 @@ fn spg_add_start_item(so: &mut SpGistScanOpaqueData<'_>, isnull: bool) {
         isNull: isnull,
         isLeaf: false,
         recheck: false,
+        recheckDistances: false,
+        distances,
     });
 }
 
@@ -187,6 +229,7 @@ fn reset_scan_opaque(so: &mut SpGistScanOpaqueData<'_>) {
     }
     so.iPtr = 0;
     so.nPtrs = 0;
+    so.distances.clear();
     so.recon_buf.clear();
 }
 
@@ -196,10 +239,6 @@ pub fn spgrescan(
     keys: Option<&[ScanKeyData]>,
     orderbys: Option<&[ScanKeyData]>,
 ) -> PgResult<()> {
-    if orderbys.is_some_and(|o| !o.is_empty()) || scan.numberOfOrderBys > 0 {
-        panic!("unported: SP-GiST ordered (KNN) scans (distance lane)");
-    }
-
     if let Some(keys) = keys {
         if scan.numberOfKeys > 0 {
             debug_assert!(keys.len() as i32 == scan.numberOfKeys);
@@ -216,6 +255,30 @@ pub fn spgrescan(
                 });
             }
         }
+    }
+
+    // Copy order-by keys and resolve each ordering operator's result type
+    // (SP-GiST distances are always float8; the operator may return float4).
+    if let Some(orderbys) = orderbys.filter(|_| scan.numberOfOrderBys > 0) {
+        debug_assert!(orderbys.len() as i32 == scan.numberOfOrderBys);
+        scan.orderByData.clear();
+        let mut order_by_types = Vec::with_capacity(orderbys.len());
+        for k in orderbys {
+            order_by_types.push(indexam_seams::get_func_rettype::call(k.sk_func.fn_oid)?);
+            scan.orderByData.push(ScanKeyData {
+                sk_flags: k.sk_flags,
+                sk_attno: k.sk_attno,
+                sk_strategy: k.sk_strategy,
+                sk_subtype: k.sk_subtype,
+                sk_collation: k.sk_collation,
+                sk_func: fmgr_info_copy(&k.sk_func),
+                sk_argument: k.sk_argument,
+            });
+        }
+        let IndexScanOpaque::Spgist(so) = &mut scan.opaque else {
+            crate::non_spgist_opaque()
+        };
+        so.orderByTypes = order_by_types;
     }
 
     spg_prepare_scan_keys(scan);
@@ -292,9 +355,12 @@ fn store_result(
     isnull: bool,
     leaf_tuple: Option<&[u8]>,
     recheck: bool,
+    recheck_distances: bool,
+    non_null_distances: Option<&[f64]>,
 ) -> PgResult<()> {
     match dest {
         StoreDest::Bitmap(tbm, ntids) => {
+            debug_assert!(!recheck_distances && non_null_distances.is_none());
             tbm.add_tuples(core::slice::from_ref(heap_ptr), recheck)?;
             **ntids += 1;
         }
@@ -302,6 +368,31 @@ fn store_result(
             debug_assert!(so.nPtrs < ::types_storage::bufpage::MaxIndexTuplesPerPage);
             so.heapPtrs[so.nPtrs] = *heap_ptr;
             so.recheck[so.nPtrs] = recheck;
+            so.recheckDistances[so.nPtrs] = recheck_distances;
+
+            if so.numberOfOrderBys > 0 {
+                debug_assert_eq!(so.distances.len(), so.nPtrs);
+                let row = match non_null_distances {
+                    Some(d) if !isnull && so.numberOfNonNullOrderBys > 0 => {
+                        let mut out =
+                            Vec::with_capacity(so.numberOfOrderBys.max(0) as usize);
+                        for i in 0..so.numberOfOrderBys as usize {
+                            let offset = so.nonNullOrderByOffsets[i];
+                            if offset >= 0 {
+                                out.push(IndexOrderByDistance {
+                                    value: d[offset as usize],
+                                    isnull: false,
+                                });
+                            } else {
+                                out.push(IndexOrderByDistance { value: 0.0, isnull: true });
+                            }
+                        }
+                        Some(out)
+                    }
+                    _ => None,
+                };
+                so.distances.push(row);
+            }
 
             if so.want_itup {
                 let mut leaf_datums = [Datum::null(); K];
@@ -353,13 +444,15 @@ fn spg_leaf_test(
 ) -> PgResult<bool> {
     let heap_ptr = SpGistLeafTupleHeader::decode(leaf_tuple).heapPtr;
 
-    let (result, leaf_value, recheck) = if isnull {
+    let (result, leaf_value, recheck, recheck_distances, distances) = if isnull {
         debug_assert!(so.searchNulls);
-        (true, Datum::null(), false)
+        (true, Datum::null(), false, false, Vec::new())
     } else {
         let leaf_in = spgLeafConsistentIn {
             scankeys: so.keyData.as_ptr(),
+            orderbys: so.orderByData.as_ptr(),
             nkeys: so.numberOfKeys,
+            norderbys: so.numberOfNonNullOrderBys,
             reconstructedValue: item.value,
             traversalValue: item.traversalValue,
             level: item.level,
@@ -381,20 +474,75 @@ fn spg_leaf_test(
             Datum::from_usize(&mut leaf_out as *mut spgLeafConsistentOut as usize),
         );
         let r = so.leafConsistentFn.invoke(&mut so.frame2)?;
-        (r.as_bool(), leaf_out.leafValue, leaf_out.recheck)
+        let distances = if r.as_bool()
+            && so.numberOfNonNullOrderBys > 0
+            && !leaf_out.distances.is_null()
+        {
+            // SAFETY: opclass contract — norderbys distances in the armed mcx.
+            unsafe {
+                core::slice::from_raw_parts(
+                    leaf_out.distances,
+                    so.numberOfNonNullOrderBys as usize,
+                )
+            }
+            .to_vec()
+        } else {
+            Vec::new()
+        };
+        (
+            r.as_bool(),
+            leaf_out.leafValue,
+            leaf_out.recheck,
+            leaf_out.recheckDistances,
+            distances,
+        )
     };
 
     if result {
-        store_result(
-            so,
-            dest,
-            &heap_ptr,
-            leaf_value,
-            isnull,
-            Some(leaf_tuple),
-            recheck,
-        )?;
-        *reported_some = true;
+        if so.numberOfNonNullOrderBys > 0 {
+            // Ordered scan: queue the heap item (spgNewHeapItem).
+            let value = if so.want_itup && !isnull {
+                datum_copy_traversal(
+                    &so.traversalCxt,
+                    leaf_value,
+                    so.state.attType.attbyval,
+                    so.state.attType.attlen,
+                )
+            } else {
+                Datum::null()
+            };
+            let leaf_copy = if so.want_itup && so.state.leafTupDesc.natts > 1 {
+                Some(leaf_tuple.to_vec())
+            } else {
+                None
+            };
+            so.scanQueue.add(SpGistSearchItem {
+                value,
+                leafTuple: leaf_copy,
+                traversalValue: 0,
+                level: item.level,
+                heapPtr: heap_ptr,
+                isNull: isnull,
+                isLeaf: true,
+                recheck,
+                recheckDistances: recheck_distances,
+                distances,
+            });
+        } else {
+            debug_assert!(!recheck_distances);
+            store_result(
+                so,
+                dest,
+                &heap_ptr,
+                leaf_value,
+                isnull,
+                Some(leaf_tuple),
+                recheck,
+                false,
+                None,
+            )?;
+            *reported_some = true;
+        }
     }
 
     Ok(result)
@@ -414,9 +562,11 @@ fn spg_inner_test(
     let mut level_adds: Vec<i32> = Vec::new();
     let mut recon_values: Vec<Datum> = Vec::new();
     let mut traversal_values: Vec<usize> = Vec::new();
+    let mut distance_rows: Vec<Vec<f64>> = Vec::new();
     let mut have_level_adds = false;
     let mut have_recon = false;
     let mut have_traversal = false;
+    let mut have_distances = false;
 
     if !isnull {
         let mut labels_scratch: Vec<Datum> = Vec::new();
@@ -425,7 +575,9 @@ fn spg_inner_test(
         let traversal_mcx = so.traversalCxt.mcx();
         let inner_in = spgInnerConsistentIn {
             scankeys: so.keyData.as_ptr(),
+            orderbys: so.orderByData.as_ptr(),
             nkeys: so.numberOfKeys,
+            norderbys: so.numberOfNonNullOrderBys,
             reconstructedValue: item.value,
             traversalValue: item.traversalValue,
             traversalMemoryContext: traversal_mcx,
@@ -476,6 +628,20 @@ fn spg_inner_test(
                 core::slice::from_raw_parts(inner_out.reconstructedValues, out_n)
             });
         }
+        if !inner_out.distances.is_null() {
+            have_distances = true;
+            let nn = so.numberOfNonNullOrderBys.max(0) as usize;
+            // SAFETY: out_n rows of norderbys distances in the armed mcx.
+            let rows = unsafe { core::slice::from_raw_parts(inner_out.distances, out_n) };
+            for &row in rows {
+                distance_rows.push(if row.is_null() {
+                    Vec::new()
+                } else {
+                    // SAFETY: as above.
+                    unsafe { core::slice::from_raw_parts(row, nn) }.to_vec()
+                });
+            }
+        }
         if !inner_out.traversalValues.is_null() {
             have_traversal = true;
             // These datums outlive tempCxt.reset(): the opclass must allocate
@@ -523,6 +689,15 @@ fn spg_inner_test(
         } else {
             Datum::null()
         };
+        // Infinity distances when the opclass returned none, or for NULL
+        // items (their distances are really unused).
+        let distances = if isnull || so.numberOfNonNullOrderBys <= 0 {
+            Vec::new()
+        } else if have_distances && !distance_rows[i].is_empty() {
+            distance_rows[i].clone()
+        } else {
+            so.infDistances[..so.numberOfNonNullOrderBys as usize].to_vec()
+        };
         so.scanQueue.add(SpGistSearchItem {
             value,
             leafTuple: None,
@@ -532,6 +707,8 @@ fn spg_inner_test(
             isNull: isnull,
             isLeaf: false,
             recheck: false,
+            recheckDistances: false,
+            distances,
         });
     }
 
@@ -608,7 +785,25 @@ fn spg_walk(
         loop {
             crate::check_for_interrupts();
 
-            debug_assert!(!item.isLeaf, "heap items only exist in ordered scans");
+            if item.isLeaf {
+                // Heap items are queued only in ordered scans.
+                debug_assert!(so.numberOfNonNullOrderBys > 0);
+                let leaf_copy = item.leafTuple.take();
+                store_result(
+                    so,
+                    &mut dest,
+                    &item.heapPtr,
+                    item.value,
+                    item.isNull,
+                    leaf_copy.as_deref(),
+                    item.recheck,
+                    item.recheckDistances,
+                    if item.isNull { None } else { Some(&item.distances) },
+                )?;
+                reported_some = true;
+                so.tempCxt.reset();
+                continue 'items;
+            }
 
             let blkno = ItemPointerGetBlockNumber(&item.heapPtr);
             let mut offset = item.heapPtr.ip_posid;
@@ -757,11 +952,53 @@ pub fn spggettuple(scan: &mut IndexScanDescData<'_>, dir: ScanDirection) -> PgRe
                     scan.xs_itup =
                         core::ptr::NonNull::new(so.recon_buf[off..].as_ptr() as *mut u8);
                 }
+                if so.numberOfOrderBys > 0 {
+                    // index_store_float8_orderby_distances (indexam.c).
+                    scan.xs_recheckorderby = so.recheckDistances[so.iPtr];
+                    for i in 0..so.numberOfOrderBys as usize {
+                        let d = so.distances[so.iPtr].as_ref().and_then(|v| v.get(i));
+                        match so.orderByTypes[i] {
+                            ::types_core::FLOAT8OID => match d {
+                                Some(d) if !d.isnull => {
+                                    scan.xs_orderbyvals[i] = Datum::from_f64(d.value);
+                                    scan.xs_orderbynulls[i] = false;
+                                }
+                                _ => {
+                                    scan.xs_orderbyvals[i] = Datum::null();
+                                    scan.xs_orderbynulls[i] = true;
+                                }
+                            },
+                            ::types_core::FLOAT4OID => match d {
+                                Some(d) if !d.isnull => {
+                                    scan.xs_orderbyvals[i] = Datum::from_f32(d.value as f32);
+                                    scan.xs_orderbynulls[i] = false;
+                                }
+                                _ => {
+                                    scan.xs_orderbyvals[i] = Datum::null();
+                                    scan.xs_orderbynulls[i] = true;
+                                }
+                            },
+                            _ => {
+                                // Only float distances convert; a lossy
+                                // distance with another type can't be
+                                // rechecked.
+                                if scan.xs_recheckorderby {
+                                    return Err(Box::new(::types_error::PgError::error(
+                                        "ORDER BY operator must return float8 or float4 if the distance function is lossy"
+                                            .to_string(),
+                                    )));
+                                }
+                                scan.xs_orderbynulls[i] = true;
+                            }
+                        }
+                    }
+                }
                 so.iPtr += 1;
                 return Ok(true);
             }
             so.iPtr = 0;
             so.nPtrs = 0;
+            so.distances.clear();
             so.recon_buf.clear();
             scan.xs_itup = None;
         }

@@ -156,7 +156,9 @@ impl Default for spgPickSplitOut {
 #[derive(Clone, Copy)]
 pub struct spgInnerConsistentIn<'a> {
     pub scankeys: *const ScanKeyData,
+    pub orderbys: *const ScanKeyData,
     pub nkeys: i32,
+    pub norderbys: i32,
     pub reconstructedValue: Datum,
     pub traversalValue: usize,
     pub traversalMemoryContext: Mcx<'a>,
@@ -176,6 +178,8 @@ pub struct spgInnerConsistentOut {
     pub levelAdds: *const i32,
     pub reconstructedValues: *const Datum,
     pub traversalValues: *const usize,
+    // per-output-node rows of norderbys distances (C double **)
+    pub distances: *const *const f64,
 }
 
 impl Default for spgInnerConsistentOut {
@@ -186,6 +190,7 @@ impl Default for spgInnerConsistentOut {
             levelAdds: core::ptr::null(),
             reconstructedValues: core::ptr::null(),
             traversalValues: core::ptr::null(),
+            distances: core::ptr::null(),
         }
     }
 }
@@ -193,7 +198,9 @@ impl Default for spgInnerConsistentOut {
 #[derive(Clone, Copy)]
 pub struct spgLeafConsistentIn {
     pub scankeys: *const ScanKeyData,
+    pub orderbys: *const ScanKeyData,
     pub nkeys: i32,
+    pub norderbys: i32,
     pub reconstructedValue: Datum,
     pub traversalValue: usize,
     pub level: i32,
@@ -205,6 +212,8 @@ pub struct spgLeafConsistentIn {
 pub struct spgLeafConsistentOut {
     pub leafValue: Datum,
     pub recheck: bool,
+    pub distances: *const f64,
+    pub recheckDistances: bool,
 }
 
 impl Default for spgLeafConsistentOut {
@@ -212,12 +221,14 @@ impl Default for spgLeafConsistentOut {
         spgLeafConsistentOut {
             leafValue: Datum::null(),
             recheck: false,
+            distances: core::ptr::null(),
+            recheckDistances: false,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Scan opaque (ordered/KNN scans are a LOUD lane: no distances anywhere).
+// Scan opaque (spgist_private.h SpGistScanOpaqueData).
 // ---------------------------------------------------------------------------
 
 pub struct SpGistSearchItem {
@@ -230,9 +241,14 @@ pub struct SpGistSearchItem {
     pub isNull: bool,
     pub isLeaf: bool,
     pub recheck: bool,
+    pub recheckDistances: bool,
+    // numberOfNonNullOrderBys entries (empty for null items and unordered
+    // scans; C allocates the array inline in the item)
+    pub distances: Vec<f64>,
 }
 
-/// pairingheap_SpGistSearchItem_cmp, norderbys == 0 arms only.
+/// pairingheap_SpGistSearchItem_cmp. KNN searches only support NULLS LAST;
+/// both non-null items carry numberOfNonNullOrderBys distances.
 pub fn spg_search_item_cmp(a: &SpGistSearchItem, b: &SpGistSearchItem) -> i32 {
     if a.isNull {
         if !b.isNull {
@@ -240,7 +256,25 @@ pub fn spg_search_item_cmp(a: &SpGistSearchItem, b: &SpGistSearchItem) -> i32 {
         }
     } else if b.isNull {
         return 1;
+    } else {
+        let n = a.distances.len().min(b.distances.len());
+        for i in 0..n {
+            let (da, db) = (a.distances[i], b.distances[i]);
+            if da.is_nan() && db.is_nan() {
+                continue; // NaN == NaN
+            }
+            if da.is_nan() {
+                return -1; // NaN > number
+            }
+            if db.is_nan() {
+                return 1; // number < NaN
+            }
+            if da != db {
+                return if da < db { 1 } else { -1 };
+            }
+        }
     }
+    // Leaf items go before inner pages, for depth-first search.
     if a.isLeaf && !b.isLeaf {
         return 1;
     }
@@ -266,6 +300,17 @@ pub struct SpGistScanOpaqueData<'mcx> {
     pub keyData: Vec<ScanKeyData>,
     pub indexCollation: Oid,
 
+    // ordered (KNN) scans: NULL-argument orderbys are compacted out of
+    // orderByData; nonNullOrderByOffsets maps original positions to the
+    // compacted ones (-1 for removed).
+    pub numberOfOrderBys: i32,
+    pub numberOfNonNullOrderBys: i32,
+    pub orderByData: Vec<ScanKeyData>,
+    pub nonNullOrderByOffsets: Vec<i32>,
+    pub orderByTypes: Vec<Oid>,
+    pub zeroDistances: Vec<f64>,
+    pub infDistances: Vec<f64>,
+
     pub innerConsistentFn: FmgrInfo,
     pub leafConsistentFn: FmgrInfo,
     pub frame2: LocalFcinfo<2>,
@@ -276,6 +321,10 @@ pub struct SpGistScanOpaqueData<'mcx> {
     pub iPtr: usize,
     pub heapPtrs: [ItemPointerData; MaxIndexTuplesPerPage],
     pub recheck: [bool; MaxIndexTuplesPerPage],
+    pub recheckDistances: [bool; MaxIndexTuplesPerPage],
+    // numberOfOrderBys IndexOrderByDistance entries per reported item (None
+    // for null items); parallel to heapPtrs
+    pub distances: Vec<Option<Vec<::types_gist::state::IndexOrderByDistance>>>,
     // reconstructed index-tuple images for IOS, packed 8-aligned; per-item
     // byte offsets in recon_offs (scan-lifetime scratch, reset per page)
     pub recon_buf: Vec<u8>,
