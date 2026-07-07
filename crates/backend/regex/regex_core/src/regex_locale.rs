@@ -9,15 +9,6 @@ use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
 use ::pg_locale::{PgLocale, WcClass, COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
 use mbutils_seams as mb_seams;
 
-#[cold]
-#[inline(never)]
-fn regex_wc_isclass_nonc(strategy: PgLocaleStrategy, class: WcClass, c: PgWChar) -> bool {
-    panic!(
-        "regex: wc-ctype probe {class:?} for c={c} under {strategy:?} not ported \
-         (pg_locale wc-ctype surface: regc_pg_locale.c BUILTIN/ICU arms)"
-    );
-}
-
 // Builtin provider ctype: unicode_category.c pg_u_is* over the codepoint,
 // posix-restricted per regc_pg_locale.c's `!casemap_full` convention.
 fn regex_wc_isclass_builtin(class: WcClass, c: PgWChar, posix: bool) -> bool {
@@ -33,16 +24,6 @@ fn regex_wc_isclass_builtin(class: WcClass, c: PgWChar, posix: bool) -> bool {
         WcClass::Punct => unicode_category::pg_u_ispunct(code, posix),
         WcClass::Space => unicode_category::pg_u_isspace(code),
     }
-}
-
-#[cold]
-#[inline(never)]
-fn regex_wc_tocase_nonc(strategy: PgLocaleStrategy, upper: bool, c: PgWChar) -> PgWChar {
-    let which = if upper { "toupper" } else { "tolower" };
-    panic!(
-        "regex: wc-{which} for c={c} under {strategy:?} not ported \
-         (pg_locale wc-case surface: regc_pg_locale.c BUILTIN/ICU arms)"
-    );
 }
 
 use crate::regex_consts::{NUM_CCLASSES, REG_ECOLLATE, REG_ECTYPE, REG_ERANGE, REG_ESPACE,
@@ -249,9 +230,7 @@ fn pg_wc_isclass(c: PgWChar, c_bit: u8, class: WcClass) -> bool {
         PgLocaleStrategy::Builtin => regex_wc_isclass_builtin(class, c, st.builtin_posix),
         PgLocaleStrategy::LibcWide => st.locale.unwrap().wc_isclass_wide(c, class),
         PgLocaleStrategy::Libc1Byte => st.locale.unwrap().wc_isclass_1byte(c, class),
-        strat @ PgLocaleStrategy::Icu => {
-            regex_wc_isclass_nonc(strat, class, c)
-        }
+        PgLocaleStrategy::Icu => ::pg_locale::icu_wc_isclass(c, class),
     }
 }
 
@@ -323,7 +302,7 @@ pub fn pg_wc_toupper(c: PgWChar) -> PgWChar {
             }
         }
         PgLocaleStrategy::Builtin => unicode_case::unicode_uppercase_simple(c as u32) as PgWChar,
-        strat @ PgLocaleStrategy::Icu => regex_wc_tocase_nonc(strat, true, c),
+        PgLocaleStrategy::Icu => ::pg_locale::icu_wc_toupper(c) as PgWChar,
     }
 }
 
@@ -352,7 +331,7 @@ pub fn pg_wc_tolower(c: PgWChar) -> PgWChar {
             }
         }
         PgLocaleStrategy::Builtin => unicode_case::unicode_lowercase_simple(c as u32) as PgWChar,
-        strat @ PgLocaleStrategy::Icu => regex_wc_tocase_nonc(strat, false, c),
+        PgLocaleStrategy::Icu => ::pg_locale::icu_wc_tolower(c) as PgWChar,
     }
 }
 

@@ -785,7 +785,7 @@ pub fn RI_Initial_Check<'mcx>(
             fk_type,
         )?;
         if pk_coll != fk_coll {
-            unported("ri_GenerateQualCollation (cross-collation FK validation)");
+            ri_GenerateQualCollation(mcx, &mut querybuf, pk_coll)?;
         }
         sep = "AND";
     }
@@ -920,7 +920,7 @@ pub fn RI_PartitionRemove_Check<'mcx>(
             fk_type,
         )?;
         if pk_coll != fk_coll {
-            unported("ri_GenerateQualCollation (cross-collation FK partition detach)");
+            ri_GenerateQualCollation(mcx, &mut querybuf, pk_coll)?;
         }
         sep = "AND";
     }
@@ -1420,10 +1420,10 @@ fn match_full_mixing_error<'mcx>(
     Box::new(e)
 }
 
-#[cold]
 // aclchk.c ACLCHECK_OK.
 const ACLCHECK_OK: i32 = 0;
 
+#[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn ri_ReportViolation<'mcx>(
@@ -1799,6 +1799,33 @@ fn syscache_shape_for_operator(opoid: Oid) -> PgResult<(Oid, Oid, String)> {
     let name = lsyscache::operator::get_opname(scratch.mcx(), opoid)?
         .unwrap_or_else(|| panic!("cache lookup failed for operator {opoid}"));
     Ok((left, right, name.as_str().to_string()))
+}
+
+// ri_GenerateQualCollation (ri_triggers.c): append an always-qualified
+// COLLATE spec so the generated query is not search-path-dependent.
+fn ri_GenerateQualCollation(
+    mcx: Mcx<'_>,
+    buf: &mut PgString<'_>,
+    collation: Oid,
+) -> PgResult<()> {
+    use core::fmt::Write;
+    if collation == InvalidOid {
+        return Ok(());
+    }
+    let shape = syscache_seams::lookup_pg_collation_shape::call(collation)?
+        .unwrap_or_else(|| panic!("cache lookup failed for collation {collation}"));
+    let collname =
+        core::str::from_utf8(shape.collname.name_str()).expect("collname UTF-8");
+    let nsp = lsyscache::get_namespace_name(mcx, shape.collnamespace)?
+        .expect("collation namespace exists");
+    write!(
+        buf,
+        " COLLATE {}.{}",
+        quote_one_name(nsp.as_str()),
+        quote_one_name(collname)
+    )
+    .expect("PgString write");
+    Ok(())
 }
 
 fn quote_one_name(name: &str) -> String {

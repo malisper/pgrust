@@ -859,10 +859,14 @@ fn assign_collations_walker<'mcx>(
                             m.msfcollid = set_coll
                         })
                         .unwrap(),
+                    // exprSetCollation(JsonBehavior) is assert-only: the
+                    // behavior expr's collation was already assigned.
                     NodeTag::T_JsonBehavior => {
-                        if let Some(e) = node.as_json_behavior().unwrap().expr {
-                            expr_set_collation(e, set_coll)
-                        }
+                        debug_assert!(node
+                            .as_json_behavior()
+                            .unwrap()
+                            .expr
+                            .is_none_or(|e| expr_collation(e) == set_coll));
                     }
                     _ => unreachable!(),
                 }

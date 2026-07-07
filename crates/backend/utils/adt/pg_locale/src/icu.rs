@@ -672,3 +672,35 @@ pub fn icu_validate_locale(loc_str: &str) -> PgResult<()> {
     unsafe { (ffi::icu().ucol_close)(collator) };
     Ok(())
 }
+
+// regc_pg_locale.c PG_REGEX_STRATEGY_ICU arms: uchar.h ctype probes over the
+// codepoint, locale-independent.
+pub fn icu_wc_isclass(c: u32, class: crate::WcClass) -> bool {
+    use crate::WcClass;
+    let api = ffi::icu();
+    let c = c as i32;
+    // SAFETY: pure uchar.h ctype calls.
+    (unsafe {
+        match class {
+            WcClass::Digit => (api.u_isdigit)(c),
+            WcClass::Alpha => (api.u_isalpha)(c),
+            WcClass::Alnum => (api.u_isalnum)(c),
+            WcClass::Upper => (api.u_isupper)(c),
+            WcClass::Lower => (api.u_islower)(c),
+            WcClass::Graph => (api.u_isgraph)(c),
+            WcClass::Print => (api.u_isprint)(c),
+            WcClass::Punct => (api.u_ispunct)(c),
+            WcClass::Space => (api.u_isspace)(c),
+        }
+    }) != 0
+}
+
+pub fn icu_wc_toupper(c: u32) -> u32 {
+    // SAFETY: pure uchar.h case mapping.
+    (unsafe { (ffi::icu().u_toupper)(c as i32) }) as u32
+}
+
+pub fn icu_wc_tolower(c: u32) -> u32 {
+    // SAFETY: pure uchar.h case mapping.
+    (unsafe { (ffi::icu().u_tolower)(c as i32) }) as u32
+}

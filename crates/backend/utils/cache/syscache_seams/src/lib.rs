@@ -189,6 +189,7 @@ pub struct PgAttributeLsShape {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgCollationShape {
     pub collname: NameData,
+    pub collnamespace: Oid,
     pub collisdeterministic: bool,
 }
 
