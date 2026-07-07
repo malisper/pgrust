@@ -380,6 +380,8 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
 // log_parameter_max_length_on_error bytes (<0 = unclipped), C's
 // appendStringInfoStringQuoted shape (quote doubling, in-quote "..." when
 // clipped, clip backed off to a character boundary).
+#[cold]
+#[inline(never)]
 fn bind_param_error_context(
     mut err: Box<types_error::PgError>,
     portal_name: &str,

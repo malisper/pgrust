@@ -595,6 +595,9 @@ fn remove_from_table(key: &PortalName) -> Option<Portal<'static>> {
 // plan, so RevalidateCachedQuery's contract decides retention; everything
 // per-execution (locks, snapshot, params, scans, permissions) is re-derived
 // at rearm.
+// inline(never): keeps PortalDrop's frame at its pre-retention size (the
+// select1/simple lanes never enter here; layout-recovery respin).
+#[inline(never)]
 fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
     {
         let p = portal.borrow();
@@ -723,6 +726,7 @@ fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
 // Frees a parked shell: the retained execution drops on its normal path, the
 // plan pin releases, and the empty context/slot park in the reuse pools
 // (PortalDrop's tail).
+#[inline(never)]
 fn discard_shell(shell: &Portal<'static>) {
     let (query_desc, stmts, cplan, ctx) = {
         let mut p = shell.borrow_mut();
@@ -769,6 +773,7 @@ fn discard_shell(shell: &Portal<'static>) {
 /// Caller contract: no live unnamed portal exists (drop it first), and the
 /// caller verifies the shell's cplan against this bind's GetCachedPlan result
 /// before reusing the retained execution.
+#[inline(never)]
 pub fn TakeParkedPortal(plansource: PlanSourceHandle) -> PgResult<Option<Portal<'static>>> {
     let Some(shell) = with_mgr(|m| {
         let i = m.parked.iter().position(|(k, _)| *k == plansource)?;
@@ -818,6 +823,8 @@ pub fn TakeParkedPortal(plansource: PlanSourceHandle) -> PgResult<Option<Portal<
 /// (revalidation replanned): shed the retained execution and hand the shell
 /// back as a plain just-created portal (status PORTAL_NEW) for the normal
 /// PortalDefineQuery + PortalStart path.
+#[cold]
+#[inline(never)]
 pub fn ShedRetainedExecution(portal: &Portal<'static>) {
     let (query_desc, stmts, cplan) = {
         let mut p = portal.borrow_mut();
