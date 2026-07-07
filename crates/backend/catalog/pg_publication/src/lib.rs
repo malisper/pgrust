@@ -1005,6 +1005,9 @@ fn collect_publication_tables(fcinfo: &Fcinfo) -> PgResult<PubTablesRows> {
     tupdesc::TupleDescInitEntry(&mut desc, 4, Some("qual"), PG_NODE_TREEOID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // BlessTupleDesc: consumers of the composite datums (put_composite_row's
+    // rowtype lookup, record_out) need the registered typmod.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
     let mut tuples = Vec::with_capacity(table_infos.len());
     for &(relid, pubid) in &table_infos {

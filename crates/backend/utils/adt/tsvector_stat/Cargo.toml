@@ -9,6 +9,7 @@ name = "adt_tsvector_stat"
 path = "src/lib.rs"
 
 [dependencies]
+typcache_seams = { path = "../../cache/typcache_seams" }
 adt_tsvector_core = { path = "../tsvector_core" }
 to_tsany = { path = "../../../tsearch/to_tsany" }
 ts_parse = { path = "../../../tsearch/ts_parse" }

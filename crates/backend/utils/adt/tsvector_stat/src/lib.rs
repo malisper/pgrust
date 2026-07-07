@@ -189,6 +189,9 @@ fn stat_rows(fcinfo: &Fcinfo, ws_arg: bool) -> PgResult<Vec<Vec<u8>>> {
     ::tupdesc::TupleDescInitEntry(&mut desc, 3, Some("nentry"), INT4OID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // BlessTupleDesc: consumers of the composite datums (put_composite_row's
+    // rowtype lookup, record_out) need the registered typmod.
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
     let mut rows = Vec::with_capacity(stats.len());
     for (word, ndoc, nentry) in stats {
