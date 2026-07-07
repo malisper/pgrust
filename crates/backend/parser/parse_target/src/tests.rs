@@ -190,8 +190,9 @@ fn figure_colname_arms() {
         )
         .unwrap()
     };
-    // Main resolves EXPR_SUBLINK names from transformed Queries only.
-    assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::EXPR_SUBLINK)), "?column?");
+    // A raw (untransformed) EXPR_SUBLINK derives the resname its transform
+    // would assign: the first ResTarget's name, else its value's name.
+    assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::EXPR_SUBLINK)), "col");
     assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::EXISTS_SUBLINK)), "exists");
     assert_eq!(FigureColname(sublink(types_nodes::SubLinkType::ANY_SUBLINK)), "?column?");
 }
