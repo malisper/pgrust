@@ -321,9 +321,11 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             let nr = s.scan.plan.plan_rows;
             let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, nr)?;
             let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * nr)?;
-            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * nr)?;
+            // indexqual/indexorderby run once per rescan (runtime keys), so
+            // C costs their AlternativeSubPlan pick at num_exec = 1.
+            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 1.0)?;
             let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
-            let iob = fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * nr)?;
+            let iob = fix_scan_list(run, &s.indexorderby, rtoffset, 1.0)?;
             let iobo = fix_scan_list(run, &s.indexorderbyorig, rtoffset, 2.0 * nr)?;
             if rtoffset != 0
                 || tl.is_some()
@@ -354,7 +356,8 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
             debug_assert!(s.scan.plan.targetlist.is_nil() && s.scan.plan.qual.is_nil());
             let nr = s.scan.plan.plan_rows;
-            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * nr)?;
+            // indexqual runs once per rescan (runtime keys): num_exec = 1.
+            let iq = fix_scan_list(run, &s.indexqual, rtoffset, 1.0)?;
             let iqo = fix_scan_list(run, &s.indexqualorig, rtoffset, 2.0 * nr)?;
             if rtoffset != 0 || iq.is_some() || iqo.is_some() {
                 // SAFETY: exclusive plan-tree ownership (prologue note).
@@ -1335,9 +1338,11 @@ fn set_indexonlyscan_references<'mcx>(
     let (iq, iob, itl) = {
         let s = plan.as_index_only_scan().unwrap();
         (
-            fix_scan_list(run, &s.indexqual, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
-            fix_scan_list(run, &s.indexorderby, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
-            fix_scan_list(run, &s.indextlist, rtoffset, 2.0 * s.scan.plan.plan_rows)?,
+            // indexqual/indexorderby run once per rescan (runtime keys):
+            // num_exec = 1; indextlist is per output tuple (NUM_EXEC_TLIST).
+            fix_scan_list(run, &s.indexqual, rtoffset, 1.0)?,
+            fix_scan_list(run, &s.indexorderby, rtoffset, 1.0)?,
+            fix_scan_list(run, &s.indextlist, rtoffset, s.scan.plan.plan_rows)?,
         )
     };
     // SAFETY: exclusive plan-tree ownership (prologue note).
