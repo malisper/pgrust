@@ -3,7 +3,9 @@ use init_small::globals as g;
 use std::sync::{Mutex, Once};
 use types_core::BackendType;
 
-const MAX_CONNECTIONS: i32 = 8;
+// One backend slot per test thread that calls my_backend(); keep headroom
+// over the my_backend() call-site count or InitProcess FATALs mid-suite.
+const MAX_CONNECTIONS: i32 = 16;
 const MAX_WORKER_PROCESSES: i32 = 2;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
