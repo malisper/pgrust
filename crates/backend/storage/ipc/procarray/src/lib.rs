@@ -756,13 +756,16 @@ fn GetSnapshotDataReuse(
         return false;
     }
 
+    // The fence is only needed when publishing: with xmin already valid (and
+    // <= snapshot.xmin, constraint 2) the horizon can never pass snapshot.xmin
+    // regardless of what the verify-load observes.
     let published = if !TransactionIdIsValid(my_proc.xmin.read()) {
         my_proc.xmin.value.store(snapshot.xmin, Relaxed);
+        fence(Ordering::SeqCst);
         true
     } else {
         false
     };
-    fence(Ordering::SeqCst);
     if tv.xactCompletionCount.load(Relaxed) != snapshot.snapXactCompletionCount {
         if published {
             my_proc.xmin.value.store(InvalidTransactionId, Relaxed);
