@@ -1,5 +1,4 @@
-//! spgproc.c: SP-GiST point-opclass distance helpers; callers (KNN scans)
-//! sit behind the scan core's loud norderbys gate.
+//! spgproc.c: SP-GiST point-opclass distance helpers for ordered (KNN) scans.
 #![allow(non_snake_case)]
 
 use ::adt_float::get_float8_nan;
