@@ -2352,8 +2352,9 @@ fn merge_update_act<'mcx>(
     let mut cross_part = false;
     pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
     let result = {
-        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
         let rel = es_relations[(mt.rel().rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
@@ -2409,7 +2410,7 @@ fn merge_update_act<'mcx>(
             slot,
             output_cid,
             snapshot,
-            &None,
+            crosscheck,
             true,
             tmfd,
             &mut lockmode,
@@ -2520,13 +2521,14 @@ fn merge_delete_act<'mcx>(
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
     let result = {
-        let EStateData { es_relations, es_snapshot, .. } = &*estate;
+        let EStateData { es_relations, es_snapshot, es_crosscheck_snapshot, .. } = &*estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = es_snapshot;
+        let crosscheck: &tableam_vocab::Snapshot<'mcx> = es_crosscheck_snapshot;
         let rel = es_relations[(mt.rel().rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
         tableam::table_tuple_delete(
-            mcx, rel, tupleid, output_cid, snapshot, &None, true, tmfd, false,
+            mcx, rel, tupleid, output_cid, snapshot, crosscheck, true, tmfd, false,
         )?
     };
     if result != TM_Result::TM_Ok {
@@ -3155,8 +3157,9 @@ fn exec_update<'mcx>(
         let mut cross_part = false;
         pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
         let result = {
-            let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+            let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, .. } = &mut *estate;
             let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+            let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
             let rel = es_relations[(mt.rel().rti - 1) as usize]
                 .as_ref()
                 .expect("result relation opened");
@@ -3219,7 +3222,7 @@ fn exec_update<'mcx>(
                 slot,
                 output_cid,
                 snapshot,
-                &None,
+                crosscheck,
                 true,
                 &mut tmfd,
                 &mut lockmode,
@@ -3779,8 +3782,9 @@ fn exec_delete<'mcx>(
     loop {
         let mcx = estate.es_query_cxt;
         let result = {
-            let EStateData { es_relations, es_snapshot, .. } = &*estate;
+            let EStateData { es_relations, es_snapshot, es_crosscheck_snapshot, .. } = &*estate;
             let snapshot: &tableam_vocab::Snapshot<'mcx> = es_snapshot;
+            let crosscheck: &tableam_vocab::Snapshot<'mcx> = es_crosscheck_snapshot;
             let rel = es_relations[(mt.rel().rti - 1) as usize]
                 .as_ref()
                 .expect("result relation opened");
@@ -3790,7 +3794,7 @@ fn exec_delete<'mcx>(
                 tupleid,
                 output_cid,
                 snapshot,
-                &None,
+                crosscheck,
                 true,
                 &mut tmfd,
                 changing_part,
@@ -6211,8 +6215,9 @@ fn exec_leaf_conflict_update<'mcx>(
         } = &mut *mt;
         let root_rti = root.as_ref().map_or(rels[0].rti, |rr| rr.rti);
         let rel = router.as_ref().expect("routed").leaf_rel(idx);
-        let EStateData { es_relations, es_tupleTable, es_snapshot, .. } = &mut *estate;
+        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, .. } = &mut *estate;
         let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
         let slot = &mut es_tupleTable[proj_id.0 as usize];
 
         slot.base_mut().tts_tableOid = rel.rd_id;
@@ -6243,7 +6248,7 @@ fn exec_leaf_conflict_update<'mcx>(
             slot,
             output_cid,
             snapshot,
-            &None,
+            crosscheck,
             true,
             &mut tmfd,
             &mut lockmode,
