@@ -986,15 +986,8 @@ pub fn addRangeTableEntryForFunction<'mcx>(
             funcapi::TypeFuncClass::Scalar => {
                 let colname =
                     chooseScalarFunctionAlias(mcx, funcexpr, funcname, alias, nfuncs)?;
-                // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
-                // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
-                let (typmod, collation) = match funcexpr.as_func_expr() {
-                    Some(fe) => (-1, fe.funccollid),
-                    None => panic!(
-                        "addRangeTableEntryForFunction (parse_relation.c): non-FuncExpr \
-                         scalar function item (planner-folded expr) unported"
-                    ),
-                };
+                let typmod = nodes_core::node_funcs::expr_typmod(funcexpr);
+                let collation = nodes_core::node_funcs::expr_collation(funcexpr);
                 let mut d = tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
                 tupdesc::TupleDescInitEntry(
                     &mut d,
@@ -2237,15 +2230,8 @@ fn expandFunction<'mcx>(
                     }
                 }
                 funcapi::TypeFuncClass::Scalar => {
-                    // exprTypmod/exprCollation of the grammar-guaranteed FuncExpr:
-                    // no FuncExpr arm in exprTypmod (-1); collation is funccollid.
-                    let (typmod, collation) = match funcexpr.as_func_expr() {
-                        Some(fe) => (-1, fe.funccollid),
-                        None => panic!(
-                            "expandRTE (parse_relation.c): non-FuncExpr scalar function \
-                             item (planner-folded expr) unported"
-                        ),
-                    };
+                    let typmod = nodes_core::node_funcs::expr_typmod(funcexpr);
+                    let collation = nodes_core::node_funcs::expr_collation(funcexpr);
                     colnames.lappend(mcx, eref.colnames.nth(atts_done))?;
                     colvars.lappend(
                         mcx,

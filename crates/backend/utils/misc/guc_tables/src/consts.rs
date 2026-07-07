@@ -119,6 +119,9 @@ pub const RECOVERY_PREFETCH_ON: i32 = 1;
 pub const RECOVERY_PREFETCH_TRY: i32 = 2;
 pub const RECOVERY_TARGET_ACTION_PAUSE: i32 = 0;
 pub const RELSEG_SIZE: i32 = 131072;
+// tcopprot.h restrict_nonsystem_relation_kind flag bits.
+pub const RESTRICT_RELKIND_VIEW: i32 = 0x01;
+pub const RESTRICT_RELKIND_FOREIGN_TABLE: i32 = 0x02;
 pub const SCRAM_SHA_256_DEFAULT_ITERATIONS: i32 = 4096;
 pub const SECS_PER_MINUTE: i32 = 60;
 pub const SESSION_REPLICATION_ROLE_LOCAL: i32 = 2;

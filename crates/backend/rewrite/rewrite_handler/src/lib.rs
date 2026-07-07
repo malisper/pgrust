@@ -2046,8 +2046,6 @@ pub fn relation_is_updatable<'mcx>(
 
 // rewriteTargetView (rewriteHandler.c): rewrite DML on an auto-updatable view
 // so the view's base relation becomes the target relation.
-// restrict_nonsystem_relation_kind is unported; its boot default (no
-// restriction) is assumed.
 fn rewriteTargetView<'mcx>(
     mcx: Mcx<'mcx>,
     mut parsetree: Query<'mcx>,
@@ -2079,6 +2077,8 @@ fn rewriteTargetView<'mcx>(
             }
         }
     }
+
+    check_view_expansion_restricted(view)?;
 
     if let Some(detail) = view_query_is_auto_updatable(viewquery, insert_or_update) {
         return Err(error_view_not_updatable(
@@ -2583,10 +2583,27 @@ fn rewrite_dml_view_with_instead_trigger<'mcx>(
     Ok(())
 }
 
+
+// Restriction check shared by ApplyRetrieveRule/rewriteTargetView
+// (rewriteHandler.c): expansion of non-system views can be disabled by the
+// restrict_nonsystem_relation_kind GUC.
+fn check_view_expansion_restricted(rel: &Relation<'_>) -> PgResult<()> {
+    if guc_tables::backing::restrict_nonsystem_relation_kind()
+        & guc_tables::consts::RESTRICT_RELKIND_VIEW
+        != 0
+        && rel.rd_id >= types_core::catalog::FirstNormalObjectId
+    {
+        let relname = String::from_utf8_lossy(rel.rd_rel.relname.name_str()).into_owned();
+        return Err(Box::new(
+            PgError::error(format!("access to non-system view \"{relname}\" is restricted"))
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+    Ok(())
+}
+
 // ApplyRetrieveRule (rewriteHandler.c), SELECT-only arm: the DML-on-view
 // result-relation branch and FOR UPDATE/SHARE (markQueryForLocking) are loud.
-// The restrict_nonsystem_relation_kind GUC is unported; its boot default (no
-// restriction) is assumed.
 #[allow(clippy::too_many_arguments)]
 fn ApplyRetrieveRule<'mcx>(
     mcx: Mcx<'mcx>,
@@ -2601,6 +2618,7 @@ fn ApplyRetrieveRule<'mcx>(
     if rule.qual_src.is_some() {
         return Err(internal_error("cannot handle qualified ON SELECT rule"));
     }
+    check_view_expansion_restricted(relation)?;
     if rt_index == parsetree.resultRelation {
         // The INSTEAD OF target stays an unexpanded RTE_RELATION: INSERT needs
         // no source data; UPDATE/DELETE were re-pointed at a target copy by

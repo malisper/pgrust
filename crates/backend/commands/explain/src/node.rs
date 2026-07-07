@@ -1440,7 +1440,10 @@ fn show_plan_tlist<'mcx>(node: Node<'mcx>, ancestors: Option<&Ancestors<'_, 'mcx
     if plan.targetlist.is_nil() {
         return Ok(());
     }
-    if matches!(node.node_tag(), NodeTag::T_Append | NodeTag::T_MergeAppend) {
+    if matches!(
+        node.node_tag(),
+        NodeTag::T_Append | NodeTag::T_MergeAppend | NodeTag::T_RecursiveUnion
+    ) {
         return Ok(());
     }
     let mcx = es.str.allocator();

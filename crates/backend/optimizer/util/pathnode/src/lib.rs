@@ -1315,11 +1315,16 @@ pub fn create_resultscan_path<'mcx>(
     Ok(id)
 }
 
-// create_ctescan_path (pathnode.c); pathkeys/required_outer empty on this lane.
-pub fn create_ctescan_path<'mcx>(run: &mut PlannerRun<'mcx>, rel_id: RelId) -> PgResult<PathId> {
+// create_ctescan_path (pathnode.c); required_outer empty on this lane.
+pub fn create_ctescan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    pathkeys: PgVec<'mcx, PathKey>,
+) -> PgResult<PathId> {
     let mut path = base_path(run, NodeTag::T_Path, NodeTag::T_CteScan, rel_id);
     path.parallel_aware = false;
     path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.pathkeys = pathkeys;
     let id = run.root.alloc_path(PathNode::Path(path));
     costsize::cost_ctescan(run, id, rel_id)?;
     Ok(id)

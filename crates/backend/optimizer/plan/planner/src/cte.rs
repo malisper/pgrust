@@ -56,6 +56,8 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
         let final_rel = fetch_final_rel(run);
         let best_path = get_cheapest_fractional_path(run, final_rel, 0.0);
         let plan = create_plan(run, best_path)?;
+        let pathkey_descs = crate::pathkeys::extract_subquery_pathkey_descs(run, best_path);
+        let tlist = crate::pathkeys::extract_subquery_tlist(run, best_path);
         run.pop_root_to_subroot();
         if !run.root.plan_params.is_empty() {
             panic!("SS_process_ctes (subselect.c): unexpected outer reference in CTE query");
@@ -67,6 +69,11 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
 
         run.glob.subplans.lappend(mcx, plan)?;
         let plan_id = run.glob.subplans.len() as i32;
+        run.cte_subpath_infos.push(types_pathnodes::run::CteSubpathInfo {
+            plan_id,
+            pathkey_descs,
+            tlist,
+        });
         // >= not ==: ancestors' parked subroots may be in flight (build_subplan).
         debug_assert!(run.subroots.len() >= run.glob.subplans.len());
 
@@ -289,8 +296,7 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
-// set_cte_pathlist (allpaths.c); pathkeys stay empty (convert_subquery_pathkeys
-// unported — a sorted CTE output loses its order hint, cost-only divergence).
+// set_cte_pathlist (allpaths.c).
 pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
     let (plan_id, cte_param) = resolve_cte_plan(run, rte);
@@ -304,8 +310,31 @@ pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgR
     let cteplan = run.glob.subplans.nth((plan_id - 1) as usize);
     let plan_rows = cteplan.as_plan().expect("plan node").plan_rows;
     crate::costsize::set_cte_size_estimates(run, rel, plan_rows)?;
+    let mcx = run.mcx;
+    // Convert the ctepath's pathkeys to the outer query's representation.
+    let pathkeys = match run
+        .cte_subpath_infos
+        .iter()
+        .position(|i| i.plan_id == plan_id)
+    {
+        Some(ix) => {
+            let descs = core::mem::replace(
+                &mut run.cte_subpath_infos[ix].pathkey_descs,
+                mcx::PgVec::new_in(mcx),
+            );
+            let tlist = core::mem::replace(
+                &mut run.cte_subpath_infos[ix].tlist,
+                mcx::PgVec::new_in(mcx),
+            );
+            let pks = crate::pathkeys::convert_subquery_pathkeys(run, rel, &descs, &tlist)?;
+            run.cte_subpath_infos[ix].pathkey_descs = descs;
+            run.cte_subpath_infos[ix].tlist = tlist;
+            pks
+        }
+        None => mcx::PgVec::new_in(mcx),
+    };
     debug_assert!(run.root.rel(rel).lateral_relids.is_none());
-    let path = crate::pathnode::create_ctescan_path(run, rel)?;
+    let path = crate::pathnode::create_ctescan_path(run, rel, pathkeys)?;
     add_path(run, rel, path);
     Ok(())
 }

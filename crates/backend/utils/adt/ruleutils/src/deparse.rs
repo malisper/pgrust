@@ -2130,6 +2130,26 @@ fn get_sublink_expr<'mcx>(sublink: &SubLink<'mcx>, ctx: &mut DeparseContext<'mcx
                 }
                 ctx.buf.push(')');
             }
+            NodeTag::T_RowCompareExpr => {
+                // multiple combining operators, < <= > >= cases
+                let rcexpr = testexpr.as_row_compare_expr().unwrap();
+                ctx.buf.push('(');
+                let mut first = true;
+                for a in rcexpr.largs.iter() {
+                    if !first {
+                        ctx.buf.push_str(", ");
+                    }
+                    first = false;
+                    get_rule_expr(a, ctx, true)?;
+                }
+                opname = Some(generate_operator_name(
+                    ctx.mcx,
+                    rcexpr.opnos.nth(0),
+                    parse_expr::expr_type(rcexpr.largs.nth(0)),
+                    parse_expr::expr_type(rcexpr.rargs.nth(0)),
+                )?);
+                ctx.buf.push(')');
+            }
             other => gap("get_sublink_expr", &format!("{other:?} testexpr")),
         }
     }

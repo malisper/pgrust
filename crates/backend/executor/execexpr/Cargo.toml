@@ -44,6 +44,9 @@ clauses_seams = { path = "../../optimizer/util/clauses_seams" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+init_small = { path = "../../utils/init/init_small" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+namespace_seams = { path = "../../catalog/namespace_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
@@ -57,7 +60,6 @@ mbutils = { path = "../../utils/mb/mbutils" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 wchar = { path = "../../../common/wchar" }
 clauses = { path = "../../optimizer/util/clauses" }
-namespace_seams = { path = "../../catalog/namespace_seams" }
 adt_int = { path = "../../utils/adt/int" }
 pgtz = { path = "../../timezone/pgtz" }
 elog = { path = "../../utils/error/elog" }

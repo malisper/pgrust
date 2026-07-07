@@ -32,11 +32,13 @@ pub(crate) fn transformSetOperationStmt<'mcx>(
         leftmost = leftmost.larg.expect("set-op node has larg");
     }
     if let Some(into) = leftmost.intoClause {
-        return Err(crate::select_into_error(
-            pstate,
-            into,
-            "SELECT ... INTO is not allowed here",
-        ));
+        if !pstate.p_consumed_into.is_some_and(|c| c.ptr_eq(into)) {
+            return Err(crate::select_into_error(
+                pstate,
+                into,
+                "SELECT ... INTO is not allowed here",
+            ));
+        }
     }
 
     // C extracts ORDER BY/LIMIT/locking/WITH off the top node and NULLs them
@@ -212,11 +214,13 @@ fn transformSetOperationTree<'mcx>(
     stack_depth::check_stack_depth()?;
 
     if let Some(into) = stmt.intoClause {
-        return Err(crate::select_into_error(
-            pstate,
-            into,
-            "INTO is only allowed on first SELECT of UNION/INTERSECT/EXCEPT",
-        ));
+        if !pstate.p_consumed_into.is_some_and(|c| c.ptr_eq(into)) {
+            return Err(crate::select_into_error(
+                pstate,
+                into,
+                "INTO is only allowed on first SELECT of UNION/INTERSECT/EXCEPT",
+            ));
+        }
     }
     if !stmt.lockingClause.is_nil() {
         return Err(crate::locking_not_allowed_with(

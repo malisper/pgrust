@@ -148,6 +148,8 @@ pub(crate) fn set_deparse_plan<'mcx>(
                 // CTE subplans are parallel-restricted; never a NULL hole.
                 .expect("CteScan subplan cell present"),
         )
+    } else if let Some(wts) = plan.as_work_table_scan() {
+        Some(find_recursive_union(ps, wts))
     } else if let Some(mt) = plan.as_modify_table() {
         if mt.operation == CmdType::CMD_MERGE {
             mt.plan.lefttree
@@ -163,6 +165,28 @@ pub(crate) fn set_deparse_plan<'mcx>(
     };
 
     ps.index_tlist = plan.as_index_only_scan().map(|ios| &ios.indextlist);
+}
+
+
+// find_recursive_union (ruleutils.c): the parent RecursiveUnion supplying a
+// WorkTableScan's rows, located by wtParam among the ancestor plans.
+fn find_recursive_union<'mcx>(
+    ps: &DpnsPlan<'mcx>,
+    wts: &types_nodes::plannodes::WorkTableScan<'_>,
+) -> Node<'mcx> {
+    for a in &ps.ancestors {
+        if let AncestorEntry::Plan(p) = a {
+            if let Some(ru) = p.as_recursive_union() {
+                if ru.wtParam == wts.wtParam {
+                    return *p;
+                }
+            }
+        }
+    }
+    panic!(
+        "could not find RecursiveUnion for WorkTableScan with wtParam {}",
+        wts.wtParam
+    )
 }
 
 pub(crate) fn push_child_plan<'mcx>(
