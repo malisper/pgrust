@@ -1689,6 +1689,33 @@ where
             None => Ok(None),
             Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
         },
+        NodeTag::T_SetOperationStmt => {
+            // C mutates larg/rarg/groupClauses; the col* value lists are
+            // copied (nodeFuncs.c expression_tree_mutator).
+            let so = node.as_set_operation_stmt().unwrap();
+            let larg = mutate_opt(so.larg, m)?;
+            let rarg = mutate_opt(so.rarg, m)?;
+            let group_clauses = mutate_list(mcx, &so.groupClauses, m)?;
+            if larg.is_none() && rarg.is_none() && group_clauses.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Node::mk(
+                mcx,
+                types_nodes::parsenodes::SetOperationStmt {
+                    op: so.op,
+                    all: so.all,
+                    larg: larg.or(so.larg),
+                    rarg: rarg.or(so.rarg),
+                    colTypes: types_nodes::OidList::from_slice(mcx, so.colTypes.as_slice())?,
+                    colTypmods: types_nodes::IntList::from_slice(mcx, so.colTypmods.as_slice())?,
+                    colCollations: types_nodes::OidList::from_slice(mcx, so.colCollations.as_slice())?,
+                    groupClauses: match group_clauses {
+                        Some(g) => g,
+                        None => so.groupClauses.clone_in(mcx)?,
+                    },
+                },
+            )?))
+        }
         NodeTag::T_PlaceHolderVar => {
             let phv = node.as_place_holder_var().unwrap();
             match m(phv.phexpr)? {

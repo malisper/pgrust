@@ -763,16 +763,16 @@ pub(crate) fn init_plan<'mcx>(
             *cell = Some(erm);
         }
     }
-    // Hooks install unconditionally: SubplanCompileEnv (whole-row eref
-    // aliasing rides env.rtable) must exist for subplan-free plans too.
-    data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
-    data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
-    data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
-    data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
     if !pstmt.subplans.is_nil() {
-        // The subplan-init loop follows the hooks: a subplan's own tree can
-        // hold nested SubPlan expressions (plan_id strictly below its own, so
-        // the es_subplanstates lookup mirrors C's incremental lappend order).
+        // Hooks precede the subplan-init loop: a subplan's own tree can hold
+        // nested SubPlan expressions (plan_id strictly below its own, so the
+        // es_subplanstates lookup mirrors C's incremental lappend order).
+        // Subplan-free plans skip the install; whole-row eref aliasing gets
+        // its SubplanCompileEnv from the rtable gate in executils instead.
+        data.estate.es_subplan_hook = Some(crate::nodesubplan::subplan_hook);
+        data.estate.es_cte_proc_hook = Some(crate::nodesubplan::cte_proc_hook);
+        data.estate.es_subplan_init_hook = Some(crate::nodesubplan::subplan_expr_init_hook);
+        data.estate.es_subplan_eval_hook = Some(crate::nodesubplan::subplan_expr_eval_hook);
         for (i, subplan) in pstmt.subplans.iter().enumerate() {
             let mut sp_eflags = eflags
                 & !(types_slot::EXEC_FLAG_REWIND
