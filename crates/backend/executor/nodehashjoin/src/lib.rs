@@ -222,15 +222,20 @@ pub fn exec_init_hash_join<'mcx>(
     }
 
     let params = estate.param_bind();
-    let outer_hash_expr = exec_build_hash32_from_exprs(
-        mcx,
-        outer_desc,
-        &node.hashkeys,
-        &outer_hashfns,
-        &collations,
-        0,
-        params,
-    )?;
+    // C ExecInitHashJoin compiles the outer hash keys with the HashJoinState
+    // parent, so SubPlans are legal in them.
+    let outer_hash_expr = ::executils::with_subplan_compile_env(estate, |env| {
+        exec_build_hash32_from_exprs(
+            mcx,
+            outer_desc,
+            &node.hashkeys,
+            &outer_hashfns,
+            &collations,
+            0,
+            params,
+            env,
+        )
+    })?;
 
     let ps_ExprContext = estate.exec_assign_expr_context();
     let ps_ResultTupleSlot =
