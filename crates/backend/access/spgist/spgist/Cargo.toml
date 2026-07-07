@@ -36,3 +36,8 @@ tidbitmap = { path = "../../../nodes/tidbitmap" }
 init_small = { path = "../../../utils/init/init_small" }
 freespace = { path = "../../../storage/freespace/freespace" }
 pg_prng = { path = "../../../../common/pg_prng" }
+types_nbtree = { path = "../../../../_support/types/types_nbtree" }
+coerce = { path = "../../../parser/coerce" }
+vacuum_seams = { path = "../../../commands/vacuum_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }

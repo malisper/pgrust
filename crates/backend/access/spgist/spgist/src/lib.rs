@@ -1,7 +1,6 @@
 //! SP-GiST access method (spgutils.c + spgdoinsert.c + spginsert.c +
-//! spgscan.c; spgxlog.c redo lives in spgist_xlog, spgbuild in spgist_build).
-//! LOUD lanes: vacuum (spgbulkdelete/spgvacuumcleanup), ordered/KNN scans,
-//! spgbuildempty (unlogged), polymorphic/compress-opclass leaf types.
+//! spgscan.c + spgvacuum.c; spgxlog.c redo lives in spgist_xlog, spgbuild in
+//! spgist_build). LOUD lanes: ordered/KNN scans, spgbuildempty (unlogged).
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -9,6 +8,7 @@
 pub mod doinsert;
 pub mod scan;
 pub mod utils;
+pub mod vacuum;
 
 use ::datum::Datum;
 use ::mcx::{Mcx, MemoryContext};
@@ -20,6 +20,7 @@ use ::types_tuple::itemptr::ItemPointerData;
 pub use ::types_spgist::{spgFormDeadTuple, spgPageIndexMultiDelete, spgUpdateNodeLink};
 pub use doinsert::{spgdoinsert, RM_SPGIST_ID};
 pub use scan::{spgbeginscan, spgcanreturn, spgendscan, spggetbitmap, spggettuple, spgrescan};
+pub use vacuum::{spgbulkdelete, spgbulkdelete_collect, spgvacuumcleanup};
 pub use utils::{
     buf_page_mut as spg_buf_page_mut, initSpGistState,
     relation_needs_wal as spg_relation_needs_wal, spgGetCache,
@@ -78,23 +79,4 @@ pub fn spginsert<'mcx>(
 
     SpGistUpdateMetaPage(r)?;
     Ok(false)
-}
-
-/// spgbulkdelete: named LOUD lane (spgvacuum.c).
-pub fn spgbulkdelete(rel: &Relation<'_>) -> PgResult<()> {
-    panic!(
-        "unported: spgbulkdelete for index \"{}\" (spgvacuum.c lane)",
-        rel.name()
-    );
-}
-
-/// spgvacuumcleanup: named LOUD lane except the analyze-only no-op.
-pub fn spgvacuumcleanup(rel: &Relation<'_>, analyze_only: bool) -> PgResult<()> {
-    if analyze_only {
-        return Ok(());
-    }
-    panic!(
-        "unported: spgvacuumcleanup for index \"{}\" (spgvacuum.c lane)",
-        rel.name()
-    );
 }

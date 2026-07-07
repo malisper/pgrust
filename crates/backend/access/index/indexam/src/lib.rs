@@ -185,10 +185,7 @@ pub fn index_bulk_delete<'mcx>(
         IndexAmKind::Hash => hash::hashbulkdelete(info, istat, dead_items),
         IndexAmKind::Gin => gin::ginbulkdelete(mcx, info, istat, dead_items),
         IndexAmKind::Gist => gist::gistbulkdelete(info, istat, dead_items),
-        IndexAmKind::Spgist => {
-            spgist::spgbulkdelete(info.index)?;
-            Ok(istat.unwrap_or_default())
-        }
+        IndexAmKind::Spgist => spgist::spgbulkdelete(info, istat, dead_items),
         // brinbulkdelete: BRIN has no per-heap-tuple entries; stats
         // allocation is the whole body.
         IndexAmKind::Brin => Ok(istat.unwrap_or_default()),
@@ -211,10 +208,11 @@ pub fn index_bulk_delete_collect<'mcx>(
         IndexAmKind::Hash => hash::hashbulkdelete_collect(info, callback),
         IndexAmKind::Gin => gin::ginbulkdelete_collect(mcx, info, callback),
         IndexAmKind::Gist => gist::gistbulkdelete_collect(info, callback),
+        IndexAmKind::Spgist => spgist::spgbulkdelete_collect(info, callback),
         // brinbulkdelete never invokes the callback: BRIN has no
         // per-heap-tuple entries to report.
         IndexAmKind::Brin => Ok(IndexBulkDeleteResult::default()),
-        _ => panic!("unported: ambulkdelete TID-collect beyond btree/hash/gin/gist/brin (validate_index)"),
+        _ => panic!("unported: ambulkdelete TID-collect beyond btree/hash/gin/gist/spgist/brin (validate_index)"),
     }
 }
 
@@ -230,10 +228,7 @@ pub fn index_vacuum_cleanup<'mcx>(
         IndexAmKind::Hash => hash::hashvacuumcleanup(info, istat),
         IndexAmKind::Gin => gin::ginvacuumcleanup(mcx, info, istat),
         IndexAmKind::Gist => gist::gistvacuumcleanup(info, istat),
-        IndexAmKind::Spgist => {
-            spgist::spgvacuumcleanup(info.index, info.analyze_only)?;
-            Ok(istat)
-        }
+        IndexAmKind::Spgist => spgist::spgvacuumcleanup(info, istat),
         IndexAmKind::Brin => {
             if info.analyze_only {
                 Ok(istat)

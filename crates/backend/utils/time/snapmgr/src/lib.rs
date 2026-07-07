@@ -963,6 +963,7 @@ pub fn init_seams() {
     snapmgr_seams::at_subabort_snapshot::set(AtSubAbort_Snapshot);
     snapmgr_seams::xact_has_exported_snapshots::set(XactHasExportedSnapshots);
     snapmgr_seams::transaction_xmin::set(TransactionXmin);
+    snapmgr_seams::active_snapshot_xmin::set(|| GetActiveSnapshot().xmin);
     snapmgr_seams::get_catalog_snapshot::set(GetCatalogSnapshot);
     snapmgr_seams::register_snapshot::set(|snapshot| {
         RegisterSnapshotOnOwner(&snapshot, resowner_seams::current_resource_owner::call())

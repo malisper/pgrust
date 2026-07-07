@@ -29,6 +29,11 @@ seam_core::seam!(
     pub fn transaction_xmin() -> types_core::TransactionId
 );
 
+seam_core::seam!(
+    // GetActiveSnapshot()->xmin (spgvacuum.c: newly-added-redirect detection).
+    pub fn active_snapshot_xmin() -> types_core::TransactionId
+);
+
 // Snapshots are snapmgr-owned, backend-lifetime storage (C: statics +
 // TopTransactionContext copies); C's signatures carry no allocator.
 seam_core::seam!(
