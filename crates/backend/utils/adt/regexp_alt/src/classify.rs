@@ -17,6 +17,14 @@
 //! - repeat bounds above 255 (Spencer's DUPMAX) or malformed bounds;
 //! - inline option/director groups (`(?i)`, `***:`);
 //! - non-UTF8 databases and patterns that are not valid UTF-8;
+//! Additionally, capture POSITIONS are only trusted ("capture-safe") when
+//! no quantifier applies to a subtree containing a capturing group: RE2's
+//! longest-match submatch resolution and Spencer's iteration rules disagree
+//! on the last-iteration capture of shapes like `(x?|...)+` (found by the
+//! adversarial corpus). Non-capture-safe patterns still dispatch for
+//! whole-match-only uses — leftmost-longest whole-match spans are uniquely
+//! defined and agree — but every submatch-consuming call falls to Spencer.
+//!
 //! - patterns beyond the complexity budget (MAX_PATTERN_BYTES /
 //!   MAX_QUANTIFIERS): Spencer enforces NFA state/arc limits ("regular
 //!   expression is too complex") that RE2 does not share, so a large
@@ -30,27 +38,41 @@ const PG_UTF8: i32 = wchar::PG_UTF8;
 
 const MAX_PATTERN_BYTES: usize = 256;
 const MAX_QUANTIFIERS: u32 = 32;
+const MAX_GROUP_DEPTH: usize = 32;
 
-pub fn re2_compatible(pattern: &[u8], cflags: i32) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compat {
+    Incompatible,
+    // Whole-match spans provably agree; capture positions do not.
+    WholeMatch,
+    // Capture positions provably agree too.
+    CaptureSafe,
+}
+
+pub fn classify(pattern: &[u8], cflags: i32) -> Compat {
     if pattern.len() > MAX_PATTERN_BYTES {
-        return false;
+        return Compat::Incompatible;
     }
     if mbutils::GetDatabaseEncoding() != PG_UTF8 {
-        return false;
+        return Compat::Incompatible;
     }
     // REG_NOSUB is an execution hint callers OR in, not a semantic mode.
     let base = cflags & !REG_NOSUB;
     let quoted = base == REG_QUOTE;
     if !quoted && base != REG_ADVANCED {
-        return false;
+        return Compat::Incompatible;
     }
     if core::str::from_utf8(pattern).is_err() {
-        return false;
+        return Compat::Incompatible;
     }
     if quoted {
-        return true;
+        return Compat::CaptureSafe;
     }
     scan_are(pattern)
+}
+
+pub fn re2_compatible(pattern: &[u8], cflags: i32) -> bool {
+    classify(pattern, cflags) != Compat::Incompatible
 }
 
 fn utf8_char_len(b: u8) -> usize {
@@ -171,105 +193,146 @@ fn parse_bracket(pat: &[u8], mut i: usize) -> Option<usize> {
     None
 }
 
-fn scan_are(pat: &[u8]) -> bool {
+fn scan_are(pat: &[u8]) -> Compat {
     let mut i = 0usize;
-    let mut depth = 0i32;
     let mut nquant = 0u32;
+    let mut capture_safe = true;
     // True when the previous item is an atom a quantifier may apply to.
     let mut quantifiable = false;
+    // Did the just-closed atom's subtree contain a capturing group? A
+    // quantifier over such a subtree makes capture positions untrusted
+    // (last-iteration submatch semantics diverge).
+    let mut last_atom_captures = false;
+    // Per open group: (is_capturing, subtree_contains_capture_so_far).
+    let mut stack: [(bool, bool); MAX_GROUP_DEPTH] = [(false, false); MAX_GROUP_DEPTH];
+    let mut depth = 0usize;
 
     while i < pat.len() {
         match pat[i] {
             b'\\' => {
                 if i + 1 >= pat.len() || !literal_escape_ok(pat[i + 1]) {
-                    return false;
+                    return Compat::Incompatible;
                 }
                 i += 2;
                 quantifiable = true;
+                last_atom_captures = false;
             }
             b'[' => match parse_bracket(pat, i) {
                 Some(next) => {
                     i = next;
                     quantifiable = true;
+                    last_atom_captures = false;
                 }
-                None => return false,
+                None => return Compat::Incompatible,
             },
             b'(' => {
+                let capturing;
                 if i + 1 < pat.len() && pat[i + 1] == b'?' {
                     // Only the non-capturing group; every other (?...) form
                     // (inline options, lookaround, named) is off-list.
                     if i + 2 >= pat.len() || pat[i + 2] != b':' {
-                        return false;
+                        return Compat::Incompatible;
                     }
+                    capturing = false;
                     i += 3;
                 } else {
+                    capturing = true;
                     i += 1;
                 }
+                if depth >= MAX_GROUP_DEPTH {
+                    return Compat::Incompatible;
+                }
+                stack[depth] = (capturing, false);
                 depth += 1;
                 quantifiable = false;
+                last_atom_captures = false;
             }
             b')' => {
+                if depth == 0 {
+                    return Compat::Incompatible;
+                }
                 depth -= 1;
-                if depth < 0 {
-                    return false;
+                let (capturing, contains) = stack[depth];
+                last_atom_captures = capturing || contains;
+                if last_atom_captures && depth > 0 {
+                    stack[depth - 1].1 = true;
                 }
                 i += 1;
                 quantifiable = true;
             }
             b'*' | b'+' | b'?' => {
                 if !quantifiable {
-                    return false;
+                    return Compat::Incompatible;
                 }
                 nquant += 1;
                 if nquant > MAX_QUANTIFIERS {
-                    return false;
+                    return Compat::Incompatible;
+                }
+                if last_atom_captures {
+                    capture_safe = false;
                 }
                 i += 1;
                 if i < pat.len() && pat[i] == b'?' {
-                    return false;
+                    return Compat::Incompatible;
                 }
                 quantifiable = false;
+                last_atom_captures = false;
             }
             b'{' => {
                 if !quantifiable {
-                    return false;
+                    return Compat::Incompatible;
                 }
                 nquant += 1;
                 if nquant > MAX_QUANTIFIERS {
-                    return false;
+                    return Compat::Incompatible;
+                }
+                if last_atom_captures {
+                    capture_safe = false;
                 }
                 match parse_bound(pat, i) {
                     Some(next) => i = next,
-                    None => return false,
+                    None => return Compat::Incompatible,
                 }
                 if i < pat.len() && pat[i] == b'?' {
-                    return false;
+                    return Compat::Incompatible;
                 }
                 quantifiable = false;
+                last_atom_captures = false;
             }
             b'|' => {
                 i += 1;
                 quantifiable = false;
+                last_atom_captures = false;
             }
             b'^' | b'$' => {
                 i += 1;
                 quantifiable = false;
+                last_atom_captures = false;
             }
             b'.' => {
                 i += 1;
                 quantifiable = true;
+                last_atom_captures = false;
             }
             b => {
                 let len = utf8_char_len(b);
                 if i + len > pat.len() {
-                    return false;
+                    return Compat::Incompatible;
                 }
                 i += len;
                 quantifiable = true;
+                last_atom_captures = false;
             }
         }
     }
-    depth == 0
+    if depth != 0 {
+        return Compat::Incompatible;
+    }
+    if capture_safe {
+        Compat::CaptureSafe
+    } else {
+        Compat::WholeMatch
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +439,31 @@ mod tests {
     fn rejects_non_utf8_pattern() {
         setup_utf8();
         assert!(!re2_compatible(b"a\xffb", REG_ADVANCED));
+    }
+
+    #[test]
+    fn capture_safety_tiers() {
+        setup_utf8();
+        let tier = |p: &str| classify(p.as_bytes(), REG_ADVANCED);
+        // Unquantified captures (Q29's shape) stay capture-safe.
+        assert_eq!(tier(r"^https?://(?:www\.)?([^/]+)/.*$"), Compat::CaptureSafe);
+        assert_eq!(tier("(a)(b)(c)"), Compat::CaptureSafe);
+        assert_eq!(tier("^(foo|bar)$"), Compat::CaptureSafe);
+        // Quantified non-capturing subtrees stay capture-safe.
+        assert_eq!(tier("(?:ab)+(c)"), Compat::CaptureSafe);
+        // A quantifier over a capture-bearing subtree: whole-match only
+        // (the adversarial corpus found last-iteration capture divergence).
+        assert_eq!(tier("(a)+"), Compat::WholeMatch);
+        assert_eq!(tier("(a)?b"), Compat::WholeMatch);
+        assert_eq!(tier("(a|b){2,3}"), Compat::WholeMatch);
+        assert_eq!(tier("(?:(a)b)+"), Compat::WholeMatch);
+        assert_eq!(tier("((a)b)*c"), Compat::WholeMatch);
+        assert_eq!(
+            tier(r"(.?|é|(?:0{2,}|é[^a][^/,]+ ?|\*)+é(?:c?0|\n{2})+)+|[a-c0-9]?|[ab]0+"),
+            Compat::WholeMatch
+        );
+        // Quoted literals have no captures.
+        assert_eq!(classify(b"a.c", REG_QUOTE), Compat::CaptureSafe);
     }
 
     #[test]

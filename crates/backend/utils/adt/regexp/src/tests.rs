@@ -627,6 +627,15 @@ fn auto_vs_spencer_differential() {
     ];
     let incompatible: &[&str] =
         &[r"(a)\1", r"\w+", r"\bword\b", "a*?", "[[:alpha:]]", r"\d", r"[\d]", "(?i)a"];
+    // Whole-match tier: quantified capture subtrees dispatch for
+    // whole-match-only probes but must fall to Spencer for every
+    // capture-consuming probe (adversarial find, pinned: RE2-longest and
+    // Spencer disagree on the last-iteration capture).
+    let whole_match_only: &[&str] = &[
+        "(a)+",
+        "(x*)+y",
+        r"(.?|é|(?:0{2,}|é[^a][^/,]+ ?|\*)+é(?:c?0|\n{2})+)+|[a-c0-9]?|[ab]0+",
+    ];
 
     for p in compatible {
         regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
@@ -647,6 +656,16 @@ fn auto_vs_spencer_differential() {
         for s in corpus {
             assert_engine_parity(m, s.as_bytes(), p.as_bytes());
         }
+    }
+
+    for p in whole_match_only {
+        regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+        let re = regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED).unwrap().unwrap();
+        assert!(!re.capture_safe(), "expected {p:?} to be whole-match tier");
+        for s in corpus {
+            assert_engine_parity(m, s.as_bytes(), p.as_bytes());
+        }
+        assert_engine_parity(m, "/100éxb\nx".as_bytes(), p.as_bytes());
     }
 
     // Spencer-ETOOBIG class (regex suite): RE2 would compile this, Spencer

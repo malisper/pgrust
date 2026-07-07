@@ -125,16 +125,19 @@ pub fn replace_text_regexp<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     // regex_engine dispatch: RE2-compatible patterns take the byte-offset
     // RE2 path; everything else (and regex_engine=spencer) falls through to
-    // the untouched C-parity Spencer path below.
+    // the untouched C-parity Spencer path below. A whole-match-only pattern
+    // may still ride RE2 when the replacement never consumes \1..\9.
     if let Some(re) = regexp_alt::dispatch(pattern_text, cflags)? {
-        return regexp_alt::replace_text_regexp_re2(
-            mcx,
-            &re,
-            src_text,
-            replace_text,
-            search_start,
-            n,
-        );
+        if re.capture_safe() || regexp_alt::check_replace_text_has_escape(replace_text) < 2 {
+            return regexp_alt::replace_text_regexp_re2(
+                mcx,
+                &re,
+                src_text,
+                replace_text,
+                search_start,
+                n,
+            );
+        }
     }
 
     let mut nmatches: i32 = 0;
