@@ -2316,9 +2316,10 @@ fn add_base_clause_to_rel(run: &mut PlannerRun<'_>, relid: i32, rinfo: RinfoId) 
     Ok(())
 }
 
-// restriction_is_always_true / _false (initsplan.c), NullTest leg only: the
-// OR leg reads orclause sub-RestrictInfos, which stay None here (documented
-// make_restrictinfo divergence).
+// restriction_is_always_true / _false (initsplan.c). The OR leg recurses on
+// the raw clause tree: orclause sub-RestrictInfos are not materialized here,
+// and C's non-RestrictInfo (AND-group) arms map to non-NullTest/non-OR nodes;
+// sub-RIs inherit the parent's clone flags, so the guard runs once at the top.
 pub(crate) fn restriction_is_always_true(run: &PlannerRun<'_>, rinfo: RinfoId) -> bool {
     restriction_nulltest_verdict(
         run,
@@ -2341,14 +2342,34 @@ fn restriction_nulltest_verdict(
     if ri.has_clone || ri.is_clone {
         return false;
     }
-    let clause = *run.root.expr_node(ri.clause);
-    let Some(nt) = clause.as_null_test() else {
-        return false;
-    };
-    if nt.nulltesttype != testtype || nt.argisrow {
-        return false;
+    clause_nulltest_verdict(run, *run.root.expr_node(ri.clause), testtype)
+}
+
+fn clause_nulltest_verdict(
+    run: &PlannerRun<'_>,
+    clause: Node<'_>,
+    testtype: types_nodes::primnodes::NullTestType,
+) -> bool {
+    if let Some(nt) = clause.as_null_test() {
+        if nt.nulltesttype != testtype || nt.argisrow {
+            return false;
+        }
+        return expr_is_nonnullable(run, nt.arg.expect("NullTest.arg"));
     }
-    expr_is_nonnullable(run, nt.arg.expect("NullTest.arg"))
+    if let Some(be) = clause.as_bool_expr() {
+        if be.boolop == types_nodes::primnodes::BoolExprType::OR_EXPR {
+            // Always-true: any provably-true arm suffices. Always-false:
+            // every arm must be provably false.
+            let want_any = testtype == types_nodes::primnodes::NullTestType::IS_NOT_NULL;
+            for a in &be.args {
+                if clause_nulltest_verdict(run, a, testtype) == want_any {
+                    return want_any;
+                }
+            }
+            return !want_any;
+        }
+    }
+    false
 }
 
 // expr_is_nonnullable (initsplan.c): simple Vars only.
