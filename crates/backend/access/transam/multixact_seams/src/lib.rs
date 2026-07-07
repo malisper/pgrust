@@ -40,6 +40,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // MultiXactIdCreate(xid1, status1, xid2, status2) (multixact.c).
+    pub fn multi_xact_id_create(
+        xid1: TransactionId,
+        status1: types_storage::multixact::MultiXactStatus,
+        xid2: TransactionId,
+        status2: types_storage::multixact::MultiXactStatus,
+    ) -> PgResult<types_core::MultiXactId>
+);
+
+seam_core::seam!(
+    // MultiXactIdExpand(multi, xid, status) (multixact.c).
+    pub fn multi_xact_id_expand(
+        multi: types_core::MultiXactId,
+        xid: TransactionId,
+        status: types_storage::multixact::MultiXactStatus,
+    ) -> PgResult<types_core::MultiXactId>
+);
+
+seam_core::seam!(
     // StartupMultiXact() (multixact.c).
     pub fn startup_multixact() -> PgResult<()>
 );

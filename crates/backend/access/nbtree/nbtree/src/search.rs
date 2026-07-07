@@ -1543,13 +1543,19 @@ fn bt_lock_and_validate_left(
     }
 }
 
-/// _bt_get_endpoint, leaf arm: first/last leaf page. Non-leaf levels are only
-/// reached from the insert lane (via _bt_gettrueroot) — phase 2.
-fn bt_get_endpoint(rel: &Relation<'_>, level: u32, rightmost: bool) -> PgResult<Option<BufferPin>> {
-    if level != 0 {
-        unported_phase2("_bt_get_endpoint above the leaf level (_bt_gettrueroot)");
-    }
-    let Some(mut pin) = bt_getroot(rel, None, BT_READ)? else {
+/// _bt_get_endpoint: first/last page on a given tree level. Leaf descends
+/// from the fast root; non-leaf levels descend from the true root.
+pub(crate) fn bt_get_endpoint(
+    rel: &Relation<'_>,
+    level: u32,
+    rightmost: bool,
+) -> PgResult<Option<BufferPin>> {
+    let root = if level == 0 {
+        bt_getroot(rel, None, BT_READ)?
+    } else {
+        crate::page::bt_gettrueroot(rel)?
+    };
+    let Some(mut pin) = root else {
         return Ok(None);
     };
 

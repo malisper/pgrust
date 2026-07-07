@@ -1,5 +1,5 @@
 // heapam.c DML phase 2: heap_insert / heap_delete / heap_update cores.
-// Deferred (named panics): toast, MultiXact create/expand/wait lanes,
+// Deferred (named panics): toast, MultiXact wait lanes,
 // speculative-insert driver, index-attr bitmaps (updates on relhasindex
 // rels), bulk insert + heap_multi_insert, heap_lock_tuple (phase 3).
 // C divergences: crit sections pend miscadmin; WAL prefix/suffix
@@ -22,6 +22,7 @@ use ::types_storage::bufpage::{ItemIdData, PageMut, PageRef, SizeofHeapTupleHead
 use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, ExclusiveLock, RowShareLock, LOCKMODE,
 };
+use ::types_storage::multixact::MultiXactStatus;
 use ::types_tuple::{
     FirstOffsetNumber, HeapTupleData, ItemPointerData, ItemPointerGetBlockNumber,
     ItemPointerGetOffsetNumber, HEAP2_XACT_MASK, HEAP_KEYS_UPDATED, HEAP_LOCK_MASK, HEAP_MOVED,
@@ -669,8 +670,43 @@ pub fn heap_multi_insert<'mcx>(
     Ok(())
 }
 
+/// `get_mxact_status_for_lock` (tupleLockExtraInfo lockstatus/updstatus).
+fn get_mxact_status_for_lock(mode: LockTupleMode, is_update: bool) -> PgResult<MultiXactStatus> {
+    Ok(match (mode, is_update) {
+        (LockTupleMode::LockTupleKeyShare, false) => MultiXactStatus::MultiXactStatusForKeyShare,
+        (LockTupleMode::LockTupleShare, false) => MultiXactStatus::MultiXactStatusForShare,
+        (LockTupleMode::LockTupleNoKeyExclusive, false) => {
+            MultiXactStatus::MultiXactStatusForNoKeyUpdate
+        }
+        (LockTupleMode::LockTupleExclusive, false) => MultiXactStatus::MultiXactStatusForUpdate,
+        (LockTupleMode::LockTupleNoKeyExclusive, true) => {
+            MultiXactStatus::MultiXactStatusNoKeyUpdate
+        }
+        (LockTupleMode::LockTupleExclusive, true) => MultiXactStatus::MultiXactStatusUpdate,
+        _ => {
+            return Err(crate::elog_error(std::format!(
+                "invalid lock tuple mode {}/{}",
+                mode as i32,
+                is_update
+            )))
+        }
+    })
+}
+
+/// `TUPLOCK_from_mxstatus` (MultiXactStatusLock table).
+const fn TUPLOCK_from_mxstatus(status: MultiXactStatus) -> LockTupleMode {
+    match status {
+        MultiXactStatus::MultiXactStatusForKeyShare => LockTupleMode::LockTupleKeyShare,
+        MultiXactStatus::MultiXactStatusForShare => LockTupleMode::LockTupleShare,
+        MultiXactStatus::MultiXactStatusForNoKeyUpdate
+        | MultiXactStatus::MultiXactStatusNoKeyUpdate => LockTupleMode::LockTupleNoKeyExclusive,
+        MultiXactStatus::MultiXactStatusForUpdate | MultiXactStatus::MultiXactStatusUpdate => {
+            LockTupleMode::LockTupleExclusive
+        }
+    }
+}
+
 /// `compute_new_xmax_infomask`: (new_xmax, new_infomask, new_infomask2).
-/// MultiXact create/expand arms are unported (named panics).
 fn compute_new_xmax_infomask(
     xmax: TransactionId,
     old_infomask: u16,
@@ -731,39 +767,80 @@ fn compute_new_xmax_infomask(
                     continue;
                 }
             }
-            unported("MultiXactIdExpand (multixact.c)");
+            let new_status = get_mxact_status_for_lock(mode, is_update)?;
+            let new_xmax =
+                multixact_seams::multi_xact_id_expand::call(xmax, add_to_xmax, new_status)?;
+            let (new_infomask, new_infomask2) = crate::freeze::GetMultiXactIdHintBits(new_xmax)?;
+            return Ok((new_xmax, new_infomask, new_infomask2));
         } else if (old_infomask & HEAP_XMAX_COMMITTED) != 0 {
-            unported("MultiXactIdCreate (multixact.c)");
+            // committed update: preserve it as updater alongside the new locker
+            let status = if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                MultiXactStatus::MultiXactStatusUpdate
+            } else {
+                MultiXactStatus::MultiXactStatusNoKeyUpdate
+            };
+            let new_status = get_mxact_status_for_lock(mode, is_update)?;
+            let new_xmax =
+                multixact_seams::multi_xact_id_create::call(xmax, status, add_to_xmax, new_status)?;
+            let (new_infomask, new_infomask2) = crate::freeze::GetMultiXactIdHintBits(new_xmax)?;
+            return Ok((new_xmax, new_infomask, new_infomask2));
         } else if procarray_seams::transaction_id_is_in_progress::call(xmax)? {
-            if xmax == add_to_xmax {
-                debug_assert!(HEAP_XMAX_IS_LOCKED_ONLY(old_infomask));
-                // acquire the strongest of both; single-xid restart trick
-                let old_mode = if ::types_tuple::HEAP_XMAX_IS_KEYSHR_LOCKED(old_infomask) {
-                    LockTupleMode::LockTupleKeyShare
+            let old_status = if HEAP_XMAX_IS_LOCKED_ONLY(old_infomask) {
+                if ::types_tuple::HEAP_XMAX_IS_KEYSHR_LOCKED(old_infomask) {
+                    MultiXactStatus::MultiXactStatusForKeyShare
                 } else if ::types_tuple::HEAP_XMAX_IS_SHR_LOCKED(old_infomask) {
-                    LockTupleMode::LockTupleShare
+                    MultiXactStatus::MultiXactStatusForShare
                 } else if ::types_tuple::HEAP_XMAX_IS_EXCL_LOCKED(old_infomask) {
                     if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
-                        LockTupleMode::LockTupleExclusive
+                        MultiXactStatus::MultiXactStatusForUpdate
                     } else {
-                        LockTupleMode::LockTupleNoKeyExclusive
+                        MultiXactStatus::MultiXactStatusForNoKeyUpdate
                     }
                 } else {
+                    // LOCK_ONLY without lock bits: pg_upgrade-only state, the
+                    // locker cannot still be running (C emits a WARNING here)
                     old_infomask |= HEAP_XMAX_INVALID;
                     old_infomask &= !HEAP_XMAX_LOCK_ONLY;
                     continue;
-                };
+                }
+            } else if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                MultiXactStatus::MultiXactStatusUpdate
+            } else {
+                MultiXactStatus::MultiXactStatusNoKeyUpdate
+            };
+            let old_mode = TUPLOCK_from_mxstatus(old_status);
+            if xmax == add_to_xmax {
+                debug_assert!(HEAP_XMAX_IS_LOCKED_ONLY(old_infomask));
+                // acquire the strongest of both; single-xid restart trick
                 if (mode as u32) < (old_mode as u32) {
                     mode = old_mode;
                 }
                 old_infomask |= HEAP_XMAX_INVALID;
                 continue;
             }
-            unported("MultiXactIdCreate (multixact.c)");
+            let new_status = get_mxact_status_for_lock(mode, is_update)?;
+            let new_xmax = multixact_seams::multi_xact_id_create::call(
+                xmax,
+                old_status,
+                add_to_xmax,
+                new_status,
+            )?;
+            let (new_infomask, new_infomask2) = crate::freeze::GetMultiXactIdHintBits(new_xmax)?;
+            return Ok((new_xmax, new_infomask, new_infomask2));
         } else if !HEAP_XMAX_IS_LOCKED_ONLY(old_infomask)
             && transam_seams::transaction_id_did_commit::call(xmax)?
         {
-            unported("MultiXactIdCreate (multixact.c)");
+            // committed update whose hint bit is not yet set
+            let status = if (old_infomask2 & HEAP_KEYS_UPDATED) != 0 {
+                MultiXactStatus::MultiXactStatusUpdate
+            } else {
+                MultiXactStatus::MultiXactStatusNoKeyUpdate
+            };
+            let new_status = get_mxact_status_for_lock(mode, is_update)?;
+            let new_xmax =
+                multixact_seams::multi_xact_id_create::call(xmax, status, add_to_xmax, new_status)?;
+            let (new_infomask, new_infomask2) = crate::freeze::GetMultiXactIdHintBits(new_xmax)?;
+            return Ok((new_xmax, new_infomask, new_infomask2));
         } else {
             // locker finished between infomask read and in-progress check
             old_infomask |= HEAP_XMAX_INVALID;
@@ -2114,7 +2191,7 @@ pub fn heap_update(
     let (infomask_new_tuple, infomask2_new_tuple) = if !TransactionIdIsValid(xmax_new_tuple) {
         (HEAP_XMAX_INVALID, 0u16)
     } else if (oldtup.t_data().t_infomask & HEAP_XMAX_IS_MULTI) != 0 {
-        unported("GetMultiXactIdHintBits (heap_update, multixact.c)");
+        crate::freeze::GetMultiXactIdHintBits(xmax_new_tuple)?
     } else {
         (HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_LOCK_ONLY, 0u16)
     };

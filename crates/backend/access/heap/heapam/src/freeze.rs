@@ -277,7 +277,7 @@ fn FreezeMultiXactId(
     Ok(newxmax)
 }
 
-fn GetMultiXactIdHintBits(multi: MultiXactId) -> PgResult<(u16, u16)> {
+pub(crate) fn GetMultiXactIdHintBits(multi: MultiXactId) -> PgResult<(u16, u16)> {
     let mut bits: u16 = HEAP_XMAX_IS_MULTI;
     let mut bits2: u16 = 0;
     let mut has_update = false;
