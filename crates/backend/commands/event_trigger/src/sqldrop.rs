@@ -21,6 +21,10 @@ const PROCEDURE_RELATION_ID: Oid = 1255;
 const REWRITE_RELATION_ID: Oid = 2618;
 const STATISTIC_EXT_RELATION_ID: Oid = 3381;
 const USER_MAPPING_RELATION_ID: Oid = types_core::USER_MAPPING_RELATION_ID;
+const FOREIGN_SERVER_RELATION_ID: Oid = types_core::catalog::FOREIGN_SERVER_RELATION_ID;
+const FOREIGN_DATA_WRAPPER_RELATION_ID: Oid = types_core::catalog::FOREIGN_DATA_WRAPPER_RELATION_ID;
+const Anum_pg_foreign_server_srvname: i32 = 2;
+const Anum_pg_foreign_data_wrapper_fdwname: i32 = 2;
 
 pub fn EventTriggerSQLDropAddObject(
     mcx: Mcx<'_>,
@@ -110,7 +114,7 @@ pub fn EventTriggerSQLDropAddObject(
 }
 
 struct ClassNaming {
-    nsp_attnum: i32,
+    nsp_attnum: Option<i32>,
     name_attnum: i32,
     namensp_unique: bool,
     syscache_id: i32,
@@ -121,28 +125,42 @@ fn class_naming(class_id: Oid) -> Option<ClassNaming> {
     // (objectaddress.c), for the classes reachable from ported drops.
     match class_id {
         TYPE_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: 3,
+            nsp_attnum: Some(3),
             name_attnum: 2,
             namensp_unique: true,
             syscache_id: cache_syscache::TYPEOID,
         }),
         CONSTRAINT_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: 3,
+            nsp_attnum: Some(3),
             name_attnum: 2,
             namensp_unique: false,
             syscache_id: cache_syscache::CONSTROID,
         }),
         PROCEDURE_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: 3,
+            nsp_attnum: Some(3),
             name_attnum: 2,
             namensp_unique: false,
             syscache_id: cache_syscache::PROCOID,
         }),
         STATISTIC_EXT_RELATION_ID => Some(ClassNaming {
-            nsp_attnum: 4,
+            nsp_attnum: Some(4),
             name_attnum: 3,
             namensp_unique: true,
             syscache_id: cache_syscache::STATEXTOID,
+        }),
+        // ObjectProperty: no namespace column (srvname/fdwname are globally
+        // unique, not per-schema).
+        FOREIGN_SERVER_RELATION_ID => Some(ClassNaming {
+            nsp_attnum: None,
+            name_attnum: Anum_pg_foreign_server_srvname,
+            namensp_unique: true,
+            syscache_id: cache_syscache::FOREIGNSERVEROID,
+        }),
+        FOREIGN_DATA_WRAPPER_RELATION_ID => Some(ClassNaming {
+            nsp_attnum: None,
+            name_attnum: Anum_pg_foreign_data_wrapper_fdwname,
+            namensp_unique: true,
+            syscache_id: cache_syscache::FOREIGNDATAWRAPPEROID,
         }),
         _ => None,
     }
@@ -213,8 +231,14 @@ fn syscache_naming(oid: Oid, naming: &ClassNaming) -> PgResult<(Option<Oid>, Opt
     else {
         return Ok((None, None));
     };
-    let (nsp_d, nsp_null) = cache_syscache::SysCacheGetAttr(naming.syscache_id, &tup, naming.nsp_attnum)?;
-    let nsp = if nsp_null { None } else { Some(nsp_d.as_oid()) };
+    let nsp = match naming.nsp_attnum {
+        Some(attnum) => {
+            let (nsp_d, nsp_null) =
+                cache_syscache::SysCacheGetAttr(naming.syscache_id, &tup, attnum)?;
+            if nsp_null { None } else { Some(nsp_d.as_oid()) }
+        }
+        None => None,
+    };
     let (name_d, name_null) =
         cache_syscache::SysCacheGetAttr(naming.syscache_id, &tup, naming.name_attnum)?;
     let name = if name_null {

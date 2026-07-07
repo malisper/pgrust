@@ -58,7 +58,7 @@ seam_core::seam!(
         stmt: &types_nodes::rawnodes::RefreshMatViewStmt<'mcx>,
         query_string: &str,
         qc: Option<&mut types_portal::QueryCompletion>,
-    ) -> PgResult<()>
+    ) -> PgResult<Oid>
 );
 
 seam_core::seam!(

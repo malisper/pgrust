@@ -588,7 +588,7 @@ pub fn expand_vacuum_rel<'mcx>(
 
 /// get_all_vacuum_rels (vacuum.c): every vacuumable rel in the database the
 /// user has privileges for.
-fn get_all_vacuum_rels<'mcx>(
+pub fn get_all_vacuum_rels<'mcx>(
     mcx: Mcx<'mcx>,
     options: u32,
     vacrels: &mut ::mcx::PgVec<'mcx, ExpandedVacRel<'mcx>>,
