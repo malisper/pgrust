@@ -24,6 +24,13 @@ fn deparse_expression_for_seam<'mcx>(
 ) -> types_error::PgResult<String> {
     deparse::deparse_expression_pretty(mcx, expr, relid, false, 0)
 }
+
+fn deparse_partbound_const_for_seam<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    expr: types_nodes::Node<'mcx>,
+) -> types_error::PgResult<String> {
+    deparse::deparse_partbound_const(mcx, expr)
+}
 pub use deparse::deparse_expression_pretty;
 pub use plan::{
     deparse_context_for_plan_tree, deparse_expression, select_rtable_names_for_explain,
@@ -891,6 +898,7 @@ pub fn init_seams() {
     genam_seams::pg_get_indexdef_columns_keys_only::set(pg_get_indexdef_columns_keys_only);
     ruleutils_seams::deparse_expression::set(deparse_expression_for_seam);
     ruleutils_seams::pg_get_partkeydef_columns::set(pg_get_partkeydef_columns_for_seam);
+    ruleutils_seams::deparse_partbound_const::set(deparse_partbound_const_for_seam);
 }
 
 // pg_get_partkeydef_columns (ruleutils.c).

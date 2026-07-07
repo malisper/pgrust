@@ -634,13 +634,13 @@ fn rel_name(mcx: Mcx<'_>, oid: Oid) -> String {
 }
 
 // check_new_partition_bound.
-pub fn check_new_partition_bound(
-    mcx: Mcx<'_>,
+pub fn check_new_partition_bound<'mcx>(
+    mcx: Mcx<'mcx>,
     relname: &str,
     key: &PartitionKeyData,
     boundinfo: Option<&PartitionBoundInfoData<'_>>,
     part_oids: &[Oid],
-    spec: &PartitionBoundSpec<'_>,
+    spec: &PartitionBoundSpec<'mcx>,
     sourcetext: Option<&[u8]>,
 ) -> PgResult<()> {
     let errpos = |loc: i32| {
@@ -768,10 +768,16 @@ pub fn check_new_partition_bound(
                     )
                     .with_detail(format!(
                         "Specified lower bound {} is greater than or equal to upper bound {}.",
-                        range_partbound_string(&spec.lowerdatums),
-                        range_partbound_string(&spec.upperdatums),
+                        range_partbound_string(mcx, &spec.lowerdatums)?,
+                        range_partbound_string(mcx, &spec.upperdatums)?,
                     ))
-                    .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION),
+                    .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    // C points at the problematic key in the lower datums
+                    // (partbounds.c:3121-3132): list_nth(lowerdatums, cmpval-1).
+                    .with_cursor_position(errpos(range_datum_location(
+                        &spec.lowerdatums,
+                        cmpval as usize - 1,
+                    ))),
                 ));
             }
             if let Some(boundinfo) = boundinfo {
@@ -830,9 +836,12 @@ fn range_datum_location(datums: &types_nodes::NodeList<'_>, idx: usize) -> i32 {
         .unwrap_or(-1)
 }
 
-// get_range_partbound_string (ruleutils.c) reduced to the Const/inf datum set
-// this lane can produce; used only inside the empty-range errdetail.
-fn range_partbound_string(datums: &types_nodes::NodeList<'_>) -> String {
+// get_range_partbound_string (ruleutils.c); the Const deparse rides the
+// ruleutils seam (ruleutils depends on this crate).
+fn range_partbound_string<'mcx>(
+    mcx: Mcx<'mcx>,
+    datums: &types_nodes::NodeList<'mcx>,
+) -> PgResult<String> {
     let mut s = String::from("(");
     for (i, node) in datums.iter().enumerate() {
         if i > 0 {
@@ -845,11 +854,11 @@ fn range_partbound_string(datums: &types_nodes::NodeList<'_>) -> String {
             PartitionRangeDatumKind::Minvalue => s.push_str("MINVALUE"),
             PartitionRangeDatumKind::Maxvalue => s.push_str("MAXVALUE"),
             PartitionRangeDatumKind::Value => {
-                let c = spec_const(prd.value.expect("PartitionRangeDatum value"));
-                s.push_str(&format!("<value of type {}>", c.consttype));
+                let value = prd.value.expect("PartitionRangeDatum value");
+                s.push_str(&ruleutils_seams::deparse_partbound_const::call(mcx, value)?);
             }
         }
     }
     s.push(')');
-    s
+    Ok(s)
 }

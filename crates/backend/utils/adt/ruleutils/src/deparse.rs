@@ -614,6 +614,15 @@ pub(crate) fn get_rule_expr<'mcx>(
     }
 }
 
+// The datum leg of C get_range_partbound_string: get_const_expr with
+// showtype -1 (no ::type suffix); seam entry for partbounds' errdetail.
+pub fn deparse_partbound_const<'mcx>(mcx: Mcx<'mcx>, expr: Node<'mcx>) -> PgResult<String> {
+    let c = expr.as_const().expect("range partition datum value is a Const");
+    let mut ctx = DeparseContext::new(mcx, 0);
+    get_const_expr(c, &mut ctx, -1)?;
+    Ok(ctx.buf)
+}
+
 // C get_range_partbound_string (ruleutils.c); appends into ctx.buf instead of
 // returning a fresh string.
 pub(crate) fn get_range_partbound_string<'mcx>(

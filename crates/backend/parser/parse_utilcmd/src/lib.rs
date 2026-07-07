@@ -53,24 +53,23 @@ pub fn typenameTypeIdAndMod<'mcx>(
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
-    typename_type_id_and_mod(mcx, pstate, tn, false)
+    typename_type_id_and_mod(mcx, pstate, tn)
 }
 
-// C's typenameTypeIdAndMod has no typtype gate; the column lanes here narrow
-// it, so composite-consumers (ALTER TABLE OF) use the allowing variant.
+// Alias kept for composite-consumer call sites; C's typenameTypeIdAndMod
+// never had a typtype gate, so both entry points are the same lane.
 pub fn typenameTypeIdAndModAllowComposite<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
-    typename_type_id_and_mod(mcx, pstate, tn, true)
+    typename_type_id_and_mod(mcx, pstate, tn)
 }
 
 fn typename_type_id_and_mod<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: Option<&parser_small1::ParseState<'_, '_>>,
     tn: &TypeName<'_>,
-    allow_composite: bool,
 ) -> PgResult<(Oid, i32)> {
     if tn.pct_type || tn.setof {
         unported("LookupTypeName %TYPE / SETOF");
@@ -122,23 +121,10 @@ fn typename_type_id_and_mod<'mcx>(
         Some(true) => {}
         _ => return Err(at_tn(type_is_only_a_shell(typname))),
     }
+    // C typenameTypeIdAndMod has no typtype gate; column legality is
+    // CheckAttributeType's job (heap.c: column "u" has pseudo-type unknown).
     match syscache_seams::pg_type_typtype::call(typoid)? {
-        Some(t)
-            if t == b'b' as i8
-                || t == b'c' as i8
-                || t == b'e' as i8
-                || t == b'r' as i8
-                || t == b'm' as i8
-                || t == b'c' as i8
-                || t == b'd' as i8 => {}
-        Some(t) if t == b'c' as i8 && allow_composite => {}
-        // C typenameTypeIdAndMod has no typtype gate; pseudo-types (record,
-        // record[]) are legal cast targets. The column lane keeps its loud.
-        Some(t) if t == b'p' as i8 && allow_composite => {}
-        Some(t) => unported(match t as u8 {
-            b'p' => "pseudo-type columns",
-            _ => "unknown typtype",
-        }),
+        Some(_) => {}
         None => return Err(type_does_not_exist(typname)),
     }
     let typmod = typenameTypeMod(mcx, pstate, tn, typoid)?;
@@ -1473,11 +1459,27 @@ pub fn transformCreateStmt<'mcx>(
 
     let relation = stmt.relation.expect("CreateStmt.relation");
     let relname = relation.relname.unwrap_or("");
-    // RangeVarGetAndCheckCreationNamespace existing-relation probe; the
-    // namespace CREATE ACL check and lock-retry loop ride with the aclchk
-    // lane (DefineRelation precedent).
+    // RangeVarGetAndCheckCreationNamespace at analysis (parse_utilcmd.c:
+    // 215-217, under a parser errposition callback): namespace/persistence
+    // errors carry the relation name's position, and a temp creation
+    // namespace flips a PERMANENT target to TEMP. The namespace CREATE ACL
+    // check and lock-retry loop ride with the aclchk lane.
+    let at_rel = |mut e: Box<PgError>| {
+        let pos = parser_small1::parser_errposition_source(
+            Some(query_string.as_bytes()),
+            relation.location,
+            mbutils::GetDatabaseEncoding(),
+        );
+        if e.cursor_position.is_none() && pos > 0 {
+            e.cursor_position = Some(pos);
+        }
+        e
+    };
+    let nspid = RangeVarGetCreationNamespace(mcx, relation).map_err(at_rel)?;
+    let adjusted_persistence =
+        catalog_namespace::RangeVarAdjustRelationPersistence(relation.relpersistence, nspid)
+            .map_err(at_rel)?;
     if stmt.if_not_exists {
-        let nspid = RangeVarGetCreationNamespace(mcx, relation)?;
         if lsyscache::get_relname_relid(relname, nspid)? != InvalidOid {
             // checkMembershipInCurrentExtension only bites inside an
             // extension script (needs getObjectDescription for its report).
@@ -1496,23 +1498,27 @@ pub fn transformCreateStmt<'mcx>(
     }
     // Qualify an unqualified non-temp target (parse_utilcmd.c:215-224) so
     // added-on commands (LIKE expansion) can't latch onto a same-named
-    // relation earlier in the search path.
-    let relation = if relation.schemaname.is_none()
-        && relation.relpersistence != types_core::RELPERSISTENCE_TEMP
-    {
-        let nspid = RangeVarGetCreationNamespace(mcx, relation)?;
-        let nsname = leak_str(
-            lsyscache::get_namespace_name(mcx, nspid)?
-                .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspid}")),
-        );
+    // relation earlier in the search path; the persistence adjustment above
+    // is stamped alongside (C mutates stmt->relation in place).
+    let qualify = relation.schemaname.is_none()
+        && adjusted_persistence != types_core::RELPERSISTENCE_TEMP;
+    let relation = if qualify || adjusted_persistence != relation.relpersistence {
+        let schemaname = if qualify {
+            Some(leak_str(
+                lsyscache::get_namespace_name(mcx, nspid)?
+                    .unwrap_or_else(|| panic!("cache lookup failed for namespace {nspid}")),
+            ))
+        } else {
+            relation.schemaname
+        };
         let stamped: &'mcx RangeVar<'mcx> = Node::mk_mut(
             mcx,
             RangeVar {
                 catalogname: relation.catalogname,
-                schemaname: Some(nsname),
+                schemaname,
                 relname: relation.relname,
                 inh: relation.inh,
-                relpersistence: relation.relpersistence,
+                relpersistence: adjusted_persistence,
                 alias: relation.alias,
                 location: relation.location,
             },
@@ -1548,6 +1554,14 @@ pub fn transformCreateStmt<'mcx>(
     let mut columns = NodeList::nil();
     if let Some(of_tn) = stmt.ofTypename {
         transformOfType(mcx, of_tn, &mut columns, Some(query_string))?;
+    }
+    // C raises this at analysis (parse_utilcmd.c:262-266), before any parent
+    // lookup can report a missing inheritance parent instead.
+    if stmt.partspec.is_some() && !stmt.inhRelations.is_nil() && stmt.partbound.is_none() {
+        return Err(Box::new(
+            PgError::new(ERROR, "cannot create partitioned table as inheritance child".to_string())
+                .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION),
+        ));
     }
     let mut cxt = CreateStmtCxt::new();
     let mut ckconstraints = NodeList::nil();
