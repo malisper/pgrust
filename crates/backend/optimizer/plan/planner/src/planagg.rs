@@ -250,7 +250,8 @@ fn build_minmax_path<'mcx>(
     let sealed: &'mcx types_nodes::parsenodes::Query<'mcx> = alloc_leak_in(mcx, subparse)?;
 
     run.push_minmax_root()?;
-    debug_assert!(run.root.append_rel_list.is_empty());
+    // append_rel_list carries over from the outer root (planagg.c:353-354's
+    // copyObject): a pulled-up UNION ALL target keeps its appendrel there.
     run.root.parse = run.intern_query(sealed);
     run.processed_tlist = Some(&sealed.targetList);
     run.root.tuple_fraction = 1.0;

@@ -3730,6 +3730,10 @@ fn get_actual_clauses<'mcx>(run: &PlannerRun<'mcx>, rinfos: &[RinfoId]) -> NodeL
 }
 
 // list_difference over shared arena nodes (Node pointer identity).
+// list_difference (list.c) membership is equal()-based: a child-translated
+// restrictlist and hashclause list carry content-equal but distinct nodes
+// (reparameterize_path_by_child adjusts them separately), and the hash/merge
+// clauses must still be removed from the joinquals.
 fn list_difference<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     a: &NodeList<'mcx>,
@@ -3737,7 +3741,7 @@ fn list_difference<'mcx>(
 ) -> NodeList<'mcx> {
     let mut out = NodeList::nil();
     for n in a.iter() {
-        if !b.iter().any(|m| Node::ptr_eq(n, m)) {
+        if !b.iter().any(|m| types_nodes::equal(n, m)) {
             out.lappend(mcx, n).expect("lappend");
         }
     }
