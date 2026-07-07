@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use std::rc::Rc;
 use std::sync::{Arc, Barrier, Mutex};
 
+use ::adt_numeric::{Int128AggState, NumericAggState};
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::{exec_eval_expr, AggPerGroup, EvalSlots};
 use ::execgrouping::TupleHashEntryData;
@@ -40,20 +41,49 @@ use crate::{
     TransTyp,
 };
 
-// Combine fns whose merge-order reassociation is unobservable: integer and
-// boolean add/min/max. Floats stay on the row path (reassociation changes
-// low-order bits); internal transtypes are excluded by the byval gate.
+// Byval combine fns whose merge-order reassociation is unobservable: integer,
+// boolean, and date/time add/min/max. Floats stay on the row path (SUM
+// reassociation changes low-order bits; MIN/MAX can flip which equal-comparing
+// bit pattern survives, e.g. -0.0 vs +0.0).
 // (oid, name): 176 int2pl, 177 int4pl, 463 int8pl, 768 int4larger,
 // 769 int4smaller, 770 int2larger, 771 int2smaller, 1236 int8larger,
-// 1237 int8smaller, 2515 booland_statefunc, 2516 boolor_statefunc.
-const COMBINE_WHITELIST: &[Oid] = &[176, 177, 463, 768, 769, 770, 771, 1236, 1237, 2515, 2516];
+// 1237 int8smaller, 2515 booland_statefunc, 2516 boolor_statefunc,
+// 1138 date_larger, 1139 date_smaller, 1377 time_larger, 1378 time_smaller,
+// 2036 timestamp_larger, 2035 timestamp_smaller, 1196/1195 the timestamptz
+// pg_proc rows over the same int64 comparison.
+const COMBINE_WHITELIST: &[Oid] = &[
+    176, 177, 463, 768, 769, 770, 771, 1236, 1237, 2515, 2516, 1138, 1139, 1377, 1378, 2036,
+    2035, 1196, 1195,
+];
 
-// One worker table, self-contained: `buf` owns the [pergroups][tuple] images
-// the entries point into (byval transvalues only, per the engagement gate).
+// Internal-transtype combines the merge admits: the states hand across
+// threads by pointer once the install relocates them into the handed buffer.
+// numeric_poly_combine 3338 / int8_avg_combine 2785 (Int128AggState, pure
+// arithmetic — bucket-parallel capable); numeric_combine 3341 /
+// numeric_avg_combine 3337 (NumericAggState, combine allocates in the agg
+// context — serial bucket merge only).
+const COMBINE_POLY_SUMX2: Oid = 3338;
+const COMBINE_POLY: Oid = 2785;
+const COMBINE_NUMERIC_SUMX2: Oid = 3341;
+const COMBINE_NUMERIC: Oid = 3337;
+const INTERNALOID: Oid = 2281;
+
+// How the merge owns and combines one transno's state (per the whitelists).
+#[derive(Clone, Copy, PartialEq)]
+enum CombineKind {
+    Byval,
+    PolyInt128 { sum_x2: bool },
+    NumericAgg { sum_x2: bool },
+}
+
+// One worker table, self-contained: `buf` owns the [pergroups][tuple][states]
+// images the entries point into — byval transvalues ride in the pergroups;
+// internal-transtype states are relocated behind them and the copied
+// pergroups repointed (u128 backing keeps Int128AggState's alignment).
 pub struct HandedAggTable {
     entries: Vec<TupleHashEntryData>,
     additionalsize: usize,
-    _buf: Vec<u64>,
+    _buf: Vec<u128>,
 }
 
 // SAFETY: entries point only into the struct's own heap buffer (stable across
@@ -61,12 +91,18 @@ pub struct HandedAggTable {
 // installer never touches the payload again.
 unsafe impl Send for HandedAggTable {}
 
-#[derive(Default)]
 pub struct AggTableHandoff {
     slots: Mutex<Vec<HandedAggTable>>,
+    // Leader-decided per-transno state plan; the worker install relocates
+    // internal states by it. Immutable after construction.
+    kinds: Vec<CombineKind>,
 }
 
 impl AggTableHandoff {
+    fn new(kinds: Vec<CombineKind>) -> AggTableHandoff {
+        AggTableHandoff { slots: Mutex::new(Vec::new()), kinds }
+    }
+
     fn install(&self, t: HandedAggTable) {
         self.slots.lock().unwrap_or_else(|e| e.into_inner()).push(t);
     }
@@ -140,9 +176,11 @@ struct MergeCombine {
 // Grouping-equality fns whose semantics the parallel claim path can evaluate
 // thread-natively: bit-equality of the deformed datum for fixed byval keys,
 // payload memcmp for texteq. (oid, name): 60 booleq, 61 chareq, 63 int2eq,
-// 65 int4eq, 184 oideq, 467 int8eq; 67 texteq (deterministic collations only
-// — default/C/POSIX; nondeterministic ones need varstr_cmp).
-const EQ_FIXED_WHITELIST: &[Oid] = &[60, 61, 63, 65, 184, 467];
+// 65 int4eq, 184 oideq, 467 int8eq, 1086 date_eq, 1145 time_eq,
+// 2052 timestamp_eq, 1152 timestamptz_eq (integer datetimes — equality is
+// bit equality); 67 texteq (deterministic collations only — default/C/POSIX;
+// nondeterministic ones need varstr_cmp).
+const EQ_FIXED_WHITELIST: &[Oid] = &[60, 61, 63, 65, 184, 467, 1086, 1145, 2052, 1152];
 const EQ_TEXT: Oid = 67;
 const DETERMINISTIC_COLLATIONS: &[Oid] = &[100, 950, 951];
 
@@ -157,14 +195,16 @@ struct KeyAtt {
     memcmp_payload: bool,
 }
 
-// The combine reduced to what the whitelist fns actually read: fn pointer,
-// strictness, collation. They never touch flinfo, fcinfo.context, or the
-// result mcx (byval results), so threads call the pointer bare.
+// The combine reduced to what the thread path actually needs. Byval: the
+// whitelist fns never touch flinfo, fcinfo.context, or the result mcx (byval
+// results), so threads call the pointer bare. PolyInt128: the arithmetic of
+// poly_combine_common runs natively on the relocated states — no call at all.
 #[derive(Clone, Copy)]
 struct ParCombine {
     func: PGFunction,
     strict: bool,
     collation: Oid,
+    kind: CombineKind,
 }
 
 // Present iff every key column and combine qualifies for bucket-parallel
@@ -179,6 +219,7 @@ pub(crate) struct FinalizeMerge<'mcx> {
     handoff: Arc<AggTableHandoff>,
     registry_key: usize,
     combines: Vec<MergeCombine>,
+    kinds: Vec<CombineKind>,
     // transno -> partial-output attno of the state column (replay fallback).
     state_cols: Vec<i16>,
     replay_slot: ExecSlotId,
@@ -261,13 +302,16 @@ fn parallel_merge_disabled() -> bool {
     *OFF.get_or_init(|| std::env::var_os("PGRUST_AGG_MERGE_NO_PARALLEL").is_some())
 }
 
-// C advance_combine semantics for a byval transition, one incoming partial
-// state (the AggPlainTransInitStrictByVal contract, input-check folded).
-// `dst` is a WORKER partial state serving as the accumulator, not a fresh
-// finalize pergroup: its no_trans_value is stale under non-strict partial
-// transfns (int4_sum never clears it), so never-adopted is detected by
-// trans_value_is_null — exact for the whitelist because those fns never
-// return NULL from non-NULL args (a strict combine chain cannot go null).
+// C advance_combine semantics, one incoming partial state (the
+// AggPlainTransInitStrictByVal contract for byval, input-check folded; the
+// non-strict internal combines run every call and manage their state args
+// themselves — handed transvalues point at states relocated into the handed
+// buffer at install). `dst` is a WORKER partial state serving as the
+// accumulator, not a fresh finalize pergroup: its no_trans_value is stale
+// under non-strict partial transfns (int4_sum never clears it), so
+// never-adopted is detected by trans_value_is_null — exact for the whitelist
+// because those fns never return NULL from non-NULL args (a strict combine
+// chain cannot go null, and the internal combines return a state pointer).
 fn combine_one(
     c: &mut MergeCombine,
     agg_node: NonNull<AggStateNode>,
@@ -431,12 +475,24 @@ pub(crate) fn init_finalize_merge<'mcx>(
         return Ok(None);
     }
     let mut combines = Vec::with_capacity(numtrans);
+    let mut kinds = Vec::with_capacity(numtrans);
     let mut state_cols = Vec::with_capacity(numtrans);
     for t in 0..numtrans {
-        if !trans_typ[t].byval || !COMBINE_WHITELIST.contains(&trans_fnoid[t]) {
-            return Ok(None);
-        }
         let (_, aggref) = trans_aggref[t].expect("planner aggtransno numbering has gaps");
+        let kind = if aggref.aggtranstype == INTERNALOID {
+            match trans_fnoid[t] {
+                COMBINE_POLY_SUMX2 => CombineKind::PolyInt128 { sum_x2: true },
+                COMBINE_POLY => CombineKind::PolyInt128 { sum_x2: false },
+                COMBINE_NUMERIC_SUMX2 => CombineKind::NumericAgg { sum_x2: true },
+                COMBINE_NUMERIC => CombineKind::NumericAgg { sum_x2: false },
+                _ => return Ok(None),
+            }
+        } else if trans_typ[t].byval && COMBINE_WHITELIST.contains(&trans_fnoid[t]) {
+            CombineKind::Byval
+        } else {
+            return Ok(None);
+        };
+        kinds.push(kind);
         let arg = aggref
             .args
             .iter()
@@ -487,9 +543,14 @@ pub(crate) fn init_finalize_merge<'mcx>(
     }
 
     // Bucket-parallel qualification (increment 2): every key column's
-    // grouping equality must be evaluable thread-natively. Failing columns
-    // leave the engagement intact on the serial bucket merge.
+    // grouping equality must be evaluable thread-natively, and every combine
+    // must run without the executor (NumericAgg combines allocate digit
+    // buffers in the agg context). Failing shapes leave the engagement intact
+    // on the serial bucket merge.
     let par = 'par: {
+        if kinds.iter().any(|k| matches!(k, CombineKind::NumericAgg { .. })) {
+            break 'par None;
+        }
         let mut atts = Vec::with_capacity(num_cols);
         let mut has_varlena = false;
         for i in 0..num_cols {
@@ -518,10 +579,12 @@ pub(crate) fn init_finalize_merge<'mcx>(
         }
         let par_combines = combines
             .iter()
-            .map(|c| ParCombine {
+            .zip(&kinds)
+            .map(|(c, &kind)| ParCombine {
                 func: c.flinfo.fn_addr,
                 strict: c.strict,
                 collation: c.collation,
+                kind,
             })
             .collect();
         Some(ParSpec { atts, combines: par_combines, has_varlena })
@@ -537,19 +600,58 @@ pub(crate) fn init_finalize_merge<'mcx>(
     let key_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(hash_desc));
 
-    let handoff = Arc::new(AggTableHandoff::default());
+    let handoff = Arc::new(AggTableHandoff::new(kinds.clone()));
     let registry_key = partial as *const Agg<'_> as usize;
     registry_insert(registry_key, &handoff);
     Ok(Some(FinalizeMerge {
         handoff,
         registry_key,
         combines,
+        kinds,
         state_cols,
         replay_slot,
         key_slot,
         par,
         run: None,
     }))
+}
+
+const fn align16(n: usize) -> usize {
+    (n + 15) & !15
+}
+
+// Handed-buffer bytes the entry's internal-transtype states need (the copy
+// loop's exact layout: one 16-aligned slot per non-null non-byval state).
+//
+// # Safety
+// `e` is a live table entry whose `additionalsize` payload holds
+// `kinds.len()` pergroups with live state pointers behind them.
+unsafe fn entry_state_bytes(
+    e: &TupleHashEntryData,
+    additionalsize: usize,
+    kinds: &[CombineKind],
+) -> usize {
+    let Some(add) = e.additional(additionalsize) else { return 0 };
+    let pg = add.cast::<AggPerGroup>();
+    let mut bytes = 0usize;
+    for (transno, k) in kinds.iter().enumerate() {
+        // SAFETY: caller contract — additionalsize holds kinds.len()
+        // pergroups.
+        let s = unsafe { &*pg.as_ptr().add(transno) };
+        if s.trans_value_is_null {
+            continue;
+        }
+        bytes += match k {
+            CombineKind::Byval => 0,
+            CombineKind::PolyInt128 { .. } => align16(core::mem::size_of::<Int128AggState>()),
+            CombineKind::NumericAgg { .. } => {
+                // SAFETY: non-null internal transvalue is the live state.
+                let st = unsafe { &*(s.trans_value.as_usize() as *const NumericAggState) };
+                align16(core::mem::size_of::<NumericAggState>() + st.digits_bytes())
+            }
+        };
+    }
+    bytes
 }
 
 // Worker-side install at fill completion: the leader registered a handoff for
@@ -567,27 +669,64 @@ pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
     if ph.spill.ever_spilled || !ph.spill.batches.is_empty() {
         return;
     }
+    let kinds = &handoff.kinds;
     let additionalsize = ph.hashtable.additionalsize();
     let src = ph.hashtable.entries();
     let mut bytes = 0usize;
     for e in src {
-        // SAFETY: entry images are live table_ctx allocations led by t_len.
-        let t_len = unsafe { (*e.tuple().as_ptr()).t_len } as usize;
-        bytes += (additionalsize + t_len + 7) & !7;
+        // SAFETY: entry images are live table_ctx allocations led by t_len;
+        // pergroup state pointers live in the worker's agg arenas until the
+        // reset below.
+        unsafe {
+            let t_len = (*e.tuple().as_ptr()).t_len as usize;
+            bytes += (additionalsize + t_len + 15) & !15;
+            bytes += entry_state_bytes(e, additionalsize, kinds);
+        }
     }
-    let mut buf: Vec<u64> = vec![0; bytes / 8];
+    let mut buf: Vec<u128> = vec![0; bytes.div_ceil(16)];
     let mut entries: Vec<TupleHashEntryData> = Vec::with_capacity(src.len());
     let base = buf.as_mut_ptr().cast::<u8>();
     let mut off = 0usize;
     for e in src {
         // SAFETY: source image is [additionalsize][tuple of t_len] per the
         // table's exec_copy_slot_minimal_tuple layout; dst has bytes reserved.
+        // Internal-transtype states are relocated behind the image (16-aligned
+        // slots off the u128 backing) and the copied pergroups repointed —
+        // after this the handed table references nothing worker-owned.
         let e2 = unsafe {
             let t_len = (*e.tuple().as_ptr()).t_len as usize;
             let img = e.tuple().as_ptr().cast::<u8>().sub(additionalsize);
             let dst = base.add(off);
             core::ptr::copy_nonoverlapping(img, dst, additionalsize + t_len);
-            off += (additionalsize + t_len + 7) & !7;
+            off += (additionalsize + t_len + 15) & !15;
+            for (transno, k) in kinds.iter().enumerate() {
+                if matches!(k, CombineKind::Byval) {
+                    continue;
+                }
+                let pg = &mut *dst.cast::<AggPerGroup>().add(transno);
+                if pg.trans_value_is_null {
+                    continue;
+                }
+                let state = base.add(off);
+                match k {
+                    CombineKind::Byval => unreachable!(),
+                    CombineKind::PolyInt128 { .. } => {
+                        let sp = pg.trans_value.as_usize() as *const Int128AggState;
+                        state.cast::<Int128AggState>().write(*sp);
+                        off += align16(core::mem::size_of::<Int128AggState>());
+                    }
+                    CombineKind::NumericAgg { .. } => {
+                        let sp = &*(pg.trans_value.as_usize() as *const NumericAggState);
+                        let digits =
+                            state.add(core::mem::size_of::<NumericAggState>()).cast::<i32>();
+                        state.cast::<NumericAggState>().write(sp.relocated_into(digits));
+                        off += align16(
+                            core::mem::size_of::<NumericAggState>() + sp.digits_bytes(),
+                        );
+                    }
+                }
+                pg.trans_value = Datum::from_usize(state as usize);
+            }
             let mut e2 = *e;
             e2.set_tuple(NonNull::new_unchecked(
                 dst.add(additionalsize).cast::<MinimalTupleData>(),
@@ -666,8 +805,23 @@ fn replay_handed_rows<'mcx>(
     let mcx = estate.es_query_cxt;
     let mut m = node.merge.take().expect("replay under an engaged merge");
     let mut result = Ok(());
+    let mut state_vals: Vec<NullableDatum> = vec![NullableDatum::null(); m.state_cols.len()];
     'outer: for t in &tables {
         for e in &t.entries {
+            // The synthesized row must carry what the worker would have SENT:
+            // internal transtypes cross as their serialfn bytea (evaltrans
+            // deserializes), so relocated states re-serialize here, into the
+            // per-tuple arena the row-body reset below reclaims.
+            if let Err(err) = synth_state_vals(
+                &m.kinds,
+                e,
+                t.additionalsize,
+                estate.ecxt(node.tmpcontext).per_tuple_mcx(),
+                &mut state_vals,
+            ) {
+                result = Err(err);
+                break 'outer;
+            }
             {
                 let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
                 // SAFETY: entry images live in the handed buffer for the
@@ -685,14 +839,9 @@ fn replay_handed_rows<'mcx>(
                         dst.tts_values[(attno - 1) as usize] = src.tts_values[i];
                         dst.tts_isnull[(attno - 1) as usize] = src.tts_isnull[i];
                     }
-                    if let Some(add) = e.additional(t.additionalsize) {
-                        let pg = add.cast::<AggPerGroup>();
-                        for (transno, &attno) in m.state_cols.iter().enumerate() {
-                            // SAFETY: additionalsize holds numtrans pergroups.
-                            let s = unsafe { &*pg.as_ptr().add(transno) };
-                            dst.tts_values[(attno - 1) as usize] = s.trans_value;
-                            dst.tts_isnull[(attno - 1) as usize] = s.trans_value_is_null;
-                        }
+                    for (&attno, v) in m.state_cols.iter().zip(&state_vals) {
+                        dst.tts_values[(attno - 1) as usize] = v.value;
+                        dst.tts_isnull[(attno - 1) as usize] = v.isnull;
                     }
                 }
             }
@@ -719,6 +868,57 @@ fn replay_handed_rows<'mcx>(
     }
     node.merge = Some(m);
     result
+}
+
+// One replayed entry's state-column datums: byval transvalues pass through;
+// internal states serialize with the same plain functions the worker's
+// serialfn wraps, so the synthesized row is byte-identical to a sent one.
+fn synth_state_vals(
+    kinds: &[CombineKind],
+    e: &TupleHashEntryData,
+    additionalsize: usize,
+    per_tuple: Mcx<'_>,
+    out: &mut [NullableDatum],
+) -> PgResult<()> {
+    let Some(add) = e.additional(additionalsize) else {
+        out.fill(NullableDatum::null());
+        return Ok(());
+    };
+    let pg = add.cast::<AggPerGroup>();
+    for (transno, k) in kinds.iter().enumerate() {
+        // SAFETY: additionalsize holds kinds.len() pergroups; non-null
+        // internal transvalues are live relocated states in the handed
+        // buffer (numeric serialization's lazy carry is the only mutation,
+        // and each entry replays once).
+        out[transno] = unsafe {
+            let s = &*pg.as_ptr().add(transno);
+            if s.trans_value_is_null || matches!(k, CombineKind::Byval) {
+                NullableDatum { value: s.trans_value, isnull: s.trans_value_is_null }
+            } else {
+                let mut buf = ::pqformat::pq_begintypsend(per_tuple)?;
+                match *k {
+                    CombineKind::Byval => unreachable!(),
+                    CombineKind::PolyInt128 { sum_x2 } => {
+                        let st = &*(s.trans_value.as_usize() as *const Int128AggState);
+                        ::adt_numeric::aggregates::int128_agg_state_serialize(
+                            st, sum_x2, &mut buf,
+                        )?;
+                    }
+                    CombineKind::NumericAgg { sum_x2 } => {
+                        let st = &mut *(s.trans_value.as_usize() as *mut NumericAggState);
+                        ::adt_numeric::aggregates::numeric_agg_state_serialize(
+                            st, sum_x2, &mut buf,
+                        )?;
+                    }
+                }
+                NullableDatum {
+                    value: ::types_fmgr::varlena_result(::pqformat::pq_endtypsend(buf)),
+                    isnull: false,
+                }
+            }
+        };
+    }
+    Ok(())
 }
 
 // agg_retrieve_hash_table's merged twin: one qual-passing merged group per
@@ -1017,10 +1217,40 @@ fn keys_equal(
     true
 }
 
-// combine_one's thread-native twin: bare fn-pointer call. The whitelist fns
-// read only their args (no flinfo, no fcinfo.context, byval result — the
-// result mcx stays unarmed) so semantics match the serial invoke exactly.
+// combine_one's thread-native twin. Byval: bare fn-pointer call — the
+// whitelist fns read only their args (no flinfo, no fcinfo.context, byval
+// result — the result mcx stays unarmed) so semantics match the serial invoke
+// exactly. PolyInt128: poly_combine_common's arithmetic run natively; where C
+// allocates a fresh agg-context state for a NULL accumulator, the merge
+// adopts the source's relocated state by pointer (owned by the run, consumed
+// exactly once) — the resulting field values are identical.
 fn combine_one_par(c: &ParCombine, dst: &mut AggPerGroup, src: &AggPerGroup) -> PgResult<()> {
+    if let CombineKind::PolyInt128 { sum_x2 } = c.kind {
+        if src.trans_value_is_null {
+            return Ok(());
+        }
+        if dst.trans_value_is_null {
+            dst.trans_value = src.trans_value;
+            dst.trans_value_is_null = false;
+            dst.no_trans_value = false;
+            return Ok(());
+        }
+        // SAFETY: non-null internal transvalues are live relocated states
+        // (handed buffers) or finalize-arena states; dst is uniquely
+        // reachable through this claimer's bucket and src feeds exactly once.
+        unsafe {
+            let d = &mut *(dst.trans_value.as_usize() as *mut Int128AggState);
+            let s = &*(src.trans_value.as_usize() as *const Int128AggState);
+            if s.n > 0 {
+                d.n += s.n;
+                d.sum_x += s.sum_x;
+                if sum_x2 {
+                    d.sum_x2 += s.sum_x2;
+                }
+            }
+        }
+        return Ok(());
+    }
     if c.strict {
         if src.trans_value_is_null {
             return Ok(());
@@ -1081,8 +1311,9 @@ struct ParCtx<'a> {
 // stay live and unmoved for the scope (no arena allocation happens inside);
 // the only mutation is (a) each claimer's exclusive `out[b]` slot — bucket b
 // is handed to exactly one claimer by the fetch_add — and (b) pergroup
-// payloads behind entry pointers, which partition by bucket (an entry's
-// bucket is a pure function of its hash), so claimers never alias them.
+// payloads and the internal states behind their transvalue pointers, which
+// partition by bucket (an entry's bucket is a pure function of its hash), so
+// claimers never alias them.
 unsafe impl Sync for ParCtx<'_> {}
 
 fn claim_loop(ctx: &ParCtx<'_>, scratch: &mut ParScratch) -> PgResult<usize> {

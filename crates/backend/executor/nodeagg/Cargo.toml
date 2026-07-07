@@ -35,11 +35,12 @@ sort_storage = { path = "../../utils/sort/sort_storage" }
 hyperloglog = { path = "../../lib/hyperloglog" }
 hashfn = { path = "../../../common/hashfn" }
 init_small = { path = "../../utils/init/init_small" }
+adt_numeric = { path = "../../utils/adt/numeric" }
+pqformat = { path = "../../libpq/pqformat" }
 
 [dev-dependencies]
 detoast = { path = "../../access/common/detoast" }
 pglz = { path = "../../../common/pglz" }
-adt_numeric = { path = "../../utils/adt/numeric" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 elog = { path = "../../utils/error/elog" }
 fd = { path = "../../storage/file/fd" }

@@ -261,6 +261,40 @@ impl NumericSumAccum {
         Ok(())
     }
 
+    /// Bytes of both digit buffers (pos + neg), 0 when empty.
+    pub fn digits_bytes(&self) -> usize {
+        2 * self.ndigits.max(0) as usize * core::mem::size_of::<i32>()
+    }
+
+    /// Field clone with the digit buffers copied to `dst` (pos first, then
+    /// neg) — the handed-table relocation of a state out of its arena.
+    ///
+    /// # Safety
+    /// `dst` is 4-aligned with [`Self::digits_bytes`] bytes writable, and the
+    /// source buffers are live per the arena contract.
+    pub unsafe fn relocated_into(&self, dst: *mut i32) -> NumericSumAccum {
+        let n = self.ndigits.max(0) as usize;
+        let (pos, neg) = if n > 0 {
+            // SAFETY: caller contract — dst holds 2n slots, sources live.
+            unsafe {
+                core::ptr::copy_nonoverlapping(self.pos_digits, dst, n);
+                core::ptr::copy_nonoverlapping(self.neg_digits, dst.add(n), n);
+            }
+            (dst, unsafe { dst.add(n) })
+        } else {
+            (core::ptr::null_mut(), core::ptr::null_mut())
+        };
+        NumericSumAccum {
+            ndigits: self.ndigits,
+            weight: self.weight,
+            dscale: self.dscale,
+            num_uncarried: self.num_uncarried,
+            have_carry_space: self.have_carry_space,
+            pos_digits: pos,
+            neg_digits: neg,
+        }
+    }
+
     /// C `accum_sum_combine`.
     pub fn combine(&mut self, mcx: Mcx<'_>, other: &mut NumericSumAccum) -> PgResult<()> {
         let mut tmp = NumericVar::new();
@@ -300,6 +334,37 @@ impl NumericAggState {
 
     pub fn total_count(&self) -> i64 {
         self.n + self.nan_count + self.pinf_count + self.ninf_count
+    }
+
+    /// Digit-buffer bytes a [`Self::relocated_into`] copy needs.
+    pub fn digits_bytes(&self) -> usize {
+        self.sum_x.digits_bytes() + self.sum_x2.digits_bytes()
+    }
+
+    /// Field clone with all digit buffers copied to `digits` (sum_x's pair
+    /// first) — the handed-table relocation of a state out of its arena.
+    ///
+    /// # Safety
+    /// `digits` is 4-aligned with [`Self::digits_bytes`] bytes writable, and
+    /// the source buffers are live per the arena contract.
+    pub unsafe fn relocated_into(&self, digits: *mut i32) -> NumericAggState {
+        // SAFETY: caller contract, split across the two accumulators.
+        let (sum_x, sum_x2) = unsafe {
+            let sum_x = self.sum_x.relocated_into(digits);
+            let x2_dst = digits.add(2 * self.sum_x.ndigits.max(0) as usize);
+            (sum_x, self.sum_x2.relocated_into(x2_dst))
+        };
+        NumericAggState {
+            calc_sum_x2: self.calc_sum_x2,
+            n: self.n,
+            sum_x,
+            sum_x2,
+            max_scale: self.max_scale,
+            max_scale_count: self.max_scale_count,
+            nan_count: self.nan_count,
+            pinf_count: self.pinf_count,
+            ninf_count: self.ninf_count,
+        }
     }
 }
 
