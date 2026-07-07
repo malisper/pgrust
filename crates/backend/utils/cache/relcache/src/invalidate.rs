@@ -126,7 +126,9 @@ fn RelationReloadIndexInfo(
     let critical = crate::criticalRelcachesBuilt();
     if held.rd_rel.relisshared && !critical {
         // Shared index before database selection: no pg_class to read, no
-        // significant schema change possible (rd_locator: storage unit).
+        // significant schema change possible — but its physical
+        // relfilenumber might have changed (relcache.c:2297-2300).
+        build::RelationInitPhysicalAddr(held)?;
         held.rd_isvalid.set(true);
         return Ok(Rc::clone(held));
     }
@@ -244,6 +246,12 @@ fn RelationReloadNailed(
 ) -> PgResult<Rc<RelationData<'static>>> {
     debug_assert!(!held.rd_isvalid.get());
     debug_assert_eq!(held.rd_rel.relkind, RELKIND_RELATION);
+
+    // Redo RelationInitPhysicalAddr in case it is a mapped relation whose
+    // mapping changed (relcache.c:2394-2398). In place, before the scan: the
+    // pg_class self-scan below must read the post-swap file, and error paths
+    // must not strand the stale locator on a valid-again entry.
+    build::RelationInitPhysicalAddr(held)?;
 
     if !crate::criticalRelcachesBuilt() {
         // Can't scan pg_class yet: leave invalid but usable.
