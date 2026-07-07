@@ -105,9 +105,10 @@ pub fn sinval_retained() -> bool {
 
 /// Standby loop, after run_child_task returns: true when the park went
 /// through whole (both resources survived) and the identity is retained for
-/// the next claim. A partial park (teardown diverged mid-way) reports false;
-/// the caller must release whatever proc_retained()/sinval_retained() still
-/// report before rotating.
+/// the next claim. On false the caller must run the release path, which
+/// consults MyProc (still set = the identity survived the teardown, e.g. a
+/// task that died before reattach, or a partial park) and then
+/// clear_identity().
 pub fn confirm_parked() -> bool {
     let parked = PARKING.get() && RETAINED_PROC.get() && RETAINED_SINVAL.get();
     PARKING.set(false);
@@ -115,9 +116,6 @@ pub fn confirm_parked() -> bool {
         IDENTITY_HELD.set(true);
         RETAINED_PROC.set(false);
         RETAINED_SINVAL.set(false);
-    } else {
-        IDENTITY_HELD.set(false);
-        RETAINED_DB.set(InvalidOid);
     }
     WARM_CLAIM.set(false);
     parked

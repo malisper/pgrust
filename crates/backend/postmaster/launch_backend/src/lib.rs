@@ -415,8 +415,11 @@ pub mod wpool {
     }
 
     static AVAILABLE: Mutex<Vec<Standby>> = Mutex::new(Vec::new());
-    // Standbys alive and not running a task (parked or still in their
-    // prelude); dispatch decrements, park/maintain() restore.
+    // Live standby THREADS (prelude, parked, or running a task). Incremented
+    // at spawn, decremented by the thread itself on any exit (rotation or
+    // retire). Claims do NOT decrement: a retention claim comes back, and
+    // counting it as gone made maintain() over-replenish, overshoot the
+    // target at park, and shrink-retire live retained standbys.
     static POPULATION: AtomicI32 = AtomicI32::new(0);
     // Task-pids whose exit announce parked the thread; consumed by
     // join_announced_child. Tiny (<= pool size).
@@ -466,9 +469,12 @@ pub mod wpool {
                 return;
             }
         }
-        while POPULATION.load(Relaxed) > target() {
+        // POPULATION only falls when the woken threads exit; bound the pops
+        // locally or this loop would drain the whole pool.
+        let mut excess = POPULATION.load(Relaxed) - target();
+        while excess > 0 {
             let Some(sb) = available().pop() else { return };
-            POPULATION.fetch_sub(1, Relaxed);
+            excess -= 1;
             drop(sb); // closed channel retires the standby
         }
     }
@@ -478,8 +484,7 @@ pub mod wpool {
     /// retained identity release it against live shared memory.
     pub fn flush() {
         FLUSH_EPOCH.fetch_add(1, Relaxed);
-        let drained: Vec<Standby> = available().drain(..).collect();
-        POPULATION.fetch_sub(drained.len() as i32, Relaxed);
+        available().clear(); // dropped channels retire the standbys
     }
 
     /// Crash reinit: shared memory is about to be reset wholesale, so woken
@@ -498,6 +503,15 @@ pub mod wpool {
         let spawned = std::thread::Builder::new()
             .name(format!("pg:standby:{spawn_pid}"))
             .spawn(move || {
+                // Any exit — rotation, retire, or a prelude panic — drops the
+                // population charge exactly once.
+                struct PopulationCharge;
+                impl Drop for PopulationCharge {
+                    fn drop(&mut self) {
+                        POPULATION.fetch_sub(1, Relaxed);
+                    }
+                }
+                let _charge = PopulationCharge;
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
@@ -566,7 +580,6 @@ pub mod wpool {
                         );
                         ipc::reset_exit_state_for_retained_park();
                         let (tx2, rx2) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
-                        POPULATION.fetch_add(1, Relaxed);
                         parked_crash_epoch = pre_crash;
                         available().push(Standby {
                             pid: task.child_pid,
@@ -586,11 +599,7 @@ pub mod wpool {
                     // Retired while parked (maintain shrink / reload flush)
                     // or never claimed: release any retained identity, drop
                     // our reaper entry (nothing announced this wake), exit.
-                    // POPULATION was already decremented by whichever pop
-                    // dropped our channel (phase 1 double-decremented here,
-                    // inflating the pool by 2x per flush cycle).
                     release_retained_identity(parked_crash_epoch);
-                    init_small::wretain::clear_identity();
                     let mut t =
                         super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(i) = t.iter().position(|(p, _)| *p == thread_key) {
@@ -602,25 +611,16 @@ pub mod wpool {
         }
     }
 
-    // POPULATION invariant: every AVAILABLE push (spawn, park) is one
-    // increment; every pop (dispatch, maintain shrink, flush) is one
-    // decrement. The retiree's own decrement in standby_loop pairs with the
-    // pop that woke it, so the count stays balanced.
-    //
-    // Ordering: sinval cleanup keys off MyProcNumber, which ProcKill clears,
-    // so it must run first — same relative order proc_exit's LIFO gives them.
+    // The identity survived (parked shape: latch already local + disowned,
+    // locks/lock-group released) exactly when MyProc is still set — parking
+    // is latched before the teardown and constant across it, so proc and
+    // sinval always take the same branch. Sinval cleanup keys off
+    // MyProcNumber, which KillRetainedProc clears, so it runs first.
     fn release_retained_identity(park_epoch: u64) {
-        if CRASH_EPOCH.load(Relaxed) != park_epoch {
-            // Shared memory was (or is being) reset; the slots this identity
-            // points at are reconstructed wholesale. Abandon, don't touch.
-            return;
-        }
-        if init_small::wretain::sinval_retained() || init_small::wretain::identity_held() {
+        if CRASH_EPOCH.load(Relaxed) == park_epoch && lmgr_proc::MyProc().is_some() {
             sinval::CleanupInvalidationState()
                 .expect("CleanupInvalidationState failed releasing retained identity");
-        }
-        if init_small::wretain::proc_retained() || init_small::wretain::identity_held() {
-            lmgr_proc::ProcKill(0, 0);
+            lmgr_proc::KillRetainedProc();
         }
         init_small::wretain::clear_identity();
     }
@@ -659,11 +659,9 @@ pub mod wpool {
                     None => return 0,
                 }
             };
-            POPULATION.fetch_sub(1, Relaxed);
             let Some(child_slot) =
                 pmchild_seams::assign_postmaster_child_slot::call(BackendType::BgWorker)
             else {
-                POPULATION.fetch_add(1, Relaxed);
                 available().push(sb);
                 return 0;
             };
