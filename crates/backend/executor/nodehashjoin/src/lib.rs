@@ -849,6 +849,32 @@ fn scan_hash_bucket<'mcx>(
         .ecxt_outertuple
         .expect("hashjoin outer tuple set");
     estate.ecxt_mut(ecxt).ecxt_innertuple = Some(hslot);
+    // SubPlan-bearing hashclauses (C ExecQual on the HashJoinState) take the
+    // per-link driver path; the fused slot-pair fast loop below cannot host
+    // a suspension.
+    if node.hashclauses.as_ref().is_some_and(|q| q.has_subplan()) {
+        while !cur.is_null() {
+            let hdr = unsafe { &*cur };
+            if hdr.hashvalue() == hashvalue {
+                let tuple = unsafe { HashJoinTupleHdr::mintuple(cur) };
+                {
+                    let inner = &mut estate.es_tupleTable[hslot.0 as usize];
+                    // SAFETY: entry images live in the batch arena until reset.
+                    unsafe { exectuples::exec_store_minimal_tuple_ptr(inner, mcx, tuple) };
+                }
+                if ::executils::exec_qual_with_subplans(
+                    node.hashclauses.as_deref_mut(),
+                    estate,
+                    ecxt,
+                )? {
+                    node.hj_CurTuple = cur;
+                    return Ok(true);
+                }
+            }
+            cur = hdr.next();
+        }
+        return Ok(false);
+    }
     let tbl = &mut estate.es_tupleTable[..];
     let [inner, outer] = tbl
         .get_disjoint_mut([hslot.0 as usize, outer_id.0 as usize])
