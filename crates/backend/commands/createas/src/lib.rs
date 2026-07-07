@@ -69,8 +69,11 @@ pub fn ExecCreateTableAs<'mcx>(
     }
 
     let query_node = stmt.query.expect("CreateTableAsStmt.query");
-    // C rewrites/plans the contained Query and never reads stmt->query again.
-    // SAFETY: this call holds the only live access to the CTAS tree.
+    // C copyObject(query) before QueryRewrite (createas.c): the statement
+    // tree lives in the caller's arena; rewrite/planning grow its lists
+    // under this mcx (see ExplainQuery).
+    let query_node = copyfuncs::copy_object(mcx, query_node)?;
+    // SAFETY: fresh copy; this call holds its only live access.
     let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("CreateTableAsStmt.query is an analyzed Query");
 

@@ -69,10 +69,15 @@ pub fn ExplainQuery<'mcx>(
 
     let query_node = stmt.query.expect("ExplainQuery: stmt->query is NULL");
 
-    // C rewrites stmt->query through the shared pointer and never reads it
-    // again outside the plancache-held EXPLAIN EXECUTE path (loud upstream):
-    // move the Query out of the node.
-    // SAFETY: this call holds the only live access to the ExplainStmt tree.
+    // C copyObject(stmt->query) before QueryRewrite (explain.c): the
+    // statement tree lives in the caller's arena (bump MessageContext), but
+    // rewrite and planning run under this portal-context mcx and grow the
+    // tree's lists in place — List growth deallocates the old cell buffer
+    // into the growing context, freeing memory this arena does not own
+    // (C's repalloc frees into the chunk's own context; this port must own
+    // the tree first).
+    let query_node = copyfuncs::copy_object(mcx, query_node)?;
+    // SAFETY: fresh copy; this call holds its only live access.
     let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("ExplainQuery: statement is not an analyzed Query");
     if queryjumble::IsQueryIdEnabled() {
@@ -286,19 +291,17 @@ fn ExplainOneUtility<'mcx>(
         }
         NodeTag::T_DeclareCursorStmt => {
             let options = stmt.as_declare_cursor_stmt().expect("tag checked").options;
-            // C copyObject(dcs->query) then rewrites the copy; EXPLAIN never
-            // reads dcs->query again (no portal is created), so the Query
-            // moves out instead.
-            // SAFETY: this call holds the only live access to the
-            // DeclareCursorStmt tree.
-            let query_node = unsafe {
-                stmt.with_mut::<types_nodes::parsenodes::DeclareCursorStmt, _>(|d| {
-                    d.query.take()
-                })
-            }
-            .flatten()
-            .expect("EXPLAIN DECLARE CURSOR without analyzed query");
-            // SAFETY: as above.
+            // C copyObject(dcs->query) then rewrites the copy: the statement
+            // tree lives in the caller's arena; rewrite/planning grow its
+            // lists under this mcx (see ExplainQuery).
+            let query_node = copyfuncs::copy_object(
+                mcx,
+                stmt.as_declare_cursor_stmt()
+                    .expect("tag checked")
+                    .query
+                    .expect("EXPLAIN DECLARE CURSOR without analyzed query"),
+            )?;
+            // SAFETY: fresh copy; this call holds its only live access.
             let mut query: Query<'mcx> =
                 unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
                     .expect("DECLARE CURSOR query is not an analyzed Query");
