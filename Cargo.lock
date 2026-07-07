@@ -3968,6 +3968,7 @@ dependencies = [
  "tableam_vocab",
  "tcop_dest",
  "trigger",
+ "tupdesc",
  "types_core",
  "types_dest",
  "types_error",
