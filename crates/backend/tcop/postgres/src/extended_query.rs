@@ -374,6 +374,57 @@ fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum, typlen: i16) -> PgResult<Da
     Ok(Datum::from_usize(out.leak().as_ptr() as usize))
 }
 
+
+// bind_param_error_callback (postgres.c): CONTEXT for an error thrown while
+// processing one bind parameter; the value is quoted and clipped to
+// log_parameter_max_length_on_error bytes (<0 = unclipped), C's
+// appendStringInfoStringQuoted shape (quote doubling, trailing "..." when
+// clipped, clip backed off to a character boundary).
+fn bind_param_error_context(
+    mut err: Box<types_error::PgError>,
+    portal_name: &str,
+    paramno: usize,
+    value: Option<&str>,
+) -> Box<types_error::PgError> {
+    let line = match value {
+        Some(s) => {
+            let maxlen = guc_tables::backing::log_parameter_max_length_on_error();
+            let (clip, ellipsis) = if maxlen < 0 || maxlen as usize >= s.len() {
+                (s, false)
+            } else {
+                let mut end = maxlen as usize;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                (&s[..end], true)
+            };
+            let mut quoted = String::with_capacity(clip.len() + 8);
+            quoted.push('\'');
+            for c in clip.chars() {
+                if c == '\'' {
+                    quoted.push('\'');
+                }
+                quoted.push(c);
+            }
+            quoted.push('\'');
+            if ellipsis {
+                quoted.push_str("...");
+            }
+            if portal_name.is_empty() {
+                format!("unnamed portal parameter ${} = {}", paramno + 1, quoted)
+            } else {
+                format!("portal \"{}\" parameter ${} = {}", portal_name, paramno + 1, quoted)
+            }
+        }
+        None if portal_name.is_empty() => {
+            format!("unnamed portal parameter ${}", paramno + 1)
+        }
+        None => format!("portal \"{}\" parameter ${}", portal_name, paramno + 1),
+    };
+    err.add_context_line(line);
+    err
+}
+
 fn portal_mcx(portal: &Portal<'static>) -> Mcx<'static> {
     // SAFETY: portalContext is PgBox'd for address stability and outlives
     // every use of this Mcx (freed only in PortalDrop, which first frees the
@@ -490,8 +541,17 @@ pub fn exec_bind_message<'mcx>(
         params.try_reserve_exact(num_params).map_err(|_| pmcx.oom(num_params))?;
 
         for paramno in 0..num_params {
+            // bind_param_error_callback (postgres.c): every error thrown while
+            // processing this parameter carries a CONTEXT line; the textual
+            // value rides only on the input-function call. Non-error reports
+            // emitted inside input functions do not attach it (the propagation
+            // pattern covers the ERROR path only).
+            let pctx = |e: Box<types_error::PgError>| {
+                bind_param_error_context(e, portal_name.as_str(), paramno, None)
+            };
             let ptype = param_types[paramno];
-            let plength = pqformat::pq_getmsgint(input_message, 4)? as i32;
+            let plength =
+                pqformat::pq_getmsgint(input_message, 4).map_err(pctx)? as i32;
             let is_null = plength == -1;
 
             let pformat: i16 = if num_pformats > 1 {
@@ -504,12 +564,14 @@ pub fn exec_bind_message<'mcx>(
 
             let pval = match pformat {
                 0 => {
-                    let (typinput, typioparam) = lsyscache::typ::getTypeInputInfo(ptype)?;
+                    let (typinput, typioparam) =
+                        lsyscache::typ::getTypeInputInfo(ptype).map_err(pctx)?;
                     let pstring = if is_null {
                         None
                     } else {
-                        let raw = pqformat::pq_getmsgbytes(input_message, plength as usize)?;
-                        Some(client_to_server_cstring(pmcx, raw)?)
+                        let raw = pqformat::pq_getmsgbytes(input_message, plength as usize)
+                            .map_err(pctx)?;
+                        Some(client_to_server_cstring(pmcx, raw).map_err(pctx)?)
                     };
                     if guc_tables::backing::log_parameter_max_length_on_error() != 0 {
                         panic!(
@@ -522,26 +584,35 @@ pub fn exec_bind_message<'mcx>(
                         CStr::from_bytes_with_nul(v)
                             .expect("client_to_server_cstring NUL-terminates")
                     });
-                    let mut finfo = fmgr_seams::fmgr_info::call(typinput)?;
-                    let v =
-                        types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, pmcx)?;
+                    let mut finfo = fmgr_seams::fmgr_info::call(typinput).map_err(pctx)?;
+                    let v = types_fmgr::input_function_call(&mut finfo, cstr, typioparam, -1, pmcx)
+                        .map_err(|e| {
+                            let val = cstr.map(|c| String::from_utf8_lossy(c.to_bytes()).into_owned());
+                            bind_param_error_context(
+                                e,
+                                portal_name.as_str(),
+                                paramno,
+                                val.as_deref(),
+                            )
+                        })?;
                     // The result may alias finfo's scratch (fc_textin's
                     // OutBuf), which dies with this arm — datumCopy into the
                     // portal context (C pallocs there directly).
-                    copy_param_datum(pmcx, v, is_null, ptype)?
+                    copy_param_datum(pmcx, v, is_null, ptype).map_err(pctx)?
                 }
                 1 => {
                     let (typreceive, typioparam) =
-                        lsyscache::typ::getTypeBinaryInputInfo(ptype)?;
-                    let mut finfo = fmgr_seams::fmgr_info::call(typreceive)?;
+                        lsyscache::typ::getTypeBinaryInputInfo(ptype).map_err(pctx)?;
+                    let mut finfo = fmgr_seams::fmgr_info::call(typreceive).map_err(pctx)?;
                     if is_null {
                         let v = types_fmgr::receive_function_call(
                             &mut finfo, None, typioparam, -1, pmcx,
-                        )?;
-                        copy_param_datum(pmcx, v, is_null, ptype)?
+                        )
+                        .map_err(pctx)?;
+                        copy_param_datum(pmcx, v, is_null, ptype).map_err(pctx)?
                     } else {
-                        let raw =
-                            pqformat::pq_getmsgbytes(input_message, plength as usize)?;
+                        let raw = pqformat::pq_getmsgbytes(input_message, plength as usize)
+                            .map_err(pctx)?;
                         // C's initReadOnlyStringInfo aliases the message buffer;
                         // no read-only StringInfo here, so copy the param bytes.
                         let mut pbuf = StringInfo::with_capacity_in(pmcx, plength as usize + 1)?;
@@ -552,26 +623,31 @@ pub fn exec_bind_message<'mcx>(
                             typioparam,
                             -1,
                             pmcx,
-                        )?;
+                        )
+                        .map_err(pctx)?;
                         if pbuf.cursor != pbuf.len() {
-                            return Err(ereport(ERROR)
-                                .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
-                                .errmsg(format!(
-                                    "incorrect binary data format in bind parameter {}",
-                                    paramno + 1
-                                ))
-                                .into_error()
-                                .into());
+                            return Err(pctx(Box::new(
+                                ereport(ERROR)
+                                    .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
+                                    .errmsg(format!(
+                                        "incorrect binary data format in bind parameter {}",
+                                        paramno + 1
+                                    ))
+                                    .into_error(),
+                            ))
+                            .into());
                         }
-                        copy_param_datum(pmcx, pval, is_null, ptype)?
+                        copy_param_datum(pmcx, pval, is_null, ptype).map_err(pctx)?
                     }
                 }
                 other => {
-                    return Err(ereport(ERROR)
-                        .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-                        .errmsg(format!("unsupported format code: {other}"))
-                        .into_error()
-                        .into());
+                    return Err(pctx(Box::new(
+                        ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                            .errmsg(format!("unsupported format code: {other}"))
+                            .into_error(),
+                    ))
+                    .into());
                 }
             };
 
