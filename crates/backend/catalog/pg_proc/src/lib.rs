@@ -903,8 +903,25 @@ pub fn ProcedureCreate<'mcx>(
 
     if a.languageValidator != InvalidOid {
         xact::CommandCounterIncrement()?;
+        // pg_proc.c ProcedureCreate: apply proconfig (GUC_ACTION_SAVE) around the
+        // validator only when check_function_bodies is on — applying it when off
+        // would create dump ordering hazards (a SET clause may reference
+        // not-yet-created objects).
+        let set_items = if guc_tables::vars::check_function_bodies.read() {
+            a.proconfig.filter(|items| !items.is_empty())
+        } else {
+            None
+        };
+        let mut save_nestlevel = 0;
+        if let Some(items) = set_items {
+            save_nestlevel = guc_seams::new_guc_nest_level::call();
+            guc_seams::process_guc_array_secdef::call(items)?;
+        }
         let mut flinfo = fmgr_core::fmgr_info(a.languageValidator)?;
         types_fmgr::function_call1_coll(&mut flinfo, InvalidOid, Datum::from_oid(retval))?;
+        if set_items.is_some() {
+            guc_seams::at_eoxact_guc::call(true, save_nestlevel)?;
+        }
     }
     // ensure that stats are dropped if transaction aborts
     if !is_update {
