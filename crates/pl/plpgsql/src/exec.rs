@@ -221,6 +221,9 @@ pub struct FrameShared {
     pub sig: String,
     pub stmt: core::cell::Cell<Option<(i32, &'static str)>>,
     pub text: core::cell::Cell<Option<&'static str>>,
+    // err_var: its declaration lineno wins over the statement's
+    // (plpgsql_exec_error_callback, pl_exec.c).
+    pub var_lineno: core::cell::Cell<Option<i32>>,
 }
 
 enum CtxFrame {
@@ -255,7 +258,16 @@ impl FrameGuard {
         let line = spi_context_line(query, mode);
         let cb = {
             let line = line.clone();
+            let query = query.to_string();
             elog::push_emit_context_callback(Box::new(move |e| {
+                // _SPI_error_callback (spi.c): a positioned report becomes an
+                // internal-query cursor; otherwise a context line.
+                if let Some(p) = e.cursor_position.filter(|&p| p > 0) {
+                    e.cursor_position = None;
+                    e.internal_position = Some(p);
+                    e.internal_query = Some(query.clone());
+                    return;
+                }
                 e.add_context_line(line.clone());
             }))
         };
@@ -390,6 +402,7 @@ impl<'a> Estate<'a> {
                 sig: func.fn_signature.clone(),
                 stmt: core::cell::Cell::new(None),
                 text: core::cell::Cell::new(None),
+                var_lineno: core::cell::Cell::new(None),
             }),
         }
     }
@@ -516,8 +529,13 @@ impl<'a> Estate<'a> {
             },
             used: &used,
         };
+        // Warnings emitted during parse/analysis (scanner escape warnings)
+        // internalize their cursor onto the expression text, as under C's
+        // _SPI_error_callback during SPI_prepare_extended.
+        let prep_frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
         let plan = spi::SPI_prepare_plpgsql(&expr.query, expr.parse_mode, &hooks, cursor_options)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
+        drop(prep_frame);
         if spi::SPI_keepplan(plan) != 0 {
             panic!("plpgsql exec_prepare_plan: SPI_keepplan failed");
         }
@@ -939,12 +957,16 @@ impl<'a> Estate<'a> {
         if !self.simple_cache.contains_key(&expr.expr_id) {
             // Write param types BEFORE compile: exec_init_expr reads the
             // slot types and bakes slot addresses.
+            // Planning errors (const-fold, etc.) carry the parse-mode context
+            // line: C wraps GetCachedPlan in _SPI_error_callback
+            // (spi.c SPI_plan_get_cached_plan).
             let cplan = plancache::GetCachedPlan(
                 psrc,
                 types_portal::ParamListHandle::NULL,
                 None,
                 types_portal::QueryEnvHandle::NULL,
-            )?;
+            )
+            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
             let built = (|| -> PgResult<Option<SimpleExpr>> {
                 let stmts = plancache::CachedPlanStmtList(cplan);
                 if stmts.len() != 1 {
@@ -1773,6 +1795,13 @@ impl<'a> Estate<'a> {
     fn exec_stmt_block(&mut self, block: &'a PlBlock) -> PgResult<i32> {
         self.frame.text.set(Some("during statement block local variable initialization"));
         for &dno in &block.initvarnos {
+            // estate->err_var = datum (exec_stmt_block): the context line
+            // carries the variable's declaration lineno.
+            self.frame.var_lineno.set(Some(match &self.func.datums[dno as usize] {
+                PlDatum::Var(v) => v.lineno,
+                PlDatum::Rec(r) => r.lineno,
+                _ => 0,
+            }));
             match &self.func.datums[dno as usize] {
                 PlDatum::Var(v) => {
                     if let Some(default_val) = &v.default_val {
@@ -1802,6 +1831,7 @@ impl<'a> Estate<'a> {
                 _ => {}
             }
         }
+        self.frame.var_lineno.set(None);
         self.frame.text.set(None);
 
         let rc = if let Some(exc) = &block.exceptions {
@@ -2345,6 +2375,26 @@ impl<'a> Estate<'a> {
         }
     }
 
+    // The strict_multi_assignment report (pl_exec.c:7286-7297); Err only at
+    // ERROR level, WARNING is emitted and execution continues.
+    fn strict_multiassignment_report(
+        &self,
+        level: types_error::ErrorLevel,
+    ) -> PgResult<()> {
+        let b = elog::ereport(level)
+            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("number of source and target fields in assignment does not match")
+            .errdetail(format!(
+                "strict_multi_assignment check of {} is active.",
+                if level == ERROR { "extra_errors" } else { "extra_warnings" }
+            ))
+            .errhint("Make sure the query returns the exact list of columns.");
+        if level == ERROR {
+            return Err(Box::new(b.into_error()));
+        }
+        b.finish(types_error::ErrorLocation::new("pl_exec.c", 0, "exec_move_row_from_fields"))
+    }
+
     // exec_move_row_from_fields REC-target arm: a RECORD rec adopts the
     // source shape; a named-composite rec coerces field-by-field onto its
     // declared tupdesc (source read positionally, dropped columns skipped on
@@ -2385,6 +2435,11 @@ impl<'a> Estate<'a> {
         let dst = RecDesc::from_tupdesc(&var_td);
         let vtd_natts = dst.types.len();
         let td_natts = srcdesc.types.len();
+        // strict_multi_assignment reads the GUCs at execution
+        // (pl_exec.c:7196-7202); active only with a source tupdesc, which
+        // this arm always has.
+        let sma_level =
+            crate::handler::extra_checks_level(crate::comp::XCHECK_STRICTMULTIASSIGNMENT)?;
         let mut newvalues = vec![Datum::null(); vtd_natts];
         let mut newnulls = vec![true; vtd_natts];
         let mut anum = 0usize;
@@ -2400,6 +2455,9 @@ impl<'a> Estate<'a> {
                 anum += 1;
                 r
             } else {
+                if let Some(level) = sma_level {
+                    self.strict_multiassignment_report(level)?;
+                }
                 (Datum::null(), true, UNKNOWNOID, -1)
             };
             let v = self.exec_cast_value(
@@ -2413,6 +2471,16 @@ impl<'a> Estate<'a> {
             newvalues[fnum] =
                 self.copy_to_datum_ctx(v, isnull, dst.typlens[fnum], dst.typbyvals[fnum])?;
             newnulls[fnum] = isnull;
+        }
+        // Unassigned source attributes, dropped columns skipped
+        // (pl_exec.c:7311-7331).
+        if let Some(level) = sma_level {
+            while anum < td_natts && srcdesc.dropped[anum] {
+                anum += 1;
+            }
+            if anum < td_natts {
+                self.strict_multiassignment_report(level)?;
+            }
         }
         self.datums[recno as usize] = DatumVal::Rec(Some(RecValue {
             desc: dst,
@@ -2836,8 +2904,14 @@ impl<'a> Estate<'a> {
                 || tag == types_portal::CMDTAG_MERGE
         });
 
+        // too_many_rows extra check reads the GUCs at execution, not compile
+        // (pl_exec.c:4217-4220).
+        let too_many_rows_level = crate::handler::extra_checks_level(
+            crate::comp::XCHECK_TOOMANYROWS,
+        )?;
+
         let tcount: i64 = if into {
-            if strict || mod_stmt {
+            if strict || mod_stmt || too_many_rows_level.is_some() {
                 2
             } else {
                 1
@@ -2908,16 +2982,26 @@ impl<'a> Estate<'a> {
                 self.move_row_null(target, tuptab)?;
                 let _ = spi::SPI_freetuptable(tuptab);
             } else {
-                if n > 1 && (strict || mod_stmt) {
-                    let _ = spi::SPI_freetuptable(tuptab);
-                    let mut b = elog::ereport(ERROR)
+                if n > 1 && (strict || mod_stmt || too_many_rows_level.is_some()) {
+                    // errlevel per pl_exec.c:4404: strict/mod_stmt force
+                    // ERROR; otherwise the extra-check level applies.
+                    let errlevel = if strict || mod_stmt {
+                        ERROR
+                    } else {
+                        too_many_rows_level.expect("guarded by is_some")
+                    };
+                    let mut b = elog::ereport(errlevel)
                         .errcode(types_error::ERRCODE_TOO_MANY_ROWS)
                         .errmsg("query returned more than one row")
                         .errhint("Make sure the query returns a single row, or use LIMIT 1.");
                     if let Some(d) = self.format_expr_params(expr)? {
                         b = b.errdetail_internal(format!("parameters: {d}"));
                     }
-                    return Err(Box::new(b.into_error()));
+                    if errlevel == ERROR {
+                        let _ = spi::SPI_freetuptable(tuptab);
+                        return Err(Box::new(b.into_error()));
+                    }
+                    b.finish(types_error::ErrorLocation::new("pl_exec.c", 0, "exec_stmt_execsql"))?;
                 }
                 self.move_row_from_tuptable(target, tuptab, 0)?;
                 let _ = spi::SPI_freetuptable(tuptab);
@@ -3151,6 +3235,10 @@ impl<'a> Estate<'a> {
     ) -> PgResult<()> {
         let (desc, _src) = self.rec_desc_of(tuptab)?;
         let natts = desc.types.len();
+        // strict_multi_assignment over the ROW arm (pl_exec.c:7196-7202,
+        // 7386-7411).
+        let sma_level =
+            crate::handler::extra_checks_level(crate::comp::XCHECK_STRICTMULTIASSIGNMENT)?;
         let mut anum = 0usize;
         for &dno in varnos {
             while anum < natts && desc.dropped[anum] {
@@ -3164,9 +3252,20 @@ impl<'a> Estate<'a> {
                 anum += 1;
                 r
             } else {
+                if let Some(level) = sma_level {
+                    self.strict_multiassignment_report(level)?;
+                }
                 (Datum::null(), true, UNKNOWNOID, -1)
             };
             self.exec_assign_value(dno, v, isnull, vt, vm)?;
+        }
+        if let Some(level) = sma_level {
+            while anum < natts && desc.dropped[anum] {
+                anum += 1;
+            }
+            if anum < natts {
+                self.strict_multiassignment_report(level)?;
+            }
         }
         Ok(())
     }
@@ -3514,8 +3613,10 @@ impl<'a> Estate<'a> {
         let dst = RecDesc::from_tupdesc(self.tuple_store_desc.as_ref().expect("initialized"));
 
         let ctx_query;
+        let ctx_mode;
         let rc = if let Some(query) = query {
             ctx_query = query.query.clone();
+            ctx_mode = query.parse_mode;
             self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
             self.exec_run_select(query, 0)?
         } else {
@@ -3530,6 +3631,7 @@ impl<'a> Estate<'a> {
             let querystr = self.convert_value_to_string(qv, restype)?;
             self.exec_eval_cleanup();
             ctx_query = querystr.clone();
+            ctx_mode = parser_seams::RawParseMode::RAW_PARSE_DEFAULT;
             let (ptypes, pvalues, pnulls) = self.exec_eval_using_params(params)?;
             let _frame =
                 FrameGuard::push_spi(&querystr, parser_seams::RawParseMode::RAW_PARSE_DEFAULT);
@@ -3550,9 +3652,16 @@ impl<'a> Estate<'a> {
                 spi::SPI_OK_UTILITY => "UTILITY",
                 _ => "SQL",
             };
-            return Err(exec_err(
-                types_error::ERRCODE_SYNTAX_ERROR,
-                format!("{tag} query does not return tuples"),
+            // C raises this inside _SPI_execute_plan under
+            // _SPI_error_callback (spi.c:2552-2570): the query rides along
+            // as an "SQL statement" context line.
+            return Err(spi_ctx_err(
+                exec_err(
+                    types_error::ERRCODE_SYNTAX_ERROR,
+                    format!("{tag} query does not return tuples"),
+                ),
+                &ctx_query,
+                ctx_mode,
             ));
         };
 
@@ -3650,6 +3759,9 @@ impl<'a> Estate<'a> {
         let cursor = spi::SPI_cursor_open(curname, plan, &values, &nulls, self.readonly_func)
             .map_err(|e| spi_ctx_err(e, &query.query, query.parse_mode))?;
         if curname.is_none() {
+            // Verify assignability before storing the portal name
+            // (pl_exec.c:4803-4807 -> exec_check_assignable).
+            self.exec_check_assignable(curvar)?;
             let name = cursor.portal.borrow().name.as_str().to_string();
             self.assign_text_var(curvar, &name)?;
         }
@@ -3686,6 +3798,8 @@ impl<'a> Estate<'a> {
             let portal =
                 self.exec_dynquery_with_params(dq, params, curname.as_deref(), cursor_options)?;
             if curname.is_none() {
+                // pl_exec.c:4727-4730.
+                self.exec_check_assignable(curvar)?;
                 let name = portal.borrow().name.as_str().to_string();
                 self.assign_text_var(curvar, &name)?;
             }
@@ -4079,9 +4193,14 @@ fn frame_context_line(estate: &Estate<'_>) -> String {
 
 fn frame_context_line_of(frame: &FrameShared) -> String {
     let sig = &frame.sig;
+    // err_var lineno wins over err_stmt's (plpgsql_exec_error_callback).
+    let lineno = match frame.var_lineno.get() {
+        Some(l) => Some(l),
+        None => frame.stmt.get().map(|(l, _)| l),
+    };
     if let Some(t) = frame.text.get() {
-        match frame.stmt.get() {
-            Some((lineno, _)) if lineno > 0 => {
+        match lineno {
+            Some(lineno) if lineno > 0 => {
                 format!("PL/pgSQL function {sig} line {lineno} {t}")
             }
             _ => format!("PL/pgSQL function {sig} {t}"),

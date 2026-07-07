@@ -151,11 +151,12 @@ fn plpgsql_compile(
         call_expr,
     )?);
     let entry = FuncCacheEntry { func, use_count: Rc::new(core::cell::Cell::new(0)) };
-    if !for_validator {
-        FUNC_CACHE.with(|c| {
-            c.borrow_mut().insert(key, entry.clone());
-        });
-    }
+    // Validator compiles are cached too (funccache.c cached_function_compile
+    // has no validator carve-out): the CREATE-time compile is the one the
+    // first call reuses, so compile-time messages fire once, at CREATE.
+    FUNC_CACHE.with(|c| {
+        c.borrow_mut().insert(key, entry.clone());
+    });
     Ok(entry)
 }
 
@@ -405,11 +406,21 @@ fn do_compile(
         )));
     }
     let mut comp = CompState::new();
+    comp.print_strict_params = print_strict_params_guc()?;
+    // Only promote extra warnings and errors at CREATE FUNCTION time
+    // (pl_comp.c:249-250).
+    if for_validator {
+        comp.extra_warnings = plpgsql_extra_checks("plpgsql.extra_warnings")?;
+        comp.extra_errors = plpgsql_extra_checks("plpgsql.extra_errors")?;
+    }
     // Outermost level: named after the function; holds params and FOUND.
     comp.ns_push_label(Some(&proc.proname), crate::gram::LABEL_BLOCK);
 
     let mut fn_argvarnos = Vec::with_capacity(proc.argtypes.len());
     let mut fn_arg_is_input = Vec::with_capacity(proc.argtypes.len());
+    // fn_signature is format_procedure(fn_oid) (pl_comp.c:240) — declared
+    // pg_proc types, not the resolved instantiation.
+    let mut declared_argtypes: Vec<Oid> = Vec::new();
     let mut out_param_varno: Dno = -1;
     let mut new_varno: Dno = -1;
     let mut old_varno: Dno = -1;
@@ -503,6 +514,7 @@ fn do_compile(
         const PROARGMODE_INOUT: i8 = b'b' as i8;
         const PROARGMODE_VARIADIC: i8 = b'v' as i8;
         const PROARGMODE_TABLE: i8 = b't' as i8;
+        declared_argtypes = proc.argtypes.clone();
         funcapi::cfunc_resolve_polymorphic_argtypes(
             &mut proc.argtypes,
             &proc.argmodes,
@@ -641,12 +653,26 @@ fn do_compile(
         fn_is_trigger: is_dml_trigger,
         out_param_varno,
         scratch: scan_cx.mcx(),
+        last_endtoken_loc: -1,
+    };
+    // function_parse_error_transpose runs for every elevel via the
+    // validator's error-context callback (pg_proc.c:1004); warnings emitted
+    // mid-parse (shadowing, scanner escape warnings) transpose here since
+    // they never reach attach_compile_context.
+    let _emit_guard = if for_validator {
+        let cb_prosrc = proc.prosrc.clone();
+        Some(EmitCbGuard(elog::push_emit_context_callback(Box::new(move |e| {
+            pg_proc::function_parse_error_transpose(e, &cb_prosrc);
+        }))))
+    } else {
+        None
     };
     let parse_result = parser.parse_function_body();
     let latest_line = parser.sc.latest_lineno();
     let mut action = parse_result.map_err(|e| {
         attach_compile_context(e, &proc.proname, latest_line, for_validator, &proc.prosrc)
     })?;
+    drop(_emit_guard);
 
     // pl_comp.c:691-693: OUT params / VOID / SETOF may fall off the end.
     if out_param_varno >= 0 || rettypeid == VOIDOID || proc.retset {
@@ -654,8 +680,7 @@ fn do_compile(
     }
 
     // format_procedure covers input args only (proargtypes).
-    let sig_argtypes: Vec<Oid> = proc
-        .argtypes
+    let sig_argtypes: Vec<Oid> = declared_argtypes
         .iter()
         .zip(fn_arg_is_input.iter().chain(std::iter::repeat(&true)))
         .filter_map(|(&t, &is_in)| is_in.then_some(t))
@@ -713,6 +738,64 @@ fn add_dummy_return(action: &mut PlBlock, out_param_varno: Dno, nstatements: &mu
     if !matches!(action.body.last(), Some(PlStmt::Return { .. })) {
         *nstatements += 1;
         action.body.push(PlStmt::Return { lineno: 0, expr: None, retvarno: out_param_varno });
+    }
+}
+
+// plpgsql_extra_checks_check_hook (pl_handler.c:61-104) applied to the
+// SET-created placeholder at compile time; an unset name is C's default
+// "none". Invalid tokens were accepted by the placeholder SET, so they
+// contribute nothing here instead of failing.
+fn plpgsql_extra_checks(guc_name: &str) -> PgResult<u32> {
+    let Some(v) = guc::GetConfigOption(guc_name, true, false)? else {
+        return Ok(0);
+    };
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("all") {
+        return Ok(crate::comp::XCHECK_ALL);
+    }
+    if v.eq_ignore_ascii_case("none") {
+        return Ok(0);
+    }
+    let mut checks = 0u32;
+    for tok in v.split(',') {
+        let tok = tok.trim();
+        if tok.eq_ignore_ascii_case("shadowed_variables") {
+            checks |= crate::comp::XCHECK_SHADOWVAR;
+        } else if tok.eq_ignore_ascii_case("too_many_rows") {
+            checks |= crate::comp::XCHECK_TOOMANYROWS;
+        } else if tok.eq_ignore_ascii_case("strict_multi_assignment") {
+            checks |= crate::comp::XCHECK_STRICTMULTIASSIGNMENT;
+        }
+    }
+    Ok(checks)
+}
+
+// The runtime extra-check level for one PLPGSQL_XCHECK bit: extra_errors
+// wins over extra_warnings (pl_exec.c:4217-4220, 7196-7202); None means the
+// check is off.
+pub(crate) fn extra_checks_level(mask: u32) -> PgResult<Option<types_error::ErrorLevel>> {
+    if plpgsql_extra_checks("plpgsql.extra_errors")? & mask != 0 {
+        return Ok(Some(ERROR));
+    }
+    if plpgsql_extra_checks("plpgsql.extra_warnings")? & mask != 0 {
+        return Ok(Some(types_error::WARNING));
+    }
+    Ok(None)
+}
+
+// plpgsql_print_strict_params: bool GUC via the placeholder lane
+// (check_asserts precedent); C's default is false.
+fn print_strict_params_guc() -> PgResult<bool> {
+    Ok(guc::GetConfigOption("plpgsql.print_strict_params", true, false)?.is_some_and(|v| {
+        matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "true" | "yes" | "1" | "t" | "y")
+    }))
+}
+
+struct EmitCbGuard(u64);
+
+impl Drop for EmitCbGuard {
+    fn drop(&mut self) {
+        elog::pop_emit_context_callback(self.0);
     }
 }
 
@@ -869,6 +952,9 @@ fn plpgsql_inline_handler(
 fn compile_inline(src: &str) -> PgResult<PlFunction> {
     let func_name = "inline_code_block";
     let mut comp = CompState::new();
+    // print_strict_params follows the GUC even inline (pl_comp.c:790); the
+    // extra checks stay 0 (pl_comp.c:796-797).
+    comp.print_strict_params = print_strict_params_guc()?;
     comp.ns_push_label(Some(func_name), crate::gram::LABEL_BLOCK);
     let found_varno = comp.build_variable(
         "found",
@@ -891,6 +977,7 @@ fn compile_inline(src: &str) -> PgResult<PlFunction> {
         fn_is_trigger: false,
         out_param_varno: -1,
         scratch: scan_cx.mcx(),
+        last_endtoken_loc: -1,
     };
     let parse_result = parser.parse_function_body();
     let latest_line = parser.sc.latest_lineno();
