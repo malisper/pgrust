@@ -26,5 +26,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 xact = { path = "../../access/transam/xact" }
 table = { path = "../../access/table/table" }
 lmgr = { path = "../../storage/lmgr/lmgr" }
+pg_inherits = { path = "../../catalog/pg_inherits" }
+syscache_seams = { path = "../../utils/cache/syscache_seams" }
 nodes_core = { path = "../../nodes/nodes_core" }
 rewrite_handler = { path = "../../rewrite/rewrite_handler" }

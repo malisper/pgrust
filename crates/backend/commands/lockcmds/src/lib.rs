@@ -1,5 +1,4 @@
 #![allow(non_snake_case)]
-// lockcmds.c: inheritance children (find_all_inheritors) are loud.
 use mcx::Mcx;
 use types_core::{
     InvalidOid, Oid, RELPERSISTENCE_TEMP, XACT_FLAGS_ACCESSEDTEMPNAMESPACE,
@@ -11,12 +10,6 @@ use types_nodes::parsenodes::{LockStmt, ObjectType, Query};
 use types_nodes::Node;
 use types_rel::{NoLock, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
 use types_storage::{AccessShareLock, RowExclusiveLock, LOCKMODE};
-
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: lockcmds.c {what}")
-}
 
 pub fn LockTableCommand<'mcx>(mcx: Mcx<'mcx>, lockstmt: &LockStmt<'mcx>) -> PgResult<()> {
     for cell in lockstmt.relations.iter() {
@@ -43,7 +36,7 @@ pub fn LockTableCommand<'mcx>(mcx: Mcx<'mcx>, lockstmt: &LockStmt<'mcx>) -> PgRe
             let mut ancestor_views: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
             LockViewRecurse(mcx, reloid, mode, lockstmt.nowait, &mut ancestor_views)?;
         } else if recurse {
-            LockTableRecurse(mcx, reloid)?;
+            LockTableRecurse(mcx, reloid, mode, lockstmt.nowait)?;
         }
     }
     Ok(())
@@ -139,7 +132,7 @@ impl<'a, 'mcx> LockViewRecurseCtx<'a, 'mcx> {
             if relkind == RELKIND_VIEW {
                 LockViewRecurse(self.mcx, relid, self.lockmode, self.nowait, self.ancestor_views)?;
             } else if rte.inh {
-                LockTableRecurse(self.mcx, relid)?;
+                LockTableRecurse(self.mcx, relid, self.lockmode, self.nowait)?;
             }
         }
         nodes_core::query_tree_walker(query, self, nodes_core::QTW_IGNORE_JOINALIASES)
@@ -189,14 +182,37 @@ pub fn LockViewRecurse<'mcx>(
     view.close(NoLock)
 }
 
-// find_all_inheritors is unported: with no children the C loop is a no-op, so
-// only rels that actually have children (relhassubclass) go loud.
-fn LockTableRecurse<'mcx>(mcx: Mcx<'mcx>, reloid: Oid) -> PgResult<()> {
-    let rel = table::table_open(mcx, reloid, NoLock)?;
-    let has_children = rel.rd_rel.relhassubclass;
-    rel.close(NoLock)?;
-    if has_children {
-        unported("LockTableRecurse: find_all_inheritors (inheritance/partition lane)");
+// Children are locked without their own ACL check: permission on the parent
+// suffices (lockcmds.c LockTableRecurse).
+fn LockTableRecurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    reloid: Oid,
+    lockmode: LOCKMODE,
+    nowait: bool,
+) -> PgResult<()> {
+    let children = pg_inherits::find_all_inheritors(mcx, reloid, NoLock)?;
+    for &childreloid in children.iter() {
+        if childreloid == reloid {
+            continue;
+        }
+        if !nowait {
+            lmgr::LockRelationOid(childreloid, lockmode)?;
+        } else if !lmgr::ConditionalLockRelationOid(childreloid, lockmode)? {
+            let Some(relname) = lsyscache::get_rel_name(mcx, childreloid)? else {
+                continue;
+            };
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    format!("could not obtain lock on relation \"{relname}\""),
+                )
+                .with_sqlstate(ERRCODE_LOCK_NOT_AVAILABLE),
+            ));
+        }
+        if !syscache_seams::search_syscache_exists_reloid::call(childreloid)? {
+            lmgr::UnlockRelationOid(childreloid, lockmode)?;
+            continue;
+        }
     }
     Ok(())
 }
