@@ -1257,6 +1257,23 @@ pub fn exec_modify_table<'mcx>(
                             mt, estate, cmd, old, Some(rslot), plan_slot,
                         )?;
                         if let Some(oid) = old {
+                            // C ExecOnConflictUpdate (nodeModifyTable.c):
+                            // the RETURNING slot may hold by-reference OLD
+                            // Datums (e.g. o.ctid) that alias the existing
+                            // slot's own storage; materialize before
+                            // clearing existing or those Datums dangle.
+                            let has_old = mt
+                                .rel()
+                                .project_returning
+                                .as_deref()
+                                .is_some_and(|st| st.has_old());
+                            if has_old {
+                                let mcx = estate.es_query_cxt;
+                                exectuples::exec_materialize_slot(
+                                    &mut estate.es_tupleTable[out.0 as usize],
+                                    mcx,
+                                )?;
+                            }
                             clear_slot(estate, oid);
                         }
                         return Ok(Some(out));

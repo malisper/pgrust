@@ -1357,7 +1357,10 @@ pub fn executor_errposition(estate: Option<&EStateData<'_>>, location: i32) -> i
         return 0;
     };
     let prefix = &src.as_bytes()[..(location as usize).min(src.len())];
-    mbutils_seams::pg_mbstrlen_with_len::call(prefix) + 1
+    // Defensive fallback: not yet wired into a real ereport() call, so an
+    // encoding error here (prefix is source text, always valid in practice)
+    // has no error-reporting path of its own to feed into.
+    mbutils_seams::pg_mbstrlen_with_len::call(prefix).unwrap_or(location) + 1
 }
 
 #[cfg(test)]
