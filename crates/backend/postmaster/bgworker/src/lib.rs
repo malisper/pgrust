@@ -495,6 +495,19 @@ pub fn RegisterDynamicBackgroundWorker(
                         slotno as i32,
                         generation,
                     );
+                    if pid == 0 {
+                        // Loud by design: a pool miss is a C-parity-preserving
+                        // slow path (the postmaster still starts the worker),
+                        // but sustained misses mean the pool is undersized or
+                        // broken.
+                        let _ = report(
+                            LOG,
+                            format!(
+                                "parallel worker pool empty; deferring \"{}\" to postmaster start",
+                                worker.bgw_name
+                            ),
+                        );
+                    }
                     if pid != 0 {
                         let _ = report(
                             DEBUG1,

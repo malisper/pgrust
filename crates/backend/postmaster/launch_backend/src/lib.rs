@@ -468,8 +468,24 @@ pub mod wpool {
     }
 
     /// parallel_pool_dispatch seam impl. Runs on the registering backend's
-    /// thread, under the bgworker registry lock.
+    /// thread, under the bgworker registry lock. A panic here must not unwind
+    /// into the registry critical section (it would leak the slot's
+    /// parallel_register_count admission charge): contain it and report a
+    /// miss so the caller takes the postmaster spawn path.
     pub fn dispatch(slot: i32, generation: u64) -> i32 {
+        match std::panic::catch_unwind(|| dispatch_inner(slot, generation)) {
+            Ok(pid) => pid,
+            Err(_) => {
+                eprintln!(
+                    "wpool: parallel worker pool dispatch panicked (slot {slot}); \
+                     falling back to postmaster launch"
+                );
+                0
+            }
+        }
+    }
+
+    fn dispatch_inner(slot: i32, generation: u64) -> i32 {
         loop {
             let Some(sb) = available().pop() else { return 0 };
             POPULATION.fetch_sub(1, Relaxed);

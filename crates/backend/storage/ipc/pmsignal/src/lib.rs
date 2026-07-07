@@ -153,9 +153,11 @@ pub fn GetQuitSignalReason() -> QuitSignalReason {
     }
 }
 
-// Postmaster-only, so no locking (as in C).
+// C is postmaster-only; here the P-pool also assigns slots from the
+// registering backend's thread — bound against the shared init-time size
+// (immutable after PMSignalShmemInit), mutual exclusion via pmchild's lock.
 pub fn MarkPostmasterChildSlotAssigned(slot: i32) -> PgResult<()> {
-    debug_assert!(slot > 0 && slot <= NUM_CHILD_FLAGS.get());
+    debug_assert!(slot > 0 && slot <= state().num_child_flags);
     let flag = &state().PMChildFlags[(slot - 1) as usize];
     if flag.load(Acquire) != PM_CHILD_UNUSED {
         return Err(Box::new(PgError::new(
@@ -168,7 +170,7 @@ pub fn MarkPostmasterChildSlotAssigned(slot: i32) -> PgResult<()> {
 }
 
 pub fn MarkPostmasterChildSlotUnassigned(slot: i32) -> bool {
-    debug_assert!(slot > 0 && slot <= NUM_CHILD_FLAGS.get());
+    debug_assert!(slot > 0 && slot <= state().num_child_flags);
     let flag = &state().PMChildFlags[(slot - 1) as usize];
     // May already be UNUSED (called twice for a crashed child): no assert.
     let result = flag.load(Acquire) == PM_CHILD_ASSIGNED;
@@ -177,7 +179,7 @@ pub fn MarkPostmasterChildSlotUnassigned(slot: i32) -> bool {
 }
 
 pub fn IsPostmasterChildWalSender(slot: i32) -> bool {
-    debug_assert!(slot > 0 && slot <= NUM_CHILD_FLAGS.get());
+    debug_assert!(slot > 0 && slot <= state().num_child_flags);
     state().PMChildFlags[(slot - 1) as usize].load(Acquire) == PM_CHILD_WALSENDER
 }
 
