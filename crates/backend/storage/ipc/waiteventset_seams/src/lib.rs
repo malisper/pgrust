@@ -51,3 +51,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn wakeup_other_proc(pid: i32)
 );
+
+seam_core::seam!(
+    // Retained-thread pid refresh (wretain): re-key this thread's wakeup-pipe
+    // registry entry to the current MyProcPid.
+    pub fn rekey_wakeup_registry()
+);

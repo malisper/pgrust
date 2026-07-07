@@ -259,8 +259,13 @@ fn run_child_task(
     if init_small::wretain::warm_claim() {
         // Retained thread (wretain): the once-per-thread half (wait-event
         // pipe, latch wait set, sigmask, SIGQUIT disposition) survived the
-        // park; only the per-task pid/start-time identity refreshes.
+        // park; only the per-task pid/start-time identity refreshes. The
+        // wakeup registry is keyed by task pid (WakeupOtherProc is SetLatch's
+        // cross-thread wake), so it must follow the fresh synthetic pid —
+        // a stale key silently drops every wake to this thread (P1 wedge:
+        // repeated parallel queries, workers asleep in shm_mq/CV waits).
         miscinit::InitProcessGlobals(child_pid);
+        waiteventset_seams::rekey_wakeup_registry::call();
     } else {
         miscinit::InitPostmasterChild(child_pid)
             .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
