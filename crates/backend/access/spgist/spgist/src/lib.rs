@@ -1,6 +1,7 @@
 //! SP-GiST access method (spgutils.c + spgdoinsert.c + spginsert.c +
 //! spgscan.c + spgvacuum.c; spgxlog.c redo lives in spgist_xlog, spgbuild in
-//! spgist_build). LOUD lanes: ordered/KNN scans, spgbuildempty (unlogged).
+//! spgist_build). LOUD lanes: spgbuildempty (unlogged), polymorphic leaf
+//! types.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
