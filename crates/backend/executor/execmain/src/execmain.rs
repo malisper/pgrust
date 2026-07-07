@@ -176,6 +176,7 @@ fn skeleton_rebind_tree<'mcx>(
 // here: permission checks, param restamp, snapshot registration, relation
 // re-pins, scan re-arm. false = param shape/type mismatch (caller builds
 // fresh; that compile re-runs C's checks and errors with C's texts).
+#[inline(never)]
 fn skeleton_rearm_exec(qd: &mut QueryDescData, exec: &mut ExecutorHandle) -> PgResult<bool> {
     // P1: C's InitPlan runs ExecCheckPermissions on every cached-plan
     // execution — reuse must too (REVOKE/SET ROLE between EXECUTEs).
@@ -262,6 +263,7 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
 
 // Park-side disarm on the QueryDesc's own executor: the eligibility gates and
 // per-run-state release of standard_executor_end's TLS-park branch, in place.
+#[inline(never)]
 fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
     if qd.cplan.is_null()
         || qd.operation != CmdType::CMD_SELECT
