@@ -11214,6 +11214,7 @@ dependencies = [
  "miscinit",
  "miscinit_seams",
  "namespace_seams",
+ "parallel_seams",
  "pg_database_seams",
  "pg_db_role_setting_seams",
  "pg_locale_seams",
