@@ -422,8 +422,13 @@ pub mod wpool {
     // join_announced_child. Tiny (<= pool size).
     static PARKED_ANNOUNCES: Mutex<Vec<pid_t>> = Mutex::new(Vec::new());
     // Bumped by flush_for_crash: shared memory is about to be reset, so a
-    // woken standby must abandon (not tear down) its retained identity.
+    // woken standby must abandon (not tear down) its retained identity. A
+    // standby compares against the value it captured before parking.
     static CRASH_EPOCH: AtomicU64 = AtomicU64::new(0);
+    // Bumped by every flush (reload + crash): a standby finishing a task
+    // after a flush must not re-park itself into the drained pool (its GUC
+    // prelude snapshot predates the reload; on crash the pool is dead).
+    static FLUSH_EPOCH: AtomicU64 = AtomicU64::new(0);
 
     fn available() -> std::sync::MutexGuard<'static, Vec<Standby>> {
         AVAILABLE.lock().unwrap_or_else(|e| e.into_inner())
@@ -472,6 +477,7 @@ pub mod wpool {
     /// respawns with a fresh postmaster GUC snapshot. Woken standbys with a
     /// retained identity release it against live shared memory.
     pub fn flush() {
+        FLUSH_EPOCH.fetch_add(1, Relaxed);
         let drained: Vec<Standby> = available().drain(..).collect();
         POPULATION.fetch_sub(drained.len() as i32, Relaxed);
     }
@@ -518,12 +524,17 @@ pub mod wpool {
         // so a rotation exit's announce joins this thread, while a park's
         // announce (marked) does not.
         let mut thread_key = spawn_pid;
+        // Crash epoch our retained identity was parked under; a bump between
+        // park and wake means the shared slots were reset out from under it.
+        let mut parked_crash_epoch = CRASH_EPOCH.load(Relaxed);
         loop {
             match rx.recv() {
                 Ok(task) => {
                     bgworker::gtrace("w.pool.task");
                     rekey_child_thread(thread_key, task.child_pid);
                     thread_key = task.child_pid;
+                    let pre_flush = FLUSH_EPOCH.load(Relaxed);
+                    let pre_crash = CRASH_EPOCH.load(Relaxed);
                     // §5 leak guard: a claimed standby must not carry a
                     // previous session's GUC bind.
                     debug_assert!(!guc::store::session_bound());
@@ -537,8 +548,14 @@ pub mod wpool {
                         task.startup_data,
                         None,
                     );
-                    let park_epoch = CRASH_EPOCH.load(Relaxed);
-                    if init_small::wretain::confirm_parked() {
+                    let parked = init_small::wretain::confirm_parked();
+                    if parked && FLUSH_EPOCH.load(Relaxed) != pre_flush {
+                        // The pool was flushed while we ran: do not re-park a
+                        // pre-flush prelude into the drained pool.
+                        release_retained_identity(pre_crash);
+                        break;
+                    }
+                    if parked {
                         // Zero-leak: a parked standby carries no session
                         // identity (GUC bind already dropped by its guard).
                         miscinit::ResetSessionIdentityForRetainedPark();
@@ -550,6 +567,7 @@ pub mod wpool {
                         ipc::reset_exit_state_for_retained_park();
                         let (tx2, rx2) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
                         POPULATION.fetch_add(1, Relaxed);
+                        parked_crash_epoch = pre_crash;
                         available().push(Standby {
                             pid: task.child_pid,
                             tx: tx2,
@@ -561,16 +579,18 @@ pub mod wpool {
                     // Rotation (retention off, task error, or partial park):
                     // release whatever the park arms retained, then exit; the
                     // reaper joins us through the announce.
-                    release_retained_identity(park_epoch);
+                    release_retained_identity(pre_crash);
                     break;
                 }
                 Err(_) => {
-                    // Retired while parked (maintain shrink / flush) or
-                    // never claimed: release any retained identity, drop our
-                    // reaper entry (nothing announced this wake), and exit.
-                    release_retained_identity(CRASH_EPOCH.load(Relaxed));
+                    // Retired while parked (maintain shrink / reload flush)
+                    // or never claimed: release any retained identity, drop
+                    // our reaper entry (nothing announced this wake), exit.
+                    // POPULATION was already decremented by whichever pop
+                    // dropped our channel (phase 1 double-decremented here,
+                    // inflating the pool by 2x per flush cycle).
+                    release_retained_identity(parked_crash_epoch);
                     init_small::wretain::clear_identity();
-                    POPULATION.fetch_sub(1, Relaxed);
                     let mut t =
                         super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(i) = t.iter().position(|(p, _)| *p == thread_key) {
@@ -582,15 +602,11 @@ pub mod wpool {
         }
     }
 
-    // Population note: a retiring standby that was parked is popped by
-    // maintain/flush (which decrement POPULATION), then wakes here and
-    // decrements again — but its park had incremented once beyond the
-    // dispatch decrement, so the count balances. A never-claimed retiree was
-    // only counted at spawn; maintain/flush's decrement plus this one would
-    // double-count, which the park/dispatch pairing prevents: every pop
-    // (dispatch, maintain, flush) decrements exactly once and every push
-    // (spawn, park) increments exactly once, and this arm runs only after a
-    // pop with no matching push.
+    // POPULATION invariant: every AVAILABLE push (spawn, park) is one
+    // increment; every pop (dispatch, maintain shrink, flush) is one
+    // decrement. The retiree's own decrement in standby_loop pairs with the
+    // pop that woke it, so the count stays balanced.
+    //
     // Ordering: sinval cleanup keys off MyProcNumber, which ProcKill clears,
     // so it must run first — same relative order proc_exit's LIFO gives them.
     fn release_retained_identity(park_epoch: u64) {
