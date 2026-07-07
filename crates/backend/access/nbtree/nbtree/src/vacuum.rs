@@ -83,14 +83,30 @@ pub fn btbulkdelete<'mcx>(
     let rel = info.index;
     let mut stats = stats.unwrap_or_default();
 
-    // C's PG_ENSURE_ERROR_CLEANUP: the slot is freed on the PgResult error
-    // path; a panic aborts the backend, so the leak C guards against is moot.
+    // C's PG_ENSURE_ERROR_CLEANUP as a Drop guard: thread-native panics
+    // UNWIND at the statement boundary (the backend thread survives), so a
+    // leaked cycle slot poisons every later vacuum of the index with
+    // "multiple active vacuums" — the sweep-219 autovacuum wedge.
     let cycleid = bt_start_vacuum(rel)?;
+    let _guard = BtVacuumGuard { rel };
     let res = btvacuumscan(mcx, info, &mut stats, Some(dead_items), None, cycleid);
-    bt_end_vacuum(rel);
     res?;
 
     Ok(stats)
+}
+
+// Guard module Drop: the cycle slot must clear on panic unwind or every
+// later vacuum of this index errors forever (nbtutils.c _bt_start_vacuum's
+// "multiple active vacuums"). Same pattern as ssi's BusyReset and wpool's
+// LocalLatchReleaseGuard.
+struct BtVacuumGuard<'a, 'mcx> {
+    rel: &'a Relation<'mcx>,
+}
+
+impl Drop for BtVacuumGuard<'_, '_> {
+    fn drop(&mut self) {
+        bt_end_vacuum(self.rel);
+    }
 }
 
 pub fn btbulkdelete_collect<'mcx>(
@@ -101,8 +117,8 @@ pub fn btbulkdelete_collect<'mcx>(
     let rel = info.index;
     let mut stats = IndexBulkDeleteResult::default();
     let cycleid = bt_start_vacuum(rel)?;
+    let _guard = BtVacuumGuard { rel };
     let res = btvacuumscan(mcx, info, &mut stats, None, Some(callback), cycleid);
-    bt_end_vacuum(rel);
     res?;
     Ok(stats)
 }
@@ -502,3 +518,4 @@ pub(crate) fn bt_update_posting<'s>(scx: Mcx<'s>, vacposting: &mut VacPosting<'s
     vacposting.itup = itup;
     Ok(())
 }
+
