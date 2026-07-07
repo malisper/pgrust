@@ -1872,6 +1872,11 @@ fn ATRewriteTable<'mcx>(
                 format!("verifying table \"{relname}\""),
             ))?;
         }
+        if newrel.is_some() {
+            // Tuples move during rewrite; tuple/page SIREAD locks must be
+            // promoted to a relation lock on the old heap.
+            predicate_seams::transfer_predicate_locks_to_heap_relation::call(&oldrel)?;
+        }
         let mut oldslot = if tab.rewrite > 0 {
             exectuples::make_tuple_table_slot(
                 mcx,

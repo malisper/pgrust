@@ -128,8 +128,16 @@ pub fn CheckTableForSerializableConflictIn(rel: &RelationData<'_>) -> PgResult<(
 
 // Gate lives in the engine: PredXact->SxactGlobalXmin, not this backend's
 // isolation level.
-pub fn TransferPredicateLocksToHeapRelation(_rel: &RelationData<'_>) -> PgResult<()> {
-    engine::TransferPredicateLocksToHeapRelation()
+pub fn TransferPredicateLocksToHeapRelation(rel: &RelationData<'_>) -> PgResult<()> {
+    let f = rel_fields(rel);
+    let heap_id = rel.rd_index.as_ref().map_or(f.rd_id, |ix| ix.indrelid);
+    engine::TransferPredicateLocksToHeapRelation(
+        f.db_oid,
+        f.rd_id,
+        heap_id,
+        f.uses_local_buffers,
+        f.is_index,
+    )
 }
 
 pub fn CheckForSerializableConflictIn(
