@@ -22,7 +22,8 @@ use types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
     BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber,
     SK_BT_DESC, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_NULLS_FIRST, SK_BT_PRIOR,
-    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_HEADER, SK_SEARCHNOTNULL,
+    SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER,
+    SK_ROW_MEMBER, SK_SEARCHNOTNULL,
 };
 use types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
 use types_snapshot::SnapshotData;
@@ -88,7 +89,11 @@ pub struct BtScanInsert {
     pub nextkey: bool,
     pub backward: bool,
     pub scantid: Option<ItemPointerData>,
+    // C BTScanInsertData.keysz: the compare prefix. _bt_mkscankey caps it at
+    // the source tuple's natts (truncated pivots) while all indnkeyatts
+    // entries stay initialized for _bt_keep_natts/_bt_load (`initialized`).
     keysz: usize,
+    initialized: usize,
     scankeys: [MaybeUninit<ScanKeyData>; INDEX_MAX_KEYS as usize],
 }
 
@@ -102,20 +107,37 @@ impl BtScanInsert {
             backward: false,
             scantid: None,
             keysz: 0,
+            initialized: 0,
             scankeys: [const { MaybeUninit::uninit() }; INDEX_MAX_KEYS as usize],
         }
     }
 
     #[inline]
     pub fn push(&mut self, key: ScanKeyData) {
-        self.scankeys[self.keysz].write(key);
-        self.keysz += 1;
+        self.scankeys[self.initialized].write(key);
+        self.initialized += 1;
+        self.keysz = self.initialized;
+    }
+
+    /// C `key->keysz = Min(indnkeyatts, tupnatts)` (_bt_mkscankey): shrink
+    /// the compare prefix below the initialized entry count.
+    #[inline]
+    pub fn set_keysz(&mut self, keysz: usize) {
+        debug_assert!(keysz <= self.initialized);
+        self.keysz = keysz;
+    }
+
+    #[inline]
+    pub fn keys_len(&self) -> usize {
+        self.initialized
     }
 
     #[inline]
     pub fn keys_mut(&mut self) -> &mut [ScanKeyData] {
-        // SAFETY: [0, keysz) written by push; MaybeUninit<T> is layout-T.
-        unsafe { core::slice::from_raw_parts_mut(self.scankeys.as_mut_ptr().cast(), self.keysz) }
+        // SAFETY: [0, initialized) written by push; MaybeUninit<T> is layout-T.
+        unsafe {
+            core::slice::from_raw_parts_mut(self.scankeys.as_mut_ptr().cast(), self.initialized)
+        }
     }
 }
 
@@ -616,7 +638,65 @@ pub(crate) fn bt_first(ctx: &mut ScanCtx<'_, '_>, dir: ScanDirection) -> PgResul
         debug_assert!(bkey.sk_attno as usize == i + 1);
 
         if bkey.sk_flags & SK_ROW_HEADER != 0 {
-            unported_phase2("row-comparison boundary keys (_bt_first)");
+            // Row comparison header: position with the member keys, already
+            // in insertion format (sk_func = 3-way comparison proc). A
+            // required >/>= (backwards: </<=) header is always the final
+            // startKeys[] entry.
+            let mut loosen_strat = false;
+            let mut tighten_strat = false;
+            // SAFETY: SK_ROW_HEADER contract (scankey.rs): sk_argument is the
+            // live SK_ROW_END-terminated subkey array.
+            unsafe {
+                let mut subkey = bkey.sk_argument.as_usize() as *const ScanKeyData;
+                debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+                debug_assert!((*subkey).sk_attno == bkey.sk_attno);
+                debug_assert!((*subkey).sk_flags & SK_ISNULL == 0);
+                debug_assert!((*subkey).sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) != 0);
+                debug_assert!((*subkey).sk_strategy == bkey.sk_strategy);
+                debug_assert!((*subkey).sk_strategy == strat_total);
+                debug_assert!(i == keysz - 1);
+                debug_assert!((*subkey).sk_flags & SK_ROW_END == 0);
+                inskey.push((*subkey).clone());
+                loop {
+                    subkey = subkey.add(1);
+                    debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+                    if (*subkey).sk_flags & SK_ISNULL != 0 {
+                        // NULL member: unsatisfiable, only earlier keys are
+                        // usable, under a more restrictive strategy.
+                        tighten_strat = true;
+                        break;
+                    }
+                    if (*subkey).sk_flags & (SK_BT_REQFWD | SK_BT_REQBKWD) == 0 {
+                        // Nonrequired member (index attribute gap): only
+                        // earlier keys are usable, as ">=" / "<=".
+                        loosen_strat = true;
+                        break;
+                    }
+                    debug_assert!((*subkey).sk_attno as usize == inskey.keys_len() + 1);
+                    debug_assert!((*subkey).sk_strategy == bkey.sk_strategy);
+                    inskey.push((*subkey).clone());
+                    if (*subkey).sk_flags & SK_ROW_END != 0 {
+                        break;
+                    }
+                }
+            }
+            debug_assert!(!(loosen_strat && tighten_strat));
+            if loosen_strat {
+                strat_total = match strat_total {
+                    BTLessStrategyNumber => BTLessEqualStrategyNumber,
+                    BTGreaterStrategyNumber => BTGreaterEqualStrategyNumber,
+                    other => other,
+                };
+            }
+            if tighten_strat {
+                strat_total = match strat_total {
+                    BTLessEqualStrategyNumber => BTLessStrategyNumber,
+                    BTGreaterEqualStrategyNumber => BTGreaterStrategyNumber,
+                    other => other,
+                };
+            }
+            // Row compare header is always the last startKeys[] key.
+            break;
         }
 
         let sk_func = if bkey.sk_subtype == rel.rd_opcintype[i] || bkey.sk_subtype == 0 {

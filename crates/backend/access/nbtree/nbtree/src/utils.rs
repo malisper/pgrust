@@ -15,9 +15,11 @@ use ::types_nbtree::{
 };
 use ::types_rel::Relation;
 use ::types_scan::scankey::{
-    BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL,
-    SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR, SK_BT_REQBKWD, SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL,
-    SK_ROW_HEADER, SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_DESC, SK_BT_NULLS_FIRST,
+    BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
+    BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy, ScanKeyData,
+    SK_BT_INDOPTION_SHIFT, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NEXT, SK_BT_PRIOR, SK_BT_REQBKWD,
+    SK_BT_REQFWD, SK_BT_SKIP, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER, SK_ROW_MEMBER,
+    SK_SEARCHARRAY, SK_SEARCHNULL, SK_BT_DESC, SK_BT_NULLS_FIRST,
 };
 use ::types_scan::sdir::{
     BackwardScanDirection, ForwardScanDirection, ScanDirection, ScanDirectionIsBackward,
@@ -35,7 +37,6 @@ use crate::itup::{
 };
 use crate::page::{bt_getbuf, bt_relbuf, page_item, page_opaque, page_special_off};
 use crate::search::{BtReadPageState, BtScanInsert};
-use crate::unported_phase2;
 
 const INVERT_COMPARE_RESULT: fn(i32) -> i32 = |r| if r < 0 { 1 } else { -r };
 const LOOK_AHEAD_REQUIRED_RECHECKS: i32 = 3;
@@ -1039,6 +1040,125 @@ unsafe fn bt_oppodir_checkkeys(
     Ok(true)
 }
 
+/// _bt_check_rowcompare (nbtutils.c): compare row members column-by-column;
+/// the deciding member's strategy and requiredness flags drive the result and
+/// continuescan, with the C NULL semantics (NULL member keys and NULL tuple
+/// values both fail the qual, ending the scan only when the required-direction
+/// flags say no later tuple can pass).
+///
+/// # Safety
+/// `header.sk_argument` is the live SK_ROW_END-terminated subkey array
+/// (scankey.rs contract); `tuple` as [`bt_checkkeys`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn bt_check_rowcompare(
+    header: &mut ScanKeyData,
+    tuple: ITup,
+    tupnatts: i32,
+    tupdesc: &TupleDescData<'_>,
+    dir: ScanDirection,
+    forcenonrequired: bool,
+    continuescan: &mut bool,
+    frame: &mut OrderProcFrame,
+) -> PgResult<bool> {
+    let first = header.sk_argument.as_usize() as *mut ScanKeyData;
+    let mut subkey = first;
+    let mut cmpresult: i32;
+
+    debug_assert!(header.sk_flags & SK_ROW_HEADER != 0);
+    debug_assert!((*subkey).sk_attno == header.sk_attno);
+    debug_assert!((*subkey).sk_strategy == header.sk_strategy);
+
+    loop {
+        debug_assert!((*subkey).sk_flags & SK_ROW_MEMBER != 0);
+
+        if (*subkey).sk_flags & SK_ISNULL != 0 {
+            // A NULL member key never matches (never the first member:
+            // preprocessing marks that qual unsatisfiable); all earlier
+            // members are required, so look one back for requiredness.
+            debug_assert!(subkey != first);
+            subkey = subkey.sub(1);
+            if forcenonrequired {
+                // treating scan's keys as non-required
+            } else if (*subkey).sk_flags & SK_BT_REQFWD != 0 && ScanDirectionIsForward(dir) {
+                *continuescan = false;
+            } else if (*subkey).sk_flags & SK_BT_REQBKWD != 0 && ScanDirectionIsBackward(dir) {
+                *continuescan = false;
+            }
+            return Ok(false);
+        }
+
+        if (*subkey).sk_attno as i32 > tupnatts {
+            // Truncated high-key attribute could hold any value on the page
+            // to the right: assume it passes.
+            debug_assert!(bt_tuple_is_pivot(tuple));
+            return Ok(true);
+        }
+
+        let mut is_null = false;
+        let datum = index_getattr(tuple, (*subkey).sk_attno, tupdesc, &mut is_null);
+
+        if is_null {
+            if forcenonrequired {
+                // treating scan's keys as non-required
+            } else if (*subkey).sk_flags & SK_BT_NULLS_FIRST != 0 {
+                // NULLs sort first: the lower limit of this attr's range; a
+                // required member ends a backward scan. The first member may
+                // also use its opposite-direction flag (safe only there).
+                let mut reqflags = SK_BT_REQBKWD;
+                if subkey == first {
+                    reqflags |= SK_BT_REQFWD;
+                }
+                if (*subkey).sk_flags & reqflags != 0 && ScanDirectionIsBackward(dir) {
+                    *continuescan = false;
+                }
+            } else {
+                // NULLs sort last: the upper limit; mirror-image of above.
+                let mut reqflags = SK_BT_REQFWD;
+                if subkey == first {
+                    reqflags |= SK_BT_REQBKWD;
+                }
+                if (*subkey).sk_flags & reqflags != 0 && ScanDirectionIsForward(dir) {
+                    *continuescan = false;
+                }
+            }
+            return Ok(false);
+        }
+
+        // Three-way comparison, not a bool operator.
+        let arg = (*subkey).sk_argument;
+        cmpresult = frame.cmp(&mut *subkey, datum, arg)?;
+        if (*subkey).sk_flags & SK_BT_DESC != 0 {
+            cmpresult = INVERT_COMPARE_RESULT(cmpresult);
+        }
+        if cmpresult != 0 {
+            break;
+        }
+        if (*subkey).sk_flags & SK_ROW_END != 0 {
+            break;
+        }
+        subkey = subkey.add(1);
+    }
+
+    // subkey is the deciding column (or the last on all-equal).
+    let result = match (*subkey).sk_strategy {
+        BTLessStrategyNumber => cmpresult < 0,
+        BTLessEqualStrategyNumber => cmpresult <= 0,
+        BTGreaterEqualStrategyNumber => cmpresult >= 0,
+        BTGreaterStrategyNumber => cmpresult > 0,
+        other => panic!("unexpected strategy number {other}"),
+    };
+
+    if !result && !forcenonrequired {
+        // Requiredness is judged at the deciding column.
+        if (*subkey).sk_flags & SK_BT_REQFWD != 0 && ScanDirectionIsForward(dir) {
+            *continuescan = false;
+        } else if (*subkey).sk_flags & SK_BT_REQBKWD != 0 && ScanDirectionIsBackward(dir) {
+            *continuescan = false;
+        }
+    }
+    Ok(result)
+}
+
 /// _bt_check_compare. const ADVANCE_NONREQUIRED folds the array-advance arm dead
 /// in the numArrayKeys==0 instantiation (inlines into bt_checkkeys::<false>).
 ///
@@ -1092,7 +1212,22 @@ unsafe fn bt_check_compare<const ADVANCE_NONREQUIRED: bool>(
         }
 
         if key.sk_flags & SK_ROW_HEADER != 0 {
-            unported_phase2("_bt_check_rowcompare (row comparison lane)");
+            // SAFETY: caller's contract; the walk stays within the header's
+            // SK_ROW_END-terminated subkey array.
+            if bt_check_rowcompare(
+                key,
+                tuple,
+                tupnatts,
+                tupdesc,
+                dir,
+                forcenonrequired,
+                continuescan,
+                frame,
+            )? {
+                *ikey += 1;
+                continue;
+            }
+            return Ok(false);
         }
 
         let mut is_null = false;
@@ -1902,5 +2037,9 @@ pub fn bt_mkscankey(rel: &Relation<'_>, itup: Option<ITup>) -> PgResult<BtScanIn
     if rel.rd_index.as_ref().is_some_and(|i| i.indnullsnotdistinct) {
         key.anynullkeys = false;
     }
+    // C: keysz = Min(indnkeyatts, tupnatts) — a truncated pivot compares only
+    // its untruncated prefix; the remaining entries stay initialized for the
+    // utility arms.
+    key.set_keysz((indnkeyatts as usize).min(tupnatts as usize));
     Ok(key)
 }

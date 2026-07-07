@@ -1,8 +1,9 @@
 // nodeIndexscan.c: Var-op-Const quals become ScanKeys at init (rule 5);
 // runtime keys (indexkey op expression, incl. SK_SEARCHARRAY arrays)
-// re-evaluate into the same ScanKeys at rescan. Non-amsearcharray array keys
-// and RowCompare loud-panic pending their lanes. EPQ arms loud-panic pending
-// EPQState.
+// re-evaluate into the same ScanKeys at rescan; RowCompare quals build a
+// SK_ROW_HEADER key over a state-owned subkey array (Const members only —
+// runtime row members loud-panic). Non-amsearcharray array keys loud-panic
+// pending their lanes. EPQ arms loud-panic pending EPQState.
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -29,8 +30,8 @@ use ::types_nodes::plannodes::IndexScan;
 use ::types_nodes::NodeTag;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::{
-    ScanKeyData, StrategyNumber, SK_ISNULL, SK_ORDER_BY, SK_SEARCHARRAY, SK_SEARCHNOTNULL,
-    SK_SEARCHNULL,
+    ScanKeyData, StrategyNumber, SK_ISNULL, SK_ORDER_BY, SK_ROW_END, SK_ROW_HEADER,
+    SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
 
@@ -659,12 +660,15 @@ fn scankey_case_unported(what: &str) -> ! {
 }
 
 /// `ExecIndexBuildScanKeys`, cases 1 (indexkey op Const), 2 (runtime key),
-/// 4 (amsearcharray ScalarArrayOp, Const or runtime array), and 5 (NullTest).
-/// RowCompare and non-amsearcharray ScalarArrayOp loud-panic (the planner
-/// only builds saop index quals on amsearcharray AMs — plancat sets it for
-/// btree only). `isorderby` is the ORDER BY (amcanorderbyop) leg: ordering-op
-/// strategy lookup + SK_ORDER_BY, cases 1 and 2 only. `runtime_keys` is
-/// shared across the indexqual and indexorderby calls (C's resized array).
+/// 3 (RowCompare over Const members), 4 (amsearcharray ScalarArrayOp, Const
+/// or runtime array), and 5 (NullTest). Runtime (non-Const) row members and
+/// non-amsearcharray ScalarArrayOp loud-panic (the planner only builds saop
+/// index quals on amsearcharray AMs — plancat sets it for btree only).
+/// `isorderby` is the ORDER BY (amcanorderbyop) leg: ordering-op strategy
+/// lookup + SK_ORDER_BY, cases 1 and 2 only. `runtime_keys` is shared across
+/// the indexqual and indexorderby calls (C's resized array). SK_ROW_HEADER
+/// keys point into a flat SK_ROW_MEMBER buffer leaked into `mcx`, freed with
+/// the query context exactly like C's palloc'd subkey array.
 pub fn exec_index_build_scan_keys<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
@@ -679,11 +683,100 @@ pub fn exec_index_build_scan_keys<'mcx>(
     scan_keys
         .try_reserve_exact(quals.len())
         .map_err(|_| Box::new(mcx.oom(quals.len() * core::mem::size_of::<ScanKeyData>())))?;
+    // Row headers point into this flat buffer: size it exactly up front so
+    // the member pointers stay stable.
+    let n_row_members: usize = quals
+        .iter()
+        .filter(|q| q.node_tag() == NodeTag::T_RowCompareExpr)
+        .map(|q| q.as_row_compare_expr().unwrap().opnos.len())
+        .sum();
+    let mut row_subkeys: PgVec<'mcx, ScanKeyData> = PgVec::new_in(mcx);
+    row_subkeys
+        .try_reserve_exact(n_row_members)
+        .map_err(|_| Box::new(mcx.oom(n_row_members * core::mem::size_of::<ScanKeyData>())))?;
 
     for clause in quals.iter() {
         let op = match clause.node_tag() {
             NodeTag::T_OpExpr => clause.as_op_expr().unwrap(),
-            NodeTag::T_RowCompareExpr => scankey_case_unported("RowCompareExpr"),
+            NodeTag::T_RowCompareExpr => {
+                // (indexkey, indexkey, ...) op (expression, expression, ...):
+                // one SK_ROW_HEADER key whose sk_argument points at its
+                // SK_ROW_MEMBER run in the state-owned flat subkey buffer
+                // (ExecIndexBuildScanKeys).
+                let rc = clause.as_row_compare_expr().unwrap();
+                let n_members = rc.opnos.len();
+                let first_member = row_subkeys.len();
+                for i in 0..n_members {
+                    let mut leftop = rc.largs.nth(i);
+                    if leftop.node_tag() == NodeTag::T_RelabelType {
+                        leftop = leftop.as_relabel_type().unwrap().arg;
+                    }
+                    let var = leftop
+                        .as_var()
+                        .filter(|v| v.varno == INDEX_VAR)
+                        .unwrap_or_else(|| panic!("indexqual doesn't have key on left side"));
+                    let varattno = var.varattno;
+                    if varattno < 1 || varattno as i32 > indnkeyatts {
+                        panic!("bogus RowCompare index qualification");
+                    }
+                    let opfamily = index.rd_opfamily[varattno as usize - 1];
+                    let (op_strategy, op_lefttype, op_righttype) =
+                        lsyscache::get_op_opfamily_properties(rc.opnos.nth(i), opfamily, false)?;
+                    if op_strategy != rc.cmptype {
+                        panic!("RowCompare index qualification contains wrong operator");
+                    }
+                    // BTORDER_PROC: subkeys carry the 3-way comparison proc.
+                    let opfuncid = lsyscache::get_opfamily_proc(
+                        opfamily,
+                        op_lefttype,
+                        op_righttype,
+                        1,
+                    )?;
+                    assert!(
+                        opfuncid != 0,
+                        "missing support function 1({op_lefttype},{op_righttype}) in opfamily {opfamily}"
+                    );
+
+                    let mut rightop = rc.rargs.nth(i);
+                    if rightop.node_tag() == NodeTag::T_RelabelType {
+                        rightop = rightop.as_relabel_type().unwrap().arg;
+                    }
+                    let (flags, scanvalue) = match rightop.as_const() {
+                        Some(con) => (
+                            SK_ROW_MEMBER | if con.constisnull { SK_ISNULL } else { 0 },
+                            con.constvalue,
+                        ),
+                        // C treats a non-Const member as a runtime key
+                        // targeting the subkey; the runtime-key table here
+                        // addresses top-level keys only.
+                        None => scankey_case_unported(
+                            "RowCompareExpr runtime (non-Const) row member",
+                        ),
+                    };
+
+                    let mut sub = ScanKeyData::empty();
+                    sub.sk_flags = flags;
+                    sub.sk_attno = varattno;
+                    sub.sk_strategy = op_strategy as StrategyNumber;
+                    sub.sk_subtype = op_righttype;
+                    sub.sk_collation = rc.inputcollids.nth(i);
+                    fmgr_core::fmgr_info_into(opfuncid, &mut sub.sk_func)?;
+                    sub.sk_argument = scanvalue;
+                    row_subkeys.push(sub);
+                }
+                row_subkeys.last_mut().expect("nonempty row").sk_flags |= SK_ROW_END;
+
+                // Buffer-wide provenance: subkey walks step across members.
+                let first_sub = unsafe { row_subkeys.as_mut_ptr().add(first_member) };
+                let mut key = ScanKeyData::empty();
+                key.sk_flags = SK_ROW_HEADER;
+                key.sk_attno = row_subkeys[first_member].sk_attno;
+                key.sk_strategy = rc.cmptype as StrategyNumber;
+                // sk_subtype/sk_collation/sk_func unused in a header.
+                key.sk_argument = ::datum::Datum::from_usize(first_sub as usize);
+                scan_keys.push(key);
+                continue;
+            }
             NodeTag::T_ScalarArrayOpExpr => {
                 let saop = clause.as_scalar_array_op_expr().unwrap();
                 debug_assert!(!isorderby);
@@ -823,6 +916,9 @@ pub fn exec_index_build_scan_keys<'mcx>(
         scan_keys.push(key);
     }
 
+    // The header keys hold raw pointers into this buffer: it lives (and is
+    // freed) with the query context, like C's palloc'd subkey array.
+    row_subkeys.leak();
     Ok(scan_keys)
 }
 
