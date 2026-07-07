@@ -1925,6 +1925,37 @@ impl<'mcx> PlannerInfo<'mcx> {
         sub.group_rtindex = self.group_rtindex;
         sub.wt_param_id = self.wt_param_id;
         sub.join_domains.push(JoinDomain::default());
+        // C memcpy's the whole PlannerInfo and copyObject's append_rel_list
+        // (planagg.c:338-354): a pulled-up UNION ALL target's appendrel
+        // structure must survive into the subroot or its inh-subquery RTE
+        // can't re-expand. translated_vars re-intern into the fresh arena
+        // (C's Var-sublevel bump is a no-op: no uplevel Vars, asserted at
+        // build_minmax_path).
+        for ari in self.append_rel_list.iter() {
+            let mut translated_vars: PgVec<'mcx, NodeId> = PgVec::new_in(self.mcx);
+            for &id in ari.translated_vars.iter() {
+                if id == NodeId::default() {
+                    translated_vars.push(id);
+                } else {
+                    let node = *self.expr_node(id);
+                    translated_vars.push(sub.alloc_expr_node(node));
+                }
+            }
+            let mut parent_colnos: PgVec<'mcx, AttrNumber> = PgVec::new_in(self.mcx);
+            for &c in ari.parent_colnos.iter() {
+                parent_colnos.push(c);
+            }
+            sub.append_rel_list.push(AppendRelInfo {
+                parent_relid: ari.parent_relid,
+                child_relid: ari.child_relid,
+                parent_reltype: ari.parent_reltype,
+                child_reltype: ari.child_reltype,
+                translated_vars,
+                num_child_cols: ari.num_child_cols,
+                parent_colnos,
+                parent_reloid: ari.parent_reloid,
+            });
+        }
         sub
     }
 
