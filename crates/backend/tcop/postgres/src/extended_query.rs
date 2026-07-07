@@ -455,8 +455,22 @@ pub fn exec_bind_message<'mcx>(
         return Err(aborted_xact_error());
     }
 
+    let mut reused = false;
     let portal = if portal_name.is_empty() {
-        portalmem::CreatePortal("", true, true)?
+        // Portal retention: drop the previous unnamed portal first (it may
+        // itself park), then take this statement's parked shell if one
+        // exists. The retained execution is only reused after GetCachedPlan
+        // below returns the shell's own still-valid generic plan.
+        if let Some(existing) = portalmem::GetPortalByName(Some("")) {
+            portalmem::PortalDrop(&existing, false)?;
+        }
+        match portalmem::TakeParkedPortal(types_portal::PlanSourceHandle(psrc.0))? {
+            Some(shell) => {
+                reused = true;
+                shell
+            }
+            None => portalmem::CreatePortal("", true, true)?,
+        }
     } else {
         portalmem::CreatePortal(portal_name.as_str(), false, false)?
     };
@@ -594,27 +608,40 @@ pub fn exec_bind_message<'mcx>(
     let cplan = plancache::GetCachedPlan(psrc, params, None, QueryEnvHandle::NULL)?;
     crate::stmt_trace::probe("b.plan");
 
-    let stmt_slice = plancache::CachedPlanStmtList(cplan);
-    // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
-    // PortalDrop releases it (which also frees this handle). NIL stays the
-    // null handle (empty query string).
-    let stmts = if stmt_slice.is_empty() {
-        types_portal::StmtListHandle::NULL
+    // Retained execution engages only against the shell's own generic plan:
+    // any RevalidateCachedQuery invalidation (DDL, search_path, RLS
+    // environment) replans into a fresh CachedPlan and misses this check.
+    let retained = reused && portal.borrow().cplan == cplan;
+    if retained {
+        // The shell already pins this plan; drop the refcount just taken.
+        plancache::ReleaseCachedPlan(cplan);
     } else {
-        unsafe { pquery::stmt_list::register(stmt_slice) }
-    };
-    // No fallible call between GetCachedPlan and PortalDefineQuery (C's
-    // refcount-leak rule; the Copy stores in DefineQuery land first).
-    portalmem::PortalDefineQuery(
-        &portal,
-        (!stmt_name.is_empty()).then(|| stmt_name.as_str()),
-        query_string,
-        plancache::CachedPlanCommandTag(psrc),
-        stmts,
-        cplan,
-    )?;
+        if reused {
+            portalmem::ShedRetainedExecution(&portal);
+        }
+        let stmt_slice = plancache::CachedPlanStmtList(cplan);
+        // SAFETY: the cplan refcount taken by GetCachedPlan pins stmt_slice until
+        // PortalDrop releases it (which also frees this handle). NIL stays the
+        // null handle (empty query string).
+        let stmts = if stmt_slice.is_empty() {
+            types_portal::StmtListHandle::NULL
+        } else {
+            unsafe { pquery::stmt_list::register(stmt_slice) }
+        };
+        // No fallible call between GetCachedPlan and PortalDefineQuery (C's
+        // refcount-leak rule; the Copy stores in DefineQuery land first).
+        portalmem::PortalDefineQuery(
+            &portal,
+            (!stmt_name.is_empty()).then(|| stmt_name.as_str()),
+            query_string,
+            plancache::CachedPlanCommandTag(psrc),
+            stmts,
+            cplan,
+        )?;
+        portal.borrow_mut().plansource = types_portal::PlanSourceHandle(psrc.0);
+    }
 
-    for stmt in stmt_slice {
+    for stmt in plancache::CachedPlanStmtList(portal.borrow().cplan) {
         if stmt.planId != 0 {
             backend_status_seams::pgstat_report_plan_id::call(stmt.planId, false);
             break;
@@ -625,7 +652,11 @@ pub fn exec_bind_message<'mcx>(
         snapmgr::PopActiveSnapshot()?;
     }
 
-    pquery::PortalStart(&portal, params, 0, None)?;
+    if retained {
+        pquery::PortalStartParked(&portal, params)?;
+    } else {
+        pquery::PortalStart(&portal, params, 0, None)?;
+    }
     crate::stmt_trace::probe("b.portalstart");
 
     pquery::PortalSetResultFormat(&portal, &rformats)?;

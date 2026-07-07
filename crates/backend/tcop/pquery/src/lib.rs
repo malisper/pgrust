@@ -445,6 +445,48 @@ pub fn PortalStart(
     Ok(())
 }
 
+/// Portal-retention start (no C counterpart): the taken shell's plan matched
+/// this bind's GetCachedPlan result, so the retained QueryDesc rearms in
+/// place of CreateQueryDesc + ExecutorStart. Falls back to the full
+/// PortalStart on a param-shape mismatch (whose compile re-runs C's checks).
+pub fn PortalStartParked(portal: &Portal<'static>, params: ParamListHandle) -> PgResult<()> {
+    debug_assert_eq!(portal.borrow().status, PORTAL_DEFINED);
+    debug_assert_eq!(portal.borrow().strategy, PORTAL_ONE_SELECT);
+    let rearmed = run_protected(portal, false, || -> PgResult<bool> {
+        portal.borrow_mut().portalParams = params;
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
+        let query_desc = portal.borrow().queryDesc;
+        let rearmed = execmain_seams::executor_rearm::call(
+            query_desc,
+            Some(snapmgr::GetActiveSnapshot()),
+            params,
+        )?;
+        if rearmed {
+            let mut p = portal.borrow_mut();
+            p.atStart = true;
+            p.atEnd = false;
+            p.portalPos = 0;
+        }
+        snapmgr::PopActiveSnapshot()?;
+        Ok(rearmed)
+    })?;
+    if rearmed {
+        let mut p = portal.borrow_mut();
+        p.cleanup = types_portal::PortalCleanupHook::PortalCleanup;
+        p.status = PORTAL_READY;
+        return Ok(());
+    }
+    let query_desc = {
+        let mut p = portal.borrow_mut();
+        p.tupDesc = None;
+        p.cleanup = types_portal::PortalCleanupHook::PortalCleanup;
+        core::mem::replace(&mut p.queryDesc, QueryDescHandle::NULL)
+    };
+    execmain_seams::release_query_desc::call(query_desc);
+    PortalStart(portal, params, 0, None)
+}
+
 pub fn PortalSetResultFormat(portal: &Portal<'static>, formats: &[i16]) -> PgResult<()> {
     let n_formats = formats.len();
 

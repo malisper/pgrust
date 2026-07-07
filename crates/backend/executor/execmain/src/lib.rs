@@ -51,6 +51,8 @@ pub fn init_seams() {
     execmain_seams::executor_start::set(execmain::executor_start_seam);
     execmain_seams::executor_run::set(execmain::executor_run_seam);
     execmain_seams::executor_finish::set(execmain::executor_finish_seam);
+    execmain_seams::executor_finish_and_park::set(execmain::executor_finish_and_park_seam);
+    execmain_seams::executor_rearm::set(execmain::executor_rearm_seam);
     execmain_seams::executor_rewind::set(execmain::executor_rewind_seam);
     execmain_seams::executor_end::set(execmain::executor_end_seam);
     execmain_seams::query_desc_es_processed::set(querydesc::query_desc_es_processed_seam);

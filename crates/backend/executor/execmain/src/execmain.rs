@@ -8,7 +8,7 @@ use ::types_error::{PgError, PgResult};
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::parsenodes::RTEPermissionInfo;
 use ::types_nodes::plannodes::PlannedStmt;
-use ::types_portal::QueryDescHandle;
+use ::types_portal::{ParamListHandle, QueryDescHandle};
 use ::types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
 use ::types_slot::{
     SlotData, EXEC_FLAG_BACKWARD, EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_SKIP_TRIGGERS,
@@ -18,7 +18,7 @@ use ::types_tuple::TupleDescData;
 use crate::procnode::{
     exec_end_node, exec_init_node, exec_proc_node, exec_shutdown_node, PlanStateNode,
 };
-use crate::querydesc::{self, ExecData, ExecTy, QueryDescData};
+use crate::querydesc::{self, ExecData, ExecTy, ExecutorHandle, QueryDescData};
 
 // One parked ExecutorState context (C's context_freelists): raw pointer keeps
 // the TLS payload !needs_drop; nested executors overflow to a plain delete.
@@ -169,6 +169,140 @@ fn skeleton_rebind_tree<'mcx>(
         PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::skeleton_rebind(ios, estate),
         _ => unreachable!("skeleton_rebind_tree on a non-parkable node"),
     }
+}
+
+// Re-arm a retained initialized executor for a fresh execution; everything
+// C's standard_ExecutorStart re-derives per cached-plan execution is redone
+// here: permission checks, param restamp, snapshot registration, relation
+// re-pins, scan re-arm. false = param shape/type mismatch (caller builds
+// fresh; that compile re-runs C's checks and errors with C's texts).
+fn skeleton_rearm_exec(qd: &mut QueryDescData, exec: &mut ExecutorHandle) -> PgResult<bool> {
+    // P1: C's InitPlan runs ExecCheckPermissions on every cached-plan
+    // execution — reuse must too (REVOKE/SET ROLE between EXECUTEs).
+    exec_check_permissions(qd.plannedstmt())?;
+    let source_text = qd.source_text();
+    // SAFETY: the registered params live in the portal context, which
+    // outlives this execution (values are copied out below).
+    let new_params =
+        (!qd.params.is_null()).then(|| unsafe { types_portal::params::resolve(qd.params) });
+    let snapshot = qd.snapshot.clone();
+    let reused = exec.with_mut(|data| -> PgResult<bool> {
+        let ExecData { estate, planstate } = data;
+        if !estate.param_stable_restamp(new_params) {
+            return Ok(false);
+        }
+        let es_snapshot = snapmgr::RegisterSnapshot(snapshot.as_ref())?;
+        estate.es_snapshot = es_snapshot;
+        estate.es_sourceText = Some(source_text);
+        estate.es_processed = 0;
+        estate.es_total_processed = 0;
+        estate.es_finished = false;
+        let ps = planstate.as_mut().expect("skeleton holds a plan state");
+        skeleton_rebind_tree(ps, estate)?;
+        crate::execami::exec_re_scan(ps, estate)?;
+        Ok(true)
+    })?;
+    if reused {
+        qd.already_executed = false;
+    }
+    Ok(reused)
+}
+
+// Portal-retention reuse: the QueryDesc kept its executor across statements
+// (parked in place at ExecutorFinish time); rearm it under this execution's
+// snapshot and params.
+pub(crate) fn executor_rearm_seam(
+    h: QueryDescHandle,
+    snapshot: Option<::snapmgr::Snapshot>,
+    params: ParamListHandle,
+) -> PgResult<bool> {
+    querydesc::with_qd(h, |qd| {
+        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
+        // CreateQueryDesc parity: the QueryDesc owns a registration on its
+        // snapshot for the life of this execution.
+        qd.snapshot = snapmgr::RegisterSnapshot(snapshot.as_ref())?;
+        qd.params = params;
+        let mut exec = qd.exec.take().expect("executor_rearm on a QueryDesc with no executor");
+        let reused = skeleton_rearm_exec(qd, &mut exec);
+        qd.exec = Some(exec);
+        reused
+    })
+}
+
+// Portal-retention park: ExecutorFinish + the skeleton disarm, leaving the
+// executor attached to the QueryDesc (the TLS-slot variant in
+// standard_executor_end moves it out instead). false = ran the normal
+// ExecutorEnd + free path; the caller's cleanup hook is consumed either way.
+pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool> {
+    let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
+    if fire_triggers {
+        ::trigger::AfterTriggerEndQuery()?;
+    }
+    let parked = querydesc::with_qd(h, |qd| -> PgResult<bool> {
+        if !skeleton_disarm_in_place(qd)? {
+            standard_executor_end(qd)?;
+            return Ok(false);
+        }
+        // CreateQueryDesc registered this snapshot; the parked QueryDesc
+        // skips FreeQueryDesc, so release it here (rearm re-registers).
+        snapmgr::UnregisterSnapshot(qd.snapshot.take().as_ref());
+        qd.params = ParamListHandle::NULL;
+        Ok(true)
+    })?;
+    if !parked {
+        querydesc::free_query_desc_seam(h);
+    }
+    Ok(parked)
+}
+
+// Park-side disarm on the QueryDesc's own executor: the eligibility gates and
+// per-run-state release of standard_executor_end's TLS-park branch, in place.
+fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<bool> {
+    if qd.cplan.is_null()
+        || qd.operation != CmdType::CMD_SELECT
+        || qd.instrument_options != 0
+        || !qd.query_env.is_null()
+        || qd.crosscheck_snapshot.is_some()
+        || qd.tup_desc.is_none()
+    {
+        return Ok(false);
+    }
+    let Some(exec) = qd.exec.as_mut() else { return Ok(false) };
+    exec.with_mut(|data| -> PgResult<bool> {
+        let ExecData { estate, planstate } = data;
+        let eligible = planstate.is_some()
+            && estate.es_subplanstates.is_empty()
+            && estate.es_subplan_expr_states.is_empty()
+            && estate.es_param_exec_vals.is_empty()
+            && estate.es_result_relations.is_empty()
+            && estate.es_rowmarks.is_empty()
+            && estate.es_part_prune_results.is_empty()
+            && estate.es_epq.is_none()
+            && estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
+            && estate.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS != 0
+            && estate.es_instrument == 0
+            && estate.es_crosscheck_snapshot.is_none()
+            && skeleton_parkable(planstate.as_ref().expect("probed above"));
+        if !eligible {
+            return Ok(false);
+        }
+        skeleton_park_tree(planstate.as_mut().expect("probed above"))?;
+        // Relations close per run, exactly as C's ExecutorEnd (locks are
+        // kept; the next execution re-acquires via AcquireExecutorLocks).
+        estate.exec_close_range_table_relations()?;
+        let mcx = estate.es_query_cxt;
+        for slot in estate.es_tupleTable.iter_mut() {
+            ::exectuples::exec_clear_tuple(slot, mcx);
+            // Materialize scratch can come from the statement's own
+            // context (dest receivers); never park it.
+            ::exectuples::exec_drop_slot_scratch(slot, mcx);
+        }
+        snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
+        // The source text lives in the portal, freed before the skeleton
+        // is reused; never hold it across the park.
+        estate.es_sourceText = None;
+        Ok(true)
+    })
 }
 
 pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
@@ -455,33 +589,8 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         if let Some(sk) =
             exec_skeleton::take_if_match(qd.plannedstmt() as *const _ as *const (), qd.cplan, eflags)
         {
-            // P1: C's InitPlan runs ExecCheckPermissions on every cached-plan
-            // execution — reuse must too (REVOKE/SET ROLE between EXECUTEs).
-            exec_check_permissions(pstmt)?;
-            let source_text = qd.source_text();
-            // SAFETY: the registered params live in the portal context, which
-            // outlives this execution (values are copied out below).
-            let new_params =
-                (!qd.params.is_null()).then(|| unsafe { types_portal::params::resolve(qd.params) });
             let mut exec = sk.exec;
-            let reused = exec.with_mut(|data| -> PgResult<bool> {
-                let ExecData { estate, planstate } = data;
-                // Param shape/type re-checks per EXECUTE; a mismatch falls
-                // back to a fresh build, whose compile re-runs C's checks.
-                if !estate.param_stable_restamp(new_params) {
-                    return Ok(false);
-                }
-                let es_snapshot = snapmgr::RegisterSnapshot(qd.snapshot.as_ref())?;
-                estate.es_snapshot = es_snapshot;
-                estate.es_sourceText = Some(source_text);
-                estate.es_processed = 0;
-                estate.es_total_processed = 0;
-                estate.es_finished = false;
-                let ps = planstate.as_mut().expect("skeleton holds a plan state");
-                skeleton_rebind_tree(ps, estate)?;
-                crate::execami::exec_re_scan(ps, estate)?;
-                Ok(true)
-            })?;
+            let reused = skeleton_rearm_exec(qd, &mut exec)?;
             if reused {
                 qd.tup_desc = Some(sk.tup_desc);
                 qd.exec = Some(exec);
@@ -906,64 +1015,23 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is
 /// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
 pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
-    let mut exec = qd.exec.take().expect("ExecutorEnd before ExecutorStart");
-
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,
     // relation pins, snapshot, source text — is released here).
-    if !qd.cplan.is_null()
-        && qd.operation == CmdType::CMD_SELECT
-        && qd.instrument_options == 0
-        && qd.query_env.is_null()
-        && qd.crosscheck_snapshot.is_none()
-    {
-        let parked_eflags = exec.with_mut(|data| -> PgResult<Option<i32>> {
-            let ExecData { estate, planstate } = data;
-            let eligible = planstate.is_some()
-                && estate.es_subplanstates.is_empty()
-                && estate.es_subplan_expr_states.is_empty()
-                && estate.es_param_exec_vals.is_empty()
-                && estate.es_result_relations.is_empty()
-                && estate.es_rowmarks.is_empty()
-                && estate.es_part_prune_results.is_empty()
-                && estate.es_epq.is_none()
-                && estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
-                && estate.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS != 0
-                && estate.es_instrument == 0
-                && estate.es_crosscheck_snapshot.is_none()
-                && skeleton_parkable(planstate.as_ref().expect("probed above"));
-            if !eligible {
-                return Ok(None);
-            }
-            skeleton_park_tree(planstate.as_mut().expect("probed above"))?;
-            // Relations close per run, exactly as C's ExecutorEnd (locks are
-            // kept; the next EXECUTE re-acquires via AcquireExecutorLocks).
-            estate.exec_close_range_table_relations()?;
-            let mcx = estate.es_query_cxt;
-            for slot in estate.es_tupleTable.iter_mut() {
-                ::exectuples::exec_clear_tuple(slot, mcx);
-                // Materialize scratch can come from the statement's own
-                // context (dest receivers); never park it.
-                ::exectuples::exec_drop_slot_scratch(slot, mcx);
-            }
-            snapmgr::UnregisterSnapshot(estate.es_snapshot.take().as_ref());
-            // The source text lives in the portal, freed before the skeleton
-            // is reused; never hold it across the park.
-            estate.es_sourceText = None;
-            Ok(Some(estate.es_top_eflags))
-        })?;
-        if let Some(eflags) = parked_eflags {
-            let tup_desc = qd.tup_desc.take().expect("finished query has a tupdesc");
-            exec_skeleton::park(exec_skeleton::Skeleton {
-                pstmt: qd.plannedstmt() as *const _ as *const (),
-                cplan: qd.cplan,
-                eflags,
-                exec,
-                tup_desc,
-            });
-            return Ok(());
-        }
+    if skeleton_disarm_in_place(qd)? {
+        let mut exec = qd.exec.take().expect("disarm probed the executor");
+        let eflags = exec.with_mut(|data| data.estate.es_top_eflags);
+        let tup_desc = qd.tup_desc.take().expect("finished query has a tupdesc");
+        exec_skeleton::park(exec_skeleton::Skeleton {
+            pstmt: qd.plannedstmt() as *const _ as *const (),
+            cplan: qd.cplan,
+            eflags,
+            exec,
+            tup_desc,
+        });
+        return Ok(());
     }
+    let mut exec = qd.exec.take().expect("ExecutorEnd before ExecutorStart");
 
     exec.with_mut(|data| -> PgResult<()> {
         let ExecData { estate, planstate } = data;

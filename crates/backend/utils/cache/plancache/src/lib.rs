@@ -371,6 +371,9 @@ pub fn SaveCachedPlan(h: CachedPlanSourceHandle) -> PgResult<()> {
 }
 
 pub fn DropCachedPlan(h: CachedPlanSourceHandle) {
+    if plancache_portal_seams::discard_parked_portal::is_installed() {
+        plancache_portal_seams::discard_parked_portal::call(types_portal::PlanSourceHandle(h.0));
+    }
     with_cache(|pc| {
         let src = source_mut(pc, h);
         if src.is_saved {

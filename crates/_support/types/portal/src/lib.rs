@@ -89,6 +89,7 @@ macro_rules! extern_handle {
 extern_handle!(
     StmtListHandle,
     CachedPlanHandle,
+    PlanSourceHandle,
     ParamListHandle,
     QueryEnvHandle,
     QueryDescHandle,
@@ -124,6 +125,8 @@ pub struct PortalData<'mcx> {
     pub qc: QueryCompletion,
     pub stmts: StmtListHandle,
     pub cplan: CachedPlanHandle,
+    // CachedPlanSource backing cplan (parked-portal retention key; no C field).
+    pub plansource: PlanSourceHandle,
     // DECLARE's plan arena, C's copy-into-portalContext analog (leaked Box; PortalDrop reclaims).
     pub planContext: *mut MemoryContext,
 

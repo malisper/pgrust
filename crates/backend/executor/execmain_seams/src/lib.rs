@@ -68,6 +68,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Portal-retention park (no C counterpart): ExecutorFinish + in-place
+    // skeleton disarm, executor left attached to the QueryDesc. false = the
+    // normal ExecutorEnd + FreeQueryDesc ran instead; the caller's cleanup
+    // hook is consumed either way.
+    pub fn executor_finish_and_park(query_desc: QueryDescHandle) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // Portal-retention reuse (no C counterpart): rearm the QueryDesc's
+    // retained executor under this execution's snapshot/params. false =
+    // param shape mismatch; caller sheds the retained executor and builds
+    // fresh via ExecutorStart.
+    pub fn executor_rearm(
+        query_desc: QueryDescHandle,
+        snapshot: Option<Snapshot>,
+        params: ParamListHandle,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn executor_rewind(query_desc: QueryDescHandle) -> PgResult<()>
 );
 

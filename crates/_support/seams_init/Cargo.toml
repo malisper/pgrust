@@ -177,6 +177,7 @@ execreplication = { path = "../../backend/executor/execreplication" }
 prepare = { path = "../../backend/commands/prepare" }
 commands_async = { path = "../../backend/commands/commands_async" }
 portalcmds = { path = "../../backend/commands/portalcmds" }
+portalmem = { path = "../../backend/utils/mmgr/portalmem" }
 utility = { path = "../../backend/tcop/utility" }
 backend_status = { path = "../../backend/utils/activity/backend_status" }
 backend_progress = { path = "../../backend/utils/activity/backend_progress" }

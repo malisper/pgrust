@@ -14,3 +14,11 @@ seam_core::seam!(
     // only): the executor-skeleton cache pins its parked plan with this.
     pub fn incr_cached_plan(cplan: types_portal::CachedPlanHandle)
 );
+
+seam_core::seam!(
+    // Portal retention: DropCachedPlan discards the parked portal shell for
+    // this plansource eagerly (DEALLOCATE / DISCARD ALL), releasing its plan
+    // pin. Invalidation-driven discard is lazy: the shell's cplan no longer
+    // matches GetCachedPlan's result at the next bind.
+    pub fn discard_parked_portal(plansource: types_portal::PlanSourceHandle)
+);
