@@ -808,6 +808,65 @@ pub fn XactHasExportedSnapshots() -> bool {
     false
 }
 
+// SNAPSHOT_EXPORT_DIR (snapmgr.c), relative to the data directory (the
+// backend's cwd, as in C).
+const SNAPSHOT_EXPORT_DIR: &str = "pg_snapshots";
+
+// ImportSnapshot (snapmgr.c:1385). ExportSnapshot is unported (phase 2), so
+// no export file can exist and every reachable outcome is one of C's
+// precondition/identifier/missing-file errors; an existing file means the
+// otherwise-unreachable parse+install tail, which stays loud.
+pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
+    if FirstSnapshotSet()
+        || xact_seams::get_top_transaction_id_if_any::call() != InvalidTransactionId
+        || xact_seams::is_sub_transaction::call()
+    {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_ACTIVE_SQL_TRANSACTION)
+            .errmsg("SET TRANSACTION SNAPSHOT must be called before any query")
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into());
+    }
+
+    if !xact_seams::isolation_uses_xact_snapshot::call() {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "a snapshot-importing transaction must have isolation level SERIALIZABLE or REPEATABLE READ",
+            )
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into());
+    }
+
+    // Only 0-9, A-F and hyphens: prevents reading arbitrary files.
+    if !idstr.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b) || b == b'-') {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("invalid snapshot identifier: \"{idstr}\""))
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into());
+    }
+
+    let path = format!("{SNAPSHOT_EXPORT_DIR}/{idstr}");
+    match std::fs::read(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("snapshot \"{idstr}\" does not exist"))
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into()),
+        Err(e) => Err(ereport(ERROR)
+            .errmsg(format!("could not open file \"{path}\" for reading: {e}"))
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into()),
+        Ok(_) => unported("ImportSnapshot parse/install (ExportSnapshot phase 2)"),
+    }
+}
+
 pub fn ThereAreNoPriorRegisteredSnapshots() -> bool {
     with_state(|s| s.registered.len() <= 1)
 }
@@ -918,4 +977,5 @@ pub fn init_seams() {
     snapmgr_portal_seams::active_snapshot_set::set(ActiveSnapshotSet);
     snapmgr_portal_seams::pop_active_snapshot::set(PopActiveSnapshot);
     snapmgr_seams::get_latest_snapshot::set(GetLatestSnapshot);
+    snapmgr_seams::import_snapshot::set(ImportSnapshot);
 }
