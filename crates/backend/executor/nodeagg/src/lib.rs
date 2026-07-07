@@ -564,6 +564,21 @@ fn collect_aggrefs<'mcx>(
                 collect_aggrefs(a, out);
             }
         }
+        NodeTag::T_SubscriptingRef => {
+            let sref = node.as_subscripting_ref().unwrap();
+            for a in sref.refupperindexpr.iter().flatten() {
+                collect_aggrefs(a, out);
+            }
+            for a in sref.reflowerindexpr.iter().flatten() {
+                collect_aggrefs(a, out);
+            }
+            if let Some(e) = sref.refexpr {
+                collect_aggrefs(e, out);
+            }
+            if let Some(e) = sref.refassgnexpr {
+                collect_aggrefs(e, out);
+            }
+        }
         tag => panic!("ExecInitAgg (nodeAgg.c): Agg tlist node family {tag:?} not ported"),
     }
 }
