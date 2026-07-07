@@ -259,7 +259,7 @@ pub fn fc_bpchar_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 pub fn fc_bpcharlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog arg 0 is a non-null bpchar varlena (strict fn).
     let payload = unsafe { fcinfo.arg_varlena_packed(0)? }.data();
-    Ok(Datum::from_i32(crate::bpcharlen(payload)))
+    Ok(Datum::from_i32(crate::bpcharlen(payload)?))
 }
 
 pub fn fc_bpcharoctetlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

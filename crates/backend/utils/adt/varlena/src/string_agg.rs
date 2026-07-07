@@ -1,11 +1,14 @@
-//! makeStringAggState + string_agg/bytea_string_agg trans/final (varlena.c).
-//! The state is C's StringInfo (data/len/maxlen/cursor) hand-rolled drop-free
-//! so it can live in the wholesale-reset aggcontext arena; `cursor` holds the
-//! first delimiter's length, stripped only in the finalfn (parallel-agg
-//! combine contract).
+//! makeStringAggState + string_agg/bytea_string_agg trans/final/combine/
+//! serialize/deserialize (varlena.c). The state is C's StringInfo
+//! (data/len/maxlen/cursor) hand-rolled drop-free so it can live in the
+//! wholesale-reset aggcontext arena; `cursor` holds the first delimiter's
+//! length, stripped only in the finalfn (parallel-agg combine contract).
+//! serialize/deserialize wire format: int32 cursor, then raw data bytes
+//! (varlena.c string_agg_serialize/string_agg_deserialize).
 
 use core::alloc::Layout;
 
+use datum::Bytea;
 use mcx::{Allocator, Mcx};
 use types_error::{PgError, PgResult};
 use types_fmgr::FunctionCallInfoBaseData as Fcinfo;
@@ -66,6 +69,12 @@ fn non_aggregate_context() -> Box<PgError> {
     Box::new(PgError::error("string_agg_transfn called in non-aggregate context"))
 }
 
+#[cold]
+#[inline(never)]
+fn non_aggregate_call_context() -> Box<PgError> {
+    Box::new(PgError::error("aggregate function called in non-aggregate context"))
+}
+
 fn make_string_agg_state(agg_mcx: Mcx<'_>) -> PgResult<*mut StringAggState> {
     let buf_layout = Layout::from_size_align(INITIAL_SIZE, 1).unwrap();
     let data = Allocator::allocate(&agg_mcx, buf_layout)
@@ -112,6 +121,66 @@ pub fn string_agg_transfn(fcinfo: &mut Fcinfo) -> PgResult<*mut StringAggState> 
         st.append(agg_mcx, value)?;
     }
     Ok(state)
+}
+
+// string_agg_combine (varlena.c): merges a sibling worker's partial state
+// into this one, copying into agg_mcx on first contact.
+pub fn string_agg_combine(fcinfo: &mut Fcinfo) -> PgResult<*mut StringAggState> {
+    let [a, b] = *fcinfo.args_n::<2>();
+    // SAFETY: combine is only ever invoked with a live AggStateNode context.
+    let Some(agg_mcx) = (unsafe { fcinfo.agg_context() }) else {
+        return Err(non_aggregate_call_context());
+    };
+    let state1: *mut StringAggState =
+        if a.isnull { core::ptr::null_mut() } else { a.value.as_usize() as *mut StringAggState };
+    let state2: *const StringAggState =
+        if b.isnull { core::ptr::null() } else { b.value.as_usize() as *const StringAggState };
+
+    if state2.is_null() {
+        return Ok(state1);
+    }
+    // SAFETY: a non-null state2 is a live partial state from a sibling
+    // worker; read-only here.
+    let s2 = unsafe { &*state2 };
+    if state1.is_null() {
+        let new_state = make_string_agg_state(agg_mcx)?;
+        // SAFETY: freshly allocated above; no other reference exists.
+        let st = unsafe { &mut *new_state };
+        st.append(agg_mcx, s2.accumulated())?;
+        st.cursor = s2.cursor;
+        return Ok(new_state);
+    }
+    if !s2.accumulated().is_empty() {
+        // SAFETY: a non-null state1 is the aggcontext-lived accumulator;
+        // state2 is a distinct read-only allocation.
+        let st1 = unsafe { &mut *state1 };
+        st1.append(agg_mcx, s2.accumulated())?;
+    }
+    Ok(state1)
+}
+
+// string_agg_serialize (varlena.c): wire = int32 cursor, then raw data.
+pub fn string_agg_serialize<'mcx>(mcx: Mcx<'mcx>, state: &StringAggState) -> PgResult<Bytea<'mcx>> {
+    let mut buf = ::pqformat::pq_begintypsend(mcx)?;
+    ::pqformat::pq_sendint(&mut buf, state.cursor, 4)?;
+    ::pqformat::pq_sendbytes(&mut buf, state.accumulated())?;
+    Ok(::pqformat::pq_endtypsend(buf))
+}
+
+// string_agg_deserialize (varlena.c): inverse of string_agg_serialize.
+pub fn string_agg_deserialize(agg_mcx: Mcx<'_>, payload: &[u8]) -> PgResult<*mut StringAggState> {
+    let mut buf = ::stringinfo::StringInfo::with_capacity_in(agg_mcx, payload.len() + 1)?;
+    buf.append_bytes(payload)?;
+    let cursor = ::pqformat::pq_getmsgint(&mut buf, 4)?;
+    let datalen = payload.len() - 4;
+    let data = ::pqformat::pq_getmsgbytes(&mut buf, datalen)?;
+    let result = make_string_agg_state(agg_mcx)?;
+    // SAFETY: freshly allocated above; no other reference exists.
+    let st = unsafe { &mut *result };
+    st.cursor = cursor;
+    st.append(agg_mcx, data)?;
+    ::pqformat::pq_getmsgend(&buf)?;
+    Ok(result)
 }
 
 pub fn string_agg_finalfn(fcinfo: &Fcinfo) -> Option<&[u8]> {

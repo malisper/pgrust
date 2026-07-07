@@ -126,7 +126,7 @@ fn pad<'mcx>(
 ) -> PgResult<Varlena<'mcx>> {
     // Negative len is silently taken as zero.
     let len = len.max(0);
-    let mut s1len = mbutils::pg_mbstrlen_with_len(string1);
+    let mut s1len = mbutils::pg_mbstrlen_with_len(string1)?;
     if s1len > len {
         s1len = len;
     }
@@ -536,7 +536,7 @@ fn chr_nul_err() -> PgError {
 // slice math; 1+n overflow means "run to end of string" (not an error).
 pub fn text_left<'mcx>(mcx: Mcx<'mcx>, t: &[u8], n: i32) -> PgResult<Varlena<'mcx>> {
     if n < 0 {
-        let n = mbutils::pg_mbstrlen_with_len(t) + n;
+        let n = mbutils::pg_mbstrlen_with_len(t)? + n;
         let rlen = mbutils::pg_mbcharcliplen(t, t.len() as i32, n)?;
         return text_result(mcx, &t[..rlen as usize]);
     }
@@ -558,7 +558,7 @@ pub fn text_right<'mcx>(mcx: Mcx<'mcx>, t: &[u8], n: i32) -> PgResult<Varlena<'m
     let n = if n < 0 {
         n.wrapping_neg()
     } else {
-        mbutils::pg_mbstrlen_with_len(t) - n
+        mbutils::pg_mbstrlen_with_len(t)? - n
     };
     let off = mbutils::pg_mbcharcliplen(t, t.len() as i32, n)? as usize;
     text_result(mcx, &t[off..])

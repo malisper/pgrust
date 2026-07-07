@@ -166,12 +166,12 @@ fn pattern_ops_trim_then_memcmp() {
 
 #[test]
 fn lengths() {
-    assert_eq!(bpcharlen(b"abc  "), 3);
-    assert_eq!(bpcharlen(b""), 0);
-    assert_eq!(bpcharlen(b"     "), 0);
+    assert_eq!(bpcharlen(b"abc  ").unwrap(), 3);
+    assert_eq!(bpcharlen(b"").unwrap(), 0);
+    assert_eq!(bpcharlen(b"     ").unwrap(), 0);
     assert_eq!(bpcharoctetlen(b"abc  "), 5);
     mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
-    assert_eq!(bpcharlen("éé ".as_bytes()), 2);
+    assert_eq!(bpcharlen("éé ".as_bytes()).unwrap(), 2);
 }
 
 #[test]

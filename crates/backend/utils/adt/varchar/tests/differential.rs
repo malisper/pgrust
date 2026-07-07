@@ -140,7 +140,7 @@ fn cases() -> Vec<(String, Box<dyn Fn(mcx::Mcx<'_>) -> String>)> {
     for s in ["abc  ", "", "     ", "éé "] {
         case!(
             format!("SELECT length('{s}'::bpchar)::text"),
-            move |_| format!("V:{}", adt_varchar::bpcharlen(s.as_bytes()))
+            move |_| norm(adt_varchar::bpcharlen(s.as_bytes()))
         );
         case!(
             format!("SELECT octet_length('{s}'::bpchar)::text"),

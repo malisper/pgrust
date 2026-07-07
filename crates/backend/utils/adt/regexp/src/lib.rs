@@ -406,7 +406,7 @@ pub fn similar_escape_internal<'mcx>(
                 e = None;
             } else {
                 if elen > 1 {
-                    let escape_mblen = mbutils::pg_mbstrlen_with_len(esc);
+                    let escape_mblen = mbutils::pg_mbstrlen_with_len(esc)?;
                     if escape_mblen > 1 {
                         return Err(PgError::error("invalid escape string")
                             .with_sqlstate(ERRCODE_INVALID_ESCAPE_SEQUENCE)
