@@ -95,7 +95,8 @@ fn eval_plan_qual_begin<'mcx>(
 fn check_epq_plan(plan: Node<'_>) {
     let ok = matches!(
         plan.node_tag(),
-        NodeTag::T_SeqScan
+        NodeTag::T_Append
+            | NodeTag::T_SeqScan
             | NodeTag::T_TidScan
             | NodeTag::T_TidRangeScan
             | NodeTag::T_IndexScan
@@ -116,6 +117,11 @@ fn check_epq_plan(plan: Node<'_>) {
              (subquery/aggregate EPQ) not exercised",
             plan.node_tag()
         );
+    }
+    if let Some(ap) = plan.as_append() {
+        for child in ap.appendplans.iter() {
+            check_epq_plan(child);
+        }
     }
     if let Some(p) = plan.as_plan() {
         if let Some(l) = p.lefttree {
