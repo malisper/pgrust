@@ -1380,6 +1380,10 @@ pub(crate) fn domainAddCheckConstraint<'mcx>(
     entry.is_validated = !constr.skip_validation;
     entry.domain_id = domain_oid;
     entry.conbin = Some(ccbin.as_str());
+    // C passes the expr tree too (typecmds.c domainAddCheckConstraint), so
+    // CreateConstraintEntry records column deps for (VALUE).field references
+    // — ALTER TYPE ... ALTER/DROP ATTRIBUTE must see this constraint.
+    entry.con_expr = Some(expr);
     let ccoid = pg_constraint::CreateConstraintEntry(mcx, &entry)?;
     parser_small1::free_parsestate(cpstate)?;
     Ok((ccoid, ccbin))
