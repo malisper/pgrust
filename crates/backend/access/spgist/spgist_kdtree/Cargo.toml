@@ -13,3 +13,4 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_scan = { path = "../../../../_support/types/types_scan" }
 types_spgist = { path = "../../../../_support/types/types_spgist" }
 adt_geo = { path = "../../../utils/adt/geo" }
+spgist_proc = { path = "../spgist_proc" }
