@@ -1067,25 +1067,37 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_NestLoop => {
             let nl = node.as_nest_loop().unwrap();
             show_upper_qual(&nl.join.joinqual, "Join Filter", node, ancestors, es)?;
-            filtered_count_gap(&nl.join.joinqual, es);
+            if !nl.join.joinqual.is_nil() {
+                show_instrumentation_count("Rows Removed by Join Filter", 1, &instrument, es);
+            }
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 2, &instrument, es);
+            }
         }
         NodeTag::T_HashJoin => {
             let hj = node.as_hash_join().unwrap();
             show_upper_qual(&hj.hashclauses, "Hash Cond", node, ancestors, es)?;
             show_upper_qual(&hj.join.joinqual, "Join Filter", node, ancestors, es)?;
-            filtered_count_gap(&hj.join.joinqual, es);
+            if !hj.join.joinqual.is_nil() {
+                show_instrumentation_count("Rows Removed by Join Filter", 1, &instrument, es);
+            }
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 2, &instrument, es);
+            }
         }
         NodeTag::T_MergeJoin => {
             let mj = node.as_merge_join().unwrap();
             show_upper_qual(&mj.mergeclauses, "Merge Cond", node, ancestors, es)?;
             show_upper_qual(&mj.join.joinqual, "Join Filter", node, ancestors, es)?;
-            filtered_count_gap(&mj.join.joinqual, es);
+            if !mj.join.joinqual.is_nil() {
+                show_instrumentation_count("Rows Removed by Join Filter", 1, &instrument, es);
+            }
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 2, &instrument, es);
+            }
         }
         NodeTag::T_Hash => {
             show_hash_info(node, es)?;

@@ -104,6 +104,8 @@ pub struct MergeJoinState<'mcx> {
     mj_OuterTupleSlot: Option<ExecSlotId>,
     mj_InnerTupleSlot: Option<ExecSlotId>,
     mj_MarkedTupleSlot: ExecSlotId,
+    // InstrCountFiltered1/2 slot for this join node (nodeMergejoin.c).
+    js_instr: Option<u32>,
 }
 
 /// `ExecInitMergeJoin` minus child linkage: the caller inits the outer child
@@ -222,6 +224,11 @@ pub fn exec_init_merge_join<'mcx>(
         mj_OuterTupleSlot: None,
         mj_InnerTupleSlot: None,
         mj_MarkedTupleSlot,
+        js_instr: if estate.es_instrument != 0 {
+            Some(u32::try_from(node.join.plan.plan_node_id).expect("plan_node_id is non-negative"))
+        } else {
+            None
+        },
     })
 }
 
@@ -554,6 +561,7 @@ fn mj_fill_outer<'mcx>(
     if eval_qual_subplan_aware(node, estate, Qual::Other, null_inner)? {
         return Ok(Some(project_result_with(node, estate, null_inner)?));
     }
+    estate.instr_count_filtered2(node.js_instr);
     estate.reset_expr_context(node.ps_ExprContext);
     Ok(None)
 }
@@ -570,6 +578,7 @@ fn mj_fill_inner<'mcx>(
         if eval_qual(node, estate, Qual::Other)? {
             return Ok(Some(project_result(node, estate)?));
         }
+        estate.instr_count_filtered2(node.js_instr);
         estate.reset_expr_context(node.ps_ExprContext);
         Ok(None)
     })();
@@ -730,6 +739,9 @@ where
                     if eval_qual(node, estate, Qual::Other)? {
                         return Ok(Some(project_result(node, estate)?));
                     }
+                    estate.instr_count_filtered2(node.js_instr);
+                } else {
+                    estate.instr_count_filtered1(node.js_instr);
                 }
                 estate.reset_expr_context(node.ps_ExprContext);
             }
@@ -889,6 +901,6 @@ mcx::forget_safe_struct!(
         mj_SkipMarkRestore, mj_ExtraMarks, js_single_match, mj_ConstFalseJoin, mj_FillOuter,
         mj_FillInner, mj_NullInnerTupleSlot, mj_NullOuterTupleSlot,
         mj_MatchedOuter, mj_MatchedInner, mj_OuterTupleSlot,
-        mj_InnerTupleSlot, mj_MarkedTupleSlot;
+        mj_InnerTupleSlot, mj_MarkedTupleSlot, js_instr;
         ps_ResultTupleDesc, proj, joinqual, otherqual, clauses },
 );

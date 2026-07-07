@@ -54,6 +54,8 @@ pub struct NestLoopState<'mcx> {
     // Outer-tlist source per nestParam, resolved once at init.
     nest_params: ::mcx::PgVec<'mcx, NestParamSlot>,
     nest_param_set: ::types_nodes::bitmapset::Bitmapset<'mcx>,
+    // InstrCountFiltered1/2 slot for this join node (nodeNestloop.c).
+    js_instr: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -146,6 +148,11 @@ pub fn exec_init_nest_loop<'mcx>(
         nl_MatchedOuter: false,
         nest_params,
         nest_param_set,
+        js_instr: if estate.es_instrument != 0 {
+            Some(u32::try_from(node.join.plan.plan_node_id).expect("plan_node_id is non-negative"))
+        } else {
+            None
+        },
     })
 }
 
@@ -208,6 +215,7 @@ where
                     project_join_tuple(estate, ecxt, result_slot, proj)?;
                     return Ok(Some(result_slot));
                 }
+                estate.instr_count_filtered2(node.js_instr);
                 estate.reset_expr_context(ecxt);
             }
             continue;
@@ -231,6 +239,9 @@ where
                 project_join_tuple(estate, ecxt, result_slot, proj)?;
                 return Ok(Some(result_slot));
             }
+            estate.instr_count_filtered2(node.js_instr);
+        } else {
+            estate.instr_count_filtered1(node.js_instr);
         }
         estate.reset_expr_context(ecxt);
     }
@@ -329,6 +340,6 @@ mcx::forget_safe_struct!(
     NestParamSlot { paramno, attno },
     NestLoopState<'_> { plan, ps_ExprContext, ps_ResultTupleSlot,
         js_single_match, nl_fill_outer, nl_NullInnerTupleSlot,
-        nl_NeedNewOuter, nl_MatchedOuter, nest_params, nest_param_set;
+        nl_NeedNewOuter, nl_MatchedOuter, nest_params, nest_param_set, js_instr;
         ps_ResultTupleDesc, proj, joinqual, otherqual },
 );
