@@ -436,7 +436,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
     // One borrow for the checks + one extraction borrow + one field-clear
     // borrow on the happy path (was ~18 borrow round trips per drop —
     // select1-gate prepared attribution). Seam callouts stay borrow-free.
-    {
+    let park_candidate = {
         let p = portal.borrow();
         if p.portalPinned {
             return Err(ereport(ERROR)
@@ -452,9 +452,10 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
                 .into_error()
                 .into());
         }
-    }
+        !p.plansource.is_null()
+    };
 
-    if try_park(portal, isTopCommit)? {
+    if park_candidate && try_park(portal, isTopCommit)? {
         return Ok(());
     }
 
