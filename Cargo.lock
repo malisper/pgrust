@@ -13796,6 +13796,7 @@ name = "spgist"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "coerce",
  "datum",
  "detoast",
  "fmgr_seams",
@@ -13808,6 +13809,8 @@ dependencies = [
  "nbtree",
  "pg_prng",
  "predicate_seams",
+ "procarray_seams",
+ "snapmgr_seams",
  "tidbitmap",
  "transam_xlog",
  "transam_xlog_seams",
@@ -13816,6 +13819,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_gist",
+ "types_nbtree",
  "types_rel",
  "types_relscan",
  "types_scan",
@@ -13823,6 +13827,7 @@ dependencies = [
  "types_spgist",
  "types_storage",
  "types_tuple",
+ "vacuum_seams",
  "xact",
  "xloginsert",
  "xloginsert_seams",

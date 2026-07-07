@@ -206,11 +206,12 @@ pub fn spgGetCache(index: &Relation<'_>) -> PgResult<SpGistCache> {
 
     if cache.config.leafType == InvalidOid {
         cache.config.leafType = index.rd_att.attr(spgKeyColumn).atttypid;
-        if cache.config.leafType != atttype {
-            panic!(
-                "unported: SP-GiST leaf type {} binary-coercibility check vs input type {atttype} (domain-over-type lane)",
-                cache.config.leafType
-            );
+        // A column type binary-coercible to atttype (e.g. a domain over it)
+        // is treated as plain atttype so no compress method is required.
+        if cache.config.leafType != atttype
+            && coerce::IsBinaryCoercible(cache.config.leafType, atttype)?
+        {
+            cache.config.leafType = atttype;
         }
     }
 
