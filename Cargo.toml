@@ -756,7 +756,6 @@ incremental = false
 inherits = "release"
 lto = false
 codegen-units = 16
-strip = false
 
 [profile.release]
 debug = 0
