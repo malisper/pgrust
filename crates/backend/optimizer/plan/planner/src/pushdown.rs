@@ -66,7 +66,7 @@ pub(crate) fn pushdown_quals_into_subquery<'mcx>(
             continue;
         }
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
-        match qual_is_pushdown_safe(run, rti, rid, clause, &safety)? {
+        match qual_is_pushdown_safe(run, orig, rti, rid, clause, &safety)? {
             PushdownSafe::Safe => {
                 subquery_push_qual(mcx, sub_parse, rte, rti, clause)?;
             }
@@ -260,6 +260,7 @@ fn target_is_in_sort_list(tle: &TargetEntry<'_>, sort_list: &NodeList<'_>) -> bo
 
 fn qual_is_pushdown_safe<'mcx>(
     run: &mut PlannerRun<'mcx>,
+    subquery: &'mcx Query<'mcx>,
     rti: usize,
     rid: RinfoId,
     clause: Node<'mcx>,
@@ -312,7 +313,115 @@ fn qual_is_pushdown_safe<'mcx>(
             safe = PushdownSafe::WindowclauseRuncond;
         }
     }
+
+    // Check point 6: past a grouping layer (DISTINCT/DISTINCT ON, window
+    // PARTITION BY, or a grouping set operation), the clause must not apply
+    // a different equivalence relation to a grouping column than the
+    // grouping uses.
+    if matches!(safe, PushdownSafe::Safe)
+        && (subquery.hasWindowFuncs
+            || !subquery.distinctClause.is_nil()
+            || subquery.setOperations.map_or(false, setop_has_grouping))
+    {
+        let conflict = clauses::expression_has_grouping_conflict(clause, &mut |var| {
+            if var.varlevelsup != 0 {
+                return Ok(types_core::InvalidOid);
+            }
+            let eqop = subquery_column_grouping_eqop(subquery, var.varattno)?;
+            // qual_is_pushdown_safe ensures any level-0 subquery Var that
+            // reaches us references a grouping column.
+            debug_assert!(eqop != types_core::InvalidOid);
+            Ok(eqop)
+        })?;
+        if conflict {
+            safe = PushdownSafe::Unsafe;
+        }
+    }
+
     Ok(safe)
+}
+
+// subquery_column_grouping_eqop (allpaths.c): the eqop the subquery groups the
+// output column under via distinctClause, every window's partitionClause, or
+// a grouping set-op node; InvalidOid when the column is not grouping-relevant.
+fn subquery_column_grouping_eqop(
+    subquery: &Query<'_>,
+    attno: i16,
+) -> PgResult<types_core::Oid> {
+    if attno <= 0 || attno as usize > subquery.targetList.len() {
+        return Ok(types_core::InvalidOid);
+    }
+    let tle = subquery
+        .targetList
+        .nth(attno as usize - 1)
+        .as_target_entry()
+        .expect("tlist cell is a TargetEntry");
+
+    for n in &subquery.distinctClause {
+        let sgc = n.as_sort_group_clause().expect("distinctClause cell");
+        if sgc.tleSortGroupRef == tle.ressortgroupref {
+            return Ok(sgc.eqop);
+        }
+    }
+
+    if subquery.hasWindowFuncs && !subquery.windowClause.is_nil() {
+        let mut eqop = types_core::InvalidOid;
+        let mut in_all_windows = true;
+        for wc_node in &subquery.windowClause {
+            let wc = wc_node.as_window_clause().expect("windowClause cell");
+            match wc.partitionClause.iter().find_map(|n| {
+                let sgc = n.as_sort_group_clause().expect("partitionClause cell");
+                (sgc.tleSortGroupRef == tle.ressortgroupref).then_some(sgc.eqop)
+            }) {
+                Some(e) => eqop = e,
+                None => {
+                    in_all_windows = false;
+                    break;
+                }
+            }
+        }
+        if in_all_windows {
+            return Ok(eqop);
+        }
+    }
+
+    if subquery.setOperations.is_some() {
+        return Ok(setop_column_grouping_eqop(subquery.setOperations, attno));
+    }
+
+    Ok(types_core::InvalidOid)
+}
+
+// setop_column_grouping_eqop (allpaths.c): groupClauses is positional, element
+// N-1 for output column N (makeSortGroupClauseForSetOp); an entirely-UNION-ALL
+// tree yields InvalidOid.
+fn setop_column_grouping_eqop(setop: Option<Node<'_>>, attno: i16) -> types_core::Oid {
+    let Some(op) = setop.and_then(|n| n.as_set_operation_stmt()) else {
+        return types_core::InvalidOid;
+    };
+    if !op.groupClauses.is_nil() && attno >= 1 && attno as usize <= op.groupClauses.len() {
+        return op
+            .groupClauses
+            .nth(attno as usize - 1)
+            .as_sort_group_clause()
+            .expect("setop groupClauses cell")
+            .eqop;
+    }
+    let eqop = setop_column_grouping_eqop(op.larg, attno);
+    if eqop != types_core::InvalidOid {
+        return eqop;
+    }
+    setop_column_grouping_eqop(op.rarg, attno)
+}
+
+// setop_has_grouping (allpaths.c).
+fn setop_has_grouping(setop: Node<'_>) -> bool {
+    let Some(op) = setop.as_set_operation_stmt() else {
+        return false;
+    };
+    !op.groupClauses.is_nil()
+        || op.larg.map_or(false, setop_has_grouping)
+        || op.rarg.map_or(false, setop_has_grouping)
 }
 
 // contain_volatile_functions((Node *) rinfo): the walker's RestrictInfo arm

@@ -1375,6 +1375,147 @@ pub fn make_notclause<'mcx>(mcx: mcx::Mcx<'mcx>, arg: Node<'mcx>) -> PgResult<No
     )
 }
 
+// expression_has_grouping_conflict (clauses.c): would 'expr' distinguish rows
+// a grouping mechanism considers equal? get_eqop identifies a grouping column
+// by returning a valid eqop for its Var (InvalidOid otherwise). A grouping
+// column is provably safe only as a direct operand of a comparison compatible
+// with the grouping eqop and, for a nondeterministic collation, under the
+// column's own collation; any other reference to a nondeterministic-collation
+// grouping column is rejected.
+pub fn expression_has_grouping_conflict<'mcx>(
+    expr: Node<'mcx>,
+    get_eqop: &mut dyn FnMut(&types_nodes::primnodes::Var<'mcx>) -> PgResult<Oid>,
+) -> PgResult<bool> {
+    let mut w = GroupingConflictWalker { get_eqop };
+    NodeWalker::visit(&mut w, expr)
+}
+
+struct GroupingConflictWalker<'a, 'mcx> {
+    get_eqop: &'a mut dyn FnMut(&types_nodes::primnodes::Var<'mcx>) -> PgResult<Oid>,
+}
+
+impl<'a, 'mcx> GroupingConflictWalker<'a, 'mcx> {
+    // grouping_check_operand (clauses.c): a direct grouping-column operand is
+    // fully handled here (not recursed into); anything else walks normally.
+    fn check_operand(&mut self, arg: Node<'mcx>, opno: Oid, inputcollid: Oid) -> PgResult<bool> {
+        let mut node = arg;
+        while let Some(r) = node.as_relabel_type() {
+            node = r.arg;
+        }
+        if let Some(var) = node.as_var() {
+            let grouping_eqop = (self.get_eqop)(var)?;
+            if grouping_eqop != types_core::InvalidOid {
+                if !lsyscache::equality_ops_are_compatible(opno, grouping_eqop)? {
+                    return Ok(true);
+                }
+                if var.varcollid != types_core::InvalidOid
+                    && !lsyscache::get_collation_isdeterministic(var.varcollid)?
+                    && inputcollid != var.varcollid
+                {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        self.visit(arg)
+    }
+
+    fn check_operands(
+        &mut self,
+        opno: Oid,
+        inputcollid: Oid,
+        args: &types_nodes::NodeList<'mcx>,
+    ) -> PgResult<bool> {
+        for arg in args {
+            if self.check_operand(arg, opno, inputcollid)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+impl<'a, 'mcx> NodeWalker<'mcx> for GroupingConflictWalker<'a, 'mcx> {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(var) = node.as_var() {
+            // A grouping column reaching here was not a direct comparison
+            // operand; safe for deterministic collations only.
+            return Ok((self.get_eqop)(var)? != types_core::InvalidOid
+                && var.varcollid != types_core::InvalidOid
+                && !lsyscache::get_collation_isdeterministic(var.varcollid)?);
+        }
+        if let Some(opexpr) = node.as_op_expr() {
+            if lsyscache::op_is_safe_index_member(opexpr.opno)? {
+                return self.check_operands(opexpr.opno, opexpr.inputcollid, &opexpr.args);
+            }
+            // not a btree/hash member: fall through to the generic walk
+        } else if let Some(saop) = node.as_scalar_array_op_expr() {
+            if lsyscache::op_is_safe_index_member(saop.opno)? {
+                return self.check_operands(saop.opno, saop.inputcollid, &saop.args);
+            }
+        } else if let Some(rcexpr) = node.as_row_compare_expr() {
+            // Each column is compared under its own operator and inputcollid.
+            for i in 0..rcexpr.largs.len() {
+                let opno = rcexpr.opnos.nth(i);
+                let collid = rcexpr.inputcollids.nth(i);
+                if self.check_operand(rcexpr.largs.nth(i), opno, collid)?
+                    || self.check_operand(rcexpr.rargs.nth(i), opno, collid)?
+                {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        } else if let Some(cexpr) = node.as_case_expr() {
+            if let Some(cexpr_arg) = cexpr.arg {
+                // A simple CASE compares the arg under every WHEN's
+                // inputcollid; the WHEN operators are always the type-default
+                // "=", so only a collation conflict is possible on the arg.
+                let mut arg = cexpr_arg;
+                while let Some(r) = arg.as_relabel_type() {
+                    arg = r.arg;
+                }
+                if let Some(var) = arg.as_var() {
+                    if (self.get_eqop)(var)? != types_core::InvalidOid
+                        && var.varcollid != types_core::InvalidOid
+                        && !lsyscache::get_collation_isdeterministic(var.varcollid)?
+                    {
+                        for cw_node in &cexpr.args {
+                            let cw = cw_node.as_case_when().expect("CaseWhen cell");
+                            let collid = cw.expr.map_or(
+                                types_core::InvalidOid,
+                                crate::walker::node_funcs::expr_input_collation,
+                            );
+                            if collid != types_core::InvalidOid && collid != var.varcollid {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                } else if self.visit(cexpr_arg)? {
+                    return Ok(true);
+                }
+                for cw_node in &cexpr.args {
+                    let cw = cw_node.as_case_when().expect("CaseWhen cell");
+                    if let Some(e) = cw.expr {
+                        if self.visit(e)? {
+                            return Ok(true);
+                        }
+                    }
+                    if let Some(r) = cw.result {
+                        if self.visit(r)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                return match cexpr.defresult {
+                    Some(d) => self.visit(d),
+                    None => Ok(false),
+                };
+            }
+        }
+        expression_tree_walker(node, self)
+    }
+}
+
 // make_ands_implicit (clauses.c): explicit AND -> flat list; constant TRUE ->
 // NIL; the cell copy shares the arg nodes (C returns the AND's own list).
 pub fn make_ands_implicit<'mcx>(

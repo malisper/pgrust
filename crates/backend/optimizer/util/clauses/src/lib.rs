@@ -19,6 +19,7 @@ pub use classify::{
     contain_volatile_functions_after_planning, contain_volatile_functions_not_nextval,
     contain_window_function, convert_saop_to_hashed_saop, expression_returns_set_rows,
     find_forced_null_var, find_forced_null_vars, find_nonnullable_rels, find_nonnullable_vars,
+    expression_has_grouping_conflict,
     find_window_functions, is_andclause, is_notclause, is_orclause, is_parallel_safe,
     is_pseudo_constant_clause, is_pseudo_constant_clause_relids, make_andclause,
     make_ands_explicit, make_ands_implicit, make_notclause, make_orclause, make_saop_expr,
