@@ -36,6 +36,39 @@ fn fixture_query_copy_roundtrip() {
     assert_eq!(c, c2);
 }
 
+// The plancache BuildCachedPlan boundary uses copy_query on transformed
+// Queries: every fixture Query in the corpus must serialize identically after
+// the structural copy and survive its source arena.
+#[test]
+fn query_corpus_copy_differential() {
+    const CORPUS: &[&str] = &[
+        include_str!("../../readfuncs/src/fixtures/pg_stat_activity.ev_action"),
+        include_str!("../../../utils/adt/ruleutils/src/fixtures/v1_action.txt"),
+        include_str!("../../../utils/adt/ruleutils/src/fixtures/v11_action.txt"),
+    ];
+    for &fixture in CORPUS {
+        let src_ctx = MemoryContext::new("src");
+        let dst_ctx = MemoryContext::new("dst");
+        let (smcx, dmcx) = (src_ctx.mcx(), dst_ctx.mcx());
+        let list = readfuncs::stringToNode(smcx, fixture).unwrap();
+        let mut copies: Vec<(String, Node<'_>)> = Vec::new();
+        for q in list.as_list().expect("action list").iter() {
+            let query = q.as_query().expect("Query member");
+            let copy = crate::copy_query(dmcx, query).unwrap();
+            let copy = Node::mk(dmcx, copy).unwrap();
+            let s = outfuncs::nodeToString(smcx, q).unwrap().as_str().to_string();
+            let c = outfuncs::nodeToString(dmcx, copy).unwrap().as_str().to_string();
+            assert_eq!(s, c, "copy_query must serialize identically");
+            copies.push((c, copy));
+        }
+        drop(src_ctx);
+        for (before, copy) in copies {
+            let after = outfuncs::nodeToString(dmcx, copy).unwrap().as_str().to_string();
+            assert_eq!(before, after, "copy must not reference the source arena");
+        }
+    }
+}
+
 #[test]
 fn const_byref_datum_is_deep_copied() {
     let src_ctx = MemoryContext::new("src");
