@@ -5,7 +5,7 @@ use ::types_core::primitive::InvalidOid;
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    function_call2_coll, varlena_result, FmgrBuiltin, FmgrInfo,
+    function_call2_coll_in, varlena_result, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 
@@ -132,7 +132,8 @@ pub fn fc_ts_match_tt(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let v = to_tsvector_image(mcx, cfg, text_data(fcinfo, 0)?)?;
     let q = query_bind::morph_to_tsquery(mcx, cfg, text_data(fcinfo, 1)?, P_TSQ_PLAIN, OP_AND)?;
     let mut fi = ::fmgr_seams::fmgr_info::call(F_TS_MATCH_VQ)?;
-    function_call2_coll(&mut fi, InvalidOid, v, q)
+    // C DirectFunctionCall2: the callee pallocs in the caller's context.
+    function_call2_coll_in(&mut fi, InvalidOid, mcx, v, q)
 }
 
 pub fn fc_ts_match_tq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -152,7 +153,8 @@ pub fn fc_ts_match_tq(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
         Datum::from_usize(packed.as_ptr() as usize)
     };
     let mut fi = ::fmgr_seams::fmgr_info::call(F_TS_MATCH_VQ)?;
-    function_call2_coll(&mut fi, InvalidOid, v, q)
+    // C DirectFunctionCall2: the callee pallocs in the caller's context.
+    function_call2_coll_in(&mut fi, InvalidOid, mcx, v, q)
 }
 
 // wparser.c ts_headline family, hosted here (the CacheEnv parser drive and

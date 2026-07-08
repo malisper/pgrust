@@ -233,6 +233,7 @@ pub struct WindowAggStateData<'mcx> {
     use_pass_through: bool,
     top_window: bool,
     all_first: bool,
+    deps_hoisted: bool,
     partition_spooled: bool,
     more_partitions: bool,
     next_partition: bool,
@@ -857,6 +858,7 @@ pub fn exec_init_window_agg<'mcx>(
         use_pass_through: !node.topWindow || node.partNumCols > 0,
         top_window: node.topWindow,
         all_first: true,
+        deps_hoisted: false,
         partition_spooled: false,
         more_partitions: false,
         next_partition: true,
@@ -2174,7 +2176,6 @@ impl<'mcx> WindowAggStateData<'mcx> {
     // evaluates it (nodeagg hoist_pending_initplans pattern). all_first-gated:
     // a rescan that re-marks exec_plan also resets all_first.
     fn hoist_pending_initplans(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
-        debug_assert!(self.all_first);
         let mut deps: Vec<u32> = Vec::new();
         for state in [
             Some(&*self.proj),
@@ -2183,8 +2184,6 @@ impl<'mcx> WindowAggStateData<'mcx> {
             self.evaltrans.as_deref(),
             self.runcondition.as_deref(),
             self.qual.as_deref(),
-            self.start_offset_state.as_deref(),
-            self.end_offset_state.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -2216,6 +2215,22 @@ impl<'mcx> WindowAggStateData<'mcx> {
         debug_assert!(self.all_first);
         let fo = self.frameOptions;
         let mcx = estate.es_query_cxt;
+        {
+            // C evaluates the offset exprs here unconditionally (before any
+            // row is fetched), so their initplan deps fire eagerly; every
+            // other dep waits for a first spooled row (hoist below).
+            let mut deps: Vec<u32> = Vec::new();
+            for state in
+                [self.start_offset_state.as_deref(), self.end_offset_state.as_deref()]
+                    .into_iter()
+                    .flatten()
+            {
+                deps.extend_from_slice(state.param_exec_deps());
+            }
+            if !deps.is_empty() {
+                ::executils::exec_eval_param_exec_params(estate, &deps)?;
+            }
+        }
         if fo & FRAMEOPTION_START_OFFSET != 0 {
             let state = self.start_offset_state.as_deref_mut().expect("startOffset ExprState");
             let mut slots = EvalSlots::default();
@@ -3304,7 +3319,6 @@ where
         return Ok(None);
     }
     if state.all_first {
-        state.hoist_pending_initplans(estate)?;
         state.calculate_frame_offsets(estate)?;
     }
     let fetch = &mut fetch_outer;
@@ -3329,6 +3343,13 @@ where
                 state.status = WaStatus::Done;
                 return Ok(None);
             }
+        }
+
+        // A row exists past this point; C first reads pending initplan
+        // params here (never on an empty input).
+        if !state.deps_hoisted {
+            state.hoist_pending_initplans(estate)?;
+            state.deps_hoisted = true;
         }
 
         estate.reset_expr_context(state.ps_ExprContext);
@@ -3526,6 +3547,7 @@ pub fn exec_rescan_window_agg<'mcx>(
 ) {
     node.status = WaStatus::Run;
     node.all_first = true;
+    node.deps_hoisted = false;
     node.release_partition(estate);
     let mcx = estate.es_query_cxt;
     exectuples::exec_clear_tuple(&mut node.first_part_slot, mcx);
@@ -3567,7 +3589,7 @@ mcx::forget_safe_struct!(
         aggregatedbase, aggregatedupto, spooled_rows,
         start_offset_value, end_offset_value, start_offset_typlen,
         start_offset_byval, end_offset_typlen, end_offset_byval,
-        use_pass_through, top_window, all_first,
+        use_pass_through, top_window, all_first, deps_hoisted,
         partition_spooled, more_partitions, next_partition, status;
         ps_ResultTupleDesc, proj, part_eq, ord_eq, buffer, scan_slot,
         first_part_slot, agg_row_slot, temp_slot_1, temp_slot_2,
