@@ -89,15 +89,28 @@ fn substitute_path_macro(s: &str, macro_: &str, value: &str) -> PgResult<String>
     Ok(format!("{value}{}", &s[sep..]))
 }
 
+// DIVERGENCE: contrib extension files are staged beside the binary by
+// main_main's build.rs (no `make install` exists); the staged dir precedes
+// the system dir so this repo's vendored scripts win over whatever C install
+// PGRUST_PGSHAREDIR points at (that env is set for tzdata, not extensions).
+fn staged_extension_dir() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("share/extension");
+    dir.is_dir().then(|| dir.to_string_lossy().into_owned())
+}
+
 pub(crate) fn get_extension_control_directories() -> PgResult<Vec<String>> {
     let system_dir = format!("{}/extension", share_path());
     let ecp = EXTENSION_CONTROL_PATH.with(|c| c.borrow().clone());
 
+    let mut paths = Vec::new();
+    paths.extend(staged_extension_dir());
+
     if ecp.is_empty() {
-        return Ok(vec![system_dir]);
+        paths.push(system_dir);
+        return Ok(paths);
     }
 
-    let mut paths = Vec::new();
     for piece in ecp.split(':') {
         let mangled = if piece == "$system" {
             substitute_path_macro(piece, "$system", &system_dir)?
