@@ -1,12 +1,6 @@
 //! `contrib/ltree/_ltree_op.c` array iteration support: walk an `ltree[]`
 //! (or `lquery[]`) container into its per-element varlena byte-slices.
 //!
-//! The container arrives at the fmgr boundary already detoasted as a flat,
-//! 4-byte-header `ArrayType` image: the C `array.h` header
-//! (`vl_len_, ndim, dataoffset, elemtype`, then the per-dim `dims`/`lbound`,
-//! then an optional null bitmap, then the MAXALIGN-padded element data). ltree
-//! / lquery elements are by-reference varlenas, stepped via
-//! `INTALIGN(VARSIZE(x))` exactly as `_ltree_op.c`'s `NEXTVAL`.
 
 // `ndim`/`nitems` accessors are part of the complete array surface but only
 // some callers use them; allow dead for the unused accessors.
@@ -22,7 +16,6 @@ const ARR_HDR_DATAOFFSET: usize = 8;
 // elemtype at offset 12; dims/lbound start at 16.
 const ARR_DIMS_START: usize = 16;
 
-/// Parsed array container giving access to per-element byte-slices.
 pub struct LtreeArray<'a> {
     buf: &'a [u8],
     ndim: i32,
@@ -33,7 +26,6 @@ pub struct LtreeArray<'a> {
 }
 
 impl<'a> LtreeArray<'a> {
-    /// Parse the header. Mirrors `ArrayGetNItems` + `ARR_NDIM`/`ARR_DATA_PTR`.
     pub fn parse(buf: &'a [u8]) -> LtreeArray<'a> {
         let ndim = read_i32(buf, ARR_HDR_NDIM);
         let dataoffset = read_i32(buf, ARR_HDR_DATAOFFSET);
@@ -77,7 +69,6 @@ impl<'a> LtreeArray<'a> {
         self.nitems
     }
 
-    /// `array_contains_nulls(arr)` — true if any null bit is 0.
     pub fn contains_nulls(&self) -> bool {
         if !self.has_null {
             return false;
@@ -91,8 +82,6 @@ impl<'a> LtreeArray<'a> {
         false
     }
 
-    /// Iterate each element's varlena byte-slice (header-ful image), assuming
-    /// no nulls (the C `array_iterator` checks `array_contains_nulls` first).
     pub fn elements(&self) -> ElementIter<'a> {
         ElementIter {
             buf: self.buf,
@@ -101,7 +90,6 @@ impl<'a> LtreeArray<'a> {
         }
     }
 
-    /// The `ARR_NDIM > 1 || contains_nulls` guards C does before iterating.
     pub fn check_1d_no_nulls(&self) -> Result<(), PgError> {
         if self.ndim > 1 {
             return Err(PgError::error("array must be one-dimensional")

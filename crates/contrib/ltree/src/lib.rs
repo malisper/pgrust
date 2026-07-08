@@ -21,9 +21,6 @@ use types_tuple::varatt;
 
 const LIBRARY: &str = "ltree";
 
-// ===========================================================================
-// fmgr boundary helpers.
-// ===========================================================================
 
 // Full 4B-header image of a by-ref varlena arg; short/toasted forms are
 // canonicalized because the repr walkers read VARSIZE = word >> 2.
@@ -62,9 +59,6 @@ fn ret_cstring(fcinfo: &Fcinfo, payload: &[u8]) -> PgResult<Datum> {
     Ok(cstring_result(v))
 }
 
-// ===========================================================================
-// I/O.
-// ===========================================================================
 
 macro_rules! fc_type_in {
     ($($fname:ident: $parse:path;)*) => {$(
@@ -135,9 +129,6 @@ fn fc_ltxtq_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Dat
     ret_text(fcinfo, &text)
 }
 
-// ===========================================================================
-// Comparison / hash (ltree_op.c).
-// ===========================================================================
 
 fn cmp_args(fcinfo: &Fcinfo) -> PgResult<(Vec<u8>, Vec<u8>)> {
     Ok(unsafe { (arg_image(fcinfo, 0)?, arg_image(fcinfo, 1)?) })
@@ -177,9 +168,6 @@ fn fc_hash_ltree_extended(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_u64(op::hash_ltree_extended(&a, seed.value.as_u64())))
 }
 
-// ===========================================================================
-// Functions (ltree_op.c).
-// ===========================================================================
 
 fn fc_nlevel(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let a = unsafe { arg_image(fcinfo, 0)? };
@@ -262,9 +250,6 @@ fn fc_ltreeparentsel(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResul
     Ok(Datum::from_f64(0.001))
 }
 
-// ===========================================================================
-// lquery / ltxtquery match (lquery_op.c, ltxtquery_op.c).
-// ===========================================================================
 
 fn fc_ltq_regex(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (tree, query) = cmp_args(fcinfo)?;
@@ -307,9 +292,6 @@ fn fc_ltxtq_rexec(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     Ok(Datum::from_bool(op::ltxtq_exec(&tree, &query)))
 }
 
-// ===========================================================================
-// ltree[] array operators (_ltree_op.c).
-// ===========================================================================
 
 fn array_iter_isparent(la: &[u8], query: &[u8], risparent: bool) -> PgResult<Option<Vec<u8>>> {
     let arr = array::LtreeArray::parse(la);
@@ -423,9 +405,6 @@ fn fc__lca(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     }
 }
 
-// ===========================================================================
-// GiST opclasses (ltree_gist.c / _ltree_gist.c) — GISTENTRY fmgr protocol.
-// ===========================================================================
 
 // SAFETY helpers over the gist fmgr protocol (pg_trgm precedent).
 unsafe fn entry_arg<'a>(fcinfo: &Fcinfo, i: usize) -> &'a GISTENTRY {
@@ -710,9 +689,6 @@ fn fc__ltree_gist_options(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_usize(0))
 }
 
-// ===========================================================================
-// Registration.
-// ===========================================================================
 
 fn lookup(function: &str) -> Option<PGFunction> {
     Some(match function {

@@ -1,7 +1,6 @@
 //! `contrib/ltree/ltree_op.c`, `lquery_op.c`, `ltxtquery_op.c` — the scalar
 //! operators/functions over `ltree` / `lquery` / `ltxtquery` (everything that
 //! works on a sequential scan). Each function operates on the borrowed varlena
-//! images; results are freshly built images.
 
 use ::types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
@@ -11,11 +10,7 @@ use ::types_error::PgError;
 use crate::crc::fold;
 use crate::repr::*;
 
-// ---------------------------------------------------------------------------
-// ltree compare / hash
-// ---------------------------------------------------------------------------
 
-/// `ltree_compare(a, b)`.
 pub fn ltree_compare(a: &[u8], b: &[u8]) -> i32 {
     let ta = Ltree::new(a);
     let tb = Ltree::new(b);
@@ -54,7 +49,6 @@ pub fn hash_ltree(a: &[u8]) -> u32 {
     result
 }
 
-/// `hash_ltree_extended(a, seed)`.
 pub fn hash_ltree_extended(a: &[u8], seed: u64) -> u64 {
     let t = Ltree::new(a);
     if t.numlevel() == 0 {
@@ -68,12 +62,10 @@ pub fn hash_ltree_extended(a: &[u8], seed: u64) -> u64 {
     result
 }
 
-/// `nlevel(a)`.
 pub fn nlevel(a: &[u8]) -> i32 {
     Ltree::new(a).numlevel() as i32
 }
 
-/// `inner_isparent(c, p)` — is `p` an ancestor-or-equal prefix of `c`?
 pub fn inner_isparent(c: &[u8], p: &[u8]) -> bool {
     let tc = Ltree::new(c);
     let tp = Ltree::new(p);
@@ -91,11 +83,7 @@ pub fn inner_isparent(c: &[u8], p: &[u8]) -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// subltree / subpath
-// ---------------------------------------------------------------------------
 
-/// `inner_subltree(t, startpos, endpos)`.
 pub fn inner_subltree(t: &[u8], startpos: i32, endpos_in: i32) -> Result<Vec<u8>, PgError> {
     let tt = Ltree::new(t);
     let numlevel = tt.numlevel() as i32;
@@ -114,7 +102,6 @@ pub fn inner_subltree(t: &[u8], startpos: i32, endpos_in: i32) -> Result<Vec<u8>
     Ok(build_ltree(&labels))
 }
 
-/// `subpath(t, start, len?)`.
 pub fn subpath(t: &[u8], start_in: i32, len_opt: Option<i32>) -> Result<Vec<u8>, PgError> {
     let numlevel = Ltree::new(t).numlevel() as i32;
     let len = len_opt.unwrap_or(0);
@@ -138,7 +125,6 @@ pub fn subpath(t: &[u8], start_in: i32, len_opt: Option<i32>) -> Result<Vec<u8>,
     inner_subltree(t, start, end)
 }
 
-/// `ltree_concat(a, b)` — append two ltrees.
 pub fn ltree_concat(a: &[u8], b: &[u8]) -> Result<Vec<u8>, PgError> {
     let ta = Ltree::new(a);
     let tb = Ltree::new(b);
@@ -160,7 +146,6 @@ pub fn ltree_concat(a: &[u8], b: &[u8]) -> Result<Vec<u8>, PgError> {
     Ok(build_ltree(&labels))
 }
 
-/// `ltree_index(a, b, start?)` — find `b` as a contiguous sub-path of `a`.
 pub fn ltree_index(a: &[u8], b: &[u8], start_in: Option<i32>) -> i32 {
     let ta = Ltree::new(a);
     let tb = Ltree::new(b);
@@ -208,8 +193,6 @@ pub fn ltree_index(a: &[u8], b: &[u8], start_in: Option<i32>) -> i32 {
     }
 }
 
-/// `lca_inner(a_list)` — longest common ancestor. Returns `None` for the C
-/// NULL result (empty LCA).
 pub fn lca_inner(a: &[&[u8]]) -> Option<Vec<u8>> {
     let len = a.len();
     if len == 0 {
@@ -249,23 +232,17 @@ pub fn lca_inner(a: &[&[u8]]) -> Option<Vec<u8>> {
     Some(build_ltree(&labels))
 }
 
-// ---------------------------------------------------------------------------
-// lquery matching (lquery_op.c)
-// ---------------------------------------------------------------------------
 
-/// `ltree_prefix_eq(a, b)` — is `a` a prefix of `b`? (byte exact)
 fn prefix_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() <= b.len() && b[..a.len()] == *a
 }
 
-/// `ltree_prefix_eq_ci(a, b)` — case-insensitive prefix (case-fold both).
 fn prefix_eq_ci(a: &[u8], b: &[u8]) -> bool {
     let al = fold(a);
     let bl = fold(b);
     al.len() <= bl.len() && bl[..al.len()] == *al
 }
 
-/// Dispatch prefix-eq by the INCASE flag.
 fn prefix_eq_dispatch(incase: bool, a: &[u8], b: &[u8]) -> bool {
     if incase {
         prefix_eq_ci(a, b)
@@ -274,8 +251,6 @@ fn prefix_eq_dispatch(incase: bool, a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-/// `getlexeme` — split on '_' boundaries: return the next lexeme slice.
-/// Returns `(start, len)` relative to the input `s`, or None at end.
 fn getlexeme(s: &[u8], mut start: usize) -> Option<(usize, usize)> {
     let end = s.len();
     // skip leading '_' (mblen-stepped, but '_' is single byte)
@@ -297,7 +272,6 @@ fn pg_mblen_range(s: &[u8], i: usize) -> usize {
     (::mbutils::pg_mblen(&s[i..]).max(1)) as usize
 }
 
-/// `compare_subnode(t_name, qn, prefix_eq, anyend)`.
 fn compare_subnode(t_name: &[u8], qn: &[u8], incase: bool, anyend: bool) -> bool {
     let mut qpos = 0usize;
     while let Some((qs, qlen)) = getlexeme(qn, qpos) {
@@ -320,7 +294,6 @@ fn compare_subnode(t_name: &[u8], qn: &[u8], incase: bool, anyend: bool) -> bool
     true
 }
 
-/// `checkLevel(curq, curt)`.
 fn check_level(curq: &LqlView, t_name: &[u8]) -> bool {
     let success = curq.flag() & LQL_NOT == 0;
     if curq.numvar() == 0 {
@@ -344,7 +317,6 @@ fn check_level(curq: &LqlView, t_name: &[u8]) -> bool {
     !success
 }
 
-/// `checkCond(curq, qlen, curt, tlen)` — recursive lquery match.
 fn check_cond(
     levels: &[LqlView],
     qi: usize,
@@ -399,7 +371,6 @@ fn check_cond(
     Ok(tlen == 0)
 }
 
-/// `ltq_regex(tree, query)` — `tree ~ query`.
 pub fn ltq_regex(tree: &[u8], query: &[u8]) -> Result<bool, PgError> {
     let t = Ltree::new(tree);
     let q = Lquery::new(query);
@@ -416,11 +387,7 @@ pub fn ltq_regex(tree: &[u8], query: &[u8]) -> Result<bool, PgError> {
     )
 }
 
-// ---------------------------------------------------------------------------
-// ltxtquery matching (ltxtquery_op.c)
-// ---------------------------------------------------------------------------
 
-/// `checkcondition_str` — does any ltree level satisfy the ITEM?
 fn checkcondition_str(t_names: &[&[u8]], operand: &[u8], it: &Item) -> bool {
     let start = it.distance as usize;
     // operand is NUL-terminated at op+distance; the C compares val->length bytes
@@ -443,7 +410,6 @@ fn checkcondition_str(t_names: &[&[u8]], operand: &[u8], it: &Item) -> bool {
     false
 }
 
-/// `ltree_execute` — evaluate the polish-notation tree.
 fn ltree_execute(
     items: &[Item],
     cur: usize,
@@ -480,7 +446,6 @@ fn ltree_execute(
     }
 }
 
-/// `ltxtq_exec(tree, query)` — `tree @ query`.
 pub fn ltxtq_exec(tree: &[u8], query: &[u8]) -> bool {
     let t = Ltree::new(tree);
     let q = Ltxtquery::new(query);
@@ -490,15 +455,6 @@ pub fn ltxtq_exec(tree: &[u8], query: &[u8]) -> bool {
     ltree_execute(&items, 0, &t_names, operand, true, 0)
 }
 
-/// `ltree_execute(GETQUERY(query), &sig, false, checkcondition_bit)` — the GiST
-/// inner-node ltxtquery evaluator. Mirrors `gist_qtxt`'s use of `ltree_execute`
-/// with `calcnot = false` (NOT-nodes optimistically match an inner key) and a
-/// signature-bitmap leaf check: each VAL `ITEM` is "present" iff its CRC's bit
-/// is set in `sign` (when the operand can look at the sign — `FLG_CANLOOKSIGN`).
-///
-/// `getbit(i)` returns the i-th signature bit; `hashval(crc)` maps an ITEM's CRC
-/// to its bit index. This keeps the bit-math (HASHVAL with the opclass's
-/// `SIGLENBIT`) in the GiST module while reusing the polish-notation walk.
 pub fn ltxtq_exec_sign(
     query: &[u8],
     canlooksign: &dyn Fn(u8) -> bool,
