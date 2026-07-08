@@ -323,9 +323,14 @@ struct MXactCache {
     live: usize,
 }
 
+// Older-minor WAL compat (upstream 0852643e): LAST_INITIALIZED_OFFSETS_PAGE
+// is the page of the last replayed XLOG_MULTIXACT_ZERO_OFF_PAGE record (-1 if
+// none yet); PRE_INITIALIZED_OFFSETS_PAGE is the last page implicitly
+// initialized by a CREATE_ID record before its ZERO_OFF_PAGE was seen.
 thread_local! {
     static MXACT_CACHE: RefCell<Option<MXactCache>> = const { RefCell::new(None) };
     static PRE_INITIALIZED_OFFSETS_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
+    static LAST_INITIALIZED_OFFSETS_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
 }
 
 #[cfg(test)]
@@ -710,20 +715,32 @@ fn RecordNewMultiXact(
     let next_entryno = MultiXactIdToOffsetEntry(next);
 
     // Pre-18 minors did not set the next multixid's offset here; when
-    // replaying their WAL the next page may not exist yet.
-    if xlogutils_seams::in_recovery::call()
-        && next_pageno != pageno
-        && octl.latest_page_number() == pageno
-    {
-        dlog(DEBUG1, "next offsets page is not initialized, initializing it now".to_string());
+    // replaying their WAL the next page may not exist yet. A CHECKPOINT
+    // record can seed latest_page_number before the CREATE_ID for its
+    // nextMulti is replayed, so latest_page_number cannot tell whether the
+    // page is initialized; track the last ZERO_OFF_PAGE we replayed instead,
+    // falling back to a physical-existence probe (after flushing the SLRU
+    // buffers so it is accurate) until we have seen one (upstream 0852643e).
+    if xlogutils_seams::in_recovery::call() && next_pageno != pageno {
+        let init_needed = if LAST_INITIALIZED_OFFSETS_PAGE.get() == -1 {
+            SimpleLruWriteAll(octl, false)?;
+            !SimpleLruDoesPhysicalPageExist(octl, next_pageno)?
+        } else {
+            LAST_INITIALIZED_OFFSETS_PAGE.get() == pageno
+        };
 
-        let mut bank = LwGuard::acquire(SimpleLruGetBankLock(octl, next_pageno), LW_EXCLUSIVE)?;
-        let slotno = SimpleLruZeroPage(octl, next_pageno, &mut bank)?;
-        SimpleLruWritePage(octl, slotno, &mut bank)?;
-        debug_assert!(!octl.page_dirty(slotno, &bank));
-        bank.release()?;
+        if init_needed {
+            dlog(DEBUG1, "next offsets page is not initialized, initializing it now".to_string());
 
-        PRE_INITIALIZED_OFFSETS_PAGE.set(next_pageno);
+            let mut bank = LwGuard::acquire(SimpleLruGetBankLock(octl, next_pageno), LW_EXCLUSIVE)?;
+            let slotno = SimpleLruZeroPage(octl, next_pageno, &mut bank)?;
+            SimpleLruWritePage(octl, slotno, &mut bank)?;
+            debug_assert!(!octl.page_dirty(slotno, &bank));
+            bank.release()?;
+
+            PRE_INITIALIZED_OFFSETS_PAGE.set(next_pageno);
+            LAST_INITIALIZED_OFFSETS_PAGE.set(next_pageno);
+        }
     }
 
     let mut bank = LwGuard::acquire(SimpleLruGetBankLock(octl, pageno), LW_EXCLUSIVE)?;
@@ -1337,6 +1354,7 @@ pub fn MultiXactShmemInit() -> PgResult<()> {
         panic!("MultiXactShmemInit called twice");
     }
     PRE_INITIALIZED_OFFSETS_PAGE.set(-1);
+    LAST_INITIALIZED_OFFSETS_PAGE.set(-1);
     Ok(())
 }
 
@@ -1968,6 +1986,8 @@ pub fn multixact_redo(record: &mut XLogReaderState) -> PgResult<()> {
             SimpleLruWritePage(octl, slotno, &mut bank)?;
             debug_assert!(!octl.page_dirty(slotno, &bank));
             bank.release()?;
+
+            LAST_INITIALIZED_OFFSETS_PAGE.set(pageno);
         } else {
             dlog(
                 DEBUG1,

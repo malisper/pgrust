@@ -7,6 +7,7 @@ use types_storage::multixact::MultiXactStatus::*;
 static XLOG_INSERTS: Mutex<Vec<(u8, u8, Vec<u8>)>> = Mutex::new(Vec::new());
 static IN_PROGRESS_XIDS: Mutex<Vec<TransactionId>> = Mutex::new(Vec::new());
 static CURRENT_XID: StdAtomicU32 = StdAtomicU32::new(0);
+static IN_RECOVERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn shmem_registry() -> &'static Mutex<std::collections::HashMap<String, usize>> {
     static R: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
@@ -113,7 +114,9 @@ fn setup() {
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         waitevent_seams::pgstat_reset_wait_event_storage::set(|| {});
 
-        xlogutils_seams::in_recovery::set(|| false);
+        xlogutils_seams::in_recovery::set(|| {
+            IN_RECOVERY.load(std::sync::atomic::Ordering::Relaxed)
+        });
         transam_xlog_seams::recovery_in_progress::set(|| false);
         transam_xlog_seams::xlog_flush::set(|_| Ok(()));
         transam_xlog_seams::count_ckpt_slru_written::set(|| {});
@@ -505,4 +508,74 @@ fn prepared_xact_oldest_member_slot_indexing() {
     assert_eq!(oldest_member(prepared_slot), my_oldest);
     multixact_twophase_postabort(88, 0, &my_oldest.to_ne_bytes()).unwrap();
     assert_eq!(oldest_member(prepared_slot), InvalidMultiXactId);
+}
+
+
+// Upstream 0852643e: a CHECKPOINT record can seed latest_page_number to the
+// next offsets page before the CREATE_ID that crosses onto it is replayed, so
+// the old latest_page_number==pageno pre-init check skipped the page. The fix
+// probes physical existence (or the last replayed ZERO_OFF_PAGE) instead.
+#[test]
+fn recovery_checkpoint_race_initializes_next_offsets_page() {
+    let _l = test_lock();
+    setup();
+
+    struct Restore {
+        next: MultiXactId,
+        off: MultiXactOffset,
+        latest: i64,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IN_RECOVERY.store(false, std::sync::atomic::Ordering::Relaxed);
+            PRE_INITIALIZED_OFFSETS_PAGE.set(-1);
+            LAST_INITIALIZED_OFFSETS_PAGE.set(-1);
+            multixact_seams::multixact_set_next_mxact::call(self.next, self.off);
+            OffsetCtl().set_latest_page_number(self.latest);
+        }
+    }
+    let st = MultiXactState();
+    let octl = OffsetCtl();
+    let _restore = Restore {
+        next: st.nextMXact.load(Relaxed),
+        off: st.nextOffset.load(Relaxed),
+        latest: octl.latest_page_number(),
+    };
+    let save_off = st.nextOffset.load(Relaxed);
+
+    // Older-minor WAL laid out pages 0..=5; page 5 got its ZERO_OFF_PAGE.
+    {
+        let mut bank = LwGuard::acquire(SimpleLruGetBankLock(octl, 5), LW_EXCLUSIVE).unwrap();
+        let slotno = ZeroMultiXactOffsetPage(5, false, &mut bank).unwrap();
+        SimpleLruWritePage(octl, slotno, &mut bank).unwrap();
+        bank.release().unwrap();
+    }
+
+    // Checkpoint said nextMulti = first multi of page 6; StartupMultiXact
+    // seeds latest_page_number to 6 before any CREATE_ID for it is replayed.
+    let boundary = 6 * MULTIXACT_OFFSETS_PER_PAGE;
+    multixact_seams::multixact_set_next_mxact::call(boundary, save_off);
+    multixact_seams::startup_multixact::call().unwrap();
+    assert_eq!(octl.latest_page_number(), 6);
+    assert!(!SimpleLruDoesPhysicalPageExist(octl, 6).unwrap());
+
+    IN_RECOVERY.store(true, std::sync::atomic::Ordering::Relaxed);
+    PRE_INITIALIZED_OFFSETS_PAGE.set(-1);
+    LAST_INITIALIZED_OFFSETS_PAGE.set(-1);
+
+    // No-ZERO_OFF_PAGE-seen branch: CREATE_ID for the last multi of page 5
+    // crosses onto missing page 6; the physical-existence probe must
+    // initialize it despite latest_page_number already being 6.
+    let members = [MultiXactMember { xid: 950, status: MultiXactStatusForShare }];
+    RecordNewMultiXact(boundary - 1, save_off, &members).unwrap();
+    assert!(SimpleLruDoesPhysicalPageExist(octl, 6).unwrap());
+    assert_eq!(PRE_INITIALIZED_OFFSETS_PAGE.get(), 6);
+    assert_eq!(LAST_INITIALIZED_OFFSETS_PAGE.get(), 6);
+
+    // Last-initialized-page branch: the next boundary crossing (page 6 -> 7)
+    // must initialize page 7 without a physical probe.
+    PRE_INITIALIZED_OFFSETS_PAGE.set(-1);
+    RecordNewMultiXact(7 * MULTIXACT_OFFSETS_PER_PAGE - 1, save_off + 1, &members).unwrap();
+    assert!(SimpleLruDoesPhysicalPageExist(octl, 7).unwrap());
+    assert_eq!(LAST_INITIALIZED_OFFSETS_PAGE.get(), 7);
 }
