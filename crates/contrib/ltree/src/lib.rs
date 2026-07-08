@@ -65,8 +65,16 @@ macro_rules! fc_type_in {
         fn $fname(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: catalog arg 0 is cstring (typlen -2).
             let s = unsafe { fcinfo.arg_cstring(0) };
-            let img = $parse(s.to_bytes())?;
-            ret_image(fcinfo, &img)
+            match $parse(s.to_bytes()) {
+                Ok(img) => ret_image(fcinfo, &img),
+                Err(e) => {
+                    // SAFETY: context, if set, rides per the ErrorSaveNode
+                    // contract for this call (pg_input_error_info path).
+                    let esc = unsafe { fcinfo.soft_error_context() };
+                    types_error::ereturn(esc, (), *e)?;
+                    Ok(fcinfo.return_null())
+                }
+            }
         }
     )*};
 }
