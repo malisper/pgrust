@@ -1,12 +1,7 @@
-//! `pgp_get_keyid` (pgp-info.c + the keyid part of pgp-pubkey.c) — extract the
-//! 16-hex-char key id from a dearmored public/secret key or an encrypted
-//! message. Needs only packet parsing + MPI reading + the SHA1 v4 fingerprint
-//! (no RSA/ElGamal math).
 
 use super::consts::*;
 use super::packet::PktReader;
 
-// Public-key algorithm ids (pgp.h).
 const PGP_PUB_RSA_ENCRYPT_SIGN: i32 = 1;
 const PGP_PUB_RSA_ENCRYPT: i32 = 2;
 const PGP_PUB_RSA_SIGN: i32 = 3;
@@ -15,7 +10,6 @@ const PGP_PUB_DSA_SIGN: i32 = 17;
 
 const HEXTBL: &[u8; 16] = b"0123456789ABCDEF";
 
-/// Read one MPI: 2-byte bit length, then ceil(bits/8) value bytes.
 fn read_mpi(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, ()> {
     if *pos + 2 > data.len() {
         return Err(());
@@ -39,7 +33,6 @@ struct PubKey {
     key_id: [u8; 8],
 }
 
-/// `_pgp_read_public_key` + `calc_key_id`. `body` is the full packet body.
 fn read_public_key(body: &[u8]) -> Result<PubKey, ()> {
     if body.is_empty() {
         return Err(());
@@ -84,7 +77,6 @@ fn read_public_key(body: &[u8]) -> Result<PubKey, ()> {
     Ok(pk)
 }
 
-/// `calc_key_id` — SHA1 over `0x99 || len2 || ver || time4 || algo || mpis`.
 fn calc_key_id(pk: &mut PubKey) -> Result<(), ()> {
     let mut len = 1 + 4 + 1;
     for m in &pk.mpis {
@@ -106,8 +98,6 @@ fn calc_key_id(pk: &mut PubKey) -> Result<(), ()> {
     Ok(())
 }
 
-/// Number of significant bits of an MPI value (big-endian, leading zeros
-/// trimmed). MPIs are stored canonical, so usually the first byte is nonzero.
 fn mpi_bit_len(v: &[u8]) -> usize {
     let mut i = 0;
     while i < v.len() && v[i] == 0 {
@@ -129,8 +119,6 @@ fn print_key(keyid: &[u8; 8]) -> String {
     s
 }
 
-/// `pgp_get_keyid` — returns the 16-hex key id string, "SYMKEY", "ANYKEY", or
-/// an error. `data` is the dearmored binary.
 pub fn pgp_get_keyid(data: &[u8]) -> Result<String, &'static str> {
     let mut rdr = PktReader::new(data);
     let mut got_pub_key = 0i32;

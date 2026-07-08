@@ -1,10 +1,7 @@
-//! PGP String-to-Key (pgp-s2k.c) — the three S2K modes (simple/salted/
-//! iterated-salted) with the multi-round output-extension scheme.
 
 use super::consts::*;
 use ::pg_strong_random::pg_strong_random;
 
-/// A PGP S2K specifier + the derived key.
 #[derive(Clone)]
 pub struct S2k {
     pub mode: i32,
@@ -16,8 +13,6 @@ pub struct S2k {
 }
 
 impl S2k {
-    /// `pgp_s2k_fill` — generate the salt/iter parameters for encryption.
-    /// `count` is the configured s2k_count (-1 = float default).
     pub fn fill(mode: i32, digest_algo: i32, count: i32) -> Result<S2k, &'static str> {
         let mut s = S2k {
             mode,
@@ -49,8 +44,6 @@ impl S2k {
         Ok(s)
     }
 
-    /// `pgp_s2k_read` — parse an S2K specifier off a byte stream, returning the
-    /// number of bytes consumed.
     pub fn read(src: &[u8]) -> Result<(S2k, usize), &'static str> {
         if src.len() < 2 {
             return Err(CORRUPT_DATA);
@@ -87,8 +80,6 @@ impl S2k {
         Ok((s, consumed))
     }
 
-    /// `pgp_s2k_process` — derive `self.key` of length `cipher_key_size(cipher)`
-    /// from the passphrase `key`.
     pub fn process(&mut self, cipher: i32, key: &[u8]) -> Result<(), &'static str> {
         let target = cipher_key_size(cipher);
         if target == 0 {
@@ -152,7 +143,6 @@ impl S2k {
     }
 }
 
-/// `decide_s2k_iter(rand_byte, count)`.
 fn decide_s2k_iter(rand_byte: u8, count: i32) -> u8 {
     if count == -1 {
         return 96 + (rand_byte & 0x1f);

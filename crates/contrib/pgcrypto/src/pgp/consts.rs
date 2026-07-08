@@ -1,14 +1,9 @@
-//! OpenPGP constants + cipher/digest tables (pgp.h, pgp.c) and a small
-//! incremental digest wrapper over the in-repo hashers (used by S2K and the
-//! MDC).
 
-// S2K modes.
 pub const PGP_S2K_SIMPLE: i32 = 0;
 pub const PGP_S2K_SALTED: i32 = 1;
 pub const PGP_S2K_ISALTED: i32 = 3;
 pub const PGP_S2K_SALT: usize = 8;
 
-// Packet tags.
 pub const PGP_PKT_PUBENC_SESSKEY: i32 = 1;
 pub const PGP_PKT_SYMENC_SESSKEY: i32 = 3;
 pub const PGP_PKT_SECRET_KEY: i32 = 5;
@@ -27,7 +22,6 @@ pub const PGP_PKT_MDC: i32 = 19;
 pub const PGP_PKT_PRIV_61: i32 = 61;
 pub const PGP_PKT_SIGNATURE: i32 = 2;
 
-// Symmetric cipher ids.
 pub const PGP_SYM_PLAIN: i32 = 0;
 pub const PGP_SYM_DES3: i32 = 2;
 pub const PGP_SYM_CAST5: i32 = 3;
@@ -36,7 +30,6 @@ pub const PGP_SYM_AES_128: i32 = 7;
 pub const PGP_SYM_AES_192: i32 = 8;
 pub const PGP_SYM_AES_256: i32 = 9;
 
-// Digest ids.
 pub const PGP_DIGEST_MD5: i32 = 1;
 pub const PGP_DIGEST_SHA1: i32 = 2;
 pub const PGP_DIGEST_RIPEMD160: i32 = 3;
@@ -44,7 +37,6 @@ pub const PGP_DIGEST_SHA256: i32 = 8;
 pub const PGP_DIGEST_SHA384: i32 = 9;
 pub const PGP_DIGEST_SHA512: i32 = 10;
 
-// Compression ids.
 pub const PGP_COMPR_NONE: i32 = 0;
 pub const PGP_COMPR_ZIP: i32 = 1;
 pub const PGP_COMPR_ZLIB: i32 = 2;
@@ -55,8 +47,6 @@ pub const PGP_MAX_BLOCK: usize = 16;
 
 pub const MDC_DIGEST_LEN: usize = 20;
 
-/// pgcrypto error strings (px_strerror). Both `PXE_PGP_CORRUPT_DATA` and the
-/// generic wrong-key code map to "Wrong key or corrupt data" in px.c.
 pub const CORRUPT_DATA: &str = "Wrong key or corrupt data";
 pub const WRONG_KEY: &str = "Wrong key or corrupt data";
 pub const UNSUPPORTED_CIPHER: &str = "Unsupported cipher algorithm";
@@ -70,7 +60,6 @@ pub fn s2k_decode_count(cval: i32) -> i32 {
     (16 + (cval & 15)) << ((cval >> 4) + 6)
 }
 
-/// Cipher info: (key_len, block_len) in bytes, or None for unknown/plain.
 pub fn cipher_key_size(code: i32) -> usize {
     match code {
         PGP_SYM_DES3 => 24,
@@ -91,7 +80,6 @@ pub fn cipher_block_size(code: i32) -> usize {
     }
 }
 
-/// The cipher spec string for `cipher::encrypt`/`decrypt` ECB single-block.
 pub fn cipher_int_name(code: i32) -> Option<&'static str> {
     match code {
         PGP_SYM_DES3 => Some("3des-ecb"),
@@ -102,7 +90,6 @@ pub fn cipher_int_name(code: i32) -> Option<&'static str> {
     }
 }
 
-/// `pgp_get_cipher_code(name)` (case-insensitive).
 pub fn cipher_code(name: &str) -> Option<i32> {
     match name.to_ascii_lowercase().as_str() {
         "3des" => Some(PGP_SYM_DES3),
@@ -116,7 +103,6 @@ pub fn cipher_code(name: &str) -> Option<i32> {
     }
 }
 
-/// `pgp_get_digest_code(name)`.
 pub fn digest_code(name: &str) -> Option<i32> {
     match name.to_ascii_lowercase().as_str() {
         "md5" => Some(PGP_DIGEST_MD5),
@@ -129,8 +115,6 @@ pub fn digest_code(name: &str) -> Option<i32> {
     }
 }
 
-// The in-repo incremental hashers finish-by-consume; the running state clones
-// so a Digest can finish() and keep accumulating (S2K's multi-round hashing).
 #[derive(Clone)]
 enum Hasher {
     Md5(::pg_md5::Md5),
@@ -140,8 +124,6 @@ enum Hasher {
     Sha512(::pg_sha2::PgSha512Ctx),
 }
 
-/// An incremental message digest — used by S2K (multi-round keyed hashing) and
-/// the MDC SHA1.
 #[derive(Clone)]
 pub struct Digest {
     initial: Hasher,
@@ -180,7 +162,6 @@ impl Digest {
         }
     }
 
-    /// Finalize into a fresh buffer. Re-inits so the context can be reused.
     pub fn finish(&mut self) -> Vec<u8> {
         let out = match self.state.clone() {
             Hasher::Md5(c) => c.finish().to_vec(),

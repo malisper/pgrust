@@ -1,8 +1,3 @@
-//! `contrib/pgcrypto` — Rust builtin resolved through the dfmgr registry.
-//! Ported: digest/hmac (in-repo hashes), gen_random_bytes/uuid, fips_mode,
-//! crypt/gen_salt (md5/des/xdes/bcrypt/sha-crypt), encrypt/decrypt(+_iv)
-//! (RustCrypto ciphers), and the full PGP suite (armor, symmetric + public-key
-//! encrypt/decrypt, key-id).
 
 mod cipher;
 mod crypt;
@@ -58,9 +53,6 @@ fn fc_pg_hmac(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     bytea_result(fcinfo, &out)
 }
 
-// px-crypt.c: px_crypt / px_gen_salt call CheckBuiltinCryptoMode() first.
-// The placeholder GUC carries the session value (default on); BC_OFF errors,
-// BC_FIPS proceeds unless OpenSSL is in FIPS mode (never, on this fleet).
 fn check_builtin_crypto() -> PgResult<()> {
     let mode = guc::GetConfigOption("pgcrypto.builtin_crypto_enabled", true, false)?;
     if matches!(mode.as_deref(), Some("off")) {
@@ -167,15 +159,11 @@ fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_bool(false))
 }
 
-// ===========================================================================
-// PGP suite (pgp-pgsql.c fmgr boundary).
-// ===========================================================================
 
 fn here(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("pgcrypto/pgp", 0, func)
 }
 
-// The `dbg:`/`expect-*` decrypt checks emit NOTICE lines before returning.
 fn pgp_notice(msg: &str) {
     let _ = ereport(NOTICE).errmsg(msg.to_string()).finish(here("pgp_decrypt"));
 }
@@ -185,7 +173,6 @@ fn px_msg(msg: &str) -> Box<PgError> {
     px_err(msg.to_string())
 }
 
-// Optional trailing arg (nullable): None when absent or SQL NULL.
 fn opt_arg_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<Option<Vec<u8>>> {
     if i >= fcinfo.nargs() || fcinfo.args[i].isnull {
         return Ok(None);
@@ -339,7 +326,6 @@ fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(srf.finish(fcinfo))
 }
 
-// deconstruct_array_builtin(a, TEXTOID); pgp_armor rejects NULL elements.
 fn deconstruct_nonnull_text(mcx: mcx::Mcx<'_>, image: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     let (elems, nulls) =
         arrayfuncs::construct::deconstruct_array_builtin(mcx, image, types_core::TEXTOID, true)?;

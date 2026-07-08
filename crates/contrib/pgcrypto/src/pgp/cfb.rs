@@ -1,5 +1,3 @@
-//! OpenPGP CFB (pgp-cfb.c) — both the normal CFB (tag 18 / MDC) and the
-//! resync CFB (tag 9, old) variants, driven over a single-block ECB encryptor.
 
 use super::consts::*;
 use crate::cipher::BlockEncryptor;
@@ -16,7 +14,6 @@ pub struct PgpCfb {
 }
 
 impl PgpCfb {
-    /// `pgp_cfb_create` — `iv = None` ⇒ FR starts all-zero.
     pub fn create(
         algo: i32,
         key: &[u8],
@@ -52,27 +49,23 @@ impl PgpCfb {
         self.ciph.encrypt_block(&mut self.fre);
     }
 
-    /// Encrypt `data` in place into a freshly-returned buffer.
     pub fn encrypt(&mut self, data: &[u8]) -> Vec<u8> {
         let mut dst = vec![0u8; data.len()];
         self.process(data, &mut dst, true);
         dst
     }
 
-    /// Decrypt `data` into a freshly-returned buffer.
     pub fn decrypt(&mut self, data: &[u8]) -> Vec<u8> {
         let mut dst = vec![0u8; data.len()];
         self.process(data, &mut dst, false);
         dst
     }
 
-    /// `cfb_process` — the driver. `enc` selects encrypt vs decrypt direction.
     fn process(&mut self, data: &[u8], dst: &mut [u8], enc: bool) {
         let bs = self.block_size;
         let mut di = 0usize; // index into data/dst
         let mut len = data.len();
 
-        // Phase 1: finish a partially-consumed keystream block.
         while len > 0 && self.pos > 0 {
             let mut n = bs - self.pos;
             if len < n {
@@ -87,7 +80,6 @@ impl PgpCfb {
             }
         }
 
-        // Phase 2: full fresh blocks.
         while len > 0 {
             self.ecb();
             if self.block_no < 5 {
@@ -107,7 +99,6 @@ impl PgpCfb {
         }
     }
 
-    /// `mix_*` — returns the number of bytes consumed.
     fn mix(&mut self, data: &[u8], dst: &mut [u8], enc: bool) -> usize {
         if self.resync {
             self.mix_resync(data, dst, enc)
@@ -151,7 +142,6 @@ impl PgpCfb {
             }
             self.pos += n;
             if self.pos == 2 {
-                // resync rotate: fr = encbuf[2..bs] ++ encbuf[0..2]
                 let mut newfr = vec![0u8; bs];
                 newfr[..bs - 2].copy_from_slice(&self.encbuf[2..bs]);
                 newfr[bs - 2..].copy_from_slice(&self.encbuf[..2]);

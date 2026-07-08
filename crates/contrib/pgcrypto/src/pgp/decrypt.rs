@@ -1,5 +1,3 @@
-//! `pgp_decrypt` (pgp-decrypt.c) — the symmetric-passphrase OpenPGP decrypt
-//! pipeline (the public-key session-key path is not ported).
 
 use super::cfb::PgpCfb;
 use super::consts::*;
@@ -12,8 +10,6 @@ pub struct SessKey {
     pub key: Vec<u8>,
 }
 
-/// `pgp_decrypt` for the symmetric path. `ctx` is updated in place with the
-/// observed cipher/s2k/compress parameters (for the expect-* checks).
 pub fn decrypt_symmetric(
     ctx: &mut PgpContext,
     data: &[u8],
@@ -24,9 +20,6 @@ pub fn decrypt_symmetric(
     })
 }
 
-/// `pgp_decrypt` for the public-key path: the caller-supplied `pubenc` closure
-/// recovers the session key from a tag-1 packet body (which it decrypts with the
-/// recipient secret key). The symmetric data-packet pipeline is shared.
 pub fn decrypt_pubkey(
     ctx: &mut PgpContext,
     data: &[u8],
@@ -39,9 +32,6 @@ pub fn decrypt_pubkey(
     })
 }
 
-/// The shared decrypt driver: walk the packet stream, recover the session key
-/// from whichever ESK packet (`sesskey` callback dispatches symmetric vs
-/// public-key), then decrypt the symmetrically-encrypted data packet.
 fn decrypt_message(
     ctx: &mut PgpContext,
     data: &[u8],
@@ -68,12 +58,8 @@ fn decrypt_message(
                 let sk = sess.as_ref().ok_or_else(|| WRONG_KEY.to_string())?;
                 let mdc = t == PGP_PKT_SYMENC_DATA_MDC;
                 ctx.disable_mdc = if mdc { 0 } else { 1 };
-                // CFB-decrypt and verify the prefix; on a wrong key C does NOT
-                // bail — it flags corrupt_prefix and keeps parsing the garbage
-                // (emitting debug NOTICEs), then reports "Wrong key" at the end.
                 let (inner, corrupt_prefix) = decrypt_data_packet(ctx, sk, &body, mdc)?;
                 let parsed = finish_inner(ctx, inner);
-                // Deferred MDC debug line comes after the literal-data parse.
                 if ctx.pending_bad_mdc {
                     ctx.dbg("mdcbuf_finish: bad MDC pkt hdr");
                     ctx.pending_bad_mdc = false;
@@ -95,7 +81,6 @@ fn decrypt_message(
     Err(WRONG_KEY.to_string())
 }
 
-/// Parse a tag-3 symmetric-key ESK packet and recover the session key.
 fn parse_symenc_sesskey(
     ctx: &mut PgpContext,
     body: &[u8],
@@ -143,10 +128,6 @@ fn parse_symenc_sesskey(
     }
 }
 
-/// CFB-decrypt the symmetrically-encrypted data packet, verify the prefix
-/// (and MDC if present), and return `(inner_stream, corrupt_prefix)`. A
-/// corrupt prefix (wrong key) does NOT abort — C flags it and keeps parsing the
-/// garbage so debug NOTICEs match, then reports "Wrong key" at the end.
 fn decrypt_data_packet(
     ctx: &mut PgpContext,
     sk: &SessKey,
@@ -184,8 +165,6 @@ fn decrypt_data_packet(
         let mdc_off = plain.len() - (2 + MDC_DIGEST_LEN);
         let inner = plain[inner_start..mdc_off].to_vec();
         if plain[mdc_off] != 0xD3 || plain[mdc_off + 1] != 0x14 {
-            // Wrong key → garbage MDC header. Defer the "bad MDC pkt hdr" debug
-            // line until AFTER the literal-data parse (C's filter order).
             ctx.pending_bad_mdc = true;
             return Ok((inner, true));
         }
@@ -205,8 +184,6 @@ fn decrypt_data_packet(
     }
 }
 
-/// Parse the inner decrypted stream (optionally compressed) down to the
-/// literal-data payload.
 fn finish_inner(ctx: &mut PgpContext, inner: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut rdr = PktReader::new(&inner);
     let hdr = rdr
@@ -268,7 +245,6 @@ fn read_literal_from(
     if body.len() < off {
         return Err(CORRUPT_DATA.to_string());
     }
-    // text-mode decrypt of a non-text ('b') literal → "Not text data" later.
     if ctx.text_mode != 0 && ty != b't' && ty != b'u' {
         ctx.dbg(&format!("parse_literal_data: data type={}", ty as char));
         ctx.unexpected_binary = true;
@@ -282,7 +258,6 @@ fn read_literal_from(
     }
 }
 
-/// `\r\n` → `\n` (reverse crlf_filter on text decrypt with convert-crlf).
 fn un_convert_crlf(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut i = 0;

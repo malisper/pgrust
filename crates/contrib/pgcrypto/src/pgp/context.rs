@@ -1,5 +1,3 @@
-//! `PGP_Context` — the encrypt/decrypt options struct + `parse_args`
-//! (pgp-pgsql.c's set_arg/parse_args + the NOTICE-emitting expect-* checks).
 
 use super::consts::*;
 
@@ -17,18 +15,11 @@ pub struct PgpContext {
     pub convert_crlf: i32,
     pub unicode_mode: i32,
     pub text_mode: i32,
-    /// `debug=1` — emit the `dbg:` NOTICE trace.
     pub debug: i32,
-    /// Accumulated `dbg:` NOTICE lines (emitted by the SQL wrapper).
     pub debug_notices: Vec<String>,
-    /// Set when a text-mode decrypt meets a binary ('b') literal packet → the
-    /// "Not text data" error after the pipeline completes.
     pub unexpected_binary: bool,
-    /// Deferred "mdcbuf_finish: bad MDC pkt hdr" debug line (emitted after the
-    /// literal-data parse to match C's filter ordering).
     pub pending_bad_mdc: bool,
 
-    // expect-* debug fields (decrypt side); -1 = unset.
     pub expect: bool,
     pub exp_cipher_algo: i32,
     pub exp_s2k_mode: i32,
@@ -75,16 +66,13 @@ impl Default for PgpContext {
 }
 
 impl PgpContext {
-    /// `px_debug` — record a `dbg:` NOTICE line when `debug=1`.
     pub fn dbg(&mut self, msg: &str) {
         if self.debug != 0 {
             self.debug_notices.push(format!("dbg: {msg}"));
         }
     }
 
-    /// `parse_args` — the comma-separated `key=val` option string.
     pub fn parse_args(&mut self, args: &[u8]) -> Result<(), String> {
-        // downcase
         let lower: Vec<u8> = args
             .iter()
             .map(|&c| {
@@ -96,7 +84,6 @@ impl PgpContext {
             })
             .collect();
         let s = String::from_utf8_lossy(&lower);
-        // split into key=val pairs on ',', words trimmed of whitespace.
         for pair in s.split(',') {
             let pair = pair.trim();
             if pair.is_empty() {

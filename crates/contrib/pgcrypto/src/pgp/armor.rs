@@ -1,24 +1,16 @@
-//! PGP ASCII-armor (Radix-64 + CRC24) — a faithful port of `pgp-armor.c`'s
-//! `pgp_armor_encode` / `pgp_armor_decode` / `pgp_extract_armor_headers`, plus
-//! the `pg_base64_*` codec the file duplicates.
 
-/// `_base64` alphabet from pgp-armor.c.
 const BASE64: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 const ARMOR_HEADER: &str = "-----BEGIN PGP MESSAGE-----\n";
 const ARMOR_FOOTER: &str = "\n-----END PGP MESSAGE-----\n";
 
-/// pgcrypto's `PXE_PGP_CORRUPT_ARMOR` → "Corrupt ascii-armor".
 pub const CORRUPT_ARMOR: &str = "Corrupt ascii-armor";
 
-/// `pg_base64_encode` (pgp-armor.c) — 76-char line wrap, '=' padding.
 fn base64_encode(src: &[u8]) -> Vec<u8> {
     let mut dst: Vec<u8> = Vec::with_capacity((src.len() + 2) / 3 * 4 + src.len() / 57 + 4);
     let mut pos: i32 = 2;
     let mut buf: u64 = 0;
-    // C tracks a moving line-end pointer `lend = dst + 76`; after writing past
-    // it, it inserts '\n' and resets lend to p + 76. Track chars-since-newline.
     let mut line_chars = 0usize;
     for &s in src {
         buf |= (s as u64) << (pos << 3);
@@ -49,8 +41,6 @@ fn base64_encode(src: &[u8]) -> Vec<u8> {
     dst
 }
 
-/// `pg_base64_decode` (pgp-armor.c). Returns the decoded bytes, or `Err` on a
-/// corrupt sequence (`PXE_PGP_CORRUPT_ARMOR`).
 fn base64_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     let mut dst = Vec::with_capacity((src.len() * 3) >> 2);
     let mut buf: u64 = 0;
@@ -103,7 +93,6 @@ fn base64_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     Ok(dst)
 }
 
-/// `crc24` (rfc2440).
 fn crc24(data: &[u8]) -> u32 {
     const CRC24_INIT: u32 = 0x00b7_04ce;
     const CRC24_POLY: u32 = 0x0186_4cfb;
@@ -120,8 +109,6 @@ fn crc24(data: &[u8]) -> u32 {
     crc & 0x00ff_ffff
 }
 
-/// `pgp_armor_encode` — produce the armored text for `src` with optional
-/// header lines.
 pub fn armor_encode(src: &[u8], keys: &[Vec<u8>], values: &[Vec<u8>]) -> Vec<u8> {
     let crc = crc24(src);
     let mut dst: Vec<u8> = Vec::new();
@@ -149,7 +136,6 @@ pub fn armor_encode(src: &[u8], keys: &[Vec<u8>], values: &[Vec<u8>]) -> Vec<u8>
     dst
 }
 
-/// `find_str` — locate `needle` in `data`.
 fn find_str(data: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || data.len() < needle.len() {
         return None;
@@ -173,10 +159,6 @@ fn find_str(data: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-/// `find_header` — returns `(start_offset, header_len)` where `start_offset` is
-/// the absolute index of the `-----BEGIN`/`-----END` and `header_len` is the
-/// length of the full header line (so `start + header_len` is the byte after
-/// the line terminator). `Err(())` = corrupt.
 fn find_header(data: &[u8], is_end: bool) -> Result<(usize, usize), ()> {
     let sep: &[u8] = if is_end { b"-----END" } else { b"-----BEGIN" };
     let mut search_from = 0usize;
@@ -196,7 +178,6 @@ fn find_header(data: &[u8], is_end: bool) -> Result<(usize, usize), ()> {
         }
     }
     let mut p = start + sep.len();
-    // header text: anything >= ' ' until a '-'
     while p < data.len() && data[p] != b'-' {
         if data[p] >= b' ' {
             p += 1;
@@ -208,7 +189,6 @@ fn find_header(data: &[u8], is_end: bool) -> Result<(usize, usize), ()> {
         return Err(());
     }
     p += 5;
-    // at end of line
     if p < data.len() {
         if data[p] != b'\n' && data[p] != b'\r' {
             return Err(());
@@ -223,23 +203,19 @@ fn find_header(data: &[u8], is_end: bool) -> Result<(usize, usize), ()> {
     Ok((start, p - start))
 }
 
-/// `pgp_armor_decode` — dearmor; returns the binary payload or `Err(())`.
 pub fn armor_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
-    // armor start
     let (start_off, hlen) = find_header(src, false)?;
     if hlen == 0 {
         return Err(());
     }
     let mut p = start_off + hlen;
 
-    // armor end (search from p)
     let (end_rel, ehlen) = find_header(&src[p..], true)?;
     if ehlen == 0 {
         return Err(());
     }
     let armor_end = p + end_rel;
 
-    // skip comments — find empty line
     while p < armor_end && src[p] != b'\n' && src[p] != b'\r' {
         match src[p..armor_end].iter().position(|&b| b == b'\n') {
             None => return Err(()),
@@ -248,7 +224,6 @@ pub fn armor_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     }
     let base64_start = p;
 
-    // find crc pos: scan backward from armor_end for '='
     let mut crc_eq: Option<usize> = None;
     let mut q = armor_end;
     loop {
@@ -264,7 +239,6 @@ pub fn armor_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     let crc_eq = crc_eq.ok_or(())?;
     let base64_end = crc_eq - 1;
 
-    // decode crc: 4 chars after '='
     if crc_eq + 5 > src.len() {
         return Err(());
     }
@@ -274,7 +248,6 @@ pub fn armor_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     }
     let crc = ((crc_buf[0] as u32) << 16) + ((crc_buf[1] as u32) << 8) + crc_buf[2] as u32;
 
-    // decode data
     let res = base64_decode(&src[base64_start..base64_end])?;
     if crc24(&res) == crc {
         Ok(res)
@@ -283,24 +256,19 @@ pub fn armor_decode(src: &[u8]) -> Result<Vec<u8>, ()> {
     }
 }
 
-/// `pgp_extract_armor_headers` — returns the list of `(key, value)` header
-/// pairs, or `Err(())` (corrupt). Keys/values are returned as raw bytes (UTF-8).
 pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ()> {
-    // armor start
     let (start_off, hlen) = find_header(src, false)?;
     if hlen == 0 {
         return Err(());
     }
     let armor_start = start_off + hlen;
 
-    // armor end
     let (end_rel, ehlen) = find_header(&src[armor_start..], true)?;
     if ehlen == 0 {
         return Err(());
     }
     let armor_end = armor_start + end_rel;
 
-    // count header lines: walk lines until an empty line
     let mut p = armor_start;
     while p < armor_end && src[p] != b'\n' && src[p] != b'\r' {
         match src[p..armor_end].iter().position(|&b| b == b'\n') {
@@ -310,26 +278,21 @@ pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ()> 
     }
     let base64_start = p;
 
-    // The header region is [armor_start, base64_start).
     let buf = &src[armor_start..base64_start];
 
-    // Split lines at '\n' and ": " separators.
     let mut headers: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut line_start = 0usize;
     loop {
-        // find end of line
         let eol = match buf[line_start..].iter().position(|&b| b == b'\n') {
             None => break,
             Some(off) => line_start + off,
         };
         let nextline = eol + 1;
-        // strip trailing CR
         let mut line_end = eol;
         if line_end > line_start && buf[line_end - 1] == b'\r' {
             line_end -= 1;
         }
         let line = &buf[line_start..line_end];
-        // find ": " separator
         let colon = find_subslice(line, b": ").ok_or(())?;
         let key = line[..colon].to_vec();
         let value = line[colon + 2..].to_vec();
@@ -339,7 +302,6 @@ pub fn extract_armor_headers(src: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ()> 
     Ok(headers)
 }
 
-/// `strstr(line, ": ")`.
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;

@@ -1,5 +1,3 @@
-//! `pgp_encrypt` (pgp-encrypt.c) — the symmetric-passphrase OpenPGP encrypt
-//! pipeline. Public-key encryption lives in `pubkey.rs`.
 
 use super::cfb::PgpCfb;
 use super::consts::*;
@@ -8,7 +6,6 @@ use super::packet::{render_newlen, write_packet};
 use super::s2k::S2k;
 use ::pg_strong_random::pg_strong_random;
 
-/// Build the inner literal-data packet body (`type, namelen=0, mtime[4], data`).
 fn build_literal_packet(ctx: &PgpContext, data: &[u8]) -> Vec<u8> {
     let ty = if ctx.text_mode != 0 {
         if ctx.unicode_mode != 0 {
@@ -30,7 +27,6 @@ fn build_literal_packet(ctx: &PgpContext, data: &[u8]) -> Vec<u8> {
     pkt
 }
 
-/// `\n` → `\r\n` (crlf_filter).
 fn convert_crlf(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     for &b in data {
@@ -42,7 +38,6 @@ fn convert_crlf(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `pgp_encrypt` for the symmetric path. Returns the raw (no varlena) bytes.
 pub fn encrypt_symmetric(
     ctx: &PgpContext,
     data: &[u8],
@@ -56,13 +51,11 @@ pub fn encrypt_symmetric(
         ctx.s2k_cipher_algo = ctx.cipher_algo;
     }
 
-    // S2K key derivation.
     let mut s2k = S2k::fill(ctx.s2k_mode, ctx.s2k_digest_algo, ctx.s2k_count)
         .map_err(|e| e.to_string())?;
     s2k.process(ctx.s2k_cipher_algo, passphrase)
         .map_err(|e| e.to_string())?;
 
-    // Session key.
     let (sess_key, sess_cipher) = if ctx.use_sess_key != 0 {
         let len = cipher_key_size(ctx.cipher_algo);
         let mut k = vec![0u8; len];
@@ -76,7 +69,6 @@ pub fn encrypt_symmetric(
 
     let mut out = Vec::new();
 
-    // --- Symmetric-key ESK packet (tag 3) ---
     let mut esk = Vec::new();
     esk.push(4); // version
     esk.push(ctx.s2k_cipher_algo as u8);
@@ -89,7 +81,6 @@ pub fn encrypt_symmetric(
         esk.push(s2k.iter);
     }
     if ctx.use_sess_key != 0 {
-        // CFB(s2k.key) over (cipher_algo_byte || sess_key)
         let mut cfb = PgpCfb::create(ctx.s2k_cipher_algo, &s2k.key, false, None)
             .map_err(|e| e.to_string())?;
         let mut pt = Vec::with_capacity(1 + sess_key.len());
@@ -100,7 +91,6 @@ pub fn encrypt_symmetric(
     }
     write_packet(&mut out, PGP_PKT_SYMENC_SESSKEY, &esk);
 
-    // --- Build the symmetrically-encrypted data packet with the session key ---
     write_encdata_packet(&ctx, data, &sess_key, &mut out)?;
 
     let _ = render_newlen; // retained for parity reference
@@ -108,9 +98,6 @@ pub fn encrypt_symmetric(
     Ok(out)
 }
 
-/// Build and append the symmetrically-encrypted data packet (prefix + literal
-/// [+ MDC], CFB-encrypted under `sess_key`) for the cipher named in `ctx`. This
-/// is shared by the symmetric and public-key encrypt entry points.
 pub fn write_encdata_packet(
     ctx: &PgpContext,
     data: &[u8],
@@ -119,7 +106,6 @@ pub fn write_encdata_packet(
 ) -> Result<(), String> {
     let bs = cipher_block_size(ctx.cipher_algo);
 
-    // literal (with optional compression wrapping)
     let mut literal = if ctx.text_mode != 0 && ctx.convert_crlf != 0 {
         build_literal_packet(ctx, &convert_crlf(data))
     } else {
@@ -129,7 +115,6 @@ pub fn write_encdata_packet(
         literal = build_compressed_packet(ctx, &literal)?;
     }
 
-    // prefix: bs random bytes + 2 repeat
     let mut prefix = vec![0u8; bs + 2];
     if !pg_strong_random(&mut prefix[..bs]) {
         return Err("random failed".to_string());
@@ -139,13 +124,11 @@ pub fn write_encdata_packet(
 
     let mdc = ctx.disable_mdc == 0;
 
-    // plaintext to encrypt = prefix || literal [|| MDC packet]
     let mut plaintext = Vec::new();
     plaintext.extend_from_slice(&prefix);
     plaintext.extend_from_slice(&literal);
 
     if mdc {
-        // MDC SHA1 over prefix || literal || 0xD3 0x14
         let mut md = Digest::new(PGP_DIGEST_SHA1).ok_or(UNSUPPORTED_HASH.to_string())?;
         md.update(&prefix);
         md.update(&literal);
@@ -156,19 +139,16 @@ pub fn write_encdata_packet(
         plaintext.extend_from_slice(&digest);
     }
 
-    // CFB encrypt.
     let resync = !mdc;
     let mut cfb = PgpCfb::create(ctx.cipher_algo, sess_key, resync, None)
         .map_err(|e| e.to_string())?;
     let ciphertext = cfb.encrypt(&plaintext);
 
-    // --- data packet ---
     let tag = if mdc {
         PGP_PKT_SYMENC_DATA_MDC
     } else {
         PGP_PKT_SYMENC_DATA
     };
-    // body = [version 0x01 if MDC] || ciphertext
     let mut body = Vec::new();
     if mdc {
         body.push(0x01);
@@ -180,7 +160,6 @@ pub fn write_encdata_packet(
 
 use super::consts::Digest;
 
-/// Wrap `inner` in a Compressed-Data packet (tag 8).
 fn build_compressed_packet(ctx: &PgpContext, inner: &[u8]) -> Result<Vec<u8>, String> {
     let algo = ctx.compress_algo;
     let compressed = match algo {

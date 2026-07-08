@@ -1,7 +1,3 @@
-//! `pgp_write_pubenc_sesskey` (pgp-pubenc.c) — wrap the session key in a
-//! Public-Key Encrypted Session Key packet (tag 1): the secret message
-//! `cipher_algo || sess_key || cksum16` is EME-PKCS1-v1.5 padded into a single
-//! MPI and RSA- or ElGamal-encrypted to the recipient public key.
 
 use super::consts::*;
 use super::mpi::{self, write_mpi, Mpi};
@@ -10,7 +6,6 @@ use super::pubkey::{KeyMaterial, PubKey, PGP_PUB_ELG_ENCRYPT, PGP_PUB_RSA_ENCRYP
     PGP_PUB_RSA_ENCRYPT_SIGN};
 use ::pg_strong_random::pg_strong_random;
 
-/// `pad_eme_pkcs1_v15` — `02 || nonzero-pad || 00 || data`, padded out to
 /// `res_len` bytes (pad must be >= 8 nonzero random bytes).
 fn pad_eme_pkcs1_v15(data: &[u8], res_len: usize) -> Result<Vec<u8>, String> {
     if res_len < data.len() + 2 {
@@ -25,7 +20,6 @@ fn pad_eme_pkcs1_v15(data: &[u8], res_len: usize) -> Result<Vec<u8>, String> {
     if !pg_strong_random(&mut buf[1..1 + pad_len]) {
         return Err("Failed to generate strong random bits".to_string());
     }
-    // No zero bytes allowed in the pad region.
     for i in 1..1 + pad_len {
         while buf[i] == 0 {
             let mut one = [0u8; 1];
@@ -40,9 +34,6 @@ fn pad_eme_pkcs1_v15(data: &[u8], res_len: usize) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// `create_secmsg` — build `cipher_algo || sess_key || cksum16`, PKCS1-pad to
-/// `full_bytes`, and return it as an MPI of `full_bytes*8 - 6` bits (the leading
-/// 0x02 byte means the top 6 bits are zero).
 fn create_secmsg(cipher_algo: i32, sess_key: &[u8], full_bytes: usize) -> Result<Mpi, String> {
     let klen = sess_key.len();
     let mut cksum: u32 = 0;
@@ -60,7 +51,6 @@ fn create_secmsg(cipher_algo: i32, sess_key: &[u8], full_bytes: usize) -> Result
     Ok(Mpi::from_bytes(padded, full_bits))
 }
 
-/// `pgp_write_pubenc_sesskey` — emit the tag-1 packet into `out`.
 pub fn write_pubenc_sesskey(
     out: &mut Vec<u8>,
     pk: &PubKey,
