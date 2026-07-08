@@ -77,11 +77,12 @@ pub(crate) fn flush_relation(key: PgStat_HashKey, counts: &PgStat_TableCounts) {
         0
     };
     let mut store = SHARED_STATS.lock().unwrap();
-    let SharedEntry::Relation(tabentry) = store
-        .entry(key)
-        .or_insert(SharedEntry::Relation(PgStat_StatTabEntry::default()))
-    else {
-        unreachable!("relation key holds non-relation shared entry")
+    // prep_pending_entry created the shared entry eagerly; absence means the
+    // object was dropped concurrently — discard the pending counts instead of
+    // resurrecting (C flushes into the dropped-but-refcounted copy, which
+    // readers can no longer find).
+    let Some(SharedEntry::Relation(tabentry)) = store.get_mut(&key) else {
+        return;
     };
 
     tabentry.numscans += counts.numscans;
@@ -115,11 +116,9 @@ pub(crate) fn flush_relation(key: PgStat_HashKey, counts: &PgStat_TableCounts) {
 
 pub(crate) fn flush_database(key: PgStat_HashKey, pending: &PgStat_StatDBEntry) {
     let mut store = SHARED_STATS.lock().unwrap();
-    let SharedEntry::Database(shared) = store
-        .entry(key)
-        .or_insert(SharedEntry::Database(PgStat_StatDBEntry::default()))
-    else {
-        unreachable!("database key holds non-database shared entry")
+    // See flush_relation: absent = dropped concurrently, discard.
+    let Some(SharedEntry::Database(shared)) = store.get_mut(&key) else {
+        return;
     };
 
     shared.xact_commit += pending.xact_commit;
@@ -160,11 +159,9 @@ pub(crate) fn flush_database(key: PgStat_HashKey, pending: &PgStat_StatDBEntry) 
 
 pub(crate) fn flush_function(key: PgStat_HashKey, pending: &crate::function::PgStat_FunctionCounts) {
     let mut store = SHARED_STATS.lock().unwrap();
-    let SharedEntry::Function(shared) = store
-        .entry(key)
-        .or_insert(SharedEntry::Function(Default::default()))
-    else {
-        unreachable!("function key holds non-function shared entry")
+    // See flush_relation: absent = dropped concurrently, discard.
+    let Some(SharedEntry::Function(shared)) = store.get_mut(&key) else {
+        return;
     };
     shared.numcalls += pending.numcalls;
     shared.total_time += pending.total_time / 1000;
@@ -176,11 +173,9 @@ pub(crate) fn flush_subscription(
     pending: &crate::subscription::PgStat_BackendSubEntry,
 ) {
     let mut store = SHARED_STATS.lock().unwrap();
-    let SharedEntry::Subscription(shared) = store
-        .entry(key)
-        .or_insert(SharedEntry::Subscription(Default::default()))
-    else {
-        unreachable!("subscription key holds non-subscription shared entry")
+    // See flush_relation: absent = dropped concurrently, discard.
+    let Some(SharedEntry::Subscription(shared)) = store.get_mut(&key) else {
+        return;
     };
     shared.apply_error_count += pending.apply_error_count;
     shared.sync_error_count += pending.sync_error_count;

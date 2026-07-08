@@ -4,12 +4,11 @@
 // the source (C's copyObject into source_context) and the invalidated-replan
 // arm re-analyzes a per-attempt copy of it: through the installed ReanalyzeFn
 // when the owner's analysis needs parse hooks (C's parserSetup), else through
-// the fixedparams default (C plancache.c:793-814). Divergences (each loud or
-// vacuously equal until its lane lands): query-side (source) invalItems are not
-// collected — the generic plan's invalItems (recorded by setrefs) carry the
-// function dependency and drive PlanCacheObjectCallback's generic-plan arm;
-// source invalidation would force re-analysis (the replan arm), RLS fields are
-// constant-false.
+// the fixedparams default (C plancache.c:793-814). Query-side (source)
+// invalItems come from extract_query_deps (extract_query_dependencies) and
+// invalidate the source, forcing re-analysis; the generic plan's own
+// invalItems (recorded by setrefs) drive PlanCacheObjectCallback's
+// generic-plan arm. Divergence: RLS fields are constant-false.
 #![allow(non_snake_case)]
 
 use core::cell::RefCell;
@@ -78,6 +77,9 @@ struct CachedPlanSource {
     reanalyze: Option<(ReanalyzeFn, i32)>,
     query_list: &'static [Query<'static>],
     relation_oids: &'static [Oid],
+    // extract_query_dependencies' invalItems (cacheId, hashValue): a matching
+    // sinval invalidates the source, forcing re-analysis of the raw tree.
+    inval_items: &'static [(i32, u32)],
     search_path: Option<SearchPathMatcher<'static>>,
     result_desc: Option<Rc<TupleDescData<'static>>>,
     gplan: Option<CachedPlanHandle>,
@@ -336,6 +338,7 @@ fn create_cached_plan_flags(
             reanalyze: None,
             query_list: &[],
             relation_oids: &[],
+            inval_items: &[],
             search_path: None,
             result_desc: None,
             gplan: None,
@@ -390,17 +393,19 @@ pub fn CompleteCachedPlan(
 
     let query_list: &'static [Query<'static>] = mcx::vec_borrow_in(query_mcx, query_list)?;
 
-    let (relation_oids, search_path) = if requires_reval {
+    let (relation_oids, inval_items, search_path) = if requires_reval {
         let mut oids: PgVec<'static, Oid> = PgVec::new_in(query_mcx);
+        let mut items: PgVec<'static, (i32, u32)> = PgVec::new_in(query_mcx);
         for q in query_list {
-            extract_query_relation_deps(q, &mut oids)?;
+            extract_query_deps(q, &mut oids, &mut items)?;
         }
         (
             mcx::vec_borrow_in(query_mcx, oids)?,
+            mcx::vec_borrow_in(query_mcx, items)?,
             Some(catalog_namespace::GetSearchPathMatcher(query_mcx)?),
         )
     } else {
-        (&[] as &[Oid], None)
+        (&[] as &[Oid], &[] as &[(i32, u32)], None)
     };
 
     let result_desc = plan_cache_compute_result_desc(source_mcx, query_list)?;
@@ -415,6 +420,7 @@ pub fn CompleteCachedPlan(
         src.rewrite_role_id = rewrite_role_id;
         src.rewrite_row_security = rewrite_row_security;
         src.relation_oids = relation_oids;
+        src.inval_items = inval_items;
         src.search_path = search_path;
         src.result_desc = result_desc;
         src.param_types = param_types;
@@ -780,6 +786,7 @@ fn RevalidateCachedQuery(
         src.is_valid = false;
         src.query_list = &[];
         src.relation_oids = &[];
+        src.inval_items = &[];
         src.search_path = None;
         (src.query_ctx, src.query_string, src.param_types, src.fixed_result, src.source_ctx)
     });
@@ -814,15 +821,17 @@ fn RevalidateCachedQuery(
         let qmcx = ctx_mcx(new_qctx);
         let query_list: &'static [Query<'static>] = mcx::vec_borrow_in(qmcx, query_list)?;
         let mut oids: PgVec<'static, Oid> = PgVec::new_in(qmcx);
+        let mut items: PgVec<'static, (i32, u32)> = PgVec::new_in(qmcx);
         for q in query_list {
-            extract_query_relation_deps(q, &mut oids)?;
+            extract_query_deps(q, &mut oids, &mut items)?;
         }
         let relation_oids = mcx::vec_borrow_in(qmcx, oids)?;
+        let inval_items = mcx::vec_borrow_in(qmcx, items)?;
         let search_path = catalog_namespace::GetSearchPathMatcher(qmcx)?;
         let result_desc = plan_cache_compute_result_desc(ctx_mcx(source_ctx), query_list)?;
-        Ok((query_list, relation_oids, search_path, result_desc))
+        Ok((query_list, relation_oids, inval_items, search_path, result_desc))
     });
-    let (query_list, relation_oids, search_path, result_desc) = match rebuilt {
+    let (query_list, relation_oids, inval_items, search_path, result_desc) = match rebuilt {
         Ok(r) => r,
         Err(e) => {
             reclaim_ctx(new_qctx);
@@ -856,6 +865,7 @@ fn RevalidateCachedQuery(
         src.query_ctx = new_qctx;
         src.query_list = query_list;
         src.relation_oids = relation_oids;
+        src.inval_items = inval_items;
         src.search_path = Some(search_path);
         if !desc_equal {
             src.result_desc = result_desc;
@@ -1321,20 +1331,39 @@ where
     Ok(())
 }
 
-// extract_query_dependencies (setrefs.c), relation half: the function/inval
-// half is compiled out repo-wide (record_plan_function_dependency panics).
-fn extract_query_relation_deps(
+// FirstUnpinnedObjectId: built-ins below it are immutable, untracked
+// (record_plan_function_dependency, setrefs.c).
+const FIRST_UNPINNED_OBJECT_ID: Oid = 12000;
+
+fn push_proc_dep(items: &mut PgVec<'static, (i32, u32)>, funcid: Oid) -> PgResult<()> {
+    if funcid < FIRST_UNPINNED_OBJECT_ID {
+        return Ok(());
+    }
+    let hash = syscache_seams::syscache_hash_value_procoid::call(funcid)?;
+    items
+        .try_reserve(1)
+        .map_err(|_| Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>())))?;
+    items.push((PROCOID, hash));
+    Ok(())
+}
+
+// extract_query_dependencies (setrefs.c): relation OIDs + the fix_expr_common
+// function/type invalItems.
+fn extract_query_deps(
     query: &Query<'static>,
     out: &mut PgVec<'static, Oid>,
+    items: &mut PgVec<'static, (i32, u32)>,
 ) -> PgResult<()> {
     for cte_node in &query.cteList {
         let cte = cte_node.as_common_table_expr().expect("cteList cell");
         let ctequery = cte.ctequery.and_then(|n| n.as_query()).expect("analyzed CTE query");
-        extract_query_relation_deps(ctequery, out)?;
+        extract_query_deps(ctequery, out, items)?;
     }
     // extract_query_dependencies_walker runs fix_expr_common on every node:
     // a regclass Const is a relation dependency (ISREGCLASSCONST accepts
-    // OIDOID because oideq-style folding coerces regclass Consts to it).
+    // OIDOID because oideq-style folding coerces regclass Consts to it);
+    // function-calling nodes are PROCOID invalItems, CoerceToDomain a TYPEOID
+    // one.
     walk_query_expr_nodes(query, &mut |node| {
         if let Some(c) = node.as_const() {
             if (c.consttype == REGCLASSOID || c.consttype == types_core::OIDOID)
@@ -1344,10 +1373,34 @@ fn extract_query_relation_deps(
                 out.push(c.constvalue.as_u32());
             }
         } else if let Some(sl) = node.as_sub_link() {
-            extract_query_relation_deps(
+            extract_query_deps(
                 sl.subselect.as_query().expect("analyzed sublink sub-select"),
                 out,
+                items,
             )?;
+        } else if let Some(f) = node.as_func_expr() {
+            push_proc_dep(items, f.funcid)?;
+        } else if let Some(o) = node.as_op_expr() {
+            push_proc_dep(items, o.opfuncid)?;
+        } else if let Some(o) = node.as_distinct_expr() {
+            push_proc_dep(items, o.opfuncid)?;
+        } else if let Some(o) = node.as_null_if_expr() {
+            push_proc_dep(items, o.opfuncid)?;
+        } else if let Some(sa) = node.as_scalar_array_op_expr() {
+            push_proc_dep(items, sa.opfuncid)?;
+        } else if let Some(a) = node.as_aggref() {
+            push_proc_dep(items, a.aggfnoid)?;
+        } else if let Some(w) = node.as_window_func() {
+            push_proc_dep(items, w.winfnoid)?;
+        } else if let Some(cd) = node.as_coerce_to_domain() {
+            if cd.resulttype >= FIRST_UNPINNED_OBJECT_ID {
+                let hash =
+                    syscache_seams::syscache_hash_value_typeoid::call(cd.resulttype)?;
+                items.try_reserve(1).map_err(|_| {
+                    Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>()))
+                })?;
+                items.push((TYPEOID, hash));
+            }
         }
         Ok(())
     })?;
@@ -1363,9 +1416,10 @@ fn extract_query_relation_deps(
                     out.try_reserve(1).map_err(|_| mcx_oom(out))?;
                     out.push(rte.relid);
                 }
-                extract_query_relation_deps(
+                extract_query_deps(
                     rte.subquery.expect("RTE_SUBQUERY has subquery"),
                     out,
+                    items,
                 )?;
             }
             // A transition-table RTE carries the base relation's OID
@@ -1638,10 +1692,17 @@ pub fn PlanCacheObjectCallback(_arg: Datum, cacheid: i32, hashvalue: u32) {
                 if !src.is_valid || !src.requires_reval {
                     continue;
                 }
-                // Source-side invalItems are uncollected: matching them would
-                // invalidate the querytree, forcing re-analysis (the replan arm
-                // needing the retained raw tree). The generic-plan scan below
-                // re-plans the analyzed querytree, covering function redefinition.
+                // Source-side invalItems (extract_query_dependencies):
+                // invalidate the querytree, forcing re-analysis of the
+                // retained raw tree (plancache.c PlanCacheObjectCallback).
+                if src.inval_items.iter().any(|&(cid, hv)| {
+                    cid == cacheid && (hashvalue == 0 || hv == hashvalue)
+                }) {
+                    if let Some(gplan) = invalidate_source_entry(src) {
+                        plan_mut(pc, gplan).is_valid = false;
+                    }
+                    continue;
+                }
                 src.gplan
             };
             let Some(gplan) = gplan else { continue };
