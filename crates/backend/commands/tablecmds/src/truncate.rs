@@ -74,11 +74,14 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
                     continue;
                 }
                 let child = table::table_open(mcx, childrelid, NoLock)?;
-                debug_assert!(
-                    !(child.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
-                        && !child.rd_islocaltemp),
-                    "other-session temp children unreachable (temp lane is session-local)"
-                );
+                // Other sessions' temp children cannot be processed; C skips
+                // them in the recursion (ExecuteTruncate, tablecmds.c).
+                if child.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+                    && !child.rd_islocaltemp
+                {
+                    child.close(AccessExclusiveLock)?;
+                    continue;
+                }
                 // Inherited TRUNCATE checks permissions on the parent only.
                 truncate_check_rel(
                     childrelid,
