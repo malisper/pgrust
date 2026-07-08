@@ -47,6 +47,10 @@ fn collect_gap(what: &str) {
 }
 
 // C's hookable entry; no plugin surface exists, so this IS standard_ProcessUtility.
+// Whole utility path is cold: per-statement DDL dispatch, never per-tuple —
+// keeps the ~100 dispatch arms out of the query-path text (icache/iTLB).
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     mcx: Mcx<'mcx>,
@@ -76,6 +80,8 @@ pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     )
 }
 
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub fn standard_ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     mcx: Mcx<'mcx>,
@@ -181,6 +187,8 @@ unsafe fn unify_call_lifetime<'u>(
     }
 }
 
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_switch<'mcx>(
     mcx: Mcx<'mcx>,
@@ -754,6 +762,8 @@ impl Drop for EventTriggerCleanup {
 }
 
 // ProcessUtilitySlow (utility.c): the event-trigger-fenced DDL fan-out.
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn process_utility_slow<'mcx>(
     mcx: Mcx<'mcx>,
@@ -794,6 +804,8 @@ fn process_utility_slow<'mcx>(
 
 // Ok(Some(address)) feeds the shared EventTriggerCollectSimpleCommand tail;
 // Ok(None) = C's `commandCollected = true` arms.
+#[cold]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn slow_switch<'mcx>(
     mcx: Mcx<'mcx>,
