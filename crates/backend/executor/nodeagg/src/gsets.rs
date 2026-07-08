@@ -235,7 +235,6 @@ pub(crate) fn init_grouping_sets<'mcx>(
         }
     }
 
-    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let hash = if hashed_nodes.is_empty() {
         None
     } else {
@@ -249,9 +248,10 @@ pub(crate) fn init_grouping_sets<'mcx>(
             specs,
             fm_agg_node,
             params,
-            per_tuple,
+            tmpcontext,
         )?)
     };
+    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
     for (phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
         let sortnode = if core::ptr::eq(aggnode, node) {
@@ -424,9 +424,10 @@ fn init_hash_sets<'mcx>(
     specs: &[AggTransSpec<'_, 'mcx>],
     fm_agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
-    per_tuple: Mcx<'mcx>,
+    tmpcontext: ::executils::EcxtId,
 ) -> PgResult<HashSetsState<'mcx>> {
     let mcx = estate.es_query_cxt;
+    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let outer_plan = node
         .plan
         .lefttree
