@@ -186,6 +186,17 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
     };
 
     debug_assert!(run.root.plan_params.is_empty());
+    // JOINRES-DEBUG (temporary, not for commit)
+    if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
+        for (i, tle) in sub_parse.targetList.iter().enumerate() {
+            eprintln!(
+                "JOINRES-DEBUG set_subquery_pathlist rti={rti} sub tlist[{i}]: {}",
+                outfuncs::nodeToString(run.mcx, tle)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| "<outfuncs failed>".into())
+            );
+        }
+    }
     run.push_root()?;
     crate::subquery::subquery_planner(run, sub_parse, false, tuple_fraction, None)?;
     let idx = run.pop_root_to_rel_subroot();
