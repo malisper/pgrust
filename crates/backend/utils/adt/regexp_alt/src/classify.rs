@@ -16,7 +16,8 @@
 //!   elements, equivalence classes, non-ASCII range endpoints;
 //! - repeat bounds above 255 (Spencer's DUPMAX) or malformed bounds;
 //! - inline option/director groups (`(?i)`, `***:`);
-//! - non-UTF8 databases and patterns that are not valid UTF-8;
+//! - non-UTF8 databases and patterns that are not valid UTF-8 or contain
+//!   NUL (Spencer's pattern view stops at the first NUL);
 //! Additionally, capture POSITIONS are only trusted ("capture-safe") when
 //! (a) no quantifier applies to a subtree containing a capturing group —
 //! RE2's longest-match submatch resolution and Spencer's iteration rules
@@ -79,7 +80,10 @@ pub fn classify(pattern: &[u8], cflags: i32) -> Classification {
     if !quoted && base != REG_ADVANCED {
         return INCOMPATIBLE;
     }
-    if core::str::from_utf8(pattern).is_err() {
+    // NUL is valid UTF-8, but Spencer compiles the pattern through
+    // pg_mb2wchar (stops at the first NUL) while RE2 would compile the full
+    // byte string.
+    if core::str::from_utf8(pattern).is_err() || pattern.contains(&0) {
         return INCOMPATIBLE;
     }
     if quoted {
@@ -461,6 +465,14 @@ mod tests {
     fn rejects_non_utf8_pattern() {
         setup_utf8();
         assert!(!re2_compatible(b"a\xffb", REG_ADVANCED));
+    }
+
+    #[test]
+    fn rejects_nul_bearing_pattern() {
+        setup_utf8();
+        assert!(!re2_compatible(b"a\x00b", REG_ADVANCED));
+        assert!(!re2_compatible(b"\x00", REG_ADVANCED));
+        assert!(!re2_compatible(b"a\x00b", REG_QUOTE));
     }
 
     #[test]

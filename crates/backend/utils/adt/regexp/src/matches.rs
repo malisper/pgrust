@@ -50,7 +50,7 @@ pub fn setup_regexp_matches<'a, 'mcx>(
     // path; everything else runs the untouched Spencer path below. Callers
     // consuming submatches need the capture-safe tier; whole-match callers
     // (count, split, instr/substr subexpr 0) ride RE2 either way.
-    if let Some(re) = regexp_alt::dispatch(pattern, re_flags.cflags)?
+    if let Some(re) = regexp_alt::dispatch(pattern, re_flags.cflags, orig_str)?
         .filter(|re| re.capture_safe() || !use_subpatterns || re.ngroups() == 0)
     {
         return setup_regexp_matches_re2(
