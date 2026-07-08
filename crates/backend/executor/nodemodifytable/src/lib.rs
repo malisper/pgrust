@@ -4087,19 +4087,24 @@ fn exec_delete_fetch_old<'mcx>(
 // plain-heap BEFORE ROW lane. LOUD: WHEN clauses, UPDATE OF columns,
 // replacement tuples returned by a trigger, and the concurrent-update EPQ
 // recheck (single-backend port: loud beats silently wrong).
+// C should_free_trig discipline (trigger.c): a Copied fetch owns the image;
+// the returned holder must stay live for as long as the raw parts are read.
 fn slot_raw_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
-) -> PgResult<(*const u8, u32, ItemPointerData, types_core::Oid)> {
+) -> PgResult<(
+    (*const u8, u32, ItemPointerData, types_core::Oid),
+    Option<heaptuple::HeapTuple<'mcx>>,
+)> {
     let mcx = estate.es_query_cxt;
     let slot = &mut estate.es_tupleTable[slot_id.0 as usize];
     let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, mcx)?;
     Ok(match fetched {
         exectuples::FetchedHeapTuple::Slot(t) => {
-            (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+            ((t.header_ptr(), t.t_len, t.t_self, t.t_tableOid), None)
         }
         exectuples::FetchedHeapTuple::Copied(t) => {
-            (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+            ((t.header_ptr(), t.t_len, t.t_self, t.t_tableOid), Some(t))
         }
     })
 }
@@ -4146,13 +4151,19 @@ fn row_triggers_common<'mcx>(
         TRIGGER_TYPE_TIMING_MASK,
     };
     let mcx = estate.es_query_cxt;
-    let raw_old = match old_slot {
-        Some(id) => Some(slot_raw_tuple(estate, id)?),
-        None => None,
+    let (raw_old, _old_owned) = match old_slot {
+        Some(id) => {
+            let (raw, owned) = slot_raw_tuple(estate, id)?;
+            (Some(raw), owned)
+        }
+        None => (None, None),
     };
-    let mut raw_new = match new_slot {
-        Some(id) => Some(slot_raw_tuple(estate, id)?),
-        None => None,
+    let (mut raw_new, mut _new_owned) = match new_slot {
+        Some(id) => {
+            let (raw, owned) = slot_raw_tuple(estate, id)?;
+            (Some(raw), owned)
+        }
+        None => (None, None),
     };
     let trigdesc = match leaf {
         None => mt.rel().trigdesc.as_ref().expect("BR caller checked trigdesc").clone(),
@@ -4314,7 +4325,9 @@ fn row_triggers_common<'mcx>(
                         return Err(moved_row_before_trigger(mcx, trigger, rel));
                     }
                 }
-                raw_new = Some(slot_raw_tuple(estate, slot_id)?);
+                let (raw, owned) = slot_raw_tuple(estate, slot_id)?;
+                raw_new = Some(raw);
+                _new_owned = owned;
             }
         }
     }

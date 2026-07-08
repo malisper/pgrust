@@ -444,14 +444,17 @@ fn insert_row_triggers<'mcx>(
         if !when.check(i, trigger, rel, tg_event, None, Some(slot))? {
             continue;
         }
-        let (img, len, tid, toid) = {
+        // C should_free_trig discipline (trigger.c): a Copied fetch owns the
+        // image and must outlive the trigger call; freed after (end of
+        // iteration), never before.
+        let (img, len, tid, toid, _trig_owned) = {
             let fetched = exectuples::exec_fetch_slot_heap_tuple(slot, true, mcx, mcx)?;
             match fetched {
                 exectuples::FetchedHeapTuple::Slot(t) => {
-                    (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+                    (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid, None)
                 }
                 exectuples::FetchedHeapTuple::Copied(t) => {
-                    (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+                    (t.header_ptr(), t.t_len, t.t_self, t.t_tableOid, Some(t))
                 }
             }
         };
