@@ -1,15 +1,8 @@
-//! `contrib/pgcrypto` — ported as a Rust builtin (no `.so`; symbols resolve
-//! through the dfmgr in-process registry so CREATE EXTENSION pgcrypto
-//! validates and installs).
-//!
-//! SCOPE (2026-07-08): digest()/hmac() over the in-repo reference hashes,
-//! gen_random_bytes/uuid, fips_mode(), crypt()/gen_salt() for md5-crypt
-//! (`$1$`), and encrypt()/decrypt()(+_iv) over the RustCrypto block ciphers
-//! (bf/des/3des/cast5/aes, ECB/CBC/CFB, pkcs/none padding). NOT yet ported —
-//! symbols resolve to loud feature-not-supported stubs so CREATE EXTENSION
-//! still succeeds: crypt/gen_salt des/bcrypt/xdes (crypt-des.c/-blowfish.c) and
-//! sha-crypt (crypt-sha.c), and the full PGP suite (pgp-*.c — needs bignum +
-//! zlib + the unported cryptohash/crypto crates).
+//! `contrib/pgcrypto` — Rust builtin resolved through the dfmgr registry.
+//! Ported: digest/hmac (in-repo hashes), gen_random_bytes/uuid, fips_mode,
+//! crypt/gen_salt md5-crypt ($1$), encrypt/decrypt(+_iv) (RustCrypto ciphers).
+//! Loud feature-not-supported stubs (so CREATE EXTENSION still installs):
+//! crypt/gen_salt des/bcrypt/xdes + sha-crypt, and the full PGP suite.
 
 mod cipher;
 mod crypt;
@@ -88,8 +81,6 @@ fn fc_pg_crypt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     bytea_result(fcinfo, s.as_bytes())
 }
 
-// find_provider: Cannot use "<spec>": No such cipher algorithm; else
-// "<op> error: <Encryption|Decryption> failed" (px_strerror).
 fn cipher_err(op: &str, e: cipher::CipherError) -> Box<PgError> {
     let msg = match e {
         cipher::CipherError::NoCipher(spec) => format!("Cannot use \"{spec}\": No such cipher algorithm"),
@@ -150,21 +141,15 @@ fn fc_pg_random_bytes(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     bytea_result(fcinfo, &buf)
 }
 
-// C: return gen_random_uuid(fcinfo) — the core v4 generator.
 fn fc_pg_random_uuid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let uuid = adt_uuid::gen_random_uuid()?;
     types_fmgr::byref_result(fcinfo.result_mcx(), &uuid)
 }
 
-// pgcrypto 1.4's fips_mode(): CheckFIPSMode(). No OpenSSL FIPS provider is
-// active in this build, so always false (C's non-FIPS path).
 fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(Datum::from_bool(false))
 }
 
-// PGP suite (pgp-*.c): resolves so CREATE EXTENSION validates; a call raises
-// feature-not-supported naming the C source. Needs bignum + zlib + the
-// unported cryptohash/crypto crates — a follow-up increment.
 macro_rules! unported {
     ($($fname:ident => $what:literal;)*) => {$(
         fn $fname(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -224,8 +209,6 @@ pub fn init_seams() {
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        // pgcrypto.c's builtin_crypto_enabled GUC path is not exercised (no
-        // crypt/cipher disable knob ported); no _PG_init needed.
         pg_init: None,
     });
 }

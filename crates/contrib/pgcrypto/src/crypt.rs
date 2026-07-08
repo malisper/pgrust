@@ -8,7 +8,6 @@ use pg_md5::Md5;
 use pg_strong_random::pg_strong_random;
 
 const MD5_SIZE: usize = 16;
-// _crypt_itoa64 — the base-64 alphabet crypt uses.
 const ITOA64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 pub enum CryptError {
@@ -24,7 +23,6 @@ fn random_salt_chars(n: usize) -> Result<Vec<u8>, CryptError> {
     Ok(raw.iter().map(|&b| ITOA64[(b & 0x3f) as usize]).collect())
 }
 
-// px_gen_salt(salt_type, buf, rounds); rounds == 0 means the scheme default.
 pub fn gen_salt(salt_type: &str, _rounds: i32) -> Result<String, CryptError> {
     match salt_type.to_ascii_lowercase().as_str() {
         "md5" => Ok(format!("$1${}", String::from_utf8_lossy(&random_salt_chars(8)?))),
@@ -46,7 +44,6 @@ fn md5(parts: &[&[u8]]) -> [u8; MD5_SIZE] {
     ctx.finish()
 }
 
-// _crypt_to64 — emit `n` base-64 chars of `v` (little-group-first).
 fn to64(out: &mut Vec<u8>, mut v: u32, n: usize) {
     for _ in 0..n {
         out.push(ITOA64[(v & 0x3f) as usize]);
@@ -54,7 +51,6 @@ fn to64(out: &mut Vec<u8>, mut v: u32, n: usize) {
     }
 }
 
-// px_crypt (crypt-blowfish.c router): dispatch on the salt prefix.
 pub fn crypt(password: &str, salt: &str) -> Result<String, CryptError> {
     let s = salt.as_bytes();
     if s.starts_with(b"$1$") {
@@ -70,7 +66,6 @@ pub fn crypt(password: &str, salt: &str) -> Result<String, CryptError> {
     }
 }
 
-// crypt-md5.c: the classic FreeBSD md5-crypt with the $1$ magic.
 fn crypt_md5(pw: &[u8], salt: &[u8]) -> Result<String, CryptError> {
     const MAGIC: &[u8] = b"$1$";
     let after = &salt[MAGIC.len()..];
