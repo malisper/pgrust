@@ -271,6 +271,12 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
         || !qd.query_env.is_null()
         || qd.crosscheck_snapshot.is_some()
         || qd.tup_desc.is_none()
+        // A one-shot custom plan never comes back from GetCachedPlan: reuse
+        // keys on the exact CachedPlan, so parking it can never hit and only
+        // pins the custom plan's arena until displacement. is_installed:
+        // test fixtures shim only the seams they use.
+        || !plancache_portal_seams::is_source_generic_plan::is_installed()
+        || !plancache_portal_seams::is_source_generic_plan::call(qd.cplan)
     {
         return Ok(None);
     }

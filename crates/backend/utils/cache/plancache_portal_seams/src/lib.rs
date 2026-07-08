@@ -16,6 +16,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // True iff cplan is its plansource's current generic plan — the only
+    // plan a later GetCachedPlan can hand back unchanged. One-shot custom
+    // plans never recur, so skeleton/portal parking on them can never hit.
+    pub fn is_source_generic_plan(cplan: types_portal::CachedPlanHandle) -> bool
+);
+
+seam_core::seam!(
     // Portal retention: DropCachedPlan discards the parked portal shell for
     // this plansource eagerly (DEALLOCATE / DISCARD ALL), releasing its plan
     // pin. Invalidation-driven discard is lazy: the shell's cplan no longer
