@@ -350,6 +350,18 @@ pub fn exec_build_window_projection_info<'mcx>(
     build_projection_info(mcx, target_list, input_desc, Some(Bind::Win(win)), params, None)
 }
 
+/// [`exec_build_window_projection_info`] with SubPlan compile support wired.
+pub fn exec_build_window_projection_info_subplans<'mcx>(
+    mcx: Mcx<'mcx>,
+    target_list: &NodeList<'mcx>,
+    input_desc: Option<&TupleDescData<'mcx>>,
+    win: WinBind<'_, 'mcx>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_projection_info(mcx, target_list, input_desc, Some(Bind::Win(win)), params, sub)
+}
+
 fn build_projection_info<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &NodeList<'mcx>,

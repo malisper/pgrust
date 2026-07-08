@@ -588,15 +588,18 @@ pub fn exec_init_window_agg<'mcx>(
                     &mut default_final,
                 )?;
             } else {
-                peragg.push(initialize_peragg_framed(
-                    mcx,
-                    wnode,
-                    wfunc,
-                    frameOptions,
-                    wfuncno as u16,
-                    params,
-                    agg_node.expect("winagg implies agg_node"),
-                )?);
+                peragg.push(::executils::with_subplan_compile_env(estate, |env| {
+                    initialize_peragg_framed(
+                        mcx,
+                        wnode,
+                        wfunc,
+                        frameOptions,
+                        wfuncno as u16,
+                        params,
+                        agg_node.expect("winagg implies agg_node"),
+                        env,
+                    )
+                })?);
                 {
                     let pa = peragg.last_mut().expect("just pushed");
                     for st in pa
@@ -693,7 +696,9 @@ pub fn exec_init_window_agg<'mcx>(
         // C arms fcinfo->context with the WindowAggState; the AggStateNode
         // stands in (AggCheckCallContext accepts both).
         let fm = unsafe { agg_node.expect("aggs imply agg_node").as_mut() }.fm_node_ptr();
-        let mut et = exec_build_agg_trans(mcx, &specs, fm, params)?;
+        let mut et = ::executils::with_subplan_compile_env(estate, |env| {
+            ::execexpr::exec_build_agg_trans_subplans(mcx, &specs, fm, params, env)
+        })?;
         // C invokes transfns in the tmpcontext per-tuple memory; by-ref call
         // results ride the armed result mcx there (nodeAgg precedent).
         // SAFETY: the tmpcontext ExprContext outlives the program (same estate).
@@ -704,13 +709,16 @@ pub fn exec_init_window_agg<'mcx>(
     };
 
     let bind = AggBind { values: agg_values_base, nulls: agg_nulls_base, naggs: numfuncs as u16, grouping: None };
-    let proj = exec_build_window_projection_info(
-        mcx,
-        &node.plan.targetlist,
-        None,
-        WinBind { agg: bind, wfuncnos: &wfuncnos },
-        params,
-    )?;
+    let proj = ::executils::with_subplan_compile_env(estate, |env| {
+        ::execexpr::exec_build_window_projection_info_subplans(
+            mcx,
+            &node.plan.targetlist,
+            None,
+            WinBind { agg: bind, wfuncnos: &wfuncnos },
+            params,
+            env,
+        )
+    })?;
 
     let part_eq = build_eq(
         mcx,
@@ -994,6 +1002,7 @@ fn initialize_peragg_framed<'mcx>(
     wfuncno: u16,
     params: ::execexpr::ParamBind<'mcx>,
     shared_agg_state: NonNull<AggStateNode>,
+    sub: Option<::execexpr::SubplanCompileEnv>,
 ) -> PgResult<PerAggData<'mcx>> {
     let shape = syscache_seams::lookup_pg_aggregate_shape::call(wfunc.winfnoid)?
         .ok_or_else(|| wfunc_lookup_failed(wfunc.winfnoid))?;
@@ -1161,9 +1170,12 @@ fn initialize_peragg_framed<'mcx>(
         trans_byval,
         agg_state,
         private_ctx,
-        argstates: build_argstates(mcx, &wfunc.args, params, None)?,
+        argstates: build_argstates(mcx, &wfunc.args, params, sub)?,
         filterstate: match wfunc.aggfilter {
-            Some(f) => Some(exec_init_expr(mcx, Some(f), params)?.expect("filter ExprState")),
+            Some(f) => Some(
+                ::execexpr::exec_init_expr_subplans(mcx, Some(f), params, sub)?
+                    .expect("filter ExprState"),
+            ),
             None => None,
         },
         init_value,
@@ -2732,9 +2744,20 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 }
             }
             {
-                let mut slots =
-                    EvalSlots { scan: None, inner: None, outer: Some(&mut self.agg_row_slot) };
-                exec_eval_expr(self.evaltrans.as_mut().unwrap(), &mut slots)?;
+                let Self { ref mut evaltrans, ref mut agg_row_slot, tmpcontext, .. } = *self;
+                let et = evaltrans.as_mut().unwrap();
+                if et.has_subplan() {
+                    ::executils::exec_eval_expr_with_subplans_outer(
+                        et,
+                        agg_row_slot,
+                        estate,
+                        tmpcontext,
+                    )?;
+                } else {
+                    let mut slots =
+                        EvalSlots { scan: None, inner: None, outer: Some(&mut *agg_row_slot) };
+                    exec_eval_expr(et, &mut slots)?;
+                }
             }
             estate.reset_expr_context(self.tmpcontext);
             self.aggregatedupto += 1;
@@ -2839,6 +2862,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
 
     fn eval_agg_args(
         &mut self,
+        estate: &mut EStateData<'mcx>,
         aggno: usize,
         which: WhichSlot,
         out: &mut [NullableDatum],
@@ -2848,6 +2872,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
             ref mut agg_row_slot,
             ref mut temp_slot_1,
             ref mut temp_slot_2,
+            tmpcontext,
             ..
         } = *self;
         let slot = match which {
@@ -2857,19 +2882,29 @@ impl<'mcx> WindowAggStateData<'mcx> {
         };
         let pa = &mut peragg[aggno];
         for (i, st) in pa.argstates.iter_mut().enumerate() {
-            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
-            out[i] = exec_eval_expr(st, &mut slots)?;
+            out[i] = if st.has_subplan() {
+                ::executils::exec_eval_expr_with_subplans_outer(st, slot, estate, tmpcontext)?
+            } else {
+                let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
+                exec_eval_expr(st, &mut slots)?
+            };
         }
         Ok(())
     }
 
     // The FILTER gate of advance_windowaggregate[_base]; true = advance.
-    fn agg_filter_passes(&mut self, aggno: usize, which: WhichSlot) -> PgResult<bool> {
+    fn agg_filter_passes(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        aggno: usize,
+        which: WhichSlot,
+    ) -> PgResult<bool> {
         let Self {
             ref mut peragg,
             ref mut agg_row_slot,
             ref mut temp_slot_1,
             ref mut temp_slot_2,
+            tmpcontext,
             ..
         } = *self;
         let Some(f) = peragg[aggno].filterstate.as_mut() else {
@@ -2880,8 +2915,12 @@ impl<'mcx> WindowAggStateData<'mcx> {
             WhichSlot::Temp1 => temp_slot_1,
             WhichSlot::Temp2 => temp_slot_2,
         };
-        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
-        let res = exec_eval_expr(f, &mut slots)?;
+        let res = if f.has_subplan() {
+            ::executils::exec_eval_expr_with_subplans_outer(f, slot, estate, tmpcontext)?
+        } else {
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut *slot) };
+            exec_eval_expr(f, &mut slots)?
+        };
         Ok(!res.isnull && res.value.as_bool())
     }
 
@@ -2889,17 +2928,17 @@ impl<'mcx> WindowAggStateData<'mcx> {
     // per-input-tuple context (C tmpcontext).
     fn advance_windowaggregate(
         &mut self,
-        estate: &EStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
         aggno: usize,
         which: WhichSlot,
     ) -> PgResult<()> {
-        if !self.agg_filter_passes(aggno, which)? {
+        if !self.agg_filter_passes(estate, aggno, which)? {
             return Ok(());
         }
         let nargs = self.peragg[aggno].num_arguments as usize;
         let mut args = [NullableDatum::null(); 4];
         assert!(nargs < 4);
-        self.eval_agg_args(aggno, which, &mut args[..nargs])?;
+        self.eval_agg_args(estate, aggno, which, &mut args[..nargs])?;
         let pa = &mut self.peragg[aggno];
 
         if pa.fn_strict {
@@ -2976,16 +3015,16 @@ impl<'mcx> WindowAggStateData<'mcx> {
     // transition; false forces a restart.
     fn advance_windowaggregate_base(
         &mut self,
-        estate: &EStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
         aggno: usize,
     ) -> PgResult<bool> {
-        if !self.agg_filter_passes(aggno, WhichSlot::Temp1)? {
+        if !self.agg_filter_passes(estate, aggno, WhichSlot::Temp1)? {
             return Ok(true);
         }
         let nargs = self.peragg[aggno].num_arguments as usize;
         let mut args = [NullableDatum::null(); 4];
         assert!(nargs < 4);
-        self.eval_agg_args(aggno, WhichSlot::Temp1, &mut args[..nargs])?;
+        self.eval_agg_args(estate, aggno, WhichSlot::Temp1, &mut args[..nargs])?;
 
         if self.peragg[aggno].fn_strict {
             for a in &args[..nargs] {
@@ -3361,7 +3400,12 @@ where
         // C force-updates framehead/frametail/grouptail pointers and trims
         // the tuplestore here; trim is unported, so the pointers stay lazy.
 
-        {
+        if state.proj.has_subplan() {
+            let ecxt = state.ps_ExprContext;
+            let result = state.ps_ResultTupleSlot;
+            let WindowAggStateData { ref mut proj, ref mut scan_slot, .. } = *state;
+            ::executils::exec_project_with_subplans_outer(proj, scan_slot, estate, ecxt, result)?;
+        } else {
             let mcx = estate.es_query_cxt;
             let result_slot = estate.slot_mut(state.ps_ResultTupleSlot);
             let mut slots =
