@@ -290,17 +290,7 @@ pub(crate) fn resolve_special_varno<'mcx>(
         return resolve_special_varno(tle.expr, ctx, callback);
     }
     if var.varno < 1 || var.varno as usize > dpns.rtable.len() {
-        // JOINRES-DEBUG (temporary, not for commit)
-        panic!(
-            "bogus varno: {} (plan.rs resolve_special_varno; varattno={} varlevelsup={} rtable.len()={} outer_tlist={} inner_tlist={} index_tlist={})",
-            var.varno,
-            var.varattno,
-            var.varlevelsup,
-            dpns.rtable.len(),
-            ps.outer_tlist.is_some(),
-            ps.inner_tlist.is_some(),
-            ps.index_tlist.is_some()
-        );
+        panic!("bogus varno: {}", var.varno);
     }
     drop(ps);
     callback(node, ctx)
