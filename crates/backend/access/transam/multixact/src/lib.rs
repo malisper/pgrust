@@ -31,7 +31,7 @@ use types_guc::GucSource;
 use types_storage::multixact::{ISUPDATE_from_mxstatus, MultiXactMember, MultiXactStatus};
 use types_storage::storage::{
     LWTRANCHE_MULTIXACTMEMBER_BUFFER, LWTRANCHE_MULTIXACTMEMBER_SLRU,
-    LWTRANCHE_MULTIXACTOFFSET_BUFFER, LWTRANCHE_MULTIXACTOFFSET_SLRU,
+    LWTRANCHE_MULTIXACTOFFSET_BUFFER, LWTRANCHE_MULTIXACTOFFSET_SLRU, NUM_AUXILIARY_PROCS,
 };
 use types_storage::storage::{MULTI_XACT_GEN_LOCK, MULTI_XACT_TRUNCATION_LOCK};
 use types_storage::sync::{FileTag, SyncRequestHandler};
@@ -213,10 +213,12 @@ struct MultiXactStateShared {
     multiStopLimit: AtomicU32,
     multiWrapLimit: AtomicU32,
     offsetStopLimit: AtomicU32,
-    // perBackendXactIds[2 * MaxOldestSlot]: OldestMemberMXactId[] then
-    // OldestVisibleMXactId[].
+    // perBackendXactIds: OldestMemberMXactId[NumMemberSlots] (MaxBackends
+    // backend slots then max_prepared_xacts prepared-xact slots) followed by
+    // OldestVisibleMXactId[NumVisibleSlots] (MaxBackends slots only; prepared
+    // xacts have no visible slot). Upstream 0a50ef09.
     perBackendXactIds: Box<[AtomicU32]>,
-    max_oldest_slot: usize,
+    num_member_slots: usize,
 }
 
 static MULTIXACT_STATE: OnceLock<&'static MultiXactStateShared> = OnceLock::new();
@@ -227,10 +229,31 @@ fn MultiXactState() -> &'static MultiXactStateShared {
         .unwrap_or_else(|| panic!("MultiXactState accessed before MultiXactShmemInit"))
 }
 
+// MaxBackends as captured at MultiXactShmemInit (globals are thread-local;
+// the shared arrays are the process-wide truth).
+fn state_max_backends(st: &MultiXactStateShared) -> usize {
+    st.perBackendXactIds.len() - st.num_member_slots
+}
+
 fn my_slot() -> usize {
     let procno = globals::MyProcNumber();
-    debug_assert!(procno >= 0, "multixact per-backend slot without MyProcNumber");
+    debug_assert!(
+        procno >= 0 && (procno as usize) < state_max_backends(MultiXactState()),
+        "multixact per-backend slot requires a regular backend MyProcNumber"
+    );
     procno as usize
+}
+
+// PreparedXactOldestMemberMXactIdSlot: dummy proc numbers start at
+// MaxBackends + NUM_AUXILIARY_PROCS (FIRST_PREPARED_XACT_PROC_NUMBER), but
+// their member slots come directly after the MaxBackends backend slots.
+fn prepared_xact_member_slot(procno: i32) -> usize {
+    let st = MultiXactState();
+    let first_prepared = state_max_backends(st) + NUM_AUXILIARY_PROCS as usize;
+    debug_assert!(procno >= 0 && procno as usize >= first_prepared);
+    let idx = state_max_backends(st) + (procno as usize - first_prepared);
+    debug_assert!(idx < st.num_member_slots);
+    idx
 }
 
 #[inline]
@@ -246,13 +269,13 @@ fn set_oldest_member(i: usize, v: MultiXactId) {
 #[inline]
 fn oldest_visible(i: usize) -> MultiXactId {
     let st = MultiXactState();
-    st.perBackendXactIds[st.max_oldest_slot + i].load(Relaxed)
+    st.perBackendXactIds[st.num_member_slots + i].load(Relaxed)
 }
 
 #[inline]
 fn set_oldest_visible(i: usize, v: MultiXactId) {
     let st = MultiXactState();
-    st.perBackendXactIds[st.max_oldest_slot + i].store(v, Relaxed);
+    st.perBackendXactIds[st.num_member_slots + i].store(v, Relaxed);
 }
 
 fn MultiXactGenLock() -> &'static LWLock {
@@ -562,7 +585,7 @@ fn MultiXactIdSetOldestVisible() -> PgResult<()> {
         if oldest_mxact < FirstMultiXactId {
             oldest_mxact = FirstMultiXactId;
         }
-        for i in 0..st.max_oldest_slot {
+        for i in 0..st.num_member_slots {
             let thisoldest = oldest_member(i);
             if MultiXactIdIsValid(thisoldest) && MultiXactIdPrecedes(thisoldest, oldest_mxact) {
                 oldest_mxact = thisoldest;
@@ -1189,7 +1212,7 @@ pub fn PostPrepare_MultiXact(xid: TransactionId) {
         // (multixact.c).
         LWLockAcquire(MultiXactGenLock(), LW_EXCLUSIVE, globals::MyProcNumber())
             .expect("PostPrepare_MultiXact: MultiXactGenLock");
-        set_oldest_member(dummy as usize, my_oldest_member);
+        set_oldest_member(prepared_xact_member_slot(dummy), my_oldest_member);
         set_oldest_member(my_slot(), InvalidMultiXactId);
         LWLockRelease(MultiXactGenLock()).expect("PostPrepare_MultiXact: unlock");
     }
@@ -1205,7 +1228,7 @@ pub fn multixact_twophase_recover(
     let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, false)?;
     assert_eq!(recdata.len(), 4);
     let oldest_member = MultiXactId::from_ne_bytes(recdata.try_into().unwrap());
-    set_oldest_member(dummy as usize, oldest_member);
+    set_oldest_member(prepared_xact_member_slot(dummy), oldest_member);
     Ok(())
 }
 
@@ -1216,7 +1239,7 @@ pub fn multixact_twophase_postcommit(
 ) -> PgResult<()> {
     let dummy = twophase_seams::two_phase_get_dummy_proc_number::call(xid, true)?;
     assert_eq!(recdata.len(), 4);
-    set_oldest_member(dummy as usize, InvalidMultiXactId);
+    set_oldest_member(prepared_xact_member_slot(dummy), InvalidMultiXactId);
     Ok(())
 }
 
@@ -1236,15 +1259,19 @@ fn MultiXactMemberBuffers() -> i32 {
     globals::multixact_member_buffers()
 }
 
-fn max_oldest_slot() -> usize {
+fn num_member_slots() -> usize {
     (globals::MaxBackends() + guc_tables::vars::max_prepared_xacts.read()) as usize
 }
 
-// SHARED_MULTIXACT_STATE_SIZE: the C scalar header is 48 bytes
+fn num_visible_slots() -> usize {
+    globals::MaxBackends() as usize
+}
+
+// MultiXactSharedStateShmemSize: the C scalar header is 48 bytes
 // (offsetof(MultiXactStateData, perBackendXactIds)); accounting only — the
 // backing store is a leaked process-local struct (procarray precedent).
 fn shared_multixact_state_size() -> Size {
-    48 + core::mem::size_of::<MultiXactId>() * 2 * max_oldest_slot()
+    48 + core::mem::size_of::<MultiXactId>() * (num_member_slots() + num_visible_slots())
 }
 
 pub fn MultiXactShmemSize() -> Size {
@@ -1286,9 +1313,10 @@ pub fn MultiXactShmemInit() -> PgResult<()> {
         panic!("MultiXactShmemInit called twice");
     }
 
-    let nslots = max_oldest_slot();
-    let mut per_backend = Vec::with_capacity(2 * nslots);
-    per_backend.resize_with(2 * nslots, || AtomicU32::new(0));
+    let member_slots = num_member_slots();
+    let total_slots = member_slots + num_visible_slots();
+    let mut per_backend = Vec::with_capacity(total_slots);
+    per_backend.resize_with(total_slots, || AtomicU32::new(0));
     let state: &'static MultiXactStateShared = Box::leak(Box::new(MultiXactStateShared {
         nextMXact: AtomicU32::new(0),
         nextOffset: AtomicU32::new(0),
@@ -1303,7 +1331,7 @@ pub fn MultiXactShmemInit() -> PgResult<()> {
         multiWrapLimit: AtomicU32::new(0),
         offsetStopLimit: AtomicU32::new(0),
         perBackendXactIds: per_backend.into_boxed_slice(),
-        max_oldest_slot: nslots,
+        num_member_slots: member_slots,
     }));
     if MULTIXACT_STATE.set(state).is_err() {
         panic!("MultiXactShmemInit called twice");
@@ -1319,7 +1347,7 @@ pub fn MultiXactShmemResetAfterCrash() {
     slru::SimpleLruResetAfterCrash(MemberCtl());
 
     let st = MultiXactState();
-    assert_eq!(st.max_oldest_slot, max_oldest_slot());
+    assert_eq!(st.num_member_slots, num_member_slots());
     st.nextMXact.store(0, Relaxed);
     st.nextOffset.store(0, Relaxed);
     st.finishedStartup.store(false, Relaxed);
@@ -1663,11 +1691,13 @@ pub fn GetOldestMultiXactId() -> PgResult<MultiXactId> {
         next_mxact = FirstMultiXactId;
     }
     let mut oldest_mxact = next_mxact;
-    for i in 0..st.max_oldest_slot {
+    for i in 0..st.num_member_slots {
         let this = oldest_member(i);
         if MultiXactIdIsValid(this) && MultiXactIdPrecedes(this, oldest_mxact) {
             oldest_mxact = this;
         }
+    }
+    for i in 0..(st.perBackendXactIds.len() - st.num_member_slots) {
         let this = oldest_visible(i);
         if MultiXactIdIsValid(this) && MultiXactIdPrecedes(this, oldest_mxact) {
             oldest_mxact = this;
