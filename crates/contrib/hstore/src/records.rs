@@ -53,7 +53,7 @@ fn composite_arg<'m>(mcx: mcx::Mcx<'m>, fcinfo: &Fcinfo, i: usize) -> PgResult<R
     let p = unsafe { fcinfo.arg_ptr(i) };
     let total = unsafe { types_tuple::varatt::varsize_any(p) };
     let raw = unsafe { core::slice::from_raw_parts(p, total) };
-    let rec = detoast_seams::detoast_attr::call(mcx, raw)?;
+    let rec: &'m [u8] = detoast_seams::detoast_attr::call(mcx, raw)?.leak();
     // SAFETY: detoasted composite image; header prefix in bounds.
     let hdr = unsafe { &*(rec.as_ptr() as *const HeapTupleHeaderData) };
     Ok(RecArg { rec, tup_type: hdr.type_id(), tup_typmod: hdr.typmod() })
