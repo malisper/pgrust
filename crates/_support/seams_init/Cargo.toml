@@ -281,6 +281,7 @@ logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
 test_decoding = { path = "../../contrib/test_decoding" }
 citext = { path = "../../contrib/citext" }
 uuid_ossp = { path = "../../contrib/uuid_ossp" }
+pg_prewarm = { path = "../../contrib/pg_prewarm" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
