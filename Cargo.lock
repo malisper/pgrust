@@ -4875,6 +4875,7 @@ dependencies = [
  "resowner",
  "resowner_seams",
  "s_lock_seams",
+ "seam_core",
  "shm_mq",
  "shmem",
  "sinval_seams",
@@ -7658,6 +7659,7 @@ dependencies = [
 name = "miscinit"
 version = "0.0.0"
 dependencies = [
+ "dfmgr",
  "elog",
  "fd",
  "guc_seams",
@@ -9671,6 +9673,7 @@ dependencies = [
  "rel_vocab",
  "relation_seams",
  "rewrite_manip",
+ "seam_core",
  "stack_depth",
  "syscache_seams",
  "table",
@@ -10956,6 +10959,7 @@ dependencies = [
  "relcache_build_seams",
  "relcache_seams",
  "rewrite_manip",
+ "seam_core",
  "spgist",
  "stack_depth",
  "statistics",
@@ -11512,6 +11516,7 @@ dependencies = [
  "procsignal",
  "s_lock_seams",
  "scalar_seams",
+ "seam_core",
  "shmem",
  "stack_depth",
  "syslogger",
@@ -16508,6 +16513,7 @@ dependencies = [
  "reloptions",
  "rewrite_define",
  "schemacmds",
+ "seam_core",
  "seclabel",
  "sequence",
  "statscmds",
