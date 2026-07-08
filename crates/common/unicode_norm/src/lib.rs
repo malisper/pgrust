@@ -486,6 +486,15 @@ mod tests {
     }
 
     #[test]
+    fn hangul_tbase_is_not_a_t_syllable() {
+        // U+11A7 (TBASE) must survive NFC unrecomposed (C 273fe94).
+        let input = vec![0x1100, 0x1161, 0x11a7];
+        let expected = vec![0xac00, 0x11a7];
+
+        assert_eq!(normalize(UNICODE_NFC, &input), expected);
+    }
+
+    #[test]
     fn canonical_ordering_sorts_non_starters_by_combining_class() {
         let input = vec!['a' as pg_wchar, 0x0315, 0x0300];
         let expected = vec!['a' as pg_wchar, 0x0300, 0x0315];
