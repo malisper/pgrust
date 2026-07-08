@@ -26,7 +26,7 @@ const K: [u32; 64] = [
     0xeb86d391,
 ];
 
-struct Md5 {
+pub struct Md5 {
     state: [u32; 4],
     len: u64,
     buf: [u8; 64],
@@ -34,7 +34,7 @@ struct Md5 {
 }
 
 impl Md5 {
-    fn new() -> Md5 {
+    pub fn new() -> Md5 {
         Md5 {
             state: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476],
             len: 0,
@@ -73,7 +73,7 @@ impl Md5 {
         self.state[3] = self.state[3].wrapping_add(d);
     }
 
-    fn update(&mut self, mut data: &[u8]) {
+    pub fn update(&mut self, mut data: &[u8]) {
         self.len += data.len() as u64;
         if self.fill > 0 {
             let take = data.len().min(64 - self.fill);
@@ -97,7 +97,7 @@ impl Md5 {
         self.fill = data.len();
     }
 
-    fn finish(mut self) -> [u8; MD5_DIGEST_LENGTH] {
+    pub fn finish(mut self) -> [u8; MD5_DIGEST_LENGTH] {
         let bits = self.len.wrapping_mul(8);
         self.update(&[0x80]);
         while self.fill != 56 {
