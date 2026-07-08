@@ -761,6 +761,14 @@ fn scan_sub_plan_loop<'mcx>(
                 }
                 found = true;
                 load_param_ids(sstate, estate, slot_id);
+                // C reads the testexpr's pending initplan params only here,
+                // per returned row (ExecEvalParamExec) — never on zero rows.
+                {
+                    let deps = sstate.testexpr.as_deref().unwrap().param_exec_deps();
+                    if !deps.is_empty() {
+                        ::executils::exec_eval_param_exec_params(estate, deps)?;
+                    }
+                }
                 let testexpr = sstate
                     .testexpr
                     .as_deref_mut()
@@ -772,6 +780,14 @@ fn scan_sub_plan_loop<'mcx>(
             SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
                 found = true;
                 load_param_ids(sstate, estate, slot_id);
+                // As ROWCOMPARE: per-row lazy initplan reads (C
+                // ExecEvalParamExec); idempotent after the first row.
+                {
+                    let deps = sstate.testexpr.as_deref().unwrap().param_exec_deps();
+                    if !deps.is_empty() {
+                        ::executils::exec_eval_param_exec_params(estate, deps)?;
+                    }
+                }
                 let testexpr = sstate
                     .testexpr
                     .as_deref_mut()
@@ -1048,6 +1064,13 @@ fn exec_hash_sub_plan<'mcx>(
 
     let lhs_slot = h.lhs_slot;
     {
+        // C ExecProject(projLeft) reads pending initplan params here — after
+        // the empty-tables early return above, never before it.
+        let deps = h.proj_left.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+        let h = sstate.hashed.as_mut().unwrap();
         let proj_left = &mut h.proj_left;
         with_eval_slots(estate, ecxt, Some(lhs_slot), |slots, rslot, m| {
             exec_project(proj_left, slots, rslot.expect("lhs slot"), m)
