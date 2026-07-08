@@ -122,14 +122,25 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: &ClientSocket, cac: CacState) -
 
     let log_hostname = guc_tables::vars::log_hostname.read();
     let raddr = init_small::globals::WithMyProcPort(|p| p.raddr);
-    let flags = (if log_hostname { 0 } else { libc::NI_NUMERICHOST }) | libc::NI_NUMERICSERV;
+    let flags = (if log_hostname {
+        0
+    } else {
+        libc::NI_NUMERICHOST
+    }) | libc::NI_NUMERICSERV;
     let mut remote_host = String::new();
     let mut remote_port = String::new();
-    let ret =
-        ip::pg_getnameinfo_all(&raddr, Some(&mut remote_host), Some(&mut remote_port), flags);
+    let ret = ip::pg_getnameinfo_all(
+        &raddr,
+        Some(&mut remote_host),
+        Some(&mut remote_port),
+        flags,
+    );
     if ret != 0 {
         ereport(WARNING)
-            .errmsg_internal(format!("pg_getnameinfo_all() failed: {}", gai_strerror(ret)))
+            .errmsg_internal(format!(
+                "pg_getnameinfo_all() failed: {}",
+                gai_strerror(ret)
+            ))
             .finish(loc(211, "BackendInitialize"))?;
     }
 
@@ -315,171 +326,181 @@ fn process_ssl_startup() -> PgResult<i32> {
     Ok(STATUS_OK)
 }
 
-// ProcessStartupPacket: the SSL/GSS recursion is real, depth-bounded as in C.
-fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgResult<i32> {
-    pqcomm::pq_startmsgread()?;
+// ProcessStartupPacket. C f7a191f replaced the SSL/GSS self-recursion (a
+// pre-auth stack-overflow DoS) with a retry loop; each negotiation kind can
+// run at most once.
+fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) -> PgResult<i32> {
+    loop {
+        pqcomm::pq_startmsgread()?;
 
-    let mut len_bytes = [0u8; 4];
-    if pqcomm::pq_getbytes(&mut len_bytes[..1])? == pqcomm::EOF {
-        // No data at all: don't clutter the log.
-        return Ok(STATUS_ERROR);
-    }
-    if pqcomm::pq_getbytes(&mut len_bytes[1..4])? == pqcomm::EOF {
-        if !ssl_done && !gss_done {
+        let mut len_bytes = [0u8; 4];
+        if pqcomm::pq_getbytes(&mut len_bytes[..1])? == pqcomm::EOF {
+            // No data at all: don't clutter the log.
+            return Ok(STATUS_ERROR);
+        }
+        if pqcomm::pq_getbytes(&mut len_bytes[1..4])? == pqcomm::EOF {
+            if !ssl_done && !gss_done {
+                ereport(COMMERROR)
+                    .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                    .errmsg("incomplete startup packet")
+                    .finish(loc(528, "ProcessStartupPacket"))?;
+            }
+            return Ok(STATUS_ERROR);
+        }
+
+        let len = i32::from_be_bytes(len_bytes) - 4;
+        if len < SIZEOF_PROTOCOL_VERSION || len > MAX_STARTUP_PACKET_LENGTH {
+            ereport(COMMERROR)
+                .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg("invalid length of startup packet")
+                .finish(loc(540, "ProcessStartupPacket"))?;
+            return Ok(STATUS_ERROR);
+        }
+
+        let mut buf: PgVec<'_, u8> = zeroed_vec(mcx, len as usize)?;
+        if pqcomm::pq_getbytes(&mut buf)? == pqcomm::EOF {
             ereport(COMMERROR)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("incomplete startup packet")
-                .finish(loc(528, "ProcessStartupPacket"))?;
+                .finish(loc(556, "ProcessStartupPacket"))?;
+            return Ok(STATUS_ERROR);
         }
-        return Ok(STATUS_ERROR);
-    }
+        pqcomm::pq_endmsgread();
 
-    let len = i32::from_be_bytes(len_bytes) - 4;
-    if len < SIZEOF_PROTOCOL_VERSION || len > MAX_STARTUP_PACKET_LENGTH {
-        ereport(COMMERROR)
-            .errcode(ERRCODE_PROTOCOL_VIOLATION)
-            .errmsg("invalid length of startup packet")
-            .finish(loc(540, "ProcessStartupPacket"))?;
-        return Ok(STATUS_ERROR);
-    }
+        let proto: ProtocolVersion = read_be_u32(&buf, 0);
+        init_small::globals::WithMyProcPort(|p| p.proto = proto);
 
-    let mut buf: PgVec<'_, u8> = zeroed_vec(mcx, len as usize)?;
-    if pqcomm::pq_getbytes(&mut buf)? == pqcomm::EOF {
-        ereport(COMMERROR)
-            .errcode(ERRCODE_PROTOCOL_VIOLATION)
-            .errmsg("incomplete startup packet")
-            .finish(loc(556, "ProcessStartupPacket"))?;
-        return Ok(STATUS_ERROR);
-    }
-    pqcomm::pq_endmsgread();
+        if proto == CANCEL_REQUEST_CODE {
+            process_cancel_request_packet(&buf, len)?;
+            // Not really an error, but we don't want to proceed further.
+            return Ok(STATUS_ERROR);
+        }
 
-    let proto: ProtocolVersion = read_be_u32(&buf, 0);
-    init_small::globals::WithMyProcPort(|p| p.proto = proto);
-
-    if proto == CANCEL_REQUEST_CODE {
-        process_cancel_request_packet(&buf, len)?;
-        // Not really an error, but we don't want to proceed further.
-        return Ok(STATUS_ERROR);
-    }
-
-    if proto == NEGOTIATE_SSL_CODE && !ssl_done {
-        // No SSL when disabled or on Unix sockets; also no SSL negotiation if
-        // we already have a direct SSL connection.
-        let (laddr, ssl_in_use) =
-            init_small::globals::WithMyProcPort(|p| (p.laddr, p.ssl_in_use));
-        let ssl_ok = if !loaded_ssl::get()
-            || ip::sockaddr_family(&laddr) == libc::AF_UNIX
-            || ssl_in_use
-        {
-            b'N'
-        } else {
-            b'S'
-        };
-        if trace_connection_negotiation::get() {
-            ereport(LOG)
-                .errmsg(if ssl_ok == b'S' {
-                    "SSLRequest accepted"
+        if proto == NEGOTIATE_SSL_CODE && !ssl_done {
+            // No SSL when disabled or on Unix sockets; also no SSL negotiation if
+            // we already have a direct SSL connection.
+            let (laddr, ssl_in_use) =
+                init_small::globals::WithMyProcPort(|p| (p.laddr, p.ssl_in_use));
+            let ssl_ok =
+                if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == libc::AF_UNIX || ssl_in_use
+                {
+                    b'N'
                 } else {
-                    "SSLRequest rejected"
-                })
-                .finish(loc(600, "ProcessStartupPacket"))?;
-        }
-        if !write_negotiation_byte(ssl_ok, "SSL")? {
-            return Ok(STATUS_ERROR);
-        }
-        if ssl_ok == b'S' && be_secure::secure_open_server()? == -1 {
-            return Ok(STATUS_ERROR);
-        }
-        if pqcomm::pq_buffer_remaining_data() > 0 {
-            return ereport(FATAL)
+                    b'S'
+                };
+            if trace_connection_negotiation::get() {
+                ereport(LOG)
+                    .errmsg(if ssl_ok == b'S' {
+                        "SSLRequest accepted"
+                    } else {
+                        "SSLRequest rejected"
+                    })
+                    .finish(loc(600, "ProcessStartupPacket"))?;
+            }
+            if !write_negotiation_byte(ssl_ok, "SSL")? {
+                return Ok(STATUS_ERROR);
+            }
+            if ssl_ok == b'S' && be_secure::secure_open_server()? == -1 {
+                return Ok(STATUS_ERROR);
+            }
+            if pqcomm::pq_buffer_remaining_data() > 0 {
+                return ereport(FATAL)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("received unencrypted data after SSL request")
                 .errdetail("This could be either a client-software bug or evidence of an attempted man-in-the-middle attack.")
                 .finish(loc(627, "ProcessStartupPacket"))
                 .map(|()| STATUS_ERROR);
-        }
-        return process_startup_packet(mcx, true, ssl_ok == b'S');
-    } else if proto == NEGOTIATE_GSS_CODE && !gss_done {
-        // No ENABLE_GSS in this build: GSSok = 'N'.
-        if trace_connection_negotiation::get() {
-            ereport(LOG)
-                .errmsg("GSSENCRequest rejected")
-                .finish(loc(654, "ProcessStartupPacket"))?;
-        }
-        if !write_negotiation_byte(b'N', "GSSAPI")? {
-            return Ok(STATUS_ERROR);
-        }
-        if pqcomm::pq_buffer_remaining_data() > 0 {
-            return ereport(FATAL)
+            }
+            ssl_done = true;
+            if ssl_ok == b'S' {
+                // Done with SSL and negotiated correctly: consider GSS done too.
+                gss_done = true;
+            }
+            continue;
+        } else if proto == NEGOTIATE_GSS_CODE && !gss_done {
+            // No ENABLE_GSS in this build: GSSok = 'N'.
+            if trace_connection_negotiation::get() {
+                ereport(LOG)
+                    .errmsg("GSSENCRequest rejected")
+                    .finish(loc(654, "ProcessStartupPacket"))?;
+            }
+            if !write_negotiation_byte(b'N', "GSSAPI")? {
+                return Ok(STATUS_ERROR);
+            }
+            if pqcomm::pq_buffer_remaining_data() > 0 {
+                return ereport(FATAL)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("received unencrypted data after GSSAPI encryption request")
                 .errdetail("This could be either a client-software bug or evidence of an attempted man-in-the-middle attack.")
                 .finish(loc(681, "ProcessStartupPacket"))
                 .map(|()| STATUS_ERROR);
+            }
+            gss_done = true;
+            continue;
         }
-        return process_startup_packet(mcx, false, true);
-    }
 
-    init_small::globals::SetFrontendProtocol(proto.min(PG_PROTOCOL_LATEST));
+        init_small::globals::SetFrontendProtocol(proto.min(PG_PROTOCOL_LATEST));
 
-    if pg_protocol_major(proto) < pg_protocol_major(PG_PROTOCOL_EARLIEST)
-        || pg_protocol_major(proto) > pg_protocol_major(PG_PROTOCOL_LATEST)
-    {
-        return ereport(FATAL)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(format!(
-                "unsupported frontend protocol {}.{}: server supports {}.0 to {}.{}",
-                pg_protocol_major(proto),
-                pg_protocol_minor(proto),
-                pg_protocol_major(PG_PROTOCOL_EARLIEST),
-                pg_protocol_major(PG_PROTOCOL_LATEST),
-                pg_protocol_minor(PG_PROTOCOL_LATEST),
-            ))
-            .finish(loc(707, "ProcessStartupPacket"))
-            .map(|()| STATUS_ERROR);
-    }
+        if pg_protocol_major(proto) < pg_protocol_major(PG_PROTOCOL_EARLIEST)
+            || pg_protocol_major(proto) > pg_protocol_major(PG_PROTOCOL_LATEST)
+        {
+            return ereport(FATAL)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "unsupported frontend protocol {}.{}: server supports {}.0 to {}.{}",
+                    pg_protocol_major(proto),
+                    pg_protocol_minor(proto),
+                    pg_protocol_major(PG_PROTOCOL_EARLIEST),
+                    pg_protocol_major(PG_PROTOCOL_LATEST),
+                    pg_protocol_minor(PG_PROTOCOL_LATEST),
+                ))
+                .finish(loc(707, "ProcessStartupPacket"))
+                .map(|()| STATUS_ERROR);
+        }
 
-    let mut unrecognized_protocol_options: Vec<String> = Vec::new();
-    {
-        let mut offset = SIZEOF_PROTOCOL_VERSION as usize;
-        let len = len as usize;
+        let mut unrecognized_protocol_options: Vec<String> = Vec::new();
+        {
+            let mut offset = SIZEOF_PROTOCOL_VERSION as usize;
+            let len = len as usize;
 
-        init_small::globals::WithMyProcPort(|p| p.guc_options.clear());
+            init_small::globals::WithMyProcPort(|p| p.guc_options.clear());
 
-        while offset < len {
-            if buf[offset] == 0 {
-                break; // found packet terminator
-            }
-            let name_len = cstr_len(&buf, offset);
-            let valoffset = offset + name_len + 1;
-            if valoffset >= len {
-                break; // missing value, will complain below
-            }
-            let val_len = cstr_len(&buf, valoffset);
-            let name = bytes_str(&buf[offset..offset + name_len]);
-            let val = bytes_str(&buf[valoffset..valoffset + val_len]);
-
-            match name.as_str() {
-                "database" => {
-                    let v = val.clone();
-                    init_small::globals::WithMyProcPort(|p| p.database_name = Some(v.clone()));
+            while offset < len {
+                if buf[offset] == 0 {
+                    break; // found packet terminator
                 }
-                "user" => {
-                    let v = val.clone();
-                    init_small::globals::WithMyProcPort(|p| p.user_name = Some(v.clone()));
+                let name_len = cstr_len(&buf, offset);
+                let valoffset = offset + name_len + 1;
+                if valoffset >= len {
+                    break; // missing value, will complain below
                 }
-                "options" => {
-                    let v = val.clone();
-                    init_small::globals::WithMyProcPort(|p| p.cmdline_options = Some(v.clone()));
-                }
-                "replication" => {
-                    // am_walsender/am_db_walsender are walsender.c globals;
-                    // walsender startup cannot proceed until that unit lands.
-                    let is_walsender = val == "database"
-                        || match scalar_seams::parse_bool::call(&val) {
-                            Some(b) => b,
-                            None => {
-                                return ereport(FATAL)
+                let val_len = cstr_len(&buf, valoffset);
+                let name = bytes_str(&buf[offset..offset + name_len]);
+                let val = bytes_str(&buf[valoffset..valoffset + val_len]);
+
+                match name.as_str() {
+                    "database" => {
+                        let v = val.clone();
+                        init_small::globals::WithMyProcPort(|p| p.database_name = Some(v.clone()));
+                    }
+                    "user" => {
+                        let v = val.clone();
+                        init_small::globals::WithMyProcPort(|p| p.user_name = Some(v.clone()));
+                    }
+                    "options" => {
+                        let v = val.clone();
+                        init_small::globals::WithMyProcPort(|p| {
+                            p.cmdline_options = Some(v.clone())
+                        });
+                    }
+                    "replication" => {
+                        // am_walsender/am_db_walsender are walsender.c globals;
+                        // walsender startup cannot proceed until that unit lands.
+                        let is_walsender = val == "database"
+                            || match scalar_seams::parse_bool::call(&val) {
+                                Some(b) => b,
+                                None => {
+                                    return ereport(FATAL)
                                     .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
                                     .errmsg(format!(
                                         "invalid value for parameter \"replication\": \"{val}\""
@@ -487,76 +508,78 @@ fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgRes
                                     .errhint("Valid values are: \"false\", 0, \"true\", 1, \"database\".")
                                     .finish(loc(767, "ProcessStartupPacket"))
                                     .map(|()| STATUS_ERROR);
-                            }
-                        };
-                    if is_walsender {
-                        panic!(
-                            "backend_startup: replication={val} needs am_walsender \
+                                }
+                            };
+                        if is_walsender {
+                            panic!(
+                                "backend_startup: replication={val} needs am_walsender \
                              (backend-replication-walsender unported)"
-                        );
+                            );
+                        }
+                    }
+                    _ if name.starts_with("_pq_.") => {
+                        unrecognized_protocol_options.push(name.clone());
+                    }
+                    _ => {
+                        {
+                            let n = name.clone();
+                            let v = val.clone();
+                            init_small::globals::WithMyProcPort(|p| {
+                                p.guc_options.push(n.clone());
+                                p.guc_options.push(v.clone());
+                            });
+                        }
+                        if name == "application_name" {
+                            let cleaned = string_seams::pg_clean_ascii::call(&val, 0)
+                                .expect("pg_clean_ascii with alloc_flags=0 cannot fail");
+                            init_small::globals::WithMyProcPort(|p| {
+                                p.application_name = Some(cleaned.clone())
+                            });
+                        }
                     }
                 }
-                _ if name.starts_with("_pq_.") => {
-                    unrecognized_protocol_options.push(name.clone());
-                }
-                _ => {
-                    {
-                        let n = name.clone();
-                        let v = val.clone();
-                        init_small::globals::WithMyProcPort(|p| {
-                            p.guc_options.push(n.clone());
-                            p.guc_options.push(v.clone());
-                        });
-                    }
-                    if name == "application_name" {
-                        let cleaned = string_seams::pg_clean_ascii::call(&val, 0)
-                            .expect("pg_clean_ascii with alloc_flags=0 cannot fail");
-                        init_small::globals::WithMyProcPort(|p| {
-                            p.application_name = Some(cleaned.clone())
-                        });
-                    }
-                }
+                offset = valoffset + val_len + 1;
             }
-            offset = valoffset + val_len + 1;
+
+            if offset != len - 1 {
+                return ereport(FATAL)
+                    .errcode(ERRCODE_PROTOCOL_VIOLATION)
+                    .errmsg("invalid startup packet layout: expected terminator as last byte")
+                    .finish(loc(811, "ProcessStartupPacket"))
+                    .map(|()| STATUS_ERROR);
+            }
+
+            if pg_protocol_minor(proto) > pg_protocol_minor(PG_PROTOCOL_LATEST)
+                || !unrecognized_protocol_options.is_empty()
+            {
+                send_negotiate_protocol_version(mcx, &unrecognized_protocol_options)?;
+            }
         }
 
-        if offset != len - 1 {
+        let user_empty = init_small::globals::WithMyProcPort(|p| {
+            p.user_name.as_deref().unwrap_or("").is_empty()
+        });
+        if user_empty {
             return ereport(FATAL)
-                .errcode(ERRCODE_PROTOCOL_VIOLATION)
-                .errmsg("invalid startup packet layout: expected terminator as last byte")
-                .finish(loc(811, "ProcessStartupPacket"))
+                .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                .errmsg("no PostgreSQL user name specified in startup packet")
+                .finish(loc(828, "ProcessStartupPacket"))
                 .map(|()| STATUS_ERROR);
         }
 
-        if pg_protocol_minor(proto) > pg_protocol_minor(PG_PROTOCOL_LATEST)
-            || !unrecognized_protocol_options.is_empty()
-        {
-            send_negotiate_protocol_version(mcx, &unrecognized_protocol_options)?;
-        }
+        init_small::globals::WithMyProcPort(|p| {
+            if p.database_name.as_deref().unwrap_or("").is_empty() {
+                p.database_name = p.user_name.clone();
+            }
+            truncate_namedatalen(&mut p.database_name);
+            truncate_namedatalen(&mut p.user_name);
+        });
+
+        // if (am_walsender) MyBackendType = B_WAL_SENDER — unreachable, see above.
+        miscinit::SetMyBackendType(types_core::BackendType::Backend);
+
+        return Ok(STATUS_OK);
     }
-
-    let user_empty =
-        init_small::globals::WithMyProcPort(|p| p.user_name.as_deref().unwrap_or("").is_empty());
-    if user_empty {
-        return ereport(FATAL)
-            .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
-            .errmsg("no PostgreSQL user name specified in startup packet")
-            .finish(loc(828, "ProcessStartupPacket"))
-            .map(|()| STATUS_ERROR);
-    }
-
-    init_small::globals::WithMyProcPort(|p| {
-        if p.database_name.as_deref().unwrap_or("").is_empty() {
-            p.database_name = p.user_name.clone();
-        }
-        truncate_namedatalen(&mut p.database_name);
-        truncate_namedatalen(&mut p.user_name);
-    });
-
-    // if (am_walsender) MyBackendType = B_WAL_SENDER — unreachable, see above.
-    miscinit::SetMyBackendType(types_core::BackendType::Backend);
-
-    Ok(STATUS_OK)
 }
 
 // Ok(false) = hard socket error, COMMERROR already raised.
@@ -744,7 +767,10 @@ fn read_be_u32(buf: &[u8], off: usize) -> u32 {
 }
 
 fn cstr_len(buf: &[u8], off: usize) -> usize {
-    buf[off..].iter().position(|&b| b == 0).unwrap_or(buf.len() - off)
+    buf[off..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(buf.len() - off)
 }
 
 fn bytes_str(b: &[u8]) -> String {

@@ -717,6 +717,11 @@ impl<'m> TuplestoreData<'m> {
             }
             let tuple = self.memtuples[i];
             self.writetup(tuple)?;
+            // Track the deletion synchronously: a later writetup failure
+            // (e.g. temp_file_limit) must not leave a corrupt tuplestore,
+            // which matters for persistent stores like a Portal holdStore
+            // (C adb7873).
+            self.memtupdeleted += 1;
         }
         self.memtupdeleted = 0;
         self.memtuples.clear();

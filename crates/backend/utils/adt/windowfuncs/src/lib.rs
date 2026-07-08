@@ -7,9 +7,13 @@ use types_nodes::primnodes::{
     MONOTONICFUNC_DECREASING, MONOTONICFUNC_INCREASING, MONOTONICFUNC_NONE,
 };
 use types_nodes::rawnodes::{
-    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_NONDEFAULT,
-    FRAMEOPTION_ROWS, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+    FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_END_UNBOUNDED_FOLLOWING,
+    FRAMEOPTION_EXCLUDE_CURRENT_ROW, FRAMEOPTION_EXCLUSION, FRAMEOPTION_NONDEFAULT,
+    FRAMEOPTION_RANGE, FRAMEOPTION_ROWS, FRAMEOPTION_START_UNBOUNDED_PRECEDING,
 };
+
+// pg_proc F_COUNT_ — the zero-argument count(*).
+const F_COUNT_STAR: Oid = 2803;
 use types_nodes::NodeTag;
 
 // C acts on WFuncMonotonic and OptimizeWindowClause requests; NULL for
@@ -35,7 +39,20 @@ fn window_support(fcinfo: &mut Fcinfo, optimize_frame: bool) -> PgResult<Datum> 
                     (*req).monotonic = MONOTONICFUNC_INCREASING;
                 } else {
                     let mut monotonic = MONOTONICFUNC_NONE;
-                    if (*req).order_clause_empty {
+                    // EXCLUDE can drop rows previously counted for earlier
+                    // rows, breaking monotonicity; the only guaranteed case
+                    // is EXCLUDE CURRENT ROW + COUNT(*) with no FILTER
+                    // (C cf184ec).
+                    if (*req).frame_options & FRAMEOPTION_EXCLUSION != 0
+                        && ((*req).frame_options & FRAMEOPTION_EXCLUDE_CURRENT_ROW == 0
+                            || (*req).winfnoid != F_COUNT_STAR
+                            || (*req).agg_has_filter)
+                    {
+                        (*req).monotonic = MONOTONICFUNC_NONE;
+                        return Ok(a.value);
+                    }
+                    // No ORDER BY and RANGE mode means all rows are peers.
+                    if (*req).order_clause_empty && (*req).frame_options & FRAMEOPTION_RANGE != 0 {
                         monotonic = MONOTONICFUNC_BOTH;
                     } else {
                         if (*req).frame_options & FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0 {

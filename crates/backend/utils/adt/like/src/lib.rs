@@ -137,15 +137,10 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
     // Byte-lockstep except after wildcards, exactly as C: '%'/'_' advance the
     // text by whole characters so recursion re-enters char-synced.
     while !t.is_empty() && !p.is_empty() {
-        if p[0] == b'\\' {
-            p = &p[1..];
-            if p.is_empty() {
-                return Err(like_pattern_ends_with_escape());
-            }
-            if M::getchar(p[0], locale) != M::getchar(t[0], locale) {
-                return Ok(LIKE_FALSE);
-            }
-        } else if p[0] == b'%' {
+        // Not positioned immediately after an escape here, so wildcards may
+        // be taken at face value; the deterministic escape branch must come
+        // after the nondeterministic arm (C 51652c4).
+        if p[0] == b'%' {
             p = &p[1..];
 
             while !p.is_empty() {
@@ -215,9 +210,11 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
                 buf = Vec::with_capacity(sublen);
                 let mut c = &p[..sublen];
                 while !c.is_empty() {
-                    if c[0] != b'\\' {
-                        buf.push(c[0]);
+                    if c[0] == b'\\' {
+                        // The p1 scan already rejected a trailing escape.
+                        c = &c[1..];
                     }
+                    buf.push(c[0]);
                     c = &c[1..];
                 }
                 &buf
@@ -246,6 +243,14 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
                     return Ok(LIKE_FALSE);
                 }
                 t1 = M::next_char(t1);
+            }
+        } else if p[0] == b'\\' {
+            p = &p[1..];
+            if p.is_empty() {
+                return Err(like_pattern_ends_with_escape());
+            }
+            if M::getchar(p[0], locale) != M::getchar(t[0], locale) {
+                return Ok(LIKE_FALSE);
             }
         } else if M::getchar(p[0], locale) != M::getchar(t[0], locale) {
             return Ok(LIKE_FALSE);

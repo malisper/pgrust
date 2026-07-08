@@ -1770,10 +1770,68 @@ fn eval_hashed_scalar_array_op(
                 }
             }
         }
+
+        // A non-strict equality function may treat NULL as equal to some
+        // value: linear-search the array once with a null lhs (OR semantics,
+        // as the non-hashed SAOP) and cache the outcome (C 035c520).
+        if !strictfunc {
+            let mut result = false;
+            let mut resultnull = false;
+            let mut off = ::arrayfuncs::foundation::arr_data_offset(img);
+            let mut bitmask: u32 = 1;
+            let mut bitmap_byte = 0usize;
+            for _ in 0..nitems {
+                let elt_null = match bitmap_off {
+                    Some(bo) => (img[bo + bitmap_byte] as u32 & bitmask) == 0,
+                    None => false,
+                };
+                let rhs = if elt_null {
+                    NullableDatum::null()
+                } else {
+                    off = ::arrayfuncs::foundation::att_align_nominal(off, typalign);
+                    // SAFETY: off stays within the VARSIZE image per the array layout.
+                    let ep = unsafe { img.as_ptr().add(off) };
+                    let elt = ::arrayfuncs::foundation::fetch_att(ep, typbyval, typlen as i32);
+                    off = ::arrayfuncs::foundation::att_addlength_pointer(off, typlen as i32, ep);
+                    NullableDatum { value: elt, isnull: false }
+                };
+                // SAFETY: arg slots 0/1 of the call's live fcinfo image.
+                unsafe {
+                    crate::steps::arg_slot_of(call.fcinfo, 0).write(NullableDatum::null());
+                    crate::steps::arg_slot_of(call.fcinfo, 1).write(rhs);
+                }
+                let (r, isnull) = invoke(call)?;
+                if isnull {
+                    resultnull = true;
+                } else if r.as_bool() {
+                    result = true;
+                    resultnull = false;
+                    break;
+                }
+                if bitmap_off.is_some() {
+                    bitmask <<= 1;
+                    if bitmask == 0x100 {
+                        bitmask = 1;
+                        bitmap_byte += 1;
+                    }
+                }
+            }
+            // Invert non-NULL results for NOT IN.
+            tab.null_lhs_result = if !resultnull && !inclause { !result } else { result };
+            tab.null_lhs_isnull = resultnull;
+        }
         tab.built = true;
     }
 
-    // Probe (C probes even a null non-strict scalar, value word 0).
+    // Null scalar with a non-strict function: the cached null-lhs result.
+    if scalar.isnull {
+        debug_assert!(!strictfunc);
+        if tab.null_lhs_isnull {
+            return Ok((Datum::null(), true));
+        }
+        return Ok((Datum::from_bool(tab.null_lhs_result), false));
+    }
+
     let mut hashfound = false;
     {
         let h = hash_of(&tab.hashcall, scalar.value)?;

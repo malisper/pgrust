@@ -194,6 +194,20 @@ fn ExtendBufferedRelCommon(
     buffers: &mut [Buffer],
 ) -> PgResult<(BlockNumber, u32)> {
     if relpersistence == RELPERSISTENCE_TEMP {
+        // Canonical place to reject extending another session's temp
+        // relation: about-to-be-created local buffers cannot be transferred
+        // to the owning session (C 3aaefe8).
+        if rel.is_some_and(|r| !r.rd_islocaltemp) {
+            return Err(Box::new(
+                types_error::PgError::new(ERROR, "cannot access temporary tables of other sessions")
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_error_location(ErrorLocation::new(
+                        "bufmgr.c",
+                        0,
+                        "ExtendBufferedRelCommon",
+                    )),
+            ));
+        }
         return crate::localbuf::ExtendBufferedRelLocal(smgr, fork, extend_by, extend_upto, buffers);
     }
     ExtendBufferedRelShared(rel, smgr, relpersistence, fork, strategy, flags, extend_by, extend_upto, buffers)

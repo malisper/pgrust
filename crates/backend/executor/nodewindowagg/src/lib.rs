@@ -1622,7 +1622,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 if fo & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
                     offset = -offset;
                 }
-                self.frameheadpos = self.currentpos + offset;
+                // Overflow means the frame head is beyond end of partition
+                // (currentpos >= 0, so only positive overflow is possible).
+                self.frameheadpos = self.currentpos.checked_add(offset).unwrap_or(i64::MAX);
                 if self.frameheadpos < 0 {
                     self.frameheadpos = 0;
                 } else if self.frameheadpos > self.currentpos + 1 {
@@ -1708,7 +1710,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 let minheadgroup = if fo & FRAMEOPTION_START_OFFSET_PRECEDING != 0 {
                     self.currentgroup - offset
                 } else {
-                    self.currentgroup + offset
+                    // Overflow: target group beyond i64 range, treat as
+                    // infinity so the loop advances to end of partition.
+                    self.currentgroup.checked_add(offset).unwrap_or(i64::MAX)
                 };
                 if self.frameheadpos == 0 && self.framehead_slot.base().is_empty() {
                     let Self { ref mut buffer, ref mut framehead_slot, framehead_ptr, .. } =
@@ -1851,7 +1855,13 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 if fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
                     offset = -offset;
                 }
-                self.frametailpos = self.currentpos + offset + 1;
+                // Overflow means the frame tail is beyond end of partition
+                // (currentpos >= 0, so only positive overflow is possible).
+                self.frametailpos = self
+                    .currentpos
+                    .checked_add(offset)
+                    .and_then(|v| v.checked_add(1))
+                    .unwrap_or(i64::MAX);
                 if self.frametailpos < 0 {
                     self.frametailpos = 0;
                 } else if self.frametailpos > self.currentpos + 1 {
@@ -1937,7 +1947,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 let maxtailgroup = if fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
                     self.currentgroup - offset
                 } else {
-                    self.currentgroup + offset
+                    // Overflow: target group beyond i64 range, treat as
+                    // infinity so the loop advances to end of partition.
+                    self.currentgroup.checked_add(offset).unwrap_or(i64::MAX)
                 };
                 if self.frametailpos == 0 && self.frametail_slot.base().is_empty() {
                     let Self { ref mut buffer, ref mut frametail_slot, frametail_ptr, .. } =
@@ -2111,7 +2123,9 @@ impl<'mcx> WindowAggStateData<'mcx> {
                 if fo & FRAMEOPTION_END_OFFSET_PRECEDING != 0 {
                     offset = -offset;
                 }
-                if pos > self.currentpos + offset {
+                // On overflow the frame end is beyond i64 range: the frame
+                // extends to end of partition, so the row is in frame.
+                if self.currentpos.checked_add(offset).is_some_and(|end| pos > end) {
                     return Ok(-1);
                 }
             } else {

@@ -2356,6 +2356,8 @@ fn init_scalar_array_op<'mcx>(
             hashcall,
             built: false,
             has_nulls: false,
+            null_lhs_result: false,
+            null_lhs_isnull: false,
             map: ::mcx::PgFxHashMap::with_hasher_in(Default::default(), mcx),
         });
 
