@@ -297,6 +297,25 @@ fn build_setop_child_paths<'mcx>(
         }
     }
 
+    // A partial path for the child builds a partial path here; only the
+    // cheapest is worth considering.
+    if run.root.rel(rel).consider_parallel
+        && crate::relnode::relids_is_empty(&run.root.rel(rel).lateral_relids)
+    {
+        if let Some((pid, info)) = &partial_candidate {
+            let id = crate::pathnode::create_subqueryscan_path(
+                run,
+                rel,
+                *pid,
+                trivial_tlist,
+                PgVec::new_in(run.mcx),
+                &None,
+                info,
+            )?;
+            crate::pathnode::add_partial_path(run, rel, id);
+        }
+    }
+
     postprocess_setop_rel(run, rel)?;
 
     if !want_num_groups {

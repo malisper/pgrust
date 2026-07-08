@@ -847,6 +847,17 @@ pub(crate) fn add_paths_to_append_rel(
         crate::pathnode::add_partial_path(run, rel, pid);
     }
 
+    // JOINRES-DEBUG (temporary, not for commit)
+    if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
+        eprintln!(
+            "JOINRES-DEBUG add_paths_to_append_rel rel_relids={:?} consider_parallel={} pa_subpaths_valid={pa_subpaths_valid} pa_nonpartial={} pa_partial={} partial_subpaths_valid={partial_subpaths_valid} nchildren={}",
+            run.root.rel(rel).relids,
+            run.root.rel(rel).consider_parallel,
+            pa_nonpartial_subpaths.len(),
+            pa_partial_subpaths.len(),
+            live_childrels.len()
+        );
+    }
     // Parallel-aware append mixing partial and non-partial subpaths: only
     // worthwhile when some child has a substantially cheaper non-partial path.
     if pa_subpaths_valid && !pa_nonpartial_subpaths.is_empty() {
@@ -1407,15 +1418,31 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
     }
 
     // is_parallel_safe over baserestrictinfo and the reltarget exprs.
+    let jr_debug = std::env::var_os("PGRUST_JOINRES_DEBUG").is_some();
     for i in 0..run.root.rel(rel).baserestrictinfo.len() {
         let rid = run.root.rel(rel).baserestrictinfo[i];
         let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
         if !crate::is_parallel_safe_opt(run, Some(clause))? {
+            // JOINRES-DEBUG (temporary, not for commit)
+            if jr_debug {
+                eprintln!(
+                    "JOINRES-DEBUG set_rel_consider_parallel rti={rti} relid_oid={} NOT parallel: baserestrictinfo[{i}] unsafe: {:?}",
+                    run.rte(rti).relid,
+                    outfuncs::nodeToString(run.mcx, clause).map(|s| s.to_string())
+                );
+            }
             return Ok(());
         }
     }
     let reltarget = run.rel_reltarget_id(rel);
     if !crate::is_parallel_safe_exprs(run, reltarget)? {
+        // JOINRES-DEBUG (temporary, not for commit)
+        if jr_debug {
+            eprintln!(
+                "JOINRES-DEBUG set_rel_consider_parallel rti={rti} relid_oid={} NOT parallel: reltarget unsafe",
+                run.rte(rti).relid
+            );
+        }
         return Ok(());
     }
 
@@ -1459,6 +1486,14 @@ fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<
             crate::gucs::max_parallel_workers_per_gather(),
         )
     };
+    // JOINRES-DEBUG (temporary, not for commit)
+    if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
+        let r = run.root.rel(rel);
+        eprintln!(
+            "JOINRES-DEBUG create_plain_partial_paths relid={} reloptkind={:?} pages={} rel_parallel_workers={} -> workers={parallel_workers}",
+            r.relid, r.reloptkind, r.pages, r.rel_parallel_workers
+        );
+    }
     if parallel_workers <= 0 {
         return Ok(());
     }
