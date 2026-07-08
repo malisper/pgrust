@@ -1046,14 +1046,6 @@ fn eqsel_internal<'mcx>(
         }
     }
     let Some((vardata, other, varonleft)) = get_restriction_variable(run, args, varrelid)? else {
-        // JOINRES-DEBUG (temporary, not for commit)
-        if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
-            eprintln!(
-                "JOINRES-DEBUG eqsel op={operator} varrelid={varrelid} get_restriction_variable=None left={:?} right={:?} -> DEFAULT_EQ_SEL",
-                run.root.expr_node(args[0]).node_tag(),
-                run.root.expr_node(args[1]).node_tag()
-            );
-        }
         return Ok(if negate { 1.0 - DEFAULT_EQ_SEL } else { DEFAULT_EQ_SEL });
     };
     let selec = match other.as_const() {
@@ -2777,18 +2769,6 @@ pub fn eqjoinsel<'mcx>(
     let vardata2 = examine_variable(run, args[1], right, 0)?;
     let (nd1, isdefault1) = get_variable_numdistinct(run, &vardata1);
     let (nd2, isdefault2) = get_variable_numdistinct(run, &vardata2);
-    // JOINRES-DEBUG (temporary, not for commit)
-    if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
-        eprintln!(
-            "JOINRES-DEBUG eqjoinsel op={operator} jointype={sj_jointype} nd1={nd1} (default={isdefault1} rel={:?} stats={}) nd2={nd2} (default={isdefault2} rel={:?} stats={}) left={:?} right={:?}",
-            vardata1.rel,
-            vardata1.stats.is_some(),
-            vardata2.rel,
-            vardata2.stats.is_some(),
-            left.node_tag(),
-            right.node_tag()
-        );
-    }
 
     let get_mcv_stats = vardata1.stats.is_some()
         && vardata2.stats.is_some()

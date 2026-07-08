@@ -2806,13 +2806,7 @@ pub(crate) fn get_name_for_var_field<'mcx>(
             drop(ps);
             return get_name_for_var_field(tle.expr, fieldno, levelsup, ctx);
         }
-        // JOINRES-DEBUG (temporary, not for commit)
-        panic!(
-            "bogus varno: {varno} (deparse.rs get_name_for_var_field; varattno={varattno} netlevelsup={netlevelsup} rtable.len()={} outer_tlist={} inner_tlist={})",
-            dpns.rtable.len(),
-            ps.outer_tlist.is_some(),
-            ps.inner_tlist.is_some()
-        );
+        panic!("bogus varno: {varno}");
     };
 
     if attnum == 0 {

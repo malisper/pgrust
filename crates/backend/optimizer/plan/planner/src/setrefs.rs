@@ -3662,24 +3662,7 @@ fn set_join_references<'mcx>(
                 let ok = paramval
                     .as_var()
                     .is_some_and(|v| v.varno == types_nodes::primnodes::OUTER_VAR);
-                if !ok {
-                    // JOINRES-DEBUG (temporary, not for commit)
-                    let dump = |n: types_nodes::Node<'mcx>| {
-                        outfuncs::nodeToString(mcx, n)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|_| "<outfuncs failed>".into())
-                    };
-                    let mut tl = String::new();
-                    for (i, t) in outer_tlist.iter().enumerate() {
-                        tl.push_str(&format!("\n  outer_tlist[{i}]: {}", dump(t)));
-                    }
-                    panic!(
-                        "NestLoopParam was not reduced to a simple Var\nJOINRES-DEBUG paramno={} orig={}\nafter={}{tl}",
-                        nlp.paramno,
-                        dump(nlp.paramval),
-                        dump(paramval)
-                    );
-                }
+                assert!(ok, "NestLoopParam was not reduced to a simple Var");
                 new_params.lappend(
                     mcx,
                     types_nodes::Node::mk(
@@ -4027,23 +4010,6 @@ fn fix_join_expr_mutator<'mcx>(
                 nrm_match,
             )? {
                 return Ok(new);
-            }
-            // JOINRES-DEBUG (temporary, not for commit)
-            if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
-                let dump = |n: types_nodes::Node<'mcx>| {
-                    outfuncs::nodeToString(mcx, n)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|_| "<outfuncs failed>".into())
-                };
-                eprintln!(
-                    "JOINRES-DEBUG fix_join_expr PHV fallthrough: {}\n  tlists inner={} outer={}",
-                    dump(node),
-                    inner_tlist.len(),
-                    outer_tlist.len()
-                );
-                for (i, t) in inner_tlist.iter().enumerate() {
-                    eprintln!("  inner[{i}]: {}", dump(t));
-                }
             }
             fix_join_expr_mutator(run, phv.phexpr, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
         }

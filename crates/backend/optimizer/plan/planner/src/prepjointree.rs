@@ -2430,18 +2430,6 @@ fn replace_var_expr_su<'mcx>(
             if sublevels_up > 0 {
                 rewrite_manip::IncrementVarSublevelsUp(newnode, sublevels_up as i32, 0)?;
             }
-            // JOINRES-DEBUG (temporary, not for commit)
-            if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() && sublevels_up > 0 {
-                eprintln!(
-                    "JOINRES-DEBUG replace_var_expr_su su={sublevels_up} varno={} attno={} nulled={} -> {}",
-                    v.varno,
-                    v.varattno,
-                    nulled,
-                    outfuncs::nodeToString(mcx, newnode)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|_| "<outfuncs failed>".into())
-                );
-            }
             Ok(Some(newnode))
         }
         // replace_rte_variables_mutator's Query recursion: a SubLink body may
