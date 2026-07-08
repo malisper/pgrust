@@ -1848,6 +1848,19 @@ fn distribute_qual_to_rels<'mcx>(
         // A qual pulled up from a LATERAL subquery can reference rels outside
         // its syntactic scope; attach it to the nearest enclosing jointree
         // level whose scope covers every referenced rel.
+        // XXX sqlsmith-planner-errors debug: rich context for both asserts.
+        if !run.root.hasLateralRTEs || sjinfo.is_some() {
+            let rv: Vec<i32> = relids_members(&relids).collect();
+            let qv: Vec<i32> = relids_members(qualscope).collect();
+            let ojv: Vec<i32> = relids_members(outerjoin_nonnullable).collect();
+            panic!(
+                "distribute_qual_to_rels debug: hasLateralRTEs={} sjinfo={} clause={:?} \
+                 relids={rv:?} qualscope={qv:?} oj_nonnullable={ojv:?} jdomain={jdomain}",
+                run.root.hasLateralRTEs,
+                sjinfo.is_some(),
+                clause.node_tag(),
+            );
+        }
         assert!(
             run.root.hasLateralRTEs,
             "distribute_qual_to_rels (initsplan.c): qual outside qualscope without \

@@ -2362,9 +2362,11 @@ fn search_indexed_tlist_for_var<'mcx>(
         if sub.varno == var.varno && sub.varattno == var.varattno {
             assert!(
                 var.varattno <= 0 || sub.varnullingrels.equal(&var.varnullingrels),
-                "wrong varnullingrels for Var {}/{}",
+                "wrong varnullingrels for Var {}/{} (upper) var_nr={:?} tlist_nr={:?}",
                 var.varno,
-                var.varattno
+                var.varattno,
+                var.varnullingrels.iter().collect::<Vec<_>>(),
+                sub.varnullingrels.iter().collect::<Vec<_>>()
             );
             let mut newvar = types_nodes::primnodes::Var {
                 varno: newvarno,
@@ -3761,7 +3763,7 @@ fn set_join_references<'mcx>(
 }
 
 // setrefs.c NullingRelsMatch.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum NrmMatch {
     Equal,
     Subset,
@@ -4743,9 +4745,13 @@ fn search_join_tlist_for_var<'mcx>(
                         NrmMatch::Superset => sub.varnullingrels.is_subset(&var.varnullingrels),
                         NrmMatch::Equal => sub.varnullingrels.equal(&var.varnullingrels),
                     },
-                "wrong varnullingrels for Var {}/{}",
+                "wrong varnullingrels for Var {}/{} nrm={:?} var_nr={:?} tlist_nr={:?} newvarno={}",
                 var.varno,
-                var.varattno
+                var.varattno,
+                nrm_match,
+                var.varnullingrels.iter().collect::<Vec<_>>(),
+                sub.varnullingrels.iter().collect::<Vec<_>>(),
+                newvarno
             );
             let mut newvar = types_nodes::primnodes::Var {
                 varno: newvarno,

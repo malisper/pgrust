@@ -31,6 +31,25 @@ pub fn pull_up_subqueries<'mcx>(
         let Some((rti, lowest_outer_join)) = target else { return Ok(()) };
         let rte_node = parse.rtable.nth(rti as usize - 1);
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        // XXX sqlsmith-planner-errors debug: rich context for the dead-RTE panic.
+        if rte.rtekind == RTEKind::RTE_SUBQUERY && rte.subquery.is_none() {
+            let mut summary = String::new();
+            for (i, n) in parse.rtable.iter().enumerate() {
+                let r = n.as_range_tbl_entry().expect("rtable cell");
+                summary.push_str(&format!(
+                    "[{} {:?} sub={} inh={} lat={} eref={:?}] ",
+                    i + 1,
+                    r.rtekind,
+                    r.subquery.is_some(),
+                    r.inh,
+                    r.lateral,
+                    r.eref.and_then(|e| e.aliasname)
+                ));
+            }
+            panic!(
+                "pull_up_subqueries dead target: rti={rti} kept={kept:?} rtable: {summary}"
+            );
+        }
         if rte.rtekind == RTEKind::RTE_VALUES {
             // C dispatch: no VALUES pullup below an outer join nor into an
             // appendrel (the driver only targets it when neither applies).
