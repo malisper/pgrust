@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let contrib_dir = manifest_dir.join("../../contrib").canonicalize().unwrap();
+    let contrib_dir = manifest_dir.join("../../../contrib").canonicalize().unwrap();
     println!("cargo:rerun-if-changed={}", contrib_dir.display());
 
     // OUT_DIR = target/<profile>/build/main_main-<hash>/out
