@@ -9,8 +9,9 @@ use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::nodes_enums::CmdType;
 use ::types_nodes::plannodes::{PlannedStmt, Result as ResultPlan};
-use ::types_portal::{ParamListHandle, QueryEnvHandle};
+use ::types_portal::{CachedPlanHandle, ParamListHandle, QueryEnvHandle};
 use ::types_scan::sdir::{ForwardScanDirection, NoMovementScanDirection};
+use ::types_slot::EXEC_FLAG_SKIP_TRIGGERS;
 use ::types_tuple::{PgTypeShape, TYPALIGN_CHAR, TYPALIGN_INT, TYPSTORAGE_PLAIN};
 
 use crate::querydesc::{ExecData, ExecTy};
@@ -181,6 +182,9 @@ fn install_seams() {
         if !guc_tables::vars::work_mem.installed() {
             init_small::init_seams();
         }
+        // Every generic cached plan is parkable in this test binary; no test
+        // here exercises the one-shot-custom-plan rejection.
+        plancache_portal_seams::is_source_generic_plan::set(|_| true);
     });
 }
 
@@ -260,6 +264,67 @@ fn select1_via_seams_returns_one_row() {
     execmain_seams::executor_end::call(qd).unwrap();
     assert!(execmain_seams::query_desc_result_tupdesc::call(qd).is_none());
     execmain_seams::free_query_desc::call(qd);
+}
+
+// Ratified 2026-07-08 (docs/design/hook-surface.md section 2 parked-portal
+// caveat): a counting tap installed at boot must see one "execution" per
+// Bind of a parked prepared statement, whether it's a fresh ExecutorStart or
+// a rearm-driven reuse — otherwise a future pgss undercounts extended-query
+// reuse. tap_executor_start is process-global and install-once, so this is
+// the crate's only test touching it; counting is filtered to this test's own
+// QueryDescHandle so it stays correct under the test harness's parallelism
+// (every other test's executor_start calls also fire the tap once installed).
+static REARM_TAP_TARGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REARM_TAP_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn count_start(h: ::types_portal::QueryDescHandle) {
+    if h.0 == REARM_TAP_TARGET.load(std::sync::atomic::Ordering::Relaxed) {
+        REARM_TAP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn tap_executor_start_counts_start_and_parked_rearm_reuse() {
+    install_seams();
+    crate::execmain::tap_executor_start::install(count_start);
+
+    let mcx = leaked_mcx();
+    let pstmt = mk_select1_pstmt(mcx, None);
+    execmain_seams::note_cplan_for_query_desc::call(CachedPlanHandle(1));
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "SELECT 1",
+        None,
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    REARM_TAP_TARGET.store(qd.0, std::sync::atomic::Ordering::Relaxed);
+
+    // Fresh start: one Bind's worth of execution.
+    execmain_seams::executor_start::call(qd, EXEC_FLAG_SKIP_TRIGGERS).unwrap();
+    assert_eq!(REARM_TAP_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let mut dest = DestReceiver::DoNothing;
+    execmain_seams::executor_run::call(qd, ForwardScanDirection, 0, &mut dest).unwrap();
+    execmain_seams::executor_run::call(qd, NoMovementScanDirection, 0, &mut dest).unwrap();
+
+    // Park (no C counterpart): ExecutorFinish + in-place skeleton disarm.
+    let parked = execmain_seams::executor_finish_and_park::call(qd).unwrap();
+    assert!(parked, "select1 over a generic cached plan must be park-eligible");
+
+    // Two more Binds against the parked portal, each a rearm reuse — neither
+    // passes through executor_start_seam, so only the ratified tap call
+    // inside executor_rearm_seam can see them.
+    for n in 2..=3 {
+        let reused =
+            execmain_seams::executor_rearm::call(qd, None, ParamListHandle::NULL).unwrap();
+        assert!(reused, "rearm {n} should reuse the parked executor");
+        assert_eq!(REARM_TAP_COUNT.load(std::sync::atomic::Ordering::Relaxed), n);
+    }
 }
 
 #[test]

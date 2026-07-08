@@ -29,7 +29,8 @@ mod tests;
 pub use execami::{exec_re_scan, exec_re_scan_result, exec_supports_backward_scan};
 pub use execmain::{
     exec_check_one_rel_perms, standard_executor_end, standard_executor_finish,
-    standard_executor_run, standard_executor_start,
+    standard_executor_run, standard_executor_start, tap_executor_end, tap_executor_finish,
+    tap_executor_run, tap_executor_start,
 };
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
 pub use nodegather::GatherState;

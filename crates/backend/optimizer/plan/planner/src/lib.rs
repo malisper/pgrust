@@ -236,7 +236,11 @@ pub fn init_seams() {
     });
 }
 
-// planner_hook is absent by design.
+// planner_hook (hook-surface.md section 2): wraps standard_planner so a
+// future pgss can time track_planning. Empty by default (S1 ships no
+// consumer).
+seam_core::tap!(pub fn tap_planner());
+
 pub fn planner<'mcx>(
     mcx: Mcx<'mcx>,
     parse: &'mcx mut Query<'mcx>,
@@ -244,6 +248,7 @@ pub fn planner<'mcx>(
     cursor_options: i32,
     bound_params: ParamListHandle,
 ) -> PgResult<PlannedStmt<'mcx>> {
+    tap_planner::call_if(|f| f());
     let result = standard_planner(mcx, parse, query_string, cursor_options, bound_params)?;
     backend_status_seams::pgstat_report_plan_id::call(result.planId, false);
     Ok(result)

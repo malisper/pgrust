@@ -20,6 +20,19 @@ use crate::procnode::{
 };
 use crate::querydesc::{self, ExecData, ExecTy, ExecutorHandle, QueryDescData};
 
+// ExecutorStart/Run/Finish/End_hook (hook-surface.md section 2). Empty by
+// default (S1 ships no consumer); the QueryDescHandle is the cheap identity
+// a future pgss buckets counters on (queryId lives behind it). Ratified
+// 2026-07-08: a parked-portal rearm (executor_rearm_seam below) has no C
+// counterpart and would otherwise be invisible to a counting consumer of
+// tap_executor_start — the rearm site fires it too on a successful reuse, so
+// a future pgss sees one "start" per user-visible execution regardless of
+// path.
+seam_core::tap!(pub fn tap_executor_start(h: QueryDescHandle));
+seam_core::tap!(pub fn tap_executor_run(h: QueryDescHandle));
+seam_core::tap!(pub fn tap_executor_finish(h: QueryDescHandle));
+seam_core::tap!(pub fn tap_executor_end(h: QueryDescHandle));
+
 // One parked ExecutorState context (C's context_freelists): raw pointer keeps
 // the TLS payload !needs_drop; nested executors overflow to a plain delete.
 mod exec_ctx_pool {
@@ -217,7 +230,7 @@ pub(crate) fn executor_rearm_seam(
     snapshot: Option<::snapmgr::Snapshot>,
     params: ParamListHandle,
 ) -> PgResult<bool> {
-    querydesc::with_qd(h, |qd| {
+    let reused = querydesc::with_qd(h, |qd| {
         backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
         // CreateQueryDesc parity: the QueryDesc owns a registration on its
         // snapshot for the life of this execution.
@@ -232,7 +245,15 @@ pub(crate) fn executor_rearm_seam(
             snapmgr::UnregisterSnapshot(qd.snapshot.take().as_ref());
         }
         reused
-    })
+    })?;
+    // Ratified 2026-07-08: a rearm has no C counterpart and bypasses
+    // executor_start_seam entirely, so a counting consumer of
+    // tap_executor_start would silently undercount reused executions of a
+    // parked prepared statement unless the tap fires here too.
+    if reused {
+        tap_executor_start::call_if(|f| f(h));
+    }
+    Ok(reused)
 }
 
 // Portal-retention park: ExecutorFinish + the skeleton disarm, leaving the
@@ -319,6 +340,7 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
 }
 
 pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
+    tap_executor_start::call_if(|f| f(h));
     querydesc::with_qd(h, |qd| {
         backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
         standard_executor_start(qd, eflags)
@@ -331,10 +353,12 @@ pub(crate) fn executor_run_seam(
     count: u64,
     dest: &mut DestReceiver<'_>,
 ) -> PgResult<()> {
+    tap_executor_run::call_if(|f| f(h));
     querydesc::with_qd(h, |qd| standard_executor_run(qd, direction, count, dest))
 }
 
 pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
+    tap_executor_finish::call_if(|f| f(h));
     // The registry borrow must drop before the after-trigger firing loop:
     // RI checks re-enter the executor through SPI (fresh QueryDesc entries).
     let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
@@ -358,6 +382,7 @@ pub(crate) fn executor_rewind_seam(h: QueryDescHandle) -> PgResult<()> {
 }
 
 pub(crate) fn executor_end_seam(h: QueryDescHandle) -> PgResult<()> {
+    tap_executor_end::call_if(|f| f(h));
     querydesc::with_qd(h, standard_executor_end)
 }
 

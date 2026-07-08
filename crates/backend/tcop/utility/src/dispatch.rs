@@ -46,6 +46,10 @@ fn collect_gap(what: &str) {
     }
 }
 
+// ProcessUtility_hook (hook-surface.md section 2). Empty by default (S1
+// ships no consumer).
+seam_core::tap!(pub fn tap_process_utility());
+
 // C's hookable entry; no plugin surface exists, so this IS standard_ProcessUtility.
 // Whole utility path is cold: per-statement DDL dispatch, never per-tuple —
 // keeps the ~100 dispatch arms out of the query-path text (icache/iTLB).
@@ -63,6 +67,7 @@ pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     dest: &'d mut DestReceiver<'mcx>,
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
+    tap_process_utility::call_if(|f| f());
     debug_assert!(pstmt.commandType == CmdType::CMD_UTILITY);
     debug_assert!(qc
         .as_ref()

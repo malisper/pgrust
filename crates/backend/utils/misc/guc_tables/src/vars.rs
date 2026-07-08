@@ -341,6 +341,7 @@ pub static shared_memory_size_in_huge_pages: GucIntVar = GucSlot::new("shared_me
 pub static shared_memory_size_mb: GucIntVar = GucSlot::new("shared_memory_size_mb");
 pub static shared_memory_type: GucEnumVar = GucSlot::new("shared_memory_type");
 pub static shared_preload_libraries_string: GucStringVar = GucSlot::new("shared_preload_libraries_string");
+pub static preload_contrib_string: GucStringVar = GucSlot::new("preload_contrib_string");
 pub static ssl_ca_file: GucStringVar = GucSlot::new("ssl_ca_file");
 pub static ssl_cert_file: GucStringVar = GucSlot::new("ssl_cert_file");
 pub static ssl_crl_dir: GucStringVar = GucSlot::new("ssl_crl_dir");

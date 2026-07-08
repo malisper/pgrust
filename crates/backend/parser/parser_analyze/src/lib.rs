@@ -31,6 +31,16 @@ use types_nodes::rawnodes::{RawStmt, SelectStmt};
 use types_nodes::{Node, NodeTag};
 use types_portal::QueryEnvHandle;
 
+// post_parse_analyze_hook (hook-surface.md section 2). Empty by default (S1
+// ships no consumer); a future pg_stat_statements installs here to see the
+// JumbleState (clocations) that JumbleQueryDiscard throws away.
+seam_core::tap!(
+    pub fn tap_post_parse_analyze<'a, 'mcx>(
+        query: &'a mut Query<'mcx>,
+        jstate: &'a queryjumble::JumbleState<'mcx>,
+    )
+);
+
 pub fn init_seams() {
     analyze_seams::parse_analyze_fixedparams::set(parse_analyze_fixedparams);
     analyze_seams::parse_analyze_sql_fn::set(parse_analyze_sql_fn);
@@ -63,7 +73,10 @@ pub fn parse_analyze_fixedparams<'a, 'mcx>(
 
     let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if queryjumble::IsQueryIdEnabled() {
+    if tap_post_parse_analyze::is_installed() {
+        let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
@@ -99,7 +112,10 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
 
     let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if queryjumble::IsQueryIdEnabled() {
+    if tap_post_parse_analyze::is_installed() {
+        let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
@@ -176,7 +192,10 @@ pub fn parse_analyze_varparams<'a, 'mcx>(
     )?;
     let mut query = mem::take(unsafe { &mut *slot });
 
-    if queryjumble::IsQueryIdEnabled() {
+    if tap_post_parse_analyze::is_installed() {
+        let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 
@@ -211,7 +230,10 @@ pub fn parse_analyze_plpgsql<'a, 'mcx>(
 
     let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if queryjumble::IsQueryIdEnabled() {
+    if tap_post_parse_analyze::is_installed() {
+        let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 

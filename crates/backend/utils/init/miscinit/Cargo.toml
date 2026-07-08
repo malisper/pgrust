@@ -33,6 +33,7 @@ pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 libc = "0.2"
 libpq_pqsignal = { path = "../../../libpq/libpq_pqsignal" }
 timestamp_seams = { path = "../../adt/timestamp_seams" }
+dfmgr = { path = "../../fmgr/dfmgr" }
 
 [dev-dependencies]
 pgstat_seams = { path = "../../activity/pgstat_seams" }
