@@ -1,0 +1,25 @@
+# Decoder-fuzz core: the actual byte->decoder driving logic, as a plain library
+# buildable on the pinned stable toolchain (no libfuzzer). The cargo-fuzz crate
+# in ../ wraps these functions in libfuzzer targets (nightly). Keeping the logic
+# here lets `cargo test` smoke it on stable without cargo-fuzz installed.
+[package]
+name = "decoder_fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "decoder_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../crates/_support/mcx" }
+types_core = { path = "../../crates/_support/types/types_core" }
+types_error = { path = "../../crates/_support/types/types_error" }
+crc32c = { path = "../../crates/port/crc32c" }
+xlogreader = { path = "../../crates/backend/access/transam/xlogreader" }
+xlogreader_seams = { path = "../../crates/backend/access/transam/xlogreader_seams" }
+pqformat = { path = "../../crates/backend/libpq/pqformat" }
+stringinfo = { path = "../../crates/_support/types/stringinfo" }
+mbutils = { path = "../../crates/backend/utils/mb/mbutils" }
+wchar = { path = "../../crates/common/wchar" }

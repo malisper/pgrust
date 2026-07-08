@@ -1820,11 +1820,11 @@ fn decode_record<'mcx>(
 
         if block_id == XLR_BLOCK_ID_DATA_SHORT {
             main_data_len = header_field!(1)[0] as u32;
-            datatotal += main_data_len;
+            datatotal = datatotal.wrapping_add(main_data_len);
             break;
         } else if block_id == XLR_BLOCK_ID_DATA_LONG {
             main_data_len = read_u32(header_field!(4), 0);
-            datatotal += main_data_len;
+            datatotal = datatotal.wrapping_add(main_data_len);
             break;
         } else if block_id == XLR_BLOCK_ID_ORIGIN {
             record_origin = read_u16(header_field!(2), 0);
@@ -1871,7 +1871,7 @@ fn decode_record<'mcx>(
                 );
                 return None;
             }
-            datatotal += blk.data_len as u32;
+            datatotal = datatotal.wrapping_add(blk.data_len as u32);
 
             if blk.has_image {
                 blk.bimg_len = read_u16(header_field!(2), 0);
@@ -1887,9 +1887,14 @@ fn decode_record<'mcx>(
                         blk.hole_length = 0;
                     }
                 } else {
-                    blk.hole_length = BLCKSZ as u16 - blk.bimg_len;
+                    // C computes this in uint16 arithmetic; a corrupt bimg_len
+                    // > BLCKSZ wraps (defined in C) and is caught by the
+                    // cross-checks below. wrapping_sub keeps that behavior
+                    // identical across profiles (debug overflow-checks would
+                    // otherwise abort the decoder on adversarial input).
+                    blk.hole_length = (BLCKSZ as u16).wrapping_sub(blk.bimg_len);
                 }
-                datatotal += blk.bimg_len as u32;
+                datatotal = datatotal.wrapping_add(blk.bimg_len as u32);
 
                 if blk.bimg_info & BKPIMAGE_HAS_HOLE != 0
                     && (blk.hole_offset == 0

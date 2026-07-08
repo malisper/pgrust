@@ -1,0 +1,42 @@
+# cargo-fuzz (libFuzzer) wrapper for pgrust-fast byte-level decoders.
+#
+#   Run (needs a nightly toolchain — libFuzzer/sanitizers are nightly-only;
+#   the repo's pinned stable 1.96.0 cannot build these targets):
+#     cargo +nightly fuzz run wal_record    -- -max_total_time=300
+#     cargo +nightly fuzz run wire_pqformat -- -max_total_time=300
+#
+# The decode-driving logic lives in ./core (crate `decoder_fuzz`), which builds
+# and unit-tests on stable; these targets are thin libFuzzer shells over it.
+[package]
+name = "pgrust-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Sole workspace root for the fuzz tooling (detached from the repo-root
+# workspace so nightly-only deps never touch the stable build). `core` is the
+# stable-buildable decode-driver library; the crates it path-depends on resolve
+# their own workspace inheritance against the repo root.
+[workspace]
+members = ["core"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+decoder_fuzz = { path = "core" }
+
+[[bin]]
+name = "wal_record"
+path = "fuzz_targets/wal_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_pqformat"
+path = "fuzz_targets/wire_pqformat.rs"
+test = false
+doc = false
+bench = false
