@@ -205,6 +205,19 @@ pub fn exec_re_scan<'mcx>(
         PlanStateNode::HashJoin(hj) => {
             let hj = &mut **hj;
             hj.probe_batch.reset_staged();
+            // An EPQ recheck swaps the target rel's test tuple under the
+            // built hash; C forces the rebuild via the epqParam landing in
+            // the Hash child's chgParam (EvalPlanQualBegin) — mirror that.
+            if estate.es_epq_active {
+                ::nodehashjoin::exec_rescan_hash_join_chg(
+                    &mut hj.state,
+                    &mut hj.hash.state,
+                    estate,
+                )?;
+                exec_re_scan(&mut hj.hash.child, estate)?;
+                exec_re_scan(&mut hj.outer, estate)?;
+                return Ok(());
+            }
             let inner = ::nodehashjoin::exec_rescan_hash_join(
                 &mut hj.state,
                 &mut hj.hash.state,
