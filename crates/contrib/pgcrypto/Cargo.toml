@@ -23,6 +23,10 @@ pg_strong_random = { path = "../../port/pg_strong_random" }
 elog = { path = "../../backend/utils/error/elog" }
 guc = { path = "../../backend/utils/misc/guc" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+types_tuple = { path = "../../_support/types/types_tuple" }
 
 # RustCrypto symmetric ciphers for encrypt()/decrypt() — byte-identical to
 # pgcrypto's OpenSSL px_combo_* (see cipher.rs). Third-party crates are policy-
@@ -38,3 +42,9 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 ecb = { version = "0.1", features = ["alloc", "block-padding"] }
 cfb-mode = "0.8"
 cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+
+# OpenPGP (pgp-*.c): ZIP/ZLIB packet compression, and RSA/ElGamal MPI math
+# (modexp/modinverse) mirroring pgcrypto's OpenSSL BIGNUM path.
+miniz_oxide = "0.8"
+num-bigint = "0.4"
+num-traits = "0.2"

@@ -1,15 +1,18 @@
 //! `contrib/pgcrypto` — Rust builtin resolved through the dfmgr registry.
 //! Ported: digest/hmac (in-repo hashes), gen_random_bytes/uuid, fips_mode,
-//! crypt/gen_salt md5-crypt ($1$), encrypt/decrypt(+_iv) (RustCrypto ciphers).
-//! Loud feature-not-supported stubs (so CREATE EXTENSION still installs):
-//! crypt/gen_salt des/bcrypt/xdes + sha-crypt, and the full PGP suite.
+//! crypt/gen_salt (md5/des/xdes/bcrypt/sha-crypt), encrypt/decrypt(+_iv)
+//! (RustCrypto ciphers), and the full PGP suite (armor, symmetric + public-key
+//! encrypt/decrypt, key-id).
 
 mod cipher;
 mod crypt;
 mod hashing;
+mod pgp;
 
 use datum::Datum;
-use types_error::{PgError, PgResult, ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
+use elog::ereport;
+use types_error::{ErrorLocation, PgError, PgResult, NOTICE,
+    ERRCODE_EXTERNAL_ROUTINE_INVOCATION_EXCEPTION,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
@@ -164,29 +167,195 @@ fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_bool(false))
 }
 
-macro_rules! unported {
-    ($($fname:ident => $what:literal;)*) => {$(
-        fn $fname(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-            Err(PgError::error(concat!("pgcrypto: ", $what, " not yet ported"))
-                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .into())
-        }
-    )*};
+// ===========================================================================
+// PGP suite (pgp-pgsql.c fmgr boundary).
+// ===========================================================================
+
+fn here(func: &'static str) -> ErrorLocation {
+    ErrorLocation::new("pgcrypto/pgp", 0, func)
 }
 
-unported! {
-    fc_pg_armor => "armor() (pgp-armor.c)";
-    fc_pg_dearmor => "dearmor() (pgp-armor.c)";
-    fc_pgp_armor_headers => "pgp_armor_headers() (pgp-armor.c)";
-    fc_pgp_key_id_w => "pgp_key_id() (pgp.c)";
-    fc_pgp_sym_encrypt_bytea => "pgp_sym_encrypt_bytea() (pgp-pgsql.c)";
-    fc_pgp_sym_encrypt_text => "pgp_sym_encrypt_text() (pgp-pgsql.c)";
-    fc_pgp_sym_decrypt_bytea => "pgp_sym_decrypt_bytea() (pgp-pgsql.c)";
-    fc_pgp_sym_decrypt_text => "pgp_sym_decrypt_text() (pgp-pgsql.c)";
-    fc_pgp_pub_encrypt_bytea => "pgp_pub_encrypt_bytea() (pgp-pgsql.c)";
-    fc_pgp_pub_encrypt_text => "pgp_pub_encrypt_text() (pgp-pgsql.c)";
-    fc_pgp_pub_decrypt_bytea => "pgp_pub_decrypt_bytea() (pgp-pgsql.c)";
-    fc_pgp_pub_decrypt_text => "pgp_pub_decrypt_text() (pgp-pgsql.c)";
+// The `dbg:`/`expect-*` decrypt checks emit NOTICE lines before returning.
+fn pgp_notice(msg: &str) {
+    let _ = ereport(NOTICE).errmsg(msg.to_string()).finish(here("pgp_decrypt"));
+}
+
+// pgcrypto px_THROW text is rendered verbatim (byte-identical to C's ERROR).
+fn px_msg(msg: &str) -> Box<PgError> {
+    px_err(msg.to_string())
+}
+
+// Optional trailing arg (nullable): None when absent or SQL NULL.
+fn opt_arg_bytes(fcinfo: &Fcinfo, i: usize) -> PgResult<Option<Vec<u8>>> {
+    if i >= fcinfo.nargs() || fcinfo.args[i].isnull {
+        return Ok(None);
+    }
+    // SAFETY: arg present and non-null per the guard above.
+    let img = unsafe { fcinfo.arg_varlena_packed(i)? };
+    Ok(Some(img.data().to_vec()))
+}
+
+fn pgp_sym_encrypt(fcinfo: &mut Fcinfo, is_text: bool) -> PgResult<Datum> {
+    // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
+    let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let (data, key) = (data.data().to_vec(), key.data().to_vec());
+    let args = opt_arg_bytes(fcinfo, 2)?;
+    let out = pgp::sym_encrypt(&data, &key, args.as_deref(), is_text).map_err(|e| px_msg(&e))?;
+    bytea_result(fcinfo, &out)
+}
+
+fn pgp_sym_decrypt(fcinfo: &mut Fcinfo, need_text: bool) -> PgResult<Datum> {
+    // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
+    let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let (data, key) = (data.data().to_vec(), key.data().to_vec());
+    let args = opt_arg_bytes(fcinfo, 2)?;
+    match pgp::sym_decrypt(&data, &key, args.as_deref(), need_text) {
+        Ok(out) => {
+            for n in &out.notices {
+                pgp_notice(n);
+            }
+            if need_text {
+                mbutils::pg_verifymbstr(&out.plaintext, false)?;
+            }
+            bytea_result(fcinfo, &out.plaintext)
+        }
+        Err(e) => {
+            for n in &e.notices {
+                pgp_notice(n);
+            }
+            Err(px_msg(&e.message))
+        }
+    }
+}
+
+fn pgp_pub_encrypt(fcinfo: &mut Fcinfo, is_text: bool) -> PgResult<Datum> {
+    // SAFETY: strict on arg0/arg1 (data, key); arg2 (args) optional/nullable.
+    let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let (data, key) = (data.data().to_vec(), key.data().to_vec());
+    let args = opt_arg_bytes(fcinfo, 2)?;
+    let out = pgp::pub_encrypt(&data, &key, args.as_deref(), is_text).map_err(|e| px_msg(&e))?;
+    bytea_result(fcinfo, &out)
+}
+
+fn pgp_pub_decrypt(fcinfo: &mut Fcinfo, need_text: bool) -> PgResult<Datum> {
+    // SAFETY: strict on arg0/arg1 (msg, seckey); arg2 psw, arg3 args optional.
+    let (data, key) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let (data, key) = (data.data().to_vec(), key.data().to_vec());
+    let psw = opt_arg_bytes(fcinfo, 2)?;
+    let args = opt_arg_bytes(fcinfo, 3)?;
+    match pgp::pub_decrypt(&data, &key, psw.as_deref(), args.as_deref(), need_text) {
+        Ok(out) => {
+            for n in &out.notices {
+                pgp_notice(n);
+            }
+            if need_text {
+                mbutils::pg_verifymbstr(&out.plaintext, false)?;
+            }
+            bytea_result(fcinfo, &out.plaintext)
+        }
+        Err(e) => {
+            for n in &e.notices {
+                pgp_notice(n);
+            }
+            Err(px_msg(&e.message))
+        }
+    }
+}
+
+fn fc_pgp_sym_encrypt_text(f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    let _ = f;
+    pgp_sym_encrypt(fc, true)
+}
+fn fc_pgp_sym_encrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_sym_encrypt(fc, false)
+}
+fn fc_pgp_sym_decrypt_text(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_sym_decrypt(fc, true)
+}
+fn fc_pgp_sym_decrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_sym_decrypt(fc, false)
+}
+fn fc_pgp_pub_encrypt_text(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_pub_encrypt(fc, true)
+}
+fn fc_pgp_pub_encrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_pub_encrypt(fc, false)
+}
+fn fc_pgp_pub_decrypt_text(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_pub_decrypt(fc, true)
+}
+fn fc_pgp_pub_decrypt_bytea(_f: Option<&mut FmgrInfo>, fc: &mut Fcinfo) -> PgResult<Datum> {
+    pgp_pub_decrypt(fc, false)
+}
+
+fn fc_pgp_key_id_w(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 bytea.
+    let data = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let s = pgp::key_id(data.data()).map_err(px_msg)?;
+    bytea_result(fcinfo, s.as_bytes())
+}
+
+fn fc_pg_armor(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 bytea; arg1/arg2 text[] when present.
+    let data = unsafe { fcinfo.arg_varlena_packed(0)? }.data().to_vec();
+    let (keys, values) = if fcinfo.nargs() == 3 {
+        let scratch = mcx::MemoryContext::new("pgp_armor headers");
+        let ki = unsafe { fcinfo.arg_varlena_packed(1)? }.data().to_vec();
+        let vi = unsafe { fcinfo.arg_varlena_packed(2)? }.data().to_vec();
+        let k = deconstruct_nonnull_text(scratch.mcx(), &ki)?;
+        let v = deconstruct_nonnull_text(scratch.mcx(), &vi)?;
+        if k.len() != v.len() {
+            return Err(px_err("pgp_armor: number of keys and values must be equal".to_string()));
+        }
+        (k, v)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let out = pgp::armor::armor_encode(&data, &keys, &values);
+    bytea_result(fcinfo, &out)
+}
+
+fn fc_pg_dearmor(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 text.
+    let data = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let out = pgp::armor::armor_decode(data.data()).map_err(|()| px_msg(pgp::armor::CORRUPT_ARMOR))?;
+    bytea_result(fcinfo, &out)
+}
+
+fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 text.
+    let data = unsafe { fcinfo.arg_varlena_packed(0)? }.data().to_vec();
+    let headers =
+        pgp::armor::extract_armor_headers(&data).map_err(|()| px_msg(pgp::armor::CORRUPT_ARMOR))?;
+    let mcx = fcinfo.result_mcx();
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    for (k, v) in &headers {
+        let kd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, k)?);
+        let vd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, v)?);
+        srf.putvalues(&[kd, vd], &[false, false])?;
+    }
+    Ok(srf.finish(fcinfo))
+}
+
+// deconstruct_array_builtin(a, TEXTOID); pgp_armor rejects NULL elements.
+fn deconstruct_nonnull_text(mcx: mcx::Mcx<'_>, image: &[u8]) -> PgResult<Vec<Vec<u8>>> {
+    let (elems, nulls) =
+        arrayfuncs::construct::deconstruct_array_builtin(mcx, image, types_core::TEXTOID, true)?;
+    let mut out = Vec::with_capacity(elems.len());
+    for (d, &isnull) in elems.iter().zip(nulls.iter()) {
+        if isnull {
+            return Err(px_err("pgp_armor: null value not allowed in header".to_string()));
+        }
+        let p = d.as_usize() as *const u8;
+        // SAFETY: non-null text element datum inside the array image.
+        let bytes = unsafe {
+            let total = types_tuple::varatt::varsize_any(p);
+            let hdr = if types_tuple::varatt::varatt_is_1b(p) { 1 } else { 4 };
+            core::slice::from_raw_parts(p.add(hdr), total - hdr).to_vec()
+        };
+        out.push(bytes);
+    }
+    Ok(out)
 }
 
 fn lookup(function: &str) -> Option<PGFunction> {

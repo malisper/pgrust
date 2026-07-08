@@ -6,9 +6,57 @@ use ::blowfish::Blowfish;
 use ::cast5::Cast5;
 use ::cipher::{
     block_padding::{NoPadding, Pkcs7},
-    AsyncStreamCipher, BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit,
+    generic_array::GenericArray,
+    AsyncStreamCipher, BlockDecryptMut, BlockEncrypt, BlockEncryptMut, KeyInit, KeyIvInit,
 };
 use ::des::{Des, TdesEde3};
+
+/// A single-block ECB encryptor over one supported cipher, driving the OpenPGP
+/// CFB keystream (`fre = ECB_encrypt(fr)`). Caller supplies the exact-length
+/// key (S2K-derived or the session key).
+pub enum BlockEncryptor {
+    Bf(Box<Blowfish>),
+    Des3(Box<TdesEde3>),
+    Cast5(Box<Cast5>),
+    Aes128(Box<Aes128>),
+    Aes192(Box<Aes192>),
+    Aes256(Box<Aes256>),
+}
+
+impl BlockEncryptor {
+    pub fn new(int_name: &str, key: &[u8]) -> Option<BlockEncryptor> {
+        Some(match int_name {
+            "bf-ecb" => BlockEncryptor::Bf(Box::new(Blowfish::new_from_slice(key).ok()?)),
+            "3des-ecb" => BlockEncryptor::Des3(Box::new(TdesEde3::new_from_slice(key).ok()?)),
+            "cast5-ecb" => BlockEncryptor::Cast5(Box::new(Cast5::new_from_slice(key).ok()?)),
+            "aes-ecb" => match key.len() {
+                16 => BlockEncryptor::Aes128(Box::new(Aes128::new_from_slice(key).ok()?)),
+                24 => BlockEncryptor::Aes192(Box::new(Aes192::new_from_slice(key).ok()?)),
+                32 => BlockEncryptor::Aes256(Box::new(Aes256::new_from_slice(key).ok()?)),
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+
+    pub fn block_size(&self) -> usize {
+        match self {
+            BlockEncryptor::Aes128(_) | BlockEncryptor::Aes192(_) | BlockEncryptor::Aes256(_) => 16,
+            _ => 8,
+        }
+    }
+
+    pub fn encrypt_block(&self, block: &mut [u8]) {
+        match self {
+            BlockEncryptor::Bf(c) => c.encrypt_block(GenericArray::from_mut_slice(block)),
+            BlockEncryptor::Des3(c) => c.encrypt_block(GenericArray::from_mut_slice(block)),
+            BlockEncryptor::Cast5(c) => c.encrypt_block(GenericArray::from_mut_slice(block)),
+            BlockEncryptor::Aes128(c) => c.encrypt_block(GenericArray::from_mut_slice(block)),
+            BlockEncryptor::Aes192(c) => c.encrypt_block(GenericArray::from_mut_slice(block)),
+            BlockEncryptor::Aes256(c) => c.encrypt_block(GenericArray::from_mut_slice(block)),
+        }
+    }
+}
 
 pub enum CipherError {
     // NoCipher carries the full downcased spec (C find_provider's "Cannot use %s").
