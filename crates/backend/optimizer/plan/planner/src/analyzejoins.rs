@@ -465,8 +465,7 @@ fn rel_is_distinct_for<'mcx>(
         let Some(subquery) = run.rte(relid as usize).subquery else {
             return Ok(false);
         };
-        let mut colnos: PgVec<'_, i16> = PgVec::new_in(run.mcx);
-        let mut opids: PgVec<'_, types_core::Oid> = PgVec::new_in(run.mcx);
+        let mut distinct_cols: PgVec<'_, DistinctColInfo> = PgVec::new_in(run.mcx);
         for &rid in clause_list {
             let ri = run.root.rinfo(rid);
             let clause = *run.root.expr_node(ri.clause);
@@ -478,10 +477,13 @@ fn rel_is_distinct_for<'mcx>(
             if v.varno != relid as i32 || v.varlevelsup != 0 {
                 continue;
             }
-            colnos.push(v.varattno);
-            opids.push(op.opno);
+            distinct_cols.push(DistinctColInfo {
+                colno: v.varattno,
+                opid: op.opno,
+                collid: op.inputcollid,
+            });
         }
-        return query_is_distinct_for(subquery, &colnos, &opids);
+        return query_is_distinct_for_with_collations(subquery, &distinct_cols);
     }
     Ok(false)
 }
@@ -499,23 +501,55 @@ fn get_sortgroupclause_tle<'mcx>(
         .expect("ORDER/GROUP BY expression not found in targetlist")
 }
 
-fn distinct_col_search(colno: i16, colnos: &[i16], opids: &[types_core::Oid]) -> types_core::Oid {
-    colnos.iter().position(|&c| c == colno).map_or(0, |i| opids[i])
+// DistinctColInfo (analyzejoins.c): a subquery output column the caller needs
+// distinctness over, the upper-level equality operator, and its input
+// collation.
+#[derive(Clone, Copy)]
+struct DistinctColInfo {
+    colno: i16,
+    opid: types_core::Oid,
+    collid: types_core::Oid,
 }
 
+fn distinct_col_search(colno: i16, distinct_cols: &[DistinctColInfo]) -> Option<DistinctColInfo> {
+    distinct_cols.iter().copied().find(|d| d.colno == colno)
+}
+
+// query_is_distinct_for (analyzejoins.c): collation-blind wrapper retained
+// for external callers; forwards with InvalidOid collations.
 pub fn query_is_distinct_for(
     query: &Query<'_>,
     colnos: &[i16],
     opids: &[types_core::Oid],
 ) -> PgResult<bool> {
     debug_assert!(colnos.len() == opids.len());
+    let distinct_cols: Vec<DistinctColInfo> = colnos
+        .iter()
+        .zip(opids.iter())
+        .map(|(&colno, &opid)| DistinctColInfo { colno, opid, collid: types_core::InvalidOid })
+        .collect();
+    query_is_distinct_for_with_collations(query, &distinct_cols)
+}
 
+fn query_is_distinct_for_with_collations(
+    query: &Query<'_>,
+    distinct_cols: &[DistinctColInfo],
+) -> PgResult<bool> {
+    // The clause's collation must agree on equality with the collation the
+    // subquery deduplicates under, else its distinctness does not carry over.
     let all_match = |clauses: &types_nodes::NodeList<'_>| -> PgResult<bool> {
         for n in clauses {
             let sgc = n.as_sort_group_clause().expect("SortGroupClause cell");
             let tle = get_sortgroupclause_tle(sgc.tleSortGroupRef, &query.targetList);
-            let opid = distinct_col_search(tle.resno, colnos, opids);
-            if opid == 0 || !lsyscache::equality_ops_are_compatible(opid, sgc.eqop)? {
+            let Some(dcinfo) = distinct_col_search(tle.resno, distinct_cols) else {
+                return Ok(false);
+            };
+            if !lsyscache::equality_ops_are_compatible(dcinfo.opid, sgc.eqop)?
+                || !lsyscache::collations_agree_on_equality(
+                    dcinfo.collid,
+                    nodes_core::node_funcs::expr_collation(tle.expr),
+                )?
+            {
                 return Ok(false);
             }
         }
@@ -568,8 +602,16 @@ pub fn query_is_distinct_for(
                     .as_sort_group_clause()
                     .expect("setop groupClauses cell");
                 lg += 1;
-                let opid = distinct_col_search(tle.resno, colnos, opids);
-                if opid == 0 || !lsyscache::equality_ops_are_compatible(opid, sgc.eqop)? {
+                let Some(dcinfo) = distinct_col_search(tle.resno, distinct_cols) else {
+                    matched = false;
+                    break;
+                };
+                if !lsyscache::equality_ops_are_compatible(dcinfo.opid, sgc.eqop)?
+                    || !lsyscache::collations_agree_on_equality(
+                        dcinfo.collid,
+                        nodes_core::node_funcs::expr_collation(tle.expr),
+                    )?
+                {
                     matched = false;
                     break;
                 }
