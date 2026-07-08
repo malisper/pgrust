@@ -2560,20 +2560,33 @@ pub fn remove_useless_groupby_columns<'mcx>(run: &mut PlannerRun<'mcx>) -> PgRes
         return Ok(());
     }
 
+    // GroupByColInfo (initsplan.c): per GROUP BY item, the compatibility info
+    // needed to verify a unique index's equality notion (opfamily+collation)
+    // agrees with some GROUP BY item on each index column.
+    struct GroupByColInfo<'mcx> {
+        attno: i16,
+        eq_opfamilies: PgVec<'mcx, types_core::Oid>,
+        coll: types_core::Oid,
+    }
+
     let nrtes = parse.rtable.len() + 1;
     let mut groupbyattnos: PgVec<'mcx, types_pathnodes::Relids<'mcx>> = PgVec::new_in(mcx);
+    let mut groupbycols: Vec<Vec<GroupByColInfo<'mcx>>> = Vec::with_capacity(nrtes);
     for _ in 0..nrtes {
         groupbyattnos.push(None);
+        groupbycols.push(Vec::new());
     }
     let mut tryremove = false;
     let group_clause = crate::relnode::pgvec_clone_shallow(mcx, &run.root.processed_groupClause);
     for &sgc_id in group_clause.iter() {
-        let sgref = run
-            .root
-            .expr_node(sgc_id)
-            .as_sort_group_clause()
-            .expect("SortGroupClause cell")
-            .tleSortGroupRef;
+        let (sgref, eqop) = {
+            let sgc = run
+                .root
+                .expr_node(sgc_id)
+                .as_sort_group_clause()
+                .expect("SortGroupClause cell");
+            (sgc.tleSortGroupRef, sgc.eqop)
+        };
         let tle = get_sortgroupclause_tle(sgref, &parse.targetList);
         let Some(var) = tle.expr.as_var() else { continue };
         if var.varlevelsup > 0 {
@@ -2587,6 +2600,11 @@ pub fn remove_useless_groupby_columns<'mcx>(run: &mut PlannerRun<'mcx>) -> PgRes
             &groupbyattnos[relid],
             (var.varattno as i32 - FirstLowInvalidHeapAttributeNumber) as u32,
         );
+        groupbycols[relid].push(GroupByColInfo {
+            attno: var.varattno,
+            eq_opfamilies: lsyscache::get_mergejoin_opfamilies(mcx, eqop)?,
+            coll: var.varcollid,
+        });
     }
     if !tryremove {
         return Ok(());
@@ -2621,21 +2639,45 @@ pub fn remove_useless_groupby_columns<'mcx>(run: &mut PlannerRun<'mcx>) -> PgRes
                 continue;
             }
             let mut ind_attnos: types_pathnodes::Relids<'mcx> = None;
-            let mut nulls_check_ok = true;
+            let mut index_check_ok = true;
             for i in 0..index.nkeycolumns as usize {
+                let indkey_attno = index.indexkeys[i];
                 if !index.nullsnotdistinct
-                    && !relids_is_member(index.indexkeys[i], &run.root.rel(rel).notnullattnums)
+                    && !relids_is_member(indkey_attno, &run.root.rel(rel).notnullattnums)
                 {
-                    nulls_check_ok = false;
+                    index_check_ok = false;
+                    break;
+                }
+                // The index proves uniqueness only under its own opfamily and
+                // collation; some GROUP BY item on this column must use a
+                // compatible eqop and collation (the same check
+                // relation_has_unique_index_for applies to join clauses).
+                let mut col_matched = false;
+                for info in groupbycols[relid].iter() {
+                    if info.attno as i32 != indkey_attno {
+                        continue;
+                    }
+                    if info.eq_opfamilies.iter().any(|&f| f == index.opfamily[i])
+                        && lsyscache::collations_agree_on_equality(
+                            index.indexcollations[i],
+                            info.coll,
+                        )?
+                    {
+                        col_matched = true;
+                        break;
+                    }
+                }
+                if !col_matched {
+                    index_check_ok = false;
                     break;
                 }
                 ind_attnos = relids_add_member(
                     mcx,
                     &ind_attnos,
-                    (index.indexkeys[i] - FirstLowInvalidHeapAttributeNumber) as u32,
+                    (indkey_attno - FirstLowInvalidHeapAttributeNumber) as u32,
                 );
             }
-            if !nulls_check_ok {
+            if !index_check_ok {
                 continue;
             }
             if crate::relnode::relids_subset_compare(&ind_attnos, &relattnos)
