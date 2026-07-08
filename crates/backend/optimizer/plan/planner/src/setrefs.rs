@@ -3662,7 +3662,24 @@ fn set_join_references<'mcx>(
                 let ok = paramval
                     .as_var()
                     .is_some_and(|v| v.varno == types_nodes::primnodes::OUTER_VAR);
-                assert!(ok, "NestLoopParam was not reduced to a simple Var");
+                if !ok {
+                    // JOINRES-DEBUG (temporary, not for commit)
+                    let dump = |n: types_nodes::Node<'mcx>| {
+                        outfuncs::nodeToString(mcx, n)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| "<outfuncs failed>".into())
+                    };
+                    let mut tl = String::new();
+                    for (i, t) in outer_tlist.iter().enumerate() {
+                        tl.push_str(&format!("\n  outer_tlist[{i}]: {}", dump(t)));
+                    }
+                    panic!(
+                        "NestLoopParam was not reduced to a simple Var\nJOINRES-DEBUG paramno={} orig={}\nafter={}{tl}",
+                        nlp.paramno,
+                        dump(nlp.paramval),
+                        dump(paramval)
+                    );
+                }
                 new_params.lappend(
                     mcx,
                     types_nodes::Node::mk(
