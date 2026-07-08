@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 clauses = { path = "../../optimizer/util/clauses" }
+instrument = { path = "../instrument" }
 nodes_core = { path = "../../nodes/nodes_core" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 types_trigger_call = { path = "../../../_support/types/types_trigger_call" }
