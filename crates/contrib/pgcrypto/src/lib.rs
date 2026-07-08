@@ -328,7 +328,8 @@ fn fc_pgp_armor_headers(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     let headers =
         pgp::armor::extract_armor_headers(&data).map_err(|()| px_msg(pgp::armor::CORRUPT_ARMOR))?;
     let flinfo = flinfo.expect("pgp_armor_headers: resolved FmgrInfo required");
-    let mcx = fcinfo.result_mcx();
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
     let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
     for (k, v) in &headers {
         let kd = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, k)?);
