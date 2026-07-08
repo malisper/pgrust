@@ -540,12 +540,13 @@ fn compute_ready_tolerates_borrowed_finfo() {
     let e = lookup_type_cache(INT4OID, TYPECACHE_CMP_PROC_FINFO).unwrap();
     let guard = e.cmp_proc_finfo();
     assert_eq!(guard.fn_oid, F_BTINT4CMP);
+    // TypCallback keeps TCFLAGS_CHECKED_CMP_PROC set, so the refilling lookup
+    // recomputes readiness through the borrowed-finfo branch.
     invalidate::TypeCacheTypCallback(
         Datum::from_oid(InvalidOid),
         82,
         INT4OID.wrapping_mul(0x9e3779b1),
     );
-    invalidate::TypeCacheOpcCallback(Datum::from_oid(InvalidOid), 83, 0);
     let e2 = lookup_type_cache(INT4OID, TYPECACHE_LT_OPR).unwrap();
     assert!(Rc::ptr_eq(&e, &e2));
     assert_eq!(e2.lt_opr(), INT4_LT);
