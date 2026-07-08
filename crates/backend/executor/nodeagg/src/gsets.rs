@@ -235,7 +235,7 @@ pub(crate) fn init_grouping_sets<'mcx>(
         }
     }
 
-    let hash = if hashed_nodes.is_empty() {
+    let mut hash = if hashed_nodes.is_empty() {
         None
     } else {
         Some(init_hash_sets(
@@ -248,10 +248,15 @@ pub(crate) fn init_grouping_sets<'mcx>(
             specs,
             fm_agg_node,
             params,
-            tmpcontext,
         )?)
     };
     let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
+    if let Some(h) = hash.as_mut() {
+        for ph in h.perhash.iter_mut() {
+            // SAFETY: the tmpcontext ExprContext outlives every phase program.
+            unsafe { ph.refill_trans.arm_result_mcx_raw(per_tuple) };
+        }
+    }
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
     for (phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
         let sortnode = if core::ptr::eq(aggnode, node) {
@@ -424,10 +429,8 @@ fn init_hash_sets<'mcx>(
     specs: &[AggTransSpec<'_, 'mcx>],
     fm_agg_node: FmNodePtr,
     params: ParamBind<'mcx>,
-    tmpcontext: ::executils::EcxtId,
 ) -> PgResult<HashSetsState<'mcx>> {
     let mcx = estate.es_query_cxt;
-    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let outer_plan = node
         .plan
         .lefttree
@@ -544,11 +547,9 @@ fn init_hash_sets<'mcx>(
         // set's cell per row; the combined mixed/gsets program assumes every
         // set's cell is live, so this set gets its own indirect program
         // (exec_build_agg_trans_hashed, C's per-set hashagg_recompile
-        // shape) built once at init.
-        let mut refill_trans =
-            exec_build_agg_trans_hashed(mcx, specs, cell, fm_agg_node, params)?;
-        // SAFETY: the tmpcontext ExprContext outlives every phase program.
-        unsafe { refill_trans.arm_result_mcx_raw(per_tuple) };
+        // shape) built once at init. Armed by the caller once per_tuple is
+        // available (arming here would tie *estate's borrow to 'mcx).
+        let refill_trans = exec_build_agg_trans_hashed(mcx, specs, cell, fm_agg_node, params)?;
 
         perhash.push(PerHashSetData {
             hashtable,
