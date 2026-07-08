@@ -2843,6 +2843,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "citext"
+version = "0.0.0"
+dependencies = [
+ "adt_formatting",
+ "datum",
+ "dfmgr",
+ "formatting_seams",
+ "hashfn",
+ "mcx",
+ "pg_database_seams",
+ "pg_locale",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+]
+
+[[package]]
 name = "clauses"
 version = "0.1.0"
 dependencies = [
@@ -4617,6 +4635,7 @@ dependencies = [
  "guc_tables",
  "heaptoast",
  "heaptuple",
+ "hstore_subs_seams",
  "indexcmds_seams",
  "init_small",
  "jit_deform",
@@ -5812,6 +5831,8 @@ dependencies = [
  "detoast",
  "freespace",
  "freespace_seams",
+ "gin_hstore_seams",
+ "gin_trgm_seams",
  "gin_vocab",
  "guc_tables",
  "init_small",
@@ -5861,6 +5882,22 @@ dependencies = [
  "types_nbtree",
  "types_nodes",
  "types_rel",
+]
+
+[[package]]
+name = "gin_hstore_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "gin_trgm_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -6659,6 +6696,50 @@ dependencies = [
  "types_core",
  "types_error",
  "types_tuple",
+]
+
+[[package]]
+name = "hstore"
+version = "0.0.0"
+dependencies = [
+ "adt_domains",
+ "adt_json",
+ "adt_jsonb",
+ "adt_numeric",
+ "arrayfuncs",
+ "crc32c",
+ "datum",
+ "detoast",
+ "detoast_seams",
+ "dfmgr",
+ "fmgr_seams",
+ "funcapi",
+ "gin_hstore_seams",
+ "hashfn",
+ "heaptuple",
+ "hstore_subs_seams",
+ "lsyscache",
+ "mcx",
+ "pqformat",
+ "reloptions",
+ "stringinfo",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
+name = "hstore_subs_seams"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -10409,6 +10490,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_prewarm"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "bufmgr",
+ "catalog_index",
+ "datum",
+ "dfmgr",
+ "lmgr_seams",
+ "lsyscache",
+ "mcx",
+ "miscinit",
+ "pg_class_seams",
+ "postgres_seams",
+ "relation",
+ "smgr",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_storage",
+]
+
+[[package]]
 name = "pg_prng"
 version = "0.1.0"
 dependencies = [
@@ -10547,6 +10653,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_sha1"
+version = "0.0.0"
+
+[[package]]
 name = "pg_sha2"
 version = "0.1.0"
 
@@ -10618,6 +10728,31 @@ dependencies = [
  "types_rel",
  "types_scan",
  "types_tuple",
+]
+
+[[package]]
+name = "pg_trgm"
+version = "0.0.0"
+dependencies = [
+ "adt_oracle_compat",
+ "arrayfuncs",
+ "crc32c",
+ "datum",
+ "detoast",
+ "dfmgr",
+ "gin_trgm_seams",
+ "guc",
+ "mbutils",
+ "mcx",
+ "reloptions",
+ "ts_locale",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_guc",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
@@ -13251,6 +13386,7 @@ dependencies = [
  "adt_acl",
  "adt_bool",
  "adt_float",
+ "adt_formatting",
  "adt_geo",
  "adt_misc",
  "adt_regexp",
@@ -13293,6 +13429,7 @@ dependencies = [
  "catalog_storage",
  "catcache",
  "checkpointer",
+ "citext",
  "clauses",
  "clog",
  "coerce",
@@ -13347,6 +13484,7 @@ dependencies = [
  "hba",
  "heapam_visibility",
  "heaptoast",
+ "hstore",
  "indexam",
  "indexcmds",
  "init_small",
@@ -13412,12 +13550,14 @@ dependencies = [
  "pg_enum",
  "pg_inherits",
  "pg_locale",
+ "pg_prewarm",
  "pg_prng",
  "pg_proc",
  "pg_publication",
  "pg_sema",
  "pg_string",
  "pg_subscription",
+ "pg_trgm",
  "pg_upgrade_support",
  "pgarch",
  "pgstat",
@@ -13511,6 +13651,7 @@ dependencies = [
  "types_fmgr",
  "user",
  "utility",
+ "uuid_ossp",
  "vacuumlazy",
  "vacuumparallel",
  "variable",
@@ -16554,6 +16695,20 @@ dependencies = [
  "types_nodes",
  "types_portal",
  "types_tuple",
+]
+
+[[package]]
+name = "uuid_ossp"
+version = "0.0.0"
+dependencies = [
+ "adt_uuid",
+ "datum",
+ "dfmgr",
+ "pg_md5",
+ "pg_sha1",
+ "pg_strong_random",
+ "types_error",
+ "types_fmgr",
 ]
 
 [[package]]
