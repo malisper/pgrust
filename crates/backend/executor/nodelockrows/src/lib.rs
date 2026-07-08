@@ -1,7 +1,7 @@
 // nodeLockRows.c over the shared-estate EPQ (execmain::epq).
 #![allow(non_snake_case)]
 
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{EStateData, EpqSubs, ExecSlotId};
 use ::mcx::PgVec;
 use ::tableam_vocab::{
     LockTupleMode, TM_FailureData, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
@@ -43,16 +43,23 @@ pub struct LockRowsState<'mcx> {
     pub lr_arowMarks: PgVec<'mcx, ExecAuxRowMark>,
     /// C's EvalPlanQualInit aux list; read only by epq's loud origslot arm.
     pub lr_epq_arowMarks: PgVec<'mcx, ExecAuxRowMark>,
+    /// This node's C EPQState.relsubs_* (execmain swaps them live per run).
+    pub epq_subs: Option<EpqSubs<'mcx>>,
 }
 
-// EvalPlanQualSlot (execMain.c): the markSlot IS the rel's EPQ test slot.
-fn eval_plan_qual_slot<'mcx>(estate: &mut EStateData<'mcx>, rti: u32) -> ExecSlotId {
-    estate.epq_ensure(rti);
+// EvalPlanQualSlot (execMain.c): the markSlot IS the rel's EPQ test slot,
+// parked in this owner's relsubs.
+fn eval_plan_qual_slot<'mcx>(
+    subs_opt: &mut Option<EpqSubs<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+    rti: u32,
+) -> ExecSlotId {
+    let mcx = estate.es_query_cxt;
+    let subs = ::executils::ensure_epq_subs(subs_opt, mcx, estate.epq_rtsize(), rti);
     let idx = (rti - 1) as usize;
-    if let Some(id) = estate.es_epq.as_ref().expect("just ensured").relsubs_slot[idx] {
+    if let Some(id) = subs.relsubs_slot[idx] {
         return id;
     }
-    let mcx = estate.es_query_cxt;
     let (kind, desc) = {
         let rel = estate.es_relations[idx].as_ref().expect("rowmark relation opened");
         (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
@@ -60,7 +67,7 @@ fn eval_plan_qual_slot<'mcx>(estate: &mut EStateData<'mcx>, rti: u32) -> ExecSlo
     let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
     let id = ExecSlotId(estate.es_tupleTable.len() as u32);
     estate.es_tupleTable.push(slot);
-    estate.es_epq.as_mut().expect("just ensured").relsubs_slot[idx] = Some(id);
+    subs_opt.as_mut().expect("just ensured").relsubs_slot[idx] = Some(id);
     id
 }
 
@@ -86,6 +93,7 @@ pub fn exec_init_lock_rows<'mcx>(
     debug_assert!(eflags & EXEC_FLAG_MARK == 0);
     let mut lr_arowMarks: PgVec<'mcx, ExecAuxRowMark> = PgVec::new_in(estate.es_query_cxt);
     let mut lr_epq_arowMarks: PgVec<'mcx, ExecAuxRowMark> = PgVec::new_in(estate.es_query_cxt);
+    let mut epq_subs: Option<EpqSubs<'mcx>> = None;
     for rc_node in &node.rowMarks {
         let rc = rc_node.as_plan_row_mark().expect("rowMarks cell is a PlanRowMark");
         if rc.isParent {
@@ -128,7 +136,7 @@ pub fn exec_init_lock_rows<'mcx>(
         };
         if erm.markType.requires_row_share_lock() {
             estate.exec_get_range_table_relation(rc.rti, false)?;
-            let mark_slot = Some(eval_plan_qual_slot(estate, rc.rti));
+            let mark_slot = Some(eval_plan_qual_slot(&mut epq_subs, estate, rc.rti));
             lr_arowMarks.push(ExecAuxRowMark {
                 rti: rc.rti,
                 ctidAttNo,
@@ -146,7 +154,7 @@ pub fn exec_init_lock_rows<'mcx>(
             });
         }
     }
-    Ok(LockRowsState { plan: node, lr_arowMarks, lr_epq_arowMarks })
+    Ok(LockRowsState { plan: node, lr_arowMarks, lr_epq_arowMarks, epq_subs })
 }
 
 /// `ExecLockRows`; C's goto lnext becomes the labeled outer loop.
@@ -154,7 +162,11 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
     node: &mut LockRowsState<'mcx>,
     child: &mut C,
     estate: &mut EStateData<'mcx>,
-    mut epq_eval: impl FnMut(&mut EStateData<'mcx>, ExecSlotId) -> PgResult<Option<ExecSlotId>>,
+    mut epq_eval: impl FnMut(
+        &mut Option<EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     cfi()?;
     'lnext: loop {
@@ -306,7 +318,7 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
             // non-locked-rel origslot re-fetch is the epq module's loud arm.
             let input =
                 node.lr_arowMarks[0].mark_slot.expect("locking mark slot made at init");
-            let Some(epqslot) = epq_eval(estate, input)? else {
+            let Some(epqslot) = epq_eval(&mut node.epq_subs, estate, input)? else {
                 continue 'lnext;
             };
             return Ok(Some(epqslot));
@@ -347,5 +359,5 @@ fn internal(msg: &str) -> Box<PgError> {
 mcx::forget_safe_nodrop!(ExecAuxRowMark);
 
 mcx::forget_safe_struct!(
-    LockRowsState<'_> { plan, lr_arowMarks, lr_epq_arowMarks },
+    LockRowsState<'_> { plan, lr_arowMarks, lr_epq_arowMarks, epq_subs },
 );

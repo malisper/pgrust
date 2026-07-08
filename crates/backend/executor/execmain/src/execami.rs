@@ -693,14 +693,41 @@ fn accumulate_outer_chg<'mcx>(
 /// `ExecMarkPos` (execAmi.c): remember `node`'s current scan position. Only the
 /// mark-capable ported nodes have arms; the planner routes an unmarkable merge
 /// inner through a Sort/Material, so anything else is a loud panic.
+// ExecIndexMarkPos/RestrPos EPQ arm: with a test tuple for the scan's rel the
+// index is never touched, so mark/restore are no-ops (relsubs_done must
+// already be set — no caller marks before the first fetch).
+fn epq_markrestore_noop(estate: &EStateData<'_>, scanrelid: u32, what: &str) -> bool {
+    if !estate.es_epq_active {
+        return false;
+    }
+    assert!(scanrelid > 0);
+    let subs = estate.es_epq.as_ref().expect("EPQ active with installed relsubs");
+    let idx = (scanrelid - 1) as usize;
+    if subs.relsubs_slot[idx].is_some() {
+        assert!(subs.relsubs_done[idx], "unexpected {what} call in EPQ recheck");
+        return true;
+    }
+    false
+}
+
 pub fn exec_mark_pos<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     match node {
         PlanStateNode::Instrumented(w) => exec_mark_pos(&mut w.inner, estate),
-        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_mark_pos(is),
-        PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_mark_pos(ios),
+        PlanStateNode::IndexScan(is) => {
+            if epq_markrestore_noop(estate, is.ss.scanrelid, "ExecIndexMarkPos") {
+                return Ok(());
+            }
+            ::nodeindexscan::exec_index_mark_pos(is)
+        }
+        PlanStateNode::IndexOnlyScan(ios) => {
+            if epq_markrestore_noop(estate, ios.ss.scanrelid, "ExecIndexOnlyMarkPos") {
+                return Ok(());
+            }
+            ::nodeindexonlyscan::exec_index_only_mark_pos(ios)
+        }
         PlanStateNode::Sort(s) => ::nodesort::exec_sort_mark_pos(&mut s.state),
         PlanStateNode::Material(m) => ::nodematerial::exec_material_mark_pos(&mut m.state),
         _ => panic!("ExecMarkPos (execAmi.c): node type does not support mark/restore"),
@@ -714,8 +741,18 @@ pub fn exec_restr_pos<'mcx>(
 ) -> PgResult<()> {
     match node {
         PlanStateNode::Instrumented(w) => exec_restr_pos(&mut w.inner, estate),
-        PlanStateNode::IndexScan(is) => ::nodeindexscan::exec_index_restr_pos(is),
-        PlanStateNode::IndexOnlyScan(ios) => ::nodeindexonlyscan::exec_index_only_restr_pos(ios),
+        PlanStateNode::IndexScan(is) => {
+            if epq_markrestore_noop(estate, is.ss.scanrelid, "ExecIndexRestrPos") {
+                return Ok(());
+            }
+            ::nodeindexscan::exec_index_restr_pos(is)
+        }
+        PlanStateNode::IndexOnlyScan(ios) => {
+            if epq_markrestore_noop(estate, ios.ss.scanrelid, "ExecIndexOnlyRestrPos") {
+                return Ok(());
+            }
+            ::nodeindexonlyscan::exec_index_only_restr_pos(ios)
+        }
         PlanStateNode::Sort(s) => ::nodesort::exec_sort_restr_pos(&mut s.state),
         PlanStateNode::Material(m) => ::nodematerial::exec_material_restr_pos(&mut m.state),
         _ => panic!("ExecRestrPos (execAmi.c): node type does not support mark/restore"),

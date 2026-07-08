@@ -2526,10 +2526,10 @@ fn transformLockingClause<'mcx>(
                     }
                     .expect("RTEPermissionInfo");
                 }
-                RTEKind::RTE_SUBQUERY => panic!(
-                    "transformLockingClause (analyze.c): FOR UPDATE/SHARE propagation \
-                     into subquery RTEs unported — unit backend-parser-analyze"
-                ),
+                RTEKind::RTE_SUBQUERY => {
+                    applyLockingClause(mcx, qry, i, lc.strength, lc.waitPolicy, pushed_down)?;
+                    mark_subquery_for_locking(mcx, pstate, rte, lc.strength, lc.waitPolicy)?;
+                }
                 _ => {}
             }
         }
@@ -2574,10 +2574,10 @@ fn transformLockingClause<'mcx>(
                     }
                     .expect("RTEPermissionInfo");
                 }
-                RTEKind::RTE_SUBQUERY => panic!(
-                    "transformLockingClause (analyze.c): FOR UPDATE/SHARE propagation \
-                     into subquery RTEs unported — unit backend-parser-analyze"
-                ),
+                RTEKind::RTE_SUBQUERY => {
+                    applyLockingClause(mcx, qry, i, lc.strength, lc.waitPolicy, pushed_down)?;
+                    mark_subquery_for_locking(mcx, pstate, rte, lc.strength, lc.waitPolicy)?;
+                }
                 RTEKind::RTE_JOIN => {
                     return Err(locking_bad_target(pstate, lc.strength, "a join", thisrel.location))
                 }
@@ -2619,6 +2619,114 @@ fn transformLockingClause<'mcx>(
 }
 
 /// `applyLockingClause` (analyze.c).
+// markQueryForLocking (analyze.c): propagate FOR UPDATE/SHARE into a
+// FOR-UPDATE'd subquery RTE's rels. The sub-Query sits behind a shared ref;
+// its owning Node comes from the root ParseState registry (pointer identity),
+// mutated under with_mut with no derived refs held across the call.
+fn mark_subquery_for_locking<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    rte: &types_nodes::RangeTblEntry<'mcx>,
+    strength: types_nodes::LockClauseStrength,
+    wait_policy: types_nodes::LockWaitPolicy,
+) -> PgResult<()> {
+    let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+    let qnode = lookup_subquery_node(pstate, sub);
+    mark_query_for_locking(mcx, pstate, qnode, strength, wait_policy)
+}
+
+fn lookup_subquery_node<'mcx>(
+    pstate: &ParseState<'_, 'mcx>,
+    sub: &types_nodes::parsenodes::Query<'mcx>,
+) -> Node<'mcx> {
+    let mut root = pstate;
+    while let Some(parent) = root.parentParseState {
+        root = parent;
+    }
+    let want = sub as *const types_nodes::parsenodes::Query<'mcx>;
+    for n in root.p_subquery_nodes.borrow().iter() {
+        if let Some(q) = n.as_query() {
+            if core::ptr::eq(q, want) {
+                return *n;
+            }
+        }
+    }
+    panic!(
+        "transformLockingClause (analyze.c): subquery RTE's Query not in the \
+         ParseState registry (non-FROM-subselect subquery RTE?)"
+    );
+}
+
+fn mark_query_for_locking<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &ParseState<'_, 'mcx>,
+    qnode: Node<'mcx>,
+    strength: types_nodes::LockClauseStrength,
+    wait_policy: types_nodes::LockWaitPolicy,
+) -> PgResult<()> {
+    use types_nodes::parsenodes::{RTEKind, ACL_SELECT_FOR_UPDATE};
+    // Collect this level's work under one with_mut, recursing afterwards so
+    // no &mut Query is live across nested with_mut calls.
+    let mut child_subs: Vec<Node<'mcx>> = Vec::new();
+    // SAFETY: parser-owned tree; no derived refs live across the closure.
+    unsafe {
+        qnode.with_mut::<types_nodes::parsenodes::Query<'mcx>, _>(|q| -> PgResult<()> {
+            let jointree = q.jointree.expect("transformed Query has a jointree");
+            let mut rtis: Vec<u32> = Vec::new();
+            for item in &jointree.fromlist {
+                collect_jointree_rtis(item, &mut rtis);
+            }
+            for rti in rtis {
+                let rte_node = q.rtable.nth((rti - 1) as usize);
+                let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+                match rte.rtekind {
+                    RTEKind::RTE_RELATION => {
+                        applyLockingClause(mcx, q, rti, strength, wait_policy, true)?;
+                        let perminfo =
+                            parse_relation::getRTEPermissionInfo(&q.rteperminfos, rte)?;
+                        // SAFETY: parser-owned tree; no derived refs live.
+                        unsafe {
+                            perminfo.with_mut::<types_nodes::RTEPermissionInfo, _>(|p| {
+                                p.requiredPerms |= ACL_SELECT_FOR_UPDATE
+                            })
+                        }
+                        .expect("RTEPermissionInfo");
+                    }
+                    RTEKind::RTE_SUBQUERY => {
+                        applyLockingClause(mcx, q, rti, strength, wait_policy, true)?;
+                        let sub = rte.subquery.expect("RTE_SUBQUERY has a subquery");
+                        child_subs.push(lookup_subquery_node(pstate, sub));
+                    }
+                    // other RTE types are unaffected by FOR UPDATE
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
+    }
+    .expect("Query")?;
+    for child in child_subs {
+        mark_query_for_locking(mcx, pstate, child, strength, wait_policy)?;
+    }
+    Ok(())
+}
+
+// markQueryForLocking's jointree walk: RangeTblRef rtis under FromExpr/JoinExpr.
+fn collect_jointree_rtis(n: Node<'_>, out: &mut Vec<u32>) {
+    if let Some(rtr) = n.as_range_tbl_ref() {
+        out.push(rtr.rtindex as u32);
+    } else if let Some(f) = n.as_from_expr() {
+        for item in &f.fromlist {
+            collect_jointree_rtis(item, out);
+        }
+    } else if let Some(j) = n.as_join_expr() {
+        collect_jointree_rtis(j.larg, out);
+        collect_jointree_rtis(j.rarg, out);
+    } else {
+        panic!("unrecognized node type in jointree: {:?}", n.node_tag());
+    }
+}
+
 fn applyLockingClause<'mcx>(
     mcx: Mcx<'mcx>,
     qry: &mut Query<'mcx>,

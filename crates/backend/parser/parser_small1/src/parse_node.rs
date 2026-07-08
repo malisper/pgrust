@@ -153,6 +153,12 @@ pub struct ParseState<'p, 'mcx> {
     // member's intoClause through its pointer; larg is a shared borrow here,
     // so the consumed IntoClause is skipped by node identity instead.
     pub p_consumed_into: Option<Node<'mcx>>,
+    // FROM-subselect Query nodes, registered at the ROOT ParseState and keyed
+    // by rte.subquery pointer identity: markQueryForLocking (analyze.c)
+    // mutates nested sub-Queries through shared RTE refs, and with_mut needs
+    // the owning Node (RefCell: the parent chain is shared borrows, like
+    // p_hasAggs).
+    pub p_subquery_nodes: core::cell::RefCell<alloc::vec::Vec<Node<'mcx>>>,
 }
 
 // C's p_pre_columnref_hook fn pointer as a closed installer set (rule-4
@@ -187,6 +193,7 @@ pub fn make_parsestate<'p, 'mcx>(
         p_is_insert: false,
         p_windowdefs: types_nodes::NodeList::nil(),
         p_expr_kind: ParseExprKind::EXPR_KIND_NONE,
+        p_subquery_nodes: core::cell::RefCell::new(alloc::vec::Vec::new()),
         p_next_resno: 1,
         p_multiassign_exprs: types_nodes::NodeList::nil(),
         p_locking_clause: types_nodes::NodeList::nil(),

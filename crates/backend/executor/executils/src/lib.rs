@@ -750,6 +750,29 @@ pub struct EpqSubs<'mcx> {
     pub relsubs_blocked: PgVec<'mcx, bool>,
 }
 
+/// `EvalPlanQualInit` relsubs alloc for one EPQ owner (ModifyTable/LockRows),
+/// deferred to first use; `result_rti` starts blocked (C EvalPlanQualStart).
+pub fn ensure_epq_subs<'a, 'mcx>(
+    subs: &'a mut Option<EpqSubs<'mcx>>,
+    mcx: ::mcx::Mcx<'mcx>,
+    rtsize: usize,
+    result_rti: u32,
+) -> &'a mut EpqSubs<'mcx> {
+    if subs.is_none() {
+        debug_assert!(result_rti >= 1 && result_rti as usize <= rtsize);
+        let mut relsubs_slot = PgVec::new_in(mcx);
+        relsubs_slot.resize(rtsize, None);
+        let mut relsubs_done = PgVec::new_in(mcx);
+        relsubs_done.resize(rtsize, false);
+        let mut relsubs_blocked = PgVec::new_in(mcx);
+        relsubs_blocked.resize(rtsize, false);
+        relsubs_blocked[(result_rti - 1) as usize] = true;
+        relsubs_done[(result_rti - 1) as usize] = true;
+        *subs = Some(EpqSubs { relsubs_slot, relsubs_done, relsubs_blocked });
+    }
+    subs.as_mut().expect("just ensured")
+}
+
 impl<'mcx> EStateData<'mcx> {
     /// `InstrCountFiltered1` (execnodes.h); idx is the node's
     /// es_instrumentation slot, None when not instrumented.
@@ -862,24 +885,9 @@ impl<'mcx> EStateData<'mcx> {
         }
     }
 
-    /// `EvalPlanQualInit` relsubs alloc, deferred to first EPQ use;
-    /// `result_rti` starts blocked (C EvalPlanQualStart).
-    pub fn epq_ensure(&mut self, result_rti: u32) -> &mut EpqSubs<'mcx> {
-        if self.es_epq.is_none() {
-            let mcx = self.es_query_cxt;
-            let n = self.es_range_table_size as usize;
-            debug_assert!(result_rti >= 1 && result_rti as usize <= n);
-            let mut relsubs_slot = PgVec::new_in(mcx);
-            relsubs_slot.resize(n, None);
-            let mut relsubs_done = PgVec::new_in(mcx);
-            relsubs_done.resize(n, false);
-            let mut relsubs_blocked = PgVec::new_in(mcx);
-            relsubs_blocked.resize(n, false);
-            relsubs_blocked[(result_rti - 1) as usize] = true;
-            relsubs_done[(result_rti - 1) as usize] = true;
-            self.es_epq = Some(EpqSubs { relsubs_slot, relsubs_done, relsubs_blocked });
-        }
-        self.es_epq.as_mut().expect("just ensured")
+    /// Range-table size for owner-held EPQ relsubs sizing.
+    pub fn epq_rtsize(&self) -> usize {
+        self.es_range_table_size as usize
     }
 
     /// `CreateExprContext(estate)`.

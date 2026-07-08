@@ -2048,8 +2048,8 @@ fn lockrows_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let LockRowsNode { state, outer, epq } = &mut **l;
-    ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |e, inputslot| {
-        crate::epq::eval_plan_qual(epq, e, inputslot)
+    ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
+        crate::epq::eval_plan_qual(epq, subs, e, inputslot)
     })
 }
 
@@ -2095,10 +2095,10 @@ fn modify_table_arm<'mcx>(
         &mut mps.mt,
         estate,
         |e| exec_proc_node(subplan, e),
-        |e, inputslot, rti| {
+        |subs, e, inputslot, rti| {
             // EvalPlanQualSlot keys by the dispatch-current result relation.
             epq.result_rti = rti;
-            crate::epq::eval_plan_qual(epq, e, inputslot)
+            crate::epq::eval_plan_qual(epq, subs, e, inputslot)
         },
     )
 }
@@ -2822,7 +2822,8 @@ fn exec_end_node_inner<'mcx>(
         }
         // C ExecEndLockRows: EvalPlanQualEnd + child.
         PlanStateNode::LockRows(l) => {
-            crate::epq::eval_plan_qual_end(&mut l.epq, estate)?;
+            let l = &mut **l;
+            crate::epq::eval_plan_qual_end(&mut l.epq, &mut l.state.epq_subs, estate)?;
             exec_end_node(&mut l.outer, estate)
         }
         PlanStateNode::BitmapHeapScan(b) => {
@@ -2841,7 +2842,7 @@ fn exec_end_node_inner<'mcx>(
         }
         PlanStateNode::ModifyTable(mps) => {
             let mps = &mut **mps;
-            crate::epq::eval_plan_qual_end(&mut mps.epq, estate)?;
+            crate::epq::eval_plan_qual_end(&mut mps.epq, &mut mps.mt.epq_subs, estate)?;
             ::nodemodifytable::exec_end_modify_table(&mut mps.mt);
             exec_end_node(&mut mps.subplan, estate)
         }
