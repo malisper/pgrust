@@ -99,18 +99,6 @@ where
     if node.grp_done {
         return Ok(None);
     }
-    // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec;
-    // this executor hoists instead (nodeagg/noderesult pattern).
-    let deps = node.proj.param_exec_deps();
-    if !deps.is_empty() {
-        ::executils::exec_eval_param_exec_params(estate, deps)?;
-    }
-    if let Some(q) = node.qual.as_deref() {
-        let deps = q.param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-    }
 
     if !node.have_first {
         let Some(outer_id) = fetch_outer(estate)? else {
@@ -118,7 +106,7 @@ where
             return Ok(None);
         };
         node.store_first(estate, outer_id)?;
-        if node.check_qual()? {
+        if node.check_qual(estate)? {
             return node.project(estate);
         }
     }
@@ -148,7 +136,7 @@ where
             }
         };
         node.store_first(estate, matched_id)?;
-        if node.check_qual()? {
+        if node.check_qual(estate)? {
             return node.project(estate);
         }
     }
@@ -167,13 +155,27 @@ impl<'mcx> GroupState<'mcx> {
         Ok(())
     }
 
-    fn check_qual(&mut self) -> PgResult<bool> {
+    // C resolves an initplan's PARAM_EXEC lazily inside ExecEvalParamExec;
+    // this executor hoists instead, but only once a first-of-group row
+    // actually exists to run the qual over (a fully-exhausted outer child
+    // must never touch a param C would never read).
+    fn check_qual(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        if let Some(q) = self.qual.as_deref() {
+            let deps = q.param_exec_deps();
+            if !deps.is_empty() {
+                ::executils::exec_eval_param_exec_params(estate, deps)?;
+            }
+        }
         let mut slots =
             EvalSlots { scan: None, inner: None, outer: Some(&mut self.firsttuple_slot) };
         exec_qual(self.qual.as_deref_mut(), &mut slots)
     }
 
     fn project(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+        let deps = self.proj.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
         let mcx = estate.es_query_cxt;
         let result_slot = estate.slot_mut(self.ps_ResultTupleSlot);
         let mut slots =

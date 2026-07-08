@@ -738,6 +738,16 @@ fn end_of_scan(scan: &mut HeapScanDescData<'_>) {
     scan.rs_inited = false;
 }
 
+// C HeapKeyTest: sk_func runs via FunctionCall2Coll, pallocing (e.g. a
+// detoasted by-ref key column) in the caller's context. There's no per-tuple
+// mcx reachable this deep in heapgettup, so a reset-per-call scratch context
+// stands in for it (the hash-support-proc precedent in
+// access/hash/hash/src/util.rs's HASH_PROC_SCRATCH).
+std::thread_local! {
+    static KEY_TEST_SCRATCH: core::cell::RefCell<::mcx::MemoryContext> =
+        core::cell::RefCell::new(::mcx::MemoryContext::new_bump("heap key test scratch"));
+}
+
 fn heap_key_test(
     tuple: &HeapTupleData<'_>,
     tupdesc: &::types_tuple::TupleDescData<'_>,
@@ -759,9 +769,26 @@ fn heap_key_test(
         }
 
         let mut fcinfo = LocalFcinfo::<2>::new(cur_key.sk_collation);
-        fcinfo.set_arg(0, atp);
-        fcinfo.set_arg(1, cur_key.sk_argument);
-        let test = cur_key.sk_func.invoke(&mut fcinfo)?;
+        let test = KEY_TEST_SCRATCH.with(|cell| -> PgResult<::datum::Datum> {
+            match cell.try_borrow_mut() {
+                Ok(mut ctx) => {
+                    ctx.reset();
+                    // SAFETY: reset-only context, outlives this call.
+                    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+                    fcinfo.set_arg(0, atp);
+                    fcinfo.set_arg(1, cur_key.sk_argument);
+                    cur_key.sk_func.invoke(&mut fcinfo)
+                }
+                Err(_) => {
+                    let ctx = ::mcx::MemoryContext::new_bump("heap key test scratch (reentrant)");
+                    // SAFETY: as above.
+                    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+                    fcinfo.set_arg(0, atp);
+                    fcinfo.set_arg(1, cur_key.sk_argument);
+                    cur_key.sk_func.invoke(&mut fcinfo)
+                }
+            }
+        })?;
         if fcinfo.isnull || !test.as_bool() {
             return Ok(false);
         }
