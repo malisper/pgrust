@@ -827,6 +827,15 @@ fn offset_and_pull_down<'mcx>(
             };
             if v.varlevelsup == 0 {
                 nv.varno += rtoffset;
+                // OffsetVarNodes_walker (rewriteManip.c) offsets the
+                // varnullingrels relid set along with varno.
+                if !nv.varnullingrels.is_empty() {
+                    let mut s = types_nodes::Bitmapset::empty();
+                    for m in nv.varnullingrels.iter() {
+                        s.add_member(mcx, m + rtoffset)?;
+                    }
+                    nv.varnullingrels = s;
+                }
                 if nv.varnosyn > 0 {
                     nv.varnosyn = nv.varnosyn.wrapping_add(rtoffset as u32);
                 }
@@ -942,7 +951,12 @@ fn make_subplan<'mcx>(
         .subselect
         .as_query()
         .expect("make_subplan on an untransformed sublink");
-    let mut subquery = query_cells_copy(mcx, orig)?;
+    // C copyObject: the planner scribbles on the sub-Query (rtable cells and
+    // Vars are written in place), the same Query can hang from several
+    // SubLinks (rules), and the EXISTS->ANY arm below replans from orig — a
+    // cells-level copy still shares the scribble targets.
+    let deep = rewrite_manip::copy_query_node(mcx, orig)?;
+    let mut subquery = query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
 
     let mut simple_exists = false;
     let tuple_fraction = match sublink.subLinkType {
@@ -990,7 +1004,9 @@ fn make_subplan<'mcx>(
     )?;
 
     if simple_exists && result.node_tag() == NodeTag::T_SubPlan {
-        let mut subquery = query_cells_copy(mcx, orig)?;
+        // C copyObject again: the first planning pass scribbled its own copy.
+        let deep = rewrite_manip::copy_query_node(mcx, orig)?;
+        let mut subquery = query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
         let ok = simplify_exists_query(run, &mut subquery)?;
         debug_assert!(ok);
         if let Some((subquery, newtestexpr, param_ids)) =
