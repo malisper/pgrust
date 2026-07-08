@@ -298,3 +298,47 @@ pub fn decrypt(spec: &str, key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    // Canonical Blowfish ECB KAT (all-zero key+block), matching the value the
+    // PGDG C build computes when its OpenSSL legacy provider IS available, and
+    // the pg-side output observed on the fleet. bf/cast5/des are not e2e-gated
+    // (PGDG's OpenSSL-3 legacy provider is off, so live C errors on them).
+    #[test]
+    fn blowfish_ecb_known_answer() {
+        let ct = encrypt("bf-ecb/pad:none", &[0u8; 8], &[], &[0u8; 8]).map_err(|_| ()).unwrap();
+        assert_eq!(hex(&ct), "4ef997456198dd78");
+    }
+
+    // Standard single-DES ECB KAT (all-zero key+block).
+    #[test]
+    fn des_ecb_known_answer() {
+        let ct = encrypt("des-ecb/pad:none", &[0u8; 8], &[], &[0u8; 8]).map_err(|_| ()).unwrap();
+        assert_eq!(hex(&ct), "8ca64de9c1b123a7");
+    }
+
+    // encrypt/decrypt inverse over each family (locks correctness regardless of
+    // the C legacy-provider availability).
+    #[test]
+    fn roundtrips() {
+        for spec in ["bf-cbc", "des-cbc", "cast5-cbc", "aes-cbc", "3des-cbc"] {
+            let key = [1u8; 16];
+            let pt = b"pgcrypto roundtrip payload!!";
+            let ct = encrypt(spec, &key, &[], pt).map_err(|_| ()).unwrap();
+            let back = decrypt(spec, &key, &[], &ct).map_err(|_| ()).unwrap();
+            assert_eq!(&back, pt, "{spec}");
+        }
+    }
+
+    #[test]
+    fn unknown_cipher_errors() {
+        assert!(matches!(encrypt("nope-cbc", &[0u8; 8], &[], &[0u8; 8]), Err(CipherError::NoCipher(_))));
+    }
+}
