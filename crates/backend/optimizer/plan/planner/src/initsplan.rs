@@ -429,22 +429,26 @@ fn extract_lateral_references<'mcx>(
     let mut newvars: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for node in &vars {
         if node.node_tag() == NodeTag::T_PlaceHolderVar {
-            // Subquery-leg PHVs come off query_cells_copy's private copy, so
-            // the level shift mutates in place; their expressions also still
-            // need preprocessing (subquery_planner only preprocessed
-            // level-zero PHVs in function/values RTEs).
+            // C copyObject: the pulled nodes are links into the RTE's own
+            // subquery tree (query_cells_copy shares expression nodes), so
+            // the level shift must work on a copy. Subquery-leg PHV
+            // expressions also still need preprocessing (subquery_planner
+            // only preprocessed level-zero PHVs in function/values RTEs).
             let phlevelsup = node.as_place_holder_var().unwrap().phlevelsup;
             if phlevelsup > 0 {
-                rewrite_manip::IncrementVarSublevelsUp(node, -(phlevelsup as i32), 0)?;
-                let phexpr = node.as_place_holder_var().unwrap().phexpr;
+                let copy = rewrite_manip::copy_node(mcx, node)?;
+                rewrite_manip::IncrementVarSublevelsUp(copy, -(phlevelsup as i32), 0)?;
+                let phexpr = copy.as_place_holder_var().unwrap().phexpr;
                 let newexpr = crate::subquery::preprocess_phv_expression(run, phexpr)?;
-                // SAFETY: node is exclusively owned (query_cells_copy above).
+                // SAFETY: copy is exclusively owned (fresh copy_node above).
                 unsafe {
-                    node.with_mut::<types_nodes::primnodes::PlaceHolderVar, _>(|p| {
+                    copy.with_mut::<types_nodes::primnodes::PlaceHolderVar, _>(|p| {
                         p.phexpr = newexpr;
                     })
                 }
                 .expect("PlaceHolderVar");
+                newvars.push(copy);
+                continue;
             }
             newvars.push(node);
             continue;
