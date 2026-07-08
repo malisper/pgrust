@@ -1335,11 +1335,21 @@ where
 // (record_plan_function_dependency, setrefs.c).
 const FIRST_UNPINNED_OBJECT_ID: Oid = 12000;
 
+fn syscache_oid_hash(cache_id: i32, oid: Oid) -> PgResult<u32> {
+    cache_syscache::GetSysCacheHashValue(
+        cache_id,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(oid)),
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+        cache_syscache::SysCacheKey::UNUSED,
+    )
+}
+
 fn push_proc_dep(items: &mut PgVec<'static, (i32, u32)>, funcid: Oid) -> PgResult<()> {
     if funcid < FIRST_UNPINNED_OBJECT_ID {
         return Ok(());
     }
-    let hash = syscache_seams::syscache_hash_value_procoid::call(funcid)?;
+    let hash = syscache_oid_hash(PROCOID, funcid)?;
     items
         .try_reserve(1)
         .map_err(|_| Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>())))?;
@@ -1394,8 +1404,7 @@ fn extract_query_deps(
             push_proc_dep(items, w.winfnoid)?;
         } else if let Some(cd) = node.as_coerce_to_domain() {
             if cd.resulttype >= FIRST_UNPINNED_OBJECT_ID {
-                let hash =
-                    syscache_seams::syscache_hash_value_typeoid::call(cd.resulttype)?;
+                let hash = syscache_oid_hash(TYPEOID, cd.resulttype)?;
                 items.try_reserve(1).map_err(|_| {
                     Box::new(items.allocator().oom(core::mem::size_of::<(i32, u32)>()))
                 })?;
