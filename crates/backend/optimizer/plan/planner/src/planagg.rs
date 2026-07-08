@@ -186,7 +186,11 @@ fn build_minmax_path<'mcx>(
     let mut subparse =
         crate::subselect::query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
 
-    let tle = Node::mk_target_entry(mcx, target, 1, Some("agg_target"), false)?;
+    // C copyObject's mminfo->target into the tle and the NullTest; the outer
+    // node must stay outside the probe's scribble scope.
+    let tle_target = crate::prepjointree::copy_expr(mcx, target, 0)?;
+    let ntest_target = crate::prepjointree::copy_expr(mcx, target, 0)?;
+    let tle = Node::mk_target_entry(mcx, tle_target, 1, Some("agg_target"), false)?;
     // assignSortGroupRef: the single fresh tle takes ref 1.
     // SAFETY: freshly built node; no other reference is live.
     unsafe {
@@ -203,7 +207,7 @@ fn build_minmax_path<'mcx>(
     let ntest = Node::mk(
         mcx,
         NullTest {
-            arg: Some(target),
+            arg: Some(ntest_target),
             nulltesttype: NullTestType::IS_NOT_NULL,
             argisrow: false,
             location: -1,
