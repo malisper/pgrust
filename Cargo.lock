@@ -7590,6 +7590,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ltree"
+version = "0.0.0"
+dependencies = [
+ "crc32c",
+ "datum",
+ "detoast",
+ "dfmgr",
+ "formatting_seams",
+ "hashfn",
+ "mbutils",
+ "mcx",
+ "pqformat",
+ "reloptions",
+ "ts_locale",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "lwlock"
 version = "0.0.0"
 dependencies = [
@@ -13503,6 +13526,7 @@ dependencies = [
  "logical",
  "logicalfuncs",
  "lsyscache",
+ "ltree",
  "mbutils",
  "mcxt_stats",
  "miscinit",

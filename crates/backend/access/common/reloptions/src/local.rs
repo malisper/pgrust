@@ -25,6 +25,7 @@ pub struct LocalRelopts {
     struct_size: usize,
     // std Vec: DDL-cold carrier, dies with the call.
     opts: Vec<LocalOptDef>,
+    validators: Vec<fn(&mut [u8]) -> Result<(), String>>,
 }
 
 impl LocalRelopts {
@@ -36,6 +37,13 @@ impl LocalRelopts {
     pub fn init(&mut self, struct_size: usize) {
         self.struct_size = struct_size;
         self.opts.clear();
+        self.validators.clear();
+    }
+
+    /// register_reloptions_validator: runs over the built struct image when
+    /// validate (CREATE INDEX ... WITH), C's relopts->validators loop.
+    pub fn register_validator(&mut self, v: fn(&mut [u8]) -> Result<(), String>) {
+        self.validators.push(v);
     }
 
     /// add_local_int_reloption (desc dropped: only surfaced via extension
@@ -136,6 +144,17 @@ pub fn build_local_reloptions(
                 out[def.offset..def.offset + 8].copy_from_slice(&default_val.to_ne_bytes());
             }
             _ => unreachable!("local reloption type confusion for {}", def.name),
+        }
+    }
+    if validate {
+        for v in &relopts.validators {
+            if let Err(msg) = v(&mut out) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errmsg(msg)
+                    .into_error()
+                    .into());
+            }
         }
     }
     Ok(out)
