@@ -595,8 +595,8 @@ mod tests {
     #[test]
     fn word_similarity_reference() {
         let env = ascii_env();
-        // word_similarity('Sunday', 'Saturday') = 0.3(3) in PG
+        // word_similarity('Sunday', 'Saturday') = 0.2857143 (2/7) in PG
         let s = calc_word_similarity(b"Sunday", b"Saturday", 0, &env, &crc, 0.6, 0.5);
-        assert!((s - 1.0 / 3.0).abs() < 1e-6, "got {s}");
+        assert!((s - 2.0 / 7.0).abs() < 1e-6, "got {s}");
     }
 }
