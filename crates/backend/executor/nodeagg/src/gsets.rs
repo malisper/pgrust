@@ -1,20 +1,25 @@
 // nodeAgg.c grouping-sets machinery: phases (top Agg + chain), projected_set
 // rollup emission, grouped_cols projection nulling, inter-phase tuplesorts,
-// hashed/AGG_MIXED grouping sets (C's phase 0). No hashagg spill — the
-// ngroups limit is a loud panic, as the single-set hashed slice. Divergence:
-// C resets aggcontexts[0..numReset] per set boundary; one bump arena serves
+// hashed/AGG_MIXED grouping sets (C's phase 0). hashagg spill: C spills
+// per-set (lookup_hash_entries, hashagg_spill_tuple, nodeAgg.c:2180-3233) —
+// hash_ngroups_current/hash_mem_limit/spill_mode/tapeset are node-shared
+// (C's AggState fields), but each set gets its own HashAggSpill/partitions
+// and its own refill trans program (indirect through its cell), since a
+// refill batch processes exactly one grouping set at a time. Divergence: C
+// resets aggcontexts[0..numReset] per set boundary; one bump arena serves
 // every set here and reclaims at query end.
 use core::alloc::Layout;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use ::execexpr::{
-    exec_build_agg_trans_gsets, exec_build_agg_trans_mixed, exec_eval_expr, exec_project,
+    exec_build_agg_trans_gsets, exec_build_agg_trans_hashed, exec_eval_expr, exec_project,
     exec_qual, AggPerGroup, AggTransSpec, EvalSlots, ExprState, GroupedColsCell,
 };
 use ::execgrouping::TupleHashTable;
 use ::executils::{EStateData, ExecSlotId};
-use ::mcx::{vec_with_capacity_in, Allocator, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Allocator, Mcx, MemoryContext, PgBox, PgVec};
+use ::sort_storage::{LogicalTapeSet, TapeIdx};
 use ::tuplesort::{Tuplesort, TUPLESORT_NONE};
 use ::types_core::Oid;
 use ::types_error::PgResult;
@@ -61,19 +66,54 @@ pub(crate) struct PerHashSetData<'mcx> {
     grouped_cols: PgVec<'mcx, i16>,
     cell: NonNull<NonNull<AggPerGroup>>,
     hashiter: usize,
+    // hash_agg_set_limits' input_groups for this set's hashagg_spill_init
+    // calls (C: perhash->aggnode->numGroups).
+    num_groups: f64,
+    // C hash_spills[setno]: this set's spill partitions, lazily created on
+    // its first spilled tuple (spill->partitions == NULL check).
+    spill: Option<crate::HashAggSpill<'mcx>>,
+    // Indirect trans program for exactly this set (exec_build_agg_trans_hashed),
+    // used by agg_refill_hash_table_gs: a refill batch advances one set at a
+    // time, unlike the combined mixed/gsets program which expects every
+    // set's cell live for the row.
+    refill_trans: PgBox<'mcx, ExprState<'mcx>>,
 }
 
 // C's phase 0: every AGG_HASHED/AGG_MIXED aggnode of node+chain is one set.
 pub(crate) struct HashSetsState<'mcx> {
     perhash: PgVec<'mcx, PerHashSetData<'mcx>>,
-    // Pure-hashed fill program; None when mixed (the first sorted phase's
-    // program carries the hash trans steps).
-    evaltrans: Option<PgBox<'mcx, ExprState<'mcx>>>,
     hash_first_slot: SlotData<'mcx>,
+    // hash_ngroups_current/hash_mem_limit/hashentrysize/spill_mode/
+    // ever_spilled/tapeset are C AggState fields shared across every hash
+    // set (hash_tablecxt/hashcontext are one context for all sets too; here
+    // that's agg_node.aggcontext(), read where needed).
     hash_ngroups_limit: u64,
     hash_ngroups_current: u64,
+    hash_mem_limit: usize,
+    hashentrysize: f64,
+    spill_mode: bool,
+    ever_spilled: bool,
+    tapeset: Option<LogicalTapeSet<'mcx>>,
+    // C hash_batches: a stack, top at the end; each batch also carries setno
+    // (C's HashAggBatch.setno) since sets aren't distinguishable by tape.
+    hash_batches: PgVec<'mcx, HashAggBatchGs>,
+    all_cols_needed: bool,
+    max_colno_needed: i32,
+    colnos_needed: PgVec<'mcx, bool>,
+    rslot: SlotData<'mcx>,
+    wslot: SlotData<'mcx>,
+    read_buf: PgVec<'mcx, u64>,
+    tmp_ctx: MemoryContext,
     table_filled: bool,
     current_set: usize,
+}
+
+// C HashAggBatch, grouping-sets form (setno-tagged).
+struct HashAggBatchGs {
+    setno: usize,
+    input_tape: TapeIdx,
+    used_bits: u32,
+    input_card: f64,
 }
 
 impl GroupingSetsState<'_> {
@@ -82,8 +122,8 @@ impl GroupingSetsState<'_> {
             deps.extend_from_slice(ph.evaltrans.param_exec_deps());
         }
         if let Some(h) = self.hash.as_ref() {
-            if let Some(et) = h.evaltrans.as_deref() {
-                deps.extend_from_slice(et.param_exec_deps());
+            for ph in h.perhash.iter() {
+                deps.extend_from_slice(ph.refill_trans.param_exec_deps());
             }
         }
     }
@@ -195,19 +235,23 @@ pub(crate) fn init_grouping_sets<'mcx>(
         }
     }
 
+    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
     let hash = if hashed_nodes.is_empty() {
         None
     } else {
-        Some(init_hash_sets(node, estate, &hashed_nodes, &all_grouped, &scan_desc, numtrans)?)
+        Some(init_hash_sets(
+            node,
+            estate,
+            &hashed_nodes,
+            &all_grouped,
+            &scan_desc,
+            numtrans,
+            specs,
+            fm_agg_node,
+            params,
+            per_tuple,
+        )?)
     };
-    let mut hash_cells: PgVec<'mcx, NonNull<NonNull<AggPerGroup>>> = PgVec::new_in(mcx);
-    if let Some(h) = hash.as_ref() {
-        for ph in h.perhash.iter() {
-            hash_cells.push(ph.cell);
-        }
-    }
-    let per_tuple = estate.ecxt(tmpcontext).per_tuple_mcx();
-
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
     for (phaseidx, &aggnode) in sorted_nodes.iter().enumerate() {
         let sortnode = if core::ptr::eq(aggnode, node) {
@@ -270,25 +314,13 @@ pub(crate) fn init_grouping_sets<'mcx>(
 
         let nsets_eff = numsets.max(1);
         // C: phase one, and only phase one, of a mixed agg also advances the
-        // hash-set transitions (dosort + dohash).
-        let mut evaltrans = if mixed && phaseidx == 0 {
-            exec_build_agg_trans_mixed(
-                mcx,
-                specs,
-                &pergroup_bases[..nsets_eff],
-                &hash_cells,
-                fm_agg_node,
-                params,
-            )?
-        } else {
-            exec_build_agg_trans_gsets(
-                mcx,
-                specs,
-                &pergroup_bases[..nsets_eff],
-                fm_agg_node,
-                params,
-            )?
-        };
+        // hash-set transitions (dosort + dohash), null-checking pergroup per
+        // set. Our compiled indirect trans steps don't null-check, so the
+        // hash side runs through each set's own program from
+        // lookup_hash_entries instead; this program stays sorted-only even
+        // for phase 0 of a mixed agg.
+        let mut evaltrans =
+            exec_build_agg_trans_gsets(mcx, specs, &pergroup_bases[..nsets_eff], fm_agg_node, params)?;
         // By-ref transfn results ride the armed per-tuple mcx (lib.rs note).
         // SAFETY: the tmpcontext ExprContext outlives every phase program.
         unsafe { evaltrans.arm_result_mcx_raw(per_tuple) };
@@ -327,16 +359,7 @@ pub(crate) fn init_grouping_sets<'mcx>(
         None
     };
 
-    let mut hash = hash;
-    if let Some(h) = hash.as_mut() {
-        if !mixed {
-            let mut et =
-                exec_build_agg_trans_mixed(mcx, specs, &[], &hash_cells, fm_agg_node, params)?;
-            // SAFETY: the tmpcontext ExprContext outlives the program.
-            unsafe { et.arm_result_mcx_raw(per_tuple) };
-            h.evaltrans = Some(et);
-        }
-    }
+    let hash = hash;
     let pure_hashed = numphases == 0;
 
     let mut gs = ::mcx::alloc_in(
@@ -390,6 +413,7 @@ fn build_grouping_equal_prefix<'mcx>(
 }
 
 // find_hash_columns + build_hash_tables (nodeAgg.c), grouping-sets form.
+#[allow(clippy::too_many_arguments)]
 fn init_hash_sets<'mcx>(
     node: &'mcx Agg<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -397,6 +421,10 @@ fn init_hash_sets<'mcx>(
     all_grouped: &[i16],
     scan_desc: &Rc<TupleDescData<'mcx>>,
     numtrans: usize,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    fm_agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    per_tuple: Mcx<'mcx>,
 ) -> PgResult<HashSetsState<'mcx>> {
     let mcx = estate.es_query_cxt;
     let outer_plan = node
@@ -511,6 +539,16 @@ fn init_hash_sets<'mcx>(
         // (lookup_hash_entries).
         unsafe { cell.write(NonNull::dangling()) };
 
+        // A refill batch (agg_refill_hash_table_gs) advances exactly one
+        // set's cell per row; the combined mixed/gsets program assumes every
+        // set's cell is live, so this set gets its own indirect program
+        // (exec_build_agg_trans_hashed, C's per-set hashagg_recompile
+        // shape) built once at init.
+        let mut refill_trans =
+            exec_build_agg_trans_hashed(mcx, specs, cell, fm_agg_node, params)?;
+        // SAFETY: the tmpcontext ExprContext outlives every phase program.
+        unsafe { refill_trans.arm_result_mcx_raw(per_tuple) };
+
         perhash.push(PerHashSetData {
             hashtable,
             hashslot,
@@ -520,24 +558,265 @@ fn init_hash_sets<'mcx>(
             grouped_cols,
             cell,
             hashiter: 0,
+            num_groups: aggnode.numGroups as f64,
+            spill: None,
+            refill_trans,
         });
     }
+
+    // C colnos_needed/all_cols_needed/max_colno_needed (find_cols): the
+    // spilled tuple shape must carry every column any set's finalize path
+    // needs, plus every grouping column of every set (all_grouped is the
+    // union across the whole node, sorted+hashed).
+    let mut colnos_needed = base_cols;
+    for &attnum in all_grouped {
+        colnos_needed[(attnum - 1) as usize] = true;
+    }
+    let mut max_colno_needed = 0i32;
+    let mut all_cols_needed = true;
+    for (i, &n) in colnos_needed.iter().enumerate() {
+        if n {
+            max_colno_needed = (i + 1) as i32;
+        } else {
+            all_cols_needed = false;
+        }
+    }
+    let outer_desc = execscan::exec_type_from_tl(mcx, outer_tlist)?;
+    let rslot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(outer_desc.clone()));
+    let wslot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(outer_desc));
+    let tmp_ctx = mcx.context().new_child_bump("HashAgg spill tuple");
 
     let hash_first_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(scan_desc.clone()));
     Ok(HashSetsState {
         perhash,
-        evaltrans: None,
         hash_first_slot,
         hash_ngroups_limit,
         hash_ngroups_current: 0,
+        hash_mem_limit: mem_limit,
+        hashentrysize,
+        spill_mode: false,
+        ever_spilled: false,
+        tapeset: None,
+        hash_batches: PgVec::new_in(mcx),
+        all_cols_needed,
+        max_colno_needed,
+        colnos_needed,
+        rslot,
+        wslot,
+        read_buf: PgVec::new_in(mcx),
+        tmp_ctx,
         table_filled: false,
         current_set: 0,
     })
 }
 
-// lookup_hash_entries (nodeAgg.c): one create-or-find per hash set, cells
-// repointed at the entries' pergroup arrays. No spill: the limit is loud.
+// hash_agg_check_limits (nodeAgg.c): total_mem/ngroups are node-shared
+// (every set feeds the same aggcontext and the same group counter).
+fn hash_agg_check_limits_gs<'mcx>(
+    h: &mut HashSetsState<'mcx>,
+    aggctx: Mcx<'_>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    let ngroups = h.hash_ngroups_current;
+    let meta_mem: usize = h.perhash.iter().map(|ph| ph.hashtable.meta_mem()).sum();
+    let total_mem = meta_mem + aggctx.context().subtree_used();
+    if ngroups > 0 && (total_mem > h.hash_mem_limit || ngroups > h.hash_ngroups_limit) {
+        h.spill_mode = true;
+        if !h.ever_spilled {
+            h.ever_spilled = true;
+            h.tapeset = Some(LogicalTapeSet::create(mcx, true)?);
+        }
+        crate::hashagg_release_retained("enter_spill");
+    }
+    Ok(())
+}
+
+// hashagg_spill_tuple (nodeAgg.c), grouping-sets form: `input` None reads
+// from `h.rslot` (the refill batch's just-read tuple); each set gets its own
+// HashAggSpill (C hash_spills[setno]), lazily created on its first miss.
+fn spill_tuple_gs<'mcx>(
+    h: &mut HashSetsState<'mcx>,
+    setno: usize,
+    used_bits: u32,
+    input: Option<&mut SlotData<'mcx>>,
+    hash: u32,
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    let HashSetsState {
+        perhash,
+        tapeset,
+        wslot,
+        rslot,
+        all_cols_needed,
+        max_colno_needed,
+        colnos_needed,
+        tmp_ctx,
+        hashentrysize,
+        ..
+    } = h;
+    let tapeset = tapeset.as_mut().expect("spill mode has a tapeset");
+    let ph = &mut perhash[setno];
+    if ph.spill.is_none() {
+        ph.spill =
+            Some(crate::hashagg_spill_init(mcx, tapeset, used_bits, ph.num_groups, *hashentrysize)?);
+    }
+    let spill = ph.spill.as_mut().unwrap();
+    let input = match input {
+        Some(s) => s,
+        None => rslot,
+    };
+    let slot = if !*all_cols_needed {
+        exectuples::slot_getsomeattrs(input, *max_colno_needed);
+        exectuples::exec_clear_tuple(wslot, mcx);
+        {
+            let src = input.base();
+            let dst = wslot.base_mut();
+            for (i, &needed) in colnos_needed.iter().enumerate() {
+                if needed {
+                    dst.tts_values[i] = src.tts_values[i];
+                    dst.tts_isnull[i] = src.tts_isnull[i];
+                } else {
+                    dst.tts_isnull[i] = true;
+                }
+            }
+        }
+        exectuples::exec_store_virtual_tuple(wslot);
+        wslot
+    } else {
+        input
+    };
+    {
+        let fetched = exectuples::exec_fetch_slot_minimal_tuple(slot, mcx, tmp_ctx.mcx())?;
+        let (ptr, len): (*const u8, usize) = match &fetched {
+            // SAFETY: live image led by t_len.
+            exectuples::FetchedMinimalTuple::Slot(p, _) => {
+                (p.as_ptr().cast(), unsafe { (*p.as_ptr()).t_len } as usize)
+            }
+            exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len() as usize),
+        };
+        let partition =
+            if spill.shift < 32 { ((hash & spill.mask) >> spill.shift) as usize } else { 0 };
+        spill.ntuples[partition] += 1;
+        // Hash the hash: partition-shared bits skew the HLL otherwise.
+        spill.hll_card[partition].add(::hashfn::hash_bytes_uint32(hash));
+        let tape = spill.partitions[partition];
+        tapeset.write(tape, &hash.to_ne_bytes())?;
+        // SAFETY: len readable bytes per the fetch above.
+        tapeset.write(tape, unsafe { core::slice::from_raw_parts(ptr, len) })?;
+    }
+    tmp_ctx.reset();
+    Ok(())
+}
+
+// hashagg_spill_finish (nodeAgg.c): one HashAggBatchGs per non-empty
+// partition, tagged with the set it belongs to.
+fn spill_finish_gs<'mcx>(
+    h: &mut HashSetsState<'mcx>,
+    setno: usize,
+    spill: crate::HashAggSpill<'mcx>,
+    batches_used: &mut i32,
+) -> PgResult<()> {
+    let used_bits = (32 - spill.shift) as u32;
+    let tapeset = h.tapeset.as_mut().expect("spill has a tapeset");
+    for i in 0..spill.npartitions {
+        if spill.ntuples[i] == 0 {
+            continue;
+        }
+        let cardinality = spill.hll_card[i].estimate();
+        tapeset.rewind_for_read(spill.partitions[i], crate::HASHAGG_READ_BUFFER_SIZE as usize)?;
+        h.hash_batches.push(HashAggBatchGs {
+            setno,
+            input_tape: spill.partitions[i],
+            used_bits,
+            input_card: cardinality,
+        });
+        *batches_used += 1;
+    }
+    Ok(())
+}
+
+// hashagg_finish_initial_spills (nodeAgg.c): turn every set's initial-pass
+// spill partitions into batches once the outer plan is exhausted.
+fn hashagg_finish_initial_spills_gs<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let id = node.plan.plan.plan_node_id;
+    let gs = node.gsets.as_mut().unwrap();
+    let h = gs.hash.as_mut().unwrap();
+    let mut total_npartitions = 0usize;
+    let numsets = h.perhash.len();
+    let mut batches_used = 0i32;
+    for setno in 0..numsets {
+        if let Some(spill) = h.perhash[setno].spill.take() {
+            total_npartitions += spill.npartitions;
+            spill_finish_gs(h, setno, spill, &mut batches_used)?;
+        }
+    }
+    if batches_used > 0 {
+        let ai = crate::agg_instrumentation(estate, id);
+        ai.hash_batches_used += batches_used;
+    }
+    update_hash_metrics(node, estate, false, total_npartitions);
+    node.gsets.as_mut().unwrap().hash.as_mut().unwrap().spill_mode = false;
+    Ok(())
+}
+
+// initialize_hash_entry (nodeAgg.c), grouping-sets form: count the new group
+// node-wide, maybe enter spill mode, then seed the entry's pergroup array.
+fn initialize_hash_entry_gs<'mcx>(
+    h: &mut HashSetsState<'mcx>,
+    setno: usize,
+    ix: u32,
+    trans_init: &[::datum::NullableDatum],
+    trans_typ: &[crate::TransTyp],
+    table_mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<()> {
+    h.hash_ngroups_current += 1;
+    hash_agg_check_limits_gs(h, table_mcx, mcx)?;
+    if trans_init.is_empty() {
+        return Ok(());
+    }
+    let ph = &mut h.perhash[setno];
+    let pergroup = ph
+        .hashtable
+        .entry_additional(ix)
+        .expect("numtrans > 0 tables carry additional space")
+        .cast::<AggPerGroup>();
+    for (transno, init) in trans_init.iter().enumerate() {
+        let typ = trans_typ[transno];
+        let value = if !init.isnull && !typ.byval {
+            // SAFETY: node-lifetime initval datum copied into the table
+            // context (C's hashcontext datumCopy).
+            unsafe { ::execexpr::agg_datum_copy(table_mcx, init.value, typ.len)? }
+        } else {
+            init.value
+        };
+        // SAFETY: the entry's additional block holds numtrans AggPerGroup
+        // slots (execgrouping contract).
+        unsafe {
+            pergroup.as_ptr().add(transno).write(AggPerGroup {
+                trans_value: value,
+                trans_value_is_null: init.isnull,
+                no_trans_value: init.isnull,
+            });
+        }
+    }
+    // SAFETY: once-allocated cell the trans steps read.
+    unsafe { ph.cell.write(pergroup) };
+    Ok(())
+}
+
+// lookup_hash_entries (nodeAgg.c): one create-or-find per hash set. A miss
+// (spill mode already active, or this set just crossed its limit) spills the
+// tuple to that set's tape instead of creating a group (C: pergroup[setno] =
+// NULL). Divergence: C's combined evaltrans null-checks pergroup per set
+// inline; our compiled indirect trans steps don't, so each set advances
+// through its own dedicated program (`ph.refill_trans`) immediately here,
+// run only for sets that got a live entry this row.
 fn lookup_hash_entries<'mcx>(
     hash: &mut HashSetsState<'mcx>,
     trans_init: &[::datum::NullableDatum],
@@ -548,8 +827,9 @@ fn lookup_hash_entries<'mcx>(
 ) -> PgResult<()> {
     // SAFETY: read of the once-allocated node; no &mut is live to it.
     let table_mcx = unsafe { agg_node.as_ref() }.aggcontext();
-    let HashSetsState { perhash, hash_ngroups_current, hash_ngroups_limit, .. } = hash;
-    for ph in perhash.iter_mut() {
+    let numsets = hash.perhash.len();
+    for setno in 0..numsets {
+        let ph = &mut hash.perhash[setno];
         exectuples::slot_getsomeattrs(input_slot, ph.largest_grp_col_idx);
         exectuples::exec_clear_tuple(&mut ph.hashslot, mcx);
         {
@@ -564,50 +844,157 @@ fn lookup_hash_entries<'mcx>(
         exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
 
         let hashval = ph.hashtable.hash_slot(&mut ph.hashslot)?;
-        let (ix, isnew) = ph.hashtable.lookup(&mut ph.hashslot, hashval, Some(table_mcx), mcx)?;
-        let ix = ix.expect("creating lookup always yields an entry");
+        let use_table = !hash.spill_mode;
+        let ph = &mut hash.perhash[setno];
+        let (ix, isnew) =
+            ph.hashtable.lookup(&mut ph.hashslot, hashval, use_table.then_some(table_mcx), mcx)?;
+        let Some(ix) = ix else {
+            spill_tuple_gs(hash, setno, 0, Some(input_slot), hashval, mcx)?;
+            continue;
+        };
         if isnew {
-            *hash_ngroups_current += 1;
-            if *hash_ngroups_current > *hash_ngroups_limit {
-                panic!(
-                    "hash_agg_check_limits (nodeAgg.c): hash_mem exceeded \
-                     ({} groups > limit {}); hashagg spill not ported",
-                    hash_ngroups_current, hash_ngroups_limit
-                );
-            }
-        }
-        if !trans_init.is_empty() {
+            initialize_hash_entry_gs(hash, setno, ix, trans_init, trans_typ, table_mcx, mcx)?;
+        } else if !trans_init.is_empty() {
+            let ph = &mut hash.perhash[setno];
             let pergroup = ph
                 .hashtable
                 .entry_additional(ix)
                 .expect("numtrans > 0 tables carry additional space")
                 .cast::<AggPerGroup>();
-            if isnew {
-                for (transno, init) in trans_init.iter().enumerate() {
-                    let typ = trans_typ[transno];
-                    let value = if !init.isnull && !typ.byval {
-                        // SAFETY: node-lifetime initval datum copied into the
-                        // table context (C's hashcontext datumCopy).
-                        unsafe { ::execexpr::agg_datum_copy(table_mcx, init.value, typ.len)? }
-                    } else {
-                        init.value
-                    };
-                    // SAFETY: the entry's additional block holds numtrans
-                    // AggPerGroup slots (execgrouping contract).
-                    unsafe {
-                        pergroup.as_ptr().add(transno).write(AggPerGroup {
-                            trans_value: value,
-                            trans_value_is_null: init.isnull,
-                            no_trans_value: init.isnull,
-                        });
-                    }
-                }
-            }
             // SAFETY: once-allocated cell the trans steps read.
             unsafe { ph.cell.write(pergroup) };
         }
+        let ph = &mut hash.perhash[setno];
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(input_slot) };
+        exec_eval_expr(&mut ph.refill_trans, &mut slots)?;
     }
     Ok(())
+}
+
+// agg_refill_hash_table (nodeAgg.c), grouping-sets form: false = no more
+// spilled batches anywhere. A batch only ever touches one set's table/cell;
+// the batch's own indirect program (`ph.refill_trans`) advances it row by
+// row, so no other set's cell needs to be valid during this pass.
+fn agg_refill_hash_table_gs<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let batch = {
+        let gs = node.gsets.as_mut().unwrap();
+        let h = gs.hash.as_mut().unwrap();
+        let Some(batch) = h.hash_batches.pop() else {
+            return Ok(false);
+        };
+        let (mem_limit, ngroups_limit, _) =
+            crate::hash_agg_set_limits(h.hashentrysize, batch.input_card, batch.used_bits);
+        h.hash_mem_limit = mem_limit;
+        h.hash_ngroups_limit = ngroups_limit;
+        for ph in h.perhash.iter_mut() {
+            ph.hashtable.reset();
+        }
+        h.hash_ngroups_current = 0;
+        debug_assert!(h.perhash[batch.setno].spill.is_none());
+        batch
+    };
+    // SAFETY: sole access path to the node during the reset (C's
+    // ReScanExprContext(hashcontext)+MemoryContextReset(hash_tablecxt), one
+    // shared aggcontext here).
+    unsafe { node.agg_node.as_mut() }.reset();
+    crate::hashagg_release_retained("refill_batch");
+
+    let setno = batch.setno;
+    loop {
+        let advance = {
+            let AggStateData { gsets, trans_init, trans_typ, agg_node, .. } = node;
+            let gs = &mut **gsets.as_mut().unwrap();
+            let h = &mut *gs.hash.as_mut().unwrap();
+            let HashSetsState { perhash, tapeset, rslot, read_buf, spill_mode, .. } = h;
+            let tapeset = tapeset.as_mut().expect("batches imply a tapeset");
+            let Some(hash) = crate::hashagg_batch_read(tapeset, batch.input_tape, read_buf)? else {
+                break;
+            };
+            let tup = NonNull::new(read_buf.as_mut_ptr().cast::<::types_tuple::htup::MinimalTupleData>())
+                .expect("read_buf is non-null");
+            // SAFETY: the image stays live in read_buf until the next read.
+            unsafe { exectuples::exec_store_minimal_tuple_ptr(rslot, mcx, tup) };
+            let ph = &mut perhash[setno];
+            exectuples::slot_getsomeattrs(rslot, ph.largest_grp_col_idx);
+            exectuples::exec_clear_tuple(&mut ph.hashslot, mcx);
+            {
+                let src = rslot.base();
+                let dst = ph.hashslot.base_mut();
+                for (i, &attno) in ph.hash_grp_col_idx_input.iter().enumerate() {
+                    let v = (attno - 1) as usize;
+                    dst.tts_values[i] = src.tts_values[v];
+                    dst.tts_isnull[i] = src.tts_isnull[v];
+                }
+            }
+            exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
+            // SAFETY: read of the once-allocated node; no &mut is live to it.
+            let table_mcx = unsafe { agg_node.as_ref() }.aggcontext();
+            let use_table = !*spill_mode;
+            let (ix, isnew) = ph.hashtable.lookup(
+                &mut ph.hashslot,
+                hash,
+                use_table.then_some(table_mcx),
+                mcx,
+            )?;
+            match ix {
+                Some(ix) => {
+                    if isnew {
+                        initialize_hash_entry_gs(h, setno, ix, trans_init, trans_typ, table_mcx, mcx)?;
+                    } else if !trans_init.is_empty() {
+                        let ph = &mut h.perhash[setno];
+                        let pergroup = ph
+                            .hashtable
+                            .entry_additional(ix)
+                            .expect("numtrans > 0 tables carry additional space")
+                            .cast::<AggPerGroup>();
+                        // SAFETY: once-allocated cell the trans steps read.
+                        unsafe { ph.cell.write(pergroup) };
+                    }
+                    true
+                }
+                None => {
+                    spill_tuple_gs(h, setno, batch.used_bits, None, hash, mcx)?;
+                    false
+                }
+            }
+        };
+        if advance {
+            let AggStateData { gsets, .. } = node;
+            let gs = &mut **gsets.as_mut().unwrap();
+            let h = &mut *gs.hash.as_mut().unwrap();
+            let HashSetsState { perhash, rslot, .. } = h;
+            let ph = &mut perhash[setno];
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(rslot) };
+            exec_eval_expr(&mut ph.refill_trans, &mut slots)?;
+        }
+        estate.reset_expr_context(node.tmpcontext);
+    }
+
+    let id = node.plan.plan.plan_node_id;
+    let gs = node.gsets.as_mut().unwrap();
+    let h = gs.hash.as_mut().unwrap();
+    h.tapeset.as_mut().unwrap().close_tape(batch.input_tape);
+    let spilled = h.perhash[setno].spill.take();
+    let npartitions = spilled.as_ref().map_or(0, |s| s.npartitions);
+    if let Some(spill) = spilled {
+        let mut batches_used = 0i32;
+        spill_finish_gs(h, setno, spill, &mut batches_used)?;
+        if batches_used > 0 {
+            let ai = crate::agg_instrumentation(estate, id);
+            ai.hash_batches_used += batches_used;
+        }
+    }
+    update_hash_metrics(node, estate, true, npartitions);
+    let gs = node.gsets.as_mut().unwrap();
+    let h = gs.hash.as_mut().unwrap();
+    h.spill_mode = false;
+    h.current_set = setno;
+    h.perhash[setno].hashiter = 0;
+    Ok(true)
 }
 
 // agg_fill_hash_table (nodeAgg.c), grouping-sets AGG_HASHED form.
@@ -627,13 +1014,13 @@ where
             let gs = gsets.as_mut().unwrap();
             let h = gs.hash.as_mut().expect("hashed grouping sets");
             let outer_slot = estate.slot_mut(outer_id);
+            // lookup_hash_entries runs each hit set's own trans program
+            // inline; spilled sets simply don't advance this row.
             lookup_hash_entries(h, trans_init, trans_typ, *agg_node, outer_slot, mcx)?;
-            let et = h.evaltrans.as_mut().expect("pure-hashed grouping sets carry a program");
-            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-            exec_eval_expr(et, &mut slots)?;
         }
         estate.reset_expr_context(node.tmpcontext);
     }
+    hashagg_finish_initial_spills_gs(node, estate)?;
     let gs = node.gsets.as_mut().unwrap();
     let h = gs.hash.as_mut().unwrap();
     h.table_filled = true;
@@ -641,25 +1028,38 @@ where
     for ph in h.perhash.iter_mut() {
         ph.hashiter = 0;
     }
-    update_hash_metrics(node, estate);
     Ok(())
 }
 
-// hash_agg_update_metrics (nodeAgg.c), no-spill form (lib.rs shape).
-fn update_hash_metrics(node: &AggStateData<'_>, estate: &mut EStateData<'_>) {
-    let gs = node.gsets.as_ref().unwrap();
-    let h = gs.hash.as_ref().unwrap();
+// hash_agg_update_metrics (nodeAgg.c): buffer_mem accounts for the shared
+// tapeset's read/write buffers (npartitions is the just-finished pass's
+// count, from_tape marks a refill-batch pass).
+fn update_hash_metrics(
+    node: &mut AggStateData<'_>,
+    estate: &mut EStateData<'_>,
+    from_tape: bool,
+    npartitions: usize,
+) {
+    let gs = node.gsets.as_mut().unwrap();
+    let h = gs.hash.as_mut().unwrap();
     // SAFETY: read of the once-allocated node; no &mut is live to it.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let meta: usize = h.perhash.iter().map(|ph| ph.hashtable.meta_mem()).sum();
-    let total = (meta + aggctx.context().subtree_used()) as u64;
+    let hashkey_mem = aggctx.context().subtree_used();
+    let buffer_mem = npartitions * crate::HASHAGG_WRITE_BUFFER_SIZE as usize
+        + if from_tape { crate::HASHAGG_READ_BUFFER_SIZE as usize } else { 0 };
+    let total = (meta + hashkey_mem + buffer_mem) as u64;
     let id = node.plan.plan.plan_node_id;
-    let ai = estate
-        .es_agg_instrumentation
-        .iter_mut()
-        .find_map(|(i, ai)| (*i == id).then_some(ai))
-        .expect("init_hash_sets published this node's metrics");
+    let ai = crate::agg_instrumentation(estate, id);
     ai.hash_mem_peak = ai.hash_mem_peak.max(total);
+    if let Some(ts) = node.gsets.as_ref().unwrap().hash.as_ref().unwrap().tapeset.as_ref() {
+        let disk_used = ts.blocks() as u64 * 8;
+        ai.hash_disk_used = ai.hash_disk_used.max(disk_used);
+    }
+    let h = node.gsets.as_mut().unwrap().hash.as_mut().unwrap();
+    if h.hash_ngroups_current > 0 {
+        h.hashentrysize = 16.0 + hashkey_mem as f64 / h.hash_ngroups_current as f64;
+    }
 }
 
 // agg_retrieve_hash_table(_in_memory) (nodeAgg.c), multi-set form: walk each
@@ -672,26 +1072,39 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
     let mcx = estate.es_query_cxt;
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
+        // After exhausting the in-memory tables, try refilling from a
+        // spilled batch (agg_retrieve_hash_table's outer retry in C); only
+        // agg_done when both the tables and the spill batches are drained.
+        let (current_set, ix) = 'find: loop {
+            {
+                let gs = &mut **node.gsets.as_mut().unwrap();
+                let h = gs.hash.as_mut().expect("hashed grouping sets");
+                let HashSetsState { perhash, current_set, .. } = h;
+                loop {
+                    let ph = &mut perhash[*current_set];
+                    if let Some(ix) = ph.hashtable.iterate(&mut ph.hashiter) {
+                        break 'find (*current_set, ix);
+                    }
+                    if *current_set + 1 < perhash.len() {
+                        *current_set += 1;
+                        perhash[*current_set].hashiter = 0;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !agg_refill_hash_table_gs(node, estate)? {
+                node.agg_done = true;
+                return Ok(None);
+            }
+        };
         let pergroup = {
-            let AggStateData { gsets, agg_done, .. } = node;
+            let AggStateData { gsets, .. } = node;
             let gs = &mut **gsets.as_mut().unwrap();
             let GroupingSetsState { hash, grouped_cols_cell, .. } = gs;
             let h = hash.as_mut().expect("hashed grouping sets");
-            let HashSetsState { perhash, hash_first_slot, current_set, .. } = h;
-            let ix = loop {
-                let ph = &mut perhash[*current_set];
-                if let Some(ix) = ph.hashtable.iterate(&mut ph.hashiter) {
-                    break ix;
-                }
-                if *current_set + 1 < perhash.len() {
-                    *current_set += 1;
-                    perhash[*current_set].hashiter = 0;
-                } else {
-                    *agg_done = true;
-                    return Ok(None);
-                }
-            };
-            let ph = &mut perhash[*current_set];
+            let HashSetsState { perhash, hash_first_slot, .. } = h;
+            let ph = &mut perhash[current_set];
             let tup = ph.hashtable.entry_tuple(ix);
             // SAFETY: entry images live in the node's table context for the
             // table's lifetime.
@@ -938,7 +1351,7 @@ where
             }
         }
         if switch_to_hash {
-            update_hash_metrics(node, estate);
+            update_hash_metrics(node, estate, false, 0);
             return agg_retrieve_hash_table(node, estate);
         }
 
@@ -1256,6 +1669,11 @@ pub(crate) fn rescan_hash_reuse(gs: &mut GroupingSetsState<'_>) -> bool {
         return false;
     }
     let Some(h) = gs.hash.as_mut() else { return false };
+    // C ExecReScanAgg: the no-reset fast path requires the hash side never
+    // spilled (a spilled tapeset/batches state doesn't survive a rescan).
+    if h.ever_spilled {
+        return false;
+    }
     if h.table_filled {
         h.current_set = 0;
         for ph in h.perhash.iter_mut() {
@@ -1276,14 +1694,37 @@ pub(crate) fn rescan_grouping_sets(gs: &mut GroupingSetsState<'_>) -> PgResult<(
         for ph in h.perhash.iter_mut() {
             ph.hashtable.reset();
             ph.hashiter = 0;
+            ph.spill = None;
         }
         h.hash_ngroups_current = 0;
         h.table_filled = false;
         h.current_set = 0;
+        h.spill_mode = false;
+        h.hash_batches.clear();
+        // hashagg_reset_spill_state (nodeAgg.c): a spilled tapeset doesn't
+        // survive a rescan; the next spill (if any) opens a fresh one.
+        if let Some(ts) = h.tapeset.take() {
+            ts.close()?;
+        }
+        h.ever_spilled = false;
     }
     gs.in_hash_mode = gs.phases.is_empty();
     if gs.phases.is_empty() {
         return Ok(());
     }
     initialize_phase(gs, 0)
+}
+
+// hashagg_reset_spill_state (nodeAgg.c), grouping-sets form: called once at
+// ExecEndAgg to close the shared tapeset (rescan already tears down spill
+// state on chgParam; this covers the no-rescan end-of-query path).
+pub(crate) fn end_grouping_sets(gs: &mut GroupingSetsState<'_>) {
+    let Some(h) = gs.hash.as_mut() else { return };
+    for ph in h.perhash.iter_mut() {
+        ph.spill = None;
+    }
+    h.hash_batches.clear();
+    if let Some(ts) = h.tapeset.take() {
+        ts.close().expect("hashagg tapeset close");
+    }
 }

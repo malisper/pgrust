@@ -3360,6 +3360,9 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     if let Some(ph) = node.perhash.as_mut() {
         hashagg_reset_spill_state(ph, node.plan.numGroups as f64);
     }
+    if let Some(gs) = node.gsets.as_mut() {
+        gsets::end_grouping_sets(gs);
+    }
     node.perhash = None;
     node.persort = None;
     node.gsets = None;
