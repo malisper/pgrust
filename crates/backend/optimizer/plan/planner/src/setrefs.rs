@@ -2362,7 +2362,9 @@ fn search_indexed_tlist_for_var<'mcx>(
         if sub.varno == var.varno && sub.varattno == var.varattno {
             assert!(
                 var.varattno <= 0 || sub.varnullingrels.equal(&var.varnullingrels),
-                "wrong varnullingrels for Var {}/{}",
+                "wrong varnullingrels {:?} (expected {:?}) for Var {}/{}",
+                var.varnullingrels,
+                sub.varnullingrels,
                 var.varno,
                 var.varattno
             );
@@ -3761,7 +3763,7 @@ fn set_join_references<'mcx>(
 }
 
 // setrefs.c NullingRelsMatch.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum NrmMatch {
     Equal,
     Subset,
@@ -4743,7 +4745,10 @@ fn search_join_tlist_for_var<'mcx>(
                         NrmMatch::Superset => sub.varnullingrels.is_subset(&var.varnullingrels),
                         NrmMatch::Equal => sub.varnullingrels.equal(&var.varnullingrels),
                     },
-                "wrong varnullingrels for Var {}/{}",
+                "wrong varnullingrels {:?} (expected {:?}, nrm {:?}) for Var {}/{}",
+                var.varnullingrels,
+                sub.varnullingrels,
+                nrm_match,
                 var.varno,
                 var.varattno
             );
@@ -4791,7 +4796,10 @@ fn search_tlist_for_phv<'mcx>(
                 NrmMatch::Superset => sub.phnullingrels.is_subset(&phv.phnullingrels),
                 NrmMatch::Equal => sub.phnullingrels.equal(&phv.phnullingrels),
             },
-            "wrong phnullingrels for PlaceHolderVar {}",
+            "wrong phnullingrels {:?} (expected {:?}, nrm {:?}) for PlaceHolderVar {}",
+            phv.phnullingrels,
+            sub.phnullingrels,
+            nrm_match,
             phv.phid
         );
         let (vartype, vartypmod) = crate::costsize::expr_type_typmod(tle.expr);
