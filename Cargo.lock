@@ -4947,6 +4947,7 @@ dependencies = [
  "types_nodes",
  "types_rel",
  "types_slot",
+ "types_snapshot",
  "types_tuple",
 ]
 
@@ -8385,6 +8386,7 @@ dependencies = [
  "heapam_visibility",
  "heaptuple",
  "init_small",
+ "instrument",
  "inval",
  "ipc_seams",
  "latch_seams",
