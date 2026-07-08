@@ -108,8 +108,7 @@ fn fc_pg_prewarm(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let fork_string = arg_text_string(fcinfo, 2)?;
     let fork_number = forkname_to_number(&fork_string)?;
 
-    // If the relation is an index, check privileges on its parent table;
-    // lock table before index to avoid deadlock.
+    // Index: check privileges on the parent table; lock table before index.
     let mcx = fcinfo.result_mcx();
     let relkind = lsyscache::get_rel_relkind(rel_oid)? as u8;
     let priv_oid = if relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX {
