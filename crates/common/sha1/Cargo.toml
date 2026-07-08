@@ -1,0 +1,9 @@
+[package]
+name = "pg_sha1"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_sha1"
+path = "src/lib.rs"
