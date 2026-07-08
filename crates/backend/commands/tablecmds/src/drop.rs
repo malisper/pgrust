@@ -1,6 +1,5 @@
 // RemoveRelations + RangeVarCallbackForDropRelation (tablecmds.c) over the
-// relation removeTypes; the partitioned-index children pre-lock
-// (find_all_inheritors) is not taken.
+// relation removeTypes.
 use mcx::Mcx;
 use types_core::{AttrNumber, InvalidOid, Oid, RELATION_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_TABLE, ERROR, NOTICE};
@@ -215,6 +214,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
         };
         let actual_relkind = core::cell::Cell::new(0u8);
         let actual_relpersistence = core::cell::Cell::new(0u8);
+        let heap_oid = core::cell::Cell::new(InvalidOid);
         let mut callback = |rv: &RangeVar<'_>, relOid: Oid, oldRelOid: Oid| {
             RangeVarCallbackForDropRelation(
                 mcx,
@@ -225,6 +225,7 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
                 heap_lockmode,
                 &actual_relkind,
                 &actual_relpersistence,
+                &heap_oid,
             )
         };
         let relOid = catalog_namespace::RangeVarGetRelidExtended(
@@ -264,6 +265,14 @@ pub fn RemoveRelations<'mcx>(mcx: Mcx<'mcx>, drop: &DropStmt<'mcx>) -> PgResult<
             ));
         }
 
+        // DROP of a partitioned index locks every table of the partition
+        // tree before any child index is locked (tablecmds.c:1671-1682):
+        // otherwise child indexes get locked before their tables, deadlocking
+        // against sessions locking table-then-index.
+        if actual_relkind.get() == types_rel::RELKIND_PARTITIONED_INDEX {
+            pg_inherits::find_all_inheritors(mcx, heap_oid.get(), heap_lockmode)?;
+        }
+
         objects.add_exact_object_address(pg_depend::ObjectAddress::set(
             RELATION_RELATION_ID,
             relOid,
@@ -283,6 +292,7 @@ fn RangeVarCallbackForDropRelation<'mcx>(
     heap_lockmode: types_storage::lock::LOCKMODE,
     actual_relkind: &core::cell::Cell<u8>,
     actual_relpersistence: &core::cell::Cell<u8>,
+    heap_oid_out: &core::cell::Cell<Oid>,
 ) -> PgResult<()> {
     if relOid == InvalidOid {
         return Ok(());
@@ -373,6 +383,7 @@ fn RangeVarCallbackForDropRelation<'mcx>(
         // is dropped; a stale-lookup retry leaves an extra heap lock held
         // until end of transaction.
         let heap_oid = catalog_index::IndexGetRelation(mcx, relOid, true)?;
+        heap_oid_out.set(heap_oid);
         if heap_oid != InvalidOid {
             lmgr::LockRelationOid(heap_oid, heap_lockmode)?;
         }

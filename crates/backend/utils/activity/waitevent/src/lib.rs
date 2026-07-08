@@ -241,6 +241,22 @@ static WAIT_EVENT_IO_NAMES: [&str; 81] = [
 
 static WAIT_EVENT_BUFFERPIN_NAMES: [&str; 1] = ["BufferPin"];
 
+// LockTagTypeNames (lockfuncs.c), indexed by LockTagType.
+static LOCK_TAG_TYPE_NAMES: [&str; 12] = [
+    "relation",
+    "extend",
+    "frozenid",
+    "page",
+    "tuple",
+    "transactionid",
+    "virtualxid",
+    "spectoken",
+    "object",
+    "userlock",
+    "advisory",
+    "applytransaction",
+];
+
 pub fn pgstat_get_wait_event_type(wait_event_info: u32) -> Option<&'static str> {
     if wait_event_info == 0 {
         return None;
@@ -274,10 +290,9 @@ pub fn pgstat_get_wait_event(wait_event_info: u32) -> Option<&'static str> {
     };
     Some(match class_id {
         PG_WAIT_LWLOCK => lwlock::GetLWLockIdentifier(class_id, event_id as u16),
-        PG_WAIT_LOCK => panic!(
-            "wait event decode for PG_WAIT_LOCK is not ported: \
-             GetLockNameFromTagType (src/backend/storage/lmgr/lmgr.c)"
-        ),
+        // GetLockNameFromTagType (lmgr.c) over LockTagTypeNames
+        // (lockfuncs.c); the event id is the locktag type.
+        PG_WAIT_LOCK => LOCK_TAG_TYPE_NAMES.get(event_id).copied().unwrap_or("???"),
         PG_WAIT_EXTENSION | PG_WAIT_INJECTIONPOINT => {
             custom::GetWaitEventCustomIdentifier(wait_event_info)
         }
