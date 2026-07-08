@@ -194,6 +194,9 @@ fn finish_relcache_entries() -> PgResult<()> {
             rd_indcollation: mcx::PgVec::new_in(crate::cache_mcx()),
             rd_options: scanned.options,
             pgstat_enabled: core::cell::Cell::new(rel.pgstat_enabled.get()),
+            // C SWAPFIELD keeps pgstat_info across the rebuild; same key, gen
+            // still governs validity.
+            pgstat_link: core::cell::Cell::new(rel.pgstat_link.get()),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
             rd_support: mcx::PgVec::new_in(crate::cache_mcx()),

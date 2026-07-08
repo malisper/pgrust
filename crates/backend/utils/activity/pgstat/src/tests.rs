@@ -40,7 +40,7 @@ fn rel_counts(relid: u32) -> Option<PgStat_TableCounts> {
     pending::with_state(|st| {
         let key = relation::relation_key(relid, false);
         match st.pending.get(&key) {
-            Some(PendingData::Relation(t)) => Some(t.counts),
+            Some(PendingData::Relation(rp)) => Some(unsafe { (*rp.as_ptr()).counts }),
             _ => None,
         }
     })
@@ -212,10 +212,11 @@ fn flush_folds_relation_into_database_pending() {
 
     let key = relation::relation_key(1009, false);
     pending::with_state(|st| {
-        let Some(PendingData::Relation(t)) = st.pending.remove(&key) else {
+        let Some(PendingData::Relation(rp)) = st.pending.remove(&key) else {
             panic!("no relation pending entry");
         };
-        pending::flush_relation_into_db(st, key.dboid, &t.counts);
+        let counts = unsafe { (*rp.as_ptr()).counts };
+        pending::flush_relation_into_db(st, key.dboid, &counts);
     });
 
     let db = db_pending(5).unwrap();

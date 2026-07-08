@@ -328,6 +328,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> Relation<'mcx> {
             rd_trigdesc: Default::default(),
             rd_hastriggers: false, rd_hasrules: false,
         pgstat_enabled: std::cell::Cell::new(false),
+        pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
     };
     Relation::open(data, None)
 }

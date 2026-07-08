@@ -830,6 +830,7 @@ mod heapfix {
             // Off: no pgstat shmem in this harness (the zero-count batched
             // flush is a no-op).
             pgstat_enabled: std::cell::Cell::new(false),
+            pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(),
             rd_amcache_gin: Default::default(),
