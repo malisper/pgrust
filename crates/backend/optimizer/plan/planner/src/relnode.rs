@@ -468,7 +468,7 @@ fn have_partkey_equi_join<'mcx>(
 
 // remove_nulling_relids (rewriteManip.c), copy-on-write expression form
 // specialized to except_relids = NULL.
-fn strip_nulling_relids<'mcx>(
+pub(crate) fn strip_nulling_relids<'mcx>(
     mcx: Mcx<'mcx>,
     node: types_nodes::Node<'mcx>,
     removable: &Relids<'mcx>,

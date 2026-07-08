@@ -1183,17 +1183,48 @@ pub fn examine_variable<'mcx>(
         // scalararraysel dummies): C's expression leg finds no relids and
         // returns "don't know".
         NodeTag::T_Aggref | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(vardata),
-        // C's general expression leg: a single-rel expression keeps its rel
-        // and searches expression-index columns for stats.
+        // C's general expression leg: rel membership is judged net of
+        // outer-join relids (basevarnos); a single-base-rel expression keeps
+        // its rel and searches expression-index columns for stats, a
+        // multi-rel one keeps the join rel.
         _ => {
-            let varnos = vars::pull_varnos(run.mcx, node)?;
-            if let Some(v) = varnos.get_singleton_member() {
-                if varrelid == 0 || varrelid == v {
-                    let onerel = crate::relnode::find_base_rel(&run.root, v);
-                    vardata.var = Some(node_id);
+            use types_pathnodes::relids;
+            let mcx = run.mcx;
+            let varnos = crate::initsplan::pull_varnos_relids(run, node)?;
+            let basevarnos =
+                relids::relids_difference(mcx, &varnos, &run.root.outer_join_rels);
+            vardata.var = Some(node_id);
+            if relids::relids_is_empty(&basevarnos) {
+                // pseudo-constant clause
+            } else if let Some(relid) = relids::relids_singleton_member(&basevarnos) {
+                if varrelid == 0 || varrelid == relid {
+                    let onerel = crate::relnode::find_base_rel(&run.root, relid);
                     vardata.rel = Some(onerel);
-                    examine_expression_index_stats(run, &mut vardata, onerel, v, node)?;
+                    // Nullingrel bits inside the expression would prevent
+                    // matching index/extended-stats expressions; strip first.
+                    let matchnode =
+                        if relids::relids_overlap(&varnos, &run.root.outer_join_rels) {
+                            crate::relnode::strip_nulling_relids(
+                                mcx,
+                                node,
+                                &run.root.outer_join_rels,
+                            )?
+                        } else {
+                            node
+                        };
+                    examine_expression_index_stats(
+                        run,
+                        &mut vardata,
+                        onerel,
+                        relid,
+                        matchnode,
+                    )?;
                 }
+                // else treat it as a constant
+            } else if varrelid == 0 {
+                vardata.rel = crate::joinrels::find_join_rel(&run.root, &varnos);
+            } else if relids::relids_is_member(varrelid, &varnos) {
+                vardata.rel = Some(crate::relnode::find_base_rel(&run.root, varrelid));
             }
             Ok(vardata)
         }
