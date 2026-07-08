@@ -463,8 +463,7 @@ pub fn AlterTable<'mcx>(
     ATController(mcx, rel, &stmt.cmds, recurse, lockmode, query_string, Some(tag))
 }
 
-// AlterTableInternal (tablecmds.c); EventTriggerAlterTableRelid is a no-op
-// repo-wide.
+// AlterTableInternal (tablecmds.c:4563).
 pub fn AlterTableInternal<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
@@ -473,6 +472,7 @@ pub fn AlterTableInternal<'mcx>(
 ) -> PgResult<()> {
     let lockmode = AlterTableGetLockLevel(cmds);
     let rel = relation_seams::relation_open::call(mcx, relid, lockmode)?;
+    event_trigger::EventTriggerAlterTableRelid(relid);
     ATController(mcx, rel, cmds, recurse, lockmode, "", None)
 }
 
