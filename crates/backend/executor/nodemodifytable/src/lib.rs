@@ -1407,7 +1407,8 @@ pub fn exec_modify_table<'mcx>(
             }
             CmdType::CMD_DELETE => {
                 let mut tupleid = fetch_row_id(mt, estate, plan_slot);
-                let modified = exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false)?;
+                let modified =
+                    exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false, None)?;
                 if modified && mt.rel().project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
                     return Ok(Some(exec_process_returning(
@@ -2468,8 +2469,10 @@ fn merge_update_act<'mcx>(
         // port's delete leg folds those into the moved/no-op outcome (see
         // exec_cross_partition_update).
         return match exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval)? {
-            UpdateResult::CrossPart(inserted) => Ok(MergeUpdActRes::CrossPart(inserted)),
-            _ => unreachable!("exec_cross_partition_update returns CrossPart"),
+            CrossPartResult::Done(inserted) => Ok(MergeUpdActRes::CrossPart(inserted)),
+            CrossPartResult::Retry(_) => {
+                unreachable!("MERGE cross-partition retry folds to Done in the delete leg")
+            }
         };
     }
     if result != TM_Result::TM_Ok {
@@ -3179,9 +3182,18 @@ fn exec_update<'mcx>(
     let mut lockmode = LockTupleMode::LockTupleExclusive;
 
     if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row) {
-        let Some(old_slot) = get_tuple_for_trigger(mt, estate, tupleid)? else {
-            return Ok(UpdateResult::NotModified);
+        let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
+            TrigFetch::Skip => return Ok(UpdateResult::NotModified),
+            TrigFetch::Proceed { old_slot, epq } => (old_slot, epq),
         };
+        if let Some(eslot) = epq {
+            // ExecBRUpdateTriggers: rebuild the new tuple from the
+            // EPQ-rechecked row (ExecGetUpdateNewTuple over the re-fetched
+            // latest old version).
+            debug_assert!(mt.rel().ri_projectNewInfoValid);
+            fetch_old_row_version(mt, estate, tupleid)?;
+            slot_id = exec_get_update_new_tuple(mt, estate, eslot)?;
+        }
         if !br_row_triggers(
             mt,
             estate,
@@ -3306,7 +3318,14 @@ fn exec_update<'mcx>(
         };
 
         if cross_part {
-            return exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval);
+            match exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval)? {
+                CrossPartResult::Done(ins) => return Ok(UpdateResult::CrossPart(ins)),
+                // C: goto lreplace with the EPQ-reprojected tuple.
+                CrossPartResult::Retry(retry) => {
+                    slot_id = retry;
+                    continue;
+                }
+            }
         }
 
         match result {
@@ -3480,6 +3499,14 @@ fn exec_update<'mcx>(
     Ok(UpdateResult::Modified)
 }
 
+// ExecCrossPartitionUpdate outcomes: Done = C returned true (inserted slot
+// carried); Retry = C returned false with *retry_slot set — the caller redoes
+// the UPDATE from lreplace with the EPQ-reprojected tuple.
+enum CrossPartResult {
+    Done(Option<ExecSlotId>),
+    Retry(ExecSlotId),
+}
+
 // ExecCrossPartitionUpdate (nodeModifyTable.c): move an updated tuple to
 // another partition — DELETE from the source partition (RETURNING skipped,
 // canSetTag=false), convert the new tuple to the root layout, and INSERT
@@ -3491,19 +3518,33 @@ fn exec_cross_partition_update<'mcx>(
     tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
     epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
-) -> PgResult<UpdateResult> {
+) -> PgResult<CrossPartResult> {
     let mcx = estate.es_query_cxt;
     let old_tid = *tupleid;
 
     // Row movement, part 1: delete, marking the tuple moved (changingPart).
     // The delete epilogue files the row into the UPDATE OLD transition table;
     // the insert epilogue files the new row as UPDATE NEW.
-    if !exec_delete(mt, estate, tupleid, epq_eval, true)? {
-        // C re-checks a concurrently-updated row via the EPQ slot and
-        // retries the UPDATE; the port's delete leg cannot return one (loud
-        // at init), so a vanished/blocked tuple skips the INSERT like C's
-        // TupIsNull(epqslot) arm — never turning one row into two.
-        return Ok(UpdateResult::CrossPart(None));
+    let mut epqslot: Option<ExecSlotId> = None;
+    if !exec_delete(mt, estate, tupleid, epq_eval, true, Some(&mut epqslot))? {
+        match epqslot {
+            // C TupIsNull(epqslot): vanished/blocked tuple skips the INSERT —
+            // never turning one row into two.
+            None => return Ok(CrossPartResult::Done(None)),
+            Some(eslot) => {
+                // C MERGE leaves the recheck to the caller (tmresult TM_Ok
+                // folds to done-without-insert there).
+                if mt.operation == CmdType::CMD_MERGE {
+                    return Ok(CrossPartResult::Done(None));
+                }
+                // Fetch the most recent version of the old tuple and project
+                // the new tuple to retry the UPDATE with.
+                debug_assert!(mt.rel().ri_projectNewInfoValid);
+                fetch_old_row_version(mt, estate, tupleid)?;
+                let retry = exec_get_update_new_tuple(mt, estate, eslot)?;
+                return Ok(CrossPartResult::Retry(retry));
+            }
+        }
     }
 
     // Part 2: convert to the root layout (ExecGetChildToRootMap +
@@ -3555,7 +3596,7 @@ fn exec_cross_partition_update<'mcx>(
         exec_cross_partition_update_foreign_key(mt, estate, old_tid, work_slot)?;
     }
 
-    Ok(UpdateResult::CrossPart(inserted))
+    Ok(CrossPartResult::Done(inserted))
 }
 
 // ExecInitRoutingInfo's RETURNING leg (execPartition.c:623-680), expressed in
@@ -3831,14 +3872,25 @@ fn exec_delete<'mcx>(
     // storage layer marks the tuple moved and the row counts once, via the
     // INSERT half (C passes canSetTag=false here).
     changing_part: bool,
+    // C epqreturnslot: on a concurrently-updated row the delete is skipped
+    // and the EPQ-rechecked slot handed back for the cross-partition caller
+    // to retry the UPDATE with.
+    mut epqreturnslot: Option<&mut Option<ExecSlotId>>,
 ) -> PgResult<bool> {
     let output_cid = estate.es_output_cid;
     let mut tmfd = TM_FailureData::default();
 
     if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_delete_before_row) {
-        let Some(old_slot) = get_tuple_for_trigger(mt, estate, tupleid)? else {
-            return Ok(false);
+        let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
+            TrigFetch::Skip => return Ok(false),
+            TrigFetch::Proceed { old_slot, epq } => (old_slot, epq),
         };
+        // ExecBRDeleteTriggers: when the caller asked for the updated row,
+        // skip the trigger and the delete and pass the EPQ slot back.
+        if let (Some(eslot), Some(out)) = (epq, epqreturnslot.as_deref_mut()) {
+            *out = Some(eslot);
+            return Ok(false);
+        }
         if !br_row_triggers(
             mt,
             estate,
@@ -3912,9 +3964,13 @@ fn exec_delete<'mcx>(
                     TM_Result::TM_Ok => {
                         debug_assert!(tmfd.traversed);
                         *tupleid = estate.slot(inputslot).base().tts_tid;
-                        // epqreturnslot only exists on the cross-partition
-                        // UPDATE path (loud at init).
-                        if epq_eval(estate, inputslot, mt.rel().rti)?.is_none() {
+                        let Some(epqslot) = epq_eval(estate, inputslot, mt.rel().rti)? else {
+                            return Ok(false);
+                        };
+                        // C: skip the delete and pass back the updated row
+                        // when requested; otherwise redo the delete (ldelete).
+                        if let Some(out) = epqreturnslot.as_deref_mut() {
+                            *out = Some(epqslot);
                             return Ok(false);
                         }
                         continue;
@@ -4463,11 +4519,20 @@ fn merge_tuple_for_trigger<'mcx>(
     }
 }
 
+// GetTupleForTrigger (trigger.c) outcomes for the plain BR paths: Skip = C
+// returned false; Proceed carries the locked old-row slot and, when a
+// concurrent update was traversed and the EPQ recheck passed, the EPQ slot.
+enum TrigFetch {
+    Skip,
+    Proceed { old_slot: ExecSlotId, epq: Option<ExecSlotId> },
+}
+
 fn get_tuple_for_trigger<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    tupleid: &ItemPointerData,
-) -> PgResult<Option<ExecSlotId>> {
+    tupleid: &mut ItemPointerData,
+    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<TrigFetch> {
     let slot_id = ensure_trig_old_slot(mt, estate);
     let output_cid = estate.es_output_cid;
     let mut tmfd = TM_FailureData::default();
@@ -4501,16 +4566,21 @@ fn get_tuple_for_trigger<'mcx>(
             if tmfd.cmax != output_cid {
                 return Err(self_modified_violation("updated"));
             }
-            Ok(None)
+            Ok(TrigFetch::Skip)
         }
         TM_Result::TM_Ok => {
             if tmfd.traversed {
-                panic!(
-                    "GetTupleForTrigger (trigger.c): EPQ recheck after a \
-                     concurrent update unported on the BEFORE ROW path"
-                );
+                // C: table_tuple_lock wrote the locked version's tid back
+                // through tid; recheck it via EPQ (do_epq_recheck arm; MERGE
+                // stays on merge_tuple_for_trigger).
+                *tupleid = estate.slot(slot_id).base().tts_tid;
+                eval_plan_qual_slot(mt, estate);
+                let Some(epqslot) = epq_eval(estate, slot_id, mt.rel().rti)? else {
+                    return Ok(TrigFetch::Skip);
+                };
+                return Ok(TrigFetch::Proceed { old_slot: slot_id, epq: Some(epqslot) });
             }
-            Ok(Some(slot_id))
+            Ok(TrigFetch::Proceed { old_slot: slot_id, epq: None })
         }
         TM_Result::TM_Updated => {
             if xact::IsolationUsesXactSnapshot() {
@@ -4522,7 +4592,7 @@ fn get_tuple_for_trigger<'mcx>(
             if xact::IsolationUsesXactSnapshot() {
                 return Err(serialization_conflict("delete"));
             }
-            Ok(None)
+            Ok(TrigFetch::Skip)
         }
         other => panic!("GetTupleForTrigger (trigger.c): unrecognized status {other:?}"),
     }
