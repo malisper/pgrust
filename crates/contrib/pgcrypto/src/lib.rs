@@ -74,6 +74,12 @@ fn fc_pg_random_uuid(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     types_fmgr::byref_result(fcinfo.result_mcx(), &uuid)
 }
 
+// pgcrypto 1.4's fips_mode(): CheckFIPSMode(). No OpenSSL FIPS provider is
+// active in this build, so always false (C's non-FIPS path).
+fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_bool(false))
+}
+
 // Unported surfaces (cipher / crypt / PGP): resolve so CREATE EXTENSION
 // validates; a call raises feature-not-supported naming the C source, exactly
 // like a missing symbol would fail the call.
@@ -115,6 +121,7 @@ fn lookup(function: &str) -> Option<PGFunction> {
         "pg_hmac" => fc_pg_hmac,
         "pg_random_bytes" => fc_pg_random_bytes,
         "pg_random_uuid" => fc_pg_random_uuid,
+        "pg_check_fipsmode" => fc_pg_check_fipsmode,
         "pg_crypt" => fc_pg_crypt,
         "pg_gen_salt" => fc_pg_gen_salt,
         "pg_gen_salt_rounds" => fc_pg_gen_salt_rounds,
