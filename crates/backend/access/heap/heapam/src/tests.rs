@@ -352,6 +352,7 @@ fn test_relation_opts<'mcx>(
             ::types_rel::reloptions::RdOptions::Std(user_catalog_std_options())
         }),
         pgstat_enabled: std::cell::Cell::new(true),
+        pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: PgVec::new_in(mcx),
