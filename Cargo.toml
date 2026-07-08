@@ -630,6 +630,7 @@ members = [
     "crates/backend/replication/logical/logicalfuncs",
     "crates/backend/replication/logical/logical_message",
     "crates/contrib/test_decoding",
+    "crates/contrib/citext",
     "crates/backend/catalog/pg_db_role_setting_seams",
     "crates/backend/utils/init/postinit",
     "crates/backend/postmaster/pmchild_seams",
