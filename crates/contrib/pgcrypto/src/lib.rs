@@ -2,16 +2,17 @@
 //! through the dfmgr in-process registry so CREATE EXTENSION pgcrypto
 //! validates and installs).
 //!
-//! SCOPE (2026-07-08 contrib-ports increment 1): digest()/hmac() over the
-//! in-repo reference hashes (pg_md5/pg_sha1/pg_sha2), gen_random_bytes,
-//! gen_random_uuid. The cipher (encrypt/decrypt), crypt/gen_salt, and full
-//! PGP surfaces are NOT yet ported — their symbols resolve to loud stubs so
-//! CREATE EXTENSION still succeeds (a caller of an unported function gets the
-//! stub's error, exactly as an unresolved C symbol would fail the call).
-//! Those depend on third-party symmetric-cipher/bignum crates (fabled used
-//! RustCrypto aes/blowfish/des/cast5 + num-bigint + miniz_oxide); adding them
-//! is a follow-up increment.
+//! SCOPE (2026-07-08): digest()/hmac() over the in-repo reference hashes,
+//! gen_random_bytes/uuid, fips_mode(), crypt()/gen_salt() for md5-crypt
+//! (`$1$`), and encrypt()/decrypt()(+_iv) over the RustCrypto block ciphers
+//! (bf/des/3des/cast5/aes, ECB/CBC/CFB, pkcs/none padding). NOT yet ported —
+//! symbols resolve to loud feature-not-supported stubs so CREATE EXTENSION
+//! still succeeds: crypt/gen_salt des/bcrypt/xdes (crypt-des.c/-blowfish.c) and
+//! sha-crypt (crypt-sha.c), and the full PGP suite (pgp-*.c — needs bignum +
+//! zlib + the unported cryptohash/crypto crates).
 
+mod cipher;
+mod crypt;
 mod hashing;
 
 use datum::Datum;
@@ -21,8 +22,6 @@ use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 
 const LIBRARY: &str = "pgcrypto";
 
-// bytea and text share the varlena image layout; cstring_to_text builds a
-// 4-byte-header image over arbitrary bytes.
 fn bytea_result(fcinfo: &mut Fcinfo, bytes: &[u8]) -> PgResult<Datum> {
     let img = varlena::cstring_to_text(fcinfo.result_mcx(), bytes)?;
     Ok(types_fmgr::varlena_result(img))
@@ -30,6 +29,15 @@ fn bytea_result(fcinfo: &mut Fcinfo, bytes: &[u8]) -> PgResult<Datum> {
 
 fn px_err(msg: String) -> Box<PgError> {
     PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE).into()
+}
+
+fn crypt_err(e: crypt::CryptError) -> Box<PgError> {
+    match e {
+        crypt::CryptError::Unsupported(what) => PgError::error(format!("pgcrypto: {what} not yet ported"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .into(),
+        crypt::CryptError::Message(m) => px_err(m),
+    }
 }
 
 fn fc_pg_digest(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -53,6 +61,80 @@ fn fc_pg_hmac(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     let out = hashing::hmac(&name, key.data(), data.data()).map_err(px_err)?;
     bytea_result(fcinfo, &out)
 }
+
+fn fc_pg_gen_salt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 text.
+    let ty = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let ty = String::from_utf8_lossy(ty.data()).into_owned();
+    let s = crypt::gen_salt(&ty, 0).map_err(crypt_err)?;
+    bytea_result(fcinfo, s.as_bytes())
+}
+
+fn fc_pg_gen_salt_rounds(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 text, arg1 int4.
+    let ty = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let ty = String::from_utf8_lossy(ty.data()).into_owned();
+    let rounds = fcinfo.arg_i32(1);
+    let s = crypt::gen_salt(&ty, rounds).map_err(crypt_err)?;
+    bytea_result(fcinfo, s.as_bytes())
+}
+
+fn fc_pg_crypt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: strict fn — arg0 password text, arg1 salt text.
+    let (pw, salt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
+    let pw = String::from_utf8_lossy(pw.data()).into_owned();
+    let salt = String::from_utf8_lossy(salt.data()).into_owned();
+    let s = crypt::crypt(&pw, &salt).map_err(crypt_err)?;
+    bytea_result(fcinfo, s.as_bytes())
+}
+
+// find_provider: Cannot use "<spec>": No such cipher algorithm; else
+// "<op> error: <Encryption|Decryption> failed" (px_strerror).
+fn cipher_err(op: &str, e: cipher::CipherError) -> Box<PgError> {
+    let msg = match e {
+        cipher::CipherError::NoCipher(spec) => format!("Cannot use \"{spec}\": No such cipher algorithm"),
+        cipher::CipherError::EncryptFailed => format!("{op} error: Encryption failed"),
+        cipher::CipherError::DecryptFailed => format!("{op} error: Decryption failed"),
+    };
+    px_err(msg)
+}
+
+macro_rules! fc_cipher {
+    ($fname:ident, $core:ident, $op:literal, $with_iv:literal) => {
+        fn $fname(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            // SAFETY: strict fn — bytea/bytea[/bytea] then text spec, all non-null.
+            let out = if $with_iv {
+                let (data, key, iv, spec) = unsafe {
+                    (
+                        fcinfo.arg_varlena_packed(0)?,
+                        fcinfo.arg_varlena_packed(1)?,
+                        fcinfo.arg_varlena_packed(2)?,
+                        fcinfo.arg_varlena_packed(3)?,
+                    )
+                };
+                let spec = String::from_utf8_lossy(spec.data()).into_owned();
+                cipher::$core(&spec, key.data(), iv.data(), data.data())
+            } else {
+                let (data, key, spec) = unsafe {
+                    (
+                        fcinfo.arg_varlena_packed(0)?,
+                        fcinfo.arg_varlena_packed(1)?,
+                        fcinfo.arg_varlena_packed(2)?,
+                    )
+                };
+                let spec = String::from_utf8_lossy(spec.data()).into_owned();
+                cipher::$core(&spec, key.data(), &[], data.data())
+            };
+            let out = out.map_err(|e| cipher_err($op, e))?;
+            bytea_result(fcinfo, &out)
+        }
+    };
+}
+
+fc_cipher!(fc_pg_encrypt, encrypt, "encrypt", false);
+fc_cipher!(fc_pg_decrypt, decrypt, "decrypt", false);
+fc_cipher!(fc_pg_encrypt_iv, encrypt, "encrypt_iv", true);
+fc_cipher!(fc_pg_decrypt_iv, decrypt, "decrypt_iv", true);
 
 fn fc_pg_random_bytes(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let len = fcinfo.arg_i32(0);
@@ -80,9 +162,9 @@ fn fc_pg_check_fipsmode(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_bool(false))
 }
 
-// Unported surfaces (cipher / crypt / PGP): resolve so CREATE EXTENSION
-// validates; a call raises feature-not-supported naming the C source, exactly
-// like a missing symbol would fail the call.
+// PGP suite (pgp-*.c): resolves so CREATE EXTENSION validates; a call raises
+// feature-not-supported naming the C source. Needs bignum + zlib + the
+// unported cryptohash/crypto crates — a follow-up increment.
 macro_rules! unported {
     ($($fname:ident => $what:literal;)*) => {$(
         fn $fname(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -94,13 +176,6 @@ macro_rules! unported {
 }
 
 unported! {
-    fc_pg_crypt => "crypt() (crypt-*.c)";
-    fc_pg_gen_salt => "gen_salt() (crypt-gensalt.c)";
-    fc_pg_gen_salt_rounds => "gen_salt(rounds) (crypt-gensalt.c)";
-    fc_pg_encrypt => "encrypt() (px cipher)";
-    fc_pg_decrypt => "decrypt() (px cipher)";
-    fc_pg_encrypt_iv => "encrypt_iv() (px cipher)";
-    fc_pg_decrypt_iv => "decrypt_iv() (px cipher)";
     fc_pg_armor => "armor() (pgp-armor.c)";
     fc_pg_dearmor => "dearmor() (pgp-armor.c)";
     fc_pgp_armor_headers => "pgp_armor_headers() (pgp-armor.c)";
@@ -119,16 +194,16 @@ fn lookup(function: &str) -> Option<PGFunction> {
     Some(match function {
         "pg_digest" => fc_pg_digest,
         "pg_hmac" => fc_pg_hmac,
-        "pg_random_bytes" => fc_pg_random_bytes,
-        "pg_random_uuid" => fc_pg_random_uuid,
-        "pg_check_fipsmode" => fc_pg_check_fipsmode,
-        "pg_crypt" => fc_pg_crypt,
         "pg_gen_salt" => fc_pg_gen_salt,
         "pg_gen_salt_rounds" => fc_pg_gen_salt_rounds,
+        "pg_crypt" => fc_pg_crypt,
         "pg_encrypt" => fc_pg_encrypt,
         "pg_decrypt" => fc_pg_decrypt,
         "pg_encrypt_iv" => fc_pg_encrypt_iv,
         "pg_decrypt_iv" => fc_pg_decrypt_iv,
+        "pg_random_bytes" => fc_pg_random_bytes,
+        "pg_random_uuid" => fc_pg_random_uuid,
+        "pg_check_fipsmode" => fc_pg_check_fipsmode,
         "pg_armor" => fc_pg_armor,
         "pg_dearmor" => fc_pg_dearmor,
         "pgp_armor_headers" => fc_pgp_armor_headers,
@@ -149,8 +224,8 @@ pub fn init_seams() {
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        // pgcrypto.c's PG_MODULE_MAGIC has no _PG_init (the builtin_crypto_enabled
-        // GUC is registered in _PG_init in 18; unported surface uses no GUC).
+        // pgcrypto.c's builtin_crypto_enabled GUC path is not exercised (no
+        // crypt/cipher disable knob ported); no _PG_init needed.
         pg_init: None,
     });
 }
