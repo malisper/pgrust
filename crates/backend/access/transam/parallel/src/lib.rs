@@ -1023,6 +1023,16 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     }
     gtrace("w.inval.done");
 
+    // A retained thread keeps its previous task's session GUCs (a C worker
+    // is a fresh process; RestoreGUCState overlays postmaster state only);
+    // the transfer below only SETs, so a variable the new leader has at
+    // default would silently keep the old task's value — RESET ALL semantics
+    // (guc.c:2003) rolls them back first. Shipped instance: matview
+    // datafill's RestrictSearchPath search_path='' surviving into later
+    // tasks, breaking worker-side function name lookup.
+    if init_small::wretain::warm_claim() {
+        guc::ResetAllOptions();
+    }
     let _guc_binding = if guc::store::session_guc_bind_enabled() {
         Some(guc::store::bind_session_gucs(&shared.guc_bind)?)
     } else {
