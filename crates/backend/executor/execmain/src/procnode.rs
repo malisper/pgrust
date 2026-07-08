@@ -2091,9 +2091,16 @@ fn modify_table_arm<'mcx>(
     let mps = &mut **mps;
     let subplan = &mut mps.subplan;
     let epq = &mut mps.epq;
+    // outerPlanState(mtstate)->instrument: MERGE's EPQ list switch adjusts
+    // the outer plan's tuple count (InstrUpdateTupleCount leg).
+    let outer_instr_idx = match subplan {
+        PlanStateNode::Instrumented(w) => Some(w.instr_idx),
+        _ => None,
+    };
     ::nodemodifytable::exec_modify_table(
         &mut mps.mt,
         estate,
+        outer_instr_idx,
         |e| exec_proc_node(subplan, e),
         |subs, e, inputslot, rti| {
             // EvalPlanQualSlot keys by the dispatch-current result relation.

@@ -194,6 +194,13 @@ pub struct ModifyTableState<'mcx> {
     // C mt_merge_action's commandType: the WHEN action being executed
     // (routed-INSERT WCO kind selection, nodeModifyTable.c:1079-1081).
     merge_active_cmd: Option<CmdType>,
+    // mt_merge_pending_not_matched: a concurrent update flipped a MATCHED row
+    // after a NOT MATCHED BY SOURCE action already produced the RETURNING
+    // row; the NOT MATCHED [BY TARGET] half runs on the next call.
+    mt_merge_pending_not_matched: Option<ExecSlotId>,
+    // outerPlanState(mtstate)->instrument: the EPQ MATCHED -> NOT MATCHED
+    // list switch counts the source row twice (InstrUpdateTupleCount).
+    outer_instr_idx: Option<u32>,
     // mt_merge_inserted/updated/deleted (EXPLAIN ANALYZE's Tuples: line;
     // skipped is derived by explain as source-total minus these).
     pub mt_merge_inserted: f64,
@@ -678,6 +685,8 @@ pub fn exec_init_modify_table<'mcx>(
         last_insert_remapped: None,
         oc_returning_leaf: None,
         merge_active_cmd: None,
+        mt_merge_pending_not_matched: None,
+        outer_instr_idx: None,
         mt_merge_inserted: 0.0,
         mt_merge_updated: 0.0,
         mt_merge_deleted: 0.0,
@@ -1188,6 +1197,7 @@ fn error_view_not_updatable_merge(rel: &Relation<'_>, action: CmdType) -> Box<Pg
 pub fn exec_modify_table<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
+    outer_instr_idx: Option<u32>,
     mut fetch_outer: impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
     mut epq_eval: impl FnMut(
         &mut Option<executils::EpqSubs<'mcx>>,
@@ -1199,6 +1209,7 @@ pub fn exec_modify_table<'mcx>(
     if mt.mt_done {
         return Ok(None);
     }
+    mt.outer_instr_idx = outer_instr_idx;
     if mt.fireBSTriggers {
         fire_bs_triggers(mt, estate)?;
         mt.fireBSTriggers = false;
@@ -1207,6 +1218,18 @@ pub fn exec_modify_table<'mcx>(
     loop {
         estate.reset_per_tuple_expr_context();
         mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
+
+        // A deferred MERGE ... WHEN NOT MATCHED [BY TARGET] action from the
+        // previous source row runs before fetching the next one (C 4200-4218);
+        // it targets the node's toplevel result relation.
+        if let Some(pending) = mt.mt_merge_pending_not_matched.take() {
+            mt.cur = 0;
+            mt.last_result_oid = 0;
+            if let Some(rslot) = exec_merge_not_matched(mt, estate, pending, &mut epq_eval)? {
+                return Ok(Some(rslot));
+            }
+            continue;
+        }
 
         let Some(plan_slot) = fetch_outer(estate)? else {
             break;
@@ -1416,7 +1439,7 @@ pub fn exec_modify_table<'mcx>(
             CmdType::CMD_DELETE => {
                 let mut tupleid = fetch_row_id(mt, estate, plan_slot);
                 let modified =
-                    exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false, None)?;
+                    exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false, None, None)?;
                 if modified && mt.rel().project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
                     return Ok(Some(exec_process_returning(
@@ -1819,8 +1842,7 @@ fn fetch_merge_row_id<'mcx>(
     Some(unsafe { *(datum.as_usize() as *const ItemPointerData) })
 }
 
-// ExecMerge (nodeModifyTable.c). mt_merge_pending_not_matched is unreachable
-// on this lane: it needs BY SOURCE + BY TARGET actions with RETURNING.
+// ExecMerge (nodeModifyTable.c).
 fn exec_merge<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1843,8 +1865,15 @@ fn exec_merge<'mcx>(
         )?;
     }
     if !matched {
-        debug_assert!(rslot.is_none());
-        rslot = exec_merge_not_matched(mt, estate, plan_slot, epq_eval)?;
+        // A WHEN NOT MATCHED BY SOURCE action may have already produced the
+        // RETURNING row for this source row (concurrent-update flip); the
+        // NOT MATCHED [BY TARGET] action is deferred to the next call
+        // (C 3013-3024, mt_merge_pending_not_matched).
+        if rslot.is_none() {
+            rslot = exec_merge_not_matched(mt, estate, plan_slot, epq_eval)?;
+        } else {
+            mt.mt_merge_pending_not_matched = Some(plan_slot);
+        }
     }
     Ok(rslot)
 }
@@ -1896,8 +1925,16 @@ fn exec_merge_matched<'mcx>(
         None => fetch_old_row_version(mt, estate, tupleid)?,
     }
 
+    // The retained join condition picks the action list: satisfied = MATCHED,
+    // else NOT MATCHED BY SOURCE (C 3128-3139). A NULL condition (no BY
+    // SOURCE actions) always passes. The choice is sticky across concurrent
+    // -update restarts: only the recheck leg may switch it (C actionStates).
+    let mut use_by_source = !merge_join_qual_passes(mt, estate, plan_slot)?;
+
     loop {
-        match exec_merge_matched_scan(mt, estate, plan_slot, tupleid, matched, epq_eval)? {
+        match exec_merge_matched_scan(
+            mt, estate, plan_slot, tupleid, &mut use_by_source, matched, epq_eval,
+        )? {
             MergeMatchedOutcome::Done(rslot) => return Ok(rslot),
             MergeMatchedOutcome::Restart => continue,
             MergeMatchedOutcome::NotMatched => {
@@ -1908,12 +1945,66 @@ fn exec_merge_matched<'mcx>(
     }
 }
 
-// One pass over the MATCHED action list (the lmerge_matched body).
+// The ri_MergeJoinCondition ExecQual (scan = old target tuple, inner = plan
+// row); None (no BY SOURCE actions) evaluates true.
+fn merge_join_qual_passes<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<bool> {
+    let old_id = mt.rel().ri_oldTupleSlot.expect("ExecInitMergeTupleSlots ran");
+    pre_eval_param_deps(
+        mt.rel().merge.as_ref().expect("merge state").join_condition.as_deref(),
+        estate,
+    )?;
+    let jc_subplans = mt
+        .rel()
+        .merge
+        .as_ref()
+        .expect("merge state")
+        .join_condition
+        .as_deref()
+        .is_some_and(|q| q.has_subplan());
+    let node_ecxt = mt.node_ecxt;
+    let ModifyTableState { rels, cur, .. } = &mut *mt;
+    let merge = rels[*cur].merge.as_mut().expect("merge state");
+    match merge.join_condition.as_deref_mut() {
+        None => Ok(true),
+        Some(jc) => {
+            if jc_subplans {
+                let ec = node_ecxt.expect("node ecxt created with MERGE");
+                estate.reset_expr_context(ec);
+                {
+                    let e = estate.ecxt_mut(ec);
+                    e.ecxt_scantuple = Some(old_id);
+                    e.ecxt_innertuple = Some(plan_slot);
+                    e.ecxt_outertuple = None;
+                }
+                executils::exec_qual_with_subplans(Some(jc), estate, ec)
+            } else {
+                let EStateData { es_tupleTable, .. } = &mut *estate;
+                let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
+                assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
+                let base = es_tupleTable.as_mut_ptr();
+                // SAFETY: distinct in-bounds indices of one live slice.
+                let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
+                let mut slots =
+                    EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
+                execexpr::exec_qual(Some(jc), &mut slots)
+            }
+        }
+    }
+}
+
+// One pass over the MATCHED (or NOT MATCHED BY SOURCE) action list — the
+// lmerge_matched body. `use_by_source` is the caller-held actionStates
+// choice; the concurrent-update recheck leg may flip it to BY SOURCE.
 fn exec_merge_matched_scan<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
     tupleid: &mut ItemPointerData,
+    use_by_source: &mut bool,
     matched: &mut bool,
     epq_eval: &mut impl FnMut(
         &mut Option<executils::EpqSubs<'mcx>>,
@@ -1926,57 +2017,11 @@ fn exec_merge_matched_scan<'mcx>(
     let output_cid = estate.es_output_cid;
     let old_id = mt.rel().ri_oldTupleSlot.expect("ExecInitMergeTupleSlots ran");
     let new_id = mt.rel().ri_newTupleSlot.expect("ExecInitMergeTupleSlots ran");
-
-    // With BY SOURCE actions the retained join condition is rechecked above
-    // the join: satisfied = MATCHED list, else NOT MATCHED BY SOURCE list
-    // (C 3128-3139). A NULL condition means only MATCHED actions exist.
-    let use_by_source = {
-        pre_eval_param_deps(
-            mt.rel().merge.as_ref().expect("merge state").join_condition.as_deref(),
-            estate,
-        )?;
-        let jc_subplans = mt
-            .rel()
-            .merge
-            .as_ref()
-            .expect("merge state")
-            .join_condition
-            .as_deref()
-            .is_some_and(|q| q.has_subplan());
-        let node_ecxt = mt.node_ecxt;
-        let ModifyTableState { rels, cur, .. } = &mut *mt;
-        let merge = rels[*cur].merge.as_mut().expect("merge state");
-        match merge.join_condition.as_deref_mut() {
-            None => false,
-            Some(jc) => {
-                if jc_subplans {
-                    let ec = node_ecxt.expect("node ecxt created with MERGE");
-                    estate.reset_expr_context(ec);
-                    {
-                        let e = estate.ecxt_mut(ec);
-                        e.ecxt_scantuple = Some(old_id);
-                        e.ecxt_innertuple = Some(plan_slot);
-                        e.ecxt_outertuple = None;
-                    }
-                    !executils::exec_qual_with_subplans(Some(jc), estate, ec)?
-                } else {
-                    let EStateData { es_tupleTable, .. } = &mut *estate;
-                    let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
-                    assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
-                    let base = es_tupleTable.as_mut_ptr();
-                    // SAFETY: distinct in-bounds indices of one live slice.
-                    let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
-                    let mut slots =
-                        EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
-                    !execexpr::exec_qual(Some(jc), &mut slots)?
-                }
-            }
-        }
-    };
+    let by_source = *use_by_source;
 
     let n_actions = {
         let m = mt.rel().merge.as_ref().expect("merge state");
-        if use_by_source {
+        if by_source {
             m.not_matched_by_source_actions.len()
         } else {
             m.matched_actions.len()
@@ -1988,7 +2033,7 @@ fn exec_merge_matched_scan<'mcx>(
             let node_ecxt = mt.node_ecxt;
             {
                 let merge = mt.rel().merge.as_ref().expect("merge state");
-                let action = if use_by_source {
+                let action = if by_source {
                     &merge.not_matched_by_source_actions[ai]
                 } else {
                     &merge.matched_actions[ai]
@@ -1996,7 +2041,7 @@ fn exec_merge_matched_scan<'mcx>(
                 pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
             }
             let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-            let action = if use_by_source {
+            let action = if by_source {
                 &mut merge.not_matched_by_source_actions[ai]
             } else {
                 &mut merge.matched_actions[ai]
@@ -2062,7 +2107,7 @@ fn exec_merge_matched_scan<'mcx>(
             {
                 // INSTEAD OF ROW UPDATE triggers on a view target
                 // (C 3202-3213); the epilogue's WCO_VIEW_CHECK still applies.
-                merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
+                merge_project_update(mt, estate, ai, by_source, plan_slot)?;
                 if !ir_row_triggers(
                     mt,
                     estate,
@@ -2108,9 +2153,12 @@ fn exec_merge_matched_scan<'mcx>(
                 TM_Result::TM_Ok
             }
             CmdType::CMD_UPDATE => {
-                merge_project_update(mt, estate, ai, use_by_source, plan_slot)?;
+                merge_project_update(mt, estate, ai, by_source, plan_slot)?;
                 // ExecUpdatePrologue: BEFORE ROW UPDATE triggers; a NULL
-                // return is C's "do nothing" (goto out, no count).
+                // return is C's "do nothing" (goto out, no count). A
+                // concurrent update seen by the trigger fetch breaks to the
+                // TM_Updated recheck below (C's prologue-false + break).
+                let mut trig_tm = None;
                 if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_update_before_row) {
                     match merge_tuple_for_trigger(mt, estate, tupleid)? {
                         MergeTrigFetch::Fetched(trig_old) => {
@@ -2132,33 +2180,42 @@ fn exec_merge_matched_scan<'mcx>(
                         MergeTrigFetch::Deleted => {
                             return Ok(MergeMatchedOutcome::NotMatched);
                         }
+                        MergeTrigFetch::Updated(fd) => {
+                            tmfd = fd;
+                            trig_tm = Some(TM_Result::TM_Updated);
+                        }
                     }
                 }
-                match merge_update_act(mt, estate, tupleid, new_id, &mut tmfd, &mut *epq_eval)? {
-                    MergeUpdActRes::Tm(r) => r,
-                    // C ExecMergeMatched crossPartUpdate leg: the INSERT half
-                    // counted the row; RETURNING reports the inserted row
-                    // (cpUpdateReturningSlot).
-                    MergeUpdActRes::CrossPart(inserted) => {
-                        mt.mt_merge_updated += 1.0;
-                        let mut rslot = None;
-                        if let Some(islot) = inserted {
-                            if mt.rel().project_returning.is_some() {
-                                rslot = Some(exec_cross_part_returning(
-                                    mt,
-                                    estate,
-                                    Some(old_id),
-                                    islot,
-                                    plan_slot,
-                                )?);
+                if let Some(r) = trig_tm {
+                    r
+                } else {
+                    match merge_update_act(mt, estate, tupleid, new_id, &mut tmfd, &mut *epq_eval)? {
+                        MergeUpdActRes::Tm(r) => r,
+                        // C ExecMergeMatched crossPartUpdate leg: the INSERT half
+                        // counted the row; RETURNING reports the inserted row
+                        // (cpUpdateReturningSlot).
+                        MergeUpdActRes::CrossPart(inserted) => {
+                            mt.mt_merge_updated += 1.0;
+                            let mut rslot = None;
+                            if let Some(islot) = inserted {
+                                if mt.rel().project_returning.is_some() {
+                                    rslot = Some(exec_cross_part_returning(
+                                        mt,
+                                        estate,
+                                        Some(old_id),
+                                        islot,
+                                        plan_slot,
+                                    )?);
+                                }
                             }
+                            return Ok(MergeMatchedOutcome::Done(rslot));
                         }
-                        return Ok(MergeMatchedOutcome::Done(rslot));
                     }
                 }
             }
             CmdType::CMD_DELETE => {
                 // ExecDeletePrologue: BEFORE ROW DELETE triggers.
+                let mut trig_tm = None;
                 if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_delete_before_row) {
                     match merge_tuple_for_trigger(mt, estate, tupleid)? {
                         MergeTrigFetch::Fetched(trig_old) => {
@@ -2180,9 +2237,17 @@ fn exec_merge_matched_scan<'mcx>(
                         MergeTrigFetch::Deleted => {
                             return Ok(MergeMatchedOutcome::NotMatched);
                         }
+                        MergeTrigFetch::Updated(fd) => {
+                            tmfd = fd;
+                            trig_tm = Some(TM_Result::TM_Updated);
+                        }
                     }
                 }
-                merge_delete_act(mt, estate, tupleid, &mut tmfd)?
+                if let Some(r) = trig_tm {
+                    r
+                } else {
+                    merge_delete_act(mt, estate, tupleid, &mut tmfd)?
+                }
             }
             CmdType::CMD_NOTHING => TM_Result::TM_Ok,
             other => panic!("unknown action in MERGE WHEN clause: {other:?}"),
@@ -2212,9 +2277,13 @@ fn exec_merge_matched_scan<'mcx>(
                 if xact::IsolationUsesXactSnapshot() {
                     return Err(serialization_conflict("update"));
                 }
-                // Concurrent update: lock the latest version and re-run the
-                // join via EvalPlanQual (was_matched is always true here).
-                let inputslot = eval_plan_qual_slot(mt, estate);
+                // Concurrent update: lock the latest version. A MATCHED
+                // action then rechecks the join via EvalPlanQual; a NOT
+                // MATCHED BY SOURCE action relocks in place and restarts
+                // (cannot switch back to MATCHED) — C 3358-3375.
+                let was_matched = !by_source;
+                let inputslot =
+                    if was_matched { eval_plan_qual_slot(mt, estate) } else { old_id };
                 let lock_result = {
                     let EStateData { es_relations, es_tupleTable, es_snapshot, .. } =
                         &mut *estate;
@@ -2238,25 +2307,60 @@ fn exec_merge_matched_scan<'mcx>(
                 match lock_result {
                     TM_Result::TM_Ok => {
                         *tupleid = estate.slot(inputslot).base().tts_tid;
-                        let rti = mt.rel().rti;
-                        let Some(epqslot) = epq_eval(&mut mt.epq_subs, estate, inputslot, rti)?
-                        else {
-                            // Inner join no longer matches and there are no
-                            // NOT MATCHED actions reachable through it.
-                            return Ok(MergeMatchedOutcome::Done(None));
-                        };
-                        let mut isnull = false;
-                        let _ = exectuples::slot_getattr(
-                            &mut estate.es_tupleTable[epqslot.0 as usize],
-                            mt.rel().ri_RowIdAttNo as i32,
-                            &mut isnull,
-                        );
-                        if isnull {
-                            // Join quals no longer pass: NOT MATCHED now.
-                            return Ok(MergeMatchedOutcome::NotMatched);
+                        // The current MERGE implementation can't follow a
+                        // row moved to another partition (C 3395-3402).
+                        if types_tuple::ItemPointerIndicatesMovedPartitions(tupleid) {
+                            return Err(Box::new(
+                                PgError::error(
+                                    "tuple to be merged was already moved to another \
+                                     partition due to concurrent update",
+                                )
+                                .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                            ));
                         }
-                        fetch_old_row_version(mt, estate, tupleid)?;
-                        debug_assert!(*matched);
+                        if was_matched {
+                            let rti = mt.rel().rti;
+                            let Some(epqslot) =
+                                epq_eval(&mut mt.epq_subs, estate, inputslot, rti)?
+                            else {
+                                // Inner join no longer matches and there are
+                                // no NOT MATCHED actions reachable through it.
+                                return Ok(MergeMatchedOutcome::Done(None));
+                            };
+                            // A NULL ctid junk attr from the recheck subplan
+                            // means the join quals no longer pass: switch to
+                            // the NOT MATCHED BY SOURCE case (C 3427-3436).
+                            let mut isnull = false;
+                            let _ = exectuples::slot_getattr(
+                                &mut estate.es_tupleTable[epqslot.0 as usize],
+                                mt.rel().ri_RowIdAttNo as i32,
+                                &mut isnull,
+                            );
+                            if isnull {
+                                *matched = false;
+                            }
+                            fetch_old_row_version(mt, estate, tupleid)?;
+                            if *matched {
+                                *matched = merge_join_qual_passes(mt, estate, plan_slot)?;
+                            }
+                            if !*matched {
+                                *use_by_source = true;
+                                // The one previously matched outer row now
+                                // counts as two not-matched ones
+                                // (InstrUpdateTupleCount leg, C 3452-3465).
+                                if let Some(idx) = mt.outer_instr_idx {
+                                    let m = mt.rel().merge.as_ref().expect("merge state");
+                                    if !m.not_matched_by_source_actions.is_empty()
+                                        && !m.not_matched_actions.is_empty()
+                                    {
+                                        ::instrument::instr_update_tuple_count(
+                                            &mut estate.es_instrumentation[idx as usize],
+                                            1.0,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         return Ok(MergeMatchedOutcome::Restart);
                     }
                     TM_Result::TM_Deleted => return Ok(MergeMatchedOutcome::NotMatched),
@@ -2498,13 +2602,14 @@ fn merge_update_act<'mcx>(
         }
     };
     if cross_part {
-        // C: MERGE gets the concurrency tmresult back for redispatch; the
-        // port's delete leg folds those into the moved/no-op outcome (see
-        // exec_cross_partition_update).
         return match exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval)? {
             CrossPartResult::Done(inserted) => Ok(MergeUpdActRes::CrossPart(inserted)),
+            CrossPartResult::MergeConcurrent(tm, fd) => {
+                *tmfd = fd;
+                Ok(MergeUpdActRes::Tm(tm))
+            }
             CrossPartResult::Retry(_) => {
-                unreachable!("MERGE cross-partition retry folds to Done in the delete leg")
+                unreachable!("MERGE cross-partition concurrency surfaces as MergeConcurrent")
             }
         };
     }
@@ -3385,6 +3490,9 @@ fn exec_update<'mcx>(
                     slot_id = retry;
                     continue;
                 }
+                CrossPartResult::MergeConcurrent(..) => {
+                    unreachable!("MergeConcurrent only surfaces under CMD_MERGE")
+                }
             }
         }
 
@@ -3567,6 +3675,10 @@ fn exec_update<'mcx>(
 enum CrossPartResult {
     Done(Option<ExecSlotId>),
     Retry(ExecSlotId),
+    // MERGE leg: the DELETE half saw a concurrent update/delete;
+    // ExecMergeMatched redispatches on the TM_Result (C ExecUpdateAct
+    // "if operation == CMD_MERGE return result").
+    MergeConcurrent(TM_Result, TM_FailureData),
 }
 
 // ExecCrossPartitionUpdate (nodeModifyTable.c): move an updated tuple to
@@ -3592,18 +3704,33 @@ fn exec_cross_partition_update<'mcx>(
     // Row movement, part 1: delete, marking the tuple moved (changingPart).
     // The delete epilogue files the row into the UPDATE OLD transition table;
     // the insert epilogue files the new row as UPDATE NEW.
+    let is_merge = mt.operation == CmdType::CMD_MERGE;
+    let mut merge_state = (TM_Result::TM_Ok, TM_FailureData::default());
     let mut epqslot: Option<ExecSlotId> = None;
-    if !exec_delete(mt, estate, tupleid, epq_eval, true, Some(&mut epqslot))? {
+    let deleted = exec_delete(
+        mt,
+        estate,
+        tupleid,
+        epq_eval,
+        true,
+        Some(&mut epqslot),
+        if is_merge { Some(&mut merge_state) } else { None },
+    )?;
+    if !deleted {
+        // MERGE leaves a concurrently updated/deleted row to ExecMergeMatched
+        // (it must recheck, and might run a different action entirely) —
+        // C "return *tmresult == TM_Ok".
+        if is_merge {
+            if merge_state.0 != TM_Result::TM_Ok {
+                return Ok(CrossPartResult::MergeConcurrent(merge_state.0, merge_state.1));
+            }
+            return Ok(CrossPartResult::Done(None));
+        }
         match epqslot {
             // C TupIsNull(epqslot): vanished/blocked tuple skips the INSERT —
             // never turning one row into two.
             None => return Ok(CrossPartResult::Done(None)),
             Some(eslot) => {
-                // C MERGE leaves the recheck to the caller (tmresult TM_Ok
-                // folds to done-without-insert there).
-                if mt.operation == CmdType::CMD_MERGE {
-                    return Ok(CrossPartResult::Done(None));
-                }
                 // Fetch the most recent version of the old tuple and project
                 // the new tuple to retry the UPDATE with.
                 debug_assert!(mt.rel().ri_projectNewInfoValid);
@@ -3948,14 +4075,45 @@ fn exec_delete<'mcx>(
     // and the EPQ-rechecked slot handed back for the cross-partition caller
     // to retry the UPDATE with.
     mut epqreturnslot: Option<&mut Option<ExecSlotId>>,
+    // C tmresult out-param, passed only from a MERGE cross-partition update:
+    // a concurrent update/delete returns false without EPQ retry here, and
+    // ExecMergeMatched redispatches on the (TM_Result, TM_FailureData).
+    mut merge_out: Option<&mut (TM_Result, TM_FailureData)>,
 ) -> PgResult<bool> {
     let output_cid = estate.es_output_cid;
     let mut tmfd = TM_FailureData::default();
 
     if mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_delete_before_row) {
-        let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
-            TrigFetch::Skip => return Ok(false),
-            TrigFetch::Proceed { old_slot, epq } => (old_slot, epq),
+        let old_slot = if let Some(out) = merge_out.as_deref_mut() {
+            // ExecBRDeleteTriggers(is_merge_delete=true): skip the EPQ
+            // recheck, hand the concurrency status back to lmerge_matched.
+            match merge_tuple_for_trigger(mt, estate, tupleid)? {
+                MergeTrigFetch::Fetched(slot) => slot,
+                MergeTrigFetch::SelfModified(fd) => {
+                    *out = (TM_Result::TM_SelfModified, fd);
+                    return Ok(false);
+                }
+                MergeTrigFetch::Deleted => {
+                    *out = (TM_Result::TM_Deleted, TM_FailureData::default());
+                    return Ok(false);
+                }
+                MergeTrigFetch::Updated(fd) => {
+                    *out = (TM_Result::TM_Updated, fd);
+                    return Ok(false);
+                }
+            }
+        } else {
+            let (old_slot, epq) = match get_tuple_for_trigger(mt, estate, tupleid, epq_eval)? {
+                TrigFetch::Skip => return Ok(false),
+                TrigFetch::Proceed { old_slot, epq } => (old_slot, epq),
+            };
+            // ExecBRDeleteTriggers: when the caller asked for the updated
+            // row, skip the trigger and the delete and pass the EPQ slot back.
+            if let (Some(eslot), Some(out)) = (epq, epqreturnslot.as_deref_mut()) {
+                *out = Some(eslot);
+                return Ok(false);
+            }
+            old_slot
         };
         // ExecBRDeleteTriggers: when the caller asked for the updated row,
         // skip the trigger and the delete and pass the EPQ slot back.
@@ -3998,6 +4156,9 @@ fn exec_delete<'mcx>(
                 changing_part,
             )?
         };
+        if let Some(out) = merge_out.as_deref_mut() {
+            *out = (result, tmfd);
+        }
 
         match result {
             TM_Result::TM_Ok => break,
@@ -4010,6 +4171,13 @@ fn exec_delete<'mcx>(
             TM_Result::TM_Updated => {
                 if xact::IsolationUsesXactSnapshot() {
                     return Err(serialization_conflict("update"));
+                }
+                if merge_out.is_some() {
+                    // C ExecDelete locks + rechecks here too, then hands the
+                    // row back untouched via epqreturnslot; lmerge_matched's
+                    // own lock + EvalPlanQual is the one that acts, so skip
+                    // straight to it.
+                    return Ok(false);
                 }
                 let inputslot = eval_plan_qual_slot(mt, estate);
                 let lock_result = {
@@ -4526,11 +4694,14 @@ fn fetch_wholerow_tuple_opt<'mcx>(
 
 // GetTupleForTrigger outcomes MERGE must tell apart: C's ExecMergeMatched
 // maps a BEFORE ROW prologue's TM_SelfModified to the 21000/27000-exact
-// errors and TM_Deleted to the NOT MATCHED flip instead of a silent skip.
+// errors, TM_Deleted to the NOT MATCHED flip instead of a silent skip, and
+// TM_Updated (do_epq_recheck=false, trigger.c 3431-3436) to its own
+// EvalPlanQual recheck, which may run a different action entirely.
 enum MergeTrigFetch {
     Fetched(ExecSlotId),
     SelfModified(TM_FailureData),
     Deleted,
+    Updated(TM_FailureData),
 }
 
 fn merge_tuple_for_trigger<'mcx>(
@@ -4570,10 +4741,7 @@ fn merge_tuple_for_trigger<'mcx>(
         TM_Result::TM_SelfModified => Ok(MergeTrigFetch::SelfModified(tmfd)),
         TM_Result::TM_Ok => {
             if tmfd.traversed {
-                panic!(
-                    "GetTupleForTrigger (trigger.c): EPQ recheck after a \
-                     concurrent update unported on the MERGE BEFORE ROW path"
-                );
+                return Ok(MergeTrigFetch::Updated(tmfd));
             }
             Ok(MergeTrigFetch::Fetched(slot_id))
         }
@@ -7417,7 +7585,8 @@ mcx::forget_safe_struct!(
         insert_target_root, last_result_oid, result_oid_attno, returning_slot,
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         last_insert_remapped, oc_returning_leaf,
-        mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd;
+        mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd,
+        mt_merge_pending_not_matched, outer_instr_idx;
         operation, rels, root, snapshot_any, on_conflict, epq_subs,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
