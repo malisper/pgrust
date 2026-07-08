@@ -2186,9 +2186,32 @@ fn finalize_plan<'mcx>(
             let rel = crate::relnode::find_base_rel(root, ss.scan.scanrelid as i32);
             let idx = root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
             let subroot = &run.rel_subroots[idx].root;
-            let sub_outer = &subroot.outer_params;
+            // subselect.c:2554-2560: the subquery finalizes under its subroot
+            // with the parent Gather's rescan param carried across (a
+            // parallel-aware node inside the subquery hangs off our Gather).
+            let mut subquery_params = types_nodes::bitmapset::Bitmapset::empty();
+            if let Some(b) = &subroot.outer_params {
+                for (i, w) in b.word_slice().iter().enumerate() {
+                    let mut w = *w;
+                    while w != 0 {
+                        let bit = w.trailing_zeros();
+                        subquery_params.add_member(mcx, (i as i32) * 64 + bit as i32)?;
+                        w &= w - 1;
+                    }
+                }
+            }
+            if gather_param >= 0 {
+                subquery_params.add_member(mcx, gather_param)?;
+            }
             let subplan = ss.subplan.expect("SubqueryScan subplan");
-            ss_finalize_plan(run, subroot, subplan, sub_outer)?;
+            finalize_plan(
+                run,
+                subroot,
+                subplan,
+                gather_param,
+                &subquery_params,
+                &types_nodes::bitmapset::Bitmapset::empty(),
+            )?;
             paramids
                 .add_members(mcx, &subplan.as_plan().expect("plan node").extParam)?;
             paramids.add_members(mcx, scan_params)?;
