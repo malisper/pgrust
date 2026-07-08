@@ -1832,9 +1832,8 @@ fn create_modifytable_plan<'mcx>(
     path_id: PathId,
 ) -> PgResult<Node<'mcx>> {
     let mcx = run.mcx;
-    let (subpath_id, operation, can_set_tag, nominal, root_rel, part_cols_updated, result_relations, epq_param, onconflict_id) = {
+    let (subpath_id, operation, can_set_tag, nominal, root_rel, part_cols_updated, result_relations, epq_param, onconflict_id, row_mark_ids) = {
         let PathNode::ModifyTablePath(p) = run.root.path(path_id) else { unreachable!() };
-        debug_assert!(p.rowMarks.is_empty());
         (
             p.subpath.expect("ModifyTablePath has a subpath"),
             p.operation,
@@ -1845,6 +1844,7 @@ fn create_modifytable_plan<'mcx>(
             crate::relnode::pgvec_clone_shallow(mcx, &p.resultRelations),
             p.epqParam,
             p.onconflict,
+            crate::relnode::pgvec_clone_shallow(mcx, &p.rowMarks),
         )
     };
     use types_nodes::nodes_enums::CmdType;
@@ -1924,6 +1924,11 @@ fn create_modifytable_plan<'mcx>(
     }
     plan.resultRelations = rr;
     plan.epqParam = epq_param;
+    // make_modifytable: PlanRowMark nodes materialize from the run store
+    // (C shares root->rowMarks pointers) — the executor's EPQ aux rowmarks.
+    for &id in row_mark_ids.iter() {
+        plan.rowMarks.lappend(mcx, Node::mk(mcx, *run.rowmark(id))?)?;
+    }
     plan.returningOldAlias = run.parse().returningOldAlias;
     plan.returningNewAlias = run.parse().returningNewAlias;
     if let Some(ocid) = onconflict_id {

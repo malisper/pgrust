@@ -844,7 +844,19 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
         NodeTag::T_ModifyTable => {
             let m = plan.as_modify_table().unwrap();
             debug_assert!(m.plan.targetlist.is_nil() && m.plan.qual.is_nil());
-            debug_assert!(m.rowMarks.is_nil());
+            if rtoffset != 0 {
+                for rc_node in &plan.as_modify_table().unwrap().rowMarks {
+                    // SAFETY: exclusive plan-tree ownership (prologue note).
+                    unsafe {
+                        rc_node.with_mut::<types_nodes::plannodes::PlanRowMark, _>(|rc| {
+                            rc.rti += rtoffset as u32;
+                            rc.prti += rtoffset as u32;
+                        })
+                    }
+                    .expect("PlanRowMark");
+                }
+            }
+            let m = plan.as_modify_table().unwrap();
             if !m.withCheckOptionLists.is_nil() {
                 debug_assert_eq!(m.withCheckOptionLists.len(), m.resultRelations.len());
                 let mut new_wlists = NodeList::nil();

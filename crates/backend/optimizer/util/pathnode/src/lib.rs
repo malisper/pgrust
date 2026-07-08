@@ -285,6 +285,7 @@ pub fn create_modifytable_path<'mcx>(
     onconflict: Option<types_pathnodes::NodeId>,
     merge_action_lists: PgVec<'mcx, PgVec<'mcx, types_pathnodes::NodeId>>,
     merge_join_conditions: PgVec<'mcx, Option<types_pathnodes::NodeId>>,
+    row_marks: PgVec<'mcx, types_pathnodes::PlanRowMarkId>,
 ) -> PathNode<'mcx> {
     let sub = run.root.path(subpath_id).base();
     let path = Path {
@@ -316,7 +317,7 @@ pub fn create_modifytable_path<'mcx>(
         updateColnosLists: update_colnos_lists,
         withCheckOptionLists: with_check_option_lists,
         returningLists: returning_lists,
-        rowMarks: PgVec::new_in(run.mcx),
+        rowMarks: row_marks,
         onconflict,
         epqParam: 0,
         mergeActionLists: merge_action_lists,

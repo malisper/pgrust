@@ -132,6 +132,11 @@ pub struct ModifyTableState<'mcx> {
     cross_part_root_slot: Option<ExecSlotId>,
     /// This node's C EPQState.relsubs_* (execmain swaps them live per run).
     pub epq_subs: Option<executils::EpqSubs<'mcx>>,
+    // C EvalPlanQualInit's arowMarks: (rti, junk-attno fetch spec) per
+    // non-locking source-rel PlanRowMark.
+    epq_arowmarks: mcx::PgVec<'mcx, (u32, executils::EpqRowMarkFetch)>,
+    // C EvalPlanQualSetSlot: the outer plan row currently being processed.
+    epq_origslot: Option<ExecSlotId>,
     on_conflict: Option<OnConflictState<'mcx>>,
     // ON CONFLICT DO UPDATE's locked pre-update row, carried to the INSERT
     // arm's RETURNING (C processes it inside ExecUpdate instead).
@@ -348,10 +353,52 @@ pub fn exec_init_modify_table<'mcx>(
     if !node.fdwPrivLists.is_nil() {
         panic!("ExecInitModifyTable (nodeModifyTable.c): FDW lists not ported");
     }
-    // rowMarks arrive with UPDATE/DELETE ... FROM (EPQ aux rowmarks) and
-    // FOR UPDATE over inherited targets — both loud in the planner today
-    // (preprocess_rowmarks / expand_inherited_rtentry).
-    debug_assert!(node.rowMarks.is_nil());
+    // C's arowmarks loop: resolve each non-parent PlanRowMark's junk attnos
+    // against the subplan targetlist (ExecFindRowMark + ExecBuildAuxRowMark);
+    // the EPQ recheck re-fetches these source rows instead of rescanning.
+    let mut epq_arowmarks: mcx::PgVec<'mcx, (u32, executils::EpqRowMarkFetch)> =
+        mcx::PgVec::new_in(estate.es_query_cxt);
+    if !node.rowMarks.is_nil() {
+        let outer_tlist = &node
+            .plan
+            .lefttree
+            .expect("ModifyTable has a subplan")
+            .as_plan()
+            .expect("subplan is a Plan")
+            .targetlist;
+        for rc_node in &node.rowMarks {
+            let rc = rc_node.as_plan_row_mark().expect("rowMarks cell is a PlanRowMark");
+            if rc.isParent {
+                continue;
+            }
+            let rte = estate.exec_rt_fetch(rc.rti);
+            if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_RELATION
+                && !estate.es_unpruned_relids.is_member(rc.rti as i32)
+            {
+                continue;
+            }
+            let erm = estate.es_rowmarks[(rc.rti - 1) as usize]
+                .expect("InitPlan built the ExecRowMark for every PlanRowMark rti");
+            use types_nodes::plannodes::RowMarkType;
+            debug_assert!(erm.rti == erm.prti, "inherited source marks not ported");
+            let fetch = if erm.markType == RowMarkType::ROW_MARK_COPY {
+                let name = format!("wholerow{}", erm.rowmarkId);
+                let n = exec_find_junk_attribute_in_tlist(outer_tlist, &name);
+                assert!(n != 0, "could not find junk {name} column");
+                executils::EpqRowMarkFetch::Copy { whole_attno: n }
+            } else {
+                assert!(
+                    erm.markType == RowMarkType::ROW_MARK_REFERENCE,
+                    "ExecInitModifyTable: locking rowmark under ModifyTable"
+                );
+                let name = format!("ctid{}", erm.rowmarkId);
+                let n = exec_find_junk_attribute_in_tlist(outer_tlist, &name);
+                assert!(n != 0, "could not find junk {name} column");
+                executils::EpqRowMarkFetch::Reference { ctid_attno: n }
+            };
+            epq_arowmarks.push((rc.rti, fetch));
+        }
+    }
     let total_nrels = node.resultRelations.len();
 
     // The unpruned-filter loop (C 4670-4726): keep each unpruned rti with its
@@ -649,6 +696,8 @@ pub fn exec_init_modify_table<'mcx>(
         mt_done: false,
         fireBSTriggers: true,
         epq_subs: None,
+        epq_arowmarks,
+        epq_origslot: None,
         rels,
         root,
         cur: 0,
@@ -1234,6 +1283,13 @@ pub fn exec_modify_table<'mcx>(
         let Some(plan_slot) = fetch_outer(estate)? else {
             break;
         };
+
+        // C EvalPlanQualSetSlot: the EPQ rowmark fetch reads this row's junk
+        // ctid/wholerow columns to re-return the source rel's tuple.
+        mt.epq_origslot = Some(plan_slot);
+        if let Some(subs) = mt.epq_subs.as_mut() {
+            subs.origslot = Some(plan_slot);
+        }
 
         // Multi-result-relation dispatch: the junk tableoid column names the
         // relation this row came from (C 4263-4311). A NULL tableoid is a
@@ -3287,12 +3343,17 @@ fn ensure_mt_epq_subs<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &EStateData
         return;
     }
     let mcx = estate.es_query_cxt;
-    let ModifyTableState { rels, epq_subs, .. } = mt;
+    let ModifyTableState { rels, epq_subs, epq_arowmarks, epq_origslot, .. } = mt;
     let subs = executils::ensure_epq_subs(epq_subs, mcx, estate.epq_rtsize(), rels[0].rti);
     for r in rels.iter() {
         subs.relsubs_blocked[(r.rti - 1) as usize] = true;
         subs.relsubs_done[(r.rti - 1) as usize] = true;
     }
+    // C EvalPlanQualStart's relsubs_rowmark loop + EvalPlanQualSetSlot.
+    for &(rti, fetch) in epq_arowmarks.iter() {
+        subs.relsubs_rowmark[(rti - 1) as usize] = Some(fetch);
+    }
+    subs.origslot = *epq_origslot;
 }
 
 fn eval_plan_qual_slot<'mcx>(
@@ -7586,8 +7647,8 @@ mcx::forget_safe_struct!(
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         last_insert_remapped, oc_returning_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd,
-        mt_merge_pending_not_matched, outer_instr_idx;
-        operation, rels, root, snapshot_any, on_conflict, epq_subs,
+        mt_merge_pending_not_matched, outer_instr_idx, epq_origslot;
+        operation, rels, root, snapshot_any, on_conflict, epq_subs, epq_arowmarks,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
         leaf_on_conflict, leaf_existing,

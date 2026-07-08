@@ -115,8 +115,97 @@ fn epq_fetch<'mcx, N: ScanNode<'mcx>>(
         }
         return Ok(EpqFetch::Tuple(test));
     }
-    // relsubs_rowmark unreachable (rowmarks loud); no test tuple falls through.
+    if let Some(rm) = subs.relsubs_rowmark[idx] {
+        subs.relsubs_done[idx] = true;
+        let orig = subs.origslot.expect("EPQ rowmark fetch requires EvalPlanQualSetSlot");
+        return epq_fetch_row_mark(node, estate, rm, orig);
+    }
+    // No test tuple and no rowmark: a plain rescannable rel falls through.
     Ok(EpqFetch::FallThrough)
+}
+
+// EvalPlanQualFetchRowMark (execMain.c), non-locking marks only: re-return
+// the origslot row's junk ctid (ROW_MARK_REFERENCE, refetched under
+// SnapshotAny) or wholerow datum (ROW_MARK_COPY) through the scan slot.
+fn epq_fetch_row_mark<'mcx, N: ScanNode<'mcx>>(
+    node: &mut N,
+    estate: &mut EStateData<'mcx>,
+    rm: ::executils::EpqRowMarkFetch,
+    orig: ExecSlotId,
+) -> PgResult<EpqFetch> {
+    let mcx = estate.es_query_cxt;
+    let ss_slot = node.ss_mut().ss_ScanTupleSlot;
+    let scanrelid = node.ss_mut().scanrelid;
+    let mut isnull = false;
+    match rm {
+        ::executils::EpqRowMarkFetch::Reference { ctid_attno } => {
+            let datum = exectuples::slot_getattr(
+                estate.slot_mut(orig),
+                ctid_attno as i32,
+                &mut isnull,
+            );
+            if isnull {
+                exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+                return Ok(EpqFetch::Empty);
+            }
+            // SAFETY: a tid datum points at an ItemPointerData inside the
+            // origslot's materialized tuple, live for this row.
+            let tid = unsafe { *(datum.as_usize() as *const types_tuple::ItemPointerData) };
+            let snapshot_any = Some(std::rc::Rc::new(types_snapshot::SnapshotData::sentinel(
+                mcx,
+                types_snapshot::SNAPSHOT_ANY,
+            )));
+            let found = {
+                let EStateData { es_relations, es_tupleTable, .. } = estate;
+                let rel = es_relations[(scanrelid - 1) as usize]
+                    .as_ref()
+                    .expect("rowmark relation opened at InitPlan");
+                tableam::table_tuple_fetch_row_version(
+                    mcx,
+                    rel,
+                    &tid,
+                    &snapshot_any,
+                    &mut es_tupleTable[ss_slot.0 as usize],
+                )?
+            };
+            if !found {
+                return Err(Box::new(::types_error::PgError::error(
+                    "failed to fetch tuple for EvalPlanQual recheck",
+                )));
+            }
+        }
+        ::executils::EpqRowMarkFetch::Copy { whole_attno } => {
+            let datum = exectuples::slot_getattr(
+                estate.slot_mut(orig),
+                whole_attno as i32,
+                &mut isnull,
+            );
+            if isnull {
+                exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+                return Ok(EpqFetch::Empty);
+            }
+            // ExecForceStoreHeapTupleDatum: a composite datum is an in-memory
+            // HeapTupleHeader image; store it through the scan slot.
+            let hdr = datum.as_usize() as *const u8;
+            // SAFETY: wholerow junk datums are in-memory composite images,
+            // live in the origslot for this row.
+            let t_len = unsafe {
+                (*(hdr as *const types_tuple::htup::HeapTupleHeaderData)).datum_length()
+            };
+            let mut tid = types_tuple::ItemPointerData::default();
+            types_tuple::itemptr::ItemPointerSetInvalid(&mut tid);
+            // SAFETY: image bounds established above.
+            let tup = unsafe {
+                types_tuple::HeapTupleData::from_raw_parts(hdr, t_len, tid, types_core::InvalidOid)
+            };
+            exectuples::exec_force_store_heap_tuple(tup, estate.slot_mut(ss_slot), mcx)?;
+        }
+    }
+    if !node.epq_recheck(estate, ss_slot)? {
+        exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
+        return Ok(EpqFetch::Empty);
+    }
+    Ok(EpqFetch::Tuple(ss_slot))
 }
 
 #[inline(always)]
