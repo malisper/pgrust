@@ -2072,8 +2072,9 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
             run.root.rel_mut(rel).attr_widths[ndx] = item_width;
             tuple_width += item_width as i64;
         } else if let Some(phv) = node.as_place_holder_var() {
-            // Evaluated elsewhere; bubble-up cost is zero, width from phinfo
-            // (created before placeholdersFrozen, so it must exist here).
+            // The PHV's contained expression is evaluated while scanning this
+            // rel: charge it to reltarget->cost; width from phinfo (created
+            // before placeholdersFrozen, so it must exist here).
             let phinfo_id = run
                 .root
                 .placeholder_array
@@ -2082,6 +2083,10 @@ pub fn set_rel_width<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<(
                 .flatten()
                 .expect("set_rel_width: PlaceHolderInfo missing");
             tuple_width += run.root.phinfo(phinfo_id).ph_width as i64;
+            let cost = cost_qual_eval_node(Some(&mut *run), phv.phexpr)?;
+            let rt = run.root.rel_reltarget_mut(rel);
+            rt.cost.startup += cost.startup;
+            rt.cost.per_tuple += cost.per_tuple;
         } else {
             // C's catch-all: an expression, or a Var of another relation (a
             // lateral reference) — width from the type, eval cost charged.
