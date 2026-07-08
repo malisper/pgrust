@@ -4176,12 +4176,6 @@ fn exec_delete<'mcx>(
             }
             old_slot
         };
-        // ExecBRDeleteTriggers: when the caller asked for the updated row,
-        // skip the trigger and the delete and pass the EPQ slot back.
-        if let (Some(eslot), Some(out)) = (epq, epqreturnslot.as_deref_mut()) {
-            *out = Some(eslot);
-            return Ok(false);
-        }
         if !br_row_triggers(
             mt,
             estate,
