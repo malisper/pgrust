@@ -109,17 +109,21 @@ fn expand_inherited_rtentry<'mcx>(
         debug_assert!(inh_oids.first() == Some(&parent_oid));
         for &child_oid in inh_oids.iter() {
             let newrelation = if child_oid != parent_oid {
-                Some(table::table_open(mcx, child_oid, types_rel::NoLock)?)
+                let r = table::table_open(mcx, child_oid, types_rel::NoLock)?;
+                // Other sessions' temp children cannot be accessed; C silently
+                // omits them from the appendrel (inherit.c).
+                if r.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
+                    && !r.rd_islocaltemp
+                {
+                    r.close(lockmode)?;
+                    continue;
+                }
+                Some(r)
             } else {
                 None
             };
             {
                 let childrel = newrelation.as_ref().unwrap_or(&oldrelation);
-                debug_assert!(
-                    !(childrel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP
-                        && !childrel.rd_islocaltemp),
-                    "other-session temp children unreachable (temp lane is session-local)"
-                );
                 let child_rti =
                     expand_single_inheritance_child(run, rti, &oldrelation, childrel, oldrc)?;
                 crate::relnode::build_simple_rel_child(run, child_rti, rel)?;

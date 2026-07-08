@@ -700,6 +700,15 @@ fn vacuum_rel<'mcx>(
         return Ok(false);
     }
 
+    // Other backends' temp tables are silently skipped — their contents are
+    // not reliably on disk, and warning would be database-wide-VACUUM chatter.
+    if rel.rd_rel.relpersistence == types_core::RELPERSISTENCE_TEMP && !rel.rd_islocaltemp {
+        rel.close(lmode)?;
+        snapmgr::PopActiveSnapshot()?;
+        xact::CommitTransactionCommand()?;
+        return Ok(false);
+    }
+
     // Partitioned tables have no storage; the useful work is on the child
     // partitions queued separately. Returning true lets ANALYZE proceed.
     if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
