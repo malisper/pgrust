@@ -3565,7 +3565,8 @@ mcx::forget_safe_struct!(
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
-        pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans;
+        pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
+        instr_idx;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual },
 );
