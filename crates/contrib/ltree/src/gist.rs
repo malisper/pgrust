@@ -1,47 +1,6 @@
 //! `contrib/ltree/ltree_gist.c` (`gist_ltree_ops`) and `_ltree_gist.c`
 //! (`gist__ltree_ops`, the `ltree[]` array opclass) — the GiST opclass support
 //! functions, ported over pgrust's generic catalog-driven GiST opclass dispatch
-//! (mirroring `pg_trgm`'s `trgm_gist`).
-//!
-//! The GiST core resolves each support proc into an `FmgrInfo`; `gist-proc`'s
-//! `extdispatch` invokes the body here through a real fmgr frame, passing the
-//! `GISTENTRY`/`GistEntryVector`/`GIST_SPLITVEC` + the `*recheck`/`*penalty`/
-//! `*size` out-parameters through the [`::gist::extproc`] internal protocol
-//! struct (slot 0), and the `consistent` query (an `ltree`/`lquery`/`ltxtquery`/
-//! `ltree[]` varlena, per strategy) on the by-ref lane (slot 1).
-//!
-//! ## The `ltree_gist` key
-//!
-//! A GiST key is a varlena: `[VARHDR(4) | flag:uint32 | data]`, with
-//! `LTG_HDRSIZE = MAXALIGN(VARHDRSZ + sizeof(uint32)) = 8`. The `flag` bits
-//! (`ltree.h`):
-//! * `LTG_ONENODE` — a leaf key holding a single `ltree` node (`data` is the
-//!   node, no signature);
-//! * otherwise an inner key: `data` is `[sign(siglen)][left ltree][right ltree?]`
-//!   (`LTG_NORIGHT` means right == left; `LTG_ALLTRUE` means the signature is the
-//!   all-ones bitmap and is NOT stored, so `data` is just `[left][right?]`).
-//!
-//! The varlena length header is encoded `len << 2` (the uncompressed-inline 4B-U
-//! varlena tag), exactly as `repr::set_varsize`; the payload is bounded by
-//! `VARSIZE` so trailing MAXALIGN padding the GiST core adds is ignored.
-//!
-//! ## `siglen`
-//!
-//! C reads the opclass `siglen` option via `LTREE_GET_SIGLEN()` /
-//! `LTREE_GET_ASIGLEN()`. pgrust's generic GiST dispatch does not thread opclass
-//! options to the support procs (the documented `tsvector_ops` divergence), so
-//! the build side uses [`LTREE_SIGLEN_DEFAULT`] / [`LTREE_ASIGLEN_DEFAULT`] and
-//! the read side uses the same default — the index is built and read at one
-//! self-consistent signature length. Results stay correct regardless of the
-//! configured `siglen`: the array opclass's `_ltree_consistent` always sets
-//! `recheck = true` (the heap recheck makes the scan exact), and the scalar
-//! opclass's leaf `ltree_consistent` checks the actual node exactly while inner
-//! signature checks are a Bloom filter (false positives only, no false
-//! negatives → exact final counts). Only an index built with an explicit
-//! non-default `siglen` differs from C in its physical signature length, not in
-//! its results. The `siglen` reloption is still REGISTERED with its range +
-//! "multiple of 4" validator so `WITH (siglen = N)` parses and rejects bad
-//! values exactly as C.
 
 use ::types_error::{ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use ::types_error::{PgError, PgResult};
@@ -51,9 +10,6 @@ use crate::crc::ltree_crc32_sz;
 use crate::op;
 use crate::repr::{intalign, read_u32, set_varsize, varsize, Ltree, Lquery, VARHDRSZ};
 
-// ===========================================================================
-// ltree.h GiST constants.
-// ===========================================================================
 
 const BITBYTE: usize = 8;
 
@@ -69,12 +25,6 @@ pub const LTREE_SIGLEN_DEFAULT: i32 = 2 * 4;
 /// `LTREE_ASIGLEN_DEFAULT = 7 * sizeof(int32)` (28 bytes) for `gist__ltree_ops`.
 pub const LTREE_ASIGLEN_DEFAULT: i32 = 7 * 4;
 
-/// `LTREE_SIGLEN_MAX = LTREE_ASIGLEN_MAX = GISTMaxIndexKeySize`.
-///
-/// `GISTMaxIndexKeySize = MAXALIGN_DOWN((BLCKSZ - SizeOfPageHeaderData -
-/// sizeof(GISTPageOpaqueData)) / 4 - sizeof(ItemIdData)) - MAXALIGN(sizeof(
-/// IndexTupleData))`, the same derivation `trgm_gist`/`tsgistidx` use. With
-/// BLCKSZ=8192 this evaluates to 2024.
 const fn maxalign_down(len: usize) -> usize {
     len & !7usize
 }
@@ -91,13 +41,9 @@ const GIST_MAX_INDEX_KEY_SIZE: usize = maxalign_down(
 /// `LTREE_SIGLEN_MAX` (= 2024 for BLCKSZ=8192).
 pub const LTREE_SIGLEN_MAX: i32 = GIST_MAX_INDEX_KEY_SIZE as i32;
 
-/// `INTALIGN(1)` — the `siglen` reloption minimum for `gist_ltree_ops`.
 pub const SIGLEN_MIN_INTALIGNED: i32 = 4;
 
-/// `offsetof(LtreeGistOptions, siglen)` — the `int siglen` after the 4-byte
-/// varlena header.
 const OFFSETOF_LTREE_GIST_OPTIONS_SIGLEN: i32 = 4;
-/// `sizeof(LtreeGistOptions)` (`int32 vl_len_` + `int siglen`).
 const SIZEOF_LTREE_GIST_OPTIONS: usize = 8;
 
 // `FLG_CANLOOKSIGN(x)` (LOWER_NODE build): no NOT / '*' / '%' bit set.
@@ -108,17 +54,13 @@ fn flg_canlooksign(flag: u8) -> bool {
     flag & (LQL_NOT | LVAR_ANYEND | LVAR_SUBLEXEME) == 0
 }
 
-// ===========================================================================
 // Signature bitmap primitives (ltree.h macros).
 //
 // NB: ltree's SIGLENBIT(siglen) = siglen * BITBYTE (no `-1`, unlike pg_trgm).
-// ===========================================================================
 
 fn siglenbit(siglen: usize) -> usize {
     siglen * BITBYTE
 }
-/// `HASHVAL(val, siglen) = ((unsigned)val) % SIGLENBIT(siglen)`. The CRC is a
-/// `u32`; cast through u32 to match C's `(unsigned int) val`.
 fn hashval(val: i32, siglen: usize) -> usize {
     (val as u32 as usize) % siglenbit(siglen)
 }
@@ -129,11 +71,9 @@ fn setbit(sign: &mut [u8], i: usize) {
     sign[i / BITBYTE] |= 0x01 << (i % BITBYTE);
 }
 
-/// `pg_popcount(sign, siglen)`.
 fn sizebitvec(sign: &[u8]) -> i32 {
     sign.iter().map(|b| b.count_ones() as i32).sum()
 }
-/// `hemdistsign(a, b, siglen)`.
 fn hemdistsign(a: &[u8], b: &[u8], siglen: usize) -> i32 {
     let mut dist = 0;
     for i in 0..siglen {
@@ -142,21 +82,12 @@ fn hemdistsign(a: &[u8], b: &[u8], siglen: usize) -> i32 {
     dist
 }
 
-// ===========================================================================
-// The decoded ltree_gist key.
-// ===========================================================================
 
-/// A decoded `ltree_gist` key. `siglen` is the opclass signature length the
-/// decode was performed with (the layout of LNODE/RNODE depends on it).
 #[derive(Clone, Debug)]
 struct LtgKey {
     flag: u32,
-    /// For ONENODE: the single node. For an inner key: the LEFT node.
     lnode: Vec<u8>,
-    /// For an inner key: the RIGHT node (== lnode when NORIGHT). Empty for
-    /// ONENODE (use `lnode`).
     rnode: Vec<u8>,
-    /// The signature bytes (length `siglen`), or empty when ALLTRUE / ONENODE.
     sign: Vec<u8>,
 }
 
@@ -181,7 +112,6 @@ impl LtgKey {
     }
 }
 
-/// Decode a header-ful `ltree_gist` varlena image at the given `siglen`.
 fn decode_key(image: &[u8], siglen: usize) -> PgResult<LtgKey> {
     if image.len() < LTG_HDRSIZE {
         return Err(PgError::error("corrupt ltree_gist GiST key (short header)").into());
@@ -246,8 +176,6 @@ fn decode_key(image: &[u8], siglen: usize) -> PgResult<LtgKey> {
     })
 }
 
-/// Read an `ltree` node at byte offset `off` within `data` (bounded by its own
-/// `VARSIZE`).
 fn read_node(data: &[u8], off: usize) -> PgResult<Vec<u8>> {
     if off + VARHDRSZ > data.len() {
         return Err(PgError::error("corrupt ltree_gist GiST key (truncated node)").into());
@@ -259,9 +187,6 @@ fn read_node(data: &[u8], off: usize) -> PgResult<Vec<u8>> {
     Ok(data[off..off + sz].to_vec())
 }
 
-/// `ltree_gist_alloc(isalltrue, sign, siglen, left, right)` — build a key image.
-/// `sign == None` means a zeroed signature; pass `siglen == 0` to build a
-/// ONENODE key (then `left` is the single node and `isalltrue`/`sign` ignored).
 fn ltree_gist_alloc(
     isalltrue: bool,
     sign: Option<&[u8]>,
@@ -327,7 +252,6 @@ fn iseq(a: &[u8], b: &[u8]) -> bool {
     Ltree::new(a).numlevel() == Ltree::new(b).numlevel() && op::ltree_compare(a, b) == 0
 }
 
-/// `hashing(sign, t, siglen)` (scalar opclass) — set a bit for each level CRC.
 fn hashing(sign: &mut [u8], t: &[u8], siglen: usize) {
     for lvl in Ltree::new(t).levels() {
         let h = ltree_crc32_sz(lvl.name) as i32;
@@ -335,12 +259,7 @@ fn hashing(sign: &mut [u8], t: &[u8], siglen: usize) {
     }
 }
 
-// ===========================================================================
-// gist_ltree_ops (ltree_gist.c)
-// ===========================================================================
 
-/// `ltree_compress(entry)` — a leaf `ltree` becomes a ONENODE key; an inner key
-/// passes through. Returns `Some(new_key)` or `None` (pass-through).
 pub fn ltree_compress(leafkey: bool, key_image: &[u8], key_is_null: bool) -> PgResult<Option<Vec<u8>>> {
     if leafkey {
         if key_is_null {
@@ -355,13 +274,10 @@ pub fn ltree_compress(leafkey: bool, key_image: &[u8], key_is_null: bool) -> PgR
     Ok(None)
 }
 
-/// `ltree_decompress` — only PG_DETOASTs; the owned by-ref lane already delivers
-/// a plain image, so identity (pass-through).
 pub fn ltree_decompress() -> Option<Vec<u8>> {
     None
 }
 
-/// `ltree_same(a, b, &result)` (scalar opclass).
 pub fn ltree_same(a_image: &[u8], b_image: &[u8], siglen: usize) -> PgResult<bool> {
     let a = decode_key(a_image, siglen)?;
     let b = decode_key(b_image, siglen)?;
@@ -387,7 +303,6 @@ pub fn ltree_same(a_image: &[u8], b_image: &[u8], siglen: usize) -> PgResult<boo
     Ok(true)
 }
 
-/// `ltree_union(entryvec, &size)` (scalar opclass).
 pub fn ltree_union(entries: &[(Vec<u8>, bool)], siglen: usize) -> PgResult<Vec<u8>> {
     let mut base = vec![0u8; siglen];
     let mut left: Option<Vec<u8>> = None;
@@ -440,7 +355,6 @@ pub fn ltree_union(entries: &[(Vec<u8>, bool)], siglen: usize) -> PgResult<Vec<u
     ))
 }
 
-/// `ltree_penalty(origentry, newentry, &penalty)` (scalar opclass).
 pub fn ltree_penalty(orig_image: &[u8], new_image: &[u8], siglen: usize) -> PgResult<f32> {
     let origval = decode_key(orig_image, siglen)?;
     let newval = decode_key(new_image, siglen)?;
@@ -450,7 +364,6 @@ pub fn ltree_penalty(orig_image: &[u8], new_image: &[u8], siglen: usize) -> PgRe
     Ok(penalty as f32)
 }
 
-/// `ltree_picksplit(entryvec, &v)` (scalar opclass).
 pub fn ltree_picksplit(
     entries: &[(Vec<u8>, bool)],
     siglen: usize,
@@ -552,8 +465,6 @@ pub fn ltree_picksplit(
 
 // --- consistent helpers (ltree_gist.c) ------------------------------------
 
-/// `gist_isparent(key, query, siglen)` — does `query` (some prefix of it) fall
-/// within `[lnode, rnode]`?
 fn gist_isparent(key: &LtgKey, query: &[u8]) -> bool {
     let numlevel = Ltree::new(query).numlevel() as i32;
     let lnode = key.get_lnode();
@@ -568,7 +479,6 @@ fn gist_isparent(key: &LtgKey, query: &[u8]) -> bool {
     false
 }
 
-/// `gist_ischild(key, query, siglen)`.
 fn gist_ischild(key: &LtgKey, query: &[u8]) -> bool {
     let qn = Ltree::new(query).numlevel();
     let mut left = key.get_lnode().to_vec();
@@ -586,14 +496,12 @@ fn gist_ischild(key: &LtgKey, query: &[u8]) -> bool {
     res
 }
 
-/// Truncate an `ltree` image to its first `n` levels (rebuild a fresh image).
 fn truncate_ltree(t: &[u8], n: usize) -> Vec<u8> {
     let tt = Ltree::new(t);
     let labels: Vec<&[u8]> = tt.levels().take(n).map(|l| l.name).collect();
     crate::repr::build_ltree(&labels)
 }
 
-/// `gist_qe(key, query, siglen)` (scalar opclass) — lquery signature test.
 fn gist_qe(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
     if key.is_alltrue() {
         return true;
@@ -617,8 +525,6 @@ fn gist_qe(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
     true
 }
 
-/// `gist_tqcmp(t, q)` — compare an ltree against the leading "good" levels of an
-/// lquery.
 fn gist_tqcmp(t: &[u8], q: &Lquery) -> i32 {
     let tt = Ltree::new(t);
     let an = tt.numlevel() as i32;
@@ -650,7 +556,6 @@ fn gist_tqcmp(t: &[u8], q: &Lquery) -> i32 {
     an.min(bn) - bn
 }
 
-/// `gist_between(key, query, siglen)`.
 fn gist_between(key: &LtgKey, query: &[u8]) -> bool {
     let q = Lquery::new(query);
     if q.firstgood() == 0 {
@@ -665,7 +570,6 @@ fn gist_between(key: &LtgKey, query: &[u8]) -> bool {
     true
 }
 
-/// `gist_qtxt(key, query, siglen)` (scalar opclass) — ltxtquery signature test.
 fn gist_qtxt(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
     if key.is_alltrue() {
         return true;
@@ -678,8 +582,6 @@ fn gist_qtxt(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
     )
 }
 
-/// `arrq_cons(key, _query, siglen)` — `?` operator: any lquery in the array
-/// matches the inner key (scalar opclass).
 fn arrq_cons(key: &LtgKey, query_array: &[u8], siglen: usize) -> PgResult<bool> {
     let arr = LtreeArray::parse(query_array);
     arr.check_1d_no_nulls()?;
@@ -691,9 +593,6 @@ fn arrq_cons(key: &LtgKey, query_array: &[u8], siglen: usize) -> PgResult<bool> 
     Ok(false)
 }
 
-/// `ltree_consistent(entry, query, strategy, subtype, recheck)`. The query rides
-/// the by-ref lane (its payload is the header-ful varlena image). Returns
-/// `(matched, recheck)`; all scalar-opclass cases are EXACT (`recheck = false`).
 pub fn ltree_consistent(
     is_leaf: bool,
     key_image: &[u8],
@@ -799,12 +698,6 @@ pub fn ltree_consistent(
     Ok((res, false))
 }
 
-/// `ltree_gist_relopts_validator` — `siglen` must be a multiple of `ALIGNOF_INT`
-/// (4). Reads `options->siglen` from the parsed `LtreeGistOptions` bytea. The
-/// reloptions builder produces the full fixed-size struct INCLUDING the 4-byte
-/// varlena header (`allocateReloptStruct` + `fillRelOptions`'s `SET_VARSIZE`),
-/// exactly the `void *parsed_options` C's validator receives, so `siglen` sits
-/// at byte offset `offsetof(LtreeGistOptions, siglen) = 4`.
 pub fn ltree_gist_relopts_validator(parsed: &mut [u8]) -> Result<(), String> {
     let siglen = read_options_siglen(parsed);
     if siglen != intalign(siglen as usize) as i32 {
@@ -813,8 +706,6 @@ pub fn ltree_gist_relopts_validator(parsed: &mut [u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the `siglen` field out of a parsed `LtreeGistOptions` bytea at
-/// `offsetof(LtreeGistOptions, siglen)` (after the 4-byte varlena header).
 fn read_options_siglen(parsed: &[u8]) -> i32 {
     let off = OFFSETOF_LTREE_GIST_OPTIONS_SIGLEN as usize;
     if parsed.len() >= off + 4 {
@@ -824,19 +715,11 @@ fn read_options_siglen(parsed: &[u8]) -> i32 {
     }
 }
 
-// ===========================================================================
-// gist__ltree_ops (_ltree_gist.c) — the ltree[] array opclass.
-// ===========================================================================
 
-/// `hashing(sign, t, siglen)` (array opclass — AHASH, same math here as the
-/// scalar one since ASIGLENBIT == SIGLENBIT).
 fn ahashing(sign: &mut [u8], t: &[u8], siglen: usize) {
     hashing(sign, t, siglen)
 }
 
-/// `_ltree_compress(entry)` (array opclass). A leaf `ltree[]` becomes a
-/// signature key; an all-0xff inner signature rewrites to ALLTRUE; else
-/// pass-through.
 pub fn array_compress(
     leafkey: bool,
     key_image: &[u8],
@@ -874,7 +757,6 @@ pub fn array_compress(
     Ok(None)
 }
 
-/// `_ltree_same(a, b, &result)` (array opclass).
 pub fn array_same(a_image: &[u8], b_image: &[u8], siglen: usize) -> PgResult<bool> {
     let a = decode_key(a_image, siglen)?;
     let b = decode_key(b_image, siglen)?;
@@ -888,7 +770,6 @@ pub fn array_same(a_image: &[u8], b_image: &[u8], siglen: usize) -> PgResult<boo
     Ok(res)
 }
 
-/// `_ltree_union(entryvec, &size)` (array opclass).
 pub fn array_union(entries: &[(Vec<u8>, bool)], siglen: usize) -> PgResult<Vec<u8>> {
     let mut base = vec![0u8; siglen];
     let mut isalltrue = false;
@@ -912,7 +793,6 @@ pub fn array_union(entries: &[(Vec<u8>, bool)], siglen: usize) -> PgResult<Vec<u
     }
 }
 
-/// `hemdist(a, b, siglen)` (array opclass).
 fn ahemdist(a: &LtgKey, b: &LtgKey, siglen: usize) -> i32 {
     if a.is_alltrue() {
         if b.is_alltrue() {
@@ -927,20 +807,17 @@ fn ahemdist(a: &LtgKey, b: &LtgKey, siglen: usize) -> i32 {
     }
 }
 
-/// `_ltree_penalty(origentry, newentry, &penalty)` (array opclass).
 pub fn array_penalty(orig_image: &[u8], new_image: &[u8], siglen: usize) -> PgResult<f32> {
     let origval = decode_key(orig_image, siglen)?;
     let newval = decode_key(new_image, siglen)?;
     Ok(ahemdist(&origval, &newval, siglen) as f32)
 }
 
-/// `WISH_F(a, b, c)`.
 fn wish_f(a: i32, b: i32, c: f64) -> f64 {
     let d = (a - b) as f64;
     -(d * d * d) * c
 }
 
-/// `_ltree_picksplit(entryvec, &v)` (array opclass).
 pub fn array_picksplit(
     entries: &[(Vec<u8>, bool)],
     siglen: usize,
@@ -1067,7 +944,6 @@ pub fn array_picksplit(
     Ok((spl_left, spl_right, ldatum, rdatum))
 }
 
-/// A synthetic signature-only key for `ahemdist` math during picksplit.
 fn make_seed_key(allistrue: bool, sign: &[u8]) -> LtgKey {
     LtgKey {
         flag: if allistrue { LTG_ALLTRUE } else { 0 },
@@ -1079,8 +955,6 @@ fn make_seed_key(allistrue: bool, sign: &[u8]) -> LtgKey {
 
 // --- array consistent helpers (_ltree_gist.c) -----------------------------
 
-/// `gist_te(key, query, siglen)` — `ltree[] @> ltree` / `<@`: every level CRC of
-/// `query` is present in `key`'s signature.
 fn gist_te(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
     if key.is_alltrue() {
         return true;
@@ -1095,7 +969,6 @@ fn gist_te(key: &LtgKey, query: &[u8], siglen: usize) -> bool {
     true
 }
 
-/// `_arrq_cons(key, _query, siglen)` — `?` operator (array opclass).
 fn array_arrq_cons(key: &LtgKey, query_array: &[u8], siglen: usize) -> PgResult<bool> {
     let arr = LtreeArray::parse(query_array);
     arr.check_1d_no_nulls()?;
@@ -1107,8 +980,6 @@ fn array_arrq_cons(key: &LtgKey, query_array: &[u8], siglen: usize) -> PgResult<
     Ok(false)
 }
 
-/// `_ltree_consistent(entry, query, strategy, subtype, recheck)` (array
-/// opclass). All cases are INEXACT (`recheck = true`).
 pub fn array_consistent(
     key_image: &[u8],
     key_is_null: bool,
@@ -1134,22 +1005,12 @@ pub fn array_consistent(
     Ok((res, true))
 }
 
-// ===========================================================================
-// options procs.
-// ===========================================================================
 
 pub const OFFSETOF_SIGLEN: usize = OFFSETOF_LTREE_GIST_OPTIONS_SIGLEN as usize;
 pub const SIZEOF_GIST_OPTIONS: usize = SIZEOF_LTREE_GIST_OPTIONS;
 
 
-// ===========================================================================
-// shared helpers.
-// ===========================================================================
 
-/// Canonicalize a by-ref varlena image to a plain 4-byte-header image the repr
-/// walkers (which read `VARSIZE = word >> 2`) expect. The boundary normalizes
-/// args to the 4-byte inline form, so this is the identity for those; it only
-/// rewrites a 1-byte "short" header if one survives (defensive).
 fn canonical_varlena(image: &[u8]) -> Vec<u8> {
     match image.first() {
         // 1-byte short header (VARATT_IS_1B): byte 0 has low bit set, byte 0 != 0x01.

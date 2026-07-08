@@ -1,7 +1,6 @@
 //! `contrib/ltree/ltree_io.c` + `ltxtquery_io.c` — the in/out parsers for
 //! `ltree`, `lquery`, and `ltxtquery`. Each parser is a faithful port of the
 //! C state machine (the regression suite compares exact parse results AND the
-//! exact syntax-error messages / character positions).
 
 use ::types_error::{
     ERRCODE_NAME_TOO_LONG, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
@@ -11,14 +10,11 @@ use ::types_error::PgError;
 use crate::crc::ltree_crc32_sz;
 use crate::repr::*;
 
-/// `pg_mblen_cstr(ptr)` over the remaining bytes (the input is a real cstring,
-/// so there is always at least the current byte).
 #[inline]
 fn mblen(s: &[u8]) -> usize {
     ::mbutils::pg_mblen(s).max(1) as usize
 }
 
-/// `ISLABEL(x)` — alphanumeric, '_' or '-'.
 #[inline]
 fn is_label(s: &[u8]) -> bool {
     let c = s[0];
@@ -56,9 +52,6 @@ fn name_too_long(detail: &str) -> PgError {
         .with_detail(detail.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// ltree
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 struct NodeItem {
@@ -71,7 +64,6 @@ struct NodeItem {
 const LTPRS_WAITNAME: i32 = 0;
 const LTPRS_WAITDELIM: i32 = 1;
 
-/// `finish_nodeitem` — compute the byte length and validate (empty/too-long).
 fn finish_nodeitem(
     buf: &[u8],
     lptr: &mut NodeItem,
@@ -82,7 +74,6 @@ fn finish_nodeitem(
     let mut ptr = ptr;
     let mut pos = pos;
     if is_lquery {
-        // Back up over trailing flag characters @ * %, discounting length/pos.
         while ptr > lptr.start && matches!(buf[ptr - 1], b'@' | b'*' | b'%') {
             ptr -= 1;
             lptr.wlen -= 1;
@@ -106,13 +97,11 @@ fn finish_nodeitem(
     Ok(())
 }
 
-/// `parse_ltree` → an `ltree` varlena image.
 pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     // buf is the cstring payload (no trailing NUL needed; we treat end-of-slice
     // as the C '\0').
     let n = buf.len();
 
-    // Count '.' to size the node list.
     let mut num = 0i32;
     {
         let mut i = 0;
@@ -181,7 +170,6 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         return Err(syntax_detail("ltree syntax error", "Unexpected end of input."));
     }
 
-    // Build the ltree image.
     let labels: Vec<&[u8]> = list[..lptr_idx]
         .iter()
         .map(|it| &buf[it.start..it.start + it.len])
@@ -189,7 +177,6 @@ pub fn parse_ltree(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     Ok(build_ltree(&labels))
 }
 
-/// `deparse_ltree` → the textual cstring payload (no trailing NUL).
 pub fn deparse_ltree(image: &[u8]) -> Vec<u8> {
     let t = Ltree::new(image);
     let mut out = Vec::new();
@@ -202,9 +189,6 @@ pub fn deparse_ltree(image: &[u8]) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// lquery
-// ---------------------------------------------------------------------------
 
 const LQPRS_WAITLEVEL: i32 = 0;
 const LQPRS_WAITDELIM: i32 = 1;
@@ -216,7 +200,6 @@ const LQPRS_WAITCLOSE: i32 = 6;
 const LQPRS_WAITEND: i32 = 7;
 const LQPRS_WAITVAR: i32 = 8;
 
-/// A parsed lquery level, in owned (pre-serialization) form.
 struct PLevel {
     flag: u16,
     low: u16,
@@ -224,7 +207,6 @@ struct PLevel {
     variants: Vec<NodeItem>,
 }
 
-/// `atoi(ptr)` C-style: parse the leading run of digits.
 fn atoi(buf: &[u8], i: usize) -> i32 {
     let mut v: i64 = 0;
     let mut j = i;
@@ -238,13 +220,9 @@ fn atoi(buf: &[u8], i: usize) -> i32 {
     v as i32
 }
 
-/// `parse_lquery` → an `lquery` varlena image.
 pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     let n = buf.len();
 
-    // count '.' (level separators); the C also counts '|' to size the variant
-    // array up-front, but we grow the variant Vec dynamically so we don't need
-    // it.
     let mut num = 0i32;
     {
         let mut i = 0;
@@ -264,7 +242,6 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         )));
     }
 
-    // Owned levels; we push one per '.'-separated level. Start with one level.
     let mut levels: Vec<PLevel> = Vec::with_capacity(num as usize);
     levels.push(PLevel {
         flag: 0,
@@ -278,7 +255,6 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     let mut state = LQPRS_WAITLEVEL;
     let mut pos = 1i32;
 
-    // helper to push a new empty level (NEXTLEV)
     macro_rules! nextlev {
         () => {{
             levels.push(PLevel {
@@ -359,7 +335,6 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
                     state = LQPRS_WAITLEVEL;
                     nextlev!();
                 } else if is_label(&buf[i..]) {
-                    // disallow more chars after a flag
                     if levels[cur].variants[lvar].flag != 0 {
                         return Err(syntax_at("lquery", pos));
                     }
@@ -458,7 +433,6 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
 
         i += cl;
         if state == LQPRS_WAITDELIM {
-            // wlen counts characters of the current variant
             levels[cur].variants[lvar].wlen += 1;
         }
         pos += 1;
@@ -472,25 +446,21 @@ pub fn parse_lquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
         return Err(syntax_detail("lquery syntax error", "Unexpected end of input."));
     }
 
-    // Number of levels actually allocated equals `num`.
     debug_assert_eq!(levels.len() as i32, num);
 
     serialize_lquery(buf, &levels, num as u16, hasnot)
 }
 
-/// `finish_nodeitem(lptr, ptr, true, pos)` for lquery variants.
 fn finish_variant(buf: &[u8], v: &mut NodeItem, ptr: usize, pos: i32) -> Result<(), PgError> {
     finish_nodeitem(buf, v, ptr, true, pos)
 }
 
-/// Build the `lquery` varlena image from the parsed levels.
 fn serialize_lquery(
     buf: &[u8],
     levels: &[PLevel],
     num: u16,
     hasnot: bool,
 ) -> Result<Vec<u8>, PgError> {
-    // Compute total length.
     let mut totallen = LQUERY_HDRSIZE;
     for lvl in levels {
         totallen += LQL_HDRSIZE;
@@ -511,8 +481,6 @@ fn serialize_lquery(
     let mut off = LQUERY_HDRSIZE;
     for lvl in levels {
         let numvar = lvl.variants.len() as u16;
-        // Write LQL header.
-        // cur->totallen computed as we go.
         let lql_off = off;
         write_u16(&mut out, lql_off + 2, lvl.flag); // flag
         write_u16(&mut out, lql_off + 4, numvar); // numvar
@@ -549,7 +517,6 @@ fn serialize_lquery(
     Ok(out)
 }
 
-/// `deparse_lquery` → textual cstring payload (no trailing NUL).
 pub fn deparse_lquery(image: &[u8]) -> Vec<u8> {
     let q = Lquery::new(image);
     let mut out = Vec::new();
@@ -589,7 +556,6 @@ pub fn deparse_lquery(image: &[u8]) -> Vec<u8> {
             } else if low == 0 {
                 if high == LTREE_MAX_LEVELS as u16 {
                     if numvar == 0 {
-                        // default for '*', print nothing
                     } else {
                         out.extend_from_slice(b"{,}");
                     }
@@ -606,15 +572,11 @@ pub fn deparse_lquery(image: &[u8]) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// ltxtquery
-// ---------------------------------------------------------------------------
 
 const WAITOPERAND: i32 = 1;
 const INOPERAND: i32 = 2;
 const WAITOPERATOR: i32 = 3;
 
-/// Owned NODE for the polish-notation list (reverse order, like C).
 #[derive(Clone, Copy)]
 struct QNode {
     typ: i32,
@@ -632,12 +594,10 @@ struct QprsState<'a> {
     /// reverse-polish list (newest first, matching C's prepend `tmp->next = str`)
     str: Vec<QNode>,
     num: i32,
-    // operand buffer
     op: Vec<u8>,
     sumlen: i32,
 }
 
-/// gettoken_query token kinds returned alongside the polish parse.
 struct Tok {
     kind: i32,
     val: i32,
@@ -667,7 +627,6 @@ impl<'a> QprsState<'a> {
     }
 }
 
-/// `gettoken_query` — pull the next token. Returns Err on hard syntax error.
 fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
     let mut flag: u16 = 0;
     let mut strval: usize = 0;
@@ -752,7 +711,6 @@ fn gettoken_query(st: &mut QprsState) -> Result<Tok, PgError> {
     }
 }
 
-/// `pushquery` — prepend a NODE.
 fn pushquery(
     st: &mut QprsState,
     typ: i32,
@@ -774,7 +732,6 @@ fn pushquery(
     Ok(())
 }
 
-/// `pushval_asis` — push a VAL node and append its operand bytes.
 fn pushval_asis(
     st: &mut QprsState,
     typ: i32,
@@ -797,7 +754,6 @@ fn pushval_asis(
 
 const STACKDEPTH: usize = 32;
 
-/// `makepol` — produce the reverse-polish list. Recursive.
 fn makepol(st: &mut QprsState, depth: u32) -> Result<i32, PgError> {
     if depth > 10_000 {
         return Err(PgError::error("stack depth limit exceeded")
@@ -866,7 +822,6 @@ fn makepol(st: &mut QprsState, depth: u32) -> Result<i32, PgError> {
     Ok(END)
 }
 
-/// `findoprnd` — set each operator's `left` back-link over the ITEM array.
 fn findoprnd(items: &mut [Item], pos: &mut usize, depth: u32) -> Result<(), PgError> {
     if depth > 10_000 {
         return Err(PgError::error("stack depth limit exceeded")
@@ -890,7 +845,6 @@ fn findoprnd(items: &mut [Item], pos: &mut usize, depth: u32) -> Result<(), PgEr
     Ok(())
 }
 
-/// `queryin` → an `ltxtquery` varlena image.
 pub fn parse_ltxtquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     let mut st = QprsState {
         buf,
@@ -952,7 +906,6 @@ pub fn parse_ltxtquery(buf: &[u8]) -> Result<Vec<u8>, PgError> {
     Ok(out)
 }
 
-/// INFIX printer for ltxtquery (`infix` in C). Recursive over the ITEM array.
 struct Infix<'a> {
     items: &'a [Item],
     cur: usize, // index into items
@@ -1030,7 +983,6 @@ impl<'a> Infix<'a> {
     }
 }
 
-/// `deparse_ltxtquery` (the `ltxtq_out`/`ltxtq_send` infix body).
 pub fn deparse_ltxtquery(image: &[u8]) -> Result<Vec<u8>, PgError> {
     let q = Ltxtquery::new(image);
     if q.size() == 0 {
