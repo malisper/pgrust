@@ -98,11 +98,20 @@ pub fn subquery_planner<'mcx>(
 
     let mut has_outer_joins = false;
     let mut has_result_rtes = false;
+    // Gates for the two outlined passes below: `!rtable.is_nil()` is never
+    // false here (replace_empty_jointree gives FROM-less queries an
+    // RTE_RESULT), so gate on RTE content instead — SELECT 1 pays neither
+    // call (select1 instruction bracket).
+    let mut saw_view_rte = false;
+    let mut needs_rte_expr_pre = false;
     let mut join_rtes: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
     for (rti0, rte_node) in parse.rtable.iter().enumerate() {
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         match rte.rtekind {
             RTEKind::RTE_RELATION => {
+                if rte.tablesample.is_some() {
+                    needs_rte_expr_pre = true;
+                }
                 if rte.inh {
                     // has_subclass (pg_inherits.c) reads pg_class.relhassubclass
                     // via syscache; the relcache entry carries the same field.
@@ -134,6 +143,7 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_FUNCTION | RTEKind::RTE_VALUES | RTEKind::RTE_TABLEFUNC => {
                 // Expression preprocessing happens in the post-tlist rtable
                 // pass below (planner.c:1007) so SubPlan numbering matches C.
+                needs_rte_expr_pre = true;
             }
             RTEKind::RTE_CTE => {
                 // A self-reference is only legal under a recursive-union level
@@ -149,6 +159,7 @@ pub fn subquery_planner<'mcx>(
             RTEKind::RTE_GROUP => {
                 debug_assert!(parse.hasGroupRTE);
                 run.root.group_rtindex = rti0 as i32 + 1;
+                needs_rte_expr_pre = true;
             }
         }
         if rte.lateral {
@@ -157,6 +168,10 @@ pub fn subquery_planner<'mcx>(
         if !rte.securityQuals.is_nil() {
             run.root.qual_security_level =
                 run.root.qual_security_level.max(rte.securityQuals.len() as u32);
+            needs_rte_expr_pre = true;
+        }
+        if rte.perminfoindex != 0 && rte.relkind == b'v' {
+            saw_view_rte = true;
         }
         // View perminfos flow through unchanged: ExecCheckOneRelPerms'
         // relation-level object_aclcheck arm covers relkind 'v'.
@@ -173,7 +188,7 @@ pub fn subquery_planner<'mcx>(
         }
     }
 
-    if !parse.rtable.is_nil() {
+    if saw_view_rte {
         check_view_perms_at_planner_startup(parse)?;
     }
 
@@ -304,7 +319,7 @@ pub fn subquery_planner<'mcx>(
     // Per-RTE expression preprocessing runs after the top-level lists
     // (planner.c:1007) so SubPlan numbering matches C. Outlined off the
     // subquery_planner hot body (select1 instruction bracket).
-    if !parse.rtable.is_nil() {
+    if needs_rte_expr_pre {
         preprocess_rte_expressions(run, parse, has_sublinks)?;
     }
 

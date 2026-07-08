@@ -101,8 +101,13 @@ pub fn build_simple_rel<'mcx>(
         }
         _ => 0,
     };
-    let check_as_user = (rtekind == RTEKind::RTE_RELATION)
-        .then(|| rte_check_as_user(run, relid as usize));
+    // Hoisted over the `root` borrow (rte_check_as_user reads run.queries);
+    // plain u32, RELATION-arm-only branch — no Option in the hot body.
+    let check_as_user = if rtekind == RTEKind::RTE_RELATION {
+        rte_check_as_user(run, relid as usize)
+    } else {
+        0
+    };
     let root = &mut run.root;
     assert!(relid > 0 && (relid as i32) < root.simple_rel_array_size);
     assert!(root.simple_rel_array[relid as usize].is_none(), "rel {relid} already exists");
@@ -121,7 +126,7 @@ pub fn build_simple_rel<'mcx>(
 
     match rtekind {
         RTEKind::RTE_RELATION => {
-            rel.userid = check_as_user.expect("computed for RTE_RELATION");
+            rel.userid = check_as_user;
         }
         RTEKind::RTE_RESULT => {
             // RTE_RESULT has no columns, nor could it have a whole-row Var.
