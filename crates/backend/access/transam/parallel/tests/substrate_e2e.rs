@@ -426,6 +426,11 @@ fn launch_registered_workers() -> Vec<std::thread::JoinHandle<i32>> {
                 }))
                 .unwrap_err();
                 let code = payload.downcast_ref::<ipc::ProcExitThread>().map(|p| p.code);
+                // proc_exit defers the exit-callback drain to the thread top
+                // (run_child_task in the real server; this rig is that top).
+                if let Some(code) = code {
+                    let _ = ipc::run_deferred_exit_callbacks(code);
+                }
                 if code.is_none() {
                     let msg = payload
                         .downcast_ref::<&str>()

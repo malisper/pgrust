@@ -900,15 +900,25 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     gtrace("w.attached");
 
     // C pq_redirect_to_shm_mq: sub-ERROR client-bound reports become 'N'
-    // messages; ERROR+ is forwarded exactly once from the unwind payload.
+    // messages; plain ERROR is forwarded exactly once from the Err return
+    // below (errfinish never emits it toward the client). FATAL+ IS emitted
+    // at the raise point and proc_exits without returning through the body,
+    // so it is forwarded here — the worker's dying words; the leader's
+    // ProcessParallelMessages downgrades it to ERROR (C
+    // HandleParallelMessages parity).
     let notice_sender = sender.clone();
     let (leader_pid, leader_proc) =
         (shared.parallel_leader_pid, shared.parallel_leader_proc_number);
     let prev_redirect = elog::set_frontend_redirect(Some(Box::new(move |e: &PgError| {
-        if e.level >= ERROR {
+        if e.level == ERROR {
             return;
         }
-        let _ = notice_sender.send(WorkerMessage::Notice(Box::new(e.clone())));
+        let msg = if e.level > ERROR {
+            WorkerMessage::Error(Box::new(e.clone()))
+        } else {
+            WorkerMessage::Notice(Box::new(e.clone()))
+        };
+        let _ = notice_sender.send(msg);
         procsignal::SendProcSignal(
             leader_pid,
             types_storage::storage::ProcSignalReason::PROCSIG_PARALLEL_MESSAGE,
@@ -926,6 +936,25 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     elog::set_frontend_redirect(prev_redirect);
     let result = match body {
         Ok(r) => r,
+        // A FATAL inside the body proc_exits; converting its unwind to an
+        // ERROR would resurrect the exit this thread is committed to (the
+        // deferred callback drain runs at the thread top). The FATAL report
+        // already reached the leader through the redirect above; tell the
+        // leader we are gone and keep unwinding.
+        Err(payload)
+            if payload.is::<ipc::ProcExitThread>()
+                || payload.is::<types_error::PanicExitThread>() =>
+        {
+            MY_PROGRESS_SENDER.with(|c| *c.borrow_mut() = None);
+            drop(sender);
+            procsignal::SendProcSignal(
+                shared.parallel_leader_pid,
+                types_storage::storage::ProcSignalReason::PROCSIG_PARALLEL_MESSAGE,
+                shared.parallel_leader_proc_number,
+            );
+            MY_WORKER_SHARED.with(|s| *s.borrow_mut() = None);
+            std::panic::resume_unwind(payload);
+        }
         Err(payload) => match types_error::pg_error_from_panic(payload) {
             Ok(e) => Err(Box::new(e)),
             Err(payload) => {
