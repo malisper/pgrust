@@ -1015,6 +1015,12 @@ fn pull_agg_input_vars<'mcx>(
                 pull_agg_input_vars(a, out);
             }
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for a in rc.largs.iter().chain(rc.rargs.iter()) {
+                pull_agg_input_vars(a, out);
+            }
+        }
         NodeTag::T_CoerceViaIO => pull_agg_input_vars(node.as_coerce_via_io().unwrap().arg, out),
         NodeTag::T_ArrayCoerceExpr => {
             let a = node.as_array_coerce_expr().unwrap();
