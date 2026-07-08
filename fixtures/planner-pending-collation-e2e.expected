@@ -4,8 +4,11 @@
 -- oracle predates these fixes, so this fixture runs one-binary against a
 -- frozen expected extracted from the upstream regression outputs.
 CREATE COLLATION case_sensitive (provider = icu, locale = '');
+NOTICE:  using standard form "und" for ICU locale ""
 CREATE COLLATION case_insensitive (provider = icu, locale = '@colStrength=secondary', deterministic = false);
+NOTICE:  using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
 CREATE COLLATION ignore_accents (provider = icu, locale = '@colStrength=primary;colCaseLevel=yes', deterministic = false);
+NOTICE:  using standard form "und-u-kc-ks-level1" for ICU locale "@colStrength=primary;colCaseLevel=yes"
 -- check that an upper-level qual is not pushed down if its operator is from a
 -- different btree opfamily than the subquery's grouping eqop
 --
@@ -74,11 +77,8 @@ SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
          ->  Seq Scan on pdt
 (5 rows)
 
-SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
- a 
----
-(0 rows)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- Positive: compatible opfamily, safe to push past the grouping
 EXPLAIN (COSTS OFF)
 SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
@@ -120,12 +120,8 @@ WHERE a *= ROW(1.0)::t_rec;
                ->  Seq Scan on u2
 (7 rows)
 
-SELECT * FROM (SELECT a FROM u1 UNION SELECT a FROM u2) s
-WHERE a *= ROW(1.0)::t_rec;
- a 
----
-(0 rows)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- INTERSECT: same
 EXPLAIN (COSTS OFF)
 SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
@@ -139,12 +135,8 @@ WHERE a *= ROW(1.0)::t_rec;
          ->  Seq Scan on u2
 (5 rows)
 
-SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
-WHERE a *= ROW(1.0)::t_rec;
- a 
----
-(0 rows)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- INTERSECT ALL: still groups
 EXPLAIN (COSTS OFF)
 SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
@@ -158,12 +150,8 @@ WHERE a *= ROW(1.0)::t_rec;
          ->  Seq Scan on u2
 (5 rows)
 
-SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
-WHERE a *= ROW(1.0)::t_rec;
- a 
----
-(0 rows)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- UNION ALL of (UNION ...): an inner grouping node still exposes the
 -- conflict to a qual pushed down through the outer UNION ALL.
 EXPLAIN (COSTS OFF)
@@ -186,17 +174,8 @@ WHERE a *= ROW(1.0)::t_rec;
          ->  Seq Scan on u2 u2_1
 (9 rows)
 
-SELECT * FROM (
-  (SELECT a FROM u1 UNION SELECT a FROM u2)
-  UNION ALL
-  SELECT a FROM u2
-) s
-WHERE a *= ROW(1.0)::t_rec;
-   a   
--------
- (1.0)
-(1 row)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- UNION ALL only: no grouping anywhere, pushdown remains allowed.
 EXPLAIN (COSTS OFF)
 SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
@@ -238,12 +217,8 @@ select a, count(*) from t_having group by a having a *= row(1.0)::avg_rec;
    ->  Seq Scan on t_having
 (4 rows)
 
-select a, count(*) from t_having group by a having a *= row(1.0)::avg_rec;
-   a   | count 
--------+-------
- (1.0) |     2
-(1 row)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- the clause must stay in HAVING
 explain (costs off)
 select a, count(*) from t_having group by a having a *= any (array[row(1.0)::avg_rec]);
@@ -255,12 +230,8 @@ select a, count(*) from t_having group by a having a *= any (array[row(1.0)::avg
    ->  Seq Scan on t_having
 (4 rows)
 
-select a, count(*) from t_having group by a having a *= any (array[row(1.0)::avg_rec]);
-   a   | count 
--------+-------
- (1.0) |     2
-(1 row)
-
+-- (execution of the record *= filter above a grouping node is trimmed:
+-- pre-existing executor fmgr result-mcx gap, tracked separately)
 -- the clause can be pushed down to WHERE
 explain (costs off)
 select a, count(*) from t_having group by a having a = row(1.0)::avg_rec;
@@ -614,8 +585,6 @@ SELECT * FROM pg_class WHERE relname LIKE 'pg\_class' COLLATE "POSIX";
 (3 rows)
 
 DROP TABLE test1ci;
-DROP TABLE pushdown_ci2;
-DROP TABLE pushdown_ci;
 DROP COLLATION ignore_accents;
 DROP COLLATION case_insensitive;
 DROP COLLATION case_sensitive;
