@@ -245,7 +245,10 @@ fn ReleaseAllCachedPlansAtExit(_code: i32, _arg: usize) {
 }
 
 pub fn InitPlanCache() -> PgResult<()> {
-    ipc_seams::on_proc_exit::call(ReleaseAllCachedPlansAtExit, 0);
+    // installed() guard: unit-test rigs call InitPlanCache without ipc.
+    if ipc_seams::on_proc_exit::is_installed() {
+        ipc_seams::on_proc_exit::call(ReleaseAllCachedPlansAtExit, 0);
+    }
     let zero = Datum::from_oid(InvalidOid);
     inval::invalidate::CacheRegisterRelcacheCallback(PlanCacheRelCallback, zero)?;
     inval::invalidate::CacheRegisterSyscacheCallback(PROCOID, PlanCacheObjectCallback, zero)?;
