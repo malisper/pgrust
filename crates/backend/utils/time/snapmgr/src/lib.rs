@@ -83,6 +83,12 @@ struct SnapMgrState {
     // Dead unique copies, xip capacity retained — C's CopySnapshot freelist
     // palloc in TopTransactionContext (rule 7 retained scratch).
     copy_freelist: Vec<Snapshot>,
+    exported: Vec<ExportedSnapshot>,
+}
+
+struct ExportedSnapshot {
+    snapfile: String,
+    snapshot: Snapshot,
 }
 
 impl SnapMgrState {
@@ -154,6 +160,7 @@ fn init_state(slot: &mut Option<ManuallyDrop<SnapMgrState>>) {
         active: Vec::new(),
         registered: Vec::new(),
         copy_freelist: Vec::new(),
+        exported: Vec::new(),
     }));
 }
 
@@ -763,7 +770,15 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
             debug_assert!(!s.registered.is_empty());
             registered_remove(s, &first_xact);
         }
-        // exportedSnapshots cleanup lives with ExportSnapshot (phase 2).
+        for esnap in core::mem::take(&mut s.exported) {
+            if let Err(e) = std::fs::remove_file(&esnap.snapfile) {
+                let _ = ereport(types_error::WARNING)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errmsg(format!("could not unlink file \"{}\": %m", esnap.snapfile))
+                    .finish(loc("AtEOXact_Snapshot"));
+            }
+            registered_remove(s, &esnap.snapshot);
+        }
 
         if s.catalog_valid {
             s.catalog_valid = false;
@@ -803,8 +818,127 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
 }
 
 pub fn XactHasExportedSnapshots() -> bool {
-    // ExportSnapshot is unported (phase 2), so none can exist.
-    false
+    with_state(|s| !s.exported.is_empty())
+}
+
+#[cold]
+#[inline(never)]
+fn export_file_err(e: &std::io::Error, msg: String) -> Box<types_error::PgError> {
+    ereport(ERROR)
+        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        .errcode_for_file_access()
+        .errmsg(msg)
+        .into_error()
+        .with_error_location(loc("ExportSnapshot"))
+        .into()
+}
+
+// ExportSnapshot (snapmgr.c): serialize into pg_snapshots/ and pin a copy
+// for the rest of the transaction; format! rides a per-statement admin path.
+pub fn ExportSnapshot(snapshot: &Snapshot) -> PgResult<String> {
+    let top_xid = xact_seams::get_top_transaction_id_if_any::call();
+
+    if xact_seams::is_sub_transaction::call() {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_ACTIVE_SQL_TRANSACTION)
+            .errmsg("cannot export a snapshot from a subtransaction")
+            .into_error()
+            .with_error_location(loc("ExportSnapshot"))
+            .into());
+    }
+
+    let children = xact_seams::xact_get_committed_children::call()?;
+
+    let my_proc = lmgr_proc::GetPGProcByNumber(lmgr_proc::MyProc().expect("ExportSnapshot requires MyProc"));
+    let proc_number = my_proc.vxid.procNumber.load(Relaxed);
+    let lxid = my_proc.vxid.lxid.load(Relaxed);
+
+    let (path, snapshot) = with_state(|s| {
+        let path = format!(
+            "{SNAPSHOT_EXPORT_DIR}/{proc_number:08X}-{lxid:08X}-{}",
+            s.exported.len() + 1
+        );
+        let copy = copy_snapshot_locked(s, snapshot);
+        s.exported.push(ExportedSnapshot { snapfile: path.clone(), snapshot: copy.clone() });
+        copy.regd_count.set(copy.regd_count.get() + 1);
+        s.registered.push(copy.clone());
+        (path, copy)
+    });
+
+    let mut buf = String::new();
+    use core::fmt::Write;
+    let w = &mut buf;
+    let _ = writeln!(w, "vxid:{proc_number}/{lxid}");
+    let _ = writeln!(w, "pid:{}", init_small::globals::MyProcPid());
+    let _ = writeln!(w, "dbid:{}", init_small::globals::MyDatabaseId());
+    let _ = writeln!(w, "iso:{}", xact_seams::get_xact_iso_level::call());
+    let _ = writeln!(w, "ro:{}", xact_seams::xact_read_only::call() as i32);
+    let _ = writeln!(w, "xmin:{}", snapshot.xmin);
+    let _ = writeln!(w, "xmax:{}", snapshot.xmax);
+
+    // Own top XID joins xip unless past xmax (GetSnapshotData omits it).
+    let add_top_xid =
+        top_xid != InvalidTransactionId && TransactionIdPrecedes(top_xid, snapshot.xmax);
+    let _ = writeln!(w, "xcnt:{}", snapshot.xcnt + add_top_xid as u32);
+    for xid in &snapshot.xip[..snapshot.xcnt as usize] {
+        let _ = writeln!(w, "xip:{xid}");
+    }
+    if add_top_xid {
+        let _ = writeln!(w, "xip:{top_xid}");
+    }
+
+    if snapshot.suboverflowed
+        || snapshot.subxcnt as usize + children.len() > procarray::GetMaxSnapshotSubxidCount()
+    {
+        let _ = writeln!(w, "sof:1");
+    } else {
+        let _ = writeln!(w, "sof:0");
+        let _ = writeln!(w, "sxcnt:{}", snapshot.subxcnt as usize + children.len());
+        for xid in &snapshot.subxip[..snapshot.subxcnt as usize] {
+            let _ = writeln!(w, "sxp:{xid}");
+        }
+        for xid in &children {
+            let _ = writeln!(w, "sxp:{xid}");
+        }
+    }
+    let _ = writeln!(w, "rec:{}", snapshot.takenDuringRecovery as u32);
+
+    let pathtmp = format!("{path}.tmp");
+    let mut f = std::fs::File::create(&pathtmp)
+        .map_err(|e| export_file_err(&e, format!("could not create file \"{pathtmp}\": %m")))?;
+    std::io::Write::write_all(&mut f, buf.as_bytes())
+        .map_err(|e| export_file_err(&e, format!("could not write to file \"{pathtmp}\": %m")))?;
+    drop(f);
+    std::fs::rename(&pathtmp, &path).map_err(|e| {
+        export_file_err(&e, format!("could not rename file \"{pathtmp}\" to \"{path}\": %m"))
+    })?;
+
+    Ok(path[SNAPSHOT_EXPORT_DIR.len() + 1..].to_string())
+}
+
+// Startup-time cleanup of crashed backends' export files; failures stay LOG.
+pub fn DeleteAllExportedSnapshotFiles() {
+    let dir = match std::fs::read_dir(SNAPSHOT_EXPORT_DIR) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = ereport(types_error::LOG)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not open directory \"{SNAPSHOT_EXPORT_DIR}\": %m"))
+                .finish(loc("DeleteAllExportedSnapshotFiles"));
+            return;
+        }
+    };
+    for entry in dir.flatten() {
+        let buf = format!("{SNAPSHOT_EXPORT_DIR}/{}", entry.file_name().to_string_lossy());
+        if let Err(e) = std::fs::remove_file(&buf) {
+            let _ = ereport(types_error::LOG)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not remove file \"{buf}\": %m"))
+                .finish(loc("DeleteAllExportedSnapshotFiles"));
+        }
+    }
 }
 
 // SNAPSHOT_EXPORT_DIR (snapmgr.c), relative to the data directory (the
@@ -961,6 +1095,7 @@ pub fn init_seams() {
     snapmgr_seams::at_subcommit_snapshot::set(AtSubCommit_Snapshot);
     snapmgr_seams::at_subabort_snapshot::set(AtSubAbort_Snapshot);
     snapmgr_seams::xact_has_exported_snapshots::set(XactHasExportedSnapshots);
+    snapmgr_seams::delete_all_exported_snapshot_files::set(DeleteAllExportedSnapshotFiles);
     snapmgr_seams::transaction_xmin::set(TransactionXmin);
     snapmgr_seams::active_snapshot_xmin::set(|| GetActiveSnapshot().xmin);
     snapmgr_seams::get_catalog_snapshot::set(GetCatalogSnapshot);

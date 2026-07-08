@@ -25,6 +25,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Startup-time cleanup of pg_snapshots/ leftovers (crash recovery).
+    pub fn delete_all_exported_snapshot_files()
+);
+
+seam_core::seam!(
     // The snapmgr.c TransactionXmin global (cold: serializable-only callers).
     pub fn transaction_xmin() -> types_core::TransactionId
 );

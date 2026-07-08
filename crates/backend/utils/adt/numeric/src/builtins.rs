@@ -55,6 +55,26 @@ fc_sum! {
     fc_int2_sum: int2_sum(as_i16);
 }
 
+// int8_sum (numeric.c): numeric transition state — no in-place branch, the
+// state is variable size.
+pub fn fc_int8_sum(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a, b] = *fcinfo.args_n::<2>();
+    if a.isnull {
+        if b.isnull {
+            return Ok(fcinfo.return_null());
+        }
+        return img_result(fcinfo, &crate::ops::int64_to_numeric(b.value.as_i64()));
+    }
+    if b.isnull {
+        return Ok(a.value);
+    }
+    // SAFETY: null-checked numeric arg of a non-strict fn.
+    let oldsum = unsafe { num_arg(fcinfo, 0)? };
+    let add = crate::ops::int64_to_numeric(b.value.as_i64());
+    let img = crate::ops::numeric_add_common(oldsum, add.num())?;
+    img_result(fcinfo, &img)
+}
+
 /// C's PG_GETARG_NUMERIC: a 1B-short image (tuple-packed numerics land here
 /// with misaligned digits) expands into the frame's result mcx, mirroring
 /// DatumGetNumeric's detoast into CurrentMemoryContext.
@@ -1254,6 +1274,7 @@ pub const NUMERIC_BUILTINS: &[FmgrBuiltin] = &[
     b(1839, "numeric_stddev_samp", 1, false, fc_numeric_stddev_samp),
     b(1840, "int2_sum", 2, false, fc_int2_sum),
     b(1841, "int4_sum", 2, false, fc_int4_sum),
+    b(1842, "int8_sum", 2, false, fc_int8_sum),
     b(1962, "int2_avg_accum", 2, true, fc_int2_avg_accum),
     b(1963, "int4_avg_accum", 2, true, fc_int4_avg_accum),
     b(1964, "int8_avg", 1, true, fc_int8_avg),

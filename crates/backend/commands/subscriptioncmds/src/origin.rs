@@ -100,8 +100,18 @@ pub(crate) fn replorigin_create(mcx: Mcx<'_>, roname: &str) -> PgResult<Oid> {
     Ok(created)
 }
 
-// replorigin_check_prerequisites(check_origins=false, recoveryOK=false).
-fn replorigin_check_prerequisites_create() -> PgResult<()> {
+// replorigin_check_prerequisites (origin.c); recoveryOK is false at every
+// ported call site.
+fn replorigin_check_prerequisites(check_origins: bool) -> PgResult<()> {
+    if check_origins && guc_tables::vars::max_active_replication_origins.read() == 0 {
+        return Err(Box::new(
+            PgError::error(
+                "cannot query or manipulate replication origin when \
+                 \"max_active_replication_origins\" is 0",
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
     if transam_xlog_seams::recovery_in_progress::call() {
         return Err(Box::new(
             PgError::error("cannot manipulate replication origins during recovery")
@@ -109,6 +119,21 @@ fn replorigin_check_prerequisites_create() -> PgResult<()> {
         ));
     }
     Ok(())
+}
+
+fn replorigin_check_prerequisites_create() -> PgResult<()> {
+    replorigin_check_prerequisites(false)
+}
+
+// No session origin can ever be configured in this build
+// (replorigin_session_setup is unported), so session_replication_state is
+// invariantly NULL.
+#[cold]
+fn no_session_origin_err() -> Box<PgError> {
+    Box::new(
+        PgError::error("no replication origin is configured")
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+    )
 }
 
 // IsReservedOriginName: "none" or "any" (pg_strcasecmp).
@@ -141,14 +166,112 @@ pub fn fc_pg_replication_origin_create(
     Ok(Datum::from_oid(roident))
 }
 
-pub const ORIGIN_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {
-    foid: 6003,
-    name: "pg_replication_origin_create",
-    nargs: 1,
-    strict: true,
-    retset: false,
-    func: fc_pg_replication_origin_create,
-}];
+pub fn fc_pg_replication_origin_session_is_setup(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    replorigin_check_prerequisites_create()?;
+    // C default: replorigin_session_origin = InvalidRepOriginId (origin.c).
+    let origin = if origin_seams::replorigin_session_origin::is_installed() {
+        origin_seams::replorigin_session_origin::call()
+    } else {
+        types_core::InvalidRepOriginId
+    };
+    Ok(Datum::from_bool(origin != types_core::InvalidRepOriginId))
+}
+
+pub fn fc_pg_replication_origin_oid(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    replorigin_check_prerequisites(false)?;
+    // SAFETY: strict fn — arg 0 is a non-null text varlena.
+    let name = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let name = String::from_utf8_lossy(name.data()).into_owned();
+    let roident = replorigin_by_name(&name, true)?;
+    if roident != InvalidOid {
+        return Ok(Datum::from_oid(roident));
+    }
+    Ok(fcinfo.return_null())
+}
+
+pub fn fc_pg_replication_origin_session_reset(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    replorigin_check_prerequisites(true)?;
+    Err(no_session_origin_err())
+}
+
+pub fn fc_pg_replication_origin_session_progress(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    replorigin_check_prerequisites(true)?;
+    Err(no_session_origin_err())
+}
+
+pub fn fc_pg_replication_origin_xact_reset(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    replorigin_check_prerequisites(true)?;
+    if origin_seams::set_replorigin_session_origin_timestamp::is_installed() {
+        origin_seams::set_replorigin_session_origin_timestamp::call(0);
+    }
+    Ok(Datum::from_usize(0))
+}
+
+pub const ORIGIN_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[
+    types_fmgr::FmgrBuiltin {
+        foid: 6003,
+        name: "pg_replication_origin_create",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_pg_replication_origin_create,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 6008,
+        name: "pg_replication_origin_session_is_setup",
+        nargs: 0,
+        strict: true,
+        retset: false,
+        func: fc_pg_replication_origin_session_is_setup,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 6005,
+        name: "pg_replication_origin_oid",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_pg_replication_origin_oid,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 6007,
+        name: "pg_replication_origin_session_reset",
+        nargs: 0,
+        strict: true,
+        retset: false,
+        func: fc_pg_replication_origin_session_reset,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 6009,
+        name: "pg_replication_origin_session_progress",
+        nargs: 1,
+        strict: true,
+        retset: false,
+        func: fc_pg_replication_origin_session_progress,
+    },
+    types_fmgr::FmgrBuiltin {
+        foid: 6011,
+        name: "pg_replication_origin_xact_reset",
+        nargs: 0,
+        strict: true,
+        retset: false,
+        func: fc_pg_replication_origin_xact_reset,
+    },
+];
 
 pub(crate) fn replorigin_by_name(roname: &str, missing_ok: bool) -> PgResult<Oid> {
     let mut roident = InvalidOid;

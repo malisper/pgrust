@@ -17,6 +17,7 @@ snapmgr_seams = { path = "../snapmgr_seams" }
 snapmgr_portal_seams = { path = "../snapmgr_portal_seams" }
 resowner_seams = { path = "../../resowner/resowner_seams" }
 xact_seams = { path = "../../../access/transam/xact_seams" }
+init_small = { path = "../../init/init_small" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
 syscache_seams = { path = "../../cache/syscache_seams" }
 elog = { path = "../../error/elog" }

@@ -48,3 +48,9 @@ fd = { path = "../../../storage/file/fd" }
 parser_small1 = { path = "../../../parser/parser_small1" }
 ruleutils = { path = "../ruleutils" }
 format_type = { path = "../format_type" }
+miscinit = { path = "../../init/miscinit" }
+guc = { path = "../../misc/guc" }
+guc_tables = { path = "../../misc/guc_tables" }
+walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
+superuser_seams = { path = "../../misc/superuser_seams" }
+varsup = { path = "../../../access/transam/varsup" }

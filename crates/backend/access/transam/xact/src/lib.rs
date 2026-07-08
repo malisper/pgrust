@@ -1194,6 +1194,8 @@ pub fn init_seams() {
         .install(GucVarAccessors { get: synchronous_commit, set: SetSynchronousCommit });
 
     xact_seams::transaction_block_status_code::set(TransactionBlockStatusCode);
+    xact_seams::get_xact_iso_level::set(XactIsoLevel);
+    xact_seams::xact_get_committed_children::set(xactGetCommittedChildren);
     xact_seams::get_current_sub_transaction_id::set(GetCurrentSubTransactionId);
     xact_seams::set_xact_accessed_temp_namespace::set(seam_set_xact_accessed_temp_namespace);
     xact_seams::get_current_command_id::set(GetCurrentCommandId);

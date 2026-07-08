@@ -150,6 +150,17 @@ const fn srf(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> Fmg
     FmgrBuiltin { foid, name, nargs, strict: true, retset: true, func }
 }
 
+// pg_export_snapshot (snapmgr.c): hosted with the snapshot builtins (the
+// crate already owns the snapmgr dep).
+pub fn fc_pg_export_snapshot(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let name = snapmgr::ExportSnapshot(&snapmgr::GetActiveSnapshot())?;
+    let mcx = fcinfo.result_mcx();
+    let mut image = ::mcx::vec_with_capacity_in(mcx, 4 + name.len())?;
+    ::mcx::vec_append_bytes(&mut image, &[0u8; 4])?;
+    ::mcx::vec_append_bytes(&mut image, name.as_bytes())?;
+    Ok(varlena_result(Varlena::from_image(image)))
+}
+
 // pg_proc.dat rows over xid8funcs.c prosrcs: the txid_* legacy aliases
 // (2939-2948, 3348, 3360) and the xid8/pg_snapshot rows (5055-5066).
 pub const XID8FUNCS_BUILTINS: &[FmgrBuiltin] = &[
@@ -165,6 +176,7 @@ pub const XID8FUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(2948, "pg_visible_in_snapshot", 2, fc_pg_visible_in_snapshot),
     b(3348, "pg_current_xact_id_if_assigned", 0, fc_pg_current_xact_id_if_assigned),
     b(3360, "pg_xact_status", 1, fc_pg_xact_status),
+    b(3809, "pg_export_snapshot", 0, fc_pg_export_snapshot),
     b(5055, "pg_snapshot_in", 1, fc_pg_snapshot_in),
     b(5056, "pg_snapshot_out", 1, fc_pg_snapshot_out),
     b(5057, "pg_snapshot_recv", 1, fc_pg_snapshot_recv),

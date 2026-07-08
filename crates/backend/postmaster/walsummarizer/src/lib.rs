@@ -1202,4 +1202,8 @@ pub fn init_seams() {
     walsummarizer_seams::get_oldest_unsummarized_lsn::set(|| {
         Ok(GetOldestUnsummarizedLSN(None, None)?.unwrap_or(InvalidXLogRecPtr))
     });
+    walsummarizer_seams::get_wal_summarizer_state::set(|| {
+        let s = GetWalSummarizerState()?;
+        Ok((s.summarized_tli, s.summarized_lsn, s.pending_lsn, s.summarizer_pid))
+    });
 }

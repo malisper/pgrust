@@ -12,3 +12,9 @@ seam_core::seam!(
 seam_core::seam!(
     pub fn get_oldest_unsummarized_lsn() -> PgResult<XLogRecPtr>
 );
+
+seam_core::seam!(
+    // GetWalSummarizerState flattened: (summarized_tli, summarized_lsn,
+    // pending_lsn, summarizer_pid); pid < 0 means no summarizer.
+    pub fn get_wal_summarizer_state() -> PgResult<(u32, XLogRecPtr, XLogRecPtr, i32)>
+);

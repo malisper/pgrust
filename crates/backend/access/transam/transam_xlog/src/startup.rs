@@ -274,8 +274,9 @@ pub fn StartupXLOG() -> PgResult<()> {
         // before anything can read them (reinit.c).
         fd::reinit::ResetUnloggedRelations(fd::reinit::UNLOGGED_RELATION_CLEANUP)?;
 
-        // DeleteAllExportedSnapshotFiles / hot-standby init: archive-recovery
-        // legs, unported (snapmgr).
+        snapmgr_seams::delete_all_exported_snapshot_files::call();
+
+        // Hot-standby init: archive-recovery leg, unported.
         if xlogrecovery_seams::archive_recovery_requested::call()
             && guc_tables::vars::EnableHotStandby.read()
         {

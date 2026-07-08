@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
+snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }

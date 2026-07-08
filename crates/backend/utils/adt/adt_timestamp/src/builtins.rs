@@ -572,6 +572,43 @@ pub fn fc_timestamptz_mi_interval_at_zone(
 
 // interval_support (timestamp.c): SupportRequestSimplify only — an
 // interval_scale cast that cannot truncate becomes a RelabelType.
+// timestamp_support (timestamp.c): SupportRequestSimplify only —
+// TemporalSimplify (datetime.c) with MAX_TIMESTAMP_PRECISION.
+pub fn fc_timestamp_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
+    let [a] = fcinfo.args_n::<1>();
+    let p = a.value.as_usize() as *const NodeTag;
+    // SAFETY: prosupport contract — arg points at a live tag-first node.
+    if unsafe { *p } != NodeTag::T_SupportRequestSimplify {
+        return Ok(Datum::from_usize(0));
+    }
+    // SAFETY: tag checked; the planner owns the request node for the call.
+    let req = unsafe { &*(a.value.as_usize() as *const SupportRequestSimplify) };
+    let fexpr = req
+        .fcall
+        .and_then(|n| n.as_func_expr())
+        .unwrap_or_else(|| panic!("timestamp_support: SupportRequestSimplify without a FuncExpr"));
+    assert!(fexpr.args.len() >= 2);
+    let Some(c) = fexpr.args.nth(1).as_const() else {
+        return Ok(Datum::from_usize(0));
+    };
+    if c.constisnull {
+        return Ok(Datum::from_usize(0));
+    }
+    let source = fexpr.args.nth(0);
+    let old_precis = nodes_core::expr_typmod(source);
+    let new_precis = c.constvalue.as_i32();
+    if new_precis < 0
+        || new_precis == adt_datetime::MAX_TIMESTAMP_PRECISION
+        || (old_precis >= 0 && new_precis >= old_precis)
+    {
+        let mcx = req.mcx.expect("timestamp_support: request carries an mcx");
+        let ret = nodes_core::relabel_to_typmod(mcx, source, new_precis)?;
+        return Ok(Datum::from_usize(ret.as_raw().as_ptr() as usize));
+    }
+    Ok(Datum::from_usize(0))
+}
+
 pub fn fc_interval_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     use ::types_nodes::{supportnodes::SupportRequestSimplify, NodeTag};
     use crate::interval::{intervaltypmodleastfield, INTERVAL_PRECISION};
@@ -1394,6 +1431,7 @@ pub const TIMESTAMP_BUILTINS: &[FmgrBuiltin] = &[
     b(2906, "timestamptypmodout", 1, fc_timestamptypmodout),
     b(2907, "timestamptztypmodin", 1, fc_timestamptztypmodin),
     b(2908, "timestamptztypmodout", 1, fc_timestamptztypmodout),
+    b(3917, "timestamp_support", 1, fc_timestamp_support),
     b(3918, "interval_support", 1, fc_interval_support),
     bn(1843, "interval_avg_accum", 2, fc_interval_avg_accum),
     bn(1844, "interval_avg", 1, fc_interval_avg),

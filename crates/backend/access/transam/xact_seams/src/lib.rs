@@ -78,6 +78,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // XactIsoLevel's numeric value (xact.h).
+    pub fn get_xact_iso_level() -> i32
+);
+
+seam_core::seam!(
+    // xactGetCommittedChildren: committed-subxact XIDs of the top xact.
+    pub fn xact_get_committed_children(
+    ) -> types_error::PgResult<Vec<types_core::TransactionId>>
+);
+
+seam_core::seam!(
     pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool
 );
 
