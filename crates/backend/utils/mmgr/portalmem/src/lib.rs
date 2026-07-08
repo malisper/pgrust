@@ -620,7 +620,14 @@ fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
         }
     }
     // Test fixtures shim only the seams they use.
-    if !execmain_seams::executor_finish_and_park::is_installed() {
+    if !execmain_seams::executor_finish_and_park::is_installed()
+        || !plancache_portal_seams::is_source_generic_plan::is_installed()
+    {
+        return Ok(false);
+    }
+    // A one-shot custom plan never comes back from GetCachedPlan, so the
+    // parked execution could never be retained — take the plain drop path.
+    if !plancache_portal_seams::is_source_generic_plan::call(portal.borrow().cplan) {
         return Ok(false);
     }
 

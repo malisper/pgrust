@@ -195,6 +195,7 @@ pub fn init_seams() {
     plancache_portal_seams::init_plan_cache::set(InitPlanCache);
     plancache_portal_seams::release_cached_plan::set(ReleaseCachedPlan);
     plancache_portal_seams::incr_cached_plan::set(IncrCachedPlan);
+    plancache_portal_seams::is_source_generic_plan::set(CachedPlanIsSourceGeneric);
     // C: plancache.c owns `int plan_cache_mode = PLAN_CACHE_MODE_AUTO`.
     thread_local! {
         static PLAN_CACHE_MODE: core::cell::Cell<i32> =
@@ -511,6 +512,20 @@ pub fn IncrCachedPlan(cplan: CachedPlanHandle) {
         assert!(plan.refcount > 0, "IncrCachedPlan: plan already freed");
         plan.refcount += 1;
     });
+}
+
+// True iff cplan is its source's current generic plan — the only plan a
+// later GetCachedPlan can return unchanged; one-shot custom plans never
+// recur. Caller must hold a refcount on cplan.
+pub fn CachedPlanIsSourceGeneric(cplan: CachedPlanHandle) -> bool {
+    with_cache(|pc| {
+        let src = plan_mut(pc, cplan).source;
+        let (idx, gen) = decode(src.0);
+        pc.sources
+            .get(idx)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| s.handle_gen == gen && s.gplan == Some(cplan))
+    })
 }
 
 pub fn CachedPlanIsValid(h: CachedPlanSourceHandle) -> bool {
