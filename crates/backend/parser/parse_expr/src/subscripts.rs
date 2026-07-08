@@ -23,6 +23,7 @@ const F_JSONB_SUBSCRIPT_HANDLER: Oid = 6098;
 pub enum SubscriptHandler {
     Array,
     Jsonb,
+    Hstore,
 }
 
 pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptHandler, Oid)>> {
@@ -33,7 +34,17 @@ pub fn subscript_handler_for(container_type: Oid) -> PgResult<Option<(SubscriptH
             Ok(Some((SubscriptHandler::Array, typelem)))
         }
         F_JSONB_SUBSCRIPT_HANDLER => Ok(Some((SubscriptHandler::Jsonb, typelem))),
-        other => panic!("getSubscriptingRoutines: typsubscript handler {other} unported"),
+        // Extension handlers carry dynamic oids; match by proname (the GIN
+        // TrgmOps precedent).
+        other => {
+            let cx = ::mcx::MemoryContext::new("subscript handler probe");
+            let name = lsyscache::get_func_name(cx.mcx(), other)?
+                .map(|n| n.as_str().to_string());
+            match name.as_deref() {
+                Some("hstore_subscript_handler") => Ok(Some((SubscriptHandler::Hstore, typelem))),
+                _ => panic!("getSubscriptingRoutines: typsubscript handler {other} unported"),
+            }
+        }
     }
 }
 
@@ -116,6 +127,9 @@ pub fn transformContainerSubscripts<'mcx>(
         }
         SubscriptHandler::Jsonb => {
             jsonb_subscript_transform(mcx, pstate, &mut sbsref, indirection, is_slice)?;
+        }
+        SubscriptHandler::Hstore => {
+            hstore_subscript_transform(mcx, pstate, &mut sbsref, indirection, is_slice)?;
         }
     }
 
@@ -302,6 +316,82 @@ fn jsonb_subscript_transform<'mcx>(
     sbsref.refupperindexpr = upper;
     sbsref.reflowerindexpr = OptNodeList::nil();
     sbsref.refrestype = JSONBOID;
+    sbsref.reftypmod = -1;
+    Ok(())
+}
+
+#[cold]
+fn hstore_one_subscript(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("hstore allows only one subscript".to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "hstore_subs.c",
+                0,
+                "hstore_subscript_transform",
+            )),
+    )
+}
+
+#[cold]
+fn hstore_subscript_not_text(pstate: &ParseState<'_, '_>, location: ParseLoc) -> Box<PgError> {
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg("hstore subscript must have type text".to_string())
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
+            .into_error()
+            .with_error_location(ErrorLocation::new(
+                "hstore_subs.c",
+                0,
+                "hstore_subscript_transform",
+            )),
+    )
+}
+
+// hstore_subscript_transform (hstore_subs.c): single non-slice subscript
+// coerced to text (assignment coercion); result type always text.
+fn hstore_subscript_transform<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'_, 'mcx>,
+    sbsref: &mut SubscriptingRef<'mcx>,
+    indirection: &NodeList<'mcx>,
+    is_slice: bool,
+) -> PgResult<()> {
+    let expr_kind = pstate.p_expr_kind;
+    if is_slice || indirection.len() != 1 {
+        let loc = indirection
+            .iter()
+            .next()
+            .and_then(|el| el.as_a_indices().and_then(|ai| ai.uidx.or(ai.lidx)))
+            .map_or(-1, expr_location);
+        return Err(hstore_one_subscript(pstate, loc));
+    }
+    let ai = indirection.iter().next().unwrap().as_a_indices().unwrap();
+    let uidx = ai.uidx.expect("non-slice A_Indices has uidx");
+
+    let sub = crate::transformExpr(mcx, pstate, uidx, expr_kind)?;
+    let coerced = coerce::coerce_to_target_type(
+        mcx,
+        pstate,
+        sub,
+        expr_type(sub),
+        TEXTOID,
+        -1,
+        coerce::COERCION_ASSIGNMENT,
+        types_nodes::CoercionForm::COERCE_IMPLICIT_CAST,
+        -1,
+    )?
+    .ok_or_else(|| hstore_subscript_not_text(pstate, expr_location(uidx)))?;
+
+    let mut upper: OptNodeList<'mcx> = OptNodeList::nil();
+    upper.lappend(mcx, Some(coerced))?;
+    sbsref.refupperindexpr = upper;
+    sbsref.reflowerindexpr = OptNodeList::nil();
+    sbsref.refrestype = TEXTOID;
     sbsref.reftypmod = -1;
     Ok(())
 }

@@ -2558,6 +2558,11 @@ impl HasResMcx for crate::jsonbsubs::JsonbSbsState {
         unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
     }
 }
+impl HasResMcx for crate::hstoresubs::HstoreSbsState {
+    unsafe fn resmcx_ptr(p: *mut Self) -> *mut crate::arrayops::ResMcx {
+        unsafe { core::ptr::addr_of_mut!((*p).resmcx) }
+    }
+}
 
 // C ExecInitExprRec T_XmlExpr: per-list arg slot arrays, args evaluated in
 // place before the XmlExprEval step runs.
@@ -2612,9 +2617,29 @@ fn init_subscripting_ref<'mcx>(
     use crate::arrayops::MAXDIM;
     let sbsref = node.as_subscripting_ref().unwrap();
     const F_JSONB_SUBSCRIPT_HANDLER: Oid = 6098;
+    const F_ARRAY_SUBSCRIPT_HANDLER: Oid = 6179;
+    const F_RAW_ARRAY_SUBSCRIPT_HANDLER: Oid = 6180;
     let (typsubscript, _) = lsyscache::typ::get_typsubscript(sbsref.refcontainertype)?;
     if typsubscript as Oid == F_JSONB_SUBSCRIPT_HANDLER {
         return init_jsonb_subscripting_ref(node, state, mcx, out, agg, params, sub);
+    }
+    if !matches!(
+        typsubscript as Oid,
+        F_ARRAY_SUBSCRIPT_HANDLER | F_RAW_ARRAY_SUBSCRIPT_HANDLER
+    ) {
+        // Extension handlers carry dynamic oids; match by proname.
+        let cx = ::mcx::MemoryContext::new("sbsref handler probe");
+        let name = lsyscache::get_func_name(cx.mcx(), typsubscript as Oid)?
+            .map(|n| n.as_str().to_string());
+        drop(cx);
+        match name.as_deref() {
+            Some("hstore_subscript_handler") => {
+                return init_hstore_subscripting_ref(node, state, mcx, out, agg, params, sub)
+            }
+            _ => unported(&format!(
+                "SubscriptingRef handler {typsubscript} (ExecInitSubscriptingRef)"
+            )),
+        }
     }
     let is_assignment = sbsref.refassgnexpr.is_some();
     let nupper = sbsref.refupperindexpr.len();
@@ -2814,6 +2839,73 @@ fn init_jsonb_subscripting_ref<'mcx>(
     for ix in adjust_jumps.iter() {
         match &mut state.steps[*ix] {
             Step::JumpIfNull { jumpdone, .. } | Step::JsonbSbsrefSubscripts { jumpdone, .. } => {
+                debug_assert_eq!(*jumpdone, u32::MAX);
+                *jumpdone = done;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+// C ExecInitSubscriptingRef + hstore_exec_setup (hstore_subs.c): exactly one
+// text subscript, no slices; fetch_strict = true, no fetch_old.
+fn init_hstore_subscripting_ref<'mcx>(
+    node: Node<'mcx>,
+    state: &mut ExprState<'mcx>,
+    mcx: Mcx<'mcx>,
+    out: OutRef,
+    agg: Option<Bind<'_, 'mcx>>,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<()> {
+    let sbsref = node.as_subscripting_ref().unwrap();
+    let is_assignment = sbsref.refassgnexpr.is_some();
+    assert!(sbsref.refupperindexpr.len() == 1, "hstore allows only one subscript");
+    assert!(sbsref.reflowerindexpr.len() == 0, "hstore subscript does not support slices");
+
+    let st = crate::hstoresubs::HstoreSbsState {
+        isassignment: is_assignment,
+        subscript: ::datum::NullableDatum::null(),
+        replace: ::datum::NullableDatum::null(),
+        resmcx: None,
+    };
+    let stp = alloc_state(mcx, st)?;
+    register_alloc_state(state, mcx, stp)?;
+
+    init_expr_rec(sbsref.refexpr.expect("SubscriptingRef.refexpr"), state, mcx, out, agg, params, sub)?;
+
+    let mut adjust_jumps: PgVec<'_, usize> = PgVec::new_in(mcx);
+    if !is_assignment {
+        // fetch_strict: NULL container => NULL result.
+        adjust_jumps.push(state.steps.len());
+        push_step(state, mcx, Step::JumpIfNull { jumpdone: u32::MAX, out })?;
+    }
+
+    let e = sbsref.refupperindexpr.iter().next().unwrap().expect("hstore subscript present");
+    let sub_slot = unsafe {
+        NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).subscript))
+    };
+    init_expr_rec(e, state, mcx, OutRef(sub_slot), agg, params, sub)?;
+
+    if is_assignment {
+        let assgn = sbsref.refassgnexpr.unwrap();
+        if assgn_needs_old(assgn) {
+            unported("hstore subscripted assignment referencing the old element (no sbs_fetch_old, hstore_subs.c)");
+        }
+        let replace_slot = unsafe {
+            NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
+        };
+        init_expr_rec(assgn, state, mcx, OutRef(replace_slot), agg, params, sub)?;
+        push_step(state, mcx, Step::HstoreSbsrefAssign { state: stp, out })?;
+    } else {
+        push_step(state, mcx, Step::HstoreSbsrefFetch { state: stp, out })?;
+    }
+
+    let done = state.steps.len() as u32;
+    for ix in adjust_jumps.iter() {
+        match &mut state.steps[*ix] {
+            Step::JumpIfNull { jumpdone, .. } => {
                 debug_assert_eq!(*jumpdone, u32::MAX);
                 *jumpdone = done;
             }

@@ -219,6 +219,9 @@ pub enum GinOpclass {
     // contrib gin_trgm_ops: extension-oid procs matched by proname at
     // initGinState; bodies reached through gin_trgm_seams.
     TrgmOps,
+    // contrib gin_hstore_ops: same proname scheme; bodies through
+    // gin_hstore_seams (text keys, shimmed triconsistent).
+    HstoreOps,
 }
 
 /// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's

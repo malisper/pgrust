@@ -14,6 +14,7 @@ pub(crate) const F_GIN_COMPARE_JSONB: ::types_core::Oid = 3480;
 pub(crate) const F_GIN_EXTRACT_JSONB: ::types_core::Oid = 3482;
 pub(crate) const F_GIN_EXTRACT_JSONB_PATH: ::types_core::Oid = 3485;
 pub(crate) const F_BTINT4CMP: ::types_core::Oid = 351;
+pub(crate) const F_BTTEXTCMP: ::types_core::Oid = 360;
 pub(crate) const F_GIN_EXTRACT_TSVECTOR: ::types_core::Oid = 3656;
 pub(crate) const F_GIN_EXTRACT_TSQUERY: ::types_core::Oid = 3657;
 pub(crate) const F_GIN_CMP_TSLEXEME: ::types_core::Oid = 3724;
@@ -92,6 +93,11 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
     match col.opclass {
         GinOpclass::JsonbOps => {
             ::adt_jsonb::gin::gin_compare_jsonb(text_payload(a), text_payload(b))
+        }
+        // bttextcmp under the support collation (hstore FUNCTION 1).
+        GinOpclass::HstoreOps => {
+            varlena::varstr_cmp(text_payload(a), text_payload(b), col.support_collation)
+                .expect("bttextcmp: varstr_cmp failed")
         }
         GinOpclass::JsonbPathOps | GinOpclass::TrgmOps => {
             // btint4cmp over uint32 path hashes stored via UInt32GetDatum
@@ -204,7 +210,23 @@ pub(crate) fn extract_value<'m>(
             }
             Ok((entries, no_nulls))
         }
+        GinOpclass::HstoreOps => {
+            let image = detoast_image(mcx, value)?;
+            let keys = gin_hstore_seams::hstore_extract_value::call(image)?;
+            Ok((text_key_datums(mcx, keys)?, no_nulls))
+        }
     }
+}
+
+// hstore keys are freshly built text images; copy each into mcx and hand the
+// pointer datum to the GIN core (key_byval=false, key_len=-1 per tupdesc).
+fn text_key_datums<'m>(mcx: Mcx<'m>, keys: Vec<Vec<u8>>) -> PgResult<PgVec<'m, Datum>> {
+    let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, keys.len())?;
+    for k in keys {
+        let img = mcx::slice_in(mcx, &k)?.leak();
+        entries.push(Datum::from_usize(img.as_ptr() as usize));
+    }
+    Ok(entries)
 }
 
 /// ginarrayextract (ginarrayproc.c): element datums + null flags. Elements
@@ -332,6 +354,18 @@ pub(crate) fn extract_query<'m>(
                 null_flags: mcx::vec_new_in(mcx),
             })
         }
+        GinOpclass::HstoreOps => {
+            let (keys, search_mode) =
+                gin_hstore_seams::hstore_extract_query::call(image, strategy)?;
+            Ok(ExtractedQuery {
+                entries: text_key_datums(mcx, keys)?,
+                search_mode,
+                jsp_ops: mcx::vec_new_in(mcx),
+                partial_match: mcx::vec_new_in(mcx),
+                map_item_operand: mcx::vec_new_in(mcx),
+                null_flags: mcx::vec_new_in(mcx),
+            })
+        }
     }
 }
 
@@ -390,6 +424,11 @@ pub(crate) fn consistent(
         }
         GinOpclass::TrgmOps => {
             let (res, rc) = gin_trgm_seams::trgm_consistent::call(check, strategy, nkeys)?;
+            *recheck = rc;
+            Ok(res)
+        }
+        GinOpclass::HstoreOps => {
+            let (res, rc) = gin_hstore_seams::hstore_consistent::call(check, strategy, nkeys)?;
             *recheck = rc;
             Ok(res)
         }
@@ -468,7 +507,75 @@ pub(crate) fn tri_consistent(
             Ok(res)
         }
         GinOpclass::TrgmOps => gin_trgm_seams::trgm_triconsistent::call(check, strategy, nkeys),
+        // hstore has no C triconsistent; mirror ginlogic.c shimTriConsistentFn
+        // over the bool consistent core, collapsing TRUE+recheck to MAYBE
+        // (identical scan outcome to C's recheckCurItem propagation).
+        GinOpclass::HstoreOps => hstore_shim_tri_consistent(check, strategy, nkeys),
     }
+}
+
+const MAX_MAYBE_ENTRIES: usize = 4;
+
+fn hstore_shim_tri_consistent(
+    check: &[GinTernaryValue],
+    strategy: StrategyNumber,
+    nkeys: usize,
+) -> PgResult<GinTernaryValue> {
+    let mut maybe_entries = [0usize; MAX_MAYBE_ENTRIES];
+    let mut nmaybe = 0usize;
+    for i in 0..nkeys {
+        if check[i] == GIN_MAYBE {
+            if nmaybe >= MAX_MAYBE_ENTRIES {
+                return Ok(GIN_MAYBE);
+            }
+            maybe_entries[nmaybe] = i;
+            nmaybe += 1;
+        }
+    }
+
+    let call = |local: &[i8]| -> PgResult<(bool, bool)> {
+        gin_hstore_seams::hstore_consistent::call(local, strategy, nkeys)
+    };
+
+    if nmaybe == 0 {
+        let (res, rc) = call(check)?;
+        return Ok(if res && rc { GIN_MAYBE } else if res { GIN_TRUE } else { GIN_FALSE });
+    }
+
+    let mut local: Vec<i8> = check[..nkeys].to_vec();
+    for &e in &maybe_entries[..nmaybe] {
+        local[e] = GIN_FALSE;
+    }
+    let (first, _rc) = call(&local)?;
+    let cur_result = first;
+    let mut recheck = false;
+    loop {
+        let mut i = 0usize;
+        while i < nmaybe {
+            let e = maybe_entries[i];
+            if local[e] == GIN_FALSE {
+                local[e] = GIN_TRUE;
+                break;
+            }
+            local[e] = GIN_FALSE;
+            i += 1;
+        }
+        if i == nmaybe {
+            break;
+        }
+        let (res, rc) = call(&local)?;
+        recheck |= rc;
+        if cur_result != res {
+            return Ok(GIN_MAYBE);
+        }
+    }
+    Ok(if cur_result && recheck {
+        GIN_MAYBE
+    } else if cur_result {
+        GIN_TRUE
+    } else {
+        GIN_FALSE
+    })
 }
 
 /// gincost_pattern's extractQuery probe (selfuncs.c gincostestimate):
@@ -500,6 +607,7 @@ pub fn gincost_extract_query(
                 .map(|n| n.as_str().to_string());
             match name.as_deref() {
                 Some("gin_extract_query_trgm") => (GinOpclass::TrgmOps, false),
+                Some("gin_extract_hstore_query") => (GinOpclass::HstoreOps, false),
                 _ => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
             }
         }

@@ -977,6 +977,20 @@ fn run_program<'mcx>(
                 let r = crate::jsonbsubs::assign(st, cur)?;
                 write_out(*out, r.value, r.isnull);
             }
+            Step::HstoreSbsrefFetch { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = crate::hstoresubs::fetch(st, cur)?;
+                write_out(*out, r.value, r.isnull);
+            }
+            Step::HstoreSbsrefAssign { state, out } => {
+                // SAFETY: as ArrayExprEval.
+                let st = unsafe { &mut *state.as_ptr() };
+                let cur = read_out(*out);
+                let r = crate::hstoresubs::assign(st, cur)?;
+                write_out(*out, r.value, r.isnull);
+            }
             Step::SbsrefAssign { state, slice, out } => {
                 // SAFETY: as ArrayExprEval.
                 let st = unsafe { &mut *state.as_ptr() };
@@ -4412,6 +4426,20 @@ pub(crate) fn exec_one_step<'mcx>(
             let r = crate::jsonbsubs::assign(st, cur)?;
             write_out(out, r.value, r.isnull);
         }
+        Step::HstoreSbsrefFetch { state: sref, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            let r = crate::hstoresubs::fetch(st, cur)?;
+            write_out(out, r.value, r.isnull);
+        }
+        Step::HstoreSbsrefAssign { state: sref, out } => {
+            // SAFETY: as ArrayExprEval.
+            let st = unsafe { &mut *sref.as_ptr() };
+            let cur = read_out(out);
+            let r = crate::hstoresubs::assign(st, cur)?;
+            write_out(out, r.value, r.isnull);
+        }
         Step::Distinct { call, out } => {
             step_distinct(&call, out)?;
         }
@@ -4672,6 +4700,8 @@ pub(crate) fn step_has_helper(step: &Step) -> bool {
         | Step::JsonbSbsrefSubscripts { .. }
         | Step::JsonbSbsrefFetch { .. }
         | Step::JsonbSbsrefAssign { .. }
+        | Step::HstoreSbsrefFetch { .. }
+        | Step::HstoreSbsrefAssign { .. }
         | Step::Distinct { .. }
         | Step::NotDistinct { .. }
         | Step::AggrefEval { .. }

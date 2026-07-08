@@ -19,6 +19,7 @@ mod compile;
 pub mod domain;
 mod interp;
 pub mod jit;
+mod hstoresubs;
 mod jsonbsubs;
 mod xmlops;
 mod steps;
