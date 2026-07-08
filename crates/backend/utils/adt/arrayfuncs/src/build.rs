@@ -344,6 +344,19 @@ pub fn accum_array_result_arr<'mcx>(
     let data_off = arr_data_offset(arg);
     let ndatabytes = arr_size(arg) - data_off;
 
+    // nitems can overflow before the allocation limit trips when
+    // accumulating many all-NULL arrays (CVE-2026-6473, C 67dd624).
+    let newnitems = st.nitems.checked_add(nitems).unwrap_or(i32::MAX);
+    if newnitems as i64 > ::arrayutils::MAX_ARRAY_SIZE {
+        return Err(Box::new(
+            PgError::error(alloc::format!(
+                "array size exceeds the maximum allowed ({})",
+                ::arrayutils::MAX_ARRAY_SIZE
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ));
+    }
+
     if st.ndims == 0 {
         if ndims == 0 {
             return Err(Box::new(
@@ -385,7 +398,6 @@ pub fn accum_array_result_arr<'mcx>(
 
     let arg_bitmap = arr_nullbitmap_off(arg);
     if st.nullbitmap.is_some() || arg_bitmap.is_some() {
-        let newnitems = st.nitems + nitems;
         match st.nullbitmap.as_mut() {
             None => {
                 // First input with nulls: prior inputs marked all-non-null.
@@ -407,7 +419,7 @@ pub fn accum_array_result_arr<'mcx>(
         array_bitmap_copy(bm, 0, st.nitems, arg_bitmap.map(|b| (arg, b)), 0, nitems);
     }
 
-    st.nitems += nitems;
+    st.nitems = newnitems;
     st.dims[0] += 1;
     Ok(st)
 }

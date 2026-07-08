@@ -1860,7 +1860,15 @@ fn quote_relation_name<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<S
 // for FK key columns backed by a btree unique index.
 fn datum_image_eq(a: Datum, b: Datum, typbyval: bool, typlen: i16) -> bool {
     if typbyval {
-        return a.as_usize() == b.as_usize();
+        // Compare at typlen width: a formed-then-deformed datum may differ
+        // from the original in the upper bits (C 49315de).
+        let (x, y) = (a.as_usize(), b.as_usize());
+        return match typlen {
+            1 => x as u8 == y as u8,
+            2 => x as u16 == y as u16,
+            4 => x as u32 == y as u32,
+            _ => x == y,
+        };
     }
     // SAFETY: by-ref datums point at live untoasted images (heap_getattr of
     // pinned-page tuples re-fetched by the trigger machinery).

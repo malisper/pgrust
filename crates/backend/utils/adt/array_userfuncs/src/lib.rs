@@ -64,6 +64,17 @@ fn diff_dimensionality() -> Box<PgError> {
     )
 }
 
+#[cold]
+fn array_size_exceeded() -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "array size exceeds the maximum allowed ({})",
+            ::arrayutils::MAX_ARRAY_SIZE
+        ))
+        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+    )
+}
+
 fn append_prepend_index(array: &[u8], is_append: bool) -> PgResult<(i32, i32)> {
     let (ndims, dims, lbs) = read_dims_lbounds(array);
     if ndims == 1 {
@@ -536,19 +547,27 @@ pub fn combine_array_build_state_arr(
         }
     }
 
-    let reqsize = s1.nbytes + s2.nbytes;
+    debug_assert_eq!(s1.array_type, s2.array_type);
+    debug_assert_eq!(s1.element_type, s2.element_type);
+
+    let (Some(reqsize), Some(newnitems)) =
+        (s1.nbytes.checked_add(s2.nbytes), s1.nitems.checked_add(s2.nitems))
+    else {
+        return Err(array_size_exceeded());
+    };
     if s1.abytes < reqsize {
         s1.abytes = pg_nextpower2_32(reqsize as u32) as i32;
     }
     vec_append_bytes(&mut s1.data, &s2.data[..s2.nbytes as usize])?;
 
-    // C only extends the bitmap when state2 carries one: a bitmap-less state2
-    // appended onto a bitmapped state1 leaves state2's bits unwritten.
-    if let Some(bm2) = s2.nullbitmap.as_deref() {
-        let newnitems = s1.nitems + s2.nitems;
+    // Combine the null bitmaps, if either side has one; a bitmap-less state2
+    // contributes all-non-null bits (C 14bf2c3).
+    if s1.nullbitmap.is_some() || s2.nullbitmap.is_some() {
         match s1.nullbitmap.as_mut() {
             None => {
-                s1.aitems = pg_nextpower2_32(core::cmp::max(256, newnitems + 1) as u32) as i32;
+                // First input with nulls: retrospectively mark all previous
+                // items non-null.
+                s1.aitems = pg_nextpower2_32(core::cmp::max(256, newnitems) as u32) as i32;
                 let need = (s1.aitems as usize + 7) / 8;
                 let mut bm: PgVec<u8> = vec_with_capacity_in(s1.mcx, need)?;
                 bm.resize(need, 0);
@@ -557,21 +576,19 @@ pub fn combine_array_build_state_arr(
             }
             Some(bm) => {
                 if newnitems > s1.aitems {
-                    let newaitems = s1.aitems + s2.aitems;
-                    s1.aitems = pg_nextpower2_32(newaitems as u32) as i32;
+                    s1.aitems = pg_nextpower2_32(newnitems as u32) as i32;
                     bm.resize((s1.aitems as usize + 7) / 8, 0);
                 }
             }
         }
+        let src = s2.nullbitmap.as_deref().map(|bm2| (bm2, 0));
         let bm = s1.nullbitmap.as_mut().unwrap();
-        array_bitmap_copy(bm, 0, s1.nitems, Some((bm2, 0)), 0, s2.nitems);
+        array_bitmap_copy(bm, 0, s1.nitems, src, 0, s2.nitems);
     }
 
     s1.nbytes += s2.nbytes;
     s1.nitems += s2.nitems;
     s1.dims[0] += s2.dims[0];
-    debug_assert_eq!(s1.array_type, s2.array_type);
-    debug_assert_eq!(s1.element_type, s2.element_type);
     Ok(())
 }
 

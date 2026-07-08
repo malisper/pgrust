@@ -559,6 +559,10 @@ pub(crate) struct SaopTable<'mcx> {
     pub(crate) hashcall: FuncCall,
     pub(crate) built: bool,
     pub(crate) has_nulls: bool,
+    // Cached result of probing a NULL scalar with a non-strict equality
+    // function (C hashedscalararrayop null_lhs_result/null_lhs_isnull).
+    pub(crate) null_lhs_result: bool,
+    pub(crate) null_lhs_isnull: bool,
     pub(crate) map: ::mcx::PgFxHashMap<'mcx, u32, PgVec<'mcx, Datum>>,
 }
 

@@ -2209,6 +2209,9 @@ fn exec_merge_matched_scan<'mcx>(
                 return Ok(MergeMatchedOutcome::NotMatched);
             }
             TM_Result::TM_Updated => {
+                if xact::IsolationUsesXactSnapshot() {
+                    return Err(serialization_conflict("update"));
+                }
                 // Concurrent update: lock the latest version and re-run the
                 // join via EvalPlanQual (was_matched is always true here).
                 let inputslot = eval_plan_qual_slot(mt, estate);

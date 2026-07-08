@@ -223,6 +223,11 @@ pub(crate) fn patternsel_common<'mcx>(
     Ok(clamp_probability(result))
 }
 
+// Non-collatable comparisons (e.g. bytea) are always deterministic.
+fn nondeterministic(coll: Oid) -> PgResult<bool> {
+    Ok(coll != 0 && !lsyscache::get_collation_isdeterministic(coll)?)
+}
+
 fn pattern_fixed_prefix<'mcx>(
     mcx: Mcx<'mcx>,
     patt: Datum,
@@ -713,7 +718,11 @@ pub fn match_pattern_prefix<'mcx>(
         if !lsyscache::op_in_opfamily(eqopr, opfamily)? {
             return Ok(None);
         }
-        if indexcollation != expr_coll {
+        // A collation mismatch only disqualifies the "=" indexqual when the
+        // expression collation is nondeterministic: all deterministic
+        // collations agree on (bitwise) equality, and the lossy indexqual is
+        // rechecked by the LIKE/regex operator anyway (C d0bb49e).
+        if indexcollation != expr_coll && nondeterministic(expr_coll)? {
             return Ok(None);
         }
         let expr = make_opclause(mcx, eqopr, leftop, const_node(mcx, prefix)?, indexcollation)?;
@@ -722,7 +731,7 @@ pub fn match_pattern_prefix<'mcx>(
         return Ok(Some(out));
     }
 
-    if expr_coll != 0 && !lsyscache::get_collation_isdeterministic(expr_coll)? {
+    if nondeterministic(expr_coll)? {
         return Ok(None);
     }
 

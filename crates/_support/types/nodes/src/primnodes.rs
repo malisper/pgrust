@@ -1777,5 +1777,7 @@ pub struct SupportRequestWFuncMonotonic {
     pub tag: crate::NodeTag,
     pub order_clause_empty: bool,
     pub frame_options: i32,
+    pub winfnoid: Oid,
+    pub agg_has_filter: bool,
     pub monotonic: i32,
 }

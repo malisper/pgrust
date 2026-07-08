@@ -559,6 +559,8 @@ fn find_window_run_conditions<'mcx>(
         tag: NodeTag::T_SupportRequestWFuncMonotonic,
         order_clause_empty: wclause.orderClause.is_nil(),
         frame_options: wclause.frameOptions,
+        winfnoid: wfunc.winfnoid,
+        agg_has_filter: wfunc.aggfilter.is_some(),
         monotonic: MONOTONICFUNC_NONE,
     };
     let res = fmgr_core::oid_function_call1_coll(

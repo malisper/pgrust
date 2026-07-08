@@ -236,7 +236,8 @@ fn recompose_code(start: pg_wchar, code: pg_wchar) -> Option<pg_wchar> {
 
     if (SBASE..SBASE + SCOUNT).contains(&start)
         && (start - SBASE) % TCOUNT == 0
-        && (TBASE..TBASE + TCOUNT).contains(&code)
+        // TBASE itself is not a T syllable; the T range starts at U+11A8.
+        && (TBASE + 1..TBASE + TCOUNT).contains(&code)
     {
         return Some(start + code - TBASE);
     }

@@ -374,7 +374,9 @@ unsafe fn tuple_t_len(node: NonNull<u8>) -> u32 {
 /// `datum_image_hash` (datum.c); detoast scratch lands in the per-tuple mcx.
 fn datum_image_hash(mcx: Mcx<'_>, value: Datum, byval: bool, len: i16) -> PgResult<u32> {
     if byval {
-        let raw = value.as_usize().to_ne_bytes();
+        // Truncate to the attlen width first: a formed-then-deformed datum
+        // may differ from the original in the upper bits (C 49315de).
+        let raw = truncate_byval(value, len).to_ne_bytes();
         return Ok(hashfn::hash_bytes(&raw));
     }
     let p = value.as_usize() as *const u8;
@@ -396,7 +398,7 @@ fn datum_image_hash(mcx: Mcx<'_>, value: Datum, byval: bool, len: i16) -> PgResu
 /// `datum_image_eq` (datum.c); detoast scratch lands in `mcx`.
 fn datum_image_eq(mcx: Mcx<'_>, a: Datum, b: Datum, byval: bool, len: i16) -> PgResult<bool> {
     if byval {
-        return Ok(a.as_usize() == b.as_usize());
+        return Ok(truncate_byval(a, len) == truncate_byval(b, len));
     }
     let (pa, pb) = (a.as_usize() as *const u8, b.as_usize() as *const u8);
     if len > 0 {
@@ -413,6 +415,18 @@ fn datum_image_eq(mcx: Mcx<'_>, a: Datum, b: Datum, byval: bool, len: i16) -> Pg
     // SAFETY: by-ref cstring datums, NUL-terminated.
     unsafe {
         Ok(core::ffi::CStr::from_ptr(pa.cast()) == core::ffi::CStr::from_ptr(pb.cast()))
+    }
+}
+
+// Sign-truncation to attlen width, then zero-extended back to a word so both
+// operands normalize identically (C DatumGetChar/Int16/Int32 in datum.c).
+fn truncate_byval(v: Datum, len: i16) -> usize {
+    let x = v.as_usize();
+    match len {
+        1 => x as u8 as usize,
+        2 => x as u16 as usize,
+        4 => x as u32 as usize,
+        _ => x,
     }
 }
 
