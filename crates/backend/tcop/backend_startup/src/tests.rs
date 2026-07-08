@@ -117,10 +117,7 @@ fn startup_packet_fills_port() {
             ]
         );
     });
-    assert_eq!(
-        miscinit::GetMyBackendType(),
-        types_core::BackendType::Backend
-    );
+    assert_eq!(miscinit::GetMyBackendType(), types_core::BackendType::Backend);
     assert_eq!(init_small::globals::FrontendProtocol(), pg_protocol(3, 0));
 }
 
@@ -222,11 +219,9 @@ fn validate_log_connections_options_matrix() {
         validate_log_connections_options(&["ALL".into()]),
         Ok(LOG_CONNECTION_ALL)
     );
-    assert!(
-        validate_log_connections_options(&["on".into(), "receipt".into()])
-            .unwrap_err()
-            .contains("in a list with other options")
-    );
+    assert!(validate_log_connections_options(&["on".into(), "receipt".into()])
+        .unwrap_err()
+        .contains("in a list with other options"));
     assert!(validate_log_connections_options(&["bogus".into()])
         .unwrap_err()
         .contains("Invalid option"));
