@@ -11,6 +11,15 @@
 //! compiled RE2 pattern (LRU, MAX 32). In auto mode an RE2 compile failure
 //! also fails closed to Spencer and the Spencer verdict is cached, so error
 //! surfaces are always Spencer's own.
+//!
+//! Dispatch is DATA-fail-closed as well as pattern-fail-closed: the Spencer
+//! path views the subject through pg_mb2wchar_with_len (C parity — stops at
+//! the first NUL, decodes invalid UTF-8 bytewise), while RE2 matches raw
+//! bytes and never matches invalid UTF-8. Auto therefore re-routes every
+//! evaluation whose subject contains NUL or is not valid UTF-8 to Spencer,
+//! per subject, regardless of the pattern's cached verdict (forced re2 is
+//! the testing knob and stays raw). Caught live by the regress encoding
+//! suite: regexp_replace on 'café\0dcba' and 'caf\xc3\x00dcba'.
 
 use core::cell::RefCell;
 use std::rc::Rc;
@@ -337,12 +346,22 @@ fn cache_put(pattern: &[u8], cflags: i32, forced: bool, verdict: Option<Re2Patte
     });
 }
 
+// Whether RE2 and Spencer provably see the same subject. Spencer's
+// pg_mb2wchar view stops at the first NUL and decodes invalid UTF-8
+// bytewise; RE2's byte view diverges on both, so such subjects must run
+// Spencer. Checked per evaluation, only after the pattern verdict says RE2
+// (Spencer-class evaluations never pay the scan).
+pub fn subject_compatible(subject: &[u8]) -> bool {
+    !subject.contains(&0) && core::str::from_utf8(subject).is_ok()
+}
+
 // The single dispatch decision point. Some(re) = run the RE2 path; None =
 // run the Spencer path untouched. The classification is cache-keyed on
 // (pattern, cflags, mode); the classifier admits only collation-independent
-// constructs, so collation does not participate in the key. Errors surface
-// only under forced re2.
-pub fn dispatch(pattern: &[u8], cflags: i32) -> PgResult<Option<Re2Pattern>> {
+// constructs, so collation does not participate in the key. The subject
+// participates only in the per-evaluation data guard, never in the cache.
+// Errors surface only under forced re2.
+pub fn dispatch(pattern: &[u8], cflags: i32, subject: &[u8]) -> PgResult<Option<Re2Pattern>> {
     let engine = regex_engine();
     if engine == REGEX_ENGINE_SPENCER {
         return Ok(None);
@@ -351,22 +370,33 @@ pub fn dispatch(pattern: &[u8], cflags: i32) -> PgResult<Option<Re2Pattern>> {
         return Ok(None);
     }
     let forced = engine == REGEX_ENGINE_RE2;
-    if let Some(verdict) = cache_get(pattern, cflags, forced) {
-        return Ok(verdict);
-    }
-    let verdict = if forced {
-        Some(compile_forced(pattern, cflags)?)
-    } else {
-        match classify_pattern(pattern, cflags) {
-            Classification { tier: Compat::Incompatible, .. } => None,
-            #[cfg(have_re2)]
-            c => compile_auto(pattern, cflags, c.tier == Compat::CaptureSafe, c.needs_longest)
-                .ok(),
-            #[cfg(not(have_re2))]
-            _ => None,
+    let verdict = match cache_get(pattern, cflags, forced) {
+        Some(v) => v,
+        None => {
+            let v = if forced {
+                Some(compile_forced(pattern, cflags)?)
+            } else {
+                match classify_pattern(pattern, cflags) {
+                    Classification { tier: Compat::Incompatible, .. } => None,
+                    #[cfg(have_re2)]
+                    c => compile_auto(
+                        pattern,
+                        cflags,
+                        c.tier == Compat::CaptureSafe,
+                        c.needs_longest,
+                    )
+                    .ok(),
+                    #[cfg(not(have_re2))]
+                    _ => None,
+                }
+            };
+            cache_put(pattern, cflags, forced, v.clone());
+            v
         }
     };
-    cache_put(pattern, cflags, forced, verdict.clone());
+    if verdict.is_some() && !forced && !subject_compatible(subject) {
+        return Ok(None);
+    }
     Ok(verdict)
 }
 

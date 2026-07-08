@@ -13,7 +13,7 @@ fn setup() {
 fn auto(p: &str) -> Option<Re2Pattern> {
     setup();
     set_regex_engine(REGEX_ENGINE_AUTO);
-    dispatch(p.as_bytes(), REG_ADVANCED).unwrap()
+    dispatch(p.as_bytes(), REG_ADVANCED, b"clean subject").unwrap()
 }
 
 fn replace(p: &str, s: &str, r: &str, start: i32, n: i32) -> String {
@@ -94,13 +94,60 @@ fn auto_fails_closed() {
     set_regex_engine(REGEX_ENGINE_AUTO);
     // Incompatible constructs classify to Spencer (None), never error.
     for p in [r"(a)\1", r"\w+", "a*?", "[[:alpha:]]"] {
-        assert!(dispatch(p.as_bytes(), REG_ADVANCED).unwrap().is_none(), "{p}");
+        assert!(dispatch(p.as_bytes(), REG_ADVANCED, b"x").unwrap().is_none(), "{p}");
     }
     // Classifier-admitted but RE2-rejected patterns also fail closed.
     // (POSIX leading-] brackets are rejected upstream by the classifier; use
     // forced mode to confirm compile errors surface only when forced.)
     set_regex_engine(REGEX_ENGINE_SPENCER);
-    assert!(dispatch(b"anything(?=x)", REG_ADVANCED).unwrap().is_none());
+    assert!(dispatch(b"anything(?=x)", REG_ADVANCED, b"x").unwrap().is_none());
+}
+
+#[test]
+fn auto_fails_closed_on_data() {
+    setup();
+    if !re2_available() {
+        return;
+    }
+    set_regex_engine(REGEX_ENGINE_AUTO);
+    let subjects: &[&[u8]] = &[
+        b"\x00",
+        b"\x00abc",
+        b"abc\x00",
+        b"ab\x00cd",
+        b"caf\xc3\xa9\x00dcba",
+        b"caf\xc3\x00dcba",
+        b"caf\xc3",
+        b"a\xffb",
+        b"\xc3\x28",
+        b"\xed\xa0\x80xyz",
+        b"\xc0\xafabc",
+    ];
+    for s in subjects {
+        assert!(!subject_compatible(s), "{s:?}");
+        assert!(dispatch(b"a", REG_ADVANCED, s).unwrap().is_none(), "{s:?}");
+    }
+    for s in [&b""[..], b"abc", "café".as_bytes(), b"a\nb\tc"] {
+        assert!(subject_compatible(s), "{s:?}");
+        assert!(dispatch(b"a", REG_ADVANCED, s).unwrap().is_some(), "{s:?}");
+    }
+    // The data guard applies after the cached pattern verdict, per subject.
+    assert!(dispatch(b"a", REG_ADVANCED, b"a\x00b").unwrap().is_none());
+    assert!(dispatch(b"a", REG_ADVANCED, b"ab").unwrap().is_some());
+}
+
+#[test]
+fn forced_re2_bypasses_data_guard() {
+    setup();
+    if !re2_available() {
+        return;
+    }
+    // The testing knob exposes raw RE2 byte semantics, NUL data included —
+    // this is what lets tests observe the divergence auto guards against.
+    set_regex_engine(REGEX_ENGINE_RE2);
+    let re = dispatch(b"b.d", REG_ADVANCED, b"ab\x00d!").unwrap();
+    set_regex_engine(REGEX_ENGINE_AUTO);
+    assert!(re.expect("forced re2 dispatches").is_match(b"ab\x00d!", 0));
 }
 
 #[test]
@@ -110,7 +157,7 @@ fn forced_re2_errors_name_engine() {
         return;
     }
     set_regex_engine(REGEX_ENGINE_RE2);
-    let err = dispatch(br"(a)\1", REG_ADVANCED).unwrap_err();
+    let err = dispatch(br"(a)\1", REG_ADVANCED, b"x").unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("regex_engine=re2"), "{msg}");
     set_regex_engine(REGEX_ENGINE_AUTO);
@@ -123,7 +170,8 @@ fn quoted_mode_is_literal() {
         return;
     }
     set_regex_engine(REGEX_ENGINE_AUTO);
-    let re = dispatch(br"a.c", ::regex_spencer::REG_QUOTE).unwrap().expect("quoted dispatches");
+    let re =
+        dispatch(br"a.c", ::regex_spencer::REG_QUOTE, b"x").unwrap().expect("quoted dispatches");
     assert!(re.is_match(b"xa.cy", 0));
     assert!(!re.is_match(b"xabcy", 0));
 }
@@ -135,13 +183,13 @@ fn dispatch_decision_is_cached() {
         return;
     }
     set_regex_engine(REGEX_ENGINE_AUTO);
-    let a = dispatch(Q29_PAT.as_bytes(), REG_ADVANCED).unwrap().unwrap();
-    let b = dispatch(Q29_PAT.as_bytes(), REG_ADVANCED).unwrap().unwrap();
+    let a = dispatch(Q29_PAT.as_bytes(), REG_ADVANCED, b"x").unwrap().unwrap();
+    let b = dispatch(Q29_PAT.as_bytes(), REG_ADVANCED, b"x").unwrap().unwrap();
     // Same Rc-backed compiled pattern comes back from the cache.
     assert!(Rc::ptr_eq(&a.inner, &b.inner));
     // Spencer verdicts are cached too.
-    assert!(dispatch(br"\d", REG_ADVANCED).unwrap().is_none());
-    assert!(dispatch(br"\d", REG_ADVANCED).unwrap().is_none());
+    assert!(dispatch(br"\d", REG_ADVANCED, b"x").unwrap().is_none());
+    assert!(dispatch(br"\d", REG_ADVANCED, b"x").unwrap().is_none());
 }
 
 #[test]

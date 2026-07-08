@@ -155,7 +155,7 @@ pub fn RE_compile_and_execute(
         cflags |= REG_NOSUB;
         // regex_engine dispatch: boolean matches (~, ~*, regexp_like) on
         // RE2-compatible patterns skip the wchar conversion entirely.
-        if let Some(re) = regexp_alt::dispatch(pattern, cflags)? {
+        if let Some(re) = regexp_alt::dispatch(pattern, cflags, dat)? {
             return Ok(re.is_match(dat, 0));
         }
     }
@@ -279,7 +279,7 @@ pub fn textregexsubstr<'mcx>(
     p: &[u8],
     collation: Oid,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
-    if let Some(re) = regexp_alt::dispatch(p, REG_ADVANCED)?
+    if let Some(re) = regexp_alt::dispatch(p, REG_ADVANCED, s)?
         .filter(|re| re.capture_safe() || re.ngroups() == 0)
     {
         let mut groups = [(-1i64, -1i64); 2];
