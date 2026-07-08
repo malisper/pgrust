@@ -419,8 +419,8 @@ pub fn set_dummy_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<
 }
 
 // The shared body of set_dummy_rel_pathlist (allpaths.c) and mark_dummy_rel
-// (joinrels.c) — the latter leaves reltarget width alone and passes no
-// required_outer (C create_append_path calls).
+// (joinrels.c) — the latter leaves reltarget width alone; both parameterize
+// by rel->lateral_relids (C create_append_path calls).
 pub(crate) fn add_dummy_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
