@@ -71,7 +71,7 @@ macro_rules! fc_type_in {
                     // SAFETY: context, if set, rides per the ErrorSaveNode
                     // contract for this call (pg_input_error_info path).
                     let esc = unsafe { fcinfo.soft_error_context() };
-                    types_error::ereturn(esc, (), *e)?;
+                    types_error::ereturn(esc, (), e)?;
                     Ok(fcinfo.return_null())
                 }
             }
