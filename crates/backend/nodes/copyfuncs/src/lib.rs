@@ -22,6 +22,10 @@ pub fn copy_object<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
     copy_node(mcx, node)
 }
 
+pub fn copy_query<'d>(mcx: Mcx<'d>, src: &types_nodes::parsenodes::Query<'_>) -> PgResult<types_nodes::parsenodes::Query<'d>> {
+    generated::copy_Query(mcx, src)
+}
+
 pub fn copy_utility_planned_stmt<'d>(
     mcx: Mcx<'d>,
     src: &PlannedStmt<'_>,
