@@ -17,7 +17,6 @@ use ::types_storage::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZ
 use ::xloginsert_seams::REGBUF_STANDARD;
 
 use crate::dml::{relation_needs_wal, XLOG_HEAP_INPLACE};
-use crate::unported;
 use heapam_visibility_seams as hv_seam;
 
 const RM_HEAP_ID: u8 = rmgr::RmgrIds::RM_HEAP_ID as u8;
@@ -77,7 +76,26 @@ pub fn heap_inplace_lock(
             let xwait = oldtup_pg.t_data().xmax_raw();
             let infomask = oldtup_pg.t_data().t_infomask;
             if (infomask & HEAP_XMAX_IS_MULTI) != 0 {
-                unported("DoesMultiXactIdConflict/MultiXactIdWait (heap_inplace_lock, multixact.c)");
+                use ::tableam_vocab::LockTupleMode;
+                use ::types_storage::multixact::MultiXactStatus;
+                let lockmode = LockTupleMode::LockTupleNoKeyExclusive;
+                let mxact_status = MultiXactStatus::MultiXactStatusNoKeyUpdate;
+                if crate::dml::DoesMultiXactIdConflict(xwait, infomask, lockmode, false)?.conflict {
+                    bufmgr_seams::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
+                    release_callback()?;
+                    ret = false;
+                    crate::dml::MultiXactIdWait(
+                        xwait,
+                        mxact_status,
+                        infomask,
+                        relation,
+                        Some(&tid),
+                        XLTW_Oper::Update,
+                        None,
+                    )?;
+                } else {
+                    ret = true;
+                }
             } else if xact_seams::transaction_id_is_current_transaction_id::call(xwait)
                 || HEAP_XMAX_IS_KEYSHR_LOCKED(infomask)
             {
