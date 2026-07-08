@@ -127,11 +127,18 @@ fn recurse_set_operations<'mcx>(
                     run.root.rel_mut(rel).pathlist[i] = path;
                 }
             }
-            assert!(
-                run.root.rel(rel).partial_pathlist.is_empty(),
-                "recurse_set_operations: parallel-union partial-path arm unported \
-                 (C prepunion.c:326-338 projects partial paths)"
-            );
+            // prepunion.c:326-338: partial paths get an unconditional
+            // ProjectionPath (never in-place — multiple refs possible).
+            let partials =
+                crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).partial_pathlist);
+            for (i, &subpath) in partials.iter().enumerate() {
+                debug_assert!(run.root.path(subpath).base().param_info.is_none());
+                let safe = ::clauses::is_parallel_safe_exprs(run, target_id)?;
+                let pn =
+                    crate::pathnode::create_projection_path(run, rel, subpath, target_id, safe);
+                let pid = run.root.alloc_path(pn);
+                run.root.rel_mut(rel).partial_pathlist[i] = pid;
+            }
         }
         postprocess_setop_rel(run, rel)?;
         Ok((rel, tlist, trivial))
@@ -174,15 +181,24 @@ fn build_setop_child_paths<'mcx>(
     let idx = run.root.rel(rel).subroot_idx.expect("subquery rel has a subroot");
     run.swap_with_rel_subroot(idx);
     let mut candidates: PgVec<'mcx, ChildCandidate> = PgVec::new_in(run.mcx);
+    let mut partial_candidate: Option<ChildCandidate> = None;
     // Swap back before propagating errors (num_groups block pattern below).
     let subroot_result = (|| -> PgResult<bool> {
         let final_rel = crate::planmain::fetch_final_rel(run);
         let consider_parallel = run.root.rel(final_rel).consider_parallel;
-        assert!(
-            run.root.rel(final_rel).partial_pathlist.is_empty(),
-            "build_setop_child_paths: parallel-union partial-path arm unported \
-             (C prepunion.c:617-633 builds a partial subqueryscan path)"
+        debug_assert!(
+            consider_parallel || run.root.rel(final_rel).partial_pathlist.is_empty()
         );
+        // prepunion.c: only the cheapest partial subpath is worth a partial
+        // SubqueryScan.
+        if let Some(&psp) = run.root.rel(final_rel).partial_pathlist.first() {
+            partial_candidate = Some(ChildCandidate {
+                pid: psp,
+                info: child_info(run, psp),
+                pathkey_descs: crate::pathkeys::extract_subquery_pathkey_descs(run, psp),
+                sub_tlist: crate::pathkeys::extract_subquery_tlist(run, psp),
+            });
+        }
         let cheapest = run
             .root
             .rel(final_rel)
@@ -262,6 +278,23 @@ fn build_setop_child_paths<'mcx>(
             &c.info,
         )?;
         add_path(run, rel, id);
+    }
+    // prepunion.c: partial SubqueryScan over the child's cheapest partial path.
+    if consider_parallel
+        && types_pathnodes::relids::relids_is_empty(&run.root.rel(rel).lateral_relids)
+    {
+        if let Some(c) = partial_candidate {
+            let id = crate::pathnode::create_subqueryscan_path(
+                run,
+                rel,
+                c.pid,
+                trivial_tlist,
+                PgVec::new_in(run.mcx),
+                &None,
+                &c.info,
+            )?;
+            crate::pathnode::add_partial_path(run, rel, id);
+        }
     }
 
     postprocess_setop_rel(run, rel)?;
@@ -354,6 +387,8 @@ fn generate_union_paths<'mcx>(
 
     let mut cheapest_pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
     let mut ordered_pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut partial_pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
+    let mut partial_paths_valid = true;
     let mut consider_parallel = true;
     let mut relids: Relids<'mcx> = None;
     for &(rel, _, _) in rellist.iter() {
@@ -375,14 +410,16 @@ fn generate_union_paths<'mcx>(
                 None => try_sorted = false,
             }
         }
-        if !run.root.rel(rel).consider_parallel {
-            consider_parallel = false;
+        if consider_parallel {
+            if !run.root.rel(rel).consider_parallel {
+                consider_parallel = false;
+                partial_paths_valid = false;
+            } else if run.root.rel(rel).partial_pathlist.is_empty() {
+                partial_paths_valid = false;
+            } else {
+                partial_pathlist.push(run.root.rel(rel).partial_pathlist[0]);
+            }
         }
-        assert!(
-            run.root.rel(rel).partial_pathlist.is_empty(),
-            "generate_union_paths: parallel-union partial-path arm unported \
-             (C prepunion.c:794-798 collects child partial paths for Parallel Append)"
-        );
         relids = crate::relnode::relids_union(mcx, &relids, &run.root.rel(rel).relids);
     }
 
@@ -410,45 +447,81 @@ fn generate_union_paths<'mcx>(
     let apath_rows = run.root.path(apath).base().rows;
     run.root.rel_mut(result_rel).rows = apath_rows;
 
+    // prepunion.c: the same append from the children's cheapest partial
+    // paths, under a Gather.
+    let gpath = if partial_paths_valid && !partial_pathlist.is_empty() {
+        let mut parallel_workers = 0;
+        for &sp in partial_pathlist.iter() {
+            parallel_workers = parallel_workers.max(run.root.path(sp).base().parallel_workers);
+        }
+        debug_assert!(parallel_workers > 0);
+        if crate::gucs::enable_parallel_append() {
+            parallel_workers =
+                parallel_workers.max((partial_pathlist.len() as u32).ilog2() as i32 + 1);
+            parallel_workers =
+                parallel_workers.min(crate::gucs::max_parallel_workers_per_gather());
+        }
+        let papath = crate::pathnode::create_append_path(
+            run,
+            result_rel,
+            PgVec::new_in(mcx),
+            partial_pathlist,
+            PgVec::new_in(mcx),
+            &None,
+            parallel_workers,
+            crate::gucs::enable_parallel_append(),
+            -1.0,
+        )?;
+        Some(crate::pathnode::create_gather_path(run, result_rel, papath, Some(target_id), None))
+    } else {
+        None
+    };
+
     if !op.all {
         let d_num_groups = apath_rows;
         let can_sort = grouping_is_sortable_nodes(&group_list);
         let can_hash = grouping_is_hashable_nodes(&group_list);
 
         if can_hash {
-            let hash_target = create_pathtarget(run, &tlist)?;
-            let group_ids = intern_clause_list(run, &group_list);
-            let path = crate::pathnode::create_agg_path(
-                run,
-                result_rel,
-                apath,
-                hash_target,
-                AGG_HASHED,
-                AGGSPLIT_SIMPLE,
-                group_ids,
-                PgVec::new_in(mcx),
-                &types_pathnodes::AggClauseCosts::default(),
-                d_num_groups,
-            )?;
-            add_path(run, result_rel, path);
+            for src in [Some(apath), gpath].into_iter().flatten() {
+                let hash_target = create_pathtarget(run, &tlist)?;
+                let group_ids = intern_clause_list(run, &group_list);
+                let path = crate::pathnode::create_agg_path(
+                    run,
+                    result_rel,
+                    src,
+                    hash_target,
+                    AGG_HASHED,
+                    AGGSPLIT_SIMPLE,
+                    group_ids,
+                    PgVec::new_in(mcx),
+                    &types_pathnodes::AggClauseCosts::default(),
+                    d_num_groups,
+                )?;
+                add_path(run, result_rel, path);
+            }
         }
 
         if can_sort {
-            let mut path = apath;
-            if !group_list.is_nil() {
-                let keys =
-                    crate::pathkeys::make_pathkeys_for_sortclauses(run, &group_list, &tlist)?;
-                path = crate::pathnode::create_sort_path(run, result_rel, path, keys, -1.0);
+            for src in [Some(apath), gpath].into_iter().flatten() {
+                let mut path = src;
+                // C sorts the Gather source unconditionally; the Append
+                // source only under a nonempty groupList.
+                if !group_list.is_nil() || path != apath {
+                    let keys =
+                        crate::pathkeys::make_pathkeys_for_sortclauses(run, &group_list, &tlist)?;
+                    path = crate::pathnode::create_sort_path(run, result_rel, path, keys, -1.0);
+                }
+                let numkeys = run.root.path(path).base().pathkeys.len() as i32;
+                let unique = crate::pathnode::create_upper_unique_path(
+                    run,
+                    result_rel,
+                    path,
+                    numkeys,
+                    d_num_groups,
+                );
+                add_path(run, result_rel, unique);
             }
-            let numkeys = run.root.path(path).base().pathkeys.len() as i32;
-            let unique = crate::pathnode::create_upper_unique_path(
-                run,
-                result_rel,
-                path,
-                numkeys,
-                d_num_groups,
-            );
-            add_path(run, result_rel, unique);
         }
 
         if try_sorted && !group_list.is_nil() {
@@ -469,6 +542,9 @@ fn generate_union_paths<'mcx>(
         }
     } else {
         add_path(run, result_rel, apath);
+        if let Some(g) = gpath {
+            add_path(run, result_rel, g);
+        }
     }
 
     Ok((result_rel, tlist))

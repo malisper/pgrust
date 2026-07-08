@@ -226,19 +226,18 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
         }
     };
 
+    let outer_consider_parallel = run.root.rel(rel).consider_parallel;
     run.swap_with_rel_subroot(idx);
-    let mut candidates: mcx::PgVec<
-        '_,
-        (
-            types_pathnodes::PathId,
-            crate::pathnode::SubqueryScanInfo,
-            mcx::PgVec<'_, crate::pathkeys::SubPathKeyDesc<'_>>,
-            mcx::PgVec<'_, crate::pathkeys::SubTle<'_>>,
-        ),
-    > = mcx::PgVec::new_in(run.mcx);
+    type SubCand<'a> = (
+        types_pathnodes::PathId,
+        crate::pathnode::SubqueryScanInfo,
+        mcx::PgVec<'a, crate::pathkeys::SubPathKeyDesc<'a>>,
+        mcx::PgVec<'a, crate::pathkeys::SubTle<'a>>,
+    );
+    let mut candidates: mcx::PgVec<'_, SubCand<'_>> = mcx::PgVec::new_in(run.mcx);
+    let mut partial_candidates: mcx::PgVec<'_, SubCand<'_>> = mcx::PgVec::new_in(run.mcx);
     {
         let final_rel = crate::planmain::fetch_final_rel(run);
-        debug_assert!(run.root.rel(final_rel).partial_pathlist.is_empty());
         let paths =
             crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(final_rel).pathlist);
         for &sp in paths.iter() {
@@ -248,6 +247,24 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
                 crate::pathkeys::extract_subquery_pathkey_descs(run, sp),
                 crate::pathkeys::extract_subquery_tlist(run, sp),
             ));
+        }
+        // allpaths.c: the sub-rel's partial paths become partial SubqueryScan
+        // paths when the outer rel allows parallelism.
+        if outer_consider_parallel
+            && types_pathnodes::relids::relids_is_empty(&required_outer)
+        {
+            let partials = crate::relnode::pgvec_clone_shallow(
+                run.mcx,
+                &run.root.rel(final_rel).partial_pathlist,
+            );
+            for &sp in partials.iter() {
+                partial_candidates.push((
+                    sp,
+                    crate::prepunion::child_info(run, sp),
+                    crate::pathkeys::extract_subquery_pathkey_descs(run, sp),
+                    crate::pathkeys::extract_subquery_tlist(run, sp),
+                ));
+            }
         }
     }
     run.swap_with_rel_subroot(idx);
@@ -264,6 +281,19 @@ fn set_subquery_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
             &c.1,
         )?;
         add_path(run, rel, id);
+    }
+    for c in partial_candidates.iter() {
+        let pathkeys = crate::pathkeys::convert_subquery_pathkeys(run, rel, &c.2, &c.3)?;
+        let id = crate::pathnode::create_subqueryscan_path(
+            run,
+            rel,
+            c.0,
+            trivial_pathtarget,
+            pathkeys,
+            &required_outer,
+            &c.1,
+        )?;
+        crate::pathnode::add_partial_path(run, rel, id);
     }
     Ok(())
 }
