@@ -122,25 +122,14 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: &ClientSocket, cac: CacState) -
 
     let log_hostname = guc_tables::vars::log_hostname.read();
     let raddr = init_small::globals::WithMyProcPort(|p| p.raddr);
-    let flags = (if log_hostname {
-        0
-    } else {
-        libc::NI_NUMERICHOST
-    }) | libc::NI_NUMERICSERV;
+    let flags = (if log_hostname { 0 } else { libc::NI_NUMERICHOST }) | libc::NI_NUMERICSERV;
     let mut remote_host = String::new();
     let mut remote_port = String::new();
-    let ret = ip::pg_getnameinfo_all(
-        &raddr,
-        Some(&mut remote_host),
-        Some(&mut remote_port),
-        flags,
-    );
+    let ret =
+        ip::pg_getnameinfo_all(&raddr, Some(&mut remote_host), Some(&mut remote_port), flags);
     if ret != 0 {
         ereport(WARNING)
-            .errmsg_internal(format!(
-                "pg_getnameinfo_all() failed: {}",
-                gai_strerror(ret)
-            ))
+            .errmsg_internal(format!("pg_getnameinfo_all() failed: {}", gai_strerror(ret)))
             .finish(loc(211, "BackendInitialize"))?;
     }
 
@@ -767,10 +756,7 @@ fn read_be_u32(buf: &[u8], off: usize) -> u32 {
 }
 
 fn cstr_len(buf: &[u8], off: usize) -> usize {
-    buf[off..]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(buf.len() - off)
+    buf[off..].iter().position(|&b| b == 0).unwrap_or(buf.len() - off)
 }
 
 fn bytes_str(b: &[u8]) -> String {
