@@ -262,9 +262,8 @@ pub fn standard_planner<'mcx>(
     let mut run = &mut *run_owner;
     run.glob.bound_params = bound_params;
 
-    // Divergence: the max_parallel_hazard scan runs in subquery_planner after
-    // the Query is arena-sealed (walker needs &'mcx Query); C scans first.
-    // Unobservable on this lane -- every Gather consumer is a panic arm.
+    // The raw-tree hazard scan (planner.c:349-353) runs at subquery_planner
+    // entry, before any sublink subquery is planned.
     run.glob.max_parallel_hazard = PROPARALLEL_UNSAFE;
     run.assess_parallel = (cursor_options & CURSOR_OPT_PARALLEL_OK) != 0
         && init_small::globals::IsUnderPostmaster()

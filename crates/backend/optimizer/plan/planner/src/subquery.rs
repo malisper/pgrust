@@ -42,6 +42,13 @@ pub fn subquery_planner<'mcx>(
         run.root.query_level = 1;
     }
     debug_assert!(run.root.query_level >= 1);
+    // standard_planner's raw-tree parallel-mode assessment (planner.c:349-353):
+    // must precede any preprocess_expression — SS_process_sublinks plans the
+    // sublink subqueries there, and their rels read glob.parallel_mode_ok.
+    if run.assess_parallel && run.root.query_level == 1 {
+        run.glob.max_parallel_hazard = clauses::max_parallel_hazard(&*parse)?;
+        run.glob.parallel_mode_ok = run.glob.max_parallel_hazard != crate::PROPARALLEL_UNSAFE;
+    }
     run.root.command_type = parse.commandType;
     if parse.resultRelation != 0 {
         run.root.all_result_relids = relids_singleton(mcx, parse.resultRelation as u32);
@@ -431,13 +438,6 @@ pub fn subquery_planner<'mcx>(
         assert_no_join_alias_vars(sealed, &join_rtes)?;
     }
 
-    // Deferred half of standard_planner's parallel-mode assessment (lib.rs).
-    // Guarded to the top level: C scans only the top query (recursing itself);
-    // a sub-level scan would clobber the verdict (Gather consumers are loud).
-    if run.assess_parallel && run.root.query_level == 1 {
-        run.glob.max_parallel_hazard = clauses::max_parallel_hazard(sealed)?;
-        run.glob.parallel_mode_ok = run.glob.max_parallel_hazard != crate::PROPARALLEL_UNSAFE;
-    }
     run.glob.parallel_mode_needed = run.glob.parallel_mode_ok
         && crate::gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF;
 

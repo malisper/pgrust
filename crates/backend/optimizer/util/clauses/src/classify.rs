@@ -305,6 +305,15 @@ impl<'mcx> NodeWalker<'mcx> for MaxParallelHazard {
         &mut self,
         q: &'mcx types_nodes::parsenodes::Query<'mcx>,
     ) -> PgResult<bool> {
+        self.scan_query(q)
+    }
+}
+
+impl MaxParallelHazard {
+    // Short-borrow body of visit_query_ref: standard_planner's toplevel scan
+    // (planner.c:349) runs while the Query is still &mut (pre-seal), where
+    // only a reborrow is available; nested Queries arrive as &'mcx.
+    fn scan_query<'mcx>(&mut self, q: &types_nodes::parsenodes::Query<'mcx>) -> PgResult<bool> {
         if !q.rowMarks.is_nil() {
             self.max_hazard = PROPARALLEL_UNSAFE;
             return Ok(true);
@@ -313,13 +322,13 @@ impl<'mcx> NodeWalker<'mcx> for MaxParallelHazard {
     }
 }
 
-pub fn max_parallel_hazard<'mcx>(parse: &'mcx types_nodes::parsenodes::Query<'mcx>) -> PgResult<i8> {
+pub fn max_parallel_hazard<'mcx>(parse: &types_nodes::parsenodes::Query<'mcx>) -> PgResult<i8> {
     let mut cx = MaxParallelHazard {
         max_hazard: PROPARALLEL_SAFE,
         max_interesting: PROPARALLEL_UNSAFE,
         safe_param_ids: Vec::new(),
     };
-    cx.visit_query_ref(parse)?;
+    cx.scan_query(parse)?;
     Ok(cx.max_hazard)
 }
 
