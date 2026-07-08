@@ -652,6 +652,12 @@ pub(crate) fn make_opclause<'mcx>(
 
 // match_pattern_prefix (like_support.c): the SupportRequestIndexCondition
 // leg. Returns the generated indexqual expressions, or None.
+// NONDETERMINISTIC (like_support.c): non-collatable comparisons, e.g. for
+// bytea, are always deterministic.
+fn nondeterministic_coll(coll: types_core::Oid) -> PgResult<bool> {
+    Ok(coll != types_core::InvalidOid && !lsyscache::get_collation_isdeterministic(coll)?)
+}
+
 pub fn match_pattern_prefix<'mcx>(
     run: &mut PlannerRun<'mcx>,
     leftop: types_nodes::Node<'mcx>,
@@ -718,11 +724,20 @@ pub fn match_pattern_prefix<'mcx>(
         if !lsyscache::op_in_opfamily(eqopr, opfamily)? {
             return Ok(None);
         }
+<<<<<<< HEAD
         // A collation mismatch only disqualifies the "=" indexqual when the
         // expression collation is nondeterministic: all deterministic
         // collations agree on (bitwise) equality, and the lossy indexqual is
         // rechecked by the LIKE/regex operator anyway (C d0bb49e).
         if indexcollation != expr_coll && nondeterministic(expr_coll)? {
+=======
+        // A mismatched index collation is fine when expr_coll is
+        // deterministic: all deterministic collations agree on (bitwise)
+        // equality, a nondeterministic index returns a superset of the
+        // bitwise-equal entries, and the lossy "=" indexqual rechecks with
+        // the LIKE/regex operator.
+        if indexcollation != expr_coll && nondeterministic_coll(expr_coll)? {
+>>>>>>> a7eb27b51 (planner: fix LIKE/regex exact-match indexqual with mismatched index collation (upstream d0bb49e))
             return Ok(None);
         }
         let expr = make_opclause(mcx, eqopr, leftop, const_node(mcx, prefix)?, indexcollation)?;
@@ -731,7 +746,11 @@ pub fn match_pattern_prefix<'mcx>(
         return Ok(Some(out));
     }
 
+<<<<<<< HEAD
     if nondeterministic(expr_coll)? {
+=======
+    if nondeterministic_coll(expr_coll)? {
+>>>>>>> a7eb27b51 (planner: fix LIKE/regex exact-match indexqual with mismatched index collation (upstream d0bb49e))
         return Ok(None);
     }
 
