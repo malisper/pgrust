@@ -1549,6 +1549,17 @@ where
         {
             Some(f) => f,
             None => {
+                let finish_spills = {
+                    let gs = node.gsets.as_ref().unwrap();
+                    gs.mixed && gs.current_phase == 0
+                };
+                // C agg_retrieve_direct (nodeAgg.c:2551): outer plan
+                // exhausted during the hashing phase of a mixed agg — the
+                // per-set initial spills must become batches HERE, or every
+                // spilled tuple is silently dropped.
+                if finish_spills {
+                    hashagg_finish_initial_spills_gs(node, estate)?;
+                }
                 node.gsets.as_mut().unwrap().input_done = true;
                 return Ok(());
             }
