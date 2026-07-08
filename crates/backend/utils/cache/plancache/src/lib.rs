@@ -209,7 +209,43 @@ pub fn init_seams() {
     }
 }
 
+// Backend-exit reclaim of every surviving plancache context. C frees these by
+// process death (plancache.c allocates under CacheMemoryContext); a
+// thread-per-connection backend must free them itself or every prepared
+// statement's CachedPlanSource/CachedPlanQuery/CachedPlan contexts leak into
+// the postmaster's heap for the server's lifetime. Runs as an on_proc_exit
+// callback: portals and transactions are already torn down
+// (shutdown_postgres_cb), so the registry structs are the last owners; their
+// arena-tied fields (search_path, result_desc) drop before their arenas are
+// reclaimed.
+fn ReleaseAllCachedPlansAtExit(_code: i32, _arg: usize) {
+    let ctxs = with_cache(|pc| {
+        let mut ctxs = Vec::new();
+        for slot in pc.plans.iter_mut() {
+            if let Some(plan) = slot.take() {
+                ctxs.push(plan.plan_ctx);
+            }
+        }
+        for slot in pc.sources.iter_mut() {
+            if let Some(src) = slot.take() {
+                ctxs.push(src.query_ctx);
+                ctxs.push(src.source_ctx);
+            }
+        }
+        pc.plans.clear();
+        pc.plan_free.clear();
+        pc.sources.clear();
+        pc.source_free.clear();
+        pc.saved_plan_list.clear();
+        ctxs
+    });
+    for ctx in ctxs {
+        reclaim_ctx(ctx);
+    }
+}
+
 pub fn InitPlanCache() -> PgResult<()> {
+    ipc_seams::on_proc_exit::call(ReleaseAllCachedPlansAtExit, 0);
     let zero = Datum::from_oid(InvalidOid);
     inval::invalidate::CacheRegisterRelcacheCallback(PlanCacheRelCallback, zero)?;
     inval::invalidate::CacheRegisterSyscacheCallback(PROCOID, PlanCacheObjectCallback, zero)?;

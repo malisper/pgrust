@@ -37,6 +37,7 @@ pquery_seams = { path = "../../../tcop/pquery_seams" }
 snapmgr = { path = "../../time/snapmgr" }
 utility_seams = { path = "../../../tcop/utility_seams" }
 plancache_portal_seams = { path = "../plancache_portal_seams" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 
 [dev-dependencies]
 types_snapshot = { path = "../../../../_support/types/snapshot" }
