@@ -152,17 +152,19 @@ fn signal_children_delivers_to_registered_child_thread() {
     assert!(pmchild_seams::release_postmaster_child_slot::call(slot));
 }
 
+// A dead-end backend has no ProcSignal slot by design (it never
+// ProcSignalInits). C's SignalChildren/signal_child (postmaster.c) signals
+// it the same as any other child and tolerates ESRCH -- it never asserts or
+// crashes the postmaster over an undeliverable signal to that lane. Matches
+// the P1 fix for the boot-loop panic under SIGINT restart with an active
+// dead-end backend (backend_startup dead-end lane, pmchild/src/lib.rs).
 #[test]
-fn signal_children_dead_end_delivery_is_loud() {
+fn signal_children_dead_end_delivery_is_tolerated_not_fatal() {
     let _g = bringup();
     let id = pmchild_seams::alloc_dead_end_child::call().unwrap();
     pmchild_seams::set_child_pid::call(id, 5512);
-    let err = std::panic::catch_unwind(|| {
-        pmchild_seams::signal_children::call(3, btmask(BackendType::DeadEndBackend))
-    })
-    .expect_err("dead-end delivery has no ProcSignal slot and must fail loud");
-    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
-    assert!(msg.contains("dead-end"), "got: {msg}");
+    let matched = pmchild_seams::signal_children::call(3, btmask(BackendType::DeadEndBackend));
+    assert!(matched, "dead-end backend must still count as matched/signaled, not skipped");
     assert!(pmchild_seams::release_postmaster_child_slot::call(id));
 }
 
