@@ -752,10 +752,23 @@ pub struct WorkerInstr<'mcx> {
     pub bitmap: PgVec<'mcx, (i32, BitmapHeapScanInstrumentation)>,
 }
 
+// C ExecAuxRowMark's junk attnos, keyed by markType: an EPQ recheck
+// re-fetches a non-locked source rel's row by ctid (ROW_MARK_REFERENCE) or
+// re-returns the wholerow junk datum (ROW_MARK_COPY) from origslot.
+#[derive(Clone, Copy, Debug)]
+pub enum EpqRowMarkFetch {
+    Reference { ctid_attno: i16 },
+    Copy { whole_attno: i16 },
+}
+
 pub struct EpqSubs<'mcx> {
     pub relsubs_slot: PgVec<'mcx, Option<ExecSlotId>>,
     pub relsubs_done: PgVec<'mcx, bool>,
     pub relsubs_blocked: PgVec<'mcx, bool>,
+    /// C EPQState.relsubs_rowmark: non-locking aux rowmarks by rti-1.
+    pub relsubs_rowmark: PgVec<'mcx, Option<EpqRowMarkFetch>>,
+    /// C EPQState.origslot (EvalPlanQualSetSlot): the plan row under recheck.
+    pub origslot: Option<ExecSlotId>,
 }
 
 /// `EvalPlanQualInit` relsubs alloc for one EPQ owner (ModifyTable/LockRows),
@@ -776,7 +789,15 @@ pub fn ensure_epq_subs<'a, 'mcx>(
         relsubs_blocked.resize(rtsize, false);
         relsubs_blocked[(result_rti - 1) as usize] = true;
         relsubs_done[(result_rti - 1) as usize] = true;
-        *subs = Some(EpqSubs { relsubs_slot, relsubs_done, relsubs_blocked });
+        let mut relsubs_rowmark = PgVec::new_in(mcx);
+        relsubs_rowmark.resize(rtsize, None);
+        *subs = Some(EpqSubs {
+            relsubs_slot,
+            relsubs_done,
+            relsubs_blocked,
+            relsubs_rowmark,
+            origslot: None,
+        });
     }
     subs.as_mut().expect("just ensured")
 }
@@ -1339,7 +1360,7 @@ const _: () = assert!(!core::mem::needs_drop::<(i32, IncrementalSortInfo)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, u64)>());
 mcx::forget_safe_struct!(
-    EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked },
+    EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked, relsubs_rowmark, origslot },
     EStateData<'_> {
         es_query_cxt, es_range_table, es_range_table_size,
         es_rteperminfos, es_plannedstmt,

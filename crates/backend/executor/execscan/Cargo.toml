@@ -12,6 +12,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
 types_rel = { path = "../../../_support/types/rel" }
 tupdesc = { path = "../../access/common/tupdesc" }
 init_small = { path = "../../utils/init/init_small" }

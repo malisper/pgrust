@@ -625,6 +625,9 @@ fn grouping_planner_tail<'mcx>(
             }
 
             let part_cols_updated = run.root.partColsUpdated;
+            // C passes root->rowMarks: the non-locking source-rel marks feed
+            // the executor's EPQ aux rowmarks (EvalPlanQualFetchRowMark).
+            let row_marks = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rowMarks);
             let mtpath = crate::pathnode::create_modifytable_path(
                 run,
                 final_rel,
@@ -641,6 +644,7 @@ fn grouping_planner_tail<'mcx>(
                 onconflict,
                 merge_action_lists,
                 merge_join_conditions,
+                row_marks,
             );
             path_id = run.root.alloc_path(mtpath);
         }
