@@ -2,6 +2,87 @@
 // startup, before any call, never again; it always holds a fn pointer of the
 // seam's exact `Signature` — so `call()` is one relaxed load + indirect call.
 
+// Tap boot phase: a `tap!` may `install()` only before this is closed. Closed
+// once, from the postmaster's single-threaded boot sequence, strictly before
+// any backend thread spawns — the same window `seam::set()` relies on. Tests
+// never close it, so `install()` in test binaries only ever hits the
+// double-install panic, never this one.
+static TAP_BOOT_PHASE_OPEN: ::std::sync::atomic::AtomicBool =
+    ::std::sync::atomic::AtomicBool::new(true);
+
+pub fn close_tap_boot_phase() {
+    TAP_BOOT_PHASE_OPEN.store(false, ::std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tap_boot_phase_open() -> bool {
+    TAP_BOOT_PHASE_OPEN.load(::std::sync::atomic::Ordering::Relaxed)
+}
+
+// Default-empty variant of `seam!`: the slot starts null (no consumer), and
+// the hot-path form is `name::call_if(|f| f(args))` — one relaxed load, a
+// predicted-not-taken null test, and (only when installed) an indirect call.
+// No chaining: install-once, like `seam!`, plus a boot-phase gate (`seam!`
+// carries no such gate because its single mandatory impl always installs
+// during boot by construction; a tap's consumer is optional and boot-loaded,
+// so the gate catches a stray runtime install directly).
+#[macro_export]
+macro_rules! tap {
+    (
+        $(#[$attr:meta])*
+        $vis:vis fn $name:ident $(<$($lt:lifetime),+ $(,)?>)? ( $($arg:ident : $arg_ty:ty),* $(,)? )
+    ) => {
+        $(#[$attr])*
+        $vis mod $name {
+            #![allow(dead_code, unused_imports)]
+            use super::*;
+
+            pub type Signature = $(for<$($lt),+>)? fn($($arg_ty),*);
+
+            static SLOT: ::std::sync::atomic::AtomicPtr<()> =
+                ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+
+            pub fn install(implementation: Signature) {
+                if !$crate::tap_boot_phase_open() {
+                    panic!(concat!("tap installed after boot: ", module_path!()));
+                }
+                let prev = SLOT.swap(
+                    implementation as *mut (),
+                    ::std::sync::atomic::Ordering::Relaxed,
+                );
+                if !prev.is_null() {
+                    panic!(concat!("tap installed twice: ", module_path!()));
+                }
+            }
+
+            #[inline(always)]
+            pub fn is_installed() -> bool {
+                !SLOT.load(::std::sync::atomic::Ordering::Relaxed).is_null()
+            }
+
+            // Empty cost: relaxed load + null test + not-taken branch. `f`
+            // is only invoked (and its captured args only materialize) on
+            // the installed path, so callers can defer expensive argument
+            // construction into the closure body.
+            #[inline(always)]
+            pub fn call_if(f: impl FnOnce(Signature)) {
+                let raw = SLOT.load(::std::sync::atomic::Ordering::Relaxed);
+                if !raw.is_null() {
+                    __invoke(raw, f);
+                }
+            }
+
+            #[cold]
+            #[inline(never)]
+            fn __invoke(raw: *mut (), f: impl FnOnce(Signature)) {
+                // SAFETY: install-once invariant — a non-null SLOT always
+                // holds a valid `Signature` written by `install()`.
+                let g: Signature = unsafe { ::std::mem::transmute::<*mut (), Signature>(raw) };
+                f(g)
+            }
+        }
+    };
+}
+
 #[macro_export]
 macro_rules! seam {
     (
@@ -140,6 +221,41 @@ mod tests {
         first::set(|xs| &xs[0]);
         let data = [7, 8, 9];
         assert_eq!(*first::call(&data), 7);
+    }
+
+    crate::tap!(pub fn counter(x: i32));
+    crate::tap!(pub fn install_twice_tap(x: i32));
+
+    #[test]
+    fn tap_default_empty_and_call_if_skips() {
+        assert!(!counter::is_installed());
+        let mut seen = None;
+        counter::call_if(|f| {
+            seen = Some(());
+            f(1);
+        });
+        assert!(seen.is_none());
+    }
+
+    #[test]
+    fn tap_install_and_call_if_fires() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        static TOTAL: AtomicI32 = AtomicI32::new(0);
+        fn add(x: i32) {
+            TOTAL.fetch_add(x, Ordering::Relaxed);
+        }
+        counter::install(add);
+        assert!(counter::is_installed());
+        counter::call_if(|f| f(5));
+        counter::call_if(|f| f(7));
+        assert_eq!(TOTAL.load(Ordering::Relaxed), 12);
+    }
+
+    #[test]
+    #[should_panic(expected = "tap installed twice: seam_core::tests::install_twice_tap")]
+    fn tap_double_install_panics_with_path() {
+        install_twice_tap::install(|_| {});
+        install_twice_tap::install(|_| {});
     }
 
     crate::seam_linktime!(

@@ -345,6 +345,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     launcher_seams::apply_launcher_register::call();
 
     miscinit_seams::process_shared_preload_libraries::call()?;
+    miscinit_seams::process_preload_contrib::call()?;
 
     if guc_tables::vars::EnableSSL.read() {
         be_secure::secure_initialize(true)?;
@@ -523,6 +524,11 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     set_pg_start_time(timestamp_seams::get_current_timestamp::call());
 
     miscinit::AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_STARTING)?;
+
+    // Last single-threaded instant: StartChildProcess below spawns the first
+    // backend thread. Any tap install after this point is a bug, not a
+    // deferred contrib load (hook-surface.md's `tap!` boot-phase gate).
+    seam_core::close_tap_boot_phase();
 
     UpdatePMState(PMState::PM_STARTUP);
 

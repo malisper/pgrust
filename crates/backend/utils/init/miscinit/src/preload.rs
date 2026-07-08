@@ -5,6 +5,7 @@ use guc_tables::{vars, GucVarAccessors};
 use types_error::PgResult;
 
 static SHARED_PRELOAD_LIBRARIES: RwLock<Option<String>> = RwLock::new(None);
+static PRELOAD_CONTRIB: RwLock<Option<String>> = RwLock::new(None);
 
 guc_tables::session_guc_string!(
     SESSION_PRELOAD_LIBRARIES,
@@ -53,6 +54,22 @@ pub fn process_shared_preload_libraries() -> PgResult<()> {
     Ok(())
 }
 
+// Compiled-in-contrib boot dispatch (hook-surface.md section 6 open Q2):
+// `preload_contrib` names key the dfmgr builtin-library registry directly —
+// no probin/dlopen indirection exists, so this is a plain name lookup +
+// pg_init, run once, single-threaded, before any backend thread spawns
+// (the same window `process_shared_preload_libraries` runs in).
+pub fn process_preload_contrib() -> PgResult<()> {
+    let Some(list) = string_get(&PRELOAD_CONTRIB) else { return Ok(()) };
+    for item in list.split(',') {
+        let name = item.trim().trim_matches('"');
+        if !name.is_empty() {
+            dfmgr::load_file(name)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn process_shared_preload_libraries_done() -> bool {
     DONE.get()
 }
@@ -89,5 +106,9 @@ pub(crate) fn install_preload_guc_vars() {
     vars::local_preload_libraries_string.install(GucVarAccessors {
         get: local_preload_libraries_string_get,
         set: local_preload_libraries_string_set,
+    });
+    vars::preload_contrib_string.install(GucVarAccessors {
+        get: || string_get(&PRELOAD_CONTRIB),
+        set: |v| *PRELOAD_CONTRIB.write().unwrap() = v,
     });
 }

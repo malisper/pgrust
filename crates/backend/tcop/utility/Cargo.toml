@@ -73,6 +73,7 @@ cmdtag = { path = "../cmdtag" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 tcop_dest = { path = "../dest" }
 utility_seams = { path = "../utility_seams" }
+seam_core = { path = "../../../_support/seam_core" }
 catalog_toasting = { path = "../../catalog/catalog_toasting" }
 reloptions = { path = "../../access/common/reloptions" }
 catalog = { path = "../../catalog/catalog" }

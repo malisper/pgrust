@@ -31,6 +31,7 @@ analyze_seams = { path = "../analyze_seams" }
 backend_status = { path = "../../utils/activity/backend_status" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 queryjumble = { path = "../../nodes/queryjumble" }
+seam_core = { path = "../../../_support/seam_core" }
 mcx = { path = "../../../_support/mcx" }
 nodes_core = { path = "../../nodes/nodes_core" }
 parse_agg = { path = "../parse_agg" }

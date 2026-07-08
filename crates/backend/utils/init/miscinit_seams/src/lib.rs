@@ -86,6 +86,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // preload_contrib boot GUC dispatch (hook-surface.md section 6 open Q2):
+    // no C counterpart — compiled-in contrib's analog of processing
+    // shared_preload_libraries.
+    pub fn process_preload_contrib() -> PgResult<()>
+);
+
+seam_core::seam!(
     // process_shmem_requests (miscinit.c) — same deferred half.
     pub fn process_shmem_requests() -> PgResult<()>
 );

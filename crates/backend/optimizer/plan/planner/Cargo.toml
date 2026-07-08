@@ -23,6 +23,7 @@ types_nodes = { path = "../../../../_support/types/nodes" }
 types_pathnodes = { path = "../../../../_support/types/pathnodes" }
 types_portal = { path = "../../../../_support/types/portal" }
 planner_seams = { path = "../planner_seams" }
+seam_core = { path = "../../../../_support/seam_core" }
 parallel_seams = { path = "../../../access/transam/parallel_seams" }
 costsize = { path = "../../path/costsize" }
 allpaths = { path = "../../path/allpaths" }
