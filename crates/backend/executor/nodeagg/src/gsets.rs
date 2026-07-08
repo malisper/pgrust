@@ -894,6 +894,10 @@ fn agg_refill_hash_table_gs<'mcx>(
         h.hash_ngroups_limit = ngroups_limit;
         for ph in h.perhash.iter_mut() {
             ph.hashtable.reset();
+            // Every set's table (not just this batch's) is wiped here (C:
+            // ResetTupleHashTable for setno in 0..num_hashes) — a stale
+            // cursor from a prior fully-drained pass must not survive it.
+            ph.hashiter = 0;
         }
         h.hash_ngroups_current = 0;
         debug_assert!(h.perhash[batch.setno].spill.is_none());
