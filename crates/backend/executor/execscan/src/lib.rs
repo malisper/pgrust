@@ -222,9 +222,8 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
 
         if passes {
             if PROJ {
-                // Projection initplan deps fire only for qual-passing tuples
-                // (C evaluates ExecEvalParamExec inside the projection, which
-                // never runs on a rejected tuple).
+                // C reads projection initplan params inside the projection,
+                // which never runs on a qual-rejected tuple.
                 {
                     let deps = ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
                     if !deps.is_empty() {
