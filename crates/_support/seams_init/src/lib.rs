@@ -137,6 +137,7 @@ pub fn init_all() {
     citext::init_seams();
     uuid_ossp::init_seams();
     pg_prewarm::init_seams();
+    ltree::init_seams();
     hstore::init_seams();
     pg_trgm::init_seams();
     session::init_seams();
