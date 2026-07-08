@@ -71,7 +71,7 @@ mod tests {
     use super::*;
 
     fn init() {
-        formatting::init_seams();
+        adt_formatting::init_seams();
     }
 
     const C_COLLATION: Oid = types_core::C_COLLATION_OID;
