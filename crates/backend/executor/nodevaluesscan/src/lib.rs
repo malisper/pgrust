@@ -127,6 +127,11 @@ pub fn exec_values_scan<'mcx>(
     node: &mut ValuesScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // ExecScanFetch: an EPQ recheck substitutes the wholerow rowmark row
+    // (ROW_MARK_COPY) for the VALUES rescan; exec_scan reads es_epq_active.
+    if estate.es_epq_active {
+        return ::execscan::exec_scan(node, estate);
+    }
     match (node.ss.qual.is_some(), node.ss.ps_ProjInfo.is_some()) {
         (false, false) => exec_scan_extended::<_, false, false>(node, estate),
         (true, false) => exec_scan_extended::<_, true, false>(node, estate),
