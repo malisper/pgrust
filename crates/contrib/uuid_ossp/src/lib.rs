@@ -13,7 +13,7 @@ use types_error::{PgError, PgResult, ERRCODE_EXTERNAL_ROUTINE_EXCEPTION};
 use types_fmgr::{
     byref_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction, UUID_LEN,
 };
-use uuid::PgUuid;
+use adt_uuid::PgUuid;
 
 const LIBRARY: &str = "uuid-ossp";
 
