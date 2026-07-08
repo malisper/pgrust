@@ -35,6 +35,7 @@ sort_storage = { path = "../../utils/sort/sort_storage" }
 hyperloglog = { path = "../../lib/hyperloglog" }
 hashfn = { path = "../../../common/hashfn" }
 init_small = { path = "../../utils/init/init_small" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 adt_numeric = { path = "../../utils/adt/numeric" }
 pqformat = { path = "../../libpq/pqformat" }
 

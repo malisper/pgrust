@@ -8022,6 +8022,7 @@ dependencies = [
  "miscinit_seams",
  "pglz",
  "pgstat_seams",
+ "postgres_seams",
  "pqformat",
  "resowner",
  "resowner_seams",
