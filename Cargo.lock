@@ -10709,6 +10709,7 @@ dependencies = [
  "guc_tables",
  "inval",
  "inval_seams",
+ "ipc_seams",
  "lmgr",
  "lock_seams",
  "mcx",
