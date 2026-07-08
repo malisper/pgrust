@@ -272,20 +272,17 @@ pub fn SignalChildren(signal: i32, target_mask: u32) -> bool {
                 bp.pid
             ),
         );
-        if bp.bkend_type == BackendType::DeadEndBackend {
-            // Dead-end children never ProcSignalInit (no slot to pend on);
-            // C reaches them because kill hits the whole process.
-            panic!(
-                "SignalChildren: signal {} to dead-end backend pid {} undeliverable \
-                 (no ProcSignal slot; backend_startup dead-end lane)",
-                signal, bp.pid
-            );
-        }
         // kill(pid, signal): pend on the target's ProcSignal slot + procLatch
-        // wake (procsignal::SendThreadSignal). ESRCH matches C only for an
-        // exit race; a launched-but-unregistered thread would drop the signal
-        // and hang shutdown, and the ServerLoop SIGKILL escalation is the
-        // loud backstop for that window.
+        // wake (procsignal::SendThreadSignal). C's SignalChildren/signal_child
+        // (postmaster.c) calls kill(pid, signal) unconditionally for every
+        // active child -- including dead-end backends, which have no
+        // ProcSignal slot by design -- and just tolerates ESRCH; it never
+        // special-cases or asserts on the dead-end lane. Dead-end backends
+        // never ProcSignalInit, so SendThreadSignal's slot scan naturally
+        // misses and returns ESRCH here too, matching C's tolerance exactly.
+        // An already-exited or launched-but-unregistered thread hits the same
+        // path; the ServerLoop SIGKILL escalation is the loud backstop for
+        // that window.
         if procsignal::SendThreadSignal(bp.pid, signal) < 0 {
             let _ = report(DEBUG3, format!("kill({},{}) failed: No such process", bp.pid, signal));
         }
