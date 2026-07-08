@@ -3703,6 +3703,58 @@ fn create_nestloop_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     let nest_params =
         crate::paramassign::identify_current_nestloop_params(run, &outerrelids, &req_outer)?;
 
+    // PHV nestloop params may be missing from the outer plan's tlist (the
+    // executor's NestLoopParam machinery needs simple outer-Var references);
+    // append them as resjunk entries. Surviving curOuterParams references
+    // inside such a PHV become Params now.
+    let mut outer_plan = outer_plan;
+    {
+        let mut new_tlist: Option<NodeList<'mcx>> = None;
+        let mut outer_parallel_safe = outer_plan.as_plan().expect("plan node").parallel_safe;
+        for nlp_node in &nest_params {
+            let nlp = nlp_node.as_nest_loop_param().expect("nestParams cell");
+            if nlp.paramval.as_var().is_some() {
+                continue;
+            }
+            let phv_node = nlp.paramval;
+            let phv = phv_node.as_place_holder_var().expect("non-Var nestParam is a PHV");
+            let already = match &new_tlist {
+                Some(tl) => tl.iter(),
+                None => outer_plan.as_plan().unwrap().targetlist.iter(),
+            }
+            .any(|n| types_nodes::equal(n.as_target_entry().expect("tlist cell").expr, phv_node));
+            if already {
+                continue;
+            }
+            // Safe after the membership check: equal() ignores phexpr.
+            let new_phexpr = replace_nestloop_params(run, phv.phexpr)?;
+            // SAFETY: exclusive plan-tree ownership (C rewrites in place).
+            unsafe {
+                phv_node.with_mut::<types_nodes::primnodes::PlaceHolderVar, _>(|p| {
+                    p.phexpr = new_phexpr;
+                })
+            }
+            .expect("PlaceHolderVar");
+            let mut tl = match new_tlist.take() {
+                Some(tl) => tl,
+                None => NodeList::from_slice(
+                    mcx,
+                    outer_plan.as_plan().unwrap().targetlist.as_slice(),
+                )?,
+            };
+            let resno = tl.len() as i16 + 1;
+            let copy = rewrite_manip::copy_node(mcx, phv_node)?;
+            tl.lappend(mcx, Node::mk_target_entry(mcx, copy, resno, None, true)?)?;
+            new_tlist = Some(tl);
+            if outer_parallel_safe {
+                outer_parallel_safe = clauses::is_parallel_safe_opt(run, Some(phv_node))?;
+            }
+        }
+        if let Some(tl) = new_tlist {
+            outer_plan = change_plan_targetlist(mcx, outer_plan, tl, outer_parallel_safe)?;
+        }
+    }
+
     let mut plan = Node::build::<types_nodes::plannodes::NestLoop>(mcx)?;
     plan.join.plan.targetlist = tlist;
     plan.join.plan.qual = otherclauses;
@@ -3714,6 +3766,43 @@ fn create_nestloop_plan<'mcx>(run: &mut PlannerRun<'mcx>, path_id: PathId) -> Pg
     plan.nestParams = nest_params;
     copy_generic_path_info(run, &mut plan.join.plan, path_id);
     Ok(plan.seal())
+}
+
+// change_plan_targetlist (createplan.c): a non-projecting plan node whose
+// tlist must change gets a Result on top.
+fn change_plan_targetlist<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    subplan: Node<'mcx>,
+    tlist: NodeList<'mcx>,
+    tlist_parallel_safe: bool,
+) -> PgResult<Node<'mcx>> {
+    if !is_projection_capable_pathtype(subplan.node_tag() as u16)
+        && !tlist_same_exprs(&tlist, &subplan.as_plan().expect("plan node").targetlist)
+    {
+        let sub = subplan.as_plan().expect("plan node");
+        let mut result = Node::build::<ResultPlan>(mcx)?;
+        result.plan.targetlist = tlist;
+        result.plan.qual = NodeList::nil();
+        result.plan.lefttree = Some(subplan);
+        result.plan.disabled_nodes = sub.disabled_nodes;
+        result.plan.startup_cost = sub.startup_cost;
+        result.plan.total_cost = sub.total_cost;
+        result.plan.plan_rows = sub.plan_rows;
+        result.plan.plan_width = sub.plan_width;
+        result.plan.parallel_aware = false;
+        result.plan.parallel_safe = sub.parallel_safe && tlist_parallel_safe;
+        Ok(result.seal())
+    } else {
+        // SAFETY: freshly built subplan; exclusive plan-tree ownership.
+        unsafe {
+            subplan.with_plan_mut(|p| {
+                p.targetlist = tlist;
+                p.parallel_safe = p.parallel_safe && tlist_parallel_safe;
+            })
+        }
+        .expect("plan node");
+        Ok(subplan)
+    }
 }
 
 // create_hashjoin_plan (createplan.c), JOIN_INNER arm. Skew fields default to
