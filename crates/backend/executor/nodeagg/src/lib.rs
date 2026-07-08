@@ -2020,6 +2020,11 @@ fn agg_refill_hash_table<'mcx>(
     hashagg_release_retained("refill_batch");
 
     loop {
+        // C's loop-top CHECK_FOR_INTERRUPTS (agg_refill_hash_table has no
+        // child node to supply cancel points).
+        if init_small::globals::InterruptPending() {
+            postgres_seams::check_for_interrupts::call()?;
+        }
         let advance = {
             let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
             let ph = perhash.as_mut().unwrap();
