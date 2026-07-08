@@ -177,7 +177,14 @@ fn build_minmax_path<'mcx>(
         );
     }
     let target = *run.root.expr_node(mminfo.target);
-    let mut subparse = crate::subselect::query_cells_copy(mcx, run.parse())?;
+    // Deep copy per C (planagg.c:353 copyObject): the probe planning
+    // scribbles in place (reduce_outer_joins' nullingrels strip, RTE jointype
+    // flips) and the main planning re-plans the same subquery RTEs; a shared
+    // tree leaves the second pass with stripped quals under an unreduced
+    // jointree ("wrong varnullingrels" in setrefs).
+    let deep = rewrite_manip::copy_query_node(mcx, run.parse())?;
+    let mut subparse =
+        crate::subselect::query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
 
     let tle = Node::mk_target_entry(mcx, target, 1, Some("agg_target"), false)?;
     // assignSortGroupRef: the single fresh tle takes ref 1.
