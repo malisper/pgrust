@@ -646,7 +646,23 @@ fn grouping_planner_tail<'mcx>(
         }
         add_existing_path(run, final_rel, path_id);
     }
-    // Partial paths, FDW upper paths, create_upper_paths_hook: all absent.
+    // planner.c: hand current_rel's partial paths to final_rel when an outer
+    // query level can use them (set_subquery_pathlist's partial SubqueryScan
+    // loop is the consumer).
+    if run.root.rel(final_rel).consider_parallel
+        && run.root.query_level > 1
+        && !limit_needed(parse)
+    {
+        debug_assert!(parse.rowMarks.is_nil() && parse.commandType == CmdType::CMD_SELECT);
+        let partials = crate::relnode::pgvec_clone_shallow(
+            run.mcx,
+            &run.root.rel(current_rel).partial_pathlist,
+        );
+        for &pid in partials.iter() {
+            crate::pathnode::add_partial_path(run, final_rel, pid);
+        }
+    }
+    // FDW upper paths, create_upper_paths_hook: absent.
     Ok(())
 }
 
