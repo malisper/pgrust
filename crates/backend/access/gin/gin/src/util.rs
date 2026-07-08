@@ -60,6 +60,7 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
                 .map(|n| n.as_str().to_string());
             match name.as_deref() {
                 Some("gin_extract_value_trgm") => GinOpclass::TrgmOps,
+                Some("gin_extract_hstore") => GinOpclass::HstoreOps,
                 _ => unported(&format!("GIN opclass with extractValue proc {other}")),
             }
         }
@@ -88,6 +89,7 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
                 GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
                 GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
                 GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
+                GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
                 GinOpclass::ArrayOps => InvalidOid,
             }
     );

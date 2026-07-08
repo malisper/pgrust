@@ -1,0 +1,39 @@
+[package]
+name = "hstore"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hstore"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+stringinfo = { path = "../../_support/types/stringinfo" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_gist = { path = "../../_support/types/gist" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+adt_json = { path = "../../backend/utils/adt/json" }
+adt_jsonb = { path = "../../backend/utils/adt/jsonb" }
+adt_numeric = { path = "../../backend/utils/adt/numeric" }
+adt_domains = { path = "../../backend/utils/adt/domains" }
+reloptions = { path = "../../backend/access/common/reloptions" }
+detoast = { path = "../../backend/access/common/detoast" }
+detoast_seams = { path = "../../backend/access/common/detoast_seams" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+hashfn = { path = "../../common/hashfn" }
+crc32c = { path = "../../port/crc32c" }
+pqformat = { path = "../../backend/libpq/pqformat" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+typcache = { path = "../../backend/utils/cache/typcache" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+gin_hstore_seams = { path = "../../backend/access/gin/gin_hstore_seams" }
+hstore_subs_seams = { path = "../../backend/executor/hstore_subs_seams" }

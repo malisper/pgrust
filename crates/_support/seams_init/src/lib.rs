@@ -136,6 +136,7 @@ pub fn init_all() {
     adt_formatting::init_seams();
     citext::init_seams();
     uuid_ossp::init_seams();
+    hstore::init_seams();
     pg_trgm::init_seams();
     session::init_seams();
     relpath::init_seams();
