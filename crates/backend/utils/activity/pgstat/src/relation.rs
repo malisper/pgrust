@@ -90,6 +90,10 @@ pub fn pgstat_assoc_relation(relid: Oid, relisshared: bool) {
 
 pub fn pgstat_unlink_relation(_relid: Oid, _relisshared: bool) {}
 
+// Both helpers reborrow through the RelationPendingPtr allocation root (never
+// through an intermediate reference), so relcache-cached count links derived
+// from the same root stay aliasing-clean. Sound: the allocation outlives the
+// returned borrow (freed only via removal paths, which need &mut PgStatState).
 fn pgstat_prep_relation_pending<'a>(
     st: &'a mut PgStatState,
     relid: Oid,
@@ -97,7 +101,8 @@ fn pgstat_prep_relation_pending<'a>(
 ) -> &'a mut PgStat_TableStatus {
     let key = relation_key(relid, relisshared);
     match st.prep_pending_entry(key) {
-        PendingData::Relation(t) => {
+        PendingData::Relation(rp) => {
+            let t = unsafe { &mut *rp.as_ptr() };
             t.id = relid;
             t.shared = relisshared;
             t
@@ -108,7 +113,7 @@ fn pgstat_prep_relation_pending<'a>(
 
 fn table_mut<'a>(st: &'a mut PgStatState, key: PgStat_HashKey) -> &'a mut PgStat_TableStatus {
     match st.pending.get_mut(&key) {
-        Some(PendingData::Relation(t)) => t,
+        Some(PendingData::Relation(rp)) => unsafe { &mut *rp.as_ptr() },
         _ => unreachable!("relation pending entry vanished"),
     }
 }
@@ -267,6 +272,43 @@ pub fn pgstat_count_buffer_read(relid: Oid, relisshared: bool) {
 
 pub fn pgstat_count_buffer_hit(relid: Oid, relisshared: bool) {
     with_counts(relid, relisshared, |c| c.blocks_hit += 1);
+}
+
+// C rel->pgstat_info link (pgstat_relation.c pgstat_assoc_relation): the
+// relcache caches (gen, counts ptr) so per-buffer-access counting is a
+// pointer bump, not a map probe. Validity contract: the pointer may be
+// dereferenced only while pgstat_relation_link_gen() equals the gen stored
+// beside it (pending.rs RELATION_PENDING_GEN).
+pub fn pgstat_relation_link_gen() -> u64 {
+    pending::relation_pending_gen()
+}
+
+pub fn pgstat_relation_link_counts(relid: Oid, relisshared: bool) -> *mut () {
+    let key = relation_key(relid, relisshared);
+    pending::with_state(|st| {
+        pgstat_prep_relation_pending(st, relid, relisshared);
+        match st.pending.get_mut(&key) {
+            Some(PendingData::Relation(rp)) => {
+                unsafe { &raw mut (*rp.as_ptr()).counts }.cast()
+            }
+            _ => unreachable!("relation pending entry vanished"),
+        }
+    })
+}
+
+/// Bump blocks_fetched (and blocks_hit) through a still-valid link.
+///
+/// # Safety
+/// `counts` must come from `pgstat_relation_link_counts` and the caller must
+/// have checked `pgstat_relation_link_gen()` against the gen captured with it.
+pub unsafe fn pgstat_count_buffer_read_via(counts: *mut (), hit: bool) {
+    let c = counts.cast::<PgStat_TableCounts>();
+    unsafe {
+        (*c).blocks_fetched += 1;
+        if hit {
+            (*c).blocks_hit += 1;
+        }
+    }
 }
 
 pub fn pgstat_create_relation(relid: Oid, relisshared: bool) {

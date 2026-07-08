@@ -46,6 +46,10 @@ pub struct RelationData<'mcx> {
     pub rd_indcollation: PgVec<'mcx, Oid>,
     pub rd_options: Option<RdOptions>,
     pub pgstat_enabled: Cell<bool>,
+    // C rd->pgstat_info: (gen, counts) raw link into pgstat's pending relation
+    // entry; dereferenceable only while gen matches pgstat's relation-pending
+    // generation (count sites check before every dereference).
+    pub pgstat_link: Cell<(u64, *mut ())>,
     // C rd_amcache (rule-5 cache): btree metapage copy so descents skip the read; enum when another AM lands; cleared with the entry as C pfrees it.
     pub rd_amcache: Cell<Option<RdAmCacheBtree>>,
     // C rd_amcache, hash arm (HashMetaPageData is 4.5KB - boxed, read via borrow).
@@ -350,6 +354,7 @@ mod tests {
             rd_indcollation: PgVec::new_in(mcx),
             rd_options: None,
             pgstat_enabled: Cell::new(false),
+            pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(),
             rd_amcache_gin: Default::default(),

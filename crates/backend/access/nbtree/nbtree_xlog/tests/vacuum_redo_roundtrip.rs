@@ -421,6 +421,7 @@ fn index_rel(mcx: Mcx<'_>) -> Relation<'_> {
         rd_indcollation: one(0),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
+        pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
         rd_trigdesc: Default::default(),
         rd_hastriggers: false, rd_hasrules: false,

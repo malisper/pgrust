@@ -803,6 +803,7 @@ fn parse_entry(rd: &mut Rd<'_>, mcx: Mcx<'static>) -> Option<(RelationData<'stat
         rd_indcollation: indcollation,
         rd_options,
         pgstat_enabled: core::cell::Cell::new(false),
+        pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(),
         rd_amcache_gin: Default::default(),

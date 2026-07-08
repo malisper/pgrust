@@ -156,15 +156,25 @@ pub fn ReadBufferExtended(
         mode,
         strategy,
     )?;
-    // bufmgr.c:1166-1168: per-relation blocks_fetched/blocks_hit; the
-    // pgstat_enabled Cell is C's pgstat_should_count_relation.
-    if rel.pgstat_enabled.get() {
-        pgstat::relation::pgstat_count_buffer_read(rel.rd_id, rel.rd_rel.relisshared);
-        if hit {
-            pgstat::relation::pgstat_count_buffer_hit(rel.rd_id, rel.rd_rel.relisshared);
-        }
-    }
+    pgstat_count_buffer(rel, hit);
     Ok(buffer)
+}
+
+// bufmgr.c:1166-1168: per-relation blocks_fetched/blocks_hit; the
+// pgstat_enabled Cell is C's pgstat_should_count_relation, and pgstat_link is
+// C's rel->pgstat_info — count through the cached pointer while its gen is
+// current, re-assoc (one map probe) when pgstat invalidated it.
+fn pgstat_count_buffer(rel: &RelationData<'_>, hit: bool) {
+    if !rel.pgstat_enabled.get() {
+        return;
+    }
+    let cur = pgstat::relation::pgstat_relation_link_gen();
+    let (gen, mut counts) = rel.pgstat_link.get();
+    if gen != cur || counts.is_null() {
+        counts = pgstat::relation::pgstat_relation_link_counts(rel.rd_id, rel.rd_rel.relisshared);
+        rel.pgstat_link.set((cur, counts));
+    }
+    unsafe { pgstat::relation::pgstat_count_buffer_read_via(counts, hit) };
 }
 
 /// Sequential-batch ReadBuffer (StartReadBuffers collapsed): see
@@ -192,12 +202,7 @@ pub fn ReadBufferBatched(
         nblocks_hint,
         strategy,
     )?;
-    if rel.pgstat_enabled.get() {
-        pgstat::relation::pgstat_count_buffer_read(rel.rd_id, rel.rd_rel.relisshared);
-        if hit {
-            pgstat::relation::pgstat_count_buffer_hit(rel.rd_id, rel.rd_rel.relisshared);
-        }
-    }
+    pgstat_count_buffer(rel, hit);
     Ok(buffer)
 }
 

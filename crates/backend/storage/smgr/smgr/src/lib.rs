@@ -1113,6 +1113,7 @@ mod tests {
             rd_indcollation: PgVec::new_in(cx.mcx()),
             rd_options: None,
             pgstat_enabled: Cell::new(false),
+            pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
             rd_amcache: Default::default(),
             rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
             rd_support: PgVec::new_in(cx.mcx()),

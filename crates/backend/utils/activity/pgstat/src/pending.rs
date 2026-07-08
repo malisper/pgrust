@@ -5,9 +5,10 @@
 
 use core::cell::{Cell, RefCell};
 use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 
 use hashbrown::hash_map::Entry;
-use mcx::{Mcx, MemoryContext, PgHashMap, PgVec};
+use mcx::{Mcx, MemoryContext, PgBox, PgHashMap, PgVec};
 use types_core::{Oid, TimestampTz};
 
 use crate::database;
@@ -40,10 +41,34 @@ pub struct PgStat_HashKey {
 }
 
 pub enum PendingData {
-    Relation(PgStat_TableStatus),
+    Relation(RelationPendingPtr),
     Database(database::PgStat_StatDBEntry),
     Function(crate::function::PgStat_FunctionCounts),
     Subscription(crate::subscription::PgStat_BackendSubEntry),
+}
+
+// C's PgStat_TableStatus lives at a stable palloc'd address that
+// rel->pgstat_info points into; the map value is the raw allocation root so
+// both map access and relcache-cached count links (rd pgstat_link) derive
+// from it. Every removal frees through free() and bumps
+// RELATION_PENDING_GEN — the link validity check — before any later count
+// could dereference a stale pointer.
+pub struct RelationPendingPtr(NonNull<PgStat_TableStatus>);
+
+impl RelationPendingPtr {
+    fn new(mcx: Mcx<'static>) -> Self {
+        let b = mcx::alloc_in(mcx, PgStat_TableStatus::new(mcx)).expect("out of memory");
+        RelationPendingPtr(NonNull::from(PgBox::leak(b)))
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut PgStat_TableStatus {
+        self.0.as_ptr()
+    }
+
+    fn free(self, mcx: Mcx<'static>) {
+        bump_relation_pending_gen();
+        unsafe { drop(PgBox::from_raw_in(self.0.as_ptr(), mcx)) };
+    }
 }
 
 pub const PGSTAT_ENTRY_REF_HASH_SIZE: usize = 128;
@@ -73,7 +98,14 @@ impl PgStatState {
     }
 
     pub(crate) fn delete_pending_entry(&mut self, key: PgStat_HashKey) -> bool {
-        self.pending.remove(&key).is_some()
+        match self.pending.remove(&key) {
+            Some(PendingData::Relation(rp)) => {
+                rp.free(self.ctx.mcx());
+                true
+            }
+            Some(_) => true,
+            None => false,
+        }
     }
 
     pub(crate) fn have_pending(&self, key: PgStat_HashKey) -> bool {
@@ -83,7 +115,7 @@ impl PgStatState {
 
 fn new_pending_data(key: PgStat_HashKey, mcx: Mcx<'static>) -> PendingData {
     if key.kind == PGSTAT_KIND_RELATION {
-        PendingData::Relation(PgStat_TableStatus::new(mcx))
+        PendingData::Relation(RelationPendingPtr::new(mcx))
     } else if key.kind == PGSTAT_KIND_DATABASE {
         PendingData::Database(database::PgStat_StatDBEntry::default())
     } else if key.kind == PGSTAT_KIND_FUNCTION {
@@ -105,6 +137,20 @@ thread_local! {
     // borrow. Contract: never false while pending is non-empty; stale TRUE
     // falls through to the real check (which then re-clears it).
     static HAVE_PENDING: Cell<bool> = const { Cell::new(false) };
+    // Validity epoch for relcache-cached relation-pending count links
+    // (rd pgstat_link): bumped by RelationPendingPtr::free before the
+    // allocation is released, so a link is dereferenceable iff its stored
+    // gen equals the current value. Starts at 1: a zero-initialized link
+    // never matches.
+    static RELATION_PENDING_GEN: Cell<u64> = const { Cell::new(1) };
+}
+
+pub fn relation_pending_gen() -> u64 {
+    RELATION_PENDING_GEN.with(|c| c.get())
+}
+
+fn bump_relation_pending_gen() {
+    RELATION_PENDING_GEN.with(|c| c.set(c.get() + 1));
 }
 
 pub(crate) fn with_state<R>(f: impl FnOnce(&mut PgStatState) -> R) -> R {
@@ -246,15 +292,17 @@ pub(crate) fn pgstat_flush_pending_entries(_nowait: bool) -> bool {
             let key = st.pending_order[i];
             i += 1;
             if key.kind == PGSTAT_KIND_RELATION {
-                let Some(PendingData::Relation(tab)) = st.pending.remove(&key) else {
+                let Some(PendingData::Relation(rp)) = st.pending.remove(&key) else {
                     continue;
                 };
+                let counts = unsafe { (*rp.as_ptr()).counts };
+                rp.free(st.ctx.mcx());
                 // Ignore entries that never accumulated counts (planner-only opens).
-                if tab.counts == PgStat_TableCounts::default() {
+                if counts == PgStat_TableCounts::default() {
                     continue;
                 }
-                crate::shmem::flush_relation(key, &tab.counts);
-                flush_relation_into_db(st, key.dboid, &tab.counts);
+                crate::shmem::flush_relation(key, &counts);
+                flush_relation_into_db(st, key.dboid, &counts);
             } else if key.kind == PGSTAT_KIND_FUNCTION {
                 let Some(PendingData::Function(f)) = st.pending.remove(&key) else {
                     continue;
