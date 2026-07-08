@@ -20,4 +20,4 @@ hashfn = { path = "../../common/hashfn" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 
 [dev-dependencies]
-formatting = { path = "../../backend/utils/adt/formatting" }
+adt_formatting = { path = "../../backend/utils/adt/formatting" }
