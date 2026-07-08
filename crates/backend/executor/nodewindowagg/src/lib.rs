@@ -2216,9 +2216,8 @@ impl<'mcx> WindowAggStateData<'mcx> {
         let fo = self.frameOptions;
         let mcx = estate.es_query_cxt;
         {
-            // C evaluates the offset exprs here unconditionally (before any
-            // row is fetched), so their initplan deps fire eagerly; every
-            // other dep waits for a first spooled row (hoist below).
+            // C evaluates the offset exprs before any row is fetched;
+            // every other dep waits for a first spooled row (hoist below).
             let mut deps: Vec<u32> = Vec::new();
             for state in
                 [self.start_offset_state.as_deref(), self.end_offset_state.as_deref()]
@@ -3345,8 +3344,7 @@ where
             }
         }
 
-        // A row exists past this point; C first reads pending initplan
-        // params here (never on an empty input).
+        // A row exists here — C never reads these params on an empty input.
         if !state.deps_hoisted {
             state.hoist_pending_initplans(estate)?;
             state.deps_hoisted = true;
