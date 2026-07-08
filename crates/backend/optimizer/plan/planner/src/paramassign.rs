@@ -412,11 +412,26 @@ pub(crate) fn process_subquery_nestloop_params<'mcx>(
             (pitem.paramId, pitem.item)
         };
         let item = *run.root.expr_node(item_id);
-        let var = item.as_var().unwrap_or_else(|| {
-            panic!("process_subquery_nestloop_params (paramassign.c): non-Var subquery parameter")
-        });
-        if !crate::relnode::relids_is_member(var.varno, &run.root.curOuterRels) {
-            panic!("non-LATERAL parameter required by subquery");
+        match item.node_tag() {
+            types_nodes::NodeTag::T_Var => {
+                let var = item.as_var().unwrap();
+                if !crate::relnode::relids_is_member(var.varno, &run.root.curOuterRels) {
+                    panic!("non-LATERAL parameter required by subquery");
+                }
+            }
+            types_nodes::NodeTag::T_PlaceHolderVar => {
+                let phv = item.as_place_holder_var().unwrap();
+                let phid = crate::placeholder::find_placeholder_info(run, phv)?;
+                let eval_at =
+                    crate::relnode::relids_copy(mcx, &run.root.phinfo(phid).ph_eval_at);
+                if !crate::relnode::relids_is_subset(&eval_at, &run.root.curOuterRels) {
+                    panic!("non-LATERAL parameter required by subquery");
+                }
+            }
+            other => panic!(
+                "process_subquery_nestloop_params (paramassign.c): unexpected type of \
+                 subquery parameter {other:?}"
+            ),
         }
         let mut present = false;
         for i in 0..run.root.curOuterParams.len() {
@@ -433,10 +448,7 @@ pub(crate) fn process_subquery_nestloop_params<'mcx>(
             }
         }
         if !present {
-            let paramval = Node::mk(
-                mcx,
-                Var { varnullingrels: var.varnullingrels.clone_in(mcx)?, ..*var },
-            )?;
+            let paramval = rewrite_manip::copy_node(mcx, item)?;
             let nlp = Node::mk(
                 mcx,
                 types_nodes::plannodes::NestLoopParam { paramno: param_id, paramval },
