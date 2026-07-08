@@ -26,6 +26,7 @@ const K: [u32; 64] = [
     0xeb86d391,
 ];
 
+#[derive(Clone)]
 pub struct Md5 {
     state: [u32; 4],
     len: u64,
