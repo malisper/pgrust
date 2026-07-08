@@ -1265,7 +1265,9 @@ pub fn ExplainNode<'mcx>(
             show_agg_keys(node, ancestors, es)?;
             show_upper_qual(&plan.qual, "Filter", node, ancestors, es)?;
             show_hashagg_info(node, es)?;
-            filtered_count_gap(&plan.qual, es);
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
         }
         NodeTag::T_Group => {
             show_group_keys(node, ancestors, es)?;
