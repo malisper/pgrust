@@ -805,6 +805,7 @@ dependencies = [
  "postgres_seams",
  "regex",
  "regex_core",
+ "regexp_alt",
  "regexp_seams",
  "types_core",
  "types_error",
@@ -12095,6 +12096,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "regexp_alt"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "guc_tables",
+ "mbutils",
+ "mcx",
+ "pkg-config",
+ "postgres_seams",
+ "regex",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "regexp_seams"
 version = "0.0.0"
 dependencies = [
@@ -16476,6 +16492,7 @@ dependencies = [
  "pqformat",
  "regex",
  "regex_core_seams",
+ "regexp_alt",
  "regexp_seams",
  "stringinfo",
  "syscache_seams",
