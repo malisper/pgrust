@@ -37,13 +37,15 @@ pub fn pull_up_subqueries<'mcx>(
             for (i, n) in parse.rtable.iter().enumerate() {
                 let r = n.as_range_tbl_entry().expect("rtable cell");
                 summary.push_str(&format!(
-                    "[{} {:?} sub={} inh={} lat={} eref={:?}] ",
+                    "[{} {:?} sub={} inh={} lat={} relid={} eref={:?} addr={:?}] ",
                     i + 1,
                     r.rtekind,
                     r.subquery.is_some(),
                     r.inh,
                     r.lateral,
-                    r.eref.and_then(|e| e.aliasname)
+                    r.relid,
+                    r.eref.and_then(|e| e.aliasname),
+                    n.as_raw()
                 ));
             }
             panic!(
@@ -1512,6 +1514,12 @@ fn pull_up_simple_subquery<'mcx>(
         }
     }
 
+    // XXX sqlsmith-planner-errors debug: trace subquery clears.
+    eprintln!(
+        "XXX clear-subquery varno={varno} node={:?} eref={:?}",
+        rte_node.as_raw(),
+        rte.eref.and_then(|e| e.aliasname)
+    );
     // SAFETY: as above — exclusive pre-seal tree fixup.
     unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.subquery = None) };
     // SubLinks can remain in the sub's tlist (now substituted into parse) and
