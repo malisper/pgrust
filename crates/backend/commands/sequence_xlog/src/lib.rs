@@ -7,7 +7,7 @@ use types_core::{OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_storage::bufpage::{PageMut, PageTemp};
 use xlogreader_seams::XLogReaderState;
-use xlogutils::XLogInitBufferForRedo;
+use xlogutils::{XLogFlushBufferForRedoIfInit, XLogInitBufferForRedo};
 
 pub const SEQ_MAGIC: u32 = 0x1717;
 pub const XLOG_SEQ_LOG: u8 = 0x00;
@@ -72,6 +72,7 @@ pub fn seq_redo(record: &mut XLogReaderState) -> PgResult<()> {
     // SAFETY: buffer pinned + exclusively locked by XLogInitBufferForRedo.
     unsafe { core::ptr::copy_nonoverlapping(local.as_bytes().as_ptr(), raw.as_ptr(), BLCKSZ) };
     bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+    XLogFlushBufferForRedoIfInit(record, 0, buffer)?;
     bufmgr_seams::lock_buffer::call(buffer, bufmgr_seams::BUFFER_LOCK_UNLOCK)?;
     bufmgr_seams::release_buffer::call(buffer)
 }

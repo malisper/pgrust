@@ -7,15 +7,15 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use types_core::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, OffsetNumber, BLCKSZ};
+use types_core::{BlockNumber, Buffer, InvalidBlockNumber, InvalidBuffer, OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_hash::*;
 use types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 use types_storage::ReadBufferMode;
 use xlogreader_seams::XLogReaderState;
 use xlogutils::{
-    XLogInitBufferForRedo, XLogReadBufferForRedo, XLogReadBufferForRedoExtended, BLK_NEEDS_REDO,
-    BLK_RESTORED,
+    XLogFlushBufferForRedoIfInit, XLogInitBufferForRedo, XLogReadBufferForRedo,
+    XLogReadBufferForRedoExtended, BLK_NEEDS_REDO, BLK_RESTORED,
 };
 
 const XLR_INFO_MASK: u8 = 0x0F;
@@ -171,15 +171,6 @@ fn init_bitmapbuffer(buffer: Buffer, bmsize: u16) {
     pm.set_pd_lower((SizeOfPageHeaderData + bmsize as usize) as u16);
 }
 
-fn flush_if_init_fork(record: &XLogReaderState, block_id: u8, buffer: Buffer) -> PgResult<()> {
-    if let Some((_, forknum, _, _)) = record.block_tag_extended(block_id) {
-        if forknum == ForkNumber::INIT_FORKNUM {
-            bufmgr_seams::flush_one_buffer::call(buffer)?;
-        }
-    }
-    Ok(())
-}
-
 fn hash_xlog_init_meta_page(record: &mut XLogReaderState) -> PgResult<()> {
     let lsn = record.EndRecPtr;
     let xlrec = main_data(record);
@@ -193,7 +184,7 @@ fn hash_xlog_init_meta_page(record: &mut XLogReaderState) -> PgResult<()> {
     unsafe { page_mut(metabuf) }.set_lsn(lsn);
     bufmgr_seams::mark_buffer_dirty::call(metabuf)?;
 
-    flush_if_init_fork(record, 0, metabuf)?;
+    XLogFlushBufferForRedoIfInit(record, 0, metabuf)?;
     unlock_release(metabuf)
 }
 
@@ -207,7 +198,7 @@ fn hash_xlog_init_bitmap_page(record: &mut XLogReaderState) -> PgResult<()> {
     // SAFETY: redo pin+lock contract.
     unsafe { page_mut(bitmapbuf) }.set_lsn(lsn);
     bufmgr_seams::mark_buffer_dirty::call(bitmapbuf)?;
-    flush_if_init_fork(record, 0, bitmapbuf)?;
+    XLogFlushBufferForRedoIfInit(record, 0, bitmapbuf)?;
     unlock_release(bitmapbuf)?;
 
     let (action, metabuf) = XLogReadBufferForRedo(record, 1)?;
@@ -221,7 +212,7 @@ fn hash_xlog_init_bitmap_page(record: &mut XLogReaderState) -> PgResult<()> {
             page_mut(metabuf).set_lsn(lsn);
         }
         bufmgr_seams::mark_buffer_dirty::call(metabuf)?;
-        flush_if_init_fork(record, 1, metabuf)?;
+        XLogFlushBufferForRedoIfInit(record, 1, metabuf)?;
     }
     if metabuf != InvalidBuffer {
         unlock_release(metabuf)?;
