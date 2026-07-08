@@ -2779,6 +2779,12 @@ pub fn relation_has_unique_index_ext<'mcx>(
                     (ri.clause, ri.outer_is_left)
                 };
                 let clause = *run.root.expr_node(clause_id);
+                if !lsyscache::misc::collations_agree_on_equality(
+                    ind.indexcollations[c],
+                    nodes_core::node_funcs::expr_input_collation(clause),
+                )? {
+                    continue;
+                }
                 let o = clause.as_op_expr().expect("mergejoinable clause is an OpExpr");
                 let rexpr = if outer_is_left { o.args.nth(1) } else { o.args.nth(0) };
                 if match_index_to_operand(run, rexpr, c, ind) {
@@ -2806,6 +2812,12 @@ pub fn relation_has_unique_index_ext<'mcx>(
                         continue;
                     }
                     if !lsyscache::amop::op_in_opfamily(oprlist[j], ind.opfamily[c])? {
+                        continue;
+                    }
+                    if !lsyscache::misc::collations_agree_on_equality(
+                        ind.indexcollations[c],
+                        nodes_core::node_funcs::expr_collation(expr),
+                    )? {
                         continue;
                     }
                     matched = true;
