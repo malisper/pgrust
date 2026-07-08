@@ -529,3 +529,25 @@ fn enum_compare_fast_path_and_reload() {
     assert_eq!(compare_values_of_enum(&e2, 90106, 90100).unwrap(), -1);
     assert_eq!(compare_values_of_enum(&e2, 90104, 90106).unwrap(), 1);
 }
+
+// SQLancer TLP campaign panic (lib.rs compute_ready): ANALYZE holds the
+// entry's cmp_proc_finfo RefMut across the comparator call; a concurrent
+// session's DDL inval (or a reentrant same-type lookup, e.g. range_cmp's
+// fn_extra fill) recomputes readiness while the finfo is borrowed.
+#[test]
+fn compute_ready_tolerates_borrowed_finfo() {
+    install();
+    let e = lookup_type_cache(INT4OID, TYPECACHE_CMP_PROC_FINFO).unwrap();
+    let guard = e.cmp_proc_finfo();
+    assert_eq!(guard.fn_oid, F_BTINT4CMP);
+    invalidate::TypeCacheTypCallback(
+        Datum::from_oid(InvalidOid),
+        82,
+        INT4OID.wrapping_mul(0x9e3779b1),
+    );
+    invalidate::TypeCacheOpcCallback(Datum::from_oid(InvalidOid), 83, 0);
+    let e2 = lookup_type_cache(INT4OID, TYPECACHE_LT_OPR).unwrap();
+    assert!(Rc::ptr_eq(&e, &e2));
+    assert_eq!(e2.lt_opr(), INT4_LT);
+    drop(guard);
+}

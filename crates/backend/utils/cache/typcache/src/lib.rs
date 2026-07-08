@@ -968,6 +968,13 @@ fn cache_array_element_properties(e: &TypeCacheEntry) -> PgResult<()> {
     Ok(())
 }
 
+// A finfo whose RefCell is currently borrowed is necessarily resolved (holders
+// obtained it from a *_FINFO lookup); reentrant lookups from inside such a call
+// (range_cmp/record_cmp fn_extra fills) must not panic here.
+fn finfo_resolved(c: &RefCell<FmgrInfo>) -> bool {
+    c.try_borrow().map_or(true, |f| f.fn_oid != InvalidOid)
+}
+
 pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
     let f = e.flags.get();
     if f & TCFLAGS_HAVE_PG_TYPE_DATA == 0 {
@@ -982,7 +989,7 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
     }
     if f & TCFLAGS_CHECKED_EQ_OPR != 0 {
         r |= TYPECACHE_EQ_OPR;
-        if e.eq_opr.get() == InvalidOid || e.eq_opr_finfo.borrow().fn_oid != InvalidOid {
+        if e.eq_opr.get() == InvalidOid || finfo_resolved(&e.eq_opr_finfo) {
             r |= TYPECACHE_EQ_OPR_FINFO;
         }
     }
@@ -994,20 +1001,20 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
     }
     if f & TCFLAGS_CHECKED_CMP_PROC != 0 {
         r |= TYPECACHE_CMP_PROC;
-        if e.cmp_proc.get() == InvalidOid || e.cmp_proc_finfo.borrow().fn_oid != InvalidOid {
+        if e.cmp_proc.get() == InvalidOid || finfo_resolved(&e.cmp_proc_finfo) {
             r |= TYPECACHE_CMP_PROC_FINFO;
         }
     }
     if f & TCFLAGS_CHECKED_HASH_PROC != 0 {
         r |= TYPECACHE_HASH_PROC;
-        if e.hash_proc.get() == InvalidOid || e.hash_proc_finfo.borrow().fn_oid != InvalidOid {
+        if e.hash_proc.get() == InvalidOid || finfo_resolved(&e.hash_proc_finfo) {
             r |= TYPECACHE_HASH_PROC_FINFO;
         }
     }
     if f & TCFLAGS_CHECKED_HASH_EXTENDED_PROC != 0 {
         r |= TYPECACHE_HASH_EXTENDED_PROC;
         if e.hash_extended_proc.get() == InvalidOid
-            || e.hash_extended_proc_finfo.borrow().fn_oid != InvalidOid
+            || finfo_resolved(&e.hash_extended_proc_finfo)
         {
             r |= TYPECACHE_HASH_EXTENDED_PROC_FINFO;
         }
@@ -1023,7 +1030,7 @@ pub(crate) fn compute_ready(e: &TypeCacheEntry) -> i32 {
     if tt != TYPTYPE_RANGE {
         r |= TYPECACHE_RANGE_INFO;
     }
-    if tt != TYPTYPE_MULTIRANGE || e.rngtype.borrow().is_some() {
+    if tt != TYPTYPE_MULTIRANGE || e.rngtype.try_borrow().map_or(true, |r| r.is_some()) {
         r |= TYPECACHE_MULTIRANGE_INFO;
     }
     if tt != TYPTYPE_DOMAIN {

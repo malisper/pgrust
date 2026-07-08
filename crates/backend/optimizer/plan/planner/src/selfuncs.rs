@@ -1003,9 +1003,9 @@ fn convert_numeric_to_scalar(value: Datum, typid: Oid) -> Option<f64> {
         FLOAT8OID => Some(value.as_f64()),
         OIDOID | REGPROCOID | REGPROCEDUREOID | REGOPEROID | REGOPERATOROID | REGCLASSOID
         | REGTYPEOID => Some(value.as_u32() as f64),
-        NUMERICOID => Some(adt_numeric::numeric_float8_no_overflow(adt_numeric::Num::from_payload(
-            varlena_datum_payload(value),
-        ))),
+        NUMERICOID => {
+            Some(adt_numeric::numeric_float8_no_overflow_any(varlena_datum_payload(value)))
+        }
         _ => None,
     }
 }

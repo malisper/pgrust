@@ -1748,10 +1748,13 @@ fn compute_scalar_stats<'mcx>(
     if values_cnt > 0 {
         let entry = typcache::lookup_type_cache(stats.attrtypid, typcache::TYPECACHE_CMP_PROC_FINFO)?;
         let collation = stats.attrcollid;
+        // Finfo copy: comparators may re-enter typcache (range_cmp fn_extra
+        // fill), so the entry's RefCell must stay unborrowed across the call.
+        let cmp_finfo = core::cell::RefCell::new(entry.cmp_proc_finfo().clone());
         // Armed with col_mcx: packed by-ref args (short numerics) expand there
         // and die at the per-column reset — C's col_context cadence.
         let cmp = |a: Datum, b: Datum| -> core::cmp::Ordering {
-            let mut finfo = entry.cmp_proc_finfo();
+            let mut finfo = cmp_finfo.borrow_mut();
             let r = types_fmgr::function_call2_coll_in(&mut finfo, collation, col_mcx, a, b)
                 .unwrap_or_else(|e| panic!("compute_scalar_stats: comparison failed: {e:?}"))
                 .as_i32();
