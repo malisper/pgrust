@@ -41,6 +41,20 @@ pub fn get_collation_isdeterministic(colloid: Oid) -> PgResult<bool> {
     }
 }
 
+// collations_agree_on_equality (lsyscache.c): equality compatibility only,
+// not ordering. InvalidOid on either side means a non-collation-sensitive
+// operation, which cannot conflict; two deterministic collations share the
+// byte-wise equality relation.
+pub fn collations_agree_on_equality(coll1: Oid, coll2: Oid) -> PgResult<bool> {
+    if coll1 == InvalidOid || coll2 == InvalidOid {
+        return Ok(true);
+    }
+    if coll1 == coll2 {
+        return Ok(true);
+    }
+    Ok(get_collation_isdeterministic(coll1)? && get_collation_isdeterministic(coll2)?)
+}
+
 pub fn get_constraint_name<'mcx>(mcx: Mcx<'mcx>, conoid: Oid) -> PgResult<Option<PgString<'mcx>>> {
     match syscache_seams::lookup_pg_constraint_shape::call(conoid)? {
         Some(contup) => Ok(Some(name_to_pgstring(mcx, &contup.conname)?)),
