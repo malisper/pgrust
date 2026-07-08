@@ -135,7 +135,10 @@ fn match_text<M: MatchMode>(mut t: &[u8], mut p: &[u8], locale: &PgLocale) -> Pg
     let nondet = !locale.deterministic;
 
     // Byte-lockstep except after wildcards, exactly as C: '%'/'_' advance the
-    // text by whole characters so recursion re-enters char-synced.
+    // text by whole characters so recursion re-enters char-synced. The '\\'
+    // stanza is only correct for deterministic matching, so it sits after the
+    // nondeterministic arm (which handles escapes itself); at the top of the
+    // loop we are never positioned immediately after an escape.
     while !t.is_empty() && !p.is_empty() {
         // Not positioned immediately after an escape here, so wildcards may
         // be taken at face value; the deterministic escape branch must come
