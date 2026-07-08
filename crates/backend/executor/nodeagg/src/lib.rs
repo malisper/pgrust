@@ -82,6 +82,8 @@ pub struct AggStateData<'mcx> {
     gsets: Option<PgBox<'mcx, gsets::GroupingSetsState<'mcx>>>,
     pertrans_sort: PgVec<'mcx, PerTransSortData<'mcx>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    // InstrCountFiltered1 target (HAVING rejections); set by instrument_node.
+    pub instr_idx: Option<u32>,
 }
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
@@ -1126,6 +1128,7 @@ pub fn exec_init_agg<'mcx>(
         gsets: gs,
         pertrans_sort,
         qual,
+        instr_idx: None,
     })
 }
 
@@ -2677,6 +2680,7 @@ fn plain_finish<'mcx>(
     if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
         let ecxt = node.ps_ExprContext;
         if !::executils::exec_qual_with_subplans(node.qual.as_deref_mut(), estate, ecxt)? {
+            estate.instr_count_filtered1(node.instr_idx);
             return Ok(None);
         }
         ::executils::exec_project_with_subplans(
@@ -2689,6 +2693,7 @@ fn plain_finish<'mcx>(
     }
     let mut slots = EvalSlots { scan: None, inner: None, outer: None };
     if !exec_qual(node.qual.as_deref_mut(), &mut slots)? {
+        estate.instr_count_filtered1(node.instr_idx);
         return Ok(None);
     }
     let mcx = estate.es_query_cxt;
@@ -3107,6 +3112,7 @@ where
         if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
+            let instr_idx = node.instr_idx;
             let AggStateData { persort, qual, proj, .. } = node;
             let ps = persort.as_mut().expect("sorted Agg has persort");
             if !::executils::exec_qual_with_subplans_outer(
@@ -3115,6 +3121,7 @@ where
                 estate,
                 ecxt,
             )? {
+                estate.instr_count_filtered1(instr_idx);
                 continue;
             }
             ::executils::exec_project_with_subplans_outer(
@@ -3132,6 +3139,7 @@ where
             let mut slots =
                 EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
             if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+                estate.instr_count_filtered1(node.instr_idx);
                 continue;
             }
         }
@@ -3329,6 +3337,7 @@ fn agg_retrieve_hash_table<'mcx>(
         if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
+            let instr_idx = node.instr_idx;
             let AggStateData { perhash, qual, proj, .. } = node;
             let ph = perhash.as_mut().unwrap();
             if !::executils::exec_qual_with_subplans_outer(
@@ -3337,6 +3346,7 @@ fn agg_retrieve_hash_table<'mcx>(
                 estate,
                 ecxt,
             )? {
+                estate.instr_count_filtered1(instr_idx);
                 continue;
             }
             ::executils::exec_project_with_subplans_outer(
@@ -3354,6 +3364,7 @@ fn agg_retrieve_hash_table<'mcx>(
             let mut slots =
                 EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
             if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+                estate.instr_count_filtered1(node.instr_idx);
                 continue;
             }
         }

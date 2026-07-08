@@ -1168,6 +1168,7 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
         if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
+            let instr_idx = node.instr_idx;
             let AggStateData { gsets, qual, proj, .. } = node;
             let h = gsets.as_mut().unwrap().hash.as_mut().unwrap();
             if !::executils::exec_qual_with_subplans_outer(
@@ -1176,6 +1177,7 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
                 estate,
                 ecxt,
             )? {
+                estate.instr_count_filtered1(instr_idx);
                 continue;
             }
             ::executils::exec_project_with_subplans_outer(
@@ -1193,6 +1195,7 @@ pub(crate) fn agg_retrieve_hash_table<'mcx>(
             let mut slots =
                 EvalSlots { scan: None, inner: None, outer: Some(&mut h.hash_first_slot) };
             if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+                estate.instr_count_filtered1(node.instr_idx);
                 continue;
             }
         }
@@ -1478,6 +1481,7 @@ where
         if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
             let ecxt = node.ps_ExprContext;
             let result = node.ps_ResultTupleSlot;
+            let instr_idx = node.instr_idx;
             let AggStateData { gsets, qual, proj, .. } = node;
             let gs = gsets.as_mut().unwrap();
             if !::executils::exec_qual_with_subplans_outer(
@@ -1486,6 +1490,7 @@ where
                 estate,
                 ecxt,
             )? {
+                estate.instr_count_filtered1(instr_idx);
                 continue;
             }
             ::executils::exec_project_with_subplans_outer(
@@ -1503,6 +1508,7 @@ where
             let mut slots =
                 EvalSlots { scan: None, inner: None, outer: Some(&mut gs.first_slot) };
             if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+                estate.instr_count_filtered1(node.instr_idx);
                 continue;
             }
         }

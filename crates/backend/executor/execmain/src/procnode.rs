@@ -1293,6 +1293,10 @@ fn instrument_node<'mcx>(
     if let Some(ss) = scan_state_of(&mut inner) {
         ss.instr_idx = Some(idx as u32);
     }
+    // InstrCountFiltered1 target for the Agg HAVING qual (nodeAgg.c).
+    if let PlanStateNode::Agg(aps) = &mut inner {
+        aps.agg.instr_idx = Some(idx as u32);
+    }
     Ok(PlanStateNode::Instrumented(::mcx::alloc_in(
         estate.es_query_cxt,
         InstrumentedNode { inner, instr_idx: idx as u32 },
