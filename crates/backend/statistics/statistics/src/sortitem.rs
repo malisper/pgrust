@@ -4,9 +4,14 @@ use datum::Datum;
 use types_core::Oid;
 use types_error::PgResult;
 use typcache::TypeCacheEntry;
+use types_fmgr::FmgrInfo;
 
+// `cmp` is a copy of the entry's cmp_proc_finfo: comparators may re-enter
+// typcache (range_cmp/record_cmp fn_extra fills), so the entry's RefCell must
+// stay unborrowed across the call.
 pub struct SortDim {
     pub entry: Rc<TypeCacheEntry>,
+    pub cmp: FmgrInfo,
     pub collation: Oid,
 }
 
@@ -29,7 +34,8 @@ impl MultiSort {
         if entry.lt_opr() == types_core::InvalidOid {
             panic!("cache lookup failed for ordering operator for type {typid}");
         }
-        self.dims.push(SortDim { entry, collation });
+        let cmp = entry.cmp_proc_finfo().clone();
+        self.dims.push(SortDim { entry, cmp, collation });
         Ok(())
     }
 
@@ -44,12 +50,11 @@ impl MultiSort {
         if bn {
             return -1;
         }
-        let d = &self.dims[dim];
-        let mut finfo = d.entry.cmp_proc_finfo();
+        let d = &mut self.dims[dim];
         // Comparators (numeric_cmp etc.) detoast by-ref args through the
         // result mcx; call-lifetime scratch (ANALYZE cold path).
         let scratch = ::mcx::MemoryContext::new("multi_sort compare_dim");
-        types_fmgr::function_call2_coll_in(&mut finfo, d.collation, scratch.mcx(), a, b)
+        types_fmgr::function_call2_coll_in(&mut d.cmp, d.collation, scratch.mcx(), a, b)
             .unwrap_or_else(|e| panic!("multi_sort_compare: comparison failed: {e:?}"))
             .as_i32()
     }

@@ -777,6 +777,23 @@ pub fn numeric_float8_no_overflow(num: Num<'_>) -> f64 {
     s.parse::<f64>().expect("numeric text parses as f64")
 }
 
+// Stats arrays hand out packed elements at arbitrary byte offsets; a 1-byte
+// varlena header puts digits at odd addresses, so realign by copy before
+// viewing (C: DatumGetNumeric's unpacking copy).
+pub fn numeric_float8_no_overflow_any(payload: &[u8]) -> f64 {
+    let num = Num::from_payload(payload);
+    if num.is_special() || (payload.as_ptr() as usize + num.header_size()) % 2 == 0 {
+        return numeric_float8_no_overflow(num);
+    }
+    let mut buf = vec![0u16; payload.len().div_ceil(2)];
+    // SAFETY: the u16 buffer reinterpreted as bytes, sized to cover payload.
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), payload.len())
+    };
+    dst.copy_from_slice(payload);
+    numeric_float8_no_overflow(Num::from_payload(dst))
+}
+
 pub fn numeric_float8(num: Num<'_>) -> PgResult<f64> {
     if num.is_special() {
         return Ok(if num.is_pinf() {

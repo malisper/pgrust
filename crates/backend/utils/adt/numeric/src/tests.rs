@@ -1147,3 +1147,20 @@ fn int128_agg_combine_matches_serial() {
     assert_eq!(s1.sum_x, all.sum_x);
     assert_eq!(s1.sum_x2, all.sum_x2);
 }
+
+// Stats arrays hand out packed images at arbitrary offsets; one of the two
+// placements below puts the digits at an odd address (panicked pre-fix).
+#[test]
+fn float8_no_overflow_any_realigns_odd_payloads() {
+    for s in ["123.456", "-0.38676990993745586", "12345678901234567890", "NaN", "Infinity"] {
+        let img = n(s);
+        let payload = img.num().as_bytes();
+        let want = numeric_float8_no_overflow(img.num()).to_bits();
+        let mut buf = vec![0u8; payload.len() + 1];
+        for off in 0..2 {
+            buf[off..off + payload.len()].copy_from_slice(payload);
+            let got = numeric_float8_no_overflow_any(&buf[off..off + payload.len()]).to_bits();
+            assert_eq!(got, want, "offset {off} for {s}");
+        }
+    }
+}

@@ -83,14 +83,19 @@ pub(crate) fn compute_array_stats<'mcx>(
     let typlen = entry.typlen();
     let typalign = entry.typalign() as u8;
 
+    // Finfo copies: element functions may re-enter typcache (range_cmp/
+    // record_cmp fn_extra fills), so the entry RefCells must stay unborrowed
+    // across the calls.
+    let hash_finfo = core::cell::RefCell::new(entry.hash_proc_finfo().clone());
+    let cmp_finfo = core::cell::RefCell::new(entry.cmp_proc_finfo().clone());
     let hash_elem = |d: Datum| -> u32 {
-        let mut finfo = entry.hash_proc_finfo();
+        let mut finfo = hash_finfo.borrow_mut();
         types_fmgr::function_call1_coll_in(&mut finfo, coll_id, col_mcx, d)
             .unwrap_or_else(|e| panic!("compute_array_stats: element hash failed: {e:?}"))
             .as_u32()
     };
     let cmp_elems = |a: Datum, b: Datum| -> i32 {
-        let mut finfo = entry.cmp_proc_finfo();
+        let mut finfo = cmp_finfo.borrow_mut();
         types_fmgr::function_call2_coll_in(&mut finfo, coll_id, col_mcx, a, b)
             .unwrap_or_else(|e| panic!("compute_array_stats: element cmp failed: {e:?}"))
             .as_i32()
