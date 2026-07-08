@@ -205,6 +205,35 @@ fn count_macros_accumulate_nontransactional_counts() {
 }
 
 #[test]
+fn relation_link_counts_and_gen_invalidation() {
+    setup();
+    let gen0 = relation::pgstat_relation_link_gen();
+    let link = relation::pgstat_relation_link_counts(1042, false);
+    assert!(!link.is_null());
+    unsafe { relation::pgstat_count_buffer_read_via(link, true) };
+    unsafe { relation::pgstat_count_buffer_read_via(link, false) };
+
+    let c = rel_counts(1042).unwrap();
+    assert_eq!(c.blocks_fetched, 2);
+    assert_eq!(c.blocks_hit, 1);
+    // link bumps land in the same entry the keyed macros use
+    relation::pgstat_count_buffer_read(1042, false);
+    assert_eq!(rel_counts(1042).unwrap().blocks_fetched, 3);
+    assert_eq!(relation::pgstat_relation_link_gen(), gen0);
+
+    // any relation-pending removal bumps the gen BEFORE the allocation is
+    // freed: a stale link must never pass the validity check again
+    let key = relation::relation_key(1042, false);
+    pending::with_state(|st| st.delete_pending_entry(key));
+    assert!(relation::pgstat_relation_link_gen() > gen0);
+
+    // re-assoc yields a fresh entry with zeroed counts
+    let link2 = relation::pgstat_relation_link_counts(1042, false);
+    unsafe { relation::pgstat_count_buffer_read_via(link2, false) };
+    assert_eq!(rel_counts(1042).unwrap().blocks_fetched, 1);
+}
+
+#[test]
 fn flush_folds_relation_into_database_pending() {
     setup();
     relation::pgstat_count_heap_getnext(1009, false);
