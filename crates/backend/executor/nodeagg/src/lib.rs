@@ -509,6 +509,12 @@ fn collect_aggrefs<'mcx>(
                 collect_aggrefs(a, out);
             }
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for a in rc.largs.iter().chain(rc.rargs.iter()) {
+                collect_aggrefs(a, out);
+            }
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
