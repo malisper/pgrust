@@ -523,11 +523,8 @@ pub fn exec_parallel_reinitialize<'mcx>(
     pei.finished = false;
     *pei.shared.param_exec.lock().unwrap_or_else(|e| e.into_inner()) =
         serialize_param_exec(estate, send_params);
-    if let Some(si) = &pei.shared.instrumentation {
-        for w in si.workers.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
-            *w = None;
-        }
-    }
+    // Worker instrumentation slots survive reinitialize: relaunched workers
+    // aggregate into them (execParallel.c:1314-1322), retrieved once at cleanup.
     // ExecParallelReInitializeDSM walk.
     for_each_parallel_scan(planstate, &mut |node| match node {
         ParallelScanMut::SeqScan(ss) => {
@@ -836,7 +833,29 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
                     }
                 })
             });
-            si.workers.lock().unwrap_or_else(|e| e.into_inner())[me as usize] = Some(report);
+            // A relaunched worker (rescan) aggregates into its slot; the
+            // per-node aux details are C's in-place DSM structs — latest
+            // write wins (execParallel.c:1314-1322).
+            let mut workers = si.workers.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = &mut workers[me as usize];
+            match slot {
+                None => *slot = Some(report),
+                Some(prev) => {
+                    if prev.instrument.len() < report.instrument.len() {
+                        prev.instrument
+                            .resize(report.instrument.len(), Instrumentation::default());
+                    }
+                    for (id, wi) in report.instrument.iter().enumerate() {
+                        ::instrument::instr_agg_node(&mut prev.instrument[id], wi);
+                    }
+                    prev.sort = report.sort;
+                    prev.incsort = report.incsort;
+                    prev.agg = report.agg;
+                    prev.hash = report.hash;
+                    prev.index = report.index;
+                    prev.bitmap = report.bitmap;
+                }
+            }
         }
 
         crate::execmain::executor_end_seam(qd)?;

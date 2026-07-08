@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use ::datum::Datum;
-use ::execexpr::{exec_eval_expr, exec_init_expr, EvalSlots, ExprState};
+use ::execexpr::{exec_eval_expr, exec_init_expr_subplans, EvalSlots, ExprState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
@@ -71,6 +71,8 @@ pub fn exec_init_project_set<'mcx>(
     let desc = exec_type_from_tl(&node.plan.targetlist)?;
     let slot = estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
 
+    let params = estate.param_bind();
+    let (elems, elemdone) = ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
     let mut elems: PgVec<'mcx, Elem<'mcx>> = PgVec::new_in(mcx);
     let mut elemdone: PgVec<'mcx, ExprDoneCond> = PgVec::new_in(mcx);
     for tle_node in &node.plan.targetlist {
@@ -100,7 +102,7 @@ pub fn exec_init_project_set<'mcx>(
                 for arg in srf_args {
                     // Query-context args replace C's argContext: by-ref arg
                     // datums must outlive per-tuple resets between rows.
-                    let mut state = exec_init_expr(mcx, Some(arg), estate.param_bind())?
+                    let mut state = exec_init_expr_subplans(mcx, Some(arg), params, env)?
                         .expect("non-NULL arg expression");
                     state.arm_result_mcx(mcx);
                     args.push(state);
@@ -163,13 +165,15 @@ pub fn exec_init_project_set<'mcx>(
                 })
             }
             _ => Elem::Scalar(
-                exec_init_expr(mcx, Some(expr), estate.param_bind())?
+                exec_init_expr_subplans(mcx, Some(expr), params, env)?
                     .expect("non-NULL tlist expression"),
             ),
         };
         elems.push(elem);
         elemdone.push(ExprDoneCond::ExprSingleResult);
     }
+    Ok((elems, elemdone))
+    })?;
 
     Ok(ProjectSetState {
         ps: PlanStateBase {

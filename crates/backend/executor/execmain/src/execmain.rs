@@ -1040,6 +1040,18 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
 // cost the per-query seam its base inlining (select1 attribution, +42/q).
 #[inline]
 pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
+    // execMain.c:487-489.
+    if let Some(exec) = qd.exec.as_mut() {
+        exec.with_mut(|data| {
+            let es = &data.estate;
+            if es.es_parallel_workers_to_launch > 0 {
+                pgstat::database::pgstat_update_parallel_workers_stats(
+                    es.es_parallel_workers_to_launch as i64,
+                    es.es_parallel_workers_launched as i64,
+                );
+            }
+        });
+    }
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,
     // relation pins, snapshot, source text — is released here).
