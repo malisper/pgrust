@@ -1245,6 +1245,12 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
                 collect_base_var_cols(a, out);
             }
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for a in rc.largs.iter().chain(rc.rargs.iter()) {
+                collect_base_var_cols(a, out);
+            }
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
