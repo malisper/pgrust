@@ -253,6 +253,13 @@ pub(crate) struct AllocSet {
     // Cached bump window over the active block (C's freeptr/endptr); null until a block exists.
     cur_ptr: *mut u8,
     cur_end: *mut u8,
+    // Outstanding dedicated (> ALLOC_CHUNK_LIMIT / over-aligned) allocations —
+    // C's single-chunk blocks (aset.c AllocSetAllocLarge links them into the
+    // block list). They live until pfree, reset, or context delete; without
+    // this list a reset/Drop leaked every outstanding dedicated chunk
+    // permanently and invisibly (P1: create_gather_merge_path's path_arena
+    // final buffer, ~13KB leaked per DISTINCT planning under ArenaForget).
+    dedicated: alloc::vec::Vec<(NonNull<u8>, Layout)>,
 }
 
 impl AllocSet {
@@ -275,6 +282,7 @@ impl AllocSet {
             mem_allocated,
             cur_ptr,
             cur_end,
+            dedicated: alloc::vec::Vec::new(),
         }
     }
 
@@ -308,7 +316,7 @@ impl AllocSet {
         }
         #[cfg(not(feature = "aset-guard"))]
         if is_dedicated(layout) {
-            return Global.allocate(layout);
+            return self.alloc_dedicated(layout);
         }
         let (idx, csize) = idx_and_chunk(layout.size());
 
@@ -330,6 +338,39 @@ impl AllocSet {
         }
 
         self.alloc_new_block(csize)
+    }
+
+    // C's AllocSetAllocLarge: a dedicated chunk is a single-chunk block —
+    // tracked, counted in mem_allocated, and freed at pfree/reset/delete.
+    #[cold]
+    #[inline(never)]
+    fn alloc_dedicated(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let out = Global.allocate(layout)?;
+        self.dedicated.push((out.cast::<u8>(), layout));
+        self.mem_allocated += layout.size();
+        Ok(out)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn dealloc_dedicated(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        let idx = self
+            .dedicated
+            .iter()
+            .position(|&(p, _)| p == ptr)
+            .expect("dedicated dealloc of an untracked chunk");
+        self.dedicated.swap_remove(idx);
+        self.mem_allocated -= layout.size();
+        // SAFETY: tracked live dedicated allocation; caller guarantees layout.
+        unsafe { Global.deallocate(ptr, layout) };
+    }
+
+    fn free_all_dedicated(&mut self) {
+        for (ptr, layout) in self.dedicated.drain(..) {
+            self.mem_allocated -= layout.size();
+            // SAFETY: reset/Drop's &mut proves no dedicated chunk is in use.
+            unsafe { Global.deallocate(ptr, layout) };
+        }
     }
 
     #[cold]
@@ -370,7 +411,7 @@ impl AllocSet {
         }
         #[cfg(not(feature = "aset-guard"))]
         if is_dedicated(layout) {
-            Global.deallocate(ptr, layout);
+            self.dealloc_dedicated(ptr, layout);
             return;
         }
         let idx = free_list_index(layout.size());
@@ -394,6 +435,7 @@ impl AllocSet {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.free_all_dedicated();
         if self.blocks.is_empty() {
             self.freelist = [None; NUM_FREELISTS];
             self.next_block_size = INIT_BLOCK_SIZE;
@@ -419,6 +461,7 @@ impl AllocSet {
 
 impl Drop for AllocSet {
     fn drop(&mut self) {
+        self.free_all_dedicated();
         if self.blocks.is_empty() {
             return;
         }
@@ -622,7 +665,40 @@ mod tests {
         let l = Layout::from_size_align(100_000, 8).unwrap();
         let p = a.alloc(l).unwrap();
         assert!(p.len() >= 100_000);
-        assert_eq!(a.mem_allocated(), 0);
+        // C counts single-chunk blocks in mem_allocated (aset.c AllocSetAllocLarge).
+        assert_eq!(a.mem_allocated(), 100_000);
         unsafe { a.dealloc(p.cast(), l) };
+        assert_eq!(a.mem_allocated(), 0);
+    }
+
+    #[test]
+    fn reset_frees_outstanding_dedicated_chunks() {
+        let mut a = AllocSet::new();
+        let l = Layout::from_size_align(100_000, 8).unwrap();
+        let _p1 = a.alloc(l).unwrap();
+        let _p2 = a.alloc(l).unwrap();
+        assert_eq!(a.mem_allocated(), 200_000);
+        assert_eq!(a.dedicated.len(), 2);
+        a.reset();
+        assert_eq!(a.dedicated.len(), 0);
+        // Only the keeper block (if any) remains charged.
+        assert_eq!(a.mem_allocated(), a.blocks.first().map_or(0, |b| b.size));
+    }
+
+    #[test]
+    fn realloc_moves_dedicated_chunks_and_keeps_accounting() {
+        let mut a = AllocSet::new();
+        let small = Layout::from_size_align(64, 8).unwrap();
+        let big = Layout::from_size_align(50_000, 8).unwrap();
+        let bigger = Layout::from_size_align(120_000, 8).unwrap();
+        let p = a.alloc(small).unwrap();
+        let base = a.mem_allocated();
+        let p2 = unsafe { a.realloc(p.cast(), small, big).unwrap() };
+        assert_eq!(a.mem_allocated(), base + 50_000);
+        let p3 = unsafe { a.realloc(p2.cast(), big, bigger).unwrap() };
+        assert_eq!(a.mem_allocated(), base + 120_000);
+        unsafe { a.dealloc(p3.cast(), bigger) };
+        assert_eq!(a.mem_allocated(), base);
+        assert!(a.dedicated.is_empty());
     }
 }
