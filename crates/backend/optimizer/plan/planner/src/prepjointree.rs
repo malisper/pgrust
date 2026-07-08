@@ -31,27 +31,6 @@ pub fn pull_up_subqueries<'mcx>(
         let Some((rti, lowest_outer_join)) = target else { return Ok(()) };
         let rte_node = parse.rtable.nth(rti as usize - 1);
         let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
-        // XXX sqlsmith-planner-errors debug: rich context for the dead-RTE panic.
-        if rte.rtekind == RTEKind::RTE_SUBQUERY && rte.subquery.is_none() {
-            let mut summary = String::new();
-            for (i, n) in parse.rtable.iter().enumerate() {
-                let r = n.as_range_tbl_entry().expect("rtable cell");
-                summary.push_str(&format!(
-                    "[{} {:?} sub={} inh={} lat={} relid={} eref={:?} addr={:?}] ",
-                    i + 1,
-                    r.rtekind,
-                    r.subquery.is_some(),
-                    r.inh,
-                    r.lateral,
-                    r.relid,
-                    r.eref.and_then(|e| e.aliasname),
-                    n.as_raw()
-                ));
-            }
-            panic!(
-                "pull_up_subqueries dead target: rti={rti} kept={kept:?} rtable: {summary}"
-            );
-        }
         if rte.rtekind == RTEKind::RTE_VALUES {
             // C dispatch: no VALUES pullup below an outer join nor into an
             // appendrel (the driver only targets it when neither applies).
@@ -1514,12 +1493,6 @@ fn pull_up_simple_subquery<'mcx>(
         }
     }
 
-    // XXX sqlsmith-planner-errors debug: trace subquery clears.
-    eprintln!(
-        "XXX clear-subquery varno={varno} node={:?} eref={:?}",
-        rte_node.as_raw(),
-        rte.eref.and_then(|e| e.aliasname)
-    );
     // SAFETY: as above — exclusive pre-seal tree fixup.
     unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.subquery = None) };
     // SubLinks can remain in the sub's tlist (now substituted into parse) and
