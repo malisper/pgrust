@@ -577,7 +577,7 @@ fn fc_ltree_consistent(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
     let strategy = fcinfo.arg(2).as_u32() as u16;
     let query = gist_query_image(fcinfo)?;
     let (matched, rc) =
-        gist::ltree_consistent(entry.leafkey, key_image(entry.key), false, &query, strategy, siglen)?;
+        gist::ltree_consistent(entry.page_is_leaf, key_image(entry.key), false, &query, strategy, siglen)?;
     let recheck = fcinfo.arg(4).as_usize() as *mut bool;
     // SAFETY: recheck out-param live in the caller frame.
     unsafe { *recheck = rc };
