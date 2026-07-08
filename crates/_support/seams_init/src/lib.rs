@@ -138,6 +138,7 @@ pub fn init_all() {
     uuid_ossp::init_seams();
     pg_prewarm::init_seams();
     ltree::init_seams();
+    pgcrypto::init_seams();
     hstore::init_seams();
     pg_trgm::init_seams();
     session::init_seams();

@@ -1,0 +1,23 @@
+[package]
+name = "pgcrypto"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgcrypto"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+adt_uuid = { path = "../../backend/utils/adt/uuid" }
+pg_md5 = { path = "../../common/md5" }
+pg_sha1 = { path = "../../common/sha1" }
+pg_sha2 = { path = "../../common/sha2" }
+pg_strong_random = { path = "../../port/pg_strong_random" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
