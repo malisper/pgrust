@@ -20,14 +20,19 @@ pg_md5 = { path = "../../common/md5" }
 pg_sha1 = { path = "../../common/sha1" }
 pg_sha2 = { path = "../../common/sha2" }
 pg_strong_random = { path = "../../port/pg_strong_random" }
+elog = { path = "../../backend/utils/error/elog" }
+guc = { path = "../../backend/utils/misc/guc" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 
 # RustCrypto symmetric ciphers for encrypt()/decrypt() — byte-identical to
 # pgcrypto's OpenSSL px_combo_* (see cipher.rs). Third-party crates are policy-
 # acceptable (AGENTS.md direct-dep default; the repo already vendors openssl).
 aes = "0.8"
-blowfish = "0.9"
+blowfish = { version = "0.9", features = ["bcrypt"] }
 des = "0.8"
+# Traditional/xdes DES crypt is self-contained (crypt/cryptdes.rs); pwhash
+# drives only sha-crypt ($5$/$6$).
+pwhash = "1"
 cast5 = "0.11"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 ecb = { version = "0.1", features = ["alloc", "block-padding"] }

@@ -55,7 +55,19 @@ fn fc_pg_hmac(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<D
     bytea_result(fcinfo, &out)
 }
 
+// px-crypt.c: px_crypt / px_gen_salt call CheckBuiltinCryptoMode() first.
+// The placeholder GUC carries the session value (default on); BC_OFF errors,
+// BC_FIPS proceeds unless OpenSSL is in FIPS mode (never, on this fleet).
+fn check_builtin_crypto() -> PgResult<()> {
+    let mode = guc::GetConfigOption("pgcrypto.builtin_crypto_enabled", true, false)?;
+    if matches!(mode.as_deref(), Some("off")) {
+        return Err(PgError::error("use of built-in crypto functions is disabled").into());
+    }
+    Ok(())
+}
+
 fn fc_pg_gen_salt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    check_builtin_crypto()?;
     // SAFETY: strict fn — arg0 text.
     let ty = unsafe { fcinfo.arg_varlena_packed(0)? };
     let ty = String::from_utf8_lossy(ty.data()).into_owned();
@@ -64,6 +76,7 @@ fn fc_pg_gen_salt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 }
 
 fn fc_pg_gen_salt_rounds(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    check_builtin_crypto()?;
     // SAFETY: strict fn — arg0 text, arg1 int4.
     let ty = unsafe { fcinfo.arg_varlena_packed(0)? };
     let ty = String::from_utf8_lossy(ty.data()).into_owned();
@@ -73,6 +86,7 @@ fn fc_pg_gen_salt_rounds(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
 }
 
 fn fc_pg_crypt(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    check_builtin_crypto()?;
     // SAFETY: strict fn — arg0 password text, arg1 salt text.
     let (pw, salt) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
     let pw = String::from_utf8_lossy(pw.data()).into_owned();
