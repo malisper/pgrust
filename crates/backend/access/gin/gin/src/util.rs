@@ -56,7 +56,9 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
         // Extension opclasses carry dynamic oids; match by proname.
         other => {
             let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
-            match lsyscache::get_func_name(cx.mcx(), other)?.as_ref().map(|n| n.as_str()) {
+            let name = lsyscache::get_func_name(cx.mcx(), other)?
+                .map(|n| n.as_str().to_string());
+            match name.as_deref() {
                 Some("gin_extract_value_trgm") => GinOpclass::TrgmOps,
                 _ => unported(&format!("GIN opclass with extractValue proc {other}")),
             }

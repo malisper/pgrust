@@ -496,7 +496,9 @@ pub fn gincost_extract_query(
         F_GINQUERYARRAYEXTRACT => (GinOpclass::ArrayOps, false),
         other => {
             let cx = ::mcx::MemoryContext::new("gincost ext opclass probe");
-            match lsyscache::get_func_name(cx.mcx(), other)?.as_ref().map(|n| n.as_str()) {
+            let name = lsyscache::get_func_name(cx.mcx(), other)?
+                .map(|n| n.as_str().to_string());
+            match name.as_deref() {
                 Some("gin_extract_query_trgm") => (GinOpclass::TrgmOps, false),
                 _ => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
             }
