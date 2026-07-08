@@ -216,6 +216,9 @@ pub enum GinOpclass {
     JsonbPathOps,
     TsvectorOps,
     ArrayOps,
+    // contrib gin_trgm_ops: extension-oid procs matched by proname at
+    // initGinState; bodies reached through gin_trgm_seams.
+    TrgmOps,
 }
 
 /// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's

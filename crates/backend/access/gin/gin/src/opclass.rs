@@ -93,8 +93,9 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
         GinOpclass::JsonbOps => {
             ::adt_jsonb::gin::gin_compare_jsonb(text_payload(a), text_payload(b))
         }
-        GinOpclass::JsonbPathOps => {
-            // btint4cmp over uint32 path hashes stored via UInt32GetDatum.
+        GinOpclass::JsonbPathOps | GinOpclass::TrgmOps => {
+            // btint4cmp over uint32 path hashes stored via UInt32GetDatum
+            // (trgm keys: trgm2int int4, always >= 0, same comparator).
             let (x, y) = (a.as_usize() as u32 as i32, b.as_usize() as u32 as i32);
             if x < y {
                 -1
@@ -194,6 +195,15 @@ pub(crate) fn extract_value<'m>(
             ))
         }
         GinOpclass::ArrayOps => ginarrayextract(mcx, value),
+        GinOpclass::TrgmOps => {
+            let payload = detoast_payload(mcx, value)?;
+            let keys = gin_trgm_seams::trgm_extract_value::call(payload)?;
+            let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, keys.len())?;
+            for k in keys {
+                entries.push(Datum::from_i32(k));
+            }
+            Ok((entries, no_nulls))
+        }
     }
 }
 
@@ -306,6 +316,22 @@ pub(crate) fn extract_query<'m>(
                 null_flags,
             })
         }
+        GinOpclass::TrgmOps => {
+            let (keys, search_mode) =
+                gin_trgm_seams::trgm_extract_query::call(&image[4..], strategy)?;
+            let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, keys.len())?;
+            for k in keys {
+                entries.push(Datum::from_i32(k));
+            }
+            Ok(ExtractedQuery {
+                entries,
+                search_mode,
+                jsp_ops: mcx::vec_new_in(mcx),
+                partial_match: mcx::vec_new_in(mcx),
+                map_item_operand: mcx::vec_new_in(mcx),
+                null_flags: mcx::vec_new_in(mcx),
+            })
+        }
     }
 }
 
@@ -360,6 +386,11 @@ pub(crate) fn consistent(
                 }
                 other => panic!("ginarrayconsistent: unknown strategy number: {other}"),
             };
+            Ok(res)
+        }
+        GinOpclass::TrgmOps => {
+            let (res, rc) = gin_trgm_seams::trgm_consistent::call(check, strategy, nkeys)?;
+            *recheck = rc;
             Ok(res)
         }
     }
@@ -436,6 +467,7 @@ pub(crate) fn tri_consistent(
             };
             Ok(res)
         }
+        GinOpclass::TrgmOps => gin_trgm_seams::trgm_triconsistent::call(check, strategy, nkeys),
     }
 }
 
@@ -462,7 +494,13 @@ pub fn gincost_extract_query(
         3486 => (GinOpclass::JsonbPathOps, false),
         F_GIN_EXTRACT_TSQUERY => (GinOpclass::TsvectorOps, true),
         F_GINQUERYARRAYEXTRACT => (GinOpclass::ArrayOps, false),
-        other => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
+        other => {
+            let cx = ::mcx::MemoryContext::new("gincost ext opclass probe");
+            match lsyscache::get_func_name(cx.mcx(), other)?.as_ref().map(|n| n.as_str()) {
+                Some("gin_extract_query_trgm") => (GinOpclass::TrgmOps, false),
+                _ => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
+            }
+        }
     };
     let col = GinColState {
         opclass,

@@ -53,7 +53,14 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
         opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
         opclass::F_GIN_EXTRACT_TSVECTOR => GinOpclass::TsvectorOps,
         opclass::F_GINARRAYEXTRACT => GinOpclass::ArrayOps,
-        other => unported(&format!("GIN opclass with extractValue proc {other}")),
+        // Extension opclasses carry dynamic oids; match by proname.
+        other => {
+            let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
+            match lsyscache::get_func_name(cx.mcx(), other)?.as_ref().map(|n| n.as_str()) {
+                Some("gin_extract_value_trgm") => GinOpclass::TrgmOps,
+                _ => unported(&format!("GIN opclass with extractValue proc {other}")),
+            }
+        }
     };
     // array_ops has no GIN_COMPARE_PROC; C falls back to the index key
     // type's default btree comparator via typcache. The index tupdesc attr
@@ -78,6 +85,7 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
                 GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
                 GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
                 GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
+                GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
                 GinOpclass::ArrayOps => InvalidOid,
             }
     );
