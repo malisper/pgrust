@@ -746,6 +746,24 @@ fn ATPrepCmd<'mcx>(
     // own copy of the subcommand.
     let cnode = copyfuncs::copy_object(mcx, cnode)?;
     let cmd = cnode.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
+    // Only DETACH FINALIZE may run on a partition pending detach
+    // (tablecmds.c:4919-4926).
+    if rel.rd_rel.relispartition
+        && cmd.subtype != AlterTableType::AT_DetachPartitionFinalize
+        && pg_inherits::PartitionHasPendingDetach(mcx, rel.rd_id)?
+    {
+        return Err(Box::new(
+            PgError::new(
+                ERROR,
+                format!("cannot alter partition \"{}\" with an incomplete detach", rel.name()),
+            )
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(
+                "Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending \
+                 detach operation.",
+            ),
+        ));
+    }
     if let Some(allowed) = at_allowed_targets(cmd.subtype) {
         ATSimplePermissions(cmd.subtype, rel, allowed)?;
     }
