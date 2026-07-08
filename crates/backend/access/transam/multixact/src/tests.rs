@@ -136,6 +136,13 @@ fn setup() {
         });
         dbcommands_seams::get_database_name::set(|_| Ok(Some("testdb".to_string())));
 
+        // Dummy proc numbers start at MaxBackends + NUM_AUXILIARY_PROCS; this
+        // fake returns the second prepared-xact proc number.
+        twophase_seams::two_phase_get_dummy_proc_number::set(|_, _| {
+            Ok(g::MaxBackends() + NUM_AUXILIARY_PROCS + 1)
+        });
+        twophase_seams::register_two_phase_record::set(|_, _, _| Ok(()));
+
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
         s_lock_seams::set_spins_per_delay::set(|_| {});
@@ -153,6 +160,7 @@ fn setup() {
         multixact_seams::startup_multixact::call().unwrap();
         multixact_seams::trim_multixact::call().unwrap();
     });
+    g::SetMaxBackends(17);
     g::SetMyProcNumber(0);
 }
 
@@ -459,4 +467,42 @@ fn panic_in_consume_does_not_wedge_member_scratch() {
     .unwrap();
     assert_eq!(n, 2);
     assert_eq!(out.len(), 2);
+}
+
+// Upstream 0a50ef09: prepared-xact OldestMemberMXactId slots come after the
+// MaxBackends backend slots, NOT at the raw dummy proc number (which starts at
+// MaxBackends + NUM_AUXILIARY_PROCS and would overflow into — or past — the
+// OldestVisibleMXactId half).
+#[test]
+fn prepared_xact_oldest_member_slot_indexing() {
+    let _l = test_lock();
+    setup();
+
+    AtEOXact_MultiXact();
+    multixact_seams::multi_xact_id_set_oldest_member::call().unwrap();
+    let my_oldest = oldest_member(0);
+    assert!(MultiXactIdIsValid(my_oldest));
+
+    multixact_seams::at_prepare_multixact::call().unwrap();
+    multixact_seams::post_prepare_multixact::call(88);
+
+    let st = MultiXactState();
+    let prepared_slot = g::MaxBackends() as usize + 1;
+    assert_eq!(oldest_member(prepared_slot), my_oldest);
+    assert_eq!(oldest_member(0), InvalidMultiXactId);
+    for i in 0..(st.perBackendXactIds.len() - st.num_member_slots) {
+        assert_eq!(oldest_visible(i), InvalidMultiXactId, "visible slot {i} corrupted");
+    }
+
+    let oldest = GetOldestMultiXactId().unwrap();
+    assert!(MultiXactIdPrecedesOrEquals(oldest, my_oldest));
+
+    multixact_twophase_postcommit(88, 0, &my_oldest.to_ne_bytes()).unwrap();
+    assert_eq!(oldest_member(prepared_slot), InvalidMultiXactId);
+
+    // Recovery path lands in the same slot.
+    multixact_twophase_recover(88, 0, &my_oldest.to_ne_bytes()).unwrap();
+    assert_eq!(oldest_member(prepared_slot), my_oldest);
+    multixact_twophase_postabort(88, 0, &my_oldest.to_ne_bytes()).unwrap();
+    assert_eq!(oldest_member(prepared_slot), InvalidMultiXactId);
 }
