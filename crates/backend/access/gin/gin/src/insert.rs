@@ -63,6 +63,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                     1 => GinOpclass::JsonbPathOps,
                     2 => GinOpclass::TsvectorOps,
                     3 => GinOpclass::ArrayOps,
+                    4 => GinOpclass::TrgmOps,
                     other => unported(&format!("rd_amcache gin opclass tag {other}")),
                 },
                 elem_cmp: match c.elem_cmp {
@@ -102,6 +103,7 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                 GinOpclass::JsonbPathOps => 1,
                 GinOpclass::TsvectorOps => 2,
                 GinOpclass::ArrayOps => 3,
+                GinOpclass::TrgmOps => 4,
             },
             elem_cmp: match col.elem_cmp {
                 GinElemCmp::None => 0,
