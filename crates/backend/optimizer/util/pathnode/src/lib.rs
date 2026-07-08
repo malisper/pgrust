@@ -2971,8 +2971,7 @@ const fn maxalign8(n: usize) -> usize {
     (n + 7) & !7
 }
 
-// apply_projection_to_path (pathnode.c); Gather/GatherMerge pushdown arms are
-// dead (loud upstream).
+// apply_projection_to_path (pathnode.c).
 pub fn apply_projection_to_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -2993,6 +2992,37 @@ pub fn apply_projection_to_path<'mcx>(
     p.startup_cost += newcost.startup - oldcost.startup;
     p.total_cost += newcost.startup - oldcost.startup
         + (newcost.per_tuple - oldcost.per_tuple) * p.rows;
+
+    // Gather/GatherMerge: push a parallel-safe target below so workers help
+    // project (a fresh ProjectionPath — never modify the subpath in place);
+    // no cost change, per C.
+    let is_gather = matches!(
+        run.root.path(path_id),
+        types_pathnodes::PathNode::GatherPath(_) | types_pathnodes::PathNode::GatherMergePath(_)
+    );
+    let target_safe = clauses::is_parallel_safe_exprs(run, target_id)?;
+    if is_gather && target_safe {
+        let subpath_id = match run.root.path(path_id) {
+            types_pathnodes::PathNode::GatherPath(g) => g.subpath.expect("Gather has a subpath"),
+            types_pathnodes::PathNode::GatherMergePath(g) => {
+                g.subpath.expect("GatherMerge has a subpath")
+            }
+            _ => unreachable!(),
+        };
+        let sub_rel = run.root.path(subpath_id).base().parent;
+        let proj = create_projection_path(run, sub_rel, subpath_id, target_id, target_safe);
+        let proj_id = run.root.alloc_path(proj);
+        match run.root.path_mut(path_id) {
+            types_pathnodes::PathNode::GatherPath(g) => g.subpath = Some(proj_id),
+            types_pathnodes::PathNode::GatherMergePath(g) => g.subpath = Some(proj_id),
+            _ => unreachable!(),
+        }
+    } else if !target_safe {
+        let p = run.root.path_mut(path_id).base_mut();
+        if p.parallel_safe {
+            p.parallel_safe = false;
+        }
+    }
     Ok(path_id)
 }
 
