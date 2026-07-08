@@ -14,7 +14,7 @@ use toastdesc::{
     TOAST_PGLZ_COMPRESSION_ID, TOAST_POINTER_SIZE,
 };
 
-use crate::{check_for_interrupts, unported, TOAST_MAX_CHUNK_SIZE};
+use crate::{check_for_interrupts, TOAST_MAX_CHUNK_SIZE};
 
 const VARHDRSZ_COMPRESSED: usize = VARHDRSZ + 4;
 pub(crate) const F_OIDEQ: Oid = 184;
@@ -298,9 +298,10 @@ pub fn toast_delete_datum<'mcx>(
         };
         let tid = toasttup.t_self;
         if is_speculative {
-            unported("heap_abort_speculative (heapam.c speculative-insert lane)");
+            heapam::heap_abort_speculative(&toastrel, &tid)?;
+        } else {
+            heapam::dml::simple_heap_delete(&toastrel, &tid)?;
         }
-        heapam::dml::simple_heap_delete(&toastrel, &tid)?;
     }
     genam::systable_endscan_ordered(mcx, toastscan)?;
 
