@@ -195,12 +195,6 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                 executils::exec_eval_param_exec_params(estate, deps)?;
             }
         }
-        if PROJ {
-            let deps = ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
-            if !deps.is_empty() {
-                executils::exec_eval_param_exec_params(estate, deps)?;
-            }
-        }
 
         let ss = node.ss_mut();
         let passes = if QUAL {
@@ -228,6 +222,16 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
 
         if passes {
             if PROJ {
+                // Projection initplan deps fire only for qual-passing tuples
+                // (C evaluates ExecEvalParamExec inside the projection, which
+                // never runs on a rejected tuple).
+                {
+                    let deps = ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
+                    if !deps.is_empty() {
+                        executils::exec_eval_param_exec_params(estate, deps)?;
+                    }
+                }
+                let ss = node.ss_mut();
                 let ecxt = ss.ps_ExprContext;
                 let proj = ss.ps_ProjInfo.as_mut().unwrap();
                 let result_id = proj.pi_result_slot;
