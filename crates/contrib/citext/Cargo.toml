@@ -21,3 +21,5 @@ dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 
 [dev-dependencies]
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
+pg_locale = { path = "../../backend/utils/adt/pg_locale" }
+pg_database_seams = { path = "../../backend/catalog/pg_database_seams" }
