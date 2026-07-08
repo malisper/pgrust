@@ -185,6 +185,96 @@ fn registration_overflow_is_fatal_and_unwinds() {
 }
 
 #[test]
+fn proc_exit_under_postmaster_defers_drain_to_thread_top() {
+    install();
+    init_small::globals::SetMyProcPid(8181);
+    init_small::globals::SetIsUnderPostmaster(true);
+    let _ = take_log();
+
+    on_proc_exit(|_, _| log("proc"), 0);
+    on_shmem_exit(|_, _| log("shmem"), 0);
+    before_shmem_exit(
+        |code, _| {
+            log(if code == 5 { "before(code5)" } else { "before" });
+            Ok(())
+        },
+        Datum::from_i32(0),
+    )
+    .unwrap();
+
+    let code = exit_code_of(|| proc_exit(5, 8181));
+    assert_eq!(code, 5);
+    // Callbacks did NOT run at the raise point: the stack's Drop glue must
+    // see live session state first (the cancelled-parallel-query ordering).
+    assert_eq!(take_log(), Vec::<&str>::new());
+    check_on_shmem_exit_lists_are_empty().unwrap_err();
+    assert!(proc_exit_inprogress());
+
+    assert_eq!(run_deferred_exit_callbacks(5), 5);
+    assert_eq!(take_log(), vec!["before(code5)", "shmem", "proc"]);
+    check_on_shmem_exit_lists_are_empty().unwrap();
+    // Second call is a no-op: the deferred flag was consumed.
+    assert_eq!(run_deferred_exit_callbacks(5), 5);
+    init_small::globals::SetIsUnderPostmaster(false);
+}
+
+#[test]
+fn deferred_drain_reentrant_proc_exit_continues_with_last_code() {
+    install();
+    init_small::globals::SetMyProcPid(9191);
+    init_small::globals::SetIsUnderPostmaster(true);
+    let _ = take_log();
+
+    on_shmem_exit(|code, _| log(if code == 9 { "shmem(code9)" } else { "shmem" }), 0);
+    before_shmem_exit(
+        |_, _| {
+            log("b-first");
+            Ok(())
+        },
+        Datum::from_i32(0),
+    )
+    .unwrap();
+    before_shmem_exit(
+        |_, _| {
+            log("reenter");
+            // C's recursion arm: a proc_exit from inside a callback finishes
+            // the remaining callbacks and the new code wins.
+            proc_exit(9, init_small::globals::MyProcPid());
+        },
+        Datum::from_i32(0),
+    )
+    .unwrap();
+
+    let code = exit_code_of(|| proc_exit(0, 9191));
+    assert_eq!(code, 0);
+    assert_eq!(take_log(), Vec::<&str>::new());
+
+    assert_eq!(run_deferred_exit_callbacks(0), 9);
+    assert_eq!(take_log(), vec!["reenter", "b-first", "shmem(code9)"]);
+    check_on_shmem_exit_lists_are_empty().unwrap();
+    init_small::globals::SetIsUnderPostmaster(false);
+}
+
+#[test]
+fn exit_thread_raw_never_defers_a_drain() {
+    install();
+    init_small::globals::SetMyProcPid(9292);
+    init_small::globals::SetIsUnderPostmaster(true);
+    let _ = take_log();
+
+    on_shmem_exit(|_, _| log("shmem"), 0);
+
+    let payload = catch_unwind(AssertUnwindSafe(|| exit_thread_raw(2))).unwrap_err();
+    assert_eq!(payload.downcast_ref::<ProcExitThread>().unwrap().code, 2);
+    // quickdie contract: no callbacks, and nothing pending at the thread top.
+    assert_eq!(run_deferred_exit_callbacks(2), 2);
+    assert_eq!(take_log(), Vec::<&str>::new());
+    check_on_shmem_exit_lists_are_empty().unwrap_err();
+    on_exit_reset();
+    init_small::globals::SetIsUnderPostmaster(false);
+}
+
+#[test]
 fn seams_delegate_to_this_crate() {
     install();
     init_small::globals::SetMyProcPid(7171);

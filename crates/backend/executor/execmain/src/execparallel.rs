@@ -707,9 +707,9 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
             panic!("injected parallel worker panic (run)");
         }
         // FATAL flavor, via the SIGTERM/ProcDiePending path the register's
-        // numeric-suite kill took: proc_exit runs the exit callbacks (incl.
-        // ProcKill), THEN the ProcExitThread unwind drops this frame's
-        // tqueue handle with the proc identity already released.
+        // numeric-suite kill took: proc_exit unwinds first — this frame's
+        // tqueue handle drops with the proc identity still live — and the
+        // deferred exit callbacks (incl. ProcKill) run at the thread top.
         if inject.contains("pgrust:worker-panic-fatal") {
             init_small::globals::SetProcDiePending(true);
             init_small::globals::SetInterruptPending(true);

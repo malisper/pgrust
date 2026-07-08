@@ -287,6 +287,24 @@ fn run_child_task(
     })) else {
         unreachable!("child main_fn returns !")
     };
+    // proc_exit's deferred half: the unwind above ran the stack's Drop glue
+    // with the session state still alive; the exit-callback stacks run here
+    // at the thread top, in C's order. Crash payloads (exit_thread_raw,
+    // PanicExitThread, raw panics) never defer and skip the drain like C's
+    // _exit. A panic escaping the drain is announced SIGABRT below.
+    let payload = match payload.downcast_ref::<ipc::ProcExitThread>() {
+        Some(p) => {
+            let code = p.code;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ipc::run_deferred_exit_callbacks(code)
+            })) {
+                Ok(final_code) => Box::new(ipc::ProcExitThread { code: final_code })
+                    as Box<dyn std::any::Any + Send>,
+                Err(crash) => crash,
+            }
+        }
+        None => payload,
+    };
     // C's process death closes fds; without this the peer never sees EOF.
     if let Some(cs) = client_sock {
         unsafe { libc::close(cs.sock) };

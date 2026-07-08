@@ -42,6 +42,7 @@ thread_local! {
     static BEFORE_SHMEM_EXIT_INDEX: Cell<usize> = const { Cell::new(0) };
     static PROC_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(false) };
     static SHMEM_EXIT_INPROGRESS: Cell<bool> = const { Cell::new(false) };
+    static EXIT_CALLBACKS_DEFERRED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Unwind payload of a normal backend-thread exit; the joiner recovers the C
@@ -61,7 +62,7 @@ pub fn shmem_exit_inprogress() -> bool {
     SHMEM_EXIT_INPROGRESS.with(Cell::get)
 }
 
-/// Retention park (wretain): proc_exit_prepare committed this thread to
+/// Retention park (wretain): commit_to_exit committed this thread to
 /// "exiting" (exit flags, ERROR->FATAL promotion, held interrupts, suppressed
 /// statement logging); a parked standby lives on and must return to the
 /// fresh-thread baseline before its next claim. Exit-callback lists were
@@ -70,6 +71,7 @@ pub fn reset_exit_state_for_retained_park() {
     debug_assert_eq!(ON_PROC_EXIT_INDEX.with(Cell::get), 0);
     debug_assert_eq!(ON_SHMEM_EXIT_INDEX.with(Cell::get), 0);
     debug_assert_eq!(BEFORE_SHMEM_EXIT_INDEX.with(Cell::get), 0);
+    debug_assert!(!EXIT_CALLBACKS_DEFERRED.with(Cell::get));
     PROC_EXIT_INPROGRESS.with(|c| c.set(false));
     SHMEM_EXIT_INPROGRESS.with(|c| c.set(false));
     elog::config::set_proc_exit_inprogress(false);
@@ -85,9 +87,49 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
         panic!("proc_exit() called in child process");
     }
 
-    proc_exit_prepare(code);
+    commit_to_exit();
+
+    // Exit-callback ordering vs the unwind: a deep FATAL (die() inside a
+    // scan) unwinds through frames whose Drop glue releases resources via
+    // the resource owner; ShutdownPostgres must therefore run AFTER those
+    // drops — the ERROR-path order — or every guard drop hits a torn-down
+    // owner (the cancelled-parallel-query server abort, resowner bad_owner).
+    // C never unwinds, so its callbacks-at-raise order has no such
+    // constraint. Child threads defer the drain to the thread top
+    // (launch_backend::run_child_task); the postmaster thread and bare test
+    // threads have no run_child_task above them and drain here.
+    if init_small::globals::IsUnderPostmaster() {
+        EXIT_CALLBACKS_DEFERRED.with(|c| c.set(true));
+    } else {
+        drain_exit_callbacks(code);
+    }
 
     std::panic::resume_unwind(Box::new(ProcExitThread { code }));
+}
+
+/// Thread-top half of proc_exit (run_child_task): if this thread's unwind
+/// deferred the callback drain, run the exit stacks now — after every stack
+/// frame's Drop glue, in C's callback order. exit_thread_raw (quickdie)
+/// never defers, so the crash class stays drain-free. A proc_exit
+/// re-entered from inside a callback (C's recursion arm) unwinds back into
+/// the loop and the drain resumes where it left off with the new code —
+/// last code wins, as in C. Returns the final exit code.
+pub fn run_deferred_exit_callbacks(mut code: i32) -> i32 {
+    loop {
+        if !EXIT_CALLBACKS_DEFERRED.with(|c| c.replace(false)) {
+            return code;
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain_exit_callbacks(code)
+        }));
+        match outcome {
+            Ok(()) => return code,
+            Err(payload) => match payload.downcast_ref::<ProcExitThread>() {
+                Some(p) => code = p.code,
+                None => std::panic::resume_unwind(payload),
+            },
+        }
+    }
 }
 
 // _exit(code)'s thread rendering: end this backend thread without running the
@@ -100,7 +142,7 @@ pub fn exit_thread_raw(code: i32) -> ! {
     std::panic::resume_unwind(Box::new(ProcExitThread { code }));
 }
 
-fn proc_exit_prepare(code: i32) {
+fn commit_to_exit() {
     // Committed to exit: elog now promotes ERROR to FATAL.
     PROC_EXIT_INPROGRESS.with(|c| c.set(true));
     elog::config::set_proc_exit_inprogress(true);
@@ -114,7 +156,9 @@ fn proc_exit_prepare(code: i32) {
 
     elog::clear_emit_context_callbacks();
     elog::suppress_statement();
+}
 
+fn drain_exit_callbacks(code: i32) {
     shmem_exit_internal(code);
 
     while ON_PROC_EXIT_INDEX.with(Cell::get) > 0 {
