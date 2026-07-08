@@ -699,6 +699,7 @@ fn make_rel_data<'mcx>(
         rd_indcollation: mcx::PgVec::new_in(mcx),
         rd_options: None,
         pgstat_enabled: Cell::new(false),
+        pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
         rd_amcache: Default::default(),
         rd_amcache_hash: Default::default(), rd_amcache_gin: Default::default(), rd_amcache_spgist: Default::default(),
         rd_support: mcx::PgVec::new_in(mcx),
