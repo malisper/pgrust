@@ -133,6 +133,7 @@ pub fn init_all() {
     snapbuild::init_seams();
     logical::init_seams();
     test_decoding::init_seams();
+    citext::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();
