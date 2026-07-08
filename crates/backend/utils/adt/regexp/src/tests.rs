@@ -643,7 +643,7 @@ fn auto_vs_spencer_differential() {
     for p in compatible {
         regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
         assert!(
-            regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED).unwrap().is_some(),
+            regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED, b"x").unwrap().is_some(),
             "expected {p:?} to dispatch to re2"
         );
         for s in corpus {
@@ -653,7 +653,7 @@ fn auto_vs_spencer_differential() {
     for p in incompatible {
         regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
         assert!(
-            regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED).unwrap().is_none(),
+            regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED, b"x").unwrap().is_none(),
             "expected {p:?} to fail closed to spencer"
         );
         for s in corpus {
@@ -663,7 +663,7 @@ fn auto_vs_spencer_differential() {
 
     for p in whole_match_only {
         regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
-        let re = regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED).unwrap().unwrap();
+        let re = regexp_alt::dispatch(p.as_bytes(), REG_ADVANCED, b"x").unwrap().unwrap();
         assert!(!re.capture_safe(), "expected {p:?} to be whole-match tier");
         for s in corpus {
             assert_engine_parity(m, s.as_bytes(), p.as_bytes());
@@ -676,8 +676,124 @@ fn auto_vs_spencer_differential() {
     // must fail it closed so the error surface stays Spencer's.
     let toobig = "x*y*z*".repeat(1000);
     regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
-    assert!(regexp_alt::dispatch(toobig.as_bytes(), REG_ADVANCED).unwrap().is_none());
+    assert!(regexp_alt::dispatch(toobig.as_bytes(), REG_ADVANCED, b"x").unwrap().is_none());
     assert_engine_parity(m, b"x", toobig.as_bytes());
+}
+
+// DATA-adversarial differential corpus: subjects on which the Spencer view
+// (pg_mb2wchar: NUL-terminated, bytewise-decoded invalid UTF-8) diverges
+// from RE2's raw-byte view. The per-evaluation data guard must route every
+// one of these to Spencer at engine=auto; parity failure here means the
+// guard has a hole. Patterns still dispatch to RE2 for clean subjects.
+#[test]
+fn data_adversarial_differential() {
+    full_setup();
+    if !regexp_alt::re2_available() {
+        return;
+    }
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+
+    let subjects: &[&[u8]] = &[
+        // NUL-only, and NUL at start / middle / end / adjacent to matches.
+        b"\x00",
+        b"\x00\x00\x00",
+        b"\x00abc",
+        b"abc\x00",
+        b"ab\x00cd",
+        b"a1\x00b2c3",
+        b"aaa\x00aaa",
+        b"caf\x00",
+        b"http://www.ex\x00ample.com/path/x?y=1",
+        b"http://www.example.com/path\x00",
+        // The two encoding-suite shapes that routed the lift back.
+        b"caf\xc3\xa9\x00dcba",
+        b"caf\xc3\x00dcba",
+        // Invalid UTF-8 the C engine tolerates (decoded bytewise or dropped
+        // at a truncated tail) but RE2 can never match.
+        b"caf\xc3",
+        b"a\xffb",
+        b"\xc3\x28",
+        b"\xed\xa0\x80xyz",
+        b"\xc0\xafabc",
+        b"caf\xc3\xa9\xf0\x9f",
+    ];
+    let patterns: &[&[u8]] = &[
+        // The two encoding-suite patterns, verbatim.
+        b"^caf(.)$",
+        b"^caf(.)dcba$",
+        b"a",
+        b"a+",
+        b"a|ab",
+        b".",
+        b"x*",
+        b"f$",
+        b"^caf",
+        b"b[^b]+",
+        b"(a)(b)?",
+        br"^https?://(?:www\.)?([^/]+)/.*$",
+    ];
+    for p in patterns {
+        regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+        assert!(
+            regexp_alt::dispatch(p, REG_ADVANCED, b"clean").unwrap().is_some(),
+            "expected {:?} to dispatch to re2 on clean subjects",
+            String::from_utf8_lossy(p)
+        );
+        for s in subjects {
+            assert!(
+                regexp_alt::dispatch(p, REG_ADVANCED, s).unwrap().is_none(),
+                "expected subject {s:?} to fall back to spencer"
+            );
+            assert_engine_parity(m, s, p);
+        }
+    }
+
+    // NUL-bearing patterns classify to Spencer (Spencer's pattern view stops
+    // at the NUL; RE2 would compile the full byte string).
+    regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
+    assert!(regexp_alt::dispatch(b"a\x00b", REG_ADVANCED, b"clean").unwrap().is_none());
+    for s in [&b"ab"[..], b"a\x00b", b"a"] {
+        assert_engine_parity(m, s, b"a\x00b");
+    }
+}
+
+// Long-haystack boundaries: the RE2 shim carries i32 lengths/offsets and the
+// data guard scans the full subject — matches at the far end, NUL/invalid
+// bytes deep in the subject, and empty-match walks must all hold parity.
+#[test]
+fn long_haystack_differential() {
+    full_setup();
+    if !regexp_alt::re2_available() {
+        return;
+    }
+    let cx = MemoryContext::new("test");
+    let m = cx.mcx();
+
+    let mut clean = "ab".repeat(32 * 1024);
+    clean.push_str("needle");
+    let mut nul_deep = clean.clone().into_bytes();
+    nul_deep[48 * 1024] = 0;
+    let mut invalid_deep = clean.clone().into_bytes();
+    invalid_deep[48 * 1024] = 0xff;
+    let mut long_url = String::from("http://www.example.com/");
+    long_url.push_str(&"p/".repeat(16 * 1024));
+    long_url.push_str("end");
+
+    for p in [
+        &b"needle$"[..],
+        b"(needle)$",
+        b"^ab|needle$",
+        br"^https?://(?:www\.)?([^/]+)/.*$",
+        b"e.d",
+    ] {
+        for s in [clean.as_bytes(), &nul_deep, &invalid_deep, long_url.as_bytes()] {
+            assert_engine_parity(m, s, p);
+        }
+    }
+    // Empty-match walk (per-character advance) at a boundary-crossing size.
+    assert_engine_parity(m, &clean.as_bytes()[..2048], b"x*");
+    assert_engine_parity(m, &nul_deep[47 * 1024..49 * 1024], b"x*");
 }
 
 // Generated adversarial patterns within the compatible class: a seeded
