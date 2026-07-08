@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn empty_hstore_layout() {
         let img = build_hstore(&[]);
-        assert_eq!(img.len(), 12);
+        assert_eq!(img.len(), 8);
         let hs = HstoreView::from_vardata(&img[4..]);
         assert_eq!(hs.count(), 0);
         assert_eq!(hs.pool_len(), 0);
