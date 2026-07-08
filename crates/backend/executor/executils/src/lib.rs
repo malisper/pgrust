@@ -1339,6 +1339,7 @@ impl<'mcx> EStateData<'mcx> {
 
 mcx::forget_safe_nodrop!(
     SubplanStateCell, ResultRelInfo, EcxtId, ExecSlotId, ExecRowMark, ParamStable,
+    EpqRowMarkFetch,
 );
 
 // Exempt groups: [1] droppy owners, all released before the exec bundle is
