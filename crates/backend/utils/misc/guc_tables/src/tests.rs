@@ -13,9 +13,9 @@ fn table_counts_match_compiled_backend_shape() {
     assert_eq!(ConfigureNamesBool.len(), 115);
     assert_eq!(ConfigureNamesInt.len(), 147);
     assert_eq!(ConfigureNamesReal.len(), 26);
-    assert_eq!(ConfigureNamesString.len(), 75);
+    assert_eq!(ConfigureNamesString.len(), 76);
     assert_eq!(ConfigureNamesEnum.len(), 42);
-    assert_eq!(all_settings().count(), 405);
+    assert_eq!(all_settings().count(), 406);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
