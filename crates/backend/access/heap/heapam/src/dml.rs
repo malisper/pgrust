@@ -723,7 +723,7 @@ fn collect_multixact_members(
 /// transaction grabbing a tuple lock of the given strength?
 /// `current_is_member` is tracked only when `need_member` (C's non-NULL out
 /// param).
-fn DoesMultiXactIdConflict(
+pub(crate) fn DoesMultiXactIdConflict(
     multi: MultiXactId,
     infomask: u16,
     lockmode: LockTupleMode,
@@ -817,7 +817,7 @@ fn Do_MultiXactIdWait(
 }
 
 /// `MultiXactIdWait`.
-fn MultiXactIdWait(
+pub(crate) fn MultiXactIdWait(
     multi: MultiXactId,
     status: MultiXactStatus,
     infomask: u16,
@@ -2056,7 +2056,8 @@ pub fn heap_abort_speculative(
             "attempted to kill a tuple inserted by another transaction",
         )));
     }
-    if !tp.t_data().is_speculative() {
+    // Toast chunks of a speculative tuple carry no token themselves.
+    if !(catalog_seams::is_toast_relation::call(relation) || tp.t_data().is_speculative()) {
         return Err(Box::new(PgError::error("attempted to kill a non-speculative tuple")));
     }
     debug_assert!(!tp.t_data().is_heap_only());
