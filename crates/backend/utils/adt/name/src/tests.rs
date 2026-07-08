@@ -165,3 +165,39 @@ fn fc_wrappers_and_table() {
         assert!(b.strict && !b.retset);
     }
 }
+
+fn text_datum(mcx: mcx::Mcx<'_>, s: &str) -> Datum {
+    let mut v = mcx::vec_with_capacity_in(mcx, 4 + s.len()).unwrap();
+    mcx::vec_append_bytes(&mut v, &datum::varlena::set_varsize_4b(4 + s.len())).unwrap();
+    mcx::vec_append_bytes(&mut v, s.as_bytes()).unwrap();
+    let d = Datum::from_usize(v.as_ptr() as usize);
+    core::mem::forget(v);
+    d
+}
+
+// text_name (OID 407) and its varchar overload (OID 1400, same prosrc): the
+// oracle-starving gap was 1400 missing from NAME_BUILTINS entirely.
+#[test]
+fn fc_text_name_truncates_and_is_registered_for_both_oids() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mut fci = LocalFcinfo::<1>::new(0);
+    unsafe { fci.set_result_mcx(ctx.mcx()) };
+    fci.set_arg(0, text_datum(ctx.mcx(), "pg_class"));
+    let d = fc_text_name(None, &mut fci).unwrap();
+    let n = unsafe { &*(d.as_usize() as *const NameData) };
+    assert_eq!(n.name_str(), b"pg_class");
+
+    // Oversize input truncates on a multibyte boundary, matching namein.
+    let long = "é".repeat(40);
+    let mut fci = LocalFcinfo::<1>::new(0);
+    unsafe { fci.set_result_mcx(ctx.mcx()) };
+    fci.set_arg(0, text_datum(ctx.mcx(), &long));
+    let d = fc_text_name(None, &mut fci).unwrap();
+    let n = unsafe { &*(d.as_usize() as *const NameData) };
+    assert_eq!(n.name_str().len(), 62);
+    assert!(std::str::from_utf8(n.name_str()).is_ok());
+
+    assert!(NAME_BUILTINS.iter().any(|b| b.foid == 407 && b.func as *const () == fc_text_name as *const ()));
+    assert!(NAME_BUILTINS.iter().any(|b| b.foid == 1400 && b.func as *const () == fc_text_name as *const ()));
+}

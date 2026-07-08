@@ -10,7 +10,7 @@ use ::mcx::{vec_from_elem_in, vec_with_capacity_in, PgVec};
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::types_fmgr::{
-    cstring_result, function_call1_coll, function_call1_coll_in, FmgrBuiltin, FmgrInfo,
+    cstring_result, function_call1_coll_in, function_call2_coll_in, FmgrBuiltin, FmgrInfo,
     FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
 use ::types_tuple::{
@@ -261,12 +261,13 @@ fn hash_record_common(
                 .unwrap()
                 .proc;
             match seed {
+                // C hash_record: the column hash proc detoasts its by-ref arg
+                // via DirectFunctionCall, pallocing in the caller's context.
                 Some(s) => {
-                    ::types_fmgr::function_call2_coll(proc, att.attcollation, values[i], s)?
-                        .as_u64()
+                    function_call2_coll_in(proc, att.attcollation, mcx, values[i], s)?.as_u64()
                 }
                 None => {
-                    function_call1_coll(proc, att.attcollation, values[i])?.as_u32() as u64
+                    function_call1_coll_in(proc, att.attcollation, mcx, values[i])?.as_u32() as u64
                 }
             }
         };

@@ -1229,7 +1229,7 @@ fn find_partial_match<'mcx>(
         // SAFETY: lhs_slot is estate-minted, distinct from probe_slot (owned
         // by the SubPlanExprState, not in es_tupleTable).
         let lhs = unsafe { &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>) };
-        if !exec_tuples_unequal(lhs, &mut h.probe_slot, ncols, &mut h.cur_eq_funcs, &h.tab_collations)? {
+        if !exec_tuples_unequal(mcx, lhs, &mut h.probe_slot, ncols, &mut h.cur_eq_funcs, &h.tab_collations)? {
             return Ok(true);
         }
     }
@@ -1239,6 +1239,7 @@ fn find_partial_match<'mcx>(
 // execTuplesUnequal (nodeSubplan.c): true only if some non-null pair
 // compares not-equal; last column first.
 fn exec_tuples_unequal<'mcx>(
+    mcx: Mcx<'mcx>,
     slot1: &mut SlotData<'mcx>,
     slot2: &mut SlotData<'mcx>,
     ncols: usize,
@@ -1259,6 +1260,9 @@ fn exec_tuples_unequal<'mcx>(
         }
         let flinfo = &mut eqfuncs[i];
         let mut fcinfo = LocalFcinfo::<2>::fresh(collations[i]);
+        // C execTuplesUnequal: the eq proc detoasts by-ref args via
+        // DirectFunctionCall, pallocing in the caller's context.
+        unsafe { fcinfo.set_result_mcx(mcx) };
         fcinfo.args[0] = NullableDatum { value: a1, isnull: false };
         fcinfo.args[1] = NullableDatum { value: a2, isnull: false };
         let fn_addr = flinfo.fn_addr;
@@ -1290,6 +1294,7 @@ fn hash_slot_lhs<'mcx>(
     estate: &mut EStateData<'mcx>,
     lhs_slot: ExecSlotId,
 ) -> PgResult<u32> {
+    let mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
     let slot = estate.slot_mut(lhs_slot);
     exectuples::slot_getsomeattrs(slot, ncols as i32);
@@ -1305,6 +1310,9 @@ fn hash_slot_lhs<'mcx>(
         if !isnull {
             let flinfo = &mut h.lhs_hash_funcs[i];
             let mut fcinfo = LocalFcinfo::<1>::fresh(h.tab_collations[i]);
+            // C ExecBuildHash32FromAttrs: the hash proc detoasts its by-ref
+            // arg via DirectFunctionCall, pallocing in the caller's context.
+            unsafe { fcinfo.set_result_mcx(mcx) };
             fcinfo.args[0] = NullableDatum { value: v, isnull: false };
             let fn_addr = flinfo.fn_addr;
             let d = fn_addr(Some(flinfo), &mut fcinfo)?;
@@ -1349,6 +1357,10 @@ fn find_exact_cross<'mcx>(
             debug_assert!(!n1 && !n2);
             let flinfo = &mut cur_eq_funcs[i];
             let mut fcinfo = LocalFcinfo::<2>::fresh(tab_collations[i]);
+            // C execTuplesMatch/FindTupleHashEntry: the eq proc detoasts
+            // by-ref args via DirectFunctionCall, pallocing in the caller's
+            // context.
+            unsafe { fcinfo.set_result_mcx(mcx) };
             fcinfo.args[0] = NullableDatum { value: a1, isnull: false };
             fcinfo.args[1] = NullableDatum { value: a2, isnull: false };
             let fn_addr = flinfo.fn_addr;
