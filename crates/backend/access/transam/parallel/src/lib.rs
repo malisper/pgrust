@@ -345,7 +345,12 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         transaction_snapshot,
         clientconninfo,
         relmap: relmapper::SerializeRelationMap(),
-        record_registry: typcache_seams::record_registry_handle::call(),
+        // Guarded for typcache-less rigs (substrate/gather e2e harnesses).
+        record_registry: if typcache_seams::record_registry_handle::is_installed() {
+            typcache_seams::record_registry_handle::call()
+        } else {
+            Default::default()
+        },
         library_name,
         function_name,
         error_senders,
@@ -1000,7 +1005,11 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     // Session attach: skipped (docs/parallel-query-design.md) except for the
     // record-type registry, which — unlike the rest of session.c's DSM state —
     // is not otherwise visible across threads (TypCacheState is thread_local).
-    typcache_seams::install_record_registry::call(std::sync::Arc::clone(&shared.record_registry));
+    if typcache_seams::install_record_registry::is_installed() {
+        typcache_seams::install_record_registry::call(std::sync::Arc::clone(
+            &shared.record_registry,
+        ));
+    }
 
     let asnapshot = snapmgr::RestoreSnapshot(&shared.active_snapshot);
     let tsource = shared.transaction_snapshot.as_ref().unwrap_or(&shared.active_snapshot);
