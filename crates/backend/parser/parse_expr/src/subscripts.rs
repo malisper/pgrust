@@ -363,12 +363,9 @@ fn hstore_subscript_transform<'mcx>(
 ) -> PgResult<()> {
     let expr_kind = pstate.p_expr_kind;
     if is_slice || indirection.len() != 1 {
-        let loc = indirection
-            .iter()
-            .next()
-            .and_then(|el| el.as_a_indices().and_then(|ai| ai.uidx.or(ai.lidx)))
-            .map_or(-1, expr_location);
-        return Err(hstore_one_subscript(pstate, loc));
+        // C: parser_errposition(exprLocation((Node *) indirection)) — List of
+        // A_Indices, and A_Indices has no exprLocation arm => -1, no position.
+        return Err(hstore_one_subscript(pstate, -1));
     }
     let ai = indirection.iter().next().unwrap().as_a_indices().unwrap();
     let uidx = ai.uidx.expect("non-slice A_Indices has uidx");

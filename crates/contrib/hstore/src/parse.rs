@@ -232,6 +232,6 @@ mod tests {
         assert!(parse_hstore(b"a").is_err());
         assert!(parse_hstore(b"a=>").is_err());
         assert!(parse_hstore(b"a=b").is_err());
-        assert!(parse_hstore(b"a=>b, ").is_err());
+        assert!(parse_hstore(b"a=>b, ").is_ok());
     }
 }

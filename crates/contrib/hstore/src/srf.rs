@@ -27,7 +27,10 @@ pub fn fc_hstore_skeys(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let pairs = owned_pairs(fcinfo)?;
-    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    // Scalar SETOF: the stored tupdesc comes from the caller's expectedDesc
+    // (plain-flags InitMaterializedSRF requires a row type).
+    let mut srf =
+        funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
     for (key, _) in &pairs {
         let d = varlena_result(varlena::cstring_to_text(mcx, key)?);
         srf.putvalues(&[d], &[false])?;
@@ -40,7 +43,8 @@ pub fn fc_hstore_svals(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     // SAFETY: as fc_hstore_skeys.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let pairs = owned_pairs(fcinfo)?;
-    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    let mut srf =
+        funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
     for (_, val) in &pairs {
         match val {
             Some(v) => {
