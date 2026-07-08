@@ -77,6 +77,11 @@ pub struct ParallelShared {
     transaction_snapshot: Option<snapmgr::SerializedSnapshot>,
     clientconninfo: Vec<u8>,
     relmap: relmapper::SerializedActiveRelMaps,
+    // SharedRecordTypmodRegistry (typcache.c/session.c): unlike the rest of
+    // session.c's DSM (skipped — threads share the address space), the
+    // record-type registry is thread_local in TypCacheState and so still
+    // needs an explicit handle so workers see the leader's registrations.
+    record_registry: typcache_seams::RecordRegistryHandle,
     library_name: String,
     function_name: String,
     error_senders: Vec<Mutex<Option<SyncSender<WorkerMessage>>>>,
@@ -340,6 +345,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         transaction_snapshot,
         clientconninfo,
         relmap: relmapper::SerializeRelationMap(),
+        record_registry: typcache_seams::record_registry_handle::call(),
         library_name,
         function_name,
         error_senders,
@@ -991,7 +997,10 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
         xact::GetCurrentTransactionNestLevel(),
     );
     combocid::RestoreComboCIDState(&shared.combocid);
-    // Session attach: skipped (docs/parallel-query-design.md).
+    // Session attach: skipped (docs/parallel-query-design.md) except for the
+    // record-type registry, which — unlike the rest of session.c's DSM state —
+    // is not otherwise visible across threads (TypCacheState is thread_local).
+    typcache_seams::install_record_registry::call(std::sync::Arc::clone(&shared.record_registry));
 
     let asnapshot = snapmgr::RestoreSnapshot(&shared.active_snapshot);
     let tsource = shared.transaction_snapshot.as_ref().unwrap_or(&shared.active_snapshot);

@@ -2223,6 +2223,17 @@ pub fn expression_returns_set(node: Node<'_>) -> bool {
         NodeTag::T_SubLink => {
             node.as_sub_link().unwrap().testexpr.is_some_and(expression_returns_set)
         }
+        // expression_tree_walker (nodeFuncs.c:2245-2256): recurse into
+        // testexpr and args, but not into the Plan.
+        NodeTag::T_SubPlan => {
+            let sp = node.as_sub_plan().unwrap();
+            sp.testexpr.is_some_and(expression_returns_set)
+                || sp.args.iter().any(expression_returns_set)
+        }
+        // expression_tree_walker (nodeFuncs.c:2257-2258).
+        NodeTag::T_AlternativeSubPlan => {
+            node.as_alternative_sub_plan().unwrap().subplans.iter().any(expression_returns_set)
+        }
         NodeTag::T_ScalarArrayOpExpr => {
             node.as_scalar_array_op_expr().unwrap().args.iter().any(expression_returns_set)
         }

@@ -1,7 +1,42 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use types_tuple::{NameData, TupleDescData};
+use types_tuple::{FormData_pg_attribute, NameData, TupleDescData};
+
+// Thread-native analog of SharedRecordTypmodRegistry (typcache.c,
+// access/common/session.c): real Postgres attaches this to CurrentSession's
+// DSM so a leader's RECORD-type registrations are visible to its workers
+// across separate processes. Threads already share the address space, but
+// TypCacheState's record registry is thread_local — so it still needs an
+// explicit handoff. FormData_pg_attribute is plain data (no Mcx lifetime),
+// so the registry is heap-owned and safely Send/Sync behind the Mutex,
+// unlike TupleDescData itself (arena-tied, not thread-shareable).
+#[derive(Clone)]
+pub struct SharedRecordEntry {
+    pub attrs: Vec<FormData_pg_attribute>,
+    pub id: u64,
+}
+
+#[derive(Default)]
+pub struct SharedRecordRegistry {
+    pub entries: Vec<SharedRecordEntry>,
+}
+
+pub type RecordRegistryHandle = std::sync::Arc<std::sync::Mutex<SharedRecordRegistry>>;
+
+seam_core::seam!(
+    // The calling thread's live record-type registry handle (assign_record_type_typmod's
+    // RecordCacheArray, played by an Arc<Mutex<..>> instead of a DSA-backed dshash table).
+    // A parallel leader clones this into ParallelShared at InitializeParallelDSM time.
+    pub fn record_registry_handle() -> RecordRegistryHandle
+);
+
+seam_core::seam!(
+    // Installs `handle` as the calling thread's record registry, replacing its own
+    // private one — called by a parallel worker before executing so it shares the
+    // leader's registrations (SharedRecordTypmodRegistryAttach, session.c).
+    pub fn install_record_registry(handle: RecordRegistryHandle)
+);
 
 seam_core::seam!(
     pub fn at_eoxact_type_cache()

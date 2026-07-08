@@ -314,9 +314,10 @@ pub(crate) struct TypCacheState {
     pub(crate) first_domain_type_entry: Oid,
     pub(crate) in_progress: PgVec<'static, Oid>,
     pub(crate) callbacks_registered: bool,
-    // C's RecordCacheArray: anonymous rowtypes registered by typmod index.
-    pub(crate) record_types: Vec<types_tuple::TupleDescData<'static>>,
-    pub(crate) record_ids: Vec<u64>,
+    // C's RecordCacheArray/SharedRecordTypmodRegistry: anonymous rowtypes
+    // registered by typmod index. A parallel worker installs the leader's
+    // handle here in place of its own (typcache_seams::install_record_registry).
+    pub(crate) record_registry: typcache_seams::RecordRegistryHandle,
     pub(crate) tupledesc_id_counter: u64,
 }
 
@@ -338,8 +339,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut TypCacheState) -> R) -> R {
                 first_domain_type_entry: InvalidOid,
                 in_progress: PgVec::new_in(mcx),
                 callbacks_registered: false,
-                record_types: Vec::new(),
-                record_ids: Vec::new(),
+                record_registry: Default::default(),
                 tupledesc_id_counter: 0,
             })
         });
@@ -1046,6 +1046,12 @@ pub fn init_seams() {
     typcache_seams::at_eosubxact_type_cache::set(AtEOSubXact_TypeCache);
     typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
     typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
+    typcache_seams::record_registry_handle::set(|| {
+        with_state(|st| std::sync::Arc::clone(&st.record_registry))
+    });
+    typcache_seams::install_record_registry::set(|handle| {
+        with_state(|st| st.record_registry = handle)
+    });
     typcache_seams::type_cache_cmp_proc::set(|type_id| {
         Ok(lookup_type_cache(type_id, TYPECACHE_CMP_PROC)?.cmp_proc())
     });
@@ -1055,12 +1061,12 @@ pub fn init_seams() {
 }
 
 // C: equalRowTypes (attname/atttypid/atttypmod/natts).
-fn row_types_equal(a: &types_tuple::TupleDescData<'_>, b: &types_tuple::TupleDescData<'_>) -> bool {
-    if a.natts != b.natts || a.tdtypeid != b.tdtypeid {
+fn row_types_equal(a: &types_tuple::TupleDescData<'_>, b: &[types_tuple::FormData_pg_attribute]) -> bool {
+    if a.natts as usize != b.len() {
         return false;
     }
     for i in 0..a.natts as usize {
-        let (x, y) = (a.attr(i), b.attr(i));
+        let (x, y) = (a.attr(i), &b[i]);
         if x.attname.name_str() != y.attname.name_str()
             || x.atttypid != y.atttypid
             || x.atttypmod != y.atttypmod
@@ -1071,26 +1077,28 @@ fn row_types_equal(a: &types_tuple::TupleDescData<'_>, b: &types_tuple::TupleDes
     true
 }
 
-/// C: assign_record_type_typmod (typcache.c) over a linear RecordCacheArray
-/// (hash dedup unneeded at this registry's size).
+/// C: assign_record_type_typmod (typcache.c) over RecordCacheArray, played by
+/// [`typcache_seams::SharedRecordRegistry`] (a thread-native
+/// SharedRecordTypmodRegistry — see typcache_seams for why this piece, unlike
+/// the rest of session.c's DSM, needs an explicit cross-thread handle).
 pub fn assign_record_type_typmod(tupdesc: &mut types_tuple::TupleDescData<'_>) -> PgResult<()> {
     debug_assert_eq!(tupdesc.tdtypeid, types_core::catalog::RECORDOID);
-    with_state(|st| {
-        for (i, d) in st.record_types.iter().enumerate() {
-            if row_types_equal(d, tupdesc) {
-                tupdesc.tdtypmod = i as i32;
-                return Ok(());
-            }
+    let handle = with_state(|st| std::sync::Arc::clone(&st.record_registry));
+    let mut reg = handle.lock().unwrap_or_else(|e| e.into_inner());
+    for (i, e) in reg.entries.iter().enumerate() {
+        if row_types_equal(tupdesc, &e.attrs) {
+            tupdesc.tdtypmod = i as i32;
+            return Ok(());
         }
-        let mcx = st.mcx;
-        let mut copy = tupdesc::CreateTupleDescCopy(mcx, tupdesc)?;
-        copy.tdtypmod = st.record_types.len() as i32;
-        tupdesc.tdtypmod = copy.tdtypmod;
-        st.record_types.push(copy);
+    }
+    let attrs: Vec<_> = (0..tupdesc.natts as usize).map(|i| *tupdesc.attr(i)).collect();
+    let id = with_state(|st| {
         st.tupledesc_id_counter += 1;
-        st.record_ids.push(st.tupledesc_id_counter);
-        Ok(())
-    })
+        st.tupledesc_id_counter
+    });
+    tupdesc.tdtypmod = reg.entries.len() as i32;
+    reg.entries.push(typcache_seams::SharedRecordEntry { attrs, id });
+    Ok(())
 }
 
 pub const INVALID_TUPLEDESC_IDENTIFIER: u64 = 0;
@@ -1100,16 +1108,18 @@ pub const INVALID_TUPLEDESC_IDENTIFIER: u64 = 0;
 /// composite tupdesc cache to pin a stable identifier to. Equal ids still
 /// imply the same tupdesc; consumers only lose cache hits, never correctness.
 pub fn assign_record_type_identifier(type_id: Oid, typmod: i32) -> PgResult<u64> {
-    with_state(|st| {
-        if type_id != types_core::catalog::RECORDOID {
+    if type_id != types_core::catalog::RECORDOID {
+        return with_state(|st| {
             st.tupledesc_id_counter += 1;
-            return Ok(st.tupledesc_id_counter);
-        }
-        match usize::try_from(typmod).ok().and_then(|i| st.record_ids.get(i)) {
-            Some(&id) => Ok(id),
-            None => Err(record_type_not_registered()),
-        }
-    })
+            Ok(st.tupledesc_id_counter)
+        });
+    }
+    let handle = with_state(|st| std::sync::Arc::clone(&st.record_registry));
+    let reg = handle.lock().unwrap_or_else(|e| e.into_inner());
+    match usize::try_from(typmod).ok().and_then(|i| reg.entries.get(i)) {
+        Some(e) => Ok(e.id),
+        None => Err(record_type_not_registered()),
+    }
 }
 
 #[cold]
@@ -1128,13 +1138,15 @@ pub fn lookup_rowtype_tupdesc_copy<'mcx>(
     typmod: i32,
 ) -> PgResult<types_tuple::TupleDescData<'mcx>> {
     if type_id == types_core::catalog::RECORDOID {
-        return with_state(|st| {
-            let Some(d) = usize::try_from(typmod).ok().and_then(|i| st.record_types.get(i))
-            else {
-                return Err(record_type_not_registered());
-            };
-            tupdesc::CreateTupleDescCopy(mcx, d)
-        });
+        let handle = with_state(|st| std::sync::Arc::clone(&st.record_registry));
+        let reg = handle.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(e) = usize::try_from(typmod).ok().and_then(|i| reg.entries.get(i)) else {
+            return Err(record_type_not_registered());
+        };
+        let mut d = tupdesc::CreateTupleDesc(mcx, &e.attrs)?;
+        d.tdtypeid = types_core::catalog::RECORDOID;
+        d.tdtypmod = typmod;
+        return Ok(d);
     }
     let typrelid = lsyscache::get_typ_typrelid(type_id)?;
     if !types_core::OidIsValid(typrelid) {
