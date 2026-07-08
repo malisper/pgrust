@@ -130,6 +130,8 @@ pub struct ModifyTableState<'mcx> {
     // C mt_root_tuple_slot: root-format staging slot for a cross-partition
     // UPDATE's re-routed tuple.
     cross_part_root_slot: Option<ExecSlotId>,
+    /// This node's C EPQState.relsubs_* (execmain swaps them live per run).
+    pub epq_subs: Option<executils::EpqSubs<'mcx>>,
     on_conflict: Option<OnConflictState<'mcx>>,
     // ON CONFLICT DO UPDATE's locked pre-update row, carried to the INSERT
     // arm's RETURNING (C processes it inside ExecUpdate instead).
@@ -639,6 +641,7 @@ pub fn exec_init_modify_table<'mcx>(
         canSetTag: node.canSetTag,
         mt_done: false,
         fireBSTriggers: true,
+        epq_subs: None,
         rels,
         root,
         cur: 0,
@@ -1186,7 +1189,12 @@ pub fn exec_modify_table<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut fetch_outer: impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
-    mut epq_eval: impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    mut epq_eval: impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     if mt.mt_done {
         return Ok(None);
@@ -1819,7 +1827,12 @@ fn exec_merge<'mcx>(
     plan_slot: ExecSlotId,
     tupleid: Option<ItemPointerData>,
     oldtup: Option<types_tuple::HeapTupleData<'mcx>>,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mut rslot = None;
     let mut matched = tupleid.is_some() || oldtup.is_some();
@@ -1855,7 +1868,12 @@ fn exec_merge_matched<'mcx>(
     tupleid: &mut ItemPointerData,
     oldtup: Option<types_tuple::HeapTupleData<'mcx>>,
     matched: &mut bool,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     debug_assert!(*matched);
     {
@@ -1897,7 +1915,12 @@ fn exec_merge_matched_scan<'mcx>(
     plan_slot: ExecSlotId,
     tupleid: &mut ItemPointerData,
     matched: &mut bool,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<MergeMatchedOutcome> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
@@ -2212,7 +2235,9 @@ fn exec_merge_matched_scan<'mcx>(
                 match lock_result {
                     TM_Result::TM_Ok => {
                         *tupleid = estate.slot(inputslot).base().tts_tid;
-                        let Some(epqslot) = epq_eval(estate, inputslot, mt.rel().rti)? else {
+                        let rti = mt.rel().rti;
+                        let Some(epqslot) = epq_eval(&mut mt.epq_subs, estate, inputslot, rti)?
+                        else {
                             // Inner join no longer matches and there are no
                             // NOT MATCHED actions reachable through it.
                             return Ok(MergeMatchedOutcome::Done(None));
@@ -2365,7 +2390,12 @@ fn merge_update_act<'mcx>(
     tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
     tmfd: &mut TM_FailureData,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<MergeUpdActRes> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
@@ -2618,7 +2648,12 @@ fn exec_merge_not_matched<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     plan_slot: ExecSlotId,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
     // INSERT actions project into and insert via the root relation when the
@@ -3135,14 +3170,31 @@ fn fetch_old_row_version<'mcx>(
 
 // EvalPlanQualSlot (execMain.c): the per-result-rel EPQ test slot,
 // created on first use into the shared tuple table.
+// C EvalPlanQualStart's resultRelations loop: every result relation starts
+// blocked (and done), not just the dispatch-current one — otherwise an EPQ
+// recheck on one inheritance child rescans its siblings and requalifies
+// against unrelated rows (the writep4a/writep4b class).
+fn ensure_mt_epq_subs<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &EStateData<'mcx>) {
+    if mt.epq_subs.is_some() {
+        return;
+    }
+    let mcx = estate.es_query_cxt;
+    let ModifyTableState { rels, epq_subs, .. } = mt;
+    let subs = executils::ensure_epq_subs(epq_subs, mcx, estate.epq_rtsize(), rels[0].rti);
+    for r in rels.iter() {
+        subs.relsubs_blocked[(r.rti - 1) as usize] = true;
+        subs.relsubs_done[(r.rti - 1) as usize] = true;
+    }
+}
+
 fn eval_plan_qual_slot<'mcx>(
-    mt: &ModifyTableState<'mcx>,
+    mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ExecSlotId {
+    ensure_mt_epq_subs(mt, estate);
     let rti = mt.rel().rti;
-    estate.epq_ensure(rti);
     let idx = (rti - 1) as usize;
-    if let Some(id) = estate.es_epq.as_ref().expect("just ensured").relsubs_slot[idx] {
+    if let Some(id) = mt.epq_subs.as_ref().expect("just ensured").relsubs_slot[idx] {
         return id;
     }
     let mcx = estate.es_query_cxt;
@@ -3153,7 +3205,7 @@ fn eval_plan_qual_slot<'mcx>(
     let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
     let id = ExecSlotId(estate.es_tupleTable.len() as u32);
     estate.es_tupleTable.push(slot);
-    estate.es_epq.as_mut().expect("just ensured").relsubs_slot[idx] = Some(id);
+    mt.epq_subs.as_mut().expect("just ensured").relsubs_slot[idx] = Some(id);
     id
 }
 
@@ -3174,7 +3226,12 @@ fn exec_update<'mcx>(
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<UpdateResult> {
     let output_cid = estate.es_output_cid;
     let mut slot_id = slot_id;
@@ -3368,7 +3425,9 @@ fn exec_update<'mcx>(
                         // writes through tupleid); read before EvalPlanQual
                         // clears the test slot.
                         *tupleid = estate.slot(inputslot).base().tts_tid;
-                        let Some(epqslot) = epq_eval(estate, inputslot, mt.rel().rti)? else {
+                        let rti = mt.rel().rti;
+                        let Some(epqslot) = epq_eval(&mut mt.epq_subs, estate, inputslot, rti)?
+                        else {
                             return Ok(UpdateResult::NotModified);
                         };
                         debug_assert!(mt.rel().ri_projectNewInfoValid);
@@ -3517,7 +3576,12 @@ fn exec_cross_partition_update<'mcx>(
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
     slot_id: ExecSlotId,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<CrossPartResult> {
     let mcx = estate.es_query_cxt;
     let old_tid = *tupleid;
@@ -3867,7 +3931,12 @@ fn exec_delete<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
     // C changingPart: this delete is half of a cross-partition UPDATE — the
     // storage layer marks the tuple moved and the row counts once, via the
     // INSERT half (C passes canSetTag=false here).
@@ -3964,7 +4033,9 @@ fn exec_delete<'mcx>(
                     TM_Result::TM_Ok => {
                         debug_assert!(tmfd.traversed);
                         *tupleid = estate.slot(inputslot).base().tts_tid;
-                        let Some(epqslot) = epq_eval(estate, inputslot, mt.rel().rti)? else {
+                        let rti = mt.rel().rti;
+                        let Some(epqslot) = epq_eval(&mut mt.epq_subs, estate, inputslot, rti)?
+                        else {
                             return Ok(false);
                         };
                         // C: skip the delete and pass back the updated row
@@ -4531,7 +4602,12 @@ fn get_tuple_for_trigger<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     tupleid: &mut ItemPointerData,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<TrigFetch> {
     let slot_id = ensure_trig_old_slot(mt, estate);
     let output_cid = estate.es_output_cid;
@@ -4575,7 +4651,8 @@ fn get_tuple_for_trigger<'mcx>(
                 // stays on merge_tuple_for_trigger).
                 *tupleid = estate.slot(slot_id).base().tts_tid;
                 eval_plan_qual_slot(mt, estate);
-                let Some(epqslot) = epq_eval(estate, slot_id, mt.rel().rti)? else {
+                let rti = mt.rel().rti;
+                let Some(epqslot) = epq_eval(&mut mt.epq_subs, estate, slot_id, rti)? else {
                     return Ok(TrigFetch::Skip);
                 };
                 return Ok(TrigFetch::Proceed { old_slot: slot_id, epq: Some(epqslot) });
@@ -5174,7 +5251,12 @@ fn exec_insert<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
@@ -5865,7 +5947,12 @@ fn exec_on_conflict_update<'mcx>(
     conflict_tid: ItemPointerData,
     excluded_id: ExecSlotId,
     leaf: Option<usize>,
-    epq_eval: &mut impl FnMut(&mut EStateData<'mcx>, ExecSlotId, u32) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<OnConflictOutcome> {
     let mcx = estate.es_query_cxt;
     let output_cid = estate.es_output_cid;
@@ -7328,7 +7415,7 @@ mcx::forget_safe_struct!(
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         last_insert_remapped, oc_returning_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd;
-        operation, rels, root, snapshot_any, on_conflict,
+        operation, rels, root, snapshot_any, on_conflict, epq_subs,
         router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
         leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
         leaf_on_conflict, leaf_existing,

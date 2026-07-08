@@ -1448,7 +1448,18 @@ fn transformRangeSubselect<'mcx>(
         ));
     }
 
-    let query = &*mcx::leak_in(mcx::alloc_in(mcx, query)?);
+    // Node-allocated (not a bare arena ref) and registered at the root
+    // ParseState: transformLockingClause's markQueryForLocking needs with_mut
+    // access to the sub-Query behind the RTE's shared ref.
+    let qnode = Node::mk(mcx, query)?;
+    let query = qnode.as_query().expect("just built");
+    {
+        let mut root = &*pstate;
+        while let Some(parent) = root.parentParseState {
+            root = parent;
+        }
+        root.p_subquery_nodes.borrow_mut().push(qnode);
+    }
     let nsitem = parse_relation::addRangeTableEntryForSubquery(
         mcx, pstate, query, &columns, r.alias, r.lateral, true,
     )?;

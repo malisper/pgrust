@@ -3478,17 +3478,18 @@ fn eval_plan_qual_recheck_over_seqscan() {
             recheck: None,
             result_rti: 1,
         };
-        estate.epq_ensure(1);
+        let mut subs = None;
+        ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
         let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
         let test = estate.exec_init_extra_tuple_slot(
             Some(desc),
             ::types_slot::TupleSlotKind::Virtual,
         );
-        estate.es_epq.as_mut().unwrap().relsubs_slot[0] = Some(test);
+        subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
 
         // Latest version still matches the qual: proceed with (1, 99).
         epq_store_test_tuple(estate, test, 1, 99);
-        let got = crate::epq::eval_plan_qual(&mut epq, estate, test).unwrap();
+        let got = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test).unwrap();
         let got = got.expect("qual passes; EPQ returns the candidate tuple");
         assert_ne!(got, test, "projection result, not the test slot");
         assert_eq!(epq_slot_vals(estate, got), (1, 99));
@@ -3497,14 +3498,16 @@ fn eval_plan_qual_recheck_over_seqscan() {
 
         // Reset path: latest version no longer matches -> skip.
         epq_store_test_tuple(estate, test, 2, 99);
-        assert!(crate::epq::eval_plan_qual(&mut epq, estate, test).unwrap().is_none());
+        assert!(crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+            .unwrap()
+            .is_none());
 
         // And matches again on a third round.
         epq_store_test_tuple(estate, test, 1, 5);
-        let got = crate::epq::eval_plan_qual(&mut epq, estate, test).unwrap();
+        let got = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test).unwrap();
         assert_eq!(epq_slot_vals(estate, got.expect("passes")), (1, 5));
 
-        crate::epq::eval_plan_qual_end(&mut epq, estate).unwrap();
+        crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
         assert!(epq.recheck.is_none());
 
         let ps = planstate.as_mut().unwrap();
