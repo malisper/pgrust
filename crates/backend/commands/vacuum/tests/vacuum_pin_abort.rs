@@ -316,6 +316,15 @@ fn install_xact_periphery_seams() {
             Err(types_error::PgError::error("no such relation").into())
         }
     });
+    namespace_seams::range_var_get_relid_extended::set(|_mcx, rv, _lockmode, flags| {
+        if rv.relname == "t" {
+            Ok(REL_OID)
+        } else if flags & namespace_seams::RVR_MISSING_OK != 0 {
+            Ok(0)
+        } else {
+            Err(types_error::PgError::error("no such relation").into())
+        }
+    });
     lmgr_seams::lock_relation_oid::set(|_, _| Ok(()));
     lmgr_seams::unlock_relation_oid::set(|_, _| Ok(()));
     syscache_seams::search_syscache_exists_reloid::set(|relid| Ok(relid == REL_OID));
