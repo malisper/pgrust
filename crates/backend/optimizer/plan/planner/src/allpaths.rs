@@ -408,19 +408,29 @@ fn relation_excluded_by_constraints(
 // set_dummy_rel_pathlist (allpaths.c). C marks a dummy with a childless
 // Append that create_append_plan turns into a gated Result; Append is
 // unported, so the marker is a zero-cost GroupResultPath whose single
-// constant-FALSE qual creates the identical Result plan.
+// constant-FALSE qual creates the identical Result plan. C parameterizes
+// the dummy path by rel->lateral_relids so lateral refs in the tlist become
+// nestloop Params.
 pub fn set_dummy_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     run.root.rel_reltarget_mut(rel).width = 0;
-    add_dummy_path(run, rel)
+    let required_outer =
+        crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
+    add_dummy_path(run, rel, &required_outer)
 }
 
 // The shared body of set_dummy_rel_pathlist (allpaths.c) and mark_dummy_rel
-// (joinrels.c) — the latter leaves reltarget width alone.
-pub(crate) fn add_dummy_path(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+// (joinrels.c) — the latter leaves reltarget width alone and passes no
+// required_outer (C create_append_path calls).
+pub(crate) fn add_dummy_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<()> {
     run.root.rel_mut(rel).rows = 0.0;
     run.root.rel_mut(rel).pathlist.clear();
     run.root.rel_mut(rel).partial_pathlist.clear();
 
+    let param_info = crate::pathnode::get_appendrel_parampathinfo(run, rel, required_outer);
     let konst = clauses::make_bool_const(run.mcx, false, false)?;
     let mut quals: mcx::PgVec<'_, types_pathnodes::NodeId> = mcx::PgVec::new_in(run.mcx);
     quals.push(run.intern_expr(konst));
@@ -432,7 +442,7 @@ pub(crate) fn add_dummy_path(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<(
             pathtype: crate::pathnode::tag16(types_nodes::NodeTag::T_Result),
             parent: rel,
             pathtarget_id: Some(target_id),
-            param_info: None,
+            param_info,
             parallel_aware: false,
             parallel_safe,
             parallel_workers: 0,

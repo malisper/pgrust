@@ -446,7 +446,7 @@ pub fn mark_dummy_rel(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     if is_dummy_rel(&run.root, rel) {
         return Ok(());
     }
-    crate::allpaths::add_dummy_path(run, rel)
+    crate::allpaths::add_dummy_path(run, rel, &None)
 }
 
 // find_join_rel (relnode.c): linear probe while the list is short, relids-
