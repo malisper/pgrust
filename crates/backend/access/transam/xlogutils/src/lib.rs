@@ -247,6 +247,29 @@ pub fn XLogReadBufferForRedo(
     XLogReadBufferForRedoExtended(record, block_id, ReadBufferMode::Normal, false)
 }
 
+// XLogFlushBufferForRedoIfInit (upstream 62760571): init forks are copied to
+// the main fork directly from disk at end of crash recovery, bypassing shared
+// buffers, so redo routines that dirty an init-fork buffer without restoring
+// a full-page image must flush it immediately.
+pub fn XLogFlushBufferForRedoIfInit(
+    record: &XLogReaderState,
+    block_id: u8,
+    buffer: Buffer,
+) -> PgResult<()> {
+    debug_assert!(BufferIsValid(buffer));
+    let Some((_, forknum, _, _)) = record.block_tag_extended(block_id) else {
+        elog(
+            PANIC,
+            format!("failed to locate backup block with ID {block_id} in WAL record"),
+        )?;
+        unreachable!("elog(PANIC) returned");
+    };
+    if forknum == ForkNumber::INIT_FORKNUM {
+        bufmgr_seams::flush_one_buffer::call(buffer)?;
+    }
+    Ok(())
+}
+
 pub fn XLogInitBufferForRedo(record: &XLogReaderState, block_id: u8) -> PgResult<Buffer> {
     let (_, buf) =
         XLogReadBufferForRedoExtended(record, block_id, ReadBufferMode::ZeroAndLock, false)?;
