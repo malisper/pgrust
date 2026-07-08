@@ -1,7 +1,5 @@
 //! New-format packet length encoding/decoding (RFC 4880 §4.2) shared by the
-//! encrypt and decrypt pipelines.
 
-/// `render_newlen` — append the new-format body-length octets.
 pub fn render_newlen(dst: &mut Vec<u8>, len: usize) {
     if len <= 191 {
         dst.push(len as u8);
@@ -17,25 +15,20 @@ pub fn render_newlen(dst: &mut Vec<u8>, len: usize) {
     }
 }
 
-/// Write a new-format definite-length packet (`0xC0|tag` + newlen + body).
 pub fn write_packet(dst: &mut Vec<u8>, tag: i32, body: &[u8]) {
     dst.push(0xC0 | (tag as u8));
     render_newlen(dst, body.len());
     dst.extend_from_slice(body);
 }
 
-/// A cursor reading new-format/old-format packets from a byte buffer.
 pub struct PktReader<'a> {
     pub data: &'a [u8],
     pub pos: usize,
 }
 
-/// A parsed packet header.
 pub struct PktHdr {
     pub tag: i32,
-    /// Body length. `None` = old-format indeterminate length (rest of input).
     pub len: Option<usize>,
-    /// `true` if the length was a new-format partial (streamed) length.
     pub partial: bool,
 }
 
@@ -57,7 +50,6 @@ impl<'a> PktReader<'a> {
         Ok(b)
     }
 
-    /// Read a packet header. Returns `Ok(None)` at clean EOF.
     pub fn read_hdr(&mut self) -> Result<Option<PktHdr>, ()> {
         if self.pos >= self.data.len() {
             return Ok(None);
@@ -67,12 +59,10 @@ impl<'a> PktReader<'a> {
             return Err(());
         }
         if p & 0x40 != 0 {
-            // new format
             let tag = (p & 0x3f) as i32;
             let (len, partial) = self.parse_new_len()?;
             Ok(Some(PktHdr { tag, len, partial }))
         } else {
-            // old format
             let lentype = p & 3;
             let tag = ((p >> 2) & 0x0f) as i32;
             if lentype == 3 {
@@ -106,7 +96,6 @@ impl<'a> PktReader<'a> {
             }
             Ok((Some(len), false))
         } else {
-            // partial body length
             Ok((Some(1usize << (b & 0x1f)), true))
         }
     }
@@ -125,12 +114,9 @@ impl<'a> PktReader<'a> {
         Ok(len)
     }
 
-    /// Read the full body of a packet whose header was just read, collecting
-    /// partial-length continuations. `hdr` came from `read_hdr`.
     pub fn read_body(&mut self, hdr: &PktHdr) -> Result<Vec<u8>, ()> {
         match hdr.len {
             None => {
-                // indeterminate: rest of input
                 let body = self.data[self.pos..].to_vec();
                 self.pos = self.data.len();
                 Ok(body)

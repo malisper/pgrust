@@ -1,12 +1,9 @@
-//! PGP compression (pgp-compress.c): ZIP = raw DEFLATE (no zlib wrapper),
-//! ZLIB = zlib-wrapped DEFLATE. Driven over `miniz_oxide`.
 
 use ::miniz_oxide::deflate::core::{compress, create_comp_flags_from_zip_params, CompressorOxide};
 use ::miniz_oxide::deflate::core::TDEFLStatus;
 use ::miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
 use ::miniz_oxide::inflate::TINFLStatus;
 
-/// Map a PGP compress-level (1..9) to a miniz level (0..10).
 fn miniz_level(level: i32) -> u8 {
     level.clamp(1, 9) as u8
 }
