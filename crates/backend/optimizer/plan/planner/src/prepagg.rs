@@ -229,6 +229,13 @@ fn preprocess_aggrefs_walker<'mcx>(
             }
             Ok(())
         }
+        NodeTag::T_RowCompareExpr => {
+            let rc = node.as_row_compare_expr().unwrap();
+            for a in rc.largs.iter().chain(rc.rargs.iter()) {
+                preprocess_aggrefs_walker(run, a)?;
+            }
+            Ok(())
+        }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
