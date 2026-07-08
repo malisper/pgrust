@@ -567,12 +567,35 @@ fn init_hash_sets<'mcx>(
     }
 
     // C colnos_needed/all_cols_needed/max_colno_needed (find_cols): the
-    // spilled tuple shape must carry every column any set's finalize path
-    // needs, plus every grouping column of every set (all_grouped is the
-    // union across the whole node, sorted+hashed).
+    // spilled tuple shape must carry every grouping column of every set
+    // (all_grouped is the union across the whole node, sorted+hashed) AND
+    // every aggregated input column — spill_tuple_gs NULLs everything else,
+    // so a missing aggregate arg column silently NULLs that agg's result
+    // for every group refilled from tape.
     let mut colnos_needed = base_cols;
     for &attnum in all_grouped {
         colnos_needed[(attnum - 1) as usize] = true;
+    }
+    {
+        let mut aggrefs: PgVec<'mcx, (Node<'mcx>, &'mcx types_nodes::primnodes::Aggref<'mcx>)> =
+            PgVec::new_in(mcx);
+        for tle in node.plan.targetlist.iter() {
+            crate::collect_aggrefs(tle, &mut aggrefs);
+        }
+        for q in node.plan.qual.iter() {
+            crate::collect_aggrefs(q, &mut aggrefs);
+        }
+        for &(_, aggref) in aggrefs.iter() {
+            for a in aggref.args.iter() {
+                crate::collect_base_var_cols(a, &mut colnos_needed);
+            }
+            for a in aggref.aggdirectargs.iter() {
+                crate::collect_base_var_cols(a, &mut colnos_needed);
+            }
+            if let Some(f) = aggref.aggfilter {
+                crate::collect_base_var_cols(f, &mut colnos_needed);
+            }
+        }
     }
     let mut max_colno_needed = 0i32;
     let mut all_cols_needed = true;
