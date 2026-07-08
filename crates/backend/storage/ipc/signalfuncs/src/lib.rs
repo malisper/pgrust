@@ -176,6 +176,25 @@ pub fn fc_pg_terminate_backend(
     }
 }
 
+pub fn fc_pg_reload_conf(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // kill(PostmasterPid, SIGHUP)'s thread rendering cannot fail, so C's
+    // false-with-WARNING arm is unreachable.
+    postmaster_seams::signal_postmaster_sighup::call();
+    Ok(Datum::from_bool(true))
+}
+
+pub fn fc_pg_rotate_logfile(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if !guc_tables::vars::Logging_collector.read() {
+        warn("rotation not possible because log collection not active".to_string())?;
+        return Ok(Datum::from_bool(false));
+    }
+    pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_ROTATE_LOGFILE);
+    Ok(Datum::from_bool(true))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: true, retset: false, func }
 }
@@ -183,4 +202,6 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 pub const SIGNALFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(2096, "pg_terminate_backend", 2, fc_pg_terminate_backend),
     b(2171, "pg_cancel_backend", 1, fc_pg_cancel_backend),
+    b(2621, "pg_reload_conf", 0, fc_pg_reload_conf),
+    b(2622, "pg_rotate_logfile", 0, fc_pg_rotate_logfile),
 ];

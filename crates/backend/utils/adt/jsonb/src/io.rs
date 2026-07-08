@@ -208,7 +208,10 @@ pub fn jsonb_recv<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let version = pqformat::pq_getmsgint(buf, 1)?;
     if version != 1 {
-        panic!("unsupported jsonb version number {version}");
+        // C elog(ERROR): XX000, client-reachable via binary input.
+        return Err(Box::new(PgError::error(format!(
+            "unsupported jsonb version number {version}"
+        ))));
     }
     let rawbytes = buf.len().saturating_sub(buf.cursor);
     let str = pqformat::pq_getmsgtext(mcx, buf, rawbytes)?;

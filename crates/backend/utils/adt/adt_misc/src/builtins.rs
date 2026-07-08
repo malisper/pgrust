@@ -405,13 +405,11 @@ pub fn fc_pg_is_in_recovery(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo
 
 pub fn fc_pg_last_wal_receive_lsn(
     _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!(
-        "pg_last_wal_receive_lsn: GetWalRcvFlushRecPtr unported — backend-replication-walreceiver \
-         is scoped non-core (CATALOG.tsv, 2026-07-03); no walreceiver crate or receivedUpto \
-         tracking exists in this repo"
-    );
+    // No walreceiver substrate (scoped non-core): GetWalRcvFlushRecPtr's
+    // flushedUpto is invariantly 0, which C maps to NULL.
+    Ok(fcinfo.return_null())
 }
 
 pub fn fc_pg_last_wal_replay_lsn(
@@ -427,18 +425,28 @@ pub fn fc_pg_last_wal_replay_lsn(
 
 pub fn fc_pg_last_xact_replay_timestamp(
     _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    panic!(
-        "pg_last_xact_replay_timestamp: GetLatestXTime unported — no recoveryLastXTime/\
-         xactCompletionTime tracking exists in xlogrecovery or procarray"
-    );
+    // recoveryLastXTime's only writer is the recovery-target stop machinery
+    // (archive recovery / PITR), which this build never runs: GetLatestXTime
+    // is invariantly 0, which C maps to NULL.
+    Ok(fcinfo.return_null())
+}
+
+// Hot-standby query service is unported, so RecoveryInProgress() is always
+// false in a live query and the in-recovery tails stay unreachable-loud.
+fn check_recovery_control() -> PgResult<()> {
+    if !transam_xlog::RecoveryInProgress() {
+        return Err(recovery_not_in_progress_err("Recovery control functions"));
+    }
+    Ok(())
 }
 
 pub fn fc_pg_wal_replay_pause(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    check_recovery_control()?;
     panic!(
         "pg_wal_replay_pause: recovery pause machinery unported — no SetRecoveryPause/\
          GetRecoveryPauseState/RecoveryPauseState substrate; WakeupRecovery itself panics \
@@ -450,6 +458,7 @@ pub fn fc_pg_wal_replay_resume(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    check_recovery_control()?;
     panic!("pg_wal_replay_resume: recovery pause machinery unported (see fc_pg_wal_replay_pause)");
 }
 
@@ -457,6 +466,7 @@ pub fn fc_pg_is_wal_replay_paused(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    check_recovery_control()?;
     panic!("pg_is_wal_replay_paused: GetRecoveryPauseState unported (see fc_pg_wal_replay_pause)");
 }
 
@@ -464,6 +474,7 @@ pub fn fc_pg_get_wal_replay_pause_state(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    check_recovery_control()?;
     panic!(
         "pg_get_wal_replay_pause_state: GetRecoveryPauseState unported (see fc_pg_wal_replay_pause)"
     );
@@ -637,6 +648,129 @@ pub fn fc_pg_backup_start(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) 
 
 pub fn fc_pg_backup_stop(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     panic!("pg_backup_stop: do_pg_backup_stop unported (see fc_pg_backup_start)");
+}
+
+pub fn fc_pg_stop_making_pinned_objects(
+    _flinfo: Option<&mut FmgrInfo>,
+    _fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    if !superuser_seams::superuser::call()? {
+        return Err(Box::new(
+            PgError::error("must be superuser to call pg_stop_making_pinned_objects()")
+                .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
+    }
+    varsup::StopGeneratingPinnedObjectIds()?;
+    Ok(Datum::from_usize(0))
+}
+
+pub fn fc_system_user(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    match miscinit::GetSystemUser() {
+        Some(s) => crate::text_datum(fcinfo.result_mcx(), s.as_bytes()),
+        None => Ok(fcinfo.return_null()),
+    }
+}
+
+pub fn fc_pg_client_encoding(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mut n = types_tuple::NameData::default();
+    n.namestrcpy(mbutils::pg_get_client_encoding_name());
+    byref_result(fcinfo.result_mcx(), &n.data)
+}
+
+pub fn fc_pg_conf_load_time(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    Ok(Datum::from_i64(guc::pg_reload_time()))
+}
+
+pub fn fc_pg_jit_available(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // provider_init(): the provider is compiled in, so availability reduces
+    // to the jit GUC.
+    Ok(Datum::from_bool(guc_tables::vars::jit_enabled.read()))
+}
+
+// misc.c LOG_METAINFO_DATAFILE, relative to the data directory (backend cwd).
+const LOG_METAINFO_DATAFILE: &str = "current_logfiles";
+
+fn current_logfile(fcinfo: &mut Fcinfo, logfmt: Option<&[u8]>) -> PgResult<Datum> {
+    if let Some(f) = logfmt {
+        if f != b"stderr" && f != b"csvlog" && f != b"jsonlog" {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "log format \"{}\" is not supported",
+                    String::from_utf8_lossy(f)
+                ))
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+                .with_hint(
+                    "The supported log formats are \"stderr\", \"csvlog\", and \"jsonlog\".",
+                ),
+            ));
+        }
+    }
+    let contents = match std::fs::read(LOG_METAINFO_DATAFILE) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(fcinfo.return_null()),
+        Err(e) => {
+            return Err(elog::ereport(types_error::ERROR)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not read file \"{LOG_METAINFO_DATAFILE}\": %m"))
+                .into_error()
+                .into())
+        }
+    };
+    for line in contents.split_inclusive(|&b| b == b'\n') {
+        let Some(sp) = line.iter().position(|&b| b == b' ') else {
+            return Err(Box::new(PgError::error(format!(
+                "missing space character in \"{LOG_METAINFO_DATAFILE}\""
+            ))));
+        };
+        let rest = &line[sp + 1..];
+        let Some(nl) = rest.iter().position(|&b| b == b'\n') else {
+            return Err(Box::new(PgError::error(format!(
+                "missing newline character in \"{LOG_METAINFO_DATAFILE}\""
+            ))));
+        };
+        if logfmt.is_none_or(|f| f == &line[..sp]) {
+            return crate::text_datum(fcinfo.result_mcx(), &rest[..nl]);
+        }
+    }
+    Ok(fcinfo.return_null())
+}
+
+pub fn fc_pg_current_logfile(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    current_logfile(fcinfo, None)
+}
+
+pub fn fc_pg_current_logfile_1arg(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    if a.isnull {
+        return current_logfile(fcinfo, None);
+    }
+    // SAFETY: null-checked text arg of a non-strict fn.
+    let fmt = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let fmt: Vec<u8> = fmt.data().to_vec();
+    current_logfile(fcinfo, Some(&fmt))
+}
+
+pub fn fc_pg_get_wal_summarizer_state(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_get_wal_summarizer_state: NULL flinfo");
+    let (tli, summarized_lsn, pending_lsn, pid) =
+        walsummarizer_seams::get_wal_summarizer_state::call()?;
+    let values = [
+        Datum::from_i64(tli as i64),
+        Datum::from_i64(summarized_lsn as i64),
+        Datum::from_i64(pending_lsn as i64),
+        Datum::from_i32(pid),
+    ];
+    composite_result(flinfo, fcinfo, &values, &[false, false, false, pid < 0])
 }
 
 fn fc_pg_my_temp_schema(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -1022,6 +1156,28 @@ pub const MISC_BUILTINS: &[FmgrBuiltin] = &[
     b(3436, "pg_promote", 2, fc_pg_promote),
     b(2172, "pg_backup_start", 2, fc_pg_backup_start),
     b(2739, "pg_backup_stop", 1, fc_pg_backup_stop),
+    b(6311, "system_user", 0, fc_system_user),
+    b(810, "pg_client_encoding", 0, fc_pg_client_encoding),
+    b(2034, "pg_conf_load_time", 0, fc_pg_conf_load_time),
+    b(315, "pg_jit_available", 0, fc_pg_jit_available),
+    b(6323, "pg_get_wal_summarizer_state", 0, fc_pg_get_wal_summarizer_state),
+    b(6241, "pg_stop_making_pinned_objects", 0, fc_pg_stop_making_pinned_objects),
+    FmgrBuiltin {
+        foid: 3800,
+        name: "pg_current_logfile",
+        nargs: 0,
+        strict: false,
+        retset: false,
+        func: fc_pg_current_logfile,
+    },
+    FmgrBuiltin {
+        foid: 3801,
+        name: "pg_current_logfile_1arg",
+        nargs: 1,
+        strict: false,
+        retset: false,
+        func: fc_pg_current_logfile_1arg,
+    },
     FmgrBuiltin {
         foid: 1686,
         name: "pg_get_keywords",

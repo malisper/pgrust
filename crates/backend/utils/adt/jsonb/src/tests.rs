@@ -383,6 +383,19 @@ fn recv_send_round_trip() {
     assert_eq!(hex(&img[..]), hex(&img2[..]));
 }
 
+// Bad version byte is a clean C-parity error (elog ERROR, XX000), not a
+// panic: the byte is client-reachable (binary param / COPY BINARY).
+#[test]
+fn recv_bad_version_is_clean_error() {
+    setup();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut buf = stringinfo::StringInfo::new_in(mcx).unwrap();
+    buf.append_bytes(&[0x02]).unwrap();
+    let err = io::jsonb_recv(mcx, &mut buf).unwrap_err();
+    assert!(err.message().contains("unsupported jsonb version number 2"), "{err:?}");
+}
+
 // On-disk byte identity of the mutation family: golden_mutations.tsv carries
 // the pageinspect-captured datum payloads of C 18.3 evaluating each case.
 #[test]

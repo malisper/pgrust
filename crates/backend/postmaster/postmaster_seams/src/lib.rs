@@ -12,6 +12,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // kill(PostmasterPid, SIGHUP)'s thread rendering: run the postmaster's
+    // SIGHUP handler (pend the reload request + set the PM latch).
+    pub fn signal_postmaster_sighup()
+);
+
+seam_core::seam!(
     // C `PgStartTime` (timestamp.c global, written once by the postmaster).
     pub fn pg_start_time() -> i64
 );

@@ -15,3 +15,6 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_nodes = { path = "../../../../_support/types/nodes" }
+ip = { path = "../../../../common/ip" }
+init_small = { path = "../../init/init_small" }
+libc = "0.2"

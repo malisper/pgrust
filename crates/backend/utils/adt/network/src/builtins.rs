@@ -304,12 +304,99 @@ pub fn fc_network_subset_support(
     Ok(Datum::from_usize(0))
 }
 
+// network.c session-introspection quartet (inet_client_addr &c). Unix-socket
+// and socketless sessions return NULL, as C's ss_family switch does.
+fn session_addr(fcinfo: &mut Fcinfo, local: bool) -> PgResult<Datum> {
+    let Some(sa) = session_sockaddr(local) else {
+        return Ok(fcinfo.return_null());
+    };
+    let mut host = String::new();
+    let rc = ::ip::pg_getnameinfo_all(
+        &sa,
+        Some(&mut host),
+        None,
+        libc::NI_NUMERICHOST | libc::NI_NUMERICSERV,
+    );
+    if rc != 0 {
+        return Ok(fcinfo.return_null());
+    }
+    clean_ipv6_addr(::ip::sockaddr_family(&sa), &mut host);
+    let v = crate::network_in(&host, false, None)?.expect("numeric host is valid inet input");
+    inet_result(fcinfo, &v)
+}
+
+fn session_port(fcinfo: &mut Fcinfo, local: bool) -> PgResult<Datum> {
+    let Some(sa) = session_sockaddr(local) else {
+        return Ok(fcinfo.return_null());
+    };
+    let mut serv = String::new();
+    let rc = ::ip::pg_getnameinfo_all(
+        &sa,
+        None,
+        Some(&mut serv),
+        libc::NI_NUMERICHOST | libc::NI_NUMERICSERV,
+    );
+    if rc != 0 {
+        return Ok(fcinfo.return_null());
+    }
+    // DirectFunctionCall1(int4in): a numeric-service string always parses.
+    let port: i32 = serv.parse().expect("numeric service string");
+    Ok(Datum::from_i32(port))
+}
+
+fn session_sockaddr(local: bool) -> Option<::ip::SockAddr> {
+    if !::init_small::globals::HaveMyProcPort() {
+        return None;
+    }
+    let sa = ::init_small::globals::WithMyProcPort(|p| if local { p.laddr } else { p.raddr });
+    match ::ip::sockaddr_family(&sa) {
+        libc::AF_INET | libc::AF_INET6 => Some(sa),
+        _ => None,
+    }
+}
+
+// network.c:2060 clean_ipv6_addr.
+fn clean_ipv6_addr(family: i32, addr: &mut String) {
+    if family == libc::AF_INET6 {
+        if let Some(pos) = addr.find('%') {
+            addr.truncate(pos);
+        }
+    }
+}
+
+pub fn fc_inet_client_addr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    session_addr(fcinfo, false)
+}
+
+pub fn fc_inet_client_port(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    session_port(fcinfo, false)
+}
+
+pub fn fc_inet_server_addr(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    session_addr(fcinfo, true)
+}
+
+pub fn fc_inet_server_port(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    session_port(fcinfo, true)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
         name,
         nargs,
         strict: true,
+        retset: false,
+        func,
+    }
+}
+
+const fn nb(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs,
+        strict: false,
         retset: false,
         func,
     }
@@ -330,6 +417,10 @@ pub const NETWORK_BUILTINS: &[FmgrBuiltin] = &[
     b(711, "network_family", 1, fc_network_family),
     b(730, "network_show", 1, fc_network_show),
     b(779, "hashinetextended", 2, fc_hashinetextended),
+    nb(2196, "inet_client_addr", 0, fc_inet_client_addr),
+    nb(2197, "inet_client_port", 0, fc_inet_client_port),
+    nb(2198, "inet_server_addr", 0, fc_inet_server_addr),
+    nb(2199, "inet_server_port", 0, fc_inet_server_port),
     b(910, "inet_in", 1, fc_inet_in),
     b(911, "inet_out", 1, fc_inet_out),
     b(920, "network_eq", 2, fc_network_eq),

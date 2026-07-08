@@ -19,6 +19,9 @@ procsignal = { path = "../procsignal" }
 backend_status = { path = "../../../utils/activity/backend_status" }
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
 superuser_seams = { path = "../../../utils/misc/superuser_seams" }
+postmaster_seams = { path = "../../../postmaster/postmaster_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+pmsignal = { path = "../pmsignal" }
 acl_seams = { path = "../../../utils/adt/acl_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 libc = "0.2"
