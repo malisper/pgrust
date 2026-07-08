@@ -348,6 +348,15 @@ pub fn subquery_planner<'mcx>(
         }
     }
 
+    // Collation conflicts must be detected before flatten_group_exprs, while
+    // HAVING still contains GROUP Vars carrying the GROUP BY collation as
+    // varcollid (planner.c find_having_collation_conflicts). Indexes stay
+    // valid across flattening: it preserves havingQual list length and order.
+    let having_collation_conflicts = if parse.hasGroupRTE {
+        find_having_collation_conflicts(&parse, run.root.group_rtindex)?
+    } else {
+        Vec::new()
+    };
     // GROUP Vars in the targetlist and HAVING give way to the preprocessed
     // grouping expressions (planner.c:1096-1103), varnullingrels preserved.
     if parse.hasGroupRTE {
@@ -390,7 +399,7 @@ pub fn subquery_planner<'mcx>(
             || crate::groupingsets::grouping_set_nonempty(parse.groupingSets.nth(0));
         let havinglist = hq.as_list().expect("preprocessed havingQual is a list");
         let mut new_having = NodeList::nil();
-        for hc in havinglist {
+        for (having_idx, hc) in havinglist.iter().enumerate() {
             // A clause referencing columns nullable by grouping sets stays in
             // HAVING: their nulled values do not exist before grouping
             // (planner.c:1160-1168, the group_rtindex pull_varnos member
@@ -398,6 +407,7 @@ pub fn subquery_planner<'mcx>(
             if clauses::contain_agg_clause(hc)?
                 || clauses::contain_volatile_functions(hc)?
                 || clauses::contain_subplans(hc)?
+                || having_collation_conflicts.contains(&having_idx)
                 || (!parse.groupClause.is_nil()
                     && !parse.groupingSets.is_nil()
                     && vars::pull_varnos(mcx, hc)?.is_member(run.root.group_rtindex))
@@ -451,6 +461,119 @@ pub fn subquery_planner<'mcx>(
     crate::subselect::ss_charge_for_initplans(run, final_rel)?;
     set_cheapest(run, final_rel)?;
     Ok(())
+}
+
+// find_having_collation_conflicts (planner.c): zero-based havingQual indexes
+// of clauses unsafe to push to WHERE because a collation-aware ancestor
+// disagrees with a nondeterministic GROUP BY collation. Must run before
+// flatten_group_exprs, while GROUP Vars still carry the GROUP BY collation
+// as varcollid.
+fn find_having_collation_conflicts(
+    parse: &Query<'_>,
+    group_rtindex: i32,
+) -> PgResult<Vec<usize>> {
+    let mut result = Vec::new();
+    let Some(hq) = parse.havingQual else {
+        return Ok(result);
+    };
+    let havinglist = hq.as_list().expect("preprocessed havingQual is a list");
+    let mut w = HavingCollationConflictWalker { group_rtindex, ancestor_collids: Vec::new() };
+    for (idx, clause) in havinglist.iter().enumerate() {
+        if nodes_core::NodeWalker::visit(&mut w, clause)? {
+            result.push(idx);
+        }
+        debug_assert!(w.ancestor_collids.is_empty());
+    }
+    Ok(result)
+}
+
+// having_collation_conflict_walker (planner.c): top-down walk carrying the
+// stack of ancestor inputcollids. RowCompareExpr carries per-column
+// inputcollids; a simple CASE holds the arg outside the WHEN OpExprs that
+// carry the comparison inputcollids, so every WHEN's inputcollid is pushed
+// before walking the arg.
+struct HavingCollationConflictWalker {
+    group_rtindex: i32,
+    ancestor_collids: Vec<types_core::Oid>,
+}
+
+impl<'mcx> nodes_core::NodeWalker<'mcx> for HavingCollationConflictWalker {
+    fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+        if let Some(var) = node.as_var() {
+            debug_assert_eq!(var.varlevelsup, 0);
+            if var.varno == self.group_rtindex
+                && var.varcollid != types_core::InvalidOid
+                && !lsyscache::get_collation_isdeterministic(var.varcollid)?
+                && self.ancestor_collids.iter().any(|&c| c != var.varcollid)
+            {
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if let Some(rc) = node.as_row_compare_expr() {
+            for i in 0..rc.largs.len() {
+                let collid = rc.inputcollids.nth(i);
+                let pushed = collid != types_core::InvalidOid;
+                if pushed {
+                    self.ancestor_collids.push(collid);
+                }
+                let found = self.visit(rc.largs.nth(i))? || self.visit(rc.rargs.nth(i))?;
+                if pushed {
+                    self.ancestor_collids.pop();
+                }
+                if found {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        if let Some(cexpr) = node.as_case_expr() {
+            if let Some(arg) = cexpr.arg {
+                let saved_len = self.ancestor_collids.len();
+                for cw_node in &cexpr.args {
+                    let cw = cw_node.as_case_when().expect("CaseWhen cell");
+                    let collid = cw
+                        .expr
+                        .map_or(types_core::InvalidOid, nodes_core::node_funcs::expr_input_collation);
+                    if collid != types_core::InvalidOid {
+                        self.ancestor_collids.push(collid);
+                    }
+                }
+                let found = self.visit(arg)?;
+                self.ancestor_collids.truncate(saved_len);
+                if found {
+                    return Ok(true);
+                }
+                for cw_node in &cexpr.args {
+                    let cw = cw_node.as_case_when().expect("CaseWhen cell");
+                    if let Some(e) = cw.expr {
+                        if self.visit(e)? {
+                            return Ok(true);
+                        }
+                    }
+                    if let Some(r) = cw.result {
+                        if self.visit(r)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                return match cexpr.defresult {
+                    Some(d) => self.visit(d),
+                    None => Ok(false),
+                };
+            }
+        }
+        let this_collid = nodes_core::node_funcs::expr_input_collation(node);
+        let pushed = this_collid != types_core::InvalidOid;
+        if pushed {
+            self.ancestor_collids.push(this_collid);
+        }
+        let result = nodes_core::expression_tree_walker(node, self)?;
+        if pushed {
+            self.ancestor_collids.pop();
+        }
+        Ok(result)
+    }
 }
 
 pub fn preprocess_expression<'mcx>(
