@@ -69,9 +69,51 @@ pub fn citext_hash_extended(txt: &[u8], seed: u64) -> PgResult<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::sync::Once;
+
+    // str_tolower(DEFAULT_COLLATION_OID) always resolves a locale (even the
+    // "C" one) through pg_locale, which reads MyDatabaseId's pg_database
+    // row. Seam .set() calls are process-global set-once — install them once
+    // for the whole test binary — then each test thread supplies its own
+    // fixed libc/C row through this thread-local (init_database_collation's
+    // cached locale is itself thread-local, so this is safe per test thread).
+    thread_local! {
+        static DB_ROW: Cell<bool> = const { Cell::new(false) };
+    }
 
     fn init() {
-        adt_formatting::init_seams();
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            adt_formatting::init_seams();
+            pg_database_seams::search_database_syscache::set(|mcx, dboid| {
+                if !DB_ROW.with(Cell::get) {
+                    return Ok(None);
+                }
+                let s = |v: &str| mcx::PgString::from_str_in(v, mcx);
+                Ok(Some(pg_database_seams::PgDatabaseForm {
+                    oid: dboid,
+                    datname: s("testdb")?,
+                    datdba: 10,
+                    datistemplate: false,
+                    dattablespace: 1663,
+                    datallowconn: true,
+                    dathasloginevt: false,
+                    datconnlimit: -1,
+                    datfrozenxid: 0,
+                    datminmxid: 0,
+                    encoding: 6,
+                    datlocprovider: pg_database_seams::COLLPROVIDER_LIBC,
+                    datcollate: s("C")?,
+                    datctype: s("C")?,
+                    datlocale: None,
+                    daticurules: None,
+                    datcollversion: None,
+                }))
+            });
+        });
+        DB_ROW.with(|c| c.set(true));
+        pg_locale::init_database_collation().unwrap();
     }
 
     const C_COLLATION: Oid = types_core::C_COLLATION_OID;
