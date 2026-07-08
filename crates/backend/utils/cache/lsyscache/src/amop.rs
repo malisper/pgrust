@@ -226,6 +226,21 @@ pub fn with_amop_members(
     })
 }
 
+// op_is_safe_index_member (lsyscache.c): btree/hash opfamily membership,
+// used as a proxy for null-safety and for equality-semantics agreement with
+// the family's other members.
+pub fn op_is_safe_index_member(opno: Oid) -> PgResult<bool> {
+    with_scratch(|scratch| {
+        let members = syscache_seams::lookup_pg_amop_members_by_operator::call(scratch, opno)?;
+        for aform in &members {
+            if aform.amopmethod == BTREE_AM_OID || aform.amopmethod == HASH_AM_OID {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
 pub fn get_mergejoin_opfamilies<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<PgVec<'mcx, Oid>> {
     let mut result = PgVec::new_in(mcx);
     with_scratch(|scratch| {
