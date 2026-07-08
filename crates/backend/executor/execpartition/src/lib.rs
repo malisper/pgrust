@@ -26,7 +26,8 @@ struct PartitionDispatch<'mcx> {
     key: std::rc::Rc<partcache::PartitionKeyData>,
     partdesc: std::rc::Rc<PartitionDescData>,
     supfuncs: Vec<FmgrInfo>,
-    // ExecPartitionCheck state for default routing, compiled once per tree.
+    // ExecPartitionCheck state for THIS rel when it is its parent's default
+    // partition (sub-partitioned default), compiled once per query.
     default_check: Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>,
     keystate: Vec<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
     // C pd->tupmap: immediate-parent layout -> this level's; the paired
@@ -46,6 +47,10 @@ pub struct PartitionTupleRouting<'mcx> {
     // C ri_RootToPartitionMap per leaf: root layout -> leaf layout, None for
     // layout-identical leaves (callers own the conversion slots).
     leaf_maps: Vec<Option<mcx::PgVec<'mcx, i16>>>,
+    // Default-partition recheck state per leaf (C ri_PartitionCheckExpr +
+    // ri_PartitionTupleSlot), populated only for default-routed leaves.
+    leaf_checks: Vec<Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>>,
+    leaf_check_slots: Vec<Option<SlotData<'mcx>>>,
     // ExecFindPartition's routing-root partition-constraint pre-check
     // (execPartition.c:286-291), compiled once (C ri_PartitionCheckExpr).
     root_check: Option<PgBox<'mcx, execexpr::ExprState<'mcx>>>,
@@ -61,6 +66,8 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             dispatch_slots: Vec::new(),
             leaves: Vec::new(),
             leaf_maps: Vec::new(),
+            leaf_checks: Vec::new(),
+            leaf_check_slots: Vec::new(),
             root_check: None,
         };
         prt.init_dispatch(root_rc, None)?;
@@ -75,7 +82,10 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         parent_idx: Option<usize>,
     ) -> PgResult<usize> {
         let key = partcache::RelationGetPartitionKey(&rel)?;
-        let partdesc = partdesc::RelationGetPartitionDesc(&rel, false)?;
+        // C ExecInitPartitionDispatchInfo's CreatePartitionDirectory: routing
+        // omits detach-pending partitions except under snapshot isolation.
+        let partdesc =
+            partdesc::RelationGetPartitionDesc(&rel, !xact::IsolationUsesXactSnapshot())?;
         let mut supfuncs = Vec::with_capacity(key.partnatts as usize);
         for f in key.partsupfunc.iter() {
             let fn_oid = f.borrow().fn_oid;
@@ -125,6 +135,8 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             false,
         )?;
         self.leaf_maps.push(map);
+        self.leaf_checks.push(None);
+        self.leaf_check_slots.push(None);
         self.leaves.push(rel);
         Ok(self.leaves.len() - 1)
     }
@@ -165,6 +177,10 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
         // Index into dispatch_slots holding the tuple converted to the
         // current level's layout; None = the caller's root-format slot.
         let mut cur: Option<usize> = None;
+        // The level just descended into is its parent's default partition;
+        // its constraint is rechecked after the layout conversion below (C
+        // ExecFindPartition's default_index arm, execPartition.c).
+        let mut pending_default_check = false;
         loop {
             // C ExecFindPartition's per-level tupmap conversion.
             if self.dispatches[dispatch_idx].tupmap.is_some() {
@@ -193,6 +209,30 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                     }
                 }
                 cur = Some(dispatch_idx);
+            }
+            // Reassigned on every descent, so no reset here.
+            if pending_default_check {
+                let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
+                assert!(dispatch_idx > 0);
+                let (head, tail) = dispatches.split_at_mut(dispatch_idx);
+                let root_rel = &head[0].rel;
+                let PartitionDispatch { rel, default_check, .. } = &mut tail[0];
+                let cur_slot: &mut SlotData<'mcx> = match cur {
+                    None => &mut *slot,
+                    Some(i) => dispatch_slots[i].as_mut().expect("converted"),
+                };
+                // ExecPartitionCheck against the current (relcache-fresh)
+                // constraint: a partition ATTACHed after this routing
+                // snapshot narrows the default partition's constraint.
+                if !exec_partition_check(mcx, default_check, rel, cur_slot)? {
+                    return Err(partition_constraint_violation(
+                        mcx,
+                        rel,
+                        cur_slot,
+                        None,
+                        Some(root_rel),
+                    ));
+                }
             }
             let (oid, is_leaf, is_default) = {
                 let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
@@ -257,17 +297,36 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
             if is_leaf {
                 let idx = self.leaf_index(oid)?;
                 if is_default {
-                    let PartitionTupleRouting { dispatches, dispatch_slots, leaves, .. } = self;
-                    let cur_slot: &mut SlotData<'mcx> = match cur {
+                    // C converts from the ROOT slot via the root-to-child map
+                    // (never from the intermediate level's layout).
+                    let PartitionTupleRouting {
+                        dispatches, leaves, leaf_maps, leaf_checks, leaf_check_slots, ..
+                    } = &mut *self;
+                    let root_rel = &dispatches[0].rel;
+                    let target = &leaves[idx];
+                    let check_slot: &mut SlotData<'mcx> = match leaf_maps[idx].as_deref() {
+                        Some(map) => {
+                            let s = leaf_check_slots[idx].get_or_insert_with(|| {
+                                exectuples::make_tuple_table_slot(
+                                    mcx,
+                                    types_slot::TupleSlotKind::Virtual,
+                                    Some(target.rd_att.clone()),
+                                )
+                            });
+                            exectuples::execute_attr_map_slot(map, slot, s, mcx);
+                            s
+                        }
                         None => &mut *slot,
-                        Some(i) => dispatch_slots[i].as_mut().expect("converted"),
                     };
-                    check_default_partition(
-                        mcx,
-                        &mut dispatches[dispatch_idx],
-                        &leaves[idx],
-                        cur_slot,
-                    )?;
+                    if !exec_partition_check(mcx, &mut leaf_checks[idx], target, check_slot)? {
+                        return Err(partition_constraint_violation(
+                            mcx,
+                            target,
+                            check_slot,
+                            None,
+                            Some(root_rel),
+                        ));
+                    }
                 }
                 return Ok(idx);
             }
@@ -280,68 +339,9 @@ impl<'mcx> PartitionTupleRouting<'mcx> {
                 assert!(sub.rd_rel.relkind == RELKIND_PARTITIONED_TABLE);
                 dispatch_idx = self.init_dispatch(sub, Some(parent_idx))?;
             }
-            if is_default {
-                let sub_idx = dispatch_idx;
-                assert_ne!(parent_idx, sub_idx);
-                let PartitionTupleRouting { dispatches, dispatch_slots, .. } = &mut *self;
-                let (parent_pd, sub_rel) = if parent_idx < sub_idx {
-                    let (a, b) = dispatches.split_at_mut(sub_idx);
-                    (&mut a[parent_idx], &b[0].rel)
-                } else {
-                    let (a, b) = dispatches.split_at_mut(parent_idx);
-                    (&mut b[0], &a[sub_idx].rel)
-                };
-                let cur_slot: &mut SlotData<'mcx> = match cur {
-                    None => &mut *slot,
-                    Some(i) => dispatch_slots[i].as_mut().expect("converted"),
-                };
-                check_default_partition(mcx, parent_pd, sub_rel, cur_slot)?;
-            }
+            pending_default_check = is_default;
         }
     }
-}
-
-// ExecFindPartition's default-partition re-check (ExecPartitionCheck).
-// C divergence: generate_partition_qual's ancestor-qual concatenation is
-// dropped — each routing level already checked its own bound on the descent.
-fn check_default_partition<'mcx>(
-    mcx: Mcx<'mcx>,
-    pd: &mut PartitionDispatch<'mcx>,
-    target: &Relation<'mcx>,
-    slot: &mut SlotData<'mcx>,
-) -> PgResult<()> {
-    if pd.default_check.is_none() {
-        let spec = types_nodes::rawnodes::PartitionBoundSpec {
-            strategy: pd.key.strategy as u8,
-            is_default: true,
-            ..Default::default()
-        };
-        let qual = partbounds::get_qual_from_partbound(
-            mcx,
-            &pd.key,
-            pd.rel.rd_id,
-            pd.partdesc.boundinfo.as_ref(),
-            &pd.partdesc.oids,
-            &spec,
-        )?;
-        let expr = partbounds::make_ands_explicit(mcx, qual)?;
-        let planned = clauses_seams::eval_const_expressions::call(mcx, expr)?;
-        let state = execexpr::exec_init_expr(mcx, Some(planned), execexpr::ParamBind::NONE)?
-            .expect("partition constraint expr");
-        pd.default_check = Some(state);
-    }
-    let state = pd.default_check.as_mut().expect("just built");
-    // C evaluates in the routing econtext's per-tuple memory; by-ref call
-    // results (collated comparisons, lower()-style key exprs) ride the armed
-    // result mcx.
-    state.arm_result_mcx(mcx);
-    let mut slots = execexpr::EvalSlots { scan: Some(slot), inner: None, outer: None };
-    let r = execexpr::exec_eval_expr(state, &mut slots)?;
-    // ExecCheck: NULL passes.
-    if !r.isnull && !r.value.as_bool() {
-        return Err(partition_constraint_violation(mcx, target, slot, None, None));
-    }
-    Ok(())
 }
 
 // ExecPartitionCheck (execMain.c), direct-DML leg: the compiled qual caches

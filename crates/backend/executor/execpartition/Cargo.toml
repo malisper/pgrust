@@ -32,3 +32,4 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 executils = { path = "../executils" }
 partprune = { path = "../../partitioning/partprune" }
+xact = { path = "../../access/transam/xact" }
