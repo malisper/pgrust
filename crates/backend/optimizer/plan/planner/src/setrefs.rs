@@ -4028,6 +4028,23 @@ fn fix_join_expr_mutator<'mcx>(
             )? {
                 return Ok(new);
             }
+            // JOINRES-DEBUG (temporary, not for commit)
+            if std::env::var_os("PGRUST_JOINRES_DEBUG").is_some() {
+                let dump = |n: types_nodes::Node<'mcx>| {
+                    outfuncs::nodeToString(mcx, n)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| "<outfuncs failed>".into())
+                };
+                eprintln!(
+                    "JOINRES-DEBUG fix_join_expr PHV fallthrough: {}\n  tlists inner={} outer={}",
+                    dump(node),
+                    inner_tlist.len(),
+                    outer_tlist.len()
+                );
+                for (i, t) in inner_tlist.iter().enumerate() {
+                    eprintln!("  inner[{i}]: {}", dump(t));
+                }
+            }
             fix_join_expr_mutator(run, phv.phexpr, outer_tlist, inner_tlist, rtoffset, nrm_match, acceptable_rel, num_exec)
         }
         NodeTag::T_Const | NodeTag::T_SQLValueFunction | NodeTag::T_NextValueExpr => {
