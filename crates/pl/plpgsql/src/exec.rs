@@ -524,6 +524,24 @@ impl<'a> Estate<'a> {
         if isnull || typbyval {
             return Ok(value);
         }
+        // Non-atomic contexts must not retain toast pointers across a COMMIT;
+        // C detoasts on assignment (pl_exec.c assign_simple_var and the
+        // expanded-record set paths, expand_external = !estate->atomic).
+        if !self.atomic && typlen == -1 {
+            let p = value.as_usize() as *const u8;
+            // SAFETY: value is a live by-ref varlena datum.
+            unsafe {
+                if types_tuple::varatt::varatt_is_1b_e(p)
+                    && !types_tuple::varatt::vartag_is_expanded(
+                        types_tuple::varatt::vartag_external(p),
+                    )
+                {
+                    let vr = datum::VarlenaRef::from_ptr(p);
+                    let flat = detoast::detoast_attr(self.datum_ctx.mcx(), vr.as_bytes())?;
+                    return Ok(Datum::from_usize(flat.leak().as_ptr() as usize));
+                }
+            }
+        }
         // SAFETY: value is a live by-ref datum of typlen discipline.
         unsafe { execexpr::agg_datum_copy(self.datum_ctx.mcx(), value, typlen) }
     }
