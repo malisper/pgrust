@@ -781,8 +781,12 @@ mod bumpdrop {
             "old model frees every box+vec individually every batch (>= {}, got {})",
             expected_old, old_real_frees,
         );
+        // Window-relative, not absolute: the probe counter is global, and the
+        // parallel suite's own frees land in both measurement windows — a
+        // fixed expected_old/4 bound sat inside that pollution band (fleet
+        // 16-thread runs measured 3.9-4.2k ambient frees vs the 4.0k line).
         assert!(
-            new_real_frees < expected_old / 4,
+            new_real_frees < old_real_frees / 3,
             "new model eliminates the bulk of per-tuple frees (got {}, old {})",
             new_real_frees, old_real_frees,
         );
