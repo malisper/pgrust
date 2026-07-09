@@ -246,6 +246,13 @@ pub fn dropdb(mcx: Mcx<'_>, dbname: &str, missing_ok: bool, force: bool) -> PgRe
 
     pgdbrel.close(types_storage::lock::NoLock)?;
 
+    // Parked parallel-pool standbys pinned to this database are permanently
+    // unclaimable once it is gone; retire them so their PGPROCs return to the
+    // bgworker freelist and the pool replenishes fresh standbys.
+    if postmaster_seams::parallel_pool_retire_db::is_installed() {
+        postmaster_seams::parallel_pool_retire_db::call(db_id);
+    }
+
     xact::ForceSyncCommit();
     Ok(())
 }

@@ -31,3 +31,12 @@ seam_core::seam!(
     // pmchild matches BackgroundWorkerStateChange's registry -> pmchild.
     pub fn parallel_pool_dispatch(slot: i32, generation: u64, dboid: types_core::Oid) -> i32
 );
+
+seam_core::seam!(
+    // DROP DATABASE rider: retire parked pool standbys pinned to the dropped
+    // database. Dispatch is same-db-only, so they can never be claimed again,
+    // yet each holds a bgworker PGPROC — left parked they starve the
+    // postmaster fallback spawn path (InitProcess freelist exhaustion) and
+    // hold POPULATION at target so maintain() never replenishes fresh ones.
+    pub fn parallel_pool_retire_db(dboid: types_core::Oid)
+);
