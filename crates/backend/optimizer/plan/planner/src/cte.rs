@@ -1,5 +1,4 @@
-//! SS_process_ctes + inline_cte (subselect.c), set_cte_pathlist /
-//! set_worktable_pathlist (allpaths.c).
+//! CTE planning: SS_process_ctes, inline_cte, {cte,worktable} pathlists.
 
 use mcx::Mcx;
 use types_error::PgResult;
@@ -17,9 +16,8 @@ use crate::run::PlannerRun;
 pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) -> PgResult<()> {
     let mcx = run.mcx;
     debug_assert!(run.root.cte_plan_ids.is_empty());
-    // C reads cteroot->parse->cteList from child levels while this level is
-    // still mid-preprocessing; the sealed parse doesn't exist yet, so the
-    // list is snapshotted here (cells shared, positions == cte_plan_ids ndx).
+    // Child levels read this cteList mid-preprocessing (pre-seal): snapshot
+    // it here, cells shared, positions == cte_plan_ids index.
     run.root.cte_list = parse.cteList.clone_in(mcx)?;
 
     for cte_node in &parse.cteList {
@@ -105,8 +103,6 @@ pub fn ss_process_ctes<'mcx>(run: &mut PlannerRun<'mcx>, parse: &Query<'mcx>) ->
     Ok(())
 }
 
-// contain_dml (subselect.c): any subquery that isn't a plain SELECT (row
-// marks included).
 fn contain_dml(node: Node<'_>) -> PgResult<bool> {
     struct W;
     impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
@@ -129,8 +125,6 @@ fn contain_dml(node: Node<'_>) -> PgResult<bool> {
     nodes_core::NodeWalker::visit(&mut W, node)
 }
 
-// contain_outer_selfref (subselect.c): a recursive self-reference above the
-// query the search started at.
 fn contain_outer_selfref(node: Node<'_>) -> PgResult<bool> {
     struct W {
         depth: u32,
@@ -165,9 +159,8 @@ struct InlineCteWalker<'a, 'mcx> {
     ctename: &'a str,
     levelsup: i64,
     ctequery: Node<'mcx>,
-    // cterefcount == 1: the source is dead after its single inlining, so the
-    // tree moves; multi-reference NOT MATERIALIZED deep-copies per reference
-    // (C copyObject; out/read round trip is this repo's deep copy).
+    // cterefcount == 1: source is dead after single inlining, so the tree
+    // moves; multi-reference NOT MATERIALIZED deep-copies per reference.
     share: bool,
 }
 
@@ -228,9 +221,8 @@ impl<'a, 'mcx> nodes_core::NodeWalker<'mcx> for InlineCteWalker<'a, 'mcx> {
     }
 }
 
-// inline_cte (subselect.c). The outer Query is a pre-seal local, so its
-// fields walk here in query_tree_walker's order; nested queries are sealed
-// nodes and take the generic walker.
+// The outer Query is a pre-seal local: its fields walk here in
+// query_tree_walker order; nested (sealed) queries take the generic walker.
 fn inline_cte<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
@@ -284,7 +276,6 @@ fn inline_cte<'mcx>(
     Ok(())
 }
 
-// SS_assign_special_exec_param (paramassign.c).
 pub(crate) fn assign_special_exec_param(run: &mut PlannerRun<'_>) -> PgResult<i32> {
     let paramid = run.glob.param_exec_types.len() as i32;
     run.glob.param_exec_types.lappend(run.mcx, 0)?;
@@ -297,7 +288,6 @@ fn str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
-// set_cte_pathlist (allpaths.c).
 pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
     let (plan_id, cte_param) = resolve_cte_plan(run, rte);
@@ -312,7 +302,6 @@ pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgR
     let plan_rows = cteplan.as_plan().expect("plan node").plan_rows;
     crate::costsize::set_cte_size_estimates(run, rel, plan_rows)?;
     let mcx = run.mcx;
-    // Convert the ctepath's pathkeys to the outer query's representation.
     let pathkeys = match run
         .cte_subpath_infos
         .iter()
@@ -340,10 +329,8 @@ pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgR
     Ok(())
 }
 
-// set_worktable_pathlist (allpaths.c). The cteroot (the level planning the
-// recursive union) is ctelevelsup-1 parents up: the suspended_roots chain at
-// path time. Its wt_param_id is stashed on this level's root because the
-// chain is gone by createplan time (see PlannerInfo.self_ref_wt_param).
+// wt_param_id is stashed on this level's root because the suspended_roots
+// chain to the cteroot (ctelevelsup-1 up) is gone by createplan time.
 pub fn set_worktable_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let rte = run.rte(rti);
     debug_assert!(rte.self_reference);
@@ -380,8 +367,7 @@ pub fn set_worktable_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) 
     Ok(())
 }
 
-// set_cte_pathlist's cteroot walk (allpaths.c): levelsup steps up C's
-// parent_root chain == our suspended_roots (one push_root per C link).
+// levelsup steps up suspended_roots (one push_root per C parent_root link).
 fn resolve_cte_plan(run: &PlannerRun<'_>, rte: &RangeTblEntry<'_>) -> (i32, i32) {
     debug_assert!(!rte.self_reference);
     let ctename = rte.ctename.expect("CTE RTE has ctename");
