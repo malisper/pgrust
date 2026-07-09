@@ -407,15 +407,11 @@ pub fn AtSubAbort_smgr() -> PgResult<()> {
     smgrDoPendingDeletes(false)
 }
 
+// The physical deletes belong to the 2PC state file: StartPrepare serialized
+// them via smgrGetPendingDeletes, FinishPreparedTransaction replays them via
+// DropRelationFiles. C just frees the local list here.
 pub fn PostPrepare_smgr() {
-    PENDING.with_borrow_mut(|p| {
-        if !p.is_empty() {
-            panic!(
-                "PostPrepare_smgr (storage.c): pending deletes across PREPARE \
-                 TRANSACTION unported"
-            );
-        }
-    });
+    PENDING.with_borrow_mut(|p| p.clear());
 }
 
 pub fn RelationPreserveStorage(rlocator: RelFileLocator, at_commit: bool) {
