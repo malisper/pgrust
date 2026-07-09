@@ -131,21 +131,38 @@ fn sys_fk_relationships_matches_generated_header() {
     }
 }
 
-#[test]
-fn pg_jit_available_tracks_the_jit_guc() {
+fn install_jit_guc() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    static JIT: AtomicBool = AtomicBool::new(true);
+    static JIT_GUC: AtomicBool = AtomicBool::new(true);
     guc_tables::vars::jit_enabled.install_if_absent(guc_tables::GucVarAccessors {
-        get: || JIT.load(Ordering::Relaxed),
-        set: |v| JIT.store(v, Ordering::Relaxed),
+        get: || JIT_GUC.load(Ordering::Relaxed),
+        set: |v| JIT_GUC.store(v, Ordering::Relaxed),
     });
+}
+
+fn jit_available() -> bool {
     let mut fcinfo = LocalFcinfo::<0>::new(0);
-    guc_tables::vars::jit_enabled.write(true);
-    let d = crate::builtins::fc_pg_jit_available(None, &mut fcinfo).unwrap();
-    assert!(d.as_bool());
+    crate::builtins::fc_pg_jit_available(None, &mut fcinfo).unwrap().as_bool()
+}
+
+#[test]
+fn pg_jit_available_is_false_without_a_provider_shlib() {
+    install_jit_guc();
+    let dir = std::env::temp_dir().join(format!("pgrust-jit-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut buf = [0u8; types_core::MAXPGPATH];
+    let s = dir.to_str().unwrap().as_bytes();
+    buf[..s.len()].copy_from_slice(s);
+    init_small::globals::set_pkglib_path(buf);
+
     guc_tables::vars::jit_enabled.write(false);
-    let d = crate::builtins::fc_pg_jit_available(None, &mut fcinfo).unwrap();
-    assert!(!d.as_bool());
+    assert!(!jit_available(), "jit=off short-circuits, C provider_init()");
+    guc_tables::vars::jit_enabled.write(true);
+    assert!(!jit_available(), "no llvmjit.so in pkglib_path");
+    // provider_failed_loading latches: a provider appearing later stays false.
+    std::fs::write(dir.join("llvmjit.so"), b"").unwrap();
+    assert!(!jit_available(), "failed probe is cached, C provider_failed_loading");
+    let _ = std::fs::remove_dir_all(&dir);
     guc_tables::vars::jit_enabled.write(true);
 }
 
