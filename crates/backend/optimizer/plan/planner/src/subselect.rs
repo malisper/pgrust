@@ -1,9 +1,6 @@
-//! subselect.c: initplans, the pull_up_sublinks transform (prepjointree.c),
-//! and the regular SubPlan lane — make_subplan/build_subplan for correlated
-//! and testexpr-bearing EXISTS/EXPR/ANY/ALL/ARRAY/ROWCOMPARE sublinks,
-//! hashed-ANY selection, convert_VALUES_to_ANY, the convert_EXISTS_to_ANY
-//! AlternativeSubPlan lane, SS_replace_correlation_vars, and finalize's
-//! SubPlan legs. CTE-expression arms are loud.
+//! Initplans, the pull_up_sublinks transform, and the regular SubPlan lane
+//! (make_subplan/build_subplan) for correlated and testexpr-bearing sublinks,
+//! plus SS_replace_correlation_vars and finalize's SubPlan legs.
 
 use clauses::NodeWalker;
 use mcx::Mcx;
@@ -21,9 +18,8 @@ use crate::pathnode::get_cheapest_fractional_path;
 use crate::planmain::fetch_final_rel;
 use crate::run::PlannerRun;
 
-// pull_up_sublinks (prepjointree.c): convert top-level ANY/EXISTS sublinks
-// into SEMI/ANTI JoinExprs stacked into the jointree. New JoinExpr and
-// FromExpr nodes are freshly built here, so the post-hoc quals/child fixups
+// Convert top-level ANY/EXISTS sublinks into SEMI/ANTI JoinExprs stacked into
+// the jointree. New nodes are freshly built here, so the post-hoc fixups
 // mirror C's in-place writes on exclusively-owned nodes.
 pub fn pull_up_sublinks<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -158,8 +154,8 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
     }
 }
 
-// pull_up_sublinks_qual_recurse (prepjointree.c). jtlink2/available_rels2 is
-// the second insertion slot for quals of an already-pulled-up ANY sublink.
+// jtlink2/available_rels2 is the second insertion slot for quals of an
+// already-pulled-up ANY sublink.
 fn pull_up_sublinks_qual_recurse<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
@@ -397,9 +393,8 @@ fn attach_anti_join<'mcx>(
     Ok(())
 }
 
-// convert_VALUES_to_ANY (subselect.c): "x = ANY (VALUES ...)" over >=2
-// all-constant single-column rows folds to a ScalarArrayOpExpr on a Const
-// array. None = not convertible.
+// "x = ANY (VALUES ...)" over >=2 all-constant single-column rows folds to a
+// ScalarArrayOpExpr on a Const array. None = not convertible.
 fn convert_values_to_any<'mcx>(
     run: &mut PlannerRun<'mcx>,
     sublink: &SubLink<'mcx>,
@@ -494,9 +489,8 @@ fn convert_values_to_any<'mcx>(
     )?))
 }
 
-// convert_ANY_sublink_to_join (subselect.c): returns (rarg, quals) for the
-// JOIN_SEMI JoinExpr the caller assembles, after appending the subselect to
-// the rangetable. None = not convertible (falls back to SubPlan, loud there).
+// Returns (rarg, quals) for the JOIN_SEMI JoinExpr the caller assembles, after
+// appending the subselect to the rangetable. None = fall back to SubPlan.
 fn convert_any_sublink_to_join<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
@@ -582,7 +576,6 @@ fn convert_any_sublink_to_join<'mcx>(
     Ok(Some((rtr, Some(quals))))
 }
 
-// convert_testexpr (subselect.c): PARAM_SUBLINK Params -> the given nodes.
 fn convert_testexpr<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
@@ -617,8 +610,8 @@ fn convert_testexpr_mutator<'mcx>(
     })
 }
 
-// convert_EXISTS_sublink_to_join (subselect.c): returns (rarg, whereClause)
-// with the simplified sub-select's rtable already merged into the parent.
+// Returns (rarg, whereClause) with the simplified sub-select's rtable already
+// merged into the parent.
 fn convert_exists_sublink_to_join<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &mut Query<'mcx>,
@@ -694,8 +687,7 @@ fn convert_exists_sublink_to_join<'mcx>(
         return Ok(None);
     }
 
-    // CombineRangeTables (rewriteManip.c). RTEs are copied, not scribbled:
-    // the sub-Query is shared with the plancache'd parse tree.
+    // RTEs are copied, not scribbled: the sub-Query is plancache-shared.
     let perm_offset = parse.rteperminfos.len() as u32;
     for srte_node in &subselect.rtable {
         let srte = srte_node.as_range_tbl_entry().expect("rtable cell");
@@ -717,9 +709,7 @@ fn convert_exists_sublink_to_join<'mcx>(
         };
         let copy = crate::prepjointree::rte_copy_with_perminfoindex(mcx, srte, new_index)?;
         if srte.rtekind == RTEKind::RTE_JOIN {
-            // OffsetVarNodes/IncrementVarSublevelsUp over the whole subselect
-            // reach joinaliasvars through the rangetable walk in C; the copy
-            // keeps the shared list unwritten.
+            // Offset joinaliasvars into the copy; shared list stays unwritten.
             let mut aliasvars = NodeList::nil();
             for av in &srte.joinaliasvars {
                 aliasvars.lappend(mcx, offset_and_pull_down(mcx, av, rtoffset)?)?;
@@ -732,10 +722,8 @@ fn convert_exists_sublink_to_join<'mcx>(
             };
         }
         if srte.rtekind == RTEKind::RTE_SUBQUERY {
-            // The C OffsetVarNodes/IncrementVarSublevelsUp pair over the whole
-            // subselect reaches this RTE's body one level down; adjustment is
-            // only needed (and the deep copy only paid) when uplevel vars
-            // exist — the plancache-shared tree stays unwritten either way.
+            // Deep-copy + adjust the body only when it has uplevel vars, else
+            // the plancache-shared tree stays unwritten.
             let body = srte.subquery.expect("RTE_SUBQUERY has a subquery");
             if crate::prepjointree::query_has_uplevel_vars(body)? {
                 let deep = rewrite_manip::copy_query_node(mcx, body)?;
@@ -751,9 +739,7 @@ fn convert_exists_sublink_to_join<'mcx>(
             }
         }
         if srte.rtekind == RTEKind::RTE_FUNCTION {
-            // OffsetVarNodes/IncrementVarSublevelsUp over the whole subselect
-            // reach each RangeTblFunction's funcexpr the same way it reaches
-            // joinaliasvars above; the shared list stays unwritten.
+            // Offset each RangeTblFunction funcexpr into the copy.
             let mut functions = NodeList::nil();
             for f in &srte.functions {
                 let rtfunc = f.as_range_tbl_function().expect("functions holds RangeTblFunction");
@@ -850,7 +836,6 @@ fn offset_and_pull_down<'mcx>(
     Ok(mutate(mcx, node, rtoffset)?.unwrap_or(node))
 }
 
-/// SS_process_sublinks (subselect.c).
 pub fn ss_process_sublinks<'mcx>(
     run: &mut PlannerRun<'mcx>,
     expr: Node<'mcx>,
@@ -937,9 +922,6 @@ fn process_sublinks_mutator<'mcx>(
     })
 }
 
-// make_subplan (subselect.c). C copyObject's the sub-Query because rules can
-// alias one Query from several SubLinks; parser-built SubLinks hold the only
-// reference, so a list-cell-level copy is the scribble target.
 fn make_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
     sublink: &SubLink<'mcx>,
@@ -1240,15 +1222,13 @@ fn convert_exists_to_any<'mcx>(
     Ok(Some((subselect, testexpr, param_ids)))
 }
 
-// contain_aggs_of_level (rewriteManip.c); the shared walker recurses into
-// sub-Queries with the level bumped, which the old local walker did not.
+// The shared walker recurses into sub-Queries with the level bumped.
 fn contain_aggs_of_level(node: Node<'_>, level: i32) -> PgResult<bool> {
     rewrite_manip::contain_aggs_of_level(node, level)
 }
 
 
 
-// build_subplan (subselect.c).
 #[allow(clippy::too_many_arguments)]
 fn build_subplan<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -1633,7 +1613,6 @@ pub(crate) fn materialize_finished_plan<'mcx>(mcx: Mcx<'mcx>, subplan: Node<'mcx
     Ok(plan.seal())
 }
 
-/// generate_new_exec_param (paramassign.c).
 pub fn generate_new_exec_param<'mcx>(
     run: &mut PlannerRun<'mcx>,
     paramtype: types_core::Oid,
@@ -1706,12 +1685,10 @@ pub(crate) fn cost_subplan<'mcx>(
     Ok(())
 }
 
-// ExecMaterializesOutput (execAmi.c) over the ported node set.
 fn exec_materializes_output(tag: NodeTag) -> bool {
     matches!(tag, NodeTag::T_Sort | NodeTag::T_Material)
 }
 
-// simplify_EXISTS_query (subselect.c).
 fn simplify_exists_query<'mcx>(run: &mut PlannerRun<'mcx>, query: &mut Query<'mcx>) -> PgResult<bool> {
     if query.commandType != types_nodes::CmdType::CMD_SELECT
         || query.setOperations.is_some()
@@ -1746,8 +1723,7 @@ fn simplify_exists_query<'mcx>(run: &mut PlannerRun<'mcx>, query: &mut Query<'mc
     query.distinctClause = NodeList::nil();
     query.sortClause = NodeList::nil();
     query.hasDistinctOn = false;
-    // The GROUP BY clauses are gone; drop the RTE_GROUP entry too
-    // (subselect.c:1691-1711).
+    // The GROUP BY clauses are gone; drop the RTE_GROUP entry too.
     if query.hasGroupRTE {
         let mut new_rtable = NodeList::nil();
         for rte_node in &query.rtable {
@@ -1875,7 +1851,6 @@ fn replace_correlation_vars_mutator<'mcx>(
     })
 }
 
-/// SS_charge_for_initplans (subselect.c).
 pub fn ss_charge_for_initplans(run: &mut PlannerRun<'_>, final_rel: RelId) -> PgResult<()> {
     if run.root.init_plans.is_empty() {
         return Ok(());
@@ -1964,7 +1939,6 @@ pub fn ss_finalize_plan<'mcx>(
     Ok(())
 }
 
-// finalize_plan (subselect.c) over the ported node set.
 fn finalize_plan<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &types_pathnodes::PlannerInfo<'mcx>,
