@@ -143,10 +143,8 @@ pub(crate) fn check_db(
     roleid: Oid,
     tokens: &[AuthToken],
 ) -> PgResult<bool> {
-    // walsender.c is unported; am_walsender/am_db_walsender are statically
-    // false in this tree (postinit precedent).
-    let am_walsender = false;
-    let am_db_walsender = false;
+    let am_walsender = walsender_seams::am_walsender();
+    let am_db_walsender = walsender_seams::am_db_walsender();
 
     for tok in tokens {
         if am_walsender && !am_db_walsender {

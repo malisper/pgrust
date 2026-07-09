@@ -367,7 +367,9 @@ pub fn ProcessInterrupts() -> PgResult<()> {
 
 // The C pqsignal block at PostgresMain entry (postgres.c:4217-4251), rendered
 // as pqsignal_thread dispositions drained at this thread's latch/client-IO
-// wakes. am_walsender arm absent (walsender unported).
+// wakes. am_walsender arm (WalSndSignals: SIGUSR2 last-cycle handler) lands
+// with streaming (replication-p1 increment 3); harmless for command-only
+// walsenders, SIGUSR2 stays Ignore.
 pub fn install_thread_signal_handlers() {
     use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
     procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));

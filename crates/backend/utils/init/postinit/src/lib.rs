@@ -49,14 +49,11 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
     ErrorLocation::new(SRC, line, func)
 }
 
-// walsender.c is unported and backend_startup panics on the replication
-// startup option, so C's am_walsender/am_db_walsender globals are statically
-// false in this tree (genam ReindexIsProcessingIndex precedent).
 fn am_walsender() -> bool {
-    false
+    walsender_seams::am_walsender()
 }
 fn am_db_walsender() -> bool {
-    false
+    walsender_seams::am_db_walsender()
 }
 
 fn GetDatabaseTuple<'mcx>(

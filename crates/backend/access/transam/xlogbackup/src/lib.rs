@@ -5,6 +5,18 @@
 use mcx::{Mcx, PgVec};
 use stringinfo::StringInfo;
 use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
+
+// tablespaceinfo (basebackup.h) — one auxiliary-tablespace entry produced by
+// do_pg_backup_start and consumed by the base-backup driver + sink chain. Homed
+// here (shared, below the backup layer) to avoid a transam_xlog -> sink
+// inversion. `size` mirrors C's int64 (-1 = unknown).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TablespaceInfo {
+    pub oid: types_core::Oid,
+    pub path: Option<String>,
+    pub rpath: Option<String>,
+    pub size: i64,
+}
 use types_error::PgResult;
 
 const MAXPGPATH: usize = 1024;

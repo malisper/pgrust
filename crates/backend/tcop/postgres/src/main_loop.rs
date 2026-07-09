@@ -157,7 +157,9 @@ pub(crate) fn error_recovery(err: &PgError, state: &mut LoopState) -> PgResult<(
 
     xact::AbortCurrentTransaction()?;
 
-    /* am_walsender WalSndErrorCleanup: walsender unported. */
+    if walsender_seams::am_walsender() {
+        walsender_seams::wal_snd_error_cleanup::call()?;
+    }
 
     portalmem::PortalErrorCleanup()?;
 
@@ -310,6 +312,40 @@ fn log_connection_ready_durations() -> PgResult<()> {
         ))
 }
 
+// postgres.c:4760 walsender 'Q' arm; #[cold] keeps the serial query path's
+// icache untouched (layout-hygiene convention).
+#[cold]
+#[inline(never)]
+fn walsender_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgResult<()> {
+    if !walsender_seams::exec_replication_command::call(query_string)? {
+        simple_query::exec_simple_query(mcx, query_string)?;
+    }
+    Ok(())
+}
+
+// forbidden_in_wal_sender (postgres.c:5030): a replication connection speaks
+// only the simple-query protocol.
+fn forbidden_in_wal_sender(firstchar: i32) -> PgResult<()> {
+    if walsender_seams::am_walsender() {
+        forbidden_in_wal_sender_error(firstchar)?;
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn forbidden_in_wal_sender_error(firstchar: i32) -> PgResult<()> {
+    let msg = if firstchar == pqmsg::FUNCTION_CALL {
+        "fastpath function calls not supported in a replication connection"
+    } else {
+        "extended query protocol not supported in a replication connection"
+    };
+    ereport(ERROR)
+        .errcode(ERRCODE_PROTOCOL_VIOLATION)
+        .errmsg(msg)
+        .finish(loc(5036, "forbidden_in_wal_sender"))
+}
+
 fn dispatch_message<'mcx>(
     mcx: Mcx<'mcx>,
     firstchar: i32,
@@ -326,12 +362,18 @@ fn dispatch_message<'mcx>(
             };
             pqformat::pq_getmsgend(input_message)?;
 
-            simple_query::exec_simple_query(mcx, query_string)?;
+            if walsender_seams::am_walsender() {
+                walsender_query(mcx, query_string)?;
+            } else {
+                simple_query::exec_simple_query(mcx, query_string)?;
+            }
 
             state.send_ready_for_query = true;
         }
 
         x if x == pqmsg::PARSE => {
+            forbidden_in_wal_sender(firstchar)?;
+
             xact::SetCurrentStatementStartTimestamp();
 
             let stmt_name = extended_query::owned_msg_string(mcx, input_message)?;
@@ -355,6 +397,8 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == pqmsg::BIND => {
+            forbidden_in_wal_sender(firstchar)?;
+
             xact::SetCurrentStatementStartTimestamp();
 
             /* this message is complex enough that the field extraction is
@@ -363,6 +407,8 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == pqmsg::EXECUTE => {
+            forbidden_in_wal_sender(firstchar)?;
+
             xact::SetCurrentStatementStartTimestamp();
 
             let portal_name = extended_query::owned_msg_string(mcx, input_message)?;
@@ -373,6 +419,8 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == pqmsg::DESCRIBE => {
+            forbidden_in_wal_sender(firstchar)?;
+
             xact::SetCurrentStatementStartTimestamp();
 
             let describe_type = pqformat::pq_getmsgbyte(input_message)?;
@@ -405,6 +453,8 @@ fn dispatch_message<'mcx>(
         x if x == pqmsg::FUNCTION_CALL => {
             use backend_status_seams::BackendState;
 
+            forbidden_in_wal_sender(firstchar)?;
+
             xact::SetCurrentStatementStartTimestamp();
 
             backend_status_seams::pgstat_report_activity::call(BackendState::STATE_FASTPATH, None);
@@ -436,6 +486,8 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == pqmsg::CLOSE => {
+            forbidden_in_wal_sender(firstchar)?;
+
             let close_type = pqformat::pq_getmsgbyte(input_message)?;
             let close_target = {
                 let s = pqformat::pq_getmsgrawstring(input_message)?;
@@ -551,6 +603,8 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 
     postinit::BaseInit()?;
 
+    // Honor session_preload_libraries if not dealing with a WAL sender.
+    let am_walsender = walsender_seams::am_walsender();
     let top = MemoryContext::new("PostgresMainInit");
     postinit::InitPostgres(
         top.mcx(),
@@ -558,7 +612,11 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
         types_core::primitive::InvalidOid,
         Some(username),
         types_core::primitive::InvalidOid,
-        postinit::INIT_PG_LOAD_SESSION_LIBS,
+        if am_walsender {
+            0
+        } else {
+            postinit::INIT_PG_LOAD_SESSION_LIBS
+        },
         None,
     )?;
     drop(top);
@@ -570,6 +628,10 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 
 
     pgstat::database::pgstat_report_connect(init_small::globals::MyDatabaseId());
+
+    if am_walsender {
+        walsender_seams::init_wal_sender::call();
+    }
 
     if elog::config::where_to_send_output() == CommandDest::Remote {
         let key = init_small::globals::MyCancelKey();

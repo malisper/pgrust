@@ -1,0 +1,18 @@
+[package]
+name = "basebackup_target"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "basebackup_target"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+sink = { path = "../sink" }
+
+[dev-dependencies]
+types_core = { path = "../../../_support/types/types_core" }

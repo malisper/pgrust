@@ -1,0 +1,469 @@
+// Physical streaming replication (walsender.c): StartReplication (PHYSICAL),
+// XLogSendPhysical, WalSndLoop, and the keepalive/timeout/sleep helpers.
+//
+// The send-decision control flow and message framing are ported 1:1. WAL bytes
+// are read through the xlogreader `wal_read` seam over an owned reader. Cascading
+// (standby-served) streaming needs the walreceiver flush position (P2) and
+// historic-timeline streaming needs the timeline-switch machinery (P4); both are
+// loud panics. SyncRep and lag-tracking are out of P1 scope (async only).
+#![allow(non_snake_case)]
+
+use core::ffi::c_long;
+
+use elog::ereport;
+use repl_gram::{ReplicationKind, StartReplicationCmd};
+use types_core::{InvalidXLogRecPtr, TimeLineID, TimestampTz, XLogRecPtr};
+use types_error::{
+    ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
+};
+use types_storage::waiteventset::{WL_POSTMASTER_DEATH, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
+use xlogreader::XLogReaderState;
+
+use crate::WalSndState;
+
+// MAX_SEND_SIZE (walsender.c:111): XLOG_BLCKSZ * 16.
+const MAX_SEND_SIZE: usize = transam_xlog::XLOG_BLCKSZ * 16;
+
+// WAIT_EVENT_WAL_SENDER_MAIN (wait_event_types.h): pg_stat_activity tag only.
+const WAIT_EVENT_WAL_SENDER_MAIN: u32 = 0x05000000 | 15;
+
+fn loc(line: i32, func: &'static str) -> ErrorLocation {
+    ErrorLocation::new("src/backend/replication/walsender.c", line, func)
+}
+
+// --- per-backend state accessors (walsender.c file-static globals) ---
+fn get_ts() -> TimestampTz {
+    timestamp_seams::get_current_timestamp::call()
+}
+fn got_stopping() -> bool {
+    crate::GOT_STOPPING.with(|c| c.get())
+}
+fn got_sigusr2() -> bool {
+    crate::GOT_SIGUSR2.with(|c| c.get())
+}
+fn am_cascading() -> bool {
+    crate::AM_CASCADING_WALSENDER.with(|c| c.get())
+}
+fn sent_ptr() -> XLogRecPtr {
+    crate::SENT_PTR.with(|c| c.get())
+}
+fn set_sent_ptr(v: XLogRecPtr) {
+    crate::SENT_PTR.with(|c| c.set(v));
+}
+fn caught_up() -> bool {
+    crate::WAL_SND_CAUGHT_UP.with(|c| c.get())
+}
+fn set_caught_up(v: bool) {
+    crate::WAL_SND_CAUGHT_UP.with(|c| c.set(v));
+}
+fn streaming_done_sending() -> bool {
+    crate::STREAMING_DONE_SENDING.with(|c| c.get())
+}
+fn streaming_done_receiving() -> bool {
+    crate::STREAMING_DONE_RECEIVING.with(|c| c.get())
+}
+fn last_reply_timestamp() -> TimestampTz {
+    crate::LAST_REPLY_TIMESTAMP.with(|c| c.get())
+}
+fn last_processing() -> TimestampTz {
+    crate::LAST_PROCESSING.with(|c| c.get())
+}
+fn waiting_for_ping_response() -> bool {
+    crate::WAITING_FOR_PING_RESPONSE.with(|c| c.get())
+}
+fn set_waiting_for_ping_response(v: bool) {
+    crate::WAITING_FOR_PING_RESPONSE.with(|c| c.set(v));
+}
+
+pub(crate) fn proc_exit(code: i32) -> ! {
+    ipc_seams::proc_exit::call(code, init_small::globals::MyProcPid())
+}
+
+// static void WalSndShutdown(void). Terminate the backend; C also resets
+// whereToSendOutput to suppress further client writes (a tcop concern not yet
+// threaded through this crate).
+pub(crate) fn WalSndShutdown() -> ! {
+    proc_exit(0)
+}
+
+// static void StartReplication(StartReplicationCmd *cmd) — PHYSICAL branch.
+pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResult<()> {
+    if let Some(slotname) = cmd.slotname.as_deref() {
+        slot::ReplicationSlotAcquire(slotname, true, true)?;
+        let acquired = slot::MyReplicationSlot().expect("StartReplication: no slot acquired");
+        if slot::SlotIsLogical(acquired) {
+            return ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg("cannot use a logical replication slot for physical replication")
+                .finish(loc(920, "StartReplication"));
+        }
+    }
+
+    let am_cascading = transam_xlog::RecoveryInProgress();
+    crate::AM_CASCADING_WALSENDER.with(|c| c.set(am_cascading));
+
+    let mut flush_tli: TimeLineID = 0;
+    let flush_ptr: XLogRecPtr = if am_cascading {
+        panic!("walsender: cascading-standby streaming needs walreceiver (replication-p1 P2)");
+    } else {
+        transam_xlog::GetFlushRecPtr(Some(&mut flush_tli))
+    };
+
+    if cmd.timeline != 0 {
+        crate::SEND_TIME_LINE.with(|c| c.set(cmd.timeline));
+        if cmd.timeline == flush_tli {
+            crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.set(false));
+            crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.set(InvalidXLogRecPtr));
+        } else {
+            panic!("walsender: historic-timeline START_REPLICATION unported (replication-p1 P4)");
+        }
+    } else {
+        crate::SEND_TIME_LINE.with(|c| c.set(flush_tli));
+        crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.set(InvalidXLogRecPtr));
+        crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.set(false));
+    }
+
+    crate::STREAMING_DONE_SENDING.with(|c| c.set(false));
+    crate::STREAMING_DONE_RECEIVING.with(|c| c.set(false));
+
+    // Non-historic: always enter COPY mode and stream.
+    crate::WalSndSetState(WalSndState::Catchup);
+
+    // CopyBothResponse ('W'): overall copy format = textual (0), natts = 0.
+    pqcomm::pq_putmessage(b'W', &[0u8, 0, 0])?;
+    pqcomm::pq_flush()?;
+
+    if flush_ptr < cmd.startpoint {
+        return ereport(ERROR)
+            .errmsg(format!(
+                "requested starting point {:X}/{:X} is ahead of the WAL flush position of this server {:X}/{:X}",
+                (cmd.startpoint >> 32) as u32,
+                cmd.startpoint as u32,
+                (flush_ptr >> 32) as u32,
+                flush_ptr as u32,
+            ))
+            .finish(loc(990, "StartReplication"));
+    }
+
+    set_sent_ptr(cmd.startpoint);
+    crate::my_set_sentptr(cmd.startpoint);
+
+    // SyncRepInitConfig(): SyncRep is out of P1 scope (async only).
+
+    crate::REPLICATION_ACTIVE.with(|c| c.set(true));
+
+    let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
+    let r = WalSndLoop(&mut reader);
+
+    crate::REPLICATION_ACTIVE.with(|c| c.set(false));
+    r?;
+
+    if got_stopping() {
+        proc_exit(0);
+    }
+    crate::WalSndSetState(WalSndState::Startup);
+
+    if cmd.slotname.is_some() {
+        slot::ReplicationSlotRelease()?;
+    }
+
+    // Non-historic: no next-timeline result set (that path is P4).
+    Ok(())
+}
+
+// static void XLogSendPhysical(void).
+pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
+    if got_stopping() {
+        crate::WalSndSetState(WalSndState::Stopping);
+    }
+
+    if streaming_done_sending() {
+        set_caught_up(true);
+        return Ok(());
+    }
+
+    let send_rqst_ptr: XLogRecPtr = if crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get()) {
+        panic!("walsender: historic-timeline streaming unported (replication-p1 P4)");
+    } else if am_cascading() {
+        panic!("walsender: cascading-standby streaming needs walreceiver (replication-p1 P2)");
+    } else {
+        // Streaming the current timeline on a primary: send everything flushed.
+        transam_xlog::GetFlushRecPtr(None)
+    };
+
+    // LagTrackerWrite: pg_stat_replication lag monitoring is deferred.
+
+    let sent = sent_ptr();
+    debug_assert!(sent <= send_rqst_ptr);
+    if send_rqst_ptr <= sent {
+        set_caught_up(true);
+        return Ok(());
+    }
+
+    let startptr: XLogRecPtr = sent;
+    let mut endptr: XLogRecPtr = startptr + MAX_SEND_SIZE as u64;
+    if send_rqst_ptr <= endptr {
+        endptr = send_rqst_ptr;
+        set_caught_up(true);
+    } else {
+        // Round down to a page boundary.
+        endptr -= endptr % transam_xlog::XLOG_BLCKSZ as u64;
+        set_caught_up(false);
+    }
+
+    let nbytes = (endptr - startptr) as usize;
+    debug_assert!(nbytes <= MAX_SEND_SIZE);
+
+    xlog_send_physical_emit(reader, startptr, endptr, send_rqst_ptr)?;
+
+    set_sent_ptr(endptr);
+    crate::my_set_sentptr(endptr);
+
+    if guc_tables::vars::update_process_title.read() {
+        let title = format!("streaming {:X}/{:X}", (endptr >> 32) as u32, endptr as u32);
+        ps_status_seams::set_ps_display::call(title.as_str());
+    }
+
+    Ok(())
+}
+
+// The WAL read + 'w' framing + CopyData put of XLogSendPhysical. WALReadFromBuffers
+// is a read-from-shared-buffers optimization; reading the whole slice through
+// wal_read (the WALRead fallback) is always correct.
+fn xlog_send_physical_emit(
+    reader: &mut XLogReaderState<'_>,
+    startptr: XLogRecPtr,
+    endptr: XLogRecPtr,
+    send_rqst_ptr: XLogRecPtr,
+) -> PgResult<()> {
+    let nbytes = (endptr - startptr) as usize;
+    let tli: TimeLineID = crate::SEND_TIME_LINE.with(|c| c.get());
+
+    let mut wal_buf = vec![0u8; nbytes];
+    if xlogreader_seams::wal_read::call(&mut reader.v, &mut wal_buf, startptr, nbytes, tli)?.is_err() {
+        return wal_read_raise_error();
+    }
+
+    crate::OUTPUT_MESSAGE.with(|b| {
+        let mut b = b.borrow_mut();
+        b.clear();
+        b.push(b'w');
+        b.extend_from_slice(&startptr.to_be_bytes()); // dataStart
+        b.extend_from_slice(&send_rqst_ptr.to_be_bytes()); // walEnd
+        b.extend_from_slice(&0i64.to_be_bytes()); // sendtime, filled in last
+        b.extend_from_slice(&wal_buf);
+        // Fill the send timestamp last so it is taken as late as possible.
+        let sendtime = get_ts();
+        b[1 + 8 + 8..1 + 8 + 8 + 8].copy_from_slice(&(sendtime as i64).to_be_bytes());
+    });
+
+    crate::OUTPUT_MESSAGE.with(|b| pqcomm::pq_putmessage_noblock(b'd', &b.borrow()))?;
+
+    let segsize = transam_xlog::wal_segment_size() as u64;
+    transam_xlog::CheckXLogRemoved(startptr / segsize, tli)?;
+    Ok(())
+}
+
+// WALReadRaiseError(&errinfo).
+fn wal_read_raise_error() -> PgResult<()> {
+    ereport(ERROR)
+        .errcode_for_file_access()
+        .errmsg("could not read from WAL: requested WAL segment slice is unavailable")
+        .finish(ErrorLocation::new("xlogreader.c", 0, "WALReadRaiseError"))
+}
+
+// static void WalSndLoop(WalSndSendDataCallback send_data). Only physical is
+// ported, so the send callback is XLogSendPhysical directly (no fn pointer).
+pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
+    // Initialize the last reply timestamp; that enables timeout processing.
+    crate::LAST_REPLY_TIMESTAMP.with(|c| c.set(get_ts()));
+    set_waiting_for_ping_response(false);
+
+    loop {
+        reset_my_latch();
+        postgres_seams::check_for_interrupts::call()?;
+
+        if interrupt::ConfigReloadPending() {
+            interrupt::SetConfigReloadPending(false);
+            guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+            // SyncRepInitConfig(): SyncRep out of P1 scope.
+        }
+
+        crate::replies::ProcessRepliesIfAny()?;
+
+        // CopyDone received + sent + output drained => exit streaming.
+        if streaming_done_receiving() && streaming_done_sending() && !pqcomm::pq_is_send_pending() {
+            break;
+        }
+
+        if !pqcomm::pq_is_send_pending() {
+            XLogSendPhysical(reader)?;
+        } else {
+            set_caught_up(false);
+        }
+
+        if pqcomm::pq_flush_if_writable()? != 0 {
+            WalSndShutdown();
+        }
+
+        if caught_up() && !pqcomm::pq_is_send_pending() {
+            if crate::my_walsnd_state() == WalSndState::Catchup {
+                crate::WalSndSetState(WalSndState::Streaming);
+            }
+            // On SIGUSR2, drain up to the shutdown checkpoint and exit.
+            if got_sigusr2() {
+                WalSndDone(reader)?;
+            }
+        }
+
+        WalSndCheckTimeOut();
+        WalSndKeepaliveIfNecessary()?;
+
+        // Block if we have unsent data, or (physical) if caught up: send_data
+        // does not block.
+        if (caught_up() && !streaming_done_sending()) || pqcomm::pq_is_send_pending() {
+            let mut wake_events: u32 = if !streaming_done_receiving() {
+                WL_SOCKET_READABLE
+            } else {
+                0
+            };
+            let now = get_ts();
+            let sleeptime = WalSndComputeSleeptime(now);
+            if pqcomm::pq_is_send_pending() {
+                wake_events |= WL_SOCKET_WRITEABLE;
+            }
+            WalSndWait(wake_events, sleeptime, WAIT_EVENT_WAL_SENDER_MAIN)?;
+        }
+    }
+    Ok(())
+}
+
+// static void WalSndDone(WalSndSendDataCallback send_data).
+fn WalSndDone(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
+    // Let's be real sure we're caught up.
+    XLogSendPhysical(reader)?;
+
+    let replicated: XLogRecPtr = if crate::my_flush() == InvalidXLogRecPtr {
+        crate::my_write()
+    } else {
+        crate::my_flush()
+    };
+
+    if caught_up() && sent_ptr() == replicated && !pqcomm::pq_is_send_pending() {
+        pqcomm::pq_flush()?;
+        proc_exit(0);
+    }
+    if !waiting_for_ping_response() {
+        WalSndKeepalive(true, InvalidXLogRecPtr)?;
+    }
+    Ok(())
+}
+
+// static long WalSndComputeSleeptime(TimestampTz now).
+fn WalSndComputeSleeptime(now: TimestampTz) -> c_long {
+    let mut sleeptime: c_long = 10000; // 10 s
+    let timeout = guc_tables::vars::wal_sender_timeout.read();
+    let last_reply = last_reply_timestamp();
+
+    if timeout > 0 && last_reply > 0 {
+        let wakeup_time = if !waiting_for_ping_response() {
+            last_reply + (timeout / 2) as i64 * 1000
+        } else {
+            last_reply + timeout as i64 * 1000
+        };
+        sleeptime = adt_timestamp::TimestampDifferenceMilliseconds(now, wakeup_time) as c_long;
+    }
+    sleeptime
+}
+
+// static void WalSndCheckTimeOut(void).
+fn WalSndCheckTimeOut() {
+    let timeout_guc = guc_tables::vars::wal_sender_timeout.read();
+    let last_reply = last_reply_timestamp();
+
+    if last_reply <= 0 {
+        return;
+    }
+    let timeout = last_reply + timeout_guc as i64 * 1000;
+    if timeout_guc > 0 && last_processing() >= timeout {
+        // Expiration usually means a communication problem; don't tell the standby.
+        let _ = ereport(LOG)
+            .errmsg("terminating walsender process due to replication timeout")
+            .finish(loc(2536, "WalSndCheckTimeOut"));
+        WalSndShutdown();
+    }
+}
+
+// static void WalSndWait(uint32 socket_events, long timeout, uint32 wait_event).
+fn WalSndWait(socket_events: u32, timeout: c_long, wait_event: u32) -> PgResult<()> {
+    // ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetSocketPos, socket_events, NULL).
+    pqcomm::pq_modify_fe_be_wait_set_socket(socket_events)?;
+
+    // Prepare to sleep on the per-kind CV so WalSndWakeup() can wake us
+    // efficiently. (The failover standby-confirmation CV is P4.)
+    let ctl = crate::WalSndCtl();
+    let cv = match crate::my_kind() {
+        ReplicationKind::REPLICATION_KIND_PHYSICAL => &ctl.wal_flush_cv,
+        ReplicationKind::REPLICATION_KIND_LOGICAL => &ctl.wal_replay_cv,
+    };
+    condition_variable::ConditionVariablePrepareToSleep(cv);
+
+    let events = pqcomm::pq_wait_event_set_wait_fe_be(timeout as i64, wait_event)?;
+    if events & WL_POSTMASTER_DEATH != 0 {
+        condition_variable::ConditionVariableCancelSleep();
+        proc_exit(1);
+    }
+    condition_variable::ConditionVariableCancelSleep();
+    Ok(())
+}
+
+// static void WalSndKeepalive(bool requestReply, XLogRecPtr writePtr).
+pub(crate) fn WalSndKeepalive(request_reply: bool, write_ptr: XLogRecPtr) -> PgResult<()> {
+    let sent = sent_ptr();
+    let now = get_ts();
+
+    crate::OUTPUT_MESSAGE.with(|b| {
+        let mut b = b.borrow_mut();
+        b.clear();
+        b.push(b'k');
+        let wpos = if write_ptr == InvalidXLogRecPtr { sent } else { write_ptr };
+        b.extend_from_slice(&wpos.to_be_bytes());
+        b.extend_from_slice(&(now as u64).to_be_bytes());
+        b.push(u8::from(request_reply));
+    });
+
+    crate::OUTPUT_MESSAGE.with(|b| pqcomm::pq_putmessage_noblock(b'd', &b.borrow()))?;
+
+    if request_reply {
+        set_waiting_for_ping_response(true);
+    }
+    Ok(())
+}
+
+// static void WalSndKeepaliveIfNecessary(void).
+fn WalSndKeepaliveIfNecessary() -> PgResult<()> {
+    let timeout = guc_tables::vars::wal_sender_timeout.read();
+    let last_reply = last_reply_timestamp();
+
+    if timeout <= 0 || last_reply <= 0 {
+        return Ok(());
+    }
+    if waiting_for_ping_response() {
+        return Ok(());
+    }
+
+    let ping_time = last_reply + (timeout / 2) as i64 * 1000;
+    if last_processing() >= ping_time {
+        WalSndKeepalive(true, InvalidXLogRecPtr)?;
+        if pqcomm::pq_flush_if_writable()? != 0 {
+            WalSndShutdown();
+        }
+    }
+    Ok(())
+}
+
+fn reset_my_latch() {
+    if let Some(l) = init_small::globals::MyLatch() {
+        latch::ResetLatch(l);
+    }
+}

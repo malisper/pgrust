@@ -641,6 +641,7 @@ dependencies = [
  "varsup",
  "waitevent",
  "walsummarizer_seams",
+ "xlogbackup",
  "xloginsert_seams",
  "xlogrecovery",
 ]
@@ -1446,6 +1447,7 @@ dependencies = [
  "types_startup",
  "waitevent_seams",
  "waiteventset",
+ "walsender_seams",
 ]
 
 [[package]]
@@ -1641,6 +1643,7 @@ dependencies = [
  "types_guc",
  "types_startup",
  "varlena",
+ "walsender_seams",
  "wchar",
  "xlogrecovery_seams",
 ]
@@ -1688,6 +1691,76 @@ name = "backend_status_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "backup_copy"
+version = "0.0.0"
+dependencies = [
+ "backup_copy_seams",
+ "mbutils_seams",
+ "mcx",
+ "pqcomm_seams",
+ "pqformat",
+ "sink",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "backup_copy_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "basebackup"
+version = "0.0.0"
+dependencies = [
+ "backup_copy",
+ "backup_copy_seams",
+ "datum",
+ "elog",
+ "exectuples_output",
+ "fd",
+ "init_small",
+ "libc",
+ "manifest",
+ "mcx",
+ "pgstrcasecmp",
+ "pqcomm_seams",
+ "ps_status",
+ "ps_status_seams",
+ "repl_gram",
+ "sink",
+ "tcop_dest",
+ "throttle",
+ "transam_xlog",
+ "tupdesc",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_fmgr",
+ "types_storage",
+ "varlena",
+ "walsender",
+ "walsender_seams",
+ "xlogbackup",
+]
+
+[[package]]
+name = "basebackup_target"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "sink",
  "types_core",
  "types_error",
 ]
@@ -6213,6 +6286,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_startup",
+ "walsender_seams",
 ]
 
 [[package]]
@@ -7461,6 +7535,23 @@ dependencies = [
  "seams_init",
  "stack_depth",
  "types_error",
+]
+
+[[package]]
+name = "manifest"
+version = "0.1.0"
+dependencies = [
+ "crc32c",
+ "localtime",
+ "mcx",
+ "pg_sha2",
+ "pgtz_seams",
+ "seam_core",
+ "strftime",
+ "timeline",
+ "types_core",
+ "types_error",
+ "varlena",
 ]
 
 [[package]]
@@ -11287,6 +11378,7 @@ dependencies = [
  "varlena",
  "varsup",
  "waitevent_seams",
+ "walsender_seams",
  "xact",
  "xloginsert_seams",
 ]
@@ -11363,6 +11455,7 @@ dependencies = [
  "types_guc",
  "types_resowner",
  "types_storage",
+ "walsender_seams",
  "xact",
  "xloginsert_seams",
 ]
@@ -11759,6 +11852,7 @@ dependencies = [
  "lsyscache_seams",
  "mbutils_seams",
  "mcx",
+ "numutils",
  "pqcomm_seams",
  "pqformat",
  "pquery_seams",
@@ -12492,6 +12586,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "repl_gram"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "repl_scanner",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "repl_scanner"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "mcx",
+ "parser_small1",
+ "types_core",
+ "types_error",
+ "wchar",
+]
+
+[[package]]
 name = "resowner"
 version = "0.1.0"
 dependencies = [
@@ -13151,6 +13267,7 @@ dependencies = [
  "backend_progress",
  "backend_startup",
  "backend_status",
+ "basebackup",
  "be_fsstubs",
  "be_secure",
  "bgworker",
@@ -13395,6 +13512,7 @@ dependencies = [
  "varsup",
  "waitevent",
  "waiteventset",
+ "walsender",
  "walsender_config",
  "walsummarizer",
  "walwriter",
@@ -13635,6 +13753,27 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_storage",
+]
+
+[[package]]
+name = "sink"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "types_core",
+ "types_error",
+ "xlogbackup",
+]
+
+[[package]]
+name = "sink_support"
+version = "0.0.0"
+dependencies = [
+ "backend_progress",
+ "mcx",
+ "sink",
+ "types_core",
+ "types_error",
 ]
 
 [[package]]
@@ -15128,6 +15267,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "throttle"
+version = "0.0.0"
+dependencies = [
+ "latch_seams",
+ "mcx",
+ "postgres_seams",
+ "sink",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
 name = "tidbitmap"
 version = "0.1.0"
 dependencies = [
@@ -15329,16 +15482,19 @@ dependencies = [
  "commit_ts_seams",
  "controldata_utils",
  "crc32c",
+ "datum",
  "elog",
  "fd",
  "guc_seams",
  "guc_tables",
  "init_small",
+ "ipc_seams",
  "latch",
  "libc",
  "lmgr_proc",
  "lmgr_proc_seams",
  "lwlock",
+ "mcx",
  "multixact_seams",
  "origin_seams",
  "pgstat",
@@ -15369,9 +15525,11 @@ dependencies = [
  "varsup",
  "varsup_seams",
  "waitevent_seams",
+ "walsender_seams",
  "walsummarizer_seams",
  "xact_seams",
  "xlogarchive_seams",
+ "xlogbackup",
  "xloginsert_seams",
  "xlogreader_seams",
  "xlogrecovery_seams",
@@ -16754,10 +16912,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "walsender"
+version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "backend_status_seams",
+ "condition_variable",
+ "datum",
+ "dbcommands_seams",
+ "elog",
+ "exectuples_output",
+ "fd",
+ "guc_file",
+ "guc_funcs",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc_seams",
+ "latch",
+ "libc",
+ "lwlock",
+ "mcx",
+ "pmsignal",
+ "postgres_seams",
+ "pqcomm",
+ "procarray",
+ "ps_status_seams",
+ "repl_gram",
+ "resowner",
+ "slot",
+ "snapbuild",
+ "stringinfo",
+ "tcop_dest",
+ "timeline",
+ "timeline_seams",
+ "timestamp_seams",
+ "transam_xlog",
+ "tupdesc",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "varlena",
+ "walsender_config",
+ "walsender_seams",
+ "xact",
+ "xlogreader",
+ "xlogreader_seams",
+ "xlogrecovery_seams",
+]
+
+[[package]]
 name = "walsender_config"
 version = "0.0.0"
 dependencies = [
  "guc_tables",
+]
+
+[[package]]
+name = "walsender_seams"
+version = "0.0.0"
+dependencies = [
+ "repl_gram",
+ "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -17346,18 +17565,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.53"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75726053136156d419e285b9b7eddaaea9e3fea6ce32eed44a89901f0bd98de1"
+checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.53"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4714fd92cf900833d49538023a9b3915155210801d1c1169eba513b2addefd71"
+checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
 dependencies = [
  "proc-macro2",
  "quote",

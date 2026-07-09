@@ -23,6 +23,8 @@ use ::types_portal::Portal;
 use ::types_slot::SlotData;
 use ::types_tuple::TupleDescData;
 
+pub mod printsimple;
+
 #[cfg(test)]
 mod tests;
 
@@ -81,14 +83,14 @@ thread_local! {
     static WIRE_BUF: Cell<Option<StringInfo<'static>>> = const { Cell::new(None) };
 }
 
-fn take_wire_buf() -> PgResult<StringInfo<'static>> {
+pub(crate) fn take_wire_buf() -> PgResult<StringInfo<'static>> {
     match WIRE_BUF.with(Cell::take) {
         Some(buf) => Ok(buf),
         None => StringInfo::new_in(scratch_mcx()),
     }
 }
 
-fn put_wire_buf(mut buf: StringInfo<'static>) {
+pub(crate) fn put_wire_buf(mut buf: StringInfo<'static>) {
     buf.reset();
     WIRE_BUF.with(|c| c.set(Some(buf)));
 }

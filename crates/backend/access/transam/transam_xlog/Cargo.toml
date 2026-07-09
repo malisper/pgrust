@@ -27,6 +27,7 @@ init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
 clog = { path = "../clog" }
 relmapper = { path = "../../../utils/cache/relmapper" }
 relcache_seams = { path = "../../../utils/cache/relcache_seams" }
@@ -34,6 +35,10 @@ xlogutils = { path = "../xlogutils" }
 xlogreader_seams = { path = "../xlogreader_seams" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
 xloginsert_seams = { path = "../xloginsert_seams" }
+xlogbackup = { path = "../xlogbackup" }
+ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
 standby_seams = { path = "../../../storage/ipc/standby_seams" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }
 xlogarchive_seams = { path = "../xlogarchive_seams" }
