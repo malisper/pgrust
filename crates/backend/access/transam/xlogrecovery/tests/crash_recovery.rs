@@ -745,6 +745,8 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         "pg_xact",
         "pg_subtrans",
         "base/5",
+        // StartupXLOG opens pg_tblspc at ERROR; real initdb always creates it.
+        "pg_tblspc",
     ] {
         std::fs::create_dir_all(dd1.join(sub)).unwrap();
     }
