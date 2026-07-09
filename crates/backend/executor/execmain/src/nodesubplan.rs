@@ -9,7 +9,7 @@ use core::ptr::NonNull;
 use std::rc::Rc;
 
 use ::datum::NullableDatum;
-use ::execexpr::{exec_eval_expr, exec_project, ExprState};
+use ::execexpr::{exec_project, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId, SubplanStateCell};
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION};
@@ -703,6 +703,81 @@ fn exec_scan_sub_plan<'mcx>(
     result
 }
 
+// C ExecEvalExpr recurses into nested ExecEvalSubPlan; the decomposed
+// interpreter surfaces nested SubPlans as suspensions, pumped here through
+// ExecSubPlan itself (testexpr / projLeft carry nested SubPlans in C).
+fn eval_expr_nested_subplans<'mcx>(
+    state: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    mut outer: Option<&mut SlotData<'mcx>>,
+) -> PgResult<NullableDatum> {
+    let mut resume: Option<::execexpr::Resume> = None;
+    loop {
+        let outcome = {
+            let r = resume.take();
+            let state = &mut *state;
+            with_eval_slots_outer(estate, ecxt, None, outer.as_deref_mut(), move |slots, _, _| {
+                ::execexpr::exec_eval_expr_outcome(state, slots, r)
+            })?
+        };
+        match outcome {
+            ::execexpr::EvalOutcome::Done(nd) => return Ok(nd),
+            ::execexpr::EvalOutcome::Suspended(s) => {
+                // SAFETY: the suspension's sstate was installed by
+                // subplan_expr_init_hook on this estate (nested compile env).
+                let v = unsafe {
+                    subplan_expr_eval_hook(s.sstate, estate, ecxt, outer.as_deref_mut())
+                }?;
+                resume = Some(s.resume_with(v));
+            }
+        }
+    }
+}
+
+// [`eval_expr_nested_subplans`] for the hashed lane's LHS projection
+// (C ExecProject(projLeft); the lefthand exprs may carry nested SubPlans).
+fn project_lhs_nested_subplans<'mcx>(
+    proj: &mut ExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    lhs_slot: ExecSlotId,
+    mut outer: Option<&mut SlotData<'mcx>>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    proj.arm_result_mcx(mcx);
+    exectuples::exec_clear_tuple(estate.slot_mut(lhs_slot), mcx);
+    let mut resume: Option<::execexpr::Resume> = None;
+    loop {
+        let suspended = {
+            let r = resume.take();
+            let proj = &mut *proj;
+            with_eval_slots_outer(
+                estate,
+                ecxt,
+                Some(lhs_slot),
+                outer.as_deref_mut(),
+                move |slots, rslot, _| {
+                    ::execexpr::exec_project_outcome(proj, slots, rslot.expect("lhs slot"), r)
+                },
+            )?
+        };
+        match suspended {
+            None => {
+                exectuples::exec_store_virtual_tuple(estate.slot_mut(lhs_slot));
+                return Ok(());
+            }
+            Some(s) => {
+                // SAFETY: as eval_expr_nested_subplans.
+                let v = unsafe {
+                    subplan_expr_eval_hook(s.sstate, estate, ecxt, outer.as_deref_mut())
+                }?;
+                resume = Some(s.resume_with(v));
+            }
+        }
+    }
+}
+
 fn scan_sub_plan_loop<'mcx>(
     sstate: &mut SubPlanExprState<'mcx>,
     ps: &mut PlanStateNode<'mcx>,
@@ -778,9 +853,8 @@ fn scan_sub_plan_loop<'mcx>(
                     .testexpr
                     .as_deref_mut()
                     .expect("ROWCOMPARE SubPlan has a testexpr");
-                result = with_eval_slots_outer(estate, ecxt, None, outer.as_deref_mut(), |slots, _, _| {
-                    exec_eval_expr(testexpr, slots)
-                })?;
+                result =
+                    eval_expr_nested_subplans(testexpr, estate, ecxt, outer.as_deref_mut())?;
             }
             SubLinkType::ANY_SUBLINK | SubLinkType::ALL_SUBLINK => {
                 found = true;
@@ -797,9 +871,8 @@ fn scan_sub_plan_loop<'mcx>(
                     .testexpr
                     .as_deref_mut()
                     .expect("ANY/ALL SubPlan has a testexpr");
-                let row = with_eval_slots_outer(estate, ecxt, None, outer.as_deref_mut(), |slots, _, _| {
-                    exec_eval_expr(testexpr, slots)
-                })?;
+                let row =
+                    eval_expr_nested_subplans(testexpr, estate, ecxt, outer.as_deref_mut())?;
                 if link == SubLinkType::ANY_SUBLINK {
                     if row.isnull {
                         result.isnull = true;
@@ -1078,9 +1151,7 @@ fn exec_hash_sub_plan<'mcx>(
         }
         let h = sstate.hashed.as_mut().unwrap();
         let proj_left = &mut h.proj_left;
-        with_eval_slots_outer(estate, ecxt, Some(lhs_slot), outer, |slots, rslot, m| {
-            exec_project(proj_left, slots, rslot.expect("lhs slot"), m)
-        })?;
+        project_lhs_nested_subplans(proj_left, estate, ecxt, lhs_slot, outer)?;
     }
 
     let h = sstate.hashed.as_mut().unwrap();

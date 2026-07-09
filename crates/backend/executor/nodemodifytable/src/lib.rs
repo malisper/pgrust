@@ -2572,12 +2572,9 @@ fn merge_update_act<'mcx>(
     let mut update_indexes = TU_UpdateIndexes::TU_None;
 
     let mut cross_part = false;
-    pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
-    let result = {
-        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, es_range_table, es_rteperminfos, .. } =
+    {
+        let EStateData { es_relations, es_tupleTable, es_range_table, es_rteperminfos, .. } =
             &mut *estate;
-        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
-        let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
         let rel = es_relations[(mt.rel().rti - 1) as usize]
             .as_ref()
             .expect("result relation opened");
@@ -2613,18 +2610,31 @@ fn merge_update_act<'mcx>(
             // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
             // performed outside this borrow scope.
             cross_part = true;
-            TM_Result::TM_Ok
-        } else {
+        }
+    }
+    // The WITH CHECK quals of UPDATE RLS policies apply to the NEW row here,
+    // exactly as in ExecUpdateAct (C 2210-2213), only when the partition
+    // constraint passed. Policy quals carry SubPlans/initplans (executils
+    // subplan driver).
+    if !cross_part && !mt.rel().wco_exprs.is_empty() {
+        let ecxt = mt.node_ecxt;
+        let r = mt.rel_mut();
+        exec_with_check_options(estate, ecxt, &mut r.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot_id)?;
+    }
+    let result = if cross_part {
+        TM_Result::TM_Ok
+    } else {
+        let EStateData { es_relations, es_tupleTable, es_snapshot, es_crosscheck_snapshot, es_range_table, es_rteperminfos, .. } =
+            &mut *estate;
+        let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+        let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
+        let rel = es_relations[(mt.rel().rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
 
         if rel.rd_rel.relhasindex && mt.rel_mut().indexes.is_none() {
             mt.rel_mut().indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
-        }
-
-        // The WITH CHECK quals of UPDATE RLS policies apply to the NEW row
-        // here, exactly as in ExecUpdateAct (C 2210-2213).
-        if !mt.rel().wco_exprs.is_empty() {
-            let r = &mut mt.rels[mt.cur];
-            exec_with_check_options_basic(&mut r.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
         }
 
         {
@@ -2661,7 +2671,6 @@ fn merge_update_act<'mcx>(
             &mut lockmode,
             &mut update_indexes,
         )?
-        }
     };
     if cross_part {
         return match exec_cross_partition_update(mt, estate, tupleid, slot_id, epq_eval)? {
@@ -3444,19 +3453,9 @@ fn exec_update<'mcx>(
     loop {
         let mcx = estate.es_query_cxt;
         let mut cross_part = false;
-        pre_eval_wco_param_deps(&mt.rel().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, estate)?;
-        let result = {
-            let EStateData {
-                es_relations,
-                es_tupleTable,
-                es_snapshot,
-                es_range_table,
-                es_rteperminfos,
-            es_crosscheck_snapshot,
-                ..
-            } = &mut *estate;
-            let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
-            let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
+        {
+            let EStateData { es_relations, es_tupleTable, es_range_table, es_rteperminfos, .. } =
+                &mut *estate;
             let rel = es_relations[(mt.rel().rti - 1) as usize]
                 .as_ref()
                 .expect("result relation opened");
@@ -3500,18 +3499,39 @@ fn exec_update<'mcx>(
                 // ExecCrossPartitionUpdate: DELETE here + re-routed INSERT,
                 // performed outside this borrow scope.
                 cross_part = true;
-                TM_Result::TM_Ok
-            } else {
+            }
+        }
+        // C ExecUpdateAct: UPDATE RLS WITH CHECK quals over the NEW row, only
+        // when the partition constraint passed. Policy quals carry
+        // SubPlans/initplans (executils subplan driver).
+        if !cross_part && !mt.rel().wco_exprs.is_empty() {
+            let ecxt = mt.node_ecxt;
+            let r = mt.rel_mut();
+            exec_with_check_options(estate, ecxt, &mut r.wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot_id)?;
+        }
+        let result = if cross_part {
+            TM_Result::TM_Ok
+        } else {
+            let EStateData {
+                es_relations,
+                es_tupleTable,
+                es_snapshot,
+                es_range_table,
+                es_rteperminfos,
+            es_crosscheck_snapshot,
+                ..
+            } = &mut *estate;
+            let snapshot: &tableam_vocab::Snapshot<'mcx> = &*es_snapshot;
+            let crosscheck: &tableam_vocab::Snapshot<'mcx> = &*es_crosscheck_snapshot;
+            let rel = es_relations[(mt.rel().rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened");
+            let slot = &mut es_tupleTable[slot_id.0 as usize];
 
             if rel.rd_rel.relhasindex && mt.rel_mut().indexes.is_none() {
                 mt.rel_mut().indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
             }
 
-            if !mt.rel_mut().wco_exprs.is_empty() {
-                // C skips these when the partition constraint failed; that
-                // path errored just above, so this only runs on success.
-                exec_with_check_options_basic(&mut mt.rel_mut().wco_exprs, WCOKind::WCO_RLS_UPDATE_CHECK, slot)?;
-            }
             {
                 // ExecConstraints (execMain.c): partition children report
                 // through the root rel + root perminfo.
@@ -3546,7 +3566,6 @@ fn exec_update<'mcx>(
                 &mut lockmode,
                 &mut update_indexes,
             )?
-            }
         };
 
         if cross_part {
@@ -6307,8 +6326,19 @@ fn exec_on_conflict_update<'mcx>(
         };
         pre_eval_param_deps(where_clause, estate)?;
         pre_eval_param_deps(set_proj, estate)?;
+        // Conflict-check WCO policy quals carry SubPlans too (C evaluates
+        // them through the same econtext); they force the driver arm.
+        let wcos = match leaf {
+            Some(idx) => mt.leaf_wco[idx].as_ref(),
+            None => Some(&mt.rels[mt.cur].wco_exprs),
+        };
+        let wco_subplan = wcos.is_some_and(|ws| {
+            ws.iter()
+                .any(|w| w.kind == WCOKind::WCO_RLS_CONFLICT_CHECK && w.state.has_subplan())
+        });
         where_clause.is_some_and(|q| q.has_subplan())
             || set_proj.is_some_and(|p| p.has_subplan())
+            || wco_subplan
     };
     if use_subplans {
         let ec = mt.node_ecxt.expect("node ecxt created with ON CONFLICT UPDATE");
@@ -7053,8 +7083,9 @@ fn copy_by_ref_datum<'mcx>(mcx: mcx::Mcx<'mcx>, d: Datum, attlen: i16) -> PgResu
 }
 
 // ExecWithCheckOptions (execMain.c): NULL or false qual = violation for
-// every kind (ExecQual semantics). Callers inside an EStateData destructure
-// use this variant; policy SubPlans/initplans need `exec_with_check_options`.
+// every kind (ExecQual semantics). Only for WCOs proven subplan-free (the
+// on-conflict driver-arm gate); initplan params must be pre-evaluated by the
+// caller. Subplan-bearing WCOs go through `exec_with_check_options`.
 fn exec_with_check_options_basic<'mcx>(
     wcos: &mut mcx::PgVec<'mcx, WcoExpr<'mcx>>,
     kind: WCOKind,
