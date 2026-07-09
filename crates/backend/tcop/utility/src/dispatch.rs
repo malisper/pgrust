@@ -1013,7 +1013,14 @@ fn slow_switch<'mcx>(
                         );
                     }
                     T_CreateStatsStmt => {
-                        exec_create_stats_stmt(mcx, stmt, source_text)?;
+                        // C recurses through ProcessUtility; the inner
+                        // ProcessUtilitySlow collects address = CreateStatistics.
+                        let address = exec_create_stats_stmt(mcx, stmt, source_text)?;
+                        event_trigger::EventTriggerCollectSimpleCommand(
+                            address,
+                            INVALID_OBJECT_ADDRESS,
+                            CreateCommandTag(stmt),
+                        );
                     }
                     _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
                 }
@@ -1117,8 +1124,8 @@ fn slow_switch<'mcx>(
             // outlives the utility call; nothing derived escapes it.
             let stmt_node =
                 unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
-            exec_create_stats_stmt(mcx, stmt_node, source_text)?;
-            Ok(None)
+            let address = exec_create_stats_stmt(mcx, stmt_node, source_text)?;
+            Ok(Some(address))
         }
 
         T_AlterCollationStmt => {
@@ -2113,7 +2120,7 @@ fn exec_create_stats_stmt<'mcx>(
     mcx: Mcx<'mcx>,
     stmt_node: Node<'mcx>,
     source_text: &str,
-) -> PgResult<()> {
+) -> PgResult<ObjectAddress> {
     let stmt = stmt_node
         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
         .expect("CreateStatsStmt");
@@ -2150,9 +2157,8 @@ fn exec_create_stats_stmt<'mcx>(
     let stmt = stmt_node
         .as_variant::<types_nodes::rawnodes::CreateStatsStmt>()
         .expect("CreateStatsStmt");
-    collect_gap("CREATE STATISTICS");
-    statscmds::CreateStatistics(mcx, stmt, true)?;
-    Ok(())
+    // C: address = CreateStatistics(); collected by the shared slow-path tail.
+    statscmds::CreateStatistics(mcx, stmt, true)
 }
 
 fn exec_index_stmt<'mcx>(
