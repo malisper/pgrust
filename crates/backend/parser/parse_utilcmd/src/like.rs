@@ -251,12 +251,10 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             let seq_relid =
                 pg_depend::getIdentitySequence(mcx, relid, attribute.attnum as i32, false)?;
             let seq_options = sequence_options(mcx, seq_relid)?;
-            let defref = def_node.as_variant::<ColumnDef>().expect("ColumnDef");
             crate::generateSerialExtraStmts(
                 mcx,
                 cxt.relation,
                 def_node,
-                defref,
                 InvalidOid,
                 seq_options,
                 true,

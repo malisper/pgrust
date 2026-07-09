@@ -825,7 +825,6 @@ fn transformConstraintAttrs<'mcx>(
 fn transformColumnDefinition<'mcx>(
     mcx: Mcx<'mcx>,
     column_node: Node<'mcx>,
-    column: &ColumnDef<'mcx>,
     relation: &RangeVar<'mcx>,
     // C cxt->rel: set only on the ALTER path; serial/identity sequences take
     // namespace/persistence/owner from the existing table.
@@ -844,13 +843,20 @@ fn transformColumnDefinition<'mcx>(
     ispartitioned: bool,
 ) -> PgResult<()> {
     let relname = relation.relname.unwrap_or("");
-    if column.raw_default.is_some() || column.cooked_default.is_some() {
+    // The ColumnDef is mutated through column_node throughout; every read
+    // re-derives so no shared ref is held across a with_mut.
+    macro_rules! col {
+        () => {
+            column_node.as_variant::<ColumnDef>().expect("ColumnDef")
+        };
+    }
+    if col!().raw_default.is_some() || col!().cooked_default.is_some() {
         unported("pre-split column defaults");
     }
 
     // SERIAL pseudo-types (transformColumnDefinition's is_serial arm).
     let mut is_serial_oid = InvalidOid;
-    if let Some(tn_node) = column.typeName {
+    if let Some(tn_node) = col!().typeName {
         let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
         if tn.names.len() == 1 && !tn.pct_type {
             let typname = tn.names.nth(0).as_string().expect("TypeName name").sval;
@@ -887,7 +893,6 @@ fn transformColumnDefinition<'mcx>(
             mcx,
             relation,
             column_node,
-            column,
             is_serial_oid,
             NodeList::nil(),
             false,
@@ -939,11 +944,11 @@ fn transformColumnDefinition<'mcx>(
     // IDENTITY column constraints do too (pre-scan mirrors C).
     let mut disallow_noinherit_notnull = is_serial_oid != InvalidOid;
 
-    transformConstraintAttrs(&column.constraints, src)?;
+    transformConstraintAttrs(&col!().constraints, src)?;
 
     if !disallow_noinherit_notnull {
-        for cnode in column.constraints.iter() {
-            let c = cnode.as_variant::<Constraint>().expect("column constraint");
+        for i in 0..col!().constraints.len() {
+            let c = col!().constraints.nth(i).as_variant::<Constraint>().expect("column constraint");
             if matches!(c.contype, ConstrType::CONSTR_IDENTITY | ConstrType::CONSTR_PRIMARY) {
                 disallow_noinherit_notnull = true;
             }
@@ -952,17 +957,22 @@ fn transformColumnDefinition<'mcx>(
 
     let mut saw_nullable = false;
     let mut saw_default = false;
-    let mut col_not_null = column.is_not_null;
+    let mut col_not_null = col!().is_not_null;
     let mut saw_identity = false;
     let mut saw_generated = false;
     let mut notnull_constraint: Option<Node<'mcx>> = None;
-    for cnode in column.constraints.iter() {
+    let mut ci = 0;
+    while ci < col!().constraints.len() {
+        let cnode = col!().constraints.nth(ci);
+        ci += 1;
         let constraint = cnode.as_variant::<Constraint>().expect("column constraint");
+        // Arms below may with_mut cnode; the trailing checks use this copy.
+        let con_location = constraint.location;
         match constraint.contype {
             ConstrType::CONSTR_DEFAULT => {
                 if saw_default {
                     return Err(multiple_defaults(
-                        column.colname.unwrap_or(""),
+                        col!().colname.unwrap_or(""),
                         relname,
                     ));
                 }
@@ -995,7 +1005,7 @@ fn transformColumnDefinition<'mcx>(
                         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
                 }
-                let tn = column
+                let tn = col!()
                     .typeName
                     .expect("ColumnDef.typeName")
                     .as_variant::<TypeName>()
@@ -1007,7 +1017,7 @@ fn transformColumnDefinition<'mcx>(
                     return Err(column_syntax_error(
                         format_args!(
                             "multiple identity specifications for column \"{}\" of table \"{}\"",
-                            column.colname.unwrap_or(""),
+                            col!().colname.unwrap_or(""),
                             relname
                         ),
                         src,
@@ -1018,7 +1028,6 @@ fn transformColumnDefinition<'mcx>(
                     mcx,
                     relation,
                     column_node,
-                    column,
                     type_oid,
                     // C list_copy: generateSerialExtraStmts prepends AS.
                     constraint.options.clone_in(mcx)?,
@@ -1041,7 +1050,7 @@ fn transformColumnDefinition<'mcx>(
                     return Err(column_syntax_error(
                         format_args!(
                             "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
-                            column.colname.unwrap_or(""),
+                            col!().colname.unwrap_or(""),
                             relname
                         ),
                         src,
@@ -1063,7 +1072,7 @@ fn transformColumnDefinition<'mcx>(
                     return Err(column_syntax_error(
                         format_args!(
                             "multiple generation clauses specified for column \"{}\" of table \"{}\"",
-                            column.colname.unwrap_or(""),
+                            col!().colname.unwrap_or(""),
                             relname
                         ),
                         src,
@@ -1086,7 +1095,7 @@ fn transformColumnDefinition<'mcx>(
             }
             ConstrType::CONSTR_CHECK => ckconstraints.lappend(mcx, cnode)?,
             ConstrType::CONSTR_NOTNULL => {
-                let colname = column.colname.expect("ColumnDef.colname");
+                let colname = col!().colname.expect("ColumnDef.colname");
                 if ispartitioned && constraint.is_no_inherit {
                     return Err(Box::new(
                         PgError::new(
@@ -1177,7 +1186,7 @@ fn transformColumnDefinition<'mcx>(
                     return Err(column_syntax_error(
                         format_args!(
                             "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
-                            column.colname.unwrap_or(""),
+                            col!().colname.unwrap_or(""),
                             relname
                         ),
                         src,
@@ -1199,7 +1208,7 @@ fn transformColumnDefinition<'mcx>(
                         return Err(column_syntax_error(
                             format_args!(
                                 "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
-                                column.colname.unwrap_or(""),
+                                col!().colname.unwrap_or(""),
                                 relname
                             ),
                             src,
@@ -1223,7 +1232,7 @@ fn transformColumnDefinition<'mcx>(
                     ));
                 }
                 if constraint.keys.is_nil() {
-                    let colname = column.colname.expect("ColumnDef.colname");
+                    let colname = col!().colname.expect("ColumnDef.colname");
                     let keys = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
                     // SAFETY: parse tree is analyze-owned; no derived refs.
                     unsafe {
@@ -1240,7 +1249,7 @@ fn transformColumnDefinition<'mcx>(
                         constraint.location,
                     ));
                 }
-                let colname = column.colname.expect("ColumnDef.colname");
+                let colname = col!().colname.expect("ColumnDef.colname");
                 let fk_attrs = NodeList::make1(mcx, Node::mk_string(mcx, colname)?)?;
                 // SAFETY: parse tree is analyze-owned; no derived refs.
                 unsafe {
@@ -1264,33 +1273,33 @@ fn transformColumnDefinition<'mcx>(
             return Err(column_syntax_error(
                 format_args!(
                     "both default and identity specified for column \"{}\" of table \"{}\"",
-                    column.colname.unwrap_or(""),
+                    col!().colname.unwrap_or(""),
                     relname
                 ),
                 src,
-                constraint.location,
+                con_location,
             ));
         }
         if saw_default && saw_generated {
             return Err(column_syntax_error(
                 format_args!(
                     "both default and generation expression specified for column \"{}\" of table \"{}\"",
-                    column.colname.unwrap_or(""),
+                    col!().colname.unwrap_or(""),
                     relname
                 ),
                 src,
-                constraint.location,
+                con_location,
             ));
         }
         if saw_identity && saw_generated {
             return Err(column_syntax_error(
                 format_args!(
                     "both identity and generation expression specified for column \"{}\" of table \"{}\"",
-                    column.colname.unwrap_or(""),
+                    col!().colname.unwrap_or(""),
                     relname
                 ),
                 src,
-                constraint.location,
+                con_location,
             ));
         }
     }
@@ -1301,20 +1310,20 @@ fn transformColumnDefinition<'mcx>(
                 .with_mut::<ColumnDef, _>(|c| c.is_not_null = true)
                 .expect("ColumnDef");
         }
-        let colname = column.colname.expect("ColumnDef.colname");
+        let colname = col!().colname.expect("ColumnDef.colname");
         nnconstraints.lappend(mcx, make_not_null_constraint(mcx, colname)?)?;
     }
     // Per-column FDW options become a post-create ALTER FOREIGN TABLE ALTER
     // COLUMN ... OPTIONS statement (parse_utilcmd.c:1008-1033).
-    if !column.fdwoptions.is_nil() {
+    if !col!().fdwoptions.is_nil() {
         use types_nodes::parsenodes::{
             AlterTableCmd, AlterTableStmt, AlterTableType, DropBehavior, ObjectType,
         };
         let mut cmd = Node::build::<AlterTableCmd>(mcx)?;
         cmd.subtype = AlterTableType::AT_AlterColumnGenericOptions;
-        cmd.name = column.colname;
+        cmd.name = col!().colname;
         let mut opts = NodeList::nil();
-        for o in column.fdwoptions.iter() {
+        for o in col!().fdwoptions.iter() {
             opts.lappend(mcx, o)?;
         }
         cmd.def = Some(Node::mk_list(mcx, opts)?);
@@ -1343,7 +1352,7 @@ fn transformColumnDefinition<'mcx>(
     }
     // Typed-table/partition column options carry no typeName; C skips
     // transformColumnType for them (parse_utilcmd.c:1055).
-    let Some(tn_node) = column.typeName else {
+    let Some(tn_node) = col!().typeName else {
         return Ok(());
     };
     let tn = tn_node.as_variant::<TypeName>().expect("TypeName");
@@ -1351,7 +1360,7 @@ fn transformColumnDefinition<'mcx>(
     // C typenameType(cxt->pstate, ...) attaches errposition at tn.location.
     let (type_oid, _typmod) = typenameTypeIdAndMod(mcx, None, tn)
         .map_err(|e| position_on_src(e, src, tn.location))?;
-    if let Some(cc) = column.collClause {
+    if let Some(cc) = col!().collClause {
         let cc = cc.as_variant::<types_nodes::CollateClause>().expect("CollateClause");
         catalog_namespace::get_collation_oid_list(&cc.collname, false)
             .map_err(|e| position_on_src(e, src, cc.location))?;
@@ -1586,11 +1595,9 @@ pub fn transformCreateStmt<'mcx>(
     for elt in stmt.tableElts.iter() {
         match elt.node_tag() {
             NodeTag::T_ColumnDef => {
-                let cd = elt.as_variant::<ColumnDef>().expect("ColumnDef");
                 transformColumnDefinition(
                     mcx,
                     elt,
-                    cd,
                     relation,
                     None,
                     Some(query_string),
@@ -2597,11 +2604,12 @@ fn leak_str(s: PgString<'_>) -> &str {
 // (SEQUENCE NAME/LOGGED/UNLOGGED options are loud). rel = C's cxt->rel
 // (ALTER TABLE: namespace/persistence/owner come from the existing table);
 // col_exists routes the OWNED BY AlterSeqStmt to blist (AT_AddIdentity).
+// Takes the node handle only: it mutates the ColumnDef (identitySequence), so
+// no caller-held &ColumnDef may cross this call.
 pub(crate) fn generateSerialExtraStmts<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &RangeVar<'mcx>,
     column_node: Node<'mcx>,
-    column: &ColumnDef<'mcx>,
     seqtypid: Oid,
     seqoptions: NodeList<'mcx>,
     for_identity: bool,
@@ -2626,7 +2634,11 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
             .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
     );
     let relname = relation.relname.expect("RangeVar.relname");
-    let colname = column.colname.expect("ColumnDef.colname");
+    let colname = column_node
+        .as_variant::<ColumnDef>()
+        .expect("ColumnDef")
+        .colname
+        .expect("ColumnDef.colname");
     let sname = leak_str(ChooseRelationName(mcx, relname, Some(colname), "seq", snamespaceid)?);
 
     let seq_rv = Node::mk_mut(
@@ -2860,7 +2872,6 @@ pub fn transformAlterTableCmd<'mcx>(
     match cmd.subtype {
         AlterTableType::AT_AddColumn => {
             let defnode = cmd.def.expect("AT_AddColumn ColumnDef");
-            let cd = defnode.as_variant::<ColumnDef>().expect("ColumnDef");
             let mut ixconstraints = NodeList::nil();
             let mut fkconstraints = NodeList::nil();
             let mut rv = RangeVar::default();
@@ -2871,7 +2882,6 @@ pub fn transformAlterTableCmd<'mcx>(
             transformColumnDefinition(
                 mcx,
                 defnode,
-                cd,
                 &rv,
                 Some(rel),
                 Some(query_string),
@@ -2949,7 +2959,6 @@ pub fn transformAlterTableCmd<'mcx>(
             if attnum == 0 {
                 return Err(alter_undefined_column(colname, relname));
             }
-            let cd = newdef_node.as_variant::<ColumnDef>().expect("ColumnDef");
             let mut rv = RangeVar::default();
             rv.relname = Some(arena_relname()?);
             rv.inh = true;
@@ -2959,7 +2968,6 @@ pub fn transformAlterTableCmd<'mcx>(
                 mcx,
                 &rv,
                 newdef_node,
-                cd,
                 lsyscache::get_atttype(rel.rd_id, attnum)?,
                 con.options.clone_in(mcx)?,
                 true,
