@@ -220,3 +220,21 @@ pub(crate) fn overflow_count() -> u32 {
 pub(crate) fn overflowed_count() -> u32 {
     with(|p| p.overflowed)
 }
+
+// Diagnostic for pinned-where-C-expects-none panics: every live private pin.
+pub fn debug_all_private_pins() -> Vec<(Buffer, i32)> {
+    with(|p| {
+        let mut out: Vec<(Buffer, i32)> = p
+            .entries
+            .iter()
+            .filter(|e| e.buffer != InvalidBuffer && e.refcount != 0)
+            .map(|e| (e.buffer, e.refcount))
+            .collect();
+        if let Some(m) = p.overflow.as_ref() {
+            if p.overflowed > 0 {
+                out.extend(m.iter().filter(|(_, &rc)| rc != 0).map(|(&b, &rc)| (b, rc)));
+            }
+        }
+        out
+    })
+}
