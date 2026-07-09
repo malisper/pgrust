@@ -23,6 +23,7 @@ postinit = { path = "../../utils/init/postinit" }
 guc = { path = "../../utils/misc/guc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 guc_file = { path = "../../utils/misc/guc_file" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
 latch = { path = "../../storage/ipc/latch" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }

@@ -85,6 +85,26 @@ fn stack_depth_exceeded() -> Box<types_error::PgError> {
     )
 }
 
+// C InitializeGUCOptionsFromEnvironment's stack-rlimit branch (guc.c): the
+// boot default is 100kB; a usable platform limit raises it to
+// min((rlimit - slop)/1024, 2048) kB, as PGC_S_ENV_VAR so conf/argv override.
+pub fn adjust_max_stack_depth_from_rlimit() -> PgResult<()> {
+    let stack_rlimit = get_stack_depth_rlimit();
+    if stack_rlimit > 0 {
+        let mut new_limit = stack_rlimit.saturating_sub(STACK_DEPTH_SLOP) / 1024;
+        if new_limit > 100 {
+            new_limit = new_limit.min(2048);
+            guc::SetConfigOption(
+                "max_stack_depth",
+                Some(&new_limit.to_string()),
+                types_guc::GucContext::PGC_POSTMASTER,
+                GucSource::PGC_S_ENV_VAR,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn check_max_stack_depth(newval: i32, _source: GucSource) -> bool {
     let newval_bytes = newval as isize * 1024;
     let stack_rlimit = get_stack_depth_rlimit();

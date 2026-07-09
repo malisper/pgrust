@@ -192,6 +192,7 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     libpq_pqsignal::unblock_signals();
 
     guc_seams::initialize_guc_options::call()?;
+    stack_depth::adjust_max_stack_depth_from_rlimit()?;
 
     let mut args = argv.iter().skip(1).peekable();
     while let Some(arg) = args.next() {
