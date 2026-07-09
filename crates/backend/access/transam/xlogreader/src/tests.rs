@@ -284,7 +284,9 @@ fn decode_corrupt_body(body: &[u8]) -> String {
 // in decode_record must reject the record with C's report_invalid_record
 // error, not abort (overflow-checks) or panic (unconditional slice bound).
 // Bytes are the minimized libFuzzer repros; message strings are byte-identical
-// to xlogreader.c DecodeXLogRecord (PG 18.3).
+// to xlogreader.c DecodeXLogRecord (PG 18.3). The LSN is 0/0 because C
+// prints state->ReadRecPtr, which only advances on record consumption — it
+// is still InvalidXLogRecPtr while decoding the first record.
 #[test]
 fn fuzz_add_overflow_lib1827_reports_invalid_length() {
     // DATA_LONG main_data_len = 0xFFFFFFFF wraps datatotal (l177 27-byte repro).
@@ -294,7 +296,7 @@ fn fuzz_add_overflow_lib1827_reports_invalid_length() {
     ];
     assert_eq!(
         decode_corrupt_body(body),
-        "record with invalid length at 0/100028"
+        "record with invalid length at 0/0"
     );
 }
 
@@ -304,7 +306,7 @@ fn fuzz_subtract_underflow_lib1890_reports_invalid_length() {
     let body = &[0x06, 0xfb, 0x01, 0x00, 0x00, 0xc2, 0x1e, 0x00, 0x00];
     assert_eq!(
         decode_corrupt_body(body),
-        "BKPIMAGE_HAS_HOLE not set, but hole offset 30 length 24064 at 0/100028"
+        "BKPIMAGE_HAS_HOLE not set, but hole offset 30 length 24064 at 0/0"
     );
 }
 
@@ -321,7 +323,7 @@ fn fuzz_bimg_slice_oob_wave2_reports_invalid_length() {
     ];
     assert_eq!(
         decode_corrupt_body(body),
-        "record with invalid length at 0/100028"
+        "record with invalid length at 0/0"
     );
 }
 
