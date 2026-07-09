@@ -178,6 +178,12 @@ fn pg_trigger_depth_reads_the_executor_seam() {
 
 #[test]
 fn recovery_control_fns_error_outside_recovery() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static XLOG_BUFFERS: AtomicI32 = AtomicI32::new(64);
+    guc_tables::vars::XLOGbuffers.install_if_absent(guc_tables::GucVarAccessors {
+        get: || XLOG_BUFFERS.load(Ordering::Relaxed),
+        set: |v| XLOG_BUFFERS.store(v, Ordering::Relaxed),
+    });
     transam_xlog::XLOGShmemInit();
     transam_xlog::ctl::XLogCtl()
         .SharedRecoveryState
