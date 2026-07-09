@@ -160,6 +160,11 @@ fn install_stub_seams() {
     startup_seams::begin_startup_progress_phase::set(|| {});
     postgres_seams::check_for_interrupts::set(|| Ok(()));
     startup_seams::process_startup_proc_interrupts::set(|| Ok(()));
+
+    // WAL summarizer is absent here; the end-of-recovery checkpoint reaches
+    // both. 0 = InvalidXLogRecPtr: no summarizer, KeepLogSeg skips its clamp.
+    walsummarizer_seams::wakeup_wal_summarizer::set(|| {});
+    walsummarizer_seams::get_oldest_unsummarized_lsn::set(|| Ok(0));
 }
 
 // The production init_seams this composition reaches; real machinery only.
