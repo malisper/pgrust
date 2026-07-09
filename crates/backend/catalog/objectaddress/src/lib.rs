@@ -133,7 +133,7 @@ fn err(sqlstate: types_error::SqlState, msg: String) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
 
-fn fill_range_var<'mcx>(parts: &[&'mcx str]) -> RangeVar<'mcx> {
+fn fill_range_var<'mcx>(parts: &[&'mcx str]) -> PgResult<RangeVar<'mcx>> {
     let mut rv = RangeVar {
         catalogname: None,
         schemaname: None,
@@ -153,16 +153,21 @@ fn fill_range_var<'mcx>(parts: &[&'mcx str]) -> RangeVar<'mcx> {
             rv.schemaname = Some(s);
             rv.relname = r;
         }
-        _ => panic!("improper relation name (too many dotted names)"),
+        _ => {
+            return Err(err(
+                ERRCODE_SYNTAX_ERROR,
+                format!("improper relation name (too many dotted names): {}", parts.join(".")),
+            ))
+        }
     }
-    rv
+    Ok(rv)
 }
 
-pub fn makeRangeVarFromParts<'mcx>(parts: &[&'mcx str]) -> RangeVar<'mcx> {
+pub fn makeRangeVarFromParts<'mcx>(parts: &[&'mcx str]) -> PgResult<RangeVar<'mcx>> {
     fill_range_var(parts)
 }
 
-pub fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> RangeVar<'mcx> {
+pub fn makeRangeVarFromNameList<'mcx>(names: &NodeList<'mcx>) -> PgResult<RangeVar<'mcx>> {
     let parts: Vec<&'mcx str> = names
         .iter()
         .map(|n| n.as_string().expect("qualified name component is a String node").sval)
@@ -217,8 +222,17 @@ pub fn LookupTypeNameOid(tn: &TypeName<'_>, missing_ok: bool) -> PgResult<Oid> {
     }
     let mut names: [&str; 3] = [""; 3];
     let nnames = tn.names.len();
-    if nnames == 0 || nnames > 3 {
-        unported("improper TypeName names length");
+    if nnames > 3 {
+        // C DeconstructQualifiedName (namespace.c): catchable 42601, not a crash.
+        return Err(err(
+            ERRCODE_SYNTAX_ERROR,
+            format!("improper qualified name (too many dotted names): {}", NameListToString(&tn.names)),
+        ));
+    }
+    if nnames == 0 {
+        // names == NIL is the pre-resolved-typeOid lane (parse_type.c);
+        // grammar TypeNames always carry names.
+        unported("pre-resolved TypeName.typeOid lane");
     }
     for (i, n) in tn.names.iter().enumerate() {
         names[i] = n.as_string().expect("TypeName names").sval;
@@ -258,7 +272,7 @@ fn get_relation_by_qualified_name<'mcx>(
     missing_ok: bool,
 ) -> PgResult<(ObjectAddress, Option<Relation<'mcx>>)> {
     let mut address = ObjectAddress::set(RELATION_RELATION_ID, InvalidOid);
-    let rv = makeRangeVarFromNameList(object);
+    let rv = makeRangeVarFromNameList(object)?;
     let Some(rel) = relation::relation_openrv_extended(mcx, &rv, lockmode, missing_ok)? else {
         return Ok((address, None));
     };
@@ -321,7 +335,7 @@ fn get_object_address_attribute<'mcx>(
     let attname = parts[nnames - 1];
     let relparts = &parts[..nnames - 1];
     let relname_str = relparts.join(".");
-    let rv = fill_range_var(relparts);
+    let rv = fill_range_var(relparts)?;
     // C: no missing_ok support for the relation itself here.
     let rel = relation::relation_openrv(mcx, &rv, lockmode)?;
     let reloid = rel.rd_id;
@@ -506,7 +520,7 @@ fn get_object_address_publication_rel<'mcx>(
         .nth(0)
         .as_list()
         .expect("publication relation object leads with a name list");
-    let rv = makeRangeVarFromNameList(&relname);
+    let rv = makeRangeVarFromNameList(&relname)?;
     let Some(relation) =
         relation::relation_openrv_extended(mcx, &rv, types_rel::AccessShareLock, missing_ok)?
     else {
@@ -618,7 +632,7 @@ fn get_object_address_relobject<'mcx>(
         .take(nnames - 1)
         .map(|n| n.as_string().expect("qualified name component is a String node").sval)
         .collect();
-    let rv = fill_range_var(&parts);
+    let rv = fill_range_var(&parts)?;
     let rel = table::table_openrv_extended(mcx, &rv, types_rel::AccessShareLock, missing_ok)?;
     let reloid = rel.as_ref().map(|r| r.rd_id).unwrap_or(InvalidOid);
     let (classId, objectId) = match objtype {
@@ -762,7 +776,7 @@ fn get_object_address_attrdef<'mcx>(
     let attname = parts[nnames - 1];
     let relparts = &parts[..nnames - 1];
     let relname_str = relparts.join(".");
-    let rv = fill_range_var(relparts);
+    let rv = fill_range_var(relparts)?;
     let rel = relation::relation_openrv(mcx, &rv, lockmode)?;
     let reloid = rel.rd_id;
     let attnum = lsyscache::get_attnum(reloid, attname)?;

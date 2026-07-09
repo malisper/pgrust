@@ -144,11 +144,31 @@ pub fn get_object_class_descr(class_id: Oid) -> &'static str {
     get_object_property_data(class_id).class_descr
 }
 
-// get_object_type (objectaddress.c): OBJECT_TABLE stands in for all
-// relation kinds, per C.
-pub fn get_object_type(class_id: Oid, object_id: Oid) -> ObjectType {
+// get_object_type (objectaddress.c): for the OBJECT_TABLE property class, dig
+// out the real relation kind so callers emit precise error nouns.
+pub fn get_object_type(class_id: Oid, object_id: Oid) -> types_error::PgResult<ObjectType> {
     match get_object_property_data(class_id).objtype {
-        Some(t) => t,
+        Some(ObjectType::OBJECT_TABLE) => {
+            let relkind = lsyscache::relation::get_rel_relkind(object_id)? as u8;
+            Ok(get_relkind_objtype(relkind))
+        }
+        Some(t) => Ok(t),
         None => panic!("unsupported object type: {class_id} for object {object_id}"),
+    }
+}
+
+// get_relkind_objtype (objectaddress.c): relkind -> ObjectType; default TABLE.
+fn get_relkind_objtype(relkind: u8) -> ObjectType {
+    use types_rel::{
+        RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
+        RELKIND_SEQUENCE, RELKIND_VIEW,
+    };
+    match relkind {
+        RELKIND_INDEX | RELKIND_PARTITIONED_INDEX => ObjectType::OBJECT_INDEX,
+        RELKIND_SEQUENCE => ObjectType::OBJECT_SEQUENCE,
+        RELKIND_VIEW => ObjectType::OBJECT_VIEW,
+        RELKIND_MATVIEW => ObjectType::OBJECT_MATVIEW,
+        RELKIND_FOREIGN_TABLE => ObjectType::OBJECT_FOREIGN_TABLE,
+        _ => ObjectType::OBJECT_TABLE,
     }
 }

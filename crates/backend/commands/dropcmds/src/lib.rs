@@ -25,7 +25,7 @@ fn notice(msg: String) -> PgResult<()> {
 }
 
 fn schema_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<String>> {
-    let rv = catalog_objectaddress::makeRangeVarFromNameList(names);
+    let rv = catalog_objectaddress::makeRangeVarFromNameList(names)?;
     if let Some(schemaname) = rv.schemaname {
         if catalog_namespace::LookupNamespaceNoError(schemaname)? == types_core::InvalidOid {
             return Ok(Some(format!(
@@ -59,7 +59,7 @@ fn owningrel_does_not_exist_skipping(names: &NodeList<'_>) -> PgResult<Option<St
     if let Some(msg) = schema_does_not_exist_skipping_parts(&parent)? {
         return Ok(Some(msg));
     }
-    let rv = catalog_objectaddress::makeRangeVarFromParts(&parent);
+    let rv = catalog_objectaddress::makeRangeVarFromParts(&parent)?;
     if !OidIsValid(catalog_namespace::RangeVarGetRelid(&rv, types_rel::NoLock, true)?) {
         return Ok(Some(format!(
             "relation \"{}\" does not exist, skipping",
