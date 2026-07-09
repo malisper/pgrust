@@ -95,6 +95,10 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     let (size, _num_semas) = CalculateShmemSize(&cfg)?;
     elog::elog(DEBUG3, format!("invoking IpcMemoryCreate(size={size})"))?;
 
+    // C reports this from PGSharedMemoryCreate; thread-shared state never
+    // mmaps with MAP_HUGETLB, so huge pages are always off (never "unknown").
+    guc::SetConfigOption("huge_pages_status", Some("off"), PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT)?;
+
     CreateOrAttachShmemStructs(&cfg)?;
 
     // The C shim is PGSharedMemoryCreate's segment header; ipci owns it here.

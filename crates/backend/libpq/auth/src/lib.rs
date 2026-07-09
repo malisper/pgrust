@@ -1,7 +1,7 @@
 //! auth.c: ClientAuthentication and the per-method handlers. Live end-to-end:
-//! trust, reject / implicit-reject (SQLSTATE 28000 exact), and the password
-//! family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
-//! CheckSASLAuth. Loud: peer / ident / radius / oauth. gss / sspi / pam /
+//! trust, reject / implicit-reject (SQLSTATE 28000 exact), peer, and the
+//! password family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
+//! CheckSASLAuth. Loud: ident / radius / oauth. gss / sspi / pam /
 //! bsd / ldap / cert never reach dispatch — hba rejects those methods in
 //! this build.
 
@@ -206,7 +206,7 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
     let status: i32 = match auth_method {
         m if m == uaReject => return reject_arm(port, true),
         m if m == uaImplicitReject => return reject_arm(port, false),
-        m if m == uaPeer => deferred_arm("peer", "auth_peer (getpeereid + check_usermap)"),
+        m if m == uaPeer => auth_peer(port)?,
         m if m == uaIdent => deferred_arm("ident", "ident_inet"),
         m if m == uaMD5 || m == uaSCRAM => CheckPWChallengeAuth(port, &mut logdetail)?,
         m if m == uaPassword => CheckPasswordAuth(port, &mut logdetail)?,
@@ -256,6 +256,93 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
 #[cold]
 fn deferred_arm(method: &str, what: &str) -> i32 {
     panic!("ClientAuthentication: \"{method}\" arm deferred — {what} unported");
+}
+
+fn getpeereid(sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                sock,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                std::ptr::addr_of_mut!(cred).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(elog::errno::current_errno());
+        }
+        Ok((cred.uid, cred.gid))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        if unsafe { libc::getpeereid(sock, &mut uid, &mut gid) } != 0 {
+            return Err(elog::errno::current_errno());
+        }
+        Ok((uid, gid))
+    }
+}
+
+fn auth_peer(port: &Port) -> PgResult<i32> {
+    let (uid, _gid) = match getpeereid(port.sock) {
+        Ok(v) => v,
+        Err(errnum) => {
+            if errnum == libc::ENOSYS {
+                ereport(LOG)
+                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("peer authentication is not supported on this platform")
+                    .finish(loc(1874, "auth_peer"))?;
+            } else {
+                ereport(LOG)
+                    .with_saved_errno(errnum)
+                    .errcode_for_socket_access()
+                    .errmsg("could not get peer credentials: %m")
+                    .finish(loc(1878, "auth_peer"))?;
+            }
+            return Ok(STATUS_ERROR);
+        }
+    };
+
+    let mut pwbuf: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = [0u8; 1024];
+    let mut pw: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(uid, &mut pwbuf, buf.as_mut_ptr().cast(), buf.len(), &mut pw)
+    };
+    if rc != 0 {
+        ereport(LOG)
+            .with_saved_errno(rc)
+            .errmsg(format!("could not look up local user ID {}: %m", uid as i64))
+            .finish(loc(1888, "auth_peer"))?;
+        return Ok(STATUS_ERROR);
+    }
+    if pw.is_null() {
+        ereport(LOG)
+            .errmsg(format!("local user with ID {} does not exist", uid as i64))
+            .finish(loc(1894, "auth_peer"))?;
+        return Ok(STATUS_ERROR);
+    }
+
+    // Copy out of the getpwuid_r buffer before check_usermap; this is our
+    // authenticated identity, set before checking the map so the log
+    // reflects that authentication succeeded.
+    let pw_name = unsafe { std::ffi::CStr::from_ptr(pwbuf.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    set_authn_id(port, &pw_name)?;
+
+    let hba = port.hba.as_ref().expect("auth_peer: port->hba is NULL");
+    let (authn_id, _) = miscinit::client_connection_info();
+    hba::check_usermap(
+        hba.usermap.as_deref(),
+        port.user_name.as_deref().unwrap_or(""),
+        authn_id.expect("authn_id set by set_authn_id"),
+        false,
+    )
 }
 
 fn reject_arm(port: &Port, explicit_reject: bool) -> PgResult<()> {

@@ -104,10 +104,8 @@ pub(crate) fn token_matches_insensitive(t: &AuthToken, k: &[u8]) -> bool {
     pg_strcasecmp(t.string.as_bytes(), k) == 0
 }
 
-// token_has_regexp(t): a compiled regex only exists past regcomp_auth_token,
-// which panics loudly on '/'-prefixed tokens (regex engine unported).
-pub(crate) fn token_has_regexp(_t: &AuthToken) -> bool {
-    false
+pub(crate) fn token_has_regexp(t: &AuthToken) -> bool {
+    t.regex
 }
 
 pub(crate) fn line_context(line_num: i32, file_name: &str) -> String {

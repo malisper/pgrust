@@ -15,6 +15,8 @@ fn setup() {
         guc_tables::init_seams();
         elog::init_seams();
         crate::init_seams();
+        regex_core::init_seams();
+        mbutils::init_seams();
         acl_seams::get_role_oid::set(|name, missing_ok| {
             assert!(missing_ok);
             Ok(match name {
@@ -502,9 +504,12 @@ fn authname_table() {
 }
 
 #[test]
-#[should_panic(expected = "regex auth token")]
-fn regex_tokens_are_loud() {
-    let _ = parse_one("local all /^ali.*$ trust");
+fn regex_tokens_compile_and_match() {
+    setup();
+    let line = parse_one("local all /^ali.*$ trust").expect("parses");
+    assert!(line.roles[0].regex, "regex marker set by regcomp_auth_token");
+    assert!(crate::check::check_role("alice", 101, &line.roles, false).unwrap());
+    assert!(!crate::check::check_role("bob", 102, &line.roles, false).unwrap());
 }
 
 #[test]

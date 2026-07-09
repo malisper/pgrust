@@ -31,12 +31,16 @@ pub type ClientCertName = u32;
 pub const clientCertCN: ClientCertName = 0;
 pub const clientCertDN: ClientCertName = 1;
 
-// AuthToken (libpq/hba.h) minus the regex handle: regex auth tokens are
-// deferred loud in hba (no regex engine in this tree yet).
+// AuthToken (libpq/hba.h). C stores the compiled regex in the token; here
+// parsed auth lines are shared across backend threads (RwLock statics in hba)
+// and the engine carrier is Rc-based, so `regex` is the compiled-OK marker
+// set by regcomp_auth_token (which validates by compiling); regexec_auth_token
+// recompiles on the executing thread. token_has_regexp(t) == this flag.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthToken {
     pub string: String,
     pub quoted: bool,
+    pub regex: bool,
 }
 
 // HbaLine (libpq/hba.h) scoped to the supported build: no ldap/radius/pam/

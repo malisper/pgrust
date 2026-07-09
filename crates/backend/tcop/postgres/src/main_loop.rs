@@ -256,6 +256,7 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
 
     guc::report::report_changed_guc_options();
 
+    log_connection_ready_durations()?;
 
     crate::stmt_trace::probe("ready.pre_rfq");
     tcop_dest::ReadyForQuery(mcx, elog::config::where_to_send_output())?;
@@ -264,6 +265,49 @@ fn ready_state(mcx: Mcx<'_>, state: &mut LoopState) -> PgResult<()> {
     state.send_ready_for_query = false;
 
     Ok(())
+}
+
+// postgres.c: first ReadyForQuery of an external-connection backend logs the
+// connection-establishment durations under log_connections=setup_durations.
+fn log_connection_ready_durations() -> PgResult<()> {
+    use types_core::init::BackendType;
+
+    let timing = backend_startup::conn_timing::get();
+    // TIMESTAMP_MINUS_INFINITY (types_startup) is i64::MIN.
+    if timing.ready_for_use != i64::MIN
+        || backend_startup::log_connections::get()
+            & backend_startup::LOG_CONNECTION_SETUP_DURATIONS
+            == 0
+        || !matches!(
+            miscinit::GetMyBackendType(),
+            BackendType::Backend | BackendType::WalSender
+        )
+    {
+        return Ok(());
+    }
+
+    let now = crate::get_current_timestamp();
+    backend_startup::conn_timing::set_ready_for_use(now);
+
+    let diff_us = |start: i64, stop: i64| -> u64 {
+        if start >= stop { 0 } else { (stop - start) as u64 }
+    };
+    let total = diff_us(timing.socket_create, now);
+    let fork = diff_us(timing.fork_start, timing.fork_end);
+    let auth = diff_us(timing.auth_start, timing.auth_end);
+
+    ereport(LOG)
+        .errmsg(format!(
+            "connection ready: setup total={:.3} ms, fork={:.3} ms, authentication={:.3} ms",
+            total as f64 / 1000.0,
+            fork as f64 / 1000.0,
+            auth as f64 / 1000.0,
+        ))
+        .finish(types_error::ErrorLocation::new(
+            "src/backend/tcop/postgres.c",
+            4677,
+            "PostgresMain",
+        ))
 }
 
 fn dispatch_message<'mcx>(
