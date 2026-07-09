@@ -45,9 +45,9 @@ postgres_seams = { path = "../../../tcop/postgres_seams" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 backend_progress = { path = "../../../utils/activity/backend_progress" }
+transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
 
 [dev-dependencies]
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 xlogutils_seams = { path = "../../transam/xlogutils_seams" }
-transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
 sinval_seams = { path = "../../../storage/ipc/sinval_seams" }
