@@ -1066,6 +1066,14 @@ impl<'a> Estate<'a> {
             )
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
             let built = (|| -> PgResult<Option<SimpleExpr>> {
+                // exec_is_simple_query (pl_exec.c): decided on the analyzed
+                // querytree, not just the plan shape — an embedded SubPlan
+                // (hasSubLinks) survives the bare-Result test below, and C
+                // routes every such query through SPI.
+                let queries = plancache::SourceQueryList(psrc);
+                if queries.len() != 1 || !exec_is_simple_query(&queries[0]) {
+                    return Ok(None);
+                }
                 let stmts = plancache::CachedPlanStmtList(cplan);
                 if stmts.len() != 1 {
                     return Ok(None);
@@ -1444,6 +1452,41 @@ impl<'a> Estate<'a> {
         }
         Ok(Some(out))
     }
+}
+
+// exec_is_simple_query (pl_exec.c) items 2-4: plain rtable-less SELECT, none
+// of the listed features, single result column.
+fn exec_is_simple_query(query: &types_nodes::parsenodes::Query<'_>) -> bool {
+    if query.commandType != types_nodes::nodes_enums::CmdType::CMD_SELECT {
+        return false;
+    }
+    if !query.rtable.is_nil() {
+        return false;
+    }
+    let (fromlist_empty, quals_none) = match query.jointree {
+        Some(jt) => (jt.fromlist.is_nil(), jt.quals.is_none()),
+        None => (true, true),
+    };
+    if query.hasAggs
+        || query.hasWindowFuncs
+        || query.hasTargetSRFs
+        || query.hasSubLinks
+        || !query.cteList.is_nil()
+        || !fromlist_empty
+        || !quals_none
+        || !query.groupClause.is_nil()
+        || !query.groupingSets.is_nil()
+        || query.havingQual.is_some()
+        || !query.windowClause.is_nil()
+        || !query.distinctClause.is_nil()
+        || !query.sortClause.is_nil()
+        || query.limitOffset.is_some()
+        || query.limitCount.is_some()
+        || query.setOperations.is_some()
+    {
+        return false;
+    }
+    query.targetList.len() == 1
 }
 
 // exec_simple_check_plan's Result-node test on the built plan; returns the
