@@ -61,19 +61,29 @@ pub fn smgr_redo(record: &mut XLogReaderState) -> PgResult<()> {
             xlogutils::XLogTruncateRelation(locator, ForkNumber::MAIN_FORKNUM, blkno)?;
         }
 
+        let fakerel = xlogutils::CreateFakeRelcacheEntry(locator);
+        let mut need_fsm_vacuum = false;
+
         if flags & SMGR_TRUNCATE_FSM != 0 && smgr::smgrexists(key, ForkNumber::FSM_FORKNUM)? {
-            panic!(
-                "smgr_redo (storage.c): XLOG_SMGR_TRUNCATE FSM arm unported \
-                 (FreeSpaceMapPrepareTruncateRel)"
-            );
+            let b = freespace::FreeSpaceMapPrepareTruncateRel(&fakerel, blkno)?;
+            if b != InvalidBlockNumber {
+                forks[nforks] = ForkNumber::FSM_FORKNUM;
+                old_blocks[nforks] = smgr::smgrnblocks(key, ForkNumber::FSM_FORKNUM)?;
+                blocks[nforks] = b;
+                nforks += 1;
+                need_fsm_vacuum = true;
+            }
         }
         if flags & SMGR_TRUNCATE_VM != 0
             && smgr::smgrexists(key, ForkNumber::VISIBILITYMAP_FORKNUM)?
         {
-            panic!(
-                "smgr_redo (storage.c): XLOG_SMGR_TRUNCATE VM arm unported \
-                 (visibilitymap_prepare_truncate over a fake relcache entry)"
-            );
+            let b = visibilitymap::visibilitymap_prepare_truncate(&fakerel, blkno)?;
+            if b != InvalidBlockNumber {
+                forks[nforks] = ForkNumber::VISIBILITYMAP_FORKNUM;
+                old_blocks[nforks] = smgr::smgrnblocks(key, ForkNumber::VISIBILITYMAP_FORKNUM)?;
+                blocks[nforks] = b;
+                nforks += 1;
+            }
         }
 
         if nforks > 0 {
@@ -81,6 +91,13 @@ pub fn smgr_redo(record: &mut XLogReaderState) -> PgResult<()> {
             smgr::smgrtruncate(key, &forks[..nforks], &old_blocks[..nforks], &blocks[..nforks])?;
             init_small::globals::EndCriticalSection();
         }
+
+        // Truncated-away pages were likely marked all-free in the upper FSM
+        // levels and would be preferentially handed out (storage.c).
+        if need_fsm_vacuum {
+            freespace::FreeSpaceMapVacuumRange(&fakerel, blkno, InvalidBlockNumber)?;
+        }
+        xlogutils::FreeFakeRelcacheEntry(fakerel);
         Ok(())
     } else {
         panic!("smgr_redo: unknown op code {info}");
