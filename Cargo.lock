@@ -4932,6 +4932,7 @@ name = "execscan"
 version = "0.1.0"
 dependencies = [
  "datum",
+ "detoast_seams",
  "execexpr",
  "exectuples",
  "executils",
