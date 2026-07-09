@@ -83,6 +83,7 @@ fn setup_n(pages: Vec<Box<AlignedPage>>, fork_exists: bool, fork_nblocks: BlockN
 
 fn install_seams() {
     INIT.call_once(|| {
+        transam_xlog_seams::xlog_standby_info_active::set(|| false);
         bufmgr_seams::relation_smgr_locator::set(|rel| RelFileLocatorBackend {
             locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: rel.rd_id },
             backend: INVALID_PROC_NUMBER,

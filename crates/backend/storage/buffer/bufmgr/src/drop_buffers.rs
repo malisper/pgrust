@@ -113,8 +113,19 @@ fn InvalidateBuffer(desc: &BufferDesc, buf_state_in: u32) -> PgResult<()> {
         if buffer_refcount(buf_state) != 0 {
             UnlockBufHdr(desc, buf_state);
             LWLockRelease(old_partition_lock)?;
-            if crate::privref::GetPrivateRefCount(BufferDescriptorGetBuffer(desc)) > 0 {
-                panic!("buffer is pinned in InvalidateBuffer");
+            let private = crate::privref::GetPrivateRefCount(BufferDescriptorGetBuffer(desc));
+            if private > 0 {
+                panic!(
+                    "buffer is pinned in InvalidateBuffer: buf={} tag=({}/{}/{} fork={} blk={}) shared_refcount={} private_refcount={}",
+                    BufferDescriptorGetBuffer(desc),
+                    old_tag.spcOid,
+                    old_tag.dbOid,
+                    old_tag.relNumber,
+                    old_tag.forkNum as i32,
+                    old_tag.blockNum,
+                    buffer_refcount(buf_state),
+                    private,
+                );
             }
             crate::read::WaitIO(desc)?;
             continue;
