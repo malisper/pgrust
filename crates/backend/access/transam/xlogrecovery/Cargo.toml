@@ -34,6 +34,8 @@ startup_seams = { path = "../../../postmaster/startup_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 libc = "0.2"
 
+bufmgr = { path = "../../../storage/buffer/bufmgr" }
+
 [dev-dependencies]
 timeline = { path = "../timeline" }
 crc32c = { path = "../../../../port/crc32c" }
@@ -45,7 +47,6 @@ types_fmgr = { path = "../../../../_support/types/fmgr" }
 heaptuple = { path = "../../common/heaptuple" }
 heapam_visibility = { path = "../../heap/heapam_visibility" }
 heapam_visibility_seams = { path = "../../heap/heapam_visibility_seams" }
-bufmgr = { path = "../../../storage/buffer/bufmgr" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 smgr = { path = "../../../storage/smgr/smgr" }
 sync = { path = "../../../storage/sync/sync" }
