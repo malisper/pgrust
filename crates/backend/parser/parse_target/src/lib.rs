@@ -1125,7 +1125,7 @@ fn ExpandSingleTable<'mcx>(
             location,
         );
     }
-    let rte = nsitem.p_rte;
+    let rte = nsitem.rte();
     let (vars, _) = parse_relation::expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location)?;
     if rte.rtekind == RTEKind::RTE_RELATION {
         let perminfo = nsitem.p_perminfo.expect("relation nsitem has perminfo");

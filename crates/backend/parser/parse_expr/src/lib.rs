@@ -2270,7 +2270,7 @@ fn transformWholeRowRef<'mcx>(
 ) -> PgResult<Node<'mcx>> {
     use types_nodes::primnodes::VarReturningType;
 
-    let rte = nsitem.p_rte;
+    let rte = nsitem.rte();
     let is_eref = match rte.eref {
         Some(eref) => core::ptr::eq(nsitem.p_names, eref),
         None => false,

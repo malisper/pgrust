@@ -826,25 +826,24 @@ fn transformFromClauseItem<'mcx>(
             let rts = n.as_range_table_sample().unwrap();
             let relation = rts.relation.expect("grammar sets relation");
             let (rel, nsitem) = transformFromClauseItem(mcx, pstate, relation)?;
-            let rte = nsitem.p_rte;
-            // Only plain relations and matviews can be sampled.
-            if rte.rtekind != RTEKind::RTE_RELATION
-                || !(rte.relkind == types_rel::RELKIND_RELATION
-                    || rte.relkind == types_rel::RELKIND_MATVIEW
-                    || rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE)
             {
-                return Err(tablesample_wrong_relkind(pstate, expr_location(relation)));
+                let rte = nsitem.rte();
+                // Only plain relations and matviews can be sampled.
+                if rte.rtekind != RTEKind::RTE_RELATION
+                    || !(rte.relkind == types_rel::RELKIND_RELATION
+                        || rte.relkind == types_rel::RELKIND_MATVIEW
+                        || rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE)
+                {
+                    return Err(tablesample_wrong_relkind(pstate, expr_location(relation)));
+                }
             }
             let tsc = transformRangeTableSample(mcx, pstate, rts)?;
-            let rte_node = pstate
-                .p_rtable
-                .nth((nsitem.p_rtindex - 1) as usize);
-            // SAFETY: the rtable entry is exclusively owned by this parse
-            // (nsitem.p_rte aliases it read-only; C mutates in place).
+            // SAFETY: no ref derived from this RTE is live across the write
+            // (nsitem holds the Node handle, not a borrow).
             unsafe {
-                rte_node.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(tsc))
+                nsitem.p_rte.with_mut::<RangeTblEntry, _>(|r| r.tablesample = Some(tsc))
             }
-            .expect("rtable cell is a RangeTblEntry");
+            .expect("nsitem p_rte is a RangeTblEntry");
             Ok((rel, nsitem))
         }
         NodeTag::T_JsonTable => {

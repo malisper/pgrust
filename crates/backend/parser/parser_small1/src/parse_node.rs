@@ -89,13 +89,15 @@ pub struct ParseNamespaceColumn {
     pub p_dontexpand: bool,
 }
 
-// p_perminfo is a Node handle, not a borrow: markRTEForSelectPriv mutates the
-// perminfo through the rteperminfos list (C mutates the aliased pointer) and a
-// standing `&` would alias those writes.
+// p_perminfo and p_rte are Node handles, not borrows: markRTEForSelectPriv
+// mutates the perminfo through the rteperminfos list, and RTEs are with_mut'd
+// through p_rtable after nsitem creation (C mutates the aliased pointers); a
+// standing `&` would alias those writes. Deref p_rte via rte(), which
+// re-derives at each use.
 #[allow(non_snake_case)]
 pub struct ParseNamespaceItem<'mcx> {
     pub p_names: &'mcx Alias<'mcx>,
-    pub p_rte: &'mcx RangeTblEntry<'mcx>,
+    pub p_rte: Node<'mcx>,
     pub p_rtindex: i32,
     pub p_perminfo: Option<Node<'mcx>>,
     pub p_nscolumns: &'mcx [ParseNamespaceColumn],
@@ -106,6 +108,13 @@ pub struct ParseNamespaceItem<'mcx> {
     pub p_lateral_only: core::cell::Cell<bool>,
     pub p_lateral_ok: core::cell::Cell<bool>,
     pub p_returning_type: VarReturningType,
+}
+
+impl<'mcx> ParseNamespaceItem<'mcx> {
+    #[inline]
+    pub fn rte(&self) -> &'mcx RangeTblEntry<'mcx> {
+        self.p_rte.as_range_tbl_entry().expect("p_rte is RangeTblEntry")
+    }
 }
 
 // C divergences: parentParseState/p_queryEnv are borrows of caller-owned state
