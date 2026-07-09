@@ -75,7 +75,7 @@ fn fc_row_security_active_name(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     let tablename = String::from_utf8_lossy(t.data()).into_owned();
     let names = varlena::textToQualifiedNameList(fcinfo.result_mcx(), &tablename)?;
     let parts: Vec<&str> = names.iter().map(String::as_str).collect();
-    let tablerel = catalog_objectaddress::makeRangeVarFromParts(&parts);
+    let tablerel = catalog_objectaddress::makeRangeVarFromParts(&parts)?;
     let tableoid = catalog_namespace::RangeVarGetRelid(&tablerel, types_rel::NoLock, false)?;
     let status = check_enable_rls(tableoid, InvalidOid, true)?;
     Ok(Datum::from_bool(status == RlsEnabled))

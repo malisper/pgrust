@@ -162,7 +162,7 @@ fn must_be_owner_err(
 ) -> PgResult<()> {
     aclchk::aclcheck_error(
         aclchk::ACLCHECK_NOT_OWNER,
-        catalog_objectaddress::get_object_type(class_id, object_id),
+        catalog_objectaddress::get_object_type(class_id, object_id)?,
         objname,
     )?;
     let _ = mcx;
