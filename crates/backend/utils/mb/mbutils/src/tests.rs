@@ -150,6 +150,72 @@ fn mbstrlen_with_len_errors_on_truncated_trailing_char() {
     );
 }
 
+// The plain per-char loop pg_encoding_mbstrlen_with_len replaced with the
+// ascii_run fast path; the differential oracle.
+fn mbstrlen_reference(encoding: pg_enc, mbstr: &[u8]) -> PgResult<i32> {
+    let mut len = 0;
+    let mut pos = 0usize;
+    let mut limit = mbstr.len() as i32;
+    while limit > 0 && mbstr[pos] != 0 {
+        let l = pg_encoding_mblen_with_len(encoding, &mbstr[pos..], limit)?;
+        limit -= l;
+        pos += l as usize;
+        len += 1;
+    }
+    Ok(len)
+}
+
+#[test]
+fn mbstrlen_ascii_run_differential() {
+    SetDatabaseEncoding(PG_UTF8).unwrap();
+    let atoms: &[&[u8]] = &[
+        b"",
+        b"a",
+        b"abcdefg",
+        b"abcdefgh",
+        b"abcdefghijklmno",
+        b"abcdefghijklmnop",
+        b"abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+        b"\0",
+        b"\x7f",
+        b"\x80",             // lone continuation
+        b"\xc3\xa9",         // 2-byte
+        b"\xe4\xb8\x96",     // 3-byte
+        b"\xf0\x9f\x98\x80", // 4-byte
+        b"\xc3",             // truncated lead (error case at end)
+        b"\xff",
+    ];
+    for &a in atoms {
+        for &b in atoms {
+            for &c in atoms {
+                let s = [a, b, c].concat();
+                let got = pg_encoding_mbstrlen_with_len(PG_UTF8, &s);
+                let want = mbstrlen_reference(PG_UTF8, &s);
+                match (got, want) {
+                    (Ok(g), Ok(w)) => assert_eq!(g, w, "input {s:x?}"),
+                    (Err(g), Err(w)) => assert_eq!(g.message(), w.message(), "input {s:x?}"),
+                    (g, w) => panic!("divergence on {s:x?}: {g:?} vs {w:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ascii_run_boundaries() {
+    for n in 0..48 {
+        let mut s = vec![b'x'; n];
+        assert_eq!(ascii_run(&s), n);
+        for stopper in [0u8, 0x80, 0xc3] {
+            for k in 0..n {
+                s[k] = stopper;
+                assert_eq!(ascii_run(&s), k, "n={n} k={k} stopper={stopper:#x}");
+                s[k] = b'x';
+            }
+        }
+    }
+}
+
 #[test]
 fn mblen_family() {
     SetDatabaseEncoding(PG_UTF8).unwrap();

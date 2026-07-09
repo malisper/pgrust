@@ -779,12 +779,56 @@ pub fn pg_encoding_mbstrlen_with_len(encoding: pg_enc, mbstr: &[u8]) -> PgResult
     let mut pos = 0usize;
     let mut limit = mbstr.len() as i32;
     while limit > 0 && mbstr[pos] != 0 {
+        if encoding == PG_UTF8 {
+            // ASCII bytes are mblen 1 in UTF-8; a NUL or high-bit byte ends
+            // the run and takes the per-char path below, so any input scores
+            // identically to the plain loop.
+            let run = ascii_run(&mbstr[pos..]);
+            pos += run;
+            limit -= run as i32;
+            len += run as i32;
+            if limit <= 0 || mbstr[pos] == 0 {
+                break;
+            }
+        }
         let l = pg_encoding_mblen_with_len(encoding, &mbstr[pos..], limit)?;
         limit -= l;
         pos += l as usize;
         len += 1;
     }
     Ok(len)
+}
+
+/// Length of the leading run of bytes in 0x01..=0x7F.
+#[inline]
+fn ascii_run(s: &[u8]) -> usize {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let stop = |w: u64| ((w.wrapping_sub(LO) & !w) | w) & HI;
+    let mut i = 0usize;
+    while i + 16 <= s.len() {
+        let sa = stop(u64::from_le_bytes(s[i..i + 8].try_into().unwrap()));
+        let sb = stop(u64::from_le_bytes(s[i + 8..i + 16].try_into().unwrap()));
+        if sa | sb != 0 {
+            return if sa != 0 {
+                i + (sa.trailing_zeros() / 8) as usize
+            } else {
+                i + 8 + (sb.trailing_zeros() / 8) as usize
+            };
+        }
+        i += 16;
+    }
+    while i + 8 <= s.len() {
+        let sa = stop(u64::from_le_bytes(s[i..i + 8].try_into().unwrap()));
+        if sa != 0 {
+            return i + (sa.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < s.len() && s[i].wrapping_sub(1) < 0x7f {
+        i += 1;
+    }
+    i
 }
 
 pub fn pg_mbcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32 {
