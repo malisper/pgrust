@@ -195,6 +195,7 @@ fn install_fake_bufmgr() {
     });
     miscinit_seams::is_bootstrap_processing_mode::set(|| false);
     catalog_seams::is_catalog_relation::set(|_rel| false);
+    catalog_seams::is_toast_relation::set(|_rel| false);
     origin_seams::replorigin_session_origin::set(|| 0);
     aio_seams::pgaio_closing_fd::set(|_| {});
     aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
