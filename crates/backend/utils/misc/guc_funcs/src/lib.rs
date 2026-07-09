@@ -8,7 +8,7 @@ use mcx::Mcx;
 use std::rc::Rc;
 
 use tcop_dest::DestReceiver;
-use tupdesc::{CreateTemplateTupleDesc, TupleDescInitEntry};
+use tupdesc::{CreateTemplateTupleDesc, TupleDescInitBuiltinEntry, TupleDescInitEntry};
 use types_core::{Oid, TEXTOID};
 use types_error::{
     ErrorLevel, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TRANSACTION_STATE,
@@ -272,7 +272,9 @@ fn ShowGUCConfigOption<'mcx>(
 ) -> PgResult<()> {
     let (varname, value) = config_option_named_value(name)?;
     let mut tupdesc = CreateTemplateTupleDesc(mcx, 1)?;
-    TupleDescInitEntry(&mut tupdesc, 1, Some(&varname), TEXTOID, -1, 0)?;
+    // Builtin entry: no catalog access, so SHOW works on a database-less
+    // walsender (guc_funcs.c ShowGUCConfigOption).
+    TupleDescInitBuiltinEntry(&mut tupdesc, 1, &varname, TEXTOID, -1, 0)?;
     let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, dest, Rc::new(tupdesc))?;
     exectuples_output::do_text_output_oneline(&mut tstate, mcx, &value)?;
     exectuples_output::end_tup_output(tstate)
@@ -281,9 +283,11 @@ fn ShowGUCConfigOption<'mcx>(
 fn ShowAllGUCConfig<'mcx>(mcx: Mcx<'mcx>, dest: &mut DestReceiver<'mcx>) -> PgResult<()> {
     let rows = show_all_guc_config_rows()?;
     let mut tupdesc = CreateTemplateTupleDesc(mcx, 3)?;
-    TupleDescInitEntry(&mut tupdesc, 1, Some("name"), TEXTOID, -1, 0)?;
-    TupleDescInitEntry(&mut tupdesc, 2, Some("setting"), TEXTOID, -1, 0)?;
-    TupleDescInitEntry(&mut tupdesc, 3, Some("description"), TEXTOID, -1, 0)?;
+    // Builtin entries: no catalog access, so SHOW ALL works on a
+    // database-less walsender (guc_funcs.c ShowAllGUCConfig).
+    TupleDescInitBuiltinEntry(&mut tupdesc, 1, "name", TEXTOID, -1, 0)?;
+    TupleDescInitBuiltinEntry(&mut tupdesc, 2, "setting", TEXTOID, -1, 0)?;
+    TupleDescInitBuiltinEntry(&mut tupdesc, 3, "description", TEXTOID, -1, 0)?;
     let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, dest, Rc::new(tupdesc))?;
     for (name, setting, short_desc) in &rows {
         let mut values = [Datum::null(); 3];
