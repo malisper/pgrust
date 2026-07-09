@@ -227,6 +227,44 @@ fn show_all_rows_are_sorted_and_visible() {
 }
 
 #[test]
+fn show_builds_builtin_tupdesc_without_syscache() {
+    setup();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+
+    // ShowGUCConfigOption/ShowAllGUCConfig build their tupdesc with
+    // TupleDescInitBuiltinEntry, not TupleDescInitEntry: a database-less
+    // walsender has no pg_type syscache to look TEXTOID up in. Reproduce the
+    // exact call each makes and check the ancillary fields land as
+    // TupleDescInitBuiltinEntry's hardcoded TEXTOID shape, not merely as
+    // whatever the (catalog-backed) syscache stub happens to return.
+    let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
+    tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 1, "DateStyle", TEXTOID, -1, 0).unwrap();
+    let attr = tupdesc.attr(0);
+    assert_eq!(attr.atttypid, TEXTOID);
+    assert_eq!(attr.attlen, -1);
+    assert!(!attr.attbyval);
+    assert_eq!(attr.attalign, b'i' as i8);
+    assert_eq!(attr.atttypmod, -1);
+    assert_eq!(attr.attcollation, types_core::DEFAULT_COLLATION_OID);
+
+    // Same three TEXTOID columns for SHOW ALL.
+    let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 3).unwrap();
+    for (i, name) in ["name", "setting", "description"].iter().enumerate() {
+        tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, (i + 1) as i16, name, TEXTOID, -1, 0)
+            .unwrap();
+    }
+    for i in 0..3 {
+        let attr = tupdesc.attr(i);
+        assert_eq!(attr.atttypid, TEXTOID);
+        assert_eq!(attr.attlen, -1);
+        assert!(!attr.attbyval);
+        assert_eq!(attr.attalign, b'i' as i8);
+        assert_eq!(attr.attcollation, types_core::DEFAULT_COLLATION_OID);
+    }
+}
+
+#[test]
 fn show_emits_through_tup_output() {
     setup();
     let ctx = MemoryContext::new("t");
