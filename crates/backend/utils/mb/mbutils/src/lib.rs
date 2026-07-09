@@ -779,10 +779,13 @@ pub fn pg_encoding_mbstrlen_with_len(encoding: pg_enc, mbstr: &[u8]) -> PgResult
     let mut pos = 0usize;
     let mut limit = mbstr.len() as i32;
     while limit > 0 && mbstr[pos] != 0 {
-        if encoding == PG_UTF8 {
-            // ASCII bytes are mblen 1 in UTF-8; a NUL or high-bit byte ends
-            // the run and takes the per-char path below, so any input scores
-            // identically to the plain loop.
+        // ASCII bytes are mblen 1 in UTF-8; count a run in one SWAR sweep.
+        // The `< 0x80` peek keeps the fast path OFF multibyte lead bytes
+        // (ascii_run would return 0 there) — one already-loaded byte compare,
+        // so a fully-multibyte string pays no fast-path tax. NUL is excluded
+        // by the while guard. Every input scores identically to the plain
+        // per-char loop; the run is pure acceleration.
+        if encoding == PG_UTF8 && mbstr[pos] < 0x80 {
             let run = ascii_run(&mbstr[pos..]);
             pos += run;
             limit -= run as i32;
