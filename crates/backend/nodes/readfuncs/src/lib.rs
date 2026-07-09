@@ -237,9 +237,12 @@ impl<'a, 'mcx> Reader<'a, 'mcx> {
             if tok == b")" {
                 return Ok(l);
             }
-            let elem = self
-                .node_read_token(tok)?
-                .expect("nodeRead: <> is not a valid list element here");
+            // C nodeRead maps <> to a NIL list member; expanded grouping
+            // sets carry one for GROUP BY () (read_list_body's convention).
+            let elem = match self.node_read_token(tok)? {
+                Some(n) => n,
+                None => Node::mk_list(self.mcx, NodeList::nil())?,
+            };
             l.lappend(self.mcx, elem)?;
         }
     }

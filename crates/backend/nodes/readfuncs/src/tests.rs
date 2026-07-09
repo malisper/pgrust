@@ -317,3 +317,18 @@ fn reads_nil_list_element_as_empty_list() {
     let inner = outer.nth(0).as_list().expect("NIL element reads as a List");
     assert!(inner.is_nil());
 }
+
+// planagg's minmax probe round-trips the post-expansion Query: GROUP BY ()
+// serializes :groupingSets (<>) — a NIL member inside a node-list field.
+#[test]
+fn reads_nil_element_in_node_list_field() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let s = EV_ACTION_V.replace(":groupingSets <>", ":groupingSets ((i 1) <>)");
+    let node = stringToNode(mcx, &s).unwrap();
+    let q = node.as_list().unwrap().nth(0).as_query().unwrap();
+    assert_eq!(q.groupingSets.len(), 2);
+    assert_eq!(q.groupingSets.nth(0).as_int_list().unwrap().iter().collect::<Vec<_>>(), [1]);
+    let empty = q.groupingSets.nth(1).as_list().expect("NIL member reads as a List");
+    assert!(empty.is_nil());
+}
