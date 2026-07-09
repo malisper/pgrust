@@ -130,3 +130,58 @@ fn sys_fk_relationships_matches_generated_header() {
         }
     }
 }
+
+#[test]
+fn pg_jit_available_tracks_the_jit_guc() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static JIT: AtomicBool = AtomicBool::new(true);
+    guc_tables::vars::jit_enabled.install_if_absent(guc_tables::GucVarAccessors {
+        get: || JIT.load(Ordering::Relaxed),
+        set: |v| JIT.store(v, Ordering::Relaxed),
+    });
+    let mut fcinfo = LocalFcinfo::<0>::new(0);
+    guc_tables::vars::jit_enabled.write(true);
+    let d = crate::builtins::fc_pg_jit_available(None, &mut fcinfo).unwrap();
+    assert!(d.as_bool());
+    guc_tables::vars::jit_enabled.write(false);
+    let d = crate::builtins::fc_pg_jit_available(None, &mut fcinfo).unwrap();
+    assert!(!d.as_bool());
+    guc_tables::vars::jit_enabled.write(true);
+}
+
+#[test]
+fn pg_trigger_depth_reads_the_executor_seam() {
+    if !trigger_seams::my_trigger_depth::is_installed() {
+        trigger_seams::my_trigger_depth::set(|| 2);
+    }
+    let mut fcinfo = LocalFcinfo::<0>::new(0);
+    let d = crate::builtins::fc_pg_trigger_depth(None, &mut fcinfo).unwrap();
+    assert_eq!(d.as_i32(), trigger_seams::my_trigger_depth::call());
+}
+
+#[test]
+fn recovery_control_fns_error_outside_recovery() {
+    transam_xlog::XLOGShmemInit();
+    transam_xlog::ctl::XLogCtl()
+        .SharedRecoveryState
+        .store(transam_xlog::RECOVERY_STATE_DONE, std::sync::atomic::Ordering::Relaxed);
+    for f in [
+        crate::builtins::fc_pg_wal_replay_pause,
+        crate::builtins::fc_pg_wal_replay_resume,
+        crate::builtins::fc_pg_is_wal_replay_paused,
+        crate::builtins::fc_pg_get_wal_replay_pause_state,
+    ] {
+        let mut fcinfo = LocalFcinfo::<0>::new(0);
+        let e = f(None, &mut fcinfo).unwrap_err();
+        assert_eq!(
+            e.sqlstate(),
+            types_error::make_sqlstate(b"55000"),
+            "ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE"
+        );
+        assert_eq!(e.message(), "recovery is not in progress");
+        assert_eq!(
+            e.hint(),
+            Some("Recovery control functions can only be executed during recovery.")
+        );
+    }
+}
