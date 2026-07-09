@@ -218,7 +218,7 @@ fn add_range_table_entry_builds_relation_rte() {
     let nsitem = add(mcx, &mut pstate, "t", None);
 
     assert_eq!(nsitem.p_rtindex, 1);
-    let rte = nsitem.p_rte;
+    let rte = nsitem.rte();
     assert_eq!(rte.rtekind, RTEKind::RTE_RELATION);
     assert_eq!(rte.relid, T_OID);
     assert!(rte.inh);
@@ -262,11 +262,11 @@ fn alias_overrides_refname_and_colnames() {
         Node::mk_mut(mcx, Alias { aliasname: Some("c"), colnames }).unwrap().seal_ref();
 
     let nsitem = add(mcx, &mut pstate, "t", Some(alias));
-    let eref = nsitem.p_rte.eref.unwrap();
+    let eref = nsitem.rte().eref.unwrap();
     assert_eq!(eref.aliasname, Some("c"));
     let names: Vec<_> = eref.colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
     assert_eq!(names, ["a", "y"]);
-    assert_eq!(nsitem.p_rte.alias.unwrap().aliasname, Some("c"));
+    assert_eq!(nsitem.rte().alias.unwrap().aliasname, Some("c"));
 }
 
 #[test]
@@ -507,7 +507,7 @@ fn dropped_columns_skip_expansion_and_get_empty_eref_cells() {
 
     let nsitem = add(mcx, &mut pstate, "d", None);
     let eref_names: Vec<_> =
-        nsitem.p_rte.eref.unwrap().colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
+        nsitem.rte().eref.unwrap().colnames.iter().map(|n| n.as_string().unwrap().sval).collect();
     assert_eq!(eref_names, ["a", "", "b"]);
     assert_eq!(nsitem.p_nscolumns[1].p_varno, 0);
 
@@ -530,7 +530,7 @@ fn expand_rte_relation_arm_matches_ns_item_expansion() {
     let nsitem = add(mcx, &mut pstate, "d", None);
     let (colnames, colvars) = expandRTE(
         mcx,
-        nsitem.p_rte,
+        nsitem.rte(),
         1,
         0,
         types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,
@@ -847,7 +847,7 @@ fn composite_function_rte_expands_rowtype_columns() {
     let nsitem =
         add_function_rte(mcx, &mut pstate, "f", fe).unwrap();
 
-    let rte = nsitem.p_rte;
+    let rte = nsitem.rte();
     assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
     let rtfunc = rte.functions.nth(0).as_range_tbl_function().unwrap();
     assert_eq!(rtfunc.funccolcount, 2);
@@ -889,7 +889,7 @@ fn scalar_function_rte_expands_single_var() {
 
     let (colnames, colvars) = expandRTE(
         mcx,
-        nsitem.p_rte,
+        nsitem.rte(),
         3,
         0,
         types_nodes::VarReturningType::VAR_RETURNING_DEFAULT,

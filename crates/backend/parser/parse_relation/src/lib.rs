@@ -126,7 +126,7 @@ fn scanNameSpaceForRelid<'p, 'mcx>(
 ) -> PgResult<Option<&'mcx ParseNamespaceItem<'mcx>>> {
     let mut result: Option<&'mcx ParseNamespaceItem<'mcx>> = None;
     for nsitem in pstate.p_namespace.iter().copied() {
-        let rte = nsitem.p_rte;
+        let rte = nsitem.rte();
         if !nsitem.p_rel_visible {
             continue;
         }
@@ -196,7 +196,7 @@ pub fn scanNSItemForColumn<'mcx>(
     colname: &str,
     location: ParseLoc,
 ) -> PgResult<Option<Node<'mcx>>> {
-    let rte = nsitem.p_rte;
+    let rte = nsitem.rte();
     let attnum = scanRTEForColumn(pstate, rte, nsitem.p_names, colname, location, 0, None)?;
 
     if attnum == InvalidAttrNumber {
@@ -616,11 +616,12 @@ fn buildRelationAliases<'mcx>(
 
 fn buildNSItemFromTupleDesc<'mcx>(
     mcx: Mcx<'mcx>,
-    rte: &'mcx RangeTblEntry<'mcx>,
+    rte_node: Node<'mcx>,
     rtindex: i32,
     perminfo: Option<Node<'mcx>>,
     tupdesc: &TupleDescData<'mcx>,
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
+    let rte = rte_node.as_range_tbl_entry().expect("p_rte is RangeTblEntry");
     let maxattrs = tupdesc.natts as usize;
     debug_assert_eq!(maxattrs, rte.eref.expect("rte has eref").colnames.len());
 
@@ -647,7 +648,7 @@ fn buildNSItemFromTupleDesc<'mcx>(
 
     Ok(ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: perminfo,
         p_nscolumns: nscolumns.leak(),
@@ -768,7 +769,7 @@ pub fn addRangeTableEntry<'mcx>(
 
     let nsitem = buildNSItemFromTupleDesc(
         mcx,
-        rte_node.as_range_tbl_entry().expect("just built"),
+        rte_node,
         rtindex,
         Some(perminfo),
         &rel.rd_att,
@@ -822,7 +823,7 @@ pub fn addRangeTableEntryForRelation<'mcx>(
 
     let nsitem = buildNSItemFromTupleDesc(
         mcx,
-        rte_node.as_range_tbl_entry().expect("just built"),
+        rte_node,
         rtindex,
         Some(perminfo),
         &rel.rd_att,
@@ -1150,7 +1151,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
 
     let nsitem = buildNSItemFromTupleDesc(
         mcx,
-        rte_node.as_range_tbl_entry().expect("just built"),
+        rte_node,
         rtindex,
         None,
         &tupdesc,
@@ -1221,7 +1222,7 @@ pub fn addRangeTableEntryForValues<'mcx>(
     }
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: None,
         p_nscolumns: nscolumns.leak(),
@@ -1315,7 +1316,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     }
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: None,
         p_nscolumns: nscolumns.leak(),
@@ -1443,7 +1444,7 @@ pub fn addRangeTableEntryForSubquery<'mcx>(
     let rte = rte_node.as_range_tbl_entry().expect("just built");
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: None,
         p_nscolumns: nscolumns.leak(),
@@ -1622,7 +1623,7 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     }
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: None,
         p_nscolumns: nscolumns.leak(),
@@ -1695,7 +1696,7 @@ pub fn addRangeTableEntryForENR<'mcx>(
 
     let nsitem = buildNSItemFromTupleDesc(
         mcx,
-        rte_node.as_range_tbl_entry().expect("just built"),
+        rte_node,
         rtindex,
         None,
         &tupdesc,
@@ -1757,7 +1758,7 @@ pub fn addRangeTableEntryForGroup<'mcx>(
     let rte = rte_node.as_range_tbl_entry().expect("just built");
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: None,
         p_nscolumns: nscolumns.leak(),
@@ -1849,7 +1850,7 @@ pub fn addRangeTableEntryForJoin<'mcx>(
     let rte = rte_node.as_range_tbl_entry().expect("just built");
     let nsitem = ParseNamespaceItem {
         p_names: rte.eref.expect("rte has eref"),
-        p_rte: rte,
+        p_rte: rte_node,
         p_rtindex: rtindex,
         p_perminfo: None,
         p_nscolumns: nscolumns.leak(),
@@ -1915,13 +1916,13 @@ pub fn checkNameSpaceConflicts(
     namespace2: &[&ParseNamespaceItem<'_>],
 ) -> PgResult<()> {
     for nsitem1 in namespace1 {
-        let rte1 = nsitem1.p_rte;
+        let rte1 = nsitem1.rte();
         let aliasname1 = nsitem1.p_names.aliasname;
         if !nsitem1.p_rel_visible {
             continue;
         }
         for nsitem2 in namespace2 {
-            let rte2 = nsitem2.p_rte;
+            let rte2 = nsitem2.rte();
             if !nsitem2.p_rel_visible {
                 continue;
             }
@@ -2426,7 +2427,7 @@ pub fn expandNSItemAttrs<'mcx>(
     require_col_privs: bool,
     location: ParseLoc,
 ) -> PgResult<NodeList<'mcx>> {
-    let rte = nsitem.p_rte;
+    let rte = nsitem.rte();
     let (vars, names) = expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location)?;
     let mut te_list = NodeList::nil();
 
@@ -2475,7 +2476,7 @@ pub fn errorMissingRTE<'mcx>(
                 relation.location,
                 Some(&mut sublevels_up),
             ) {
-                Ok(Some(nsitem)) if core::ptr::eq(nsitem.p_rte, rte) => {
+                Ok(Some(nsitem)) if core::ptr::eq(nsitem.rte(), rte) => {
                     badAlias = Some(eref_alias);
                 }
                 Ok(_) => {}
@@ -2657,7 +2658,7 @@ fn findNSItemForRTE<'p, 'mcx>(
     let mut ps = Some(pstate);
     while let Some(p) = ps {
         for nsitem in p.p_namespace.iter().copied() {
-            if core::ptr::eq(nsitem.p_rte, rte) {
+            if core::ptr::eq(nsitem.rte(), rte) {
                 return Some(nsitem);
             }
         }
@@ -2766,7 +2767,7 @@ fn bad_lateral_ref<'p, 'mcx>(
 ) -> Box<PgError> {
     let refname = nsitem.p_names.aliasname.unwrap_or("");
     let is_target =
-        pstate.p_target_nsitem.is_some_and(|t| core::ptr::eq(t.p_rte, nsitem.p_rte));
+        pstate.p_target_nsitem.is_some_and(|t| t.p_rte.ptr_eq(nsitem.p_rte));
     let b = elog::ereport(ERROR)
         .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
         .errmsg(format!("invalid reference to FROM-clause entry for table \"{refname}\""));

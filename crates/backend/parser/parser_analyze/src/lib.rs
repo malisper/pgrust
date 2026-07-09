@@ -1698,18 +1698,18 @@ fn transformOnConflictClause<'mcx>(
             false,
         )?;
         excl_rel_index = nsitem.p_rtindex;
-        excl_nsitem = Some(nsitem);
         // Composite relkind signals this is not an actual relation and needs
         // no permission checks; the real target relation is checked instead.
-        let rte_node = pstate.p_rtable.nth(excl_rel_index as usize - 1);
-        // SAFETY: parser-owned rtable; nsitem's p_rte probe is not read
-        // before the namespace lookups that follow rebuild it.
+        // SAFETY: no ref derived from this RTE is live across the write
+        // (nsitem holds the Node handle, not a borrow; later EXCLUDED column
+        // lookups re-derive and see the mutation).
         unsafe {
-            rte_node.with_mut::<types_nodes::RangeTblEntry, _>(|r| {
+            nsitem.p_rte.with_mut::<types_nodes::RangeTblEntry, _>(|r| {
                 r.relkind = types_rel::RELKIND_COMPOSITE_TYPE
             })
         }
-        .expect("rtable holds RangeTblEntry");
+        .expect("nsitem p_rte is a RangeTblEntry");
+        excl_nsitem = Some(nsitem);
 
         excl_rel_tlist = BuildOnConflictExcludedTargetlist(mcx, &targetrel, excl_rel_index)?;
     }
@@ -2262,7 +2262,7 @@ fn addNSItemForReturning<'mcx>(
     use types_nodes::primnodes::Alias;
 
     let target = pstate.p_target_nsitem.expect("setTargetTable set p_target_nsitem");
-    let eref = target.p_rte.eref.expect("rte has eref");
+    let eref = target.rte().eref.expect("rte has eref");
     let numattrs = eref.colnames.len();
 
     let mut nscolumns: mcx::PgVec<'mcx, parser_small1::ParseNamespaceColumn> =
