@@ -544,8 +544,12 @@ fn prune_apply(
     Ok(())
 }
 
+// RelationNeedsWAL (rel.h), including the wal_level=minimal skip-WAL clause.
 fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
+        && (transam_xlog_seams::xlog_standby_info_active::call()
+            || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
+                && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
 }
 
 fn heap_prune_satisfies_vacuum(
