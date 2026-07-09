@@ -107,6 +107,10 @@ where
         debug_assert!(start_blockno == 0 && numblocks == InvalidBlockNumber);
     }
 
+    // C heapam_handler.c ExecPrepareQual runs before the scan: predicate fold
+    // errors surface even when no tuple is ever tested.
+    crate::prepare_index_predicate(mcx, index_info)?;
+
     let mut reltuples = 0.0f64;
     let mut root_blkno = InvalidBlockNumber;
     let mut root_offsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];

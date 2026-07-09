@@ -676,6 +676,9 @@ fn compute_index_stats<'mcx>(
                 mcx::vec_with_capacity_in(ind_mcx, rows.len() * attr_cnt)?;
             let mut exprnulls: PgVec<'_, bool> =
                 mcx::vec_with_capacity_in(ind_mcx, rows.len() * attr_cnt)?;
+            // C analyze.c compute_index_stats: ExecPrepareQual runs before
+            // the sample-row loop.
+            execindexing::prepare_index_predicate(anl_mcx, &mut thisdata.index_info)?;
             let mut numindexrows = 0usize;
             for row in rows {
                 per_tuple.reset();
