@@ -3224,11 +3224,27 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     result: Option<ExecSlotId>,
     f: impl FnOnce(&mut EvalSlots<'_, 'mcx>, Option<&mut SlotData<'mcx>>, Mcx<'mcx>) -> PgResult<R>,
 ) -> PgResult<R> {
+    with_eval_slots_outer(estate, ecxt, result, None, f)
+}
+
+/// [`with_eval_slots`] with the Outer slot overridden by the owning node's
+/// explicit row (SubplanEvalHook contract: the override lives OUTSIDE
+/// es_tupleTable, so it aliases none of the table-derived borrows).
+pub(crate) fn with_eval_slots_outer<'mcx, R>(
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    result: Option<ExecSlotId>,
+    outer_override: Option<&mut SlotData<'mcx>>,
+    f: impl FnOnce(&mut EvalSlots<'_, 'mcx>, Option<&mut SlotData<'mcx>>, Mcx<'mcx>) -> PgResult<R>,
+) -> PgResult<R> {
     let mcx = estate.es_query_cxt;
-    let (scan, inner, outer) = {
+    let (scan, inner, mut outer) = {
         let e = estate.ecxt(ecxt);
         (e.ecxt_scantuple, e.ecxt_innertuple, e.ecxt_outertuple)
     };
+    if outer_override.is_some() {
+        outer = None;
+    }
     let table: &mut [SlotData<'mcx>] = &mut estate.es_tupleTable;
     let ids = [scan, inner, outer, result];
     for (i, id) in ids.iter().enumerate() {
@@ -3246,7 +3262,10 @@ pub(crate) fn with_eval_slots<'mcx, R>(
     let mut slots = EvalSlots {
         scan: get(scan),
         inner: get(inner),
-        outer: get(outer),
+        outer: match outer_override {
+            Some(o) => Some(o),
+            None => get(outer),
+        },
     };
     f(&mut slots, get(result), mcx)
 }
