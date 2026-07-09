@@ -522,7 +522,10 @@ pub fn HandleNotifyInterrupt() {
 /// Called just before ReadyForQuery (flush=false: RFQ flushes) and when a
 /// notify interrupt lands during a client read (flush=true).
 pub fn ProcessNotifyInterrupt(flush: bool) -> PgResult<()> {
+    // Not really idle: reading the queue here would advance our listener pos
+    // mid-transaction (C returns; the pinned pos is what async-notify tests).
     if xact::IsTransactionOrTransactionBlock() {
+        return Ok(());
     }
     while notifyInterruptPending() {
         ProcessIncomingNotify(flush)?;
