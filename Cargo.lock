@@ -17259,6 +17259,7 @@ dependencies = [
  "varsup",
  "waitevent_seams",
  "walsender_config",
+ "walsummarizer_seams",
  "xact",
  "xloginsert",
  "xloginsert_seams",
