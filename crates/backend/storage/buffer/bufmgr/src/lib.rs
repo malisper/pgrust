@@ -58,6 +58,12 @@ pub use pin::{
 };
 pub use privref::{debug_all_private_pins, GetPrivateRefCount, ReservePrivateRefCountEntry};
 
+// Diagnostic (PGRUST_REDO_PIN_CHECK): wait out this thread's in-flight uring
+// prefetch pins so the check sees only genuine leaks.
+pub fn debug_drain_prefetch_pins() {
+    uring::drain_own();
+}
+
 // Diagnostic (PGRUST_REDO_PIN_CHECK): tag string for a pinned buffer.
 pub fn debug_buffer_tag_string(buffer: types_core::Buffer) -> String {
     let t = buf_hdr::GetBufferDescriptor(buffer - 1).tag();
