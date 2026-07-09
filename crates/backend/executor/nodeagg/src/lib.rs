@@ -1504,7 +1504,8 @@ fn init_perhash<'mcx>(
 }
 
 const SIZEOF_MINIMAL_TUPLE_HEADER: usize = 15;
-const CHUNKHDRSZ: usize = 16;
+// C: sizeof(MemoryChunk) = 8 in production builds (memutils_memorychunk.h).
+const CHUNKHDRSZ: usize = 8;
 
 const fn maxalign(n: usize) -> usize {
     (n + 7) & !7
