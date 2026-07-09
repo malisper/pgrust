@@ -2388,6 +2388,7 @@ dependencies = [
  "elog_seams",
  "execindexing",
  "fmgr_seams",
+ "format_type",
  "genam",
  "ginbuild",
  "gistbuild",

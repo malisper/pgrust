@@ -210,9 +210,17 @@ fn ConstructTupleDescriptor<'mcx>(
         } else {
             let indexkey = indexpr_item.next().expect("too few entries in indexprs list");
             let keyType = nodes_core::expr_type(indexkey);
-            // C's CheckAttributeType defense: anonymous records can't be stored.
-            const RECORDOID: Oid = 2249;
-            assert!(keyType != RECORDOID, "column \"{colname}\" has pseudo-type record");
+            // index.c ConstructTupleDescriptor calls CheckAttributeType(flags=0),
+            // rejecting any pseudo-type result (e.g. an anonymous record).
+            if lsyscache::get_typtype(keyType)? == b'p' as i8 {
+                return Err(err(
+                    format!(
+                        "column \"{colname}\" has pseudo-type {}",
+                        format_type::format_type_be(keyType)?
+                    ),
+                    types_error::ERRCODE_INVALID_TABLE_DEFINITION,
+                ));
+            }
             let shape = syscache_seams::lookup_pg_type_shape::call(keyType)?
                 .unwrap_or_else(|| panic!("cache lookup failed for type {keyType}"));
             let to = indexTupDesc.attr_mut(i);
