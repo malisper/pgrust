@@ -626,7 +626,14 @@ fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
     // proc_exit unwinds ProcExitThread; converting it to an ERROR turns
     // backend exit into an infinite recovery loop (client EOF -> proc_exit(0)
     // -> "recovered" -> ReadCommand panic, ~850/s). Re-raise it.
-    if payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
+    // KilledBySignal (SIGKILL crash-test injection) must reach the thread top
+    // as a crash, exactly like ProcExitThread/PanicExitThread — demoting it to
+    // ERROR would make a SIGKILL'd backend recover as FATAL(1) and skip the
+    // postmaster crash cascade.
+    if payload.is::<ipc::ProcExitThread>()
+        || payload.is::<types_error::PanicExitThread>()
+        || payload.is::<ipc::KilledBySignal>()
+    {
         std::panic::resume_unwind(payload);
     }
     match ::types_error::pg_error_from_panic(payload) {

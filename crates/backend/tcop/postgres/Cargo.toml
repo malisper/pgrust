@@ -37,6 +37,7 @@ commands_async = { path = "../../commands/commands_async" }
 sinval = { path = "../../storage/ipc/sinval" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+superuser_seams = { path = "../../utils/misc/superuser_seams" }
 parallel_seams = { path = "../../access/transam/parallel_seams" }
 mcxt_seams = { path = "../../utils/mmgr/mcxt_seams" }
 interrupt = { path = "../../../backend/postmaster/interrupt" }

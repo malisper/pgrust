@@ -309,10 +309,12 @@ fn run_child_task(
     if let Some(cs) = client_sock {
         unsafe { libc::close(cs.sock) };
     }
-    // C wait status: ProcExitThread == WIFEXITED; other payloads == WTERMSIG(SIGABRT).
+    // C wait status: ProcExitThread == WIFEXITED; KilledBySignal ==
+    // WTERMSIG(signo); other payloads == WTERMSIG(SIGABRT).
     let exitstatus = payload
         .downcast_ref::<ipc::ProcExitThread>()
         .map(|p| p.code << 8)
+        .or_else(|| payload.downcast_ref::<ipc::KilledBySignal>().map(|k| k.signo))
         .unwrap_or(libc::SIGABRT);
     // Park in flight (wretain): the reaper must treat this announce as a
     // task end, not a thread end. Marked before the announce so the reaper

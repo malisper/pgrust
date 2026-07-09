@@ -375,6 +375,9 @@ pub fn install_thread_signal_handlers() {
     procsignal::pqsignal_thread(libc::SIGTERM, Fallible(die));
     if init_small::globals::IsUnderPostmaster() {
         procsignal::pqsignal_thread(libc::SIGQUIT, Simple(quickdie_handler));
+        // No C analog (SIGKILL has no handler): the crash-test injection's
+        // kill-9 rendering, reachable only via procsignal::SendThreadKill.
+        procsignal::pqsignal_thread(libc::SIGKILL, Simple(kill9_handler));
     } else {
         procsignal::pqsignal_thread(libc::SIGQUIT, Fallible(die));
     }
@@ -387,6 +390,18 @@ pub fn install_thread_signal_handlers() {
 
 fn quickdie_handler() {
     quickdie()
+}
+
+// SIGKILL semantics: no handler runs in C, so no client message and no exit
+// callbacks — the connection just closes and the postmaster reaps
+// "terminated by signal 9".
+fn kill9_handler() {
+    init_small::globals::HoldInterrupts();
+    if elog::config::where_to_send_output() == types_dest::CommandDest::Remote {
+        elog::config::set_where_to_send_output(types_dest::CommandDest::None);
+    }
+    elog::clear_emit_context_callbacks();
+    ipc::exit_thread_killed(libc::SIGKILL)
 }
 
 pub fn die() -> PgResult<()> {
