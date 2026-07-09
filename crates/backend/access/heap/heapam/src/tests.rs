@@ -46,6 +46,7 @@ fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
 
 fn install_seams() {
     INIT.call_once(|| {
+        transam_xlog_seams::xlog_standby_info_active::set(|| false);
         bufmgr_seams::read_buffer::set(|rel, block| {
             with_fake(|f| {
                 let buf = f.tables[&rel.rd_id][block as usize];

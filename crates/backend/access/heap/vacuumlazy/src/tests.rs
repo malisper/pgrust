@@ -58,6 +58,7 @@ fn fork_nblocks(fork: u8) -> BlockNumber {
 fn install_seams() {
     static INSTALL: OnceLock<()> = OnceLock::new();
     INSTALL.get_or_init(|| {
+        transam_xlog_seams::xlog_standby_info_active::set(|| false);
         postgres_seams::check_for_interrupts::set(|| Ok(()));
         bufmgr_seams::buffer_get_page::set(|buf| {
             let addr = with_fake(|f| {
