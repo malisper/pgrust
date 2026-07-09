@@ -382,6 +382,8 @@ fn overwrite_contrecord_round_trip() {
         "pg_xact",
         "pg_subtrans",
         "base/5",
+        // StartupXLOG opens pg_tblspc at ERROR; real initdb always creates it.
+        "pg_tblspc",
     ] {
         std::fs::create_dir_all(dd1.join(sub)).unwrap();
     }
