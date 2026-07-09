@@ -17,7 +17,7 @@
   <span>&nbsp;&nbsp;|&nbsp;&nbsp;</span>
   <a href="https://discord.gg/FZZ4dbdvwU">Discord</a>
   <span>&nbsp;&nbsp;|&nbsp;&nbsp;</span>
-  <a href="https://malisper.me/subscribe/">Mailing list</a>
+  <a href="https://malisper.me/subscribe/">Get pgrust updates</a>
   <span>&nbsp;&nbsp;|&nbsp;&nbsp;</span>
   <a href="https://github.com/malisper/pgrust/issues">Issues</a>
 </div>
@@ -33,6 +33,11 @@ pgrust is disk compatible with Postgres and can boot from an existing Postgres
 The goal is to make Postgres easier to change from the inside: keep the behavior
 Postgres-shaped, keep the real Postgres tests as the oracle, and use Rust plus
 AI-assisted programming to explore deeper server changes.
+
+## Follow pgrust
+
+[Get project updates by email](https://malisper.me/subscribe/), including new
+releases, compatibility milestones, and architecture experiments.
 
 ## Status
 
@@ -166,7 +171,7 @@ a Postgres improvement you want to see first.
 
 - Email: maintainers@pgrust.com
 - Discord: https://discord.gg/FZZ4dbdvwU
-- Mailing list: https://malisper.me/subscribe/
+- Project updates: https://malisper.me/subscribe/
 
 ## License
 
