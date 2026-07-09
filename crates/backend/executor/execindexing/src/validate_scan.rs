@@ -84,6 +84,10 @@ pub fn table_index_validate_scan<'mcx>(
         flags,
     )?;
 
+    // C heapam_handler.c ExecPrepareQual runs before the scan (see
+    // prepare_index_predicate).
+    crate::prepare_index_predicate(mcx, index_info)?;
+
     let mut per_tuple = mcx::MemoryContext::new_bump("IndexValidatePerTuple");
 
     loop {

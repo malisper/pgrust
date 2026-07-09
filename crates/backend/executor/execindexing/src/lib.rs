@@ -480,9 +480,32 @@ pub fn FormIndexDatum<'mcx>(
     Ok(())
 }
 
+/// C ExecPrepareQual over ii_Predicate: expression_planner folds each
+/// implicit-AND arm independently, so a folding error (e.g. non-contiguous
+/// range difference) surfaces even beside a constant-false sibling arm.
+/// Scan-path callers (build/validate/exclusion-check/analyze) must run this
+/// eagerly before the loop like C — errors surface on empty tables too.
+pub fn prepare_index_predicate<'mcx>(
+    mcx: Mcx<'mcx>,
+    indexInfo: &mut IndexInfo<'mcx>,
+) -> PgResult<()> {
+    if indexInfo.ii_Predicate.is_nil() || indexInfo.ii_PredicateState.is_some() {
+        return Ok(());
+    }
+    let mut planned = NodeList::nil();
+    for e in indexInfo.ii_Predicate.iter() {
+        let folded = clauses::eval_const_expressions(mcx, e)?;
+        nodes_core::fix_opfuncids(folded)?;
+        planned.lappend(mcx, folded)?;
+    }
+    indexInfo.ii_PredicateState =
+        execexpr::exec_init_qual(mcx, &planned, execexpr::ParamBind::NONE)?;
+    Ok(())
+}
+
 // The ii_PredicateState arm of C's ExecInsertIndexTuples /
-// ExecCheckIndexConstraints / heapam_index_build_range_scan: lazy
-// ExecPrepareQual + ExecQual over the scan slot.
+// ExecCheckIndexConstraints: lazy ExecPrepareQual + ExecQual over the scan
+// slot.
 pub fn index_predicate_passes<'mcx>(
     mcx: Mcx<'mcx>,
     eval_mcx: Mcx<'_>,
@@ -490,18 +513,7 @@ pub fn index_predicate_passes<'mcx>(
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     debug_assert!(!indexInfo.ii_Predicate.is_nil());
-    if indexInfo.ii_PredicateState.is_none() {
-        // C ExecPrepareQual: expression_planner over the qual before init —
-        // required on the CREATE INDEX build path (raw parse-tree predicate).
-        let mut planned = NodeList::nil();
-        for e in indexInfo.ii_Predicate.iter() {
-            let folded = clauses::eval_const_expressions(mcx, e)?;
-            nodes_core::fix_opfuncids(folded)?;
-            planned.lappend(mcx, folded)?;
-        }
-        indexInfo.ii_PredicateState =
-            execexpr::exec_init_qual(mcx, &planned, execexpr::ParamBind::NONE)?;
-    }
+    prepare_index_predicate(mcx, indexInfo)?;
     if let Some(state) = indexInfo.ii_PredicateState.as_deref_mut() {
         // SAFETY: eval_mcx outlives this call; the qual result is consumed
         // before the caller resets it.
@@ -941,6 +953,9 @@ pub fn IndexCheckExclusion<'mcx>(
         None,
         flags,
     )?;
+
+    // C index.c IndexCheckExclusion: ExecPrepareQual runs before the scan.
+    prepare_index_predicate(mcx, index_info)?;
 
     let mut values = [Datum::null(); INDEX_MAX_KEYS as usize];
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
