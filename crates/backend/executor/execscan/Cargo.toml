@@ -18,6 +18,7 @@ tupdesc = { path = "../../access/common/tupdesc" }
 init_small = { path = "../../utils/init/init_small" }
 tableam = { path = "../../access/table/tableam" }
 exectuples = { path = "../exectuples" }
+detoast_seams = { path = "../../access/common/detoast_seams" }
 execexpr = { path = "../execexpr" }
 executils = { path = "../executils" }
 nodes_core = { path = "../../nodes/nodes_core" }

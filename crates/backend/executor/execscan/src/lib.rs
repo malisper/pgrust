@@ -184,11 +184,29 @@ fn epq_fetch_row_mark<'mcx, N: ScanNode<'mcx>>(
                 exectuples::exec_clear_tuple(estate.slot_mut(ss_slot), mcx);
                 return Ok(EpqFetch::Empty);
             }
-            // ExecForceStoreHeapTupleDatum: a composite datum is an in-memory
-            // HeapTupleHeader image; store it through the scan slot.
-            let hdr = datum.as_usize() as *const u8;
-            // SAFETY: wholerow junk datums are in-memory composite images,
-            // live in the origslot for this row.
+            // ExecStoreHeapTupleDatum: DatumGetHeapTupleHeader detoasts first —
+            // a wholerow datum that crossed a Hash/Sort/Material tuple store is
+            // repacked as a short varlena (no 4B header); the detoasted copy
+            // lives in the query context like C's.
+            let src = datum.as_usize() as *const u8;
+            // SAFETY: a non-null wholerow junk datum is a live varlena image,
+            // valid in the origslot for this row.
+            let hdr = unsafe {
+                if !types_tuple::varatt::varatt_is_4b_u(src) {
+                    let image = core::slice::from_raw_parts(
+                        src,
+                        types_tuple::varatt::varsize_any(src),
+                    );
+                    let flat = ::detoast_seams::detoast_attr::call(mcx, image)?;
+                    let p = flat.as_ptr();
+                    core::mem::forget(flat);
+                    p
+                } else {
+                    src
+                }
+            };
+            // SAFETY: hdr is a plain 4B composite image readable for its
+            // datum length.
             let t_len = unsafe {
                 (*(hdr as *const types_tuple::htup::HeapTupleHeaderData)).datum_length()
             };
