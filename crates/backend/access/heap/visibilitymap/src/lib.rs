@@ -195,8 +195,12 @@ pub fn xlog_hint_bit_is_needed() -> bool {
     transam_xlog_seams::data_checksums_enabled::call() || guc_tables::vars::wal_log_hints.read()
 }
 
+// RelationNeedsWAL (rel.h), including the wal_level=minimal skip-WAL clause.
 fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
+        && (transam_xlog_seams::xlog_standby_info_active::call()
+            || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
+                && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
 }
 
 const XLOG_HEAP2_VISIBLE: u8 = 0x40;

@@ -277,8 +277,12 @@ fn read_seq_tuple(rel: &Relation<'_>) -> PgResult<(Buffer, SeqTuple)> {
     Ok((buf, tup))
 }
 
+// RelationNeedsWAL (rel.h), including the wal_level=minimal skip-WAL clause.
 fn relation_needs_wal(rel: &Relation<'_>) -> bool {
     rel.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT
+        && (transam_xlog_seams::xlog_standby_info_active::call()
+            || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
+                && rel.rd_firstRelfilelocatorSubid.get() == types_core::InvalidSubTransactionId))
 }
 
 fn rd_locator_bytes(rel: &Relation<'_>) -> [u8; SizeOfXlSeqRec] {

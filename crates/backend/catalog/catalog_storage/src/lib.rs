@@ -317,10 +317,14 @@ pub fn smgrGetPendingDeletes<'mcx>(
     mcx: Mcx<'mcx>,
     for_commit: bool,
 ) -> PgResult<PgVec<'mcx, RelFileLocator>> {
+    // C filters on nestLevel >= GetCurrentTransactionNestLevel(): a subxact's
+    // abort record must carry only that subxact's creations, never the outer
+    // transaction's (redo would drop live relfilenodes).
+    let nest_level = xact::GetCurrentTransactionNestLevel();
     let mut out = PgVec::new_in(mcx);
     PENDING.with_borrow(|p| {
         for pending in p {
-            if pending.nest_level == 1
+            if pending.nest_level >= nest_level
                 && pending.at_commit == for_commit
                 && pending.proc_number == INVALID_PROC_NUMBER
             {
