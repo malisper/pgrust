@@ -177,7 +177,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2856, "pg_timezone_names", BuiltinGapKind::NotRegistered),
     (2857, "pg_stat_get_backend_xact_start", BuiltinGapKind::NotRegistered),
     (2859, "pg_stat_get_buf_alloc", BuiltinGapKind::NotRegistered),
-    (2898, "xml_recv", BuiltinGapKind::NotRegistered),
     (2931, "xpath", BuiltinGapKind::NotRegistered),
     (2947, "pg_snapshot_xip", BuiltinGapKind::NotRegistered),
     (3035, "pg_listening_channels", BuiltinGapKind::NotRegistered),

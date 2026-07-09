@@ -24,6 +24,16 @@ use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
+/// A `recv` function's `internal` (StringInfo) argument, delivered as its raw
+/// message-buffer bytes on the by-ref lane (no varlena header stripping).
+#[inline]
+fn arg_recv_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("xml fn: by-ref recv (StringInfo) arg missing from by-ref lane")
+}
+
 /// A `text` arg's detoasted `VARDATA_ANY` payload bytes on the by-ref lane
 /// (C: `VARDATA_ANY(data)` / `VARSIZE_ANY_EXHDR(data)`).
 #[inline]
@@ -127,6 +137,14 @@ fn fc_xml_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let x = arg_text_bytes(fcinfo, 0);
     let out = crate::xml_out(x)?;
     Ok(ret_cstring(fcinfo, out))
+}
+
+/// `xml_recv(internal) -> xml` (OID 2898) — validate wire bytes, convert to
+/// server encoding, and return the stored `xml` payload bytes.
+fn fc_xml_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let buf = arg_recv_payload(fcinfo, 0);
+    let out = crate::xml_recv(buf)?;
+    Ok(ret_varlena(fcinfo, out))
 }
 
 /// `xmlcomment(text)` (OID 2895) — `<!--text-->`.
@@ -498,6 +516,7 @@ pub fn register_xml_builtins() {
         // text<->xml casts, so xml values parse, print, and round-trip.
         builtin(2893, "xml_in", 1, true, false, fc_xml_in),
         builtin(2894, "xml_out", 1, true, false, fc_xml_out),
+        builtin(2898, "xml_recv", 1, true, false, fc_xml_recv),
         builtin(2895, "xmlcomment", 1, true, false, fc_xmlcomment),
         builtin(2896, "texttoxml", 1, true, false, fc_texttoxml),
         builtin(2922, "xmltotext", 1, true, false, fc_xmltotext),
