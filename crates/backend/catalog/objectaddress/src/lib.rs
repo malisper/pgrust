@@ -185,15 +185,18 @@ pub fn NameListToString(names: &NodeList<'_>) -> String {
 // TypeNameToString/appendTypeNameToBuffer (parse_type.c); C renders %TYPE
 // and [] decorations but never SETOF.
 pub fn TypeNameToString(tn: &TypeName<'_>) -> String {
-    if tn.names.is_nil() {
-        unported("TypeNameToString pre-resolved typeOid rendering");
-    }
     let mut out = String::new();
-    for (i, node) in tn.names.iter().enumerate() {
-        if i > 0 {
-            out.push('.');
+    if tn.names.is_nil() {
+        // Internally-generated TypeName: render the resolved OID (C's
+        // format_type_be arm). Unreachable from grammar TypeNames.
+        out.push_str(&format_type::format_type_be(tn.typeOid).expect("format_type_be"));
+    } else {
+        for (i, node) in tn.names.iter().enumerate() {
+            if i > 0 {
+                out.push('.');
+            }
+            out.push_str(node.as_string().expect("TypeName names").sval);
         }
-        out.push_str(node.as_string().expect("TypeName names").sval);
     }
     if tn.pct_type {
         out.push_str("%TYPE");
