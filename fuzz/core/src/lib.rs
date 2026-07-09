@@ -267,6 +267,13 @@ mod tests {
             0, 32, 4, 0, 1, 0, 0, 0, 0, 91, 0, 0, 46, 255, 2, 104, 105, 100, 97, 116, 254, 255,
             255, 255, 255, 255, 255, 255, 0, 0, 255, 2, 104, 105, 100, 97, 116, 97,
         ]);
+        // wave2: HAS_IMAGE bimg_len=8 then DATA_LONG main_data_len=0xFFFFFFFF
+        // wraps datatotal past the gate → payload-copy slice-OOB (now a clean
+        // invalid-length reject; asserted in xlogreader's own tests).
+        wal_record(&[
+            0, 29, 0, 0, 8, 0, 0, 0, 4, 255, 0, 1, 8, 39, 4, 9, 170, 170, 170, 170, 170, 170,
+            170, 0, 1, 254, 255, 255, 255, 255, 2, 0, 8, 0, 255, 0, 0,
+        ]);
     }
 
     #[test]

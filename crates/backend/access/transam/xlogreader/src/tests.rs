@@ -266,6 +266,65 @@ fn crc_failure_reports_checksum_error() {
     );
 }
 
+// Decodes a single record whose raw body is `body` (framed + CRC'd by
+// WalSim::append) and returns the reader's deferred error message.
+fn decode_corrupt_body(body: &[u8]) -> String {
+    let mut w = WalSim::new();
+    let l1 = w.append(0, 0, 0, body);
+    let mut src = SimRead { wal: &w, end: w.insert };
+    let cx = MemoryContext::new("t");
+    let mut r = reader(&cx);
+    r.XLogBeginRead(l1);
+    let res = r.XLogReadRecord(&mut src).unwrap();
+    assert_eq!(res, None, "corrupt record must fail to decode");
+    r.errormsg().expect("decode failure reports an error").to_owned()
+}
+
+// Cargo-fuzz decoder crashes (2026-07-08): wire-controlled u32/u16 arithmetic
+// in decode_record must reject the record with C's report_invalid_record
+// error, not abort (overflow-checks) or panic (unconditional slice bound).
+// Bytes are the minimized libFuzzer repros; message strings are byte-identical
+// to xlogreader.c DecodeXLogRecord (PG 18.3).
+#[test]
+fn fuzz_add_overflow_lib1827_reports_invalid_length() {
+    // DATA_LONG main_data_len = 0xFFFFFFFF wraps datatotal (l177 27-byte repro).
+    let body = &[
+        0, 32, 4, 0, 1, 0, 0, 0, 0, 91, 0, 0, 46, 255, 2, 104, 105, 100, 97, 116, 254, 255, 255,
+        255, 255, 255, 255, 255, 0, 0, 255, 2, 104, 105, 100, 97, 116, 97,
+    ];
+    assert_eq!(
+        decode_corrupt_body(body),
+        "record with invalid length at 0/100028"
+    );
+}
+
+#[test]
+fn fuzz_subtract_underflow_lib1890_reports_invalid_length() {
+    // bimg_len 0xc200 > BLCKSZ; BLCKSZ-bimg_len underflow (l177 9-byte repro).
+    let body = &[0x06, 0xfb, 0x01, 0x00, 0x00, 0xc2, 0x1e, 0x00, 0x00];
+    assert_eq!(
+        decode_corrupt_body(body),
+        "BKPIMAGE_HAS_HOLE not set, but hole offset 30 length 24064 at 0/100028"
+    );
+}
+
+#[test]
+fn fuzz_bimg_slice_oob_wave2_reports_invalid_length() {
+    // HAS_IMAGE bimg_len=8 then DATA_LONG main_data_len=0xFFFFFFFF wraps
+    // datatotal past the aggregate gate; the payload copy must re-check the
+    // per-fragment length (wave2 37-byte repro). C silently heap-overreads on
+    // this CRC-valid record (UB); we deliberately reject it — the ruled
+    // divergence, so this message is NOT byte-identical to C by design.
+    let body = &[
+        0, 29, 0, 0, 8, 0, 0, 0, 4, 255, 0, 1, 8, 39, 4, 9, 170, 170, 170, 170, 170, 170, 170, 0,
+        1, 254, 255, 255, 255, 255, 2, 0, 8, 0, 255, 0, 0,
+    ];
+    assert_eq!(
+        decode_corrupt_body(body),
+        "record with invalid length at 0/100028"
+    );
+}
+
 #[test]
 fn bad_prev_link_detected() {
     let mut w = WalSim::new();
