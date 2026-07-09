@@ -18,6 +18,7 @@ datum = { path = "../../../_support/types/datum" }
 execindexing = { path = "../../executor/execindexing" }
 elog = { path = "../../utils/error/elog" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
+format_type = { path = "../../utils/adt/format_type" }
 genam = { path = "../../access/index/genam" }
 heaptuple = { path = "../../access/common/heaptuple" }
 indexam = { path = "../../access/index/indexam" }
