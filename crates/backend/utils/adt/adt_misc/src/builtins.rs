@@ -738,10 +738,45 @@ pub fn fc_pg_conf_load_time(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo
     Ok(Datum::from_i64(guc::pg_reload_time()))
 }
 
+// jit.c DLSUFFIX on the build platforms.
+const DLSUFFIX: &str = ".so";
+
+thread_local! {
+    // jit.c provider_failed_loading: a probe failed once; don't re-stat.
+    static JIT_PROVIDER_FAILED_LOADING: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 pub fn fc_pg_jit_available(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // provider_init(): the provider is compiled in, so availability reduces
-    // to the jit GUC.
-    Ok(Datum::from_bool(guc_tables::vars::jit_enabled.read()))
+    Ok(Datum::from_bool(jit_provider_init()?))
+}
+
+// jit.c provider_init() up to the pg_file_exists probe. There is no dlopen
+// substrate, so a provider shlib actually present in pkglib_path is
+// unreachable-loud rather than silently claimed available (the PGDG oracle
+// image ships none: C answers false, and so do we).
+fn jit_provider_init() -> PgResult<bool> {
+    if !guc_tables::vars::jit_enabled.read() {
+        return Ok(false);
+    }
+    if JIT_PROVIDER_FAILED_LOADING.get() {
+        return Ok(false);
+    }
+    // jit_provider is PGC_POSTMASTER with boot_val "llvmjit"; no owner
+    // installs accessors yet, so the boot default stands in until one does.
+    let provider = if guc_tables::vars::jit_provider.installed() {
+        guc_tables::vars::jit_provider.read().unwrap_or_default()
+    } else {
+        "llvmjit".to_string()
+    };
+    let pkglib = init_small::globals::pkglib_path();
+    let len = pkglib.iter().position(|&b| b == 0).unwrap_or(pkglib.len());
+    let path = format!("{}/{provider}{DLSUFFIX}", String::from_utf8_lossy(&pkglib[..len]));
+    if !fd::pg_file_exists(&path)? {
+        JIT_PROVIDER_FAILED_LOADING.set(true);
+        return Ok(false);
+    }
+    panic!("pg_jit_available: JIT provider shlib present at {path} but provider loading is unported");
 }
 
 // misc.c LOG_METAINFO_DATAFILE, relative to the data directory (backend cwd).
