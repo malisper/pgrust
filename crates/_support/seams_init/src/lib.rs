@@ -1,5 +1,6 @@
 // One line per crate: the full seam-install closure for the postgres binary.
 pub fn init_all() {
+    install_panic_hook();
     detoast::init_seams();
     ruleutils::init_seams();
     heaptoast::init_seams();
@@ -300,4 +301,26 @@ pub fn init_all() {
         stats_import::STATS_IMPORT_BUILTINS,
     ];
     fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
+}
+
+// A PgError-payload panic is the ereport-through-infallible-C idiom (a sort
+// comparator error unwinding through qsort, etc.): caught at the nearest
+// catch_unwind boundary and re-raised as a client ERROR, matching C's
+// ereport/longjmp — never a crash. Suppress its default "panicked at" line so
+// crash gates don't misread the error path as a backend crash. Every other
+// payload (string panic!/unwrap/assert, PanicExitThread abort) keeps the loud
+// default hook.
+fn install_panic_hook() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let p = info.payload();
+            if p.is::<elog::PgError>() || p.is::<Box<elog::PgError>>() {
+                return;
+            }
+            default_hook(info);
+        }));
+    });
 }
