@@ -1,4 +1,5 @@
 use core::cell::Cell;
+use std::sync::{Mutex, MutexGuard};
 
 use init_small::globals::SetMyDatabaseId;
 use mcx::MemoryContext;
@@ -16,7 +17,14 @@ thread_local! {
     static NOW: Cell<i64> = const { Cell::new(1_000_000) };
 }
 
-fn setup() {
+// Serializes every test that touches the process-global stores: SHARED_STATS,
+// SHARED_IO, SHARED_SLRU, the fixed-kind stats, and the statsfile import/reset
+// paths, which replace all of them wholesale.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[must_use]
+fn setup() -> MutexGuard<'static, ()> {
+    let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         timestamp_seams::get_current_timestamp::set(|| NOW.with(|c| c.get()));
@@ -30,6 +38,7 @@ fn setup() {
     SetMyDatabaseId(5);
     crate::set_pgstat_track_counts(true);
     NEST_LEVEL.with(|c| c.set(1));
+    guard
 }
 
 fn advance_clock(usec: i64) {
@@ -62,14 +71,14 @@ fn db_pending(dboid: u32) -> Option<database::PgStat_StatDBEntry> {
 
 #[test]
 fn report_stat_with_nothing_pending_is_zero() {
-    setup();
+    let _lock = setup();
     assert_eq!(pending::pgstat_report_stat(false), 0);
     assert_eq!(pending::pgstat_report_stat(true), 0);
 }
 
 #[test]
 fn eoxact_commit_folds_trans_into_counts() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1001, false, 3);
     relation::pgstat_count_heap_update(1001, false, true, false);
     relation::pgstat_count_heap_delete(1001, false);
@@ -89,7 +98,7 @@ fn eoxact_commit_folds_trans_into_counts() {
 
 #[test]
 fn eoxact_abort_counts_dead_only() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1002, false, 2);
     relation::pgstat_count_heap_update(1002, false, false, true);
 
@@ -106,7 +115,7 @@ fn eoxact_abort_counts_dead_only() {
 
 #[test]
 fn truncate_zeroes_and_abort_restores() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1003, false, 2);
     relation::pgstat_count_truncate(1003, false);
     relation::pgstat_count_heap_insert(1003, false, 1);
@@ -122,7 +131,7 @@ fn truncate_zeroes_and_abort_restores() {
 
 #[test]
 fn truncate_commit_resets_deltas() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1004, false, 4);
     relation::pgstat_count_truncate(1004, false);
     relation::pgstat_count_heap_insert(1004, false, 1);
@@ -138,7 +147,7 @@ fn truncate_commit_resets_deltas() {
 
 #[test]
 fn subxact_commit_merges_into_parent_level() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1005, false, 1);
     NEST_LEVEL.with(|c| c.set(2));
     relation::pgstat_count_heap_insert(1005, false, 10);
@@ -153,7 +162,7 @@ fn subxact_commit_merges_into_parent_level() {
 
 #[test]
 fn subxact_commit_without_parent_node_relinks_upward() {
-    setup();
+    let _lock = setup();
     NEST_LEVEL.with(|c| c.set(2));
     relation::pgstat_count_heap_insert(1006, false, 7);
     xact::AtEOSubXact_PgStat(true, 2);
@@ -167,7 +176,7 @@ fn subxact_commit_without_parent_node_relinks_upward() {
 
 #[test]
 fn subxact_abort_folds_dead_into_counts() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1007, false, 1);
     NEST_LEVEL.with(|c| c.set(2));
     relation::pgstat_count_heap_insert(1007, false, 5);
@@ -184,7 +193,7 @@ fn subxact_abort_folds_dead_into_counts() {
 
 #[test]
 fn count_macros_accumulate_nontransactional_counts() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_scan(1008, false);
     relation::pgstat_count_heap_getnext(1008, false);
     relation::pgstat_count_heap_getnext(1008, false);
@@ -206,7 +215,7 @@ fn count_macros_accumulate_nontransactional_counts() {
 
 #[test]
 fn relation_link_counts_and_gen_invalidation() {
-    setup();
+    let _lock = setup();
     let gen0 = relation::pgstat_relation_link_gen();
     let link = relation::pgstat_relation_link_counts(1042, false);
     assert!(!link.is_null());
@@ -235,7 +244,7 @@ fn relation_link_counts_and_gen_invalidation() {
 
 #[test]
 fn flush_folds_relation_into_database_pending() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_getnext(1009, false);
     xact::AtEOXact_PgStat(true, false);
 
@@ -255,7 +264,7 @@ fn flush_folds_relation_into_database_pending() {
 
 #[test]
 fn report_stat_flushes_and_rate_limits() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1010, false, 1);
     xact::AtEOXact_PgStat(true, false);
 
@@ -277,7 +286,7 @@ fn report_stat_flushes_and_rate_limits() {
 
 #[test]
 fn force_next_flush_overrides_rate_limit() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(1011, false, 1);
     xact::AtEOXact_PgStat(true, false);
     assert_eq!(pending::pgstat_report_stat(true), 0);
@@ -292,7 +301,7 @@ fn force_next_flush_overrides_rate_limit() {
 
 #[test]
 fn update_dbstats_folds_xact_and_io_time_counters() {
-    setup();
+    let _lock = setup();
     xact::AtEOXact_PgStat(true, false);
     xact::AtEOXact_PgStat(false, false);
     xact::AtEOXact_PgStat(true, true); // parallel: not counted
@@ -312,7 +321,7 @@ fn update_dbstats_folds_xact_and_io_time_counters() {
 
 #[test]
 fn tempfile_and_deadlock_reports_respect_track_counts() {
-    setup();
+    let _lock = setup();
     crate::set_pgstat_track_counts(false);
     database::pgstat_report_tempfile(100);
     database::pgstat_report_deadlock();
@@ -329,7 +338,7 @@ fn tempfile_and_deadlock_reports_respect_track_counts() {
 
 #[test]
 fn transactional_drops_filter_by_outcome() {
-    setup();
+    let _lock = setup();
     relation::pgstat_create_relation(2001, false);
     relation::pgstat_drop_relation(2002, false);
 
@@ -348,7 +357,7 @@ fn transactional_drops_filter_by_outcome() {
 
 #[test]
 fn subxact_commit_passes_drops_to_parent() {
-    setup();
+    let _lock = setup();
     NEST_LEVEL.with(|c| c.set(2));
     relation::pgstat_drop_relation(2003, false);
     xact::AtEOSubXact_PgStat(true, 2);
@@ -363,7 +372,7 @@ fn subxact_commit_passes_drops_to_parent() {
 
 #[test]
 fn subxact_abort_drops_created_entries_pending() {
-    setup();
+    let _lock = setup();
     NEST_LEVEL.with(|c| c.set(2));
     relation::pgstat_create_relation(2004, false);
     relation::pgstat_count_heap_insert(2004, false, 1);
@@ -376,7 +385,7 @@ fn subxact_abort_drops_created_entries_pending() {
 
 #[test]
 fn execute_transactional_drops_removes_pending() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(2005, false, 1);
     let items = [types_core::xact::XlXactStatsItem {
         kind: PGSTAT_KIND_RELATION.0 as i32,
@@ -390,7 +399,7 @@ fn execute_transactional_drops_removes_pending() {
 
 #[test]
 fn drop_relation_zeroes_current_level_trans() {
-    setup();
+    let _lock = setup();
     relation::pgstat_count_heap_insert(2006, false, 9);
     relation::pgstat_drop_relation(2006, false);
     assert_eq!(
@@ -402,7 +411,7 @@ fn drop_relation_zeroes_current_level_trans() {
 
 #[test]
 fn init_relation_gates_on_relkind_and_track_counts() {
-    setup();
+    let _lock = setup();
     assert!(relation::pgstat_init_relation(1, b'r'));
     assert!(relation::pgstat_init_relation(1, b'p'));
     assert!(relation::pgstat_init_relation(1, b'i'));
@@ -413,7 +422,7 @@ fn init_relation_gates_on_relkind_and_track_counts() {
 
 #[test]
 fn slru_counters_and_flush() {
-    setup();
+    let _lock = setup();
     assert_eq!(slru::pgstat_get_slru_index("transaction"), 6);
     assert_eq!(slru::pgstat_get_slru_index("bogus"), 7);
     assert_eq!(slru::pgstat_get_slru_name(0), Some("commit_timestamp"));
@@ -441,7 +450,7 @@ fn slru_counters_and_flush() {
 
 #[test]
 fn checkpointer_slru_written_counter() {
-    setup();
+    let _lock = setup();
     checkpointer::pgstat_count_checkpointer_slru_written();
     checkpointer::pgstat_count_checkpointer_slru_written();
     assert_eq!(checkpointer::pending_checkpointer_stats().slru_written, 2);
@@ -449,7 +458,7 @@ fn checkpointer_slru_written_counter() {
 
 #[test]
 fn session_end_cause_fatal_only_upgrades_normal() {
-    setup();
+    let _lock = setup();
     assert_eq!(
         database::pgstat_session_end_cause(),
         SessionEndType::DisconnectNormal
@@ -469,7 +478,7 @@ fn session_end_cause_fatal_only_upgrades_normal() {
 
 #[test]
 fn flush_applies_to_shared_store_and_fetch_returns_sum() {
-    setup();
+    let _lock = setup();
     SetMyDatabaseId(601);
     crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_NONE);
     relation::pgstat_count_heap_scan(6001, false);
@@ -499,7 +508,7 @@ fn flush_applies_to_shared_store_and_fetch_returns_sum() {
 
 #[test]
 fn truncdrop_flush_resets_live_dead_ins() {
-    setup();
+    let _lock = setup();
     SetMyDatabaseId(605);
     crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_NONE);
     relation::pgstat_count_heap_insert(6006, false, 5);
@@ -521,7 +530,7 @@ fn truncdrop_flush_resets_live_dead_ins() {
 
 #[test]
 fn cache_consistency_is_stable_until_clear() {
-    setup();
+    let _lock = setup();
     SetMyDatabaseId(602);
     crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_CACHE);
     relation::pgstat_count_heap_getnext(6002, false);
@@ -550,7 +559,7 @@ fn cache_consistency_is_stable_until_clear() {
 
 #[test]
 fn snapshot_consistency_excludes_later_entries() {
-    setup();
+    let _lock = setup();
     SetMyDatabaseId(603);
     crate::set_pgstat_fetch_consistency(crate::PGSTAT_FETCH_CONSISTENCY_SNAPSHOT);
     relation::pgstat_count_heap_getnext(6003, false);
@@ -569,7 +578,7 @@ fn snapshot_consistency_excludes_later_entries() {
 
 #[test]
 fn have_entry_sees_pending_flushed_and_fixed() {
-    setup();
+    let _lock = setup();
     SetMyDatabaseId(604);
     assert!(!crate::pgstat_have_entry(PGSTAT_KIND_RELATION.0, 604, 6005));
     relation::pgstat_count_heap_getnext(6005, false);
@@ -590,7 +599,7 @@ fn have_entry_sees_pending_flushed_and_fixed() {
 
 #[test]
 fn seams_are_wired() {
-    setup();
+    let _lock = setup();
     pgstat_seams::pgstat_report_tempfile::call(64);
     assert_eq!(db_pending(5).unwrap().temp_files, 1);
     assert_eq!(pgstat_seams::pgstat_get_slru_index::call("notify"), 3);
@@ -611,7 +620,7 @@ fn setup_function_seams() {
 
 #[test]
 fn function_usage_accumulates_and_flushes() {
-    setup();
+    let _lock = setup();
     setup_function_seams();
     let fcu = crate::function::pgstat_init_function_usage(7001).unwrap();
     crate::function::pgstat_end_function_usage(&fcu, true);
@@ -633,7 +642,7 @@ fn function_usage_accumulates_and_flushes() {
 
 #[test]
 fn function_usage_recursion_assigns_total_once() {
-    setup();
+    let _lock = setup();
     setup_function_seams();
     let outer = crate::function::pgstat_init_function_usage(7002).unwrap();
     let inner = crate::function::pgstat_init_function_usage(7002).unwrap();
@@ -648,20 +657,28 @@ fn function_usage_recursion_assigns_total_once() {
 
 #[test]
 fn function_usage_dropped_function_errors() {
-    setup();
+    let _lock = setup();
     setup_function_seams();
     let err = crate::function::pgstat_init_function_usage(66_666).unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_UNDEFINED_FUNCTION);
     assert!(crate::find_funcstat_entry(66_666).is_none());
 }
 
-#[test]
-fn statsfile_roundtrip_restores_entries() {
-    setup();
-    setup_function_seams();
-    let dir = std::env::temp_dir().join(format!("pgstat-file-test-{}", std::process::id()));
+// Fresh per-test data dir so a stale statsfile from an earlier run is never
+// read back; DataDir is thread-local so this only redirects the calling test.
+fn statsfile_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("pg_stat")).unwrap();
     init_small::globals::SetDataDir(dir.to_str().unwrap());
+    dir
+}
+
+#[test]
+fn statsfile_roundtrip_restores_entries() {
+    let _lock = setup();
+    setup_function_seams();
+    let dir = statsfile_dir("pgstat-file-test");
 
     relation::pgstat_count_heap_insert(8001, false, 4);
     xact::AtEOXact_PgStat(true, false);
@@ -684,6 +701,7 @@ fn statsfile_roundtrip_restores_entries() {
     assert_eq!(after.tuples_inserted, 4);
     // C unlinks after a successful read
     assert!(!dir.join("pg_stat/pgstat.stat").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -695,9 +713,11 @@ fn statsfile_corrupt_body_is_rejected() {
     assert!(crate::file::read_statsfile_body(&good_header).is_none());
 }
 
-fn setup_io() {
-    setup();
+#[must_use]
+fn setup_io() -> MutexGuard<'static, ()> {
+    let guard = setup();
     miscinit::SetMyBackendType(types_core::BackendType::Backend);
+    guard
 }
 
 #[test]
@@ -719,7 +739,7 @@ fn io_tracks_predicates_match_c_rules() {
 #[test]
 fn io_count_flush_and_fetch() {
     use crate::io::{self, IOContext, IOObject, IOOp};
-    setup_io();
+    let _lock = setup_io();
     let base = io::export_io_stats().stats[types_core::BackendType::Backend as usize]
         .counts[IOObject::Relation as usize][IOContext::IOCONTEXT_NORMAL as usize][IOOp::Hit as usize];
     io::pgstat_count_io_op(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Hit, 3, 0);
@@ -736,7 +756,7 @@ fn io_count_flush_and_fetch() {
 #[test]
 fn io_timed_count_records_time_and_dbstats() {
     use crate::io::{self, IOContext, IOObject, IOOp};
-    setup_io();
+    let _lock = setup_io();
     let start = io::pgstat_prepare_io_time(true);
     assert!(start > 0);
     io::pgstat_count_io_op_time(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Write, start, 1, 8192);
@@ -750,7 +770,7 @@ const IOCONTEXT_NORMAL_IDX: usize = 3;
 
 #[test]
 fn slru_flush_reset_and_fetch() {
-    setup();
+    let _lock = setup();
     slru::pgstat_count_slru_page_hit(2);
     slru::pgstat_count_slru_page_read(2);
     assert!(slru::pgstat_have_slrustats());
@@ -769,7 +789,7 @@ fn slru_flush_reset_and_fetch() {
 #[test]
 fn backend_kind_flush_fetch_reset_drop() {
     use crate::io::{IOContext, IOObject, IOOp};
-    setup_io();
+    let _lock = setup_io();
     init_small::globals::SetMyProcNumber(41);
     crate::backend::pgstat_create_backend(41);
     crate::io::pgstat_count_io_op(IOObject::Relation, IOContext::IOCONTEXT_NORMAL, IOOp::Hit, 2, 0);
@@ -787,7 +807,7 @@ fn backend_kind_flush_fetch_reset_drop() {
 
 #[test]
 fn reset_of_kind_covers_all_fixed_kinds() {
-    setup();
+    let _lock = setup();
     for kind in [
         pending::PGSTAT_KIND_ARCHIVER,
         pending::PGSTAT_KIND_BGWRITER,
@@ -806,7 +826,7 @@ fn reset_of_kind_covers_all_fixed_kinds() {
 
 #[test]
 fn checkpointer_and_bgwriter_report_apply_pending() {
-    setup();
+    let _lock = setup();
     checkpointer::with_pending_checkpointer_stats(|s| s.num_timed += 1);
     checkpointer::pgstat_report_checkpointer();
     crate::pgstat_clear_snapshot();
@@ -819,7 +839,7 @@ fn checkpointer_and_bgwriter_report_apply_pending() {
 
 #[test]
 fn wal_flush_without_installed_usage_seam_is_noop() {
-    setup();
+    let _lock = setup();
     assert!(!crate::wal::pgstat_wal_flush_cb(false));
 }
 
@@ -842,7 +862,7 @@ fn install_replslot_seams() {
 
 #[test]
 fn replslot_report_accumulates_and_resets() {
-    setup();
+    let _lock = setup();
     crate::replslot::pgstat_create_replslot(3);
     let rep = crate::replslot::PgStat_StatReplSlotEntry {
         spill_txns: 2,
@@ -875,7 +895,7 @@ fn replslot_report_accumulates_and_resets() {
 
 #[test]
 fn subscription_counts_flush_and_reset() {
-    setup();
+    let _lock = setup();
     crate::subscription::pgstat_report_subscription_error(9001, true);
     crate::subscription::pgstat_report_subscription_error(9001, true);
     crate::subscription::pgstat_report_subscription_error(9001, false);
@@ -897,7 +917,7 @@ fn subscription_counts_flush_and_reset() {
 
 #[test]
 fn subscription_create_rollback_drops_entry() {
-    setup();
+    let _lock = setup();
     crate::subscription::pgstat_create_subscription(9002);
     crate::pgstat_clear_snapshot();
     assert!(crate::pgstat_fetch_stat_subscription(9002).is_some());
@@ -908,10 +928,8 @@ fn subscription_create_rollback_drops_entry() {
 
 #[test]
 fn statsfile_replslot_roundtrips_by_name() {
-    setup();
-    let dir = std::env::temp_dir().join(format!("pgstat-replslot-test-{}", std::process::id()));
-    std::fs::create_dir_all(dir.join("pg_stat")).unwrap();
-    init_small::globals::SetDataDir(dir.to_str().unwrap());
+    let _lock = setup();
+    let dir = statsfile_dir("pgstat-replslot-test");
 
     crate::replslot::pgstat_create_replslot(3);
     let rep = crate::replslot::PgStat_StatReplSlotEntry {
@@ -930,4 +948,5 @@ fn statsfile_replslot_roundtrips_by_name() {
     let e = crate::pgstat_fetch_replslot("logslot").unwrap().unwrap();
     assert_eq!(e.stream_count, 7);
     crate::replslot::pgstat_drop_replslot(3);
+    let _ = std::fs::remove_dir_all(&dir);
 }
