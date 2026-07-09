@@ -754,6 +754,7 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     // PGRUST_REDO_PIN_CHECK: every redo arm must return with zero private
     // pins (C recovery holds no pins across records).
     if redo_pin_check() {
+        bufmgr::debug_drain_prefetch_pins();
         let pins = bufmgr::debug_all_private_pins();
         if !pins.is_empty() {
             let desc: Vec<String> = pins

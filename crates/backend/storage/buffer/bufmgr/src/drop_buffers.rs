@@ -113,7 +113,14 @@ fn InvalidateBuffer(desc: &BufferDesc, buf_state_in: u32) -> PgResult<()> {
         if buffer_refcount(buf_state) != 0 {
             UnlockBufHdr(desc, buf_state);
             LWLockRelease(old_partition_lock)?;
-            let private = crate::privref::GetPrivateRefCount(BufferDescriptorGetBuffer(desc));
+            let mut private = crate::privref::GetPrivateRefCount(BufferDescriptorGetBuffer(desc));
+            if private > 0 {
+                // Uncollected uring prefetch reads hold thread-owned pins
+                // (LockBufferForCleanup precedent); wait them out before the
+                // C safety check — C's fadvise prefetch never holds pins.
+                crate::uring::drain_own();
+                private = crate::privref::GetPrivateRefCount(BufferDescriptorGetBuffer(desc));
+            }
             if private > 0 {
                 let pins: Vec<String> = crate::privref::debug_all_private_pins()
                     .into_iter()
