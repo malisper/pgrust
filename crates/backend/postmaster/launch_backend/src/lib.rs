@@ -456,6 +456,11 @@ pub mod wpool {
         // Database the retained caches are pinned to; InvalidOid = fresh
         // standby, matches any task.
         db: Oid,
+        // Signaled by the standby thread after a retire has pushed its
+        // retained PGPROC back on the freelist; a cross-db miss waits on this
+        // so the deferred postmaster spawn cannot race the release
+        // (InitProcess FATALs on an empty bgworker freelist).
+        released: Receiver<()>,
     }
 
     static AVAILABLE: Mutex<Vec<Standby>> = Mutex::new(Vec::new());
@@ -556,6 +561,7 @@ pub mod wpool {
         let inherited = super::Inherited::capture();
         let guc_snapshot = guc::store::capture_nondefault_variables();
         let (tx, rx) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let spawned = std::thread::Builder::new()
             .name(format!("pg:standby:{spawn_pid}"))
             .stack_size(super::child_thread_stack_size())
@@ -577,7 +583,7 @@ pub mod wpool {
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
                     .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
                     .unwrap_or_else(|e| panic!("standby GUC restore failed: {e:?}"));
-                standby_loop(spawn_pid, rx);
+                standby_loop(spawn_pid, rx, ack_tx);
             });
         match spawned {
             Ok(handle) => {
@@ -586,14 +592,19 @@ pub mod wpool {
                     .unwrap_or_else(|e| e.into_inner())
                     .push((spawn_pid, handle));
                 POPULATION.fetch_add(1, Relaxed);
-                available().push(Standby { pid: spawn_pid, tx, db: InvalidOid });
+                available().push(Standby {
+                    pid: spawn_pid,
+                    tx,
+                    db: InvalidOid,
+                    released: ack_rx,
+                });
                 true
             }
             Err(_) => false,
         }
     }
 
-    fn standby_loop(spawn_pid: pid_t, mut rx: Receiver<StandbyTask>) {
+    fn standby_loop(spawn_pid: pid_t, mut rx: Receiver<StandbyTask>, mut ack_tx: SyncSender<()>) {
         // CHILD_THREADS key for our JoinHandle; re-keyed to each task's pid
         // so a rotation exit's announce joins this thread, while a park's
         // announce (marked) does not.
@@ -640,13 +651,16 @@ pub mod wpool {
                         );
                         ipc::reset_exit_state_for_retained_park();
                         let (tx2, rx2) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
+                        let (ack_tx2, ack_rx2) = std::sync::mpsc::sync_channel::<()>(1);
                         parked_crash_epoch = pre_crash;
                         available().push(Standby {
                             pid: task.child_pid,
                             tx: tx2,
                             db: init_small::wretain::retained_db(),
+                            released: ack_rx2,
                         });
                         rx = rx2;
+                        ack_tx = ack_tx2;
                         continue;
                     }
                     // Rotation (retention off, task error, or partial park):
@@ -656,10 +670,15 @@ pub mod wpool {
                     break;
                 }
                 Err(_) => {
-                    // Retired while parked (maintain shrink / reload flush)
-                    // or never claimed: release any retained identity, drop
-                    // our reaper entry (nothing announced this wake), exit.
+                    // Retired while parked (maintain shrink / reload flush /
+                    // cross-db miss) or never claimed: release any retained
+                    // identity, drop our reaper entry (nothing announced this
+                    // wake), exit. The ack must follow the identity release —
+                    // a cross-db miss blocks on it before deferring to the
+                    // postmaster spawn, which needs our PGPROC on the
+                    // freelist.
                     release_retained_identity(parked_crash_epoch);
+                    let _ = ack_tx.try_send(());
                     let mut t =
                         super::CHILD_THREADS.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(i) = t.iter().position(|(p, _)| *p == thread_key) {
@@ -716,7 +735,30 @@ pub mod wpool {
                     .or_else(|| avail.iter().position(|s| s.db == InvalidOid));
                 match idx {
                     Some(i) => avail.swap_remove(i),
-                    None => return 0,
+                    None => {
+                        // Cross-db miss: retained parks pinned to other live
+                        // databases each hold a bgworker-class PGPROC, and at
+                        // population target they exhaust the InitProcess
+                        // freelist — the deferred postmaster spawn FATALs
+                        // where C (fresh spawn per query) succeeds. Retire
+                        // one mismatched park per missed dispatch and block
+                        // on its release ack so the freed PGPROC is on the
+                        // freelist before the deferral; maintain() then
+                        // replenishes a fresh any-db standby. Warm-claim hit
+                        // paths are untouched.
+                        let Some(v) = avail.iter().position(|s| s.db != InvalidOid) else {
+                            return 0;
+                        };
+                        let Standby { tx, released, .. } = avail.swap_remove(v);
+                        drop(avail);
+                        drop(tx); // closed channel retires the standby
+                        bgworker::gtrace("w.pool.retire_mismatch");
+                        // Timeout = fail open: worst case is today's behavior
+                        // (deferral races the release), never a hang under
+                        // the registry lock.
+                        let _ = released.recv_timeout(std::time::Duration::from_secs(2));
+                        return 0;
+                    }
                 }
             };
             let Some(child_slot) =
