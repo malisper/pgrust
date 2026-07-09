@@ -546,9 +546,11 @@ impl<'a> Estate<'a> {
                 if types_tuple::varatt::varatt_is_1b_e(p)
                     && !types_tuple::varatt::varatt_is_external_expanded(p)
                 {
-                    let vr = datum::VarlenaRef::from_ptr(p);
-                    let out =
-                        detoast::detoast_external_attr(self.datum_ctx.mcx(), vr.as_bytes())?;
+                    // VarlenaRef is the 4B-only lane; external pointers size
+                    // via varsize_any.
+                    let attr =
+                        core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p));
+                    let out = detoast::detoast_external_attr(self.datum_ctx.mcx(), attr)?;
                     let d = Datum::from_usize(out.as_ptr() as usize);
                     core::mem::forget(out);
                     return Ok(d);
