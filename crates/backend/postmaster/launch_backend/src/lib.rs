@@ -400,6 +400,7 @@ pub fn postmaster_child_launch(
 
 pub fn init_seams() {
     postmaster_seams::parallel_pool_dispatch::set(wpool::dispatch);
+    postmaster_seams::parallel_pool_retire_db::set(wpool::retire_db);
 }
 
 pub mod wpool {
@@ -505,6 +506,18 @@ pub mod wpool {
             excess -= 1;
             drop(sb); // closed channel retires the standby
         }
+    }
+
+    /// DROP DATABASE rider (parallel_pool_retire_db seam): parked standbys
+    /// pinned to the dropped database can never be claimed again (dispatch is
+    /// same-db-only) but each holds a bgworker PGPROC and a POPULATION charge;
+    /// left parked they exhaust the InitProcess freelist for the postmaster
+    /// fallback spawn ("parallel worker failed to initialize" where C
+    /// launches fine) and block maintain() from replenishing fresh standbys.
+    /// Runs on the dropping backend's thread; pool-lock only, no registry
+    /// lock (claim path untouched).
+    pub fn retire_db(dboid: Oid) {
+        available().retain(|s| s.db != dboid); // dropped channels retire the standbys
     }
 
     /// Retire every parked standby (config reload): the next maintain()
