@@ -524,26 +524,38 @@ impl<'a> Estate<'a> {
         if isnull || typbyval {
             return Ok(value);
         }
-        // Non-atomic contexts must not retain toast pointers across a COMMIT;
-        // C detoasts on assignment (pl_exec.c assign_simple_var and the
-        // expanded-record set paths, expand_external = !estate->atomic).
-        if !self.atomic && typlen == -1 {
+        // SAFETY: value is a live by-ref datum of typlen discipline.
+        unsafe { execexpr::agg_datum_copy(self.datum_ctx.mcx(), value, typlen) }
+    }
+
+    // C assign_simple_var / expanded_record_set_* expand_external
+    // (pl_exec.c 18.3:8786-8808): when !estate->atomic, stored values must
+    // not keep on-disk toast pointers across a commit; expanded datums stay
+    // and inline-compressed values stay compressed (detoast_external_attr).
+    pub(crate) fn assign_copy_to_datum_ctx(
+        &self,
+        value: Datum,
+        isnull: bool,
+        typlen: i16,
+        typbyval: bool,
+    ) -> PgResult<Datum> {
+        if !self.atomic && !isnull && typlen == -1 {
             let p = value.as_usize() as *const u8;
-            // SAFETY: value is a live by-ref varlena datum.
+            // SAFETY: non-null by-ref varlena datum.
             unsafe {
                 if types_tuple::varatt::varatt_is_1b_e(p)
-                    && !types_tuple::varatt::vartag_is_expanded(
-                        types_tuple::varatt::vartag_external(p),
-                    )
+                    && !types_tuple::varatt::varatt_is_external_expanded(p)
                 {
                     let vr = datum::VarlenaRef::from_ptr(p);
-                    let flat = detoast::detoast_attr(self.datum_ctx.mcx(), vr.as_bytes())?;
-                    return Ok(Datum::from_usize(flat.leak().as_ptr() as usize));
+                    let out =
+                        detoast::detoast_external_attr(self.datum_ctx.mcx(), vr.as_bytes())?;
+                    let d = Datum::from_usize(out.as_ptr() as usize);
+                    core::mem::forget(out);
+                    return Ok(d);
                 }
             }
         }
-        // SAFETY: value is a live by-ref datum of typlen discipline.
-        unsafe { execexpr::agg_datum_copy(self.datum_ctx.mcx(), value, typlen) }
+        self.copy_to_datum_ctx(value, isnull, typlen, typbyval)
     }
 
     // ------------------------------------------------------------------
@@ -1745,7 +1757,7 @@ impl<'a> Estate<'a> {
                 let t = self.var_type(t_varno);
                 (t.typlen, t.typbyval)
             };
-            let stored = self.copy_to_datum_ctx(t_val, isnull, tl, bv)?;
+            let stored = self.assign_copy_to_datum_ctx(t_val, isnull, tl, bv)?;
             self.set_var(t_varno, stored, isnull);
             self.exec_eval_cleanup();
         }
@@ -2162,7 +2174,7 @@ impl<'a> Estate<'a> {
                         ),
                     ));
                 }
-                let stored = self.copy_to_datum_ctx(newvalue, isnull, typlen, typbyval)?;
+                let stored = self.assign_copy_to_datum_ctx(newvalue, isnull, typlen, typbyval)?;
                 self.set_var(target, stored, isnull);
                 Ok(())
             }
@@ -2203,7 +2215,7 @@ impl<'a> Estate<'a> {
                 };
                 let newvalue =
                     self.exec_cast_value(value, &mut isnull, valtype, valtypmod, ftype, ftypmod)?;
-                let stored = self.copy_to_datum_ctx(newvalue, isnull, flen, fbyval)?;
+                let stored = self.assign_copy_to_datum_ctx(newvalue, isnull, flen, fbyval)?;
                 if let DatumVal::Rec(Some(rv)) = &mut self.datums[recno as usize] {
                     rv.values[i] = stored;
                     rv.nulls[i] = isnull;
@@ -2559,7 +2571,7 @@ impl<'a> Estate<'a> {
             let mut out_values = values.to_vec();
             for f in 0..natts {
                 if !srcdesc.dropped[f] {
-                    out_values[f] = self.copy_to_datum_ctx(
+                    out_values[f] = self.assign_copy_to_datum_ctx(
                         out_values[f],
                         nulls[f],
                         srcdesc.typlens[f],
@@ -2618,7 +2630,7 @@ impl<'a> Estate<'a> {
                 dst.typmods[fnum],
             )?;
             newvalues[fnum] =
-                self.copy_to_datum_ctx(v, isnull, dst.typlens[fnum], dst.typbyvals[fnum])?;
+                self.assign_copy_to_datum_ctx(v, isnull, dst.typlens[fnum], dst.typbyvals[fnum])?;
             newnulls[fnum] = isnull;
         }
         // Unassigned source attributes, dropped columns skipped
