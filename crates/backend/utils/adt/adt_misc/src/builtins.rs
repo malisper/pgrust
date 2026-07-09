@@ -840,7 +840,7 @@ fn fc_pg_is_other_temp_schema(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(Datum::from_bool(catalog_namespace::isOtherTempNamespace(oid)?))
 }
 
-fn fc_pg_trigger_depth(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+pub fn fc_pg_trigger_depth(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let _ = fcinfo;
     Ok(Datum::from_i32(trigger_seams::my_trigger_depth::call()))
 }

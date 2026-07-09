@@ -312,3 +312,147 @@ fn sort_order_matches_live_pg_order_by() {
     let got: Vec<String> = vals.iter().map(|v| out(v, false)).collect();
     assert_eq!(got, want);
 }
+
+// --- network.c session-introspection quartet (MyProcPort raddr/laddr) ---
+
+fn sockaddr_in4(ip: [u8; 4], port: u16) -> ::ip::SockAddr {
+    // SAFETY: zeroed sockaddr_in is a valid all-defaults value.
+    let mut sin: libc::sockaddr_in = unsafe { core::mem::zeroed() };
+    sin.sin_family = libc::AF_INET as libc::sa_family_t;
+    sin.sin_port = port.to_be();
+    // s_addr is network byte order: the array is already big-endian.
+    sin.sin_addr.s_addr = u32::from_ne_bytes(ip);
+    let mut sa = ::ip::SockAddr::zeroed();
+    let n = core::mem::size_of::<libc::sockaddr_in>();
+    // SAFETY: n <= sizeof(sockaddr_storage) == sa.addr.len().
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            core::ptr::from_ref(&sin).cast::<u8>(),
+            sa.addr.as_mut_ptr(),
+            n,
+        );
+    }
+    sa.salen = n as u32;
+    sa
+}
+
+fn sockaddr_in6(ip: [u8; 16], port: u16, scope_id: u32) -> ::ip::SockAddr {
+    // SAFETY: zeroed sockaddr_in6 is a valid all-defaults value.
+    let mut sin6: libc::sockaddr_in6 = unsafe { core::mem::zeroed() };
+    sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+    sin6.sin6_port = port.to_be();
+    sin6.sin6_addr.s6_addr = ip;
+    sin6.sin6_scope_id = scope_id;
+    let mut sa = ::ip::SockAddr::zeroed();
+    let n = core::mem::size_of::<libc::sockaddr_in6>();
+    // SAFETY: n <= sizeof(sockaddr_storage) == sa.addr.len().
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            core::ptr::from_ref(&sin6).cast::<u8>(),
+            sa.addr.as_mut_ptr(),
+            n,
+        );
+    }
+    sa.salen = n as u32;
+    sa
+}
+
+fn sockaddr_unix() -> ::ip::SockAddr {
+    // SAFETY: zeroed sockaddr_un is a valid empty-path value.
+    let mut sun: libc::sockaddr_un = unsafe { core::mem::zeroed() };
+    sun.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let mut sa = ::ip::SockAddr::zeroed();
+    let n = core::mem::size_of::<libc::sockaddr_un>();
+    // SAFETY: n <= sizeof(sockaddr_storage) == sa.addr.len().
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            core::ptr::from_ref(&sun).cast::<u8>(),
+            sa.addr.as_mut_ptr(),
+            n,
+        );
+    }
+    sa.salen = n as u32;
+    sa
+}
+
+fn set_proc_port(raddr: ::ip::SockAddr, laddr: ::ip::SockAddr) {
+    let mut port = ::types_startup::Port::new(&::types_startup::ClientSocket { sock: -1, raddr });
+    port.laddr = laddr;
+    ::init_small::globals::SetMyProcPort(port);
+}
+
+fn session_addr_str(f: ::types_fmgr::PGFunction) -> Option<String> {
+    let ctx = ::mcx::MemoryContext::new("t");
+    let mut fcinfo = ::types_fmgr::LocalFcinfo::<0>::new(0);
+    // SAFETY: mcx outlives the call.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    let d = f(None, &mut fcinfo).unwrap();
+    if fcinfo.isnull {
+        return None;
+    }
+    let p = d.as_usize() as *const u8;
+    // inet varlena: 4B header, then family/bits/addr (addrsize from family).
+    // SAFETY: non-null results of these fns are in-mcx inet images.
+    let family = unsafe { *p.add(4) };
+    let addrsize = if family == PGSQL_AF_INET { 4 } else { 16 };
+    let payload = unsafe { core::slice::from_raw_parts(p.add(4), 2 + addrsize) };
+    let r = InetRef::from_payload(payload);
+    let mut buf = [0u8; INET_OUT_BUFLEN];
+    let len = network_out_into(r, false, &mut buf).unwrap();
+    Some(String::from_utf8(buf[..len].to_vec()).unwrap())
+}
+
+fn session_port_num(f: ::types_fmgr::PGFunction) -> Option<i32> {
+    let ctx = ::mcx::MemoryContext::new("t");
+    let mut fcinfo = ::types_fmgr::LocalFcinfo::<0>::new(0);
+    // SAFETY: mcx outlives the call.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    let d = f(None, &mut fcinfo).unwrap();
+    (!fcinfo.isnull).then(|| d.as_i32())
+}
+
+use crate::builtins::{
+    fc_inet_client_addr, fc_inet_client_port, fc_inet_server_addr, fc_inet_server_port,
+};
+
+#[test]
+fn session_quartet_without_myprocport_is_null() {
+    assert_eq!(session_addr_str(fc_inet_client_addr), None);
+    assert_eq!(session_port_num(fc_inet_client_port), None);
+    assert_eq!(session_addr_str(fc_inet_server_addr), None);
+    assert_eq!(session_port_num(fc_inet_server_port), None);
+}
+
+#[test]
+fn session_quartet_reads_raddr_and_laddr() {
+    set_proc_port(
+        sockaddr_in4([192, 0, 2, 5], 45678),
+        sockaddr_in4([198, 51, 100, 7], 5433),
+    );
+    assert_eq!(session_addr_str(fc_inet_client_addr).as_deref(), Some("192.0.2.5"));
+    assert_eq!(session_port_num(fc_inet_client_port), Some(45678));
+    assert_eq!(session_addr_str(fc_inet_server_addr).as_deref(), Some("198.51.100.7"));
+    assert_eq!(session_port_num(fc_inet_server_port), Some(5433));
+}
+
+#[test]
+fn session_quartet_over_unix_socket_is_null() {
+    set_proc_port(sockaddr_unix(), sockaddr_unix());
+    assert_eq!(session_addr_str(fc_inet_client_addr), None);
+    assert_eq!(session_port_num(fc_inet_client_port), None);
+    assert_eq!(session_addr_str(fc_inet_server_addr), None);
+    assert_eq!(session_port_num(fc_inet_server_port), None);
+}
+
+#[test]
+fn session_addr_strips_the_ipv6_zone() {
+    // fe80::1 with a scope id: getnameinfo appends %<zone>; clean_ipv6_addr
+    // (network.c:2060) truncates it before network_in.
+    let mut ip6 = [0u8; 16];
+    ip6[0] = 0xfe;
+    ip6[1] = 0x80;
+    ip6[15] = 1;
+    set_proc_port(sockaddr_in6(ip6, 40000, 1), sockaddr_in4([10, 0, 0, 1], 5432));
+    assert_eq!(session_addr_str(fc_inet_client_addr).as_deref(), Some("fe80::1"));
+    assert_eq!(session_port_num(fc_inet_client_port), Some(40000));
+}

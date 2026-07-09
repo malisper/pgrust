@@ -690,6 +690,7 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_nodes",
+ "types_startup",
 ]
 
 [[package]]
