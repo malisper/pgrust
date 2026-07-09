@@ -14516,12 +14516,14 @@ dependencies = [
 name = "storage_xlog"
 version = "0.1.0"
 dependencies = [
+ "freespace",
  "init_small",
  "smgr",
  "transam_xlog",
  "types_core",
  "types_error",
  "types_storage",
+ "visibilitymap",
  "xlogreader_seams",
  "xlogutils",
 ]
