@@ -23,6 +23,7 @@ transam_xlog_seams = { path = "../transam_xlog_seams" }
 dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
 tablespace_seams = { path = "../../../commands/tablespace_seams" }
 storage_xlog = { path = "../../../catalog/storage_xlog" }
+logical_message = { path = "../../../replication/logical/logical_message" }
 standby = { path = "../../../storage/ipc/standby" }
 heapam_xlog = { path = "../../heap/heapam_xlog" }
 nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }

@@ -1,8 +1,7 @@
 //! pgarch.c: the WAL archiver as a postmaster child thread (walwriter/
 //! checkpointer precedents). ArchiveModuleCallbacks is the ArchiveModule enum
 //! with the shell module as the only in-core arm; loadable archive_library
-//! values are a loud panic. pgstat_report_archiver is skipped until
-//! backend-utils-activity-small lands (CATALOG note).
+//! values are a loud panic.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -324,10 +323,11 @@ fn pgarch_ArchiverCopyLoop(af: &mut ArchFilesState, module: &ArchiveModule) -> P
 
             if pgarch_archiveXlog(&xlog, module)? {
                 pgarch_archiveDone(&xlog)?;
-                // pgstat_report_archiver skipped: activity unit unported.
+                pgstat::archiver::pgstat_report_archiver(&xlog, false);
                 break;
             }
 
+            pgstat::archiver::pgstat_report_archiver(&xlog, true);
             failures += 1;
             if failures >= NUM_ARCHIVE_RETRIES {
                 ereport(WARNING)

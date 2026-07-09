@@ -7,7 +7,7 @@ use types_error::PgResult;
 use types_nodes::parsenodes;
 use types_nodes::parsenodes::{
     AccessPriv, AlterDefaultPrivilegesStmt, AlterFunctionStmt, AlterOwnerStmt, AlterPolicyStmt,
-    AlterRoleSetStmt, AlterRoleStmt,
+    AlterRoleSetStmt, AlterRoleStmt, AlterSystemStmt,
     AlterTableCmd, AlterTableMoveAllStmt, AlterTableStmt, AlterTableType,
     CTECycleClause, CTEMaterialize, CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt,
     CommentStmt, CommonTableExpr,
@@ -5567,6 +5567,18 @@ impl<'mcx> Parser<'mcx> {
                 let mut n = Node::build::<types_nodes::parsenodes::AlterCollationStmt>(mcx)?;
                 n.collname = view.v(3).list();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterSystemStmt: ALTER SYSTEM_P SET generic_set
+            //               | ALTER SYSTEM_P RESET generic_reset.
+            1527 | 1528 => {
+                let setstmt = view
+                    .v(4)
+                    .node()
+                    .expect("generic_set")
+                    .as_variable_set_stmt()
+                    .expect("VariableSetStmt");
+                let n = Node::mk(mcx, AlterSystemStmt { setstmt })?;
+                *yyval = YYSTYPE::Node(Some(n));
             }
             1589 => {
                 let mut n = Node::build::<types_nodes::parsenodes::ExplainStmt>(mcx)?;

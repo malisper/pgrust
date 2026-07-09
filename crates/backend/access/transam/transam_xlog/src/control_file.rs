@@ -152,7 +152,20 @@ pub fn ReadControlFile() -> PgResult<()> {
             .errdetail("The WAL segment size must be a power of two between 1 MB and 1 GB.".to_string())
             .finish(loc("ReadControlFile"));
     }
-    guc_tables::vars::wal_segment_size.write(wal_segment_size);
+    // C: SetConfigOption("wal_segment_size", ..., PGC_INTERNAL,
+    // PGC_S_DYNAMIC_DEFAULT). Recording the source in the registry is load-
+    // bearing under the thread model: each backend thread's GUC re-init
+    // republishes boot values into the PROCESS-SHARED backing var, so a bare
+    // write here gets clobbered back to 16MB by the next thread bring-up
+    // (visible only on --wal-segsize != 16MB clusters).
+    if guc_seams::set_config_option_internal_dynamic_default::is_installed() {
+        guc_seams::set_config_option_internal_dynamic_default::call(
+            "wal_segment_size",
+            &wal_segment_size.to_string(),
+        )?;
+    } else {
+        guc_tables::vars::wal_segment_size.write(wal_segment_size);
+    }
     crate::set_wal_segment_size(wal_segment_size);
 
     if XLogMBVarToSegs(guc_tables::vars::min_wal_size_mb.read(), wal_segment_size) < 2 {

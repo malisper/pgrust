@@ -114,7 +114,6 @@ fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
 
 unported_redo! {
     replorigin_redo => "backend-replication-origin";
-    logicalmsg_redo => "backend-replication-message";
 }
 
 // btree/gin/gist/spgist rm_startup/rm_cleanup only allocate the recovery
@@ -322,7 +321,7 @@ pub static RmgrTable: [RmgrData; RM_N_BUILTIN_IDS] = [
     },
     RmgrData {
         rm_name: "LogicalMessage",
-        rm_redo: logicalmsg_redo,
+        rm_redo: logical_message::logicalmsg_redo,
         rm_desc: rmgrdesc::logicalmsgdesc::logicalmsg_desc,
         rm_identify: rmgrdesc::logicalmsgdesc::logicalmsg_identify,
         rm_startup: None,

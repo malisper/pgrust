@@ -12,10 +12,16 @@ path = "src/lib.rs"
 adt_acl = { path = "../../adt/acl" }
 arrayfuncs = { path = "../../adt/arrayfuncs" }
 elog = { path = "../../error/elog" }
+aclchk_seams = { path = "../../../catalog/aclchk_seams" }
+fd = { path = "../../../storage/file/fd" }
+init_small = { path = "../../init/init_small" }
+libc = "0.2"
+lwlock = { path = "../../../storage/lmgr/lwlock" }
 funcapi = { path = "../../fmgr/funcapi" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 format_type = { path = "../../adt/format_type" }
 guc = { path = "../guc" }
+guc_file = { path = "../guc_file" }
 guc_seams = { path = "../guc_seams" }
 guc_tables = { path = "../guc_tables" }
 mcx = { path = "../../../../_support/mcx" }
@@ -38,7 +44,6 @@ adt_timestamp = { path = "../../adt/adt_timestamp" }
 adt_datetime = { path = "../../adt/adt_datetime" }
 
 [dev-dependencies]
-aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 scalar_seams = { path = "../../adt/scalar_seams" }

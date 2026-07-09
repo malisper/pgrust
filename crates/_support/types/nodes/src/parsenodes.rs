@@ -910,6 +910,10 @@ pub struct AlterTableSpaceOptionsStmt<'mcx> {
     pub isReset: bool,
 }
 
+pub struct AlterSystemStmt<'mcx> {
+    pub setstmt: &'mcx VariableSetStmt<'mcx>,
+}
+
 // C: setstmt is a VariableSetStmt node.
 #[derive(Default)]
 pub struct AlterDatabaseSetStmt<'mcx> {
@@ -1517,6 +1521,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterDomainStmt<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for AlterObjectSchemaStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterObjectSchemaStmt;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterSystemStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterSystemStmt;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for VariableSetStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_VariableSetStmt;
 }
@@ -1890,6 +1897,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_variable_set_stmt(self) -> Option<&'mcx VariableSetStmt<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_alter_system_stmt(self) -> Option<&'mcx AlterSystemStmt<'mcx>> {
         self.as_variant()
     }
 

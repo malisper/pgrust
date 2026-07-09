@@ -1484,6 +1484,9 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
         NodeTag::T_VariableShowStmt => {
             js.f_str(cast!(q::VariableShowStmt).name);
         }
+        NodeTag::T_AlterSystemStmt => {
+            variable_set_stmt(js, cast!(q::AlterSystemStmt).setstmt)?;
+        }
         NodeTag::T_CreateStmt => {
             create_stmt_fields(js, cast!(r::CreateStmt))?;
         }
