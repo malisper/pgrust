@@ -25,7 +25,7 @@ use ::types_tuple::TupleDescData;
 use ::datum as Datum_crate;
 use Datum_crate::Datum;
 
-use crate::procnode::{exec_proc_node, with_eval_slots, PlanStateNode};
+use crate::procnode::{exec_proc_node, with_eval_slots, with_eval_slots_outer, PlanStateNode};
 
 pub(crate) struct SubPlanState<'mcx> {
     sub_link_type: SubLinkType,
@@ -665,20 +665,23 @@ fn init_hashed_state<'mcx>(
 /// # Safety
 /// `p` is a SubPlanExprState installed by [`subplan_expr_init_hook`] on the
 /// same estate; `ecxt` is the owning node's ExprContext with its slot triple
-/// current for the row being evaluated.
-pub(crate) unsafe fn subplan_expr_eval_hook(
+/// current for the row being evaluated; `outer`, when present, is the owning
+/// node's explicit outer row living outside es_tupleTable (it overrides the
+/// ecxt outer for testexpr/LHS-projection evals — C econtext->ecxt_outertuple).
+pub(crate) unsafe fn subplan_expr_eval_hook<'a, 'b, 'mcx>(
     p: NonNull<()>,
-    estate: &mut EStateData<'_>,
+    estate: &'a mut EStateData<'mcx>,
     ecxt: EcxtId,
+    outer: Option<&'b mut SlotData<'mcx>>,
 ) -> PgResult<NullableDatum> {
     // SAFETY: caller contract; the 'mcx erased here is the estate's own.
     let sstate = unsafe { &mut *p.cast::<SubPlanExprState<'_>>().as_ptr() };
     let saved_dir = estate.es_direction;
     estate.es_direction = ScanDirection::ForwardScanDirection;
     let result = if sstate.hashed.is_some() {
-        exec_hash_sub_plan(sstate, estate, ecxt)
+        exec_hash_sub_plan(sstate, estate, ecxt, outer)
     } else {
-        exec_scan_sub_plan(sstate, estate, ecxt)
+        exec_scan_sub_plan(sstate, estate, ecxt, outer)
     };
     estate.es_direction = saved_dir;
     result
@@ -688,13 +691,14 @@ fn exec_scan_sub_plan<'mcx>(
     sstate: &mut SubPlanExprState<'mcx>,
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
+    outer: Option<&mut SlotData<'mcx>>,
 ) -> PgResult<NullableDatum> {
     // SAFETY: es_query_cxt-lifetime cell; exclusive by the take-out protocol.
     let cell = unsafe { &mut *sstate.ps_cell.as_ptr() };
     let mut ps = cell
         .take()
         .unwrap_or_else(|| panic!("recursive subplan execution (nodeSubplan.c)"));
-    let result = scan_sub_plan_loop(sstate, &mut ps, estate, ecxt);
+    let result = scan_sub_plan_loop(sstate, &mut ps, estate, ecxt, outer);
     *cell = Some(ps);
     result
 }
@@ -704,6 +708,7 @@ fn scan_sub_plan_loop<'mcx>(
     ps: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
+    mut outer: Option<&mut SlotData<'mcx>>,
 ) -> PgResult<NullableDatum> {
     let mcx = estate.es_query_cxt;
     let link = sstate.sub_link_type;
@@ -773,7 +778,7 @@ fn scan_sub_plan_loop<'mcx>(
                     .testexpr
                     .as_deref_mut()
                     .expect("ROWCOMPARE SubPlan has a testexpr");
-                result = with_eval_slots(estate, ecxt, None, |slots, _, _| {
+                result = with_eval_slots_outer(estate, ecxt, None, outer.as_deref_mut(), |slots, _, _| {
                     exec_eval_expr(testexpr, slots)
                 })?;
             }
@@ -792,7 +797,7 @@ fn scan_sub_plan_loop<'mcx>(
                     .testexpr
                     .as_deref_mut()
                     .expect("ANY/ALL SubPlan has a testexpr");
-                let row = with_eval_slots(estate, ecxt, None, |slots, _, _| {
+                let row = with_eval_slots_outer(estate, ecxt, None, outer.as_deref_mut(), |slots, _, _| {
                     exec_eval_expr(testexpr, slots)
                 })?;
                 if link == SubLinkType::ANY_SUBLINK {
@@ -1051,6 +1056,7 @@ fn exec_hash_sub_plan<'mcx>(
     sstate: &mut SubPlanExprState<'mcx>,
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
+    outer: Option<&mut SlotData<'mcx>>,
 ) -> PgResult<NullableDatum> {
     debug_assert!(sstate.par_param.is_empty());
     if !sstate.hashed.as_ref().unwrap().built {
@@ -1072,7 +1078,7 @@ fn exec_hash_sub_plan<'mcx>(
         }
         let h = sstate.hashed.as_mut().unwrap();
         let proj_left = &mut h.proj_left;
-        with_eval_slots(estate, ecxt, Some(lhs_slot), |slots, rslot, m| {
+        with_eval_slots_outer(estate, ecxt, Some(lhs_slot), outer, |slots, rslot, m| {
             exec_project(proj_left, slots, rslot.expect("lhs slot"), m)
         })?;
     }

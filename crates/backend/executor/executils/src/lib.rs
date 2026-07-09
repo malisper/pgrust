@@ -82,10 +82,15 @@ pub type SubplanInitHook = for<'x> unsafe fn(
     Option<execexpr::AggBind>,
 ) -> PgResult<core::ptr::NonNull<()>>;
 
-pub type SubplanEvalHook = for<'a, 'mcx> unsafe fn(
+/// `outer` carries the owning node's explicit outer row when it lives
+/// outside es_tupleTable (WindowAgg/Agg node-local slots): the hook's
+/// testexpr/LHS-projection evals bind it as the Outer slot, C's
+/// econtext->ecxt_outertuple the owner set before ExecProject.
+pub type SubplanEvalHook = for<'a, 'b, 'mcx> unsafe fn(
     core::ptr::NonNull<()>,
     &'a mut EStateData<'mcx>,
     EcxtId,
+    Option<&'b mut SlotData<'mcx>>,
 ) -> PgResult<::datum::NullableDatum>;
 
 /// C's CteScanState leader fields (cte_table/eof_cte), hoisted to the estate
@@ -228,19 +233,22 @@ pub fn run_subplan_eval<'mcx>(
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
 ) -> PgResult<::datum::NullableDatum> {
-    run_subplan_eval_hook(sstate, estate, ecxt)
+    run_subplan_eval_hook(sstate, estate, ecxt, None)
 }
 
+/// `outer` must live outside es_tupleTable (the hook derives &mut table
+/// entries while it is held).
 fn run_subplan_eval_hook<'mcx>(
     sstate: core::ptr::NonNull<()>,
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
+    outer: Option<&mut SlotData<'mcx>>,
 ) -> PgResult<::datum::NullableDatum> {
     let hook = estate
         .es_subplan_eval_hook
         .expect("SubPlan step before execmain installed the eval hook");
     // SAFETY: sstate was installed by execmain's ExecInitSubPlan on this estate.
-    unsafe { hook(sstate, estate, ecxt) }
+    unsafe { hook(sstate, estate, ecxt, outer) }
 }
 
 pub fn exec_qual_with_subplans<'mcx>(
@@ -268,7 +276,7 @@ pub fn exec_qual_with_subplans<'mcx>(
         match outcome {
             execexpr::QualOutcome::Done(b) => return Ok(b),
             execexpr::QualOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, None)?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -299,7 +307,7 @@ pub fn exec_qual_with_subplans_outer<'mcx>(
         match outcome {
             execexpr::QualOutcome::Done(b) => return Ok(b),
             execexpr::QualOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, Some(&mut *outer))?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -326,7 +334,7 @@ pub fn exec_eval_expr_with_subplans_outer<'mcx>(
         match outcome {
             execexpr::EvalOutcome::Done(nd) => return Ok(nd),
             execexpr::EvalOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, Some(&mut *outer))?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -360,7 +368,7 @@ pub fn exec_project_with_subplans_outer<'mcx>(
                 return Ok(());
             }
             Some(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, Some(&mut *outer))?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -393,7 +401,7 @@ pub fn exec_eval_expr_with_subplans_hashkey<'mcx>(
         match outcome {
             execexpr::EvalOutcome::Done(nd) => return Ok(nd),
             execexpr::EvalOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, None)?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -417,7 +425,7 @@ pub fn exec_eval_expr_with_subplans<'mcx>(
         match outcome {
             execexpr::EvalOutcome::Done(nd) => return Ok(nd),
             execexpr::EvalOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, None)?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -444,7 +452,7 @@ pub fn exec_eval_expr_with_subplans_outer_slot<'mcx>(
         match outcome {
             execexpr::EvalOutcome::Done(nd) => return Ok(nd),
             execexpr::EvalOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, None)?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -472,7 +480,7 @@ pub fn exec_eval_expr_with_subplans_inner_slot<'mcx>(
         match outcome {
             execexpr::EvalOutcome::Done(nd) => return Ok(nd),
             execexpr::EvalOutcome::Suspended(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, None)?;
                 resume = Some(s.resume_with(r));
             }
         }
@@ -508,7 +516,7 @@ pub fn exec_project_with_subplans<'mcx>(
                 return Ok(());
             }
             Some(s) => {
-                let r = run_subplan_eval_hook(s.sstate, estate, ecxt)?;
+                let r = run_subplan_eval_hook(s.sstate, estate, ecxt, None)?;
                 resume = Some(s.resume_with(r));
             }
         }
