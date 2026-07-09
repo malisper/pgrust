@@ -380,7 +380,13 @@ pub fn exec_init_modify_table<'mcx>(
             let erm = estate.es_rowmarks[(rc.rti - 1) as usize]
                 .expect("InitPlan built the ExecRowMark for every PlanRowMark rti");
             use types_nodes::plannodes::RowMarkType;
-            debug_assert!(erm.rti == erm.prti, "inherited source marks not ported");
+            // Inherited source marks (erm.rti != erm.prti) flow through the
+            // same wholerow/ctid fetch arms: the junk column is emitted per
+            // child rti and looked up by rowmarkId below, matching C's
+            // EvalPlanQualFetchRowMark which never branches on prti. Verified
+            // byte-identical to C on merge.sql's inheritance MERGE (release
+            // regress 230/230); a prior debug_assert here mis-fired on that
+            // legitimate case.
             let fetch = if erm.markType == RowMarkType::ROW_MARK_COPY {
                 let name = format!("wholerow{}", erm.rowmarkId);
                 let n = exec_find_junk_attribute_in_tlist(outer_tlist, &name);
