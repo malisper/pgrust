@@ -31,6 +31,7 @@ trigger_seams = { path = "../../../commands/trigger_seams" }
 init_small = { path = "../../init/init_small" }
 varlena = { path = "../varlena" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
+xlogbackup = { path = "../../../access/transam/xlogbackup" }
 elog = { path = "../../error/elog" }
 latch_seams = { path = "../../../storage/ipc/latch_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }

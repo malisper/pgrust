@@ -57,6 +57,7 @@ parallel_seams = { path = "../../../access/transam/parallel_seams" }
 acl_seams = { path = "../../adt/acl_seams" }
 aclchk_seams = { path = "../../../catalog/aclchk_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
 xloginsert_seams = { path = "../../../access/transam/xloginsert_seams" }

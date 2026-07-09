@@ -24,7 +24,7 @@ pub enum DestReceiver<'mcx> {
     DoNothing,                             // donothingDR (DestNone); fully functional
     DebugTup,                              // debugtupDR shell; callbacks in printtup.c
     PrintTup(printtup::DrPrinttup<'mcx>),  // printtup_create_DR(Remote|RemoteExecute)
-    PrintSimple,                           // printsimpleDR shell; callbacks in printsimple.c
+    PrintSimple(printtup::printsimple::DrPrintsimple), // printsimpleDR (DestRemoteSimple)
     SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
     Tuplestore(tstore_receiver::DrTstore), // CreateTuplestoreDestReceiver (tstoreReceiver.c)
     IntoRel(createas_seams::IntoRelState<'mcx>), // CreateIntoRelDestReceiver (createas.c)
@@ -42,6 +42,7 @@ impl<'mcx> DestReceiver<'mcx> {
         match self {
             DestReceiver::DoNothing => Ok(true),
             DestReceiver::PrintTup(dr) => dr.receive_slot(slot),
+            DestReceiver::PrintSimple(dr) => dr.receive_slot(slot),
             DestReceiver::SpiPrintTup => spi_seams::spi_printtup::call(slot),
             DestReceiver::Tuplestore(dr) => dr.receive_slot(slot),
             DestReceiver::IntoRel(state) => createas_seams::intorel_receive::call(state, slot),
@@ -62,6 +63,7 @@ impl<'mcx> DestReceiver<'mcx> {
         match self {
             DestReceiver::DoNothing => Ok(()),
             DestReceiver::PrintTup(dr) => dr.startup(operation, typeinfo),
+            DestReceiver::PrintSimple(dr) => dr.startup(operation, typeinfo),
             DestReceiver::SpiPrintTup => spi_seams::spi_dest_startup::call(operation, typeinfo),
             DestReceiver::Tuplestore(dr) => dr.startup(operation, typeinfo),
             DestReceiver::IntoRel(state) => {
@@ -85,11 +87,14 @@ impl<'mcx> DestReceiver<'mcx> {
         match self {
             DestReceiver::DoNothing
             | DestReceiver::DebugTup
-            | DestReceiver::PrintSimple
             | DestReceiver::SpiPrintTup
             | DestReceiver::CopyOut(_)
             | DestReceiver::SqlFunction(_) => Ok(()),
             DestReceiver::PrintTup(dr) => {
+                dr.shutdown();
+                Ok(())
+            }
+            DestReceiver::PrintSimple(dr) => {
                 dr.shutdown();
                 Ok(())
             }
@@ -115,7 +120,7 @@ impl<'mcx> DestReceiver<'mcx> {
             DestReceiver::DoNothing => CommandDest::None,
             DestReceiver::DebugTup => CommandDest::Debug,
             DestReceiver::PrintTup(dr) => dr.mydest,
-            DestReceiver::PrintSimple => CommandDest::RemoteSimple,
+            DestReceiver::PrintSimple(_) => CommandDest::RemoteSimple,
             DestReceiver::SpiPrintTup => CommandDest::Spi,
             DestReceiver::Tuplestore(_) => CommandDest::Tuplestore,
             DestReceiver::IntoRel(_) => CommandDest::IntoRel,
@@ -170,7 +175,9 @@ pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
         CommandDest::Remote | CommandDest::RemoteExecute => {
             DestReceiver::PrintTup(printtup::printtup_create_DR(dest))
         }
-        CommandDest::RemoteSimple => DestReceiver::PrintSimple,
+        CommandDest::RemoteSimple => {
+            DestReceiver::PrintSimple(printtup::printsimple::printsimple_create_DR())
+        }
         CommandDest::None => DestReceiver::DoNothing,
         CommandDest::Debug => DestReceiver::DebugTup,
         CommandDest::Spi => DestReceiver::SpiPrintTup,

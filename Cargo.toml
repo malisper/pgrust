@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/backend/backup/sink",
+    "crates/backend/backup/sink_support",
+    "crates/backend/backup/backup_copy",
+    "crates/backend/backup/backup_copy_seams",
+    "crates/backend/backup/basebackup_target",
+    "crates/backend/backup/throttle",
+    "crates/backend/backup/manifest",
+    "crates/backend/backup/basebackup",
     "crates/_support/jit_deform",
     "crates/_support/types/types_error",
     "crates/_support/types/types_core",
@@ -352,6 +360,10 @@ members = [
     "crates/backend/replication/launcher_seams",
     "crates/backend/replication/launcher",
     "crates/backend/replication/walsender_config",
+    "crates/backend/replication/repl_scanner",
+    "crates/backend/replication/repl_gram",
+    "crates/backend/replication/walsender",
+    "crates/backend/replication/walsender_seams",
     "crates/backend/replication/logical_worker_seams",
     "crates/backend/storage/ipc/standby",
     "crates/backend/storage/ipc/standby_seams",

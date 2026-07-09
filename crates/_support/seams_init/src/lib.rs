@@ -126,6 +126,8 @@ pub fn init_all() {
     syslogger::init_seams();
     launcher::init_seams();
     walsender_config::init_seams();
+    walsender::init_seams();
+    basebackup::init_seams();
     slot::init_seams();
     reorderbuffer::init_seams();
     snapbuild::init_seams();

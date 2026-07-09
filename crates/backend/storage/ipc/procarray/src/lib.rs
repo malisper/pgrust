@@ -130,6 +130,21 @@ pub fn set_transaction_xmin(xmin: TransactionId) {
     TRANSACTION_XMIN.set(xmin);
 }
 
+/// InitWalSender's PROC_AFFECTS_ALL_HORIZONS arm (walsender.c:317): a
+/// database-less walsender's advertised xmin delays vacuum in all databases.
+pub fn ProcSetStatusFlagAffectsAllHorizons() -> PgResult<()> {
+    let my_procno = MyProc().expect("ProcSetStatusFlagAffectsAllHorizons without MyProc");
+    let me = GetPGProcByNumber(my_procno);
+    debug_assert_eq!(me.xmin.read(), InvalidTransactionId);
+
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
+    let flags = me.statusFlags.load(Relaxed) | PROC_AFFECTS_ALL_HORIZONS;
+    me.statusFlags.store(flags, Relaxed);
+    ProcGlobal().statusFlags[me.pgxactoff.load(Relaxed) as usize].store(flags, Relaxed);
+    LWLockRelease(ProcArrayLock())?;
+    Ok(())
+}
+
 /// ProcArrayInstallRestoredXmin (procarray.c): parallel workers pin their xmin
 /// under the leader's; PROC_XMIN_FLAGS propagate so vacuum's horizon reads the
 /// value the same way. False = source xact no longer running.

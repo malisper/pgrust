@@ -638,16 +638,73 @@ pub fn fc_pg_promote(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     Ok(Datum::from_bool(false))
 }
 
-pub fn fc_pg_backup_start(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!(
-        "pg_backup_start: do_pg_backup_start unported — xlog.c's backup state machine \
-         (BackupState/get_backup_status/register_persistent_abort_backup_handler) has no \
-         substrate; only xlogbackup.c's build_backup_content formatting is ported"
-    );
+// Session-level context for the SQL-callable backup functions (xlogfuncs.c's
+// static backup_state / tablespace_map, kept alive across the two calls).
+std::thread_local! {
+    static BACKUP_SESSION: core::cell::RefCell<Option<(xlogbackup::BackupState, Vec<u8>)>> =
+        const { core::cell::RefCell::new(None) };
 }
 
-pub fn fc_pg_backup_stop(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("pg_backup_stop: do_pg_backup_stop unported (see fc_pg_backup_start)");
+// pg_backup_start(label text, fast bool) (xlogfuncs.c).
+pub fn fc_pg_backup_start(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: arg 0 is a non-null text varlena (strict function).
+    let backupid = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let raw = backupid.data();
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let backupidstr = String::from_utf8_lossy(&raw[..end]).into_owned();
+    let fast = fcinfo.arg_bool(1);
+
+    if transam_xlog::get_backup_status() == transam_xlog::SessionBackupState::Running {
+        return Err(Box::new(
+            PgError::error("a backup is already in progress in this session")
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+        ));
+    }
+
+    transam_xlog::register_persistent_abort_backup_handler()?;
+
+    let mut state = xlogbackup::BackupState::default();
+    let mut tablespace_map: Vec<u8> = Vec::new();
+    transam_xlog::do_pg_backup_start(&backupidstr, fast, None, &mut state, &mut tablespace_map)?;
+
+    let startpoint = state.startpoint;
+    BACKUP_SESSION.with(|c| *c.borrow_mut() = Some((state, tablespace_map)));
+
+    Ok(Datum::from_i64(startpoint as i64))
+}
+
+// pg_backup_stop(wait_for_archive bool) → (lsn, labelfile, spcmapfile) (xlogfuncs.c).
+pub fn fc_pg_backup_stop(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_backup_stop: NULL flinfo");
+    let waitforarchive = fcinfo.arg_bool(0);
+
+    if transam_xlog::get_backup_status() != transam_xlog::SessionBackupState::Running {
+        return Err(Box::new(
+            PgError::error("backup is not in progress")
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_hint("Did you call pg_backup_start()?"),
+        ));
+    }
+
+    let (mut state, tablespace_map) = BACKUP_SESSION
+        .with(|c| c.borrow_mut().take())
+        .expect("backup session state present when SESSION_BACKUP_RUNNING");
+
+    transam_xlog::do_pg_backup_stop(&mut state, waitforarchive)?;
+
+    let wal_segment_size = transam_xlog::wal_segment_size();
+    // Scope the result_mcx() borrow of fcinfo (held alive by backup_label, an
+    // mcx-allocated Vec) so it ends before composite_result borrows fcinfo &mut.
+    let values = {
+        let mcx = fcinfo.result_mcx();
+        let backup_label = xlogbackup::build_backup_content(mcx, &state, false, wal_segment_size)?;
+        [
+            Datum::from_i64(state.stoppoint as i64),
+            crate::text_datum(mcx, &backup_label)?,
+            crate::text_datum(mcx, &tablespace_map)?,
+        ]
+    };
+    composite_result(flinfo, fcinfo, &values, &[false, false, false])
 }
 
 pub fn fc_pg_stop_making_pinned_objects(

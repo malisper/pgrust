@@ -240,10 +240,12 @@ fn reject_for_cac_state(cac: CacState) -> PgResult<()> {
 }
 
 fn build_ps_title() {
-    // am_walsender is always false here: the replication startup option
-    // panics until the walsender unit lands (see process_startup_packet).
     let ps_data = init_small::globals::WithMyProcPort(|port| {
         let mut s = String::new();
+        if walsender_seams::am_walsender() {
+            s.push_str(miscinit::GetBackendTypeDesc(types_core::BackendType::WalSender));
+            s.push(' ');
+        }
         s.push_str(port.user_name.as_deref().unwrap_or(""));
         s.push(' ');
         if let Some(db) = port.database_name.as_deref() {
@@ -483,8 +485,8 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
                         });
                     }
                     "replication" => {
-                        // am_walsender/am_db_walsender are walsender.c globals;
-                        // walsender startup cannot proceed until that unit lands.
+                        // Sets the walsender.c am_walsender/am_db_walsender
+                        // globals via the walsender seam (inc-1 front door).
                         let is_walsender = val == "database"
                             || match scalar_seams::parse_bool::call(&val) {
                                 Some(b) => b,
@@ -500,10 +502,7 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
                                 }
                             };
                         if is_walsender {
-                            panic!(
-                                "backend_startup: replication={val} needs am_walsender \
-                             (backend-replication-walsender unported)"
-                            );
+                            walsender_seams::set_walsender_flags(val == "database");
                         }
                     }
                     _ if name.starts_with("_pq_.") => {
@@ -564,8 +563,19 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
             truncate_namedatalen(&mut p.user_name);
         });
 
-        // if (am_walsender) MyBackendType = B_WAL_SENDER — unreachable, see above.
-        miscinit::SetMyBackendType(types_core::BackendType::Backend);
+        // if (am_walsender) MyBackendType = B_WAL_SENDER (postgres.c).
+        let am_walsender = walsender_seams::am_walsender();
+        miscinit::SetMyBackendType(if am_walsender {
+            types_core::BackendType::WalSender
+        } else {
+            types_core::BackendType::Backend
+        });
+
+        // Normal (physical) walsenders are not connected to a particular
+        // database; logical-replication walsenders keep theirs.
+        if am_walsender && !walsender_seams::am_db_walsender() {
+            init_small::globals::WithMyProcPort(|p| p.database_name = Some(String::new()));
+        }
 
         return Ok(STATUS_OK);
     }

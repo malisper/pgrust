@@ -270,6 +270,8 @@ autovacuum = { path = "../../backend/postmaster/autovacuum" }
 syslogger = { path = "../../backend/postmaster/syslogger" }
 launcher = { path = "../../backend/replication/launcher" }
 walsender_config = { path = "../../backend/replication/walsender_config" }
+walsender = { path = "../../backend/replication/walsender" }
+basebackup = { path = "../../backend/backup/basebackup" }
 slot = { path = "../../backend/replication/slot" }
 reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
 snapbuild = { path = "../../backend/replication/logical/snapbuild" }

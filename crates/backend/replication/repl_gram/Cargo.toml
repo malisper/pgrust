@@ -1,0 +1,15 @@
+[package]
+name = "repl_gram"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "repl_gram"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+elog = { path = "../../utils/error/elog" }
+repl_scanner = { path = "../repl_scanner" }

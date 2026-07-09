@@ -357,14 +357,30 @@ fn reject_arm(port: &Port, explicit_reject: bool) -> PgResult<()> {
 
     let user_name = port.user_name.as_deref().unwrap_or("");
     let database_name = port.database_name.as_deref().unwrap_or("");
-    // walsender.c unported: am_walsender statically false (postinit
-    // precedent); the replication wordings are dead here.
+    // Physical walsenders get the replication wording, as in C's check_db
+    // "replication" keyword matching.
+    let am_physical_walsender =
+        walsender_seams::am_walsender() && !walsender_seams::am_db_walsender();
 
     let mut builder = if explicit_reject {
+        if am_physical_walsender {
+            ereport(FATAL)
+                .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                .errmsg(format!(
+                    "pg_hba.conf rejects replication connection for host \"{hostinfo}\", user \"{user_name}\", {encryption_state}"
+                ))
+        } else {
+            ereport(FATAL)
+                .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
+                .errmsg(format!(
+                    "pg_hba.conf rejects connection for host \"{hostinfo}\", user \"{user_name}\", database \"{database_name}\", {encryption_state}"
+                ))
+        }
+    } else if am_physical_walsender {
         ereport(FATAL)
             .errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION)
             .errmsg(format!(
-                "pg_hba.conf rejects connection for host \"{hostinfo}\", user \"{user_name}\", database \"{database_name}\", {encryption_state}"
+                "no pg_hba.conf entry for replication connection from host \"{hostinfo}\", user \"{user_name}\", {encryption_state}"
             ))
     } else {
         ereport(FATAL)

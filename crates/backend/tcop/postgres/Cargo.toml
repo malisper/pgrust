@@ -54,6 +54,7 @@ lsyscache = { path = "../../utils/cache/lsyscache" }
 mbutils = { path = "../../utils/mb/mbutils" }
 varlena = { path = "../../utils/adt/varlena" }
 postgres_seams = { path = "../postgres_seams" }
+walsender_seams = { path = "../../replication/walsender_seams" }
 utility_seams = { path = "../utility_seams" }
 parser_seams = { path = "../../parser/parser_seams" }
 analyze_seams = { path = "../../parser/analyze_seams" }

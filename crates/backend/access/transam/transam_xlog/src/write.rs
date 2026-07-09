@@ -23,6 +23,32 @@ thread_local! {
     pub(crate) static LOCAL_MIN_RECOVERY_POINT: Cell<XLogRecPtr> = const { Cell::new(0) };
     pub(crate) static LOCAL_MIN_RECOVERY_POINT_TLI: Cell<TimeLineID> = const { Cell::new(0) };
     static UPDATE_MIN_RECOVERY_POINT: Cell<bool> = const { Cell::new(true) };
+    // wake_wal_senders (xlog.c): set after an fsync in XLogWrite, consumed at the
+    // XLogWrite / XLogBackgroundFlush tails. Per-backend like C's global (set and
+    // read within one flushing backend).
+    static WAKE_WAL_SENDERS: Cell<bool> = const { Cell::new(false) };
+}
+
+// WalSndWakeupRequest() (walsender.h).
+fn WalSndWakeupRequest() {
+    WAKE_WAL_SENDERS.set(true);
+}
+
+// WalSndWakeupProcessRequests(physical, logical) (walsender.h). The
+// WAKE_WAL_SENDERS early-out keeps read-only backends (no WAL fsync) off the
+// wakeup machinery entirely; the seam is skipped when walsender is unlinked.
+fn WalSndWakeupProcessRequests(physical: bool, logical: bool) {
+    if !WAKE_WAL_SENDERS.get() {
+        return;
+    }
+    WAKE_WAL_SENDERS.set(false);
+    // is_installed() first: standalone transam_xlog tests do not link walsender
+    // (nor install GUCs), so short-circuit before reading max_wal_senders.
+    if walsender_seams::wal_snd_wakeup::is_installed()
+        && guc_tables::vars::max_wal_senders.read() > 0
+    {
+        walsender_seams::wal_snd_wakeup::call(physical, logical);
+    }
 }
 
 // Flush is read before Write with an intervening barrier so Flush always
@@ -396,6 +422,7 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
 
             if finishing_seg {
                 issue_xlog_fsync(OPEN_LOG_FILE.get(), OPEN_LOG_SEG_NO.get(), tli)?;
+                WalSndWakeupRequest();
                 LOGWRT_RESULT.set((lw_write, lw_write));
 
                 if XLogArchivingActive() {
@@ -451,6 +478,7 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                 fd::ReserveExternalFD()?;
             }
             issue_xlog_fsync(OPEN_LOG_FILE.get(), OPEN_LOG_SEG_NO.get(), tli)?;
+            WalSndWakeupRequest();
         }
         LOGWRT_RESULT.set((lw_write, lw_write));
     }
@@ -468,6 +496,10 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
     // Write published before Flush (readers see Flush trailing Write).
     ctl.logWriteResult.store(lw_write, Release);
     ctl.logFlushResult.store(lw_flush, Release);
+
+    // Wake up walsenders once the new flush position is published so a woken
+    // sender reads the advanced LSN (C wakes after END_CRIT_SECTION).
+    WalSndWakeupProcessRequests(true, !crate::insert::RecoveryInProgress());
     Ok(())
 }
 
@@ -645,9 +677,7 @@ pub fn XLogSetAsyncXactLSN(async_xact_lsn: XLogRecPtr) {
     }
 }
 
-/// XLogBackgroundFlush (xlog.c). Walsender wakeup (WalSndWakeupProcessRequests)
-/// is omitted like XLogFlush's: no walsender can exist while that unit is
-/// unported.
+/// XLogBackgroundFlush (xlog.c).
 pub fn XLogBackgroundFlush() -> PgResult<bool> {
     thread_local! {
         static LAST_FLUSH: Cell<i64> = const { Cell::new(0) };
@@ -713,6 +743,9 @@ pub fn XLogBackgroundFlush() -> PgResult<bool> {
     LWLockRelease(WALWriteLock())?;
 
     init_small::globals::EndCriticalSection();
+
+    // Wake up walsenders now that we've released heavily contended locks.
+    WalSndWakeupProcessRequests(true, !crate::insert::RecoveryInProgress());
 
     crate::insert::AdvanceXLInsertBuffer(InvalidXLogRecPtr, insert_tli, true);
 

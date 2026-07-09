@@ -26,6 +26,7 @@ mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 types_startup = { path = "../../../_support/types/types_startup" }
+walsender_seams = { path = "../../replication/walsender_seams" }
 
 [dev-dependencies]
 regex_core = { path = "../../regex/regex_core" }

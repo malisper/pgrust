@@ -11,13 +11,18 @@ use std::cell::Cell;
 use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::PgResult;
 
+mod backup;
+pub use backup::{
+    do_pg_abort_backup, do_pg_backup_start, do_pg_backup_stop, get_backup_status,
+    register_persistent_abort_backup_handler, SessionBackupState, TablespaceInfo,
+};
 pub mod control_file;
 pub mod ctl;
 pub mod guc_vars;
 pub mod insert;
 pub mod redo;
 pub(crate) mod removal;
-pub use removal::XLogGetOldestSegno;
+pub use removal::{CheckXLogRemoved, XLogGetOldestSegno};
 pub mod startup;
 pub mod write;
 

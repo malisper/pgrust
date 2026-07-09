@@ -12,6 +12,21 @@ thread_local! {
     static PREV_CHECK_POINT_DISTANCE: Cell<f64> = const { Cell::new(0.0) };
 }
 
+// CheckXLogRemoved (xlog.c): error out if the segment we intend to read has
+// already been recycled/removed under us.
+pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
+    let ctl = XLogCtl();
+    let last_removed = ctl.info_lck.with(|| ctl.lastRemovedSegNo.load(Relaxed));
+    if segno <= last_removed {
+        let filename = crate::XLogFileName(tli, segno, wal_segment_size());
+        return elog::ereport(types_error::ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("requested WAL segment {filename} has already been removed"))
+            .finish(types_error::ErrorLocation::new("xlog.c", 0, "CheckXLogRemoved"));
+    }
+    Ok(())
+}
+
 pub(crate) fn UpdateCheckPointDistanceEstimate(nbytes: u64) {
     let nbytes = nbytes as f64;
     PREV_CHECK_POINT_DISTANCE.set(nbytes);
