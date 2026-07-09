@@ -1987,6 +1987,27 @@ fn decode_record<'mcx>(
         return None;
     }
 
+    // Re-validate each fragment against the bytes actually left as we copy: a
+    // u32-wrapped datatotal satisfies the aggregate gate above yet leaves a
+    // fragment length exceeding the record. C's uint32 datatotal wraps the
+    // same way and C then silently overreads the heap (UB) on such a record;
+    // we deliberately diverge to a clean invalid-length rejection (the ruled
+    // never-replicate-C-UB exception).
+    macro_rules! payload_field {
+        ($len:expr) => {{
+            let len = $len as usize;
+            if (remaining as usize) < len {
+                let (h, l) = lsn_fmt(read_rec_ptr);
+                report_invalid!(err, "record with invalid length at {:X}/{:X}", h, l);
+                return None;
+            }
+            let s = ptr;
+            ptr += len;
+            remaining -= len as u32;
+            &record_bytes[s..s + len]
+        }};
+    }
+
     let overflow = if slot.oversized {
         match vec_with_capacity_in(mcx, record_hdr.xl_tot_len as usize) {
             Ok(v) => Some(v),
@@ -2040,14 +2061,12 @@ fn decode_record<'mcx>(
         };
 
         if blk.has_image {
-            out_blk.bkp_image = sink.put(&record_bytes[ptr..ptr + blk.bimg_len as usize]);
-            ptr += blk.bimg_len as usize;
+            out_blk.bkp_image = sink.put(payload_field!(blk.bimg_len));
             out += blk.bimg_len as usize;
         }
         if blk.has_data {
             out = MAXALIGN(out);
-            out_blk.data = sink.put(&record_bytes[ptr..ptr + blk.data_len as usize]);
-            ptr += blk.data_len as usize;
+            out_blk.data = sink.put(payload_field!(blk.data_len));
             out += blk.data_len as usize;
         }
         blocks_pool.push(out_blk);
@@ -2056,7 +2075,7 @@ fn decode_record<'mcx>(
     let mut main_data = PayloadRange::default();
     if main_data_len > 0 {
         out = MAXALIGN(out);
-        main_data = sink.put(&record_bytes[ptr..ptr + main_data_len as usize]);
+        main_data = sink.put(payload_field!(main_data_len));
         out += main_data_len as usize;
     }
 
@@ -2124,6 +2143,14 @@ fn restore_image_core(
     hole_length: usize,
     page: &mut [u8],
 ) -> Result<(), RestoreErr> {
+    // hole_length is `BLCKSZ - bimg_len` (u16-wrapping) or a raw field; a
+    // corrupt bimg_len > BLCKSZ / oversized hole wraps it. C computes
+    // `BLCKSZ - (hole_offset + hole_length)` and heap-overreads (UB) on such a
+    // record; we diverge to a clean invalid-state rejection (never replicate C
+    // UB) instead of panicking on the slices below.
+    if hole_offset > BLCKSZ || hole_length > BLCKSZ || hole_offset + hole_length > BLCKSZ {
+        return Err(RestoreErr::InvalidState);
+    }
     let mut tmp = [core::mem::MaybeUninit::<u8>::uninit(); BLCKSZ];
     let src: &[u8] = if BKPIMAGE_COMPRESSED(bimg_info) {
         if bimg_info & BKPIMAGE_COMPRESS_PGLZ != 0 {
