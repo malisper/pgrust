@@ -11387,6 +11387,7 @@ dependencies = [
  "s_lock_seams",
  "scalar_seams",
  "shmem",
+ "stack_depth",
  "syslogger",
  "syslogger_seams",
  "timestamp_seams",

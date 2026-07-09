@@ -368,6 +368,7 @@ pub fn postmaster_child_launch(
 
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
+        .stack_size(child_thread_stack_size())
         .spawn(move || {
             // Thread-scoped (a retained thread reuses its slot across tasks):
             // the local latch slab slot returns on every thread exit —
@@ -396,6 +397,20 @@ pub fn postmaster_child_launch(
         }
         Err(_) => -1,
     }
+}
+
+// C backends run on the process stack (RLIMIT_STACK); a raised-from-rlimit
+// max_stack_depth needs the same real budget here, so child threads reserve
+// the finite rlimit (env RUST_MIN_STACK still wins when larger; std ignores
+// it once stack_size() is explicit). Unlimited/unknown rlimit reserves 64MiB.
+fn child_thread_stack_size() -> usize {
+    let rlim = stack_depth::get_stack_depth_rlimit();
+    let rlim = if rlim > 0 && rlim < isize::MAX { rlim as usize } else { 64 << 20 };
+    let min_stack = std::env::var("RUST_MIN_STACK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    rlim.max(min_stack).max(2 << 20)
 }
 
 pub fn init_seams() {
@@ -543,6 +558,7 @@ pub mod wpool {
         let (tx, rx) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
         let spawned = std::thread::Builder::new()
             .name(format!("pg:standby:{spawn_pid}"))
+            .stack_size(super::child_thread_stack_size())
             .spawn(move || {
                 // Any exit — rotation, retire, or a prelude panic — drops the
                 // population charge exactly once.
