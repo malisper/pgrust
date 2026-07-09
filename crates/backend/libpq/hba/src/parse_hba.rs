@@ -148,8 +148,10 @@ pub fn parse_hba_line(
         );
     }
     for tc in tok_line.fields[field].clone() {
-        let tok = copy_auth_token(&tc);
-        if regcomp_auth_token(&tok, &file_name, line_num)? != 0 {
+        let mut tok = copy_auth_token(&tc);
+        let mut err_msg = None;
+        if regcomp_auth_token(&mut tok, &file_name, line_num, &mut err_msg, elevel)? != 0 {
+            tok_line.err_msg = err_msg;
             return Ok(None);
         }
         parsedline.databases.push(tok);
@@ -166,8 +168,10 @@ pub fn parse_hba_line(
         );
     }
     for tc in tok_line.fields[field].clone() {
-        let tok = copy_auth_token(&tc);
-        if regcomp_auth_token(&tok, &file_name, line_num)? != 0 {
+        let mut tok = copy_auth_token(&tc);
+        let mut err_msg = None;
+        if regcomp_auth_token(&mut tok, &file_name, line_num, &mut err_msg, elevel)? != 0 {
+            tok_line.err_msg = err_msg;
             return Ok(None);
         }
         parsedline.roles.push(tok);

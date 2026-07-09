@@ -66,6 +66,7 @@ ipc = { path = "../../storage/ipc/ipc" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 postinit = { path = "../../utils/init/postinit" }
 miscinit = { path = "../../utils/init/miscinit" }
+backend_startup = { path = "../backend_startup" }
 types_guc = { path = "../../../_support/types/types_guc" }
 
 event_trigger_seams = { path = "../../commands/event_trigger_seams" }

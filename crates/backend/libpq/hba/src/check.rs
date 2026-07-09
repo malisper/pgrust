@@ -123,7 +123,9 @@ pub(crate) fn check_role(
         } else if token_is_keyword(tok, "all") {
             return Ok(true);
         } else if token_has_regexp(tok) {
-            unreachable!("regex auth tokens panic at parse");
+            if crate::token::regexec_auth_token(role, tok, &mut [])?.unwrap_or(false) {
+                return Ok(true);
+            }
         } else if case_insensitive {
             if token_matches_insensitive(tok, role.as_bytes()) {
                 return Ok(true);
@@ -166,7 +168,9 @@ pub(crate) fn check_db(
         } else if token_is_keyword(tok, "replication") {
             continue; // never match this if not walsender
         } else if token_has_regexp(tok) {
-            unreachable!("regex auth tokens panic at parse");
+            if crate::token::regexec_auth_token(dbname, tok, &mut [])?.unwrap_or(false) {
+                return Ok(true);
+            }
         } else if token_matches(tok, dbname.as_bytes()) {
             return Ok(true);
         }

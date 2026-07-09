@@ -9,6 +9,7 @@ name = "parallel"
 path = "src/lib.rs"
 
 [dependencies]
+hba_seams = { path = "../../../libpq/hba_seams" }
 backend_progress = { path = "../../../utils/activity/backend_progress" }
 parallel_seams = { path = "../parallel_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }

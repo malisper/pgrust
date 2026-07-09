@@ -1087,8 +1087,11 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     );
 
     miscinit::RestoreClientConnectionInfo(&shared.clientconninfo)?;
-    if miscinit::client_connection_info().0.is_some() {
-        panic!("ParallelWorkerMain: InitializeSystemUser (SYSTEM_USER for authenticated identity) unported");
+    // C: InitializeSystemUser once MyClientConnectionInfo is restored (only
+    // when authn_id is set, so auth_method is valid).
+    let (authn_id, auth_method) = miscinit::client_connection_info();
+    if let Some(authn_id) = authn_id {
+        miscinit::InitializeSystemUser(authn_id, hba_seams::hba_authname::call(auth_method));
     }
 
     predicate_seams::attach_serializable_xact::call(shared.serializable_xact_handle)?;

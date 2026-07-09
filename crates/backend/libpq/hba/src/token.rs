@@ -98,28 +98,94 @@ pub(crate) fn make_auth_token(token: &[u8], quoted: bool) -> AuthToken {
     AuthToken {
         string: String::from_utf8_lossy(token).into_owned(),
         quoted,
+        regex: false,
     }
 }
 
 pub(crate) fn copy_auth_token(input: &AuthToken) -> AuthToken {
-    input.clone()
+    // C's copy_auth_token drops the compiled regex (make_auth_token copy).
+    AuthToken { regex: false, ..input.clone() }
 }
 
-// regcomp_auth_token (hba.c:302): '/'-prefixed tokens compile a regex; the
-// regex engine is unported, so the arm is loud rather than silently literal.
+// regcomp_auth_token (hba.c:302): '/'-prefixed tokens compile a regex
+// (validation; the token keeps the compiled-OK marker); non-zero return =
+// compile failure (already reported at elevel, err_msg set for the
+// pg_hba_file_rules/pg_ident_file_mappings views).
 pub(crate) fn regcomp_auth_token(
-    token: &AuthToken,
+    token: &mut AuthToken,
     filename: &str,
     line_num: i32,
+    err_msg: &mut Option<String>,
+    elevel: ErrorLevel,
 ) -> PgResult<i32> {
+    use ::regex::{RegcompResult, REG_ADVANCED};
+
+    debug_assert!(!token.regex);
     if token.string.as_bytes().first() != Some(&b'/') {
         return Ok(0); // nothing to compile
     }
-    panic!(
-        "regcomp_auth_token: regex auth token \"{}\" ({filename} line {line_num}) — \
-         backend regex engine unported",
-        token.string
-    );
+
+    let pattern = &token.string.as_bytes()[1..];
+    let cx = mcx::MemoryContext::new("regcomp_auth_token");
+    let wstr = mbutils_seams::pg_mb2wchar_with_len::call(cx.mcx(), pattern)?;
+    match regex_core_seams::pg_regcomp::call(&wstr, REG_ADVANCED, types_core::catalog::C_COLLATION_OID)? {
+        RegcompResult::Compiled(re) => {
+            // Parsed auth lines are shared across threads; the Rc-based
+            // carrier cannot live in them. Validation happened; the executing
+            // thread recompiles in regexec_auth_token.
+            regex_core_seams::pg_regfree::call(re);
+            token.regex = true;
+            Ok(0)
+        }
+        RegcompResult::Failed(f) => {
+            let msg = format!(
+                "invalid regular expression \"{}\": {}",
+                &token.string[1..],
+                f.message
+            );
+            ereport(elevel)
+                .errcode(types_error::ERRCODE_INVALID_REGULAR_EXPRESSION)
+                .errmsg(msg.clone())
+                .errcontext_msg(crate::line_context(line_num, filename))
+                .finish(loc(327, "regcomp_auth_token"))?;
+            *err_msg = Some(msg);
+            Ok(1)
+        }
+    }
+}
+
+// regexec_auth_token (hba.c:348): Ok(true) = match, Ok(false) = REG_NOMATCH,
+// Err(msg) = hard regexec failure (the caller raises its own ereport).
+pub(crate) fn regexec_auth_token(
+    matchstr: &str,
+    token: &AuthToken,
+    pmatch: &mut [::regex::RegMatch],
+) -> PgResult<Result<bool, String>> {
+    use ::regex::{RegcompResult, RegexecResult, REG_ADVANCED};
+
+    debug_assert!(token.regex && token.string.starts_with('/'));
+    let cx = mcx::MemoryContext::new("regexec_auth_token");
+    let wpat =
+        mbutils_seams::pg_mb2wchar_with_len::call(cx.mcx(), &token.string.as_bytes()[1..])?;
+    // Recompile of a parse-validated pattern (see regcomp_auth_token).
+    let re = match regex_core_seams::pg_regcomp::call(
+        &wpat,
+        REG_ADVANCED,
+        types_core::catalog::C_COLLATION_OID,
+    )? {
+        RegcompResult::Compiled(re) => re,
+        RegcompResult::Failed(f) => {
+            panic!("regexec_auth_token: parse-validated pattern failed to recompile: {}", f.message)
+        }
+    };
+    let wstr = mbutils_seams::pg_mb2wchar_with_len::call(cx.mcx(), matchstr.as_bytes())?;
+    let result = match regex_core_seams::pg_regexec::call(&re, &wstr, 0, pmatch)? {
+        RegexecResult::Matched => Ok(true),
+        RegexecResult::NoMatch => Ok(false),
+        RegexecResult::Failed(f) => Err(f.message),
+    };
+    regex_core_seams::pg_regfree::call(re);
+    Ok(result)
 }
 
 pub fn free_auth_file(_file: FileHandle, _depth: i32) {}

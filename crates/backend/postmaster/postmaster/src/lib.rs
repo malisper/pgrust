@@ -657,6 +657,14 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                     handle_child_crash("server process", pid, exitstatus)?;
                 } else {
                     bgworker::BackgroundWorkerStopNotifications(pid);
+                    // CleanupBackend's trailing LogChildExit(DEBUG2) — the TAP
+                    // harness (Cluster.pm connect_ok/fails) waits on this line.
+                    log_child_exit_at(
+                        DEBUG2,
+                        miscinit::GetBackendTypeDesc(btype),
+                        pid,
+                        exitstatus,
+                    );
                 }
             }
             Some((child_slot, BackendType::BgWorker)) => {
