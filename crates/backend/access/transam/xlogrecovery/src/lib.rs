@@ -751,6 +751,25 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
 
     (rmgr::GetRmgr(rmid)?.rm_redo)(&mut rec.reader.v)?;
 
+    // PGRUST_REDO_PIN_CHECK: every redo arm must return with zero private
+    // pins (C recovery holds no pins across records).
+    if redo_pin_check() {
+        let pins = bufmgr::debug_all_private_pins();
+        if !pins.is_empty() {
+            let desc: Vec<String> = pins
+                .iter()
+                .map(|&(b, rc)| format!("buf={b} rc={rc} tag={}", bufmgr::debug_buffer_tag_string(b)))
+                .collect();
+            panic!(
+                "redo pin leak after rmid={} info={:#04x} end_lsn={:X}: [{}]",
+                rmid,
+                info,
+                rec.reader.v.EndRecPtr,
+                desc.join(", ")
+            );
+        }
+    }
+
     if info & XLR_CHECK_CONSISTENCY != 0 {
         panic!("verifyBackupPageConsistency not ported (wal_consistency_checking record seen)");
     }
@@ -765,6 +784,13 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     }
 
     check_recovery_consistency()
+}
+
+
+fn redo_pin_check() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PGRUST_REDO_PIN_CHECK").is_some())
 }
 
 pub fn PerformWalRecovery() -> PgResult<()> {

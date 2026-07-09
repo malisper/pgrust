@@ -56,7 +56,16 @@ pub use pin::{
     AtEOXact_Buffers, BufferIsPinned, CheckBufferIsPinnedOnce, IncrBufferRefCount, ReleaseBuffer,
     UnlockBuffers,
 };
-pub use privref::{GetPrivateRefCount, ReservePrivateRefCountEntry};
+pub use privref::{debug_all_private_pins, GetPrivateRefCount, ReservePrivateRefCountEntry};
+
+// Diagnostic (PGRUST_REDO_PIN_CHECK): tag string for a pinned buffer.
+pub fn debug_buffer_tag_string(buffer: types_core::Buffer) -> String {
+    let t = buf_hdr::GetBufferDescriptor(buffer - 1).tag();
+    format!(
+        "({}/{}/{} fork={} blk={})",
+        t.spcOid, t.dbOid, t.relNumber, t.forkNum as i32, t.blockNum
+    )
+}
 pub use localbuf::{
     n_loc_buffer, AtEOXact_LocalBuffers, AtProcExit_LocalBuffers, DropRelationAllLocalBuffers,
     DropRelationLocalBuffers,
