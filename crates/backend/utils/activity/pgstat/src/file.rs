@@ -1,9 +1,11 @@
 // pgstat.c's statsfile half: write pg_stat/pgstat.stat on clean shutdown
 // (checkpointer's before_shmem_exit), restore + unlink on clean start,
-// unlink on crash recovery. Record payloads are this port's repr(C) entry
-// structs (fixed-size scalars, native-endian), not C's PgStatShared_*
-// layouts — the file is never exchanged with C; corruption behavior matches
-// C (log, reset, unlink).
+// unlink on crash recovery. Header, record tags, and per-entry payload
+// bytes match C's pgstat_write_statsfile/pgstat_read_statsfile exactly
+// (no on-disk length field; payload size is implicit from `kind`, as in
+// C's pgstat_get_entry_len) so a C-initdb'd datadir's pgstat.stat is
+// readable on pgrust's first boot. Corruption behavior matches C (log,
+// reset, unlink).
 
 use core::mem::size_of;
 use std::io::{Read, Write};
@@ -17,10 +19,11 @@ use crate::pending::{
 };
 use crate::shmem::SharedEntry;
 
-// Deliberately NOT C's 0x01A5BCB7: a C-initdb'd datadir carries a C-format
-// pgstat.stat whose payloads we can't parse; a distinct id rejects it at the
-// header (C's own incorrect-format path) instead of mid-entry.
-pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x51A5BCB8;
+// Must equal C 18.3's PGSTAT_FILE_FORMAT_ID (pgstat.h): initdb bootstrap runs
+// the real C postgres, which writes this file at shutdown; pgrust's first
+// boot reads it back, so header and entry layout below must byte-match C's
+// pgstat_write_statsfile/pgstat_read_statsfile.
+pub const PGSTAT_FILE_FORMAT_ID: i32 = 0x01A5BCB7;
 
 const PGSTAT_FILE_ENTRY_END: u8 = b'E';
 const PGSTAT_FILE_ENTRY_HASH: u8 = b'S';
@@ -68,12 +71,12 @@ fn entry_payload(entry: &SharedEntry) -> Option<&[u8]> {
     }
 }
 
+// C's write_chunk/pgstat_get_entry_len carry no on-disk length: the payload
+// size is implicit, derived from `kind` on both write and read.
 fn push_fixed<T: Copy>(out: &mut Vec<u8>, kind: PgStat_Kind, v: &T) {
     out.push(PGSTAT_FILE_ENTRY_FIXED);
     out.extend_from_slice(&kind.0.to_ne_bytes());
-    let payload = as_bytes(v);
-    out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
-    out.extend_from_slice(payload);
+    out.extend_from_slice(as_bytes(v));
 }
 
 pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
@@ -111,12 +114,10 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
                         key.objid
                     )
                 });
-            let payload = as_bytes(slot_entry);
             out.push(PGSTAT_FILE_ENTRY_NAME);
             out.extend_from_slice(&key.kind.0.to_ne_bytes());
             out.extend_from_slice(&namebuf);
-            out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
-            out.extend_from_slice(payload);
+            out.extend_from_slice(as_bytes(slot_entry));
             return;
         }
         let Some(payload) = entry_payload(&entry) else {
@@ -126,7 +127,6 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
         out.extend_from_slice(&key.kind.0.to_ne_bytes());
         out.extend_from_slice(&key.dboid.to_ne_bytes());
         out.extend_from_slice(&key.objid.to_ne_bytes());
-        out.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         out.extend_from_slice(payload);
     });
     out.push(PGSTAT_FILE_ENTRY_END);
@@ -171,6 +171,12 @@ impl<'a> Cursor<'a> {
     }
 }
 
+// C's pgstat_get_entry_len(kind) reads the length back out of the kind info
+// table, not the file; take_payload mirrors that by sizing the read from T.
+fn take_payload<T: Copy + Default>(c: &mut Cursor<'_>) -> Option<T> {
+    from_bytes(c.take(size_of::<T>())?)
+}
+
 pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
     let mut c = Cursor { buf, pos: 0 };
     if c.take_u32()? as i32 != PGSTAT_FILE_FORMAT_ID {
@@ -185,13 +191,11 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
                 let kind = PgStat_Kind(c.take_u32()?);
                 let dboid = c.take_u32()?;
                 let objid = u64::from_ne_bytes(c.take(8)?.try_into().unwrap());
-                let len = c.take_u32()? as usize;
-                let payload = c.take(len)?;
                 let entry = match kind {
-                    PGSTAT_KIND_RELATION => SharedEntry::Relation(from_bytes(payload)?),
-                    PGSTAT_KIND_DATABASE => SharedEntry::Database(from_bytes(payload)?),
-                    PGSTAT_KIND_FUNCTION => SharedEntry::Function(from_bytes(payload)?),
-                    PGSTAT_KIND_SUBSCRIPTION => SharedEntry::Subscription(from_bytes(payload)?),
+                    PGSTAT_KIND_RELATION => SharedEntry::Relation(take_payload(&mut c)?),
+                    PGSTAT_KIND_DATABASE => SharedEntry::Database(take_payload(&mut c)?),
+                    PGSTAT_KIND_FUNCTION => SharedEntry::Function(take_payload(&mut c)?),
+                    PGSTAT_KIND_SUBSCRIPTION => SharedEntry::Subscription(take_payload(&mut c)?),
                     _ => return None,
                 };
                 crate::shmem::import_entry(PgStat_HashKey { kind, dboid, objid }, entry);
@@ -199,12 +203,10 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
             PGSTAT_FILE_ENTRY_NAME => {
                 let kind = PgStat_Kind(c.take_u32()?);
                 let namebuf = c.take(NAMEDATALEN)?;
-                let len = c.take_u32()? as usize;
-                let payload = c.take(len)?;
                 if kind != PGSTAT_KIND_REPLSLOT {
                     return None;
                 }
-                let entry = SharedEntry::ReplSlot(from_bytes(payload)?);
+                let entry = SharedEntry::ReplSlot(take_payload(&mut c)?);
                 let nul = namebuf.iter().position(|&b| b == 0).unwrap_or(NAMEDATALEN);
                 let Ok(name) = core::str::from_utf8(&namebuf[..nul]) else {
                     return None;
@@ -232,21 +234,19 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
                     PGSTAT_KIND_IO, PGSTAT_KIND_SLRU, PGSTAT_KIND_WAL,
                 };
                 let kind = PgStat_Kind(c.take_u32()?);
-                let len = c.take_u32()? as usize;
-                let payload = c.take(len)?;
                 match kind {
                     PGSTAT_KIND_ARCHIVER => {
-                        crate::archiver::import_archiver_stats(from_bytes(payload)?)
+                        crate::archiver::import_archiver_stats(take_payload(&mut c)?)
                     }
                     PGSTAT_KIND_BGWRITER => {
-                        crate::bgwriter::import_bgwriter_stats(from_bytes(payload)?)
+                        crate::bgwriter::import_bgwriter_stats(take_payload(&mut c)?)
                     }
                     PGSTAT_KIND_CHECKPOINTER => {
-                        crate::checkpointer::import_checkpointer_stats(from_bytes(payload)?)
+                        crate::checkpointer::import_checkpointer_stats(take_payload(&mut c)?)
                     }
-                    PGSTAT_KIND_IO => crate::io::import_io_stats(from_bytes(payload)?),
-                    PGSTAT_KIND_SLRU => crate::slru::import_slru_stats(from_bytes(payload)?),
-                    PGSTAT_KIND_WAL => crate::wal::import_wal_stats(from_bytes(payload)?),
+                    PGSTAT_KIND_IO => crate::io::import_io_stats(take_payload(&mut c)?),
+                    PGSTAT_KIND_SLRU => crate::slru::import_slru_stats(take_payload(&mut c)?),
+                    PGSTAT_KIND_WAL => crate::wal::import_wal_stats(take_payload(&mut c)?),
                     _ => return None,
                 }
             }

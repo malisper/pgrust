@@ -2484,3 +2484,27 @@ fn func_alias_coldeflist_shapes() {
     assert_eq!(rf.alias.unwrap().aliasname, Some("t"));
     assert_eq!(rf.coldeflist.len(), 1);
 }
+
+#[test]
+fn alter_system_shapes() {
+    use types_nodes::parsenodes::VariableSetKind;
+
+    let list = parse("ALTER SYSTEM SET work_mem = '64MB';");
+    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    assert_eq!(n.setstmt.kind, VariableSetKind::VAR_SET_VALUE);
+    assert_eq!(n.setstmt.name, Some("work_mem"));
+    assert_eq!(n.setstmt.args.len(), 1);
+
+    let list = parse("ALTER SYSTEM RESET work_mem;");
+    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    assert_eq!(n.setstmt.kind, VariableSetKind::VAR_RESET);
+    assert_eq!(n.setstmt.name, Some("work_mem"));
+
+    let list = parse("ALTER SYSTEM RESET ALL;");
+    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    assert_eq!(n.setstmt.kind, VariableSetKind::VAR_RESET_ALL);
+
+    let list = parse("ALTER SYSTEM SET search_path TO DEFAULT;");
+    let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
+    assert_eq!(n.setstmt.kind, VariableSetKind::VAR_SET_DEFAULT);
+}

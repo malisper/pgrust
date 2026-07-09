@@ -25,6 +25,7 @@ latch = { path = "../../../storage/ipc/latch" }
 procarray = { path = "../../../storage/ipc/procarray" }
 init_small = { path = "../../../utils/init/init_small" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
 clog = { path = "../clog" }
 relmapper = { path = "../../../utils/cache/relmapper" }

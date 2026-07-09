@@ -27,3 +27,4 @@ xlogreader = { path = "../../../access/transam/xlogreader" }
 slot = { path = "../../slot" }
 logical = { path = "../logical" }
 logical_decode = { path = "../logical_decode" }
+logical_message = { path = "../logical_message" }

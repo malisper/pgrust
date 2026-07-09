@@ -32,7 +32,7 @@ use types_nodes::parsenodes::{
     ATAlterConstraint, AccessPriv, AlterCollationStmt, AlterDatabaseRefreshCollStmt,
     AlterDatabaseSetStmt, AlterDatabaseStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt,
     AlterEventTrigStmt, AlterFunctionStmt, AlterObjectSchemaStmt, AlterOpFamilyStmt,
-    AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt,
+    AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt, AlterSystemStmt,
     AlterRoleStmt, AlterSubscriptionStmt, AlterTableCmd, AlterTableMoveAllStmt,
     AlterTableSpaceOptionsStmt, AlterTableStmt, CTECycleClause, CTESearchClause, CheckPointStmt,
     ClosePortalStmt,
@@ -195,6 +195,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_AlterRoleSetStmt => {
             let s = node.as_variant::<AlterRoleSetStmt>().expect("AlterRoleSetStmt");
             Node::mk(mcx, copy_AlterRoleSetStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterSystemStmt => {
+            let s = node.as_variant::<AlterSystemStmt>().expect("AlterSystemStmt");
+            Node::mk(mcx, copy_AlterSystemStmt(mcx, s)?)?
         }
         NodeTag::T_AlterRoleStmt => {
             let s = node.as_variant::<AlterRoleStmt>().expect("AlterRoleStmt");
@@ -1611,6 +1615,12 @@ pub(crate) fn copy_AlterPublicationStmt<'d>(mcx: Mcx<'d>, s: &AlterPublicationSt
         pubobjects: copy_node_list(mcx, &s.pubobjects)?,
         for_all_tables: s.for_all_tables,
         action: s.action,
+    })
+}
+
+pub(crate) fn copy_AlterSystemStmt<'d>(mcx: Mcx<'d>, s: &AlterSystemStmt<'_>) -> PgResult<AlterSystemStmt<'d>> {
+    Ok(AlterSystemStmt {
+        setstmt: mk_ref(mcx, copy_VariableSetStmt(mcx, s.setstmt)?)?,
     })
 }
 

@@ -318,6 +318,46 @@ pub fn fc_pg_logical_slot_peek_binary_changes(
     pg_logical_slot_get_changes_guts(flinfo, fcinfo, false, true)
 }
 
+// pg_logical_emit_message_bytea/_text (logicalfuncs.c): text and bytea are
+// binary compatible, so both OIDs share one body — text_to_cstring's
+// strlen() truncation on an embedded NUL in prefix is reproduced by slicing
+// at the first zero byte before handing prefix to LogLogicalMessage.
+fn pg_logical_emit_message_guts(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let transactional = fcinfo.arg_bool(0);
+    // SAFETY: caller arms result_mcx for the query lifetime.
+    let mcx: Mcx<'static> = unsafe { fcinfo.result_mcx_detached() };
+
+    let prefix_img = detoast_datum(mcx, fcinfo.arg(1))?;
+    let prefix_payload = &prefix_img[VARHDRSZ..];
+    let prefix_len = prefix_payload
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(prefix_payload.len());
+    let prefix = &prefix_payload[..prefix_len];
+
+    let data_img = detoast_datum(mcx, fcinfo.arg(2))?;
+    let message = &data_img[VARHDRSZ..];
+
+    let flush = fcinfo.arg_bool(3);
+
+    let lsn = logical_message::LogLogicalMessage(prefix, message, transactional, flush)?;
+    Ok(Datum::from_u64(lsn))
+}
+
+pub fn fc_pg_logical_emit_message_bytea(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    pg_logical_emit_message_guts(fcinfo)
+}
+
+pub fn fc_pg_logical_emit_message_text(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    pg_logical_emit_message_guts(fcinfo)
+}
+
 const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -329,7 +369,20 @@ const fn b(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
     }
 }
 
+const fn be(foid: Oid, name: &'static str, func: PGFunction) -> FmgrBuiltin {
+    FmgrBuiltin {
+        foid,
+        name,
+        nargs: 4,
+        strict: true,
+        retset: false,
+        func,
+    }
+}
+
 pub const LOGICALFUNCS_BUILTINS: &[FmgrBuiltin] = &[
+    be(3577, "pg_logical_emit_message_text", fc_pg_logical_emit_message_text),
+    be(3578, "pg_logical_emit_message_bytea", fc_pg_logical_emit_message_bytea),
     b(3782, "pg_logical_slot_get_changes", fc_pg_logical_slot_get_changes),
     b(
         3783,

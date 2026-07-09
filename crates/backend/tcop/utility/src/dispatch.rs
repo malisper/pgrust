@@ -526,7 +526,7 @@ fn dispatch_switch<'mcx>(
         }
         T_AlterSystemStmt => {
             xact::PreventInTransactionBlock(is_top_level, "ALTER SYSTEM")?;
-            handler_gap("AlterSystemSetConfigFile (guc lane)")
+            guc_funcs::AlterSystemSetConfigFile(parsetree.as_alter_system_stmt().unwrap())?;
         }
         T_VariableSetStmt => {
             let stmt = parsetree.as_variable_set_stmt().unwrap();

@@ -6031,11 +6031,16 @@ dependencies = [
  "datum",
  "elog",
  "exectuples_output",
+ "fd",
  "format_type",
  "funcapi",
  "guc",
+ "guc_file",
  "guc_seams",
  "guc_tables",
+ "init_small",
+ "libc",
+ "lwlock",
  "mbutils",
  "mbutils_seams",
  "mcx",
@@ -7332,6 +7337,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "logical_message"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "xact",
+ "xloginsert",
+ "xlogreader_seams",
+]
+
+[[package]]
 name = "logical_seams"
 version = "0.0.0"
 dependencies = [
@@ -7362,6 +7380,7 @@ dependencies = [
  "inval",
  "logical",
  "logical_decode",
+ "logical_message",
  "mcx",
  "slot",
  "transam_xlog",
@@ -10577,6 +10596,7 @@ dependencies = [
  "lwlock",
  "mcxt_seams",
  "miscinit",
+ "pgstat",
  "procsignal",
  "procsignal_seams",
  "ps_status_seams",
@@ -12844,6 +12864,7 @@ dependencies = [
  "gist_xlog",
  "hash_xlog",
  "heapam_xlog",
+ "logical_message",
  "mcx",
  "multixact",
  "nbtree_xlog",
@@ -15298,6 +15319,7 @@ dependencies = [
  "crc32c",
  "elog",
  "fd",
+ "guc_seams",
  "guc_tables",
  "init_small",
  "latch",
