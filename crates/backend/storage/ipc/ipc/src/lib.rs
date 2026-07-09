@@ -142,6 +142,22 @@ pub fn exit_thread_raw(code: i32) -> ! {
     std::panic::resume_unwind(Box::new(ProcExitThread { code }));
 }
 
+/// Unwind payload of a SIGKILL-style abrupt death (crash-test injection): the
+/// joiner reports WTERMSIG(signo) instead of the generic SIGABRT crash class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KilledBySignal {
+    pub signo: i32,
+}
+
+// kill -9's thread rendering: no exit callbacks, no client message; the
+// postmaster reaps it as "terminated by signal {signo}" and runs the crash
+// cycle. Stack Drop glue still runs (same divergence as exit_thread_raw).
+pub fn exit_thread_killed(signo: i32) -> ! {
+    PROC_EXIT_INPROGRESS.with(|c| c.set(true));
+    elog::config::set_proc_exit_inprogress(true);
+    std::panic::resume_unwind(Box::new(KilledBySignal { signo }));
+}
+
 fn commit_to_exit() {
     // Committed to exit: elog now promotes ERROR to FATAL.
     PROC_EXIT_INPROGRESS.with(|c| c.set(true));

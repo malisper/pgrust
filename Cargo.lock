@@ -11250,6 +11250,7 @@ dependencies = [
  "spi_seams",
  "stringinfo",
  "subtrans_seams",
+ "superuser_seams",
  "syncrep_seams",
  "syscache_seams",
  "tablecmds_seams",

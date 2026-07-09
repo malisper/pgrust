@@ -158,6 +158,51 @@ pub fn pg_plan_queries<'mcx>(
     Ok(stmt_list)
 }
 
+// Crash-test injection worker (env-gated caller). Signals a TARGET vpid to
+// die abruptly: `quit` = SIGQUIT quickdie (WARNING + 57P02 to peers, no proc
+// cleanup), `kill` = SIGKILL-equivalent (no message, no cleanup). Superuser-
+// gated, mirroring pg_signal_backend's contract. The delivery is async — the
+// target dies at its next interrupt point and the postmaster runs the crash-
+// restart cycle; this session returns a clean empty-query response first.
+fn crash_backend_injection(args: &str) -> PgResult<()> {
+    if !superuser_seams::superuser::call()? {
+        return Err(ereport(ERROR)
+            .errmsg("crash-backend injection requires superuser")
+            .into_error()
+            .into());
+    }
+
+    let mut parts = args.split_whitespace();
+    let pid: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg("crash backend: expected 'pgrust: crash backend <vpid> quit|kill'")
+                .into_error()
+        })?;
+    let mode = parts.next().unwrap_or("quit");
+
+    let rc = match mode {
+        "quit" => procsignal::SendThreadSignal(pid, libc::SIGQUIT),
+        "kill" => procsignal::SendThreadKill(pid),
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg(format!("crash backend: unknown mode {other:?} (want quit|kill)"))
+                .into_error()
+                .into());
+        }
+    };
+    if rc != 0 {
+        return Err(ereport(ERROR)
+            .errmsg(format!("PID {pid} is not a PostgreSQL backend process"))
+            .into_error()
+            .into());
+    }
+
+    tcop_dest::NullCommand(elog::config::where_to_send_output())
+}
+
 pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgResult<()> {
     // Crash-restart test injection: PANIC-class fault on demand, env-gated so
     // the surface is inert in production (notes/crash-restart-design.md).
@@ -167,6 +212,16 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         ereport(types_error::PANIC)
             .errmsg("crash-restart test injection")
             .finish(loc(0, "exec_simple_query"))?;
+    }
+
+    // Crash-test injection: make a TARGET backend die as if externally
+    // SIGQUIT/SIGKILL'd. TAP crash tests kill by OS pid; thread-model vpids
+    // aren't OS-signalable, so the recovery rig routes pg_ctl kill here
+    // (notes/crash-tap-kill-design.md). Env-gated: inert in production.
+    if let Some(args) = query_string.strip_prefix("pgrust: crash backend ") {
+        if std::env::var_os("PGRUST_CRASH_TEST").is_some() {
+            return crash_backend_injection(args);
+        }
     }
 
     let dest = elog::config::where_to_send_output();

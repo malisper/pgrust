@@ -256,7 +256,18 @@ pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
              (postmaster SIGKILL-escalation redesign)"
         );
     }
-    let bit = thread_signal_bit(signo);
+    deliver_thread_signal(pid, thread_signal_bit(signo))
+}
+
+// SIGKILL's crash-test rendering: pend the bit past SendThreadSignal's
+// refusal. Callable only from the crash-injection surface — the target's
+// SIGKILL disposition dies abruptly (ipc::exit_thread_killed), it is not a
+// no-handler process kill.
+pub fn SendThreadKill(pid: i32) -> i32 {
+    deliver_thread_signal(pid, thread_signal_bit(libc::SIGKILL))
+}
+
+fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
     if pid <= 0 {
         // kill(-pid) process-group fanout: callers signal each member.
         set_errno(libc::ESRCH);
