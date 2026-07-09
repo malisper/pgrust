@@ -192,7 +192,7 @@ fn recovery_control_fns_error_outside_recovery() {
         let e = f(None, &mut fcinfo).unwrap_err();
         assert_eq!(
             e.sqlstate(),
-            types_error::make_sqlstate(b"55000"),
+            types_error::make_sqlstate(*b"55000"),
             "ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE"
         );
         assert_eq!(e.message(), "recovery is not in progress");
