@@ -156,7 +156,7 @@ pub fn CreateStatistics<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateStatsStmt<'mcx>,
     check_rights: bool,
-) -> PgResult<()> {
+) -> PgResult<pg_depend::ObjectAddress> {
     let mut attnums: [i16; STATS_MAX_DIMENSIONS] = [0; STATS_MAX_DIMENSIONS];
     let mut nattnums = 0usize;
     let stxowner = miscinit_seams::get_user_id::call();
@@ -266,7 +266,7 @@ pub fn CreateStatistics<'mcx>(
                 .errmsg(format!("statistics object \"{namestr}\" already exists, skipping"))
                 .finish(loc("CreateStatistics"))?;
             rel.close(NoLock)?;
-            return Ok(());
+            return Ok(pg_depend::ObjectAddress::set(InvalidOid, InvalidOid));
         }
         return Err(err(
             types_error::ERRCODE_DUPLICATE_OBJECT,
@@ -545,7 +545,7 @@ pub fn CreateStatistics<'mcx>(
         commands_comment::CreateComments(mcx, statoid, StatisticExtRelationId, 0, Some(comment))?;
     }
 
-    Ok(())
+    Ok(myself)
 }
 
 const MAX_STATISTICS_TARGET: i64 = 10000;
