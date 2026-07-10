@@ -181,6 +181,14 @@ pub fn GetTempNamespaceState() -> (Oid, Oid) {
     (my_temp_namespace(), my_temp_toast_namespace())
 }
 
+pub fn ReplaceTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) -> (Oid, Oid) {
+    let old = GetTempNamespaceState();
+    MY_TEMP_NAMESPACE.with(|c| c.set(tempNamespaceId));
+    MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(tempToastNamespaceId));
+    BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
+    old
+}
+
 pub fn SetTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) {
     debug_assert_eq!(my_temp_namespace(), InvalidOid);
     debug_assert_eq!(my_temp_toast_namespace(), InvalidOid);

@@ -1035,6 +1035,14 @@ pub fn AuxProcessResourceOwner() -> ResourceOwner {
     AUX_PROCESS_OWNER.with(|c| c.get())
 }
 
+pub fn ResourceOwnerStateClean() -> bool {
+    CurrentResourceOwner().is_null()
+        && CurTransactionResourceOwner().is_null()
+        && TopTransactionResourceOwner().is_null()
+        && AuxProcessResourceOwner().is_null()
+        && with_arena(|a| a.slots.iter().all(|slot| !slot.live))
+}
+
 pub fn init_seams() {
     seams::install();
 }
