@@ -7,6 +7,8 @@
 //! single-threaded).
 
 use super::*;
+use ::datum::NullableDatum;
+use ::fmgr::boundary::RefPayload;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
 
@@ -186,6 +188,43 @@ fn name_varlena_bytea_hash_their_image() {
     assert_eq!(
         hashnameextended(bytes, seed),
         hashfn::hash_bytes_extended(bytes, seed)
+    );
+}
+
+#[test]
+fn hashtext_adapter_accepts_short_and_long_varlena_headers() {
+    install_seams();
+    DETERMINISTIC.store(true, Ordering::SeqCst);
+    let payload = b"hash join key";
+
+    let mut short = Vec::with_capacity(payload.len() + 1);
+    short.push((((payload.len() + 1) << 1) | 1) as u8);
+    short.extend_from_slice(payload);
+
+    let mut long = Vec::with_capacity(payload.len() + 4);
+    long.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + 4));
+    long.extend_from_slice(payload);
+
+    for image in [short, long] {
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 100, None, None);
+        fcinfo.args = vec![NullableDatum::value(Datum::null())];
+        fcinfo.ref_args = vec![Some(RefPayload::Varlena(image))];
+        assert_eq!(
+            fc_hashtext(&mut fcinfo).unwrap().as_u32(),
+            hashfn::hash_bytes(payload)
+        );
+    }
+}
+
+#[test]
+fn missing_byref_hash_argument_returns_error() {
+    let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 100, None, None);
+    fcinfo.args = vec![NullableDatum::value(Datum::from_usize(1))];
+
+    let err = fc_hashtext(&mut fcinfo).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "hash fn: by-reference argument missing from the by-ref lane"
     );
 }
 

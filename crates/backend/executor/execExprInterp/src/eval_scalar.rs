@@ -609,20 +609,23 @@ pub fn exec_rowcompare_step<'mcx>(
 /// argument cell into the call frame, and surface the previous (intermediate)
 /// hash via `iresult`. The argument crosses to the hash function via the
 /// canonical [`DatumV`] lane (the by-reference-capable form), so a by-ref
-/// text/name/varchar key survives the gather — the bare-word `word_of`
-/// downgrade panics on such a value (the type's hash function, e.g.
-/// `hashtext`/`namehash`, reads its argument by reference).
+/// text/name/varchar key survives the gather. A legacy `Const` may still carry
+/// a by-reference value as its C pointer word in `DatumV::ByVal`; normalize that
+/// audited compatibility form back to a self-contained `DatumV::ByRef` before
+/// crossing fmgr (the type's hash function, e.g. `hashtext`/`hashname`, reads
+/// its argument by reference).
 /// Returns `(fn_oid, collation, args, arg0_isnull, iresult)`.
 fn hashdatum_step_inputs<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     state: &ExprState<'mcx>,
     op: usize,
-) -> (
+) -> PgResult<(
     ::types_core::primitive::Oid,
     ::types_core::primitive::Oid,
     Vec<DatumV<'mcx>>,
     bool,
     u32,
-) {
+)> {
     match step_data(state, op) {
         ExprEvalStepData::HashDatum {
             finfo,
@@ -640,19 +643,112 @@ fn hashdatum_step_inputs<'mcx>(
             // fcinfo->args[0] <- the hash-key cell the sub-expression evaluated.
             // Carry the full canonical Datum image (by-value word OR by-reference
             // referent bytes) so the hash function reads a by-ref key correctly.
-            let c = state.result_cells.get(*arg_cell);
-            let args = vec![c.value.clone()];
+            // `read_cell` also honors STATE_RESULT_CELL if a builder aliases the
+            // hash argument to the ExprState result cell.
+            let (value, arg0_isnull) = crate::interp_loop::read_cell(state, *arg_cell);
+            let value = if arg0_isnull {
+                value
+            } else {
+                materialize_hashdatum_arg(mcx, finfo.fn_oid, value)?
+            };
+            let args = vec![value];
             // DatumGetUInt32(op->d.hashdatum.iresult->value) (NEXT32 only; the
             // FIRST variants ignore it). `iresult` carries the shared accumulator
             // cell id (C's aliased `iresult->value`); the prior column's hash
             // step wrote the running hash there, so read it back from that cell.
             let existing = (*iresult)
-                .map(|cell| state.result_cells.get(cell).value.as_u32())
+                .map(|cell| crate::interp_loop::read_cell(state, cell).0.as_u32())
                 .unwrap_or(0);
-            (finfo.fn_oid, fcinfo.fncollation, args, c.isnull, existing)
+            Ok((
+                finfo.fn_oid,
+                fcinfo.fncollation,
+                args,
+                arg0_isnull,
+                existing,
+            ))
         }
         other => unreachable!("EEOP_HASHDATUM_* carries the wrong payload: {other:?}"),
     }
+}
+
+/// Rebuild the legacy pointer-word representation of a by-reference hash key
+/// as the canonical owned byte image expected by `function_call_invoke_datum`.
+///
+/// `makeConst` still accepts C-shaped varlena pointer words at a sanctioned ABI
+/// edge. Most executor producers already emit `DatumV::ByRef`, but a folded or
+/// deserialized hash-key expression can therefore leave a non-NULL pointer word
+/// in the result cell. The fmgr canonical lane deliberately treats every
+/// `DatumV::ByVal` as a scalar, so forwarding that word would omit the referent
+/// and make `hashtext` fail to find `fcinfo.ref_args[0]`.
+///
+/// Limit recovery to PostgreSQL's built-in by-reference hash functions. Other
+/// hash procs retain their canonical value unchanged, and a missing payload then
+/// becomes the hash adapter's normal `PgResult` error rather than an unsafe guess
+/// about an extension-defined type.
+fn materialize_hashdatum_arg<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fn_oid: ::types_core::primitive::Oid,
+    value: DatumV<'mcx>,
+) -> PgResult<DatumV<'mcx>> {
+    // pg_proc.dat OIDs for hashname/hashtext/hashvarlena/hashbytea/
+    // hashoidvector and their extended variants.
+    const HASHNAME_OIDS: &[u32] = &[455, 447];
+    const HASHVARLENA_OIDS: &[u32] = &[400, 448, 456, 772, 6413, 6414, 457, 776];
+    const NAMEDATALEN: usize = 64;
+
+    let word = match value {
+        DatumV::ByVal(word) if HASHNAME_OIDS.contains(&fn_oid) => word,
+        DatumV::ByVal(word) if HASHVARLENA_OIDS.contains(&fn_oid) => word,
+        other => return Ok(other),
+    };
+    if word == 0 {
+        return Err(PgError::error(
+            "EEOP_HASHDATUM: non-NULL by-reference hash key has a null pointer",
+        ));
+    }
+
+    let ptr = word as *const u8;
+    if HASHNAME_OIDS.contains(&fn_oid) {
+        // SAFETY: this arm is reached only for hashname[_extended], whose
+        // non-NULL C Datum is a pointer to a NAMEDATALEN-byte NameData image.
+        let image = unsafe { core::slice::from_raw_parts(ptr, NAMEDATALEN) };
+        return Ok(DatumV::ByRef(mcx::slice_in(mcx, image)?));
+    }
+
+    // SAFETY: the remaining matched OIDs all accept a varlena pointer. The
+    // producer supplied a non-NULL pointer-word Datum under that hash proc's
+    // declared argument type, so reading its self-describing header and exactly
+    // the advertised image length mirrors C's VARSIZE_ANY(PointerGetDatum()).
+    let image = unsafe {
+        let header = ptr.read();
+        let len = if header == 0x01 {
+            // A bare external TOAST pointer should already have been detoasted
+            // by makeConst/slot deformation. Its tag-dependent span cannot be
+            // recovered here without reintroducing pointer-model TOAST state.
+            return Err(PgError::error(
+                "EEOP_HASHDATUM: external varlena hash key was not materialized",
+            ));
+        } else if (header & 0x01) == 0x01 {
+            ((header >> 1) & 0x7f) as usize
+        } else {
+            let raw = (ptr as *const u32).read_unaligned();
+            #[cfg(target_endian = "little")]
+            let len = ((raw >> 2) & 0x3fff_ffff) as usize;
+            #[cfg(target_endian = "big")]
+            let len = (raw & 0x3fff_ffff) as usize;
+            len
+        };
+        let min_header = if (header & 0x01) == 0x01 { 1 } else { 4 };
+        if len < min_header {
+            return Err(PgError::error(
+                "EEOP_HASHDATUM: malformed varlena hash-key image",
+            ));
+        }
+        core::slice::from_raw_parts(ptr, len)
+    };
+    // The fmgr dispatcher remains the single owner of compressed-varlena
+    // detoasting; this producer only restores the complete stored image.
+    Ok(DatumV::ByRef(mcx::slice_in(mcx, image)?))
 }
 
 /// Recover the `fn_expr` stamped onto an `EEOP_HASHDATUM_*` step's
@@ -686,9 +782,9 @@ pub fn exec_hashdatum_step<'mcx>(
     jumpdone: i32,
     estate: &EStateData<'mcx>,
 ) -> PgResult<usize> {
-    let (fn_oid, collation, args, arg0_isnull, existing) = hashdatum_step_inputs(state, op);
-    let (resvalue_id, _resnull_id) = res_cells(state, op);
     let mcx = estate.es_query_cxt;
+    let (fn_oid, collation, args, arg0_isnull, existing) = hashdatum_step_inputs(mcx, state, op)?;
+    let (resvalue_id, _resnull_id) = res_cells(state, op);
     let fn_expr = hashdatum_step_fn_expr(state, op);
 
     if first {
@@ -2159,4 +2255,39 @@ fn res_cells<'mcx>(
         .as_ref()
         .expect("eval_scalar: steps not ready")[op];
     (step.resvalue, step.resnull)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hashdatum_materializes_pointer_word_varlena_images() {
+        let ctx = ::mcx::MemoryContext::new("hashdatum materialize test");
+        let payload = b"hash join key";
+
+        let mut short = Vec::with_capacity(payload.len() + 1);
+        short.push((((payload.len() + 1) << 1) | 1) as u8);
+        short.extend_from_slice(payload);
+
+        let mut long = Vec::with_capacity(payload.len() + 4);
+        long.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + 4));
+        long.extend_from_slice(payload);
+
+        for image in [&short, &long] {
+            let value = DatumV::ByVal(image.as_ptr() as usize);
+            let materialized = materialize_hashdatum_arg(ctx.mcx(), 400, value).unwrap();
+            assert_eq!(materialized.as_ref_bytes(), image.as_slice());
+        }
+    }
+
+    #[test]
+    fn hashdatum_rejects_null_pointer_for_nonnull_byref_key() {
+        let ctx = ::mcx::MemoryContext::new("hashdatum null pointer test");
+        let err = materialize_hashdatum_arg(ctx.mcx(), 400, DatumV::ByVal(0)).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "EEOP_HASHDATUM: non-NULL by-reference hash key has a null pointer"
+        );
+    }
 }

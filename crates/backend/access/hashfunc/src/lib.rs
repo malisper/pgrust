@@ -22,14 +22,14 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
+use ::datum::Datum;
+use ::fmgr::{FunctionCallInfoBaseData, PgFnNative};
 use ::hashfn::{
     hash_bytes as hash_any, hash_bytes_extended as hash_any_extended,
     hash_bytes_uint32 as hash_uint32, hash_bytes_uint32_extended as hash_uint32_extended,
 };
 use ::types_core::Oid;
-use ::datum::Datum;
-use ::types_error::{PgResult, ERRCODE_INDETERMINATE_COLLATION, ERROR};
-use ::fmgr::{FunctionCallInfoBaseData, PgFnNative};
+use ::types_error::{PgError, PgResult, ERRCODE_INDETERMINATE_COLLATION, ERROR};
 
 use ::oid_seams::check_valid_oidvector;
 use ::pg_locale_seams::{collation_is_deterministic, pg_strxfrm};
@@ -376,11 +376,13 @@ fn arg_word(fcinfo: &FunctionCallInfoBaseData, i: usize) -> usize {
 /// (`PG_GETARG_TEXT_PP` / `PG_GETARG_NAME` / `PG_GETARG_VARLENA_PP` /
 /// `PG_GETARG_POINTER` for the oidvector image).
 #[inline]
-fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> PgResult<&'a [u8]> {
     fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("hash fn: by-reference argument missing from the by-ref lane")
+        .ok_or_else(|| {
+            PgError::error("hash fn: by-reference argument missing from the by-ref lane")
+        })
 }
 
 /// `NameStr(*PG_GETARG_NAME(i))` length-trimmed bytes: a `name` value crosses
@@ -392,10 +394,10 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
 /// `hashtext` for the same string, breaking the cross-type text/name hash
 /// opfamily 1995 invariant that hashed IN/ANY SubPlans rely on.)
 #[inline]
-fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let image = arg_bytes(fcinfo, i);
+fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> PgResult<&'a [u8]> {
+    let image = arg_bytes(fcinfo, i)?;
     let len = image.iter().position(|&b| b == 0).unwrap_or(image.len());
-    &image[..len]
+    Ok(&image[..len])
 }
 
 /// `VARDATA_ANY` of a text/bytea varlena argument so the core hashes
@@ -406,13 +408,13 @@ fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] 
 /// values. Skip ONE byte for a short header, else the 4-byte header. No-op while
 /// packing is off.
 #[inline]
-fn arg_varlena_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    let image = arg_bytes(fcinfo, i);
-    match image.first() {
+fn arg_varlena_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> PgResult<&'a [u8]> {
+    let image = arg_bytes(fcinfo, i)?;
+    Ok(match image.first() {
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
         Some(_) if image.len() >= 4 => &image[4..],
         _ => &[],
-    }
+    })
 }
 
 /// `PG_RETURN_UINT32` — box a 32-bit hash into the fmgr-ABI result word.
@@ -482,41 +484,51 @@ fn fc_hashfloat8extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datu
     )))
 }
 fn fc_hashoidvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    Ok(ret_u32(hashoidvector(arg_bytes(fcinfo, 0))?))
+    Ok(ret_u32(hashoidvector(arg_bytes(fcinfo, 0)?)?))
 }
 fn fc_hashoidvectorextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    Ok(ret_u64(hashoidvectorextended(arg_bytes(fcinfo, 0), seed)?))
+    Ok(ret_u64(hashoidvectorextended(arg_bytes(fcinfo, 0)?, seed)?))
 }
 fn fc_hashname(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    Ok(ret_u32(hashname(arg_name_str(fcinfo, 0))))
+    Ok(ret_u32(hashname(arg_name_str(fcinfo, 0)?)))
 }
 fn fc_hashnameextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    Ok(ret_u64(hashnameextended(arg_name_str(fcinfo, 0), seed)))
+    Ok(ret_u64(hashnameextended(arg_name_str(fcinfo, 0)?, seed)))
 }
 fn fc_hashtext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
-    Ok(ret_u32(hashtext(arg_varlena_payload(fcinfo, 0), collid)?))
+    Ok(ret_u32(hashtext(arg_varlena_payload(fcinfo, 0)?, collid)?))
 }
 fn fc_hashtextextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
     let seed = arg_word(fcinfo, 1) as u64;
-    Ok(ret_u64(hashtextextended(arg_varlena_payload(fcinfo, 0), collid, seed)?))
+    Ok(ret_u64(hashtextextended(
+        arg_varlena_payload(fcinfo, 0)?,
+        collid,
+        seed,
+    )?))
 }
 fn fc_hashvarlena(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    Ok(ret_u32(hashvarlena(arg_varlena_payload(fcinfo, 0))))
+    Ok(ret_u32(hashvarlena(arg_varlena_payload(fcinfo, 0)?)))
 }
 fn fc_hashvarlenaextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    Ok(ret_u64(hashvarlenaextended(arg_varlena_payload(fcinfo, 0), seed)))
+    Ok(ret_u64(hashvarlenaextended(
+        arg_varlena_payload(fcinfo, 0)?,
+        seed,
+    )))
 }
 fn fc_hashbytea(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    Ok(ret_u32(hashbytea(arg_varlena_payload(fcinfo, 0))))
+    Ok(ret_u32(hashbytea(arg_varlena_payload(fcinfo, 0)?)))
 }
 fn fc_hashbyteaextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    Ok(ret_u64(hashbyteaextended(arg_varlena_payload(fcinfo, 0), seed)))
+    Ok(ret_u64(hashbyteaextended(
+        arg_varlena_payload(fcinfo, 0)?,
+        seed,
+    )))
 }
 
 // pg_proc OIDs (pg_proc.dat).
