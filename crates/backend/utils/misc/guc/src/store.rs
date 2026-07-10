@@ -324,12 +324,21 @@ pub fn bind_session_gucs(caps: &[CapturedGuc]) -> PgResult<SessionGucBinding> {
     );
     SESSION_BOUND.set(true);
     let binding = SessionGucBinding { _not_send: std::marker::PhantomData };
+    apply_captured_session_gucs(caps)?;
+    Ok(binding)
+}
+
+/// Applies a captured session GUC set onto this thread's store without
+/// touching the session-bind marker; the session-envelope restore path
+/// reuses it (harvested from 0a71b80a9, ported onto the lane-executor-v2
+/// store which has no bind fingerprint/stamp machinery).
+pub fn apply_captured_session_gucs(caps: &[CapturedGuc]) -> PgResult<()> {
     let trace = std::env::var_os("PGRUST_GATHER_TRACE").is_some();
     let t0 = trace.then(std::time::Instant::now);
     for cap in caps {
         let mut deferred_hooks: Vec<DeferredAssignHook> = Vec::new();
         with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred_hooks))
-            .unwrap_or_else(|| store_uninitialized("bind_session_gucs"))?;
+            .unwrap_or_else(|| store_uninitialized("apply_captured_session_gucs"))?;
         for hook in deferred_hooks {
             hook();
         }
@@ -337,7 +346,7 @@ pub fn bind_session_gucs(caps: &[CapturedGuc]) -> PgResult<SessionGucBinding> {
     if let Some(t0) = t0 {
         eprintln!("GTRACE guc.bind n={} total_us={}", caps.len(), t0.elapsed().as_micros());
     }
-    Ok(binding)
+    Ok(())
 }
 
 pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {
