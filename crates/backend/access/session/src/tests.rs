@@ -19,6 +19,7 @@ fn setup() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         guc_tables::init_seams();
+        init_small::init_seams();
         elog::init_seams();
         guc::init_seams();
         xact_seams::is_in_parallel_mode::set(|| false);
@@ -71,14 +72,10 @@ fn set_state(user: Oid, work_mem: i32, temp: (Oid, Oid)) {
 }
 
 fn install_context(context: &SessionContext) {
+    guc::store::replace_exact_guc_state(&context.gucs);
+    catalog_namespace::ReplaceSessionNamespaceState(&context.namespace);
     miscinit::ReplaceSessionIdentityState(context.identity);
-    catalog_namespace::ReplaceTempNamespaceState(
-        context.temp_namespace.0,
-        context.temp_namespace.1,
-    );
-    guc::ResetAllOptions();
-    guc::store::apply_captured_session_gucs(&context.gucs).unwrap();
-    miscinit::ReplaceSessionIdentityState(context.identity);
+    CURRENT_SESSION.set(context.session_exists);
 }
 
 fn assert_state(user: Oid, work_mem: i32, temp: (Oid, Oid)) {
@@ -90,6 +87,7 @@ fn assert_state(user: Oid, work_mem: i32, temp: (Oid, Oid)) {
 fn contexts() -> (SessionContext, SessionContext, SessionContext) {
     set_state(BOOTSTRAP_SUPERUSERID, 4096, (InvalidOid, InvalidOid));
     let base = SessionContext::capture();
+    InitializeSession().unwrap();
     set_state(22, 8192, (2200, 2201));
     let a = SessionContext::capture();
     set_state(23, 16384, (2300, 2301));
@@ -99,7 +97,41 @@ fn contexts() -> (SessionContext, SessionContext, SessionContext) {
 }
 
 #[test]
-fn manifest_is_unique_and_phase0_actions_are_explicit() {
+fn manifest_is_unique_exhaustive_and_phase0_actions_are_explicit() {
+    let expected: HashSet<_> = [
+        EnvelopeMemberId::DatabaseIdentity,
+        EnvelopeMemberId::DatabasePaths,
+        EnvelopeMemberId::ProcessIdentity,
+        EnvelopeMemberId::SessionLifecycle,
+        EnvelopeMemberId::UserIdentity,
+        EnvelopeMemberId::TempNamespace,
+        EnvelopeMemberId::SearchPath,
+        EnvelopeMemberId::SnapshotState,
+        EnvelopeMemberId::TransactionState,
+        EnvelopeMemberId::GucStore,
+        EnvelopeMemberId::GucFlatBackings,
+        EnvelopeMemberId::GucNesting,
+        EnvelopeMemberId::ResourceOwnerCells,
+        EnvelopeMemberId::ResourceOwnerArena,
+        EnvelopeMemberId::ErrorStack,
+        EnvelopeMemberId::ErrorCallbacks,
+        EnvelopeMemberId::InterruptPending,
+        EnvelopeMemberId::InterruptHoldoffs,
+        EnvelopeMemberId::Catcache,
+        EnvelopeMemberId::Relcache,
+        EnvelopeMemberId::Typcache,
+        EnvelopeMemberId::Plancache,
+        EnvelopeMemberId::InvalidationCallbacks,
+        EnvelopeMemberId::InvalidationMessages,
+        EnvelopeMemberId::PendingInvalidations,
+        EnvelopeMemberId::SyscacheArrays,
+        EnvelopeMemberId::Relmapper,
+        EnvelopeMemberId::Partcache,
+        EnvelopeMemberId::TsCache,
+        EnvelopeMemberId::EventCache,
+    ]
+    .into_iter()
+    .collect();
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
     for member in SESSION_ENVELOPE_MANIFEST {
@@ -113,19 +145,104 @@ fn manifest_is_unique_and_phase0_actions_are_explicit() {
             "duplicate manifest name: {}",
             member.name
         );
-        if member.phase0 == Phase0Action::Refuse {
-            assert!(
+        assert!(
+            !member.declaration.is_empty(),
+            "unlocated TLS member: {}",
+            member.name
+        );
+        match member.phase0 {
+            Phase0Action::CaptureApply => assert_eq!(member.kind, EnvelopeBindKind::SwapRoot),
+            Phase0Action::RestoreScalar | Phase0Action::RequireSameDatabase => {
+                assert_eq!(member.kind, EnvelopeBindKind::ScalarRestore)
+            }
+            Phase0Action::Drain => assert_eq!(member.kind, EnvelopeBindKind::DrainSameDatabase),
+            Phase0Action::CheckEmpty => assert_eq!(member.kind, EnvelopeBindKind::MustBeEmpty),
+            Phase0Action::Refuse => assert!(
                 member.blocker.is_some(),
                 "refusal without blocker: {}",
                 member.name
-            );
+            ),
         }
     }
-    assert_eq!(ids.len(), 21);
-    assert!(ids.contains(&EnvelopeMemberId::GucStore));
-    assert!(ids.contains(&EnvelopeMemberId::SnapshotState));
-    assert!(ids.contains(&EnvelopeMemberId::ResourceOwners));
-    assert!(ids.contains(&EnvelopeMemberId::ErrorStack));
+    assert_eq!(ids, expected);
+}
+
+#[test]
+fn tls_source_census_and_session_surface_are_pinned() {
+    fn count_tree(path: &std::path::Path) -> usize {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| {
+                if path.is_dir() {
+                    count_tree(&path)
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    std::fs::read_to_string(path)
+                        .unwrap()
+                        .lines()
+                        .filter(|line| {
+                            let line = line.trim_start();
+                            line.starts_with("thread_local!")
+                                || line.starts_with("std::thread_local!")
+                                || line.starts_with("::std::thread_local!")
+                        })
+                        .count()
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    assert_eq!(count_tree(crates), 451, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    let session_sources = [
+        ("backend/access/session/src/lib.rs", 1),
+        ("backend/utils/init/init_small/src/globals.rs", 4),
+        ("backend/utils/init/miscinit/src/userid.rs", 1),
+        ("backend/catalog/catalog_namespace/src/lib.rs", 1),
+        ("backend/catalog/catalog_namespace/src/path.rs", 2),
+        ("backend/utils/time/snapmgr/src/lib.rs", 2),
+        ("backend/access/transam/xact/src/state.rs", 2),
+        ("backend/access/transam/xact/src/engine.rs", 2),
+        ("backend/access/transam/xact/src/lib.rs", 1),
+        ("backend/utils/misc/guc/src/store.rs", 1),
+        ("backend/utils/misc/guc/src/lib.rs", 1),
+        ("backend/utils/misc/guc_tables/src/session.rs", 5),
+        ("backend/utils/resowner/resowner/src/lib.rs", 1),
+        ("backend/utils/error/elog/src/stack.rs", 4),
+        ("backend/storage/lmgr/lmgr_proc/src/lib.rs", 1),
+        ("backend/utils/cache/catcache/src/lib.rs", 2),
+        ("backend/utils/cache/catcache/src/graph.rs", 1),
+        ("backend/utils/cache/relcache/src/lib.rs", 1),
+        ("backend/utils/cache/typcache/src/lib.rs", 1),
+        ("backend/utils/cache/plancache/src/lib.rs", 3),
+        ("backend/utils/cache/inval/src/lib.rs", 2),
+        ("backend/utils/cache/cache_syscache/src/lib.rs", 1),
+        ("backend/utils/cache/relmapper/src/lib.rs", 1),
+        ("backend/utils/cache/partcache/src/lib.rs", 1),
+        ("backend/utils/cache/ts_cache/src/lib.rs", 1),
+        ("backend/utils/cache/cache_evtcache/src/lib.rs", 1),
+    ];
+    for (path, expected) in session_sources {
+        let source = std::fs::read_to_string(crates.join(path)).unwrap();
+        let actual = source
+            .lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with("thread_local!")
+                    || line.starts_with("std::thread_local!")
+                    || line.starts_with("::std::thread_local!")
+            })
+            .count();
+        assert_eq!(
+            actual, expected,
+            "session TLS declarations changed in {path}"
+        );
+    }
 }
 
 #[test]
@@ -141,6 +258,12 @@ fn nested_bind_restores_roots_and_scalars_in_lifo_order() {
         })
         .unwrap();
         assert_state(22, 8192, (2200, 2201));
+        assert!(CurrentSessionExists());
+        assert!(!SessionEnvelopeBoundaryClean());
+        assert_eq!(
+            catalog_namespace::CaptureSessionNamespaceState(),
+            a.namespace
+        );
 
         let inner = bind_session_envelope_with(&b, || {
             drains += 1;
@@ -148,10 +271,20 @@ fn nested_bind_restores_roots_and_scalars_in_lifo_order() {
         })
         .unwrap();
         assert_state(23, 16384, (2300, 2301));
+        assert_eq!(
+            catalog_namespace::CaptureSessionNamespaceState(),
+            b.namespace
+        );
         drop(inner);
         assert_state(22, 8192, (2200, 2201));
+        assert_eq!(
+            catalog_namespace::CaptureSessionNamespaceState(),
+            a.namespace
+        );
         drop(outer);
         assert_state(BOOTSTRAP_SUPERUSERID, 4096, (InvalidOid, InvalidOid));
+        assert!(!CurrentSessionExists());
+        assert!(SessionEnvelopeBoundaryClean());
         assert_eq!(drains, 2);
     })
     .join()
@@ -191,8 +324,17 @@ fn panic_and_cancel_paths_restore_without_clearing_cancel() {
 fn cross_database_and_unimplemented_transaction_state_are_refused_before_drain() {
     std::thread::spawn(|| {
         setup();
-        let (_base, mut target, _) = contexts();
+        let (base, mut target, _) = contexts();
         let mut drains = 0;
+        let error = bind_session_envelope_with(&base, || {
+            drains += 1;
+            Ok(())
+        })
+        .err()
+        .expect("uninitialized target session must fail");
+        assert!(error.message().contains("initialized target session"));
+        assert_eq!(drains, 0);
+
         target.database_id = 43;
         let error = bind_session_envelope_with(&target, || {
             drains += 1;
@@ -215,6 +357,66 @@ fn cross_database_and_unimplemented_transaction_state_are_refused_before_drain()
         .expect("transaction-bearing bind must fail");
         assert!(error.message().contains("transaction/snapshot root"));
         assert_eq!(drains, 0);
+
+        target.xact_nest_level = 0;
+        target.transaction_active = false;
+        target.guc_nest_level = 1;
+        let error = bind_session_envelope_with(&target, || {
+            drains += 1;
+            Ok(())
+        })
+        .err()
+        .expect("nested GUC target must fail");
+        assert!(error.message().contains("SET LOCAL"));
+        assert_eq!(drains, 0);
+
+        target.guc_nest_level = 0;
+        target.pending_invalidations = true;
+        let error = bind_session_envelope_with(&target, || {
+            drains += 1;
+            Ok(())
+        })
+        .err()
+        .expect("uncommitted invalidations must fail");
+        assert!(error.message().contains("uncommitted invalidations"));
+        assert_eq!(drains, 0);
+
+        target.pending_invalidations = false;
+        target.data_dir = Some("/other-cluster");
+        let error = bind_session_envelope_with(&target, || {
+            drains += 1;
+            Ok(())
+        })
+        .err()
+        .expect("path mismatch must fail");
+        assert!(error.message().contains("path identity"));
+        assert_eq!(drains, 0);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn drain_failure_and_dirty_exit_restore_without_partial_binding() {
+    std::thread::spawn(|| {
+        setup();
+        let (_base, target, _) = contexts();
+        let error = bind_session_envelope_with(&target, || {
+            Err(PgError::new(ERROR, "invalidation drain failed").into())
+        })
+        .err()
+        .expect("drain failure must refuse binding");
+        assert!(error.message().contains("drain failed"));
+        assert_state(BOOTSTRAP_SUPERUSERID, 4096, (InvalidOid, InvalidOid));
+        assert_eq!(ENVELOPE_DEPTH.get(), 0);
+
+        let binding = bind_session_envelope_with(&target, || Ok(())).unwrap();
+        init_small::globals::SetCritSectionCount(1);
+        let error = binding.finish().expect_err("dirty exit must fail");
+        assert!(error.message().contains("holdoff"));
+        assert_state(BOOTSTRAP_SUPERUSERID, 4096, (InvalidOid, InvalidOid));
+        assert_eq!(ENVELOPE_DEPTH.get(), 0);
+        init_small::globals::SetCritSectionCount(0);
     })
     .join()
     .unwrap();
