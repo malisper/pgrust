@@ -324,20 +324,27 @@ pub fn bind_session_gucs(caps: &[CapturedGuc]) -> PgResult<SessionGucBinding> {
     );
     SESSION_BOUND.set(true);
     let binding = SessionGucBinding { _not_send: std::marker::PhantomData };
-    apply_captured_session_gucs(caps)?;
+    apply_captured_session_gucs_impl(caps, false)?;
     Ok(binding)
 }
 
 /// Applies a captured session GUC set onto this thread's store without
 /// touching the session-bind marker; the session-envelope restore path
-/// reuses it (harvested from 0a71b80a9, ported onto the lane-executor-v2
-/// store which has no bind fingerprint/stamp machinery).
+/// reuses it (harvested from 0a71b80a9 + a1c4e48cc, ported onto the
+/// lane-executor-v2 store which has no bind fingerprint/stamp machinery).
+///
+/// Envelope restore is an exact replacement: source priority from the inner
+/// binding must not suppress the outer session's captured value.
 pub fn apply_captured_session_gucs(caps: &[CapturedGuc]) -> PgResult<()> {
+    apply_captured_session_gucs_impl(caps, true)
+}
+
+fn apply_captured_session_gucs_impl(caps: &[CapturedGuc], exact: bool) -> PgResult<()> {
     let trace = std::env::var_os("PGRUST_GATHER_TRACE").is_some();
     let t0 = trace.then(std::time::Instant::now);
     for cap in caps {
         let mut deferred_hooks: Vec<DeferredAssignHook> = Vec::new();
-        with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred_hooks))
+        with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred_hooks, exact))
             .unwrap_or_else(|| store_uninitialized("apply_captured_session_gucs"))?;
         for hook in deferred_hooks {
             hook();

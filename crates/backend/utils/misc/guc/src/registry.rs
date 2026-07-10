@@ -1189,6 +1189,7 @@ pub(crate) fn bind_captured_guc(
     reg: &mut GucRegistry,
     cap: &CapturedGuc,
     deferred_hooks: &mut Vec<DeferredAssignHook>,
+    exact: bool,
 ) -> PgResult<()> {
     let elevel = resolve_elevel(ErrorLevel(0), cap.source);
     let idx = match reg.find_index(&cap.name) {
@@ -1220,7 +1221,7 @@ pub(crate) fn bind_captured_guc(
 
     let make_default = cap.source <= PGC_S_OVERRIDE;
     let mut change_val = true;
-    if reg.vars[idx].gen().source > cap.source {
+    if !exact && reg.vars[idx].gen().source > cap.source {
         if !make_default {
             return Ok(());
         }
