@@ -17,21 +17,30 @@ thread_local! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnvelopeMemberId {
     DatabaseIdentity,
+    DatabasePaths,
     ProcessIdentity,
+    SessionLifecycle,
     UserIdentity,
     TempNamespace,
     SearchPath,
     SnapshotState,
     TransactionState,
     GucStore,
-    ResourceOwners,
+    GucFlatBackings,
+    GucNesting,
+    ResourceOwnerCells,
+    ResourceOwnerArena,
     ErrorStack,
+    ErrorCallbacks,
+    InterruptPending,
     InterruptHoldoffs,
     Catcache,
     Relcache,
     Typcache,
     Plancache,
-    InvalidationState,
+    InvalidationCallbacks,
+    InvalidationMessages,
+    PendingInvalidations,
     SyscacheArrays,
     Relmapper,
     Partcache,
@@ -61,41 +70,54 @@ pub enum Phase0Action {
 pub struct EnvelopeMember {
     pub id: EnvelopeMemberId,
     pub name: &'static str,
+    pub declaration: &'static str,
     pub kind: EnvelopeBindKind,
     pub phase0: Phase0Action,
     pub blocker: Option<&'static str>,
 }
 
 pub const SESSION_ENVELOPE_MANIFEST: &[EnvelopeMember] = &[
-    EnvelopeMember { id: EnvelopeMemberId::DatabaseIdentity, name: "database identity", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RequireSameDatabase, blocker: Some("cross-database cache roots have no portable key or cold-switch protocol") },
-    EnvelopeMember { id: EnvelopeMemberId::ProcessIdentity, name: "MyProc/MyProcNumber", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::Refuse, blocker: Some("worker PGPROC ownership cannot alias the target backend") },
-    EnvelopeMember { id: EnvelopeMemberId::UserIdentity, name: "role, RLS, authenticated and system user", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RestoreScalar, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::TempNamespace, name: "temp namespace ids", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RestoreScalar, blocker: Some("foreign temp-relation execution remains refused") },
-    EnvelopeMember { id: EnvelopeMemberId::SearchPath, name: "search_path and path cache", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::CaptureApply, blocker: Some("GUC assign hooks invalidate the worker-local path cache; root swap remains pending") },
-    EnvelopeMember { id: EnvelopeMemberId::SnapshotState, name: "snapmgr root", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::Refuse, blocker: Some("query-owned snapshot state belongs to Envelope Phase 5") },
-    EnvelopeMember { id: EnvelopeMemberId::TransactionState, name: "xact root", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::Refuse, blocker: Some("query-owned xact state belongs to Envelope Phase 5") },
-    EnvelopeMember { id: EnvelopeMemberId::GucStore, name: "GUC store", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::CaptureApply, blocker: Some("Phase 0 uses validated capture/apply; O(1) root swap is blocked by flat assign-hook backings") },
-    EnvelopeMember { id: EnvelopeMemberId::ResourceOwners, name: "resource-owner cells and arena", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: Some("the per-thread arena is shared-sequential, never transferred") },
-    EnvelopeMember { id: EnvelopeMemberId::ErrorStack, name: "error and callback stacks", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::InterruptHoldoffs, name: "interrupt and critical-section holdoffs", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::Catcache, name: "catcache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::Relcache, name: "relcache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::Typcache, name: "typcache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::Plancache, name: "plancache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::InvalidationState, name: "invalidation callbacks and message state", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::SyscacheArrays, name: "syscache oid arrays", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::Relmapper, name: "relation mapper", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::Partcache, name: "partition cache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::TsCache, name: "text-search cache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
-    EnvelopeMember { id: EnvelopeMemberId::EventCache, name: "event-trigger cache", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::DatabaseIdentity, name: "database identity", declaration: "init_small/globals.rs: MY_DATABASE_ID, MY_DATABASE_TABLE_SPACE", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RequireSameDatabase, blocker: Some("cross-database cache roots have no portable key or cold-switch protocol") },
+    EnvelopeMember { id: EnvelopeMemberId::DatabasePaths, name: "database and data paths", declaration: "init_small/globals.rs: DATA_DIR, DATABASE_PATH", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RequireSameDatabase, blocker: Some("cross-database path switching belongs with the cache cold-switch protocol") },
+    EnvelopeMember { id: EnvelopeMemberId::ProcessIdentity, name: "MyProc/MyProcNumber", declaration: "init_small/globals.rs: MY_PROC_NUMBER; lmgr_proc/lib.rs: MY_PROC", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::Refuse, blocker: Some("worker PGPROC ownership cannot alias the target backend") },
+    EnvelopeMember { id: EnvelopeMemberId::SessionLifecycle, name: "session lifecycle marker", declaration: "session/lib.rs: CURRENT_SESSION", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RestoreScalar, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::UserIdentity, name: "role, RLS, authenticated and system user", declaration: "miscinit/userid.rs: AUTHENTICATED_USER_ID..SET_ROLE_IS_ACTIVE", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RestoreScalar, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::TempNamespace, name: "temp namespace state", declaration: "catalog_namespace/lib.rs: MY_TEMP_NAMESPACE..BASE_TEMP_CREATION_PENDING", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RestoreScalar, blocker: Some("foreign temp-relation execution remains refused") },
+    EnvelopeMember { id: EnvelopeMemberId::SearchPath, name: "search_path and path cache", declaration: "catalog_namespace/lib.rs,path.rs: PATH, SPCACHE and validity scalars", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::CaptureApply, blocker: Some("derived path caches are invalidated and lazily rebuilt in Phase 0") },
+    EnvelopeMember { id: EnvelopeMemberId::SnapshotState, name: "snapmgr root", declaration: "snapmgr/lib.rs: STATE and debug-only STATE_BUSY/STATIC_REPLACED", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::Refuse, blocker: Some("query-owned snapshot state belongs to Envelope Phase 5") },
+    EnvelopeMember { id: EnvelopeMemberId::TransactionState, name: "xact root and mirrors", declaration: "xact/state.rs,engine.rs: STATE and CUR_* mirrors", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::Refuse, blocker: Some("query-owned xact state belongs to Envelope Phase 5") },
+    EnvelopeMember { id: EnvelopeMemberId::GucStore, name: "GUC registry root", declaration: "guc/store.rs: GUC_STORE", kind: EnvelopeBindKind::SwapRoot, phase0: Phase0Action::CaptureApply, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::GucFlatBackings, name: "GUC flat backings and store hints", declaration: "guc_tables/session.rs; guc/store.rs: PG_RELOAD_TIME, hints", kind: EnvelopeBindKind::ScalarRestore, phase0: Phase0Action::RestoreScalar, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::GucNesting, name: "GUC nesting level", declaration: "guc/lib.rs: GUC_NEST_LEVEL", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: Some("SET LOCAL and nested GUC state require the transaction root") },
+    EnvelopeMember { id: EnvelopeMemberId::ResourceOwnerCells, name: "resource-owner cells", declaration: "resowner/lib.rs: CURRENT_OWNER..AUX_PROCESS_OWNER", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::ResourceOwnerArena, name: "resource-owner arena", declaration: "resowner/lib.rs: ARENA", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: Some("the per-thread arena is shared-sequential, never transferred") },
+    EnvelopeMember { id: EnvelopeMemberId::ErrorStack, name: "error stack", declaration: "elog/stack.rs: STACK", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::ErrorCallbacks, name: "error context callbacks", declaration: "elog/stack.rs: EMIT_CONTEXT_CALLBACKS", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::InterruptPending, name: "interrupt and cancellation pending flags", declaration: "init_small/globals.rs: INTERRUPT_PENDING, QUERY_CANCEL_PENDING, PROC_DIE_PENDING", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::InterruptHoldoffs, name: "interrupt and critical-section holdoffs", declaration: "init_small/globals.rs: INTERRUPT_HOLDOFF_COUNT, QUERY_CANCEL_HOLDOFF_COUNT, CRIT_SECTION_COUNT", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::Catcache, name: "catcache", declaration: "catcache/lib.rs,graph.rs: STATE, INVAL_EPOCH", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::Relcache, name: "relcache", declaration: "relcache/lib.rs: STATE", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::Typcache, name: "typcache", declaration: "typcache/lib.rs: STATE", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::Plancache, name: "plancache", declaration: "plancache/lib.rs: STATE and invalidation counters", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::InvalidationCallbacks, name: "invalidation callbacks", declaration: "inval/lib.rs: CALLBACKS, SYSCACHE_LINKS", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::InvalidationMessages, name: "invalidation message state", declaration: "inval/lib.rs: STATE, DEBUG_DISCARD_CACHES, ACCEPT_RECURSION_DEPTH", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::PendingInvalidations, name: "uncommitted invalidations", declaration: "inval/lib.rs: STATE trans_stack and inplace_info", kind: EnvelopeBindKind::MustBeEmpty, phase0: Phase0Action::CheckEmpty, blocker: Some("uncommitted invalidations are transaction-owned and cannot be drained") },
+    EnvelopeMember { id: EnvelopeMemberId::SyscacheArrays, name: "syscache oid arrays", declaration: "cache_syscache/lib.rs: caches", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::Relmapper, name: "relation mapper", declaration: "relmapper/lib.rs: STATE", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::Partcache, name: "partition cache", declaration: "partcache/lib.rs: STATE", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::TsCache, name: "text-search cache", declaration: "ts_cache/lib.rs: STATE", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
+    EnvelopeMember { id: EnvelopeMemberId::EventCache, name: "event-trigger cache", declaration: "cache_evtcache/lib.rs: STATE", kind: EnvelopeBindKind::DrainSameDatabase, phase0: Phase0Action::Drain, blocker: None },
 ];
 
 pub struct SessionContext {
     database_id: Oid,
     database_tablespace: Oid,
+    data_dir: Option<&'static str>,
+    database_path: Option<&'static str>,
+    session_exists: bool,
     identity: miscinit::SessionIdentityState,
-    temp_namespace: (Oid, Oid),
-    gucs: Vec<guc::store::CapturedGuc>,
+    namespace: catalog_namespace::SessionNamespaceState,
+    gucs: guc::store::ExactGucState,
     guc_nest_level: i32,
     xact_nest_level: i32,
     transaction_active: bool,
@@ -113,9 +135,12 @@ impl SessionContext {
         Self {
             database_id: init_small::globals::MyDatabaseId(),
             database_tablespace: init_small::globals::MyDatabaseTableSpace(),
+            data_dir: init_small::globals::DataDir(),
+            database_path: init_small::globals::DatabasePath(),
+            session_exists: CurrentSessionExists(),
             identity: miscinit::CaptureSessionIdentityState(),
-            temp_namespace: catalog_namespace::GetTempNamespaceState(),
-            gucs: guc::store::capture_session_gucs(),
+            namespace: catalog_namespace::CaptureSessionNamespaceState(),
+            gucs: guc::store::capture_exact_guc_state(),
             guc_nest_level: guc::guc_nest_level(),
             xact_nest_level: xact::GetCurrentTransactionNestLevel(),
             transaction_active: xact::IsTransactionOrTransactionBlock(),
@@ -130,9 +155,10 @@ impl SessionContext {
 }
 
 struct SavedEnvelope {
+    session_exists: bool,
     identity: miscinit::SessionIdentityState,
-    temp_namespace: (Oid, Oid),
-    gucs: Vec<guc::store::CapturedGuc>,
+    namespace: catalog_namespace::SessionNamespaceState,
+    gucs: guc::store::ExactGucState,
 }
 
 pub struct SessionEnvelopeBinding {
@@ -196,9 +222,10 @@ fn bind_session_envelope_with(
     drain_same_database()?;
 
     let saved = SavedEnvelope {
+        session_exists: CurrentSessionExists(),
         identity: miscinit::CaptureSessionIdentityState(),
-        temp_namespace: catalog_namespace::GetTempNamespaceState(),
-        gucs: guc::store::capture_session_gucs(),
+        namespace: catalog_namespace::CaptureSessionNamespaceState(),
+        gucs: guc::store::capture_exact_guc_state(),
     };
     let depth = ENVELOPE_DEPTH.with(|cell| {
         let next = cell
@@ -208,35 +235,34 @@ fn bind_session_envelope_with(
         cell.set(next);
         next
     });
-
-    miscinit::ReplaceSessionIdentityState(target.identity);
-    catalog_namespace::ReplaceTempNamespaceState(target.temp_namespace.0, target.temp_namespace.1);
-    guc::ResetAllOptions();
-    if let Err(error) = guc::store::apply_captured_session_gucs(&target.gucs) {
-        install_saved(saved);
-        ENVELOPE_DEPTH.with(|cell| cell.set(depth - 1));
-        return Err(error);
-    }
-    miscinit::ReplaceSessionIdentityState(target.identity);
-
-    Ok(SessionEnvelopeBinding {
+    let binding = SessionEnvelopeBinding {
         saved: Some(saved),
         depth,
         _not_send: PhantomData,
-    })
+    };
+
+    guc::store::replace_exact_guc_state_for_envelope(&target.gucs);
+    catalog_namespace::ReplaceSessionNamespaceState(&target.namespace);
+    miscinit::ReplaceSessionIdentityState(target.identity);
+    CURRENT_SESSION.set(target.session_exists);
+
+    Ok(binding)
 }
 
 fn install_saved(saved: SavedEnvelope) {
+    guc::store::replace_exact_guc_state(&saved.gucs);
+    catalog_namespace::ReplaceSessionNamespaceState(&saved.namespace);
     miscinit::ReplaceSessionIdentityState(saved.identity);
-    catalog_namespace::ReplaceTempNamespaceState(saved.temp_namespace.0, saved.temp_namespace.1);
-    guc::ResetAllOptions();
-    guc::store::apply_captured_session_gucs(&saved.gucs)
-        .expect("SessionEnvelopeBinding: validated GUC restore failed");
-    miscinit::ReplaceSessionIdentityState(saved.identity);
+    CURRENT_SESSION.set(saved.session_exists);
 }
 
 fn validate_target(target: &SessionContext) -> PgResult<()> {
     let current_db = init_small::globals::MyDatabaseId();
+    if !target.session_exists {
+        return Err(unsupported(
+            "SessionEnvelope Phase 0 requires an initialized target session",
+        ));
+    }
     if current_db == InvalidOid || target.database_id == InvalidOid {
         return Err(unsupported(
             "SessionEnvelope Phase 0 requires an attached database",
@@ -250,6 +276,13 @@ fn validate_target(target: &SessionContext) -> PgResult<()> {
     if init_small::globals::MyDatabaseTableSpace() != target.database_tablespace {
         return Err(prerequisite_error(
             "same database has mismatched tablespace identity",
+        ));
+    }
+    if init_small::globals::DataDir() != target.data_dir
+        || init_small::globals::DatabasePath() != target.database_path
+    {
+        return Err(prerequisite_error(
+            "same database has mismatched database path identity",
         ));
     }
     if target.xact_nest_level != 0 || target.transaction_active || !target.snapshot_clean {
@@ -271,7 +304,7 @@ fn validate_target(target: &SessionContext) -> PgResult<()> {
 }
 
 pub fn SessionEnvelopeBoundaryClean() -> bool {
-    !guc::store::session_bound() && bound_state_issue().is_none()
+    ENVELOPE_DEPTH.get() == 0 && !guc::store::session_bound() && bound_state_issue().is_none()
 }
 
 fn validate_entry_boundary() -> PgResult<()> {
@@ -305,6 +338,9 @@ fn bound_state_issue() -> Option<&'static str> {
     }
     if guc::guc_nest_level() != 0 {
         return Some("GUC nesting state is not empty");
+    }
+    if inval::TransactionHasPendingInvalidationMessages() {
+        return Some("uncommitted invalidation state is not empty");
     }
     if init_small::globals::InterruptHoldoffCount() != 0
         || init_small::globals::QueryCancelHoldoffCount() != 0
