@@ -14,6 +14,7 @@ mod execami;
 mod execcurrent;
 mod execmain;
 mod execparallel;
+mod lanev2;
 mod nodegather;
 mod nodegathermerge;
 mod noderesult;

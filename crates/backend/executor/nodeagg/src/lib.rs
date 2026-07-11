@@ -2711,32 +2711,13 @@ fn plain_finish<'mcx>(
 /// Page-batch feed for the fused agg-over-scan drive (upstream batch
 /// executor design, CF 6176); implemented over the concrete scan node by the
 /// dispatcher, which owns both sides.
-pub trait AggBatchSource<'mcx> {
-    /// Stage the next page batch; 0 = input exhausted.
-    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
-    /// Store staged tuple `i` into the outer slot and apply the scan qual;
-    /// false = filtered out.
-    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
-    fn outer_slot(&self) -> ExecSlotId;
-    fn has_qual(&self) -> bool;
-    /// True only when `next_batch` counts VISIBLE, qual-passing rows (the
-    /// storeless drain never calls `fetch_tuple`). Sources resolving
-    /// visibility or quals at fetch time must return false.
-    fn storeless_ok(&self) -> bool {
-        !self.has_qual()
-    }
-    /// Batched qual census over the staged batch: VISIBLE rows passing the
-    /// qual, any per-row-only rows resolved inside. None = the per-row drain
-    /// owns the batch. Only sources whose census preserves per-row qual
-    /// semantics (non-erroring kernel quals) may return Some.
-    fn qualifying_count(
-        &mut self,
-        _estate: &mut EStateData<'mcx>,
-        _n: u32,
-    ) -> PgResult<Option<u32>> {
-        Ok(None)
-    }
-}
+///
+/// Promoted to the shared `executils::BatchSource` seam (lane-executor-v2
+/// design §Architecture 1) so the execmain lane driver can consume the same
+/// batch source. Kept re-exported under the historical `AggBatchSource` name
+/// so the fused-agg path (and its `SeqScan`/index/bitmap source impls in
+/// execmain) is unchanged.
+pub use ::executils::BatchSource as AggBatchSource;
 
 /// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
 /// per-tuple drive otherwise.

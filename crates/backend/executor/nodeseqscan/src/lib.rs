@@ -49,6 +49,13 @@ pub struct SeqScanState<'mcx> {
     scan_batch: ScanBatchMode,
     batch_allowed: bool,
     bloom: Option<::mcx::PgBox<'mcx, BloomScan<'mcx>>>,
+    // Lane-executor-v2 page-batch cursor (driven by `execmain::lanev2`):
+    // position within the currently-staged page batch and its row count.
+    // `lane_pos == lane_n` (both 0 initially) means "pull the next batch".
+    // Reset on rescan/park. Only touched via the accessors below; the lane
+    // drive itself lives entirely in the `lanev2` module.
+    lane_pos: u32,
+    lane_n: u32,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -158,6 +165,31 @@ impl<'mcx> SeqScanState<'mcx> {
 
     pub fn parallel_aware(&self) -> bool {
         self.parallel_aware
+    }
+
+    /// Parallel leader or worker: the lane-v2 driver refuses parallel scans
+    /// for now (Phase 2 adds parallel-worker safety).
+    pub fn is_parallel(&self) -> bool {
+        self.parallel_aware || self.parallel.is_some()
+    }
+
+    /// Forward, non-mark eflags at init (`ExecInitSeqScan`). False for a
+    /// scrollable/backward or mergejoin-mark cursor — the lane-v2 page-batch
+    /// drive is forward-only, so it refuses these.
+    pub fn batch_allowed(&self) -> bool {
+        self.batch_allowed
+    }
+
+    /// Lane-executor-v2 page-batch cursor `(pos, n)`: the drive lives in the
+    /// `lanev2` module, this only stores its position across the Volcano
+    /// per-call boundary.
+    pub fn lane_cursor(&self) -> (u32, u32) {
+        (self.lane_pos, self.lane_n)
+    }
+
+    pub fn set_lane_cursor(&mut self, pos: u32, n: u32) {
+        self.lane_pos = pos;
+        self.lane_n = n;
     }
 
     pub fn release_parallel(&mut self) {
@@ -945,6 +977,8 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         scan_batch: ScanBatchMode::Unknown,
         batch_allowed: false,
         bloom: None,
+        lane_pos: 0,
+        lane_n: 0,
     })
 }
 
@@ -972,6 +1006,8 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
     node.batch_soa = None;
     node.scan_batch = ScanBatchMode::Unknown;
+    node.lane_pos = 0;
+    node.lane_n = 0;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -1006,6 +1042,8 @@ pub fn exec_rescan_seq_scan<'mcx>(
     if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
         table_rescan(mcx, scan, None)?;
     }
+    node.lane_pos = 0;
+    node.lane_n = 0;
     if let Some(b) = node.batch_soa.as_deref_mut() {
         b.reset_staged();
     }
@@ -1068,7 +1106,8 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 // bloom/parallel exempt: released in exec_end_seq_scan / release_parallel.
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
-        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed;
+        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
+        lane_pos, lane_n;
         bloom, parallel
     },
     BatchSoa<'_> {
