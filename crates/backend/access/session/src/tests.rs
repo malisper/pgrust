@@ -198,7 +198,21 @@ fn tls_source_census_and_session_surface_are_pinned() {
         .ancestors()
         .nth(3)
         .unwrap();
-    assert_eq!(count_tree(crates), 451, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // Baseline 463, re-pinned at the m0-harvest onto lane-executor-v2
+    // (fc6ded2c7): the donor lineage's 451/453/455 pins counted the
+    // cb-compose-v9.3 tree; this tree carries lane-executor-v2's own
+    // non-session TLS population. The two binder-era sources the donor
+    // classified stay classified here and are deliberately NOT
+    // SESSION_ENVELOPE_MANIFEST members:
+    //   1. parallel/src/query_task_guard.rs QUERY_TASK_FAULT — a
+    //      #[cfg(debug_assertions)] fault-injection selector for the query-task
+    //      binder fault matrix. It is compiled out of release builds, so it can
+    //      never affect production byte-identity; it is one-shot per fire and
+    //      carries no session state. It is thread-local (not the former global
+    //      Mutex) so each helper thread injects independently.
+    //   2. parallel/tests/substrate_e2e.rs TEST_RECORD_REGISTRY — pure test
+    //      harness state, not product session state.
+    assert_eq!(count_tree(crates), 463, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
