@@ -36,24 +36,27 @@ pub enum QueryTaskFaultAction {
 }
 
 #[cfg(debug_assertions)]
-static QUERY_TASK_FAULT: std::sync::Mutex<Option<(QueryTaskFaultPoint, QueryTaskFaultAction)>> =
-    std::sync::Mutex::new(None);
+thread_local! {
+    static QUERY_TASK_FAULT: std::cell::Cell<Option<(QueryTaskFaultPoint, QueryTaskFaultAction)>> =
+        const { std::cell::Cell::new(None) };
+}
 
 #[cfg(debug_assertions)]
 pub fn set_query_task_fault(point: QueryTaskFaultPoint, action: QueryTaskFaultAction) {
-    *QUERY_TASK_FAULT.lock().unwrap_or_else(|error| error.into_inner()) = Some((point, action));
+    QUERY_TASK_FAULT.with(|fault| fault.set(Some((point, action))));
 }
 
 #[cfg(debug_assertions)]
 fn inject(point: QueryTaskFaultPoint) -> PgResult<()> {
-    let action = {
-        let mut fault = QUERY_TASK_FAULT.lock().unwrap_or_else(|error| error.into_inner());
-        if fault.as_ref().map(|value| value.0) == Some(point) {
-            fault.take().map(|value| value.1)
+    let action = QUERY_TASK_FAULT.with(|fault| {
+        let configured = fault.get();
+        if configured.map(|v| v.0) == Some(point) {
+            fault.set(None);
+            configured.map(|v| v.1)
         } else {
             None
         }
-    };
+    });
     match action {
         Some(QueryTaskFaultAction::Error) => {
             Err(PgError::new(ERROR, format!("query-task injected fault at {point:?}")).into())
@@ -255,7 +258,15 @@ impl QueryTaskBindingGuard {
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindGucs)?;
             miscinit::SetUserIdAndSecContext(shared.current_user_id, shared.sec_context);
-            catalog_namespace::ReplaceTempNamespaceState(
+            // A parked helper carries its own session temp-namespace state; a C
+            // parallel worker is a fresh process whose temp namespace is unset.
+            // SetTempNamespaceState asserts that fresh-process precondition, so
+            // reset the pooled helper to the fresh baseline first. The helper's
+            // pre-bind namespace was captured in `saved_namespace` above and is
+            // restored on every exit path (finish/Drop/retry) below, so this
+            // reset never leaks: it is undone byte-for-byte at task boundary.
+            catalog_namespace::ResetTempNamespaceStateForRetainedPark();
+            catalog_namespace::SetTempNamespaceState(
                 shared.temp_namespace_id,
                 shared.temp_toast_namespace_id,
             );
