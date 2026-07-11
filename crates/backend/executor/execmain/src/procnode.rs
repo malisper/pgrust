@@ -1417,6 +1417,14 @@ fn seq_scan_arm<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 (Phase 1) dispatch hook: when enabled, the lane may
+    // *own* this SeqScan; all lane logic + the refuse-set live in `lanev2`.
+    // On refuse this falls through to the UNCHANGED per-tuple path.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_seq_scan(ss, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeseqscan::exec_seq_scan(ss, estate)
 }
 
