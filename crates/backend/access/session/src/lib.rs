@@ -304,7 +304,23 @@ fn validate_target(target: &SessionContext) -> PgResult<()> {
 }
 
 pub fn SessionEnvelopeBoundaryClean() -> bool {
-    ENVELOPE_DEPTH.get() == 0 && !guc::store::session_bound() && bound_state_issue().is_none()
+    SessionEnvelopeBoundaryIssue().is_none()
+}
+
+pub fn SessionEnvelopeBoundaryIssue() -> Option<&'static str> {
+    if ENVELOPE_DEPTH.get() != 0 {
+        return Some("session envelope binding is still live");
+    }
+    if guc::store::session_bound() {
+        return Some("legacy SessionGucBinding is still live");
+    }
+    if init_small::globals::InterruptPending()
+        || init_small::globals::QueryCancelPending()
+        || init_small::globals::ProcDiePending()
+    {
+        return Some("interrupt or cancellation is pending");
+    }
+    bound_state_issue()
 }
 
 fn validate_entry_boundary() -> PgResult<()> {
@@ -327,8 +343,8 @@ fn bound_state_issue() -> Option<&'static str> {
     if !elog::error_stack_clean() {
         return Some("error or callback stack is not empty");
     }
-    if !resowner::ResourceOwnerStateClean() {
-        return Some("resource-owner state is not empty");
+    if let Some(issue) = xact::ResourceOwnerBoundaryIssue() {
+        return Some(issue);
     }
     if !snapmgr::SnapshotStateClean() {
         return Some("snapshot state is not empty");

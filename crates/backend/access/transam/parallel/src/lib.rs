@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::SeqCst};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +16,13 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
 use types_storage::RelFileLocator;
+
+mod query_task_guard;
+
+#[cfg(debug_assertions)]
+pub use query_task_guard::{
+    set_query_task_fault, QueryTaskFaultAction, QueryTaskFaultPoint,
+};
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +38,20 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
 const PARALLEL_ERROR_QUEUE_MSGS: usize = 64;
 
 pub type ParallelWorkerEntry = fn(&ParallelShared) -> PgResult<()>;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryTaskBindingPolicy {
+    pub has_params: bool,
+    pub temp_state: bool,
+    pub serializable: bool,
+    pub pending_invalidations: bool,
+}
+
+const QUERY_TASK_INSTALLED: u8 = 1 << 0;
+const QUERY_TASK_PARAMS: u8 = 1 << 1;
+const QUERY_TASK_TEMP: u8 = 1 << 2;
+const QUERY_TASK_SERIALIZABLE: u8 = 1 << 3;
+const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 
 pub enum WorkerMessage {
     Error(Box<PgError>),
@@ -86,6 +107,7 @@ pub struct ParallelShared {
     error_senders: Vec<Mutex<Option<SyncSender<WorkerMessage>>>>,
     worker_attached: Vec<AtomicBool>,
     private: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
+    query_task_binding: AtomicU8,
 }
 
 const _: fn() = || {
@@ -355,6 +377,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         error_senders,
         worker_attached,
         private: Mutex::new(None),
+        query_task_binding: AtomicU8::new(0),
     });
 
     with_pcxt(id, |p| {
@@ -381,6 +404,35 @@ pub fn shared_for(id: ParallelContextId) -> Arc<ParallelShared> {
 pub fn set_private(id: ParallelContextId, private: Arc<dyn Any + Send + Sync>) {
     let shared = shared_for(id);
     *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
+}
+
+pub fn InstallQueryTaskBinding(
+    id: ParallelContextId,
+    policy: QueryTaskBindingPolicy,
+) -> PgResult<()> {
+    let shared = shared_for(id);
+    let encoded = QUERY_TASK_INSTALLED
+        | u8::from(policy.has_params) * QUERY_TASK_PARAMS
+        | u8::from(policy.temp_state) * QUERY_TASK_TEMP
+        | u8::from(policy.serializable) * QUERY_TASK_SERIALIZABLE
+        | u8::from(policy.pending_invalidations) * QUERY_TASK_PENDING_INVALS;
+    shared
+        .query_task_binding
+        .compare_exchange(0, encoded, SeqCst, SeqCst)
+        .map(|_| ())
+        .map_err(|_| {
+            Box::new(
+                PgError::new(ERROR, "parallel query-task binding was installed twice")
+                    .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            )
+        })
+}
+
+pub fn with_query_task_binding<T>(
+    shared: &Arc<ParallelShared>,
+    body: impl FnOnce() -> PgResult<T>,
+) -> PgResult<T> {
+    query_task_guard::with_query_task_binding(shared, body)
 }
 
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
