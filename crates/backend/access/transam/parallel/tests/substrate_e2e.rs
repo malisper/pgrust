@@ -6,10 +6,10 @@
 // snapshot (Serialize/Restore is unit-proven in snapmgr).
 use std::any::Any;
 use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once};
 
 use init_small::globals as g;
-use types_core::InvalidOid;
+use types_core::{InvalidOid, INVALID_PROC_NUMBER};
 use types_error::{PgError, PgResult, ERROR};
 use types_startup::StartupData;
 
@@ -24,6 +24,36 @@ static NEXT_PID: AtomicI32 = AtomicI32::new(9000);
 
 // The fleet log filters captured test stdout; diagnostics ride the asserts.
 static WORKER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static BINDER_TARGET: Mutex<Option<Arc<parallel::ParallelShared>>> = Mutex::new(None);
+static BINDER_REFUSALS: Mutex<Vec<(Arc<parallel::ParallelShared>, &'static str)>> =
+    Mutex::new(Vec::new());
+static BINDER_REPORT: (Mutex<Option<Result<(), String>>>, Condvar) =
+    (Mutex::new(None), Condvar::new());
+
+static TEST_RECORD_REGISTRIES: Mutex<
+    Vec<(std::thread::ThreadId, typcache_seams::RecordRegistryHandle)>,
+> = Mutex::new(Vec::new());
+
+fn test_record_registry_handle() -> typcache_seams::RecordRegistryHandle {
+    let thread = std::thread::current().id();
+    let mut registries = TEST_RECORD_REGISTRIES.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((_, registry)) = registries.iter().find(|(id, _)| *id == thread) {
+        return Arc::clone(registry);
+    }
+    let registry = typcache_seams::RecordRegistryHandle::default();
+    registries.push((thread, Arc::clone(&registry)));
+    registry
+}
+
+fn install_test_record_registry(registry: typcache_seams::RecordRegistryHandle) {
+    let thread = std::thread::current().id();
+    let mut registries = TEST_RECORD_REGISTRIES.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((_, current)) = registries.iter_mut().find(|(id, _)| *id == thread) {
+        *current = registry;
+    } else {
+        registries.push((thread, registry));
+    }
+}
 
 fn wlog(s: String) {
     WORKER_LOG.lock().unwrap_or_else(|e| e.into_inner()).push(s);
@@ -156,6 +186,8 @@ fn stub_seams() {
     relcache_seams::relation_cache_invalidate::set(|_| Ok(()));
     catcache_seams::reset_catalog_caches_ext::set(|_| Ok(()));
     typcache_seams::at_eoxact_type_cache::set(|| {});
+    typcache_seams::record_registry_handle::set(test_record_registry_handle);
+    typcache_seams::install_record_registry::set(install_test_record_registry);
     logical_seams::reset_logical_streaming_state::set(|| {});
     snapbuild_seams::snap_build_reset_exported_snapshot_state::set(|| {});
     origin_seams::replorigin_session_origin::set(|| types_core::InvalidRepOriginId);
@@ -259,6 +291,8 @@ fn setup() {
         procsignal::ProcSignalShmemInit();
         parallel::register_parallel_worker_entrypoint("substrate_e2e_main", e2e_worker_main);
         parallel::register_parallel_worker_entrypoint("substrate_e2e_error", e2e_error_main);
+        parallel::register_parallel_worker_entrypoint("substrate_e2e_noop", |_| Ok(()));
+        parallel::register_parallel_post_task_park(query_task_binder_hook);
     });
     leader_thread_boot();
 }
@@ -386,6 +420,295 @@ fn e2e_error_main(_shared: &parallel::ParallelShared) -> PgResult<()> {
             .with_sqlstate(types_error::ERRCODE_DIVISION_BY_ZERO)
             .with_context("inner worker frame"),
     ))
+}
+
+struct HelperState {
+    identity: miscinit::SessionIdentityState,
+    xact: types_core::SavedTransactionCharacteristics,
+    xact_ts: types_core::TimestampTz,
+    stmt_ts: types_core::TimestampTz,
+    namespace: catalog_namespace::SessionNamespaceState,
+    work_mem: i32,
+    client: (Option<&'static str>, types_core::init::UserAuth),
+    record_registry: typcache_seams::RecordRegistryHandle,
+}
+
+fn seed_helper_state() -> PgResult<HelperState> {
+    guc::SetConfigOption(
+        "work_mem",
+        Some("8192"),
+        types_guc::PGC_USERSET,
+        types_guc::PGC_S_SESSION,
+    )?;
+    catalog_namespace::SetTempNamespaceState(700, 701);
+    miscinit::set_client_connection_info(Some("scram:helper"), types_core::init::uaSCRAM);
+    install_test_record_registry(Default::default());
+    xact::SetXactIsoLevel(2);
+    xact::SetXactReadOnly(true);
+    xact::SetXactDeferrable(true);
+    xact::SetParallelStartTimestamps(111_111, 222_222);
+    Ok(capture_helper_state())
+}
+
+fn capture_helper_state() -> HelperState {
+    HelperState {
+        identity: miscinit::CaptureSessionIdentityState(),
+        xact: xact::SaveTransactionCharacteristics(),
+        xact_ts: xact::GetCurrentTransactionStartTimestamp(),
+        stmt_ts: xact::GetCurrentStatementStartTimestamp(),
+        namespace: catalog_namespace::CaptureSessionNamespaceState(),
+        work_mem: g::work_mem(),
+        client: miscinit::client_connection_info(),
+        record_registry: test_record_registry_handle(),
+    }
+}
+
+fn assert_helper_state(expected: &HelperState) -> PgResult<()> {
+    assert_query_task_helper_clean()?;
+    let actual = capture_helper_state();
+    if actual.identity != expected.identity
+        || actual.xact != expected.xact
+        || actual.xact_ts != expected.xact_ts
+        || actual.stmt_ts != expected.stmt_ts
+        || actual.namespace != expected.namespace
+        || actual.work_mem != expected.work_mem
+        || actual.client != expected.client
+        || !Arc::ptr_eq(&actual.record_registry, &expected.record_registry)
+    {
+        return Err(PgError::error("query-task helper state was not restored exactly").into());
+    }
+    Ok(())
+}
+
+fn panic_text(payload: &(dyn Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+}
+
+fn query_task_binder_hook(_source: &parallel::ParallelShared) {
+    let Some(target) = BINDER_TARGET.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return;
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        g::SetMyDatabaseId(target.database_id);
+        lmgr_proc::GetPGProcByNumber(target.parallel_leader_proc_number)
+            .databaseId
+            .store(target.database_id, Relaxed);
+        session::InitializeSession()?;
+        assert_query_task_helper_clean()?;
+        let helper_state = seed_helper_state()?;
+        for _ in 0..3 {
+            parallel::with_query_task_binding(&target, || {
+                if miscinit::GetUserId() != 20
+                    || !xact::IsTransactionOrTransactionBlock()
+                    || !snapmgr::ActiveSnapshotSet()
+                    || resowner::ResourceOwnerStateClean()
+                {
+                    return Err(PgError::error("query-task state was not fully bound").into());
+                }
+                Ok(())
+            })?;
+            assert_helper_state(&helper_state)?;
+        }
+
+        let sql_error = parallel::with_query_task_binding(&target, || {
+            Err::<(), _>(PgError::new(ERROR, "binder SQL error").into())
+        })
+        .expect_err("SQL error must escape binding");
+        if sql_error.message() != "binder SQL error" {
+            return Err(PgError::error("query-task binder replaced the first SQL error").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        let cancel = parallel::with_query_task_binding(&target, || {
+            Err::<(), _>(
+                PgError::new(ERROR, "binder cancellation")
+                    .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED)
+                    .into(),
+            )
+        })
+        .expect_err("cancellation must escape binding");
+        if cancel.sqlstate() != types_error::ERRCODE_QUERY_CANCELED {
+            return Err(PgError::error("query-task binder replaced cancellation").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        parallel::with_query_task_binding(&target, || {
+            let nested = parallel::with_query_task_binding(&target, || Ok(()))
+                .expect_err("nested binding must be refused");
+            if !nested.message().contains("nested") {
+                return Err(PgError::error("nested binding refusal lost its reason").into());
+            }
+            Ok(())
+        })?;
+        assert_helper_state(&helper_state)?;
+
+        let helper = lmgr_proc::GetPGProcByNumber(g::MyProcNumber());
+        let leader = helper.lockGroupLeader.swap(INVALID_PROC_NUMBER, Relaxed);
+        let cross_leader = parallel::with_query_task_binding(&target, || Ok(()))
+            .expect_err("cross-leader binding must be refused");
+        helper.lockGroupLeader.store(leader, Relaxed);
+        if !cross_leader.message().contains("cross-leader") {
+            return Err(PgError::error("cross-leader refusal lost its reason").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = parallel::with_query_task_binding(&target, || -> PgResult<()> {
+                panic!("binder injected panic")
+            });
+        }));
+        if panic.is_ok() {
+            return Err(PgError::error("query-task binder swallowed panic").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        for point in [
+            parallel::QueryTaskFaultPoint::BindIdentity,
+            parallel::QueryTaskFaultPoint::BindTransaction,
+            parallel::QueryTaskFaultPoint::BindRelationMap,
+            parallel::QueryTaskFaultPoint::BindTransactionSnapshot,
+            parallel::QueryTaskFaultPoint::BindActiveSnapshot,
+            parallel::QueryTaskFaultPoint::BindInvalidations,
+            parallel::QueryTaskFaultPoint::BindGucs,
+            parallel::QueryTaskFaultPoint::BindClient,
+            parallel::QueryTaskFaultPoint::BindParallelMode,
+        ] {
+            parallel::set_query_task_fault(point, parallel::QueryTaskFaultAction::Error);
+            let error = parallel::with_query_task_binding(&target, || Ok(()))
+                .expect_err("partial bind fault must escape");
+            if !error.message().contains("injected fault") {
+                return Err(PgError::error("partial bind fault lost its reason").into());
+            }
+            assert_helper_state(&helper_state)?;
+        }
+
+        init_small::wretain::begin_task(true);
+        parallel::set_query_task_fault(
+            parallel::QueryTaskFaultPoint::BindGucs,
+            parallel::QueryTaskFaultAction::Panic,
+        );
+        let bind_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = parallel::with_query_task_binding(&target, || Ok(()));
+        }))
+        .expect_err("partial bind panic must escape");
+        if panic_text(bind_panic.as_ref()) != Some("query-task injected panic at BindGucs")
+            || init_small::wretain::candidate()
+        {
+            return Err(PgError::error("partial bind panic was not preserved and retired").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        for point in [
+            parallel::QueryTaskFaultPoint::FinishParallelMode,
+            parallel::QueryTaskFaultPoint::FinishSnapshot,
+            parallel::QueryTaskFaultPoint::FinishTransaction,
+            parallel::QueryTaskFaultPoint::FinishSessionState,
+            parallel::QueryTaskFaultPoint::FinishBoundary,
+        ] {
+            init_small::wretain::begin_task(true);
+            parallel::set_query_task_fault(point, parallel::QueryTaskFaultAction::Error);
+            let error = parallel::with_query_task_binding(&target, || Ok(()))
+                .expect_err("cleanup fault must escape a successful body");
+            if !error.message().contains("injected fault") || init_small::wretain::candidate() {
+                return Err(PgError::error("cleanup fault did not retire the helper").into());
+            }
+            assert_helper_state(&helper_state)?;
+        }
+
+        init_small::wretain::begin_task(true);
+        parallel::set_query_task_fault(
+            parallel::QueryTaskFaultPoint::FinishSnapshot,
+            parallel::QueryTaskFaultAction::Panic,
+        );
+        let cleanup_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parallel::with_query_task_binding(&target, || {
+                Err::<(), _>(PgError::new(ERROR, "binder original error").into())
+            })
+        }));
+        let original = match cleanup_panic {
+            Ok(Err(error)) => error,
+            _ => return Err(PgError::error("cleanup panic replaced the body error").into()),
+        };
+        if original.message() != "binder original error" || init_small::wretain::candidate() {
+            return Err(PgError::error("cleanup panic did not preserve error and retire").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        init_small::wretain::begin_task(true);
+        parallel::set_query_task_fault(
+            parallel::QueryTaskFaultPoint::FinishTransaction,
+            parallel::QueryTaskFaultAction::Panic,
+        );
+        let double_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = parallel::with_query_task_binding(&target, || -> PgResult<()> {
+                panic!("binder original panic")
+            });
+        }))
+        .expect_err("body panic must escape cleanup panic");
+        if panic_text(double_panic.as_ref()) != Some("binder original panic")
+            || init_small::wretain::candidate()
+        {
+            return Err(PgError::error("double panic did not preserve body panic and retire").into());
+        }
+        assert_helper_state(&helper_state)?;
+
+        let refusals = BINDER_REFUSALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>();
+        for (refused, needle) in refusals {
+            let error = parallel::with_query_task_binding(&refused, || Ok(()))
+                .expect_err("unsafe query-task target must be refused");
+            if !error.message().contains(needle) {
+                return Err(PgError::error(format!(
+                    "query-task refusal expected {needle}, got {}",
+                    error.message()
+                ))
+                .into());
+            }
+            assert_helper_state(&helper_state)?;
+        }
+
+        init_small::wretain::begin_task(true);
+        let cleanup_fault = parallel::with_query_task_binding(&target, || {
+            g::SetCritSectionCount(1);
+            Err::<(), _>(PgError::new(ERROR, "binder first fault").into())
+        })
+        .expect_err("fault-injected cleanup must preserve the body error");
+        if cleanup_fault.message() != "binder first fault" || init_small::wretain::candidate() {
+            return Err(PgError::error("cleanup fault did not preserve error and retire helper").into());
+        }
+        g::SetCritSectionCount(0);
+        assert_helper_state(&helper_state)?;
+        Ok::<(), Box<PgError>>(())
+    }));
+    let report = match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.message().to_string()),
+        Err(_) => Err("query-task binder hook panicked".to_string()),
+    };
+    *BINDER_REPORT.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
+    BINDER_REPORT.1.notify_all();
+}
+
+fn assert_query_task_helper_clean() -> PgResult<()> {
+    if miscinit::GetAuthenticatedUserId() != 10 || miscinit::GetUserId() != 10 {
+        return Err(PgError::error("query-task helper boundary: identity was not restored").into());
+    }
+    if let Some(issue) = session::SessionEnvelopeBoundaryIssue() {
+        return Err(PgError::error(format!("query-task helper boundary: {issue}")).into());
+    }
+    if xact::IsTransactionOrTransactionBlock() {
+        return Err(PgError::error("query-task helper boundary: transaction is live").into());
+    }
+    if !snapmgr::SnapshotStateClean() {
+        return Err(PgError::error("query-task helper boundary: snapshot state is live").into());
+    }
+    Ok(())
 }
 
 // The postmaster stand-in: what serverloop's maybe_start_bgworkers + the
@@ -597,5 +920,110 @@ fn worker_error_rethrows_with_c_shape() {
     end_parallel_ready_xact();
     for j in joins {
         assert_eq!(j.join().unwrap(), 1);
+    }
+}
+
+#[test]
+fn query_task_binder_restores_clean_helper_across_outcomes() {
+    let _s = serial();
+    let _w = Watchdog::arm(180, "query_task_binder_restores_clean_helper_across_outcomes");
+    setup();
+
+    g::SetMyDatabaseId(42);
+    session::InitializeSession().unwrap();
+    begin_parallel_ready_xact();
+    let helper_identity = miscinit::CaptureSessionIdentityState();
+    miscinit::ReplaceSessionIdentityState(miscinit::SessionIdentityState {
+        authenticated_user_id: 10,
+        session_user_id: 10,
+        outer_user_id: 10,
+        current_user_id: 20,
+        system_user: helper_identity.system_user,
+        session_user_is_superuser: true,
+        security_restriction_context: 0,
+        set_role_is_active: false,
+    });
+    let target = parallel::CreateParallelContext("postgres", "substrate_e2e_noop", 0).unwrap();
+    parallel::InitializeParallelDSM(target).unwrap();
+    miscinit::ReplaceSessionIdentityState(helper_identity);
+    parallel::InstallQueryTaskBinding(target, parallel::QueryTaskBindingPolicy::default()).unwrap();
+    *BINDER_TARGET.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(parallel::shared_for(target));
+    *BINDER_REPORT.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    let refusal_cases = [
+        (
+            42,
+            parallel::QueryTaskBindingPolicy {
+                has_params: true,
+                ..Default::default()
+            },
+            "Params",
+        ),
+        (
+            42,
+            parallel::QueryTaskBindingPolicy {
+                temp_state: true,
+                ..Default::default()
+            },
+            "temporary",
+        ),
+        (
+            42,
+            parallel::QueryTaskBindingPolicy {
+                serializable: true,
+                ..Default::default()
+            },
+            "serializable",
+        ),
+        (
+            42,
+            parallel::QueryTaskBindingPolicy {
+                pending_invalidations: true,
+                ..Default::default()
+            },
+            "invalidations",
+        ),
+        (43, parallel::QueryTaskBindingPolicy::default(), "cross-database"),
+    ];
+    let mut refusal_contexts = Vec::new();
+    for (database, policy, needle) in refusal_cases {
+        g::SetMyDatabaseId(database);
+        let context = parallel::CreateParallelContext("postgres", "substrate_e2e_noop", 0).unwrap();
+        parallel::InitializeParallelDSM(context).unwrap();
+        parallel::InstallQueryTaskBinding(context, policy).unwrap();
+        BINDER_REFUSALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((parallel::shared_for(context), needle));
+        refusal_contexts.push(context);
+    }
+
+    g::SetMyDatabaseId(InvalidOid);
+    let source = parallel::CreateParallelContext("postgres", "substrate_e2e_noop", 1).unwrap();
+    parallel::InitializeParallelDSM(source).unwrap();
+    assert_eq!(launch_as_if_under_postmaster(source).unwrap(), 1);
+    let joins = launch_registered_workers();
+    parallel::WaitForParallelWorkersToAttach(source).unwrap();
+
+    let report = BINDER_REPORT.0.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut report, timeout) = BINDER_REPORT
+        .1
+        .wait_timeout_while(report, std::time::Duration::from_secs(120), |r| r.is_none())
+        .unwrap_or_else(|e| e.into_inner());
+    assert!(!timeout.timed_out(), "binder hook timed out; worker log: {}", wlog_dump());
+    report.take().expect("binder hook omitted report").unwrap();
+    drop(report);
+
+    parallel::WaitForParallelWorkersToFinish(source).unwrap();
+    parallel::DestroyParallelContext(source).unwrap();
+    for context in refusal_contexts {
+        parallel::DestroyParallelContext(context).unwrap();
+    }
+    parallel::DestroyParallelContext(target).unwrap();
+    g::SetMyDatabaseId(42);
+    end_parallel_ready_xact();
+    for join in joins {
+        assert_eq!(join.join().unwrap(), 0);
     }
 }
