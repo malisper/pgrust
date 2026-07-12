@@ -1888,6 +1888,9 @@ impl<'mcx> TupleOp<'mcx> for NestLoopProbe<'_, 'mcx> {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus> {
+        // One OWNED tick per accepted outer row — the unit the lane owns
+        // (bind params -> rescan the inner -> drain the expansion).
+        stats::tick_owned(ShapeClass::NestLoop);
         ::nodenestloop::lane_accept_outer(self.nl, self.inner, estate, tuple)?;
         self.emit(out, estate)
     }
@@ -2021,20 +2024,33 @@ fn nest_loop_lane_fusible<'mcx>(
     if let Some(v) = nl.lane_fusible {
         return Ok(v);
     }
-    let v = nest_loop_fusible_static(nl, estate)?;
+    // Engagement accounting for the structural verdict ticks exactly here —
+    // once per memoized decision (a child-scan refusal's specific reason is
+    // ticked under the child's class inside its fusible gate). OWNED ticks
+    // for the nestloop class count accepted OUTER ROWS, in
+    // `NestLoopProbe::accept`.
+    let refuse = nest_loop_refuse_reason(nl, estate)?;
+    if let Some(r) = refuse {
+        stats::tick_refused(ShapeClass::NestLoop, r);
+    }
+    let v = refuse.is_none();
     nl.lane_fusible = Some(v);
     Ok(v)
 }
 
-fn nest_loop_fusible_static<'mcx>(
+/// `None` = admitted; `Some(reason)` = refused.
+fn nest_loop_refuse_reason<'mcx>(
     nl: &mut crate::procnode::NestLoopNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
+) -> PgResult<Option<RefuseReason>> {
     let crate::procnode::NestLoopNode { state, outer, .. } = nl;
+    // Instrumented, subplan/param-bearing joinqual/otherqual/projection —
+    // plus a node the row path already drove (verdict stability demands
+    // whole-life ownership).
     if !::nodenestloop::lane_nest_loop_admissible(state)
         || !::nodenestloop::lane_nest_loop_untouched(state, estate)
     {
-        return Ok(false);
+        return Ok(Some(RefuseReason::JoinShape));
     }
     scan_child_fusible(outer, estate)
 }
@@ -2050,9 +2066,12 @@ pub fn try_own_nest_loop<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Dynamic per-call gates (mirrors the sort/hash-join breakers).
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Backward);
         return Ok(None);
     }
     if !nest_loop_lane_fusible(nl, estate)? {
@@ -2079,12 +2098,21 @@ pub fn try_own_agg_over_nest_loop<'mcx>(
     nl: &mut crate::procnode::NestLoopNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    // Dynamic per-call gates, ticked under the nestloop class (the
+    // composition's feed pipeline hangs off the join's drive).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::nodeagg::agg_hash_breaker_admissible(agg) || !nest_loop_lane_fusible(nl, estate)? {
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Backward);
+        return Ok(None);
+    }
+    if !::nodeagg::agg_hash_breaker_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    if !nest_loop_lane_fusible(nl, estate)? {
         return Ok(None);
     }
     // exec_agg's top-of-call guard: a drained agg stays drained.
@@ -2095,6 +2123,9 @@ pub fn try_own_agg_over_nest_loop<'mcx>(
     // re-enters — the whole-NestLoop rescan resets `nl_NeedNewOuter` and the
     // outer scan's staged cursor, so the feed restarts coherently).
     if !::nodeagg::agg_hash_table_filled(agg) {
+        // One OWNED tick per lane-owned agg build event (here the build is
+        // fed by the NestLoop expansion drain).
+        stats::tick_owned(ShapeClass::AggBuild);
         let crate::procnode::NestLoopNode { state, outer, inner, .. } = nl;
         let mut probe = NestLoopProbe { nl: state, inner };
         let mut sink = HashAggBuildSink { agg: &mut *agg };
