@@ -28,12 +28,11 @@
 //! Disabling or deleting the lane is therefore local: drop this module + the
 //! thin hook, and the C-identical executor is exactly as before.
 //!
-//! Gated OFF by default via the `PGRUST_LANE_V2` env var — deliberately NOT a
-//! SQL GUC: a new GUC would add a row to the byte-identical `pg_settings` /
-//! `SHOW ALL` output and break the `guc` / `rules` regression tests. Env-var
-//! gating mirrors `jit_deform`'s `PGRUST_JIT_DEFORM` switch and is
-//! byte-identity-safe. The completeness-gate run sets `PGRUST_LANE_V2=1` to
-//! enable the lane across the whole regression suite.
+//! Gated ON by default (as of 2026-07-14) via the `PGRUST_LANE_V2` env var;
+//! `PGRUST_LANE_V2=0`/`off` is the explicit kill switch — the operational
+//! escape hatch and the A/B lever. Env-var gating mirrors `jit_deform`'s
+//! `PGRUST_JIT_DEFORM` switch and is byte-identity-safe (no `pg_settings` /
+//! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod push;
 mod stats;
@@ -49,14 +48,16 @@ use push::{
 };
 use stats::{RefuseReason, ShapeClass};
 
-/// Master switch for lane-v2. Default OFF; `PGRUST_LANE_V2=1` (or `on`) enables
-/// it. Resolved once per process (a boot-time decision, like
-/// `jit_deform::available()`).
+/// Master switch for lane-v2. Default ON since 2026-07-14 (evidence:
+/// notes/lane-timed-regress-2026-07-14.md — byte-identical regress ×6,
+/// timed-regress median 1.000, all floors green); `PGRUST_LANE_V2=0` (or
+/// `off`) is the explicit kill switch and the A/B lever. Resolved once per
+/// process (a boot-time decision, like `jit_deform::available()`).
 #[inline]
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
