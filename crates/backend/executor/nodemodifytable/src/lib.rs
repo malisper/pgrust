@@ -102,7 +102,11 @@ pub struct ModifyTableState<'mcx> {
     pub mt_done: bool,
     fireBSTriggers: bool,
     // The unpruned result relations (C mtstate->resultRelInfo[0..mt_nrels]).
-    rels: Vec<ResultRelExec<'mcx>>,
+    // Arena-backed (es_query_cxt) like every sibling collection: the whole
+    // planstate bundle is FORGOTTEN at standard_executor_end, so a std-heap
+    // buffer here leaked once per write statement (832 B — the pgbench-rw
+    // eviction driver, notes/oltp-memory-footprint-2026-07-12.md).
+    rels: mcx::PgVec<'mcx, ResultRelExec<'mcx>>,
     // C mtstate->rootResultRelInfo when node->rootRelation > 0 (inherited or
     // partitioned target); None means the root is rels[0].
     root: Option<ResultRelExec<'mcx>>,
@@ -145,46 +149,49 @@ pub struct ModifyTableState<'mcx> {
     transition_capture: Option<::trigger::TransitionCaptureState>,
     oc_transition_capture: Option<::trigger::TransitionCaptureState>,
     // Partitioned-target INSERT routing (execPartition.c); per-leaf insert
-    // state is indexed by the router's leaf index.
+    // state is indexed by the router's leaf index. The leaf_* collections are
+    // arena-backed for the same forget-at-end reason as `rels` above (their
+    // std forms leaked their buffers per routed INSERT statement).
     router: Option<execpartition::PartitionTupleRouting<'mcx>>,
-    leaf_indexes: Vec<Option<execindexing::ResultRelIndexState<'mcx>>>,
-    leaf_checks: Vec<Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
-    leaf_virtual_nn: Vec<Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
+    leaf_indexes: mcx::PgVec<'mcx, Option<execindexing::ResultRelIndexState<'mcx>>>,
+    leaf_checks: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, CheckExpr<'mcx>>>>,
+    leaf_virtual_nn: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, VirtualNnExpr<'mcx>>>>,
     // ri_GeneratedExprsI per leaf: partitions may override generation exprs.
-    leaf_generated: Vec<Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>>,
+    leaf_generated: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, GeneratedExpr<'mcx>>>>,
     // ri_PartitionTupleSlot per remapped leaf (estate slot, leaf layout) and
     // the leaf's ri_PartitionCheckExpr.
-    leaf_slots: Vec<Option<ExecSlotId>>,
-    leaf_partition_check: Vec<Option<PgBox<'mcx, ExprState<'mcx>>>>,
+    leaf_slots: mcx::PgVec<'mcx, Option<ExecSlotId>>,
+    leaf_partition_check: mcx::PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
     // C ExecInitPartitionInfo's ri_onConflictArbiterIndexes: the root arbiter
     // index OIDs mapped to this leaf's own index children.
-    leaf_arbiters: Vec<Option<mcx::PgVec<'mcx, Oid>>>,
+    leaf_arbiters: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, Oid>>>,
     // C ExecInitPartitionInfo's per-leaf oc_Existing (table_slot_create on the
     // leaf rel); the root's existing slot is Virtual when the target is
     // partitioned and cannot feed the heap AM lock/fetch callbacks.
-    leaf_existing: Vec<Option<ExecSlotId>>,
+    leaf_existing: mcx::PgVec<'mcx, Option<ExecSlotId>>,
     // C ri_ChildToRootMap per routed leaf (ExecGetChildToRootMap); outer
     // Option = resolved yet, inner None = no conversion needed.
-    leaf_child_to_root: Vec<Option<Option<mcx::PgVec<'mcx, i16>>>>,
+    leaf_child_to_root: mcx::PgVec<'mcx, Option<Option<mcx::PgVec<'mcx, i16>>>>,
     // C ExecInitPartitionInfo's per-leaf ri_WithCheckOptions: the first WCO
     // list translated to the leaf's attnos via map_variable_attnos.
-    leaf_wco: Vec<Option<mcx::PgVec<'mcx, WcoExpr<'mcx>>>>,
+    leaf_wco: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, WcoExpr<'mcx>>>>,
     // C ExecInitPartitionInfo's per-leaf OnConflictSetState (map != NULL leg,
     // execPartition.c:781-864): only built for attno-remapped leaves; other
     // leaves reuse the root's DO UPDATE state as C does.
-    leaf_on_conflict: Vec<Option<LeafOnConflict<'mcx>>>,
+    leaf_on_conflict: mcx::PgVec<'mcx, Option<LeafOnConflict<'mcx>>>,
     // C ExecInitPartitionInfo's per-leaf ri_projectReturning: the first
     // returningList translated to the leaf's attnos; only built (and used)
     // for attno-remapped leaves — a non-remapped leaf's projection is
     // identical to the root's.
-    leaf_returning: Vec<Option<PgBox<'mcx, ExprState<'mcx>>>>,
+    leaf_returning: mcx::PgVec<'mcx, Option<PgBox<'mcx, ExprState<'mcx>>>>,
     // C ExecInitPartitionInfo's CheckValidResultRel: once per routed leaf.
-    leaf_ri_checked: Vec<bool>,
+    leaf_ri_checked: mcx::PgVec<'mcx, bool>,
     // Routed-leaf trigger state (C: per-partition ResultRelInfo trigger
-    // fields); outer Option = resolved yet.
-    leaf_trigdesc: Vec<Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
-    leaf_trig_fmgr: Vec<::trigger::TriggerFmgrCache>,
-    leaf_trig_when: Vec<::trigger::TriggerWhenCache<'mcx>>,
+    // fields); outer Option = resolved yet. Elements hold non-arena state
+    // (Rc trigdesc, std fmgr/when caches): exec_end_modify_table clears them.
+    leaf_trigdesc: mcx::PgVec<'mcx, Option<Option<Rc<types_trigger::TriggerDesc<'static>>>>>,
+    leaf_trig_fmgr: mcx::PgVec<'mcx, ::trigger::TriggerFmgrCache>,
+    leaf_trig_when: mcx::PgVec<'mcx, ::trigger::TriggerWhenCache<'mcx>>,
     // C ExecInsert's *insert_destrel out-param (routed leaf of the last
     // insert; None = unrouted), for the cross-partition FK update event.
     last_insert_leaf: Option<usize>,
@@ -434,7 +441,8 @@ pub fn exec_init_modify_table<'mcx>(
         assert_eq!(total_nrels, 1);
     }
 
-    let mut rels: Vec<ResultRelExec<'mcx>> = Vec::with_capacity(nrels);
+    let mut rels: mcx::PgVec<'mcx, ResultRelExec<'mcx>> =
+        mcx::PgVec::with_capacity_in(nrels, estate.es_query_cxt);
     for &(rti, i) in &kept {
         rels.push(init_result_rel(
             node,
@@ -695,6 +703,7 @@ pub fn exec_init_modify_table<'mcx>(
 
     let _ = rti;
 
+    let qcx = estate.es_query_cxt;
     Ok(ModifyTableState {
         plan: node,
         operation: node.operation,
@@ -720,22 +729,22 @@ pub fn exec_init_modify_table<'mcx>(
         transition_capture,
         oc_transition_capture,
         router: None,
-        leaf_indexes: Vec::new(),
-        leaf_checks: Vec::new(),
-        leaf_virtual_nn: Vec::new(),
-        leaf_generated: Vec::new(),
-        leaf_slots: Vec::new(),
-        leaf_partition_check: Vec::new(),
-        leaf_arbiters: Vec::new(),
-        leaf_existing: Vec::new(),
-        leaf_child_to_root: Vec::new(),
-        leaf_wco: Vec::new(),
-        leaf_on_conflict: Vec::new(),
-        leaf_returning: Vec::new(),
-        leaf_ri_checked: Vec::new(),
-        leaf_trigdesc: Vec::new(),
-        leaf_trig_fmgr: Vec::new(),
-        leaf_trig_when: Vec::new(),
+        leaf_indexes: mcx::PgVec::new_in(qcx),
+        leaf_checks: mcx::PgVec::new_in(qcx),
+        leaf_virtual_nn: mcx::PgVec::new_in(qcx),
+        leaf_generated: mcx::PgVec::new_in(qcx),
+        leaf_slots: mcx::PgVec::new_in(qcx),
+        leaf_partition_check: mcx::PgVec::new_in(qcx),
+        leaf_arbiters: mcx::PgVec::new_in(qcx),
+        leaf_existing: mcx::PgVec::new_in(qcx),
+        leaf_child_to_root: mcx::PgVec::new_in(qcx),
+        leaf_wco: mcx::PgVec::new_in(qcx),
+        leaf_on_conflict: mcx::PgVec::new_in(qcx),
+        leaf_returning: mcx::PgVec::new_in(qcx),
+        leaf_ri_checked: mcx::PgVec::new_in(qcx),
+        leaf_trigdesc: mcx::PgVec::new_in(qcx),
+        leaf_trig_fmgr: mcx::PgVec::new_in(qcx),
+        leaf_trig_when: mcx::PgVec::new_in(qcx),
         last_insert_leaf: None,
         last_insert_remapped: None,
         oc_returning_leaf: None,
@@ -3008,6 +3017,9 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
         r.wco_exprs.clear();
         r.trigdesc = None;
         r.trig_fmgr = ::trigger::TriggerFmgrCache::default();
+        // trig_when's compiled-WHEN cache and scratch slots are std-backed;
+        // the struct is forgotten, so drop them here like trig_fmgr's.
+        r.trig_when = ::trigger::TriggerWhenCache::default();
         r.child_to_root = None;
         r.generated_exprs = None;
         r.virtual_nn_exprs = None;
@@ -3024,15 +3036,23 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
     }
     mt.leaf_indexes.clear();
     mt.leaf_checks.clear();
+    mt.leaf_virtual_nn.clear();
     mt.leaf_generated.clear();
     mt.leaf_slots.clear();
     mt.leaf_partition_check.clear();
+    mt.leaf_arbiters.clear();
     mt.leaf_existing.clear();
     mt.leaf_child_to_root.clear();
     mt.leaf_wco.clear();
     mt.leaf_on_conflict.clear();
     mt.leaf_returning.clear();
     mt.leaf_ri_checked.clear();
+    // These hold non-arena state (Rc trigdesc clones, std-backed fmgr/WHEN
+    // caches); the planstate is forgotten, so their element drops must run
+    // here (the PgVec buffers themselves are arena-backed and forget-safe).
+    mt.leaf_trigdesc.clear();
+    mt.leaf_trig_fmgr.clear();
+    mt.leaf_trig_when.clear();
     mt.router = None;
     mt.index_eval_cx = None;
 }
@@ -7658,9 +7678,15 @@ fn plan_output_mismatch(detail: impl Into<String>) -> Box<PgError> {
 mcx::forget_safe_nodrop!(NewColSrc);
 
 // Exempt: indexes/snapshot_any/project_returning/on_conflict/check_exprs/
-// trigdesc/generated_exprs/router/leaf_indexes/leaf_checks/index_eval_cx/merge
+// trigdesc/trig_fmgr/trig_when/generated_exprs/router/leaf_indexes/
+// leaf_partition_check/leaf_on_conflict/leaf_returning/leaf_trigdesc/
+// leaf_trig_fmgr/leaf_trig_when/index_eval_cx/merge
 // (and each CheckExpr's/GeneratedExpr's state) are
 // released in exec_end_modify_table; CmdType is no-drop, const-proven below.
+// rels and the leaf_* collections are arena PgVecs (their buffers die with
+// es_query_cxt); the ones still exempt have element types without ForgetSafe
+// impls (ExprState boxes, Rc trigdesc, std trigger caches) — all cleared in
+// exec_end_modify_table before the bundle is forgotten.
 const _: () = assert!(!core::mem::needs_drop::<CmdType>());
 mcx::forget_safe_struct!(
     CheckExpr<'_> { name; state },
@@ -7678,12 +7704,14 @@ mcx::forget_safe_struct!(
         node_ecxt, oc_old_slot, cross_part_root_slot, last_insert_leaf,
         last_insert_remapped, oc_returning_leaf,
         mt_merge_inserted, mt_merge_updated, mt_merge_deleted, merge_active_cmd,
-        mt_merge_pending_not_matched, outer_instr_idx, epq_origslot;
-        operation, rels, root, snapshot_any, on_conflict, epq_subs, epq_arowmarks,
-        router, leaf_indexes, leaf_checks, leaf_virtual_nn, leaf_generated,
-        leaf_slots, leaf_partition_check, leaf_arbiters, leaf_child_to_root, leaf_wco,
-        leaf_on_conflict, leaf_existing,
-        leaf_returning, leaf_ri_checked, leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
+        mt_merge_pending_not_matched, outer_instr_idx, epq_origslot,
+        rels, root, leaf_checks, leaf_virtual_nn, leaf_generated, leaf_slots,
+        leaf_arbiters, leaf_existing, leaf_child_to_root, leaf_wco,
+        leaf_ri_checked;
+        operation, snapshot_any, on_conflict, epq_subs, epq_arowmarks,
+        router, leaf_indexes, leaf_partition_check,
+        leaf_on_conflict,
+        leaf_returning, leaf_trigdesc, leaf_trig_fmgr, leaf_trig_when,
         transition_capture, oc_transition_capture,
         index_eval_cx },
 );
