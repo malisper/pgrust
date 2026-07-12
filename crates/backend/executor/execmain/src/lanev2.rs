@@ -2501,9 +2501,26 @@ fn try_arm_cb_multikey_dict<'mcx>(
     if !plan.vguards.is_empty() {
         return refused();
     }
-    // Pure-int multi-key shapes need no dict arm (and their prefix refusal
-    // means a different column blocked it — not this arm's business).
-    let Some(key) = scan_mk_dict_att(agg) else { return false };
+    // Pure-int multi-key shapes need no dict lane — but a varlena column
+    // INSIDE the fixed-width prefix (the reason the standard arm refused)
+    // still blocks the staging. The offset-free columnar arm hosts those
+    // (Q32-class `GROUP BY WatchID, ClientIP` on cbstore): every staged
+    // column fills as decoded Datums, no dict registration.
+    let Some(key) = scan_mk_dict_att(agg) else {
+        // All-Int keys → plain columnar staging; any Other component means
+        // the compact arm will refuse anyway — don't arm for nothing.
+        let all_int = ::nodeagg::agg_hash_key_cols(agg)
+            .iter()
+            .all(|&(_, k)| matches!(k, ::nodeagg::GroupKeyKind::Int { .. }));
+        if !all_int {
+            return refused();
+        }
+        let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
+        if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix) {
+            return refused();
+        }
+        return true;
+    };
     // The fold must not read the dict component's SoA Datum cells: they are
     // STALE while a dict lane answers (the dictgroup rule, unchanged).
     if plan.cols.iter().any(|&c| c == key) {

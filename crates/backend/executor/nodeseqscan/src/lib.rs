@@ -777,6 +777,64 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
 /// and the post-qual gather-to-Raw skips the registered column). Refuses —
 /// fail-open to the per-row paths — when another staging consumer owns the
 /// batch (sort key feed / varkey staging).
+/// Plain COLUMNAR staging arm for a cbstore scan (the multi-key packed
+/// feed's pure-int shapes): the dict-group arm's offset-free columnar plan
+/// WITHOUT a dict-lane registration — every staged column fills as decoded
+/// Datums, so varlena columns inside the prefix (which the heap fixed-width
+/// plan refuses) stage fine. Same idempotence/conflict rules as the
+/// dict-group arm; fail-open to the per-row paths.
+pub fn seq_scan_cb_columnar_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+) -> bool {
+    if node.cb_scan.is_none() || prefix <= 0 {
+        return false;
+    }
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        // An existing staging that covers the ask serves it (PREWHERE lane,
+        // dict-group co-arm, or an earlier columnar arm).
+        if b.plan.ncols() as i32 >= prefix && b.key_col.is_none() && b.varkey.is_none() {
+            return true;
+        }
+        if b.key_col.is_some() || b.varkey.is_some() {
+            return false;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let Some(plan) = ::exectuples::SoaDeformPlan::columnar(mcx, prefix as usize) else {
+        return false;
+    };
+    let soa = ::exectuples::SoaBatch::new_in(mcx, plan.ncols());
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa,
+            plan,
+            qual_armed: false,
+            qual_only: false,
+            key_col: None,
+            varkey: None,
+            key_read_col: 0,
+            publish: false,
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            stitch: None,
+            proj: None,
+            lane: None,
+            lane_requal: false,
+            dict_group: None,
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    lane_trace("cbstore columnar staging armed");
+    true
+}
+
 pub fn seq_scan_cb_dictgroup_arm<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
