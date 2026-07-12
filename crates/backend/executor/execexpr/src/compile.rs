@@ -4501,6 +4501,14 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
+    // Multi-clause scan-cmp-const census (lane-v2 batched qual tiers): must
+    // run on the PRISTINE program — fuse_program below rewrites the clause
+    // shapes (FUNCEXPR_STRICT_2 + QUAL -> FuncStrict2Qual etc.). Quals only;
+    // the walk is a few steps on the shapes it can match, and it bails on
+    // the first non-matching step otherwise.
+    if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL != 0 {
+        state.scan_cmp_clauses = select_scan_cmp_clauses(state);
+    }
     // Kernelized programs never run their steps: skipping the peephole keeps
     // compile-per-query lanes (point/select1) free of the pass cost.
     if matches!(state.kernel, Kernel::Program) {
@@ -5030,4 +5038,73 @@ fn select_fused_qual(state: &ExprState<'_>) -> Option<Kernel> {
     let konst = unsafe { frame.arg_slot(const_argno).read().value };
     let cmp = if var_is_arg0 { cmp } else { cmp.commuted() };
     Some(Kernel::QualScanVarCmpConst { attnum, konst, cmp })
+}
+
+// Multi-clause generalization of `select_fused_qual` (the lane-v2 batched
+// qual census): [SCAN_FETCHSOME*, (SCAN_VAR -> arg, FUNCEXPR_STRICT_2 with
+// the other arg a compile-time non-null Const, QUAL -> done)+, DONE_RETURN],
+// every comparator an in-core int comparator. Runs at ready time on the
+// pristine (pre-fusion) program. 2..=SCAN_CMP_MAX_CLAUSES clauses — the
+// 1-clause shape is `select_fused_qual`'s kernel. Fail-closed: any
+// unrecognized step refuses.
+fn select_scan_cmp_clauses(state: &ExprState<'_>) -> Option<crate::steps::ScanCmpClauses> {
+    use crate::steps::{ScanCmpClauses, SCAN_CMP_MAX_CLAUSES};
+    let steps = state.steps.as_slice();
+    let done = steps.len().checked_sub(1)?;
+    if !matches!(steps[done], Step::DoneReturn) {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < done {
+        let Some(src) = fetch_src(&steps[i]) else { break };
+        if src != SlotSrc::Scan {
+            return None;
+        }
+        i += 1;
+    }
+    let mut out = ScanCmpClauses {
+        clauses: [(0, CmpOp::Int4Eq, ::datum::Datum::from_usize(0)); SCAN_CMP_MAX_CLAUSES],
+        n: 0,
+    };
+    while i < done {
+        if i + 3 > done || out.n as usize == SCAN_CMP_MAX_CLAUSES {
+            return None;
+        }
+        let (src, attnum, var_out) = var_src(&steps[i])?;
+        if src != SlotSrc::Scan {
+            return None;
+        }
+        let Step::FuncExprStrict2 { call, out: fout } = &steps[i + 1] else {
+            return None;
+        };
+        if !state.is_result(*fout) {
+            return None;
+        }
+        let Step::Qual { jumpdone } = steps[i + 2] else {
+            return None;
+        };
+        if jumpdone as usize != done {
+            return None;
+        }
+        let frame = &state.frames[call.frame as usize];
+        // SAFETY: frame-owned mcx-boxed FmgrInfo, read-only here.
+        let cmp = CmpOp::for_fn_oid(unsafe { frame.flinfo.as_ref() }.fn_oid)?;
+        let var_is_arg0 = var_out.0 == frame.arg_slot(0);
+        let const_argno = if var_is_arg0 { 1usize } else { 0 };
+        if var_out.0 != frame.arg_slot(if var_is_arg0 { 0 } else { 1 }) {
+            return None;
+        }
+        if frame.const_args & (1 << const_argno) == 0
+            || frame.const_null_args & (1 << const_argno) != 0
+        {
+            return None;
+        }
+        // SAFETY: const arg slot was written at compile and never re-targeted.
+        let konst = unsafe { frame.arg_slot(const_argno).read().value };
+        let cmp = if var_is_arg0 { cmp } else { cmp.commuted() };
+        out.clauses[out.n as usize] = (attnum, cmp, konst);
+        out.n += 1;
+        i += 3;
+    }
+    (out.n >= 2).then_some(out)
 }

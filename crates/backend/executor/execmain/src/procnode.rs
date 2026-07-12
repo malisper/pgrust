@@ -1560,6 +1560,7 @@ fn agg_arm<'mcx>(
                     fused_soa_prefix(agg, ss).unwrap_or(0),
                     qual_only,
                     false,
+                    false,
                 );
                 let outer_slot = ss.ss.ss_ScanTupleSlot;
                 let src = SeqScanBatchSource { ss, outer_slot };
@@ -2346,7 +2347,7 @@ fn probe_batch_probe<'mcx>(
     }
     let hash_col = hjs.probe_hash_col();
     let force = hash_col.is_some_and(|c| (c as i32) < prefix);
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, force);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, force, false);
     if let Some(c) = hash_col {
         if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| (c as i32) < soa.ncols() as i32)
         {
@@ -3266,6 +3267,7 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                     ss,
                     estate,
                     hash_build_soa_prefix(hs, ss).unwrap_or(0),
+                    false,
                     false,
                     false,
                 );

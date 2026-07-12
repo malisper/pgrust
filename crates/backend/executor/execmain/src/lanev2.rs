@@ -84,29 +84,43 @@ fn lane_trace(event: &str) {
 // ===========================================================================
 
 /// Arm the SoA deform + selection-bitmap qual for a lane-owned filtered
-/// SeqScan pipeline. Admission is exactly `scan_batch_probe`'s: the qual must
-/// be kernel-shaped (`QualScanVarCmpConst` — non-erroring, non-volatile by
-/// construction, which is why only kernel shapes are admitted), and
-/// `seq_scan_batch_soa_prepare` internally refuses a non-fixed-width column
-/// prefix (the scalar per-row path then continues unchanged). `qual_only`:
-/// the deform stages the qual column only; surviving rows deform lazily
-/// per-row — identical to the non-lane `exec_seq_scan_batch` drive. No-op
-/// (memo hit) when already armed, so per-pull callers pay one load+test.
+/// SeqScan pipeline. Admission generalizes `scan_batch_probe`'s to the
+/// clause census: the qual must be an AND of scan-Var-CMP-Const clauses
+/// (`scan_cmp_const_clauses` — non-erroring, non-volatile by construction,
+/// which is why only these shapes are admitted; 1 clause = the fused
+/// kernel), and `seq_scan_batch_soa_prepare` internally refuses a
+/// non-fixed-width column prefix (the scalar per-row path then continues
+/// unchanged). `qual_only`: single-clause staging deforms the qual column
+/// only, multi-clause the clause-covering prefix; surviving rows deform
+/// lazily per-row — identical to the non-lane `exec_seq_scan_batch` drive.
+/// No-op (memo hit) when already armed, so per-pull callers pay one
+/// load+test.
+///
+/// `stitch`: additionally arm the tier-2 stitched body for the qual — set
+/// ONLY by drain-pipeline callers (feeds into breakers). Pull-one-tuple
+/// pipelines keep the AOT bitmap tier (design rule: stitched segments exist
+/// only on drain pipelines).
 fn arm_seq_scan_qual_bitmap<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     ctx: &str,
+    stitch: bool,
 ) {
-    if ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-        return;
+    if !::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+        let Some(q) = ss.ss.qual.as_deref() else { return };
+        let Some(c) = q.scan_cmp_const_clauses() else { return };
+        let prefix = c.clauses[..c.n as usize]
+            .iter()
+            .map(|&(col, _, _)| col as i32 + 1)
+            .max()
+            .expect("census has at least one clause");
+        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, true, false, true);
+        if ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+            lane_trace(&format!("seqscan qual bitmap armed ({ctx})"));
+        }
     }
-    let Some(q) = ss.ss.qual.as_deref() else { return };
-    let ::execexpr::Kernel::QualScanVarCmpConst { attnum, .. } = q.kernel() else {
-        return;
-    };
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, attnum as i32 + 1, true, false);
-    if ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-        lane_trace(&format!("seqscan qual bitmap armed ({ctx})"));
+    if stitch {
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
     }
 }
 
@@ -826,37 +840,42 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
                 let force = ::nodeagg::agg_lanefold_plan(agg)
                     .is_some_and(|plan| !plan.cols.is_empty());
                 let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
                     // Full-prefix deform unarmable (non-fixed-width column in
                     // the prefix) or declined (break-even). A column-reading
                     // fold plan cannot get here — `decide_agg_lane` probe-armed
                     // this exact prefix before choosing Fold — so the SoA has
                     // no fold reader and the qual-only bitmap arm is safe.
-                    arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only");
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
                 } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
                     lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
                 }
             } else {
                 // Fold with no knowable prefix = a plan reading no lane
                 // columns (count(*)-only); the bitmap is the only SoA user.
-                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed");
+                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed", true);
             }
+            // Tier-2 arm for the fused-deform-armed bitmap (drain feed);
+            // idempotent, no-op when the bitmap is not armed.
+            ::nodeseqscan::seq_scan_stitch_arm(ss);
             agg_hash_build_fold_feed(agg, ss, estate)?;
         } else {
             if soa_prefix > 0 {
                 let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false, true);
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
                     // Unarmable/declined full prefix; the per-row feed reads
                     // no SoA columns, so fall back to the qual-only bitmap.
-                    arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only");
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only", true);
                 } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
                     lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
                 }
             } else {
-                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed");
+                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed", true);
             }
+            // Tier-2 arm for the fused-deform-armed bitmap (drain feed).
+            ::nodeseqscan::seq_scan_stitch_arm(ss);
             let mut sink = HashAggBuildSink { agg: &mut *agg };
             drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
         }
@@ -884,7 +903,7 @@ fn decide_agg_lane<'mcx>(
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
                 // width column) is known BEFORE committing to ownership.
                 let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
                 ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
             }
         }
@@ -1226,7 +1245,7 @@ pub fn try_own_sort<'mcx>(
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
         match &mut **outer {
             crate::procnode::PlanStateNode::SeqScan(ss) => {
-                arm_seq_scan_qual_bitmap(ss, estate, "sort feed");
+                arm_seq_scan_qual_bitmap(ss, estate, "sort feed", true);
                 sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
             }
             crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -1545,7 +1564,7 @@ fn join_build_dispatch<'mcx>(
 ) -> PgResult<::nodehashjoin::LaneBuildDone> {
     match child {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "join build feed");
+            arm_seq_scan_qual_bitmap(ss, estate, "join build feed", true);
             join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -1577,7 +1596,7 @@ fn join_probe_drain_dispatch<'mcx>(
     let mut probe = JoinProbe { hj, hs };
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "join probe drain");
+            arm_seq_scan_qual_bitmap(ss, estate, "join probe drain", true);
             drain_pipeline_chain(
                 ss,
                 &mut SeqScanSource,
@@ -1636,7 +1655,7 @@ fn join_probe_pull_dispatch<'mcx>(
             // Per-pull entry: `arm_seq_scan_qual_bitmap` early-returns once
             // armed (one load+test), and the first pull arms BEFORE any
             // batch is staged, so a staged batch always matches its bitmap.
-            arm_seq_scan_qual_bitmap(ss, estate, "join probe pull");
+            arm_seq_scan_qual_bitmap(ss, estate, "join probe pull", false);
             pull_step_chain(
                 ss,
                 &mut SeqScanSource,
