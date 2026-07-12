@@ -1526,10 +1526,10 @@ pub fn spgdoinsert<'m>(
         node: -1,
     };
 
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
 
     let result = 'outer: loop {
-        crate::check_for_interrupts();
+        crate::check_for_interrupts()?;
 
         let mut is_new = false;
         if current.blkno == InvalidBlockNumber {
@@ -1628,7 +1628,7 @@ pub fn spgdoinsert<'m>(
         if process_inner {
             // process_inner_tuple
             loop {
-                crate::check_for_interrupts();
+                crate::check_for_interrupts()?;
 
                 let (in_choose, n_nodes, all_the_same) = {
                     let pm = page(&current);
@@ -1758,7 +1758,7 @@ pub fn spgdoinsert<'m>(
         unlock_release(parent.buffer)?;
     }
 
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
     Ok(result)
 }
 

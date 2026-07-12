@@ -53,7 +53,7 @@ struct SpgVacState<'a, 'cb, 'mcx> {
 }
 
 fn vacuum_delay_point() -> PgResult<()> {
-    crate::check_for_interrupts();
+    crate::check_for_interrupts()?;
     if init_small::globals::VacuumCostActive() {
         vacuum_seams::vacuum_delay_point::call(false)?;
     }

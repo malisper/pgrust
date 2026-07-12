@@ -14907,6 +14907,7 @@ dependencies = [
  "mcx",
  "nbtree",
  "pg_prng",
+ "postgres_seams",
  "predicate_seams",
  "procarray_seams",
  "snapmgr_seams",

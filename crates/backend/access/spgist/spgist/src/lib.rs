@@ -35,10 +35,16 @@ pub(crate) fn non_spgist_opaque() -> ! {
     panic!("spgist entry point reached with a non-spgist scan opaque")
 }
 
-pub(crate) fn check_for_interrupts() {
+pub(crate) fn check_for_interrupts() -> ::types_error::PgResult<()> {
+    // CHECK_FOR_INTERRUPTS() — route a pending interrupt through the ported
+    // ProcessInterrupts seam (the gin/hash/heapam pattern). The former
+    // unported-panic stub surfaced as a spurious ERROR line in regress
+    // vacuum's `VACUUM (PARALLEL 2)` whenever a signal landed mid-bulkdelete
+    // (train-6 validate, 2/9 lane-ON runs).
     if init_small::globals::InterruptPending() {
-        panic!("unported: ProcessInterrupts (tcop/postgres.c) reached from spgist");
+        return ::postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 // The per-statement insert cache (C indexInfo->ii_AmCache mirror; C rebuilds

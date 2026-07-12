@@ -24,6 +24,7 @@ tupdesc = { path = "../../common/tupdesc" }
 detoast = { path = "../../common/detoast" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 indexam_seams = { path = "../../index/indexam_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
