@@ -1959,6 +1959,31 @@ pub fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fractio
     0
 }
 
+
+// costing-rider leg (2026-07-07): a full-input Sort directly over a
+// Gather/GatherMerge on a cbstore-fed plan denies the workers the fused
+// bounded-sort feed (top-k admission + ref decode clamp): every surviving row
+// is materialized full-width in a worker, pulled per-row through the tuple
+// queue, and sorted wide in the leader. Measured CB Q24 forced-shape A/B @
+// b81a4e09958 (jobs pgrust-clickbench-explain-1783458412/-1783458427):
+// GatherMerge-over-worker-Sort 0.956s vs leader-Sort ~7.1s steady-state
+// lane-on (lane-off ties), ~30 units/tuple at the Q17 163-units/ms anchor.
+// The surcharge is startup+total (a Sort consumes its whole input before the
+// first output row). Heap plans keep C costing.
+fn cbstore_gather_sort_penalty(run: &PlannerRun<'_>, subpath_id: PathId) -> f64 {
+    let sub = run.root.path(subpath_id);
+    if !matches!(
+        sub,
+        PathNode::GatherPath(_) | PathNode::GatherMergePath(_)
+    ) {
+        return 0.0;
+    }
+    if !costsize::cbstore_feeds_plan(run) {
+        return 0.0;
+    }
+    costsize::gucs::cbstore_gather_sort_tuple_cost() * sub.base().rows
+}
+
 pub fn create_sort_path<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: RelId,
@@ -2003,6 +2028,12 @@ pub fn create_sort_path<'mcx>(
         init_small::globals::work_mem(),
         limit_tuples,
     );
+    let penalty = cbstore_gather_sort_penalty(run, subpath_id);
+    if penalty > 0.0 {
+        let p = run.root.path_mut(id).base_mut();
+        p.startup_cost += penalty;
+        p.total_cost += penalty;
+    }
     id
 }
 
@@ -2056,6 +2087,12 @@ pub fn create_incremental_sort_path<'mcx>(
         init_small::globals::work_mem(),
         limit_tuples,
     )?;
+    let penalty = cbstore_gather_sort_penalty(run, subpath_id);
+    if penalty > 0.0 {
+        let p = run.root.path_mut(id).base_mut();
+        p.startup_cost += penalty;
+        p.total_cost += penalty;
+    }
     Ok(id)
 }
 

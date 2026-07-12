@@ -1,0 +1,33 @@
+[package]
+name = "cbstore"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[features]
+bench-internals = []
+
+[dependencies]
+libc = "0.2"
+lz4_flex = "0.11"
+mcx = { path = "../../../_support/mcx" }
+datum = { path = "../../../_support/types/datum" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_rel = { path = "../../../_support/types/rel" }
+types_scan = { path = "../../../_support/types/types_scan" }
+types_snapshot = { path = "../../../_support/types/snapshot" }
+types_slot = { path = "../../../_support/types/types_slot" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+tableam_vocab = { path = "../table/tableam_vocab" }
+exectuples = { path = "../../executor/exectuples" }
+relpath = { path = "../../../common/relpath" }
+init_small = { path = "../../utils/init/init_small" }
+xact_seams = { path = "../transam/xact_seams" }
+transam_seams = { path = "../transam/transam_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
+inval = { path = "../../utils/cache/inval" }
+
+[dev-dependencies]
+laneexec = { path = "../../executor/laneexec" }

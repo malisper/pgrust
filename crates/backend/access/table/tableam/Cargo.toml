@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
@@ -26,6 +27,7 @@ guc_seams = { path = "../../../utils/misc/guc_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 tableam_vocab = { path = "../tableam_vocab" }
+cbstore = { path = "../../cbstore" }
 heapam = { path = "../../heap/heapam" }
 format_type = { path = "../../../utils/adt/format_type" }
 heapam_handler = { path = "../../heap/heapam_handler" }
