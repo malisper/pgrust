@@ -136,6 +136,9 @@ struct BatchSoa<'mcx> {
     // Tier-2 stitched-JIT state; armed only by the lane driver on drain
     // pipelines feeding breakers (`seq_scan_stitch_arm`).
     stitch: Option<QualStitch>,
+    // Stitched-projection state (Phase-3 projection stitching); armed only
+    // by the lane driver on drain pipelines (`seq_scan_proj_stitch_arm`).
+    proj: Option<ProjStitch<'mcx>>,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
@@ -165,6 +168,44 @@ struct QualStitch {
     n_stitched: u64,
     n_aot: u64,
     n_interp: u64,
+}
+
+/// Stitched-projection state for a lane-owned projected scan (Phase-3
+/// projection stitching): the vocabulary-covered target list (Var
+/// passthrough / same-width int2/4/8 arith — `ScanProjCols`) compiled over
+/// the staged SoA lanes, computing per-batch OUTPUT lanes for the qual
+/// bitmap's true survivors (forced-fallback rows are masked out — their
+/// lanes are undeformed; they keep the per-row path). The emit's fast lane
+/// fills the projection result slot from the output lanes; everything the
+/// vocabulary does not cover refuses at arm time and leaves the per-row
+/// `exec_project` path untouched.
+///
+/// Refuse-and-replay (charter discipline): an arith trap (overflow / zero
+/// divisor) makes the body exit refused having constructed NO error and
+/// this batch's `staged` stays false — every row of the batch then projects
+/// per-row through the C-ported `exec_project`, which raises C's exact
+/// error text on C's row after consuming the preceding survivors. Sticky
+/// per plan: after one replay the body never runs again.
+struct ProjStitch<'mcx> {
+    /// The tlist translation (LoadLane/LoadConst/Arith/StoreOut per column).
+    prog: ::lanestitch::Program,
+    /// Lane-view width the body compiles against (max read attnum + 1).
+    ncols: usize,
+    /// Output-lane count == tlist arity == result-slot natts.
+    nouts: u16,
+    /// Compiled once past the row floor; None below it (per-row tier owns).
+    body: Option<::lanestitch::StitchedProjection>,
+    rows_seen: u64,
+    /// Sticky per-plan refusal (classification / arch / arena / replay).
+    refused: bool,
+    /// Outputs valid for the CURRENTLY staged batch (set at staging).
+    staged: bool,
+    /// Output lanes, nouts x SOA_MAX_ROWS (column-major, SoaBatch layout).
+    out_values: ::mcx::PgVec<'mcx, ::datum::Datum>,
+    out_isnull: ::mcx::PgVec<'mcx, bool>,
+    // Engagement telemetry (PGRUST_LANE_V2_TRACE summary at scan end).
+    n_stitched: u64,
+    n_perrow: u64,
 }
 
 /// Tier-2 row floor (the batchexec POC admission number): the stitched body
@@ -507,6 +548,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 ),
                 nquals: qual.map_or(0, |c| c.n),
                 stitch: None,
+                proj: None,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -574,6 +616,7 @@ pub fn seq_scan_sortkey_direct<'mcx>(
                 ::execexpr::SCAN_CMP_MAX_CLAUSES],
             nquals: 0,
             stitch: None,
+            proj: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -655,10 +698,13 @@ pub fn seq_scan_next_pagebatch<'mcx>(
             }
             // Single-clause qual-only staging deforms just the qual column;
             // a multi-clause qual needs every clause column, so it stages
-            // the full (fixed-width) prefix.
-            let qual_col_only = (b.qual_only && b.qual_armed && b.nquals == 1)
-                .then_some(b.quals[0].0)
-                .or(b.key_col);
+            // the full (fixed-width) prefix. An armed stitched projection
+            // reads its tlist columns from the lanes too, so it also forces
+            // the full prefix.
+            let qual_col_only =
+                (b.qual_only && b.qual_armed && b.nquals == 1 && b.proj.is_none())
+                    .then_some(b.quals[0].0)
+                    .or(b.key_col);
             ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
             if b.qual_armed {
                 let nwords = (n as usize).div_ceil(64);
@@ -697,6 +743,12 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                         }
                     }
                 }
+                // Stitched projection over the TRUE qual survivors: runs on
+                // the pure qual bits BEFORE the forced-fallback OR below
+                // (fallback rows carry no lane values — they keep the
+                // per-row store+qual+project path; a garbage lane value must
+                // never reach an erroring arith stencil).
+                stitch_project(b, n);
                 // Skipped rows carry a forced bit; the fetch re-checks them.
                 for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
                     *w |= fb;
@@ -704,6 +756,10 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 b.nwords = nwords as u32;
                 b.cur_word = 0;
                 b.cur_bits = b.sel[0];
+            } else if let Some(p) = &mut b.proj {
+                // No qual bitmap staged for this batch (bitmap disarmed):
+                // the per-row path owns projection too.
+                p.staged = false;
             }
         }
     }
@@ -781,6 +837,90 @@ fn stitch_qual_bitmap(b: &mut BatchSoa<'_>, n: u32) -> PgResult<bool> {
     }
     st.rows_seen += n as u64;
     Ok(ran)
+}
+
+/// Stitched-projection attempt for one staged batch: compute the output
+/// lanes for the TRUE qual survivors (the pure qual bits, fallback rows
+/// masked out — their lanes are undeformed garbage). Sets `proj.staged`;
+/// on any refuse/drift the batch's rows project per-row (`exec_project`),
+/// and a runtime trap additionally refuses the body for good (sticky
+/// refuse-and-replay: the body constructed NO error; the per-row replay
+/// raises C's exact error on C's row).
+fn stitch_project(b: &mut BatchSoa<'_>, n: u32) {
+    let BatchSoa { soa, sel, proj, .. } = b;
+    let Some(p) = proj.as_mut() else { return };
+    p.staged = false;
+    if !p.refused {
+        if p.body.is_none() && p.rows_seen >= STITCH_ROW_FLOOR {
+            match ::lanestitch::StitchedProjection::compile(&p.prog, p.ncols, p.nouts as usize) {
+                Some(body) => {
+                    lane_trace(&format!(
+                        "proj stitch compiled (cols={} outs={} bytes={} nanos={})",
+                        p.ncols, p.nouts, body.code_bytes, body.stitch_nanos,
+                    ));
+                    p.body = Some(body);
+                }
+                None => {
+                    p.refused = true;
+                    lane_trace("proj stitch refused (compile)");
+                }
+            }
+        }
+        if let Some(body) = &p.body {
+            let nwords = (n as usize).div_ceil(64);
+            // True survivors only: qual bits minus forced-fallback bits
+            // (the AOT/stitched qual computed garbage bits for undeformed
+            // fallback rows; they must never reach an erroring stencil).
+            let mut proj_sel = [0u64; ::exectuples::SOA_BM_WORDS];
+            for ((d, s), fb) in proj_sel[..nwords]
+                .iter_mut()
+                .zip(&sel[..nwords])
+                .zip(soa.fallback_words())
+            {
+                *d = s & !fb;
+            }
+            let mut lanes =
+                [::lanestitch::Lane { values: &[], isnull: &[] }; ::lanestitch::MAX_COLS];
+            for (c, lane) in lanes[..p.ncols].iter_mut().enumerate() {
+                *lane = ::lanestitch::Lane {
+                    values: soa.col_values(c),
+                    isnull: soa.col_isnull(c),
+                };
+            }
+            // Output-lane views over the arm-time buffers (zero per-batch
+            // allocation): one SOA_MAX_ROWS chunk per tlist column.
+            let mut outs: [::lanestitch::OutLane<'_>; ::lanestitch::MAX_OUTS] = {
+                let mut vch = p.out_values.chunks_mut(::exectuples::SOA_MAX_ROWS);
+                let mut nch = p.out_isnull.chunks_mut(::exectuples::SOA_MAX_ROWS);
+                core::array::from_fn(|_| ::lanestitch::OutLane {
+                    values: vch.next().map(|c| &mut c[..n as usize]).unwrap_or(&mut []),
+                    isnull: nch.next().map(|c| &mut c[..n as usize]).unwrap_or(&mut []),
+                })
+            };
+            match body.run_into(n, &lanes[..p.ncols], &proj_sel[..nwords], &mut outs[..p.nouts as usize]) {
+                ::lanestitch::ProjOutcome::Stitched => {
+                    p.staged = true;
+                    p.n_stitched += 1;
+                }
+                ::lanestitch::ProjOutcome::Drift => {
+                    p.n_perrow += 1;
+                }
+                ::lanestitch::ProjOutcome::Refused => {
+                    // Sticky refuse-and-replay: this plan's data errors —
+                    // the per-row C path owns the batch (and all later
+                    // ones), raising the exact error on the exact row.
+                    p.refused = true;
+                    p.n_perrow += 1;
+                    lane_trace("proj stitch refused (replay: data error)");
+                }
+            }
+        } else {
+            p.n_perrow += 1;
+        }
+    } else {
+        p.n_perrow += 1;
+    }
+    p.rows_seen += n as u64;
 }
 
 /// Map an execexpr comparator + its const onto the stitcher vocabulary,
@@ -895,7 +1035,160 @@ fn stitch_trace_summary(node: &SeqScanState<'_>) {
                 st.n_stitched, st.n_aot, st.n_interp, st.refused
             ));
         }
+        if let Some(p) = &b.proj {
+            lane_trace(&format!(
+                "proj stitch summary: stitched={} perrow={} refused={}",
+                p.n_stitched, p.n_perrow, p.refused
+            ));
+        }
     }
+}
+
+/// Kill switch for measurement: PGRUST_LANESTITCH_PROJ=0|off disables the
+/// stitched-projection tier (the per-row `exec_project` path owns projected
+/// scans, i.e. exactly the pre-projstitch lane behavior).
+fn proj_stitch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANESTITCH_PROJ").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+fn proj_arith(op: ::execexpr::ProjArithOp) -> ::lanestitch::ArithOp {
+    use ::execexpr::ProjArithOp as E;
+    use ::lanestitch::ArithOp as S;
+    match op {
+        E::Add2 => S::Add2,
+        E::Sub2 => S::Sub2,
+        E::Mul2 => S::Mul2,
+        E::Div2 => S::Div2,
+        E::Add4 => S::Add4,
+        E::Sub4 => S::Sub4,
+        E::Mul4 => S::Mul4,
+        E::Div4 => S::Div4,
+        E::Add8 => S::Add8,
+        E::Sub8 => S::Sub8,
+        E::Mul8 => S::Mul8,
+        E::Div8 => S::Div8,
+    }
+}
+
+/// Canonicalize an arith const to the lanestitch canonical-datum contract
+/// (sign-extended image at the op's own width — same-width families only).
+fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::datum::Datum {
+    use ::execexpr::ProjArithOp as E;
+    match op {
+        E::Add2 | E::Sub2 | E::Mul2 | E::Div2 => ::datum::Datum::from_i16(konst.as_i16()),
+        E::Add4 | E::Sub4 | E::Mul4 | E::Div4 => ::datum::Datum::from_i32(konst.as_i32()),
+        E::Add8 | E::Sub8 | E::Mul8 | E::Div8 => ::datum::Datum::from_i64(konst.as_i64()),
+    }
+}
+
+/// The SoA prefix a stitched projection needs (max read attnum + 1), when
+/// this scan's projection is census-covered and hostable: lane driver
+/// callers widen their `seq_scan_batch_soa_prepare` prefix by this BEFORE
+/// arming (`seq_scan_proj_stitch_arm` requires the staged prefix to cover
+/// it). None = no hostable projection (no ProjInfo / census refused /
+/// out-of-window / kill switch / stitcher unavailable).
+///
+/// Admission economics: Var-only tlists are refused (`any_arith`) — the
+/// stitched fill would only replace the per-row Assign walk, measured a
+/// wash, while WIDENING the deform prefix (extra per-batch deform cost).
+/// Computed columns are where the fused lanes win. Ratchet only with a
+/// measurement.
+pub fn seq_scan_proj_stitch_prefix(node: &SeqScanState<'_>) -> Option<i32> {
+    if !proj_stitch_enabled() || !::lanestitch::available() {
+        return None;
+    }
+    let proj = node.ss.ps_ProjInfo.as_ref()?;
+    let cols = proj.pi_state.scan_proj_cols()?;
+    if !cols.any_arith() {
+        return None;
+    }
+    if cols.n as usize > ::lanestitch::MAX_OUTS
+        || cols.max_attnum() as usize >= ::lanestitch::MAX_COLS
+    {
+        return None;
+    }
+    Some(cols.max_attnum() as i32 + 1)
+}
+
+/// Arm the stitched-projection tier for an armed kernel-qual bitmap whose
+/// staged prefix covers the projection's read columns. Called ONLY by the
+/// lane driver on drain pipelines (the stitched segments never run on
+/// pull-one-tuple pipelines). Idempotent; a no-op when unhostable — the
+/// per-row `exec_project` path stays untouched (fail closed). Compilation
+/// defers past the row floor (`stitch_project`); this translates the census
+/// into the stitch program and allocates the output lanes once.
+pub fn seq_scan_proj_stitch_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    let Some(prefix) = seq_scan_proj_stitch_prefix(node) else { return };
+    let Some(proj) = node.ss.ps_ProjInfo.as_ref() else { return };
+    let Some(cols) = proj.pi_state.scan_proj_cols() else { return };
+    let result_slot = proj.pi_result_slot;
+    let Some(b) = node.batch_soa.as_deref_mut() else { return };
+    if !b.qual_armed || b.proj.is_some() || (b.plan.ncols() as i32) < prefix {
+        return;
+    }
+    // The projection writes the result slot's value arrays positionally;
+    // its descriptor arity must equal the census arity (defense in depth —
+    // the projection program was compiled against this slot).
+    if estate.slot_mut(result_slot).base_mut().tts_values.len() != cols.n as usize {
+        return;
+    }
+    let mut prog = ::lanestitch::Program::new();
+    for (j, col) in cols.cols[..cols.n as usize].iter().enumerate() {
+        match *col {
+            ::execexpr::ScanProjCol::Var { attnum } => {
+                prog.steps.push(::lanestitch::Step::LoadLane { col: attnum, out: 0 });
+                prog.steps.push(::lanestitch::Step::StoreOut { a: 0, out: j as u16 });
+            }
+            ::execexpr::ScanProjCol::ArithVV { op, a, b: bcol } => {
+                prog.steps.push(::lanestitch::Step::LoadLane { col: a, out: 0 });
+                prog.steps.push(::lanestitch::Step::LoadLane { col: bcol, out: 1 });
+                prog.steps.push(::lanestitch::Step::Arith {
+                    op: proj_arith(op),
+                    a: 0,
+                    b: 1,
+                    out: 2,
+                });
+                prog.steps.push(::lanestitch::Step::StoreOut { a: 2, out: j as u16 });
+            }
+            ::execexpr::ScanProjCol::ArithVK { op, attnum, konst, var_is_arg0 } => {
+                let k = proj_arith_konst(op, konst);
+                let kix = prog
+                    .push_const(::datum::NullableDatum { value: k, isnull: false });
+                prog.steps.push(::lanestitch::Step::LoadLane { col: attnum, out: 0 });
+                prog.steps.push(::lanestitch::Step::LoadConst { k: kix, out: 1 });
+                let (a, bb) = if var_is_arg0 { (0u8, 1u8) } else { (1u8, 0u8) };
+                prog.steps.push(::lanestitch::Step::Arith {
+                    op: proj_arith(op),
+                    a,
+                    b: bb,
+                    out: 2,
+                });
+                prog.steps.push(::lanestitch::Step::StoreOut { a: 2, out: j as u16 });
+            }
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let cells = cols.n as usize * ::exectuples::SOA_MAX_ROWS;
+    b.proj = Some(ProjStitch {
+        prog,
+        ncols: cols.max_attnum() as usize + 1,
+        nouts: cols.n as u16,
+        body: None,
+        rows_seen: 0,
+        refused: false,
+        staged: false,
+        out_values: ::mcx::vec_from_elem_in(mcx, ::datum::Datum::null(), cells),
+        out_isnull: ::mcx::vec_from_elem_in(mcx, false, cells),
+        n_stitched: 0,
+        n_perrow: 0,
+    });
+    lane_trace(&format!("proj stitch armed (cols={})", cols.n));
 }
 
 /// Bitmap-armed batch census: rows of the staged batch passing the kernel
@@ -1003,6 +1296,46 @@ pub fn seq_scan_batch_emit<'mcx>(
     i: u32,
 ) -> PgResult<Option<ExecSlotId>> {
     estate.ecxt_mut(node.ss.ps_ExprContext).reset();
+    // Stitched-projection fast lane: this batch's output lanes are staged
+    // (qual bitmap computed, projection body ran over the true survivors),
+    // so a bitmap hit fills the result slot straight from the output lanes —
+    // no scan-slot store, no per-row `exec_project`. Same values, same
+    // isnull, same result-slot state as the per-row path (the census admits
+    // only Var images and strict int arith, whose outputs are exactly the
+    // per-row program's Datums). Fallback rows (no lane values) fall through
+    // to the per-row path below, as do batches the body refused/drifted on.
+    {
+        let SeqScanState { ss, batch_soa, .. } = node;
+        if let Some(b) = batch_soa.as_deref() {
+            if b.qual_armed && b.nwords > 0 {
+                if let Some(p) = &b.proj {
+                    if p.staged {
+                        if b.sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
+                            return Ok(None);
+                        }
+                        if !b.soa.is_fallback(i) {
+                            let proj =
+                                ss.ps_ProjInfo.as_ref().expect("proj stitch armed with ProjInfo");
+                            let result_id = proj.pi_result_slot;
+                            let mcx = estate.es_query_cxt;
+                            let slot = estate.slot_mut(result_id);
+                            ::exectuples::exec_clear_tuple(slot, mcx);
+                            let base = slot.base_mut();
+                            let idx = i as usize;
+                            for j in 0..p.nouts as usize {
+                                base.tts_values[j] =
+                                    p.out_values[j * ::exectuples::SOA_MAX_ROWS + idx];
+                                base.tts_isnull[j] =
+                                    p.out_isnull[j * ::exectuples::SOA_MAX_ROWS + idx];
+                            }
+                            ::exectuples::exec_store_virtual_tuple(slot);
+                            return Ok(Some(result_id));
+                        }
+                    }
+                }
+            }
+        }
+    }
     if !seq_scan_batch_fetch(node, estate, i)? {
         return Ok(None);
     }
@@ -1482,12 +1815,12 @@ mcx::forget_safe_struct!(
         lane_pos, lane_n, lane_verdict;
         bloom, parallel
     },
-    // stitch exempt: the stitched program (heap Vecs + the W^X code block)
-    // is released in exec_end_seq_scan / skeleton_park via `batch_soa = None`
-    // (the deform-JIT kernel Rc precedent).
+    // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
+    // blocks) are released in exec_end_seq_scan / skeleton_park via
+    // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, sel, nwords, cur_word, cur_bits; stitch,
+        nquals, sel, nwords, cur_word, cur_bits; stitch, proj,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

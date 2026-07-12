@@ -48,7 +48,8 @@ pub use interp::{
 };
 pub use steps::{
     agg_count_star_advance, qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState,
-    GroupedColsCell, Kernel, OutRef, ScanCmpClauses, SlotSrc, Step, SCAN_CMP_MAX_CLAUSES,
+    GroupedColsCell, Kernel, OutRef, ProjArithOp, ScanCmpClauses, ScanProjCol, ScanProjCols,
+    SlotSrc, Step, SCAN_CMP_MAX_CLAUSES, SCAN_PROJ_MAX_COLS,
 };
 pub use types_portal::params::ParamBind;
 pub use xmlops::map_sql_value_to_xml_value;

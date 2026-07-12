@@ -523,6 +523,97 @@ pub struct ScanCmpClauses {
     pub n: u8,
 }
 
+/// Column cap for [`ScanProjCols`] (the lane-v2 stitched-projection census;
+/// mirrors the lanestitch output-lane cap).
+pub const SCAN_PROJ_MAX_COLS: usize = 8;
+
+/// Same-width int2/int4/int8 arithmetic of the scan-projection census
+/// (C int.c / int8.c pl/mi/mul/div: erroring — overflow / division by zero).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjArithOp {
+    Add2,
+    Sub2,
+    Mul2,
+    Div2,
+    Add4,
+    Sub4,
+    Mul4,
+    Div4,
+    Add8,
+    Sub8,
+    Mul8,
+    Div8,
+}
+
+impl ProjArithOp {
+    pub fn for_fn_oid(oid: Oid) -> Option<ProjArithOp> {
+        Some(match oid {
+            176 => ProjArithOp::Add2,
+            180 => ProjArithOp::Sub2,
+            152 => ProjArithOp::Mul2,
+            153 => ProjArithOp::Div2,
+            177 => ProjArithOp::Add4,
+            181 => ProjArithOp::Sub4,
+            141 => ProjArithOp::Mul4,
+            154 => ProjArithOp::Div4,
+            463 => ProjArithOp::Add8,
+            464 => ProjArithOp::Sub8,
+            465 => ProjArithOp::Mul8,
+            466 => ProjArithOp::Div8,
+            _ => return None,
+        })
+    }
+}
+
+/// One tlist column of the scan-projection census.
+#[derive(Clone, Copy, Debug)]
+pub enum ScanProjCol {
+    /// The column is one scan Var (0-based attnum): a Datum-image copy, any
+    /// type (byval or by-ref — same currency as `AssignScanVar`).
+    Var { attnum: u16 },
+    /// int arith over two scan Vars (strict: NULL in -> NULL out).
+    ArithVV { op: ProjArithOp, a: u16, b: u16 },
+    /// int arith over one scan Var and one compile-time non-null Const;
+    /// `var_is_arg0` = the Var is the left operand.
+    ArithVK { op: ProjArithOp, attnum: u16, konst: Datum, var_is_arg0: bool },
+}
+
+/// Whole-projection census for the lane-v2 stitched-projection tier: the
+/// target list as `n` recognized columns in resultnum order (0..n-1, dense).
+/// Selected at ready time from the PRISTINE step program (before
+/// `fuse_program` rewrites Assign shapes), like [`ScanCmpClauses`]. Every
+/// admitted column is subplan- and param-free by construction (scan Vars,
+/// compile-time Consts, in-core strict int arith whose only errors are C's
+/// overflow / division-by-zero).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanProjCols {
+    pub cols: [ScanProjCol; SCAN_PROJ_MAX_COLS],
+    pub n: u8,
+}
+
+impl ScanProjCols {
+    /// Highest 0-based scan attnum any column reads.
+    pub fn max_attnum(&self) -> u16 {
+        self.cols[..self.n as usize]
+            .iter()
+            .map(|c| match *c {
+                ScanProjCol::Var { attnum } => attnum,
+                ScanProjCol::ArithVV { a, b, .. } => a.max(b),
+                ScanProjCol::ArithVK { attnum, .. } => attnum,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// True when any column computes (non-Var-passthrough) — the stitched
+    /// projection's admission-economics gate keys on this.
+    pub fn any_arith(&self) -> bool {
+        self.cols[..self.n as usize]
+            .iter()
+            .any(|c| !matches!(c, ScanProjCol::Var { .. }))
+    }
+}
+
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);
 
 // C ExprEvalStep.d.func minus the FmgrInfo pointer: fn_addr/fcinfo are the
@@ -965,6 +1056,8 @@ pub struct ExprState<'mcx> {
     // Multi-clause scan-Var-cmp-Const census (lane-v2 batched qual tiers);
     // the 1-clause case lives in `kernel` as QualScanVarCmpConst.
     pub(crate) scan_cmp_clauses: Option<ScanCmpClauses>,
+    // Scan-projection census (lane-v2 stitched-projection tier).
+    pub(crate) scan_proj_cols: Option<ScanProjCols>,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
     // access carries no Rust borrow provenance.
@@ -1016,6 +1109,7 @@ impl<'mcx> ExprState<'mcx> {
                 saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 scan_cmp_clauses: None,
+                scan_proj_cols: None,
                 flags: 0,
                 resnd,
                 innermost_case: None,
@@ -1153,6 +1247,13 @@ impl<'mcx> ExprState<'mcx> {
             return Some(c);
         }
         self.scan_cmp_clauses
+    }
+
+    /// The projection as `n` scan-Var / int-arith columns in resultnum order
+    /// (the ready-time census), or None (shape outside the census
+    /// vocabulary). Subplan- and param-free by construction.
+    pub fn scan_proj_cols(&self) -> Option<ScanProjCols> {
+        self.scan_proj_cols
     }
 
     #[inline]

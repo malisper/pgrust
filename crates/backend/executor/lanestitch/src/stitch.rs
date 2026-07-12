@@ -59,6 +59,9 @@ pub(crate) struct ParamsLayout {
     pub lane_isnull: u32,
     pub sel: u32,
     pub nrows: u32,
+    /// Base offset of the output-lane array (projection bodies only; qual
+    /// layouts pass 0 — no StoreOut ever emits there by classification).
+    pub outs_base: u32,
 }
 
 /// Upper bound on SaopAny array length (the stencil unrolls one compare
@@ -115,6 +118,7 @@ fn step_io(s: &Step) -> ([Option<u8>; 2], Option<u8>) {
         | Step::BoolTest { a, out, .. }
         | Step::SaopAny { a, out, .. } => ([Some(a), None], Some(out)),
         Step::Qual { a } => ([Some(a), None], None),
+        Step::StoreOut { a, .. } => ([Some(a), None], None),
     }
 }
 
@@ -364,6 +368,10 @@ pub(crate) fn plan_clauses(prog: &Program, ncols: usize) -> Option<Plan> {
                                 return None;
                             }
                         }
+                        // Projection-only step: a qual program never stores
+                        // output lanes (fail closed — the qual body has no
+                        // outs in its params block).
+                        Step::StoreOut { .. } => return None,
                     }
                 }
                 ClauseShape::Generic { lo, hi }
@@ -435,6 +443,14 @@ fn lane_p0(ctx: &Ctx<'_>, col: u16) -> u32 {
 
 fn lane_isnull(ctx: &Ctx<'_>, col: u16) -> u32 {
     col as u32 * ctx.lay.lane_stride + ctx.lay.lane_isnull
+}
+
+fn out_p0(ctx: &Ctx<'_>, out: u16) -> u32 {
+    ctx.lay.outs_base + out as u32 * ctx.lay.lane_stride + ctx.lay.lane_p0
+}
+
+fn out_isnull(ctx: &Ctx<'_>, out: u16) -> u32 {
+    ctx.lay.outs_base + out as u32 * ctx.lay.lane_stride + ctx.lay.lane_isnull
 }
 
 /// The lane's values base pointer: a hoisted callee-saved register, or a
@@ -878,6 +894,18 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
             e.ldr_x(11, 31, rv(a));
             e.cbz_x(11, ctx.row_fail);
         }
+        Step::StoreOut { a, out } => {
+            // Projection bodies only (plan_clauses refuses StoreOut in qual
+            // programs, so a qual body never reaches this arm). Out lane base
+            // pointers load from the params block per store — projections
+            // hoist input lanes, not outputs.
+            e.ldr_x(8, PARAMS, out_p0(ctx, out));
+            e.ldr_x(9, 31, rv(a));
+            e.str_x_idx3(9, 8, ROW);
+            e.ldr_x(8, PARAMS, out_isnull(ctx, out));
+            e.ldrb(10, 31, rn(a));
+            e.strb_idx(10, 8, ROW);
+        }
     }
 }
 
@@ -1187,4 +1215,199 @@ fn emit_bits_clause(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, steps: &[Ste
 /// the 64-row NEON block tier (the scalar loop still owns the tail).
 pub(crate) fn plan_is_simd(plan: &Plan) -> bool {
     classify_simd(plan)
+}
+
+// ---- Projection tier ------------------------------------------------------
+//
+// A projection program computes output lanes for the SELECTED rows of a
+// staged batch (the qual segment's selection bitmap is the input currency):
+// straight-line steps ending in StoreOut stores, NO Qual steps. The body is
+// one scalar row loop — test the row's sel bit, skip clear rows, run the
+// register-file stencils, store the outputs. Arith traps take the same
+// refuse-and-replay exit as the qual body: RC_REFUSE with no error
+// constructed; the driver replays the batch through the C-ported per-row
+// projection, which raises C's exact error on C's row (outputs written
+// before the trap are discarded — the consumer contract only covers a batch
+// whose body exited RC_OK).
+
+/// One classified projection program: a single generic window over the whole
+/// step list (no clause structure to fuse).
+pub(crate) struct ProjPlan {
+    pub used_cols: Vec<u16>,
+}
+
+/// Fail-closed classification for projection programs: exhaustive over Step
+/// with no wildcard admission. Register-self-contained by construction (one
+/// window = the whole program). Refuses: any Qual step (projection segments
+/// carry no filter), float compares (no NaN-exact var-var cond — the fused
+/// const shapes are qual-only), missing StoreOut (nothing observable), and
+/// every bound violation.
+pub(crate) fn plan_project(prog: &Program, ncols: usize, nouts: usize) -> Option<ProjPlan> {
+    if prog.volatile || prog.steps.is_empty() || nouts == 0 || nouts > crate::spec::MAX_OUTS {
+        return None;
+    }
+    let ncols = ncols.min(MAX_COLS);
+    let mut used_cols: Vec<u16> = Vec::new();
+    let mut written: Vec<u8> = Vec::new();
+    let mut any_store = false;
+    let use_col = |used: &mut Vec<u16>, col: u16| {
+        if !used.contains(&col) {
+            used.push(col);
+        }
+    };
+    let col_ok = |col: u16| (col as usize) < ncols;
+    let reads_ok = |written: &Vec<u8>, r: u8| written.contains(&r);
+    for step in &prog.steps {
+        match *step {
+            Step::LoadLane { col, out } => {
+                if reg_bad(out) || !col_ok(col) {
+                    return None;
+                }
+                use_col(&mut used_cols, col);
+                written.push(out);
+            }
+            Step::LoadConst { k, out } => {
+                if reg_bad(out) || k as usize >= prog.consts.len() {
+                    return None;
+                }
+                written.push(out);
+            }
+            Step::Cmp { op, a, b, out } => {
+                if reg_bad(a) || reg_bad(b) || reg_bad(out) || is_float_cmp(op) {
+                    return None;
+                }
+                if !reads_ok(&written, a) || !reads_ok(&written, b) {
+                    return None;
+                }
+                written.push(out);
+            }
+            Step::Arith { op: _, a, b, out } => {
+                if reg_bad(a) || reg_bad(b) || reg_bad(out) {
+                    return None;
+                }
+                if !reads_ok(&written, a) || !reads_ok(&written, b) {
+                    return None;
+                }
+                written.push(out);
+            }
+            Step::NullTest { a, out, .. } | Step::BoolTest { a, out, .. } => {
+                if reg_bad(a) || reg_bad(out) || !reads_ok(&written, a) {
+                    return None;
+                }
+                written.push(out);
+            }
+            Step::SaopAny { a, out, op, arr } => {
+                if reg_bad(a) || reg_bad(out) || !reads_ok(&written, a) {
+                    return None;
+                }
+                if is_float_cmp(op) || (arr as usize) >= prog.arrays.len() {
+                    return None;
+                }
+                if prog.arrays[arr as usize].len() > MAX_SAOP_ELEMS {
+                    return None;
+                }
+                written.push(out);
+            }
+            Step::StoreOut { a, out } => {
+                if reg_bad(a) || !reads_ok(&written, a) || out as usize >= nouts {
+                    return None;
+                }
+                any_store = true;
+            }
+            // Projection segments carry no filter clauses (fail closed).
+            Step::Qual { .. } => return None,
+        }
+    }
+    if !any_store || used_cols.is_empty() {
+        return None;
+    }
+    Some(ProjPlan { used_cols })
+}
+
+/// Emits the projection body: one scalar row loop over the staged batch,
+/// each SELECTED row (its bit set in the caller's sel words) running the
+/// generic register-file stencils; clear rows skip in a handful of
+/// instructions. Same prologue/epilogue and refuse exit as `emit_pipeline`.
+pub(crate) fn emit_project_pipeline(
+    prog: &Program,
+    plan: &ProjPlan,
+    lay: &ParamsLayout,
+) -> Vec<u32> {
+    let mut e = Emitter::new();
+
+    e.raw(0xA9BA_7BFD); // stp x29, x30, [sp, #-0x60]!
+    e.raw(0x9100_03FD); // mov x29, sp
+    e.raw(0xA901_53F3); // stp x19, x20, [sp, #0x10]
+    e.raw(0xA902_5BF5); // stp x21, x22, [sp, #0x20]
+    e.raw(0xA903_63F7); // stp x23, x24, [sp, #0x30]
+    e.raw(0xA904_6BF9); // stp x25, x26, [sp, #0x40]
+    e.raw(0xA905_73FB); // stp x27, x28, [sp, #0x50]
+    e.raw(0xD104_83FF); // sub sp, sp, #288
+    e.mov_x(PARAMS, 0);
+    e.ldr_x(NROWS, PARAMS, lay.nrows);
+    e.ldr_x(SEL, PARAMS, lay.sel);
+
+    let hoist: Vec<(u16, u32, u32)> = plan
+        .used_cols
+        .iter()
+        .take(HOIST_PAIRS.len())
+        .zip(HOIST_PAIRS)
+        .map(|(&col, (p0, nul))| (col, p0, nul))
+        .collect();
+    let mut ctx = Ctx { lay, hoist, row_fail: Label(0), row_next: Label(0), refuse: Label(0) };
+    for &(col, p0, nul) in &ctx.hoist {
+        e.ldr_x(p0, PARAMS, lane_p0(&ctx, col));
+        e.ldr_x(nul, PARAMS, lane_isnull(&ctx, col));
+    }
+    e.mov_x(ROW, 31); // i = 0
+
+    let loop_head = e.new_label();
+    ctx.row_next = e.new_label();
+    // No Qual steps exist in a classified projection program (plan_project
+    // refuses them), so row_fail is unreachable; alias it to row_next.
+    ctx.row_fail = ctx.row_next;
+    let exit_ok = e.new_label();
+    ctx.refuse = e.new_label();
+    let row_next = ctx.row_next;
+    let refuse = ctx.refuse;
+    let ctx = ctx;
+
+    e.bind(loop_head);
+    e.cmp_x_x(ROW, NROWS);
+    e.b_cond(Cond::Ge, exit_ok);
+
+    // Selection test: skip rows whose bit is clear.
+    e.lsr_x_6(8, ROW);
+    e.ldr_x_idx3(9, SEL, 8);
+    e.and_x_63(10, ROW);
+    e.movz_x(11, 1);
+    e.lslv_x(11, 11, 10);
+    e.and_x(9, 9, 11);
+    e.cbz_x(9, row_next);
+
+    for step in &prog.steps {
+        emit_step(&mut e, &ctx, prog, step);
+    }
+
+    e.bind(row_next);
+    e.add_x_imm(ROW, ROW, 1);
+    e.b(loop_head);
+
+    e.bind(exit_ok);
+    e.movz_x(0, 0); // RC_OK
+    let epilogue = e.new_label();
+    e.b(epilogue);
+    e.bind(refuse);
+    e.movn_x(0, 0); // RC_REFUSE = -1
+    e.bind(epilogue);
+    e.raw(0x9104_83FF); // add sp, sp, #288
+    e.raw(0xA941_53F3); // ldp x19, x20, [sp, #0x10]
+    e.raw(0xA942_5BF5); // ldp x21, x22, [sp, #0x20]
+    e.raw(0xA943_63F7); // ldp x23, x24, [sp, #0x30]
+    e.raw(0xA944_6BF9); // ldp x25, x26, [sp, #0x40]
+    e.raw(0xA945_73FB); // ldp x27, x28, [sp, #0x50]
+    e.raw(0xA8C6_7BFD); // ldp x29, x30, [sp], #0x60
+    e.ret();
+
+    e.finish()
 }
