@@ -1314,3 +1314,341 @@ fn gen_new_vocab_program(r: &mut Lcg) -> Program {
     }
     p
 }
+
+// ---- projection tier ------------------------------------------------------
+//
+// The stitched projection contract: for every accepted program and every
+// batch + selection mask, run_into == eval_project on all SELECTED rows'
+// output cells; an erroring program (arith trap on a selected row) exits
+// Refused with NO error constructed where eval_project raises — the driver's
+// per-row replay owns error identity. Non-selected rows' cells are
+// unspecified (the consumer contract only covers selected rows).
+
+use lanestitch::{eval_project, OutLane, ProjOutcome, StitchedProjection};
+
+/// Random projection program over int columns: 1..=4 output columns drawn
+/// from {Var passthrough, arith var-var, arith var-const}.
+fn gen_proj_program(r: &mut Lcg, tys: &[ColTy]) -> (Program, usize) {
+    let mut prog = Program::new();
+    let nouts = 1 + r.below(4) as usize;
+    let int_col = |r: &mut Lcg, tys: &[ColTy]| -> (u16, ColTy) {
+        loop {
+            let c = r.below(tys.len() as u64) as usize;
+            if matches!(tys[c], ColTy::I16 | ColTy::I32 | ColTy::I64) {
+                return (c as u16, tys[c]);
+            }
+        }
+    };
+    let arith_for = |r: &mut Lcg, ty: ColTy| -> ArithOp {
+        let k = r.below(4);
+        match (ty, k) {
+            (ColTy::I16, 0) => ArithOp::Add2,
+            (ColTy::I16, 1) => ArithOp::Sub2,
+            (ColTy::I16, 2) => ArithOp::Mul2,
+            (ColTy::I16, _) => ArithOp::Div2,
+            (ColTy::I32, 0) => ArithOp::Add4,
+            (ColTy::I32, 1) => ArithOp::Sub4,
+            (ColTy::I32, 2) => ArithOp::Mul4,
+            (ColTy::I32, _) => ArithOp::Div4,
+            (_, 0) => ArithOp::Add8,
+            (_, 1) => ArithOp::Sub8,
+            (_, 2) => ArithOp::Mul8,
+            (_, _) => ArithOp::Div8,
+        }
+    };
+    for j in 0..nouts {
+        match r.below(3) {
+            0 => {
+                let c = r.below(tys.len() as u64) as u16;
+                prog.steps.push(Step::LoadLane { col: c, out: 0 });
+                prog.steps.push(Step::StoreOut { a: 0, out: j as u16 });
+            }
+            1 => {
+                let (a, ty) = int_col(r, tys);
+                let (b, _) = loop {
+                    let (b, bty) = int_col(r, tys);
+                    if bty == ty {
+                        break (b, bty);
+                    }
+                };
+                prog.steps.push(Step::LoadLane { col: a, out: 0 });
+                prog.steps.push(Step::LoadLane { col: b, out: 1 });
+                prog.steps.push(Step::Arith { op: arith_for(r, ty), a: 0, b: 1, out: 2 });
+                prog.steps.push(Step::StoreOut { a: 2, out: j as u16 });
+            }
+            _ => {
+                let (a, ty) = int_col(r, tys);
+                let k = prog.push_const(NullableDatum { value: gen_value(r, ty), isnull: false });
+                prog.steps.push(Step::LoadLane { col: a, out: 0 });
+                prog.steps.push(Step::LoadConst { k, out: 1 });
+                let (x, y) = if r.chance(50) { (0u8, 1u8) } else { (1u8, 0u8) };
+                prog.steps.push(Step::Arith { op: arith_for(r, ty), a: x, b: y, out: 2 });
+                prog.steps.push(Step::StoreOut { a: 2, out: j as u16 });
+            }
+        }
+    }
+    (prog, nouts)
+}
+
+struct OutBufs {
+    values: Vec<Vec<Datum>>,
+    isnull: Vec<Vec<bool>>,
+}
+
+impl OutBufs {
+    fn new(nouts: usize, nrows: usize) -> OutBufs {
+        OutBufs {
+            values: vec![vec![Datum::from_i64(-777); nrows]; nouts],
+            isnull: vec![vec![false; nrows]; nouts],
+        }
+    }
+
+    fn lanes(&mut self) -> Vec<OutLane<'_>> {
+        self.values
+            .iter_mut()
+            .zip(self.isnull.iter_mut())
+            .map(|(v, n)| OutLane { values: v, isnull: n })
+            .collect()
+    }
+}
+
+fn random_sel(r: &mut Lcg, nrows: u32) -> SelVec {
+    let mut sel = SelVec::all(nrows);
+    for i in 0..nrows {
+        if r.chance(40) {
+            sel.clear(i);
+        }
+    }
+    sel
+}
+
+#[test]
+fn proj_fuzz_parity_vs_interpreter() {
+    let mut r = Lcg(0x9e3779b97f4a7c15);
+    let mut stitched_seen = 0u32;
+    let mut refused_seen = 0u32;
+    for round in 0..400 {
+        let ncols = 1 + r.below(4) as usize;
+        let tys: Vec<ColTy> = (0..ncols)
+            .map(|_| match r.below(3) {
+                0 => ColTy::I16,
+                1 => ColTy::I32,
+                _ => ColTy::I64,
+            })
+            .collect();
+        let (prog, nouts) = gen_proj_program(&mut r, &tys);
+        let nrows = 1 + r.below(MAX_ROWS as u64) as u32;
+        let cols = gen_batch_data(&mut r, &tys, nrows as usize, 15);
+        let sel = random_sel(&mut r, nrows);
+        let batch = as_batch(&cols, nrows);
+
+        // Reference: interpreter over selected rows.
+        let mut want = OutBufs::new(nouts, nrows as usize);
+        let interp_res = {
+            let mut lanes = want.lanes();
+            eval_project(&prog, &batch, &sel, &mut lanes)
+        };
+
+        let Some(body) = StitchedProjection::compile(&prog, ncols, nouts) else {
+            // Off-arch / kill switch: nothing to compare.
+            continue;
+        };
+        let mut got = OutBufs::new(nouts, nrows as usize);
+        let nwords = (nrows as usize).div_ceil(64);
+        let outcome = {
+            let mut lanes = got.lanes();
+            body.run_into(nrows, &batch.lanes, &sel.words[..nwords], &mut lanes)
+        };
+        match (outcome, &interp_res) {
+            (ProjOutcome::Stitched, Ok(())) => {
+                stitched_seen += 1;
+                for j in 0..nouts {
+                    for i in 0..nrows as usize {
+                        if !sel.contains(i as u32) {
+                            continue;
+                        }
+                        assert_eq!(
+                            got.values[j][i].as_usize(),
+                            want.values[j][i].as_usize(),
+                            "round {round} out {j} row {i} value diverged"
+                        );
+                        assert_eq!(
+                            got.isnull[j][i], want.isnull[j][i],
+                            "round {round} out {j} row {i} isnull diverged"
+                        );
+                    }
+                }
+            }
+            (ProjOutcome::Refused, Err(_)) => {
+                // Trap parity: the body refused exactly where the
+                // interpreter errored. Sticky: the next run refuses too.
+                refused_seen += 1;
+                let mut again = OutBufs::new(nouts, nrows as usize);
+                let mut lanes = again.lanes();
+                assert_eq!(
+                    body.run_into(nrows, &batch.lanes, &sel.words[..nwords], &mut lanes),
+                    ProjOutcome::Refused,
+                    "round {round}: refusal must be sticky"
+                );
+            }
+            (outcome, res) => panic!(
+                "round {round}: outcome {outcome:?} vs interp {:?} — must agree on trap-or-not",
+                res.as_ref().map(|_| ()).map_err(|e| e.message.clone())
+            ),
+        }
+    }
+    if cfg!(target_arch = "aarch64") && lanestitch::available() {
+        // Adversarial pools (MIN/MAX heavy) make traps common; the floor
+        // only pins that BOTH arms are exercised.
+        assert!(stitched_seen > 50, "stitched projection engaged {stitched_seen} times only");
+        assert!(refused_seen > 0, "no refuse-and-replay rounds seen");
+    }
+}
+
+#[test]
+fn proj_fail_closed_refusals() {
+    // Qual step inside a projection program refuses.
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    prog.steps.push(Step::Qual { a: 0 });
+    prog.steps.push(Step::StoreOut { a: 0, out: 0 });
+    assert!(StitchedProjection::compile(&prog, 1, 1).is_none());
+
+    // No StoreOut refuses.
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    assert!(StitchedProjection::compile(&prog, 1, 1).is_none());
+
+    // Out index beyond nouts refuses.
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    prog.steps.push(Step::StoreOut { a: 0, out: 3 });
+    assert!(StitchedProjection::compile(&prog, 1, 1).is_none());
+
+    // Read of a never-written register refuses.
+    let mut prog = Program::new();
+    prog.steps.push(Step::StoreOut { a: 0, out: 0 });
+    assert!(StitchedProjection::compile(&prog, 1, 1).is_none());
+
+    // StoreOut in a QUAL program refuses (plan_clauses side).
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    prog.steps.push(Step::StoreOut { a: 0, out: 0 });
+    prog.steps.push(Step::LoadLane { col: 0, out: 1 });
+    prog.steps.push(Step::Qual { a: 1 });
+    assert!(StitchedProgram::compile(&prog, 1).is_none());
+}
+
+#[test]
+fn proj_selected_rows_only() {
+    // Overflow on a NON-selected row must not trap: the body skips clear
+    // bits entirely (the driver masks fallback rows out for exactly this).
+    let values = vec![Datum::from_i32(i32::MAX), Datum::from_i32(1)];
+    let isnull = vec![false, false];
+    let cols = vec![
+        ColData { values, isnull },
+        ColData { values: vec![Datum::from_i32(1); 2], isnull: vec![false; 2] },
+    ];
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    prog.steps.push(Step::LoadLane { col: 1, out: 1 });
+    prog.steps.push(Step::Arith { op: ArithOp::Add4, a: 0, b: 1, out: 2 });
+    prog.steps.push(Step::StoreOut { a: 2, out: 0 });
+    let Some(body) = StitchedProjection::compile(&prog, 2, 1) else { return };
+    let mut sel = SelVec::all(2);
+    sel.clear(0); // the overflowing row is not selected
+    let batch = as_batch(&cols, 2);
+    let mut bufs = OutBufs::new(1, 2);
+    let mut lanes = bufs.lanes();
+    assert_eq!(
+        body.run_into(2, &batch.lanes, &sel.words[..1], &mut lanes),
+        ProjOutcome::Stitched
+    );
+    drop(lanes);
+    assert_eq!(bufs.values[0][1].as_i32(), 2);
+    assert!(!bufs.isnull[0][1]);
+
+    // Same program, overflowing row selected: Refused, no error object.
+    let mut sel = SelVec::all(2);
+    let mut bufs = OutBufs::new(1, 2);
+    let mut lanes = bufs.lanes();
+    assert_eq!(
+        body.run_into(2, &batch.lanes, &sel.words[..1], &mut lanes),
+        ProjOutcome::Refused
+    );
+    drop(lanes);
+    // And the interpreter raises C's message for the replay.
+    let err = eval_project(&prog, &batch, &sel, &mut bufs.lanes()).unwrap_err();
+    assert_eq!(err.message, "integer out of range");
+}
+
+#[test]
+fn proj_null_propagation() {
+    // Strict arith: NULL in -> NULL out; Var passthrough copies isnull.
+    let cols = vec![
+        ColData {
+            values: vec![Datum::from_i64(5), Datum::from_i64(7)],
+            isnull: vec![false, true],
+        },
+        ColData {
+            values: vec![Datum::from_i64(2), Datum::from_i64(2)],
+            isnull: vec![false, false],
+        },
+    ];
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    prog.steps.push(Step::LoadLane { col: 1, out: 1 });
+    prog.steps.push(Step::Arith { op: ArithOp::Mul8, a: 0, b: 1, out: 2 });
+    prog.steps.push(Step::StoreOut { a: 2, out: 0 });
+    prog.steps.push(Step::LoadLane { col: 0, out: 3 });
+    prog.steps.push(Step::StoreOut { a: 3, out: 1 });
+    let batch = as_batch(&cols, 2);
+    let sel = SelVec::all(2);
+    let mut want = OutBufs::new(2, 2);
+    eval_project(&prog, &batch, &sel, &mut want.lanes()).unwrap();
+    assert_eq!(want.values[0][0].as_i64(), 10);
+    assert!(!want.isnull[0][0]);
+    assert!(want.isnull[0][1], "NULL lane must propagate through strict arith");
+    assert!(want.isnull[1][1], "Var passthrough must copy isnull");
+    if let Some(body) = StitchedProjection::compile(&prog, 2, 2) {
+        let mut got = OutBufs::new(2, 2);
+        let mut lanes = got.lanes();
+        assert_eq!(
+            body.run_into(2, &batch.lanes, &sel.words[..1], &mut lanes),
+            ProjOutcome::Stitched
+        );
+        drop(lanes);
+        for j in 0..2 {
+            for i in 0..2 {
+                assert_eq!(got.isnull[j][i], want.isnull[j][i]);
+                if !want.isnull[j][i] {
+                    assert_eq!(got.values[j][i].as_usize(), want.values[j][i].as_usize());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn proj_drift_fails_open() {
+    let mut prog = Program::new();
+    prog.steps.push(Step::LoadLane { col: 0, out: 0 });
+    prog.steps.push(Step::StoreOut { a: 0, out: 0 });
+    // Var-only programs classify (economics floors live in the driver).
+    let Some(body) = StitchedProjection::compile(&prog, 1, 1) else { return };
+    let cols = vec![ColData { values: vec![Datum::from_i32(1); 4], isnull: vec![false; 4] }];
+    let batch = as_batch(&cols, 4);
+    let sel = SelVec::all(4);
+    // Short output lane: Drift (fail open), outputs untouched.
+    let mut short_v = vec![Datum::from_i32(0); 2];
+    let mut short_n = vec![false; 2];
+    let mut lanes = [OutLane { values: &mut short_v, isnull: &mut short_n }];
+    assert_eq!(
+        body.run_into(4, &batch.lanes, &sel.words[..1], &mut lanes),
+        ProjOutcome::Drift
+    );
+    // Missing lane: Drift.
+    let mut bufs = OutBufs::new(1, 4);
+    let mut lanes = bufs.lanes();
+    assert_eq!(body.run_into(4, &[], &sel.words[..1], &mut lanes), ProjOutcome::Drift);
+}

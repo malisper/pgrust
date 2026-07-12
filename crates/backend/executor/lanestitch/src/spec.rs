@@ -25,6 +25,8 @@ pub const MAX_ROWS: usize = 1024;
 pub const SEL_WORDS: usize = MAX_ROWS / 64;
 pub const MAX_COLS: usize = 8;
 pub const MAX_REGS: usize = 16;
+/// Output-lane cap for projection programs (`Step::StoreOut`).
+pub const MAX_OUTS: usize = 8;
 
 /// Selection vector over one staged batch: bit i set = row i selected.
 #[derive(Clone)]
@@ -78,6 +80,15 @@ pub struct Lane<'a> {
 pub struct Batch<'a> {
     pub nrows: u32,
     pub lanes: Vec<Lane<'a>>,
+}
+
+/// One mutable output lane of a projection program: `Step::StoreOut` writes
+/// the row's computed Datum + isnull byte here. Same canonical-datum
+/// currency as [`Lane`] (arith results are `from_iN`-canonical; Var
+/// passthrough copies the input lane image verbatim).
+pub struct OutLane<'a> {
+    pub values: &'a mut [Datum],
+    pub isnull: &'a mut [bool],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +167,11 @@ pub enum Step {
     /// Clause boundary: reg[a] NULL or false fails the row (short-circuit:
     /// later clauses never evaluate for this row).
     Qual { a: u8 },
+    /// Projection output: out_lane[out][row] = reg[a] (value + isnull).
+    /// Projection programs only — a qual program carrying StoreOut refuses
+    /// (fail closed), and a projection program carrying Qual refuses too:
+    /// the two segment kinds never mix in one program.
+    StoreOut { a: u8, out: u16 },
 }
 
 pub struct Program {

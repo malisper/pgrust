@@ -8,7 +8,9 @@ use types_error::{
     PgError, PgResult, ERRCODE_DIVISION_BY_ZERO, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 
-use crate::spec::{ArithOp, Batch, BoolTestKind, NullTestKind, Program, SelVec, Step, MAX_REGS, MAX_ROWS};
+use crate::spec::{
+    ArithOp, Batch, BoolTestKind, NullTestKind, OutLane, Program, SelVec, Step, MAX_REGS, MAX_ROWS,
+};
 
 #[cold]
 #[inline(never)]
@@ -77,6 +79,19 @@ fn arith_eval(op: ArithOp, a: Datum, b: Datum) -> PgResult<Datum> {
 /// exits the row. Errors propagate with rows 0..i-1 fully consumed.
 #[inline(always)]
 pub fn eval_row(prog: &Program, batch: &Batch<'_>, i: u32) -> PgResult<bool> {
+    eval_row_outs(prog, batch, i, &mut [])
+}
+
+/// [`eval_row`] with projection output lanes: `StoreOut` steps write
+/// `outs[out]` at row `i`. Qual programs pass `&mut []` (a StoreOut in a
+/// qual program is a caller bug — debug-asserted).
+#[inline(always)]
+pub fn eval_row_outs(
+    prog: &Program,
+    batch: &Batch<'_>,
+    i: u32,
+    outs: &mut [OutLane<'_>],
+) -> PgResult<bool> {
     let mut regs = [NullableDatum::null(); MAX_REGS];
     for step in &prog.steps {
         match *step {
@@ -162,9 +177,38 @@ pub fn eval_row(prog: &Program, batch: &Batch<'_>, i: u32) -> PgResult<bool> {
                     return Ok(false);
                 }
             }
+            Step::StoreOut { a, out } => {
+                let r = regs[a as usize];
+                let lane = &mut outs[out as usize];
+                lane.values[i as usize] = r.value;
+                lane.isnull[i as usize] = r.isnull;
+            }
         }
     }
     Ok(true)
+}
+
+/// The reference projection tier over one staged batch: for every SELECTED
+/// row (ascending), run the whole program, `StoreOut` steps writing the
+/// output lanes. Non-selected rows are untouched (their output cells hold
+/// garbage — the consumer contract only covers selected rows). On error,
+/// outputs for rows before the erroring row are final; the caller discards
+/// them (refuse-and-replay routes the batch through the C-ported per-row
+/// path, which re-raises the error on C's row with C's message).
+pub fn eval_project(
+    prog: &Program,
+    batch: &Batch<'_>,
+    sel: &SelVec,
+    outs: &mut [OutLane<'_>],
+) -> PgResult<()> {
+    debug_assert!(batch.nrows as usize <= MAX_ROWS);
+    for i in 0..batch.nrows {
+        if sel.contains(i) {
+            let ok = eval_row_outs(prog, batch, i, outs)?;
+            debug_assert!(ok, "projection programs carry no Qual steps");
+        }
+    }
+    Ok(())
 }
 
 /// The reference tier over one staged batch: ascending rows, failing rows'

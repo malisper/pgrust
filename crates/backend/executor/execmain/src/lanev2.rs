@@ -116,13 +116,33 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
             .map(|&(col, _, _)| col as i32 + 1)
             .max()
             .expect("census has at least one clause");
-        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, true, false, true);
+        // Phase-3 projection stitching (drain pipelines only, like every
+        // stitched segment): when the scan's projection is census-covered,
+        // widen the deform prefix to its read columns so the stitched
+        // projection reads the SAME staged lanes as the qual bitmap (the
+        // one-deform-two-consumers coupling; the bitmap + output lanes are
+        // the only currency between the segments). If the wider prefix is
+        // unarmable (a non-fixed-width column inside it), fall back to the
+        // qual-only prefix — projection hosting refuses, current per-row
+        // projection behavior untouched (fail closed).
+        let proj_prefix = if stitch {
+            ::nodeseqscan::seq_scan_proj_stitch_prefix(ss).unwrap_or(0)
+        } else {
+            0
+        };
+        if proj_prefix > prefix {
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, proj_prefix, true, false, true);
+        }
+        if !::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, true, false, true);
+        }
         if ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
             lane_trace(&format!("seqscan qual bitmap armed ({ctx})"));
         }
     }
     if stitch {
         ::nodeseqscan::seq_scan_stitch_arm(ss);
+        ::nodeseqscan::seq_scan_proj_stitch_arm(ss, estate);
     }
 }
 

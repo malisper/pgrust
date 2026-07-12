@@ -134,6 +134,11 @@ impl Emitter {
         self.raw(0x3860_6800 | (rm << 16) | (rn << 5) | rt);
     }
 
+    // STRB Wt, [Xn, Xm] (X index, no extend)
+    pub fn strb_idx(&mut self, rt: u32, rn: u32, rm: u32) {
+        self.raw(0x3820_6800 | (rm << 16) | (rn << 5) | rt);
+    }
+
     pub fn movz_w(&mut self, rd: u32, imm16: u32) {
         debug_assert!(imm16 <= 0xFFFF);
         self.raw(0x5280_0000 | (imm16 << 5) | rd);
