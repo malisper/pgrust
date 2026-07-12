@@ -224,6 +224,10 @@ fn gather_readnext(
     node: &mut GatherState<'_>,
 ) -> PgResult<Option<core::ptr::NonNull<::types_tuple::MinimalTupleData>>> {
     let mut nvisited = 0;
+    // Stall self-report clock for the leader's all-queues-idle wait; a tuple
+    // or a reader finishing returns from this call (= progress). Latch wakes
+    // without progress keep the clock running.
+    let mut stall = ::shm_mq::stall::StallDetector::new();
     loop {
         crate::cfi()?;
 
@@ -237,6 +241,7 @@ fn gather_readnext(
 
         if done {
             debug_assert!(tup.is_none());
+            stall.reset();
             node.nreaders -= 1;
             if node.nreaders == 0 {
                 exec_shutdown_gather_workers(node)?;
@@ -263,7 +268,7 @@ fn gather_readnext(
             if node.need_to_scan_locally {
                 return Ok(None);
             }
-            wait_on_my_latch(WAIT_EVENT_EXECUTE_GATHER)?;
+            leader_wait_reporting(WAIT_EVENT_EXECUTE_GATHER, &mut stall, &node.reader)?;
             nvisited = 0;
         }
     }
@@ -273,6 +278,41 @@ pub(crate) fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = init_small::globals::MyLatch().expect("gather leader without MyLatch");
     ::parallel::gtrace("l.wait.begin");
     latch::WaitLatch(Some(latch), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event)?;
+    ::parallel::gtrace("l.wait.end");
+    latch::ResetLatch(latch);
+    Ok(())
+}
+
+/// `wait_on_my_latch` with the MQ stall self-report armed
+/// (notes/parallel-repeat-wedge-2026-07-12.md): if the leader's wait crosses
+/// the threshold with every reader idle, elog one LOG line describing every
+/// worker queue — counters plus each endpoint's latch and wakeup-registry
+/// state, the deaf-worker evidence — then keep waiting unchanged.
+fn leader_wait_reporting(
+    wait_event: u32,
+    stall: &mut ::shm_mq::stall::StallDetector,
+    readers: &[tqueue::TupleQueueReader],
+) -> PgResult<()> {
+    let latch = init_small::globals::MyLatch().expect("gather leader without MyLatch");
+    ::parallel::gtrace("l.wait.begin");
+    ::shm_mq::stall::wait_latch_reporting(latch, wait_event, stall, &mut |waited_ms| {
+        let mut msg = format!(
+            "gather leader stall self-report: waited_ms={waited_ms} my_pid={} my_procno={} nreaders={}",
+            init_small::globals::MyProcPid(),
+            init_small::globals::MyProcNumber(),
+            readers.len(),
+        );
+        for (i, reader) in readers.iter().enumerate() {
+            msg.push_str(&format!(
+                " reader[{i}]={{{}}}",
+                ::shm_mq::stall::describe_queue(reader.mq())
+            ));
+        }
+        // LOG never unwinds; the wait continues untouched either way.
+        let _ = ::elog::ereport(::types_error::LOG).errmsg(msg).finish(
+            ::types_error::ErrorLocation::new("nodeGather.c", 0, "gather_stall_report"),
+        );
+    })?;
     ::parallel::gtrace("l.wait.end");
     latch::ResetLatch(latch);
     Ok(())
