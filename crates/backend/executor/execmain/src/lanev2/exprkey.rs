@@ -720,6 +720,12 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     // Fresh per-build epoch map (rescans must not reuse stale pergroups).
     xk.dg_epoch = None;
     xk.dg_slots.clear();
+    // Same for the multi-key intern cache: rescans rebuild the compact +
+    // intern tables, so cached code -> intern-id entries are stale.
+    if let ExprKeyKind::Multi(m) = &mut xk.kind {
+        m.mks.epoch = None;
+        m.mks.code_ids.clear();
+    }
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
