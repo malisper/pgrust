@@ -363,6 +363,139 @@ where
     Ok(if got { Some(slot_id) } else { None })
 }
 
+// ---------------------------------------------------------------------------
+// Lane-executor-v2 sort-breaker seam (docs/design/lane-executor-v2.md §8:
+// breakers delegate finalize/read-back to the row-path state). The breaker
+// node lives in `execmain::lanev2`; these four legs give it `exec_sort`'s
+// exact tuplesort drive — build / put / performsort / drain — over the SAME
+// node state (`sort_Done` doubles as the breaker's Feed→Emit phase flag, and
+// `exec_rescan_sort` resets it for free), so falling back to `exec_sort` at
+// any call boundary is byte-safe and the output order is C's by construction.
+// Each leg mirrors the corresponding `exec_sort` leg — keep them in lockstep.
+// ---------------------------------------------------------------------------
+
+/// Build leg: create the tuplesort exactly as `exec_sort` does (same options,
+/// same work_mem, same begin_* arms, same bound). The caller owns the
+/// `!sort_done()` check.
+pub fn sort_lane_begin<'mcx>(
+    node: &mut SortState<'mcx>,
+    outer_desc: Rc<TupleDescData<'static>>,
+) -> PgResult<()> {
+    debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
+    debug_assert!(node.datumSort == (outer_desc.natts == 1));
+    let mut tuplesortopts = TUPLESORT_NONE;
+    if node.randomAccess {
+        tuplesortopts |= TUPLESORT_RANDOMACCESS;
+    }
+    if node.bounded {
+        tuplesortopts |= TUPLESORT_ALLOWBOUNDED;
+    }
+    let work_mem = init_small::globals::work_mem();
+    let mut ts = if node.datumSort {
+        Tuplesort::begin_datum(
+            outer_desc.attr(0).atttypid,
+            node.plan.sortOperators[0],
+            node.plan.collations[0],
+            node.plan.nullsFirst[0],
+            work_mem,
+            tuplesortopts,
+        )?
+    } else {
+        Tuplesort::begin_heap(
+            outer_desc,
+            node.plan.sortColIdx,
+            node.plan.sortOperators,
+            node.plan.collations,
+            node.plan.nullsFirst,
+            work_mem,
+            tuplesortopts,
+        )?
+    };
+    if node.bounded {
+        ts.set_bound(node.bound);
+    }
+    node.tuplesortstate = Some(ts);
+    Ok(())
+}
+
+/// Feed leg (breaker `Sink::accept`): put one outer tuple. Datum sorts take
+/// `putdatum` for BOTH by-ref and by-val keys: by-ref must copy (exactly as
+/// `exec_sort`), and the by-val batch putter is a closure-scoped lever the
+/// one-tuple-per-accept push feed cannot hold open — `putdatum`'s by-val arm
+/// is the same `puttuple_common` call with identical accounting, so the sort
+/// state and output are unchanged (a per-put len round-trip is the only
+/// cost; re-batching it is a later perf lever).
+pub fn sort_lane_put<'mcx>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    id: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let ts = node.tuplesortstate.as_mut().expect("sort_lane_put before sort_lane_begin");
+    if node.datumSort {
+        let slot = estate.slot_mut(id);
+        exectuples::slot_getsomeattrs(slot, 1);
+        let base = slot.base();
+        ts.putdatum(base.tts_values[0], base.tts_isnull[0])
+    } else {
+        ts.puttupleslot(estate.slot_mut(id), mcx)
+    }
+}
+
+/// Finalize leg (breaker `Sink::finish`): `performsort` + the EXPLAIN sort
+/// stats + the built flags — `exec_sort`'s build-leg tail verbatim. Flips
+/// `sort_Done`, the breaker's Feed→Emit phase flag.
+pub fn sort_lane_finish<'mcx>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ts =
+        node.tuplesortstate.as_mut().expect("sort_lane_finish before sort_lane_begin");
+    ts.performsort()?;
+
+    let id = node.plan.plan.plan_node_id;
+    let stats = ts.get_stats();
+    match estate.es_sort_instrumentation.iter_mut().find(|(i, _)| *i == id) {
+        Some((_, s)) => *s = stats,
+        None => estate.es_sort_instrumentation.push((id, stats)),
+    }
+
+    node.sort_Done = true;
+    node.bounded_Done = node.bounded;
+    node.bound_Done = node.bound;
+    Ok(())
+}
+
+/// Read-back leg (breaker `Source::produce`): `exec_sort`'s drain leg,
+/// forward-only (the lane refuses non-forward calls before engaging).
+/// Fetches into `ps_ResultTupleSlot`; `None` = exhausted.
+pub fn sort_lane_next<'mcx>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(node.sort_Done);
+    let mcx = estate.es_query_cxt;
+    let ts = node.tuplesortstate.as_mut().expect("sort_lane_next before sort_lane_finish");
+    let slot_id = node.ps_ResultTupleSlot;
+    let slot = estate.slot_mut(slot_id);
+    let got = if node.datumSort {
+        exectuples::exec_clear_tuple(slot, mcx);
+        match ts.getdatum(true)? {
+            Some(nd) => {
+                let base = slot.base_mut();
+                base.tts_values[0] = if nd.isnull { Datum::null() } else { nd.value };
+                base.tts_isnull[0] = nd.isnull;
+                exectuples::exec_store_virtual_tuple(slot);
+                true
+            }
+            None => false,
+        }
+    } else {
+        ts.gettupleslot(true, false, slot, mcx)?
+    };
+    Ok(got.then_some(slot_id))
+}
+
 /// `ExecEndSort` node-local half; the caller ends the outer child.
 pub fn exec_end_sort(node: &mut SortState<'_>) {
     node.tuplesortstate = None;
