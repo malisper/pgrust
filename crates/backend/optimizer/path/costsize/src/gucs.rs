@@ -38,6 +38,59 @@ session_guc_cluster!(CostsizeGucs, COSTSIZE_GUCS:
     (parallel_leader_participation_backing_cell, bool, parallel_leader_participation_backing, set_parallel_leader_participation_backing, true),
 );
 
+// --- cbstore planner knobs (pgrust-only) ---------------------------------
+//
+// Re-homed from the old cbstore branch's hidden (GUC_NO_SHOW_ALL) SQL GUCs:
+// the lane-v2 line deliberately adds NO new GUCs (a new row would break the
+// byte-identical `pg_settings` / `SHOW ALL` regression outputs — see
+// execmain::lanev2's gating note), so these are compile-time constants with
+// an env off-switch where the old surface was a bool. Every consumer is
+// gated on the relation/plan actually being cbstore-fed, so heap plans are
+// untouched at any value. Provenance / calibration notes for the constants
+// live with their original definitions on the old branch
+// (guc_tables::consts @ inter-query-scheduling).
+
+// cbstore-path Gather setup: measured one-time thread-native startup
+// (~11ms flat) vs C's fork-based ~1-2ms that DEFAULT_PARALLEL_SETUP_COST
+// prices. PROVISIONAL — re-measure when lane-v2 parallel over cbstore lands.
+pub const DEFAULT_CBSTORE_PARALLEL_SETUP_COST: f64 = 32000.0;
+// cbstore-path Gather per-tuple transfer (chunked transport ~27ns/tuple).
+pub const DEFAULT_CBSTORE_PARALLEL_TUPLE_COST: f64 = 0.005;
+// cbstore no-stats group-key ndistinct ratio (0 disables = C behavior);
+// superseded per column once a footer-NDV-backed ANALYZE has run.
+pub const DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO: f64 = 0.05;
+// Per-tuple surcharge for a Sort directly over a Gather on cbstore-fed
+// plans (denies workers the fused bounded-sort feed).
+pub const DEFAULT_CBSTORE_GATHER_SORT_TUPLE_COST: f64 = 30.0;
+
+pub fn cbstore_parallel_setup_cost() -> f64 {
+    DEFAULT_CBSTORE_PARALLEL_SETUP_COST
+}
+
+pub fn cbstore_parallel_tuple_cost() -> f64 {
+    DEFAULT_CBSTORE_PARALLEL_TUPLE_COST
+}
+
+pub fn cbstore_group_ndistinct_ratio() -> f64 {
+    DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO
+}
+
+pub fn cbstore_gather_sort_tuple_cost() -> f64 {
+    DEFAULT_CBSTORE_GATHER_SORT_TUPLE_COST
+}
+
+/// Footer sorted-column scan pathkeys (was GUC `cbstore_scan_pathkeys`,
+/// default on). `PGRUST_CBSTORE_SCAN_PATHKEYS=0`/`off` disables for A/B.
+pub fn cbstore_scan_pathkeys() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_CBSTORE_SCAN_PATHKEYS").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 // Read through the slot: execmain install_if_absent's a stand-in accessor,
 // whichever install wins must serve every reader.
 
