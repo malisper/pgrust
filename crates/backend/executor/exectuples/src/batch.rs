@@ -69,12 +69,25 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     /// and the fixed-width-prefix restriction does not apply). The heap
     /// deform paths must never see this plan (they index `offs`); callers
     /// install it only on cbstore scan states, whose `TableScanDesc`
-    /// dispatch never reaches the heap deform.
+    /// dispatch never reaches the heap deform (`is_virtual` guards it).
     pub fn columnar(mcx: Mcx<'mcx>, ncols: usize) -> Option<SoaDeformPlan<'mcx>> {
         if ncols == 0 || ncols > u16::MAX as usize {
             return None;
         }
         Some(SoaDeformPlan { ncols: ncols as u16, end_off: 0, offs: PgVec::new_in(mcx), jit: None })
+    }
+
+    /// Alias of [`SoaDeformPlan::columnar`] (likeband's name for the same
+    /// virtual, offset-chain-free columnar plan).
+    pub fn virtual_prefix(mcx: Mcx<'mcx>, ncols: usize) -> Option<SoaDeformPlan<'mcx>> {
+        Self::columnar(mcx, ncols)
+    }
+
+    /// True for `columnar`/`virtual_prefix` plans (no offset chain despite
+    /// `ncols > 0`).
+    #[inline]
+    pub fn is_virtual(&self) -> bool {
+        self.ncols > 0 && self.offs.is_empty()
     }
 }
 
@@ -157,6 +170,22 @@ impl SoaDictLane {
     }
 }
 
+/// Contiguity witness for a text column's staged window (likeband blob-wide
+/// kernel): the window's varlena images sit back-to-back (modulo alignment
+/// padding) inside ONE readable span — the columnar AM's decode arena or the
+/// raw mmap blob — and the column's value cells are ASCENDING pointers into
+/// it. Published per window by a columnar fill that can prove the layout;
+/// heap fills never publish one (page tuples are not contiguous). Consumers
+/// (the contains-LIKE blob kernel) run one substring search over the whole
+/// span and map hits back to rows through the pointer lane, rejecting hits
+/// that straddle row boundaries (headers/padding) — the per-row occurrence
+/// set is therefore identical to a per-row search.
+#[derive(Clone, Copy)]
+pub struct SoaTextSpan {
+    pub base: *const u8,
+    pub len: usize,
+}
+
 pub struct SoaBatch<'mcx> {
     ncols: u16,
     nrows: u32,
@@ -187,6 +216,11 @@ pub struct SoaBatch<'mcx> {
     // Unarmed = fill all needed columns exactly as before (fail open).
     lane_read: PgVec<'mcx, bool>,
     lane_read_any: bool,
+    // Per-window text-span witnesses (blob-wide contains kernel); same
+    // window-boundary discipline as dict lanes: cleared at begin, re-answered
+    // (or left None = per-row) by the fill every window.
+    text_spans: PgVec<'mcx, Option<SoaTextSpan>>,
+    text_any: bool,
 }
 
 impl<'mcx> SoaBatch<'mcx> {
@@ -208,6 +242,8 @@ impl<'mcx> SoaBatch<'mcx> {
             dict_any: false,
             lane_read: ::mcx::vec_from_elem_in(mcx, false, ncols as usize),
             lane_read_any: false,
+            text_spans: ::mcx::vec_from_elem_in(mcx, None, ncols as usize),
+            text_any: false,
         }
     }
 
@@ -223,6 +259,29 @@ impl<'mcx> SoaBatch<'mcx> {
         if self.dict_any {
             self.dict_lanes.fill(None);
         }
+        // Same discipline for text-span witnesses: spans are per-window
+        // (arena/blob pointers); stale spans must never survive a re-fill.
+        if self.text_any {
+            self.text_spans.fill(None);
+            self.text_any = false;
+        }
+    }
+
+    /// AM-side per-window contiguity answer for a Raw-filled text column
+    /// (see `SoaTextSpan`). The column's values cells MUST also be filled
+    /// (the span complements the pointer lane, it does not replace it).
+    #[inline]
+    pub fn set_text_span(&mut self, c: usize, span: SoaTextSpan) {
+        self.text_spans[c] = Some(span);
+        self.text_any = true;
+    }
+
+    #[inline]
+    pub fn text_span(&self, c: usize) -> Option<SoaTextSpan> {
+        if !self.text_any {
+            return None;
+        }
+        self.text_spans[c]
     }
 
     /// Lane arm (once, at scan/program build): the consumer reads column `c`
@@ -513,6 +572,7 @@ pub fn soa_deform_columns(
     atts: &[CompactAttribute],
     qual_col_only: Option<u16>,
 ) {
+    debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
     let n = soa.nrows as usize;
     let ncols = plan.ncols as usize;
     let (first, last) = match qual_col_only {
@@ -668,9 +728,10 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
 mcx::forget_safe_nodrop!(SoaVarKeyPlan);
 mcx::forget_safe_nodrop!(SoaDictTable);
 mcx::forget_safe_nodrop!(SoaDictLane);
+mcx::forget_safe_nodrop!(SoaTextSpan);
 
 // jit exempt: released in exec_end_seq_scan (the bloom-filter Rc precedent).
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs; jit },
-    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any },
+    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any, text_spans, text_any },
 );

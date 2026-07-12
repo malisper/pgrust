@@ -70,6 +70,12 @@ pub struct SeqScanState<'mcx> {
     // per-pull walk measured +20% on kernel-less count(*) shapes). Reset
     // with lane_verdict on park.
     cb_standalone: Option<bool>,
+    // Memoized PREWHERE-arm refusal (walker/translate refused the qual —
+    // static per node: the qual never changes). Refused shapes must not
+    // re-pay the translate cascade (LIKE-kernel builds, the regex probe
+    // compile) per feed event or rescan — the refusal-audit "admission-
+    // attempt tax" (coordinator rider, 2026-07-14). Never set on success.
+    cb_prewhere_refused: bool,
     // cbstore relations only: plan-derived column need-set + zone-mappable
     // conjuncts, installed on the scan desc at open (cbstore-impl.md §7.3).
     cb_scan: Option<std::boxed::Box<CbScanInfo>>,
@@ -735,11 +741,18 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
             return Ok(b.plan.ncols() as i32 >= min_prefix);
         }
     }
+    // Refusal memo: the qual is static per node — a refused translate must
+    // not re-run (kernel builds, the regex probe compile) per feed event,
+    // rescan, or memoized-standalone pull (the admission-attempt tax).
+    if node.cb_prewhere_refused {
+        return Ok(false);
+    }
     let Some(q) = node.ss.qual.as_deref() else { return Ok(false) };
     let shape = match ::execexpr::lane_scan_qual(q) {
         Ok(s) => s,
         Err(reason) => {
             ::laneexec::log_refused(reason);
+            node.cb_prewhere_refused = true;
             return Ok(false);
         }
     };
@@ -748,6 +761,7 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
         Ok(lq) => lq,
         Err(reason) => {
             ::laneexec::log_refused(reason);
+            node.cb_prewhere_refused = true;
             return Ok(false);
         }
     };
@@ -765,6 +779,49 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
     // the caller's arms rebuild their own staging.
     let prefix = (lq.max_attnum as i32 + 1).max(min_prefix);
     seq_scan_batch_soa_prepare(node, estate, prefix, false, true, true);
+    if node.batch_soa.is_none() {
+        // Text-qual staging (likeband): the fixed-width prefix refused — a
+        // text column sits inside the qual prefix (the LIKE band's Q21-class
+        // shape). That proof is a heap tuple-walk requirement only; the
+        // cbstore window deform fills ANY column type per column
+        // (`batch_deform_col` publishes decoded pointer Datums for text) and
+        // the staged evaluators already consume them (dict lanes /
+        // `eval_raw_rows` over the Raw pointer lane). Arm the same lane over
+        // a VIRTUAL prefix plan carrying only the column count: this
+        // function is unreachable for heap scans (`cb_scan` gate above), the
+        // cbstore deform consumes exactly `ncols()`, and the slot publish is
+        // the virtual-slot no-op — the missing offset chain is never walked.
+        let mcx = estate.es_query_cxt;
+        node.batch_soa =
+            ::exectuples::SoaDeformPlan::virtual_prefix(mcx, prefix as usize).map(|plan| {
+                ::mcx::PgBox::new_in(
+                    BatchSoa {
+                        soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+                        plan,
+                        qual_armed: true,
+                        qual_only: false,
+                        key_col: None,
+                        varkey: None,
+                        key_read_col: 0,
+                        publish: true,
+                        quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                            ::execexpr::SCAN_CMP_MAX_CLAUSES],
+                        nquals: 0,
+                        contains: None,
+                        stitch: None,
+                        proj: None,
+                        lane: None,
+                        lane_requal: false,
+                        dict_group: None,
+                        sel: [0; ::exectuples::SOA_BM_WORDS],
+                        nwords: 0,
+                        cur_word: 0,
+                        cur_bits: 0,
+                    },
+                    mcx,
+                )
+            });
+    }
     match node.batch_soa.as_deref_mut() {
         Some(b) => {
             b.qual_armed = true;
@@ -791,7 +848,12 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
             Ok(true)
         }
         None => {
-            ::laneexec::log_refused("qual columns are not a fixed-width prefix");
+            // Residual staging refusal: only `virtual_prefix`'s u16 bound
+            // can fail now (the fixed-width-prefix refusal died with the
+            // virtual plan — likeband). Kept distinct so the gates can prove
+            // the old reason no longer fires.
+            ::laneexec::log_refused("qual prefix exceeds the staging bound");
+            node.cb_prewhere_refused = true;
             Ok(false)
         }
     }
@@ -2444,6 +2506,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         lane_n: 0,
         lane_verdict: None,
         cb_standalone: None,
+        cb_prewhere_refused: false,
         cb_scan,
     })
 }
@@ -2640,6 +2703,7 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.lane_n = 0;
     node.lane_verdict = None;
     node.cb_standalone = None;
+    node.cb_prewhere_refused = false;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -2741,7 +2805,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n, lane_verdict, cb_standalone;
+        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused;
         bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code

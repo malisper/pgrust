@@ -258,9 +258,18 @@ pub(super) enum RefuseReason {
     /// interval is unproven against the visible rows' footer min/max — the
     /// per-row drive owns the call and raises C's overflow error at C's row.
     MetaRuntime = 29,
+    /// cbstore standalone scan: the scan HAS a qual, but no staged kernel
+    /// armed for it — the PREWHERE walker/translate refused the shape
+    /// (anchored/underscore/escape LIKE classes, non-whitelisted comparators,
+    /// hybrid prefixes below the engagement gate). Split out of
+    /// `AdmissionEconomicsNoConsumer` at the likeband landing so the gates
+    /// can count the residual after the fixed-width-prefix refusal died
+    /// (refusal-audit rider, 2026-07-14). Per-PULL cadence on the memoized
+    /// verdict, like the cbscan admission row.
+    QualNotVectorizable = 30,
 }
 
-const N_REASONS: usize = 30;
+const N_REASONS: usize = 31;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -295,6 +304,7 @@ impl RefuseReason {
             RefuseReason::DictGroupShape => "dictgroup-shape",
             RefuseReason::MetaShape => "meta-shape",
             RefuseReason::MetaRuntime => "meta-runtime",
+            RefuseReason::QualNotVectorizable => "qual-not-vectorizable",
         }
     }
 
@@ -331,6 +341,7 @@ impl RefuseReason {
             DictGroupShape,
             MetaShape,
             MetaRuntime,
+            QualNotVectorizable,
         ][i]
     }
 }
