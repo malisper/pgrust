@@ -35,10 +35,12 @@
 //!
 //! ## Migration recipe — how a pending tier's table slots in
 //!
-//! Side branches (`lane-v2-foldcov`, `lane-v2-textfold`, `lane-v2-stitchwire`,
-//! `lane-v2-k2probe`, `lane-v2-projstitch`) each add coverage. Their tables are
-//! ALREADY represented here as [`Avail::Pending`] rows (with the branch name),
-//! so landing one is mechanical:
+//! Side branches each add coverage; their tables are represented here as
+//! [`Avail::Pending`] rows (with the branch name) until they land. Landing
+//! one is mechanical (`lane-v2-foldcov`, `lane-v2-textfold`,
+//! `lane-v2-stitchwire` flipped to `InTree` on the third merge train,
+//! 2026-07-12; `lane-v2-k2probe`/`lane-v2-projstitch` carried no pending
+//! rows — their coverage is consumer-side):
 //!   1. flip the affected [`TierCov`] rows from `Pending { branch }` to
 //!      `InTree` (delete the `branch`);
 //!   2. point the consumer at the registry (e.g. the new fold OIDs' consumer
@@ -244,7 +246,10 @@ pub enum FoldKind {
     AvgAccum,
     Min,
     Max,
-    // pending (foldcov):
+    // INTERNAL Int128AggState accumulation (sum/avg(int8) — int8_avg_accum;
+    // landed with lane-v2-int8fold, row added at the registry migration):
+    Int128AvgAccum,
+    // tier 2 (landed 2026-07-12, lane-v2-foldcov):
     FMin,
     FMax,
     BoolAnd,
@@ -290,12 +295,12 @@ use CmpWidth::*;
 // an inline `&[..]` inside a const fn is not allowed, and naming them dedups).
 const COV_AOT_CMP: &[TierCov] = &[
     TierCov::intree(Tier::AotQualCmp, GuardTier::NonErroring, CollGate::NotApplicable),
-    TierCov::pending(Tier::StitchCmp, "lane-v2-stitchwire", GuardTier::NonErroring, CollGate::NotApplicable),
+    TierCov::intree(Tier::StitchCmp, GuardTier::NonErroring, CollGate::NotApplicable),
 ];
 const COV_ARITH_INT4: &[TierCov] = &[
     TierCov::intree(Tier::JitArith, GuardTier::ReplayOnErr, CollGate::NotApplicable),
     TierCov::intree(Tier::FoldAffine, GuardTier::DataGuard, CollGate::NotApplicable),
-    TierCov::pending(Tier::StitchArith, "lane-v2-stitchwire", GuardTier::ReplayOnErr, CollGate::NotApplicable),
+    TierCov::intree(Tier::StitchArith, GuardTier::ReplayOnErr, CollGate::NotApplicable),
 ];
 // int8 pl/mi/mul: JIT inlines them (adds/subs/mul+smulh overflow checks with
 // per-call replay), but the fold's affine admission is REFUSED (censusgaps):
@@ -443,6 +448,7 @@ pub static ENTRIES: &[BatchFn] = &[
     fold_it(1841, "int4_sum", FoldKind::Sum),
     fold_it(1962, "int2_avg_accum", FoldKind::AvgAccum),
     fold_it(1963, "int4_avg_accum", FoldKind::AvgAccum),
+    fold_it(2746, "int8_avg_accum", FoldKind::Int128AvgAccum),
     fold_it(768, "int4larger", FoldKind::Max),
     fold_it(769, "int4smaller", FoldKind::Min),
     fold_it(770, "int2larger", FoldKind::Max),
@@ -455,24 +461,24 @@ pub static ENTRIES: &[BatchFn] = &[
     fold_it(2035, "timestamp_smaller", FoldKind::Min),
     fold_it(1196, "timestamptz_larger", FoldKind::Max),
     fold_it(1195, "timestamptz_smaller", FoldKind::Min),
-    // === aggregate transition folds — pending (lane-v2-foldcov) ===
-    fold_pending(209, "float4larger", FoldKind::FMax, "lane-v2-foldcov"),
-    fold_pending(211, "float4smaller", FoldKind::FMin, "lane-v2-foldcov"),
-    fold_pending(223, "float8larger", FoldKind::FMax, "lane-v2-foldcov"),
-    fold_pending(224, "float8smaller", FoldKind::FMin, "lane-v2-foldcov"),
-    fold_pending(2515, "booland_statefunc", FoldKind::BoolAnd, "lane-v2-foldcov"),
-    fold_pending(2516, "boolor_statefunc", FoldKind::BoolOr, "lane-v2-foldcov"),
-    fold_pending(1892, "int2and", FoldKind::BitAnd, "lane-v2-foldcov"),
-    fold_pending(1893, "int2or", FoldKind::BitOr, "lane-v2-foldcov"),
-    fold_pending(1898, "int4and", FoldKind::BitAnd, "lane-v2-foldcov"),
-    fold_pending(1899, "int4or", FoldKind::BitOr, "lane-v2-foldcov"),
-    fold_pending(1904, "int8and", FoldKind::BitAnd, "lane-v2-foldcov"),
-    fold_pending(1905, "int8or", FoldKind::BitOr, "lane-v2-foldcov"),
-    // === aggregate transition folds — pending (lane-v2-textfold, collation-gated) ===
-    fold_pending_coll(458, "text_larger", FoldKind::Max, "lane-v2-textfold"),
-    fold_pending_coll(459, "text_smaller", FoldKind::Min, "lane-v2-textfold"),
-    fold_pending_coll(1063, "bpchar_larger", FoldKind::Max, "lane-v2-textfold"),
-    fold_pending_coll(1064, "bpchar_smaller", FoldKind::Min, "lane-v2-textfold"),
+    // === aggregate transition folds — tier 2 (landed 2026-07-12, lane-v2-foldcov) ===
+    fold_cov2(209, "float4larger", FoldKind::FMax),
+    fold_cov2(211, "float4smaller", FoldKind::FMin),
+    fold_cov2(223, "float8larger", FoldKind::FMax),
+    fold_cov2(224, "float8smaller", FoldKind::FMin),
+    fold_cov2(2515, "booland_statefunc", FoldKind::BoolAnd),
+    fold_cov2(2516, "boolor_statefunc", FoldKind::BoolOr),
+    fold_cov2(1892, "int2and", FoldKind::BitAnd),
+    fold_cov2(1893, "int2or", FoldKind::BitOr),
+    fold_cov2(1898, "int4and", FoldKind::BitAnd),
+    fold_cov2(1899, "int4or", FoldKind::BitOr),
+    fold_cov2(1904, "int8and", FoldKind::BitAnd),
+    fold_cov2(1905, "int8or", FoldKind::BitOr),
+    // === aggregate transition folds — text/bpchar MIN/MAX (landed 2026-07-12, lane-v2-textfold; collation-gated) ===
+    fold_str(458, "text_larger", FoldKind::Max),
+    fold_str(459, "text_smaller", FoldKind::Min),
+    fold_str(1063, "bpchar_larger", FoldKind::Max),
+    fold_str(1064, "bpchar_smaller", FoldKind::Min),
 ];
 
 const fn arith(oid: Oid, name: &'static str, width: ArithWidth, op: ArithKind, cov: &'static [TierCov]) -> BatchFn {
@@ -487,18 +493,19 @@ const fn fold_it(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_IT }
 }
 
-// Pending-fold cov slices are per-branch (the branch string differs), so they
-// are built from named per-branch consts rather than a shared slice.
+// Landed-fold cov slices, per coverage family (guard/collation classes
+// differ): tier-2 scalar folds (foldcov) are TypeProof like the base set;
+// text/bpchar MIN/MAX (textfold) are non-erroring but collation-gated.
 const COV_FOLD_FOLDCOV: &[TierCov] =
-    &[TierCov::pending(Tier::Fold, "lane-v2-foldcov", GuardTier::TypeProof, CollGate::NotApplicable)];
+    &[TierCov::intree(Tier::Fold, GuardTier::TypeProof, CollGate::NotApplicable)];
 const COV_FOLD_TEXTFOLD: &[TierCov] =
-    &[TierCov::pending(Tier::Fold, "lane-v2-textfold", GuardTier::NonErroring, CollGate::Deterministic)];
+    &[TierCov::intree(Tier::Fold, GuardTier::NonErroring, CollGate::Deterministic)];
 
-const fn fold_pending(oid: Oid, name: &'static str, kind: FoldKind, _branch: &'static str) -> BatchFn {
+const fn fold_cov2(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_FOLDCOV }
 }
 
-const fn fold_pending_coll(oid: Oid, name: &'static str, kind: FoldKind, _branch: &'static str) -> BatchFn {
+const fn fold_str(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_TEXTFOLD }
 }
 

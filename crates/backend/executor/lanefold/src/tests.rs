@@ -2198,6 +2198,26 @@ fn fold_oid_set_matches_lanereg_census() {
         (F_TIMESTAMP_SMALLER, R::Min),
         (F_TIMESTAMPTZ_LARGER, R::Max),
         (F_TIMESTAMPTZ_SMALLER, R::Min),
+        // int8fold (2746 int8_avg_accum), landed second train:
+        (2746, R::Int128AvgAccum),
+        // foldcov tier 2, landed third train:
+        (209, R::FMax),
+        (211, R::FMin),
+        (223, R::FMax),
+        (224, R::FMin),
+        (2515, R::BoolAnd),
+        (2516, R::BoolOr),
+        (1892, R::BitAnd),
+        (1893, R::BitOr),
+        (1898, R::BitAnd),
+        (1899, R::BitOr),
+        (1904, R::BitAnd),
+        (1905, R::BitOr),
+        // textfold str MIN/MAX (census kind = plain Min/Max), landed third train:
+        (458, R::Max),
+        (459, R::Min),
+        (1063, R::Max),
+        (1064, R::Min),
     ];
     for &(oid, kind) in expect {
         assert_eq!(::lanereg::fold_desc(oid), Some(kind), "fold oid {oid} census mismatch");
