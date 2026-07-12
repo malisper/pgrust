@@ -5233,3 +5233,530 @@ fn select_scan_proj_cols(state: &ExprState<'_>) -> Option<crate::steps::ScanProj
     }
     (out.n >= 1).then_some(out)
 }
+
+// ===========================================================================
+// Lane qual shape extraction (the CbstoreSource wiring tranche; harvested
+// from the old lane-executor line). `lane_scan_qual` decodes a scan qual's
+// compiled step stream into the structural clause vocabulary laneexec's
+// fail-closed translate consumes (laneexec re-exports these types as its
+// `shape` module). Structural checks only — the fn-oid whitelist that makes
+// an accepted clause non-erroring/non-volatile/allocation-free is laneexec's.
+// ===========================================================================
+
+/// One implicitly-ANDed comparison clause of a scan qual. `col` is the Var
+/// feeding arg0 (or, for const clauses with the Var at arg1, the sole Var
+/// with `commuted` set). The comparator's fn oid is carried raw: the legality
+/// gate (which oids are in-core non-erroring int comparators) lives in
+/// laneexec, so its vocabulary can grow without touching the kernel CmpOp.
+pub enum LaneCmpRhs {
+    Const(::datum::Datum),
+    Col(u16),
+}
+
+pub struct LaneCmpClause {
+    pub col: u16,
+    pub fn_oid: Oid,
+    pub commuted: bool,
+    /// The call's input collation (fcinfo fncollation) — collation-sensitive
+    /// predicates (text eq/LIKE over dict lanes) re-evaluate with it.
+    pub collation: Oid,
+    pub rhs: LaneCmpRhs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneBoolTest {
+    IsTrue,
+    IsNotTrue,
+    IsFalse,
+    IsNotFalse,
+}
+
+pub enum LaneClause {
+    Cmp(LaneCmpClause),
+    /// col IS [NOT] NULL — NullTest is non-strict, non-erroring, no fn call.
+    NullTest { col: u16, want_null: bool },
+    /// Bare boolean Var clause (`WHERE boolcol`): the Var writes the result
+    /// slot and Qual tests it directly (NULL or false fails).
+    BoolVar { col: u16 },
+    /// col IS [NOT] TRUE/FALSE — BooleanTest is non-strict, non-erroring.
+    BoolTest { col: u16, kind: LaneBoolTest },
+    /// col <op> ANY(non-null Const array): useOr SAOP over a strict
+    /// comparator, elements decoded at classify time (flat byval arrays
+    /// only, structurally capped). NULL elements are kept: they flip a miss
+    /// to NULL, which a Qual fails exactly like false, so laneexec may skip
+    /// them — the shape stays exact for the census.
+    InList { col: u16, fn_oid: Oid, elems: alloc::vec::Vec<::datum::NullableDatum> },
+}
+
+/// Trailing clauses the walker could not decode (the hybrid split's per-row
+/// suffix). `Calls` carries every call fn oid found there so laneexec can
+/// gate on volatility; `Opaque` = the suffix holds step kinds the collector
+/// does not enumerate (treated as volatile downstream, fail-closed).
+pub enum LaneSuffix {
+    None,
+    Calls(alloc::vec::Vec<Oid>),
+    Opaque,
+}
+
+pub struct LaneQualShape {
+    pub clauses: alloc::vec::Vec<LaneClause>,
+    /// Parsed clauses' columns (laneexec recomputes over its whitelisted
+    /// prefix; suffix columns deform lazily from the stored tuple on the
+    /// per-row requal).
+    pub max_attnum: u16,
+    pub suffix: LaneSuffix,
+}
+
+/// Fail-closed extraction of a scan qual's compiled step stream into lane
+/// clauses. Per clause: [ScanVar (x1|x2) + strict 2-arg comparator call (any
+/// post-fusion spelling) + Qual] or [ScanVar + NullTestIs(Not)Null + Qual],
+/// each Qual jumping to the shared DoneReturn — structural checks only; the
+/// fn-oid whitelist that makes an accepted clause non-erroring/non-volatile/
+/// allocation-free is laneexec's. The first undecodable clause ends the
+/// prefix: everything from its clause start to DoneReturn is returned as the
+/// suffix (sound as a per-row requal target because prefix clauses are a
+/// strict prefix of the implicit-AND list). No decodable leading clause =
+/// hard refusal.
+pub fn lane_scan_qual(state: &ExprState<'_>) -> Result<LaneQualShape, &'static str> {
+    if !state.is_qual() {
+        return Err("not a qual program");
+    }
+    if state.has_subplan() {
+        return Err("subplan");
+    }
+    if !state.param_exec_deps().is_empty() {
+        return Err("exec params");
+    }
+    let steps = state.steps.as_slice();
+    let done = steps.len().checked_sub(1).ok_or("empty program")?;
+    if !matches!(steps[done], Step::DoneReturn) {
+        return Err("no DoneReturn tail");
+    }
+    let mut ix = 0usize;
+    while ix < done && fetch_src(&steps[ix]).is_some() {
+        if fetch_src(&steps[ix]) != Some(SlotSrc::Scan) {
+            return Err("non-scan fetch");
+        }
+        ix += 1;
+    }
+    let mut clauses = alloc::vec::Vec::new();
+    let mut max_attnum = 0u16;
+    let mut suffix = LaneSuffix::None;
+    while ix < done {
+        match parse_lane_clause(state, steps, done, ix) {
+            Ok((clause, clause_max, next_ix)) => {
+                max_attnum = max_attnum.max(clause_max);
+                clauses.push(clause);
+                ix = next_ix;
+            }
+            Err(reason) => {
+                if clauses.is_empty() {
+                    return Err(reason);
+                }
+                suffix = collect_suffix_calls(state, &steps[ix..done]);
+                break;
+            }
+        }
+    }
+    if clauses.is_empty() {
+        return Err("no clauses");
+    }
+    Ok(LaneQualShape { clauses, max_attnum, suffix })
+}
+
+/// One clause starting at `ix`; Ok returns (clause, clause max attnum, index
+/// past the clause's Qual terminator).
+fn parse_lane_clause(
+    state: &ExprState<'_>,
+    steps: &[Step],
+    done: usize,
+    mut ix: usize,
+) -> Result<(LaneClause, u16, usize), &'static str> {
+    // Up to two leading plain Var loads (unfused clause form, plus the
+    // first operand of a fused var-vs-var clause).
+    let mut plain: [Option<(u16, OutRef)>; 2] = [None, None];
+    let mut nplain = 0usize;
+    while nplain < 2 {
+        match steps.get(ix).filter(|_| ix < done).and_then(var_src) {
+            Some((SlotSrc::Scan, a, out)) => {
+                plain[nplain] = Some((a, out));
+                nplain += 1;
+                ix += 1;
+            }
+            Some(_) => return Err("non-scan Var"),
+            None => break,
+        }
+    }
+    // NullTest clause: never fused (no try_fuse pattern touches NullTest),
+    // reads and rewrites the Var's out slot in place.
+    if let Some(Step::NullTestIsNull { out } | Step::NullTestIsNotNull { out }) =
+        steps.get(ix).filter(|_| ix < done)
+    {
+        let want_null = matches!(steps[ix], Step::NullTestIsNull { .. });
+        let Some((a, vout)) = plain[0] else {
+            return Err("null test without a Var");
+        };
+        if nplain != 1 || vout.0 != out.0 || !state.is_result(*out) {
+            return Err("null test does not consume the Var");
+        }
+        ix += 1;
+        let Some(Step::Qual { jumpdone }) = steps.get(ix).filter(|_| ix < done) else {
+            return Err("clause does not end in Qual");
+        };
+        if *jumpdone as usize != done {
+            return Err("Qual jump is not the shared done");
+        }
+        return Ok((LaneClause::NullTest { col: a, want_null }, a, ix + 1));
+    }
+    // BooleanTest clause: same in-place read/rewrite shape as NullTest.
+    if let Some(
+        Step::BoolTestIsTrue { out }
+        | Step::BoolTestIsNotTrue { out }
+        | Step::BoolTestIsFalse { out }
+        | Step::BoolTestIsNotFalse { out },
+    ) = steps.get(ix).filter(|_| ix < done)
+    {
+        let kind = match steps[ix] {
+            Step::BoolTestIsTrue { .. } => LaneBoolTest::IsTrue,
+            Step::BoolTestIsNotTrue { .. } => LaneBoolTest::IsNotTrue,
+            Step::BoolTestIsFalse { .. } => LaneBoolTest::IsFalse,
+            _ => LaneBoolTest::IsNotFalse,
+        };
+        let Some((a, vout)) = plain[0] else {
+            return Err("bool test without a Var");
+        };
+        if nplain != 1 || vout.0 != out.0 || !state.is_result(*out) {
+            return Err("bool test does not consume the Var");
+        }
+        ix += 1;
+        let Some(Step::Qual { jumpdone }) = steps.get(ix).filter(|_| ix < done) else {
+            return Err("clause does not end in Qual");
+        };
+        if *jumpdone as usize != done {
+            return Err("Qual jump is not the shared done");
+        }
+        return Ok((LaneClause::BoolTest { col: a, kind }, a, ix + 1));
+    }
+    // Bare boolean Var clause: the Var wrote the result slot; Qual tests it.
+    if let Some(Step::Qual { jumpdone }) = steps.get(ix).filter(|_| ix < done) {
+        let Some((a, vout)) = plain[0] else {
+            return Err("clause Qual without a body");
+        };
+        if nplain != 1 || !state.is_result(vout) {
+            return Err("bare Var does not write the qual result");
+        }
+        if *jumpdone as usize != done {
+            return Err("Qual jump is not the shared done");
+        }
+        return Ok((LaneClause::BoolVar { col: a }, a, ix + 1));
+    }
+    // SAOP clause over a non-null Const array: [ScanVar -> arg0; Const ->
+    // out; ScalarArrayOp; Qual]. Fail-closed conditions mirror laneexec's
+    // eval fast assumptions: OR semantics, strict comparator (NULL scalar ->
+    // NULL -> row fails on both drives), flat uncompressed 4B varlena image,
+    // byval fixed-width elements, small list.
+    if let Some(Step::Const { value, isnull, out: c_out }) = steps.get(ix).filter(|_| ix < done) {
+        let Some(Step::ScalarArrayOp { call, use_or, strict, typlen, typbyval, typalign, out }) =
+            steps.get(ix + 1).filter(|_| ix + 1 < done)
+        else {
+            return Err("Const does not feed a SAOP");
+        };
+        if !*use_or || !*strict {
+            return Err("SAOP is not a strict OR form");
+        }
+        if *isnull {
+            return Err("NULL SAOP array");
+        }
+        if c_out.0 != out.0 || !state.is_result(*out) {
+            return Err("SAOP does not write the qual result");
+        }
+        if !*typbyval || !matches!(*typlen, 1 | 2 | 4 | 8) {
+            return Err("SAOP element type is not fixed-width byval");
+        }
+        let frame = &state.frames[call.frame as usize];
+        if frame.nargs != 2 {
+            return Err("SAOP comparator is not 2-arg");
+        }
+        let Some((a, vout)) = plain[0] else {
+            return Err("SAOP without a Var scalar");
+        };
+        if nplain != 1 || vout.0 != frame.arg_slot(0) {
+            return Err("SAOP scalar is not the Var");
+        }
+        // SAFETY: frame-owned mcx-boxed FmgrInfo, read-only here.
+        let fn_oid = unsafe { frame.flinfo.as_ref() }.fn_oid;
+        let elems = decode_saop_const_array(*value, *typlen, *typalign)?;
+        ix += 2;
+        let Some(Step::Qual { jumpdone }) = steps.get(ix).filter(|_| ix < done) else {
+            return Err("clause does not end in Qual");
+        };
+        if *jumpdone as usize != done {
+            return Err("Qual jump is not the shared done");
+        }
+        return Ok((LaneClause::InList { col: a, fn_oid, elems }, a, ix + 1));
+    }
+    // The comparator call in any post-fusion spelling: fuse_program runs
+    // on every Kernel::Program qual, so the fused Thin forms are the
+    // common case; the unfused forms remain for jit-armed programs,
+    // which skip fusion.
+    let (fcinfo, out, fused_var, fused_jump) = match steps.get(ix).filter(|_| ix < done) {
+        Some(Step::FuncExprStrict2 { call, out }) => {
+            (state.frames[call.frame as usize].fcinfo, *out, None, None)
+        }
+        Some(Step::FuncExprStrict2Thin { call, out }) => (call.fcinfo, *out, None, None),
+        Some(Step::ScanVarFuncStrict2 { attnum, argno, call, out, .. }) => {
+            (call.fcinfo, *out, Some((*attnum, *argno)), None)
+        }
+        Some(Step::ScanVarFuncStrict2Thin { attnum, argno, call, out, .. }) => {
+            (call.fcinfo, *out, Some((*attnum, *argno)), None)
+        }
+        Some(Step::FuncStrict2Qual { call, jumpdone, out }) => {
+            (call.fcinfo, *out, None, Some(*jumpdone))
+        }
+        Some(Step::FuncStrict2QualThin { call, jumpdone, out }) => {
+            (call.fcinfo, *out, None, Some(*jumpdone))
+        }
+        _ => return Err("comparator is not a strict 2-arg fn"),
+    };
+    ix += 1;
+    if !state.is_result(out) {
+        return Err("comparator does not write the qual result");
+    }
+    let frame = state
+        .frames
+        .iter()
+        .find(|fr| fr.fcinfo == fcinfo)
+        .ok_or("comparator call has no frame")?;
+    if frame.nargs != 2 {
+        return Err("comparator is not a strict 2-arg fn");
+    }
+    // SAFETY: frame-owned mcx-boxed FmgrInfo, read-only here.
+    let fn_oid = unsafe { frame.flinfo.as_ref() }.fn_oid;
+    let collation = frame.collation();
+    // Resolve which arg each Var feeds: fused vars carry their argno,
+    // plain vars are matched by out-slot address.
+    let mut arg_var: [Option<u16>; 2] = [None, None];
+    if let Some((a, argno)) = fused_var {
+        if argno > 1 {
+            return Err("fused Var argno out of range");
+        }
+        arg_var[argno as usize] = Some(a);
+    }
+    for &(a, vout) in plain.iter().flatten() {
+        let argno = if vout.0 == frame.arg_slot(0) {
+            0usize
+        } else if vout.0 == frame.arg_slot(1) {
+            1
+        } else {
+            return Err("Var arg does not feed the comparator");
+        };
+        if arg_var[argno].is_some() {
+            return Err("two Vars feed one comparator arg");
+        }
+        arg_var[argno] = Some(a);
+    }
+    let (clause, clause_max) = match arg_var {
+        [Some(l), Some(r)] => (
+            LaneCmpClause { col: l, fn_oid, commuted: false, collation, rhs: LaneCmpRhs::Col(r) },
+            l.max(r),
+        ),
+        [var0, var1] => {
+            let (a, var_is_arg0) = match (var0, var1) {
+                (Some(a), None) => (a, true),
+                (None, Some(a)) => (a, false),
+                _ => return Err("comparator has no Var operand"),
+            };
+            let const_argno = if var_is_arg0 { 1usize } else { 0 };
+            if frame.const_args & (1 << const_argno) == 0 {
+                return Err("comparator operand is not a Const");
+            }
+            if frame.const_null_args & (1 << const_argno) != 0 {
+                return Err("NULL Const comparison");
+            }
+            // SAFETY: const arg slot was written at compile and never
+            // re-targeted.
+            let konst = unsafe { frame.arg_slot(const_argno).read().value };
+            (
+                LaneCmpClause {
+                    col: a,
+                    fn_oid,
+                    commuted: !var_is_arg0,
+                    collation,
+                    rhs: LaneCmpRhs::Const(konst),
+                },
+                a,
+            )
+        }
+    };
+    let jumpdone = match fused_jump {
+        Some(j) => j,
+        None => {
+            let Some(Step::Qual { jumpdone }) = steps.get(ix).filter(|_| ix < done) else {
+                return Err("clause does not end in Qual");
+            };
+            ix += 1;
+            *jumpdone
+        }
+    };
+    if jumpdone as usize != done {
+        return Err("Qual jump is not the shared done");
+    }
+    Ok((LaneClause::Cmp(clause), clause_max, ix))
+}
+
+// Structural cap on decoded IN-list length (laneexec evaluates elements per
+// row per code; a long list belongs to the hashed SAOP path anyway).
+const LANE_INLIST_MAX: i64 = 16;
+
+fn decode_saop_const_array(
+    value: ::datum::Datum,
+    typlen: i16,
+    typalign: u8,
+) -> Result<alloc::vec::Vec<::datum::NullableDatum>, &'static str> {
+    let p = value.as_usize() as *const u8;
+    // SAFETY: non-null Const array datum addresses a varlena that lives as
+    // long as the plan (and therefore any lane program built from it).
+    let img: &[u8] = unsafe {
+        if !::types_tuple::varatt::varatt_is_4b_u(p) {
+            return Err("SAOP array is not a flat 4B varlena");
+        }
+        core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+    };
+    let (ndim, dims, _lbs) = ::arrayfuncs::foundation::read_dims_lbounds(img);
+    let mut nitems = 1i64;
+    for d in &dims[..ndim as usize] {
+        nitems *= *d as i64;
+    }
+    if ndim == 0 {
+        nitems = 0;
+    }
+    if !(0..=LANE_INLIST_MAX).contains(&nitems) {
+        return Err("SAOP array too long for a lane clause");
+    }
+    let bitmap_off = ::arrayfuncs::foundation::arr_nullbitmap_off(img);
+    let mut off = ::arrayfuncs::foundation::arr_data_offset(img);
+    let mut bitmask: u32 = 1;
+    let mut bitmap_byte = 0usize;
+    let mut elems = alloc::vec::Vec::with_capacity(nitems as usize);
+    for _ in 0..nitems {
+        let elt_null = match bitmap_off {
+            Some(bo) => (img[bo + bitmap_byte] as u32 & bitmask) == 0,
+            None => false,
+        };
+        if elt_null {
+            elems.push(::datum::NullableDatum::null());
+        } else {
+            off = ::arrayfuncs::foundation::att_align_nominal(off, typalign);
+            // SAFETY: off stays within the VARSIZE image per the array
+            // layout; tupmacs::fetch_att (NOT the arrayfuncs one, which
+            // zero-extends) keeps the canonical sign-extension the lane
+            // engine's wide compares rely on.
+            let elt = unsafe {
+                ::types_tuple::tupmacs::fetch_att(img.as_ptr().add(off), true, typlen as i32)
+            };
+            off = ::arrayfuncs::foundation::att_addlength_pointer(off, typlen as i32, unsafe {
+                img.as_ptr().add(off)
+            });
+            elems.push(::datum::NullableDatum { value: elt, isnull: false });
+        }
+        if bitmap_off.is_some() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                bitmask = 1;
+                bitmap_byte += 1;
+            }
+        }
+    }
+    Ok(elems)
+}
+
+/// Every call fn oid in the undecoded suffix, for laneexec's volatility
+/// gate. Enumerated allowlist (no side-effect-free wildcard): any step kind
+/// outside it makes the suffix Opaque. The suffix is never interpreted —
+/// the per-row requal runs the ORIGINAL ExprState — so this walk only needs
+/// to find calls, not understand dataflow.
+fn collect_suffix_calls(state: &ExprState<'_>, steps: &[Step]) -> LaneSuffix {
+    let mut oids = alloc::vec::Vec::new();
+    // SAFETY (all arms): frame-owned mcx-boxed FmgrInfo, read-only here.
+    let mut push_flinfo =
+        |oids: &mut alloc::vec::Vec<Oid>, fl: NonNull<FmgrInfo>| oids.push(unsafe { fl.as_ref() }.fn_oid);
+    for s in steps {
+        match s {
+            Step::ScanVar { .. }
+            | Step::InnerVar { .. }
+            | Step::OuterVar { .. }
+            | Step::Const { .. }
+            | Step::Qual { .. }
+            | Step::Jump { .. }
+            | Step::JumpIfNotTrue { .. }
+            | Step::JumpIfNotNull { .. }
+            | Step::JumpIfNull { .. }
+            | Step::BoolAndStepFirst { .. }
+            | Step::BoolAndStep { .. }
+            | Step::BoolAndStepLast { .. }
+            | Step::BoolOrStepFirst { .. }
+            | Step::BoolOrStep { .. }
+            | Step::BoolOrStepLast { .. }
+            | Step::BoolNotStep { .. }
+            | Step::NullTestIsNull { .. }
+            | Step::NullTestIsNotNull { .. }
+            | Step::BoolTestIsTrue { .. }
+            | Step::BoolTestIsNotTrue { .. }
+            | Step::BoolTestIsFalse { .. }
+            | Step::BoolTestIsNotFalse { .. }
+            | Step::ScanFetchSome { .. }
+            | Step::InnerFetchSome { .. }
+            | Step::OuterFetchSome { .. } => {}
+            Step::FuncExpr { call, .. }
+            | Step::FuncExprStrict { call, .. }
+            | Step::FuncExprStrict1 { call, .. }
+            | Step::FuncExprStrict2 { call, .. }
+            | Step::FuncExprStrictFusage { call, .. }
+            | Step::Distinct { call, .. }
+            | Step::NullIf { call, .. }
+            | Step::NotDistinct { call, .. } => push_flinfo(&mut oids, call.flinfo),
+            Step::ScanVarFuncStrict2 { call, .. }
+            | Step::FuncStrict2Qual { call, .. }
+            | Step::NotDistinctQual { call, .. }
+            | Step::OuterVarNotDistinct { call, .. } => push_flinfo(&mut oids, call.flinfo),
+            Step::FuncFuncStrict2 { call1, call2, .. } => {
+                push_flinfo(&mut oids, call1.flinfo);
+                push_flinfo(&mut oids, call2.flinfo);
+            }
+            Step::FuncExprStrict1Thin { call, .. }
+            | Step::FuncExprStrict2Thin { call, .. }
+            | Step::ScanVarFuncStrict2Thin { call, .. }
+            | Step::FuncStrict2QualThin { call, .. }
+            | Step::NotDistinctQualThin { call, .. }
+            | Step::OuterVarNotDistinctThin { call, .. } => {
+                let Some(fr) = state.frames.iter().find(|fr| fr.fcinfo == call.fcinfo) else {
+                    return LaneSuffix::Opaque;
+                };
+                push_flinfo(&mut oids, fr.flinfo);
+            }
+            Step::FuncFuncStrict2Thin { call1, call2, .. } => {
+                for c in [call1, call2] {
+                    let Some(fr) = state.frames.iter().find(|fr| fr.fcinfo == c.fcinfo) else {
+                        return LaneSuffix::Opaque;
+                    };
+                    push_flinfo(&mut oids, fr.flinfo);
+                }
+            }
+            // SAOP: the element-comparison fn decides volatility; the array
+            // operand's own evaluation steps are walked independently. The
+            // hashed form additionally surfaces its element hash fn (in-core
+            // hash fns are immutable, but the per-oid check decides — no
+            // step-level exemption).
+            Step::ScalarArrayOp { call, .. } => push_flinfo(&mut oids, call.flinfo),
+            Step::HashedScalarArrayOp { call, table, .. } => {
+                push_flinfo(&mut oids, call.flinfo);
+                let Some(t) = state.saop_tables.get(*table as usize) else {
+                    return LaneSuffix::Opaque;
+                };
+                push_flinfo(&mut oids, t.hashcall.flinfo);
+            }
+            _ => return LaneSuffix::Opaque,
+        }
+    }
+    LaneSuffix::Calls(oids)
+}

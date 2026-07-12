@@ -9,6 +9,7 @@ adt_like = { path = "../../utils/adt/like" }
 datum = { path = "../../../_support/types/datum" }
 elog_seams = { path = "../../utils/error/elog_seams" }
 exectuples = { path = "../exectuples" }
+execexpr = { path = "../execexpr" }
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
