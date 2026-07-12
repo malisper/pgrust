@@ -347,9 +347,12 @@ pub fn agg_hashgroup_begin<'mcx>(
     }));
     // The build starts with NO group loaded; the node's own pergroup array
     // is the swap scratch. Clear leftover pertrans set state (a rescan can
-    // leave a cut-short group's set behind).
+    // leave the last emitted group's set behind) — and DROP the slot:
+    // `switch_to` owns the invariant that no set is loaded between groups
+    // (its debug_assert fired on rescan re-engagement when this left a
+    // cleared-but-Some slot; release builds silently overwrote it).
     for ps in node.pertrans_sort.iter_mut() {
-        if let Some(d) = ps.dset.as_mut() {
+        if let Some(mut d) = ps.dset.take() {
             d.clear();
         }
         debug_assert!(!ps.dset_degraded);
@@ -1056,10 +1059,11 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         rep_cursor: 0,
         mcx,
     }));
-    // The emit starts with NO group loaded; clear leftover pertrans set
-    // state (begin's discipline).
+    // The emit starts with NO group loaded; clear AND DROP leftover
+    // pertrans set state (begin's discipline — switch_to asserts no set is
+    // loaded between groups).
     for ps in node.pertrans_sort.iter_mut() {
-        if let Some(d) = ps.dset.as_mut() {
+        if let Some(mut d) = ps.dset.take() {
             d.clear();
         }
         debug_assert!(!ps.dset_degraded);
