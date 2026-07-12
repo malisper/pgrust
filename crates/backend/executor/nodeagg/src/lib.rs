@@ -91,6 +91,20 @@ pub struct AggStateData<'mcx> {
     // are replay-order-insensitive). False = presorted entries keep C's
     // per-row dedup bit-exactly.
     force_distinct_set: bool,
+    // Every grouping-key equality operator is REPRESENTATIONAL (equal keys
+    // are byte-equal: int2/4/8/bool eq, texteq under a deterministic
+    // collation — recorded at init, false when never probed). The narrow-
+    // sort arm's second admission leg: with a narrowed sort a DIFFERENT row
+    // becomes each group's first tuple, and the projected group-key
+    // representative must not be able to differ (numeric's 1.0/1.00 class
+    // equality would leak the choice).
+    group_eq_representational: bool,
+    // Every transition function of this node is order-insensitive-EXACT
+    // (`order_insensitive_exact_transfn` whitelist, recorded at init): same
+    // input multiset in ANY order produces byte-identical transvalues. The
+    // grouped narrow-sort arm's admission leg (nothing in the node observes
+    // intra-group row order once presorted dedup is replaced by exact sets).
+    trans_order_insensitive: bool,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     // Lane-v2 hash-agg breaker fold state (None = lane off / nothing admits).
     lanefold: Option<LaneFold<'mcx>>,
@@ -1332,6 +1346,37 @@ pub fn exec_init_agg<'mcx>(
         None
     };
 
+    // Narrow-sort admission leg (field doc): probed only where the arm can
+    // ever engage (lane on, AGG_SORTED with internal-sort entries).
+    let group_eq_representational = if lane_v2_enabled()
+        && node.aggstrategy == AGG_SORTED
+        && !pertrans_sort.is_empty()
+        && node.numCols > 0
+    {
+        let mut ok = true;
+        for (i, &op) in node.grpOperators.iter().enumerate() {
+            const F_BOOLEQ: Oid = 60;
+            const F_INT2EQ: Oid = 63;
+            const F_INT4EQ: Oid = 65;
+            const F_TEXTEQ: Oid = 67;
+            const F_INT8EQ: Oid = 467;
+            ok &= match lsyscache::get_opcode(op)? {
+                F_BOOLEQ | F_INT2EQ | F_INT4EQ | F_INT8EQ => true,
+                F_TEXTEQ => {
+                    let coll = node.grpCollations[i];
+                    coll != 0 && lsyscache::get_collation_isdeterministic(coll)?
+                }
+                _ => false,
+            };
+            if !ok {
+                break;
+            }
+        }
+        ok
+    } else {
+        false
+    };
+
     Ok(AggStateData {
         plan: node,
         ps_ExprContext,
@@ -1357,10 +1402,39 @@ pub fn exec_init_agg<'mcx>(
         gsets: gs,
         pertrans_sort,
         force_distinct_set: false,
+        group_eq_representational,
+        trans_order_insensitive: (0..numtrans)
+            .all(|t| order_insensitive_exact_transfn(trans_fnoid[t])),
         qual,
         lanefold,
         instr_idx: None,
     })
+}
+
+/// Transition functions whose result is byte-identical for ANY input order —
+/// pure counting and exact integer / Int128 accumulation (the same family
+/// `distinct_set_kind` admits, plus `int8inc` = count(*)). No floats (fp
+/// addition is order-sensitive), no min/max (a collation-equal tie could
+/// return a byte-different representative), no by-ref accumulators outside
+/// the exact-integer family.
+fn order_insensitive_exact_transfn(transfn_oid: Oid) -> bool {
+    const F_INT8INC: Oid = 1219; // count(*)
+    const F_INT8INC_ANY: Oid = 2804; // count(x)
+    const F_INT2_SUM: Oid = 1840;
+    const F_INT4_SUM: Oid = 1841;
+    const F_INT2_AVG_ACCUM: Oid = 1962;
+    const F_INT4_AVG_ACCUM: Oid = 1963;
+    const F_INT8_AVG_ACCUM: Oid = 2746; // sum(int8) / avg(int8)
+    matches!(
+        transfn_oid,
+        F_INT8INC
+            | F_INT8INC_ANY
+            | F_INT2_SUM
+            | F_INT4_SUM
+            | F_INT2_AVG_ACCUM
+            | F_INT4_AVG_ACCUM
+            | F_INT8_AVG_ACCUM
+    )
 }
 
 // The AGG_SORTED half of ExecInitAgg: outer-format slots + the grouping-
@@ -3643,8 +3717,12 @@ pub fn agg_hash_build_probe_resid<'mcx>(
 /// hosts only the all-set shape (allowlist discipline; the C paths keep
 /// everything else).
 pub fn agg_pertrans_all_distinct_set(node: &AggStateData<'_>) -> bool {
+    // `force_distinct_set` counts armed presorted entries as set-mode: once a
+    // narrow/skip-sort drive armed the node, every later admission must see
+    // the entries the way the collect/replay run them (sticky, value-safe —
+    // the force doc).
     !node.pertrans_sort.is_empty()
-        && node.pertrans_sort.iter().all(|ps| ps.set_active(false))
+        && node.pertrans_sort.iter().all(|ps| ps.set_active(node.force_distinct_set))
 }
 
 /// Skip-sort admission (lanev2 `try_own_plain_distinct_agg_over_sort`):
@@ -3911,6 +3989,56 @@ pub fn agg_sorted_lane_admissible(node: &AggStateData<'_>) -> bool {
             .is_none_or(|et| et.param_exec_deps().is_empty())
         && node.proj.param_exec_deps().is_empty()
         && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// Grouped narrow-sort admission (lanev2 `try_own_sorted_agg_over_sort`'s
+/// order-relaxation arm — the ClickBench Q9/Q10 shape): AGG_SORTED whose
+/// every internal-sort entry is a set-CAPABLE exact-DISTINCT (presorted
+/// entries included — the drive arms `force_distinct_set`, replacing the
+/// plan's sort-suffix adjacent-dedup with the exact set) and whose EVERY
+/// transition function is order-insensitive-exact. Under those two facts the
+/// plan Sort's distinct-arg suffix keys have NO observable effect beyond
+/// intra-group row order — which nothing in the node observes — so the lane
+/// may sort by the group-key prefix alone (the sort-side structural check is
+/// the drive's: prefix == group columns) and still produce byte-identical
+/// output: same groups in the same order, same exact aggregate values.
+pub fn agg_sorted_distinct_narrow_admissible(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_SORTED
+        && node.gsets.is_none()
+        && node.merge.is_none()
+        && !node.pertrans_sort.is_empty()
+        && node.pertrans_sort.iter().all(|ps| ps.set_kind.is_some())
+        && node.trans_order_insensitive
+        && node.group_eq_representational
+        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// Arm set-mode for the grouped narrow-sort drive (see `force_distinct_set`
+/// field doc — sticky, value-safe on later per-tuple fallbacks: the set over
+/// ANY input order yields the same distinct multiset, and the admitted
+/// transitions are replay-order-insensitive).
+pub fn agg_sorted_force_distinct_set(node: &mut AggStateData<'_>) {
+    debug_assert!(agg_sorted_distinct_narrow_admissible(node));
+    node.force_distinct_set = true;
+}
+
+/// The plan's grouping columns (1-based attnos into the outer slot) — the
+/// narrow-sort drive's prefix check.
+pub fn agg_plan_group_cols<'a>(node: &AggStateData<'a>) -> &'a [i16] {
+    node.plan.grpColIdx
+}
+
+/// Whether a drive already armed `force_distinct_set` on this node (the
+/// narrow-sort drive re-narrows a rescan-rebuilt sort iff so — the plain
+/// admission is force-satisfied then and would otherwise skip the probe).
+pub fn agg_distinct_set_forced(node: &AggStateData<'_>) -> bool {
+    node.force_distinct_set
 }
 
 /// A boundary tuple is saved and the next group has not started — the lane
@@ -4934,7 +5062,7 @@ mcx::forget_safe_struct!(
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
-        force_distinct_set, instr_idx;
+        force_distinct_set, group_eq_representational, trans_order_insensitive, instr_idx;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual, lanefold },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
