@@ -703,7 +703,24 @@ fn assign_synchronous_standby_names(
     *SYNC_REP_CONFIG.write().expect("SYNC_REP_CONFIG poisoned") = parsed;
 }
 
+// synchronous_standby_names' backing storage (C: the SyncRepStandbyNames
+// char* owned by syncrep). PGC_SIGHUP — one cluster-wide value, so a
+// process-shared static matches the thread model.
+static STANDBY_NAMES: RwLock<Option<String>> = RwLock::new(None);
+
+fn standby_names_get() -> Option<String> {
+    STANDBY_NAMES.read().expect("STANDBY_NAMES poisoned").clone()
+}
+
+fn standby_names_set(v: Option<String>) {
+    *STANDBY_NAMES.write().expect("STANDBY_NAMES poisoned") = v;
+}
+
 pub fn init_seams() {
+    guc_tables::vars::SyncRepStandbyNames.install_if_absent(guc_tables::GucVarAccessors {
+        get: standby_names_get,
+        set: standby_names_set,
+    });
     guc_tables::hooks::check_synchronous_standby_names.install(check_synchronous_standby_names);
     guc_tables::hooks::assign_synchronous_standby_names.install(assign_synchronous_standby_names);
 
