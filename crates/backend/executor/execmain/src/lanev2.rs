@@ -266,11 +266,18 @@ fn arm_scan_staging<'mcx>(
                 ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
                     // Full-prefix deform unarmable (non-fixed-width column in
-                    // the prefix) or declined (break-even). A column-reading
-                    // fold plan cannot get here — `decide_agg_lane` probe-armed
-                    // this exact prefix before choosing Fold — so the SoA has
-                    // no fold reader and the qual-only bitmap arm is safe.
-                    arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
+                    // the prefix) or declined (break-even). Try the cbstore
+                    // dict-group columnar arm (§2.1) first — count(*)-only
+                    // plans reach here without decide's probe-arm (their fold
+                    // reads no lane columns, but K2 wants the key staged).
+                    // Otherwise: a column-reading fold plan cannot get here —
+                    // `decide_agg_lane` probe-armed this prefix (or armed
+                    // dict-group, which the re-prepare above keeps) before
+                    // choosing Fold — so the SoA has no fold reader and the
+                    // qual-only bitmap arm is safe.
+                    if !try_arm_cb_dictgroup(agg, ss, estate) {
+                        arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
+                    }
                 } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
                     lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
                 }
@@ -1368,8 +1375,12 @@ fn decide_agg_lane<'mcx>(
                 true
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
-                // width column) is known BEFORE committing to ownership.
+                // width column) is known BEFORE committing to ownership. A
+                // cbstore scan whose prefix refuses only on varlena columns
+                // gets the dict-group columnar arm (§2.1) — the text grouping
+                // key stages as dict codes, everything else as decoded Datums.
                 probe_arm_fold_prefix(agg, ss, estate)?
+                    || try_arm_cb_dictgroup(agg, ss, estate)
             }
         }
         _ => false,
@@ -1485,7 +1496,17 @@ fn agg_hash_build_fold_feed<'mcx>(
             }
             ::nodeagg::CompactArm::Off => false,
         };
-    trace_feed(if compact {
+    // Stage-2.1 dict-group registration (per build): the K2 key column was
+    // opted into dict lanes by `try_arm_cb_dictgroup`. Dict-answered windows
+    // take the per-epoch code-grouping path inside `scan_k2_batch`; Raw
+    // windows keep the Raw keys path — both through the same global table.
+    let dictgroup = k2
+        .as_ref()
+        .map_or(false, |s| ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) == Some(s.key_col));
+    let mut dgs = DictGroupScratch::default();
+    trace_feed(if dictgroup {
+        "agg-over-seqscan: staged fold feed engaged (dict-group armed)"
+    } else if compact {
         "agg-over-seqscan: staged fold feed engaged (compact table)"
     } else if k2.is_some() {
         "agg-over-seqscan: staged fold feed engaged (k2 probe)"
@@ -1569,7 +1590,16 @@ fn agg_hash_build_fold_feed<'mcx>(
                 .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
             if all_lane {
                 scan_k2_batch(
-                    agg, ss, shape, stage_slot, &mut k2s, &mut idxs, &mut groups, n, estate,
+                    agg,
+                    ss,
+                    shape,
+                    stage_slot,
+                    &mut k2s,
+                    dictgroup.then_some(&mut dgs),
+                    &mut idxs,
+                    &mut groups,
+                    n,
+                    estate,
                 )?;
                 continue;
             }
@@ -1951,6 +1981,97 @@ fn scan_k2_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
         && ::nodeagg::agg_hash_staged_probe_col(agg).is_some()
 }
 
+// ===========================================================================
+// Stage-2.1 dict-code grouping (cbstore-v2 plan §2.1 — the LowCardinality /
+// DuckDB dict-grouping analog): when the K2 scan feed's single grouping key
+// is a dict-encoded cbstore column, the feed opts the key into the dict lane
+// (`dict_want`) and groups each dict-answered window ON THE u32 CODES — a
+// per-epoch (row-group) DIRECT-INDEXED array maps code → the group's live
+// pergroup state in the GLOBAL C-ported tuplehash, resolved LAZILY on the
+// first surviving row of each (epoch, code): dict[code] is materialized ONCE
+// per epoch and probed through the same `agg_hash_probe_staged` leg the Raw
+// K2 path uses (same first-arrival insertion order — the resolve happens AT
+// the first row that would have probed — same entry initialization, same
+// spill decisions, same read-back). Per-row work drops from hash+probe to
+// one array index; the k-per-epoch resolves are off the hot path, which is
+// why the GLOBAL table stays the C tuplehash (full semantics/spill/retrieve
+// delegation; the compact table's text-arena hosting is a non-blocking
+// follow-up — its probe-speed edge is amortized away here).
+//
+// Rejected alternative (charter option A): per-epoch PARTIAL states merged
+// at epoch boundaries — needs combine machinery per transtype and breaks
+// first-arrival order; direct global pointers keep the C transition code
+// running exactly once per row into the one true state.
+//
+// NULLs: dict lanes are NULL-free by the cbstore per-chunk proof (the store
+// writes no NULLs today) — asserted per batch, never assumed structurally.
+// Raw windows (non-dict-encoded key chunks) fall back to the Raw K2 keys
+// path within the same build, byte-identically.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_DICTGROUP` kill switch (default ON inside the lane).
+fn dictgroup_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_DICTGROUP").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Dict-group admission + columnar staging arm, tried when the standard
+/// fixed-width-prefix arm refused (a varlena column — typically the text
+/// grouping key itself — sits inside the fold prefix). Admission (§2.1):
+///   * cbstore scan, unprojected (callers gate), lane fold plan classified;
+///   * the K2 deferred probe wants the shape (`scan_k2_wanted`: unguarded,
+///     no residual transitions, single kernel-hostable grouping key);
+///   * no varlena-guard transitions (str MIN/MAX keeps the varkey staging /
+///     per-row paths — mixed vguard+dict shapes are a follow-up);
+///   * the columnar staging arms (`seq_scan_cb_dictgroup_arm`).
+/// True = the SoA staging is armed with the key opted into dict lanes; the
+/// fold feed's dict-group batch path consumes the codes. False = fail-open
+/// (per-row / Raw paths, byte-identical), ticking the observability reason.
+fn try_arm_cb_dictgroup<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    if !dictgroup_enabled()
+        || !::nodeseqscan::seq_scan_is_cbstore(ss)
+        || !scan_k2_wanted(agg)
+    {
+        return false;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::DictGroupShape);
+        false
+    };
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else { return refused() };
+    if !plan.vguards.is_empty() {
+        return refused();
+    }
+    let Some(key) = ::nodeagg::agg_hash_staged_probe_col(agg) else { return refused() };
+    // The fold must not read the key column's SoA Datum cells: they are
+    // STALE while a dict lane answers (e.g. `count(url) ... GROUP BY url`
+    // reads url as a transition arg). Refuse — the Raw paths host it.
+    if plan.cols.iter().any(|&c| c == key) {
+        return refused();
+    }
+    let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
+    if !::nodeseqscan::seq_scan_cb_dictgroup_arm(ss, estate, prefix, key) {
+        return refused();
+    }
+    true
+}
+
+/// Per-build dict-group state: the per-epoch direct-indexed code → global
+/// pergroup map (`slots`, `ndict`-sized, cleared at every epoch roll) plus
+/// the one-element hash scratch for the lazy per-code resolve.
+#[derive(Default)]
+struct DictGroupScratch {
+    epoch: Option<u64>,
+    slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    hash1: Vec<u32>,
+}
+
 /// K2 admission inputs for the scan-fed fold feed. `needed` is the spill
 /// replay's column set (`colnos_needed` — exactly what the hashagg spill
 /// projection keeps); all of it must lie inside the armed SoA prefix so a
@@ -2031,6 +2152,7 @@ fn scan_k2_batch<'mcx>(
     shape: &ScanK2,
     stage_slot: &mut Option<ExecSlotId>,
     k2s: &mut ScanK2Scratch,
+    dgs: Option<&mut DictGroupScratch>,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     n: u32,
@@ -2041,6 +2163,20 @@ fn scan_k2_batch<'mcx>(
     for i in 0..n {
         if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
             rows.push(i);
+        }
+    }
+    // Stage-2.1 dict-group window (registered key + a dict-answered window):
+    // group on the u32 codes through the per-epoch direct-indexed map — no
+    // per-row hashing/probing at all. A Raw-answered window (non-dict key
+    // chunk) falls through to the Raw keys path below; both paths resolve
+    // into the same global table in the same row order.
+    if let Some(dgs) = dgs {
+        let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .and_then(|soa| soa.dict_lane(shape.key_col as usize));
+        if let Some(lane) = lane {
+            return scan_dictgroup_batch(
+                agg, ss, shape, stage_slot, dgs, idxs, groups, rows, lane, estate,
+            );
         }
     }
     keys.clear();
@@ -2131,6 +2267,139 @@ fn scan_k2_batch<'mcx>(
     // the plan is unguarded (K2 admission); each pergroup was installed by
     // the probe within this batch; the rest is agg_fold_staged's contract.
     unsafe { agg_fold_staged(agg, soa, idxs, groups) }
+}
+
+/// One dict-answered page batch through the dict-group path (§2.1 header
+/// above `dictgroup_enabled`): per surviving row, one direct index into the
+/// per-epoch code→pergroup map; unseen codes resolve lazily — dict[code]
+/// materialized once per epoch and probed through the SAME staged-probe leg
+/// as the Raw K2 path, at exactly the row the Raw path would have probed
+/// (first-arrival insertion order, entry initialization, memory limits and
+/// spill decisions all identical). Spill-mode misses replay off the SoA
+/// lanes with the key materialized from the dictionary (its SoA cells are
+/// stale under a dict lane) and are deliberately NOT cached: every later row
+/// of that code must also spill, exactly as the per-row path would.
+///
+/// NULL discipline: dict codes have no NULL representation and cbstore
+/// stores no NULLs (per-chunk proof, phase4 §8.3) — every dict-window row
+/// probes with `isnull = false`, which is what the Raw fill would have
+/// published (`isnull.fill(false)`).
+#[allow(clippy::too_many_arguments)]
+fn scan_dictgroup_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    shape: &ScanK2,
+    stage_slot: &mut Option<ExecSlotId>,
+    dgs: &mut DictGroupScratch,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    rows: &[u32],
+    lane: ::exectuples::SoaDictLane,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Epoch roll (epoch = row-group index, stable per pinned scan): per-RG
+    // dictionaries are dense 0..ndict, so the map is a flat array — k
+    // entries per epoch, cleared once per RG change.
+    let ndict = lane.table.ndict as usize;
+    if dgs.epoch != Some(lane.table.epoch) {
+        dgs.epoch = Some(lane.table.epoch);
+        dgs.slots.clear();
+        dgs.slots.resize(ndict, None);
+        trace_feed(&format!(
+            "dict-group epoch {} (ndict={ndict})",
+            lane.table.epoch
+        ));
+    }
+    debug_assert!(dgs.slots.len() >= ndict, "dict size is fixed per epoch");
+    idxs.clear();
+    groups.clear();
+    for &i in rows {
+        let code = lane.code(i as usize) as usize;
+        debug_assert!(code < ndict, "filler contract: code < ndict");
+        let pg = match dgs.slots[code] {
+            Some(pg) => pg,
+            None => {
+                // First surviving row of (epoch, code): materialize + probe
+                // once. The hash rides the same probe-kernel leg as the Raw
+                // path (bit-identical per the kernel contract).
+                let key = lane.table.datum(code as u32);
+                ::nodeagg::agg_hash_hash_staged(agg, &[key], &[false], &mut dgs.hash1)?;
+                let hash = dgs.hash1[0];
+                match ::nodeagg::agg_hash_probe_staged(agg, estate, key, false, hash)? {
+                    Some(pg) => {
+                        dgs.slots[code] = Some(pg);
+                        pg
+                    }
+                    None => {
+                        scan_dictgroup_spill(agg, ss, shape, stage_slot, i, key, hash, estate)?;
+                        continue;
+                    }
+                }
+            }
+        };
+        idxs.push(i);
+        groups.push(pg);
+    }
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("dict-group feed requires the armed SoA");
+    // SAFETY: as the Raw K2 fold — every probed row is non-fallback (cbstore
+    // stages none) with valid lane values for every plan column (the
+    // columnar fill stages decoded Datums; the key column is NOT in
+    // `plan.cols` — grouping keys are not transition args in this shape, and
+    // vguard plans refuse dict-group); the plan is unguarded (K2 admission);
+    // each pergroup is a live global-table state block (allocation-stable
+    // for the table's lifetime — the per-epoch cache only ever holds
+    // pointers the probe installed).
+    unsafe { agg_fold_staged(agg, soa, idxs, groups) }
+}
+
+/// Dict-group spill-mode miss: the Raw K2 path's replay verbatim, except the
+/// grouping key cell takes the materialized dictionary datum (the key's SoA
+/// cells are stale under a dict lane). `hashagg_spill_tuple` materializes the
+/// slot into the spill tape, so the dict-borrowed datum's scan lifetime is
+/// long enough by construction.
+#[cold]
+#[allow(clippy::too_many_arguments)]
+fn scan_dictgroup_spill<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    shape: &ScanK2,
+    stage_slot: &mut Option<ExecSlotId>,
+    i: u32,
+    key: ::datum::Datum,
+    hash: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let slot_id = match *stage_slot {
+        Some(s) => s,
+        None => {
+            let desc = estate.slot(ss.ss.ss_ScanTupleSlot).base().tts_tupleDescriptor.clone();
+            let s = estate.exec_init_extra_tuple_slot(desc, ::types_slot::TupleSlotKind::Virtual);
+            *stage_slot = Some(s);
+            s
+        }
+    };
+    {
+        let mcx = estate.es_query_cxt;
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("dict-group feed requires the armed SoA");
+        let slot = estate.slot_mut(slot_id);
+        ::exectuples::exec_clear_tuple(slot, mcx);
+        let base = slot.base_mut();
+        for c in 0..shape.natts {
+            base.tts_values[c] = ::datum::Datum::null();
+            base.tts_isnull[c] = true;
+        }
+        for &c in &shape.needed {
+            let c = c as usize;
+            base.tts_values[c] = soa.col_values(c)[i as usize];
+            base.tts_isnull[c] = soa.col_isnull(c)[i as usize];
+        }
+        base.tts_values[shape.key_col as usize] = key;
+        base.tts_isnull[shape.key_col as usize] = false;
+        ::exectuples::exec_store_virtual_tuple(slot);
+    }
+    ::nodeagg::agg_hash_spill_staged(agg, estate, slot_id, hash)
 }
 
 /// Shared fold tail for the staged fold feeds (seqscan page batches and the
