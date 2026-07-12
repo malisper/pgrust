@@ -47,8 +47,14 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+mod compact;
 mod gsets;
 pub mod merge;
+
+pub use compact::{
+    agg_hash_compact_armed, agg_hash_compact_batch, agg_hash_compact_disarm,
+    agg_hash_compact_try_arm, CompactArm,
+};
 
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
@@ -358,6 +364,9 @@ struct PerHashData<'mcx> {
     // C hash_tablecxt: entries + pergroups (transvalues stay in aggcontext).
     table_ctx: MemoryContext,
     spill: HashSpillState<'mcx>,
+    // Lane-v2 compact-row table (Stage 2.2) when armed for this build; the
+    // C tuplehash above stays the fallback + oracle (compact.rs module doc).
+    compact: Option<compact::CompactHash>,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1558,6 +1567,7 @@ fn init_perhash<'mcx>(
         hash_ngroups_current: 0,
         hash_mem_limit: mem_limit,
         table_filled: false,
+        compact: None,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -3932,6 +3942,20 @@ fn agg_retrieve_hash_table<'mcx>(
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
 
+        // Lane-v2 compact-table read-back (compact.rs): row order —
+        // order-relaxed vs the C bucket iterate; no spill refill (compact
+        // builds never spill). first_slot gets the reconstructed grouping
+        // key, exactly the copy the C arm below performs from the stored
+        // tuple; the shared finalize/qual/project tail runs unchanged.
+        let pergroup = if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
+            match compact::compact_retrieve_next(node, estate)? {
+                Some(pg) => pg,
+                None => {
+                    node.agg_done = true;
+                    return Ok(None);
+                }
+            }
+        } else {
         let next = {
             let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
             ph.hashtable.iterate(&mut ph.hashiter)
@@ -3943,7 +3967,7 @@ fn agg_retrieve_hash_table<'mcx>(
             }
             continue;
         };
-        let pergroup = {
+        {
             let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
 
             let tup = ph.hashtable.entry_tuple(ix);
@@ -3966,6 +3990,7 @@ fn agg_retrieve_hash_table<'mcx>(
                 }
             }
             ph.hashtable.entry_additional(ix).map_or(NonNull::dangling(), |p| p.cast())
+        }
         };
         // Written by lookup_hash_entry; unread (and dangling) when peragg is
         // empty.
@@ -4073,6 +4098,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
         ph.spill.mode = false;
         ph.hashtable.reset();
         ph.table_ctx.reset();
+        compact::compact_reset(ph);
     }
     if let Some(ps) = node.persort.as_mut() {
         ps.have_pending = false;
@@ -4124,6 +4150,7 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         ph.spill.mode = false;
         ph.hashtable.reset();
         ph.table_ctx.reset();
+        compact::compact_reset(ph);
         // SAFETY: sole access path to the node during the reset.
         unsafe { node.agg_node.as_mut() }.reset();
         return;
@@ -4202,7 +4229,7 @@ mcx::forget_safe_struct!(
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
         hash_mem_limit, table_filled, hashiter, spill;
-        hashtable, hashslot, retrieve_slot, first_slot, table_ctx },
+        hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
