@@ -44,6 +44,7 @@ varsup = { path = "../varsup" }
 subtrans = { path = "../subtrans" }
 xact = { path = "../xact" }
 xlogreader = { path = "../xlogreader" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
 xlogutils = { path = "../xlogutils" }
 xloginsert_seams = { path = "../xloginsert_seams" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }

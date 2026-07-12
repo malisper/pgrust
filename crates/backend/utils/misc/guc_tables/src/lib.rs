@@ -554,6 +554,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::recovery_target_lsn_string,
         set: backing::set_recovery_target_lsn_string,
     });
+    vars::recovery_target_time_string.install(GucVarAccessors {
+        get: backing::recovery_target_time_string,
+        set: backing::set_recovery_target_time_string,
+    });
     vars::recoveryRestoreCommand.install(GucVarAccessors {
         get: backing::recoveryRestoreCommand,
         set: backing::set_recoveryRestoreCommand,
@@ -581,6 +585,18 @@ fn install_guc_tables_owned_vars() {
     vars::wal_receiver_create_temp_slot.install(GucVarAccessors {
         get: backing::wal_receiver_create_temp_slot,
         set: backing::set_wal_receiver_create_temp_slot,
+    });
+    vars::hot_standby_feedback.install(GucVarAccessors {
+        get: backing::hot_standby_feedback,
+        set: backing::set_hot_standby_feedback,
+    });
+    vars::wal_receiver_status_interval.install(GucVarAccessors {
+        get: backing::wal_receiver_status_interval,
+        set: backing::set_wal_receiver_status_interval,
+    });
+    vars::wal_receiver_timeout.install(GucVarAccessors {
+        get: backing::wal_receiver_timeout,
+        set: backing::set_wal_receiver_timeout,
     });
     vars::recoveryTargetAction.install(GucVarAccessors {
         get: backing::recoveryTargetAction,

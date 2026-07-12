@@ -339,6 +339,12 @@ string_var!(
     Some("")
 );
 string_var!(
+    CELL_recovery_target_time_string,
+    recovery_target_time_string,
+    set_recovery_target_time_string,
+    Some("")
+);
+string_var!(
     CELL_recoveryRestoreCommand,
     recoveryRestoreCommand,
     set_recoveryRestoreCommand,
@@ -369,6 +375,24 @@ bool_var!(
     wal_receiver_create_temp_slot,
     set_wal_receiver_create_temp_slot,
     false
+);
+bool_var!(
+    B_hot_standby_feedback,
+    hot_standby_feedback,
+    set_hot_standby_feedback,
+    false
+);
+int_var!(
+    I_wal_receiver_status_interval,
+    wal_receiver_status_interval,
+    set_wal_receiver_status_interval,
+    10
+);
+int_var!(
+    I_wal_receiver_timeout,
+    wal_receiver_timeout,
+    set_wal_receiver_timeout,
+    60 * 1000
 );
 int_var!(
     I_recoveryTargetAction,

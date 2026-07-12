@@ -26,6 +26,14 @@ fn pchomp(s: &str) -> String {
     s.trim_end_matches('\n').to_string()
 }
 
+// ereport(ERROR)'s .finish() is typed PgResult<()>; rethrow it as any T.
+fn throw<T>(r: PgResult<()>) -> PgResult<T> {
+    match r {
+        Ok(()) => unreachable!("throw called with non-error report"),
+        Err(e) => Err(e),
+    }
+}
+
 fn lsn_fmt(lsn: XLogRecPtr) -> String {
     format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
 }
@@ -120,7 +128,9 @@ pub struct PgConn {
     inbuf: Vec<u8>,
     inpos: usize,
     conn_ok: bool,
-    in_copy_both: bool,
+    in_copy: bool,
+    copy_server_done: bool,
+    copy_client_done: bool,
     err: String,
     opts: Vec<(String, String)>,
     display_host: String,
@@ -134,6 +144,7 @@ pub enum ExecStatus {
     CommandOk,
     TuplesOk,
     CopyBoth,
+    CopyIn,
     Empty,
     Error,
 }
@@ -363,6 +374,8 @@ impl PgConn {
 
         let mut nfields = 0usize;
         let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
+        let mut result_nfields = 0usize;
+        let mut result_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
         let mut last = ExecStatus::CommandOk;
         let mut error: Option<String> = None;
         let mut got_result = false;
@@ -387,6 +400,9 @@ impl PgConn {
                 b'C' => {
                     last = if nfields > 0 { ExecStatus::TuplesOk } else { ExecStatus::CommandOk };
                     got_result = true;
+                    result_nfields = nfields;
+                    result_rows = std::mem::take(&mut rows);
+                    nfields = 0;
                 }
                 b'I' => {
                     last = ExecStatus::Empty;
@@ -397,7 +413,9 @@ impl PgConn {
                     error = Some(self.err.clone());
                 }
                 b'W' => {
-                    self.in_copy_both = true;
+                    self.in_copy = true;
+                    self.copy_server_done = false;
+                    self.copy_client_done = false;
                     return Ok(QueryResult {
                         status: ExecStatus::CopyBoth,
                         nfields: 0,
@@ -422,7 +440,7 @@ impl PgConn {
             return Ok(QueryResult { status: ExecStatus::Error, nfields: 0, rows: Vec::new(), err: e });
         }
         let _ = got_result;
-        Ok(QueryResult { status: last, nfields, rows, err: String::new() })
+        Ok(QueryResult { status: last, nfields: result_nfields, rows: result_rows, err: String::new() })
     }
 
     // PQgetCopyData(async=true).
@@ -434,7 +452,7 @@ impl PgConn {
             match t {
                 b'd' => return Ok(CopyData::Msg(body)),
                 b'c' => {
-                    self.in_copy_both = false;
+                    self.copy_server_done = true;
                     return Ok(CopyData::End);
                 }
                 b'E' => {
@@ -452,7 +470,17 @@ impl PgConn {
     }
 
     // PQgetResult: one result per call; None once ReadyForQuery is consumed.
+    // A half-closed CopyBoth (server CopyDone, ours unsent) reports COPY_IN
+    // without reading, exactly as libpq does — the walreceiver may still send.
     pub fn get_result(&mut self) -> PgResult<Option<QueryResult>> {
+        if self.in_copy && self.copy_server_done && !self.copy_client_done {
+            return Ok(Some(QueryResult {
+                status: ExecStatus::CopyIn,
+                nfields: 0,
+                rows: Vec::new(),
+                err: String::new(),
+            }));
+        }
         let mut nfields = 0usize;
         let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
         loop {
@@ -496,7 +524,9 @@ impl PgConn {
                     }));
                 }
                 b'W' => {
-                    self.in_copy_both = true;
+                    self.in_copy = true;
+                    self.copy_server_done = false;
+                    self.copy_client_done = false;
                     return Ok(Some(QueryResult {
                         status: ExecStatus::CopyBoth,
                         nfields: 0,
@@ -505,9 +535,12 @@ impl PgConn {
                     }));
                 }
                 b'd' => {}
-                b'c' => self.in_copy_both = false,
+                b'c' => self.copy_server_done = true,
                 b'S' | b'N' | b'A' => {}
-                b'Z' => return Ok(None),
+                b'Z' => {
+                    self.in_copy = false;
+                    return Ok(None);
+                }
                 other => {
                     self.conn_ok = false;
                     self.err = format!("unexpected message type \"{}\" from server", other as char);
@@ -527,6 +560,7 @@ impl PgConn {
     }
 
     pub fn put_copy_end(&mut self) -> Result<(), String> {
+        self.copy_client_done = true;
         self.send_all(&msg(b'c', &[]))
     }
 
@@ -629,7 +663,9 @@ pub fn connect(conninfo: &str, appname: &str) -> PgResult<Result<PgConn, String>
         inbuf: Vec::new(),
         inpos: 0,
         conn_ok: true,
-        in_copy_both: false,
+        in_copy: false,
+        copy_server_done: false,
+        copy_client_done: false,
         err: String::new(),
         opts,
         display_host,
@@ -892,11 +928,12 @@ fn pg_hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 pub fn check_conninfo(conninfo: &str) -> PgResult<Vec<(String, String)>> {
     match parse_conninfo(conninfo) {
         Ok(opts) => Ok(opts),
-        Err(e) => ereport(ERROR)
-            .errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg(format!("invalid connection string syntax: {e}"))
-            .finish(loc("libpqrcv_check_conninfo"))
-            .map(|_| unreachable!()),
+        Err(e) => throw(
+            ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("invalid connection string syntax: {e}"))
+                .finish(loc("libpqrcv_check_conninfo")),
+        ),
     }
 }
 
@@ -904,16 +941,16 @@ pub fn check_conninfo(conninfo: &str) -> PgResult<Vec<(String, String)>> {
 pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID)> {
     let res = conn.exec("IDENTIFY_SYSTEM")?;
     if res.status != ExecStatus::TuplesOk {
-        return ereport(ERROR)
+        return throw(ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!(
                 "could not receive database system identifier and timeline ID from the primary server: {}",
                 pchomp(&res.err)
             ))
-            .finish(loc("libpqrcv_identify_system"));
+            .finish(loc("libpqrcv_identify_system")));
     }
     if res.nfields < 3 || res.rows.len() != 1 {
-        return ereport(ERROR)
+        return throw(ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg("invalid response from primary server")
             .errdetail(format!(
@@ -923,7 +960,7 @@ pub fn identify_system(conn: &mut PgConn) -> PgResult<(String, TimeLineID)> {
                 1,
                 3
             ))
-            .finish(loc("libpqrcv_identify_system"));
+            .finish(loc("libpqrcv_identify_system")));
     }
     let sysid = text_col(&res, 0, 0);
     let tli: TimeLineID = text_col(&res, 0, 1).trim().parse().map_err(|_| {
@@ -960,23 +997,23 @@ pub fn start_streaming(
     match res.status {
         ExecStatus::CommandOk => Ok(false),
         ExecStatus::CopyBoth => Ok(true),
-        _ => ereport(ERROR)
+        _ => throw(ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!("could not start WAL streaming: {}", pchomp(&res.err)))
-            .finish(loc("libpqrcv_startstreaming")),
+            .finish(loc("libpqrcv_startstreaming"))),
     }
 }
 
 /// libpqrcv_endstreaming. Returns the next timeline ID (0 if not reported).
 pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
     if conn.put_copy_end().is_err() {
-        return ereport(ERROR)
+        return throw(ereport(ERROR)
             .errcode(ERRCODE_CONNECTION_FAILURE)
             .errmsg(format!(
                 "could not send end-of-streaming message to primary: {}",
                 pchomp(&conn.error_message())
             ))
-            .finish(loc("libpqrcv_endstreaming"));
+            .finish(loc("libpqrcv_endstreaming")));
     }
 
     let mut next_tli: TimeLineID = 0;
@@ -984,10 +1021,10 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
     if let Some(r) = &res {
         if r.status == ExecStatus::TuplesOk {
             if r.nfields < 2 || r.rows.len() != 1 {
-                return ereport(ERROR)
+                return throw(ereport(ERROR)
                     .errcode(ERRCODE_PROTOCOL_VIOLATION)
                     .errmsg("unexpected result set after end-of-streaming")
-                    .finish(loc("libpqrcv_endstreaming"));
+                    .finish(loc("libpqrcv_endstreaming")));
             }
             next_tli = text_col(r, 0, 0).trim().parse().unwrap_or(0);
             res = conn.get_result()?;
@@ -996,7 +1033,7 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
     match &res {
         Some(r) if r.status == ExecStatus::CommandOk => {}
         _ => {
-            return ereport(ERROR)
+            return throw(ereport(ERROR)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg(format!(
                     "error reading result of streaming command: {}",
@@ -1012,7 +1049,7 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
                 "unexpected result after CommandComplete: {}",
                 pchomp(&conn.error_message())
             ))
-            .finish(loc("libpqrcv_endstreaming"));
+            .finish(loc("libpqrcv_endstreaming")));
     }
     Ok(next_tli)
 }
@@ -1024,16 +1061,16 @@ pub fn read_timeline_history_file(
 ) -> PgResult<(String, Vec<u8>)> {
     let res = conn.exec(&format!("TIMELINE_HISTORY {tli}"))?;
     if res.status != ExecStatus::TuplesOk {
-        return ereport(ERROR)
+        return throw(ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!(
                 "could not receive timeline history file from the primary server: {}",
                 pchomp(&res.err)
             ))
-            .finish(loc("libpqrcv_readtimelinehistoryfile"));
+            .finish(loc("libpqrcv_readtimelinehistoryfile")));
     }
     if res.nfields != 2 || res.rows.len() != 1 {
-        return ereport(ERROR)
+        return throw(ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg("invalid response from primary server")
             .errdetail(format!(
@@ -1041,7 +1078,7 @@ pub fn read_timeline_history_file(
                 res.rows.len(),
                 res.nfields
             ))
-            .finish(loc("libpqrcv_readtimelinehistoryfile"));
+            .finish(loc("libpqrcv_readtimelinehistoryfile")));
     }
     let fname = text_col(&res, 0, 0);
     let content = res.rows[0][1].clone().unwrap_or_default();
@@ -1078,22 +1115,17 @@ pub fn receive(conn: &mut PgConn) -> PgResult<(i32, Vec<u8>, pgsocket)> {
                         if conn.connection_bad() {
                             return Ok((-1, Vec::new(), 0));
                         }
-                        return ereport(ERROR)
+                        return throw(ereport(ERROR)
                             .errcode(ERRCODE_PROTOCOL_VIOLATION)
                             .errmsg(format!(
                                 "unexpected result after CommandComplete: {}",
                                 conn.error_message()
                             ))
-                            .finish(loc("libpqrcv_receive"));
+                            .finish(loc("libpqrcv_receive")));
                     }
                     Ok((-1, Vec::new(), 0))
                 }
-                Some(r) if r.status == ExecStatus::TuplesOk => {
-                    // Timeline-switch result set: leave it for endstreaming by
-                    // reporting end-of-copy; C reaches this via PQgetResult
-                    // ordering, which this client preserves by buffering.
-                    Ok((-1, Vec::new(), 0))
-                }
+                Some(r) if r.status == ExecStatus::CopyIn => Ok((-1, Vec::new(), 0)),
                 _ => receive_stream_error(&conn.error_message()),
             }
         }
@@ -1102,10 +1134,12 @@ pub fn receive(conn: &mut PgConn) -> PgResult<(i32, Vec<u8>, pgsocket)> {
 }
 
 fn receive_stream_error(err: &str) -> PgResult<(i32, Vec<u8>, pgsocket)> {
-    ereport(ERROR)
-        .errcode(ERRCODE_CONNECTION_FAILURE)
-        .errmsg(format!("could not receive data from WAL stream: {}", pchomp(err)))
-        .finish(loc("libpqrcv_receive"))
+    throw(
+        ereport(ERROR)
+            .errcode(ERRCODE_CONNECTION_FAILURE)
+            .errmsg(format!("could not receive data from WAL stream: {}", pchomp(err)))
+            .finish(loc("libpqrcv_receive")),
+    )
 }
 
 /// libpqrcv_send.

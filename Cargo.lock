@@ -16918,6 +16918,7 @@ dependencies = [
  "s_lock_seams",
  "shmem_seams",
  "sinval",
+ "standby_seams",
  "subtrans",
  "subtrans_seams",
  "superuser_seams",
