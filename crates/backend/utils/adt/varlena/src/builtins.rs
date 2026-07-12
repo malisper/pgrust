@@ -108,7 +108,7 @@ fn hash_collation_err() -> Box<PgError> {
     )
 }
 
-fn hashtext_nondeterministic(
+pub(crate) fn hashtext_nondeterministic(
     collid: types_core::Oid,
     data: &[u8],
     seed: Option<u64>,

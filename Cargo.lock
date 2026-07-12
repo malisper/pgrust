@@ -4859,6 +4859,7 @@ dependencies = [
  "types_fmgr",
  "types_slot",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
