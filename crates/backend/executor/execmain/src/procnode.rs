@@ -175,6 +175,9 @@ pub struct AggPlanState<'mcx> {
     /// Lane-v2 memoized structural choice for the hash-agg breaker (None =
     /// undecided); all lane logic lives in `lanev2`.
     pub lane_choice: Option<crate::lanev2::AggLaneChoice>,
+    /// Lane-v2 staged join-feed replay slot, memoized across rescan rebuilds
+    /// (a fresh extra slot per rebuild would grow es_tupleTable per rescan).
+    pub lane_stage_slot: Option<::executils::ExecSlotId>,
 }
 
 // The WindowAgg node's outer child lives here (nodesort/nodeagg precedent).
@@ -844,7 +847,10 @@ pub fn exec_init_node<'mcx>(
             let outer_desc =
                 outer.exec_get_result_type(agg_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
             let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc, Some(outer_desc))?;
-            PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer, lane_choice: None })?)
+            PlanStateNode::Agg(::mcx::alloc_in(
+                mcx,
+                AggPlanState { agg, outer, lane_choice: None, lane_stage_slot: None },
+            )?)
         }
         NodeTag::T_WindowAgg => {
             let mcx = estate.es_query_cxt;
@@ -1540,7 +1546,7 @@ fn agg_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let aps = &mut **aps;
-    let AggPlanState { agg, outer, lane_choice } = aps;
+    let AggPlanState { agg, outer, lane_choice, lane_stage_slot } = aps;
     match outer {
         PlanStateNode::SeqScan(ss) => {
             // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
@@ -1625,7 +1631,9 @@ fn agg_arm<'mcx>(
             // lane scans). Falls through to the UNCHANGED per-tuple agg over
             // exec_hash_join on refuse. Lane logic + refuse-set in `lanev2`.
             if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_hash_join(agg, hj, estate)? {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_hash_join(agg, hj, lane_stage_slot, estate)?
+                {
                     return Ok(r);
                 }
             }
@@ -3388,7 +3396,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     ModifyTablePlanState<'_> { mt, subplan, epq },
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
-    AggPlanState<'_> { agg, outer, lane_choice },
+    AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot },
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },

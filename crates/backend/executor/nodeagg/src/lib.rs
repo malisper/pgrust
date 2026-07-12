@@ -3009,6 +3009,20 @@ pub fn agg_aggcontext<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
     unsafe { node.agg_node.as_ref() }.aggcontext()
 }
 
+/// Lane-v2 staged join-feed admission inputs: the outer columns the hashed
+/// build reads per row — C find_cols' `colnos_needed` (grouping + hashed +
+/// unaggregated + aggregated input columns; exactly the spill projection's
+/// column set) — plus the deform bound (`max_colno_needed`). A staged replay
+/// slot carrying exactly these columns (others NULL) is observation-identical
+/// to the original input slot for the whole build: the probe hashes grouping
+/// columns, the transition programs read the aggregated inputs, and a spilled
+/// tuple materializes exactly the needed columns (the spill projection nulls
+/// the unneeded ones anyway — `hashagg_spill_tuple`'s wslot arm).
+pub fn agg_hash_needed_cols<'a>(node: &'a AggStateData<'_>) -> (&'a [bool], i32) {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    (&ph.spill.colnos_needed, ph.spill.max_colno_needed)
+}
+
 /// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
 /// program split — prepare/lookup per row (spill-mode misses spill the tuple
 /// identically), then only the RESIDUAL transitions (the transnos classify
