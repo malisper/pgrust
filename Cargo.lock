@@ -8393,6 +8393,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "lanefold",
+ "lanetable",
  "lsyscache",
  "mcx",
  "mcxt_stats",
