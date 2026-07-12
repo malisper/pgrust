@@ -1,12 +1,7 @@
 //! `contrib/unaccent/unaccent.c` — the unaccent text search dictionary
-//! template (a filtering dictionary built on a byte trie) plus the
-//! `unaccent()` SQL function wrapper.
-//!
-//! The C trie is an array of 256 `TrieChar` per node with raw pointers; here
-//! the trie is an index-linked arena (`nodes`/`replacements`) owned by the
-//! dictionary's memory context, matching the same byte-at-a-time,
-//! longest-match search with no attention to multibyte boundaries (safe for
-//! validly encoded data, per the C comment).
+//! template plus the `unaccent()` SQL wrapper. C's pointer trie (256
+//! `TrieChar` per node) is an index-linked arena here; same byte-at-a-time
+//! longest-match search, `next`/`replace` 1-based (0 = C's NULL).
 
 use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
 use ::ts_locale::dict_api::{lexize_result_ref, DictInitData, LexizeResult};
@@ -21,10 +16,6 @@ use datum::Datum;
 
 const LIBRARY: &str = "unaccent";
 
-// One trie level: cell N is the transition for next byte N. `next` and
-// `replace` are 1-based indexes into the arena vectors (0 = C's NULL); a
-// present-but-empty replacement ("src" with omitted trg) stays distinguishable
-// from no replacement, like C's non-NULL replaceTo with replacelen 0.
 #[derive(Clone, Copy)]
 struct TrieCell {
     next: u32,
@@ -32,7 +23,6 @@ struct TrieCell {
 }
 
 pub struct UnaccentTrie {
-    // Each node is 256 cells. Empty `nodes` is C's NULL rootTrie.
     nodes: PgVec<'static, PgVec<'static, TrieCell>>,
     replacements: PgVec<'static, PgVec<'static, u8>>,
 }
@@ -45,8 +35,6 @@ impl UnaccentTrie {
         Ok(self.nodes.len() - 1)
     }
 
-    // placeChar: put src into the trie byte by byte (iterative form of the C
-    // recursion).
     fn place(&mut self, mcx: Mcx<'static>, src: &[u8], replace_to: &[u8]) -> PgResult<()> {
         debug_assert!(!src.is_empty());
         if self.nodes.is_empty() {
@@ -78,8 +66,6 @@ impl UnaccentTrie {
         Ok(())
     }
 
-    // findReplaceTo: longest possible match starting at src[0]; returns the
-    // replacement index plus the length of the matched source string.
     fn find_replace_to(&self, src: &[u8]) -> Option<(usize, usize)> {
         if self.nodes.is_empty() {
             return None;
@@ -111,18 +97,14 @@ fn config_warning(msg: &str) {
     );
 }
 
-// The tsearch_readline loop of C initTrie: read the (UTF-8) rules file, recode
-// each line to the server encoding, and skip lines with untranslatable
-// characters (C catches ERRCODE_UNTRANSLATABLE_CHARACTER per line and
-// continues with the next).
 fn read_rules_lines<'mcx>(
     mcx: Mcx<'mcx>,
     filename: &[u8],
-) -> PgResult<Option<PgVec<'mcx, PgVec<'mcx, u8>>>> {
+) -> PgResult<Result<PgVec<'mcx, PgVec<'mcx, u8>>, std::io::Error>> {
     let path = String::from_utf8_lossy(filename).into_owned();
     let raw = match std::fs::read(&path) {
         Ok(b) => b,
-        Err(_) => return Ok(None),
+        Err(e) => return Ok(Err(e)),
     };
     let mut lines: PgVec<'mcx, PgVec<'mcx, u8>> = PgVec::new_in(mcx);
     for chunk in raw.split_inclusive(|&b| b == b'\n') {
@@ -137,14 +119,11 @@ fn read_rules_lines<'mcx>(
             Err(e) => return Err(e),
         }
     }
-    Ok(Some(lines))
+    Ok(Ok(lines))
 }
 
-// initTrie's per-line parser. The format of each line must be "src" or
-// "src trg"; trg may be double-quoted (whitespace allowed inside, `""`
-// unescapes to `"`). States as in C:
-//   0 initial, 1 in src, 2 after src, 3 in trg, 4 in quoted trg,
-//   5 after trg, -1 two strings, -2 unfinished quoted string.
+// C initTrie's line parser, states as in C: 0 initial, 1 in src, 2 after
+// src, 3 in trg, 4 in quoted trg, 5 after trg, -1/-2 syntax errors.
 fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
     let mut state: i32 = 0;
     let mut src: (usize, usize) = (0, 0);
@@ -154,14 +133,12 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
     let mut i = 0usize;
     while i < line.len() {
         let ptrlen = ::mbutils::pg_mblen(&line[i..]) as usize;
-        // ignore whitespace, but end src or trg
         if byte_isspace(line[i]) {
             if state == 1 {
                 state = 2;
             } else if state == 3 {
                 state = 5;
             }
-            // whitespaces are OK in quoted area
             if state != 4 {
                 i += ptrlen;
                 continue;
@@ -189,8 +166,6 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
             }
             4 => {
                 trg.1 = i + ptrlen;
-                // A quote ends trg unless the follow-up character is itself
-                // a quote.
                 if line[i] == b'"' {
                     if line.get(i + 1) == Some(&b'"') {
                         i += ptrlen;
@@ -201,7 +176,6 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
                 }
             }
             _ => {
-                // bogus line format
                 state = -1;
             }
         }
@@ -209,10 +183,8 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
     }
 
     if state == 1 || state == 2 {
-        // trg was omitted, so use ""
         trg = (0, 0);
     }
-    // If still in a quoted area, fall back to an error
     if state == 4 {
         state = -2;
     }
@@ -220,13 +192,11 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
         return Err(state);
     }
     if state == 0 {
-        // empty line
         return Ok(None);
     }
 
     let trg_bytes = &line[trg.0..trg.1];
     let trgstore = if trgquoted {
-        // Ignore first and end quotes; unescape doubled quotes.
         let inner = &trg_bytes[1..trg_bytes.len() - 1];
         let mut out = Vec::with_capacity(inner.len());
         let mut j = 0usize;
@@ -245,16 +215,23 @@ fn parse_rule_line(line: &[u8]) -> Result<Option<(&[u8], Vec<u8>)>, i32> {
     Ok(Some((&line[src.0..src.1], trgstore)))
 }
 
-// initTrie: create the trie from the rules file.
 fn init_trie(mcx: Mcx<'static>, filename: &[u8]) -> PgResult<UnaccentTrie> {
     let path = get_tsearch_config_filename(mcx, filename, "rules")?;
-    let Some(lines) = read_rules_lines(mcx, &path)? else {
-        return Err(PgError::error(format!(
-            "could not open unaccent file \"{}\": No such file or directory",
-            String::from_utf8_lossy(&path)
-        ))
-        .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
-        .into());
+    let lines = match read_rules_lines(mcx, &path)? {
+        Ok(lines) => lines,
+        Err(e) => {
+            // C: could not open unaccent file "%s": %m — strerror(errno).
+            let errno_text = e
+                .raw_os_error()
+                .map(strerror_text)
+                .unwrap_or_else(|| e.to_string());
+            return Err(PgError::error(format!(
+                "could not open unaccent file \"{}\": {errno_text}",
+                String::from_utf8_lossy(&path)
+            ))
+            .with_sqlstate(ERRCODE_CONFIG_FILE_ERROR)
+            .into());
+        }
     };
     let mut trie = UnaccentTrie {
         nodes: PgVec::new_in(mcx),
@@ -275,11 +252,17 @@ fn init_trie(mcx: Mcx<'static>, filename: &[u8]) -> PgResult<UnaccentTrie> {
     Ok(trie)
 }
 
+fn strerror_text(errno: i32) -> String {
+    // SAFETY: strerror returns a static NUL-terminated string for any errno.
+    unsafe { core::ffi::CStr::from_ptr(libc::strerror(errno)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn invalid_param(msg: impl Into<String>) -> Box<PgError> {
     Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-// unaccent_init.
 pub fn unaccent_init(init: &DictInitData<'static>) -> PgResult<UnaccentTrie> {
     let mut root: Option<UnaccentTrie> = None;
     for (name, value) in init.dict_options.iter() {
@@ -301,9 +284,6 @@ pub fn unaccent_init(init: &DictInitData<'static>) -> PgResult<UnaccentTrie> {
     Ok(trie)
 }
 
-// unaccent_lexize: longest-match replacement over the whole token; returns a
-// result only if at least one substitution was made (TSL_FILTER, so the
-// dictionary acts as a filter in a configuration's chain).
 pub fn unaccent_lexize<'mcx>(
     mcx: Mcx<'mcx>,
     trie: &UnaccentTrie,
@@ -314,7 +294,6 @@ pub fn unaccent_lexize<'mcx>(
     while i < token.len() {
         if let Some((ridx, matchlen)) = trie.find_replace_to(&token[i..]) {
             if buf.is_none() {
-                // insert any data we already skipped over
                 let mut b = vec_with_capacity_in(mcx, token.len())?;
                 b.extend_from_slice(&token[..i]);
                 buf = Some(b);
@@ -324,8 +303,7 @@ pub fn unaccent_lexize<'mcx>(
                 .extend_from_slice(&trie.replacements[ridx]);
             i += matchlen;
         } else {
-            let matchlen = (::mbutils::pg_mblen_range(&token[i..])? as usize)
-                .clamp(1, token.len() - i);
+            let matchlen = ::mbutils::pg_mblen_range(&token[i..])?.max(1) as usize;
             if let Some(b) = buf.as_mut() {
                 b.extend_from_slice(&token[i..i + matchlen]);
             }
@@ -343,7 +321,6 @@ pub fn unaccent_lexize<'mcx>(
     }
 }
 
-// ---- fmgr wrappers (dict_api conventions, see tsearch/dict) ----
 
 fn arg_dict_ptr(fcinfo: &Fcinfo) -> usize {
     fcinfo.arg(0).as_usize()
@@ -377,12 +354,8 @@ fn fc_unaccent_lexize(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     }
 }
 
-// unaccent_dict: function-like wrapper for the dictionary — unaccent(text)
-// and unaccent(regdictionary, text).
 fn fc_unaccent_dict(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let (dict_oid, str_arg) = if fcinfo.nargs == 1 {
-        // Use the "unaccent" dictionary that is in the same schema that this
-        // function is in.
         let flinfo = flinfo.as_ref().expect("unaccent(text): resolved FmgrInfo required");
         let procnspid = lsyscache::get_func_namespace(flinfo.fn_oid)?;
         let dict_oid =

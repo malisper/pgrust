@@ -549,6 +549,16 @@ impl<'mcx> XLogReaderState<'mcx> {
         core::str::from_utf8(&self.errormsg_buf).ok()
     }
 
+    /// The raw error buffer, ignoring the exposure flag — C consumers
+    /// (pg_walinspect) read `record->errormsg_buf` directly after a failed
+    /// `RestoreBlockImage`, which never goes through the out-parameter path.
+    pub fn errormsg_buf_raw(&self) -> Option<&str> {
+        if self.errormsg_buf.is_empty() {
+            return None;
+        }
+        core::str::from_utf8(&self.errormsg_buf).ok()
+    }
+
     pub fn XLogReaderResetError(&mut self) {
         self.errormsg_buf.clear();
         self.errormsg_deferred = false;

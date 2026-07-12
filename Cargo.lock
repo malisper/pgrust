@@ -17013,6 +17013,7 @@ dependencies = [
  "datum",
  "dfmgr",
  "elog",
+ "libc",
  "lsyscache",
  "mbutils",
  "mcx",
