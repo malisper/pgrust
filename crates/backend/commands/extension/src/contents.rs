@@ -160,13 +160,32 @@ fn alter_contents_recurse<'mcx>(
             return Err(PgError::error("unexpected number of extension dependency records").into());
         }
         if object.classId == RELATION_RELATION_ID {
-            unported("extension_config_remove (ALTER EXTENSION DROP TABLE with extconfig)");
+            extension_config_remove(extension.objectId)?;
         }
         // removeExtObjInitPriv: pg_init_privs is a repo-wide no-op.
     }
 
     if object.classId == TYPE_RELATION_ID {
         unported("ALTER EXTENSION ADD/DROP TYPE dependent-object recursion");
+    }
+    Ok(())
+}
+
+/// `extension_config_remove` (extension.c): drop the table from the
+/// extension's extconfig/extcondition arrays. pg_extension_config_dump is
+/// unported, so a populated array cannot exist yet — the null fast path is
+/// the whole live surface, anything else is loud.
+fn extension_config_remove(ext_oid: Oid) -> PgResult<()> {
+    use cache_syscache::{ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, SysCacheKey, EXTENSIONOID};
+    let Some(tuple) =
+        SearchSysCache1(EXTENSIONOID, SysCacheKey::Value(datum::Datum::from_oid(ext_oid)))?
+    else {
+        return Ok(());
+    };
+    let (_, isnull) = SysCacheGetAttr(EXTENSIONOID, &tuple, crate::Anum_pg_extension_extconfig)?;
+    ReleaseSysCache(tuple);
+    if !isnull {
+        unported("extension_config_remove with a populated extconfig array");
     }
     Ok(())
 }
