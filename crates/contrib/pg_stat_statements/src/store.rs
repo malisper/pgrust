@@ -263,7 +263,7 @@ fn dump_path() -> Option<std::path::PathBuf> {
     init_small::globals::DataDir().map(|d| std::path::Path::new(d).join(PGSS_DUMP_FILE))
 }
 
-pub(crate) const COUNTER_WORDS: usize = 6 * PGSS_NUMKIND + 35;
+pub(crate) const COUNTER_WORDS: usize = 6 * PGSS_NUMKIND + 34;
 
 pub(crate) fn counters_to_words(c: &Counters) -> Vec<u64> {
     let mut w: Vec<u64> = Vec::with_capacity(COUNTER_WORDS);
