@@ -2424,10 +2424,10 @@ fn sort_feed_if_needed<'mcx>(
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
             arm_seq_scan_qual_bitmap(ss, estate, "sort feed", true);
-            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
+            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, None, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
-            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)
+            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, None, estate)
         }
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
@@ -2435,6 +2435,7 @@ fn sort_feed_if_needed<'mcx>(
             IndexOnlyScanSource,
             IndexOnlyScanEmit,
             outer_desc,
+            None,
             estate,
         ),
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
@@ -2450,6 +2451,7 @@ fn sort_feed_if_needed<'mcx>(
                 BitmapHeapScanSource,
                 BitmapHeapScanEmit,
                 outer_desc,
+                None,
                 estate,
             )
         }
@@ -2512,19 +2514,27 @@ fn scan_child_fusible<'mcx>(
 /// construction verbatim), then run pipeline N to exhaustion into the breaker
 /// sink. Mirrors `exec_sort`'s build leg in forcing a forward child read for
 /// the feed's duration (restored on success; an error aborts the query).
+/// `narrow_keys`: `Some(k)` = the grouped exact-DISTINCT order-relaxation
+/// arm — begin the tuplesort with only the first `k` sort keys
+/// (`sort_lane_begin_narrowed`; the caller proved the dropped suffix is
+/// observation-free). `None` = `exec_sort`'s construction verbatim.
 fn sort_feed<'mcx, S, O>(
     sort: &mut ::nodesort::SortState<'mcx>,
     scan: &mut S::Node,
     mut src: S,
     mut op: O,
     outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    narrow_keys: Option<usize>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()>
 where
     S: Source<'mcx>,
     O: Operator<'mcx, Node = S::Node>,
 {
-    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    match narrow_keys {
+        Some(k) => ::nodesort::sort_lane_begin_narrowed(sort, outer_desc, k)?,
+        None => ::nodesort::sort_lane_begin(sort, outer_desc)?,
+    }
     // Direct sort-key feed (`exec_sort_batched`'s `key_direct` probe,
     // mirrored): probed once per feed, BEFORE the first `produce` (arming
     // decides what the staging pass stages), datum sorts only — exactly the
@@ -2840,9 +2850,52 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     }
     // Agg-side admission (static shape; ticked per offered call, the hashed
     // breaker's AggNotDrainable cadence).
-    if !::nodeagg::agg_sorted_lane_admissible(agg) {
-        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
-        return Ok(None);
+    //
+    // Grouped narrow-sort arm (v2, the ClickBench Q9/Q10 shape): an
+    // AGG_SORTED node whose DISTINCT aggregates ride the plan Sort's
+    // distinct-arg SUFFIX keys (aggpresorted adjacent-dedup) fails the plain
+    // admission — but when every internal-sort entry is set-CAPABLE, every
+    // transition is order-insensitive-exact, and the Sort's key prefix is
+    // exactly the grouping columns, the suffix's only observable effect is
+    // intra-group row order, which nothing observes once the drive arms
+    // set-mode. The drive then feeds the sort with the comparator NARROWED
+    // to the group prefix (`sort_lane_begin_narrowed`) and the exact sets
+    // replace the dedup: byte-identical output (same groups, same group
+    // order, same exact values), with the suffix compares and the per-row
+    // dedup calls deleted. Armed only BEFORE the sort is built (arming
+    // decides the feed's construction); the sticky force keeps the plain
+    // admission true on later calls and any per-tuple fallback value-safe.
+    let mut narrow: Option<usize> = None;
+    let plain_admissible = ::nodeagg::agg_sorted_lane_admissible(agg);
+    // Probe the narrow shape when the plain admission failed (the arm's
+    // first engagement) OR when a prior call armed it (a rescan-rebuilt sort
+    // must narrow again — the sticky force makes the plain admission true).
+    if !plain_admissible || ::nodeagg::agg_distinct_set_forced(agg) {
+        let sp = s.state.plan;
+        let k = ::nodeagg::agg_plan_group_cols(agg).len();
+        let ok = ::nodeagg::agg_sorted_distinct_narrow_admissible(agg)
+            && !s.state.sort_done()
+            && !s.state.bounded
+            && k >= 1
+            && (sp.numCols as usize) > k
+            && sp.sortColIdx.len() >= k
+            && {
+                // Prefix == group columns as a MULTISET (order within the
+                // prefix is free: grouping adjacency only needs the rows
+                // prefix-sorted, whichever prefix order).
+                let mut a: Vec<i16> = sp.sortColIdx[..k].to_vec();
+                let mut b: Vec<i16> = ::nodeagg::agg_plan_group_cols(agg).to_vec();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            };
+        if !plain_admissible && !ok {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+            return Ok(None);
+        }
+        if ok {
+            narrow = Some(k);
+        }
     }
     // Sort-side structural verdict — the bare-sort arm's memo, shared (the
     // refusal ticks once per node whichever arm probes first).
@@ -2875,13 +2928,25 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         // once per (re)scan).
         stats::tick_owned(ShapeClass::SortFeed);
         stats::tick_owned(ShapeClass::AggBuild);
+        if narrow.is_some() {
+            // Arm set-mode BEFORE any input (sticky; the arming doc), then
+            // build the narrowed sort below.
+            ::nodeagg::agg_sorted_force_distinct_set(agg);
+            trace_feed("sorted-agg distinct-set narrowed sort feed armed");
+        }
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
         match &mut **outer {
-            crate::procnode::PlanStateNode::SeqScan(ss) => {
-                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
-            }
+            crate::procnode::PlanStateNode::SeqScan(ss) => sort_feed(
+                state,
+                ss,
+                SeqScanSource,
+                SeqScanFilterProject,
+                outer_desc,
+                narrow,
+                estate,
+            )?,
             crate::procnode::PlanStateNode::IndexScan(is) => {
-                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
+                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, narrow, estate)?
             }
             crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
                 state,
@@ -2889,6 +2954,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
                 IndexOnlyScanSource,
                 IndexOnlyScanEmit,
                 outer_desc,
+                narrow,
                 estate,
             )?,
             crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
@@ -2902,6 +2968,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
                     BitmapHeapScanSource,
                     BitmapHeapScanEmit,
                     outer_desc,
+                    narrow,
                     estate,
                 )?
             }
