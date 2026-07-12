@@ -442,6 +442,60 @@ pub fn sort_lane_put<'mcx>(
     }
 }
 
+/// Batch-granular feed leg (breaker `BatchSink::accept_batch`): put every
+/// row `emit` yields for staged positions `pos..n`. Row-for-row this is
+/// `sort_lane_put` over the same emit stream in the same order — the
+/// dispatch-granularity change only — with the per-put invariants hoisted
+/// out of the loop, exactly as `exec_sort_batched`'s feed arms hoist them:
+///   * the tuplesort handle is resolved once per batch, not per put;
+///   * by-val datum sorts hold the batch putter open across the batch
+///     (`putdatum_batch` — the same `puttuple_common` accounting as
+///     `putdatum`, per-put len round-trip elided; `exec_sort` itself feeds
+///     through it, so the sort state and output are unchanged);
+///   * by-ref datum sorts keep `putdatum` (its datumCopy arm — the batch
+///     putter parks raw slot pointers the next emit would recycle).
+pub fn sort_lane_put_batch<'mcx, E>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    pos: u32,
+    n: u32,
+    emit: &mut E,
+) -> PgResult<()>
+where
+    E: FnMut(u32, &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+{
+    let mcx = estate.es_query_cxt;
+    let ts = node.tuplesortstate.as_mut().expect("sort_lane_put_batch before sort_lane_begin");
+    if node.datumSort {
+        if ts.datum_sort_is_byref() {
+            for i in pos..n {
+                let Some(id) = emit(i, estate)? else { continue };
+                let slot = estate.slot_mut(id);
+                exectuples::slot_getsomeattrs(slot, 1);
+                let base = slot.base();
+                ts.putdatum(base.tts_values[0], base.tts_isnull[0])?;
+            }
+        } else {
+            ts.putdatum_batch(|p| {
+                for i in pos..n {
+                    let Some(id) = emit(i, estate)? else { continue };
+                    let slot = estate.slot_mut(id);
+                    exectuples::slot_getsomeattrs(slot, 1);
+                    let base = slot.base();
+                    p.put(base.tts_values[0], base.tts_isnull[0])?;
+                }
+                Ok(())
+            })?;
+        }
+    } else {
+        for i in pos..n {
+            let Some(id) = emit(i, estate)? else { continue };
+            ts.puttupleslot(estate.slot_mut(id), mcx)?;
+        }
+    }
+    Ok(())
+}
+
 /// Finalize leg (breaker `Sink::finish`): `performsort` + the EXPLAIN sort
 /// stats + the built flags — `exec_sort`'s build-leg tail verbatim. Flips
 /// `sort_Done`, the breaker's Feed→Emit phase flag.
