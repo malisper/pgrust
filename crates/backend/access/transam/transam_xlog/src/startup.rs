@@ -265,8 +265,17 @@ pub fn StartupXLOG() -> PgResult<()> {
         });
         UpdateControlFile()?;
 
-        if init.have_backup_label || init.have_tblspc_map {
-            panic!("backup_label / tablespace_map recovery not ported");
+        if init.have_backup_label {
+            let _ = std::fs::remove_file(data_path("backup_label.old"));
+            let _ = fd::durable_rename(&data_path("backup_label"), &data_path("backup_label.old"), FATAL)?;
+        }
+        if init.have_tblspc_map {
+            let _ = std::fs::remove_file(data_path("tablespace_map.old"));
+            let _ = fd::durable_rename(
+                &data_path("tablespace_map"),
+                &data_path("tablespace_map.old"),
+                FATAL,
+            )?;
         }
 
         if xlogrecovery_seams::in_archive_recovery::call() {

@@ -301,6 +301,7 @@ fn SubTransPagePrecedes(page1: i64, page2: i64) -> bool {
 
 pub fn init_seams() {
     subtrans_seams::sub_trans_get_topmost_transaction::set(SubTransGetTopmostTransaction);
+    subtrans_seams::startup_subtrans::set(StartupSUBTRANS);
     subtrans_seams::sub_trans_set_parent::set(SubTransSetParent);
     subtrans_seams::extend_subtrans::set(ExtendSUBTRANS);
 
