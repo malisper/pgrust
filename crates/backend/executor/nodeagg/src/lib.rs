@@ -3081,6 +3081,35 @@ pub fn agg_hash_build_probe_resid<'mcx>(
     Ok(pg)
 }
 
+/// Expr-key feed resid leg: run only the RESIDUAL transitions for a row whose
+/// group the caller already resolved (the per-epoch code→pergroup cache) —
+/// `agg_hash_build_probe_resid` with the lookup replaced by installing the
+/// cached pergroup in the cell the resid program reads. Byte-identical to the
+/// probe leg for found-existing groups: `lookup_hash_entry`'s only effect on
+/// a hit is that same cell write.
+pub fn agg_hash_build_resid_group<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+    pg: NonNull<AggPerGroup>,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    {
+        let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+        // SAFETY: the once-allocated cell every probe leg writes; the resid
+        // program reads it through the same pointer.
+        unsafe { ph.pergroup_cell.as_ptr().write(pg) };
+    }
+    if let Some(resid) = node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut()) {
+        let outer_slot = estate.slot_mut(outer_id);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+        exec_eval_expr(resid, &mut slots)?;
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
 // ===========================================================================
 // Lane-v2 plain-agg (AGG_PLAIN, ungrouped) fold-drive delegation seam. The
 // lane's fold drive (execmain/src/lanev2.rs) owns the batched feed; these
