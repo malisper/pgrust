@@ -102,7 +102,7 @@ fn get_sync_bit(method: i32) -> i32 {
     }
 }
 
-pub(crate) fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
+pub fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
     let method = wal_sync_method();
     if !init_small::globals::enableFsync()
         || method == WAL_SYNC_METHOD_OPEN

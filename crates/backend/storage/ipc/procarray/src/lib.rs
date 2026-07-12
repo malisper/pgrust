@@ -1197,9 +1197,13 @@ struct ComputeXidHorizonsResult {
     latest_completed: FullTransactionId,
     oldest_considered_running: TransactionId,
     shared_oldest_nonremovable: TransactionId,
+    // shared horizon before the slot xmins fold in (hot_standby_feedback
+    // reports slot effects separately).
+    shared_oldest_nonremovable_raw: TransactionId,
     catalog_oldest_nonremovable: TransactionId,
     data_oldest_nonremovable: TransactionId,
     temp_oldest_nonremovable: TransactionId,
+    slot_catalog_xmin: TransactionId,
 }
 
 thread_local! {
@@ -1225,6 +1229,8 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         latest_completed,
         oldest_considered_running: initial,
         shared_oldest_nonremovable: initial,
+        shared_oldest_nonremovable_raw: initial,
+        slot_catalog_xmin: InvalidTransactionId,
         catalog_oldest_nonremovable: InvalidTransactionId,
         data_oldest_nonremovable: initial,
         temp_oldest_nonremovable: if TransactionIdIsValid(my_proc.xid.read()) {
@@ -1280,6 +1286,8 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, kaxmin);
     }
 
+    h.shared_oldest_nonremovable_raw = h.shared_oldest_nonremovable;
+    h.slot_catalog_xmin = slot_catalog_xmin;
     h.shared_oldest_nonremovable =
         TransactionIdOlder(h.shared_oldest_nonremovable, slot_xmin);
     h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, slot_xmin);
@@ -1342,6 +1350,13 @@ fn GlobalVisHorizonKindForRel(rel: &types_rel::RelationData<'_>) -> GlobalVisHor
 // C's rel == NULL arm (GlobalVisHorizonKindForRel(NULL) == VISHORIZON_SHARED).
 pub fn GetOldestNonRemovableTransactionIdShared() -> PgResult<TransactionId> {
     Ok(ComputeXidHorizons()?.shared_oldest_nonremovable)
+}
+
+/// GetReplicationHorizons (procarray.c): (xmin, catalog_xmin) for a hot
+/// standby feedback message.
+pub fn GetReplicationHorizons() -> PgResult<(TransactionId, TransactionId)> {
+    let h = ComputeXidHorizons()?;
+    Ok((h.shared_oldest_nonremovable_raw, h.slot_catalog_xmin))
 }
 
 pub fn GetOldestNonRemovableTransactionId(

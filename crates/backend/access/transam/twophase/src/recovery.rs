@@ -339,8 +339,8 @@ pub fn RecoverPreparedTransactions() -> PgResult<()> {
                 &twophase_rmgr::twophase_recover_callbacks,
             )?;
 
-            if xlogutils::standby_state() == xlogutils::HotStandbyState::STANDBY_SNAPSHOT_READY {
-                panic!("RecoverPreparedTransactions: StandbyReleaseLockTree unported (hot standby)");
+            if xlogutils::InHotStandby() {
+                standby_seams::standby_release_lock_tree::call(xid, &subxids)?;
             }
 
             PostPrepare_Twophase();
