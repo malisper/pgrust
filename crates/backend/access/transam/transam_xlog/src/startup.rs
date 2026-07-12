@@ -977,14 +977,6 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         return Ok(false);
     }
 
-    // C emits the running-xacts snapshot before entering its critical
-    // section; the fast port's section spans the whole header build, so the
-    // insert happens here (same WAL position: after the skip check, before
-    // the REDO pointer is chosen).
-    if !shutdown && XLogStandbyInfoActive() {
-        standby_seams::log_standby_snapshot::call()?;
-    }
-
     let old_xlog_allowed = if flags & CHECKPOINT_END_OF_RECOVERY != 0 {
         LocalSetXLogInsertAllowed()
     } else {
