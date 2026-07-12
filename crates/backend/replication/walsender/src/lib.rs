@@ -504,6 +504,32 @@ pub(crate) fn GetStandbyFlushRecPtr() -> (types_core::XLogRecPtr, TimeLineID) {
     (result, replay_tli)
 }
 
+// StartReplication's historic-timeline epilogue (walsender.c:990): a
+// single-row (next_tli int8, next_tli_startpos text) result set.
+pub(crate) fn send_next_timeline_result_set(mcx: mcx::Mcx<'_>) -> PgResult<()> {
+    let valid_upto = SEND_TIME_LINE_VALID_UPTO.with(|c| c.get());
+    let next_tli = SEND_TIME_LINE_NEXT_TLI.with(|c| c.get());
+    let startpos_str = format!("{:X}/{:X}", (valid_upto >> 32) as u32, valid_upto as u32);
+
+    let mut dest = tcop_dest::CreateDestReceiver(types_dest::CommandDest::RemoteSimple);
+
+    // int8 for next_tli: int4 is not wide enough (TimeLineID is unsigned).
+    let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
+    tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 1, "next_tli", INT8OID, -1, 0)?;
+    tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 2, "next_tli_startpos", TEXTOID, -1, 0)?;
+
+    let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, &mut dest, Rc::new(tupdesc))?;
+
+    let mut values = [Datum::null(); 2];
+    let nulls = [false; 2];
+    values[0] = Datum::from_i64(next_tli as i64);
+    let pos_v = varlena::cstring_to_text(mcx, startpos_str.as_bytes())?;
+    values[1] = Datum::from_usize(pos_v.as_bytes().as_ptr() as usize);
+
+    exectuples_output::do_tup_output(&mut tstate, mcx, &values, &nulls)?;
+    exectuples_output::end_tup_output(tstate)
+}
+
 // IdentifySystem (walsender.c:395).
 fn IdentifySystem(mcx: mcx::Mcx<'_>) -> PgResult<()> {
     let sysid = format!("{}", transam_xlog::GetSystemIdentifier());

@@ -14,7 +14,7 @@ use elog::ereport;
 use repl_gram::{ReplicationKind, StartReplicationCmd};
 use types_core::{InvalidXLogRecPtr, TimeLineID, TimestampTz, XLogRecPtr};
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
+    ErrorLocation, PgResult, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, LOG,
 };
 use types_storage::waiteventset::{WL_POSTMASTER_DEATH, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 use xlogreader::XLogReaderState;
@@ -117,7 +117,39 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
             crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.set(false));
             crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.set(InvalidXLogRecPtr));
         } else {
-            panic!("walsender: historic-timeline START_REPLICATION unported (replication-p1 P4)");
+            crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.set(true));
+
+            // Check that the timeline the client requested exists, and the
+            // requested start location is on that timeline (walsender.c:871).
+            let switchpoint = {
+                let cx = mcx::MemoryContext::new("StartReplication/timeline-history");
+                let history = timeline_seams::read_timeline_history::call(cx.mcx(), flush_tli)?;
+                let (switchpoint, next_tli) =
+                    timeline_seams::tli_switch_point::call(cmd.timeline, &history)?;
+                crate::SEND_TIME_LINE_NEXT_TLI.with(|c| c.set(next_tli));
+                switchpoint
+            };
+
+            // Loose on purpose (C comment): only reject when we forked off
+            // the requested timeline before the switchpoint — the client may
+            // legitimately ask for the beginning of the switch segment.
+            if switchpoint != InvalidXLogRecPtr && switchpoint < cmd.startpoint {
+                return ereport(ERROR)
+                    .errmsg(format!(
+                        "requested starting point {:X}/{:X} on timeline {} is not in this server's history",
+                        (cmd.startpoint >> 32) as u32,
+                        cmd.startpoint as u32,
+                        cmd.timeline,
+                    ))
+                    .errdetail(format!(
+                        "This server's history forked from timeline {} at {:X}/{:X}.",
+                        cmd.timeline,
+                        (switchpoint >> 32) as u32,
+                        switchpoint as u32,
+                    ))
+                    .finish(loc(908, "StartReplication"));
+            }
+            crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.set(switchpoint));
         }
     } else {
         crate::SEND_TIME_LINE.with(|c| c.set(flush_tli));
@@ -128,48 +160,58 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
     crate::STREAMING_DONE_SENDING.with(|c| c.set(false));
     crate::STREAMING_DONE_RECEIVING.with(|c| c.set(false));
 
-    // Non-historic: always enter COPY mode and stream.
-    crate::WalSndSetState(WalSndState::Catchup);
+    // If there is nothing to stream, don't even enter COPY mode.
+    if !crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get())
+        || cmd.startpoint < crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.get())
+    {
+        crate::WalSndSetState(WalSndState::Catchup);
 
-    // CopyBothResponse ('W'): overall copy format = textual (0), natts = 0.
-    pqcomm::pq_putmessage(b'W', &[0u8, 0, 0])?;
-    pqcomm::pq_flush()?;
+        // CopyBothResponse ('W'): overall copy format = textual (0), natts = 0.
+        pqcomm::pq_putmessage(b'W', &[0u8, 0, 0])?;
+        pqcomm::pq_flush()?;
 
-    if flush_ptr < cmd.startpoint {
-        return ereport(ERROR)
-            .errmsg(format!(
-                "requested starting point {:X}/{:X} is ahead of the WAL flush position of this server {:X}/{:X}",
-                (cmd.startpoint >> 32) as u32,
-                cmd.startpoint as u32,
-                (flush_ptr >> 32) as u32,
-                flush_ptr as u32,
-            ))
-            .finish(loc(990, "StartReplication"));
+        if flush_ptr < cmd.startpoint {
+            return ereport(ERROR)
+                .errmsg(format!(
+                    "requested starting point {:X}/{:X} is ahead of the WAL flush position of this server {:X}/{:X}",
+                    (cmd.startpoint >> 32) as u32,
+                    cmd.startpoint as u32,
+                    (flush_ptr >> 32) as u32,
+                    flush_ptr as u32,
+                ))
+                .finish(loc(990, "StartReplication"));
+        }
+
+        set_sent_ptr(cmd.startpoint);
+        crate::my_set_sentptr(cmd.startpoint);
+
+        // SyncRepInitConfig(): SyncRep is out of P1 scope (async only).
+
+        crate::REPLICATION_ACTIVE.with(|c| c.set(true));
+
+        let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
+        let r = WalSndLoop(&mut reader);
+
+        crate::REPLICATION_ACTIVE.with(|c| c.set(false));
+        r?;
+
+        if got_stopping() {
+            proc_exit(0);
+        }
+        crate::WalSndSetState(WalSndState::Startup);
+
+        debug_assert!(streaming_done_sending() && streaming_done_receiving());
     }
-
-    set_sent_ptr(cmd.startpoint);
-    crate::my_set_sentptr(cmd.startpoint);
-
-    // SyncRepInitConfig(): SyncRep is out of P1 scope (async only).
-
-    crate::REPLICATION_ACTIVE.with(|c| c.set(true));
-
-    let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
-    let r = WalSndLoop(&mut reader);
-
-    crate::REPLICATION_ACTIVE.with(|c| c.set(false));
-    r?;
-
-    if got_stopping() {
-        proc_exit(0);
-    }
-    crate::WalSndSetState(WalSndState::Startup);
 
     if cmd.slotname.is_some() {
         slot::ReplicationSlotRelease()?;
     }
 
-    // Non-historic: no next-timeline result set (that path is P4).
+    // Copy is finished. Send a single-row result set indicating the next
+    // timeline (walsender.c:990).
+    if crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get()) {
+        crate::send_next_timeline_result_set(mcx)?;
+    }
     Ok(())
 }
 
@@ -185,21 +227,39 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
     }
 
     let send_rqst_ptr: XLogRecPtr = if crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get()) {
-        panic!("walsender: historic-timeline streaming unported (replication-p1 P4)");
+        // Streaming an old timeline in this server's history: it can be
+        // streamed up to the point where we switched off that timeline.
+        crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.get())
     } else if am_cascading() {
         // Streaming the latest timeline on a cascading standby.
-        let (ptr, send_rqst_tli) = crate::GetStandbyFlushRecPtr();
+        let (ptr, mut send_rqst_tli) = crate::GetStandbyFlushRecPtr();
         let became_historic = if !transam_xlog::RecoveryInProgress() {
             // We have been promoted; the current timeline became historic.
+            send_rqst_tli = transam_xlog::ctl::GetWALInsertionTimeLine();
             crate::AM_CASCADING_WALSENDER.with(|c| c.set(false));
             true
         } else {
             crate::SEND_TIME_LINE.with(|c| c.get()) != send_rqst_tli
         };
         if became_historic {
-            panic!("walsender: timeline switch while cascading unported (replication-p1 P4)");
+            // The timeline we were sending has become historic. Read the new
+            // timeline's history to find where we forked off the one we were
+            // sending (walsender.c XLogSendPhysical).
+            let send_tli = crate::SEND_TIME_LINE.with(|c| c.get());
+            let (valid_upto, next_tli) = {
+                let cx = mcx::MemoryContext::new("XLogSendPhysical/timeline-history");
+                let history =
+                    timeline_seams::read_timeline_history::call(cx.mcx(), send_rqst_tli)?;
+                timeline_seams::tli_switch_point::call(send_tli, &history)?
+            };
+            debug_assert!(send_tli < next_tli);
+            crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.set(valid_upto));
+            crate::SEND_TIME_LINE_NEXT_TLI.with(|c| c.set(next_tli));
+            crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.set(true));
+            valid_upto
+        } else {
+            ptr
         }
-        ptr
     } else {
         // Streaming the current timeline on a primary: send everything flushed.
         transam_xlog::GetFlushRecPtr(None)
@@ -207,7 +267,40 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
 
     // LagTrackerWrite: pg_stat_replication lag monitoring is deferred.
 
+    // If this is a historic timeline and we've reached the point where we
+    // forked to the next timeline, stop streaming. (sentPtr may legitimately
+    // already exceed sendTimeLineValidUpto: a partial WAL record at the
+    // switch point may have been half-sent — see the C comment.)
     let sent = sent_ptr();
+    if crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get())
+        && crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.get()) <= sent
+    {
+        // Close the current file.
+        if reader.v.seg.ws_file >= 0 {
+            // SAFETY: closing the fd this reader opened; C ignores errno too.
+            unsafe { libc::close(reader.v.seg.ws_file) };
+            reader.v.seg.ws_file = -1;
+        }
+
+        // Send CopyDone.
+        pqcomm::pq_putmessage_noblock(b'c', &[])?;
+        crate::STREAMING_DONE_SENDING.with(|c| c.set(true));
+        set_caught_up(true);
+
+        let valid_upto = crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.get());
+        let _ = elog::elog(
+            DEBUG1,
+            format!(
+                "walsender reached end of timeline at {:X}/{:X} (sent up to {:X}/{:X})",
+                (valid_upto >> 32) as u32,
+                valid_upto as u32,
+                (sent >> 32) as u32,
+                sent as u32
+            ),
+        );
+        return Ok(());
+    }
+
     debug_assert!(sent <= send_rqst_ptr);
     if send_rqst_ptr <= sent {
         set_caught_up(true);
@@ -218,7 +311,8 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
     let mut endptr: XLogRecPtr = startptr + MAX_SEND_SIZE as u64;
     if send_rqst_ptr <= endptr {
         endptr = send_rqst_ptr;
-        set_caught_up(true);
+        // Historic: not caught up until the timeline-end block above fires.
+        set_caught_up(!crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get()));
     } else {
         // Round down to a page boundary.
         endptr -= endptr % transam_xlog::XLOG_BLCKSZ as u64;
@@ -251,11 +345,44 @@ fn xlog_send_physical_emit(
     send_rqst_ptr: XLogRecPtr,
 ) -> PgResult<()> {
     let nbytes = (endptr - startptr) as usize;
-    let tli: TimeLineID = crate::SEND_TIME_LINE.with(|c| c.get());
+    let send_tli: TimeLineID = crate::SEND_TIME_LINE.with(|c| c.get());
+    let segsize_u = transam_xlog::wal_segment_size() as u64;
+
+    // WalSndSegmentOpen parity (walsender.c:3031): on a historic timeline the
+    // segment containing sendTimeLineValidUpto is read from the NEXT
+    // timeline's file (recovery copies the used portion of the old segment
+    // into the new timeline's file; the old-TLI file may not exist). Pick the
+    // TLI per segment and read segment-sized chunks.
+    let historic = crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get());
+    let end_seg_no = if historic {
+        crate::SEND_TIME_LINE_VALID_UPTO.with(|c| c.get()) / segsize_u
+    } else {
+        0
+    };
+    let next_tli = crate::SEND_TIME_LINE_NEXT_TLI.with(|c| c.get());
 
     let mut wal_buf = vec![0u8; nbytes];
-    if xlogreader_seams::wal_read::call(&mut reader.v, &mut wal_buf, startptr, nbytes, tli)?.is_err() {
-        return wal_read_raise_error();
+    let mut chunk_start = startptr;
+    let mut off = 0usize;
+    while chunk_start < endptr {
+        let seg_no = chunk_start / segsize_u;
+        let seg_end = (seg_no + 1) * segsize_u;
+        let chunk_end = seg_end.min(endptr);
+        let chunk_len = (chunk_end - chunk_start) as usize;
+        let tli = if historic && seg_no == end_seg_no { next_tli } else { send_tli };
+        if xlogreader_seams::wal_read::call(
+            &mut reader.v,
+            &mut wal_buf[off..off + chunk_len],
+            chunk_start,
+            chunk_len,
+            tli,
+        )?
+        .is_err()
+        {
+            return wal_read_raise_error();
+        }
+        chunk_start = chunk_end;
+        off += chunk_len;
     }
 
     crate::OUTPUT_MESSAGE.with(|b| {
@@ -273,8 +400,8 @@ fn xlog_send_physical_emit(
 
     crate::OUTPUT_MESSAGE.with(|b| pqcomm::pq_putmessage_noblock(b'd', &b.borrow()))?;
 
-    let segsize = transam_xlog::wal_segment_size() as u64;
-    transam_xlog::CheckXLogRemoved(startptr / segsize, tli)?;
+    // C checks with xlogreader->seg.ws_tli, the TLI of the last-opened file.
+    transam_xlog::CheckXLogRemoved(startptr / segsize_u, reader.v.seg.ws_tli)?;
     Ok(())
 }
 
