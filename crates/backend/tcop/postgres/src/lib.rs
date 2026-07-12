@@ -375,9 +375,9 @@ pub fn ProcessInterrupts() -> PgResult<()> {
 
 // The C pqsignal block at PostgresMain entry (postgres.c:4217-4251), rendered
 // as pqsignal_thread dispositions drained at this thread's latch/client-IO
-// wakes. am_walsender arm (WalSndSignals: SIGUSR2 last-cycle handler) lands
-// with streaming (replication-p1 increment 3); harmless for command-only
-// walsenders, SIGUSR2 stays Ignore.
+// wakes. am_walsender arm = WalSndSignals' one delta from the regular backend
+// set: SIGUSR2 runs WalSndLastCycleHandler (drain WAL up to the shutdown
+// checkpoint, then exit) instead of Ignore.
 pub fn install_thread_signal_handlers() {
     use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
     procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
@@ -393,7 +393,16 @@ pub fn install_thread_signal_handlers() {
     }
     procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
     procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
-    procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+    if walsender_seams::am_walsender()
+        && walsender_seams::wal_snd_last_cycle_handler::is_installed()
+    {
+        procsignal::pqsignal_thread(
+            libc::SIGUSR2,
+            Simple(|| walsender_seams::wal_snd_last_cycle_handler::call()),
+        );
+    } else {
+        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+    }
     procsignal::pqsignal_thread(libc::SIGFPE, Fallible(FloatExceptionHandler));
     procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
 }

@@ -250,11 +250,17 @@ pub fn pqsignal_thread(signo: i32, handler: ThreadSignalHandler) {
 // wake its procLatch; the target's next drain point runs its registered
 // disposition. Contract kept: 0 on match, -1 + errno=ESRCH otherwise.
 pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
-    if signo == libc::SIGKILL || signo == libc::SIGSTOP {
-        panic!(
-            "SendThreadSignal: signal {signo} has no thread rendering \
-             (postmaster SIGKILL-escalation redesign)"
-        );
+    if signo == libc::SIGKILL {
+        // The postmaster's ServerLoop SIGKILL escalation (and TerminateChildren
+        // during immediate shutdown). No thread can be force-killed; deliver
+        // the crash-test kill-9 bit instead — threads with the kill9
+        // disposition (backends under postmaster) exit as if killed, matching
+        // C's "terminated by signal 9" reap. A thread wedged past its drain
+        // points stays wedged, which is the honest single-process limit.
+        return SendThreadKill(pid);
+    }
+    if signo == libc::SIGSTOP {
+        panic!("SendThreadSignal: SIGSTOP has no thread rendering");
     }
     deliver_thread_signal(pid, thread_signal_bit(signo))
 }

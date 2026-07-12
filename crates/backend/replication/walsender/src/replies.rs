@@ -179,7 +179,9 @@ fn ProcessStandbyReplyMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
         reply_time,
     );
 
-    // SyncRepReleaseWaiters(): SyncRep is out of P1 scope (async only).
+    if syncrep_seams::sync_rep_release_waiters::is_installed() {
+        syncrep_seams::sync_rep_release_waiters::call()?;
+    }
 
     if let Some(s) = slot::MyReplicationSlot() {
         if flush_ptr != InvalidXLogRecPtr {

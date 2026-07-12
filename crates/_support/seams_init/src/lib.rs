@@ -127,6 +127,7 @@ pub fn init_all() {
     launcher::init_seams();
     walsender_config::init_seams();
     walsender::init_seams();
+    syncrep::init_seams();
     walreceiverfuncs::init_seams();
     walreceiver::init_seams();
     basebackup::init_seams();

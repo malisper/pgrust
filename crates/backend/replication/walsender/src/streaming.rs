@@ -185,7 +185,9 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
         set_sent_ptr(cmd.startpoint);
         crate::my_set_sentptr(cmd.startpoint);
 
-        // SyncRepInitConfig(): SyncRep is out of P1 scope (async only).
+        if syncrep_seams::sync_rep_init_config::is_installed() {
+            syncrep_seams::sync_rep_init_config::call()?;
+        }
 
         crate::REPLICATION_ACTIVE.with(|c| c.set(true));
 
@@ -427,7 +429,9 @@ pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
         if interrupt::ConfigReloadPending() {
             interrupt::SetConfigReloadPending(false);
             guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
-            // SyncRepInitConfig(): SyncRep out of P1 scope.
+            if syncrep_seams::sync_rep_init_config::is_installed() {
+                syncrep_seams::sync_rep_init_config::call()?;
+            }
         }
 
         crate::replies::ProcessRepliesIfAny()?;

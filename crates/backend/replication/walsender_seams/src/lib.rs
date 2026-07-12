@@ -39,6 +39,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // WalSndLastCycleHandler (walsender.c): SIGUSR2 disposition for walsender
+    // backends — got_SIGUSR2 = true + SetLatch(MyLatch). Installed by
+    // walsender; tcop wires it as the thread-signal handler when am_walsender.
+    pub fn wal_snd_last_cycle_handler()
+);
+
+seam_core::seam!(
     // WalSndWakeup(physical, logical); the WAL flush/replay paths broadcast the
     // per-kind ConditionVariables in WalSndCtl. Uninstalled (walsender not
     // linked) reads as is_installed()==false so the flush tail skips it.
