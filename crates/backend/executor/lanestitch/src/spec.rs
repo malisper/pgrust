@@ -25,6 +25,8 @@ pub const MAX_ROWS: usize = 1024;
 pub const SEL_WORDS: usize = MAX_ROWS / 64;
 pub const MAX_COLS: usize = 8;
 pub const MAX_REGS: usize = 16;
+/// Output-lane cap for projection programs (`Step::StoreOut`).
+pub const MAX_OUTS: usize = 8;
 
 /// Selection vector over one staged batch: bit i set = row i selected.
 #[derive(Clone)]
@@ -80,12 +82,64 @@ pub struct Batch<'a> {
     pub lanes: Vec<Lane<'a>>,
 }
 
+/// One mutable output lane of a projection program: `Step::StoreOut` writes
+/// the row's computed Datum + isnull byte here. Same canonical-datum
+/// currency as [`Lane`] (arith results are `from_iN`-canonical; Var
+/// passthrough copies the input lane image verbatim).
+pub struct OutLane<'a> {
+    pub values: &'a mut [Datum],
+    pub isnull: &'a mut [bool],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArithOp {
+    // int4 (integer): "integer out of range".
     Add4,
     Sub4,
     Mul4,
     Div4,
+    // int2 (smallint): "smallint out of range". C int2pl/mi/mul/div parity.
+    Add2,
+    Sub2,
+    Mul2,
+    Div2,
+    // int8 (bigint): "bigint out of range". C int8pl/mi/mul/div parity.
+    Add8,
+    Sub8,
+    Mul8,
+    Div8,
+}
+
+impl ArithOp {
+    /// The integer width this op computes at (2, 4, or 8 bytes) — the
+    /// interpreter reads/writes the register at that width and the stitched
+    /// stencil selects its overflow probe from it.
+    pub(crate) fn width(self) -> u8 {
+        use ArithOp::*;
+        match self {
+            Add2 | Sub2 | Mul2 | Div2 => 2,
+            Add4 | Sub4 | Mul4 | Div4 => 4,
+            Add8 | Sub8 | Mul8 | Div8 => 8,
+        }
+    }
+}
+
+/// IS NULL / IS NOT NULL — never-erroring, never-NULL predicate over one
+/// register's null flag (production NullTest).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NullTestKind {
+    IsNull,
+    IsNotNull,
+}
+
+/// IS [NOT] TRUE / IS [NOT] FALSE — production BooleanTest three-valued
+/// collapse: NULL input reads as the "not" arm, result is never NULL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoolTestKind {
+    IsTrue,
+    IsNotTrue,
+    IsFalse,
+    IsNotFalse,
 }
 
 /// The initial stitch vocabulary: fixed-width lane loads, the whitelisted
@@ -98,16 +152,35 @@ pub enum Step {
     LoadConst { k: u16, out: u8 },
     /// Strict comparison: NULL if either input NULL.
     Cmp { op: CmpOp, a: u8, b: u8, out: u8 },
-    /// int4 arithmetic with production error behavior (erroring step).
+    /// int2/int4/int8 arithmetic with production error behavior (erroring
+    /// step — refuse-and-replay for overflow / zero divisor).
     Arith { op: ArithOp, a: u8, b: u8, out: u8 },
+    /// reg[out] = (reg[a] IS [NOT] NULL) — non-erroring, non-NULL.
+    NullTest { a: u8, out: u8, kind: NullTestKind },
+    /// reg[out] = (reg[a] IS [NOT] TRUE/FALSE) — non-erroring, non-NULL.
+    BoolTest { a: u8, out: u8, kind: BoolTestKind },
+    /// reg[out] = reg[a] <op> ANY (const array `arr`), strict-OR three-valued
+    /// (production ScalarArrayOpExpr useOr): non-erroring for the whitelisted
+    /// fixed-width by-value comparators. NULL scalar or all-non-matching with
+    /// a NULL element yields NULL; else the OR of the element matches.
+    SaopAny { a: u8, out: u8, op: CmpOp, arr: u16 },
     /// Clause boundary: reg[a] NULL or false fails the row (short-circuit:
     /// later clauses never evaluate for this row).
     Qual { a: u8 },
+    /// Projection output: out_lane[out][row] = reg[a] (value + isnull).
+    /// Projection programs only — a qual program carrying StoreOut refuses
+    /// (fail closed), and a projection program carrying Qual refuses too:
+    /// the two segment kinds never mix in one program.
+    StoreOut { a: u8, out: u16 },
 }
 
 pub struct Program {
     pub steps: Vec<Step>,
     pub consts: Vec<NullableDatum>,
+    /// Baked const arrays for SaopAny steps (fixed-width by-value elements,
+    /// individual elements may be NULL). The array datum itself is always
+    /// present — a NULL array upstream keeps the program off the stitcher.
+    pub arrays: Vec<Vec<NullableDatum>>,
     /// Set by the translator for programs that must never be reordered or
     /// stitched (volatile functions upstream); keeps the program on the
     /// interpreter tier.
@@ -116,12 +189,17 @@ pub struct Program {
 
 impl Program {
     pub fn new() -> Program {
-        Program { steps: Vec::new(), consts: Vec::new(), volatile: false }
+        Program { steps: Vec::new(), consts: Vec::new(), arrays: Vec::new(), volatile: false }
     }
 
     pub fn push_const(&mut self, nd: NullableDatum) -> u16 {
         self.consts.push(nd);
         (self.consts.len() - 1) as u16
+    }
+
+    pub fn push_array(&mut self, elems: Vec<NullableDatum>) -> u16 {
+        self.arrays.push(elems);
+        (self.arrays.len() - 1) as u16
     }
 }
 
@@ -134,6 +212,15 @@ impl Default for Program {
 // The whitelisted comparator families (execexpr steps.rs lineage: full
 // int2/int4/int8 + cross-width families, unsigned oid, and the float
 // families with C float.h NaN ordering).
+//
+// DATE / TIMESTAMP carriers (old-lane reuse, no new stencil): date is an
+// int4 carrier and timestamp/timestamptz are int8 carriers, all with
+// -infinity/+infinity encoded as the type sentinels (INT_MIN/MAX,
+// INT64_MIN/MAX). Those sentinels sort as plain signed integers, so date
+// comparisons stitch through the Int4* family and timestamp/tstz through
+// the Int8* family unchanged — the translator picks the carrier's width and
+// the ordering is already exact (see the date_timestamp_carrier_ordering
+// parity test).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CmpOp {
