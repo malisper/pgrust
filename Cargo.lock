@@ -7363,6 +7363,7 @@ dependencies = [
  "types_error",
  "types_nodes",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]

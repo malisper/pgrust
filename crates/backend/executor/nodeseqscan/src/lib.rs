@@ -519,6 +519,52 @@ pub fn seq_scan_sortkey_direct<'mcx>(
     true
 }
 
+/// Arm the varlena lane feed for the lane-v2 agg fold: stage per-row datum
+/// pointers to varlena column `attnum` into SoA column 0 via the varkey pass
+/// (the fixed-width prefix deform cannot host an `attlen == -1` column).
+/// Publish stays off — the fold feed stores every emitted row per-row, so
+/// slot deform semantics are untouched. False = the column's tuple walk is
+/// not stageable (an `attlen == -2` attribute precedes it); the caller keeps
+/// its per-row path.
+pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
+    if let Some(b) = &node.batch_soa {
+        if b.key_col == Some(attnum) && b.varkey.is_some() {
+            return true;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize) else {
+        return false;
+    };
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa: ::exectuples::SoaBatch::new_in(mcx, 1),
+            plan: ::exectuples::SoaDeformPlan::unused(mcx),
+            qual_armed: false,
+            qual_only: false,
+            key_col: Some(attnum),
+            varkey: Some(vk),
+            key_read_col: 0,
+            publish: false,
+            qual_col: 0,
+            qual_cmp: ::execexpr::CmpOp::Int4Eq,
+            qual_konst: ::datum::Datum::null(),
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    true
+}
+
 /// Direct key read for staged row `i`; None = fallback row (narrow tuple),
 /// the caller must take the full emit path.
 #[inline(always)]

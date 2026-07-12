@@ -16,5 +16,6 @@ datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+varlena = { path = "../../utils/adt/varlena" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }
