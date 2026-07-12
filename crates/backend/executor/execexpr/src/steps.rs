@@ -739,6 +739,16 @@ impl<'mcx> FuncFrame<'mcx> {
         // SAFETY: argno < nargs, inside the frame's live fcinfo image.
         unsafe { arg_slot_of(self.fcinfo, argno) }
     }
+
+    /// The call's input collation (fcinfo fncollation), for the lane qual
+    /// walker: collation-sensitive predicates (text eq/LIKE over dict lanes)
+    /// re-evaluate with it.
+    #[inline]
+    pub(crate) fn collation(&self) -> Oid {
+        // SAFETY: the frame's fcinfo image is a live LocalFcinfo header
+        // (written at frame build) followed by the args tail.
+        unsafe { self.fcinfo.cast::<LocalFcinfo<0>>().as_ref() }.fncollation
+    }
 }
 
 /// Emit-time address of a call's arg cell (kernel stencils bake it).

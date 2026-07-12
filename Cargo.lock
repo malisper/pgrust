@@ -7386,6 +7386,7 @@ dependencies = [
  "adt_like",
  "datum",
  "elog_seams",
+ "execexpr",
  "exectuples",
  "fmgr_core",
  "lsyscache",
