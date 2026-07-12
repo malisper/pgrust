@@ -4210,13 +4210,31 @@ struct AdaptiveTopk {
     tracked: bool,
 }
 
-/// Kill switch: `PGRUST_LANE_ADAPTIVE_TOPK=0|off` disables the adaptive
-/// top-N arm (byte-identical A/B gate channel); default on, resolved once.
-fn adaptive_topk_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !std::env::var("PGRUST_LANE_ADAPTIVE_TOPK")
-            .is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off"))
+/// Adaptive top-N modes for `PGRUST_LANE_ADAPTIVE_TOPK` (resolved once).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdaptiveTopkMode {
+    /// `=0|off`: never arm (byte-identical A/B gate channel).
+    Off,
+    /// Default: arm only ties-invisible shapes (every non-junk output
+    /// column is a byte-equality sort key — any tie handling prints
+    /// identical bytes, so the walk can never demote and never loses).
+    InvisibleOnly,
+    /// `=tracked`: additionally arm payload-visible shapes with tie
+    /// tracking + demotion. Measured on the 10M sorted-v2 bank: Q25-class
+    /// shapes DEMOTE on real boundary ties (probe cost ~5%), and Q24-class
+    /// sparse-qual shapes never bound the heap early — the zone-ordered
+    /// probe degenerates to a full scattered-order scan before demoting
+    /// (2.5x). Opt-in until the probe gets a budget and the ratified
+    /// retained-tie order relaxation gets a gate-normalization story.
+    Tracked,
+}
+
+fn adaptive_topk_mode() -> AdaptiveTopkMode {
+    static MODE: std::sync::OnceLock<AdaptiveTopkMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PGRUST_LANE_ADAPTIVE_TOPK") {
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("off") => AdaptiveTopkMode::Off,
+        Ok(v) if v.eq_ignore_ascii_case("tracked") => AdaptiveTopkMode::Tracked,
+        _ => AdaptiveTopkMode::InvisibleOnly,
     })
 }
 
@@ -4239,7 +4257,8 @@ fn adaptive_topk_arm<'mcx>(
     outer_desc: &::types_tuple::TupleDescData<'static>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
 ) -> PgResult<Option<AdaptiveTopk>> {
-    if !adaptive_topk_enabled() {
+    let mode = adaptive_topk_mode();
+    if mode == AdaptiveTopkMode::Off {
         return Ok(None);
     }
     if !state.bounded || state.bound <= 0 || state.bound > ADAPTIVE_TOPK_MAX_BOUND {
@@ -4257,10 +4276,13 @@ fn adaptive_topk_arm<'mcx>(
         Some(Int2Gt | Int4Gt | Int8Gt | OidGt) => true,
         _ => return Ok(None),
     };
+    let tracked = !sort_topk_ties_invisible(state, outer_desc);
+    if tracked && mode != AdaptiveTopkMode::Tracked {
+        return Ok(None);
+    }
     if !::nodeseqscan::seq_scan_adaptive_topk_arm(ss, attnum, desc)? {
         return Ok(None);
     }
-    let tracked = !sort_topk_ties_invisible(state, outer_desc);
     stats::tick_owned(ShapeClass::AdaptiveTopk);
     lane_trace(if tracked {
         "adaptive topk armed (sort feed, tie-tracked)"
