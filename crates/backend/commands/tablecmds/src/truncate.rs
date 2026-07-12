@@ -357,9 +357,14 @@ fn truncate_check_rel(
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
         ));
     }
+    // C exempts pg_largeobject during pg_upgrade (relfilenode carryover);
+    // object-access hooks (InvokeObjectTruncateHook) are elided repo-wide.
     let is_system =
         catalog::IsCatalogRelationOid(relid) || catalog::IsToastNamespace(relnamespace);
-    if is_system && !init_small::globals::allowSystemTableMods() {
+    if is_system
+        && !init_small::globals::allowSystemTableMods()
+        && (!init_small::globals::IsBinaryUpgrade() || relid != catalog::LargeObjectRelationId)
+    {
         return Err(Box::new(
             PgError::new(
                 ERROR,
