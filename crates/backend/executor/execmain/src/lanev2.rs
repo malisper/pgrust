@@ -1445,15 +1445,23 @@ impl<'mcx> Operator<'mcx> for SortEmit {
 // value is authoritative — and checking after a fully delegated build is
 // byte-safe precisely because the build is bit-equal to the row path's.
 //
-// Admitted join types: the outer-driven ones — INNER, LEFT, SEMI, ANTI —
-// with joinqual/otherqual residuals evaluated scalar-within-lane through the
-// row path's exact `eval_probe_qual` (LEFT/ANTI null-fill emits happen
+// Admitted join types: all eight — INNER, LEFT, SEMI, ANTI plus the
+// right-fill family RIGHT, FULL, RIGHT_SEMI, RIGHT_ANTI — with
+// joinqual/otherqual residuals evaluated scalar-within-lane through the
+// row path's exact `eval_probe_qual` (LEFT/FULL/ANTI null-fill emits happen
 // inside `lane_probe_next`'s HJ_FILL_OUTER_TUPLE arm, exactly where C emits
-// them). Refused join shapes (assert-refuse set; each needs its own
-// byte-verified staging): RIGHT/FULL/RIGHT_SEMI/RIGHT_ANTI (they need the
-// unmatched-BUILD scan phase, HJ_FILL_INNER_TUPLES), multi-batch (above),
-// parallel hash, instrumented, subplan/param-bearing hash, residual-qual or
-// projection exprs, non-lane-fusible scan children on either side.
+// them). The right-fill types (`hj_fill_inner` — RIGHT/FULL/RIGHT_ANTI) add
+// a post-exhaustion phase: when the outer source ends, the probe TupleOp
+// becomes a SOURCE of never-matched build tuples (C's HJ_FILL_INNER_TUPLES
+// via the driver's `source_exhausted` seam; the walk delegates to the
+// row path's exact `ExecScanHashTableForUnmatched` port, so the fill
+// emission order is C's bucket order for free; the cursor is C's own
+// node-resident `hj_CurBucketNo`/`hj_CurTuple`, so a LIMIT pause mid-fill
+// resumes exactly). RIGHT_SEMI needs no fill phase — only the has-match
+// skip in the probe arm. Refused join shapes (assert-refuse set):
+// multi-batch (above), parallel hash, instrumented, subplan/param-bearing
+// hash, residual-qual or projection exprs, non-lane-fusible scan children
+// on either side.
 // ===========================================================================
 
 /// The breaker's `Sink` face (build pipeline endpoint). Holds the join +
@@ -1526,7 +1534,37 @@ impl<'mcx> TupleOp<'mcx> for JoinProbe<'_, 'mcx> {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus> {
-        self.emit(out, estate)
+        let s = self.emit(out, estate)?;
+        // A resumed fill scan that just drained is terminal: the driver must
+        // not fall through to another source produce — a pulled-past-end
+        // heap scan RESTARTS (C never re-pulls a child after NULL).
+        if s == OpStatus::NeedInput && ::nodehashjoin::lane_join_finished(self.hj) {
+            return Ok(OpStatus::Finished);
+        }
+        Ok(s)
+    }
+
+    /// Outer exhausted: the right-fill types (`hj_fill_inner` —
+    /// RIGHT/FULL/RIGHT_ANTI) flip into the unmatched-BUILD fill scan
+    /// (C's HJ_FILL_INNER_TUPLES, sequenced exactly where C enters it:
+    /// after the probe fully ends) and become a source of null-extended
+    /// unmatched inner tuples into the same sink. The prep is idempotent
+    /// (no-op unless the join sits at HJ_NEED_NEW_OUTER), the fill cursor
+    /// is C's own node-resident `hj_CurBucketNo`/`hj_CurTuple`, and a
+    /// mid-fill pause (`Paused`) resumes through the ordinary
+    /// `pending()`/`resume()` protocol. Non-fill types emit nothing here.
+    fn source_exhausted(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        ::nodehashjoin::lane_fill_inner_prep(self.hj);
+        Ok(match self.emit(out, estate)? {
+            // The fill scan is drained (or there never was one): nothing
+            // further will ever be produced.
+            OpStatus::NeedInput => OpStatus::Finished,
+            s => s,
+        })
     }
 }
 
@@ -1695,7 +1733,7 @@ fn join_probe_pull_dispatch<'mcx>(
 /// lane-owned — `lane_join_untouched` in the verdict guarantees the row path
 /// never drove this node before the lane, and memoization guarantees the
 /// lane drives it ever after). Join side: `lane_join_admissible`
-/// (INNER/LEFT/SEMI/ANTI, subplan/param-free residual quals admitted,
+/// (all eight join types, subplan/param-free residual quals admitted,
 /// uninstrumented, subplan/param-free hash + projection exprs) + serial hash
 /// + subplan/param-free build hash. Child side: the Phase-1 scan refuse-sets
 /// on BOTH children. The caller re-checks the dynamic EPQ/direction gates
@@ -1727,9 +1765,10 @@ fn hash_join_refuse_reason<'mcx>(
 ) -> PgResult<Option<RefuseReason>> {
     let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
     let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
-    // Non-INNER faces, joinqual/otherqual residuals, instrumented,
-    // subplan/param-bearing join exprs or projection — plus a node the row
-    // path already drove (verdict stability demands whole-life ownership).
+    // Instrumented, subplan/param-bearing join exprs or projection (all
+    // eight join types + residuals are admitted since lane-v2-jointypes /
+    // lane-v2-rightjoin) — plus a node the row path already drove (verdict
+    // stability demands whole-life ownership).
     if !::nodehashjoin::lane_join_admissible(state)
         || !::nodehashjoin::lane_join_untouched(state, hstate)
     {
@@ -1876,11 +1915,13 @@ pub fn try_own_agg_over_hash_join<'mcx>(
         }
         match ::nodehashjoin::lane_join_phase(state, hstate) {
             ::nodehashjoin::LaneJoinPhase::EmptyDone => {
-                // A non-fill-outer join (INNER/SEMI) over an empty build:
-                // emits nothing, and the outer child is never pulled (C's
-                // early return; LEFT/ANTI never take this phase — their
-                // empty build proceeds to the probe and null-fills). The agg
-                // finalizes over an empty input.
+                // A non-fill-outer join (INNER/SEMI/RIGHT/RIGHT_SEMI/
+                // RIGHT_ANTI) over an empty build: emits nothing — an empty
+                // build has no unmatched inner tuples to fill either — and
+                // the outer child is never pulled (C's early return;
+                // LEFT/FULL/ANTI never take this phase — their empty build
+                // proceeds to the probe and null-fills). The agg finalizes
+                // over an empty input.
                 stats::tick_owned(ShapeClass::AggBuild);
                 let mut sink = HashAggBuildSink { agg: &mut *agg };
                 sink.finish(estate)?;
