@@ -27,7 +27,7 @@ pub(crate) struct AllocateDesc {
 }
 
 pub(crate) fn reserveAllocatedDesc(fd: &mut FdState) -> bool {
-    let num = fd.allocated_descs.len() as i32;
+    let num = vfd::occupied_descs(fd);
 
     if num < fd.max_allocated_descs {
         return true;
@@ -76,10 +76,17 @@ fn current_subid() -> SubTransactionId {
     xact_seams::get_current_sub_transaction_id::call()
 }
 
-// C compacts with `*desc = allocatedDescs[--numAllocatedDescs]`; swap_remove
-// is exactly that. Returns the underlying close result.
+// C compacts and re-finds by FILE*; index handles need stable slots, so the
+// slot is tombstoned instead (trailing tombstones trimmed). Returns the
+// underlying close result.
 pub(crate) fn FreeDesc(index: i32) -> i32 {
-    let desc = with_fd(|fd| fd.allocated_descs.swap_remove(index as usize));
+    let desc = with_fd(|fd| {
+        let desc = fd.allocated_descs[index as usize].take().expect("FreeDesc: occupied slot");
+        while matches!(fd.allocated_descs.last(), Some(None)) {
+            fd.allocated_descs.pop();
+        }
+        desc
+    });
     match desc.desc {
         AllocatedHandle::File(file) => {
             let raw = file.into_raw_fd();
@@ -100,6 +107,21 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
     }
 }
 
+
+// First tombstoned slot, else append (stable indices; see FreeDesc).
+fn install_desc(fd: &mut FdState, desc: AllocateDesc) -> i32 {
+    match fd.allocated_descs.iter().position(Option::is_none) {
+        Some(i) => {
+            fd.allocated_descs[i] = Some(desc);
+            i as i32
+        }
+        None => {
+            fd.allocated_descs.push(Some(desc));
+            (fd.allocated_descs.len() - 1) as i32
+        }
+    }
+}
+
 // C contract: table index >= 0, or -1 with errno set on fopen failure.
 pub fn AllocateFile(name: &str, mode: &str) -> PgResult<i32> {
     if !with_fd(reserveAllocatedDesc) {
@@ -113,11 +135,10 @@ pub fn AllocateFile(name: &str, mode: &str) -> PgResult<i32> {
             Ok(file) => {
                 let create_subid = current_subid();
                 return with_fd(|fd| {
-                    fd.allocated_descs.push(AllocateDesc {
-                        create_subid,
-                        desc: AllocatedHandle::File(file),
-                    });
-                    Ok((fd.allocated_descs.len() - 1) as i32)
+                    Ok(install_desc(
+                        fd,
+                        AllocateDesc { create_subid, desc: AllocatedHandle::File(file) },
+                    ))
                 });
             }
             Err(en) => {
@@ -137,8 +158,10 @@ pub fn AllocateFile(name: &str, mode: &str) -> PgResult<i32> {
 
 pub fn FreeFile(index: i32) -> PgResult<i32> {
     let found = with_fd(|fd| {
-        (index as usize) < fd.allocated_descs.len()
-            && matches!(fd.allocated_descs[index as usize].desc, AllocatedHandle::File(_))
+        matches!(
+            fd.allocated_descs.get(index as usize),
+            Some(Some(AllocateDesc { desc: AllocatedHandle::File(_), .. }))
+        )
     });
     if found {
         return Ok(FreeDesc(index));
@@ -165,14 +188,17 @@ pub fn OpenTransientFilePerm(file_name: &str, file_flags: i32, file_mode: u32) -
 
         let raw = vfd::BasicOpenFilePermInternal(fd, file_name, file_flags, file_mode)?;
         if raw >= 0 {
-            fd.allocated_descs.push(AllocateDesc {
-                create_subid: current_subid(),
-                // SAFETY: freshly opened descriptor now owned by the table.
-                desc: AllocatedHandle::RawFd(unsafe {
-                    use std::os::fd::FromRawFd;
-                    OwnedFd::from_raw_fd(raw)
-                }),
-            });
+            install_desc(
+                fd,
+                AllocateDesc {
+                    create_subid: current_subid(),
+                    // SAFETY: freshly opened descriptor now owned by the table.
+                    desc: AllocatedHandle::RawFd(unsafe {
+                        use std::os::fd::FromRawFd;
+                        OwnedFd::from_raw_fd(raw)
+                    }),
+                },
+            );
         }
         Ok(raw)
     })
@@ -182,7 +208,9 @@ pub fn OpenTransientFilePerm(file_name: &str, file_flags: i32, file_mode: u32) -
 pub fn CloseTransientFile(fd_to_close: i32) -> i32 {
     let index = with_fd(|fd| {
         for i in (0..fd.allocated_descs.len()).rev() {
-            if let AllocatedHandle::RawFd(f) = &fd.allocated_descs[i].desc {
+            if let Some(AllocateDesc { desc: AllocatedHandle::RawFd(f), .. }) =
+                &fd.allocated_descs[i]
+            {
                 if f.as_raw_fd() == fd_to_close {
                     return Some(i as i32);
                 }
@@ -218,11 +246,10 @@ pub fn OpenPipeStream(command: &str, mode: &str) -> PgResult<i32> {
             Ok(pipe) => {
                 let create_subid = current_subid();
                 return with_fd(|fd| {
-                    fd.allocated_descs.push(AllocateDesc {
-                        create_subid,
-                        desc: AllocatedHandle::Pipe(pipe),
-                    });
-                    Ok((fd.allocated_descs.len() - 1) as i32)
+                    Ok(install_desc(
+                        fd,
+                        AllocateDesc { create_subid, desc: AllocatedHandle::Pipe(pipe) },
+                    ))
                 });
             }
             Err(en) => {
@@ -247,7 +274,7 @@ pub fn PipeStreamGets(index: i32, buf: &mut [u8]) -> Result<usize, i32> {
     use std::io::Read;
 
     with_fd(|fd| {
-        let Some(desc) = fd.allocated_descs.get_mut(index as usize) else {
+        let Some(Some(desc)) = fd.allocated_descs.get_mut(index as usize) else {
             return Err(libc::EBADF);
         };
         let AllocatedHandle::Pipe(pipe) = &mut desc.desc else {
@@ -282,8 +309,10 @@ pub fn PipeStreamGets(index: i32, buf: &mut [u8]) -> Result<usize, i32> {
 // C contract: pclose()'s wait status, -1 on a stream we don't track.
 pub fn ClosePipeStream(index: i32) -> PgResult<i32> {
     let found = with_fd(|fd| {
-        (index as usize) < fd.allocated_descs.len()
-            && matches!(fd.allocated_descs[index as usize].desc, AllocatedHandle::Pipe(_))
+        matches!(
+            fd.allocated_descs.get(index as usize),
+            Some(Some(AllocateDesc { desc: AllocatedHandle::Pipe(_), .. }))
+        )
     });
     if found {
         return Ok(FreeDesc(index));
@@ -309,11 +338,10 @@ pub fn AllocateDir(dirname: &str) -> PgResult<Option<Dir>> {
             Ok(iter) => {
                 let create_subid = current_subid();
                 return with_fd(|fd| {
-                    fd.allocated_descs.push(AllocateDesc {
-                        create_subid,
-                        desc: AllocatedHandle::Dir(Some(iter)),
-                    });
-                    Ok(Some((fd.allocated_descs.len() - 1) as i32))
+                    Ok(Some(install_desc(
+                        fd,
+                        AllocateDesc { create_subid, desc: AllocatedHandle::Dir(Some(iter)) },
+                    )))
                 });
             }
             Err(e) => {
@@ -353,8 +381,10 @@ pub fn ReadDirExtended(
         Some(index) => index,
     };
 
-    let next = with_fd(|fd| match &mut fd.allocated_descs[index as usize].desc {
-        AllocatedHandle::Dir(iter) => iter.as_mut().and_then(Iterator::next),
+    let next = with_fd(|fd| match fd.allocated_descs[index as usize].as_mut() {
+        Some(AllocateDesc { desc: AllocatedHandle::Dir(iter), .. }) => {
+            iter.as_mut().and_then(Iterator::next)
+        }
         _ => None,
     });
 
@@ -381,8 +411,10 @@ pub fn FreeDir(dir: Option<Dir>) -> PgResult<i32> {
     };
 
     let found = with_fd(|fd| {
-        (index as usize) < fd.allocated_descs.len()
-            && matches!(fd.allocated_descs[index as usize].desc, AllocatedHandle::Dir(_))
+        matches!(
+            fd.allocated_descs.get(index as usize),
+            Some(Some(AllocateDesc { desc: AllocatedHandle::Dir(_), .. }))
+        )
     });
     if found {
         return Ok(FreeDesc(index));
@@ -511,10 +543,10 @@ fn pclose(mut pipe: PipeHandle) -> i32 {
 // direct `FILE *` reads/writes).
 pub fn with_allocated_stdio<R>(index: i32, f: impl FnOnce(&mut StdFile) -> R) -> Option<R> {
     with_fd(|fd| match fd.allocated_descs.get_mut(index as usize) {
-        Some(AllocateDesc {
+        Some(Some(AllocateDesc {
             desc: AllocatedHandle::File(file),
             ..
-        }) => Some(f(file)),
+        })) => Some(f(file)),
         _ => None,
     })
 }
@@ -522,7 +554,7 @@ pub fn with_allocated_stdio<R>(index: i32, f: impl FnOnce(&mut StdFile) -> R) ->
 // Raw kernel fd behind a transient-file value (fstat-style callers).
 pub fn TransientFileRawFd(fd_value: i32) -> Option<RawFd> {
     with_fd(|fd| {
-        fd.allocated_descs.iter().rev().find_map(|d| match &d.desc {
+        fd.allocated_descs.iter().rev().flatten().find_map(|d| match &d.desc {
             AllocatedHandle::RawFd(f) if f.as_raw_fd() == fd_value => Some(f.as_raw_fd()),
             _ => None,
         })

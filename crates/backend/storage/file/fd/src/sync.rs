@@ -769,7 +769,6 @@ pub fn AtEOSubXact_Files(
     my_subid: SubTransactionId,
     parent_subid: SubTransactionId,
 ) {
-    // FreeDesc swap-compacts, so on abort the same index is re-checked.
     let mut i = 0;
     loop {
         enum Step {
@@ -781,15 +780,16 @@ pub fn AtEOSubXact_Files(
             if i >= fd.allocated_descs.len() {
                 return Step::Done;
             }
-            if fd.allocated_descs[i].create_subid == my_subid {
-                if is_commit {
-                    fd.allocated_descs[i].create_subid = parent_subid;
-                    Step::Advance
-                } else {
-                    Step::Free
+            match fd.allocated_descs[i].as_mut() {
+                Some(d) if d.create_subid == my_subid => {
+                    if is_commit {
+                        d.create_subid = parent_subid;
+                        Step::Advance
+                    } else {
+                        Step::Free
+                    }
                 }
-            } else {
-                Step::Advance
+                _ => Step::Advance,
             }
         });
         match step {
@@ -863,7 +863,7 @@ pub(crate) fn CleanupTempFiles(is_commit: bool, is_proc_exit: bool) -> PgResult<
         crate::io::FileClose(file)?;
     }
 
-    let num_allocated = with_fd(|fd| fd.allocated_descs.len());
+    let num_allocated = with_fd(|fd| crate::vfd::occupied_descs(fd));
     if is_commit && num_allocated > 0 {
         ereport(WARNING)
             .errmsg_internal(format!(
@@ -872,8 +872,8 @@ pub(crate) fn CleanupTempFiles(is_commit: bool, is_proc_exit: bool) -> PgResult<
             .finish(loc("CleanupTempFiles"))?;
     }
 
-    while with_fd(|fd| !fd.allocated_descs.is_empty()) {
-        FreeDesc(0);
+    while let Some(i) = with_fd(|fd| fd.allocated_descs.iter().position(Option::is_some)) {
+        FreeDesc(i as i32);
     }
     Ok(())
 }

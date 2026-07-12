@@ -247,8 +247,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
         pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     }
     pg_depend::recordDependencyOnOwner(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, owner_id)?;
-    // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
-    // outside extension scripts.
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(fdw_id)

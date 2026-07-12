@@ -38,10 +38,13 @@ pub struct FdwExecRoutine {
     pub rescan:
         for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
     pub end: for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
+    /// The `bool` is C's `es->costs` (the only ExplainState field file_fdw
+    /// reads; the full state can't cross the crate boundary).
     pub explain: Option<
         for<'mcx> fn(
             &mut ForeignScanState<'mcx>,
             &mut EStateData<'mcx>,
+            bool,
             &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
         ) -> PgResult<()>,
     >,
@@ -212,10 +215,11 @@ pub fn exec_rescan_foreign_scan<'mcx>(
 pub fn explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
+    costs: bool,
     emit: &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     match fdw_exec_routine(node.fdwroutine).explain {
-        Some(f) => f(node, estate, emit),
+        Some(f) => f(node, estate, costs, emit),
         None => Ok(()),
     }
 }
