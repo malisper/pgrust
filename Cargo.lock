@@ -9110,6 +9110,7 @@ dependencies = [
  "hashfn",
  "heapam_visibility_seams",
  "jit_deform",
+ "lanestitch",
  "mcx",
  "miscinit_seams",
  "nodehash",

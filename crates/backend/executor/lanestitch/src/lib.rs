@@ -74,9 +74,10 @@ use std::cell::Cell;
 
 use types_error::PgResult;
 
-pub use interp::{eval_qual, eval_row};
+pub use interp::{eval_project, eval_qual, eval_row};
 pub use spec::{
-    ArithOp, Batch, CmpOp, Lane, Program, SelVec, Step, MAX_COLS, MAX_REGS, MAX_ROWS, SEL_WORDS,
+    ArithOp, Batch, BoolTestKind, CmpOp, Lane, NullTestKind, OutLane, Program, SelVec, Step,
+    MAX_COLS, MAX_OUTS, MAX_REGS, MAX_ROWS, SEL_WORDS,
 };
 
 /// AIO-style availability gate + kill switch (PGRUST_LANESTITCH=0|off).
@@ -107,9 +108,20 @@ struct JitParams {
     nrows: u64,
 }
 
+// Projection params: input lanes + output lanes (mutable) + the qual
+// segment's selection words (read-only here — only set bits project).
+#[repr(C)]
+struct ProjJitParams {
+    lanes: [LaneParam; MAX_COLS],
+    outs: [LaneParam; MAX_OUTS],
+    sel: *const u64,
+    nrows: u64,
+}
+
 const _: () = assert!(core::mem::size_of::<datum::Datum>() == 8);
 const _: () = assert!(core::mem::size_of::<bool>() == 1);
 const _: () = assert!(core::mem::offset_of!(JitParams, lanes) == 0);
+const _: () = assert!(core::mem::offset_of!(ProjJitParams, lanes) == 0);
 const _: () = assert!(core::mem::size_of::<LaneParam>() == 16);
 
 fn params_layout() -> stitch::ParamsLayout {
@@ -119,10 +131,23 @@ fn params_layout() -> stitch::ParamsLayout {
         lane_isnull: core::mem::offset_of!(LaneParam, isnull) as u32,
         sel: core::mem::offset_of!(JitParams, sel) as u32,
         nrows: core::mem::offset_of!(JitParams, nrows) as u32,
+        outs_base: 0, // qual bodies have no outs (StoreOut refuses)
+    }
+}
+
+fn proj_params_layout() -> stitch::ParamsLayout {
+    stitch::ParamsLayout {
+        lane_stride: core::mem::size_of::<LaneParam>() as u32,
+        lane_p0: core::mem::offset_of!(LaneParam, p0) as u32,
+        lane_isnull: core::mem::offset_of!(LaneParam, isnull) as u32,
+        sel: core::mem::offset_of!(ProjJitParams, sel) as u32,
+        nrows: core::mem::offset_of!(ProjJitParams, nrows) as u32,
+        outs_base: core::mem::offset_of!(ProjJitParams, outs) as u32,
     }
 }
 
 type PipelineFn = unsafe extern "C" fn(*mut JitParams) -> i64;
+type ProjPipelineFn = unsafe extern "C" fn(*mut ProjJitParams) -> i64;
 
 /// How one batch was actually evaluated (telemetry / test introspection).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,22 +218,63 @@ impl StitchedProgram {
         batch: &Batch<'_>,
         sel: &mut SelVec,
     ) -> PgResult<RunOutcome> {
-        debug_assert_eq!(sel.nrows, batch.nrows);
-        debug_assert!(sel.is_all(), "run requires an all-ones sel (only failures store)");
+        self.run_lanes(prog, batch.nrows, &batch.lanes, sel)
+    }
+
+    /// [`run`](Self::run) over a bare lane-view slice — the zero-allocation
+    /// pipeline entry (the caller keeps its views in a stack array instead
+    /// of building a `Batch`'s `Vec` per staged page).
+    pub fn run_lanes(
+        &self,
+        prog: &Program,
+        nrows: u32,
+        lane_views: &[Lane<'_>],
+        sel: &mut SelVec,
+    ) -> PgResult<RunOutcome> {
+        debug_assert_eq!(sel.nrows, nrows);
+        let nwords = (nrows as usize).div_ceil(64);
+        self.run_into(prog, nrows, lane_views, &mut sel.words[..nwords])
+    }
+
+    /// [`run_lanes`](Self::run_lanes) writing directly into the caller's
+    /// selection words (the pipeline's own bitmap — no `SelVec` staging or
+    /// copy-out on the per-batch path). `sel_words` must span exactly
+    /// `ceil(nrows/64)` words and be all-ones over `nrows` on entry (tail
+    /// bits of the last word clear; only failures store) — both the body
+    /// and the interpreter tiers touch no word beyond that span (the scalar
+    /// loop and the 64-row SIMD block pass index words by row/64 only).
+    pub fn run_into(
+        &self,
+        prog: &Program,
+        nrows: u32,
+        lane_views: &[Lane<'_>],
+        sel_words: &mut [u64],
+    ) -> PgResult<RunOutcome> {
+        let nwords = (nrows as usize).div_ceil(64);
+        debug_assert_eq!(sel_words.len(), nwords);
+        // Interpreter tiers (cold: sticky refuse / per-batch drift /
+        // refuse-and-replay): materialize the Batch + SelVec currency.
+        let interp_into = |sel_words: &mut [u64]| -> PgResult<()> {
+            let batch = Batch { nrows, lanes: lane_views.to_vec() };
+            let mut sv = SelVec::all(nrows);
+            interp::eval_qual(prog, &batch, &mut sv)?;
+            sel_words.copy_from_slice(&sv.words[..nwords]);
+            Ok(())
+        };
         if self.refused.get() {
-            interp::eval_qual(prog, batch, sel)?;
+            interp_into(sel_words)?;
             return Ok(RunOutcome::InterpretedSticky);
         }
         // Per-batch fail-open: drifted staging interprets this batch.
-        if batch.nrows as usize > MAX_ROWS || batch.lanes.len() < self.ncols {
-            interp::eval_qual(prog, batch, sel)?;
+        if nrows as usize > MAX_ROWS || lane_views.len() < self.ncols {
+            interp_into(sel_words)?;
             return Ok(RunOutcome::InterpretedDrift);
         }
-        let n = batch.nrows as usize;
+        let n = nrows as usize;
         for &col in &self.used_cols {
-            let lane = &batch.lanes[col as usize];
+            let lane = &lane_views[col as usize];
             if lane.values.len() < n || lane.isnull.len() < n {
-                interp::eval_qual(prog, batch, sel)?;
+                interp_into(sel_words)?;
                 return Ok(RunOutcome::InterpretedDrift);
             }
         }
@@ -217,15 +283,17 @@ impl StitchedProgram {
             isnull: core::ptr::null(),
         });
         for &col in &self.used_cols {
-            let lane = &batch.lanes[col as usize];
+            let lane = &lane_views[col as usize];
             lanes[col as usize] =
                 LaneParam { p0: lane.values.as_ptr().cast(), isnull: lane.isnull.as_ptr().cast() };
         }
         let mut params =
-            JitParams { lanes, sel: sel.words.as_mut_ptr(), nrows: batch.nrows as u64 };
+            JitParams { lanes, sel: sel_words.as_mut_ptr(), nrows: nrows as u64 };
         // SAFETY: body compiled for ncols-lane batches; every used lane
-        // pointer covers nrows rows (checked above); sel covers MAX_ROWS
-        // bits >= nrows; the body only reads lanes and clears sel bits.
+        // pointer covers nrows rows (checked above); sel spans
+        // ceil(nrows/64) words and the body indexes sel words by row/64
+        // with row < nrows only; the body only reads lanes and clears sel
+        // bits.
         let rc = unsafe { (self.entry)(&mut params) };
         if rc == stitch::RC_OK {
             return Ok(RunOutcome::Stitched);
@@ -238,8 +306,7 @@ impl StitchedProgram {
         // interpreter raises C's exact error on C's row. Sticky: this
         // program's data errors; stop stitching it.
         self.refused.set(true);
-        *sel = SelVec::all(batch.nrows);
-        interp::eval_qual(prog, batch, sel)?;
+        interp_into(sel_words)?;
         // Defensive completeness: if the replay did NOT error (can only
         // happen if a trap condition raced with... nothing — lanes are
         // immutable for the call; kept because fail-open must never turn
@@ -251,6 +318,148 @@ impl StitchedProgram {
     /// the n % 64 tail). Test/telemetry introspection.
     pub fn is_simd(&self) -> bool {
         self.simd
+    }
+
+    pub fn entry_addr(&self) -> usize {
+        self.block.base() as usize
+    }
+}
+
+/// How one projection batch was handled (telemetry / driver dispatch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjOutcome {
+    /// The stitched body computed every selected row's outputs.
+    Stitched,
+    /// Per-batch fail-open: lane/out drift (short arrays) or an oversize
+    /// batch. Outputs untouched; the caller projects this batch through its
+    /// per-row path. The body stays armed.
+    Drift,
+    /// An erroring stencil tripped (int overflow / zero divisor) — the body
+    /// constructed NO error and the outputs are garbage. The caller must
+    /// replay the batch per-row through the C-ported projection path (which
+    /// raises C's exact error on C's row) and stop running this body
+    /// (sticky, enforced here like the qual body's refusal).
+    Refused,
+}
+
+/// One stitched projection body plus its runtime rails. Owns the code block.
+///
+/// Contract (parity-fuzzed in tests/parity.rs): for every accepted program
+/// and every batch honoring the canonical-datum contract,
+/// `run == interp::eval_project` on all SELECTED rows' outputs, except that
+/// an erroring program exits `Refused` with no error constructed where the
+/// interpreter raises — the caller's per-row replay owns error identity.
+pub struct StitchedProjection {
+    block: jit_deform::CodeBlock,
+    entry: ProjPipelineFn,
+    ncols: usize,
+    nouts: usize,
+    used_cols: Vec<u16>,
+    refused: Cell<bool>,
+    pub stitch_nanos: u64,
+    pub code_bytes: usize,
+}
+
+impl StitchedProjection {
+    /// Stitch a projection body for `prog` over `ncols` input lanes and
+    /// `nouts` output lanes. None = refused (classification, arch, kill
+    /// switch, arena full): the caller stays on its per-row path.
+    pub fn compile(prog: &Program, ncols: usize, nouts: usize) -> Option<StitchedProjection> {
+        if !available() {
+            return None;
+        }
+        let t0 = std::time::Instant::now();
+        let plan = stitch::plan_project(prog, ncols, nouts)?;
+        let words = stitch::emit_project_pipeline(prog, &plan, &proj_params_layout());
+        let block = jit_deform::install_code(&words)?;
+        // SAFETY: block holds a complete body starting at base, RX-mapped
+        // and icache-flushed by install_code.
+        let entry: ProjPipelineFn = unsafe { core::mem::transmute(block.base()) };
+        Some(StitchedProjection {
+            block,
+            entry,
+            ncols,
+            nouts,
+            used_cols: plan.used_cols.clone(),
+            refused: Cell::new(false),
+            stitch_nanos: t0.elapsed().as_nanos() as u64,
+            code_bytes: words.len() * 4,
+        })
+    }
+
+    /// Compute output lanes for every SELECTED row of one staged batch.
+    /// `sel_words` spans exactly `ceil(nrows/64)` words (tail bits of the
+    /// last word clear); rows with a set bit get all their outputs written,
+    /// clear rows are untouched. Outputs must each span >= nrows rows.
+    pub fn run_into(
+        &self,
+        nrows: u32,
+        lane_views: &[Lane<'_>],
+        sel_words: &[u64],
+        outs: &mut [OutLane<'_>],
+    ) -> ProjOutcome {
+        let nwords = (nrows as usize).div_ceil(64);
+        debug_assert_eq!(sel_words.len(), nwords);
+        if self.refused.get() {
+            return ProjOutcome::Refused;
+        }
+        // Per-batch fail-open: drifted staging falls back per-row.
+        if nrows as usize > MAX_ROWS
+            || lane_views.len() < self.ncols
+            || outs.len() < self.nouts
+        {
+            return ProjOutcome::Drift;
+        }
+        let n = nrows as usize;
+        for &col in &self.used_cols {
+            let lane = &lane_views[col as usize];
+            if lane.values.len() < n || lane.isnull.len() < n {
+                return ProjOutcome::Drift;
+            }
+        }
+        for out in outs[..self.nouts].iter() {
+            if out.values.len() < n || out.isnull.len() < n {
+                return ProjOutcome::Drift;
+            }
+        }
+        let mut lanes: [LaneParam; MAX_COLS] = core::array::from_fn(|_| LaneParam {
+            p0: core::ptr::null(),
+            isnull: core::ptr::null(),
+        });
+        for &col in &self.used_cols {
+            let lane = &lane_views[col as usize];
+            lanes[col as usize] =
+                LaneParam { p0: lane.values.as_ptr().cast(), isnull: lane.isnull.as_ptr().cast() };
+        }
+        let mut outps: [LaneParam; MAX_OUTS] = core::array::from_fn(|_| LaneParam {
+            p0: core::ptr::null(),
+            isnull: core::ptr::null(),
+        });
+        for (op, out) in outps[..self.nouts].iter_mut().zip(outs.iter_mut()) {
+            *op = LaneParam {
+                p0: out.values.as_mut_ptr().cast(),
+                isnull: out.isnull.as_mut_ptr().cast(),
+            };
+        }
+        let mut params = ProjJitParams {
+            lanes,
+            outs: outps,
+            sel: sel_words.as_ptr(),
+            nrows: nrows as u64,
+        };
+        // SAFETY: body compiled for (ncols, nouts); every used lane pointer
+        // and every out pointer covers nrows rows (checked above); sel spans
+        // ceil(nrows/64) words and the body indexes them by row/64 with
+        // row < nrows only; the body reads lanes/sel and writes outs only.
+        let rc = unsafe { (self.entry)(&mut params) };
+        if rc == stitch::RC_OK {
+            return ProjOutcome::Stitched;
+        }
+        debug_assert_eq!(rc, stitch::RC_REFUSE);
+        // Refuse-and-replay, sticky: this program's data errors — the caller
+        // replays per-row (C error identity) and this body never runs again.
+        self.refused.set(true);
+        ProjOutcome::Refused
     }
 
     pub fn entry_addr(&self) -> usize {

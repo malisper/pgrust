@@ -21,6 +21,8 @@ unsafe impl<T: ForgetSafe> ForgetSafe for Option<T> {}
 unsafe impl<T: ForgetSafe> ForgetSafe for core::cell::Cell<T> {}
 unsafe impl<T: ForgetSafe> ForgetSafe for core::cell::RefCell<T> {}
 unsafe impl<T: ForgetSafe, const N: usize> ForgetSafe for [T; N] {}
+unsafe impl<A: ForgetSafe, B: ForgetSafe> ForgetSafe for (A, B) {}
+unsafe impl<A: ForgetSafe, B: ForgetSafe, C: ForgetSafe> ForgetSafe for (A, B, C) {}
 unsafe impl<'mcx, T: ForgetSafe> ForgetSafe for crate::PgVec<'mcx, T> {}
 unsafe impl<'mcx, T: ForgetSafe + ?Sized> ForgetSafe for crate::PgBox<'mcx, T> {}
 unsafe impl<'mcx, K: ForgetSafe, V: ForgetSafe> ForgetSafe
