@@ -137,7 +137,6 @@ pub fn agg_hash_compact_batch<'mcx>(
     groups: &mut Vec<NonNull<AggPerGroup>>,
 ) -> PgResult<bool> {
     debug_assert_eq!(keys.len(), isnull.len());
-    let mcx = estate.es_query_cxt;
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     // Runtime backstop (module doc): actual footprint against the half
@@ -225,7 +224,6 @@ pub fn agg_hash_compact_batch<'mcx>(
         // SAFETY: probe never returns null state pointers.
         unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
     }));
-    let _ = mcx;
     Ok(true)
 }
 
