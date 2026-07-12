@@ -7217,6 +7217,7 @@ version = "0.1.0"
 dependencies = [
  "bufmgr",
  "fd",
+ "transam_xlog_seams",
  "types_core",
 ]
 
@@ -11122,6 +11123,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_stat_statements"
+version = "0.0.0"
+dependencies = [
+ "adt_acl",
+ "adt_numeric",
+ "adt_timestamp",
+ "datum",
+ "dfmgr",
+ "elog",
+ "execmain",
+ "executils",
+ "funcapi",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "instrument",
+ "ipc",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "parallel",
+ "parser_analyze",
+ "planner",
+ "queryjumble",
+ "rustc-hash",
+ "scan_fgram",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_portal",
+ "utility",
+ "varlena",
+]
+
+[[package]]
 name = "pg_string"
 version = "0.0.0"
 dependencies = [
@@ -14086,6 +14123,7 @@ dependencies = [
  "pg_proc",
  "pg_publication",
  "pg_sema",
+ "pg_stat_statements",
  "pg_string",
  "pg_subscription",
  "pg_trgm",
@@ -16919,6 +16957,7 @@ dependencies = [
  "mcx",
  "types_core",
  "types_error",
+ "types_storage",
  "types_tuple",
 ]
 

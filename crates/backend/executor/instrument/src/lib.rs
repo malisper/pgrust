@@ -84,6 +84,11 @@ pub fn instr_accum_parallel_query(bufusage: &BufferUsage) {
     });
 }
 
+/// `pgWalUsage` read (instrument.h global; owned by xloginsert).
+pub fn pg_wal_usage() -> WalUsage {
+    transam_xlog_seams::wal_usage::call()
+}
+
 /// `InstrInit`.
 pub fn instr_init(instr: &mut Instrumentation, instrument_options: i32) {
     *instr = Instrumentation::default();
