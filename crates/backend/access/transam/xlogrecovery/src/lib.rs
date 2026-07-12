@@ -21,6 +21,7 @@ use types_error::{
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use xlogreader::{
     XLogReaderRoutine, XLogReaderState, XLogSegmentRoutine, XLREAD_FAIL, XLREAD_SUCCESS,
+    XLREAD_WOULDBLOCK,
 };
 use xlogreader_seams::{XLogReaderState as ReaderView, XLOG_BLCKSZ};
 use xlogrecovery_seams::{EndOfWalRecoveryInfo, InitWalRecoveryResult};
@@ -336,7 +337,11 @@ impl PageSource {
 
     fn xlog_file_read_any_tli(&mut self, segno: XLogSegNo, source: XLogSource) -> PgResult<i32> {
         let wal_segsz = transam_xlog::wal_segment_size();
-        let tles = if self.expected_tles.is_empty() {
+        // A freshly generated history is saved only if a segment is found:
+        // a bootstrapping standby must later prefer the history streamed from
+        // the primary over a locally fabricated single-entry list.
+        let fresh = self.expected_tles.is_empty();
+        let tles = if fresh {
             read_timeline_history(RECOVERY_TARGET_TLI.load(Relaxed))?
         } else {
             std::mem::take(&mut self.expected_tles)
@@ -368,7 +373,9 @@ impl PageSource {
                 }
             }
         }
-        self.expected_tles = tles;
+        if !fresh || found >= 0 {
+            self.expected_tles = tles;
+        }
         Ok(found)
     }
 
@@ -416,6 +423,7 @@ impl PageSource {
         rec_ptr: XLogRecPtr,
         tli_rec_ptr: XLogRecPtr,
         replay_lsn: XLogRecPtr,
+        nonblocking: bool,
     ) -> PgResult<i32> {
         let mut streaming_reply_sent = false;
 
@@ -433,6 +441,11 @@ impl PageSource {
             let mut start_walreceiver = false;
 
             if self.last_source_failed {
+                // No retry loops during nonblocking readahead: yield already-
+                // decoded records to replay first.
+                if nonblocking {
+                    return Ok(XLREAD_WOULDBLOCK);
+                }
                 match self.cur_source {
                     XLogSource::Archive | XLogSource::PgWal => {
                         if StandbyMode() && targets::CheckForStandbyTrigger() {
@@ -617,6 +630,9 @@ impl PageSource {
                             return Ok(XLREAD_SUCCESS);
                         }
                     } else {
+                        if nonblocking {
+                            return Ok(XLREAD_WOULDBLOCK);
+                        }
                         if targets::CheckForStandbyTrigger() {
                             self.last_source_failed = true;
                             continue;
@@ -653,6 +669,18 @@ impl PageSource {
             startup_seams::process_startup_proc_interrupts::call()?;
         }
     }
+}
+
+fn rec_end_for_report(target_page_ptr: XLogRecPtr, req_len: i32) -> XLogRecPtr {
+    target_page_ptr + req_len as u64
+}
+
+// The recycled-segment signature: wrong magic or a page address belonging to
+// the segment's previous life. Full validation stays in the reader.
+fn page_header_plausible(page: &[u8], target_page_ptr: XLogRecPtr) -> bool {
+    let magic = u16::from_ne_bytes(page[0..2].try_into().unwrap());
+    let pageaddr = u64::from_ne_bytes(page[8..16].try_into().unwrap());
+    magic == xlogreader::XLOG_PAGE_MAGIC && pageaddr == target_page_ptr
 }
 
 thread_local! {
@@ -720,12 +748,21 @@ impl XLogReaderRoutine for PageSource {
                 || (self.read_source == XLogSource::Stream
                     && self.flushed_upto < target_page_ptr + req_len as u64)
             {
+                if self.read_file >= 0
+                    && v.nonblocking
+                    && self.read_source == XLogSource::Stream
+                    && self.flushed_upto < target_page_ptr + req_len as u64
+                {
+                    return Ok(XLREAD_WOULDBLOCK);
+                }
                 let replay_lsn = REPLAY_END_REC_PTR.load(Relaxed);
                 match self.wait_for_wal(
                     target_page_ptr + req_len as u64,
                     target_rec_ptr,
                     replay_lsn,
+                    v.nonblocking,
                 )? {
+                    r if r == XLREAD_WOULDBLOCK => return Ok(XLREAD_WOULDBLOCK),
                     r if r == XLREAD_FAIL => {
                         self.close_read_file();
                         self.read_source = XLogSource::Any;
@@ -777,13 +814,30 @@ impl XLogReaderRoutine for PageSource {
                 self.report(emode, target_page_ptr + req_len as u64, msg)?;
             } else {
                 v.seg.ws_tli = self.cur_file_tli;
-                // In standby mode, sanity-check the page header now so a
-                // recycled segment streams a retry instead of ending recovery.
-                if StandbyMode() && target_page_ptr % wal_segsz as u64 == 0 {
-                    // Deferred: XLogReaderValidatePageHeader needs the full
-                    // reader; the outer read loop re-validates. C's extra
-                    // check only accelerates the recycled-segment case.
-                }
+                // In standby mode, sanity-check a segment-start page header
+                // now: a contrecord's second half read from a recycled local
+                // segment must retry another source here, or ReadRecord's
+                // whole-record retry loops forever (xlogrecovery.c:3498).
+                if StandbyMode()
+                    && target_page_ptr % wal_segsz as u64 == 0
+                    && !page_header_plausible(cur_page, target_page_ptr)
+                {
+                    let emode = self.emode;
+                    let fname = transam_xlog::XLogFileName(
+                        self.cur_file_tli,
+                        self.read_seg_no,
+                        wal_segsz,
+                    );
+                    self.report(
+                        emode,
+                        rec_end_for_report(target_page_ptr, req_len),
+                        format!(
+                            "invalid page header in WAL segment {fname}, LSN {}, offset {}",
+                            lsn_fmt(target_page_ptr),
+                            target_page_off
+                        ),
+                    )?;
+                } else {
                 let read_len = if self.read_source == XLogSource::Stream
                     && target_page_ptr / XLOG_BLCKSZ as u64 == self.flushed_upto / XLOG_BLCKSZ as u64
                 {
@@ -793,8 +847,12 @@ impl XLogReaderRoutine for PageSource {
                     XLOG_BLCKSZ as i32
                 };
                 return Ok(read_len);
+                }
             }
 
+            if v.nonblocking {
+                return Ok(XLREAD_WOULDBLOCK);
+            }
             self.last_source_failed = true;
             self.close_read_file();
             self.read_source = XLogSource::Any;
@@ -1319,7 +1377,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
             .finish(loc("InitWalRecovery"))?;
     }
     if check_point.redo < rec.check_point_loc {
-        if was_shutdown && !have_backup_label {
+        if was_shutdown {
             ereport(PANIC)
                 .errmsg("invalid redo record in shutdown checkpoint")
                 .finish(loc("InitWalRecovery"))?;
