@@ -131,6 +131,7 @@ fn plan_tree_copy() {
     let seqscan = Node::mk(
         smcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     plan_rows: 100.0,

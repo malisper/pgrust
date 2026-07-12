@@ -369,7 +369,7 @@ fn exec_supports_backward_scan_arms() {
 
     let mcx = leaked_mcx();
     let seqscan = || {
-        Node::mk(mcx, SeqScan { scan: Scan { plan: Plan::default(), scanrelid: 1 } }).unwrap()
+        Node::mk(mcx, SeqScan { scan: Scan { plan: Plan::default(), scanrelid: 1 }, cb_scan_cols: None }).unwrap()
     };
 
     assert!(!crate::exec_supports_backward_scan(None));
@@ -804,6 +804,7 @@ fn mk_seqscan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStm
     let scan_node = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: tlist,
@@ -1126,6 +1127,7 @@ fn mk_agg_pstmt<'mcx>(
     let scan_node = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan { targetlist: scan_tlist, ..Default::default() },
                 scanrelid: 1,
@@ -1301,6 +1303,7 @@ fn mk_sort_limit_pstmt<'mcx>(
     let mut tree = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
@@ -1521,6 +1524,7 @@ fn mk_junk_sort_limit_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Pl
     let scan = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
                 scanrelid: 1,
@@ -1661,6 +1665,7 @@ fn mk_hashed_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx Planned
     let scan_node = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
@@ -1807,6 +1812,7 @@ fn mk_nestloop_pstmt<'mcx>(
         Node::mk(
             mcx,
             SeqScan {
+                cb_scan_cols: None,
                 scan: Scan {
                     plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
                     scanrelid,
@@ -2087,6 +2093,7 @@ fn mk_hashjoin_pstmt_est<'mcx>(
         Node::mk(
             mcx,
             SeqScan {
+                cb_scan_cols: None,
                 scan: Scan {
                     plan: Plan {
                         targetlist: scan_tlist(varno),
@@ -2632,6 +2639,7 @@ fn unique_over_sort_dedups_end_to_end() {
     let scan = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
@@ -2716,6 +2724,7 @@ fn mk_initplan_sub_seqscan<'mcx>(
     Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan { targetlist: tlist, ..Default::default() },
                 scanrelid: 2,
@@ -2817,6 +2826,7 @@ fn mk_expr_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'mc
     let scan = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make1(mcx, tle).unwrap(),
@@ -2860,6 +2870,7 @@ fn mk_exists_initplan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, t1: u32, t2: u32) -> &'
     let scan = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make1(mcx, tle).unwrap(),
@@ -3054,6 +3065,7 @@ fn worker_pstmt_nulls_parallel_unsafe_subplans() {
         Node::mk(
             mcx,
             SeqScan {
+                cb_scan_cols: None,
                 scan: Scan {
                     plan: Plan { parallel_safe: safe, ..Default::default() },
                     scanrelid: 1,
@@ -3164,6 +3176,7 @@ fn mk_windowagg_pstmt<'mcx>(
     let scan = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
                 scanrelid: 1,
@@ -3449,6 +3462,7 @@ fn mk_epq_update_subplan_pstmt<'mcx>(
     let scan_node = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan { targetlist: tlist, qual, ..Default::default() },
                 scanrelid: 1,
@@ -3765,6 +3779,7 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     let init_scan = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make1(mcx, inner_tle).unwrap(),
@@ -3837,6 +3852,7 @@ fn mk_correlated_initplan_in_subplan_pstmt<'mcx>(
     let outer = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan {
                 plan: Plan {
                     targetlist: NodeList::make2(mcx, out_tle1, out_tle2).unwrap(),

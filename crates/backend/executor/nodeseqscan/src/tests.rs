@@ -322,6 +322,7 @@ fn mk_seqscan<'mcx>(
     qual: NodeList<'mcx>,
 ) -> SeqScan<'mcx> {
     SeqScan {
+        cb_scan_cols: None,
         scan: Scan {
             plan: Plan { targetlist, qual, ..Default::default() },
             scanrelid,

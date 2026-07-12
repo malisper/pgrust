@@ -858,7 +858,7 @@ fn seqscan_node(mcx: ::mcx::Mcx<'_>, parallel_aware: bool, node_id: i32) -> Node
         parallel_aware,
         ..Default::default()
     };
-    Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 } }).unwrap()
+    Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 }, cb_scan_cols: None }).unwrap()
 }
 
 fn seqscan_tables<'m>(
