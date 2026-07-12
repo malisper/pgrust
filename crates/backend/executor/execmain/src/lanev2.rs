@@ -1056,6 +1056,15 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_plain_fold_admissible(agg) {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
     }
+    // AGG_PLAIN exact-DISTINCT (count/sum/avg(DISTINCT x) — nodeagg's
+    // set-mode admission): NOT batch-drainable (pertrans_sort non-empty), so
+    // neither the fold drive above nor the legacy fused arm can host it —
+    // the incumbent is the per-tuple pull with a per-group TUPLESORT. The
+    // set drive replaces that sort with the exact-distinct hash set
+    // (uniqExact analog, cbstore-v2 plan §2.3).
+    if ::nodeagg::agg_plain_distinct_set_admissible(agg) {
+        return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
+    }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
         return Ok(None);
     }
@@ -1616,6 +1625,164 @@ fn agg_plain_fold_feed<'mcx>(
         }
     }
     Ok(())
+}
+
+// ===========================================================================
+// Plain-agg exact-DISTINCT drive (the uniqExact analog — cbstore-v2 plan
+// §2.3; nodeagg's distinctset module). Hosts AGG_PLAIN nodes whose every
+// DISTINCT aggregate is a set-mode entry (count/sum/avg(DISTINCT x) over
+// int2/4/8 or deterministic-collation text — `distinct_set_kind`'s matrix):
+// the per-row feed runs the SAME evaltrans park + ordered-input collect the
+// per-tuple pull runs (the collect inserts into the per-group set instead of
+// a tuplesort), and the delegated finalize replays each distinct value once
+// through the real transfn.
+//
+// Value identity (order-relaxation charter): the set changes only the
+// transfn REPLAY ORDER over the identical distinct-value multiset, and the
+// admitted transitions are order-insensitive (counting / exact integer /
+// Int128 accumulation), so transvalues — and output bytes — match the C
+// sort-based path on every input. Memory stays C-shaped: past the work_mem
+// budget the group degrades to the very tuplesort it displaced (nodeagg
+// `degrade_distinct_set`), whose own spill machinery then applies.
+// ===========================================================================
+
+/// The plain exact-DISTINCT build sink: accept = the delegated per-row
+/// transition program (`agg_plain_build_accept`, set collect included);
+/// finish = nothing (the drive runs the delegated `agg_plain_finish` after
+/// the drain, mirroring the fold drive's retrieve step).
+struct PlainDistinctAggBuildSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+}
+
+impl<'mcx> Sink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodeagg::agg_plain_build_accept(self.agg, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
+}
+
+impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {}
+
+/// Try to let the lane own an AGG_PLAIN exact-DISTINCT `Agg` over a
+/// `SeqScan` (section doc above). `Some(result)` = the lane drove this call;
+/// `None` = refused (the caller falls to the per-tuple pull — whose
+/// collect/replay uses the SAME set state, so a per-call fallback is
+/// value-safe in both directions).
+fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Scan-side refuse-set: the Phase-1 gate verbatim (dynamic EPQ/direction
+    // gates re-checked per call; structural verdict memoized on the node).
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: the one result row is out; a drained agg
+    // stays drained until rescan clears `agg_done`.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // One OWNED tick per lane-owned plain-agg build event (the gate's
+    // aggbuild floor counts builds; this drive runs the whole feed inside
+    // one call).
+    stats::tick_owned(ShapeClass::AggBuild);
+    trace_feed("plain-agg distinct-set drive engaged");
+    // Kernel-shaped quals vectorize via the staged selection bitmap; the
+    // set feed itself is per-row (the DISTINCT park is per-row by nature).
+    arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set feed", true);
+    ::nodeseqscan::seq_scan_stitch_arm(ss);
+    // initialize_aggregates (delegated): fresh initval pergroups + cleared
+    // sets; a rescan re-enters here with agg_done cleared.
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let mut sink = PlainDistinctAggBuildSink { agg };
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    // Retrieve (delegated): set replay + finalize + HAVING + project — one
+    // row (or none, when the var-free HAVING rejects it), setting agg_done.
+    Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
+}
+
+/// Try to let the lane own `Agg(AGG_PLAIN, all-DISTINCT) → Sort → SeqScan`
+/// by SKIPPING the Sort — the q9/Q14-family plan shape: the planner serves a
+/// single DISTINCT aggregate by sorting the whole input and marking the
+/// aggregate `aggpresorted` (adjacent-dedup). When EVERY transition of the
+/// node is replayed from an exact-DISTINCT set
+/// (`agg_plain_distinct_set_only` — presorted entries get force-armed into
+/// set-mode), the Sort's ONLY observable effect is that dedup, so feeding
+/// the UNSORTED scan into the sets produces identical values with the whole
+/// O(n log n) sort deleted: the order-relaxation charter's headline grant.
+/// `None` = refused; the caller falls to the per-tuple `exec_agg` over
+/// `exec_sort` (which, if the drive armed set-mode on an earlier call,
+/// still computes identical values — the arming doc in nodeagg).
+#[inline]
+pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Refusals here are SILENT: every refused offer falls through to
+    // `try_own_sorted_agg_over_sort`, whose gates tick the identical
+    // accounting for this node (a tick here too would double-count the
+    // (class, reason) cadence the gate files ratchet).
+    if !::nodeagg::agg_plain_distinct_set_only(agg) {
+        return Ok(None);
+    }
+    // Dynamic per-call gates (mirror the sorted-agg-over-sort arm).
+    if estate.es_epq_active || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        return Ok(None);
+    }
+    // Sort-side structural verdict — the sort arms' shared memo (covers
+    // random access + the child scan's own refuse-set, EXPLAIN ANALYZE
+    // included).
+    let fusible = match s.lane_fusible {
+        Some(v) => v,
+        None => {
+            let refuse = sort_refuse_reason(s, estate)?;
+            if let Some(r) = refuse {
+                stats::tick_refused(ShapeClass::SortFeed, r);
+            }
+            let v = refuse.is_none();
+            s.lane_fusible = Some(v);
+            v
+        }
+    };
+    if !fusible {
+        return Ok(None);
+    }
+    // v1 scope: SeqScan child only (the q9-class shape; index/bitmap-fed
+    // sorts under an all-DISTINCT plain agg keep the C drive). Silent for
+    // the same fall-through reason as above.
+    if !matches!(&*s.outer, crate::procnode::PlanStateNode::SeqScan(_)) {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // C's CHECK_FOR_INTERRUPTS at the would-be ExecSort feed entry.
+    ::postgres_seams::check_for_interrupts::call()?;
+    stats::tick_owned(ShapeClass::AggBuild);
+    trace_feed("plain-agg distinct-set skip-sort drive engaged");
+    // Arm set-mode for the presorted entries BEFORE any input (sticky;
+    // value-safe on later fallbacks — nodeagg's arming doc).
+    ::nodeagg::agg_force_distinct_set(agg);
+    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
+        unreachable!("matched SeqScan above")
+    };
+    arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
+    ::nodeseqscan::seq_scan_stitch_arm(ss);
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let mut sink = PlainDistinctAggBuildSink { agg };
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
 
 /// Build phase of the hash-agg breaker over a SeqScan feed (once, lazily on

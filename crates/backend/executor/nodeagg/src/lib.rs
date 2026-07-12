@@ -47,6 +47,7 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+mod distinctset;
 mod gsets;
 pub mod merge;
 
@@ -81,6 +82,15 @@ pub struct AggStateData<'mcx> {
     persort: Option<PerSortData<'mcx>>,
     gsets: Option<PgBox<'mcx, gsets::GroupingSetsState<'mcx>>>,
     pertrans_sort: PgVec<'mcx, PerTransSortData<'mcx>>,
+    // Lane-v2 skip-sort arming (`agg_force_distinct_set`): when true,
+    // set-capable PRESORTED entries also run set-mode (collect inserts,
+    // finalize replays) — the lane feeds UNSORTED input, so the adjacent-
+    // dedup contract is gone and the exact set replaces it. Sticky once
+    // armed: value-safe on any later per-tuple fallback too (set dedup over
+    // sorted input yields the same distinct multiset; admitted transitions
+    // are replay-order-insensitive). False = presorted entries keep C's
+    // per-row dedup bit-exactly.
+    force_distinct_set: bool,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     // Lane-v2 hash-agg breaker fold state (None = lane off / nothing admits).
     lanefold: Option<LaneFold<'mcx>>,
@@ -138,11 +148,36 @@ struct PerTransSortData<'mcx> {
     agg_collation: Oid,
     scratch: NonNull<NullableDatum>,
     flag: NonNull<bool>,
+    // Lane-v2 exact-DISTINCT set hosting (distinctset.rs, cbstore-v2 plan
+    // §2.3). `Some` = this entry is SET-MODE: admitted at ExecInitAgg
+    // (`distinct_set_kind`, only under PGRUST_LANE_V2 and never with grouping
+    // sets / combine / presorted / agg-level ORDER BY), the per-group
+    // tuplesort is replaced by `dset` (insert on collect, transfn replay at
+    // the group boundary), and lane drives may host the node (the value-
+    // identity argument lives on `distinct_set_kind`). `dset_degraded` is a
+    // PER-GROUP runtime fallback: past the work_mem budget the group's set is
+    // dumped into the very tuplesort it displaced (`degrade_distinct_set`)
+    // and the C sort path finishes the group — C-shaped spill conservatism
+    // (charter §4) instead of a bespoke set spill.
+    set_kind: Option<distinctset::DistinctKeyKind>,
+    dset: Option<distinctset::DistinctSet>,
+    dset_degraded: bool,
     // One sortstate per grouping set (C sortstates[maxsets]); [0] otherwise.
     sortstates: Vec<Option<Tuplesort>>,
     insert_slot: Option<SlotData<'mcx>>,
     slot1: Option<SlotData<'mcx>>,
     slot2: Option<SlotData<'mcx>>,
+}
+
+impl PerTransSortData<'_> {
+    /// Whether this entry runs SET-MODE right now: a set-capable
+    /// non-presorted entry always does; a set-capable presorted entry only
+    /// under the lane's skip-sort arming (`force_distinct_set` — the input
+    /// is unsorted then, so C's adjacent-dedup contract is unavailable).
+    #[inline]
+    fn set_active(&self, force: bool) -> bool {
+        self.set_kind.is_some() && (force || !self.presorted)
+    }
 }
 
 fn init_pertrans_sort<'mcx>(
@@ -152,6 +187,7 @@ fn init_pertrans_sort<'mcx>(
     transfn_oid: Oid,
     agg_collation: Oid,
     presorted: bool,
+    set_candidate: bool,
 ) -> PgResult<(PerTransSortData<'mcx>, AggOrderedSpec)> {
     let num_inputs = aggref.args.len();
     let num_trans_inputs = aggref.aggargtypes.len();
@@ -193,6 +229,7 @@ fn init_pertrans_sort<'mcx>(
 
     let mut equalfn_one = None;
     let mut equalfn_multi = None;
+    let mut eq_proc: Oid = 0;
     if num_distinct_cols > 0 {
         let mut eqfuncoids: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, num_distinct_cols)?;
         for sc_node in &aggref.aggdistinct {
@@ -200,6 +237,7 @@ fn init_pertrans_sort<'mcx>(
             eqfuncoids.push(lsyscache::get_opcode(scl.eqop)?);
         }
         if num_distinct_cols == 1 {
+            eq_proc = eqfuncoids[0];
             equalfn_one = Some(fmgr_core::fmgr_info(eqfuncoids[0])?);
         } else {
             equalfn_multi = Some(::execexpr::exec_build_grouping_equal(
@@ -284,6 +322,30 @@ fn init_pertrans_sort<'mcx>(
         let a = sortdesc.attr(0);
         (a.attbyval, a.attlen)
     };
+    // Lane-v2 exact-DISTINCT set admission (distinctset.rs; cbstore-v2 plan
+    // §2.3). Structural half here: single-column DISTINCT (which by
+    // transformDistinctClause construction also means no agg-level ORDER BY
+    // beyond that column — refuse any explicit aggorder), single input,
+    // single transition input; the caller's `set_candidate` carries the
+    // node-level half (lane enabled, no grouping sets, no combine).
+    // Presorted entries get a kind too — DORMANT (C's per-row dedup runs)
+    // unless the lane's skip-sort drive arms `force_distinct_set`. Everything
+    // refused keeps the C paths bit-exactly.
+    let set_kind = if set_candidate
+        && aggref.aggorder.is_nil()
+        && num_distinct_cols == 1
+        && num_inputs == 1
+        && num_trans_inputs == 1
+    {
+        distinct_set_kind(
+            transfn_oid,
+            sortdesc.attr(0).atttypid,
+            eq_proc,
+            sort_collations[0],
+        )?
+    } else {
+        None
+    };
     Ok((
         PerTransSortData {
             transno,
@@ -307,6 +369,9 @@ fn init_pertrans_sort<'mcx>(
             agg_collation,
             scratch,
             flag,
+            set_kind,
+            dset: None,
+            dset_degraded: false,
             sortstates: Vec::new(),
             insert_slot,
             slot1,
@@ -314,6 +379,74 @@ fn init_pertrans_sort<'mcx>(
         },
         ospec,
     ))
+}
+
+/// The lane-v2 exact-DISTINCT set's type/equality/transition admission
+/// matrix (cbstore-v2 plan §2.3). `Some(kind)` requires ALL of:
+///
+///   * the transition is one of count(any) / sum(int2|int4) /
+///     avg(int2|int4) / sum-or-avg(int8) — the order-insensitive allowlist
+///     (each transfn's result over a distinct-value multiset is independent
+///     of replay order: pure counting or exact integer/Int128 accumulation);
+///   * the DISTINCT equality operator's proc is the type's own equality and
+///     that equality is REPRESENTATIONAL on the stored key —
+///       int2eq/int4eq/int8eq over int2/int4/int8 (sign-extended-word value
+///       equality; `DistinctSet` keys the sign-extended i64), or
+///       texteq over text/varchar under a DETERMINISTIC collation (texteq's
+///       deterministic arm is length+memcmp of detoasted content bytes —
+///       exactly `DistinctSet`'s byte key). Nondeterministic collations
+///       refuse: equal-under-collation but byte-different values would
+///       violate equal-values-must-hash-equal for a byte hash.
+///
+/// Everything else (multi-arg DISTINCT, ORDER BY within the aggregate,
+/// other types/operators — numeric's class equality included, bpchar's
+/// space-stripping bpchareq included) returns None and keeps the C
+/// sort-based path.
+fn distinct_set_kind(
+    transfn_oid: Oid,
+    atttypid: Oid,
+    eq_proc: Oid,
+    collation: Oid,
+) -> PgResult<Option<distinctset::DistinctKeyKind>> {
+    // pg_proc transition functions (fmgr_core canonical.rs oids).
+    const F_INT8INC_ANY: Oid = 2804; // count(x)
+    const F_INT2_SUM: Oid = 1840; // sum(int2)
+    const F_INT4_SUM: Oid = 1841; // sum(int4)
+    const F_INT2_AVG_ACCUM: Oid = 1962; // avg(int2)
+    const F_INT4_AVG_ACCUM: Oid = 1963; // avg(int4)
+    const F_INT8_AVG_ACCUM: Oid = 2746; // sum(int8) / avg(int8)
+    if !matches!(
+        transfn_oid,
+        F_INT8INC_ANY
+            | F_INT2_SUM
+            | F_INT4_SUM
+            | F_INT2_AVG_ACCUM
+            | F_INT4_AVG_ACCUM
+            | F_INT8_AVG_ACCUM
+    ) {
+        return Ok(None);
+    }
+    // pg_proc equality procs (types_core::fmgr + int8/builtins.rs).
+    const F_INT2EQ: Oid = 63;
+    const F_INT4EQ: Oid = 65;
+    const F_TEXTEQ: Oid = 67;
+    const F_INT8EQ: Oid = 467;
+    const INT2OID: Oid = 21;
+    const INT4OID: Oid = 23;
+    const INT8OID: Oid = 20;
+    const TEXTOID: Oid = 25;
+    const VARCHAROID: Oid = 1043;
+    Ok(match (eq_proc, atttypid) {
+        (F_INT2EQ, INT2OID) => Some(distinctset::DistinctKeyKind::Int16),
+        (F_INT4EQ, INT4OID) => Some(distinctset::DistinctKeyKind::Int32),
+        (F_INT8EQ, INT8OID) => Some(distinctset::DistinctKeyKind::Int64),
+        (F_TEXTEQ, TEXTOID | VARCHAROID)
+            if collation != 0 && lsyscache::get_collation_isdeterministic(collation)? =>
+        {
+            Some(distinctset::DistinctKeyKind::Bytes)
+        }
+        _ => None,
+    })
 }
 
 // C AggStatePerTransData's transtypeLen/transtypeByVal pair, indexed by
@@ -902,6 +1035,12 @@ pub fn exec_init_agg<'mcx>(
                         shape.aggtransfn,
                         aggref.inputcollid,
                         aggref.aggpresorted,
+                        // Node-level half of the exact-DISTINCT set admission
+                        // (distinct_set_kind doc): lane-v2 only (lane-OFF is
+                        // bit-untouched), never under grouping sets (per-set
+                        // sortstates — the set is single-set) or a combine
+                        // phase.
+                        lane_v2_enabled() && !has_grouping_sets && !do_combine,
                     )?;
                     if let Some(eq) = ps.equalfn_multi.as_mut() {
                         // The DISTINCT dedup eq detoasts compressed by-ref
@@ -1200,6 +1339,7 @@ pub fn exec_init_agg<'mcx>(
         persort,
         gsets: gs,
         pertrans_sort,
+        force_distinct_set: false,
         qual,
         lanefold,
         instr_idx: None,
@@ -2193,11 +2333,30 @@ fn agg_refill_hash_table<'mcx>(
 }
 
 // initialize_aggregate (nodeAgg.c) sortstate restart, one grouping set.
+// `force` = the node's `force_distinct_set` (grouping-sets callers pass
+// false — set-mode is never admitted there).
 pub(crate) fn restart_pertrans_sortstates(
     pertrans_sort: &mut [PerTransSortData<'_>],
     setno: usize,
+    force: bool,
 ) -> PgResult<()> {
     for ps in pertrans_sort.iter_mut() {
+        if ps.set_active(force) {
+            // Set-mode entry (distinctset.rs): the group boundary clears the
+            // set (allocation kept for the next group) instead of restarting
+            // a tuplesort. A degraded group's leftover sortstate (rescan
+            // before the group finalized) ends here, exactly as the sort
+            // path's restart would.
+            debug_assert_eq!(setno, 0, "set-mode refuses grouping sets");
+            if let Some(old) = ps.sortstates.get_mut(setno).and_then(|s| s.take()) {
+                old.end();
+            }
+            if let Some(d) = ps.dset.as_mut() {
+                d.clear();
+            }
+            ps.dset_degraded = false;
+            continue;
+        }
         if ps.presorted {
             continue;
         }
@@ -2240,7 +2399,7 @@ pub(crate) fn restart_pertrans_sortstates(
 // initialize_aggregates (nodeAgg.c); by-ref initvals datumCopy into the
 // aggcontext.
 fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
-    restart_pertrans_sortstates(&mut node.pertrans_sort, 0)?;
+    restart_pertrans_sortstates(&mut node.pertrans_sort, 0, node.force_distinct_set)?;
     for (transno, init) in node.trans_init.iter().enumerate() {
         let typ = node.trans_typ[transno];
         let value = if !init.isnull && !typ.byval {
@@ -2278,7 +2437,9 @@ pub(crate) fn collect_ordered_input<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     let tmp = node.tmpcontext;
-    let AggStateData { pertrans_sort, trans_typ, agg_node, pergroup_base, .. } = node;
+    let AggStateData {
+        pertrans_sort, trans_typ, agg_node, pergroup_base, force_distinct_set, ..
+    } = node;
     for ps in pertrans_sort.iter_mut() {
         // SAFETY: once-allocated cells the trans program writes (steps.rs).
         if !unsafe { ps.flag.read() } {
@@ -2286,7 +2447,21 @@ pub(crate) fn collect_ordered_input<'mcx>(
         }
         // SAFETY: as above.
         unsafe { ps.flag.write(false) };
-        if ps.presorted {
+        if ps.set_active(*force_distinct_set) {
+            if !ps.dset_degraded {
+                // Set-mode entry (distinctset.rs): the parked row inserts
+                // into the group's exact-distinct set instead of the
+                // tuplesort (or, when the skip-sort drive forced a presorted
+                // entry, instead of the adjacent-dedup); a budget overflow
+                // degrades the GROUP back to the tuplesort (subsequent rows
+                // then take the sort feed below).
+                debug_assert_eq!(nsets, 1, "set-mode refuses grouping sets");
+                collect_distinct_set(ps, estate, tmp)?;
+                continue;
+            }
+            // Degraded group: fall through to the tuplesort feed
+            // (sortstates[0] begun at the degrade point).
+        } else if ps.presorted {
             advance_presorted_distinct(
                 ps,
                 trans_typ[ps.transno],
@@ -2322,6 +2497,114 @@ pub(crate) fn collect_ordered_input<'mcx>(
             }
         }
     }
+    Ok(())
+}
+
+/// Memory budget for one exact-distinct set: the same work_mem allowance the
+/// displaced tuplesort would get before spilling. The set has no spill;
+/// crossing the budget degrades the group to that tuplesort
+/// (`degrade_distinct_set`) so total memory behavior stays C-shaped
+/// (charter §4 conservatism). Capped so the text blob's u32 offsets can
+/// never overflow under absurd work_mem settings.
+fn distinct_set_budget() -> usize {
+    let kb = init_small::globals::work_mem().max(64) as usize;
+    (kb * 1024).min(1 << 31)
+}
+
+// The set-mode half of the ordered-trans collect: the parked scratch datum
+// inserts into the group's exact-distinct set. NULLs collapse to `seen_null`
+// (the C sort path's DISTINCT dedup makes at most one NULL reach the
+// transfn; the replay passes exactly one, through the identical
+// advance_transition_function). Runs before the tmpcontext reset — by-ref
+// scratch datums live in per-tuple memory, and any detoast copy lands there
+// too (the set retains its own canonical image).
+fn collect_distinct_set<'mcx>(
+    ps: &mut PerTransSortData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tmp: EcxtId,
+) -> PgResult<()> {
+    let kind = ps.set_kind.expect("set-mode pertrans");
+    // SAFETY: scratch slot 0 written by the program this row.
+    let nd = unsafe { ps.scratch.read() };
+    let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
+    if nd.isnull {
+        dset.seen_null = true;
+        return Ok(());
+    }
+    match kind {
+        distinctset::DistinctKeyKind::Int16 => dset.insert_i64(nd.value.as_i16() as i64),
+        distinctset::DistinctKeyKind::Int32 => dset.insert_i64(nd.value.as_i32() as i64),
+        distinctset::DistinctKeyKind::Int64 => dset.insert_i64(nd.value.as_i64()),
+        distinctset::DistinctKeyKind::Bytes => {
+            // SAFETY: non-null live text/varchar varlena — the admission
+            // proved the argument type; detoast copies land in per-tuple
+            // memory (reset per row).
+            let v = unsafe {
+                ::types_fmgr::datum_varlena_packed(nd.value, estate.ecxt(tmp).per_tuple_mcx())
+            }?;
+            dset.insert_bytes(v.data());
+        }
+    }
+    if dset.mem_bytes() > distinct_set_budget() {
+        degrade_distinct_set(ps)?;
+    }
+    Ok(())
+}
+
+// Budget overflow: dump the group's distinct values into the tuplesort the
+// set displaced and finish the group on the C sort path (its own work_mem
+// spill included). Value-identical: the sort re-orders whatever feed order
+// it gets, its drain re-dedups (set values are already unique; later rows
+// may duplicate them), and the admitted transfns are replay-order-
+// insensitive. `dset_degraded` routes this group's remaining collects to the
+// sort feed; the group boundary (restart / process) re-arms the set.
+#[cold]
+#[inline(never)]
+fn degrade_distinct_set(ps: &mut PerTransSortData<'_>) -> PgResult<()> {
+    let kind = ps.set_kind.expect("set-mode pertrans");
+    debug_assert!(!ps.dset_degraded);
+    let work_mem = init_small::globals::work_mem();
+    let mut sort = Tuplesort::begin_datum(
+        ps.sortdesc.attr(0).atttypid,
+        ps.sort_ops[0],
+        ps.sort_collations[0],
+        ps.sort_nulls_first[0],
+        work_mem,
+        TUPLESORT_NONE,
+    )?;
+    let dset = ps.dset.as_mut().expect("degrade fires on insert");
+    match kind {
+        distinctset::DistinctKeyKind::Int16 => {
+            for &k in dset.ints() {
+                sort.putdatum(Datum::from_i16(k as i16), false)?;
+            }
+        }
+        distinctset::DistinctKeyKind::Int32 => {
+            for &k in dset.ints() {
+                sort.putdatum(Datum::from_i32(k as i32), false)?;
+            }
+        }
+        distinctset::DistinctKeyKind::Int64 => {
+            for &k in dset.ints() {
+                sort.putdatum(Datum::from_i64(k), false)?;
+            }
+        }
+        distinctset::DistinctKeyKind::Bytes => {
+            for i in 0..dset.n_bytes() {
+                sort.putdatum(dset.bytes_datum(i), false)?;
+            }
+        }
+    }
+    if dset.seen_null {
+        sort.putdatum(Datum::null(), true)?;
+    }
+    dset.clear_shrink();
+    if ps.sortstates.is_empty() {
+        ps.sortstates.resize_with(1, || None);
+    }
+    debug_assert!(ps.sortstates[0].is_none());
+    ps.sortstates[0] = Some(sort);
+    ps.dset_degraded = true;
     Ok(())
 }
 
@@ -2508,12 +2791,16 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
     }
     let mcx = estate.es_query_cxt;
     let tmp = node.tmpcontext;
-    let AggStateData { pertrans_sort, trans_typ, agg_node, .. } = node;
+    let AggStateData {
+        pertrans_sort, trans_typ, agg_node, force_distinct_set, ..
+    } = node;
     let pergroup_base = &set_pergroup_base;
     for ps in pertrans_sort.iter_mut() {
-        // Presorted DISTINCT already advanced per row: drop the group's
-        // comparand (C finalize_aggregates' haslast reset).
-        if ps.presorted {
+        let set_active = ps.set_active(*force_distinct_set);
+        // Presorted DISTINCT already advanced per row (unless set-mode took
+        // the entry over): drop the group's comparand (C
+        // finalize_aggregates' haslast reset).
+        if !set_active && ps.presorted {
             if ps.haslast {
                 ps.haslast = false;
                 ps.last_single = NullableDatum::null();
@@ -2532,6 +2819,83 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
         // SAFETY: the per-tuple context outlives every call below (resets
         // recycle the same context object).
         unsafe { fcinfo.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
+        if set_active {
+            if !ps.dset_degraded {
+                // Set-mode replay (distinctset.rs): each distinct value once
+                // through the SAME advance_transition_function the sort
+                // drain uses; the at-most-one NULL replays last (order is
+                // transfn-invisible — the admitted transitions are
+                // order-insensitive, which is the set's admission ticket).
+                debug_assert_eq!(setno, 0, "set-mode refuses grouping sets");
+                let Some(mut dset) = ps.dset.take() else {
+                    continue;
+                };
+                let kind = ps.set_kind.expect("set-mode pertrans");
+                let mut replay = |ps: &mut PerTransSortData<'mcx>,
+                                  estate: &mut EStateData<'mcx>,
+                                  nd: NullableDatum|
+                 -> PgResult<()> {
+                    estate.reset_expr_context(tmp);
+                    fcinfo.args[1] = nd;
+                    advance_transition_function(
+                        &mut fcinfo,
+                        &mut ps.transfn,
+                        typ,
+                        ps.num_trans_inputs,
+                        *agg_node,
+                        pg,
+                    )
+                };
+                match kind {
+                    distinctset::DistinctKeyKind::Int16 => {
+                        for i in 0..dset.ints().len() {
+                            let k = dset.ints()[i];
+                            replay(
+                                ps,
+                                estate,
+                                NullableDatum { value: Datum::from_i16(k as i16), isnull: false },
+                            )?;
+                        }
+                    }
+                    distinctset::DistinctKeyKind::Int32 => {
+                        for i in 0..dset.ints().len() {
+                            let k = dset.ints()[i];
+                            replay(
+                                ps,
+                                estate,
+                                NullableDatum { value: Datum::from_i32(k as i32), isnull: false },
+                            )?;
+                        }
+                    }
+                    distinctset::DistinctKeyKind::Int64 => {
+                        for i in 0..dset.ints().len() {
+                            let k = dset.ints()[i];
+                            replay(
+                                ps,
+                                estate,
+                                NullableDatum { value: Datum::from_i64(k), isnull: false },
+                            )?;
+                        }
+                    }
+                    distinctset::DistinctKeyKind::Bytes => {
+                        for i in 0..dset.n_bytes() {
+                            let d = dset.bytes_datum(i);
+                            replay(ps, estate, NullableDatum { value: d, isnull: false })?;
+                        }
+                    }
+                }
+                if dset.seen_null {
+                    replay(ps, estate, NullableDatum::null())?;
+                }
+                dset.clear();
+                ps.dset = Some(dset);
+                continue;
+            }
+            // Degraded group: the dumped tuplesort drains through the sort
+            // path below (its DISTINCT dedup included); re-arm the set for
+            // the next group.
+            ps.dset_degraded = false;
+        }
         let mut sort = ps.sortstates[setno].take().expect("ordered pertrans sort begun");
         sort.performsort()?;
         // Spilled by-ref values live in recycled slab slots (valid until the
@@ -3080,6 +3444,74 @@ pub fn agg_hash_build_probe_resid<'mcx>(
 // finalize/HAVING/project tail (one result row; zero-row input included).
 // ===========================================================================
 
+/// Every DISTINCT/ORDER-BY-within-aggregate internal-sort entry is a
+/// lane-hosted exact-DISTINCT set (distinctset module; admission matrix on
+/// `distinct_set_kind`), and there is at least one. Mixed nodes — any
+/// tuplesort-mode or presorted entry alongside — refuse wholesale: the lane
+/// hosts only the all-set shape (allowlist discipline; the C paths keep
+/// everything else).
+pub fn agg_pertrans_all_distinct_set(node: &AggStateData<'_>) -> bool {
+    !node.pertrans_sort.is_empty()
+        && node.pertrans_sort.iter().all(|ps| ps.set_active(false))
+}
+
+/// Skip-sort admission (lanev2 `try_own_plain_distinct_agg_over_sort`):
+/// EVERY transition of this AGG_PLAIN node is replayed from an
+/// exact-DISTINCT set — each transno has a pertrans_sort entry and each
+/// entry is set-capable (presorted included: the drive arms
+/// `force_distinct_set`, converting the plan-Sort-served adjacent-dedup to
+/// the exact set). That total coverage is what makes SKIPPING the plan's
+/// Sort legal beyond row order: no transition ever observes input order
+/// (the per-row program only parks; all aggregation happens at the replay,
+/// whose transfns are the order-insensitive allowlist), so same rows in ⇒
+/// same values out — the order-relaxation charter's exact grant.
+pub fn agg_plain_distinct_set_only(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_PLAIN
+        && node.gsets.is_none()
+        && node.merge.is_none()
+        && node.pertrans_sort.len() == node.numtrans
+        && node.pertrans_sort.iter().all(|ps| ps.set_kind.is_some())
+        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// Arm skip-sort set-mode (see `force_distinct_set` field doc): the lane's
+/// skip-sort drive calls this before the build so presorted entries collect
+/// into sets. Sticky by design — value-safe on later per-tuple fallbacks.
+pub fn agg_force_distinct_set(node: &mut AggStateData<'_>) {
+    debug_assert!(agg_plain_distinct_set_only(node));
+    node.force_distinct_set = true;
+}
+
+/// Agg-side admission for the lane-v2 plain-agg exact-DISTINCT drive
+/// (execmain lanev2.rs `try_own_plain_distinct_agg_over_seq_scan`):
+/// AGG_PLAIN whose every internal-sort entry is a set-mode exact-DISTINCT
+/// (`agg_pertrans_all_distinct_set` — such nodes are NOT batch-drainable, so
+/// the fold drive and the legacy fused arm never see them), single grouping
+/// set, no merge phase, subplan-free transitions, initplan-param-free
+/// everywhere (the lane drive does not hoist pending initplans). The drive
+/// itself is `agg_plain_build_begin` + per-row `agg_plain_build_accept`
+/// (whose collect feeds the sets) + `agg_plain_finish` (whose
+/// process_ordered_aggregates replays them).
+pub fn agg_plain_distinct_set_admissible(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_PLAIN
+        && node.gsets.is_none()
+        && node.merge.is_none()
+        && agg_pertrans_all_distinct_set(node)
+        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
 /// Agg-side admission for the lane-v2 plain-agg fold drive: batch-drainable,
 /// AGG_PLAIN, a classified fold plan, and initplan-param-free (the lane
 /// drive, like `exec_agg_batched`, does not hoist pending initplans).
@@ -3103,9 +3535,10 @@ pub fn agg_plain_build_begin(node: &mut AggStateData<'_>) -> PgResult<()> {
 }
 
 /// One outer row through the FULL per-row transition program — `exec_agg`'s
-/// single-group loop body verbatim (no ordered-input collection: the lane
-/// admission requires `pertrans_sort` empty). Demoted/fallback rows and
-/// scalar-qual feeds run here.
+/// single-group loop body verbatim, ordered-input collection included (a
+/// no-op for the fold drive's shapes, whose admission requires
+/// `pertrans_sort` empty; the exact-DISTINCT drive's set entries collect
+/// here). Demoted/fallback rows and scalar-qual feeds run here.
 pub fn agg_plain_build_accept<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3113,9 +3546,14 @@ pub fn agg_plain_build_accept<'mcx>(
 ) -> PgResult<()> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
     estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
-    let outer_slot = estate.slot_mut(outer_id);
-    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-    exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    {
+        let outer_slot = estate.slot_mut(outer_id);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    }
+    if !node.pertrans_sort.is_empty() {
+        collect_ordered_input(node, estate, 1)?;
+    }
     estate.reset_expr_context(node.tmpcontext);
     Ok(())
 }
@@ -3177,9 +3615,11 @@ pub fn agg_plain_finish<'mcx>(
 
 /// Agg-side admission for the lane-v2 sorted-agg streaming operator:
 /// AGG_SORTED single grouping set, no merge phase, no
-/// DISTINCT/ORDER-BY-within-aggregate internal sorts (`pertrans_sort` — the
-/// per-row path interleaves `collect_ordered_input`, which the lane does not
-/// drive), subplan-free transitions, and initplan-param-free everywhere (the
+/// DISTINCT/ORDER-BY-within-aggregate internal sorts (`pertrans_sort`) —
+/// UNLESS every such entry is a lane-hosted exact-DISTINCT set (distinctset
+/// module; `agg_sorted_accept`/`agg_sorted_group_begin` drive the collect and
+/// the emit tail's `process_ordered_aggregates` replays the sets) — plus
+/// subplan-free transitions, and initplan-param-free everywhere (the
 /// lane drive, like `exec_agg_batched`, does not hoist pending initplans).
 /// Subplan-bearing HAVING/projection ARE admitted: the emit tail delegates to
 /// the same subplan-aware qual/project arms `agg_retrieve_sorted` uses.
@@ -3187,7 +3627,7 @@ pub fn agg_sorted_lane_admissible(node: &AggStateData<'_>) -> bool {
     node.plan.aggstrategy == AGG_SORTED
         && node.gsets.is_none()
         && node.merge.is_none()
-        && node.pertrans_sort.is_empty()
+        && (node.pertrans_sort.is_empty() || agg_pertrans_all_distinct_set(node))
         && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
         && node
             .evaltrans
@@ -3243,6 +3683,11 @@ pub fn agg_sorted_group_begin<'mcx>(
             EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
         exec_eval_expr(et, &mut slots)?;
     }
+    // Ordered-input collection (the pull loop's interleave) — a no-op unless
+    // the admission's exact-DISTINCT set entries parked this row.
+    if !node.pertrans_sort.is_empty() {
+        collect_ordered_input(node, estate, 1)?;
+    }
     estate.reset_expr_context(node.tmpcontext);
     Ok(())
 }
@@ -3274,17 +3719,24 @@ pub fn agg_sorted_same_group<'mcx>(
 }
 
 /// One same-group row through the FULL per-row transition program —
-/// `agg_retrieve_sorted`'s loop body verbatim (no subplan / ordered-input
-/// arms: the lane admission refuses those shapes).
+/// `agg_retrieve_sorted`'s loop body verbatim, ordered-input collection
+/// included (no subplan arms: the lane admission refuses those shapes; the
+/// only admitted `pertrans_sort` entries are exact-DISTINCT sets, which
+/// collect here exactly as the pull loop interleaves).
 pub fn agg_sorted_accept<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     outer_id: ExecSlotId,
 ) -> PgResult<()> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
-    let outer_slot = estate.slot_mut(outer_id);
-    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
-    exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    {
+        let outer_slot = estate.slot_mut(outer_id);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    }
+    if !node.pertrans_sort.is_empty() {
+        collect_ordered_input(node, estate, 1)?;
+    }
     estate.reset_expr_context(node.tmpcontext);
     Ok(())
 }
@@ -4206,7 +4658,7 @@ mcx::forget_safe_struct!(
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
-        instr_idx;
+        force_distinct_set, instr_idx;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual, lanefold },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
