@@ -299,7 +299,14 @@ impl NumProc for Float4 {
         Datum::from_f32(l)
     }
     scalar_penalty!();
-    lower_ssup!();
+    // C's ssup deliberately switches to the total order (float4_cmp_internal:
+    // NaN greatest), unlike every other float comparison in this opclass.
+    fn ssup_cmp(x: Datum, y: Datum, _c: Oid, _m: Mcx<'_>) -> PgResult<i32> {
+        Ok(adt_float::float4_cmp_internal(
+            Self::read(num_key::<Self>(x)),
+            Self::read(num_key::<Self>(y)),
+        ))
+    }
 }
 
 scalar_numops!(Float8, f64, 8, 16, rd_f64);
@@ -311,7 +318,13 @@ impl NumProc for Float8 {
         Datum::from_f64(l)
     }
     scalar_penalty!();
-    lower_ssup!();
+    // As Float4: C ssup uses the float8_cmp_internal total order.
+    fn ssup_cmp(x: Datum, y: Datum, _c: Oid, _m: Mcx<'_>) -> PgResult<i32> {
+        Ok(adt_float::float8_cmp_internal(
+            Self::read(num_key::<Self>(x)),
+            Self::read(num_key::<Self>(y)),
+        ))
+    }
 }
 
 scalar_numops!(CashT, i64, 8, 16, rd_i64);
@@ -1102,6 +1115,12 @@ impl VarOps for BitV {
     }
     fn leaf_cmp(a: &[u8], b: &[u8], _: &mut Ctx) -> PgResult<i32> {
         Ok(adt_varbit::bit_cmp_payload(&a[VARHDRSZ..], &b[VARHDRSZ..]))
+    }
+    // C biteq: equal bit counts + memcmp of VARBITBYTES(a). On truncated node
+    // keys C's memcmp over-reads (UB); payload equality is the OOB-free
+    // equivalent (identical on well-formed values, conservative on nodes).
+    fn eq(a: &[u8], b: &[u8], _: &mut Ctx) -> PgResult<bool> {
+        Ok(a[VARHDRSZ..] == b[VARHDRSZ..])
     }
     fn l2n(leaf: &[u8]) -> Option<Vec<u8>> {
         Some(bit_xfrm(leaf))
