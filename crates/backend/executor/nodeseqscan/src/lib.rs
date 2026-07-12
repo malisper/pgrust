@@ -200,6 +200,16 @@ struct ProjStitch<'mcx> {
     refused: bool,
     /// Outputs valid for the CURRENTLY staged batch (set at staging).
     staged: bool,
+    /// The selectivity disarm applies: hosting WIDENED the per-batch deform
+    /// beyond what the qual alone stages (the single-clause col-only case),
+    /// so low-selectivity scans pay full-prefix deform for few saved
+    /// projections. `stitched_rows`/`stitched_survivors` (rows staged /
+    /// true survivors through the stitched body) feed the one-shot check in
+    /// `stitch_project`.
+    adapt: bool,
+    adapt_checked: bool,
+    stitched_rows: u64,
+    stitched_survivors: u64,
     /// Output lanes, nouts x SOA_MAX_ROWS (column-major, SoaBatch layout).
     out_values: ::mcx::PgVec<'mcx, ::datum::Datum>,
     out_isnull: ::mcx::PgVec<'mcx, bool>,
@@ -207,6 +217,18 @@ struct ProjStitch<'mcx> {
     n_stitched: u64,
     n_perrow: u64,
 }
+
+/// Selectivity floor for the ADAPTIVE projection disarm (admission
+/// economics, measured 2026-07-12 on the 10M-row lane-bench dataset, warm
+/// best-of-3x3 interleaved): when hosting widened a single-clause col-only
+/// deform to the full projection prefix, ~10%-selectivity shapes ran +1-2%
+/// (p1/p4: extra 4-5 col deform on every staged row, few saved projections)
+/// while ~50%-selectivity shapes won 13-19% (p2/p3). One-shot check after
+/// PROJ_ADAPT_ROWS staged rows: below the floor, drop the projection arm —
+/// staging returns to the qual-only col deform and the per-row projection
+/// path (exactly the pre-projstitch lane). Ratchet only with a measurement.
+const PROJ_MIN_SELECTIVITY_PCT: u64 = 20;
+const PROJ_ADAPT_ROWS: u64 = 65536;
 
 /// Tier-2 row floor (the batchexec POC admission number): the stitched body
 /// engages only once ~2048 rows have flowed through the armed qual — OLTP-
@@ -255,6 +277,12 @@ impl BatchSoa<'_> {
         self.nwords = 0;
         self.cur_word = 0;
         self.cur_bits = 0;
+        if let Some(p) = self.proj.as_mut() {
+            // The staged batch is gone; its output lanes go with it. (The
+            // emit fast lane is additionally gated on nwords > 0, so this
+            // is belt-and-braces.)
+            p.staged = false;
+        }
     }
 }
 
@@ -747,8 +775,12 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 // the pure qual bits BEFORE the forced-fallback OR below
                 // (fallback rows carry no lane values — they keep the
                 // per-row store+qual+project path; a garbage lane value must
-                // never reach an erroring arith stencil).
-                stitch_project(b, n);
+                // never reach an erroring arith stencil). A true return =
+                // the adaptive selectivity floor tripped: drop the arm, so
+                // the NEXT staging returns to the qual-only column deform.
+                if stitch_project(b, n) {
+                    b.proj = None;
+                }
                 // Skipped rows carry a forced bit; the fetch re-checks them.
                 for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
                     *w |= fb;
@@ -846,9 +878,12 @@ fn stitch_qual_bitmap(b: &mut BatchSoa<'_>, n: u32) -> PgResult<bool> {
 /// and a runtime trap additionally refuses the body for good (sticky
 /// refuse-and-replay: the body constructed NO error; the per-row replay
 /// raises C's exact error on C's row).
-fn stitch_project(b: &mut BatchSoa<'_>, n: u32) {
+/// Returns true when the caller must DISARM projection hosting (the
+/// adaptive selectivity floor tripped): dropping the arm returns staging to
+/// the qual-only column deform, i.e. the pre-projstitch lane behavior.
+fn stitch_project(b: &mut BatchSoa<'_>, n: u32) -> bool {
     let BatchSoa { soa, sel, proj, .. } = b;
-    let Some(p) = proj.as_mut() else { return };
+    let Some(p) = proj.as_mut() else { return false };
     p.staged = false;
     if !p.refused {
         if p.body.is_none() && p.rows_seen >= STITCH_ROW_FLOOR {
@@ -901,6 +936,9 @@ fn stitch_project(b: &mut BatchSoa<'_>, n: u32) {
                 ::lanestitch::ProjOutcome::Stitched => {
                     p.staged = true;
                     p.n_stitched += 1;
+                    p.stitched_rows += n as u64;
+                    p.stitched_survivors +=
+                        proj_sel[..nwords].iter().map(|w| w.count_ones() as u64).sum::<u64>();
                 }
                 ::lanestitch::ProjOutcome::Drift => {
                     p.n_perrow += 1;
@@ -921,6 +959,19 @@ fn stitch_project(b: &mut BatchSoa<'_>, n: u32) {
         p.n_perrow += 1;
     }
     p.rows_seen += n as u64;
+    // Adaptive selectivity disarm (one-shot, PROJ_MIN_SELECTIVITY_PCT):
+    // only when hosting widened the deform; the caller drops the arm.
+    if p.adapt && !p.adapt_checked && p.stitched_rows >= PROJ_ADAPT_ROWS {
+        p.adapt_checked = true;
+        if p.stitched_survivors * 100 < p.stitched_rows * PROJ_MIN_SELECTIVITY_PCT {
+            lane_trace(&format!(
+                "proj stitch disarmed (selectivity {}/{} below {}%)",
+                p.stitched_survivors, p.stitched_rows, PROJ_MIN_SELECTIVITY_PCT
+            ));
+            return true;
+        }
+    }
+    false
 }
 
 /// Map an execexpr comparator + its const onto the stitcher vocabulary,
@@ -1091,11 +1142,13 @@ fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::dat
 /// it). None = no hostable projection (no ProjInfo / census refused /
 /// out-of-window / kill switch / stitcher unavailable).
 ///
-/// Admission economics: Var-only tlists are refused (`any_arith`) — the
-/// stitched fill would only replace the per-row Assign walk, measured a
-/// wash, while WIDENING the deform prefix (extra per-batch deform cost).
-/// Computed columns are where the fused lanes win. Ratchet only with a
-/// measurement.
+/// Admission economics (design §4 — fail closed until measured): Var-only
+/// tlists are refused (`any_arith`) — the stitched fill would only replace
+/// the per-row Assign walk while WIDENING the deform prefix (a real
+/// per-batch deform cost on every staged row), an unproven trade. Computed
+/// columns are where the fused lanes carry a measured win (see the
+/// projstitch A/B in the branch log). Ratchet DOWN (admit Var-only) only
+/// with a measurement, STITCH_MIN_CLAUSES-style.
 pub fn seq_scan_proj_stitch_prefix(node: &SeqScanState<'_>) -> Option<i32> {
     if !proj_stitch_enabled() || !::lanestitch::available() {
         return None;
@@ -1175,6 +1228,16 @@ pub fn seq_scan_proj_stitch_arm<'mcx>(
     }
     let mcx = estate.es_query_cxt;
     let cells = cols.n as usize * ::exectuples::SOA_MAX_ROWS;
+    // The adaptive selectivity disarm applies iff hosting WIDENS the
+    // per-batch deform beyond the qual's own staging: single-clause
+    // qual-only staging deforms one column, multi-clause the clause-covering
+    // prefix; anything wider is projection-hosting cost that low-selectivity
+    // scans cannot amortize (PROJ_MIN_SELECTIVITY_PCT).
+    let qual_deform_cols = if b.qual_only && b.nquals == 1 {
+        1
+    } else {
+        b.quals[..b.nquals as usize].iter().map(|&(c, _, _)| c as usize + 1).max().unwrap_or(0)
+    };
     b.proj = Some(ProjStitch {
         prog,
         ncols: cols.max_attnum() as usize + 1,
@@ -1183,6 +1246,10 @@ pub fn seq_scan_proj_stitch_arm<'mcx>(
         rows_seen: 0,
         refused: false,
         staged: false,
+        adapt: b.plan.ncols() as usize > qual_deform_cols,
+        adapt_checked: false,
+        stitched_rows: 0,
+        stitched_survivors: 0,
         out_values: ::mcx::vec_from_elem_in(mcx, ::datum::Datum::null(), cells),
         out_isnull: ::mcx::vec_from_elem_in(mcx, false, cells),
         n_stitched: 0,
