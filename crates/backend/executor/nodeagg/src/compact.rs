@@ -19,7 +19,11 @@
 //!   * the key kernel is an INTEGER width (int2/int4/int8 — text keys keep
 //!     the C table until the str8/arena hosting lands; the lanetable crate
 //!     already implements it, microbench-proven);
-//!   * `aggsplit == AGGSPLIT_SIMPLE` (partial-agg handoffs read the C table);
+//!   * `aggsplit == AGGSPLIT_SIMPLE`, or `AGGSPLIT_INITIAL_SERIAL` under an
+//!     ARMED lane parallel pool (Stage 2.2 × Stage 4: worker partial builds
+//!     use the compact table and export it into the merge handoff —
+//!     `merge::maybe_install_handoff`'s compact arm; group estimates divide
+//!     by the pool DOP, see `compact_split_divisor`);
 //!   * NOT spill-eligible by estimate: planner `numGroups` must fit within
 //!     HALF the hash-mem/ngroups limits (v1 policy: the compact table
 //!     REFUSES spill-eligible plans; distinct-spill is v2, like the
@@ -140,15 +144,46 @@ fn compact_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_LANE_V2_COMPACT").map_or(true, |v| v != "0"))
 }
 
+/// Aggsplit admission + the per-worker group-estimate divisor (Stage 2.2 ×
+/// Stage 4):
+///   * `AGGSPLIT_SIMPLE` — the serial lane build; divisor 1.
+///   * `AGGSPLIT_INITIAL_SERIAL` under an ARMED lane pool — a worker (or the
+///     participating leader) partial build; the planner's `numGroups` is the
+///     whole input's estimate while each of the DOP participants sees ~1/DOP
+///     of the rows, so the spill/layout gates divide by the pool DOP. An
+///     underestimate is bounded by the runtime migration backstop, which
+///     works in-worker (thread-native) and falls back to the C table + row
+///     emission. Pool-unarmed partial builds refuse: the parallel-finalize
+///     handoff of ordinary (heap) parallel agg keeps its C-table behavior
+///     byte-for-byte.
+///   * everything else (`AGGSPLIT_FINAL_DESERIAL`) refuses — the finalize
+///     combines states; it never runs transition builds the compact table
+///     could host.
+fn compact_split_divisor(aggsplit: ::types_pathnodes::AggSplit) -> Option<u64> {
+    if aggsplit == ::types_pathnodes::AGGSPLIT_SIMPLE {
+        return Some(1);
+    }
+    if aggsplit == ::types_pathnodes::AGGSPLIT_INITIAL_SERIAL {
+        let dop = ::guc_tables::lane_pool::lane_parallel_pool_dop();
+        if dop > 0 {
+            return Some(dop as u64);
+        }
+    }
+    None
+}
+
 /// Decide + arm the compact table for this build. Caller (the lane's scan-K2
 /// feed) has already admitted the K2 shape; this adds the compact-specific
 /// gates (module doc). Idempotent per build: re-arming an armed node keeps
 /// its table.
 pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
-    if !compact_enabled() || node.plan.aggsplit != ::types_pathnodes::AGGSPLIT_SIMPLE {
+    if !compact_enabled() {
         return CompactArm::Off;
     }
-    let numgroups = node.plan.numGroups.max(1) as u64;
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return CompactArm::Off;
+    };
+    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     if ph.compact.is_some() {
         return CompactArm::Armed;
@@ -210,10 +245,13 @@ pub fn agg_hash_compact_try_arm_mk(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> CompactArm {
-    if !compact_enabled() || node.plan.aggsplit != ::types_pathnodes::AGGSPLIT_SIMPLE {
+    if !compact_enabled() {
         return CompactArm::Off;
     }
-    let numgroups = node.plan.numGroups.max(1) as u64;
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return CompactArm::Off;
+    };
+    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     if ph.compact.is_some() {
         return CompactArm::Armed;
@@ -633,6 +671,56 @@ fn compact_key_datums_mk(
     Ok(())
 }
 
+/// Present row `row`'s key datums in `hashslot` (hash_desc shape, key
+/// order) — the shared read-back leg of the migration walk and the merge
+/// handoff export. Interned text materializes into `table_mcx` (node
+/// lifetime, exactly like the C entries / handed images that outlive it).
+pub(crate) fn compact_row_into_hashslot<'mcx>(
+    ch: &CompactHash,
+    hashslot: &mut ::types_slot::SlotData<'mcx>,
+    mk_scratch: &mut Vec<(Datum, bool)>,
+    row: usize,
+    table_mcx: ::mcx::Mcx<'_>,
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<()> {
+    ::exectuples::exec_clear_tuple(hashslot, mcx);
+    match &ch.key {
+        CompactKeySpec::Single { width } => {
+            let (key, key_isnull) = match compact_key_datum(ch, *width, row) {
+                Some(d) => (d, false),
+                None => (Datum::null(), true),
+            };
+            let base = hashslot.base_mut();
+            base.tts_values[0] = key;
+            base.tts_isnull[0] = key_isnull;
+        }
+        CompactKeySpec::Multi(shape) => {
+            compact_key_datums_mk(ch, shape, row, table_mcx, mk_scratch)?;
+            let base = hashslot.base_mut();
+            for (j, &(d, isnull)) in mk_scratch.iter().enumerate() {
+                base.tts_values[j] = d;
+                base.tts_isnull[j] = isnull;
+            }
+        }
+    }
+    ::exectuples::exec_store_virtual_tuple(hashslot);
+    Ok(())
+}
+
+/// Row `row`'s byval kernel key cache for an exported handoff entry
+/// (`TupleHashEntryData::from_parts`): the single-key datum + isnull.
+/// Multi-key tables probe through the Expr kernel, whose entries never read
+/// the cache — (null, false) matches what a fresh Expr insert stores.
+pub(crate) fn compact_export_entry_key(ch: &CompactHash, row: usize) -> (Datum, bool) {
+    match &ch.key {
+        CompactKeySpec::Single { width } => match compact_key_datum(ch, *width, row) {
+            Some(d) => (d, false),
+            None => (Datum::null(), true),
+        },
+        CompactKeySpec::Multi(_) => (Datum::null(), false),
+    }
+}
+
 /// Runtime backstop: move every compact group into the C tuplehash and
 /// disarm. Entries land in first-arrival (row) order through the SAME
 /// C-ported `lookup` insert leg the per-row path uses; the `AggPerGroup`
@@ -668,30 +756,17 @@ fn compact_migrate<'mcx>(
     debug_assert!(!ph.spill.mode, "compact builds never enter spill mode");
     let mut mk_scratch: Vec<(Datum, bool)> = Vec::new();
     for row in 0..ch.table.nrows() {
-        ::exectuples::exec_clear_tuple(&mut ph.hashslot, mcx);
-        match &ch.key {
-            CompactKeySpec::Single { width } => {
-                let (key, key_isnull) = match compact_key_datum(&ch, *width, row) {
-                    Some(d) => (d, false),
-                    None => (Datum::null(), true),
-                };
-                let base = ph.hashslot.base_mut();
-                base.tts_values[0] = key;
-                base.tts_isnull[0] = key_isnull;
-            }
-            CompactKeySpec::Multi(shape) => {
-                // Reconstruct every component; interned text materializes
-                // into the table context (same lifetime as the C entries the
-                // lookup below copies the slot into).
-                compact_key_datums_mk(&ch, shape, row, ph.table_ctx.mcx(), &mut mk_scratch)?;
-                let base = ph.hashslot.base_mut();
-                for (j, &(d, isnull)) in mk_scratch.iter().enumerate() {
-                    base.tts_values[j] = d;
-                    base.tts_isnull[j] = isnull;
-                }
-            }
-        }
-        ::exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
+        // Reconstruct every component; interned text materializes into the
+        // table context (same lifetime as the C entries the lookup below
+        // copies the slot into).
+        compact_row_into_hashslot(
+            &ch,
+            &mut ph.hashslot,
+            &mut mk_scratch,
+            row,
+            ph.table_ctx.mcx(),
+            mcx,
+        )?;
         let hash = ph.hashtable.hash_slot(&mut ph.hashslot)?;
         let table_mcx = ph.table_ctx.mcx();
         let (ix, isnew) = ph.hashtable.lookup(&mut ph.hashslot, hash, Some(table_mcx), mcx)?;

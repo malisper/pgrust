@@ -153,6 +153,17 @@ pub(super) trait Sink<'mcx> {
         tuple: ExecSlotId,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<SinkFeed>;
+    /// Combine-before-finish (the Stage-4 seam, reserved since Phase 2):
+    /// a parallel worker's breaker publishes its partial state for the
+    /// cross-worker combine here — the hash-agg breaker hands its whole
+    /// table to the leader by pointer (nodeagg::merge handoff; the leader
+    /// merges partition-parallel with the ported combinefn machinery) —
+    /// before `finish` flips the breaker to its Source face. Serial
+    /// pipelines and non-partial sinks keep the default no-op; drivers call
+    /// it exactly once, immediately before `finish`.
+    fn combine(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
     /// Upstream exhausted: final flush/cleanup.
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()>;
 }
@@ -548,6 +559,7 @@ where
     if let OpStatus::Paused = top.source_exhausted(sink, estate)? {
         unreachable!("chain build pipeline paused in flush: breaker sink returned Full")
     }
+    sink.combine(estate)?;
     sink.finish(estate)
 }
 
@@ -594,5 +606,6 @@ where
             OpStatus::Paused => unreachable!("build pipeline paused: breaker sink returned Full"),
         }
     }
+    sink.combine(estate)?;
     sink.finish(estate)
 }

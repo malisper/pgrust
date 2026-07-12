@@ -487,7 +487,19 @@ pub fn compute_gather_rows(rows: f64, parallel_workers: i32) -> f64 {
 // empty — scan the simple-rel array instead: any cbstore baserel in the
 // (sub)query prices the whole plan's Gathers.
 fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
-    if cbstore_feeds_plan(run) { gucs::cbstore_parallel_setup_cost() } else { gucs::parallel_setup_cost() }
+    if cbstore_feeds_plan(run) {
+        // Stage-4 pool arming (guc_tables::lane_pool): a session that set
+        // `pgrust.lane_parallel_pool` is asking for the parallel shape —
+        // drop the provisional pre-pool surcharge back to the regular knob
+        // so the forced-DOP partial paths actually win.
+        if guc_tables::lane_pool::lane_parallel_pool_armed() {
+            gucs::parallel_setup_cost()
+        } else {
+            gucs::cbstore_parallel_setup_cost()
+        }
+    } else {
+        gucs::parallel_setup_cost()
+    }
 }
 
 // Per-tuple Gather transfer price: cbstore-fed plans pay the measured P0b
@@ -495,7 +507,21 @@ fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
 // provenance), heap plans keep C's parallel_tuple_cost. Same selector as
 // gather_setup_cost.
 fn gather_tuple_cost(run: &PlannerRun<'_>) -> f64 {
-    if cbstore_feeds_plan(run) { gucs::cbstore_parallel_tuple_cost() } else { gucs::parallel_tuple_cost() }
+    if cbstore_feeds_plan(run) {
+        // Armed pool sessions price Gather transfer at the regular rate too:
+        // the measured cbstore chunked-transport rate (0.005/tuple) is cheap
+        // enough that at high forced DOP the planner starts preferring
+        // ship-every-row-to-the-leader plans (HashAggregate ABOVE Gather)
+        // over the partial-agg shape the pool exists for. Heap semantics for
+        // armed cbstore plans; the measured rate stays for unarmed costing.
+        if guc_tables::lane_pool::lane_parallel_pool_armed() {
+            gucs::parallel_tuple_cost()
+        } else {
+            gucs::cbstore_parallel_tuple_cost()
+        }
+    } else {
+        gucs::parallel_tuple_cost()
+    }
 }
 
 pub fn cbstore_feeds_plan(run: &PlannerRun<'_>) -> bool {

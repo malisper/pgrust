@@ -32,8 +32,10 @@ use ::types_tuple::varatt::{
     varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b, varsize_any,
     VARHDRSZ, VARHDRSZ_SHORT,
 };
+use ::heaptuple::{heap_compute_data_size, heap_fill_tuple};
 use ::types_tuple::{
-    TupleDescData, HEAP_HASNULL, MINIMAL_TUPLE_OFFSET, SizeofMinimalTupleHeader,
+    TupleDescData, BITMAPLEN, HEAP_HASNULL, MAXALIGN, MINIMAL_TUPLE_OFFSET,
+    SizeofMinimalTupleHeader,
 };
 
 use crate::{
@@ -83,6 +85,12 @@ enum CombineKind {
 pub struct HandedAggTable {
     entries: Vec<TupleHashEntryData>,
     additionalsize: usize,
+    // Stage-4 pool: radix partition (top-8 hash bits) computed on the WORKER
+    // thread at install when the lane pool is armed, so the leader's consume
+    // boundary starts bucket-claiming immediately instead of running T
+    // serial counting sorts over O(T·G) entries first (the Stage-0.4
+    // prototype's merge-wall correction). None = leader partitions (classic).
+    parts: Option<Partition>,
     _buf: Vec<u128>,
 }
 
@@ -632,12 +640,20 @@ unsafe fn entry_state_bytes(
     kinds: &[CombineKind],
 ) -> usize {
     let Some(add) = e.additional(additionalsize) else { return 0 };
-    let pg = add.cast::<AggPerGroup>();
+    // SAFETY: caller contract.
+    unsafe { states_extra_bytes(add.as_ptr().cast::<AggPerGroup>(), kinds) }
+}
+
+// `entry_state_bytes` over a bare pergroup array (the compact-table rows'
+// state blocks carry the same `kinds.len()` pergroups).
+//
+// # Safety
+// `pg` points at `kinds.len()` live pergroups with live state pointers.
+unsafe fn states_extra_bytes(pg: *const AggPerGroup, kinds: &[CombineKind]) -> usize {
     let mut bytes = 0usize;
     for (transno, k) in kinds.iter().enumerate() {
-        // SAFETY: caller contract — additionalsize holds kinds.len()
-        // pergroups.
-        let s = unsafe { &*pg.as_ptr().add(transno) };
+        // SAFETY: caller contract — pg holds kinds.len() pergroups.
+        let s = unsafe { &*pg.add(transno) };
         if s.trans_value_is_null {
             continue;
         }
@@ -654,21 +670,78 @@ unsafe fn entry_state_bytes(
     bytes
 }
 
+// Relocate one handed image's internal-transtype states behind it: for each
+// non-null non-byval pergroup at `dst` (the image's already-copied pergroup
+// prefix), copy the state into `base + off` (16-aligned slots off the u128
+// backing) and repoint the copied pergroup — after this the image references
+// nothing owner-arena-backed. Returns the advanced `off`.
+//
+// # Safety
+// `dst` holds `kinds.len()` copied pergroups whose non-null internal
+// transvalues point at live source states; `base + off ..` has
+// `states_extra_bytes` bytes reserved for exactly these states.
+unsafe fn relocate_states_into(
+    dst: *mut u8,
+    kinds: &[CombineKind],
+    base: *mut u8,
+    mut off: usize,
+) -> usize {
+    for (transno, k) in kinds.iter().enumerate() {
+        if matches!(k, CombineKind::Byval) {
+            continue;
+        }
+        // SAFETY: caller contract throughout.
+        unsafe {
+            let pg = &mut *dst.cast::<AggPerGroup>().add(transno);
+            if pg.trans_value_is_null {
+                continue;
+            }
+            let state = base.add(off);
+            match k {
+                CombineKind::Byval => unreachable!(),
+                CombineKind::PolyInt128 { .. } => {
+                    let sp = pg.trans_value.as_usize() as *const Int128AggState;
+                    state.cast::<Int128AggState>().write(*sp);
+                    off += align16(core::mem::size_of::<Int128AggState>());
+                }
+                CombineKind::NumericAgg { .. } => {
+                    let sp = &*(pg.trans_value.as_usize() as *const NumericAggState);
+                    let digits = state.add(core::mem::size_of::<NumericAggState>()).cast::<i32>();
+                    state.cast::<NumericAggState>().write(sp.relocated_into(digits));
+                    off += align16(core::mem::size_of::<NumericAggState>() + sp.digits_bytes());
+                }
+            }
+            pg.trans_value = Datum::from_usize(state as usize);
+        }
+    }
+    off
+}
+
 // Worker-side install at fill completion: the leader registered a handoff for
 // this plan node iff the shape is engaged. A spilled table keeps the classic
-// row emission (its groups already went partly to tape).
-pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
+// row emission (its groups already went partly to tape). A compact-armed
+// build (Stage 2.2 × Stage 4) exports the compact table directly.
+pub(crate) fn maybe_install_handoff<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     if node.plan.aggsplit != AGGSPLIT_INITIAL_SERIAL || node.plan.aggstrategy != AGG_HASHED {
-        return;
+        return Ok(());
     }
     let id = node.plan.plan.plan_node_id;
     let Some(handoff) = registry_get(node.plan as *const Agg<'_> as usize) else {
-        return;
+        return Ok(());
     };
-    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
-    if ph.spill.ever_spilled || !ph.spill.batches.is_empty() {
-        return;
+    {
+        let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+        if ph.spill.ever_spilled || !ph.spill.batches.is_empty() {
+            return Ok(());
+        }
+        if ph.compact.is_some() {
+            return install_compact_handoff(node, estate, &handoff, id);
+        }
     }
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let kinds = &handoff.kinds;
     let additionalsize = ph.hashtable.additionalsize();
     let src = ph.hashtable.entries();
@@ -699,34 +772,7 @@ pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
             let dst = base.add(off);
             core::ptr::copy_nonoverlapping(img, dst, additionalsize + t_len);
             off += (additionalsize + t_len + 15) & !15;
-            for (transno, k) in kinds.iter().enumerate() {
-                if matches!(k, CombineKind::Byval) {
-                    continue;
-                }
-                let pg = &mut *dst.cast::<AggPerGroup>().add(transno);
-                if pg.trans_value_is_null {
-                    continue;
-                }
-                let state = base.add(off);
-                match k {
-                    CombineKind::Byval => unreachable!(),
-                    CombineKind::PolyInt128 { .. } => {
-                        let sp = pg.trans_value.as_usize() as *const Int128AggState;
-                        state.cast::<Int128AggState>().write(*sp);
-                        off += align16(core::mem::size_of::<Int128AggState>());
-                    }
-                    CombineKind::NumericAgg { .. } => {
-                        let sp = &*(pg.trans_value.as_usize() as *const NumericAggState);
-                        let digits =
-                            state.add(core::mem::size_of::<NumericAggState>()).cast::<i32>();
-                        state.cast::<NumericAggState>().write(sp.relocated_into(digits));
-                        off += align16(
-                            core::mem::size_of::<NumericAggState>() + sp.digits_bytes(),
-                        );
-                    }
-                }
-                pg.trans_value = Datum::from_usize(state as usize);
-            }
+            off = relocate_states_into(dst, kinds, base, off);
             let mut e2 = *e;
             // Verbatim image copy: relocate through the table so a by-ref
             // cached key (Text probe kernel) is rebased, not left dangling.
@@ -738,11 +784,158 @@ pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
         };
         entries.push(e2);
     }
+    // Stage-4 pool: pre-partition on the worker thread (parallel across
+    // workers) so the leader's merge boundary is bucket-claim-ready. Armed
+    // sessions only — unarmed heap parallel agg keeps the classic
+    // leader-side partitioning byte-for-byte.
+    let parts = ::guc_tables::lane_pool::lane_parallel_pool_armed()
+        .then(|| partition_entries(&entries));
     if merge_stats_enabled() {
-        eprintln!("AGG_MERGE_STATS install: node={id} entries={} bytes={bytes}", entries.len());
+        eprintln!(
+            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={}",
+            entries.len(),
+            parts.is_some(),
+        );
     }
-    handoff.install(HandedAggTable { entries, additionalsize, _buf: buf });
+    handoff.install(HandedAggTable { entries, additionalsize, parts, _buf: buf });
     ph.hashtable.reset();
+    Ok(())
+}
+
+// The compact table's handoff export (Stage 2.2 × Stage 4, the G4
+// groupby_high blocker): a compact-armed partial build hands its groups to
+// the finalize WITHOUT rebuilding the C tuplehash. Per row — insertion
+// order, the same first-arrival order the C entries vec would carry —
+// reconstruct the key datums (the migration walk's read-back leg), hash
+// them through the SAME kernel `hash_slot` classic worker entries used (the
+// compact table's internal CRC/Fmix hash never crosses the boundary —
+// tableresidual semantics check), form the hash_desc minimal tuple directly
+// into the handed buffer at the classic install's image layout
+// (`[pergroups][tuple][relocated internal states]`, heap_form_minimal_tuple's
+// body over pre-zeroed bytes), and assemble the entry with
+// `TupleHashEntryData::from_parts`. Transvalue bytes are the compact rows'
+// live pergroups, copied verbatim — the same states the C path would have
+// handed. The table is consumed (disarmed) by the export: retrieve finds
+// compact=None over an empty C table and emits nothing, exactly like the
+// classic install's `hashtable.reset()`.
+fn install_compact_handoff<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    handoff: &Arc<AggTableHandoff>,
+    id: i32,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let kinds = &handoff.kinds;
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    debug_assert!(!ph.spill.mode, "compact builds never enter spill mode");
+    let additionalsize = ph.hashtable.additionalsize();
+    let ch = ph.compact.take().expect("compact install requires an armed table");
+    let nrows = ch.table.nrows();
+    let desc = ph
+        .hashslot
+        .base()
+        .tts_tupleDescriptor
+        .clone()
+        .expect("perhash hashslot carries the hash desc");
+    let natts = desc.natts as usize;
+    let mut mk_scratch: Vec<(Datum, bool)> = Vec::new();
+    // Pass 1: exact byte total + per-row tuple lengths (entries hold raw
+    // pointers into the handed buffer, so it cannot grow). Interned text
+    // components materialize per pass into the node-lifetime table context
+    // (mk+dict shapes only; two small allocations per such GROUP, bulk-freed
+    // with the node — docs/no-drop.md).
+    let mut tlens: Vec<u32> = Vec::with_capacity(nrows);
+    let mut bytes = 0usize;
+    for row in 0..nrows {
+        crate::compact::compact_row_into_hashslot(
+            &ch,
+            &mut ph.hashslot,
+            &mut mk_scratch,
+            row,
+            ph.table_ctx.mcx(),
+            mcx,
+        )?;
+        let sb = ph.hashslot.base();
+        let hasnull = sb.tts_isnull[..natts].contains(&true);
+        let mut hlen = SizeofMinimalTupleHeader;
+        if hasnull {
+            hlen += BITMAPLEN(natts as i32) as usize;
+        }
+        let t_len =
+            MAXALIGN(hlen) + heap_compute_data_size(&desc, &sb.tts_values, &sb.tts_isnull);
+        tlens.push(t_len as u32);
+        bytes += (additionalsize + t_len + 15) & !15;
+        // SAFETY: the row's state block holds kinds.len() live pergroups
+        // (compact build contract; numtrans matches the engagement proof).
+        bytes +=
+            unsafe { states_extra_bytes(ch.table.row_states(row).cast_const().cast(), kinds) };
+    }
+    let mut buf: Vec<u128> = vec![0; bytes.div_ceil(16)];
+    let mut entries: Vec<TupleHashEntryData> = Vec::with_capacity(nrows);
+    let base = buf.as_mut_ptr().cast::<u8>();
+    let mut off = 0usize;
+    for row in 0..nrows {
+        crate::compact::compact_row_into_hashslot(
+            &ch,
+            &mut ph.hashslot,
+            &mut mk_scratch,
+            row,
+            ph.table_ctx.mcx(),
+            mcx,
+        )?;
+        let hash = ph.hashtable.hash_slot(&mut ph.hashslot)?;
+        let t_len = tlens[row] as usize;
+        // SAFETY: pass 1 reserved additionalsize + t_len (+ state bytes) at
+        // `off` for exactly this row over the same reconstructed datums; the
+        // buffer is pre-zeroed as heap_form_minimal_tuple/heap_fill_tuple
+        // require; dst is 16-aligned (off stays 16-aligned) and the tuple at
+        // MAXALIGN'd additionalsize is MAXALIGN-aligned.
+        let tuple = unsafe {
+            let dst = base.add(off);
+            core::ptr::copy_nonoverlapping(ch.table.row_states(row), dst, additionalsize);
+            let tp = dst.add(additionalsize);
+            let sb = ph.hashslot.base();
+            let hasnull = sb.tts_isnull[..natts].contains(&true);
+            let mut hlen = SizeofMinimalTupleHeader;
+            if hasnull {
+                hlen += BITMAPLEN(natts as i32) as usize;
+            }
+            let hoff = MAXALIGN(hlen);
+            let mt = &mut *tp.cast::<MinimalTupleData>();
+            mt.t_len = t_len as u32;
+            mt.set_natts(natts as u16);
+            mt.t_hoff = (hoff + MINIMAL_TUPLE_OFFSET) as u8;
+            heap_fill_tuple(
+                &desc,
+                &sb.tts_values,
+                &sb.tts_isnull,
+                tp.add(hoff),
+                t_len - hoff,
+                &mut (*tp.cast::<MinimalTupleData>()).t_infomask,
+                hasnull.then(|| tp.add(SizeofMinimalTupleHeader)),
+            );
+            off += (additionalsize + t_len + 15) & !15;
+            off = relocate_states_into(dst, kinds, base, off);
+            NonNull::new_unchecked(tp.cast::<MinimalTupleData>())
+        };
+        let (key, key_isnull) = crate::compact::compact_export_entry_key(&ch, row);
+        entries.push(TupleHashEntryData::from_parts(tuple, hash, key, key_isnull));
+    }
+    debug_assert_eq!(off, bytes);
+    // Stage-4 pool: pre-partition on the worker thread, exactly like the
+    // classic install (compact exports only arise under an armed pool, but
+    // the gate keeps the two paths' conditions literally identical).
+    let parts =
+        ::guc_tables::lane_pool::lane_parallel_pool_armed().then(|| partition_entries(&entries));
+    if merge_stats_enabled() {
+        eprintln!(
+            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={} src=compact",
+            entries.len(),
+            parts.is_some(),
+        );
+    }
+    handoff.install(HandedAggTable { entries, additionalsize, parts, _buf: buf });
+    Ok(())
 }
 
 // Leader-side consumption at the finalize's fill boundary (before
@@ -771,12 +964,19 @@ pub(crate) fn consume_handoff<'mcx>(
     if ph.spill.ever_spilled {
         return replay_handed_rows(node, estate, tables);
     }
+    let t0 = merge_stats_enabled().then(std::time::Instant::now);
     let additionalsize = ph.hashtable.additionalsize();
+    let mut tables = tables;
     let mut parts = Vec::with_capacity(tables.len() + 1);
     parts.push(partition_entries(ph.hashtable.entries()));
-    for t in &tables {
+    for t in &mut tables {
         debug_assert!(t.additionalsize == additionalsize);
-        parts.push(partition_entries(&t.entries));
+        // Worker-partitioned handoff (Stage-4 pool): reuse; else partition
+        // here, exactly as before.
+        parts.push(match t.parts.take() {
+            Some(p) => p,
+            None => partition_entries(&t.entries),
+        });
     }
     let pre = match &m.par {
         Some(spec) if !parallel_merge_disabled() => {
@@ -784,6 +984,15 @@ pub(crate) fn consume_handoff<'mcx>(
         }
         _ => None,
     };
+    if let Some(t0) = t0 {
+        // Merge-wall probe for the G4 merge-fraction gate: partition reuse +
+        // the bucket-claim merge, leader-observed.
+        eprintln!(
+            "AGG_MERGE_STATS merge-wall-us={} mode={}",
+            t0.elapsed().as_micros(),
+            if pre.is_some() { "parallel" } else { "serial-buckets-deferred" },
+        );
+    }
     node.merge.as_mut().unwrap().run = Some(MergeRun {
         tables,
         parts,

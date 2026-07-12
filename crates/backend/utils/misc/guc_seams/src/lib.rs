@@ -66,3 +66,11 @@ seam_core::seam!(
     // (installed by guc_funcs, which owns the ConfigOptionIsVisible deps).
     pub fn get_explain_guc_options() -> PgResult<Vec<(&'static str, Option<String>)>>
 );
+
+seam_core::seam!(
+    // GetConfigOption(name, missing_ok=true, restrict_privileged=false)
+    // (guc.c) — lets low-level crates (planner costing, executor arming)
+    // read placeholder customized options (e.g. `pgrust.lane_parallel_pool`)
+    // without a dependency edge onto the full guc crate. None = never set.
+    pub fn get_config_option_missing_ok(name: &str) -> PgResult<Option<String>>
+);
