@@ -28,3 +28,7 @@ varlena = { path = "../../backend/utils/adt/varlena" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 reloptions = { path = "../../backend/access/common/reloptions" }
 gin_trgm_seams = { path = "../../backend/access/gin/gin_trgm_seams" }
+gin_vocab = { path = "../../backend/access/gin/gin_vocab" }
+regex = { path = "../../_support/types/regex" }
+regex_core = { path = "../../backend/regex/regex_core" }
+rustc-hash = { version = "2", default-features = false }

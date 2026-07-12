@@ -1,3 +1,5 @@
+-- contrib-ports: prepended CREATE EXTENSION (ln runs each suite in its own DB; upstream relies on the shared contrib_regression DB).
+CREATE EXTENSION pg_trgm;
 DROP INDEX trgm_idx2;
 
 \copy test_trgm3 from 'data/trgm2.data'
