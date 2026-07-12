@@ -270,7 +270,7 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
     // it must fire the same taps the split seams do or a consumer
     // (pg_stat_statements) silently loses these executions.
     tap_executor_finish::call_if(|f| f(h));
-    let r = (|| {
+    let r = (|| -> PgResult<()> {
         let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
         if fire_triggers {
             ::trigger::AfterTriggerEndQuery()?;
@@ -378,7 +378,7 @@ pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     tap_executor_finish::call_if(|f| f(h));
     // The registry borrow must drop before the after-trigger firing loop:
     // RI checks re-enter the executor through SPI (fresh QueryDesc entries).
-    let r = (|| {
+    let r = (|| -> PgResult<()> {
         let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
         if fire_triggers {
             ::trigger::AfterTriggerEndQuery()?;
