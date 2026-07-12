@@ -216,6 +216,14 @@ pub fn report_queue_stall(mq: &ShmMq, role: &str, pending: usize, waited_ms: i64
         .finish(ErrorLocation::new("shm_mq.c", 0, "shm_mq_stall_report"));
 }
 
+/// LOG channel for layered wait sites' stall reports (the Gather leader wait
+/// lives in execmain, which has no elog dependency).
+pub fn log_stall_report(msg: String) {
+    let _ = ereport(LOG)
+        .errmsg(msg)
+        .finish(ErrorLocation::new("shm_mq.c", 0, "mq_stall_report"));
+}
+
 #[cfg(test)]
 mod stall_tests {
     use super::StallDetector;

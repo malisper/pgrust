@@ -14506,6 +14506,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "latch",
+ "libc",
  "lmgr_proc",
  "lmgr_proc_seams",
  "pg_sema_seams",
@@ -14517,6 +14518,7 @@ dependencies = [
  "types_storage",
  "waitevent_seams",
  "waiteventset",
+ "waiteventset_seams",
 ]
 
 [[package]]
