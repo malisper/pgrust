@@ -627,6 +627,17 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             continue;
         }
 
+        // C treats walreceiver exit status 0 or 1 as normal (FATAL exit = 1):
+        // the startup process re-requests one when it still wants streaming.
+        if with_pm(|pm| pm.walreceiver.map(|c| c.pid)) == Some(pid) {
+            let wr = with_pm(|pm| pm.walreceiver.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(wr.child_slot);
+            if !(status0 || status1) {
+                handle_child_crash("WAL receiver process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
         // C treats archiver exit status 0 or 1 as normal (FATAL exit = 1):
         // the main loop relaunches it to retry archiving remaining files.
         if with_pm(|pm| pm.pgarch.map(|c| c.pid)) == Some(pid) {
