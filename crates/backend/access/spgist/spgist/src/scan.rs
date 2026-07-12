@@ -783,7 +783,7 @@ fn spg_walk(
 
         // redirect loop
         loop {
-            crate::check_for_interrupts();
+            crate::check_for_interrupts()?;
 
             if item.isLeaf {
                 // Heap items are queued only in ordered scans.
