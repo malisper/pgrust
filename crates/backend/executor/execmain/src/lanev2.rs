@@ -3721,11 +3721,12 @@ fn sort_feed_if_needed<'mcx>(
     // pulls from `exec_agg`, in C's retrieve order (per-row, matching the
     // per-tuple pull cadence: no staged batch exists over agg output).
     //
-    // No top-k pre-filter on this feed: the vectorized boundary kernel runs
-    // over a staged SoA key lane, which only scan feeds stage — agg output
-    // rows are computed one at a time (cardinality = group count, already
-    // post-reduction), so the bounded tuplesort's own compare-and-discard is
-    // the whole cost and a per-row pre-compare would just duplicate it.
+    // The vectorized topk_cut pre-filter never applies here (it runs over a
+    // staged SoA key lane, which only scan feeds stage) — but the EMIT-side
+    // boundary cut does: on the admitted `GROUP BY … ORDER BY count-agg
+    // LIMIT k` shape, `topn_emit_arm` hoists the bounded sort's
+    // compare-and-discard in front of each group's key reconstruction,
+    // finalize, projection and tuple-form (see `sort_feed_agg_topn`).
     if let crate::procnode::PlanStateNode::Agg(aps) = outer {
         let aps = &mut **aps;
         // exec_agg's top-of-call guard: a drained agg stays drained (its
@@ -3761,7 +3762,19 @@ fn sort_feed_if_needed<'mcx>(
         }
         stats::tick_owned(ShapeClass::SortFeed);
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        sort_feed(state, &mut aps.agg, HashAggSource, HashAggEmit, outer_desc, None, estate, None)?;
+        match topn_emit_arm(state, &aps.agg) {
+            Some(spec) => sort_feed_agg_topn(state, &mut aps.agg, outer_desc, spec, estate)?,
+            None => sort_feed(
+                state,
+                &mut aps.agg,
+                HashAggSource,
+                HashAggEmit,
+                outer_desc,
+                None,
+                estate,
+                None,
+            )?,
+        }
         return Ok(true);
     }
     // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
@@ -4106,6 +4119,136 @@ fn topk_keep_mask<'mcx, E: BatchEmit<'mcx>>(
         sel[w] |= nulls | fb;
     }
     Some(sel)
+}
+
+// ===========================================================================
+// Emit-side top-N boundary cut on the hash-agg-fed sort breaker (lane-v2
+// topnemit; the emit-side complement of the scan-level topk_cut above). The
+// `GROUP BY keys ORDER BY count-agg DESC LIMIT k` tail (CB Q13/Q15/Q16/Q17/
+// Q31–Q35 class) today EMITS EVERY GROUP — key reconstruction, finalize,
+// projection, minimal-tuple form, sort put — into a bounded sort that keeps
+// k. Once the bounded heap is full, each further put is compare-against-the-
+// k-th-boundary-and-usually-discard; this arm hoists that compare all the
+// way into the agg retrieve, in front of the WHOLE per-group emit body.
+//
+// CORRECTNESS INVARIANT (same family as topk_cut's, tie-relaxation-free):
+//   * The retrieve skips group G iff G's leading-key value is STRICTLY worse
+//     than the bounded heap root's leading key (heap FULL — `topk_boundary`
+//     returns None otherwise, disabling the cut). A strictly-worse leading
+//     key forces full_cmp(G, root) > 0 (lexicographic), so the tuplesort
+//     would discard G with NO state change (`puttuple_bounded`'s compare<=0
+//     arm frees the tuple and returns). Removing exactly no-state-change
+//     puts leaves every heap transition, every tie selection, and the
+//     surviving arrival ORDER identical — the sorted output is
+//     byte-identical BY CONSTRUCTION, with no reliance on the ratified
+//     tie-order relaxation. Leading-key ties and better keys always pass;
+//     NULL/pending transvalues always pass (rank depends on NULLS placement;
+//     the tuplesort's comparator stays the authority).
+//   * The compared value is the group's RAW int8 transvalue; admission
+//     (`topn_emit_resolve`) proves it IS the finalized, projected sort-key
+//     datum: finalfn-none int8-byval aggregate (count(*)/count(x)/sum-int
+//     family) projected as a bare tlist Aggref. The boundary datum is the
+//     same column's datum1 in the heap root — an i64/i64 compare in the
+//     leading order operator's own direction (Int8Lt/Int8Gt kernel families
+//     only), matching btint8cmp exactly.
+//   * Skipping a group elides its whole emit body, so admission requires it
+//     observation-free: no HAVING qual, every other tlist entry a bare
+//     Var/Const/Aggref, and every skipped finalfn in the pure-arithmetic
+//     allowlist (`TOPN_SKIPPABLE_FINALFNS`) — nothing C could observably do
+//     (no reachable error, no side effect) is elided. Skipped groups keep a
+//     per-group CHECK_FOR_INTERRUPTS (the elided sort put's cadence).
+//   * The boundary only TIGHTENS as puts replace the root, and it is
+//     re-read from the live heap before every retrieve call; within one
+//     call's skip run no puts happen, so the held boundary is
+//     stale-but-conservative — it only lets through groups the tuplesort
+//     then judges itself.
+// Net: a pure skip optimization with zero refusal surface — non-admission
+// feeds the sort through the unfiltered breaker path, exactly as before.
+// Kill switch: PGRUST_LANE_V2_TOPNEMIT=0.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_TOPNEMIT` kill switch (default ON inside the lane).
+fn topn_emit_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_TOPNEMIT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Admission + arming for the emit-side top-N boundary cut (invariant block
+/// above). `None` = not admitted; the feed runs through the unchanged
+/// breaker path (never a lane refusal). Sort side: bounded, leading order
+/// operator in the int8 kernel family. Agg side: `topn_emit_resolve` (bare
+/// finalfn-none int8 Aggref sort key; whole emit body observation-free).
+fn topn_emit_arm<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    agg: &::nodeagg::AggStateData<'mcx>,
+) -> Option<::nodeagg::TopnEmitSpec> {
+    if !topn_emit_enabled() || !state.bounded {
+        return None;
+    }
+    let plan = state.plan;
+    if plan.numCols < 1 || plan.sortColIdx.is_empty() {
+        return None;
+    }
+    let oc = plan.sortColIdx[0];
+    if oc < 1 {
+        return None;
+    }
+    // The leading order operator's compare kernel fixes both the key type
+    // (int8 — the resolve below re-proves it on the agg) and the direction.
+    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
+    let desc = match ::execexpr::CmpOp::for_fn_oid(opfn)? {
+        ::execexpr::CmpOp::Int8Gt => true,
+        ::execexpr::CmpOp::Int8Lt => false,
+        _ => return None,
+    };
+    let transno = ::nodeagg::topn_emit_resolve(agg, oc)?;
+    stats::tick_owned(ShapeClass::TopnEmit);
+    lane_trace("topn emit boundary armed (agg sort feed)");
+    Some(::nodeagg::TopnEmitSpec { transno, desc })
+}
+
+/// The armed agg→sort feed: `sort_feed`'s begin/finish frame around a
+/// per-group pull loop that re-reads the tuplesort's live k-th boundary
+/// before every retrieve (`sort_lane_topk_boundary` — None until the bounded
+/// heap fills, disabling the cut) and hands it to the agg's retrieve, which
+/// skips boundary-rejected groups ahead of their whole emit body. Surviving
+/// groups take the exact `HashAggSource`/`HashAggEmit`/`SortBreakerSink`
+/// row path: retrieve → result slot → `sort_lane_put`.
+fn sort_feed_agg_topn<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    spec: ::nodeagg::TopnEmitSpec,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let mut emitted: u64 = 0;
+    let mut skipped: u64 = 0;
+    loop {
+        let cut = match ::nodesort::sort_lane_topk_boundary(sort) {
+            Some((b, false)) => {
+                Some(::nodeagg::TopnEmitCut { spec, bound: b.as_i64(), skipped: &mut skipped })
+            }
+            // Heap not yet full, or a NULL boundary (a NULL's rank depends
+            // on NULLS placement): no cut, the retrieve emits unfiltered.
+            _ => None,
+        };
+        let Some(slot) = ::nodeagg::agg_hash_retrieve_topn(agg, estate, cut)? else {
+            break;
+        };
+        emitted += 1;
+        ::nodesort::sort_lane_put(sort, estate, slot)?;
+    }
+    if stats::armed() {
+        stats::tick_topnemit_groups(emitted + skipped, skipped);
+    }
+    ::nodesort::sort_lane_finish(sort, estate)?;
+    estate.es_direction = dir;
+    Ok(())
 }
 
 /// The breaker's `Sink` face (pipeline N endpoint). Holds the sort node by
