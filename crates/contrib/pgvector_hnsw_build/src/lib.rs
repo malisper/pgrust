@@ -94,7 +94,7 @@ fn search_layer_mem(
     ep: Vec<(u32, f64)>,
     ef: i32,
     lc: i32,
-    m: i32,
+    _m: i32,
 ) -> PgResult<Vec<(u32, f64)>> {
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut c_heap: Vec<(f64, u32)> = Vec::new();

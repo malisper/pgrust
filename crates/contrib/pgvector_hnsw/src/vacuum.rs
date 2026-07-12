@@ -4,8 +4,8 @@ use bufmgr::{
     LockBuffer, LockBufferForCleanup, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE,
     BUFFER_LOCK_SHARE,
 };
-use generic_xlog::{GenericXLogAbort, GenericXLogFinish, GenericXLogStart, GenericXLogState};
-use mcx::{Mcx, PgBox, PgFxHashMap};
+use generic_xlog::{GenericXLogAbort, GenericXLogFinish, GenericXLogStart};
+use mcx::{Mcx, PgFxHashMap};
 use types_core::{BlockNumber, ForkNumber, BLCKSZ};
 use types_error::PgResult;
 use types_hnsw::*;
