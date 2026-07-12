@@ -103,6 +103,17 @@ pub struct HashJoinState<'mcx> {
     dense_cols: Option<DenseCols>,
     dense_on: bool,
     hj_CurDense: u32,
+    // Lane-owned probe prefilter: the build's ProbeBloom (the same object
+    // the row path pushes to the outer scan drive), armed by
+    // `lane_probe_filter_arm` under the row path's exact push conditions.
+    // A miss on the outer hash proves the bucket walk finds nothing (false
+    // positives only) — never armed under hj_fill_outer, so no null-fill
+    // decision is ever skipped. Counters drive the row path's
+    // measure-then-disarm (drop < seen/8 at the 1024 cadence). Exempt Rc:
+    // released on disarm/rebuild and in exec_end_hash_join.
+    lane_filter: Option<Rc<::nodehash::ProbeBloom<'mcx>>>,
+    lane_flt_seen: u32,
+    lane_flt_drop: u32,
 }
 
 impl<'mcx> HashJoinState<'mcx> {
@@ -324,6 +335,9 @@ pub fn exec_init_hash_join<'mcx>(
         dense_cols,
         dense_on: false,
         hj_CurDense: ::nodehash::DENSE_END,
+        lane_filter: None,
+        lane_flt_seen: 0,
+        lane_flt_drop: 0,
     };
     Ok((hjstate, hash_state))
 }
@@ -967,6 +981,7 @@ pub fn exec_end_hash_join<'mcx>(
     node.hashclauses = None;
     node.joinqual = None;
     node.otherqual = None;
+    node.lane_filter = None;
     node.proj.release_frames();
     node.outer_hash_expr.release_frames();
     node.ps_ResultTupleDesc = None;
@@ -1124,6 +1139,453 @@ pub fn exec_rescan_hash_join<'mcx>(
     Ok(rescan_inner)
 }
 
+// ===========================================================================
+// Lane-executor-v2 join-breaker delegation seams (design §Architecture 1, §8;
+// push-executor study Patterns 3+4). The lane's pipeline shapes live in
+// `execmain/src/lanev2.rs`; these entry points delegate to the SAME row-path
+// state machine (`exec_hash_join`'s arms) over the SAME `HashJoinState` /
+// `HashJoinTable`, so falling back to `exec_hash_join` at any call boundary
+// resumes from coherent node state, and the lane's join output (probe order ×
+// bucket-chain order) is C's exactly. The phase flag is `hj_JoinState` itself
+// — C's own cross-call state; no new field.
+//
+// Admitted shape (everything else refuses in `lanev2`): every hash-join
+// type — INNER / LEFT / SEMI / ANTI plus the right-fill family RIGHT /
+// FULL / RIGHT_SEMI / RIGHT_ANTI (the fill types add the unmatched-BUILD
+// scan phase, HJ_FILL_INNER_TUPLES, entered via `lane_fill_inner_prep`
+// after the outer source is exhausted) — with joinqual/otherqual residuals
+// run scalar-within-lane via the row path's exact `eval_probe_qual`; single
+// batch (nbatch==1 checked after the delegated build), serial,
+// uninstrumented, subplan- and param-free hashclauses / joinqual /
+// otherqual / projection / hash exprs.
+// ===========================================================================
+
+/// Where the lane may pick the join up. `EmptyDone` mirrors C's empty-build
+/// early return (`total_tuples == 0 && !hj_fill_outer` leaves `hj_JoinState`
+/// at HJ_BUILD_HASHTABLE with the table built): the join emits nothing, and
+/// the outer child is never pulled.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LaneJoinPhase {
+    Build,
+    Probe,
+    EmptyDone,
+}
+
+pub fn lane_join_phase(node: &HashJoinState<'_>, hs: &HashState<'_>) -> LaneJoinPhase {
+    if node.hj_JoinState == HJ_BUILD_HASHTABLE {
+        if hs.table.is_none() {
+            LaneJoinPhase::Build
+        } else {
+            LaneJoinPhase::EmptyDone
+        }
+    } else {
+        LaneJoinPhase::Probe
+    }
+}
+
+/// Structural admission, join side: the probe shapes `lane_probe_next`
+/// handles — all eight hash-join types. The right-fill family
+/// (RIGHT/FULL/RIGHT_ANTI, `hj_fill_inner`) adds the unmatched-BUILD scan
+/// phase (HJ_FILL_INNER_TUPLES), entered by the lane driver's
+/// post-exhaustion seam via `lane_fill_inner_prep` and emitted through the
+/// delegated `scan_hash_table_for_unmatched` — C's exact bucket-ordered
+/// walk, so the fill order is C's for free; RIGHT_SEMI needs only the
+/// has-match skip in the probe arm. joinqual/otherqual residuals ARE
+/// admitted — the lane evaluates them through the row path's exact
+/// `eval_probe_qual` — but, like every other lane expr, only when subplan-
+/// and initplan-param-free (no suspension hosting, no pending-initplan
+/// hoist); uninstrumented (`js_instr`/`hash_instr` are Some iff
+/// es_instrument != 0 at init).
+pub fn lane_join_admissible(node: &HashJoinState<'_>) -> bool {
+    matches!(
+        node.plan.join.jointype,
+        JoinType::JOIN_INNER
+            | JoinType::JOIN_LEFT
+            | JoinType::JOIN_SEMI
+            | JoinType::JOIN_ANTI
+            | JoinType::JOIN_RIGHT
+            | JoinType::JOIN_FULL
+            | JoinType::JOIN_RIGHT_SEMI
+            | JoinType::JOIN_RIGHT_ANTI
+    )
+        && node.js_instr.is_none()
+        && node.hash_instr.is_none()
+        && !node.outer_hash_expr.has_subplan()
+        && node.outer_hash_expr.param_exec_deps().is_empty()
+        && node
+            .hashclauses
+            .as_deref()
+            .is_none_or(|q| !q.has_subplan() && q.param_exec_deps().is_empty())
+        && node
+            .joinqual
+            .as_deref()
+            .is_none_or(|q| !q.has_subplan() && q.param_exec_deps().is_empty())
+        && node
+            .otherqual
+            .as_deref()
+            .is_none_or(|q| !q.has_subplan() && q.param_exec_deps().is_empty())
+        && !node.proj.has_subplan()
+        && node.proj.param_exec_deps().is_empty()
+}
+
+/// True while no drive (lane or row-path) has touched this join: the verdict
+/// is memoized at first engagement, so admitting only an untouched node
+/// guarantees the lane owns the node's whole life (never a mid-stream
+/// takeover from row-path-left state).
+pub fn lane_join_untouched(node: &HashJoinState<'_>, hs: &HashState<'_>) -> bool {
+    node.hj_JoinState == HJ_BUILD_HASHTABLE && hs.table.is_none() && hs.ptable.is_none()
+}
+
+/// Build-phase entry: `exec_hash_join`'s HJ_BUILD_HASHTABLE table creation,
+/// verbatim — same `want_filter` (bloom sizing counts identically toward the
+/// table's space accounting, so nbatch growth points match the row path) and
+/// same dense key-track arming. The lane probe consumes the bloom through
+/// `lane_probe_filter_arm` (the row path's push, retargeted at the lane's
+/// own probe feed); a rebuild disarms any stale filter here, exactly as the
+/// row path's `set_hash_filter(None)` push does.
+pub fn lane_build_begin<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(hs.table.is_none());
+    // Rebuild disarms a stale filter (row path: the unconditional
+    // set_hash_filter push after HJ_BUILD_HASHTABLE).
+    node.lane_filter = None;
+    let want_filter = !node.hj_fill_outer
+        && node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_some();
+    hs.table = Some(::nodehash::exec_hash_table_create(hs, estate, want_filter)?);
+    if estate.es_instrument == 0 {
+        if let Some(dc) = node.dense_cols {
+            if hs.build_hash_col() == Some(dc.i) {
+                hs.table.as_mut().expect("hash table created").arm_key_track(dc.i);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Post-build tail of `lane_build_begin`'s phase.
+pub struct LaneBuildDone {
+    /// C's empty-build early return: emit nothing, never pull the outer child.
+    pub empty: bool,
+    /// The built table's final batch count; > 1 must refuse the lane probe
+    /// (the multi-batch outer postpone/reread machinery stays row-path-only).
+    pub nbatch: i32,
+}
+
+/// Build-phase exit: `exec_hash_join`'s HJ_BUILD_HASHTABLE tail after
+/// MultiExecHash — empty-build early return, `nbatch_outstart`, `dense_on`,
+/// the phase flip to HJ_NEED_NEW_OUTER. The bloom push to the outer drive is
+/// deliberately skipped: the lane owns only shapes where the row path's
+/// `set_hash_filter` is a no-op (plain `PlanStateNode` outers; the fused
+/// probe source never coexists with a lane-owned join).
+pub fn lane_build_finish<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<LaneBuildDone> {
+    ::nodehash::lane_build_finish(hs, estate)?;
+    let table = hs.table.as_mut().expect("hash table built");
+    if table.total_tuples() == 0.0 && !node.hj_fill_outer {
+        // Mirror C: hj_JoinState stays HJ_BUILD_HASHTABLE (rescan handles it:
+        // nbatch==1 + table kept -> HJ_NEED_NEW_OUTER, probing the empty
+        // table over the rescanned outer, exactly as the row path would).
+        return Ok(LaneBuildDone { empty: true, nbatch: table.nbatch });
+    }
+    table.nbatch_outstart = table.nbatch;
+    node.dense_on = table.dense().is_some();
+    node.hj_OuterNotEmpty = false;
+    node.hj_JoinState = HJ_NEED_NEW_OUTER;
+    Ok(LaneBuildDone { empty: false, nbatch: table.nbatch })
+}
+
+/// Arm the lane probe's bloom prefilter — the row path's post-build
+/// `set_hash_filter` push, retargeted at the lane's own probe feed. Exact
+/// legacy push gate: never under `hj_fill_outer` (LEFT/FULL/ANTI must
+/// null-fill unmatched outers — a bloom-missed outer still emits, so those
+/// types must reach the FILL arm with the bucket scan run; `want_filter`
+/// never sizes a bloom for them either), never when the dense seat is on (a
+/// dense miss is already exact), only with the Hash32Var columnar cover
+/// (the same gate that sized the bloom), and only through
+/// `take_probe_filter`'s runtime gate (single-batch build, density <= 0.25).
+/// For every armed type (INNER/SEMI/RIGHT/RIGHT_SEMI/RIGHT_ANTI) a bloom
+/// miss on the outer hash proves the bucket walk finds no hashvalue match:
+/// nothing would be emitted for that outer AND no inner match flag would be
+/// set, so skipping the bucket scan is result-identical by construction.
+/// The lane driver calls this once per completed build, only where the row
+/// path's own push seat would also arm (SeqScan outer drives).
+pub fn lane_probe_filter_arm<'mcx>(node: &mut HashJoinState<'mcx>, hs: &mut HashState<'mcx>) {
+    debug_assert!(node.lane_filter.is_none(), "rebuild disarm ran in lane_build_begin");
+    if node.hj_fill_outer || node.dense_on {
+        return;
+    }
+    if node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_none() {
+        return;
+    }
+    let Some(table) = hs.table.as_mut() else { return };
+    node.lane_filter = table.take_probe_filter();
+    node.lane_flt_seen = 0;
+    node.lane_flt_drop = 0;
+}
+
+/// Intra-row expansion pending? (One outer row -> K matches; the position —
+/// `hj_CurTuple`/`hj_CurDense` — is node-resident, so a paused expansion
+/// resumes exactly across the Volcano call boundary, as C's own
+/// HJ_SCAN_BUCKET cross-call state does.) Two states can persist
+/// mid-expansion: HJ_SCAN_BUCKET (a paused per-outer-row bucket walk) and
+/// HJ_FILL_INNER_TUPLES (a paused unmatched-build fill scan — its cursor,
+/// `hj_CurBucketNo`/`hj_CurTuple`, is C's own cross-call state too).
+/// `lane_probe_next` always runs the HJ_FILL_OUTER_TUPLE arm through to
+/// HJ_NEED_NEW_OUTER within the call that reaches it (the null-fill row is
+/// returned with the state already advanced), so a pause after a null-fill
+/// emit leaves nothing pending.
+#[inline]
+pub fn lane_probe_pending(node: &HashJoinState<'_>) -> bool {
+    node.hj_JoinState == HJ_SCAN_BUCKET || node.hj_JoinState == HJ_FILL_INNER_TUPLES
+}
+
+/// Outer source exhausted: flip a right-fill join (`hj_fill_inner` —
+/// RIGHT/FULL/RIGHT_ANTI) into the unmatched-BUILD scan phase. This is
+/// `exec_hash_join`'s HJ_NEED_NEW_OUTER outer-exhaustion arm verbatim:
+/// C's ExecPrepHashTableForUnmatched cursor reset + the flip to
+/// HJ_FILL_INNER_TUPLES. No-op for non-fill types (they end at
+/// HJ_NEED_NEW_OUTER exactly as before) and for an already-prepped or
+/// already-finished fill scan (idempotent across post-exhaustion pulls).
+#[inline]
+pub fn lane_fill_inner_prep(node: &mut HashJoinState<'_>) {
+    if node.hj_fill_inner && node.hj_JoinState == HJ_NEED_NEW_OUTER {
+        node.hj_CurBucketNo = 0;
+        node.hj_CurTuple = core::ptr::null_mut();
+        node.hj_JoinState = HJ_FILL_INNER_TUPLES;
+    }
+}
+
+/// The fill scan ran to exhaustion (HJ_NEED_NEW_BATCH; single batch by
+/// admission, so the join is finished). The lane driver must treat this as
+/// terminal — in particular it must NOT touch the outer source again: a
+/// pulled-past-end heap scan restarts from the beginning (C's
+/// `rs_inited=false` re-init), which is why C's executor never re-pulls a
+/// child after NULL.
+#[inline]
+pub fn lane_join_finished(node: &HashJoinState<'_>) -> bool {
+    node.hj_JoinState == HJ_NEED_NEW_BATCH
+}
+
+/// Accept one outer (probe-side) row: `exec_hash_join`'s HJ_NEED_NEW_OUTER
+/// arm for curbatch==0 (dense and hashed variants), minus the child pull —
+/// the row arrives pushed. nbatch==1 is an admission invariant, so the
+/// postpone-to-batch-file arm is unreachable.
+pub fn lane_probe_accept<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_slot: ExecSlotId,
+) -> PgResult<()> {
+    cfi()?;
+    debug_assert_eq!(node.hj_JoinState, HJ_NEED_NEW_OUTER);
+    {
+        let e = estate.ecxt_mut(node.ps_ExprContext);
+        e.reset();
+        e.ecxt_outertuple = Some(outer_slot);
+    }
+    node.hj_MatchedOuter = false;
+    node.hj_CurTuple = core::ptr::null_mut();
+    if node.dense_on {
+        // HJ_NEED_NEW_OUTER dense arm (get_outer_key + head_for).
+        let dc = node.dense_cols.expect("dense gate matched");
+        let mut isnull = false;
+        let v = exectuples::slot_getattr(
+            &mut estate.es_tupleTable[outer_slot.0 as usize],
+            dc.o as i32 + 1,
+            &mut isnull,
+        );
+        let dense = hs.table.as_ref().expect("hash table built").dense().expect("dense seated");
+        node.hj_CurDense =
+            if isnull { ::nodehash::DENSE_END } else { dense.head_for(v.as_i32()) };
+    } else {
+        let ecxt = node.ps_ExprContext;
+        let h = ::executils::exec_eval_expr_with_subplans_inner_slot(
+            &mut node.outer_hash_expr,
+            estate,
+            ecxt,
+            outer_slot,
+        )?
+        .value
+        .as_u32();
+        node.hj_CurHashValue = h;
+        if let Some(f) = node.lane_filter.as_deref() {
+            node.lane_flt_seen = node.lane_flt_seen.wrapping_add(1);
+            if !f.test(h) {
+                // A miss proves the bucket walk finds no hashvalue match:
+                // no emission and no inner match flag for this outer. The
+                // filter never arms under hj_fill_outer, so skipping
+                // HJ_SCAN_BUCKET skips only the bucket scan — HJ_NEED_NEW_
+                // OUTER is exactly where an empty bucket walk lands
+                // (found=false → FILL arm → no fill_outer emit → advance).
+                debug_assert!(!node.hj_fill_outer, "bloom armed on a fill-outer join");
+                node.lane_flt_drop += 1;
+                node.hj_OuterNotEmpty = true;
+                node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                return Ok(());
+            }
+            // Row path's adaptive disarm, at its 1024 cadence: a
+            // near-passthrough filter (drop < seen/8) costs more than it
+            // saves on non-selective joins.
+            if node.lane_flt_seen & 1023 == 0 && node.lane_flt_drop < node.lane_flt_seen / 8 {
+                node.lane_filter = None;
+            }
+        }
+        let table = hs.table.as_ref().expect("hash table built");
+        let (bucketno, batchno) = table.get_bucket_and_batch(h);
+        debug_assert_eq!(batchno, 0, "lane join admitted a multi-batch probe");
+        node.hj_CurBucketNo = bucketno;
+    }
+    node.hj_OuterNotEmpty = true;
+    node.hj_JoinState = HJ_SCAN_BUCKET;
+    Ok(())
+}
+
+/// Next joined tuple for the accepted outer row — or, post-exhaustion, the
+/// next unmatched build-side fill row: `exec_hash_join`'s HJ_SCAN_BUCKET +
+/// HJ_FILL_OUTER_TUPLE + HJ_FILL_INNER_TUPLES arms, verbatim, for all eight
+/// join types:
+///   * each bucket/dense match runs the joinqual residual through the row
+///     path's `eval_probe_qual` (both tuple slots armed by the scan step +
+///     `with_probe_slots`, per-tuple ecxt reset done per outer row in
+///     `lane_probe_accept` — C's cadence); only a QUALIFYING match sets
+///     `hj_MatchedOuter` and the inner match flag;
+///   * RIGHT_SEMI skips an already-matched inner tuple before qual eval
+///     (each inner emits at most once); ANTI steps to HJ_NEED_NEW_OUTER on
+///     the first qualifying match (no emit); SEMI/inner_unique
+///     (`js_single_match`) emit once then advance; RIGHT_ANTI keeps
+///     scanning the bucket marking matches without emitting;
+///   * a qualifying match then runs the otherqual residual and projects on
+///     pass;
+///   * bucket exhaustion runs C's HJ_FILL_OUTER_TUPLE arm: state advances to
+///     HJ_NEED_NEW_OUTER first, and an unmatched outer under `hj_fill_outer`
+///     (LEFT/FULL/ANTI) evaluates otherqual over the row path's own
+///     `hj_NullInnerTupleSlot` and emits the null-filled projection —
+///     exactly where C emits it;
+///   * HJ_FILL_INNER_TUPLES (entered only via `lane_fill_inner_prep`, after
+///     the outer source is exhausted) emits each never-matched build tuple
+///     through the delegated `scan_hash_table_for_unmatched` — C's exact
+///     bucket-ordered walk — null-extending the outer side over
+///     `hj_NullOuterTupleSlot` and running the otherqual residual, exactly
+///     C's arm; exhaustion steps to HJ_NEED_NEW_BATCH (where the row-path
+///     fallback's `new_batch` on nbatch==1 simply ends the join).
+/// `None` = this outer row's expansion is complete (state back at
+/// HJ_NEED_NEW_OUTER), or the fill scan is complete (HJ_NEED_NEW_BATCH).
+pub fn lane_probe_next<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    loop {
+        match node.hj_JoinState {
+            HJ_SCAN_BUCKET => {
+                cfi()?;
+                let found = if node.dense_on {
+                    scan_dense(node, hs, estate)
+                } else {
+                    scan_hash_bucket(node, hs, estate)?
+                };
+                if !found {
+                    node.hj_JoinState = HJ_FILL_OUTER_TUPLE;
+                    continue;
+                }
+                // A right-semijoin needs only the first match per inner tuple.
+                // SAFETY: hj_CurTuple just returned non-null by the scan.
+                if node.plan.join.jointype == JoinType::JOIN_RIGHT_SEMI
+                    && unsafe {
+                        (*HashJoinTupleHdr::mintuple(node.hj_CurTuple).as_ptr()).has_match()
+                    }
+                {
+                    continue;
+                }
+                let ecxt = node.ps_ExprContext;
+                let inner_id = hs.hash_tuple_slot;
+                let matched =
+                    eval_probe_qual(node.joinqual.as_deref_mut(), ecxt, inner_id, estate)?;
+                if matched {
+                    node.hj_MatchedOuter = true;
+                    // SAFETY: hj_CurTuple was just set non-null by the
+                    // bucket/dense scan.
+                    unsafe {
+                        let mt = HashJoinTupleHdr::mintuple(node.hj_CurTuple).as_ptr();
+                        if !(*mt).has_match() {
+                            (*mt).set_match();
+                        }
+                    }
+                    // An anti join needs no more matches once the outer is
+                    // proven matched — and never emits it (C skips the FILL
+                    // arm by stepping straight to HJ_NEED_NEW_OUTER).
+                    if node.plan.join.jointype == JoinType::JOIN_ANTI {
+                        node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                        continue;
+                    }
+                    if node.js_single_match {
+                        node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                    }
+                    // RIGHT_ANTI emits nothing here but stays on this outer
+                    // to keep marking inner matches.
+                    if node.plan.join.jointype == JoinType::JOIN_RIGHT_ANTI {
+                        continue;
+                    }
+                    let pass =
+                        eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, inner_id, estate)?;
+                    if pass {
+                        return Ok(Some(project_result(node, inner_id, estate)?));
+                    }
+                    estate.instr_count_filtered2(node.js_instr);
+                } else {
+                    estate.instr_count_filtered1(node.js_instr);
+                }
+            }
+            HJ_FILL_OUTER_TUPLE => {
+                node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                if !node.hj_MatchedOuter && node.hj_fill_outer {
+                    let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
+                    estate.ecxt_mut(node.ps_ExprContext).ecxt_innertuple = Some(null_inner);
+                    let ecxt = node.ps_ExprContext;
+                    let pass =
+                        eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, null_inner, estate)?;
+                    if pass {
+                        return Ok(Some(project_result(node, null_inner, estate)?));
+                    }
+                    estate.instr_count_filtered2(node.js_instr);
+                }
+            }
+            HJ_FILL_INNER_TUPLES => {
+                if !scan_hash_table_for_unmatched(node, hs, estate)? {
+                    node.hj_JoinState = HJ_NEED_NEW_BATCH;
+                    continue;
+                }
+                let null_outer = node.hj_NullOuterTupleSlot.expect("null outer slot");
+                estate.ecxt_mut(node.ps_ExprContext).ecxt_outertuple = Some(null_outer);
+                let ecxt = node.ps_ExprContext;
+                let inner_id = hs.hash_tuple_slot;
+                let pass =
+                    eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, inner_id, estate)?;
+                if pass {
+                    return Ok(Some(project_result(node, inner_id, estate)?));
+                }
+                estate.instr_count_filtered2(node.js_instr);
+            }
+            // HJ_NEED_NEW_OUTER: the accepted outer row is fully expanded.
+            // HJ_NEED_NEW_BATCH: the fill scan is complete (single batch by
+            // admission — the row-path fallback's new_batch ends the join).
+            _ => {
+                debug_assert!(
+                    node.hj_JoinState == HJ_NEED_NEW_OUTER
+                        || node.hj_JoinState == HJ_NEED_NEW_BATCH
+                );
+                return Ok(None);
+            }
+        }
+    }
+}
+
 #[inline(always)]
 fn eval_probe_qual<'mcx>(
     qual: Option<&mut ExprState<'mcx>>,
@@ -1204,7 +1666,7 @@ mcx::forget_safe_struct!(
         hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
         hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
         outer_saved_scratch, inner_saved_scratch, hash_instr, js_instr,
-        dense_cols, dense_on, hj_CurDense;
+        dense_cols, dense_on, hj_CurDense, lane_flt_seen, lane_flt_drop;
         ps_ResultTupleDesc, proj, hashclauses, joinqual, otherqual,
-        outer_hash_expr },
+        outer_hash_expr, lane_filter },
 );

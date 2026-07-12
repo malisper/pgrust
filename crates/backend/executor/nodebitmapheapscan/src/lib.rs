@@ -63,6 +63,13 @@ pub struct BitmapHeapScanState<'mcx> {
     pub pstate: Option<Arc<ParallelBitmapHeapState>>,
     pub plan_node_id: i32,
     pub parallel_aware: bool,
+    // Lane-executor-v2 (`execmain::lanev2`) page-batch cursor `(pos, n)` over
+    // the currently-staged page; stored across the Volcano per-call boundary.
+    // The drive lives in the `lanev2` module. Reset on rescan. Bitmap scans
+    // are never scrollable/mark cursors (planner-guaranteed), so no eflags
+    // gate is needed here.
+    lane_pos: u32,
+    lane_n: u32,
 }
 
 impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
@@ -230,6 +237,20 @@ pub fn bitmap_scan_batch_fetch<'mcx>(
 }
 
 impl BitmapHeapScanState<'_> {
+    /// Lane-executor-v2 page-batch cursor `(pos, n)`; the drive lives in
+    /// `lanev2`, this only stores its position across the Volcano per-call
+    /// boundary.
+    #[inline]
+    pub fn lane_cursor(&self) -> (u32, u32) {
+        (self.lane_pos, self.lane_n)
+    }
+
+    #[inline]
+    pub fn set_lane_cursor(&mut self, pos: u32, n: u32) {
+        self.lane_pos = pos;
+        self.lane_n = n;
+    }
+
     #[cold]
     fn publish_stats(&self, estate: &mut EStateData<'_>) {
         estate.instr_set_bitmap_stats(
@@ -415,6 +436,8 @@ pub fn exec_init_bitmap_heap_scan_rel<'mcx>(
         pstate: None,
         plan_node_id: node.scan.plan.plan_node_id,
         parallel_aware: node.scan.plan.parallel_aware,
+        lane_pos: 0,
+        lane_n: 0,
     })
 }
 
@@ -444,6 +467,9 @@ pub fn exec_rescan_bitmap_heap_scan<'mcx>(
     node.tbm = None;
     node.initialized = false;
     node.recheck = true;
+    // Lane-executor-v2: the staged page batch is stale after rescan.
+    node.lane_pos = 0;
+    node.lane_n = 0;
     execscan::exec_scan_rescan(&mut node.ss, estate);
     Ok(())
 }
@@ -460,6 +486,7 @@ fn check_for_interrupts() -> types_error::PgResult<()> {
 // in exec_end_bitmap_heap_scan.
 mcx::forget_safe_struct!(
     BitmapHeapScanState<'_> { ss, tbm, initialized, recheck,
-        stats_exact_pages, stats_lossy_pages, plan_node_id, parallel_aware;
+        stats_exact_pages, stats_lossy_pages, plan_node_id, parallel_aware,
+        lane_pos, lane_n;
         bitmapqualorig, tbmiterator, pstate },
 );

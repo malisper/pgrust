@@ -49,6 +49,42 @@ pub struct SeqScanState<'mcx> {
     scan_batch: ScanBatchMode,
     batch_allowed: bool,
     bloom: Option<::mcx::PgBox<'mcx, BloomScan<'mcx>>>,
+    // Lane-executor-v2 page-batch cursor (driven by `execmain::lanev2`):
+    // position within the currently-staged page batch and its row count.
+    // `lane_pos == lane_n` (both 0 initially) means "pull the next batch".
+    // Reset on rescan/park. Only touched via the accessors below; the lane
+    // drive itself lives entirely in the `lanev2` module.
+    lane_pos: u32,
+    lane_n: u32,
+    // Lane-executor-v2 memoized STATIC fusibility verdict (plan shape + AM
+    // page-batch support), computed once at the first dispatch: the refuse
+    // verdict must be stable across Volcano calls — a mid-scan REFUSE→OWN
+    // flip would skip the staged remainder of the current page — and the
+    // fusibility cascade must not run per pulled tuple. Dynamic per-call
+    // gates (EPQ, direction) stay in the lane. None = not yet evaluated.
+    // Reset on park (rebind may change the backing scan).
+    lane_verdict: Option<bool>,
+    // Memoized STANDALONE-ownership verdict for cbstore scans (lane-v2):
+    // admitted only with an armed qual kernel; the arm outcome is static per
+    // node, and the admission cascade must not re-run per pulled tuple (the
+    // per-pull walk measured +20% on kernel-less count(*) shapes). Reset
+    // with lane_verdict on park.
+    cb_standalone: Option<bool>,
+    // cbstore relations only: plan-derived column need-set + zone-mappable
+    // conjuncts, installed on the scan desc at open (cbstore-impl.md §7.3).
+    cb_scan: Option<std::boxed::Box<CbScanInfo>>,
+}
+
+/// Plan-derived cbstore scan settings (built once at init, applied to every
+/// freshly opened scan desc — serial open and both parallel init paths).
+struct CbScanInfo {
+    /// Columns the scan reads (qual + targetlist Vars; whole row when a
+    /// whole-row Var appears). Only these columns' chunks decode.
+    needed: Vec<bool>,
+    /// Zone-map-mappable `Var CMP Const` conjuncts of the scan qual
+    /// (advisory pruning only; the executor still evaluates the full qual
+    /// on surviving rows).
+    zone: Vec<::tableam::ZoneQual>,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -114,13 +150,145 @@ struct BatchSoa<'mcx> {
     key_read_col: u16,
     // Precomputed !qual_only && key_col.is_none(): one test on the store path.
     publish: bool,
-    qual_col: u16,
-    qual_cmp: ::execexpr::CmpOp,
-    qual_konst: ::datum::Datum,
+    // The kernel-qual clause list (AND of scan-Var-CMP-Const; 1 = the fused
+    // kernel, 2+ = the multi-clause census the lane admits).
+    quals: [(u16, ::execexpr::CmpOp, ::datum::Datum); ::execexpr::SCAN_CMP_MAX_CLAUSES],
+    nquals: u8,
+    // Tier-2 stitched-JIT state; armed only by the lane driver on drain
+    // pipelines feeding breakers (`seq_scan_stitch_arm`).
+    stitch: Option<QualStitch>,
+    // Stitched-projection state (Phase-3 projection stitching); armed only
+    // by the lane driver on drain pipelines (`seq_scan_proj_stitch_arm`).
+    proj: Option<ProjStitch<'mcx>>,
+    // PREWHERE v1 lane qual (cbstore scans under lane-v2 only; phase4 design
+    // §3): the fail-closed translation of the scan qual — staged clauses in
+    // ascending cost order (zone folds + per-clause late materialization at
+    // window staging), the dict text tier, and the hybrid requal split. When
+    // armed it OWNS the selection bitmap; the kernel `quals`/stitch tiers
+    // are bypassed for this scan.
+    lane: Option<Box<::laneexec::LaneQualProg>>,
+    // Hybrid lane qual: the sel bits are a conservative PRE-FILTER (the
+    // qual's vectorizable clause prefix); every selected row re-runs the
+    // FULL original qual per row at fetch. Exact-bitmap consumers
+    // (`seq_scan_batch_qual_sel`, the qual census) refuse these batches.
+    lane_requal: bool,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
     cur_bits: u64,
+}
+
+/// Tier-2 (stitched-JIT) state for the kernel-qual filter segment — the JIT
+/// ladder per design doc §3a: interpreter (oracle/floor, inside
+/// `StitchedProgram::run`) → AOT bitmap passes (`qual_bitmap_cmp_const`) →
+/// the stitched body. Lives on the `BatchSoa` so the row census and the
+/// sticky refusal are per plan-node arming; `exec_end_seq_scan` releases it
+/// (the deform-JIT Rc precedent).
+struct QualStitch {
+    /// The clause program (LoadLane/LoadConst/Cmp/Qual per clause), the
+    /// translation of `BatchSoa::quals` — also the replay/oracle source the
+    /// stitched body falls back to on drift or refuse-and-replay.
+    prog: ::lanestitch::Program,
+    /// Lane-view width the body compiles against (max clause col + 1).
+    ncols: usize,
+    /// Compiled once past the row floor; None below it (AOT tier owns).
+    body: Option<::lanestitch::StitchedProgram>,
+    /// Rows staged through the armed qual so far (the tier-2 row floor).
+    rows_seen: u64,
+    /// Sticky per-plan refusal (classification / arch / arena refuse).
+    refused: bool,
+    // Engagement telemetry (PGRUST_LANE_V2_TRACE summary at scan end).
+    n_stitched: u64,
+    n_aot: u64,
+    n_interp: u64,
+}
+
+/// Stitched-projection state for a lane-owned projected scan (Phase-3
+/// projection stitching): the vocabulary-covered target list (Var
+/// passthrough / same-width int2/4/8 arith — `ScanProjCols`) compiled over
+/// the staged SoA lanes, computing per-batch OUTPUT lanes for the qual
+/// bitmap's true survivors (forced-fallback rows are masked out — their
+/// lanes are undeformed; they keep the per-row path). The emit's fast lane
+/// fills the projection result slot from the output lanes; everything the
+/// vocabulary does not cover refuses at arm time and leaves the per-row
+/// `exec_project` path untouched.
+///
+/// Refuse-and-replay (charter discipline): an arith trap (overflow / zero
+/// divisor) makes the body exit refused having constructed NO error and
+/// this batch's `staged` stays false — every row of the batch then projects
+/// per-row through the C-ported `exec_project`, which raises C's exact
+/// error text on C's row after consuming the preceding survivors. Sticky
+/// per plan: after one replay the body never runs again.
+struct ProjStitch<'mcx> {
+    /// The tlist translation (LoadLane/LoadConst/Arith/StoreOut per column).
+    prog: ::lanestitch::Program,
+    /// Lane-view width the body compiles against (max read attnum + 1).
+    ncols: usize,
+    /// Output-lane count == tlist arity == result-slot natts.
+    nouts: u16,
+    /// Compiled once past the row floor; None below it (per-row tier owns).
+    body: Option<::lanestitch::StitchedProjection>,
+    rows_seen: u64,
+    /// Sticky per-plan refusal (classification / arch / arena / replay).
+    refused: bool,
+    /// Outputs valid for the CURRENTLY staged batch (set at staging).
+    staged: bool,
+    /// The selectivity disarm applies: hosting WIDENED the per-batch deform
+    /// beyond what the qual alone stages (the single-clause col-only case),
+    /// so low-selectivity scans pay full-prefix deform for few saved
+    /// projections. `stitched_rows`/`stitched_survivors` (rows staged /
+    /// true survivors through the stitched body) feed the one-shot check in
+    /// `stitch_project`.
+    adapt: bool,
+    adapt_checked: bool,
+    stitched_rows: u64,
+    stitched_survivors: u64,
+    /// Output lanes, nouts x SOA_MAX_ROWS (column-major, SoaBatch layout).
+    out_values: ::mcx::PgVec<'mcx, ::datum::Datum>,
+    out_isnull: ::mcx::PgVec<'mcx, bool>,
+    // Engagement telemetry (PGRUST_LANE_V2_TRACE summary at scan end).
+    n_stitched: u64,
+    n_perrow: u64,
+}
+
+/// Selectivity floor for the ADAPTIVE projection disarm (admission
+/// economics, measured 2026-07-12 on the 10M-row lane-bench dataset, warm
+/// best-of-3x3 interleaved): when hosting widened a single-clause col-only
+/// deform to the full projection prefix, ~10%-selectivity shapes ran +1-2%
+/// (p1/p4: extra 4-5 col deform on every staged row, few saved projections)
+/// while ~50%-selectivity shapes won 13-19% (p2/p3). One-shot check after
+/// PROJ_ADAPT_ROWS staged rows: below the floor, drop the projection arm —
+/// staging returns to the qual-only col deform and the per-row projection
+/// path (exactly the pre-projstitch lane). Ratchet only with a measurement.
+const PROJ_MIN_SELECTIVITY_PCT: u64 = 20;
+// 16k rows: >=1.6k survivors even at the 10% floor case — ample signal; the
+// widened-deform probe window stays ~0.2% of a 10M-row scan.
+const PROJ_ADAPT_ROWS: u64 = 16384;
+
+/// Tier-2 row floor (the batchexec POC admission number): the stitched body
+/// engages only once ~2048 rows have flowed through the armed qual — OLTP-
+/// sized scans never pay a stitch.
+const STITCH_ROW_FLOOR: u64 = 2048;
+
+/// Tier-2 fusion floor (admission economics, design §4 — never preempt a
+/// measured-faster path): the stitched body engages only when it FUSES
+/// something the AOT tier runs as separate passes, i.e. >= 2 clauses. A
+/// single-clause body re-runs exactly the AOT kernel's one pass plus the
+/// per-batch call/params overhead — measured 2026-07-12 (10M-row filtered
+/// drain shapes, warm best-of-6 interleaved): 1-clause agg feeds 0.998x
+/// (parity), 1-clause sort feed 1.04x (loss); 3-clause shapes 0.97-0.98x
+/// (fusion win). Ratchet DOWN only with a measurement.
+const STITCH_MIN_CLAUSES: u8 = 2;
+
+/// Engagement trace (verification aid, no perf path): mirrors lanev2's
+/// `PGRUST_LANE_V2_TRACE` switch so one env var traces the whole lane.
+fn lane_trace(event: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    }) {
+        eprintln!("[lane-v2] {event}");
+    }
 }
 
 impl BatchSoa<'_> {
@@ -144,6 +312,12 @@ impl BatchSoa<'_> {
         self.nwords = 0;
         self.cur_word = 0;
         self.cur_bits = 0;
+        if let Some(p) = self.proj.as_mut() {
+            // The staged batch is gone; its output lanes go with it. (The
+            // emit fast lane is additionally gated on nwords > 0, so this
+            // is belt-and-braces.)
+            p.staged = false;
+        }
     }
 }
 
@@ -158,6 +332,50 @@ impl<'mcx> SeqScanState<'mcx> {
 
     pub fn parallel_aware(&self) -> bool {
         self.parallel_aware
+    }
+
+    /// Parallel leader or worker. (The lane-v2 SeqScan drive now admits
+    /// parallel scans — the batched page feed rides the shared DSM block
+    /// cursor; kept for gates that still refuse parallel.)
+    pub fn is_parallel(&self) -> bool {
+        self.parallel_aware || self.parallel.is_some()
+    }
+
+    /// Forward, non-mark eflags at init (`ExecInitSeqScan`). False for a
+    /// scrollable/backward or mergejoin-mark cursor — the lane-v2 page-batch
+    /// drive is forward-only, so it refuses these.
+    pub fn batch_allowed(&self) -> bool {
+        self.batch_allowed
+    }
+
+    /// Lane-executor-v2 page-batch cursor `(pos, n)`: the drive lives in the
+    /// `lanev2` module, this only stores its position across the Volcano
+    /// per-call boundary.
+    pub fn lane_cursor(&self) -> (u32, u32) {
+        (self.lane_pos, self.lane_n)
+    }
+
+    pub fn set_lane_cursor(&mut self, pos: u32, n: u32) {
+        self.lane_pos = pos;
+        self.lane_n = n;
+    }
+
+    /// Memoized static lane fusibility verdict; `None` = not yet evaluated.
+    pub fn lane_verdict(&self) -> Option<bool> {
+        self.lane_verdict
+    }
+
+    pub fn set_lane_verdict(&mut self, v: bool) {
+        self.lane_verdict = Some(v);
+    }
+
+    /// Memoized standalone cbstore ownership verdict (see the field doc).
+    pub fn cb_standalone_verdict(&self) -> Option<bool> {
+        self.cb_standalone
+    }
+
+    pub fn set_cb_standalone_verdict(&mut self, v: bool) {
+        self.cb_standalone = Some(v);
     }
 
     pub fn release_parallel(&mut self) {
@@ -219,8 +437,19 @@ impl<'mcx> SeqScanState<'mcx> {
             0,
             PgVec::new_in(mcx),
         )?);
+        self.apply_cb_scan_settings();
         self.arm_slot_jit_deform(estate);
         Ok(())
+    }
+
+    // cbstore need-set + zone quals onto a freshly opened scan desc (serial
+    // open_scandesc and both parallel init paths).
+    fn apply_cb_scan_settings(&mut self) {
+        if let Some(cb) = self.cb_scan.as_deref() {
+            let sd = self.ss.ss_currentScanDesc.as_mut().unwrap();
+            ::tableam::table_scan_set_needed_attrs(sd, &cb.needed);
+            ::tableam::table_scan_push_zone_quals(sd, &cb.zone);
+        }
     }
 
     // Rung 1 (per-row lazy path): arm the scan slot with a kernel sized to
@@ -310,15 +539,43 @@ pub fn seq_scan_batch_supported<'mcx>(
     Ok(::tableam::table_scan_supports_pagebatch(scandesc))
 }
 
+/// As `seq_scan_batch_supported`, but also admits parallel scan descriptors
+/// (the batched page feed routes block acquisition through the shared DSM
+/// block cursor). Lane-v2 SeqScan drive only — the fused agg/sort/hash
+/// drives keep the conservative serial-only gate.
+pub fn seq_scan_batch_supported_parallel<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if matches!(node.variant, SeqScanVariant::Epq) {
+        return Ok(false);
+    }
+    node.ensure_scandesc(estate)?;
+    let scandesc = node.ss.ss_currentScanDesc.as_ref().unwrap();
+    Ok(::tableam::table_scan_supports_pagebatch_parallel(scandesc))
+}
+
 /// Arm SoA batch deform of the `prefix`-column prefix for the fused drive;
 /// stays disarmed (per-row lazy deform) unless the prefix is all fixed-width.
+/// `multi`: admit multi-clause kernel quals (AND of scan-Var-CMP-Const) to
+/// the selection bitmap — lane-v2 callers only; the incumbent fused drives
+/// pass false and keep their exact single-kernel admission.
 pub fn seq_scan_batch_soa_prepare<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     prefix: i32,
     qual_only: bool,
     force: bool,
+    multi: bool,
 ) {
+    if let Some(b) = &node.batch_soa {
+        // An armed PREWHERE lane owns this scan's staging: keep it whenever
+        // its forced full-prefix deform covers the ask (qual-only and
+        // narrower asks are subsumed — the owned bitmap serves them).
+        if b.lane.is_some() && b.key_col.is_none() && b.plan.ncols() as i32 >= prefix {
+            return;
+        }
+    }
     if prefix <= 0 {
         node.batch_soa = None;
         return;
@@ -331,14 +588,15 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     let mcx = estate.es_query_cxt;
     let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     let atts: &[_] = &rel.rd_att.compact_attrs;
-    let qual = match node.ss.qual.as_deref().map(|q| q.kernel()) {
-        Some(::execexpr::Kernel::QualScanVarCmpConst { attnum, konst, cmp })
-            if (attnum as i32) < prefix =>
-        {
-            Some((attnum, cmp, konst))
-        }
-        _ => None,
-    };
+    let qual = node
+        .ss
+        .qual
+        .as_deref()
+        .and_then(|q| q.scan_cmp_const_clauses())
+        .filter(|c| {
+            (multi || c.n == 1)
+                && c.clauses[..c.n as usize].iter().all(|&(col, _, _)| (col as i32) < prefix)
+        });
     // Break-even: at <=2 fixed columns the deform+gather double-copy loses to
     // the per-row walk (distinct +2.3% instr) unless a bitmap qual skips the
     // gather for non-survivors; group_agg's 3-column prefix wins -4.9%.
@@ -374,9 +632,16 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 varkey: None,
                 key_read_col: 0,
                 publish: !(qual_only && qual.is_some()),
-                qual_col: qual.map_or(0, |(a, _, _)| a),
-                qual_cmp: qual.map_or(::execexpr::CmpOp::Int4Eq, |(_, c, _)| c),
-                qual_konst: qual.map_or(::datum::Datum::null(), |(_, _, k)| k),
+                quals: qual.map_or(
+                    [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                        ::execexpr::SCAN_CMP_MAX_CLAUSES],
+                    |c| c.clauses,
+                ),
+                nquals: qual.map_or(0, |c| c.n),
+                stitch: None,
+                proj: None,
+                lane: None,
+                lane_requal: false,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -385,6 +650,106 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
             mcx,
         )
     });
+}
+
+/// PREWHERE v1 kill switch (A/B tooling): `PGRUST_LANE_V2_PREWHERE=0`/`off`
+/// keeps cbstore lane quals on the kernel-bitmap/per-row paths. Default ON —
+/// the master `PGRUST_LANE_V2` switch still gates every caller.
+fn prewhere_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_PREWHERE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// PREWHERE v1 arm for a cbstore scan under the lane (phase4 design §3):
+/// translate the scan qual fail-closed (`lane_scan_qual` walker ->
+/// `translate_scan_qual`) into staged clauses (ascending static cost class,
+/// pg_statistic-refined), the dict text tier, and the hybrid requal split;
+/// arm the forced full-prefix SoA deform covering max(qual columns,
+/// `min_prefix` — the feed's own column ask) and install the program on the
+/// batch state. On success the staged window drive in
+/// `seq_scan_next_pagebatch` owns the qual (zone folds + per-clause late
+/// materialization + selection bitmap; requal survivors re-run the full
+/// original qual at fetch) and granule decode goes lazy (per-column on
+/// demand; `store_slot` completes the needed set for surviving rows only).
+/// False = refused; the caller's heap-shaped arms proceed unchanged
+/// (byte-safe either way). Idempotent: an armed lane whose prefix covers the
+/// ask is kept.
+#[cold]
+pub fn seq_scan_cb_prewhere_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    min_prefix: i32,
+) -> PgResult<bool> {
+    if node.cb_scan.is_none() || !prewhere_enabled() {
+        return Ok(false);
+    }
+    if let Some(b) = node.batch_soa.as_deref() {
+        if b.lane.is_some() {
+            return Ok(b.plan.ncols() as i32 >= min_prefix);
+        }
+    }
+    let Some(q) = node.ss.qual.as_deref() else { return Ok(false) };
+    let shape = match ::execexpr::lane_scan_qual(q) {
+        Ok(s) => s,
+        Err(reason) => {
+            ::laneexec::log_refused(reason);
+            return Ok(false);
+        }
+    };
+    // Dict text lanes are a cbstore capability (heap has no text SoA lane).
+    let mut lq = match ::laneexec::translate_scan_qual(&shape, true) {
+        Ok(lq) => lq,
+        Err(reason) => {
+            ::laneexec::log_refused(reason);
+            return Ok(false);
+        }
+    };
+    node.ensure_scandesc(estate)?;
+    // Prewhere clause order: refine the static cost classes with live
+    // pg_statistic selectivity; a stats-free relation keeps the static
+    // order (equality < range < LIKE). Static order only in v1 — the
+    // observed-pass-rate re-refinement is deferred (phase4 design §3).
+    let relid = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation").rd_id;
+    lq.order_staged_with_stats(estate.es_query_cxt, relid);
+    // Full-prefix deform (qual_only=false, forced): lane quals read several
+    // columns and the lane sel skips the gather for non-survivors — the same
+    // economics as the kernel bitmap. The prefix must also cover the feed's
+    // own SoA reads (`min_prefix`); an uncoverable ask refuses wholesale so
+    // the caller's arms rebuild their own staging.
+    let prefix = (lq.max_attnum as i32 + 1).max(min_prefix);
+    seq_scan_batch_soa_prepare(node, estate, prefix, false, true, true);
+    match node.batch_soa.as_deref_mut() {
+        Some(b) => {
+            b.qual_armed = true;
+            b.lane_requal = lq.requal;
+            // Dict-lane arming: the AM's batch fill answers these columns as
+            // codes+dict (zero decode); the dict tier evaluates on the memo
+            // and the drive gathers survivors' lanes back to Raw for the
+            // SoA-reading consumers (v1 — no dict-code-carrying consumer
+            // exists yet).
+            for c in lq.dict_cols() {
+                b.soa.set_dict_want(c);
+            }
+            ::laneexec::log_compiled(lq.nclauses, lq.requal);
+            if lq.ndict() > 0 {
+                ::laneexec::log_dict_clauses(lq.ndict());
+            }
+            b.lane = Some(lq);
+            // Post-qual materialization: granule decode per column on
+            // demand — undeformed clauses' columns never decode, store_slot
+            // completes the needed set on the first surviving row.
+            let sd = node.ss.ss_currentScanDesc.as_mut().unwrap();
+            ::tableam::table_scan_set_lazy_decode(sd, true);
+            lane_trace("cbstore prewhere armed");
+            Ok(true)
+        }
+        None => {
+            ::laneexec::log_refused("qual columns are not a fixed-width prefix");
+            Ok(false)
+        }
+    }
 }
 
 /// Arm the fused-sort direct key feed: output column 0 must be exactly one
@@ -440,9 +805,63 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             varkey,
             key_read_col,
             publish: false,
-            qual_col: 0,
-            qual_cmp: ::execexpr::CmpOp::Int4Eq,
-            qual_konst: ::datum::Datum::null(),
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            stitch: None,
+            proj: None,
+            lane: None,
+            lane_requal: false,
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    true
+}
+
+/// Arm the varlena lane feed for the lane-v2 agg fold: stage per-row datum
+/// pointers to varlena column `attnum` into SoA column 0 via the varkey pass
+/// (the fixed-width prefix deform cannot host an `attlen == -1` column).
+/// Publish stays off — the fold feed stores every emitted row per-row, so
+/// slot deform semantics are untouched. False = the column's tuple walk is
+/// not stageable (an `attlen == -2` attribute precedes it); the caller keeps
+/// its per-row path.
+pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
+    if let Some(b) = &node.batch_soa {
+        if b.key_col == Some(attnum) && b.varkey.is_some() {
+            return true;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize) else {
+        return false;
+    };
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa: ::exectuples::SoaBatch::new_in(mcx, 1),
+            plan: ::exectuples::SoaDeformPlan::unused(mcx),
+            qual_armed: false,
+            qual_only: false,
+            key_col: Some(attnum),
+            varkey: Some(vk),
+            key_read_col: 0,
+            publish: false,
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            stitch: None,
+            proj: None,
+            lane: None,
+            lane_requal: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -469,6 +888,34 @@ pub fn seq_scan_batch_key<'mcx>(
     Some((b.soa.col_values(c)[i as usize], b.soa.col_isnull(c)[i as usize]))
 }
 
+/// Kernel-qual selection bitmap armed on the batch SoA — the lane-v2
+/// filtered-scan fast path (also true under the fused full-prefix deform,
+/// where one deform serves both the qual bitmap and the fold lanes).
+#[inline(always)]
+pub fn seq_scan_batch_qual_bitmap_armed(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.qual_armed)
+}
+
+/// Bitmap computed for the CURRENTLY staged page batch (armed + a non-empty
+/// selection word set). False for a batch staged before arming — the caller
+/// must keep the per-row walk for that batch.
+#[inline(always)]
+pub fn seq_scan_batch_qual_bitmap_ready(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.qual_armed && b.nwords > 0)
+}
+
+/// Pop the next selection-bitmap survivor of the staged batch (ascending
+/// staged-row index): bitmap hits plus forced fallback bits — the SoA prefix
+/// deform skipped those rows, so `seq_scan_batch_fetch` re-checks them
+/// per-row. The iterator cursor is node-resident (`cur_word`/`cur_bits`),
+/// surviving the Volcano call boundary; `exec_rescan_seq_scan` resets it.
+#[inline(always)]
+pub fn seq_scan_batch_next_selected(node: &mut SeqScanState<'_>) -> Option<u32> {
+    let b = node.batch_soa.as_deref_mut()?;
+    debug_assert!(b.qual_armed);
+    b.next_selected()
+}
+
 /// Staged SoA batch when the full-prefix deform is armed (columnar readers).
 #[inline]
 pub fn seq_scan_batch_soa<'a, 'mcx>(
@@ -476,6 +923,20 @@ pub fn seq_scan_batch_soa<'a, 'mcx>(
 ) -> Option<&'a ::exectuples::SoaBatch<'mcx>> {
     let b = node.batch_soa.as_deref()?;
     (!b.qual_only).then_some(&b.soa)
+}
+
+/// Staged kernel-qual selection bitmap when the SoA deform armed the batch
+/// qual (bits over the current staged batch; forced fallback rows carry a
+/// set bit and must be re-checked per-row — compose with `fallback_words`).
+/// None = no bitmap qual staged; the per-row fetch path owns the qual. A
+/// `Some` covers the scan's WHOLE qual (the kernel is the entire program).
+#[inline]
+pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    // Hybrid lane quals: the bits are a conservative pre-filter (survivors
+    // still re-run the full qual per row) — never expose them as the whole
+    // qual's verdicts.
+    (b.qual_armed && !b.lane_requal).then_some(&b.sel[..])
 }
 
 pub fn seq_scan_next_pagebatch<'mcx>(
@@ -494,18 +955,149 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 ::tableam::table_scan_batch_stage_varkey(scandesc, vk, &mut b.soa);
                 return Ok(n);
             }
+            // PREWHERE v1 staged drive (cbstore lane quals; phase4 design
+            // §3): staged clauses run cheapest-first, each (a) folding
+            // against the staged granule's zone metadata — AllFail clears
+            // the window without touching data, AllPass skips the clause's
+            // evaluation — then (b) deforming ONLY its own columns (late
+            // materialization: undeformed clauses' columns never decode) and
+            // ANDing into the selection bitmap, with an early-out once the
+            // bitmap empties. Surviving windows complete to the full fill
+            // set so every downstream SoA reader sees exactly the unstaged
+            // deform; dict-answered lanes gather back to Raw (no dict-code
+            // consumer past the qual in v1). Requal tails re-run the FULL
+            // original qual per survivor at fetch (error identity / LIMIT
+            // truncation / volatile counts — the per-row drive's by
+            // construction). Below two staged clauses the whole-prefix lane
+            // eval is the same one deform + one pass.
+            if let Some(lq) = b.lane.as_deref_mut() {
+                let nwords = (n as usize).div_ceil(64);
+                b.sel[..nwords].fill(u64::MAX);
+                if n % 64 != 0 {
+                    b.sel[nwords - 1] = (1u64 << (n % 64)) - 1;
+                }
+                if lq.nstaged() >= 2 {
+                    lq.log_staged_once();
+                    b.soa.begin(n);
+                    for k in 0..lq.nstaged() {
+                        if !b.sel[..nwords].iter().any(|&w| w != 0) {
+                            break;
+                        }
+                        // Compressed-domain fold: a `Var CMP Const` clause
+                        // whose staged granule is uniformly pass/fail skips
+                        // its column decode and per-row eval entirely. The
+                        // zone qual derives through the SAME extraction that
+                        // built the pruning zone quals, so the folded
+                        // verdict is byte-identical to the pruning path's.
+                        if let Some(zs) = lq.staged_zone_src(k) {
+                            if let Some((attnum, op, val)) =
+                                cb_zone_from_parts(zs.col + 1, zs.fn_oid, zs.commuted, zs.konst)
+                            {
+                                let zq = ::tableam::ZoneQual { attnum, op, val };
+                                match ::tableam::table_scan_staged_granule_verdict(scandesc, &zq)
+                                {
+                                    ::tableam::ZoneVerdict::AllPass => continue,
+                                    ::tableam::ZoneVerdict::AllFail => {
+                                        b.sel[..nwords].fill(0);
+                                        break;
+                                    }
+                                    ::tableam::ZoneVerdict::Mixed => {}
+                                }
+                            }
+                        }
+                        for &c in lq.staged_cols(k) {
+                            ::tableam::table_scan_batch_deform_col(scandesc, c, &mut b.soa);
+                        }
+                        lq.eval_staged(k, &b.soa, n, &mut b.sel)?;
+                    }
+                    if b.sel[..nwords].iter().any(|&w| w != 0) {
+                        // Survivors: complete the deform to the full fill
+                        // set (idempotent per column; dict-wanted columns
+                        // re-answer as lanes and gather below).
+                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        for c in lq.dict_cols() {
+                            b.soa.gather_dict_lane(c as usize);
+                        }
+                    }
+                } else {
+                    ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                    ::laneexec::eval_lane_qual(lq, &b.soa, n, &mut b.sel)?;
+                    for c in lq.dict_cols() {
+                        b.soa.gather_dict_lane(c as usize);
+                    }
+                }
+                // cbstore stages no fallback rows; keep the OR for the
+                // contract with `seq_scan_batch_fetch` anyway.
+                for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
+                    *w |= fb;
+                }
+                b.nwords = nwords as u32;
+                b.cur_word = 0;
+                b.cur_bits = b.sel[0];
+                if let Some(p) = &mut b.proj {
+                    // The stitched projection never co-arms with a lane qual
+                    // (`seq_scan_proj_stitch_arm` refuses); belt anyway.
+                    p.staged = false;
+                }
+                return Ok(n);
+            }
+            // Single-clause qual-only staging deforms just the qual column;
+            // a multi-clause qual needs every clause column, so it stages
+            // the full (fixed-width) prefix. An armed stitched projection
+            // reads its tlist columns from the lanes too, so it also forces
+            // the full prefix.
             let qual_col_only =
-                (b.qual_only && b.qual_armed).then_some(b.qual_col).or(b.key_col);
+                (b.qual_only && b.qual_armed && b.nquals == 1 && b.proj.is_none())
+                    .then_some(b.quals[0].0)
+                    .or(b.key_col);
             ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
             if b.qual_armed {
-                ::execexpr::qual_bitmap_cmp_const(
-                    b.qual_cmp,
-                    b.qual_konst,
-                    b.soa.col_values(b.qual_col as usize),
-                    b.soa.col_isnull(b.qual_col as usize),
-                    &mut b.sel,
-                );
                 let nwords = (n as usize).div_ceil(64);
+                // Tier ladder (design §3a): tier 2 = the stitched body over
+                // the staged lanes (drain pipelines only, past the row
+                // floor); tier 1 = the AOT bitmap kernel, one pass per
+                // clause ANDed; tier 0 = the lanestitch interpreter, run
+                // inside `StitchedProgram::run` on per-batch drift or after
+                // a sticky refuse-and-replay. All tiers produce the same
+                // selection bits over the same staged lanes (the lanestitch
+                // equivalence contract + the strict-compare AND identity).
+                if !stitch_qual_bitmap(b, n)? {
+                    for (ci, &(col, cmp, konst)) in
+                        b.quals[..b.nquals as usize].iter().enumerate()
+                    {
+                        if ci == 0 {
+                            ::execexpr::qual_bitmap_cmp_const(
+                                cmp,
+                                konst,
+                                b.soa.col_values(col as usize),
+                                b.soa.col_isnull(col as usize),
+                                &mut b.sel,
+                            );
+                        } else {
+                            let mut tmp = [0u64; ::exectuples::SOA_BM_WORDS];
+                            ::execexpr::qual_bitmap_cmp_const(
+                                cmp,
+                                konst,
+                                b.soa.col_values(col as usize),
+                                b.soa.col_isnull(col as usize),
+                                &mut tmp,
+                            );
+                            for (w, t) in b.sel[..nwords].iter_mut().zip(&tmp[..nwords]) {
+                                *w &= t;
+                            }
+                        }
+                    }
+                }
+                // Stitched projection over the TRUE qual survivors: runs on
+                // the pure qual bits BEFORE the forced-fallback OR below
+                // (fallback rows carry no lane values — they keep the
+                // per-row store+qual+project path; a garbage lane value must
+                // never reach an erroring arith stencil). A true return =
+                // the adaptive selectivity floor tripped: drop the arm, so
+                // the NEXT staging returns to the qual-only column deform.
+                if stitch_project(b, n) {
+                    b.proj = None;
+                }
                 // Skipped rows carry a forced bit; the fetch re-checks them.
                 for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
                     *w |= fb;
@@ -513,10 +1105,542 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 b.nwords = nwords as u32;
                 b.cur_word = 0;
                 b.cur_bits = b.sel[0];
+            } else if let Some(p) = &mut b.proj {
+                // No qual bitmap staged for this batch (bitmap disarmed):
+                // the per-row path owns projection too.
+                p.staged = false;
             }
         }
     }
     Ok(n)
+}
+
+/// Tier-2 attempt for one staged batch: run the stitched body (compiling it
+/// first once past the row floor) over the staged SoA lanes into `b.sel`.
+/// false = the AOT tier owns this batch (below floor / sticky refused /
+/// never armed). The one-deform-two-consumers property holds by
+/// construction: the lanes handed to the body are views over the SAME
+/// staged `SoaBatch` the fold/emit consumers read; the selection bitmap is
+/// the only coupling currency.
+fn stitch_qual_bitmap(b: &mut BatchSoa<'_>, n: u32) -> PgResult<bool> {
+    // Disjoint field borrows: the body reads `soa` lanes and the runner
+    // writes `sel`; `stitch` carries the program + telemetry.
+    let BatchSoa { soa, sel, stitch, .. } = b;
+    let Some(st) = stitch.as_mut() else { return Ok(false) };
+    let mut ran = false;
+    if !st.refused {
+        if st.body.is_none() && st.rows_seen >= STITCH_ROW_FLOOR {
+            match ::lanestitch::StitchedProgram::compile(&st.prog, st.ncols) {
+                Some(p) => {
+                    lane_trace(&format!(
+                        "stitch compiled (cols={} bytes={} nanos={} simd={})",
+                        st.ncols,
+                        p.code_bytes,
+                        p.stitch_nanos,
+                        p.is_simd(),
+                    ));
+                    st.body = Some(p);
+                }
+                None => {
+                    // Sticky per plan: classification / arch / kill switch /
+                    // arena refuse — the AOT tier owns every later batch.
+                    st.refused = true;
+                    lane_trace("stitch refused (compile)");
+                }
+            }
+        }
+        if let Some(body) = &st.body {
+            // Stack lane views over the staged SoA (zero allocation on the
+            // per-batch path — doctrine rule 7).
+            let mut lanes =
+                [::lanestitch::Lane { values: &[], isnull: &[] }; ::lanestitch::MAX_COLS];
+            for (c, lane) in lanes[..st.ncols].iter_mut().enumerate() {
+                *lane = ::lanestitch::Lane {
+                    values: soa.col_values(c),
+                    isnull: soa.col_isnull(c),
+                };
+            }
+            // The body writes the pipeline's own selection words (all-ones
+            // over n on entry, tail clear; only failures store).
+            let nwords = (n as usize).div_ceil(64);
+            sel[..nwords].fill(!0u64);
+            if n % 64 != 0 {
+                sel[nwords - 1] = (1u64 << (n % 64)) - 1;
+            }
+            // Per-batch signature check + refuse-and-replay live in the
+            // runner: lane drift or an oversize batch interprets this batch
+            // (fail-open); an erroring stitched exit replays the batch on
+            // the interpreter and refuses the body for good. Our compare
+            // programs are non-erroring, so the error arm is unreachable —
+            // kept because fail-open must never become wrong-answer.
+            match body.run_into(&st.prog, n, &lanes[..st.ncols], &mut sel[..nwords])? {
+                ::lanestitch::RunOutcome::Stitched => st.n_stitched += 1,
+                ::lanestitch::RunOutcome::InterpretedDrift
+                | ::lanestitch::RunOutcome::InterpretedSticky => st.n_interp += 1,
+            }
+            ran = true;
+        }
+    }
+    if !ran {
+        st.n_aot += 1;
+    }
+    st.rows_seen += n as u64;
+    Ok(ran)
+}
+
+/// Stitched-projection attempt for one staged batch: compute the output
+/// lanes for the TRUE qual survivors (the pure qual bits, fallback rows
+/// masked out — their lanes are undeformed garbage). Sets `proj.staged`;
+/// on any refuse/drift the batch's rows project per-row (`exec_project`),
+/// and a runtime trap additionally refuses the body for good (sticky
+/// refuse-and-replay: the body constructed NO error; the per-row replay
+/// raises C's exact error on C's row).
+/// Returns true when the caller must DISARM projection hosting (the
+/// adaptive selectivity floor tripped): dropping the arm returns staging to
+/// the qual-only column deform, i.e. the pre-projstitch lane behavior.
+fn stitch_project(b: &mut BatchSoa<'_>, n: u32) -> bool {
+    let BatchSoa { soa, sel, proj, .. } = b;
+    let Some(p) = proj.as_mut() else { return false };
+    p.staged = false;
+    if !p.refused {
+        if p.body.is_none() && p.rows_seen >= STITCH_ROW_FLOOR {
+            match ::lanestitch::StitchedProjection::compile(&p.prog, p.ncols, p.nouts as usize) {
+                Some(body) => {
+                    lane_trace(&format!(
+                        "proj stitch compiled (cols={} outs={} bytes={} nanos={})",
+                        p.ncols, p.nouts, body.code_bytes, body.stitch_nanos,
+                    ));
+                    p.body = Some(body);
+                }
+                None => {
+                    p.refused = true;
+                    lane_trace("proj stitch refused (compile)");
+                }
+            }
+        }
+        if let Some(body) = &p.body {
+            let nwords = (n as usize).div_ceil(64);
+            // True survivors only: qual bits minus forced-fallback bits
+            // (the AOT/stitched qual computed garbage bits for undeformed
+            // fallback rows; they must never reach an erroring stencil).
+            let mut proj_sel = [0u64; ::exectuples::SOA_BM_WORDS];
+            for ((d, s), fb) in proj_sel[..nwords]
+                .iter_mut()
+                .zip(&sel[..nwords])
+                .zip(soa.fallback_words())
+            {
+                *d = s & !fb;
+            }
+            let mut lanes =
+                [::lanestitch::Lane { values: &[], isnull: &[] }; ::lanestitch::MAX_COLS];
+            for (c, lane) in lanes[..p.ncols].iter_mut().enumerate() {
+                *lane = ::lanestitch::Lane {
+                    values: soa.col_values(c),
+                    isnull: soa.col_isnull(c),
+                };
+            }
+            // Output-lane views over the arm-time buffers (zero per-batch
+            // allocation): one SOA_MAX_ROWS chunk per tlist column.
+            let mut outs: [::lanestitch::OutLane<'_>; ::lanestitch::MAX_OUTS] = {
+                let mut vch = p.out_values.chunks_mut(::exectuples::SOA_MAX_ROWS);
+                let mut nch = p.out_isnull.chunks_mut(::exectuples::SOA_MAX_ROWS);
+                core::array::from_fn(|_| ::lanestitch::OutLane {
+                    values: vch.next().map(|c| &mut c[..n as usize]).unwrap_or(&mut []),
+                    isnull: nch.next().map(|c| &mut c[..n as usize]).unwrap_or(&mut []),
+                })
+            };
+            match body.run_into(n, &lanes[..p.ncols], &proj_sel[..nwords], &mut outs[..p.nouts as usize]) {
+                ::lanestitch::ProjOutcome::Stitched => {
+                    p.staged = true;
+                    p.n_stitched += 1;
+                    p.stitched_rows += n as u64;
+                    p.stitched_survivors +=
+                        proj_sel[..nwords].iter().map(|w| w.count_ones() as u64).sum::<u64>();
+                }
+                ::lanestitch::ProjOutcome::Drift => {
+                    p.n_perrow += 1;
+                }
+                ::lanestitch::ProjOutcome::Refused => {
+                    // Sticky refuse-and-replay: this plan's data errors —
+                    // the per-row C path owns the batch (and all later
+                    // ones), raising the exact error on the exact row.
+                    p.refused = true;
+                    p.n_perrow += 1;
+                    lane_trace("proj stitch refused (replay: data error)");
+                }
+            }
+        } else {
+            p.n_perrow += 1;
+        }
+    } else {
+        p.n_perrow += 1;
+    }
+    p.rows_seen += n as u64;
+    // Adaptive selectivity disarm (one-shot, PROJ_MIN_SELECTIVITY_PCT):
+    // only when hosting widened the deform; the caller drops the arm.
+    if p.adapt && !p.adapt_checked && p.stitched_rows >= PROJ_ADAPT_ROWS {
+        p.adapt_checked = true;
+        if p.stitched_survivors * 100 < p.stitched_rows * PROJ_MIN_SELECTIVITY_PCT {
+            lane_trace(&format!(
+                "proj stitch disarmed (selectivity {}/{} below {}%)",
+                p.stitched_survivors, p.stitched_rows, PROJ_MIN_SELECTIVITY_PCT
+            ));
+            return true;
+        }
+    }
+    false
+}
+
+/// Map an execexpr comparator + its const onto the stitcher vocabulary,
+/// canonicalizing the const to the lanestitch canonical-datum contract
+/// (sign-extended integer image at the const's own width — `Datum::from_iN`).
+fn stitch_cmp(
+    cmp: ::execexpr::CmpOp,
+    konst: ::datum::Datum,
+) -> (::lanestitch::CmpOp, ::datum::Datum) {
+    use ::execexpr::CmpOp as E;
+    use ::lanestitch::CmpOp as S;
+    let op = match cmp {
+        E::Int4Eq => S::Int4Eq,
+        E::Int4Ne => S::Int4Ne,
+        E::Int4Lt => S::Int4Lt,
+        E::Int4Le => S::Int4Le,
+        E::Int4Gt => S::Int4Gt,
+        E::Int4Ge => S::Int4Ge,
+        E::Int8Eq => S::Int8Eq,
+        E::Int8Ne => S::Int8Ne,
+        E::Int8Lt => S::Int8Lt,
+        E::Int8Le => S::Int8Le,
+        E::Int8Gt => S::Int8Gt,
+        E::Int8Ge => S::Int8Ge,
+        E::Int2Eq => S::Int2Eq,
+        E::Int2Ne => S::Int2Ne,
+        E::Int2Lt => S::Int2Lt,
+        E::Int2Le => S::Int2Le,
+        E::Int2Gt => S::Int2Gt,
+        E::Int2Ge => S::Int2Ge,
+        E::Int84Eq => S::Int84Eq,
+        E::Int84Ne => S::Int84Ne,
+        E::Int84Lt => S::Int84Lt,
+        E::Int84Le => S::Int84Le,
+        E::Int84Gt => S::Int84Gt,
+        E::Int84Ge => S::Int84Ge,
+        E::Int48Eq => S::Int48Eq,
+        E::Int48Ne => S::Int48Ne,
+        E::Int48Lt => S::Int48Lt,
+        E::Int48Le => S::Int48Le,
+        E::Int48Gt => S::Int48Gt,
+        E::Int48Ge => S::Int48Ge,
+        E::Int24Eq => S::Int24Eq,
+        E::Int24Ne => S::Int24Ne,
+        E::Int24Lt => S::Int24Lt,
+        E::Int24Le => S::Int24Le,
+        E::Int24Gt => S::Int24Gt,
+        E::Int24Ge => S::Int24Ge,
+        E::Int42Eq => S::Int42Eq,
+        E::Int42Ne => S::Int42Ne,
+        E::Int42Lt => S::Int42Lt,
+        E::Int42Le => S::Int42Le,
+        E::Int42Gt => S::Int42Gt,
+        E::Int42Ge => S::Int42Ge,
+        E::OidEq => S::OidEq,
+        E::OidNe => S::OidNe,
+        E::OidLt => S::OidLt,
+        E::OidLe => S::OidLe,
+        E::OidGt => S::OidGt,
+        E::OidGe => S::OidGe,
+        E::Float4Eq => S::Float4Eq,
+        E::Float4Ne => S::Float4Ne,
+        E::Float4Lt => S::Float4Lt,
+        E::Float4Le => S::Float4Le,
+        E::Float4Gt => S::Float4Gt,
+        E::Float4Ge => S::Float4Ge,
+        E::Float8Eq => S::Float8Eq,
+        E::Float8Ne => S::Float8Ne,
+        E::Float8Lt => S::Float8Lt,
+        E::Float8Le => S::Float8Le,
+        E::Float8Gt => S::Float8Gt,
+        E::Float8Ge => S::Float8Ge,
+        E::Float48Eq => S::Float48Eq,
+        E::Float48Ne => S::Float48Ne,
+        E::Float48Lt => S::Float48Lt,
+        E::Float48Le => S::Float48Le,
+        E::Float48Gt => S::Float48Gt,
+        E::Float48Ge => S::Float48Ge,
+        E::Float84Eq => S::Float84Eq,
+        E::Float84Ne => S::Float84Ne,
+        E::Float84Lt => S::Float84Lt,
+        E::Float84Le => S::Float84Le,
+        E::Float84Gt => S::Float84Gt,
+        E::Float84Ge => S::Float84Ge,
+    };
+    // The const operand's own width per comparator family (the b side).
+    let k = match cmp {
+        E::Int2Eq | E::Int2Ne | E::Int2Lt | E::Int2Le | E::Int2Gt | E::Int2Ge
+        | E::Int42Eq | E::Int42Ne | E::Int42Lt | E::Int42Le | E::Int42Gt | E::Int42Ge => {
+            ::datum::Datum::from_i16(konst.as_i16())
+        }
+        E::Int4Eq | E::Int4Ne | E::Int4Lt | E::Int4Le | E::Int4Gt | E::Int4Ge
+        | E::Int84Eq | E::Int84Ne | E::Int84Lt | E::Int84Le | E::Int84Gt | E::Int84Ge
+        | E::Int24Eq | E::Int24Ne | E::Int24Lt | E::Int24Le | E::Int24Gt | E::Int24Ge => {
+            ::datum::Datum::from_i32(konst.as_i32())
+        }
+        E::Int8Eq | E::Int8Ne | E::Int8Lt | E::Int8Le | E::Int8Gt | E::Int8Ge
+        | E::Int48Eq | E::Int48Ne | E::Int48Lt | E::Int48Le | E::Int48Gt | E::Int48Ge => {
+            ::datum::Datum::from_i64(konst.as_i64())
+        }
+        // Oid: sign-extend the u32 image (the stitcher's canonical-datum
+        // contract — makes the 2x64 unsigned NEON compares exact).
+        E::OidEq | E::OidNe | E::OidLt | E::OidLe | E::OidGt | E::OidGe => {
+            ::datum::Datum::from_i32(konst.as_u32() as i32)
+        }
+        // Float consts: raw bit patterns at the const's own width (low-word
+        // f32 / full-word f64 — the b side of each family).
+        E::Float4Eq | E::Float4Ne | E::Float4Lt | E::Float4Le | E::Float4Gt | E::Float4Ge
+        | E::Float84Eq | E::Float84Ne | E::Float84Lt | E::Float84Le | E::Float84Gt
+        | E::Float84Ge => ::datum::Datum::from_f32(konst.as_f32()),
+        E::Float8Eq | E::Float8Ne | E::Float8Lt | E::Float8Le | E::Float8Gt | E::Float8Ge
+        | E::Float48Eq | E::Float48Ne | E::Float48Lt | E::Float48Le | E::Float48Gt
+        | E::Float48Ge => ::datum::Datum::from_f64(konst.as_f64()),
+    };
+    (op, k)
+}
+
+/// Arm the tier-2 stitched body for an armed kernel-qual bitmap. Called ONLY
+/// by the lane driver on drain pipelines feeding breakers (design rule: the
+/// stitched segment never runs on pull-one-tuple pipelines). Idempotent; a
+/// no-op when the bitmap is not armed, the stitcher is unavailable, or a
+/// clause column exceeds the stitcher's lane window. Compilation itself is
+/// deferred past the row floor (`stitch_qual_bitmap`); this only translates
+/// the clause list into the stitch program.
+pub fn seq_scan_stitch_arm(node: &mut SeqScanState<'_>) {
+    let Some(b) = node.batch_soa.as_deref_mut() else { return };
+    // A PREWHERE lane qual owns the bitmap (staged clauses + dict tier +
+    // requal); the kernel `quals` it may shadow must not run a second tier.
+    if b.lane.is_some() {
+        return;
+    }
+    if !b.qual_armed
+        || b.nquals < STITCH_MIN_CLAUSES
+        || b.stitch.is_some()
+        || !::lanestitch::available()
+    {
+        return;
+    }
+    let mut prog = ::lanestitch::Program::new();
+    let mut ncols = 0usize;
+    for &(col, cmp, konst) in &b.quals[..b.nquals as usize] {
+        if col as usize >= ::lanestitch::MAX_COLS {
+            return;
+        }
+        let (op, k) = stitch_cmp(cmp, konst);
+        let kix = prog.push_const(::datum::NullableDatum { value: k, isnull: false });
+        prog.steps.push(::lanestitch::Step::LoadLane { col, out: 0 });
+        prog.steps.push(::lanestitch::Step::LoadConst { k: kix, out: 1 });
+        prog.steps.push(::lanestitch::Step::Cmp { op, a: 0, b: 1, out: 2 });
+        prog.steps.push(::lanestitch::Step::Qual { a: 2 });
+        ncols = ncols.max(col as usize + 1);
+    }
+    let nquals = b.nquals;
+    b.stitch = Some(QualStitch {
+        prog,
+        ncols,
+        body: None,
+        rows_seen: 0,
+        refused: false,
+        n_stitched: 0,
+        n_aot: 0,
+        n_interp: 0,
+    });
+    lane_trace(&format!("stitch armed (clauses={nquals})"));
+}
+
+/// PGRUST_LANE_V2_TRACE engagement summary, emitted when the scan releases
+/// its batch state (end / park).
+fn stitch_trace_summary(node: &SeqScanState<'_>) {
+    if let Some(b) = node.batch_soa.as_deref() {
+        if let Some(st) = &b.stitch {
+            lane_trace(&format!(
+                "stitch summary: stitched={} aot={} interp={} refused={}",
+                st.n_stitched, st.n_aot, st.n_interp, st.refused
+            ));
+        }
+        if let Some(p) = &b.proj {
+            lane_trace(&format!(
+                "proj stitch summary: stitched={} perrow={} refused={}",
+                p.n_stitched, p.n_perrow, p.refused
+            ));
+        }
+    }
+}
+
+/// Kill switch for measurement: PGRUST_LANESTITCH_PROJ=0|off disables the
+/// stitched-projection tier (the per-row `exec_project` path owns projected
+/// scans, i.e. exactly the pre-projstitch lane behavior).
+fn proj_stitch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANESTITCH_PROJ").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+fn proj_arith(op: ::execexpr::ProjArithOp) -> ::lanestitch::ArithOp {
+    use ::execexpr::ProjArithOp as E;
+    use ::lanestitch::ArithOp as S;
+    match op {
+        E::Add2 => S::Add2,
+        E::Sub2 => S::Sub2,
+        E::Mul2 => S::Mul2,
+        E::Div2 => S::Div2,
+        E::Add4 => S::Add4,
+        E::Sub4 => S::Sub4,
+        E::Mul4 => S::Mul4,
+        E::Div4 => S::Div4,
+        E::Add8 => S::Add8,
+        E::Sub8 => S::Sub8,
+        E::Mul8 => S::Mul8,
+        E::Div8 => S::Div8,
+    }
+}
+
+/// Canonicalize an arith const to the lanestitch canonical-datum contract
+/// (sign-extended image at the op's own width — same-width families only).
+fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::datum::Datum {
+    use ::execexpr::ProjArithOp as E;
+    match op {
+        E::Add2 | E::Sub2 | E::Mul2 | E::Div2 => ::datum::Datum::from_i16(konst.as_i16()),
+        E::Add4 | E::Sub4 | E::Mul4 | E::Div4 => ::datum::Datum::from_i32(konst.as_i32()),
+        E::Add8 | E::Sub8 | E::Mul8 | E::Div8 => ::datum::Datum::from_i64(konst.as_i64()),
+    }
+}
+
+/// The SoA prefix a stitched projection needs (max read attnum + 1), when
+/// this scan's projection is census-covered and hostable: lane driver
+/// callers widen their `seq_scan_batch_soa_prepare` prefix by this BEFORE
+/// arming (`seq_scan_proj_stitch_arm` requires the staged prefix to cover
+/// it). None = no hostable projection (no ProjInfo / census refused /
+/// out-of-window / kill switch / stitcher unavailable).
+///
+/// Admission economics (design §4 — fail closed until measured): Var-only
+/// tlists are refused (`any_arith`) — the stitched fill would only replace
+/// the per-row Assign walk while WIDENING the deform prefix (a real
+/// per-batch deform cost on every staged row), an unproven trade. Computed
+/// columns are where the fused lanes carry a measured win (see the
+/// projstitch A/B in the branch log). Ratchet DOWN (admit Var-only) only
+/// with a measurement, STITCH_MIN_CLAUSES-style.
+pub fn seq_scan_proj_stitch_prefix(node: &SeqScanState<'_>) -> Option<i32> {
+    if !proj_stitch_enabled() || !::lanestitch::available() {
+        return None;
+    }
+    let proj = node.ss.ps_ProjInfo.as_ref()?;
+    let cols = proj.pi_state.scan_proj_cols()?;
+    if !cols.any_arith() {
+        return None;
+    }
+    if cols.n as usize > ::lanestitch::MAX_OUTS
+        || cols.max_attnum() as usize >= ::lanestitch::MAX_COLS
+    {
+        return None;
+    }
+    Some(cols.max_attnum() as i32 + 1)
+}
+
+/// Arm the stitched-projection tier for an armed kernel-qual bitmap whose
+/// staged prefix covers the projection's read columns. Called ONLY by the
+/// lane driver on drain pipelines (the stitched segments never run on
+/// pull-one-tuple pipelines). Idempotent; a no-op when unhostable — the
+/// per-row `exec_project` path stays untouched (fail closed). Compilation
+/// defers past the row floor (`stitch_project`); this translates the census
+/// into the stitch program and allocates the output lanes once.
+pub fn seq_scan_proj_stitch_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    let Some(prefix) = seq_scan_proj_stitch_prefix(node) else { return };
+    let Some(proj) = node.ss.ps_ProjInfo.as_ref() else { return };
+    let Some(cols) = proj.pi_state.scan_proj_cols() else { return };
+    let result_slot = proj.pi_result_slot;
+    let Some(b) = node.batch_soa.as_deref_mut() else { return };
+    // Never co-arm with a PREWHERE lane qual: its bits may be a requal
+    // pre-filter, and the stitched-projection emit fast lane bypasses the
+    // per-row qual re-check entirely.
+    if b.lane.is_some() {
+        return;
+    }
+    if !b.qual_armed || b.proj.is_some() || (b.plan.ncols() as i32) < prefix {
+        return;
+    }
+    // The projection writes the result slot's value arrays positionally;
+    // its descriptor arity must equal the census arity (defense in depth —
+    // the projection program was compiled against this slot).
+    if estate.slot_mut(result_slot).base_mut().tts_values.len() != cols.n as usize {
+        return;
+    }
+    let mut prog = ::lanestitch::Program::new();
+    for (j, col) in cols.cols[..cols.n as usize].iter().enumerate() {
+        match *col {
+            ::execexpr::ScanProjCol::Var { attnum } => {
+                prog.steps.push(::lanestitch::Step::LoadLane { col: attnum, out: 0 });
+                prog.steps.push(::lanestitch::Step::StoreOut { a: 0, out: j as u16 });
+            }
+            ::execexpr::ScanProjCol::ArithVV { op, a, b: bcol } => {
+                prog.steps.push(::lanestitch::Step::LoadLane { col: a, out: 0 });
+                prog.steps.push(::lanestitch::Step::LoadLane { col: bcol, out: 1 });
+                prog.steps.push(::lanestitch::Step::Arith {
+                    op: proj_arith(op),
+                    a: 0,
+                    b: 1,
+                    out: 2,
+                });
+                prog.steps.push(::lanestitch::Step::StoreOut { a: 2, out: j as u16 });
+            }
+            ::execexpr::ScanProjCol::ArithVK { op, attnum, konst, var_is_arg0 } => {
+                let k = proj_arith_konst(op, konst);
+                let kix = prog
+                    .push_const(::datum::NullableDatum { value: k, isnull: false });
+                prog.steps.push(::lanestitch::Step::LoadLane { col: attnum, out: 0 });
+                prog.steps.push(::lanestitch::Step::LoadConst { k: kix, out: 1 });
+                let (a, bb) = if var_is_arg0 { (0u8, 1u8) } else { (1u8, 0u8) };
+                prog.steps.push(::lanestitch::Step::Arith {
+                    op: proj_arith(op),
+                    a,
+                    b: bb,
+                    out: 2,
+                });
+                prog.steps.push(::lanestitch::Step::StoreOut { a: 2, out: j as u16 });
+            }
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let cells = cols.n as usize * ::exectuples::SOA_MAX_ROWS;
+    // The adaptive selectivity disarm applies iff hosting WIDENS the
+    // per-batch deform beyond the qual's own staging: single-clause
+    // qual-only staging deforms one column, multi-clause the clause-covering
+    // prefix; anything wider is projection-hosting cost that low-selectivity
+    // scans cannot amortize (PROJ_MIN_SELECTIVITY_PCT).
+    let qual_deform_cols = if b.qual_only && b.nquals == 1 {
+        1
+    } else {
+        b.quals[..b.nquals as usize].iter().map(|&(c, _, _)| c as usize + 1).max().unwrap_or(0)
+    };
+    b.proj = Some(ProjStitch {
+        prog,
+        ncols: cols.max_attnum() as usize + 1,
+        nouts: cols.n as u16,
+        body: None,
+        rows_seen: 0,
+        refused: false,
+        staged: false,
+        adapt: b.plan.ncols() as usize > qual_deform_cols,
+        adapt_checked: false,
+        stitched_rows: 0,
+        stitched_survivors: 0,
+        out_values: ::mcx::vec_from_elem_in(mcx, ::datum::Datum::null(), cells),
+        out_isnull: ::mcx::vec_from_elem_in(mcx, false, cells),
+        n_stitched: 0,
+        n_perrow: 0,
+    });
+    lane_trace(&format!("proj stitch armed (cols={})", cols.n));
 }
 
 /// Bitmap-armed batch census: rows of the staged batch passing the kernel
@@ -533,7 +1657,9 @@ pub fn seq_scan_batch_qual_count<'mcx>(
     let mut count = 0u32;
     {
         let Some(b) = node.batch_soa.as_deref() else { return Ok(None) };
-        if !b.qual_armed {
+        if !b.qual_armed || b.lane_requal {
+            // A hybrid lane qual's bits are a pre-filter, not verdicts; the
+            // census cannot count off them.
             return Ok(None);
         }
         for (w, fb) in b.soa.fallback_words()[..nwords].iter().enumerate() {
@@ -566,16 +1692,29 @@ pub fn seq_scan_batch_fetch<'mcx>(
             if b.sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
                 return Ok(false);
             }
-            if !b.soa.is_fallback(i) {
+            // Hybrid lane quals (`lane_requal`): the bit is a conservative
+            // pre-filter — fall through to the full per-row qual below
+            // (error identity/order and volatile-call counts are the
+            // original evaluator's by construction).
+            if !b.soa.is_fallback(i) && !b.lane_requal {
                 seq_scan_batch_store(node, estate, i);
                 return Ok(true);
             }
         }
     }
     seq_scan_batch_store(node, estate, i);
+    let ecxt = node.ss.ps_ExprContext;
     match node.ss.qual.as_deref_mut() {
         None => Ok(true),
         Some(q) => {
+            // Per-tuple result mcx for arg-detoasting quals (C's
+            // ecxt_per_tuple_memory; the emit-entry ExprContext reset frees
+            // it) — mirrors `exec_scan_impl`'s per-row arming; es_query_cxt
+            // would otherwise accumulate over the whole fused feed.
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            // SAFETY: reset-only context, arena-boxed (address-stable),
+            // outlives the plan.
+            unsafe { q.arm_result_mcx_raw(per_tuple) };
             let slot_id = node.ss.ss_ScanTupleSlot;
             let mut slots = ::execexpr::EvalSlots {
                 scan: Some(estate.slot_mut(slot_id)),
@@ -608,6 +1747,11 @@ pub fn seq_scan_batch_store<'mcx>(
 /// Fused-feed emit: reset the per-tuple context, fetch row `i`, apply the
 /// qual, project — `ExecScanExtended`'s body over a staged batch row. None =
 /// filtered; Some = the scan's output slot.
+///
+/// Subplan- and param-bearing quals/projections run `exec_scan_impl`'s exact
+/// arms (pending-initplan param evaluation, then the suspension-driven
+/// subplan qual/projection drivers) — same per-row program, same order, same
+/// per-tuple context discipline → byte-identical to the per-tuple path.
 #[inline(always)]
 pub fn seq_scan_batch_emit<'mcx>(
     node: &mut SeqScanState<'mcx>,
@@ -615,19 +1759,124 @@ pub fn seq_scan_batch_emit<'mcx>(
     i: u32,
 ) -> PgResult<Option<ExecSlotId>> {
     estate.ecxt_mut(node.ss.ps_ExprContext).reset();
-    if !seq_scan_batch_fetch(node, estate, i)? {
+    // Stitched-projection fast lane: this batch's output lanes are staged
+    // (qual bitmap computed, projection body ran over the true survivors),
+    // so a bitmap hit fills the result slot straight from the output lanes —
+    // no scan-slot store, no per-row `exec_project`. Same values, same
+    // isnull, same result-slot state as the per-row path (the census admits
+    // only Var images and strict int arith, whose outputs are exactly the
+    // per-row program's Datums). Fallback rows (no lane values) fall through
+    // to the per-row path below, as do batches the body refused/drifted on.
+    {
+        let SeqScanState { ss, batch_soa, .. } = node;
+        if let Some(b) = batch_soa.as_deref() {
+            if b.qual_armed && b.nwords > 0 {
+                if let Some(p) = &b.proj {
+                    if p.staged {
+                        if b.sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
+                            return Ok(None);
+                        }
+                        if !b.soa.is_fallback(i) {
+                            let proj =
+                                ss.ps_ProjInfo.as_ref().expect("proj stitch armed with ProjInfo");
+                            let result_id = proj.pi_result_slot;
+                            let mcx = estate.es_query_cxt;
+                            let slot = estate.slot_mut(result_id);
+                            ::exectuples::exec_clear_tuple(slot, mcx);
+                            let base = slot.base_mut();
+                            let idx = i as usize;
+                            for j in 0..p.nouts as usize {
+                                base.tts_values[j] =
+                                    p.out_values[j * ::exectuples::SOA_MAX_ROWS + idx];
+                                base.tts_isnull[j] =
+                                    p.out_isnull[j * ::exectuples::SOA_MAX_ROWS + idx];
+                            }
+                            ::exectuples::exec_store_virtual_tuple(slot);
+                            return Ok(Some(result_id));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let qual_hosted = node
+        .ss
+        .qual
+        .as_deref()
+        .is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty());
+    let passes = if qual_hosted {
+        // Subplan/param quals never arm the kernel bitmap (the kernel shapes
+        // are subplan- and param-free), so the plain store path is the only
+        // one live here.
+        debug_assert!(node.batch_soa.as_deref().is_none_or(|b| !b.qual_armed));
+        seq_scan_batch_store(node, estate, i);
+        let scan_id = node.ss.ss_ScanTupleSlot;
+        let ecxt = node.ss.ps_ExprContext;
+        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(scan_id);
+        // ExecEvalParamExec pending-initplan arm, hoisted out of the
+        // interpreter — mirrors `exec_scan_impl`.
+        let deps = node.ss.qual.as_deref().unwrap().param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+        if node.ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            ::executils::exec_qual_with_subplans(node.ss.qual.as_deref_mut(), estate, ecxt)?
+        } else {
+            // Param-only qual (initplan or correlated exec params, no subplan
+            // steps): the params are plain datum reads once evaluated above —
+            // `exec_scan_impl`'s ordinary per-row qual arm.
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            // SAFETY: reset-only context, arena-boxed (address-stable),
+            // outlives the plan.
+            unsafe { node.ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple) };
+            let mut slots = ::execexpr::EvalSlots {
+                scan: Some(estate.slot_mut(scan_id)),
+                inner: None,
+                outer: None,
+            };
+            ::execexpr::exec_qual(node.ss.qual.as_deref_mut(), &mut slots)?
+        }
+    } else {
+        seq_scan_batch_fetch(node, estate, i)?
+    };
+    if !passes {
         return Ok(None);
     }
     let scan_id = node.ss.ss_ScanTupleSlot;
-    estate.ecxt_mut(node.ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
-    let Some(proj) = node.ss.ps_ProjInfo.as_mut() else {
+    let ecxt = node.ss.ps_ExprContext;
+    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(scan_id);
+    if node.ss.ps_ProjInfo.is_none() {
         return Ok(Some(scan_id));
     };
+    // C reads projection initplan params inside the projection, which never
+    // runs on a qual-rejected tuple — mirrors `exec_scan_impl`.
+    {
+        let deps = node.ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
+    let proj = node.ss.ps_ProjInfo.as_mut().unwrap();
+    let result_id = proj.pi_result_slot;
+    if proj.pi_state.has_subplan() {
+        ::executils::exec_project_with_subplans(&mut proj.pi_state, estate, ecxt, result_id)?;
+        return Ok(Some(result_id));
+    }
+    // By-ref projection results (and callee scratch) must live in the
+    // per-tuple memory reset at the next emit entry (C projects into
+    // ecxt_per_tuple_memory) — mirrors `exec_scan_impl`; es_query_cxt would
+    // otherwise accumulate over the whole fused feed.
+    // SAFETY: reset-only context, arena-boxed (address-stable), outlives the
+    // plan.
+    unsafe {
+        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+        proj.pi_state.arm_result_mcx_raw(per_tuple);
+    }
     let mcx = estate.es_query_cxt;
     let result_id = proj.pi_result_slot;
     let (scan_slot, result_slot) = ::execscan::slot_pair(estate, scan_id, result_id);
     let mut slots = ::execexpr::EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
-    ::execexpr::exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+    ::execexpr::exec_project_prearmed(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
     Ok(Some(result_id))
 }
 
@@ -694,7 +1943,7 @@ fn scan_batch_probe<'mcx>(
     if !::tableam::table_scan_supports_pagebatch(node.ss.ss_currentScanDesc.as_ref().unwrap()) {
         return Ok(false);
     }
-    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1, true, false);
+    seq_scan_batch_soa_prepare(node, estate, attnum as i32 + 1, true, false, false);
     if node.batch_soa.as_deref().is_some_and(|b| b.qual_armed) {
         node.scan_batch = ScanBatchMode::On;
         return Ok(true);
@@ -935,6 +2184,10 @@ pub fn exec_init_seq_scan_rel<'mcx>(
             (true, true) => SeqScanVariant::WithQualProject,
         }
     };
+    let cb_scan = match rel_am_is_cbstore(ss.ss_currentRelation.as_ref().unwrap()) {
+        false => None,
+        true => Some(std::boxed::Box::new(cb_scan_info(node, &ss)?)),
+    };
     Ok(SeqScanState {
         ss,
         variant,
@@ -945,13 +2198,181 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         scan_batch: ScanBatchMode::Unknown,
         batch_allowed: false,
         bloom: None,
+        lane_pos: 0,
+        lane_n: 0,
+        lane_verdict: None,
+        cb_standalone: None,
+        cb_scan,
+    })
+}
+
+fn rel_am_is_cbstore(rel: &Relation<'_>) -> bool {
+    ::tableam::TableAm::of(rel) == Some(::tableam::TableAm::Cbstore)
+}
+
+/// A cbstore relation drives this scan (lane arm gates; the lane's cbscan
+/// engagement class ticks on this).
+pub fn seq_scan_is_cbstore(node: &SeqScanState<'_>) -> bool {
+    node.cb_scan.is_some()
+}
+
+// Plan-derived need-set + zone-mappable conjuncts for a cbstore scan.
+fn cb_scan_info<'mcx>(
+    node: &SeqScan<'mcx>,
+    ss: &ScanState<'mcx>,
+) -> PgResult<CbScanInfo> {
+    use ::nodes_core::NodeWalker as _;
+    use ::types_nodes::NodeTag;
+
+    let rel = ss.ss_currentRelation.as_ref().unwrap();
+    let natts = rel.rd_att.natts as usize;
+    let scanrelid = node.scan.scanrelid as i32;
+
+    struct Cx {
+        scanrelid: i32,
+        needed: Vec<bool>,
+        wholerow: bool,
+        syscol: bool,
+    }
+    impl<'mcx> ::nodes_core::NodeWalker<'mcx> for Cx {
+        fn visit(&mut self, n: ::types_nodes::Node<'mcx>) -> PgResult<bool> {
+            if n.node_tag() == NodeTag::T_Var {
+                let v = n.as_var().unwrap();
+                if v.varno == self.scanrelid && v.varlevelsup == 0 {
+                    if v.varattno == 0 {
+                        self.wholerow = true;
+                    } else if v.varattno < 0 {
+                        self.syscol = true;
+                    } else if (v.varattno as usize) <= self.needed.len() {
+                        self.needed[(v.varattno - 1) as usize] = true;
+                    }
+                }
+                return Ok(false);
+            }
+            ::nodes_core::expression_tree_walker(n, self)
+        }
+    }
+    let mut cx = Cx { scanrelid, needed: vec![false; natts], wholerow: false, syscol: false };
+    for n in node.scan.plan.qual.iter() {
+        cx.visit(n)?;
+    }
+    for n in node.scan.plan.targetlist.iter() {
+        cx.visit(n)?;
+    }
+    if cx.syscol {
+        return Err(Box::new(PgError::error(
+            "cbstore does not support system columns".to_string(),
+        )));
+    }
+    if cx.wholerow {
+        cx.needed.iter_mut().for_each(|b| *b = true);
+    }
+
+    let mut zone: Vec<::tableam::ZoneQual> = Vec::new();
+    for n in node.scan.plan.qual.iter() {
+        if let Some((attnum, op, val)) = cb_zone_conjunct(n, scanrelid) {
+            zone.push(::tableam::ZoneQual { attnum, op, val });
+        }
+    }
+    Ok(CbScanInfo { needed: cx.needed, zone })
+}
+
+// Zone-mappable scan-qual conjunct: a top-level `Var CMP Const` OpExpr of
+// this relation over the int/date/timestamp cross-type compare families.
+fn cb_zone_conjunct(
+    n: ::types_nodes::Node<'_>,
+    scanrelid: i32,
+) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
+    use ::types_nodes::NodeTag;
+    if n.node_tag() != NodeTag::T_OpExpr {
+        return None;
+    }
+    let op = n.as_op_expr()?;
+    if op.args.len() != 2 {
+        return None;
+    }
+    let a = op.args.iter().next()?;
+    let b = op.args.iter().nth(1)?;
+    let (var, konst, flip) = match (a.node_tag(), b.node_tag()) {
+        (NodeTag::T_Var, NodeTag::T_Const) => (a.as_var()?, b.as_const()?, false),
+        (NodeTag::T_Const, NodeTag::T_Var) => (b.as_var()?, a.as_const()?, true),
+        _ => return None,
+    };
+    if var.varno != scanrelid || var.varlevelsup != 0 || var.varattno <= 0 || konst.constisnull {
+        return None;
+    }
+    cb_zone_from_parts(var.varattno as u16, op.opfuncid, flip, konst.constvalue)
+}
+
+// Shared zone-qual extraction (op/const-width/flip) for a `Var CMP Const`
+// with the const on the `commuted` side. attnum is 1-based. Also the staged
+// prewhere fold's source, so folded verdicts derive from byte-identical
+// (attnum, op, val) to the pruning path.
+fn cb_zone_from_parts(
+    attnum: u16,
+    fn_oid: u32,
+    commuted: bool,
+    konst: ::datum::Datum,
+) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
+    use ::tableam::ZoneCmp as Z;
+    let (cmp, cw) = cb_zone_cmp(fn_oid)?;
+    let val = match cw {
+        2 => konst.as_i16() as i64,
+        4 => konst.as_i32() as i64,
+        _ => konst.as_i64(),
+    };
+    let cmp = if commuted {
+        match cmp {
+            Z::Lt => Z::Gt,
+            Z::Le => Z::Ge,
+            Z::Gt => Z::Lt,
+            Z::Ge => Z::Le,
+            other => other,
+        }
+    } else {
+        cmp
+    };
+    Some((attnum, cmp, val))
+}
+
+// (comparison, const width) by pg_proc oid; const width is the CONST side
+// of the cross-type families (int2/4/8 x int2/4/8, date, timestamp,
+// date-vs-timestamp).
+#[rustfmt::skip]
+fn cb_zone_cmp(fnoid: u32) -> Option<(::tableam::ZoneCmp, u8)> {
+    use ::tableam::ZoneCmp as Z;
+    Some(match fnoid {
+        63 => (Z::Eq, 2), 145 => (Z::Ne, 2), 64 => (Z::Lt, 2), 148 => (Z::Le, 2),
+        146 => (Z::Gt, 2), 151 => (Z::Ge, 2),
+        65 => (Z::Eq, 4), 144 => (Z::Ne, 4), 66 => (Z::Lt, 4), 149 => (Z::Le, 4),
+        147 => (Z::Gt, 4), 150 => (Z::Ge, 4),
+        467 => (Z::Eq, 8), 468 => (Z::Ne, 8), 469 => (Z::Lt, 8), 471 => (Z::Le, 8),
+        470 => (Z::Gt, 8), 472 => (Z::Ge, 8),
+        158 => (Z::Eq, 4), 164 => (Z::Ne, 4), 160 => (Z::Lt, 4), 166 => (Z::Le, 4),
+        162 => (Z::Gt, 4), 168 => (Z::Ge, 4),
+        159 => (Z::Eq, 2), 165 => (Z::Ne, 2), 161 => (Z::Lt, 2), 167 => (Z::Le, 2),
+        163 => (Z::Gt, 2), 169 => (Z::Ge, 2),
+        474 => (Z::Eq, 4), 475 => (Z::Ne, 4), 476 => (Z::Lt, 4), 478 => (Z::Le, 4),
+        477 => (Z::Gt, 4), 479 => (Z::Ge, 4),
+        852 => (Z::Eq, 8), 853 => (Z::Ne, 8), 854 => (Z::Lt, 8), 856 => (Z::Le, 8),
+        855 => (Z::Gt, 8), 857 => (Z::Ge, 8),
+        1086 => (Z::Eq, 4), 1091 => (Z::Ne, 4), 1087 => (Z::Lt, 4), 1088 => (Z::Le, 4),
+        1089 => (Z::Gt, 4), 1090 => (Z::Ge, 4),
+        2052 => (Z::Eq, 8), 2053 => (Z::Ne, 8), 2054 => (Z::Lt, 8), 2055 => (Z::Le, 8),
+        2057 => (Z::Gt, 8), 2056 => (Z::Ge, 8),
+        1152 => (Z::Eq, 8), 1153 => (Z::Ne, 8), 1154 => (Z::Lt, 8), 1155 => (Z::Le, 8),
+        1157 => (Z::Gt, 8), 1156 => (Z::Ge, 8),
+        _ => return None,
     })
 }
 
 /// `ExecEndSeqScan`.
 pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
-    // Releases the plan's deform-JIT kernel Rc (forget-exempt in batch.rs).
+    node.cb_scan = None;
+    stitch_trace_summary(node);
+    // Releases the plan's deform-JIT kernel Rc and the stitched body's code
+    // block (forget-exempt in batch.rs / here).
     node.batch_soa = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
@@ -970,8 +2391,13 @@ pub fn skeleton_parkable(node: &SeqScanState<'_>) -> bool {
 /// slots stay armed. Pairs with `skeleton_rebind`.
 pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
+    stitch_trace_summary(node);
     node.batch_soa = None;
     node.scan_batch = ScanBatchMode::Unknown;
+    node.lane_pos = 0;
+    node.lane_n = 0;
+    node.lane_verdict = None;
+    node.cb_standalone = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -1006,6 +2432,8 @@ pub fn exec_rescan_seq_scan<'mcx>(
     if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
         table_rescan(mcx, scan, None)?;
     }
+    node.lane_pos = 0;
+    node.lane_n = 0;
     if let Some(b) = node.batch_soa.as_deref_mut() {
         b.reset_staged();
     }
@@ -1034,6 +2462,7 @@ pub fn exec_seq_scan_initialize_dsm<'mcx>(
     )?;
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(std::sync::Arc::clone(&shared));
     Ok(shared)
@@ -1056,6 +2485,7 @@ pub fn exec_seq_scan_initialize_worker<'mcx>(
     let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(shared);
     Ok(())
@@ -1068,12 +2498,16 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 // bloom/parallel exempt: released in exec_end_seq_scan / release_parallel.
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
-        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed;
-        bloom, parallel
+        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
+        lane_pos, lane_n, lane_verdict, cb_standalone;
+        bloom, parallel, cb_scan
     },
+    // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
+    // blocks) are released in exec_end_seq_scan / skeleton_park via
+    // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
-        plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, qual_col,
-        qual_cmp, qual_konst, sel, nwords, cur_word, cur_bits,
+        plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
+        nquals, lane_requal, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

@@ -82,8 +82,26 @@ pub struct AggStateData<'mcx> {
     gsets: Option<PgBox<'mcx, gsets::GroupingSetsState<'mcx>>>,
     pertrans_sort: PgVec<'mcx, PerTransSortData<'mcx>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    // Lane-v2 hash-agg breaker fold state (None = lane off / nothing admits).
+    lanefold: Option<LaneFold<'mcx>>,
     // InstrCountFiltered1 target (HAVING rejections); set by instrument_node.
     pub instr_idx: Option<u32>,
+}
+
+// Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
+// plan classified over this node's transition specs at init, plus the
+// residual per-row transition program (the transitions classify refused,
+// compiled with their ORIGINAL transnos so it runs beside the batched fold).
+struct LaneFold<'mcx> {
+    plan: ::lanefold::LanePlan<'mcx>,
+    resid: Option<PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// Mirrors execmain `lanev2::enabled()` (the byte-identity-safe env-var gate);
+// duplicated because nodeagg cannot depend on execmain (crate cycle).
+fn lane_v2_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("1") | Ok("on")))
 }
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
@@ -1103,6 +1121,61 @@ pub fn exec_init_agg<'mcx>(
         unsafe { q.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
     }
 
+    // Lane-v2 agg-breaker fold plan (lanefold crate), classified once at
+    // init — only when the lane can ever engage this node (env-gated; hashed
+    // or plain, single set, no sorted transitions, subplan- and param-free
+    // transition program — the lane's own admission gate re-checks the rest
+    // per call).
+    let lanefold = if lane_v2_enabled()
+        && gs.is_none()
+        && (node.aggstrategy == AGG_HASHED || node.aggstrategy == AGG_PLAIN)
+        && pertrans_sort.is_empty()
+        && evaltrans
+            .as_deref()
+            .is_some_and(|et| !et.has_subplan() && et.param_exec_deps().is_empty())
+    {
+        match ::lanefold::classify(mcx, &specs) {
+            Some(plan) => {
+                let resid = if plan.resid.is_empty() {
+                    None
+                } else {
+                    let mut keep: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, numtrans)?;
+                    keep.resize(numtrans, false);
+                    for &r in plan.resid.iter() {
+                        keep[r] = true;
+                    }
+                    let mut prog = if node.aggstrategy == AGG_HASHED {
+                        let base =
+                            perhash.as_ref().expect("hashed Agg has perhash").pergroup_cell;
+                        ::executils::with_subplan_compile_env(estate, |env| {
+                            ::execexpr::exec_build_agg_trans_hashed_masked(
+                                mcx, &specs, &keep, base, fm_agg_node, params, env,
+                            )
+                        })?
+                    } else {
+                        // AGG_PLAIN: fixed pergroup targets (spec.pergroup =
+                        // pergroup_base + transno), same as the full evaltrans.
+                        ::executils::with_subplan_compile_env(estate, |env| {
+                            ::execexpr::exec_build_agg_trans_plain_masked(
+                                mcx, &specs, &keep, fm_agg_node, params, env,
+                            )
+                        })?
+                    };
+                    // Same result-mcx discipline as the full evaltrans.
+                    // SAFETY: the tmpcontext ExprContext outlives the program.
+                    unsafe {
+                        prog.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx())
+                    };
+                    Some(prog)
+                };
+                Some(LaneFold { plan, resid })
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     Ok(AggStateData {
         plan: node,
         ps_ExprContext,
@@ -1128,6 +1201,7 @@ pub fn exec_init_agg<'mcx>(
         gsets: gs,
         pertrans_sort,
         qual,
+        lanefold,
         instr_idx: None,
     })
 }
@@ -2711,32 +2785,13 @@ fn plain_finish<'mcx>(
 /// Page-batch feed for the fused agg-over-scan drive (upstream batch
 /// executor design, CF 6176); implemented over the concrete scan node by the
 /// dispatcher, which owns both sides.
-pub trait AggBatchSource<'mcx> {
-    /// Stage the next page batch; 0 = input exhausted.
-    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
-    /// Store staged tuple `i` into the outer slot and apply the scan qual;
-    /// false = filtered out.
-    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
-    fn outer_slot(&self) -> ExecSlotId;
-    fn has_qual(&self) -> bool;
-    /// True only when `next_batch` counts VISIBLE, qual-passing rows (the
-    /// storeless drain never calls `fetch_tuple`). Sources resolving
-    /// visibility or quals at fetch time must return false.
-    fn storeless_ok(&self) -> bool {
-        !self.has_qual()
-    }
-    /// Batched qual census over the staged batch: VISIBLE rows passing the
-    /// qual, any per-row-only rows resolved inside. None = the per-row drain
-    /// owns the batch. Only sources whose census preserves per-row qual
-    /// semantics (non-erroring kernel quals) may return Some.
-    fn qualifying_count(
-        &mut self,
-        _estate: &mut EStateData<'mcx>,
-        _n: u32,
-    ) -> PgResult<Option<u32>> {
-        Ok(None)
-    }
-}
+///
+/// Promoted to the shared `executils::BatchSource` seam (lane-executor-v2
+/// design §Architecture 1) so the execmain lane driver can consume the same
+/// batch source. Kept re-exported under the historical `AggBatchSource` name
+/// so the fused-agg path (and its `SeqScan`/index/bitmap source impls in
+/// execmain) is unchanged.
+pub use ::executils::BatchSource as AggBatchSource;
 
 /// Shapes `exec_agg_batched` handles; the dispatcher falls back to the
 /// per-tuple drive otherwise.
@@ -2866,6 +2921,583 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
     ph.table_filled = true;
     ph.hashiter = 0;
     Ok(())
+}
+
+// ===========================================================================
+// Lane-executor-v2 hash-agg breaker delegation seam (design §Architecture 1,
+// §8). The lane's pipeline-breaker node implements push `Sink` + `Source` in
+// `execmain/src/lanev2.rs`; these thin entry points delegate every substantive
+// step to the SAME row-path machinery the fused batched drive uses — the
+// per-row transition path (`lookup_hash_entry` + evaltrans), the hashagg
+// spill, and the canonical `agg_retrieve_hash_table` read-back (same table,
+// same iteration → same output order as C).
+// ===========================================================================
+
+/// Agg-side admission for the lane-v2 hash-agg breaker: batch-drainable,
+/// AGG_HASHED, and initplan-param-free (the lane drive, like
+/// `exec_agg_batched`, does not hoist pending initplans).
+pub fn agg_hash_breaker_admissible(node: &AggStateData<'_>) -> bool {
+    agg_batch_drainable(node)
+        && node.plan.aggstrategy == AGG_HASHED
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// `agg_done` read for the lane driver (exec_agg's top-of-call guard).
+pub fn agg_is_done(node: &AggStateData<'_>) -> bool {
+    node.agg_done
+}
+
+/// Build→Probe phase flag for the breaker: the hash table's `table_filled`
+/// IS the phase (exactly C's cross-call state; no new field).
+pub fn agg_hash_table_filled(node: &AggStateData<'_>) -> bool {
+    node.perhash.as_ref().is_some_and(|ph| ph.table_filled)
+}
+
+/// Breaker `Sink::accept`: one outer row through prepare/lookup + the
+/// transition program — `agg_fill_hash_table_batched`'s per-row body verbatim
+/// (spill-mode misses spill the tuple and skip the transition, identically).
+pub fn agg_hash_build_accept<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    if lookup_hash_entry(node, estate, outer_id)? {
+        let outer_slot = estate.slot_mut(outer_id);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// Breaker `Sink::finish` (= Finalize): `agg_fill_hash_table_batched`'s
+/// post-drain tail — finish initial spills, install the merge handoff if one
+/// arose, flip the phase flag, park the iterator at the table head.
+pub fn agg_hash_build_finish<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    hashagg_finish_initial_spills(node, estate)?;
+    merge::maybe_install_handoff(node);
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    ph.table_filled = true;
+    ph.hashiter = 0;
+    Ok(())
+}
+
+/// Breaker `Source::produce`: the canonical read-back —
+/// `agg_retrieve_hash_table` (one qual-passing group per call, C's iteration
+/// order, spill refill included).
+pub fn agg_hash_retrieve<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    agg_retrieve_hash_table(node, estate)
+}
+
+/// Lane-v2 fold plan classified at init; None = the lane is off, the shape
+/// can never engage the breaker, or no transition admits (`lanefold::classify`
+/// returned None).
+pub fn agg_lanefold_plan<'a, 'mcx>(
+    node: &'a AggStateData<'mcx>,
+) -> Option<&'a ::lanefold::LanePlan<'mcx>> {
+    node.lanefold.as_ref().map(|lf| &lf.plan)
+}
+
+/// The node's aggcontext arena — C's curaggcontext, the context transfns
+/// reach via fcinfo->context (`AggCheckCallContext`) and where by-ref
+/// transvalues are datumCopy'd (execexpr's `agg_datum_copy` target). The lane
+/// fold allocates INTERNAL transition states (lanefold `Int128AvgAccum`) here
+/// so fold-fed and per-row/demoted batches accumulate into one shared state,
+/// and str-kind transvalue copies land exactly where the per-row program's
+/// would.
+pub fn agg_aggcontext<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
+    // SAFETY: agg_node is the node's own arena-boxed AggStateNode, live for
+    // the node's lifetime; no &mut to it is formed during this borrow.
+    unsafe { node.agg_node.as_ref() }.aggcontext()
+}
+
+/// Lane-v2 staged join-feed admission inputs: the outer columns the hashed
+/// build reads per row — C find_cols' `colnos_needed` (grouping + hashed +
+/// unaggregated + aggregated input columns; exactly the spill projection's
+/// column set) — plus the deform bound (`max_colno_needed`). A staged replay
+/// slot carrying exactly these columns (others NULL) is observation-identical
+/// to the original input slot for the whole build: the probe hashes grouping
+/// columns, the transition programs read the aggregated inputs, and a spilled
+/// tuple materializes exactly the needed columns (the spill projection nulls
+/// the unneeded ones anyway — `hashagg_spill_tuple`'s wslot arm).
+pub fn agg_hash_needed_cols<'a>(node: &'a AggStateData<'_>) -> (&'a [bool], i32) {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    (&ph.spill.colnos_needed, ph.spill.max_colno_needed)
+}
+/// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
+/// program split — prepare/lookup per row (spill-mode misses spill the tuple
+/// identically), then only the RESIDUAL transitions (the transnos classify
+/// refused) run per-row; the admitted transitions are folded per batch by the
+/// caller (`lanefold::fold_rows_grouped`) over the returned pergroup
+/// snapshot. Transition-major reordering across independent pergroup cells is
+/// bit-invisible (the fold kernels are commutative and non-erroring on
+/// admitted/guard-proven data; residual transitions still run in row order).
+/// None = spill-mode miss: no transition runs, exactly as the per-row build.
+pub fn agg_hash_build_probe_resid<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<Option<NonNull<AggPerGroup>>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let mut pg = None;
+    if lookup_hash_entry(node, estate, outer_id)? {
+        let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+        // SAFETY: lookup_hash_entry installed the entry's live pergroup in
+        // the cell (numtrans > 0 whenever a fold plan exists).
+        pg = Some(unsafe { ph.pergroup_cell.as_ptr().read() });
+        if let Some(resid) =
+            node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut())
+        {
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+            exec_eval_expr(resid, &mut slots)?;
+        }
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(pg)
+}
+
+// ===========================================================================
+// Lane-v2 plain-agg (AGG_PLAIN, ungrouped) fold-drive delegation seam. The
+// lane's fold drive (execmain/src/lanev2.rs) owns the batched feed; these
+// thin entry points delegate every substantive step to the SAME row-path
+// machinery `exec_agg` / `exec_agg_batched` use — initialize_aggregates, the
+// per-row transition program, and the canonical `plain_finish`
+// finalize/HAVING/project tail (one result row; zero-row input included).
+// ===========================================================================
+
+/// Agg-side admission for the lane-v2 plain-agg fold drive: batch-drainable,
+/// AGG_PLAIN, a classified fold plan, and initplan-param-free (the lane
+/// drive, like `exec_agg_batched`, does not hoist pending initplans).
+pub fn agg_plain_fold_admissible(node: &AggStateData<'_>) -> bool {
+    agg_batch_drainable(node)
+        && node.plan.aggstrategy == AGG_PLAIN
+        && node.lanefold.is_some()
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// Feed-phase begin: `exec_agg`'s `initialize_aggregates` (fresh initval
+/// pergroups — a rescan re-enters here with `agg_done` cleared).
+pub fn agg_plain_build_begin(node: &mut AggStateData<'_>) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    initialize_aggregates(node)
+}
+
+/// One outer row through the FULL per-row transition program — `exec_agg`'s
+/// single-group loop body verbatim (no ordered-input collection: the lane
+/// admission requires `pertrans_sort` empty). Demoted/fallback rows and
+/// scalar-qual feeds run here.
+pub fn agg_plain_build_accept<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// One outer row through only the RESIDUAL transitions (the transnos
+/// classify refused); the admitted transitions are folded per batch by the
+/// caller (`lanefold::fold_batch`) over `agg_plain_pergroup_base`. No-op when
+/// the plan admitted every transition.
+pub fn agg_plain_build_accept_resid<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    let Some(resid) = node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut()) else {
+        return Ok(());
+    };
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(resid, &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// The single group's once-allocated pergroup array (the fold target).
+pub fn agg_plain_pergroup_base(node: &AggStateData<'_>) -> NonNull<AggPerGroup> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    node.pergroup_base
+}
+
+/// Retrieve: `exec_agg`'s post-drain tail (finalize + HAVING + project, sets
+/// `agg_done`) — the one result row, C's zero-row contract included.
+pub fn agg_plain_finish<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    plain_finish(node, estate)
+}
+
+// ===========================================================================
+// Lane-v2 sorted-agg (AGG_SORTED) streaming-operator delegation seam. The
+// lane hosts AGG_SORTED as a mid-pipeline operator (execmain/src/lanev2.rs
+// `SortedAggOp`): rows are PUSHED at it in the child's sorted order and it
+// emits one finalized group row per boundary — the control-flow inverse of
+// `agg_retrieve_sorted`'s pull loop. These thin entry points delegate every
+// substantive step to the SAME row-path machinery — the persort state
+// (first/pending slots + `have_pending`), the ported grouping-equality
+// ExprState (`ps.eq`), `initialize_aggregates`, the per-row transition
+// program, and the finalize/HAVING/project tail — split at
+// `agg_retrieve_sorted`'s own seams, so the same rows run the same
+// comparisons, transitions and finalizations in the same order
+// (byte-identical), and the node state is call-boundary-compatible with the
+// pull loop in BOTH directions (each returns with the current group closed
+// and at most a pending boundary tuple saved), making a per-call fallback to
+// `exec_agg` byte-safe.
+// ===========================================================================
+
+/// Agg-side admission for the lane-v2 sorted-agg streaming operator:
+/// AGG_SORTED single grouping set, no merge phase, no
+/// DISTINCT/ORDER-BY-within-aggregate internal sorts (`pertrans_sort` — the
+/// per-row path interleaves `collect_ordered_input`, which the lane does not
+/// drive), subplan-free transitions, and initplan-param-free everywhere (the
+/// lane drive, like `exec_agg_batched`, does not hoist pending initplans).
+/// Subplan-bearing HAVING/projection ARE admitted: the emit tail delegates to
+/// the same subplan-aware qual/project arms `agg_retrieve_sorted` uses.
+pub fn agg_sorted_lane_admissible(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_SORTED
+        && node.gsets.is_none()
+        && node.merge.is_none()
+        && node.pertrans_sort.is_empty()
+        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// A boundary tuple is saved and the next group has not started — the lane
+/// operator's cross-call resume flag (C's own `have_pending` state).
+pub fn agg_sorted_have_pending(node: &AggStateData<'_>) -> bool {
+    node.persort.as_ref().is_some_and(|ps| ps.have_pending)
+}
+
+/// Start a new group — `agg_retrieve_sorted`'s per-group prologue verbatim:
+/// reset the per-output context + aggcontext, install the group's first tuple
+/// (`Some(id)` = copy the pushed row; `None` = swap in the saved pending
+/// boundary tuple), `initialize_aggregates`, and run the transition program
+/// on the first tuple.
+pub fn agg_sorted_group_begin<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    first: Option<ExecSlotId>,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let mcx = estate.es_query_cxt;
+    estate.reset_expr_context(node.ps_ExprContext);
+    // SAFETY: sole access path to the node during the reset (the frames'
+    // copies are raw and dormant between evaluations).
+    unsafe { node.agg_node.as_mut() }.reset();
+    {
+        let AggStateData { persort, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        match first {
+            None => {
+                debug_assert!(ps.have_pending);
+                core::mem::swap(&mut ps.first_slot, &mut ps.pending_slot);
+                ps.have_pending = false;
+            }
+            Some(outer_id) => {
+                let outer_slot = estate.slot_mut(outer_id);
+                exectuples::exec_copy_slot(&mut ps.first_slot, outer_slot, mcx, mcx)?;
+            }
+        }
+    }
+    initialize_aggregates(node)?;
+    {
+        let AggStateData { persort, evaltrans, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        let et = evaltrans.as_mut().unwrap();
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+        exec_eval_expr(et, &mut slots)?;
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// The group-boundary comparison — the ported grouping-equality ExprState
+/// (`ps.eq`, C's ExecBuildGroupingEqual product; NULL grouping keys compare
+/// as same-group through it) over {inner: group first tuple, outer: pushed
+/// row}, exactly as `agg_retrieve_sorted`'s loop. `eq` None (numCols == 0,
+/// planner-proved-redundant keys) = never a boundary, as C's numCols > 0
+/// guard.
+pub fn agg_sorted_same_group<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<bool> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let AggStateData { persort, .. } = node;
+    let ps = persort.as_mut().expect("sorted Agg has persort");
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots {
+        scan: None,
+        inner: Some(&mut ps.first_slot),
+        outer: Some(&mut *outer_slot),
+    };
+    match ps.eq.as_mut() {
+        Some(eq) => exec_qual(Some(eq), &mut slots),
+        None => Ok(true),
+    }
+}
+
+/// One same-group row through the FULL per-row transition program —
+/// `agg_retrieve_sorted`'s loop body verbatim (no subplan / ordered-input
+/// arms: the lane admission refuses those shapes).
+pub fn agg_sorted_accept<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// Save the boundary row as the next group's first tuple (query-context copy
+/// into the pending slot — `agg_retrieve_sorted`'s boundary arm verbatim).
+pub fn agg_sorted_save_pending<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let mcx = estate.es_query_cxt;
+    let AggStateData { persort, .. } = node;
+    let ps = persort.as_mut().expect("sorted Agg has persort");
+    let outer_slot = estate.slot_mut(outer_id);
+    exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, mcx, mcx)?;
+    ps.have_pending = true;
+    Ok(())
+}
+
+/// Finalize + HAVING + project the completed group —
+/// `agg_retrieve_sorted`'s post-loop tail verbatim (subplan-aware qual/proj
+/// arms included; the group's representative tuple rides in
+/// `persort.first_slot`). `None` = the HAVING qual rejected the group (the
+/// caller starts the next group / ends the stream, exactly as the pull
+/// loop's `continue`).
+pub fn agg_sorted_emit<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let mcx = estate.es_query_cxt;
+    process_ordered_aggregates(node, estate)?;
+    finalize_aggregates(node, estate, node.pergroup_base)?;
+
+    if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ecxt = node.ps_ExprContext;
+        let result = node.ps_ResultTupleSlot;
+        let instr_idx = node.instr_idx;
+        let AggStateData { persort, qual, proj, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        if !::executils::exec_qual_with_subplans_outer(
+            qual.as_deref_mut(),
+            &mut ps.first_slot,
+            estate,
+            ecxt,
+        )? {
+            estate.instr_count_filtered1(instr_idx);
+            return Ok(None);
+        }
+        ::executils::exec_project_with_subplans_outer(
+            proj,
+            &mut ps.first_slot,
+            estate,
+            ecxt,
+            result,
+        )?;
+        return Ok(Some(result));
+    }
+    {
+        let AggStateData { persort, qual, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+        if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+            estate.instr_count_filtered1(node.instr_idx);
+            return Ok(None);
+        }
+    }
+    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    let ps = node.persort.as_mut().unwrap();
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+    exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+    Ok(Some(node.ps_ResultTupleSlot))
+}
+
+/// Input exhausted: `agg_retrieve_sorted`'s end-of-stream arm (sets
+/// `agg_done` BEFORE the last group finalizes, exactly as the pull loop's
+/// `fetch None` arms do).
+pub fn agg_sorted_input_done(node: &mut AggStateData<'_>) {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    node.agg_done = true;
+}
+
+// ===========================================================================
+// Lane-v2 K2 staged group probe (design §3a): the fold feed's batched
+// hash+probe pre-pass. The lane stages the (single) grouping key per batch,
+// hashes the whole lane in one tight kernel loop (`agg_hash_hash_staged`),
+// then probes each row IN ROW ORDER through the same C-ported tuplehash
+// lookup the per-row path uses (`agg_hash_probe_staged`) — same hash values
+// (bit-identical by the kernel contract), same insertion order, same entry
+// initialization, same spill decisions → same table layout, same iteration
+// order, same output bytes. Only the per-row expr-program walk + slot
+// prepare + per-row context churn are replaced.
+// ===========================================================================
+
+/// K2 admission: a single grouping-key column whose tuplehash probe kernel is
+/// batch-hostable (Int4/Int8/Text — `staged_probe_supported`). Returns the
+/// key's 0-based column number in the agg's OUTER (input) tuple. `None` =
+/// keep the per-row arrival probe.
+pub fn agg_hash_staged_probe_col(node: &AggStateData<'_>) -> Option<u16> {
+    let ph = node.perhash.as_ref()?;
+    if ph.num_cols == 1 && ph.hashtable.staged_probe_supported() {
+        Some((ph.hash_grp_col_idx_input[0] - 1) as u16)
+    } else {
+        None
+    }
+}
+
+/// Whether the lanefold plan carries residual (classify-refused) transitions.
+/// The K2 deferred probe hosts only fully-admitted plans: residuals need the
+/// live input row at probe time, which a deferred flush no longer has.
+pub fn agg_lanefold_has_resid(node: &AggStateData<'_>) -> bool {
+    node.lanefold.as_ref().is_some_and(|lf| lf.resid.is_some())
+}
+
+/// K2 batched hashing over the staged key lane — delegates to the tuplehash
+/// probe kernel, bit-identical per element to the per-row `hash_slot`.
+///
+/// Contract (like `hash_staged`): non-null staged datums are live values of
+/// the grouping key's type for the whole call.
+pub fn agg_hash_hash_staged(
+    node: &AggStateData<'_>,
+    keys: &[Datum],
+    isnull: &[bool],
+    out: &mut Vec<u32>,
+) -> PgResult<()> {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    ph.hashtable.hash_staged(keys, isnull, out)
+}
+
+/// K2 staged probe: `lookup_hash_entry` with the grouping key presented
+/// directly (the caller staged it — self-contained for the batch) and the
+/// hash precomputed by [`agg_hash_hash_staged`]. Same C-ported lookup, same
+/// first-arrival insertion, same `initialize_hash_entry`, same spill-mode
+/// gate as the per-row path. `None` = spill-mode miss: no transition runs
+/// (exactly as per-row) and the caller replays + spills the row via
+/// [`agg_hash_spill_staged`].
+pub fn agg_hash_probe_staged<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    key: Datum,
+    isnull: bool,
+    hash: u32,
+) -> PgResult<Option<NonNull<AggPerGroup>>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    let mcx = estate.es_query_cxt;
+    let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
+    let ph = perhash.as_mut().expect("hashed Agg has perhash");
+    debug_assert_eq!(ph.num_cols, 1);
+    // Fast path — the overwhelmingly common found-existing-group case: the
+    // slot-free kernel find (no hashslot presentation, no slot deform).
+    let ix = match ph.hashtable.find_staged(key, isnull, hash)? {
+        Some(ix) => ix,
+        None => {
+            // Miss: present the key in the hashslot (prepare_hash_slot's
+            // tail with the key already in hand) and run the full C-ported
+            // lookup — the insert leg (entry copy + robin-hood placement) or
+            // the spill-mode miss, exactly as the per-row path.
+            exectuples::exec_clear_tuple(&mut ph.hashslot, mcx);
+            {
+                let base = ph.hashslot.base_mut();
+                base.tts_values[0] = key;
+                base.tts_isnull[0] = isnull;
+            }
+            exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
+            #[cfg(debug_assertions)]
+            {
+                // The staged hash must equal what the per-row path computes.
+                let h = ph.hashtable.hash_slot(&mut ph.hashslot)?;
+                debug_assert_eq!(h, hash);
+            }
+            let table_mcx = ph.table_ctx.mcx();
+            let use_table = !ph.spill.mode;
+            let (ix, isnew) = ph.hashtable.lookup(
+                &mut ph.hashslot,
+                hash,
+                use_table.then_some(table_mcx),
+                mcx,
+            )?;
+            let Some(ix) = ix else {
+                return Ok(None);
+            };
+            debug_assert!(isnew, "find_staged missed an existing entry");
+            if isnew {
+                initialize_hash_entry(ph, trans_init, trans_typ, *agg_node, ix, mcx)?;
+            }
+            ix
+        }
+    };
+    Ok(Some(
+        ph.hashtable
+            .entry_additional(ix)
+            .expect("fold-fed hashagg carries pergroup space")
+            .cast::<AggPerGroup>(),
+    ))
+}
+
+/// K2 spill leg for a staged spill-mode miss: `hashagg_spill_tuple` over the
+/// caller's replayed row (needed columns populated, unneeded NULL — the spill
+/// projection's own treatment), byte-identical to spilling the original
+/// input row.
+pub fn agg_hash_spill_staged<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: ExecSlotId,
+    hash: u32,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    let s = estate.slot_mut(slot);
+    hashagg_spill_tuple(&mut ph.spill, Some(s), hash, mcx)
 }
 
 const MAX_FINAL_ARGS: usize = 8;
@@ -3403,6 +4035,9 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     if let Some(et) = node.evaltrans.as_mut() {
         et.release_frames();
     }
+    if let Some(r) = node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut()) {
+        r.release_frames();
+    }
     node.ps_ResultTupleDesc = None;
 }
 
@@ -3573,5 +4208,8 @@ mcx::forget_safe_struct!(
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
         instr_idx;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual },
+        pertrans_sort, qual, lanefold },
+    // resid released in exec_end_agg (evaltrans discipline); the plan holds
+    // only arena PgVecs.
+    LaneFold<'_> { plan; resid },
 );

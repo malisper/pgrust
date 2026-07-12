@@ -394,6 +394,96 @@ pub fn exec_scan<'mcx, N: ScanNode<'mcx>>(
     }
 }
 
+// ===========================================================================
+// Lane-executor-v2 scan-driver seam: `exec_scan_impl`'s per-tuple
+// qual/projection body over ONE already-produced tuple. The lane's push chain
+// supplies the tuple (a SubqueryScan's subplan row arrives from an upstream
+// lane pipeline instead of `scan_next`), so the fetch is elided; everything
+// else mirrors the QUAL/PROJ arms of `exec_scan_impl` exactly — per-tuple
+// expr-context reset at entry, `ecxt_scantuple` staging, pending-initplan
+// param hoists (projection params only on qual-passing rows), the
+// subplan-aware qual/projection drivers, per-tuple result-mcx arming for the
+// non-subplan paths, and the nfiltered1 instrumentation tick on a rejected
+// row. Kept separate from the const-generic `exec_scan_impl` so the hot
+// per-tuple scan codegen is untouched; the arms are runtime-dispatched here
+// (the lane is not per-instruction sensitive at this seam).
+// ===========================================================================
+
+/// One pushed tuple through the scan driver's qual → project segment.
+/// `None` = qual-rejected (the caller feeds the next tuple); `Some(slot)` =
+/// the projected output (or `scan_id` itself for projection-less scans).
+pub fn lane_scan_accept<'mcx>(
+    ss: &mut ScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    scan_id: ExecSlotId,
+) -> PgResult<Option<ExecSlotId>> {
+    estate.ecxt_mut(ss.ps_ExprContext).reset();
+    estate.ecxt_mut(ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
+
+    if ss.qual.is_some() {
+        // ExecEvalParamExec pending-initplan arm, hoisted out of the
+        // interpreter (exec_scan_impl parity).
+        let deps = ss.qual.as_deref().unwrap().param_exec_deps();
+        if !deps.is_empty() {
+            executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+        let passes = if ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            let ecxt = ss.ps_ExprContext;
+            executils::exec_qual_with_subplans(ss.qual.as_deref_mut(), estate, ecxt)?
+        } else {
+            // Per-tuple result mcx for arg-detoasting quals (C's
+            // ecxt_per_tuple_memory; the entry reset frees it).
+            let per_tuple = estate.ecxt(ss.ps_ExprContext).per_tuple_mcx();
+            // SAFETY: reset-only context, outlives the plan.
+            unsafe {
+                ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple);
+            }
+            let mut slots = EvalSlots {
+                scan: Some(estate.slot_mut(scan_id)),
+                inner: None,
+                outer: None,
+            };
+            exec_qual(ss.qual.as_deref_mut(), &mut slots)?
+        };
+        if !passes {
+            if let Some(idx) = ss.instr_idx {
+                estate.es_instrumentation[idx as usize].nfiltered1 += 1.0;
+            }
+            return Ok(None);
+        }
+    }
+
+    let ecxt = ss.ps_ExprContext;
+    let Some(proj) = ss.ps_ProjInfo.as_mut() else {
+        return Ok(Some(scan_id));
+    };
+    // C reads projection initplan params inside the projection, which never
+    // runs on a qual-rejected tuple.
+    {
+        let deps = proj.pi_state.param_exec_deps();
+        if !deps.is_empty() {
+            executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
+    let result_id = proj.pi_result_slot;
+    if proj.pi_state.has_subplan() {
+        executils::exec_project_with_subplans(&mut proj.pi_state, estate, ecxt, result_id)?;
+        return Ok(Some(result_id));
+    }
+    // By-ref projection results (and callee scratch) must live in the
+    // per-tuple memory reset at the next entry (exec_scan_impl parity).
+    // SAFETY: reset-only context, outlives the plan.
+    unsafe {
+        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+        proj.pi_state.arm_result_mcx_raw(per_tuple);
+    }
+    let mcx = estate.es_query_cxt;
+    let (scan_slot, result_slot) = slot_pair(estate, scan_id, result_id);
+    let mut slots = EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
+    ::execexpr::exec_project_prearmed(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+    Ok(Some(result_id))
+}
+
 pub fn slot_pair<'a, 'mcx>(
     estate: &'a mut EStateData<'mcx>,
     a: ExecSlotId,

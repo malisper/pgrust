@@ -89,24 +89,8 @@ pub fn exec_result<'mcx>(
     crate::cfi()?;
     let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
 
-    if node.rs_checkqual {
-        // C runs pending initplans lazily inside ExecQual (ExecEvalParamExec);
-        // the One-Time Filter's $n params resolve here instead (execscan note).
-        let deps = node.resconstantqual.as_deref().unwrap().param_exec_deps();
-        if !deps.is_empty() {
-            ::executils::exec_eval_param_exec_params(estate, deps)?;
-        }
-        let resconstantqual = node.resconstantqual.as_deref_mut();
-        let qual_result = if resconstantqual.as_ref().is_some_and(|q| q.has_subplan()) {
-            ::executils::exec_qual_with_subplans(resconstantqual, estate, ecxt)?
-        } else {
-            with_eval_slots(estate, ecxt, None, |slots, _, _| exec_qual(resconstantqual, slots))?
-        };
-        node.rs_checkqual = false;
-        if !qual_result {
-            node.rs_done = true;
-            return Ok(None);
-        }
+    if node.rs_checkqual && !lane_result_gate(node, estate)? {
+        return Ok(None);
     }
 
     estate.reset_expr_context(ecxt);
@@ -124,19 +108,67 @@ pub fn exec_result<'mcx>(
         node.rs_done = true;
     }
 
-    let result_slot = node.ps.ps_ResultTupleSlot.expect("ResultState without result slot");
-    if !node
-        .ps
+    Ok(Some(lane_result_project(&mut node.ps, estate)?))
+}
+
+// ===========================================================================
+// Lane-executor-v2 result seams. The lane's ResultOp / childless drive live
+// in `lanev2.rs`; the arms below ARE `exec_result`'s (the Volcano body above
+// calls the same functions), so the lane runs the SAME one-time gate and
+// (subplan-aware) projection — no reimplementation, and a Volcano fallback at
+// any call boundary sees exactly C's state (rs_checkqual / rs_done).
+// ===========================================================================
+
+/// `exec_result`'s One-Time Filter arm (`rs_checkqual`): evaluate
+/// `resconstantqual` once — pending-initplan $n params hoisted first, the
+/// subplan-aware qual driver where needed — consuming `rs_checkqual`. False →
+/// the node is done for good (`rs_done`), no row is ever produced.
+pub(crate) fn lane_result_gate<'mcx>(
+    node: &mut ResultState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    debug_assert!(node.rs_checkqual);
+    let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
+    // C runs pending initplans lazily inside ExecQual (ExecEvalParamExec);
+    // the One-Time Filter's $n params resolve here instead (execscan note).
+    let deps = node.resconstantqual.as_deref().unwrap().param_exec_deps();
+    if !deps.is_empty() {
+        ::executils::exec_eval_param_exec_params(estate, deps)?;
+    }
+    let resconstantqual = node.resconstantqual.as_deref_mut();
+    let qual_result = if resconstantqual.as_ref().is_some_and(|q| q.has_subplan()) {
+        ::executils::exec_qual_with_subplans(resconstantqual, estate, ecxt)?
+    } else {
+        with_eval_slots(estate, ecxt, None, |slots, _, _| exec_qual(resconstantqual, slots))?
+    };
+    node.rs_checkqual = false;
+    if !qual_result {
+        node.rs_done = true;
+    }
+    Ok(qual_result)
+}
+
+/// `exec_result`'s projection tail: pending-initplan param hoist + the
+/// (subplan-aware) projection into the result slot. The caller has already
+/// staged the input — `ecxt_outertuple` set for a child row, untouched for
+/// the no-FROM single row — exactly as the Volcano body does.
+pub(crate) fn lane_result_project<'mcx>(
+    ps: &mut crate::procnode::PlanStateBase<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ExecSlotId> {
+    let ecxt = ps.ps_ExprContext.expect("ResultState without ExprContext");
+    let result_slot = ps.ps_ResultTupleSlot.expect("ResultState without result slot");
+    if !ps
         .ps_ProjInfo
         .as_deref()
         .expect("ResultState without projection")
         .param_exec_deps()
         .is_empty()
     {
-        let deps = node.ps.ps_ProjInfo.as_deref().unwrap().param_exec_deps();
+        let deps = ps.ps_ProjInfo.as_deref().unwrap().param_exec_deps();
         ::executils::exec_eval_param_exec_params(estate, deps)?;
     }
-    let proj = node.ps.ps_ProjInfo.as_deref_mut().expect("ResultState without projection");
+    let proj = ps.ps_ProjInfo.as_deref_mut().expect("ResultState without projection");
     if proj.has_subplan() {
         ::executils::exec_project_with_subplans(proj, estate, ecxt, result_slot)?;
     } else {
@@ -144,7 +176,7 @@ pub fn exec_result<'mcx>(
             exec_project(proj, slots, result.unwrap(), mcx)
         })?;
     }
-    Ok(Some(result_slot))
+    Ok(result_slot)
 }
 
 /// `ExecEndResult` (nodeResult.c).

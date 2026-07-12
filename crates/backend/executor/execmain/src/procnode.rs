@@ -95,6 +95,11 @@ pub struct AppendNode<'mcx> {
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
     /// Original appendplans index per substate (initial pruning skips some).
     pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
+    /// Lane-executor-v2 append verdict, memoized at first offer (verdict
+    /// stability: a lane-driven child carries a staged-batch cursor across
+    /// the Volcano boundary); the dynamic gates (EPQ, direction, parallel
+    /// mode) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 pub struct MergeAppendNode<'mcx> {
@@ -172,6 +177,12 @@ pub struct BitmapCombineState<'mcx> {
 pub struct AggPlanState<'mcx> {
     pub agg: ::nodeagg::AggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
+    /// Lane-v2 memoized structural choice for the hash-agg breaker (None =
+    /// undecided); all lane logic lives in `lanev2`.
+    pub lane_choice: Option<crate::lanev2::AggLaneChoice>,
+    /// Lane-v2 staged join-feed replay slot, memoized across rescan rebuilds
+    /// (a fresh extra slot per rebuild would grow es_tupleTable per rescan).
+    pub lane_stage_slot: Option<::executils::ExecSlotId>,
 }
 
 // The WindowAgg node's outer child lives here (nodesort/nodeagg precedent).
@@ -199,6 +210,10 @@ pub struct SortNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     // None only after exec_end_node (released for the forget path).
     pub outer_desc: Option<Rc<TupleDescData<'static>>>,
+    /// Lane-executor-v2 sort-breaker verdict, memoized at first call (the
+    /// structural fusibility cascade must not run per pulled tuple); the
+    /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 // The IncrementalSort node's outer child lives here (nodesort precedent).
@@ -235,6 +250,11 @@ pub struct NestLoopNode<'mcx> {
     pub state: ::nodenestloop::NestLoopState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
+    /// Lane-executor-v2 NestLoop verdict, memoized at first call (the
+    /// structural fusibility cascade must not run per pulled tuple, and the
+    /// verdict must be stable — a lane-owned join stays lane-owned); the
+    /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 // The inner Hash sub-node: its own HashState + the real inner scan child.
@@ -248,10 +268,15 @@ pub struct HashJoinNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub hash: PgBox<'mcx, HashSubNode<'mcx>>,
     pub probe_batch: ProbeBatch<'mcx>,
+    /// Lane-executor-v2 join-breaker verdict, memoized at first call (the
+    /// structural fusibility cascade must not run per pulled tuple, and the
+    /// verdict must be stable — a lane-owned join stays lane-owned); the
+    /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ProbeBatchMode {
+pub(crate) enum ProbeBatchMode {
     Unknown,
     Off,
     On,
@@ -292,6 +317,12 @@ impl<'mcx> ProbeBatch<'mcx> {
             flt_seen: 0,
             flt_drop: 0,
         }
+    }
+
+    /// The fused probe drive's once-decided mode — read by the lane-v2 join
+    /// hook's admission-economics gate (never preempt the fused drive).
+    pub(crate) fn mode(&self) -> ProbeBatchMode {
+        self.mode
     }
 
     // Rescan invalidates the staged page; the fusibility verdict survives.
@@ -691,6 +722,7 @@ pub fn exec_init_node<'mcx>(
                 state,
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
                 outer_desc: Some(outer_desc),
+                lane_fusible: None,
             })
         }
         NodeTag::T_IncrementalSort => {
@@ -825,7 +857,10 @@ pub fn exec_init_node<'mcx>(
             let outer_desc =
                 outer.exec_get_result_type(agg_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
             let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc, Some(outer_desc))?;
-            PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer })?)
+            PlanStateNode::Agg(::mcx::alloc_in(
+                mcx,
+                AggPlanState { agg, outer, lane_choice: None, lane_stage_slot: None },
+            )?)
         }
         NodeTag::T_WindowAgg => {
             let mcx = estate.es_query_cxt;
@@ -877,6 +912,7 @@ pub fn exec_init_node<'mcx>(
                 state,
                 outer: ::mcx::alloc_in(mcx, outer)?,
                 inner: ::mcx::alloc_in(mcx, inner)?,
+                lane_fusible: None,
             })
         }
         NodeTag::T_HashJoin => {
@@ -929,6 +965,7 @@ pub fn exec_init_node<'mcx>(
                         HashSubNode { state: hash_state, child: ::mcx::alloc_in(mcx, hash_child)? },
                     )?,
                     probe_batch: ProbeBatch::new(),
+                    lane_fusible: None,
                 },
             )?)
         }
@@ -1019,7 +1056,7 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::Append(::mcx::alloc_in(
                 mcx,
-                AppendNode { state, substates, subplan_origin },
+                AppendNode { state, substates, subplan_origin, lane_fusible: None },
             )?)
         }
         NodeTag::T_MergeAppend => {
@@ -1401,6 +1438,14 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: the no-FROM row / the
+    // projection stream over the sort breaker): falls through to the
+    // UNCHANGED exec_result on refuse. Lane logic + refuse-set in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_result(rs, estate)? {
+            return Ok(r);
+        }
+    }
     exec_result(rs, estate)
 }
 
@@ -1409,6 +1454,13 @@ fn project_set_arm<'mcx>(
     ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2: ProjectSet is REFUSED wholesale — a documented
+    // refuse-set entry (the SRF multi-call protocol is per-tuple stateful and
+    // has no lane-owned child shape to chain onto; see the ProjectSet section
+    // of `lanev2.rs`). Accounting tick only; always the unchanged body.
+    if crate::lanev2::enabled() {
+        crate::lanev2::refuse_project_set();
+    }
     exec_project_set(ps, estate)
 }
 
@@ -1417,6 +1469,14 @@ fn seq_scan_arm<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 (Phase 1) dispatch hook: when enabled, the lane may
+    // *own* this SeqScan; all lane logic + the refuse-set live in `lanev2`.
+    // On refuse this falls through to the UNCHANGED per-tuple path.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_seq_scan(ss, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeseqscan::exec_seq_scan(ss, estate)
 }
 
@@ -1465,6 +1525,13 @@ fn index_scan_arm<'mcx>(
     is: &mut ::nodeindexscan::IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: on refuse this falls through to the
+    // UNCHANGED per-tuple path. All lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_index_scan(is, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeindexscan::exec_index_scan(is, estate)
 }
 
@@ -1489,6 +1556,13 @@ fn index_only_scan_arm<'mcx>(
     ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: falls through to the UNCHANGED per-tuple
+    // path on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_index_only_scan(ios, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
 }
 
@@ -1498,9 +1572,25 @@ fn agg_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let aps = &mut **aps;
-    let AggPlanState { agg, outer } = aps;
+    let AggPlanState { agg, outer, lane_choice, lane_stage_slot } = aps;
     match outer {
         PlanStateNode::SeqScan(ss) => {
+            // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
+            // falls through to the UNCHANGED fused/per-tuple agg paths on
+            // refuse. Lane logic + refuse-set live in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_seq_scan(
+                        agg,
+                        ss,
+                        lane_choice,
+                        lane_stage_slot,
+                        estate,
+                    )?
+                {
+                    return Ok(r);
+                }
+            }
             if seq_agg_fusible(agg, ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
             {
@@ -1514,6 +1604,7 @@ fn agg_arm<'mcx>(
                     fused_soa_prefix(agg, ss).unwrap_or(0),
                     qual_only,
                     false,
+                    false,
                 );
                 let outer_slot = ss.ss.ss_ScanTupleSlot;
                 let src = SeqScanBatchSource { ss, outer_slot };
@@ -1521,6 +1612,17 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::IndexScan(is) => {
+            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
+            // over an index-ordered feed): falls through to the UNCHANGED
+            // fused/per-tuple paths on refuse. Lane logic + refuse-set live
+            // in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_sorted_agg_over_index_scan(agg, is, estate)?
+                {
+                    return Ok(r);
+                }
+            }
             if agg_fusible_common(agg, estate)
                 && is.ss.qual.is_none()
                 && is.ss.ps_ProjInfo.is_none()
@@ -1537,6 +1639,15 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::IndexOnlyScan(ios) => {
+            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
+            // over an index-ordered feed); see the IndexScan arm.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_sorted_agg_over_index_only_scan(agg, &mut **ios, estate)?
+                {
+                    return Ok(r);
+                }
+            }
             if agg_fusible_common(agg, estate)
                 && ios.ss.qual.is_none()
                 && ios.ss.ps_ProjInfo.is_none()
@@ -1567,6 +1678,55 @@ fn agg_arm<'mcx>(
                 return ::nodeagg::exec_agg_batched(agg, estate, src);
             }
         }
+        PlanStateNode::Sort(s) => {
+            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
+            // over the sort breaker): falls through to the UNCHANGED
+            // per-tuple exec_agg over exec_sort on refuse. Lane logic +
+            // refuse-set live in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_sorted_agg_over_sort(agg, s, estate)? {
+                    return Ok(r);
+                }
+            }
+        }
+        PlanStateNode::HashJoin(hj) => {
+            // Lane-executor-v2 dispatch hook (Phase-2 breaker-to-breaker
+            // composition: hash-agg breaker over the hash-join breaker over
+            // lane scans). Falls through to the UNCHANGED per-tuple agg over
+            // exec_hash_join on refuse. Lane logic + refuse-set in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_hash_join(agg, hj, lane_stage_slot, estate)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
+        PlanStateNode::NestLoop(nl) => {
+            // Lane-executor-v2 dispatch hook (§4: hash-agg breaker over the
+            // NestLoop TupleOp over a lane outer scan; the inner stays
+            // Volcano). Falls through to the UNCHANGED per-tuple agg over
+            // exec_nest_loop on refuse. Lane logic + refuse-set in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_agg_over_nest_loop(agg, nl, estate)? {
+                    return Ok(r);
+                }
+            }
+        }
+        PlanStateNode::SubqueryScan(sqs) => {
+            // Lane-executor-v2 dispatch hook (wave-4 glue: hash-agg breaker
+            // over a SubqueryScan over lane scans — pipelines chaining
+            // through the subquery boundary). Falls through to the UNCHANGED
+            // per-tuple agg over exec_scan on refuse. Lane logic + refuse-set
+            // in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_subquery_scan(agg, sqs, estate)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
         _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
@@ -1592,7 +1752,7 @@ fn agg_fusible_common<'mcx>(
 // same tuples, same transition order; per-tuple node recursion elided.
 // Instrumented children never match the SeqScan arm, so EXPLAIN ANALYZE
 // keeps the per-tuple drive and its filter counters.
-fn seq_agg_fusible<'mcx>(
+pub(crate) fn seq_agg_fusible<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     estate: &EStateData<'mcx>,
@@ -1891,7 +2051,15 @@ fn window_agg_arm<'mcx>(
 
 #[inline(never)]
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    let SortNode { state, outer, outer_desc } = s;
+    // Lane-executor-v2 dispatch hook (Phase-2 sort pipeline-breaker): on
+    // refuse this falls through to the UNCHANGED paths below. Lane logic +
+    // refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_sort(s, estate)? {
+            return Ok(r);
+        }
+    }
+    let SortNode { state, outer, outer_desc, .. } = s;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     if !state.sort_done() {
         if let PlanStateNode::SeqScan(ss) = &mut **outer {
@@ -2026,6 +2194,14 @@ fn unique_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let u = &mut **u;
+    // Lane-executor-v2 dispatch hook (Phase-2 streaming unique over the sort
+    // breaker): falls through to the UNCHANGED exec_unique on refuse. Lane
+    // logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_unique(u, estate)? {
+            return Ok(r);
+        }
+    }
     let outer = &mut u.outer;
     ::nodeunique::exec_unique(&mut u.state, estate, |e| exec_proc_node(outer, e))
 }
@@ -2035,6 +2211,14 @@ fn group_arm<'mcx>(
     g: &mut PgBox<'mcx, GroupNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: streaming sorted grouping
+    // over the sort breaker): falls through to the UNCHANGED exec_group on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_group(g, estate)? {
+            return Ok(r);
+        }
+    }
     let g = &mut **g;
     let outer = &mut g.outer;
     ::nodegroup::exec_group(&mut g.state, estate, |e| exec_proc_node(outer, e))
@@ -2042,6 +2226,14 @@ fn group_arm<'mcx>(
 
 #[inline(never)]
 fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (Phase-2 streaming limit over lane-owned
+    // chains): falls through to the UNCHANGED exec_limit on refuse. Lane
+    // logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_limit(l, estate)? {
+            return Ok(r);
+        }
+    }
     let LimitNode { state, outer } = l;
     ::nodelimit::exec_limit(state, &mut **outer, estate)
 }
@@ -2066,12 +2258,22 @@ fn bitmap_heap_scan_arm<'mcx>(
     if !b.scan.initialized {
         bitmap_table_scan_setup_dispatch(b, estate)?;
     }
+    // Lane-executor-v2 dispatch hook: the bitmap is now built, so the lane may
+    // own the heap-scan drive. Falls through to the UNCHANGED per-tuple path on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_bitmap_heap_scan(&mut b.scan, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)
 }
 
 // BitmapTableScanSetup's MultiExec leg (nodeBitmapHeapscan.c): serial always
 // builds; parallel builds only in the participant that wins BM_INITIAL.
-fn bitmap_table_scan_setup_dispatch<'mcx>(
+// pub(crate): the lanev2 sort-breaker feed drives a BitmapHeapScan child
+// directly and must run the same setup the arm would.
+pub(crate) fn bitmap_table_scan_setup_dispatch<'mcx>(
     b: &mut BitmapHeapPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -2119,7 +2321,16 @@ fn append_arm<'mcx>(
     a: &mut PgBox<'mcx, AppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    let AppendNode { state, substates, subplan_origin: _ } = &mut **a;
+    // Lane-executor-v2 dispatch hook (wave 5: the serial Append over
+    // lane-fusible scan children — the node's own exec_append body over lane
+    // child pipelines): falls through to the UNCHANGED exec_append on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_append(a, estate)? {
+            return Ok(r);
+        }
+    }
+    let AppendNode { state, substates, .. } = &mut **a;
     ::nodeappend::exec_append(state, estate, |e, i| exec_proc_node(&mut substates[i], e))
 }
 
@@ -2139,6 +2350,14 @@ fn subquery_scan_arm<'mcx>(
     s: &mut PgBox<'mcx, SubqueryScanNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: pass-through
+    // filter/project over the sort breaker): falls through to the UNCHANGED
+    // exec_scan on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_subquery_scan(s, estate)? {
+            return Ok(r);
+        }
+    }
     ::execscan::exec_scan(&mut **s, estate)
 }
 
@@ -2183,7 +2402,15 @@ fn named_tuplestore_scan_arm<'mcx>(
 
 #[inline(never)]
 fn nest_loop_arm<'mcx>(nl: &mut NestLoopNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    let NestLoopNode { state, outer, inner } = nl;
+    // Lane-executor-v2 dispatch hook (§4 NestLoop TupleOp over a lane outer
+    // scan; the inner stays Volcano): falls through to the UNCHANGED
+    // exec_nest_loop on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_nest_loop(nl, estate)? {
+            return Ok(r);
+        }
+    }
+    let NestLoopNode { state, outer, inner, .. } = nl;
     ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
 }
 
@@ -2193,15 +2420,28 @@ fn hash_join_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let hj = &mut **hj;
-    let HashJoinNode { state, outer, hash, probe_batch } = hj;
-    let HashSubNode { state: hstate, child } = &mut **hash;
-    if probe_batch.mode == ProbeBatchMode::Unknown {
+    if hj.probe_batch.mode == ProbeBatchMode::Unknown {
+        let HashJoinNode { state, outer, hash, probe_batch, .. } = hj;
+        let HashSubNode { state: hstate, .. } = &mut **hash;
         probe_batch.mode = if hstate.parallel_state().is_some() {
             ProbeBatchMode::Parallel
         } else {
             probe_batch_probe(state, &mut **outer, estate, probe_batch)?
         };
     }
+    // Lane-executor-v2 dispatch hook (Phase-2 join breaker, bare). The
+    // admission-economics gate — engage only where the legacy fused probe
+    // drive does NOT (never preempt the faster existing path) — lives inside
+    // `try_own_hash_join` (via `ProbeBatch::mode()`) so its refusals are
+    // ticked in the lane accounting. Falls through to the UNCHANGED
+    // exec_hash_join on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_hash_join(hj, estate)? {
+            return Ok(r);
+        }
+    }
+    let HashJoinNode { state, outer, hash, probe_batch, .. } = hj;
+    let HashSubNode { state: hstate, child } = &mut **hash;
     if probe_batch.mode == ProbeBatchMode::On {
         let PlanStateNode::SeqScan(ss) = &mut **outer else {
             unreachable!("probe fusion armed on a non-SeqScan outer")
@@ -2260,7 +2500,7 @@ fn probe_batch_probe<'mcx>(
     }
     let hash_col = hjs.probe_hash_col();
     let force = hash_col.is_some_and(|c| (c as i32) < prefix);
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, force);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, force, false);
     if let Some(c) = hash_col {
         if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| (c as i32) < soa.ncols() as i32)
         {
@@ -3182,6 +3422,7 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                     hash_build_soa_prefix(hs, ss).unwrap_or(0),
                     false,
                     false,
+                    false,
                 );
                 match ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot) {
                     Some(result_slot) => {
@@ -3294,13 +3535,13 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     ModifyTablePlanState<'_> { mt, subplan, epq },
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
-    AggPlanState<'_> { agg, outer },
+    AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot },
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
-    SortNode<'_> { state, outer; outer_desc },
+    SortNode<'_> { state, outer, lane_fusible; outer_desc },
     IncrementalSortNode<'_> { state, outer },
-    AppendNode<'_> { state, substates, subplan_origin },
+    AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },
@@ -3309,9 +3550,9 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     LimitNode<'_> { state, outer },
     UniqueNode<'_> { state, outer },
     GroupNode<'_> { state, outer },
-    NestLoopNode<'_> { state, outer, inner },
+    NestLoopNode<'_> { state, outer, inner, lane_fusible },
     HashSubNode<'_> { state, child },
-    HashJoinNode<'_> { state, outer, hash, probe_batch },
+    HashJoinNode<'_> { state, outer, hash, probe_batch, lane_fusible },
     MergeJoinNode<'_> { state, outer, inner },
     GatherNode<'_> { state, outer },
     GatherMergeNode<'_> { state, outer },

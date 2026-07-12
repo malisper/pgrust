@@ -1294,6 +1294,7 @@ pub fn heap_getnext<'a, 'mcx>(
     // C's "only heap AM" ereport is subsumed by the closed TableAm carrier.
     match scan.rs_base.rs_am {
         TableAm::Heap => {}
+        other => panic!("only heap AM is supported in heap_getnext: {other:?}"),
     }
     if unexpected_during_logical_decoding() {
         return Err(elog_error(

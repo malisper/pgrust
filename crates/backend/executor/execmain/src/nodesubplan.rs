@@ -300,7 +300,7 @@ fn too_many_rows() -> Box<PgError> {
 
 // datumCopy (datum.c) into es_query_cxt (fold.rs precedent); short and toast
 // headers copy verbatim per C, only expanded flattens (no producers: loud).
-fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -> PgResult<Datum_crate::Datum> {
+pub(crate) fn datum_copy_in<'mcx>(mcx: Mcx<'mcx>, value: Datum_crate::Datum, attlen: i16) -> PgResult<Datum_crate::Datum> {
     let p = value.as_usize() as *const u8;
     if p.is_null() {
         return Ok(Datum::null());

@@ -2573,7 +2573,23 @@ fn add_unique_group_var<'mcx>(
     node: Node<'mcx>,
     vardata: &VariableStatData<'mcx>,
 ) -> PgResult<()> {
-    let (ndistinct, isdefault) = get_variable_numdistinct(run, vardata);
+    let (mut ndistinct, isdefault) = get_variable_numdistinct(run, vardata);
+    // cbstore no-stats group-key ndistinct (pgrust-only divergence, scoped to
+    // grouping/DISTINCT estimation -- consts::DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO
+    // provenance): cbstore cannot ANALYZE, so a defaulted 200 here starves
+    // hash-finalize parallel agg at 100M scale. isdefault is preserved so
+    // SELFLAG_USED_DEFAULT consumers still see the truth.
+    if isdefault {
+        let ratio = crate::costsize::gucs::cbstore_group_ndistinct_ratio();
+        if ratio > 0.0 {
+            if let Some(rel) = vardata.rel {
+                let r = run.root.rel(rel);
+                if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 && r.tuples > 0.0 {
+                    ndistinct = crate::costsize::clamp_row_est(r.tuples * ratio);
+                }
+            }
+        }
+    }
     // remove_nulling_relids: Vars only carry outer-join nulling relids here,
     // so stripping to empty matches C's outer_join_rels removal. Nulled Vars
     // inside larger grouped expressions keep theirs (such expressions can
