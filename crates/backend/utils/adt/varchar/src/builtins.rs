@@ -231,29 +231,30 @@ fc_bpcharcmp! {
     fc_bpcharcmp: bpcharcmp -> from_i32;
 }
 
-// C returns one of the input pointers — so do larger/smaller.
+// C returns one of the PG_GETARG_BPCHAR_PP pointers — the DETOASTED (packed)
+// image, never the raw compressed/external arg datum (see fc_text_larger).
 pub fn fc_bpchar_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bpchar varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(
+    Ok(Datum::from_usize(
         if crate::bpcharcmp(a.data(), b.data(), fcinfo.get_collation())? >= 0 {
-            fcinfo.arg(0)
+            a.as_ptr()
         } else {
-            fcinfo.arg(1)
-        },
-    )
+            b.as_ptr()
+        } as usize,
+    ))
 }
 
 pub fn fc_bpchar_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null bpchar varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(
+    Ok(Datum::from_usize(
         if crate::bpcharcmp(a.data(), b.data(), fcinfo.get_collation())? <= 0 {
-            fcinfo.arg(0)
+            a.as_ptr()
         } else {
-            fcinfo.arg(1)
-        },
-    )
+            b.as_ptr()
+        } as usize,
+    ))
 }
 
 pub fn fc_bpcharlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
