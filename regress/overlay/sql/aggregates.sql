@@ -20,152 +20,246 @@ COPY aggtest FROM :'filename';
 ANALYZE aggtest;
 
 
+-- pgrust:rowsort
 SELECT avg(four) AS avg_1 FROM onek;
 
+-- pgrust:rowsort
 SELECT avg(a) AS avg_32 FROM aggtest WHERE a < 100;
 
+-- pgrust:rowsort
 SELECT any_value(v) FROM (VALUES (1), (2), (3)) AS v (v);
+-- pgrust:rowsort
 SELECT any_value(v) FROM (VALUES (NULL)) AS v (v);
+-- pgrust:rowsort
 SELECT any_value(v) FROM (VALUES (NULL), (1), (2)) AS v (v);
+-- pgrust:rowsort
 SELECT any_value(v) FROM (VALUES (array['hello', 'world'])) AS v (v);
 
 -- In 7.1, avg(float4) is computed using float8 arithmetic.
 -- Round the result to 3 digits to avoid platform-specific results.
 
+-- pgrust:rowsort
 SELECT avg(b)::numeric(10,3) AS avg_107_943 FROM aggtest;
 
+-- pgrust:rowsort
 SELECT avg(gpa) AS avg_3_4 FROM ONLY student;
 
 
+-- pgrust:rowsort
 SELECT sum(four) AS sum_1500 FROM onek;
+-- pgrust:rowsort
 SELECT sum(a) AS sum_198 FROM aggtest;
+-- pgrust:rowsort
 SELECT sum(b) AS avg_431_773 FROM aggtest;
+-- pgrust:rowsort
 SELECT sum(gpa) AS avg_6_8 FROM ONLY student;
 
+-- pgrust:rowsort
 SELECT max(four) AS max_3 FROM onek;
+-- pgrust:rowsort
 SELECT max(a) AS max_100 FROM aggtest;
+-- pgrust:rowsort
 SELECT max(aggtest.b) AS max_324_78 FROM aggtest;
+-- pgrust:rowsort
 SELECT max(student.gpa) AS max_3_7 FROM student;
 
+-- pgrust:rowsort
 SELECT stddev_pop(b) FROM aggtest;
+-- pgrust:rowsort
 SELECT stddev_samp(b) FROM aggtest;
+-- pgrust:rowsort
 SELECT var_pop(b) FROM aggtest;
+-- pgrust:rowsort
 SELECT var_samp(b) FROM aggtest;
 
+-- pgrust:rowsort
 SELECT stddev_pop(b::numeric) FROM aggtest;
+-- pgrust:rowsort
 SELECT stddev_samp(b::numeric) FROM aggtest;
+-- pgrust:rowsort
 SELECT var_pop(b::numeric) FROM aggtest;
+-- pgrust:rowsort
 SELECT var_samp(b::numeric) FROM aggtest;
 
 -- population variance is defined for a single tuple, sample variance
 -- is not
+-- pgrust:rowsort
 SELECT var_pop(1.0::float8), var_samp(2.0::float8);
+-- pgrust:rowsort
 SELECT stddev_pop(3.0::float8), stddev_samp(4.0::float8);
+-- pgrust:rowsort
 SELECT var_pop('inf'::float8), var_samp('inf'::float8);
+-- pgrust:rowsort
 SELECT stddev_pop('inf'::float8), stddev_samp('inf'::float8);
+-- pgrust:rowsort
 SELECT var_pop('nan'::float8), var_samp('nan'::float8);
+-- pgrust:rowsort
 SELECT stddev_pop('nan'::float8), stddev_samp('nan'::float8);
+-- pgrust:rowsort
 SELECT var_pop(1.0::float4), var_samp(2.0::float4);
+-- pgrust:rowsort
 SELECT stddev_pop(3.0::float4), stddev_samp(4.0::float4);
+-- pgrust:rowsort
 SELECT var_pop('inf'::float4), var_samp('inf'::float4);
+-- pgrust:rowsort
 SELECT stddev_pop('inf'::float4), stddev_samp('inf'::float4);
+-- pgrust:rowsort
 SELECT var_pop('nan'::float4), var_samp('nan'::float4);
+-- pgrust:rowsort
 SELECT stddev_pop('nan'::float4), stddev_samp('nan'::float4);
+-- pgrust:rowsort
 SELECT var_pop(1.0::numeric), var_samp(2.0::numeric);
+-- pgrust:rowsort
 SELECT stddev_pop(3.0::numeric), stddev_samp(4.0::numeric);
+-- pgrust:rowsort
 SELECT var_pop('inf'::numeric), var_samp('inf'::numeric);
+-- pgrust:rowsort
 SELECT stddev_pop('inf'::numeric), stddev_samp('inf'::numeric);
+-- pgrust:rowsort
 SELECT var_pop('nan'::numeric), var_samp('nan'::numeric);
+-- pgrust:rowsort
 SELECT stddev_pop('nan'::numeric), stddev_samp('nan'::numeric);
 
 -- verify correct results for min(record) and max(record) aggregates
+-- pgrust:rowsort
 SELECT max(row(a,b)) FROM aggtest;
+-- pgrust:rowsort
 SELECT max(row(b,a)) FROM aggtest;
+-- pgrust:rowsort
 SELECT min(row(a,b)) FROM aggtest;
+-- pgrust:rowsort
 SELECT min(row(b,a)) FROM aggtest;
 
 -- verify correct results for null and NaN inputs
+-- pgrust:rowsort
 select sum(null::int4) from generate_series(1,3);
+-- pgrust:rowsort
 select sum(null::int8) from generate_series(1,3);
+-- pgrust:rowsort
 select sum(null::numeric) from generate_series(1,3);
+-- pgrust:rowsort
 select sum(null::float8) from generate_series(1,3);
+-- pgrust:rowsort
 select avg(null::int4) from generate_series(1,3);
+-- pgrust:rowsort
 select avg(null::int8) from generate_series(1,3);
+-- pgrust:rowsort
 select avg(null::numeric) from generate_series(1,3);
+-- pgrust:rowsort
 select avg(null::float8) from generate_series(1,3);
+-- pgrust:rowsort
 select sum('NaN'::numeric) from generate_series(1,3);
+-- pgrust:rowsort
 select avg('NaN'::numeric) from generate_series(1,3);
 
 -- verify correct results for infinite inputs
+-- pgrust:rowsort
 SELECT sum(x::float8), avg(x::float8), var_pop(x::float8)
 FROM (VALUES ('1'), ('infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::float8), avg(x::float8), var_pop(x::float8)
 FROM (VALUES ('infinity'), ('1')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::float8), avg(x::float8), var_pop(x::float8)
 FROM (VALUES ('infinity'), ('infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::float8), avg(x::float8), var_pop(x::float8)
 FROM (VALUES ('-infinity'), ('infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::float8), avg(x::float8), var_pop(x::float8)
 FROM (VALUES ('-infinity'), ('-infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::numeric), avg(x::numeric), var_pop(x::numeric)
 FROM (VALUES ('1'), ('infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::numeric), avg(x::numeric), var_pop(x::numeric)
 FROM (VALUES ('infinity'), ('1')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::numeric), avg(x::numeric), var_pop(x::numeric)
 FROM (VALUES ('infinity'), ('infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::numeric), avg(x::numeric), var_pop(x::numeric)
 FROM (VALUES ('-infinity'), ('infinity')) v(x);
+-- pgrust:rowsort
 SELECT sum(x::numeric), avg(x::numeric), var_pop(x::numeric)
 FROM (VALUES ('-infinity'), ('-infinity')) v(x);
 
 -- test accuracy with a large input offset
+-- pgrust:rowsort
 SELECT avg(x::float8), var_pop(x::float8)
 FROM (VALUES (100000003), (100000004), (100000006), (100000007)) v(x);
+-- pgrust:rowsort
 SELECT avg(x::float8), var_pop(x::float8)
 FROM (VALUES (7000000000005), (7000000000007)) v(x);
 
 -- SQL2003 binary aggregates
+-- pgrust:rowsort
 SELECT regr_count(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT regr_sxx(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT regr_syy(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT regr_sxy(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT regr_avgx(b, a), regr_avgy(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT regr_r2(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT regr_slope(b, a), regr_intercept(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT covar_pop(b, a), covar_samp(b, a) FROM aggtest;
+-- pgrust:rowsort
 SELECT corr(b, a) FROM aggtest;
 
 -- check single-tuple behavior
+-- pgrust:rowsort
 SELECT covar_pop(1::float8,2::float8), covar_samp(3::float8,4::float8);
+-- pgrust:rowsort
 SELECT covar_pop(1::float8,'inf'::float8), covar_samp(3::float8,'inf'::float8);
+-- pgrust:rowsort
 SELECT covar_pop(1::float8,'nan'::float8), covar_samp(3::float8,'nan'::float8);
 
 -- test accum and combine functions directly
 CREATE TABLE regr_test (x float8, y float8);
 INSERT INTO regr_test VALUES (10,150),(20,250),(30,350),(80,540),(100,200);
+-- pgrust:rowsort
 SELECT count(*), sum(x), regr_sxx(y,x), sum(y),regr_syy(y,x), regr_sxy(y,x)
 FROM regr_test WHERE x IN (10,20,30,80);
+-- pgrust:rowsort
 SELECT count(*), sum(x), regr_sxx(y,x), sum(y),regr_syy(y,x), regr_sxy(y,x)
 FROM regr_test;
+-- pgrust:rowsort
 SELECT float8_accum('{4,140,2900}'::float8[], 100);
+-- pgrust:rowsort
 SELECT float8_regr_accum('{4,140,2900,1290,83075,15050}'::float8[], 200, 100);
+-- pgrust:rowsort
 SELECT count(*), sum(x), regr_sxx(y,x), sum(y),regr_syy(y,x), regr_sxy(y,x)
 FROM regr_test WHERE x IN (10,20,30);
+-- pgrust:rowsort
 SELECT count(*), sum(x), regr_sxx(y,x), sum(y),regr_syy(y,x), regr_sxy(y,x)
 FROM regr_test WHERE x IN (80,100);
+-- pgrust:rowsort
 SELECT float8_combine('{3,60,200}'::float8[], '{0,0,0}'::float8[]);
+-- pgrust:rowsort
 SELECT float8_combine('{0,0,0}'::float8[], '{2,180,200}'::float8[]);
+-- pgrust:rowsort
 SELECT float8_combine('{3,60,200}'::float8[], '{2,180,200}'::float8[]);
+-- pgrust:rowsort
 SELECT float8_regr_combine('{3,60,200,750,20000,2000}'::float8[],
                            '{0,0,0,0,0,0}'::float8[]);
+-- pgrust:rowsort
 SELECT float8_regr_combine('{0,0,0,0,0,0}'::float8[],
                            '{2,180,200,740,57800,-3400}'::float8[]);
+-- pgrust:rowsort
 SELECT float8_regr_combine('{3,60,200,750,20000,2000}'::float8[],
                            '{2,180,200,740,57800,-3400}'::float8[]);
 DROP TABLE regr_test;
 
 -- test count, distinct
+-- pgrust:rowsort
 SELECT count(four) AS cnt_1000 FROM onek;
+-- pgrust:rowsort
 SELECT count(DISTINCT four) AS cnt_4 FROM onek;
 
 select ten, count(*), sum(four) from onek
@@ -175,11 +269,17 @@ select ten, count(four), sum(DISTINCT four) from onek
 group by ten order by ten;
 
 -- user-defined aggregates
+-- pgrust:rowsort
 SELECT newavg(four) AS avg_1 FROM onek;
+-- pgrust:rowsort
 SELECT newsum(four) AS sum_1500 FROM onek;
+-- pgrust:rowsort
 SELECT newcnt(four) AS cnt_1000 FROM onek;
+-- pgrust:rowsort
 SELECT newcnt(*) AS cnt_1000 FROM onek;
+-- pgrust:rowsort
 SELECT oldcnt(*) AS cnt_1000 FROM onek;
+-- pgrust:rowsort
 SELECT sum2(q1,q2) FROM int8_tbl;
 
 -- test for outer-level aggregates
@@ -198,6 +298,7 @@ having exists (select 1 from onek b
 
 -- Test handling of sublinks within outer-level aggregates.
 -- Per bug report from Daniel Grace.
+-- pgrust:rowsort
 select
   (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1)))
 from tenk1 o;
@@ -220,6 +321,7 @@ explain (verbose, costs off)
 select array(select sum(x+y) s
             from generate_series(1,3) y group by y order by s)
   from generate_series(1,3) x;
+-- pgrust:rowsort
 select array(select sum(x+y) s
             from generate_series(1,3) y group by y order by s)
   from generate_series(1,3) x;
@@ -237,6 +339,7 @@ CREATE TEMPORARY TABLE bitwise_test(
 );
 
 -- empty case
+-- pgrust:rowsort
 SELECT
   BIT_AND(i2) AS "?",
   BIT_OR(i4)  AS "?",
@@ -277,6 +380,7 @@ FROM bitwise_test;
 --
 -- first test all possible transition and final states
 
+-- pgrust:rowsort
 SELECT
   -- boolean and transitions
   -- null because strict
@@ -291,6 +395,7 @@ SELECT
   NOT booland_statefunc(FALSE, TRUE) AS "t",
   NOT booland_statefunc(FALSE, FALSE) AS "t";
 
+-- pgrust:rowsort
 SELECT
   -- boolean or transitions
   -- null because strict
@@ -312,6 +417,7 @@ CREATE TEMPORARY TABLE bool_test(
   b4 BOOL);
 
 -- empty case
+-- pgrust:rowsort
 SELECT
   BOOL_AND(b1)   AS "n",
   BOOL_OR(b3)    AS "n"
@@ -323,6 +429,7 @@ FALSE	TRUE	null	null
 null	TRUE	FALSE	null
 \.
 
+-- pgrust:rowsort
 SELECT
   BOOL_AND(b1)     AS "f",
   BOOL_AND(b2)     AS "t",
@@ -332,6 +439,7 @@ SELECT
   BOOL_AND(NOT b3) AS "t"
 FROM bool_test;
 
+-- pgrust:rowsort
 SELECT
   EVERY(b1)     AS "f",
   EVERY(b2)     AS "t",
@@ -341,6 +449,7 @@ SELECT
   EVERY(NOT b3) AS "t"
 FROM bool_test;
 
+-- pgrust:rowsort
 SELECT
   BOOL_OR(b1)      AS "t",
   BOOL_OR(b2)      AS "t",
@@ -358,15 +467,19 @@ FROM bool_test;
 -- Basic cases
 explain (costs off)
   select min(unique1) from tenk1;
+-- pgrust:rowsort
 select min(unique1) from tenk1;
 explain (costs off)
   select max(unique1) from tenk1;
+-- pgrust:rowsort
 select max(unique1) from tenk1;
 explain (costs off)
   select max(unique1) from tenk1 where unique1 < 42;
+-- pgrust:rowsort
 select max(unique1) from tenk1 where unique1 < 42;
 explain (costs off)
   select max(unique1) from tenk1 where unique1 > 42;
+-- pgrust:rowsort
 select max(unique1) from tenk1 where unique1 > 42;
 
 -- the planner may choose a generic aggregate here if parallel query is
@@ -377,27 +490,32 @@ begin;
 set local max_parallel_workers_per_gather = 0;
 explain (costs off)
   select max(unique1) from tenk1 where unique1 > 42000;
+-- pgrust:rowsort
 select max(unique1) from tenk1 where unique1 > 42000;
 rollback;
 
 -- multi-column index (uses tenk1_thous_tenthous)
 explain (costs off)
   select max(tenthous) from tenk1 where thousand = 33;
+-- pgrust:rowsort
 select max(tenthous) from tenk1 where thousand = 33;
 explain (costs off)
   select min(tenthous) from tenk1 where thousand = 33;
+-- pgrust:rowsort
 select min(tenthous) from tenk1 where thousand = 33;
 
 -- check parameter propagation into an indexscan subquery
 explain (costs off)
   select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
     from int4_tbl;
+-- pgrust:rowsort
 select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
   from int4_tbl;
 
 -- check some cases that were handled incorrectly in 8.3.0
 explain (costs off)
   select distinct max(unique2) from tenk1;
+-- pgrust:rowsort
 select distinct max(unique2) from tenk1;
 explain (costs off)
   select max(unique2) from tenk1 order by 1;
@@ -415,6 +533,7 @@ select max(unique2), generate_series(1,3) as g from tenk1 order by g desc;
 -- interesting corner case: constant gets optimized into a seqscan
 explain (costs off)
   select max(100) from tenk1;
+-- pgrust:rowsort
 select max(100) from tenk1;
 
 -- try it on an inheritance tree
@@ -434,11 +553,13 @@ insert into minmaxtest3 values(17), (18);
 
 explain (costs off)
   select min(f1), max(f1) from minmaxtest;
+-- pgrust:rowsort
 select min(f1), max(f1) from minmaxtest;
 
 -- DISTINCT doesn't do anything useful here, but it shouldn't fail
 explain (costs off)
   select distinct min(f1), max(f1) from minmaxtest;
+-- pgrust:rowsort
 select distinct min(f1), max(f1) from minmaxtest;
 
 drop table minmaxtest cascade;
@@ -449,6 +570,7 @@ set local enable_sort = off;
 explain (costs off)
   select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
   from int4_tbl t0;
+-- pgrust:rowsort
 select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
 from int4_tbl t0;
 rollback;
@@ -552,18 +674,23 @@ drop table p_t1;
 create temp table t1(f1 int, f2 int);
 create temp table t2(f1 bigint, f2 oid);
 
+-- pgrust:rowsort
 select f1 from t1 left join t2 using (f1) group by f1;
+-- pgrust:rowsort
 select f1 from t1 left join t2 using (f1) group by t1.f1;
+-- pgrust:rowsort
 select t1.f1 from t1 left join t2 using (f1) group by t1.f1;
 -- only this one should fail:
 select t1.f1 from t1 left join t2 using (f1) group by f1;
 
 -- check case where we have to inject nullingrels into coerced join alias
+-- pgrust:rowsort
 select f1, count(*) from
 t1 x(x0,x1) left join (t1 left join t2 using(f1)) on (x0 = 0)
 group by f1;
 
 -- same, for a RelabelType coercion
+-- pgrust:rowsort
 select f2, count(*) from
 t1 x(x0,x1) left join (t1 left join t2 using(f2)) on (x0 = 0)
 group by f2;
@@ -625,6 +752,7 @@ from tenk1
 group by ten;
 
 -- Ensure consecutive NULLs are properly treated as distinct from each other
+-- pgrust:rowsort
 select array_agg(distinct val)
 from (select null as val from generate_series(1, 2));
 
@@ -657,61 +785,80 @@ from varchar_tbl;
 -- Test combinations of DISTINCT and/or ORDER BY
 --
 
+-- pgrust:rowsort
 select array_agg(a order by b)
   from (values (1,4),(2,3),(3,1),(4,2)) v(a,b);
+-- pgrust:rowsort
 select array_agg(a order by a)
   from (values (1,4),(2,3),(3,1),(4,2)) v(a,b);
+-- pgrust:rowsort
 select array_agg(a order by a desc)
   from (values (1,4),(2,3),(3,1),(4,2)) v(a,b);
+-- pgrust:rowsort
 select array_agg(b order by a desc)
   from (values (1,4),(2,3),(3,1),(4,2)) v(a,b);
 
+-- pgrust:rowsort
 select array_agg(distinct a)
   from (values (1),(2),(1),(3),(null),(2)) v(a);
+-- pgrust:rowsort
 select array_agg(distinct a order by a)
   from (values (1),(2),(1),(3),(null),(2)) v(a);
+-- pgrust:rowsort
 select array_agg(distinct a order by a desc)
   from (values (1),(2),(1),(3),(null),(2)) v(a);
+-- pgrust:rowsort
 select array_agg(distinct a order by a desc nulls last)
   from (values (1),(2),(1),(3),(null),(2)) v(a);
 
 -- multi-arg aggs, strict/nonstrict, distinct/order by
 
+-- pgrust:rowsort
 select aggfstr(a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
+-- pgrust:rowsort
 select aggfns(a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
 
+-- pgrust:rowsort
 select aggfstr(distinct a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
+-- pgrust:rowsort
 select aggfns(distinct a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
 
+-- pgrust:rowsort
 select aggfstr(distinct a,b,c order by b)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
+-- pgrust:rowsort
 select aggfns(distinct a,b,c order by b)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
 
 -- test specific code paths
 
+-- pgrust:rowsort
 select aggfns(distinct a,a,c order by c using ~<~,a)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
+-- pgrust:rowsort
 select aggfns(distinct a,a,c order by c using ~<~)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
+-- pgrust:rowsort
 select aggfns(distinct a,a,c order by a)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
+-- pgrust:rowsort
 select aggfns(distinct a,b,c order by a,c using ~<~,b)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
 
 -- test a more complex permutation that has previous caused issues
+-- pgrust:rowsort
 select
     string_agg(distinct 'a', ','),
     sum((
@@ -726,6 +873,7 @@ create view agg_view1 as
   select aggfns(a,b,c)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -734,6 +882,7 @@ create or replace view agg_view1 as
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
          generate_series(1,3) i;
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -742,6 +891,7 @@ create or replace view agg_view1 as
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
          generate_series(1,3) i;
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -749,6 +899,7 @@ create or replace view agg_view1 as
   select aggfns(a,b,c order by b+1)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -756,6 +907,7 @@ create or replace view agg_view1 as
   select aggfns(a,a,c order by b)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -763,6 +915,7 @@ create or replace view agg_view1 as
   select aggfns(a,b,c order by c using ~<~)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -771,6 +924,7 @@ create or replace view agg_view1 as
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
          generate_series(1,2) i;
 
+-- pgrust:rowsort
 select * from agg_view1;
 select pg_get_viewdef('agg_view1'::regclass);
 
@@ -788,39 +942,54 @@ select aggfns(distinct a,a,c order by a,b)
   from (values (1,1,'foo')) v(a,b,c), generate_series(1,2) i;
 
 -- string_agg tests
+-- pgrust:rowsort
 select string_agg(a,',') from (values('aaaa'),('bbbb'),('cccc')) g(a);
+-- pgrust:rowsort
 select string_agg(a,',') from (values('aaaa'),(null),('bbbb'),('cccc')) g(a);
+-- pgrust:rowsort
 select string_agg(a,'AB') from (values(null),(null),('bbbb'),('cccc')) g(a);
+-- pgrust:rowsort
 select string_agg(a,',') from (values(null),(null)) g(a);
 
 -- check some implicit casting cases, as per bug #5564
+-- pgrust:rowsort
 select string_agg(distinct f1, ',' order by f1) from varchar_tbl;  -- ok
 select string_agg(distinct f1::text, ',' order by f1) from varchar_tbl;  -- not ok
 select string_agg(distinct f1, ',' order by f1::text) from varchar_tbl;  -- not ok
+-- pgrust:rowsort
 select string_agg(distinct f1::text, ',' order by f1::text) from varchar_tbl;  -- ok
 
 -- string_agg, min, max bytea tests
 create table bytea_test_table(v bytea);
 
+-- pgrust:rowsort
 select string_agg(v, '') from bytea_test_table;
 
 insert into bytea_test_table values(decode('ff','hex'));
 
+-- pgrust:rowsort
 select string_agg(v, '') from bytea_test_table;
 
 insert into bytea_test_table values(decode('aa','hex'));
 
+-- pgrust:rowsort
 select string_agg(v, '') from bytea_test_table;
+-- pgrust:rowsort
 select string_agg(v, NULL) from bytea_test_table;
+-- pgrust:rowsort
 select string_agg(v, decode('ee', 'hex')) from bytea_test_table;
 
+-- pgrust:rowsort
 select min(v) from bytea_test_table;
+-- pgrust:rowsort
 select max(v) from bytea_test_table;
 
 insert into bytea_test_table values(decode('ffff','hex'));
 insert into bytea_test_table values(decode('aaaa','hex'));
 
+-- pgrust:rowsort
 select min(v) from bytea_test_table;
+-- pgrust:rowsort
 select max(v) from bytea_test_table;
 
 drop table bytea_test_table;
@@ -880,6 +1049,7 @@ select * from v_pagg_test order by y;
 set max_parallel_workers_per_gather = 2;
 explain (costs off)
 select array_dims(array_agg(s)) from (select * from pagg_test) s;
+-- pgrust:rowsort
 select array_dims(array_agg(s)) from (select * from pagg_test) s;
 
 -- Clean up
@@ -895,49 +1065,62 @@ drop table pagg_test;
 
 -- FILTER tests
 
+-- pgrust:rowsort
 select min(unique1) filter (where unique1 > 100) from tenk1;
 
+-- pgrust:rowsort
 select sum(1/ten) filter (where ten > 0) from tenk1;
 
 -- pgrust:rowsort
 select ten, sum(distinct four) filter (where four::text ~ '123') from onek a
 group by ten;
 
+-- pgrust:rowsort
 select ten, sum(distinct four) filter (where four > 10) from onek a
 group by ten
 having exists (select 1 from onek b where sum(distinct a.four) = b.four);
 
+-- pgrust:rowsort
 select max(foo COLLATE "C") filter (where (bar collate "POSIX") > '0')
 from (values ('a', 'b')) AS v(foo,bar);
 
+-- pgrust:rowsort
 select any_value(v) filter (where v > 2) from (values (1), (2), (3)) as v (v);
 
 -- outer reference in FILTER (PostgreSQL extension)
+-- pgrust:rowsort
 select (select count(*)
         from (values (1)) t0(inner_c))
 from (values (2),(3)) t1(outer_c); -- inner query is aggregation query
+-- pgrust:rowsort
 select (select count(*) filter (where outer_c <> 0)
         from (values (1)) t0(inner_c))
 from (values (2),(3)) t1(outer_c); -- outer query is aggregation query
+-- pgrust:rowsort
 select (select count(inner_c) filter (where outer_c <> 0)
         from (values (1)) t0(inner_c))
 from (values (2),(3)) t1(outer_c); -- inner query is aggregation query
+-- pgrust:rowsort
 select
   (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1))
      filter (where o.unique1 < 10))
 from tenk1 o;					-- outer query is aggregation query
 
 -- subquery in FILTER clause (PostgreSQL extension)
+-- pgrust:rowsort
 select sum(unique1) FILTER (WHERE
   unique1 IN (SELECT unique1 FROM onek where unique1 < 100)) FROM tenk1;
 
 -- exercise lots of aggregate parts with FILTER
+-- pgrust:rowsort
 select aggfns(distinct a,b,c order by a,c using ~<~,b) filter (where a > 1)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
     generate_series(1,2) i;
 
 -- check handling of bare boolean Var in FILTER
+-- pgrust:rowsort
 select max(0) filter (where b1) from bool_test;
+-- pgrust:rowsort
 select (select max(0) filter (where b1)) from bool_test;
 
 -- check for correct detection of nested-aggregate errors in FILTER
@@ -969,30 +1152,44 @@ from generate_series(1,5) x,
      (values (0::float8),(0.1),(0.25),(0.4),(0.5),(0.6),(0.75),(0.9),(1)) v(p)
 group by p order by p;
 
+-- pgrust:rowsort
 select percentile_cont(0.5) within group (order by b) from aggtest;
+-- pgrust:rowsort
 select percentile_cont(0.5) within group (order by b), sum(b) from aggtest;
+-- pgrust:rowsort
 select percentile_cont(0.5) within group (order by thousand) from tenk1;
+-- pgrust:rowsort
 select percentile_disc(0.5) within group (order by thousand) from tenk1;
+-- pgrust:rowsort
 select rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
+-- pgrust:rowsort
 select cume_dist(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
+-- pgrust:rowsort
 select percent_rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4),(5)) v(x);
+-- pgrust:rowsort
 select dense_rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
 
+-- pgrust:rowsort
 select percentile_disc(array[0,0.1,0.25,0.5,0.75,0.9,1]) within group (order by thousand)
 from tenk1;
+-- pgrust:rowsort
 select percentile_cont(array[0,0.25,0.5,0.75,1]) within group (order by thousand)
 from tenk1;
+-- pgrust:rowsort
 select percentile_disc(array[[null,1,0.5],[0.75,0.25,null]]) within group (order by thousand)
 from tenk1;
+-- pgrust:rowsort
 select percentile_cont(array[0,1,0.25,0.75,0.5,1,0.3,0.32,0.35,0.38,0.4]) within group (order by x)
 from generate_series(1,6) x;
 
+-- pgrust:rowsort
 select ten, mode() within group (order by string4) from tenk1 group by ten;
 
+-- pgrust:rowsort
 select percentile_disc(array[0.25,0.5,0.75]) within group (order by x)
 from unnest('{fred,jim,fred,jack,jill,fred,jill,jim,jim,sheila,jim,sheila}'::text[]) u(x);
 
@@ -1001,8 +1198,10 @@ select pg_collation_for(percentile_disc(1) within group (order by x collate "POS
   from (values ('fred'),('jim')) v(x);
 
 -- ordered-set aggs created with CREATE AGGREGATE
+-- pgrust:rowsort
 select test_rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
+-- pgrust:rowsort
 select test_percentile_disc(0.5) within group (order by thousand) from tenk1;
 
 -- ordered-set aggs can't use ungrouped vars in direct args:
@@ -1023,10 +1222,13 @@ select rank('fred') within group (order by x) from generate_series(1,5) x;
 select rank('adam'::text collate "C") within group (order by x collate "POSIX")
   from (values ('fred'),('jim')) v(x);
 -- hypothetical-set type unification successes:
+-- pgrust:rowsort
 select rank('adam'::varchar) within group (order by x) from (values ('fred'),('jim')) v(x);
+-- pgrust:rowsort
 select rank('3') within group (order by x) from generate_series(1,5) x;
 
 -- divide by zero check
+-- pgrust:rowsort
 select percent_rank(0) within group (order by x) from generate_series(1,0) x;
 
 -- deparse and multiple features:
@@ -1043,11 +1245,16 @@ select * from aggordview1 order by ten;
 drop view aggordview1;
 
 -- variadic aggregates
+-- pgrust:rowsort
 select least_agg(q1,q2) from int8_tbl;
+-- pgrust:rowsort
 select least_agg(variadic array[q1,q2]) from int8_tbl;
 
+-- pgrust:rowsort
 select cleast_agg(q1,q2) from int8_tbl;
+-- pgrust:rowsort
 select cleast_agg(4.5,f1) from int4_tbl;
+-- pgrust:rowsort
 select cleast_agg(variadic array[4.5,f1]) from int4_tbl;
 select pg_typeof(cleast_agg(variadic array[4.5,f1])) from int4_tbl;
 
@@ -1133,17 +1340,20 @@ select my_avg(one) filter (where one > 1),my_sum(one) from (values(1),(3)) t(one
 select my_avg(one),my_sum(two) from (values(1,2),(3,4)) t(one,two);
 
 -- exercise cases where OSAs share state
+-- pgrust:rowsort
 select
   percentile_cont(0.5) within group (order by a),
   percentile_disc(0.5) within group (order by a)
 from (values(1::float8),(3),(5),(7)) t(a);
 
+-- pgrust:rowsort
 select
   percentile_cont(0.25) within group (order by a),
   percentile_disc(0.5) within group (order by a)
 from (values(1::float8),(3),(5),(7)) t(a);
 
 -- these can't share state currently
+-- pgrust:rowsort
 select
   rank(4) within group (order by a),
   dense_rank(4) within group (order by a)
@@ -1260,6 +1470,7 @@ CREATE AGGREGATE balk(int4)
     INITCOND = '0'
 );
 
+-- pgrust:rowsort
 SELECT balk(hundred) FROM tenk1;
 
 ROLLBACK;
@@ -1332,6 +1543,7 @@ EXPLAIN (COSTS OFF)
 SELECT avg(c1.f ORDER BY c1.x, c1.y)
 FROM group_agg_pk c1 JOIN group_agg_pk c2 ON c1.x = c2.x
 GROUP BY c1.w, c1.z;
+-- pgrust:rowsort
 SELECT avg(c1.f ORDER BY c1.x, c1.y)
 FROM group_agg_pk c1 JOIN group_agg_pk c2 ON c1.x = c2.x
 GROUP BY c1.w, c1.z;
@@ -1403,6 +1615,7 @@ SET LOCAL parallel_setup_cost=0;
 SET LOCAL max_parallel_workers_per_gather=4;
 
 EXPLAIN (COSTS OFF) SELECT balk(hundred) FROM tenk1;
+-- pgrust:rowsort
 SELECT balk(hundred) FROM tenk1;
 
 ROLLBACK;
@@ -1442,6 +1655,7 @@ BEGIN
 END;
 $$;
 
+-- pgrust:rowsort
 SELECT eatarray(rwagg(ARRAY[1.0::real])), eatarray(rwagg(ARRAY[1.0::real]));
 
 ROLLBACK;
@@ -1466,6 +1680,7 @@ FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1) u;
 
+-- pgrust:rowsort
 SELECT variance(unique1::int4), sum(unique1::int8), regr_count(unique1::float8, unique1::float8)
 FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
@@ -1481,6 +1696,7 @@ FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1) u;
 
+-- pgrust:rowsort
 SELECT variance(unique1::int8), avg(unique1::numeric)
 FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
@@ -1496,7 +1712,9 @@ SELECT dense_rank(x) WITHIN GROUP (ORDER BY x) FROM (VALUES (1),(1),(2),(2),(3),
 -- Ensure that the STRICT checks for aggregates does not take NULLness
 -- of ORDER BY columns into account. See bug report around
 -- 2a505161-2727-2473-7c46-591ed108ac52@email.cz
+-- pgrust:rowsort
 SELECT min(x ORDER BY y) FROM (VALUES(1, NULL)) AS d(x,y);
+-- pgrust:rowsort
 SELECT min(x ORDER BY y) FROM (VALUES(1, 2)) AS d(x,y);
 
 -- check collation-sensitive matching between grouping expressions

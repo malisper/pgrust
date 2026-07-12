@@ -49,21 +49,27 @@ analyze onerow;
 -- before diving into more complex join syntax.
 --
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL AS tx;
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL tx;
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL AS t1 (a, b, c);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL t1 (a, b, c);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL t1 (a, b, c), J2_TBL t2 (d, e);
 
+-- pgrust:rowsort
 SELECT t1.a, t2.e
   FROM J1_TBL t1 (a, b, c), J2_TBL t2 (d, e)
   WHERE t1.a = t2.d;
@@ -84,17 +90,21 @@ SELECT i, k, t
   FROM J1_TBL CROSS JOIN J2_TBL;
 
 -- resolve previous ambiguity by specifying the table name
+-- pgrust:rowsort
 SELECT t1.i, k, t
   FROM J1_TBL t1 CROSS JOIN J2_TBL t2;
 
+-- pgrust:rowsort
 SELECT ii, tt, kk
   FROM (J1_TBL CROSS JOIN J2_TBL)
     AS tx (ii, jj, tt, ii2, kk);
 
+-- pgrust:rowsort
 SELECT tx.ii, tx.jj, tx.kk
   FROM (J1_TBL t1 (a, b, c) CROSS JOIN J2_TBL t2 (d, e))
     AS tx (ii, jj, tt, ii2, kk);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL CROSS JOIN J2_TBL a CROSS JOIN J2_TBL b;
 
@@ -117,6 +127,7 @@ SELECT *
   FROM J1_TBL INNER JOIN J2_TBL USING (i);
 
 -- Same as above, slightly different syntax
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL JOIN J2_TBL USING (i);
 
@@ -129,15 +140,21 @@ SELECT *
   ORDER BY b, t1.a;
 
 -- test join using aliases
+-- pgrust:rowsort
 SELECT * FROM J1_TBL JOIN J2_TBL USING (i) WHERE J1_TBL.t = 'one';  -- ok
+-- pgrust:rowsort
 SELECT * FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';  -- ok
 SELECT * FROM (J1_TBL JOIN J2_TBL USING (i)) AS x WHERE J1_TBL.t = 'one';  -- error
+-- pgrust:rowsort
 SELECT * FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE x.i = 1;  -- ok
 SELECT * FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE x.t = 'one';  -- error
 SELECT * FROM (J1_TBL JOIN J2_TBL USING (i) AS x) AS xx WHERE x.i = 1;  -- error (XXX could use better hint)
 SELECT * FROM J1_TBL a1 JOIN J2_TBL a2 USING (i) AS a1;  -- error
+-- pgrust:rowsort
 SELECT x.* FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';
+-- pgrust:rowsort
 SELECT ROW(x.*) FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';
+-- pgrust:rowsort
 SELECT row_to_json(x.*) FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';
 
 --
@@ -145,17 +162,21 @@ SELECT row_to_json(x.*) FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 
 -- Inner equi-join on all columns with the same name
 --
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL NATURAL JOIN J2_TBL;
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL t1 (a, b, c) NATURAL JOIN J2_TBL t2 (a, d);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL t1 (a, b, c) NATURAL JOIN J2_TBL t2 (d, a);
 
 -- mismatch number of columns
 -- currently, Postgres will fill in with underlying names
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL t1 (a, b) NATURAL JOIN J2_TBL t2 (a);
 
@@ -164,9 +185,11 @@ SELECT *
 -- Inner joins (equi-joins)
 --
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL JOIN J2_TBL ON (J1_TBL.i = J2_TBL.i);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL JOIN J2_TBL ON (J1_TBL.i = J2_TBL.k);
 
@@ -175,6 +198,7 @@ SELECT *
 -- Non-equi-joins
 --
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL JOIN J2_TBL ON (J1_TBL.i <= J2_TBL.k);
 
@@ -192,9 +216,11 @@ SELECT *
   FROM J1_TBL LEFT JOIN J2_TBL USING (i)
   ORDER BY i, k, t;
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL RIGHT OUTER JOIN J2_TBL USING (i);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL RIGHT JOIN J2_TBL USING (i);
 
@@ -206,9 +232,11 @@ SELECT *
   FROM J1_TBL FULL JOIN J2_TBL USING (i)
   ORDER BY i, k, t;
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL LEFT JOIN J2_TBL USING (i) WHERE (k = 1);
 
+-- pgrust:rowsort
 SELECT *
   FROM J1_TBL LEFT JOIN J2_TBL USING (i) WHERE (i = 1);
 
@@ -242,6 +270,7 @@ INSERT INTO t3 VALUES ( 'bb', 13 );
 INSERT INTO t3 VALUES ( 'cc', 23 );
 INSERT INTO t3 VALUES ( 'dd', 33 );
 
+-- pgrust:rowsort
 SELECT * FROM t1 FULL JOIN t2 USING (name) FULL JOIN t3 USING (name);
 
 --
@@ -249,18 +278,21 @@ SELECT * FROM t1 FULL JOIN t2 USING (name) FULL JOIN t3 USING (name);
 --
 
 -- Basic cases (we expect planner to pull up the subquery here)
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT * FROM t2) as s2
 INNER JOIN
 (SELECT * FROM t3) s3
 USING (name);
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT * FROM t2) as s2
 LEFT JOIN
 (SELECT * FROM t3) s3
 USING (name);
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT * FROM t2) as s2
 FULL JOIN
@@ -269,21 +301,25 @@ USING (name);
 
 -- Cases with non-nullable expressions in subquery results;
 -- make sure these go to null as expected
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s2_n, 2 as s2_2 FROM t2) as s2
 NATURAL INNER JOIN
 (SELECT name, n as s3_n, 3 as s3_2 FROM t3) s3;
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s2_n, 2 as s2_2 FROM t2) as s2
 NATURAL LEFT JOIN
 (SELECT name, n as s3_n, 3 as s3_2 FROM t3) s3;
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s2_n, 2 as s2_2 FROM t2) as s2
 NATURAL FULL JOIN
 (SELECT name, n as s3_n, 3 as s3_2 FROM t3) s3;
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s1_n, 1 as s1_1 FROM t1) as s1
 NATURAL INNER JOIN
@@ -291,6 +327,7 @@ NATURAL INNER JOIN
 NATURAL INNER JOIN
 (SELECT name, n as s3_n, 3 as s3_2 FROM t3) s3;
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s1_n, 1 as s1_1 FROM t1) as s1
 NATURAL FULL JOIN
@@ -298,6 +335,7 @@ NATURAL FULL JOIN
 NATURAL FULL JOIN
 (SELECT name, n as s3_n, 3 as s3_2 FROM t3) s3;
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s1_n FROM t1) as s1
 NATURAL FULL JOIN
@@ -307,6 +345,7 @@ NATURAL FULL JOIN
     (SELECT name, n as s3_n FROM t3) as s3
   ) ss2;
 
+-- pgrust:rowsort
 SELECT * FROM
 (SELECT name, n as s1_n FROM t1) as s1
 NATURAL FULL JOIN
@@ -317,6 +356,7 @@ NATURAL FULL JOIN
   ) ss2;
 
 -- Constants as join keys can also be problematic
+-- pgrust:rowsort
 SELECT * FROM
   (SELECT name, n as s1_n FROM t1) as s1
 FULL JOIN
@@ -339,25 +379,36 @@ insert into y values (2,222);
 insert into y values (3,333);
 insert into y values (4,null);
 
+-- pgrust:rowsort
 select * from x;
+-- pgrust:rowsort
 select * from y;
 
+-- pgrust:rowsort
 select * from x left join y on (x1 = y1 and x2 is not null);
+-- pgrust:rowsort
 select * from x left join y on (x1 = y1 and y2 is not null);
 
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1);
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1 and x2 is not null);
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1 and y2 is not null);
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1 and xx2 is not null);
 -- these should NOT give the same answers as above
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1) where (x2 is not null);
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1) where (y2 is not null);
+-- pgrust:rowsort
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1) where (xx2 is not null);
 
@@ -365,6 +416,7 @@ on (x1 = xx1) where (xx2 is not null);
 -- regression test: check for bug with propagation of implied equality
 -- to outside an IN
 --
+-- pgrust:rowsort
 select count(*) from tenk1 a where unique1 in
   (select unique1 from tenk1 b join tenk1 c using (unique1)
    where b.unique2 = 42);
@@ -373,6 +425,7 @@ select count(*) from tenk1 a where unique1 in
 -- regression test: check for failure to generate a plan with multiple
 -- degenerate IN clauses
 --
+-- pgrust:rowsort
 select count(*) from tenk1 x where
   x.unique1 in (select a.f1 from int4_tbl a,float8_tbl b where a.f1=b.f1) and
   x.unique1 = 0 and
@@ -382,6 +435,7 @@ select count(*) from tenk1 x where
 begin;
 set geqo = on;
 set geqo_threshold = 2;
+-- pgrust:rowsort
 select count(*) from tenk1 x where
   x.unique1 in (select a.f1 from int4_tbl a,float8_tbl b where a.f1=b.f1) and
   x.unique1 = 0 and
@@ -396,6 +450,7 @@ select aa, bb, unique1, unique1
   from tenk1 right join b_star on aa = unique1
   where bb < bb and bb is null;
 
+-- pgrust:rowsort
 select aa, bb, unique1, unique1
   from tenk1 right join b_star on aa = unique1
   where bb < bb and bb is null;
@@ -416,6 +471,7 @@ order by 1, 2;
 -- regression test: check a case where join_clause_is_movable_into()
 -- used to give an imprecise result, causing an assertion failure
 --
+-- pgrust:rowsort
 select count(*)
 from
   (select t3.tenthous as x1, coalesce(t1.stringu1, t2.stringu1) as x2
@@ -437,6 +493,7 @@ select a.f1, b.f1, t.thousand, t.tenthous from
   (select sum(f1) as f1 from int4_tbl i4b) b
 where b.f1 = t.thousand and a.f1 = b.f1 and (a.f1+b.f1+999) = t.tenthous;
 
+-- pgrust:rowsort
 select a.f1, b.f1, t.thousand, t.tenthous from
   tenk1 t,
   (select sum(f1)+1 as f1 from int4_tbl i4a) a,
@@ -474,6 +531,7 @@ from int4_tbl t1, int4_tbl t2
   left join int4_tbl t4 on t3.f1 > 1
 where t4.f1 is null;
 
+-- pgrust:rowsort
 select t1.f1
 from int4_tbl t1, int4_tbl t2
   left join int4_tbl t3 on t3.f1 > 0
@@ -583,6 +641,7 @@ select * from
   (select * from j2_tbl order by j2_tbl.i desc, j2_tbl.k asc) j2_tbl
   on j1_tbl.i = j2_tbl.i and j1_tbl.i = j2_tbl.k;
 
+-- pgrust:rowsort
 select * from
   j1_tbl full join
   (select * from j2_tbl order by j2_tbl.i desc, j2_tbl.k asc) j2_tbl
@@ -598,6 +657,7 @@ select count(*) from
   (select * from tenk1 y order by y.unique2) y
   on x.thousand = y.unique2 and x.twothousand = y.hundred and x.fivethous = y.unique2;
 
+-- pgrust:rowsort
 select count(*) from
   (select * from tenk1 x order by x.thousand, x.twothousand, x.fivethous) x
   left join
@@ -652,10 +712,13 @@ INSERT INTO t3 VALUES (7, 8);
 INSERT INTO t3 VALUES (500, 100);
 
 DELETE FROM t3 USING t1 table1 WHERE t3.x = table1.a;
+-- pgrust:rowsort
 SELECT * FROM t3;
 DELETE FROM t3 USING t1 JOIN t2 USING (a) WHERE t3.x > t1.a;
+-- pgrust:rowsort
 SELECT * FROM t3;
 DELETE FROM t3 USING t3 t3_other WHERE t3.x = t3_other.x AND t3.y = t3_other.y;
+-- pgrust:rowsort
 SELECT * FROM t3;
 
 -- Test join against inheritance tree
@@ -664,6 +727,7 @@ create temp table t2a () inherits (t2);
 
 insert into t2a values (200, 2001);
 
+-- pgrust:rowsort
 select * from t1 left join t2 on (t1.a = t2.a);
 
 -- Test matching of column name with wrong alias
@@ -672,10 +736,12 @@ select t1.x from t1 join t3 on (t1.a = t3.x);
 
 -- Test matching of locking clause with wrong alias
 
+-- pgrust:rowsort
 select t1.*, t2.*, unnamed_join.* from
   t1 join t2 on (t1.a = t2.a), t3 as unnamed_join
   for update of unnamed_join;
 
+-- pgrust:rowsort
 select foo.*, unnamed_join.* from
   t1 join t2 using (a) as foo, t3 as unnamed_join
   for update of unnamed_join;
@@ -709,8 +775,10 @@ set enable_nestloop to off;
 
 -- these should give the same results
 
+-- pgrust:rowsort
 select tt1.*, tt2.* from tt1 left join tt2 on tt1.joincol = tt2.joincol;
 
+-- pgrust:rowsort
 select tt1.*, tt2.* from tt2 right join tt1 on tt1.joincol = tt2.joincol;
 
 reset enable_hashjoin;
@@ -734,6 +802,7 @@ select * from tbl_ra t1
 where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2;
 
 -- and check we get the expected results
+-- pgrust:rowsort
 select * from tbl_ra t1
 where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2;
 
@@ -756,6 +825,7 @@ select * from tbl_rs t1 join
   on true;
 
 -- and check we get the expected results
+-- pgrust:rowsort
 select * from tbl_rs t1 join
   lateral (select * from tbl_rs t2 where t2.a in
             (select t1.a+t3.a from tbl_rs t3) and t2.a < 5)
@@ -792,6 +862,7 @@ set enable_memoize to off;
 explain (costs off)
 select count(*) from tenk1 a, tenk1 b
   where a.hundred = b.thousand and (b.fivethous % 10) < 10;
+-- pgrust:rowsort
 select count(*) from tenk1 a, tenk1 b
   where a.hundred = b.thousand and (b.fivethous % 10) < 10;
 
@@ -907,6 +978,7 @@ insert into tt6 values(1, 9);
 insert into tt6 values(1, 2);
 insert into tt6 values(2, 9);
 
+-- pgrust:rowsort
 select * from tt5,tt6 where tt5.f1 = tt6.f1 and tt5.f1 = tt5.f2 - tt6.f2;
 
 --
@@ -924,6 +996,7 @@ insert into yy values (101, 1);
 insert into yy values (201, 2);
 insert into yy values (301, NULL);
 
+-- pgrust:rowsort
 select yy.pkyy as yy_pkyy, yy.pkxx as yy_pkxx, yya.pkyy as yya_pkyy,
        xxa.pkxx as xxa_pkxx, xxb.pkxx as xxb_pkxx
 from yy
@@ -942,6 +1015,7 @@ create temp table zt3 (f3 int primary key);
 insert into zt1 values(53);
 insert into zt2 values(53);
 
+-- pgrust:rowsort
 select * from
   zt2 left join zt3 on (f2 = f3)
       left join zt1 on (f3 = f1)
@@ -949,6 +1023,7 @@ where f2 = 53;
 
 create temp view zv1 as select *,'dummy'::text AS junk from zt1;
 
+-- pgrust:rowsort
 select * from
   zt2 left join zt3 on (f2 = f3)
       left join zv1 on (f3 = f1)
@@ -959,6 +1034,7 @@ where f2 = 53;
 -- (as seen in early 8.3.x releases)
 --
 
+-- pgrust:rowsort
 select a.unique2, a.ten, b.tenthous, b.unique2, b.hundred
 from tenk1 a left join tenk1 b on a.unique2 = b.tenthous
 where a.unique1 = 42 and
@@ -987,6 +1063,7 @@ set enable_nestloop = 0;
 create temp table a (i integer);
 create temp table b (x integer, y integer);
 
+-- pgrust:rowsort
 select * from a left join b on i = x and i = y and x = i;
 
 rollback;
@@ -1077,6 +1154,7 @@ rollback;
 -- test incorrect handling of placeholders that only appear in targetlists,
 -- per bug #6154
 --
+-- pgrust:rowsort
 SELECT * FROM
 ( SELECT 1 as key1 ) sub1
 LEFT JOIN
@@ -1094,6 +1172,7 @@ LEFT JOIN
 ON sub1.key1 = sub2.key3;
 
 -- test the path using join aliases, too
+-- pgrust:rowsort
 SELECT * FROM
 ( SELECT 1 as key1 ) sub1
 LEFT JOIN
@@ -1123,6 +1202,7 @@ SELECT qq, unique1
   USING (qq)
   INNER JOIN tenk1 c ON qq = unique2;
 
+-- pgrust:rowsort
 SELECT qq, unique1
   FROM
   ( SELECT COALESCE(q1, 0) AS qq FROM int8_tbl a ) AS ss1
@@ -1177,6 +1257,7 @@ from nt3 as nt3
     on ss2.id = nt3.nt2_id
 where nt3.id = 1 and ss2.b3;
 
+-- pgrust:rowsort
 select nt3.id
 from nt3 as nt3
   left join
@@ -1226,6 +1307,7 @@ select * from
       where ss1.loc = ss1.lat) as ss2
 where i41.f1 > 0;
 
+-- pgrust:rowsort
 select * from
   int4_tbl as i41,
   lateral
@@ -1240,7 +1322,9 @@ where i41.f1 > 0;
 --
 -- test the corner cases FULL JOIN ON TRUE and FULL JOIN ON FALSE
 --
+-- pgrust:rowsort
 select * from int4_tbl a full join int4_tbl b on true;
+-- pgrust:rowsort
 select * from int4_tbl a full join int4_tbl b on false;
 
 --
@@ -1291,6 +1375,7 @@ select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   on (subq1.y1 = t2.unique1)
 where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 
+-- pgrust:rowsort
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
@@ -1355,6 +1440,7 @@ select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   on (subq1.y1 = t2.unique1)
 where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
 
+-- pgrust:rowsort
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
   inner join int4_tbl i1
@@ -1374,6 +1460,7 @@ explain (verbose, costs off)
 select * from
   (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
+-- pgrust:rowsort
 select * from
   (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
@@ -1448,6 +1535,7 @@ select * from
            select a as b) as t3
 where b;
 
+-- pgrust:rowsort
 select * from
   (select 0 as z) as t1
   left join
@@ -1464,6 +1552,7 @@ with ctetable as not materialized ( select 1 as f1 )
 select * from ctetable c1
 where f1 in ( select c3.f1 from ctetable c2 full join ctetable c3 on true );
 
+-- pgrust:rowsort
 with ctetable as not materialized ( select 1 as f1 )
 select * from ctetable c1
 where f1 in ( select c3.f1 from ctetable c2 full join ctetable c3 on true );
@@ -1498,6 +1587,7 @@ select t1.a, s.a from t_append t1
   ) s on true
 where s.a is not null;
 
+-- pgrust:rowsort
 select t1.a, s.a from t_append t1
   left join t_append t2 on t1.a = t2.b
   join lateral (
@@ -1574,10 +1664,12 @@ $$select row($1)::int4_tbl$$ language sql;
 
 explain (verbose, costs off)
 select * from mki8(1,2);
+-- pgrust:rowsort
 select * from mki8(1,2);
 
 explain (verbose, costs off)
 select * from mki4(42);
+-- pgrust:rowsort
 select * from mki4(42);
 
 drop function mki8(bigint, bigint);
@@ -1642,6 +1734,7 @@ select count(*) from
   left join tenk1 c on a.unique2 = b.unique1 and c.thousand = a.thousand
   join int4_tbl on b.thousand = f1;
 
+-- pgrust:rowsort
 select count(*) from
   tenk1 a join tenk1 b on a.unique1 = b.unique2
   left join tenk1 c on a.unique2 = b.unique1 and c.thousand = a.thousand
@@ -1685,6 +1778,7 @@ select * from
 left join (values (1, 10), (2, 20)) as v2(v2x,v2y) on v2x = v1x
 left join unnest(v1ys) as u1(u1y) on u1y = v2y;
 
+-- pgrust:rowsort
 select * from
 (values (1, array[10,20]), (2, array[20,30])) as v1(v1x,v1ys)
 left join (values (1, 10), (2, 20)) as v2(v2x,v2y) on v2x = v1x
@@ -1699,6 +1793,7 @@ select q1, unique2, thousand, hundred
   from int8_tbl a left join tenk1 b on q1 = unique2
   where coalesce(thousand,123) = q1 and q1 = coalesce(hundred,123);
 
+-- pgrust:rowsort
 select q1, unique2, thousand, hundred
   from int8_tbl a left join tenk1 b on q1 = unique2
   where coalesce(thousand,123) = q1 and q1 = coalesce(hundred,123);
@@ -1708,6 +1803,7 @@ select f1, unique2, case when unique2 is null then f1 else 0 end
   from int4_tbl a left join tenk1 b on f1 = unique2
   where (case when unique2 is null then f1 else 0 end) = 0;
 
+-- pgrust:rowsort
 select f1, unique2, case when unique2 is null then f1 else 0 end
   from int4_tbl a left join tenk1 b on f1 = unique2
   where (case when unique2 is null then f1 else 0 end) = 0;
@@ -1721,6 +1817,7 @@ select a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
   from tenk1 a left join tenk1 b on b.thousand = a.unique1                        left join tenk1 c on c.unique2 = coalesce(b.twothousand, a.twothousand)
   where a.unique2 < 10 and coalesce(b.twothousand, a.twothousand) = 44;
 
+-- pgrust:rowsort
 select a.unique1, b.unique1, c.unique1, coalesce(b.twothousand, a.twothousand)
   from tenk1 a left join tenk1 b on b.thousand = a.unique1                        left join tenk1 c on c.unique2 = coalesce(b.twothousand, a.twothousand)
   where a.unique2 < 10 and coalesce(b.twothousand, a.twothousand) = 44;
@@ -1731,6 +1828,7 @@ explain (costs off)
 select * from int8_tbl t1 left join int8_tbl t2 on t1.q2 = t2.q1,
   lateral (select * from int8_tbl t3 where t2.q1 = t2.q2) ss;
 
+-- pgrust:rowsort
 select * from int8_tbl t1 left join int8_tbl t2 on t1.q2 = t2.q1,
   lateral (select * from int8_tbl t3 where t2.q1 = t2.q2) ss;
 
@@ -1752,6 +1850,7 @@ left join
   ) foo3
 using (join_key);
 
+-- pgrust:rowsort
 select foo1.join_key as foo1_id, foo3.join_key AS foo3_id, bug_field from
   (values (0),(1)) foo1(join_key)
 left join
@@ -1805,6 +1904,7 @@ select t1.* from
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
 
+-- pgrust:rowsort
 select t1.* from
   text_tbl t1
   left join (select *, '***'::text as d1 from int8_tbl i8b1) b1
@@ -1828,6 +1928,7 @@ select t1.* from
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
 
+-- pgrust:rowsort
 select t1.* from
   text_tbl t1
   left join (select *, '***'::text as d1 from int8_tbl i8b1) b1
@@ -1852,6 +1953,7 @@ select t1.* from
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
 
+-- pgrust:rowsort
 select t1.* from
   text_tbl t1
   left join (select *, '***'::text as d1 from int8_tbl i8b1) b1
@@ -1874,6 +1976,7 @@ select * from
   left join int4_tbl i4
   on i8.q1 = i4.f1;
 
+-- pgrust:rowsort
 select * from
   text_tbl t1
   inner join int8_tbl i8
@@ -1916,6 +2019,7 @@ select * from
   lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss
 where t1.f1 = ss.f1;
 
+-- pgrust:rowsort
 select * from
   text_tbl t1
   left join int8_tbl i8
@@ -1932,6 +2036,7 @@ select * from
   lateral (select ss1.* from text_tbl t3 limit 1) as ss2
 where t1.f1 = ss2.f1;
 
+-- pgrust:rowsort
 select * from
   text_tbl t1
   left join int8_tbl i8
@@ -1949,6 +2054,7 @@ select 1 from
   lateral (select tt4.f1 as c0 from text_tbl as tt5 limit 1) as ss1
 where tt1.f1 = ss1.c0;
 
+-- pgrust:rowsort
 select 1 from
   text_tbl as tt1
   inner join text_tbl as tt2 on (tt1.f1 = 'foo')
@@ -1966,6 +2072,7 @@ select 1 from
   on false,
   lateral (select i4.f1, ss1.n from int8_tbl as i8 limit 1) as ss3;
 
+-- pgrust:rowsort
 select 1 from
   int4_tbl as i4
   inner join
@@ -2011,6 +2118,7 @@ select ss2.* from
   lateral (select i41.*, i8.*, ss1.* from text_tbl limit 1) ss2
 where ss1.c2 = 0;
 
+-- pgrust:rowsort
 select ss2.* from
   int4_tbl i41
   left join int8_tbl i8
@@ -2032,6 +2140,7 @@ select * from
     (tenk1 as a1 full join (select 1 as id) as yy on (a1.unique1 = yy.id))
   on (xx.id = coalesce(yy.id));
 
+-- pgrust:rowsort
 select * from
   (select 1 as id) as xx
   left join
@@ -2061,6 +2170,7 @@ explain (verbose, costs off)
   select a.q2, b.q1
     from int8_tbl a left join int8_tbl b on a.q2 = coalesce(b.q1, 1)
     where coalesce(b.q1, 1) > 0;
+-- pgrust:rowsort
 select a.q2, b.q1
   from int8_tbl a left join int8_tbl b on a.q2 = coalesce(b.q1, 1)
   where coalesce(b.q1, 1) > 0;
@@ -2077,6 +2187,7 @@ select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
   where (b.unique2, random() > 0) = any (select q1, random() > 0 from int8_tbl c where c.q1 < b.unique1);
 
+-- pgrust:rowsort
 select a.unique1, b.unique2
   from onek a left join onek b on a.unique1 = b.unique2
   where (b.unique2, random() > 0) = any (select q1, random() > 0 from int8_tbl c where c.q1 < b.unique1);
@@ -2090,6 +2201,7 @@ select a.unique1, b.unique2
   from onek a full join onek b on a.unique1 = b.unique2
   where a.unique1 = 42;
 
+-- pgrust:rowsort
 select a.unique1, b.unique2
   from onek a full join onek b on a.unique1 = b.unique2
   where a.unique1 = 42;
@@ -2099,6 +2211,7 @@ select a.unique1, b.unique2
   from onek a full join onek b on a.unique1 = b.unique2
   where b.unique2 = 43;
 
+-- pgrust:rowsort
 select a.unique1, b.unique2
   from onek a full join onek b on a.unique1 = b.unique2
   where b.unique2 = 43;
@@ -2108,6 +2221,7 @@ select a.unique1, b.unique2
   from onek a full join onek b on a.unique1 = b.unique2
   where a.unique1 = 42 and b.unique2 = 42;
 
+-- pgrust:rowsort
 select a.unique1, b.unique2
   from onek a full join onek b on a.unique1 = b.unique2
   where a.unique1 = 42 and b.unique2 = 42;
@@ -2123,6 +2237,7 @@ full join
   (select * from (values(456,2)) w(v1,v2) join int8_tbl i82 on q2=v1) ss2
 on true;
 
+-- pgrust:rowsort
 select * from
   (select * from int8_tbl i81 join (values(123,2)) v(v1,v2) on q2=v1) ss1
 full join
@@ -2329,11 +2444,13 @@ insert into parent values (1, 10), (2, 20), (3, 30);
 insert into child values (1, 100), (4, 400);
 
 -- this case is optimizable
+-- pgrust:rowsort
 select p.* from parent p left join child c on (p.k = c.k);
 explain (costs off)
   select p.* from parent p left join child c on (p.k = c.k);
 
 -- this case is not
+-- pgrust:rowsort
 select p.*, linked from parent p
   left join (select c.*, true as linked from child c) as ss
   on (p.k = ss.k);
@@ -2343,6 +2460,7 @@ explain (costs off)
     on (p.k = ss.k);
 
 -- check for a 9.0rc1 bug: join removal breaks pseudoconstant qual handling
+-- pgrust:rowsort
 select p.* from
   parent p left join child c on (p.k = c.k)
   where p.k = 1 and p.k = 2;
@@ -2351,6 +2469,7 @@ select p.* from
   parent p left join child c on (p.k = c.k)
   where p.k = 1 and p.k = 2;
 
+-- pgrust:rowsort
 select p.* from
   (parent p left join child c on (p.k = c.k)) join parent x on p.k = x.k
   where p.k = 1 and p.k = 2;
@@ -2367,7 +2486,9 @@ CREATE TEMP TABLE b (id int PRIMARY KEY, a_id int);
 INSERT INTO a VALUES (0), (1);
 INSERT INTO b VALUES (0, 0), (1, NULL);
 
+-- pgrust:rowsort
 SELECT * FROM b LEFT JOIN a ON (b.a_id = a.id) WHERE (a.id IS NULL OR a.id > 0);
+-- pgrust:rowsort
 SELECT b.* FROM b LEFT JOIN a ON (b.a_id = a.id) WHERE (a.id IS NULL OR a.id > 0);
 
 rollback;
@@ -2378,6 +2499,7 @@ begin;
 create temp table innertab (id int8 primary key, dat1 int8);
 insert into innertab values(123, 42);
 
+-- pgrust:rowsort
 SELECT * FROM
     (SELECT 1 AS x) ss1
   LEFT JOIN
@@ -2436,6 +2558,7 @@ from
   on t0.f1 = ss.case1
 where ss.stringu2 !~* ss.case1;
 
+-- pgrust:rowsort
 select t0.*
 from
  text_tbl t0
@@ -2464,6 +2587,7 @@ from t t1
     on true
 where t1.a = s.c;
 
+-- pgrust:rowsort
 select 1
 from t t1
   left join (select 2 as c
@@ -2489,6 +2613,7 @@ where exists (select 1 from t t4
                 join t t6 on t5.b = t6.b
               where t1.a = t4.a and t3.a = t5.a and t4.a = 1);
 
+-- pgrust:rowsort
 select t1.a from t t1
   left join t t2 on t1.a = t2.a
        join t t3 on true
@@ -2510,6 +2635,7 @@ explain (costs off)
 select * from t t1, t t2 where exists
   (select 1 from t t3 where t1.a = t3.a and t2.b = t3.b and t3.a = 1 and t3.b = 2);
 
+-- pgrust:rowsort
 select * from t t1, t t2 where exists
   (select 1 from t t3 where t1.a = t3.a and t2.b = t3.b and t3.a = 1 and t3.b = 2);
 
@@ -2531,6 +2657,7 @@ explain (costs off)
 select * from p t1 where exists
   (select 1 from p t2 where t1.a = t2.a and t1.a = 1);
 
+-- pgrust:rowsort
 select * from p t1 where exists
   (select 1 from p t2 where t1.a = t2.a and t1.a = 1);
 
@@ -2560,6 +2687,7 @@ from t t1
   left join t t4 on true
 where s.a < s.c;
 
+-- pgrust:rowsort
 select t1.a, s.*
 from t t1
   left join lateral (select t2.a, coalesce(t1.a, 1) as c
@@ -2579,6 +2707,7 @@ select i8.*, ss.v, t.unique2
     left join tenk1 t on t.unique2 = ss.v
 where q2 = 456;
 
+-- pgrust:rowsort
 select i8.*, ss.v, t.unique2
   from int8_tbl i8
     left join int4_tbl i4 on i4.f1 = 1
@@ -2597,6 +2726,7 @@ select * from
   right join int4_tbl on true
 where ss.a = ss.phv and f1 = 0;
 
+-- pgrust:rowsort
 select * from
   (select *, 12 as phv from parttbl) as ss
   right join int4_tbl on true
@@ -2608,6 +2738,7 @@ select * from
   int8_tbl x join (int4_tbl x cross join int4_tbl y) j on q1 = f1; -- error
 select * from
   int8_tbl x join (int4_tbl x cross join int4_tbl y) j on q1 = y.f1; -- error
+-- pgrust:rowsort
 select * from
   int8_tbl x join (int4_tbl x cross join int4_tbl y(ff)) j on q1 = f1; -- ok
 
@@ -2626,6 +2757,7 @@ analyze sj;
 -- Trivial self-join case.
 explain (costs off)
 select p.* from sj p, sj q where q.a = p.a and q.b = q.a - 1;
+-- pgrust:rowsort
 select p.* from sj p, sj q where q.a = p.a and q.b = q.a - 1;
 
 -- Self-join removal performs after a subquery pull-up process and could remove
@@ -2634,6 +2766,7 @@ explain (costs off)
 select * from sj p
 where exists (select * from sj q
               where q.a = p.a and q.b < 10);
+-- pgrust:rowsort
 select * from sj p
 where exists (select * from sj q
               where q.a = p.a and q.b < 10);
@@ -2751,12 +2884,14 @@ INSERT INTO sj VALUES (3, 1, 3);
 EXPLAIN (COSTS OFF)
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND j1.a = 2 AND j2.a = 3;
 -- Return one row
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND j1.a = 2 AND j2.a = 3;
 
 -- Remove SJ, define uniqueness by a constant
 EXPLAIN (COSTS OFF)
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND j1.a = 2 AND j2.a = 2;
 -- Return one row
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND j1.a = 2 AND j2.a = 2;
 
 -- Remove SJ, define uniqueness by a constant expression
@@ -2766,6 +2901,7 @@ WHERE j1.b = j2.b
   AND j1.a = (EXTRACT(DOW FROM current_timestamp(0))/15 + 3)::int
   AND (EXTRACT(DOW FROM current_timestamp(0))/15 + 3)::int = j2.a;
 -- Return one row
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2
 WHERE j1.b = j2.b
   AND j1.a = (EXTRACT(DOW FROM current_timestamp(0))/15 + 3)::int
@@ -2775,12 +2911,14 @@ WHERE j1.b = j2.b
 EXPLAIN (COSTS OFF)
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND j1.a = 1 AND j2.a = 1;
 -- Return no rows
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND j1.a = 1 AND j2.a = 1;
 
 -- Shuffle a clause. Remove SJ
 EXPLAIN (COSTS OFF)
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND 1 = j1.a AND j2.a = 1;
 -- Return no rows
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND 1 = j1.a AND j2.a = 1;
 
 -- SJE Corner case: a 'a.x=a.x' clause, have replaced with 'a.x IS NOT NULL'
@@ -2789,6 +2927,7 @@ EXPLAIN (COSTS OFF)
 SELECT t4.*
 FROM (SELECT t1.*, t2.a AS a1 FROM sj t1, sj t2 WHERE t1.b = t2.b) AS t3
 JOIN sj t4 ON (t4.a = t3.a) WHERE t3.a1 = 42;
+-- pgrust:rowsort
 SELECT t4.*
 FROM (SELECT t1.*, t2.a AS a1 FROM sj t1, sj t2 WHERE t1.b = t2.b) AS t3
 JOIN sj t4 ON (t4.a = t3.a) WHERE t3.a1 = 42;
@@ -2812,6 +2951,7 @@ WHERE j1.b = j2.b
   AND (j1.a*j1.a) = (EXTRACT(DOW FROM current_timestamp(0))/15 + 3)::int
   AND (EXTRACT(DOW FROM current_timestamp(0))/15 + 3)::int = (j2.a*j2.a);
 -- Empty set of rows should be returned
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2
 WHERE j1.b = j2.b
   AND (j1.a*j1.a) = (EXTRACT(DOW FROM current_timestamp(0))/15 + 3)::int
@@ -2824,6 +2964,7 @@ WHERE j1.b = j2.b
   AND (j1.a*j1.c/3) = (random()/3 + 3)::int
   AND (random()/3 + 3)::int = (j2.a*j2.c/3);
 -- Return one row
+-- pgrust:rowsort
 SELECT * FROM sj j1, sj j2
 WHERE j1.b = j2.b
   AND (j1.a*j1.c/3) = (random()/3 + 3)::int
@@ -3030,6 +3171,7 @@ select 1 from emp1 full join
         on true
     where false) s on true
 where false;
+-- pgrust:rowsort
 select 1 from emp1 full join
     (select * from emp1 t1 join
         emp1 t2 join emp1 t3 on t2.id = t3.id
@@ -3043,6 +3185,7 @@ insert into emp1 values (2, 1);
 explain (costs off)
 select * from emp1 t1 where exists (select * from emp1 t2
                                     where t2.id = t1.code and t2.code > 0);
+-- pgrust:rowsort
 select * from emp1 t1 where exists (select * from emp1 t2
                                     where t2.id = t1.code and t2.code > 0);
 
@@ -3154,11 +3297,13 @@ where false;
 -- Test LATERAL
 --
 
+-- pgrust:rowsort
 select unique2, x.*
 from tenk1 a, lateral (select * from int4_tbl b where f1 = a.unique1) x;
 explain (costs off)
   select unique2, x.*
   from tenk1 a, lateral (select * from int4_tbl b where f1 = a.unique1) x;
+-- pgrust:rowsort
 select unique2, x.*
 from int4_tbl x, lateral (select unique2 from tenk1 where f1 = unique1) ss;
 explain (costs off)
@@ -3167,6 +3312,7 @@ explain (costs off)
 explain (costs off)
   select unique2, x.*
   from int4_tbl x cross join lateral (select unique2 from tenk1 where f1 = unique1) ss;
+-- pgrust:rowsort
 select unique2, x.*
 from int4_tbl x left join lateral (select unique1, unique2 from tenk1 where f1 = unique1) ss on true;
 explain (costs off)
@@ -3175,10 +3321,13 @@ explain (costs off)
 
 -- check scoping of lateral versus parent references
 -- the first of these should return int8_tbl.q2, the second int8_tbl.q1
+-- pgrust:rowsort
 select *, (select r from (select q1 as q2) x, (select q2 as r) y) from int8_tbl;
+-- pgrust:rowsort
 select *, (select r from (select q1 as q2) x, lateral (select q2 as r) y) from int8_tbl;
 
 -- lateral with function in FROM
+-- pgrust:rowsort
 select count(*) from tenk1 a, lateral generate_series(1,two) g;
 explain (costs off)
   select count(*) from tenk1 a, lateral generate_series(1,two) g;
@@ -3193,6 +3342,7 @@ explain (costs off)
   select * from generate_series(100,200) g,
     lateral (select * from int8_tbl a where g = q1 union all
              select * from int8_tbl b where g = q2) ss;
+-- pgrust:rowsort
 select * from generate_series(100,200) g,
   lateral (select * from int8_tbl a where g = q1 union all
            select * from int8_tbl b where g = q2) ss;
@@ -3201,6 +3351,7 @@ select * from generate_series(100,200) g,
 explain (costs off)
   select count(*) from tenk1 a,
     tenk1 b join lateral (values(a.unique1)) ss(x) on b.unique2 = ss.x;
+-- pgrust:rowsort
 select count(*) from tenk1 a,
   tenk1 b join lateral (values(a.unique1)) ss(x) on b.unique2 = ss.x;
 
@@ -3208,6 +3359,7 @@ select count(*) from tenk1 a,
 explain (costs off)
   select count(*) from tenk1 a,
     tenk1 b join lateral (values(a.unique1),(-1)) ss(x) on b.unique2 = ss.x;
+-- pgrust:rowsort
 select count(*) from tenk1 a,
   tenk1 b join lateral (values(a.unique1),(-1)) ss(x) on b.unique2 = ss.x;
 
@@ -3223,39 +3375,52 @@ select * from int8_tbl a,
   order by a.q1, a.q2, x.q1, x.q2, ss.z;
 
 -- lateral reference to a join alias variable
+-- pgrust:rowsort
 select * from (select f1/2 as x from int4_tbl) ss1 join int4_tbl i4 on x = f1,
   lateral (select x) ss2(y);
+-- pgrust:rowsort
 select * from (select f1 as x from int4_tbl) ss1 join int4_tbl i4 on x = f1,
   lateral (values(x)) ss2(y);
+-- pgrust:rowsort
 select * from ((select f1/2 as x from int4_tbl) ss1 join int4_tbl i4 on x = f1) j,
   lateral (select x) ss2(y);
 
 -- lateral references requiring pullup
+-- pgrust:rowsort
 select * from (values(1)) x(lb),
   lateral generate_series(lb,4) x4;
+-- pgrust:rowsort
 select * from (select f1/1000000000 from int4_tbl) x(lb),
   lateral generate_series(lb,4) x4;
+-- pgrust:rowsort
 select * from (values(1)) x(lb),
   lateral (values(lb)) y(lbcopy);
+-- pgrust:rowsort
 select * from (values(1)) x(lb),
   lateral (select lb from int4_tbl) y(lbcopy);
+-- pgrust:rowsort
 select * from
   int8_tbl x left join (select q1,coalesce(q2,0) q2 from int8_tbl) y on x.q2 = y.q1,
   lateral (values(x.q1,y.q1,y.q2)) v(xq1,yq1,yq2);
+-- pgrust:rowsort
 select * from
   int8_tbl x left join (select q1,coalesce(q2,0) q2 from int8_tbl) y on x.q2 = y.q1,
   lateral (select x.q1,y.q1,y.q2) v(xq1,yq1,yq2);
+-- pgrust:rowsort
 select x.* from
   int8_tbl x left join (select q1,coalesce(q2,0) q2 from int8_tbl) y on x.q2 = y.q1,
   lateral (select x.q1,y.q1,y.q2) v(xq1,yq1,yq2);
+-- pgrust:rowsort
 select v.* from
   (int8_tbl x left join (select q1,coalesce(q2,0) q2 from int8_tbl) y on x.q2 = y.q1)
   left join int4_tbl z on z.f1 = x.q2,
   lateral (select x.q1,y.q1 union all select x.q2,y.q2) v(vx,vy);
+-- pgrust:rowsort
 select v.* from
   (int8_tbl x left join (select q1,(select coalesce(q2,0)) q2 from int8_tbl) y on x.q2 = y.q1)
   left join int4_tbl z on z.f1 = x.q2,
   lateral (select x.q1,y.q1 union all select x.q2,y.q2) v(vx,vy);
+-- pgrust:rowsort
 select v.* from
   (int8_tbl x left join (select q1,(select coalesce(q2,0)) q2 from int8_tbl) y on x.q2 = y.q1)
   left join int4_tbl z on z.f1 = x.q2,
@@ -3265,6 +3430,7 @@ explain (verbose, costs off)
 select * from
   int8_tbl a left join
   lateral (select *, a.q2 as x from int8_tbl b) ss on a.q2 = ss.q1;
+-- pgrust:rowsort
 select * from
   int8_tbl a left join
   lateral (select *, a.q2 as x from int8_tbl b) ss on a.q2 = ss.q1;
@@ -3272,6 +3438,7 @@ explain (verbose, costs off)
 select * from
   int8_tbl a left join
   lateral (select *, coalesce(a.q2, 42) as x from int8_tbl b) ss on a.q2 = ss.q1;
+-- pgrust:rowsort
 select * from
   int8_tbl a left join
   lateral (select *, coalesce(a.q2, 42) as x from int8_tbl b) ss on a.q2 = ss.q1;
@@ -3281,11 +3448,13 @@ select * from
 explain (verbose, costs off)
 select * from int4_tbl i left join
   lateral (select * from int2_tbl j where i.f1 = j.f1) k on true;
+-- pgrust:rowsort
 select * from int4_tbl i left join
   lateral (select * from int2_tbl j where i.f1 = j.f1) k on true;
 explain (verbose, costs off)
 select * from int4_tbl i left join
   lateral (select coalesce(i) from int2_tbl j where i.f1 = j.f1) k on true;
+-- pgrust:rowsort
 select * from int4_tbl i left join
   lateral (select coalesce(i) from int2_tbl j where i.f1 = j.f1) k on true;
 explain (verbose, costs off)
@@ -3293,6 +3462,7 @@ select * from int4_tbl a,
   lateral (
     select * from int4_tbl b left join int8_tbl c on (b.f1 = q1 and a.f1 = q2)
   ) ss;
+-- pgrust:rowsort
 select * from int4_tbl a,
   lateral (
     select * from int4_tbl b left join int8_tbl c on (b.f1 = q1 and a.f1 = q2)
@@ -3305,6 +3475,7 @@ select * from
   (select b.q1 as bq1, c.q1 as cq1, least(a.q1,b.q1,c.q1) from
    int8_tbl b cross join int8_tbl c) ss
   on a.q2 = ss.bq1;
+-- pgrust:rowsort
 select * from
   int8_tbl a left join lateral
   (select b.q1 as bq1, c.q1 as cq1, least(a.q1,b.q1,c.q1) from
@@ -3329,6 +3500,7 @@ select * from
   left join (select 1 as val) as ss1 on true
   left join lateral (select ss1.val as val_filtered where false) as ss2 on true;
 
+-- pgrust:rowsort
 select * from
   (select 0 as val0) as ss0
   left join (select 1 as val) as ss1 on true
@@ -3370,6 +3542,7 @@ select * from int8_tbl i8 left join lateral
   (select *, i8.q2 from int4_tbl i1, int4_tbl i2 where false) ss on true;
 
 -- check handling of nested appendrels inside LATERAL
+-- pgrust:rowsort
 select * from
   ((select 2 as v) union all (select 3 as v)) as q1
   cross join lateral
@@ -3389,6 +3562,7 @@ select * from
   lateral (select f1 from int4_tbl
            where f1 = any (select unique1 from tenk1
                            where unique2 = v.x offset 0)) ss;
+-- pgrust:rowsort
 select * from
   (values (0,9998), (1,1000)) v(id,x),
   lateral (select f1 from int4_tbl
@@ -3407,6 +3581,7 @@ lateral (select * from int8_tbl t1,
                                        and (select v.id=0)) offset 0) ss2) ss
          where t1.q1 = ss.q2) ss0;
 
+-- pgrust:rowsort
 select * from (values (0), (1)) v(id),
 lateral (select * from int8_tbl t1,
          lateral (select * from
@@ -3653,6 +3828,7 @@ explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1;
 
+-- pgrust:rowsort
 select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1;
@@ -3662,6 +3838,7 @@ explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 = any (array[1]);
 
+-- pgrust:rowsort
 select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 = any (array[1]);
@@ -3671,6 +3848,7 @@ explain (costs off) select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 >= any (array[1,5]);
 
+-- pgrust:rowsort
 select * from j1
 inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2
 where j1.id1 % 1000 = 1 and j2.id1 % 1000 = 1 and j2.id1 >= any (array[1,5]);
@@ -3724,6 +3902,7 @@ SET enable_indexonlyscan = off;
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
 SELECT t1.a FROM skip_fetch t1 LEFT JOIN skip_fetch t2 ON t2.a = 1 WHERE t2.a IS NULL;
+-- pgrust:rowsort
 SELECT t1.a FROM skip_fetch t1 LEFT JOIN skip_fetch t2 ON t2.a = 1 WHERE t2.a IS NULL;
 
 RESET enable_indexonlyscan;
@@ -3739,6 +3918,7 @@ CREATE INDEX ON rescan_bhs (a);
 EXPLAIN (COSTS OFF)
 SELECT * FROM rescan_bhs t1 LEFT JOIN rescan_bhs t2 ON t1.a IN
   (SELECT a FROM rescan_bhs t3 WHERE t2.a > 1);
+-- pgrust:rowsort
 SELECT * FROM rescan_bhs t1 LEFT JOIN rescan_bhs t2 ON t1.a IN
   (SELECT a FROM rescan_bhs t3 WHERE t2.a > 1);
 
@@ -3764,6 +3944,7 @@ SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
   (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
 WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 
+-- pgrust:rowsort
 SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
   (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
 WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
@@ -3776,11 +3957,13 @@ WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM tenk1 t1, tenk1 t2
 WHERE t2.thousand = t1.tenthous OR t2.thousand = t1.unique1 OR t2.thousand = t1.unique2;
+-- pgrust:rowsort
 SELECT COUNT(*) FROM tenk1 t1, tenk1 t2
 WHERE t2.thousand = t1.tenthous OR t2.thousand = t1.unique1 OR t2.thousand = t1.unique2;
 
 EXPLAIN (COSTS OFF)
 SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
     ON (t2.thousand = t1.tenthous OR t2.thousand = t1.thousand);
+-- pgrust:rowsort
 SELECT COUNT(*) FROM onek t1 LEFT JOIN tenk1 t2
     ON (t2.thousand = t1.tenthous OR t2.thousand = t1.thousand);
