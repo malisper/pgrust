@@ -188,6 +188,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::row_security,
         set: backing::set_row_security,
     });
+    vars::pgrust_lane_executor.install(GucVarAccessors {
+        get: backing::pgrust_lane_executor,
+        set: backing::set_pgrust_lane_executor,
+    });
     vars::check_function_bodies.install(GucVarAccessors {
         get: backing::check_function_bodies,
         set: backing::set_check_function_bodies,

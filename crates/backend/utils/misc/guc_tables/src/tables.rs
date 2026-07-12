@@ -609,6 +609,13 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     GucBoolSetting { name: "sync_replication_slots", context: PGC_SIGHUP, group: REPLICATION_STANDBY, short_desc: Some("Enables a physical standby to synchronize logical failover replication slots from the primary server."), long_desc: None, flags: 0, variable: &vars::sync_replication_slots, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "md5_password_warnings", context: PGC_USERSET, group: CONN_AUTH_AUTH, short_desc: Some("Enables deprecation warnings for MD5 passwords."), long_desc: None, flags: 0, variable: &vars::md5_password_warnings, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "vacuum_truncate", context: PGC_USERSET, group: VACUUM_DEFAULT, short_desc: Some("Enables vacuum to truncate empty pages at the end of the table."), long_desc: None, flags: 0, variable: &vars::vacuum_truncate, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust-only (no C counterpart): the lane-v2 push executor's master
+    // switch. Default ON (2026-07-14); the PGRUST_LANE_V2 boot env var sets
+    // the startup default (=0|off -> default off) via
+    // initialize_guc_options_from_environment (PGC_S_ENV_VAR) — the fleet
+    // harness / kill-switch path. The session backing cell IS the gate the
+    // executor reads, so SET / SET LOCAL re-evaluates it on the next query.
+    GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesInt: &[GucIntSetting] = &[

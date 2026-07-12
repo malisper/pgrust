@@ -50,15 +50,15 @@ use stats::{RefuseReason, ShapeClass};
 
 /// Master switch for lane-v2. Default ON since 2026-07-14 (evidence:
 /// notes/lane-timed-regress-2026-07-14.md — byte-identical regress ×6,
-/// timed-regress median 1.000, all floors green); `PGRUST_LANE_V2=0` (or
-/// `off`) is the explicit kill switch and the A/B lever. Resolved once per
-/// process (a boot-time decision, like `jit_deform::available()`).
+/// timed-regress median 1.000, all floors green). The primary control is the
+/// `pgrust.lane_executor` bool GUC (USERSET; its session TLS backing cell is
+/// read here directly, so SET / SET LOCAL re-evaluates the gate on the next
+/// query). The `PGRUST_LANE_V2` boot env var sets the GUC's startup default
+/// (`=0`/`off` → default off, PGC_S_ENV_VAR) and remains the fleet-harness /
+/// kill-switch path.
 #[inline]
 pub fn enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("0") | Ok("off"))
-    })
+    ::guc_tables::backing::pgrust_lane_executor()
 }
 
 /// Engagement trace (verification aid, no perf path): `PGRUST_LANE_V2_TRACE=1`

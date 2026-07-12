@@ -201,6 +201,14 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
     if let Ok(env) = std::env::var("PGCLIENTENCODING") {
         crate::SetConfigOption("client_encoding", Some(&env), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
     }
+    // pgrust-only: the lane-v2 boot env var sets pgrust.lane_executor's
+    // startup default (the fleet-harness / kill-switch path; the GUC value
+    // governs from there — SET/SET LOCAL/RESET land on this as the reset
+    // value, like C's PGDATESTYLE precedent above).
+    if let Ok(env) = std::env::var("PGRUST_LANE_V2") {
+        let v = if matches!(env.as_str(), "0" | "off") { "off" } else { "on" };
+        crate::SetConfigOption("pgrust.lane_executor", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
     Ok(())
 }
 
