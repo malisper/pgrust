@@ -240,6 +240,16 @@ fn format_procedure_lite(name: &str, argtypes: &[Oid]) -> PgResult<String> {
     Ok(sig)
 }
 
+// C: TextDatumGetCString — strip the 1B/4B varlena header (or detoast)
+// before treating the payload as text.
+fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
+    let ptr = d.as_usize() as *const u8;
+    // SAFETY: a live varlena readable through its full VARSIZE_ANY.
+    let raw = unsafe { core::slice::from_raw_parts(ptr, types_tuple::varatt::varsize_any(ptr)) };
+    let payload = varlena::open_image(mcx, raw)?;
+    Ok(String::from_utf8_lossy(payload.as_bytes()).into_owned())
+}
+
 pub fn ProcedureCreate<'mcx>(
     mcx: Mcx<'mcx>,
     a: &ProcedureCreateArgs<'_>,
@@ -773,18 +783,8 @@ pub fn ProcedureCreate<'mcx>(
             }
             let (old_defaults_d, old_defaults_null) = getattr(Anum_pg_proc_proargdefaults);
             assert!(!old_defaults_null, "pronargdefaults set but proargdefaults is null");
-            // SAFETY: non-null text attr of a pinned syscache tuple.
-            let old_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    old_defaults_d.as_usize() as *const u8,
-                    types_tuple::varatt::varsize_any(old_defaults_d.as_usize() as *const u8),
-                )
-            };
-            let old_str = varlena::text_to_cstring(mcx, old_bytes)?;
-            let old_node = readfuncs::stringToNode(
-                mcx,
-                core::str::from_utf8(&old_str[..old_str.len() - 1]).expect("stored node text"),
-            )?;
+            let old_str = text_datum_to_string(mcx, old_defaults_d)?;
+            let old_node = readfuncs::stringToNode(mcx, &old_str)?;
             let old_defaults = old_node.as_list().expect("proargdefaults holds a List");
             debug_assert_eq!(old_defaults.len(), old_nargdefaults as usize);
             // The caller hands defaults pre-serialized (train field shape);
@@ -1115,4 +1115,24 @@ pub fn IsThereFunctionInNamespace(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proargdefaults_text_excludes_varlena_header() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        let node_text = "({CONST :consttype 23 :consttypmod -1 :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 :constvalue 4 [ 42 0 0 0 0 0 0 0 ]})";
+        let t = varlena::cstring_to_text(mcx, node_text.as_bytes()).unwrap();
+        let d = Datum::from_usize(t.as_bytes().as_ptr() as usize);
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), node_text);
+        let short_payload = b"({X})";
+        let mut short = vec![(((short_payload.len() + 1) << 1) | 1) as u8];
+        short.extend_from_slice(short_payload);
+        let d = Datum::from_usize(short.as_ptr() as usize);
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), "({X})");
+    }
 }
