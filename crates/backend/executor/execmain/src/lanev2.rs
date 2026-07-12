@@ -118,10 +118,14 @@ pub fn try_own_seq_scan<'mcx>(
 
 /// Refuse-set for the lane-v2 SeqScan pipeline (false → the caller falls
 /// through to `exec_seq_scan`, byte-identically). Admits Plain / WithQual /
-/// WithProject / WithQualProject over a page-batch-supporting AM, and only
-/// when the qual and projection are subplan-free and param-free: the generic
-/// per-row emit path runs neither initplan params nor subplan quals, whereas
-/// `exec_scan_extended` does, so those shapes must keep the old path.
+/// WithProject / WithQualProject over a page-batch-supporting AM.
+/// Subplan- and param-bearing quals/projections are admitted (Phase 2):
+/// `seq_scan_batch_emit` now runs `exec_scan_impl`'s exact arms for them —
+/// pending-initplan param evaluation before the qual (and before the
+/// projection, only on qual-passing rows), and the suspension-driven
+/// `exec_qual_with_subplans` / `exec_project_with_subplans` drivers — so
+/// initplan params demand-evaluate identically and correlated subplans run
+/// scalar-per-batch-row through the same `nodesubplan` machinery.
 ///
 /// Disarms on: EPQ, a backward/mark cursor (init eflags) or a non-forward
 /// call, EXPLAIN ANALYZE (instrumented), the Bloom/EPQ variants, and AMs
@@ -188,16 +192,6 @@ fn seq_scan_refuse_reason<'mcx>(
             return Ok(Some(RefuseReason::BloomVariant))
         }
         ::nodeseqscan::SeqScanVariant::Epq => return Ok(Some(RefuseReason::Epq)),
-    }
-    if let Some(q) = ss.ss.qual.as_deref() {
-        if q.has_subplan() || !q.param_exec_deps().is_empty() {
-            return Ok(Some(RefuseReason::SubplanParam));
-        }
-    }
-    if let Some(p) = ss.ss.ps_ProjInfo.as_ref() {
-        if p.pi_state.has_subplan() || !p.pi_state.param_exec_deps().is_empty() {
-            return Ok(Some(RefuseReason::SubplanParam));
-        }
     }
     // AM must support the page-batch primitives (opens the scan desc once).
     // The parallel-admitting variant: only this lane routes through it; the
@@ -1045,8 +1039,9 @@ fn agg_hash_build_fold_feed<'mcx>(
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
 ///   * scan side: the Phase-1 `seq_scan_fusible` gate verbatim (page-batch AM,
-///     uninstrumented, forward, non-parallel, non-EPQ, non-Bloom, subplan- and
-///     param-free qual/projection) — WIDER than the legacy fused arm's
+///     uninstrumented, forward, non-parallel, non-EPQ, non-Bloom; subplan- and
+///     param-bearing quals/projections run scalar-within-lane via
+///     `seq_scan_batch_emit`'s hosted arms) — WIDER than the legacy fused arm's
 ///     `seq_agg_fusible` (any scalar qual and any admitted projection run
 ///     scalar-within-lane, not just kernel quals / outer-read-free tlists);
 ///   * agg side: `agg_hash_breaker_admissible` (batch-drainable — no grouping

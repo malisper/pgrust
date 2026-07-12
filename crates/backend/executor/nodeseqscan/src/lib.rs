@@ -683,6 +683,11 @@ pub fn seq_scan_batch_store<'mcx>(
 /// Fused-feed emit: reset the per-tuple context, fetch row `i`, apply the
 /// qual, project — `ExecScanExtended`'s body over a staged batch row. None =
 /// filtered; Some = the scan's output slot.
+///
+/// Subplan- and param-bearing quals/projections run `exec_scan_impl`'s exact
+/// arms (pending-initplan param evaluation, then the suspension-driven
+/// subplan qual/projection drivers) — same per-row program, same order, same
+/// per-tuple context discipline → byte-identical to the per-tuple path.
 #[inline(always)]
 pub fn seq_scan_batch_emit<'mcx>(
     node: &mut SeqScanState<'mcx>,
@@ -690,15 +695,69 @@ pub fn seq_scan_batch_emit<'mcx>(
     i: u32,
 ) -> PgResult<Option<ExecSlotId>> {
     estate.ecxt_mut(node.ss.ps_ExprContext).reset();
-    if !seq_scan_batch_fetch(node, estate, i)? {
+    let qual_hosted = node
+        .ss
+        .qual
+        .as_deref()
+        .is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty());
+    let passes = if qual_hosted {
+        // Subplan/param quals never arm the kernel bitmap (the kernel shapes
+        // are subplan- and param-free), so the plain store path is the only
+        // one live here.
+        debug_assert!(node.batch_soa.as_deref().is_none_or(|b| !b.qual_armed));
+        seq_scan_batch_store(node, estate, i);
+        let scan_id = node.ss.ss_ScanTupleSlot;
+        let ecxt = node.ss.ps_ExprContext;
+        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(scan_id);
+        // ExecEvalParamExec pending-initplan arm, hoisted out of the
+        // interpreter — mirrors `exec_scan_impl`.
+        let deps = node.ss.qual.as_deref().unwrap().param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+        if node.ss.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+            ::executils::exec_qual_with_subplans(node.ss.qual.as_deref_mut(), estate, ecxt)?
+        } else {
+            // Param-only qual (initplan or correlated exec params, no subplan
+            // steps): the params are plain datum reads once evaluated above —
+            // `exec_scan_impl`'s ordinary per-row qual arm.
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            // SAFETY: reset-only context, arena-boxed (address-stable),
+            // outlives the plan.
+            unsafe { node.ss.qual.as_deref_mut().unwrap().arm_result_mcx_raw(per_tuple) };
+            let mut slots = ::execexpr::EvalSlots {
+                scan: Some(estate.slot_mut(scan_id)),
+                inner: None,
+                outer: None,
+            };
+            ::execexpr::exec_qual(node.ss.qual.as_deref_mut(), &mut slots)?
+        }
+    } else {
+        seq_scan_batch_fetch(node, estate, i)?
+    };
+    if !passes {
         return Ok(None);
     }
     let scan_id = node.ss.ss_ScanTupleSlot;
     let ecxt = node.ss.ps_ExprContext;
     estate.ecxt_mut(ecxt).ecxt_scantuple = Some(scan_id);
-    let Some(proj) = node.ss.ps_ProjInfo.as_mut() else {
+    if node.ss.ps_ProjInfo.is_none() {
         return Ok(Some(scan_id));
     };
+    // C reads projection initplan params inside the projection, which never
+    // runs on a qual-rejected tuple — mirrors `exec_scan_impl`.
+    {
+        let deps = node.ss.ps_ProjInfo.as_ref().unwrap().pi_state.param_exec_deps();
+        if !deps.is_empty() {
+            ::executils::exec_eval_param_exec_params(estate, deps)?;
+        }
+    }
+    let proj = node.ss.ps_ProjInfo.as_mut().unwrap();
+    let result_id = proj.pi_result_slot;
+    if proj.pi_state.has_subplan() {
+        ::executils::exec_project_with_subplans(&mut proj.pi_state, estate, ecxt, result_id)?;
+        return Ok(Some(result_id));
+    }
     // By-ref projection results (and callee scratch) must live in the
     // per-tuple memory reset at the next emit entry (C projects into
     // ecxt_per_tuple_memory) — mirrors `exec_scan_impl`; es_query_cxt would
