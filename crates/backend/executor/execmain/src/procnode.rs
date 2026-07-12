@@ -252,6 +252,11 @@ pub struct HashJoinNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub hash: PgBox<'mcx, HashSubNode<'mcx>>,
     pub probe_batch: ProbeBatch<'mcx>,
+    /// Lane-executor-v2 join-breaker verdict, memoized at first call (the
+    /// structural fusibility cascade must not run per pulled tuple, and the
+    /// verdict must be stable — a lane-owned join stays lane-owned); the
+    /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -934,6 +939,7 @@ pub fn exec_init_node<'mcx>(
                         HashSubNode { state: hash_state, child: ::mcx::alloc_in(mcx, hash_child)? },
                     )?,
                     probe_batch: ProbeBatch::new(),
+                    lane_fusible: None,
                 },
             )?)
         }
@@ -1602,6 +1608,17 @@ fn agg_arm<'mcx>(
                 return ::nodeagg::exec_agg_batched(agg, estate, src);
             }
         }
+        PlanStateNode::HashJoin(hj) => {
+            // Lane-executor-v2 dispatch hook (Phase-2 breaker-to-breaker
+            // composition: hash-agg breaker over the hash-join breaker over
+            // lane scans). Falls through to the UNCHANGED per-tuple agg over
+            // exec_hash_join on refuse. Lane logic + refuse-set in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_agg_over_hash_join(agg, hj, estate)? {
+                    return Ok(r);
+                }
+            }
+        }
         _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
@@ -2246,15 +2263,26 @@ fn hash_join_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let hj = &mut **hj;
-    let HashJoinNode { state, outer, hash, probe_batch } = hj;
-    let HashSubNode { state: hstate, child } = &mut **hash;
-    if probe_batch.mode == ProbeBatchMode::Unknown {
+    if hj.probe_batch.mode == ProbeBatchMode::Unknown {
+        let HashJoinNode { state, outer, hash, probe_batch, .. } = hj;
+        let HashSubNode { state: hstate, .. } = &mut **hash;
         probe_batch.mode = if hstate.parallel_state().is_some() {
             ProbeBatchMode::Parallel
         } else {
             probe_batch_probe(state, &mut **outer, estate, probe_batch)?
         };
     }
+    // Lane-executor-v2 dispatch hook (Phase-2 join breaker, bare): only where
+    // the legacy fused probe drive does NOT engage (admission economics —
+    // never preempt the faster existing path). Falls through to the UNCHANGED
+    // exec_hash_join on refuse. Lane logic + refuse-set live in `lanev2`.
+    if hj.probe_batch.mode == ProbeBatchMode::Off && crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_hash_join(hj, estate)? {
+            return Ok(r);
+        }
+    }
+    let HashJoinNode { state, outer, hash, probe_batch, .. } = hj;
+    let HashSubNode { state: hstate, child } = &mut **hash;
     if probe_batch.mode == ProbeBatchMode::On {
         let PlanStateNode::SeqScan(ss) = &mut **outer else {
             unreachable!("probe fusion armed on a non-SeqScan outer")
@@ -3364,7 +3392,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     GroupNode<'_> { state, outer },
     NestLoopNode<'_> { state, outer, inner },
     HashSubNode<'_> { state, child },
-    HashJoinNode<'_> { state, outer, hash, probe_batch },
+    HashJoinNode<'_> { state, outer, hash, probe_batch, lane_fusible },
     MergeJoinNode<'_> { state, outer, inner },
     GatherNode<'_> { state, outer },
     GatherMergeNode<'_> { state, outer },

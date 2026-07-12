@@ -226,6 +226,165 @@ where
     }
 }
 
+/// A mid-pipeline expanding operator — the minimal operator-CHAIN seam
+/// (design §Architecture 1: "expanding operators (join probe, unnest) keep
+/// intra-row expansion state node-resident so a mid-expansion pause resumes
+/// exactly"). Where `Operator` consumes node-staged batches, a `TupleOp` sits
+/// BETWEEN an upstream operator and the pipeline sink: it accepts one input
+/// tuple at a time (pushed by the upstream operator through a `TupleOpSink`
+/// adapter) and pushes 0..K produced tuples into the downstream sink.
+///
+/// Pause protocol: if the downstream sink goes `Full` mid-expansion, the op
+/// returns `Paused` with its position saved node-resident (e.g. the hash
+/// join's own `hj_CurTuple` bucket cursor); the chain driver must `resume` it
+/// before feeding the next upstream tuple — otherwise the remainder of the
+/// expansion would be lost.
+pub(super) trait TupleOp<'mcx> {
+    /// An accepted tuple's expansion is not yet fully emitted.
+    fn pending(&self) -> bool;
+    /// Accept one upstream tuple and push its expansion into `out`.
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus>;
+    /// Continue a paused expansion into `out`.
+    fn resume(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus>;
+}
+
+/// Splices a `TupleOp` between an upstream `Operator` and the pipeline sink
+/// (the module-doc chaining shape: "Phase-2 chains splice operators by
+/// handing an upstream operator a `Sink` adapter that feeds the downstream
+/// one"). `Paused` (downstream full mid-expansion) maps to `SinkFeed::Full`,
+/// pausing the upstream operator too — both positions are node-resident, so
+/// the chain driver resumes the downstream op first, then the upstream batch.
+struct TupleOpSink<'a, 'b, 'mcx> {
+    op: &'a mut dyn TupleOp<'mcx>,
+    out: &'b mut dyn Sink<'mcx>,
+}
+
+impl<'mcx> Sink<'mcx> for TupleOpSink<'_, '_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        Ok(match self.op.accept(tuple, self.out, estate)? {
+            OpStatus::NeedInput => SinkFeed::NeedMore,
+            OpStatus::Paused => SinkFeed::Full,
+            OpStatus::Finished => {
+                unreachable!("mid-chain TupleOp finished early (no early-stop ops exist yet)")
+            }
+        })
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        self.out.finish(estate)
+    }
+}
+
+/// `pull_step` over a two-operator chain (upstream batch operator, then a
+/// `TupleOp`): one PG pull's worth. The downstream op's pending expansion is
+/// always resumed BEFORE the upstream feed advances — the upstream operator
+/// consumed the expanding tuple already, so its remainder exists only in the
+/// downstream op's node-resident cursor.
+pub(super) fn pull_step_chain<'mcx, S, O>(
+    node: &mut S::Node,
+    src: &mut S,
+    op: &mut O,
+    top: &mut dyn TupleOp<'mcx>,
+    root: &mut RootAdapter,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    debug_assert!(root.buffered.is_none());
+    loop {
+        if top.pending() {
+            match top.resume(root, estate)? {
+                OpStatus::Paused => {
+                    let t = root.take();
+                    debug_assert!(t.is_some(), "TupleOp paused on a non-full root");
+                    return Ok(t);
+                }
+                OpStatus::NeedInput => {}
+                OpStatus::Finished => {
+                    debug_assert!(root.buffered.is_none(), "Finished with a buffered tuple");
+                    root.finish(estate)?;
+                    return Ok(None);
+                }
+            }
+        }
+        let batch = match op.pending(node) {
+            Some(b) => b,
+            None => match src.produce(node, estate)? {
+                Some(b) => b,
+                None => {
+                    root.finish(estate)?;
+                    return Ok(None);
+                }
+            },
+        };
+        let mut mid = TupleOpSink { op: top, out: root };
+        match op.consume(node, batch, &mut mid, estate)? {
+            OpStatus::Paused => {
+                let t = root.take();
+                debug_assert!(t.is_some(), "operator paused on a non-full root");
+                return Ok(t);
+            }
+            OpStatus::NeedInput => {}
+            OpStatus::Finished => {
+                debug_assert!(root.buffered.is_none(), "Finished with a buffered tuple");
+                root.finish(estate)?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// `drain_pipeline` over a two-operator chain: run the whole feed (scan →
+/// upstream operator → `TupleOp` → breaker sink) to exhaustion, then
+/// `finish()` the sink. Breaker sinks never fill, so neither op ever pauses.
+pub(super) fn drain_pipeline_chain<'mcx, S, O>(
+    node: &mut S::Node,
+    src: &mut S,
+    op: &mut O,
+    top: &mut dyn TupleOp<'mcx>,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    loop {
+        debug_assert!(!top.pending(), "chain build pipeline paused: breaker sink returned Full");
+        let batch = match op.pending(node) {
+            Some(b) => b,
+            None => match src.produce(node, estate)? {
+                Some(b) => b,
+                None => break,
+            },
+        };
+        let mut mid = TupleOpSink { op: top, out: sink };
+        match op.consume(node, batch, &mut mid, estate)? {
+            OpStatus::NeedInput => {}
+            OpStatus::Finished => break,
+            OpStatus::Paused => {
+                unreachable!("chain build pipeline paused: breaker sink returned Full")
+            }
+        }
+    }
+    sink.finish(estate)
+}
+
 /// The build-pipeline driver — pipeline N in full: drain the source through
 /// the operator chain into a pipeline-breaker sink to completion, then
 /// `finish()` the sink (= Finalize; the breaker delegates it to the row-path
