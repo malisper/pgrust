@@ -163,17 +163,14 @@ pub fn decompress_padded(input: &[u8], out: &mut [u8], raw_len: usize) -> Result
             if op_end > raw_len {
                 return Err(ERR_OUT);
             }
-            if lit > 256 || ip_end + 31 > ilen {
-                // Long runs (near-incompressible data is one giant literal):
-                // libc memcpy beats a strided loop. Also the exact-copy tail
-                // when the input lacks wild-load slack.
-                out[op..op_end].copy_from_slice(&input[ip..ip_end]);
-            } else {
+            if ip_end + 31 <= ilen {
                 // Wild copy: 32 B strides. Input loads bounded by the slack
                 // check; output stores spill only into the pad (see header).
                 unsafe {
                     wide_copy(input.as_ptr().add(ip), out.as_mut_ptr().add(op), lit);
                 }
+            } else {
+                out[op..op_end].copy_from_slice(&input[ip..ip_end]);
             }
             ip = ip_end;
             op = op_end;
@@ -292,11 +289,9 @@ unsafe fn copy_match(out: *mut u8, op: usize, offset: usize, len: usize) {
         }
         2 | 4 | 8 => {
             // Power-of-two period p dividing 16: stage one 16 B pattern and
-            // stamp it 64 B per iteration; every stride lands phase-aligned
+            // stamp it 32 B per iteration; every stride lands phase-aligned
             // (16 % p == 0). The hot case for sorted/delta int columns
-            // (u16/u32/u64 RLE runs — CounterID-class ultra-compressible
-            // chunks are almost entirely this kernel). Stores end at most
-            // ceil(len/64)*64 <= len + 63 past dst0: inside OUT_PAD.
+            // (u16/u32/u64 runs). Stores end < len + 32 past dst0: in-pad.
             let mut pat = [0u8; 16];
             for (i, b) in pat.iter_mut().enumerate() {
                 *b = *src0.add(i % offset);
@@ -306,9 +301,7 @@ unsafe fn copy_match(out: *mut u8, op: usize, offset: usize, len: usize) {
             loop {
                 core::ptr::copy_nonoverlapping(pat.as_ptr(), dst, 16);
                 core::ptr::copy_nonoverlapping(pat.as_ptr(), dst.add(16), 16);
-                core::ptr::copy_nonoverlapping(pat.as_ptr(), dst.add(32), 16);
-                core::ptr::copy_nonoverlapping(pat.as_ptr(), dst.add(48), 16);
-                dst = dst.add(64);
+                dst = dst.add(32);
                 if dst >= end {
                     return;
                 }
