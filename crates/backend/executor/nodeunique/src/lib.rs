@@ -84,21 +84,45 @@ pub fn exec_unique<'mcx, F>(
 where
     F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
 {
+    lane_unique_cfi()?;
+    loop {
+        let Some(outer_id) = fetch_outer(estate)? else {
+            lane_unique_eof(node, estate);
+            return Ok(None);
+        };
+        if let Some(result) = lane_unique_feed(node, estate, outer_id)? {
+            return Ok(Some(result));
+        }
+    }
+}
+
+// ===========================================================================
+// Lane-executor-v2 streaming-unique seam. The lane's UniqueOp lives in
+// `execmain/src/lanev2.rs`; the per-tuple body below IS `exec_unique`'s (the
+// Volcano loop above calls the same functions), so the lane runs the SAME
+// grouping-equality program and prev-slot bookkeeping — no reimplementation,
+// and a Volcano fallback at any call boundary sees exactly C's state.
+// ===========================================================================
+
+/// C's ExecUnique entry interrupt check (conditional, exactly the Volcano
+/// entry's), exposed for the lane driver.
+pub fn lane_unique_cfi() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
         postgres_seams::check_for_interrupts::call()?;
     }
-    let mcx = estate.es_query_cxt;
-    loop {
-        let Some(outer_id) = fetch_outer(estate)? else {
-            node.have_prev = false;
-            exectuples::exec_clear_tuple(&mut node.prev_slot, mcx);
-            let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
-            exectuples::exec_clear_tuple(result_slot, mcx);
-            return Ok(None);
-        };
-        if !node.have_prev {
-            break node.store_and_return(estate, outer_id)?;
-        }
+    Ok(())
+}
+
+/// One incoming outer tuple — `exec_unique`'s per-tuple body: the first
+/// tuple, or one whose grouping keys differ from the retained previous
+/// tuple, starts a new run and is returned (`Some(result slot)`); a
+/// duplicate is skipped (`None`).
+pub fn lane_unique_feed<'mcx>(
+    node: &mut UniqueState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<Option<ExecSlotId>> {
+    if node.have_prev {
         // SAFETY: the per-tuple context outlives this evaluation and is reset
         // right after (C: ExecQual under ecxt_per_tuple_memory; packed-capable
         // eq procs detoast-expand into it).
@@ -114,11 +138,23 @@ where
         };
         let matched = exec_qual(Some(&mut node.eq), &mut slots)?;
         estate.reset_expr_context(node.ps_ExprContext);
-        if !matched {
-            break node.store_and_return(estate, outer_id)?;
+        if matched {
+            return Ok(None);
         }
-    };
+    }
+    node.store_and_return(estate, outer_id)?;
     Ok(Some(node.ps_ResultTupleSlot))
+}
+
+/// `exec_unique`'s child-exhausted arm: drop the retained previous tuple and
+/// clear both slots (called on every end-of-stream return, exactly as the
+/// Volcano loop does).
+pub fn lane_unique_eof<'mcx>(node: &mut UniqueState<'mcx>, estate: &mut EStateData<'mcx>) {
+    let mcx = estate.es_query_cxt;
+    node.have_prev = false;
+    exectuples::exec_clear_tuple(&mut node.prev_slot, mcx);
+    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    exectuples::exec_clear_tuple(result_slot, mcx);
 }
 
 impl<'mcx> UniqueState<'mcx> {
@@ -159,11 +195,8 @@ pub fn exec_end_unique(node: &mut UniqueState<'_>) {
 
 /// `ExecReScanUnique`; the caller rescans the outer child.
 pub fn exec_rescan_unique<'mcx>(node: &mut UniqueState<'mcx>, estate: &mut EStateData<'mcx>) {
-    node.have_prev = false;
-    let mcx = estate.es_query_cxt;
-    exectuples::exec_clear_tuple(&mut node.prev_slot, mcx);
-    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
-    exectuples::exec_clear_tuple(result_slot, mcx);
+    // Same resets as the end-of-stream arm.
+    lane_unique_eof(node, estate);
 }
 
 // Exempt: all released in exec_end_unique (eq via release_frames).
