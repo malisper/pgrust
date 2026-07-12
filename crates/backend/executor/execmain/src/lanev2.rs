@@ -1409,8 +1409,13 @@ impl<'mcx> Source<'mcx> for SortEmitSource {
         // C's per-ExecSort-call CHECK_FOR_INTERRUPTS: when a chained consumer
         // (Group's duplicate skip, Result's stream) drains several sorted
         // tuples in one PG pull, C would enter ExecSort once per tuple — keep
-        // that cadence here rather than once per pull (§9).
-        ::postgres_seams::check_for_interrupts::call()?;
+        // that cadence here rather than once per pull (§9). Pending-gated,
+        // exactly C's CHECK_FOR_INTERRUPTS macro: the unconditional seam call
+        // per produced tuple measured +17% on the distinct-count shape (q9),
+        // where the agg parent pulls this source once per input row.
+        if ::init_small::globals::InterruptPending() {
+            ::postgres_seams::check_for_interrupts::call()?;
+        }
         Ok(::nodesort::sort_lane_next(node, estate)?.map(|_| Batch { n: 1 }))
     }
 }
