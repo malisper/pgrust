@@ -38,6 +38,19 @@ pub fn read_header(hdr: &[u8]) -> PgResult<(u64, u64, u32)> {
     Ok((get_u64(hdr, 16), get_u64(hdr, 24), version))
 }
 
+/// Abort/crash-tolerant header read: an all-zero header page reads as "no
+/// committed footer" (None) instead of erroring. Zeros can only mean a part
+/// that never published — writers historically wrote row-group bytes past a
+/// still-unwritten header, so a COPY aborted mid-statement left len >=
+/// CB_HEADER_LEN files whose first page is a zero hole; a published part's
+/// header is written and fsynced at every publish and is never zeroed again.
+pub fn read_header_opt(hdr: &[u8]) -> PgResult<Option<(u64, u64, u32)>> {
+    if hdr[..CB_HEADER_LEN as usize].iter().all(|&b| b == 0) {
+        return Ok(None);
+    }
+    read_header(hdr).map(Some)
+}
+
 // want_sums materializes the v4 per-RG sums into FooterRg::sums (the writer's
 // reopen-append path re-emits them); readers leave them on disk and consume
 // lazily via Part::rg_sum. The CRC always covers the whole footer body.
@@ -48,6 +61,12 @@ pub fn read_footer_rgs(
     version: u32,
     want_sums: bool,
 ) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>)> {
+    let total_len = file.total_len();
+    if footer_off < CB_HEADER_LEN || footer_off + 8 > total_len {
+        return Err(Box::new(PgError::error(
+            "cbstore: corrupt part (footer offset out of bounds)".to_string(),
+        )));
+    }
     let mut fixed = [0u8; 8];
     file.read_exact_at(&mut fixed, footer_off)?;
     let nrgs = get_u32(&fixed, 0) as usize;
@@ -60,6 +79,13 @@ pub fn read_footer_rgs(
     let sorted_len = if version >= CB_VERSION_V5 { ncols } else { 0 };
     let ckey_len = if version >= CB_VERSION_V6 { CB_CLUSTER_KEY_SECTION_LEN } else { 0 };
     let body_len = 8 + nrgs * 24 + nrgs * ncols * 24 + ndv_len + sums_len + sorted_len + ckey_len + 16;
+    // Bounds-gate before the allocation and read: a torn/garbage footer word
+    // must produce a clean error, not a huge alloc or a read past EOF.
+    if body_len as u64 > total_len - footer_off {
+        return Err(Box::new(PgError::error(
+            "cbstore: corrupt part (footer body out of bounds)".to_string(),
+        )));
+    }
     let mut buf = vec![0u8; body_len];
     file.read_exact_at(&mut buf, footer_off)?;
     parse_footer(&buf, nrgs, ncols, version, want_sums)
@@ -153,7 +179,7 @@ pub fn part_footer_rows(path: &str, ncols: usize) -> PgResult<Option<u64>> {
     }
     let mut hdr = [0u8; CB_HEADER_LEN as usize];
     file.read_exact_at(&mut hdr, 0)?;
-    let (footer_off, _, version) = read_header(&hdr)?;
+    let Some((footer_off, _, version)) = read_header_opt(&hdr)? else { return Ok(None) };
     if footer_off == 0 {
         return Ok(None);
     }
@@ -170,7 +196,7 @@ pub fn part_footer_ndv(path: &str, ncols: usize) -> PgResult<Option<Vec<u64>>> {
     }
     let mut hdr = [0u8; CB_HEADER_LEN as usize];
     file.read_exact_at(&mut hdr, 0)?;
-    let (footer_off, _, version) = read_header(&hdr)?;
+    let Some((footer_off, _, version)) = read_header_opt(&hdr)? else { return Ok(None) };
     if footer_off == 0 || version < CB_VERSION_V2 {
         return Ok(None);
     }
@@ -206,7 +232,7 @@ impl Part {
         }
         let mut hdr = [0u8; CB_HEADER_LEN as usize];
         file.read_exact_at(&mut hdr, 0)?;
-        let (footer_off, _fp, version) = read_header(&hdr)?;
+        let Some((footer_off, _fp, version)) = read_header_opt(&hdr)? else { return Ok(None) };
         if footer_off == 0 {
             return Ok(None);
         }
@@ -214,6 +240,16 @@ impl Part {
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
         let Some(map) = SegMap::open(path)? else { return Ok(None) };
+        // Structural skippability guard: a footer whose RG directory points
+        // past the live mapping is torn state — readers must error cleanly
+        // here rather than slice-panic on garbage row-group offsets.
+        for rg in &rgs {
+            if rg.file_off.saturating_add(CB_RG_HEADER_LEN as u64) > map.bytes().len() as u64 {
+                return Err(Box::new(PgError::error(
+                    "cbstore: corrupt part (row group out of bounds)".to_string(),
+                )));
+            }
+        }
         let sums_off = if version >= CB_VERSION_V4 {
             let ndv_len = if version >= CB_VERSION_V2 { ncols * 8 } else { 0 };
             footer_off + (8 + rgs.len() * 24 + rgs.len() * ncols * 24 + ndv_len) as u64
