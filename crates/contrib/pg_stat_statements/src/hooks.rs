@@ -9,7 +9,7 @@ use types_core::instrument::{
 };
 use types_nodes::parsenodes::Query;
 use types_nodes::plannodes::PlannedStmt;
-use types_nodes::tags::NodeTag;
+use types_nodes::NodeTag;
 use types_portal::{QueryCompletion, QueryDescHandle};
 use utility::consts::{
     CMDTAG_COPY, CMDTAG_FETCH, CMDTAG_REFRESH_MATERIALIZED_VIEW, CMDTAG_SELECT,
