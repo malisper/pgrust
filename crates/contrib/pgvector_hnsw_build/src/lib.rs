@@ -718,13 +718,6 @@ fn create_graph_pages(bs: &mut BuildState<'_, '_, '_>) -> PgResult<()> {
 
         serialize_element_tuple(&mut etup, &bs.graph.elems[i]);
         let e_offno = bs.graph.elems[i].offno;
-        {
-            let e = &bs.graph.elems[i];
-            eprintln!(
-                "HNSWDBG elem i={i} level={} etup={etup_size} ntup={ntup_size} combined={combined_size} max={max_size} free={free} blkno={} offno={} npage={} noff={}",
-                e.level, e.blkno, e.offno, e.neighbor_page, e.neighbor_offno
-            );
-        }
         page_add(bs.index, buf, &etup, e_offno)?;
 
         // SAFETY: lock held.
