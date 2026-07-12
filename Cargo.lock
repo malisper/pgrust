@@ -9159,6 +9159,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodehash",
+ "nodes_core",
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",

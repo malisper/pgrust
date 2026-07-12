@@ -64,6 +64,21 @@ pub struct SeqScanState<'mcx> {
     // gates (EPQ, direction) stay in the lane. None = not yet evaluated.
     // Reset on park (rebind may change the backing scan).
     lane_verdict: Option<bool>,
+    // cbstore relations only: plan-derived column need-set + zone-mappable
+    // conjuncts, installed on the scan desc at open (cbstore-impl.md §7.3).
+    cb_scan: Option<std::boxed::Box<CbScanInfo>>,
+}
+
+/// Plan-derived cbstore scan settings (built once at init, applied to every
+/// freshly opened scan desc — serial open and both parallel init paths).
+struct CbScanInfo {
+    /// Columns the scan reads (qual + targetlist Vars; whole row when a
+    /// whole-row Var appears). Only these columns' chunks decode.
+    needed: Vec<bool>,
+    /// Zone-map-mappable `Var CMP Const` conjuncts of the scan qual
+    /// (advisory pruning only; the executor still evaluates the full qual
+    /// on surviving rows).
+    zone: Vec<::tableam::ZoneQual>,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -395,8 +410,19 @@ impl<'mcx> SeqScanState<'mcx> {
             0,
             PgVec::new_in(mcx),
         )?);
+        self.apply_cb_scan_settings();
         self.arm_slot_jit_deform(estate);
         Ok(())
+    }
+
+    // cbstore need-set + zone quals onto a freshly opened scan desc (serial
+    // open_scandesc and both parallel init paths).
+    fn apply_cb_scan_settings(&mut self) {
+        if let Some(cb) = self.cb_scan.as_deref() {
+            let sd = self.ss.ss_currentScanDesc.as_mut().unwrap();
+            ::tableam::table_scan_set_needed_attrs(sd, &cb.needed);
+            ::tableam::table_scan_push_zone_quals(sd, &cb.zone);
+        }
     }
 
     // Rung 1 (per-row lazy path): arm the scan slot with a kernel sized to
@@ -1911,6 +1937,10 @@ pub fn exec_init_seq_scan_rel<'mcx>(
             (true, true) => SeqScanVariant::WithQualProject,
         }
     };
+    let cb_scan = match rel_am_is_cbstore(ss.ss_currentRelation.as_ref().unwrap()) {
+        false => None,
+        true => Some(std::boxed::Box::new(cb_scan_info(node, &ss)?)),
+    };
     Ok(SeqScanState {
         ss,
         variant,
@@ -1924,12 +1954,174 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         lane_pos: 0,
         lane_n: 0,
         lane_verdict: None,
+        cb_scan,
+    })
+}
+
+fn rel_am_is_cbstore(rel: &Relation<'_>) -> bool {
+    ::tableam::TableAm::of(rel) == Some(::tableam::TableAm::Cbstore)
+}
+
+/// A cbstore relation drives this scan (lane arm gates; the lane's cbscan
+/// engagement class ticks on this).
+pub fn seq_scan_is_cbstore(node: &SeqScanState<'_>) -> bool {
+    node.cb_scan.is_some()
+}
+
+// Plan-derived need-set + zone-mappable conjuncts for a cbstore scan.
+fn cb_scan_info<'mcx>(
+    node: &SeqScan<'mcx>,
+    ss: &ScanState<'mcx>,
+) -> PgResult<CbScanInfo> {
+    use ::nodes_core::NodeWalker as _;
+    use ::types_nodes::NodeTag;
+
+    let rel = ss.ss_currentRelation.as_ref().unwrap();
+    let natts = rel.rd_att.natts as usize;
+    let scanrelid = node.scan.scanrelid as i32;
+
+    struct Cx {
+        scanrelid: i32,
+        needed: Vec<bool>,
+        wholerow: bool,
+        syscol: bool,
+    }
+    impl<'mcx> ::nodes_core::NodeWalker<'mcx> for Cx {
+        fn visit(&mut self, n: ::types_nodes::Node<'mcx>) -> PgResult<bool> {
+            if n.node_tag() == NodeTag::T_Var {
+                let v = n.as_var().unwrap();
+                if v.varno == self.scanrelid && v.varlevelsup == 0 {
+                    if v.varattno == 0 {
+                        self.wholerow = true;
+                    } else if v.varattno < 0 {
+                        self.syscol = true;
+                    } else if (v.varattno as usize) <= self.needed.len() {
+                        self.needed[(v.varattno - 1) as usize] = true;
+                    }
+                }
+                return Ok(false);
+            }
+            ::nodes_core::expression_tree_walker(n, self)
+        }
+    }
+    let mut cx = Cx { scanrelid, needed: vec![false; natts], wholerow: false, syscol: false };
+    for n in node.scan.plan.qual.iter() {
+        cx.visit(n)?;
+    }
+    for n in node.scan.plan.targetlist.iter() {
+        cx.visit(n)?;
+    }
+    if cx.syscol {
+        return Err(Box::new(PgError::error(
+            "cbstore does not support system columns".to_string(),
+        )));
+    }
+    if cx.wholerow {
+        cx.needed.iter_mut().for_each(|b| *b = true);
+    }
+
+    let mut zone: Vec<::tableam::ZoneQual> = Vec::new();
+    for n in node.scan.plan.qual.iter() {
+        if let Some((attnum, op, val)) = cb_zone_conjunct(n, scanrelid) {
+            zone.push(::tableam::ZoneQual { attnum, op, val });
+        }
+    }
+    Ok(CbScanInfo { needed: cx.needed, zone })
+}
+
+// Zone-mappable scan-qual conjunct: a top-level `Var CMP Const` OpExpr of
+// this relation over the int/date/timestamp cross-type compare families.
+fn cb_zone_conjunct(
+    n: ::types_nodes::Node<'_>,
+    scanrelid: i32,
+) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
+    use ::types_nodes::NodeTag;
+    if n.node_tag() != NodeTag::T_OpExpr {
+        return None;
+    }
+    let op = n.as_op_expr()?;
+    if op.args.len() != 2 {
+        return None;
+    }
+    let a = op.args.iter().next()?;
+    let b = op.args.iter().nth(1)?;
+    let (var, konst, flip) = match (a.node_tag(), b.node_tag()) {
+        (NodeTag::T_Var, NodeTag::T_Const) => (a.as_var()?, b.as_const()?, false),
+        (NodeTag::T_Const, NodeTag::T_Var) => (b.as_var()?, a.as_const()?, true),
+        _ => return None,
+    };
+    if var.varno != scanrelid || var.varlevelsup != 0 || var.varattno <= 0 || konst.constisnull {
+        return None;
+    }
+    cb_zone_from_parts(var.varattno as u16, op.opfuncid, flip, konst.constvalue)
+}
+
+// Shared zone-qual extraction (op/const-width/flip) for a `Var CMP Const`
+// with the const on the `commuted` side. attnum is 1-based. Also the staged
+// prewhere fold's source, so folded verdicts derive from byte-identical
+// (attnum, op, val) to the pruning path.
+fn cb_zone_from_parts(
+    attnum: u16,
+    fn_oid: u32,
+    commuted: bool,
+    konst: ::datum::Datum,
+) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
+    use ::tableam::ZoneCmp as Z;
+    let (cmp, cw) = cb_zone_cmp(fn_oid)?;
+    let val = match cw {
+        2 => konst.as_i16() as i64,
+        4 => konst.as_i32() as i64,
+        _ => konst.as_i64(),
+    };
+    let cmp = if commuted {
+        match cmp {
+            Z::Lt => Z::Gt,
+            Z::Le => Z::Ge,
+            Z::Gt => Z::Lt,
+            Z::Ge => Z::Le,
+            other => other,
+        }
+    } else {
+        cmp
+    };
+    Some((attnum, cmp, val))
+}
+
+// (comparison, const width) by pg_proc oid; const width is the CONST side
+// of the cross-type families (int2/4/8 x int2/4/8, date, timestamp,
+// date-vs-timestamp).
+#[rustfmt::skip]
+fn cb_zone_cmp(fnoid: u32) -> Option<(::tableam::ZoneCmp, u8)> {
+    use ::tableam::ZoneCmp as Z;
+    Some(match fnoid {
+        63 => (Z::Eq, 2), 145 => (Z::Ne, 2), 64 => (Z::Lt, 2), 148 => (Z::Le, 2),
+        146 => (Z::Gt, 2), 151 => (Z::Ge, 2),
+        65 => (Z::Eq, 4), 144 => (Z::Ne, 4), 66 => (Z::Lt, 4), 149 => (Z::Le, 4),
+        147 => (Z::Gt, 4), 150 => (Z::Ge, 4),
+        467 => (Z::Eq, 8), 468 => (Z::Ne, 8), 469 => (Z::Lt, 8), 471 => (Z::Le, 8),
+        470 => (Z::Gt, 8), 472 => (Z::Ge, 8),
+        158 => (Z::Eq, 4), 164 => (Z::Ne, 4), 160 => (Z::Lt, 4), 166 => (Z::Le, 4),
+        162 => (Z::Gt, 4), 168 => (Z::Ge, 4),
+        159 => (Z::Eq, 2), 165 => (Z::Ne, 2), 161 => (Z::Lt, 2), 167 => (Z::Le, 2),
+        163 => (Z::Gt, 2), 169 => (Z::Ge, 2),
+        474 => (Z::Eq, 4), 475 => (Z::Ne, 4), 476 => (Z::Lt, 4), 478 => (Z::Le, 4),
+        477 => (Z::Gt, 4), 479 => (Z::Ge, 4),
+        852 => (Z::Eq, 8), 853 => (Z::Ne, 8), 854 => (Z::Lt, 8), 856 => (Z::Le, 8),
+        855 => (Z::Gt, 8), 857 => (Z::Ge, 8),
+        1086 => (Z::Eq, 4), 1091 => (Z::Ne, 4), 1087 => (Z::Lt, 4), 1088 => (Z::Le, 4),
+        1089 => (Z::Gt, 4), 1090 => (Z::Ge, 4),
+        2052 => (Z::Eq, 8), 2053 => (Z::Ne, 8), 2054 => (Z::Lt, 8), 2055 => (Z::Le, 8),
+        2057 => (Z::Gt, 8), 2056 => (Z::Ge, 8),
+        1152 => (Z::Eq, 8), 1153 => (Z::Ne, 8), 1154 => (Z::Lt, 8), 1155 => (Z::Le, 8),
+        1157 => (Z::Gt, 8), 1156 => (Z::Ge, 8),
+        _ => return None,
     })
 }
 
 /// `ExecEndSeqScan`.
 pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
+    node.cb_scan = None;
     stitch_trace_summary(node);
     // Releases the plan's deform-JIT kernel Rc and the stitched body's code
     // block (forget-exempt in batch.rs / here).
@@ -2021,6 +2213,7 @@ pub fn exec_seq_scan_initialize_dsm<'mcx>(
     )?;
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(std::sync::Arc::clone(&shared));
     Ok(shared)
@@ -2043,6 +2236,7 @@ pub fn exec_seq_scan_initialize_worker<'mcx>(
     let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(shared);
     Ok(())
@@ -2057,7 +2251,7 @@ mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
         lane_pos, lane_n, lane_verdict;
-        bloom, parallel
+        bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
     // blocks) are released in exec_end_seq_scan / skeleton_park via
