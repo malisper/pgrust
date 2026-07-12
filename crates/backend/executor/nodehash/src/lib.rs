@@ -988,6 +988,43 @@ pub fn multi_exec_hash_batched<'mcx, S: HashBuildBatchSource<'mcx>>(
     Ok(())
 }
 
+// ===========================================================================
+// Lane-executor-v2 hash-build delegation seams (design §Architecture 1, §8).
+// The lane's join-breaker `Sink` lives in `execmain/src/lanev2.rs`; these thin
+// entry points delegate every substantive step to the SAME row-path machinery
+// `multi_exec_hash`/`multi_exec_hash_batched` use — the per-row hash eval +
+// `ExecHashTableInsert` (spill/growth arms included) and the `finish_build`
+// tail — so the built table is bit-for-bit the row path's.
+// ===========================================================================
+
+/// Lane breaker `Sink::accept`: one build-side row through the per-row hash +
+/// insert path — `multi_exec_hash`'s loop body verbatim (batch-file spilling
+/// and nbatch growth included, identically).
+pub fn lane_build_accept<'mcx>(
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<()> {
+    hash_insert_slot(hs, estate, slot_id)
+}
+
+/// Lane breaker `Sink::finish` tail on the hash side: `multi_exec_hash`'s
+/// post-loop `finish_build` (bucket growth + dense seat), verbatim.
+pub fn lane_build_finish<'mcx>(
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    hs.table.as_mut().expect("hash table created").finish_build(mcx)
+}
+
+/// Lane-v2 admission, build side: the per-row build hash must be subplan- and
+/// initplan-param-free (the lane drive, like the fused batched build, hoists
+/// no pending initplans and hosts no subplan suspensions).
+pub fn lane_build_hash_admissible(hs: &HashState<'_>) -> bool {
+    !hs.hash_expr.has_subplan() && hs.hash_expr.param_exec_deps().is_empty()
+}
+
 /// `ExecEndHash`: the table lives in the query arena (wholesale reset).
 pub fn exec_end_hash(hs: &mut HashState<'_>) {
     hs.hash_expr.release_frames();

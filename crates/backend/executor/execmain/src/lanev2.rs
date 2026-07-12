@@ -43,7 +43,8 @@ use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
 use push::{
-    drain_pipeline, pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source,
+    drain_pipeline, drain_pipeline_chain, pull_step, pull_step_chain, Batch, OpStatus, Operator,
+    RootAdapter, Sink, SinkFeed, Source, TupleOp,
 };
 
 /// Master switch for lane-v2. Default OFF; `PGRUST_LANE_V2=1` (or `on`) enables
@@ -891,7 +892,19 @@ fn sort_fusible<'mcx>(
     if s.state.randomAccess {
         return Ok(false);
     }
-    match &mut *s.outer {
+    scan_child_fusible(&mut s.outer, estate)
+}
+
+/// Shared child-side gate for breakers fed by a Phase-1 scan pipeline (sort
+/// and hash-join build/probe feeds): the Phase-1 scan refuse-sets, verbatim.
+/// Non-scan children refuse. These also cover EXPLAIN ANALYZE (an
+/// instrumented tree wraps every node in the `Instrumented` variant, which
+/// matches no scan arm).
+fn scan_child_fusible<'mcx>(
+    child: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    match child {
         crate::procnode::PlanStateNode::SeqScan(ss) => seq_scan_fusible(ss, estate),
         crate::procnode::PlanStateNode::IndexScan(is) => {
             Ok(index_scan_fusible(is, estate))
@@ -996,4 +1009,428 @@ impl<'mcx> Operator<'mcx> for SortEmit {
             SinkFeed::NeedMore => OpStatus::NeedInput,
         })
     }
+}
+
+// ===========================================================================
+// Hash-join pipeline breaker (Phase 2). The join spans two pipelines plus a
+// mid-pipeline streaming stage:
+//
+//   pipeline N   (build): inner scan source → scalar filter/project →
+//                         HashJoinBuildSink   (breaker Sink face)
+//   pipeline N+1 (probe): outer scan source → scalar filter/project →
+//                         JoinProbe (TupleOp) → sink
+//
+// The build side is the breaker: `accept` = the row-path per-row hash +
+// `ExecHashTableInsert` (`nodehash::lane_build_accept` — spill/growth arms
+// included), `finish` = the delegated build tail (`finish_build`,
+// empty-build early return, `nbatch_outstart`/`dense_on`, phase flip). The
+// probe side is NOT a breaker — it streams: one outer row in, 0..K joined
+// rows out, with the intra-row expansion position node-resident on the
+// HashJoinState (`hj_CurTuple`/`hj_CurDense` — C's own cross-call state), so
+// a mid-expansion pause resumes exactly. The phase flag is `hj_JoinState`
+// itself (HJ_BUILD_HASHTABLE → HJ_NEED_NEW_OUTER — C's own state machine).
+//
+// Spill (§8): the build delegates wholesale to the row-path table, so nbatch
+// growth happens exactly as the row path's; the lane then checks the FINAL
+// nbatch after the completed build and REFUSES the probe when nbatch > 1 —
+// before any lane tuple is emitted, so the fallback `exec_hash_join` resumes
+// from HJ_NEED_NEW_OUTER over the identical table (postponing outer tuples
+// to batch files exactly as if the row path had built it). Refusing on the
+// planner's initial estimate alone would be insufficient: the row path grows
+// nbatch mid-build (`ExecHashIncreaseNumBatches`), so only the post-build
+// value is authoritative — and checking after a fully delegated build is
+// byte-safe precisely because the build is bit-equal to the row path's.
+//
+// Refused join shapes (assert-refuse set; each needs its own byte-verified
+// staging): LEFT/RIGHT/FULL/SEMI/ANTI/RIGHT_SEMI/RIGHT_ANTI (null-fill faces
+// + match-driven skips), joinqual/otherqual residuals, multi-batch (above),
+// parallel hash, instrumented, subplan/param-bearing hash or projection
+// exprs, non-lane-fusible scan children on either side.
+// ===========================================================================
+
+/// The breaker's `Sink` face (build pipeline endpoint). Holds the join +
+/// hash nodes by `&mut` — the driver threads the inner SCAN node, so the
+/// breaker spanning other nodes needs no driver rework (sort-breaker shape).
+struct HashJoinBuildSink<'a, 'mcx> {
+    hj: &'a mut ::nodehashjoin::HashJoinState<'mcx>,
+    hs: &'a mut ::nodehash::HashState<'mcx>,
+    done: Option<::nodehashjoin::LaneBuildDone>,
+}
+
+impl<'mcx> Sink<'mcx> for HashJoinBuildSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodehash::lane_build_accept(self.hs, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        self.done = Some(::nodehashjoin::lane_build_finish(self.hj, self.hs, estate)?);
+        Ok(())
+    }
+}
+
+/// The join probe as a mid-pipeline `TupleOp`: accept stages one outer row
+/// (`lane_probe_accept` — ecxt reset + hash/dense key, C's per-outer-row
+/// prologue), then the expansion streams each bucket/dense-chain match
+/// through the row-path recheck + projection (`lane_probe_next`) into the
+/// downstream sink. Expansion position is node-resident on the join state.
+struct JoinProbe<'a, 'mcx> {
+    hj: &'a mut ::nodehashjoin::HashJoinState<'mcx>,
+    hs: &'a mut ::nodehash::HashState<'mcx>,
+}
+
+impl<'mcx> JoinProbe<'_, 'mcx> {
+    fn emit(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        while let Some(j) = ::nodehashjoin::lane_probe_next(self.hj, self.hs, estate)? {
+            if let SinkFeed::Full = out.accept(j, estate)? {
+                return Ok(OpStatus::Paused);
+            }
+        }
+        Ok(OpStatus::NeedInput)
+    }
+}
+
+impl<'mcx> TupleOp<'mcx> for JoinProbe<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        ::nodehashjoin::lane_probe_pending(self.hj)
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        ::nodehashjoin::lane_probe_accept(self.hj, self.hs, estate, tuple)?;
+        self.emit(out, estate)
+    }
+
+    fn resume(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        self.emit(out, estate)
+    }
+}
+
+/// Build-pipeline driver, generic over the inner scan: table create
+/// (delegated, bit-equal to the row path's), drain the scan pipeline into
+/// the breaker sink, delegated finish. Returns the post-build verdict inputs
+/// (empty / final nbatch).
+fn join_build_feed<'mcx, S, O>(
+    hj: &mut ::nodehashjoin::HashJoinState<'mcx>,
+    hs: &mut ::nodehash::HashState<'mcx>,
+    scan: &mut S::Node,
+    mut src: S,
+    mut op: O,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<::nodehashjoin::LaneBuildDone>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    ::nodehashjoin::lane_build_begin(hj, hs, estate)?;
+    let mut sink = HashJoinBuildSink { hj, hs, done: None };
+    drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
+    Ok(sink.done.expect("build sink finished"))
+}
+
+/// Dispatch the build feed over the admitted inner-scan child types.
+fn join_build_dispatch<'mcx>(
+    hj: &mut ::nodehashjoin::HashJoinState<'mcx>,
+    hs: &mut ::nodehash::HashState<'mcx>,
+    child: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<::nodehashjoin::LaneBuildDone> {
+    match child {
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
+        }
+        crate::procnode::PlanStateNode::IndexScan(is) => {
+            join_build_feed(hj, hs, is, IndexScanSource, IndexScanEmit, estate)
+        }
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => {
+            join_build_feed(hj, hs, &mut **ios, IndexOnlyScanSource, IndexOnlyScanEmit, estate)
+        }
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            join_build_feed(hj, hs, &mut b.scan, BitmapHeapScanSource, BitmapHeapScanEmit, estate)
+        }
+        _ => unreachable!("memoized join verdict admitted a non-scan build child"),
+    }
+}
+
+/// Probe-pipeline drain (composition): outer scan → filter/project →
+/// JoinProbe → the downstream breaker sink (the agg build), to exhaustion.
+fn join_probe_drain_dispatch<'mcx>(
+    hj: &mut ::nodehashjoin::HashJoinState<'mcx>,
+    hs: &mut ::nodehash::HashState<'mcx>,
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mut probe = JoinProbe { hj, hs };
+    match outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => drain_pipeline_chain(
+            ss,
+            &mut SeqScanSource,
+            &mut SeqScanFilterProject,
+            &mut probe,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexScan(is) => drain_pipeline_chain(
+            is,
+            &mut IndexScanSource,
+            &mut IndexScanEmit,
+            &mut probe,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => drain_pipeline_chain(
+            &mut **ios,
+            &mut IndexOnlyScanSource,
+            &mut IndexOnlyScanEmit,
+            &mut probe,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            drain_pipeline_chain(
+                &mut b.scan,
+                &mut BitmapHeapScanSource,
+                &mut BitmapHeapScanEmit,
+                &mut probe,
+                sink,
+                estate,
+            )
+        }
+        _ => unreachable!("memoized join verdict admitted a non-scan outer child"),
+    }
+}
+
+/// Probe-pipeline pull (bare join): one PG pull's worth through the chain
+/// into the root adapter — exercising the mid-expansion pause/resume.
+fn join_probe_pull_dispatch<'mcx>(
+    hj: &mut ::nodehashjoin::HashJoinState<'mcx>,
+    hs: &mut ::nodehash::HashState<'mcx>,
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let mut probe = JoinProbe { hj, hs };
+    let mut root = RootAdapter::new(None);
+    match outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => pull_step_chain(
+            ss,
+            &mut SeqScanSource,
+            &mut SeqScanFilterProject,
+            &mut probe,
+            &mut root,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexScan(is) => pull_step_chain(
+            is,
+            &mut IndexScanSource,
+            &mut IndexScanEmit,
+            &mut probe,
+            &mut root,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => pull_step_chain(
+            &mut **ios,
+            &mut IndexOnlyScanSource,
+            &mut IndexOnlyScanEmit,
+            &mut probe,
+            &mut root,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            pull_step_chain(
+                &mut b.scan,
+                &mut BitmapHeapScanSource,
+                &mut BitmapHeapScanEmit,
+                &mut probe,
+                &mut root,
+                estate,
+            )
+        }
+        _ => unreachable!("memoized join verdict admitted a non-scan outer child"),
+    }
+}
+
+/// Structural refuse-set for the lane hash join, memoized on the node at
+/// first evaluation (verdict stability: a lane-owned join must stay
+/// lane-owned — `lane_join_untouched` in the verdict guarantees the row path
+/// never drove this node before the lane, and memoization guarantees the
+/// lane drives it ever after). Join side: `lane_join_admissible` (INNER, no
+/// residual quals, uninstrumented, subplan/param-free) + serial hash +
+/// subplan/param-free build hash. Child side: the Phase-1 scan refuse-sets
+/// on BOTH children. The caller re-checks the dynamic EPQ/direction gates
+/// per call.
+fn hash_join_lane_fusible<'mcx>(
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if let Some(v) = hj.lane_fusible {
+        return Ok(v);
+    }
+    let v = hash_join_fusible_static(hj, estate)?;
+    hj.lane_fusible = Some(v);
+    Ok(v)
+}
+
+fn hash_join_fusible_static<'mcx>(
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
+    let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
+    if !::nodehashjoin::lane_join_admissible(state)
+        || hstate.parallel_state().is_some()
+        || hstate.is_parallel_aware()
+        || !::nodehash::lane_build_hash_admissible(hstate)
+        || !::nodehashjoin::lane_join_untouched(state, hstate)
+    {
+        return Ok(false);
+    }
+    Ok(scan_child_fusible(outer, estate)? && scan_child_fusible(child, estate)?)
+}
+
+/// Try to let the lane own a bare `HashJoin` (no lane consumer above): build
+/// pipeline once (lazily, phase = the node's own HJ_BUILD_HASHTABLE), then
+/// one joined tuple per PG pull through the probe chain. `None` = refused
+/// (caller runs the unchanged `exec_hash_join` — byte-safe even after a
+/// lane-delegated build, which leaves exactly the row path's post-build node
+/// state). The dispatch hook gates this on the legacy fused probe drive NOT
+/// engaging (admission economics: never preempt the faster existing path).
+#[inline]
+pub fn try_own_hash_join<'mcx>(
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (mirrors the sort breaker).
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    if !hash_join_lane_fusible(hj, estate)? {
+        return Ok(None);
+    }
+    // C's CHECK_FOR_INTERRUPTS at ExecHashJoin entry.
+    ::postgres_seams::check_for_interrupts::call()?;
+    let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
+    let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
+    if ::nodehashjoin::lane_join_phase(state, hstate) == ::nodehashjoin::LaneJoinPhase::Build {
+        let done = join_build_dispatch(state, hstate, child, estate)?;
+        if done.empty {
+            // C's empty-build early return: no output, outer never pulled.
+            return Ok(Some(None));
+        }
+        if done.nbatch > 1 {
+            // Spill refuse, before any lane tuple is emitted: the fallback
+            // row path resumes from HJ_NEED_NEW_OUTER over the same table.
+            return Ok(None);
+        }
+    } else {
+        match ::nodehashjoin::lane_join_phase(state, hstate) {
+            ::nodehashjoin::LaneJoinPhase::EmptyDone => return Ok(Some(None)),
+            ::nodehashjoin::LaneJoinPhase::Probe => {
+                if hstate.table.as_ref().expect("probe phase has a table").nbatch > 1 {
+                    return Ok(None);
+                }
+            }
+            ::nodehashjoin::LaneJoinPhase::Build => unreachable!("handled above"),
+        }
+    }
+    Ok(Some(join_probe_pull_dispatch(state, hstate, outer, estate)?))
+}
+
+/// Try to let the lane own `Agg(hashed) → HashJoin(inner) → scans` — the
+/// first breaker-to-breaker composition. Three pipelines on two breaker
+/// nodes, all phase flags node-resident row-path state:
+///
+///   1. build:  inner scan → filter/project → HashJoinBuildSink
+///   2. probe:  outer scan → filter/project → JoinProbe → HashAggBuildSink
+///   3. emit:   HashAggSource → HashAggEmit → RootAdapter (one group per pull)
+///
+/// `None` = refused (caller falls to the per-tuple `exec_agg` over
+/// `exec_hash_join`, byte-identically — including after a lane-delegated
+/// join build that then spill-refused).
+#[inline]
+pub fn try_own_agg_over_hash_join<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    if !::nodeagg::agg_hash_breaker_admissible(agg) || !hash_join_lane_fusible(hj, estate)? {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    if !::nodeagg::agg_hash_table_filled(agg) {
+        let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
+        let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
+        // Join build phase (once, lazily; a rescan that rebuilt the inner
+        // side re-enters here via the node's own HJ_BUILD_HASHTABLE).
+        if ::nodehashjoin::lane_join_phase(state, hstate)
+            == ::nodehashjoin::LaneJoinPhase::Build
+        {
+            let done = join_build_dispatch(state, hstate, child, estate)?;
+            if !done.empty && done.nbatch > 1 {
+                // Spill refuse before any lane tuple is emitted; the
+                // fallback per-tuple agg over exec_hash_join resumes from
+                // HJ_NEED_NEW_OUTER over the identical table.
+                return Ok(None);
+            }
+        }
+        match ::nodehashjoin::lane_join_phase(state, hstate) {
+            ::nodehashjoin::LaneJoinPhase::EmptyDone => {
+                // Inner join over an empty build: emits nothing, and the
+                // outer child is never pulled (C's early return). The agg
+                // finalizes over an empty input.
+                let mut sink = HashAggBuildSink { agg: &mut *agg };
+                sink.finish(estate)?;
+            }
+            ::nodehashjoin::LaneJoinPhase::Probe => {
+                if hstate.table.as_ref().expect("probe phase has a table").nbatch > 1 {
+                    return Ok(None);
+                }
+                let mut sink = HashAggBuildSink { agg: &mut *agg };
+                join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
+            }
+            ::nodehashjoin::LaneJoinPhase::Build => unreachable!("build ran above"),
+        }
+    }
+    // Agg emit phase (every call): one qual-passing group per PG pull, in
+    // C's retrieve order.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
 }
