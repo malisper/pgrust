@@ -62,8 +62,12 @@
 [ -n "${__SCRATCH_LOADED:-}" ] && return 0
 __SCRATCH_LOADED=1
 
-SCRATCH_ROOT="${PGRUST_SCRATCH_ROOT:-/tmp/pgrust-scratch/${USER:-pod}}"
-SCRATCH_CACHE_ROOT="${PGRUST_SCRATCH_CACHE_ROOT:-/tmp/pgrust-scratch-cache/${USER:-pod}}"
+# Keyed by the EFFECTIVE user (id -un), not $USER: fleet pods gosu from root
+# to pg with root's env, and a $USER-keyed root would collide across the two
+# uids (root-owned 755 dir -> pg's mktemp EACCES).
+__SCRATCH_USER="$(id -un 2>/dev/null || echo "${USER:-pod}")"
+SCRATCH_ROOT="${PGRUST_SCRATCH_ROOT:-/tmp/pgrust-scratch/$__SCRATCH_USER}"
+SCRATCH_CACHE_ROOT="${PGRUST_SCRATCH_CACHE_ROOT:-/tmp/pgrust-scratch-cache/$__SCRATCH_USER}"
 
 __SCRATCH_DIRS=()
 __SCRATCH_HOOKS=()
