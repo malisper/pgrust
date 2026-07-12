@@ -596,6 +596,38 @@ pub fn sort_lane_topk_boundary(node: &SortState<'_>) -> Option<(Datum, bool)> {
     node.tuplesortstate.as_ref()?.topk_boundary()
 }
 
+/// Arm top-k boundary-tie tracking on the just-begun tuplesort (the lane's
+/// zone-adaptive sort feed: arrival order is about to change, so tie
+/// selection at the LIMIT cut must be provably arrival-insensitive or the
+/// feed demotes). Call between `sort_lane_begin` and the first put.
+pub fn sort_lane_topk_tie_track_arm(node: &mut SortState<'_>) {
+    node.tuplesortstate
+        .as_mut()
+        .expect("tie track armed before sort_lane_begin")
+        .arm_topk_tie_track();
+}
+
+/// After `sort_lane_finish`, with tracking armed: could the selection or
+/// order of the emitted top-N depend on feed arrival order, and which
+/// trigger fired? (see `Tuplesort::topk_tie_ambiguity`). `None` when
+/// tracking was never armed or no tie is arrival-sensitive.
+pub fn sort_lane_topk_tie_ambiguity(
+    node: &SortState<'_>,
+) -> Option<::tuplesort::TopkTieAmbiguity> {
+    node.tuplesortstate.as_ref().and_then(|ts| ts.topk_tie_ambiguity())
+}
+
+/// Demotion reset (the zone-adaptive feed observed an ambiguous boundary
+/// tie): drop the finished tuplesort and clear the phase flag so the caller
+/// can re-run `sort_lane_begin` + a physical-order re-feed. The node's
+/// bounded/bound plan state is untouched — the re-begun sort is built
+/// exactly as the first one was.
+pub fn sort_lane_reset_for_refeed(node: &mut SortState<'_>) {
+    node.tuplesortstate = None;
+    node.sort_Done = false;
+    node.bounded_Done = false;
+}
+
 /// Finalize leg (breaker `Sink::finish`): `performsort` + the EXPLAIN sort
 /// stats + the built flags — `exec_sort`'s build-leg tail verbatim. Flips
 /// `sort_Done`, the breaker's Feed→Emit phase flag.

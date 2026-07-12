@@ -217,6 +217,17 @@ struct ClusterTupleHeader {
 const _: () = assert!(mem::size_of::<ClusterTupleHeader>() == 16);
 
 
+/// Trigger classes for `Tuplesort::topk_tie_ambiguity` (top-k boundary-tie
+/// tracking, lane zone-adaptive sort feeds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopkTieAmbiguity {
+    /// Which rows made the LIMIT cut depends on arrival order.
+    CutSelection,
+    /// The cut set is exact; only equal-full-key emit order inside the
+    /// output is arrival-dependent.
+    RetainedOrder,
+}
+
 pub struct TuplesortData<'m> {
     mcx: Mcx<'m>,
     tuplecontext: MemoryContext,
@@ -251,6 +262,17 @@ pub struct TuplesortData<'m> {
     abbrev_next: i64,
     // Freed-space size mode, resolved once (bounded-path discards are per-put).
     free_typlen: i16,
+    // Top-k boundary-tie tracking (armed only by the lane's zone-adaptive
+    // sort feed, docs/design/cbstore-zone-adaptive.md): `tie_dirty` records
+    // whether the CURRENT k-th boundary key group extends beyond the heap —
+    // i.e. an incoming full-key tie against the boundary was discarded, or a
+    // boundary-tie heap member was evicted while an equal-key member remains.
+    // Maintenance keeps it exact w.r.t. the FINAL boundary: a replace-top
+    // that strictly improves the boundary clears it (all earlier tie events
+    // were at keys the final boundary strictly beats). Off (false/false) the
+    // put paths are untouched.
+    tie_track: bool,
+    tie_dirty: bool,
     variant: SortVariant,
     // Unique violation recorded mid-sort, surfaced by performsort.
     unique_violation: Cell<Option<Box<PgError>>>,
@@ -1074,6 +1096,8 @@ impl Tuplesort {
                 abbrev,
                 abbrev_next: 10,
                 free_typlen,
+                tie_track: false,
+                tie_dirty: false,
                 variant,
                 unique_violation: Cell::new(None),
             })
@@ -1158,6 +1182,70 @@ impl Tuplesort {
         })
     }
 
+    /// Arm top-k boundary-tie tracking (lane zone-adaptive sort feeds only;
+    /// see the `tie_track` field). Must be armed before the first put.
+    pub fn arm_topk_tie_track(&mut self) {
+        self.0.with_mut(|st| {
+            debug_assert!(st.status == TupSortStatus::Initial && st.memtuples.is_empty());
+            st.tie_track = true;
+            st.tie_dirty = false;
+        })
+    }
+
+    /// After `performsort`, with tie tracking armed: could the SELECTION or
+    /// ORDER of the first `bound` output rows depend on input arrival order?
+    /// True iff (a) a full-key tie group at the final k-th boundary extends
+    /// beyond the heap (`tie_dirty`, maintained by the bounded put paths;
+    /// also the never-bounded cut pair), or (b) any adjacent full-key-equal
+    /// pair exists within the first `bound` output rows (the in-memory qsort
+    /// and the bounded heapsort are both unstable, so retained-tie emit
+    /// order is arrival-dependent). Conservative `true` when the sort left
+    /// memory (spilled bounded feeds are out of the lane's admitted
+    /// envelope). False whenever tracking was never armed.
+    pub fn topk_tie_ambiguous(&self) -> bool {
+        self.topk_tie_ambiguity().is_some()
+    }
+
+    /// `topk_tie_ambiguous` with the trigger distinguished: `CutSelection` =
+    /// which rows made the LIMIT cut is arrival-dependent (demotion is the
+    /// only byte-exact answer); `RetainedOrder` = the cut set is exact but
+    /// equal-full-key rows inside the output can emit in arrival-dependent
+    /// order (the surface the ratified tie-order relaxation covers).
+    /// `CutSelection` dominates when both hold.
+    pub fn topk_tie_ambiguity(&self) -> Option<TopkTieAmbiguity> {
+        self.0.with(|st| {
+            if !st.tie_track {
+                return None;
+            }
+            if st.tie_dirty || st.status != TupSortStatus::SortedInMem {
+                return Some(TopkTieAmbiguity::CutSelection);
+            }
+            debug_assert!(st.bounded && st.abbrev.is_none());
+            let len = st.memtuples.len();
+            // Pairs (i, i+1) for i < min(bound, len-1): every adjacent pair
+            // inside the emitted prefix, plus the cut pair when more rows
+            // than the bound survived in memory (the never-bounded case,
+            // where `tie_dirty` never armed — a cut-pair tie is selection
+            // ambiguity there, interior pairs are order-only).
+            let bound = st.bound as usize;
+            let hi = bound.min(len.saturating_sub(1));
+            let ctx = ctx!(st);
+            dispatch_cmp!(ctx, |cmp| {
+                let mut kind = None;
+                for i in 0..hi {
+                    if cmp(&st.memtuples[i], &st.memtuples[i + 1]) == 0 {
+                        if i + 1 == bound {
+                            kind = Some(TopkTieAmbiguity::CutSelection);
+                            break;
+                        }
+                        kind = Some(TopkTieAmbiguity::RetainedOrder);
+                    }
+                }
+                kind
+            })
+        })
+    }
+
     /// `tuplesort_reset`: recycle the batch, keep keys + memtuples capacity.
     pub fn reset(&mut self) {
         self.0.with_mut(|st| {
@@ -1184,6 +1272,8 @@ impl Tuplesort {
             st.markpos_eof = false;
             // C's reset leaves availMem = allowedMem (memtuples not re-charged).
             st.avail_mem = st.allowed_mem;
+            st.tie_track = false;
+            st.tie_dirty = false;
             st.abbrev_next = 10;
             st.recompute_put_watermark();
         })
@@ -2126,6 +2216,12 @@ impl<'m> TuplesortData<'m> {
             self.bounded_cmp_generic(&tuple, &heap_top)
         };
         if compare <= 0 {
+            // Tie tracking: an incoming full-key tie against the boundary is
+            // discarded here — which equal-key rows survive is now
+            // arrival-order dependent.
+            if compare == 0 && self.tie_track {
+                self.tie_dirty = true;
+            }
             self.free_sort_tuple(&tuple);
             cfi()
         } else {
@@ -2142,14 +2238,34 @@ impl<'m> TuplesortData<'m> {
     #[inline(never)]
     fn puttuple_bounded_replace(&mut self, tuple: SortTuple) -> PgResult<()> {
         let top = self.memtuples[0];
-        self.free_sort_tuple(&top);
+        if !self.tie_track {
+            self.free_sort_tuple(&top);
+        }
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let count = tuples.len();
+        let mut tie = false;
         let result = {
             let ctx = ctx!(self);
-            dispatch_cmp!(ctx, |cmp| heap_replace_top(cmp, &mut tuples, count, tuple))
+            dispatch_cmp!(ctx, |cmp| {
+                let r = heap_replace_top(cmp, &mut tuples, count, tuple);
+                if self.tie_track {
+                    // Evicted boundary member vs the NEW boundary: equal =
+                    // an equal-key member remains (tie selection happened);
+                    // strictly improved = every earlier tie event was at a
+                    // key the boundary now strictly beats — clear. The
+                    // evicted tuple's free is deferred below so the compare
+                    // reads live bytes (accounting order is invisible;
+                    // nothing allocates in between).
+                    tie = cmp(&top, &tuples[0]) == 0;
+                }
+                r
+            })
         };
         self.memtuples = tuples;
+        if self.tie_track {
+            self.tie_dirty = tie;
+            self.free_sort_tuple(&top);
+        }
         result
     }
 
@@ -2373,6 +2489,8 @@ impl<'m> TuplesortData<'m> {
 
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let free_typlen = self.free_typlen;
+        let tie_track = self.tie_track;
+        let mut tie_dirty = false;
         let mut freed: i64 = 0;
         let result = (|| {
             let ctx = ctx!(self);
@@ -2382,13 +2500,29 @@ impl<'m> TuplesortData<'m> {
                     if count < bound {
                         let stup = tuples[i];
                         heap_insert(cmp, &mut tuples, &mut count, stup)?;
-                    } else if cmp(&tuples[i], &tuples[0]) <= 0 {
-                        freed += freed_space(free_typlen, &tuples[i]);
-                        cfi()?;
                     } else {
-                        let stup = tuples[i];
-                        freed += freed_space(free_typlen, &tuples[0]);
-                        heap_replace_top(cmp, &mut tuples, count, stup)?;
+                        let c = cmp(&tuples[i], &tuples[0]);
+                        if c <= 0 {
+                            // Tie tracking: same discard/evict rules as
+                            // puttuple_bounded / puttuple_bounded_replace
+                            // (this loop is the same bounded put over the
+                            // pre-transition backlog). freed_space is
+                            // size accounting only, so the evicted root's
+                            // bytes stay live for the post-replace compare.
+                            if c == 0 && tie_track {
+                                tie_dirty = true;
+                            }
+                            freed += freed_space(free_typlen, &tuples[i]);
+                            cfi()?;
+                        } else {
+                            let stup = tuples[i];
+                            let top = tuples[0];
+                            freed += freed_space(free_typlen, &top);
+                            heap_replace_top(cmp, &mut tuples, count, stup)?;
+                            if tie_track {
+                                tie_dirty = cmp(&top, &tuples[0]) == 0;
+                            }
+                        }
                     }
                 }
                 debug_assert!(count == bound);
@@ -2398,6 +2532,9 @@ impl<'m> TuplesortData<'m> {
         tuples.truncate(bound);
         self.memtuples = tuples;
         self.avail_mem += freed;
+        if tie_track {
+            self.tie_dirty = tie_dirty;
+        }
         self.status = TupSortStatus::Bounded;
         result
     }
