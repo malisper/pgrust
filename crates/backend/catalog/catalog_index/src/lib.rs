@@ -424,11 +424,16 @@ pub fn index_opclass_options<'mcx>(
     let amoptsprocnum = kind.amoptsprocnum() as usize;
     let amsupport = kind.amsupport() as usize;
     // index_getprocid over the rd_support preload (nkey x amsupport, row-major).
-    let procid = indrel
-        .rd_support
-        .get((attnum as usize - 1) * amsupport + (amoptsprocnum - 1))
-        .copied()
-        .unwrap_or(InvalidOid);
+    // amoptsprocnum == 0: the AM has no opclass-options proc (hnsw).
+    let procid = if amoptsprocnum == 0 {
+        InvalidOid
+    } else {
+        indrel
+            .rd_support
+            .get((attnum as usize - 1) * amsupport + (amoptsprocnum - 1))
+            .copied()
+            .unwrap_or(InvalidOid)
+    };
     if procid == InvalidOid {
         if attoptions == Datum::null() {
             return Ok(None);
