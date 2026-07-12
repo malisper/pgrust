@@ -63,11 +63,17 @@ pub fn init_support(index: &Relation<'_>) -> PgResult<HnswSupport> {
 }
 
 // HnswGetTypeInfo: proc 3 (halfvec/bit/sparsevec) is unported — vector only.
-pub fn check_type_supported(index: &Relation<'_>) -> i32 {
+// Unreachable through the trimmed vector--0.8.5.sql (no such opclasses), but
+// error rather than panic if a foreign catalog ever presents one.
+pub fn check_type_supported(index: &Relation<'_>) -> PgResult<i32> {
     if index_getprocid(index, HNSW_TYPE_INFO_PROC) != 0 {
-        panic!("pgvector_hnsw: HNSW_TYPE_INFO_PROC opclasses (halfvec/bit/sparsevec) unported");
+        return Err(PgError::error(
+            "hnsw type-info opclasses (halfvec/bit/sparsevec) are not supported",
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into());
     }
-    HNSW_MAX_DIM as i32
+    Ok(HNSW_MAX_DIM as i32)
 }
 
 #[inline]

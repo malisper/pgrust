@@ -147,7 +147,6 @@ pub struct HnswScanOpaqueData<'mcx> {
     pub max_memory: usize,
     // Approximates C MemoryContextMemAllocated(tmpCtx) for the iterative cap.
     pub mem_used: usize,
-    pub iterative: i32,
     // value/w/visited/discarded live in C's so->tmpCtx, which hnswrescan
     // resets; here they are globally-allocated owned values so reassignment
     // in hnswrescan/hnswendscan frees them (bounded memory across rescans).

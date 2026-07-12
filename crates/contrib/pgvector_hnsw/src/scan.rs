@@ -26,7 +26,7 @@ pub fn hnswbeginscan<'mcx>(
     nkeys: i32,
     norderbys: i32,
 ) -> PgResult<IndexScanDescData<'mcx>> {
-    check_type_supported(index);
+    check_type_supported(index)?;
     let support = init_support(index)?;
     let max_memory = (init_small::globals::work_mem() as f64
         * guc_tables::vars::hnsw_scan_mem_multiplier.read()
@@ -42,7 +42,6 @@ pub fn hnswbeginscan<'mcx>(
         previous_distance: f64::NEG_INFINITY,
         max_memory,
         mem_used: 0,
-        iterative: guc_tables::vars::hnsw_iterative_scan.read(),
         value: None,
         support,
         max_dimensions: HNSW_MAX_DIM as i32,
@@ -84,7 +83,6 @@ pub fn hnswrescan(
     }
     let so = opaque(scan);
     so.first = true;
-    so.iterative = guc_tables::vars::hnsw_iterative_scan.read();
     so.tuples = 0;
     so.mem_used = 0;
     so.previous_distance = f64::NEG_INFINITY;
@@ -223,7 +221,8 @@ fn get_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     }
 
     let ef_search = guc_tables::vars::hnsw_ef_search.read();
-    let iterative = so.iterative != HNSW_ITERATIVE_SCAN_OFF;
+    // C reads the hnsw_iterative_scan GUC at each use (no cached copy).
+    let iterative = guc_tables::vars::hnsw_iterative_scan.read() != HNSW_ITERATIVE_SCAN_OFF;
     let mut discarded = iterative.then(|| DiscardedHeap::new(tmcx));
 
     // Layer-0 visited persists across iterations in so.visited.
@@ -405,7 +404,7 @@ pub fn hnswgettuple(
             let so = opaque(scan);
             if !so.w.is_empty() {
                 (false, false, false)
-            } else if so.iterative == HNSW_ITERATIVE_SCAN_OFF {
+            } else if guc_tables::vars::hnsw_iterative_scan.read() == HNSW_ITERATIVE_SCAN_OFF {
                 (false, false, true)
             } else if so.discarded.is_none() {
                 (false, false, true)
@@ -449,7 +448,7 @@ pub fn hnswgettuple(
         e.heaptids_len -= 1;
         let heaptid: ItemPointerData = e.heaptids[e.heaptids_len as usize];
 
-        if so.iterative == HNSW_ITERATIVE_SCAN_STRICT {
+        if guc_tables::vars::hnsw_iterative_scan.read() == HNSW_ITERATIVE_SCAN_STRICT {
             if sc_distance < so.previous_distance {
                 continue;
             }

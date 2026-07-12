@@ -832,17 +832,10 @@ fn insert_tuple(
         return r.map(|_| true);
     }
 
-    // Memory accounting mirrors HnswMemoryContextAlloc: element struct +
-    // neighbor arrays + value image, approximated by allocation sizes.
-    let level = random_level(bs.ml, bs.max_level);
-    let mut neighbors_bytes = 0usize;
-    for lc in 0..=level as i32 {
-        neighbors_bytes +=
-            hnsw_get_layer_m(bs.m, lc) as usize * core::mem::size_of::<MemCandidate>() + 16;
-    }
-    let elem_bytes = core::mem::size_of::<MemElement<'_>>() + neighbors_bytes + img.len();
-
-    if bs.graph.memory_used + elem_bytes >= bs.graph.memory_total {
+    // C checks memoryUsed (+ zero serial margin) against memoryTotal BEFORE
+    // HnswInitElement draws the level, so the PRNG stream is not consumed by
+    // a tuple that diverts to the on-disk path at the flush transition.
+    if bs.graph.memory_used >= bs.graph.memory_total {
         if !bs.graph.flushed {
             elog::ereport(NOTICE)
                 .errmsg(format!(
@@ -859,6 +852,16 @@ fn insert_tuple(
         bs.support = support;
         return r.map(|_| true);
     }
+
+    // Memory accounting mirrors HnswMemoryContextAlloc: element struct +
+    // neighbor arrays + value image, approximated by allocation sizes.
+    let level = random_level(bs.ml, bs.max_level);
+    let mut neighbors_bytes = 0usize;
+    for lc in 0..=level as i32 {
+        neighbors_bytes +=
+            hnsw_get_layer_m(bs.m, lc) as usize * core::mem::size_of::<MemCandidate>() + 16;
+    }
+    let elem_bytes = core::mem::size_of::<MemElement<'_>>() + neighbors_bytes + img.len();
     bs.graph.memory_used += elem_bytes;
 
     let gmcx = bs.graph.mcx;
@@ -895,7 +898,7 @@ fn init_build_state<'a, 'g, 'mcx>(
     fork_num: ForkNumber,
     gmcx: Mcx<'g>,
 ) -> PgResult<BuildState<'a, 'g, 'mcx>> {
-    let max_dims = check_type_supported(index);
+    let max_dims = check_type_supported(index)?;
     let m = hnsw_get_m(index);
     let ef_construction = hnsw_get_ef_construction(index);
     let dimensions = index.rd_att.attr(0).atttypmod;
