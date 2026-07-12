@@ -44,8 +44,8 @@ use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
 use push::{
-    drain_pipeline, drain_pipeline_chain, pull_step, pull_step_chain, Batch, OpStatus, Operator,
-    RootAdapter, Sink, SinkFeed, Source, TupleOp,
+    drain_pipeline, drain_pipeline_chain, pull_step, pull_step_chain, Batch, BatchEmit,
+    BatchSink, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source, TupleOp,
 };
 use stats::{RefuseReason, ShapeClass};
 
@@ -287,6 +287,42 @@ impl<'mcx> Operator<'mcx> for SeqScanFilterProject {
             }
         }
     }
+
+    fn consume_batch<K: BatchSink<'mcx>>(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut K,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        let (pos, n) = node.lane_cursor();
+        debug_assert_eq!(n, batch.n);
+        out.accept_batch(&mut SeqScanBatchEmit { node }, pos, n, estate)?;
+        // One cursor save per batch (not per row): breaker sinks never pause,
+        // an error mid-batch aborts the query, and a rescan restages.
+        node.set_lane_cursor(n, n);
+        Ok(OpStatus::NeedInput)
+    }
+}
+
+/// `SeqScanFilterProject`'s per-row body as a `BatchEmit` face: identical
+/// primitive (`seq_scan_batch_emit`) at the identical per-row interrupt
+/// cadence (`consume` runs `check_for_interrupts` once per tuple attempt,
+/// matching `exec_scan_fetch`).
+struct SeqScanBatchEmit<'a, 'mcx> {
+    node: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
+}
+
+impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
+    #[inline]
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        ::postgres_seams::check_for_interrupts::call()?;
+        ::nodeseqscan::seq_scan_batch_emit(self.node, estate, i)
+    }
 }
 
 // ===========================================================================
@@ -457,6 +493,39 @@ impl<'mcx> Operator<'mcx> for IndexScanEmit {
                 }
             }
         }
+    }
+
+    fn consume_batch<K: BatchSink<'mcx>>(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut K,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        let (pos, n) = node.lane_cursor();
+        debug_assert_eq!(n, batch.n);
+        out.accept_batch(&mut IndexScanBatchEmit { node }, pos, n, estate)?;
+        node.set_lane_cursor(n, n);
+        Ok(OpStatus::NeedInput)
+    }
+}
+
+/// `IndexScanEmit`'s per-row body as a `BatchEmit` face (no per-row CFI —
+/// `index_scan_next_tidrun` runs it per run, exactly as `consume`). The run
+/// is consumed sequentially 0,1,2,… by construction (`pos..n`).
+struct IndexScanBatchEmit<'a, 'mcx> {
+    node: &'a mut ::nodeindexscan::IndexScanState<'mcx>,
+}
+
+impl<'mcx> BatchEmit<'mcx> for IndexScanBatchEmit<'_, 'mcx> {
+    #[inline]
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        Ok(::nodeindexscan::index_scan_batch_fetch(self.node, estate, i)?
+            .then_some(self.node.ss.ss_ScanTupleSlot))
     }
 }
 
@@ -768,6 +837,38 @@ impl<'mcx> Operator<'mcx> for BitmapHeapScanEmit {
                 }
             }
         }
+    }
+
+    fn consume_batch<K: BatchSink<'mcx>>(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut K,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        let (pos, n) = node.lane_cursor();
+        debug_assert_eq!(n, batch.n);
+        out.accept_batch(&mut BitmapHeapScanBatchEmit { node }, pos, n, estate)?;
+        node.set_lane_cursor(n, n);
+        Ok(OpStatus::NeedInput)
+    }
+}
+
+/// `BitmapHeapScanEmit`'s per-row body as a `BatchEmit` face (no per-row CFI
+/// — `bitmap_scan_next_pagebatch` runs it per page, exactly as `consume`).
+struct BitmapHeapScanBatchEmit<'a, 'mcx> {
+    node: &'a mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+}
+
+impl<'mcx> BatchEmit<'mcx> for BitmapHeapScanBatchEmit<'_, 'mcx> {
+    #[inline]
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        Ok(::nodebitmapheapscan::bitmap_scan_batch_fetch(self.node, estate, i)?
+            .then_some(self.node.ss.ss_ScanTupleSlot))
     }
 }
 
@@ -1110,6 +1211,11 @@ impl<'mcx> Sink<'mcx> for HashAggBuildSink<'_, 'mcx> {
     }
 }
 
+/// Batch-granular feed: the default loop, monomorphized — each staged row
+/// runs the same `agg_hash_build_accept` in the same order, with the per-row
+/// dyn dispatch, `SinkFeed` matching, and consume-cursor saves elided.
+impl<'mcx> BatchSink<'mcx> for HashAggBuildSink<'_, 'mcx> {}
+
 /// The breaker as Source of pipeline N+1: produce = the existing
 /// `agg_retrieve_hash_table` read-back, one final projected group row per
 /// batch (the row lives in the agg's result slot — node-side, per the `Batch`
@@ -1371,6 +1477,25 @@ impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
     }
 }
 
+/// Batch-granular feed: `sort_lane_put_batch` — row-for-row `sort_lane_put`
+/// over the same emit stream in the same order, with the tuplesort handle
+/// hoisted per batch and the by-val datum batch putter held open across the
+/// batch (the `exec_sort`/`exec_sort_batched` feed arms; identical put
+/// accounting, see the seam's doc).
+impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        ::nodesort::sort_lane_put_batch(self.sort, estate, pos, n, &mut |i, estate| {
+            emit.emit(i, estate)
+        })
+    }
+}
+
 /// The breaker's `Source` face (pipeline N+1): each produce streams the next
 /// tuple of the tuplesort read-back into `ps_ResultTupleSlot` (one-row
 /// batches, like the IndexOnlyScan source — always consumed within the
@@ -1476,6 +1601,11 @@ impl<'mcx> Sink<'mcx> for HashJoinBuildSink<'_, 'mcx> {
         Ok(())
     }
 }
+
+/// Batch-granular feed: the default loop, monomorphized — each staged row
+/// runs the same `lane_build_accept` in the same order, with the per-row dyn
+/// dispatch, `SinkFeed` matching, and consume-cursor saves elided.
+impl<'mcx> BatchSink<'mcx> for HashJoinBuildSink<'_, 'mcx> {}
 
 /// The join probe as a mid-pipeline `TupleOp`: accept stages one outer row
 /// (`lane_probe_accept` — ecxt reset + hash/dense key, C's per-outer-row

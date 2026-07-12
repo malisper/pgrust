@@ -112,6 +112,21 @@ pub(super) trait Operator<'mcx> {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus>;
+    /// Batch-granular variant for BREAKER-fed pipelines (`drain_pipeline`):
+    /// hand the sink the whole staged range once (`BatchSink::accept_batch`)
+    /// instead of one dyn `accept` per produced tuple. Operators that
+    /// override this skip the per-row consume-cursor saves too — sound only
+    /// because a breaker sink never pauses (an error mid-batch aborts the
+    /// query; a rescan restages). Default: the per-row `consume`, unchanged.
+    fn consume_batch<K: BatchSink<'mcx>>(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut K,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        self.consume(node, batch, out, estate)
+    }
 }
 
 /// A pipeline endpoint. For scan-only pipelines this is the `RootAdapter`;
@@ -127,6 +142,69 @@ pub(super) trait Sink<'mcx> {
     ) -> PgResult<SinkFeed>;
     /// Upstream exhausted: final flush/cleanup.
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()>;
+}
+
+/// Per-row emit face over a staged batch: the operator's filter/project
+/// segment bound to its node, handed to a batch-granular sink
+/// (`BatchSink::accept_batch`) so the sink runs the per-row delegation loop
+/// internally. `emit` must reproduce the owning operator's `consume` body for
+/// staged row `i` EXACTLY — same primitive, same interrupt cadence, same
+/// order — so a batch-fed sink sees the identical row stream the per-row
+/// `accept` feed would deliver.
+pub(super) trait BatchEmit<'mcx> {
+    /// Produce staged row `i`'s output slot; `None` = qual-filtered.
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>>;
+}
+
+/// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3
+/// "batch-granular sink calls" item). Instead of one dyn `accept` per
+/// produced tuple, the operator hands the sink its per-row emit face plus the
+/// staged range once per batch, and the sink runs the per-row delegation loop
+/// internally. `accept_batch` is generic over the emit type, so the whole
+/// loop monomorphizes: no per-tuple dyn dispatch, no per-row `SinkFeed`
+/// status matching, no per-row consume-cursor saves — and a sink may hoist
+/// per-put invariants (the sort breaker hoists its tuplesort handle and holds
+/// the by-val datum batch putter open across the batch, exactly as
+/// `exec_sort`/`exec_sort_batched` do).
+///
+/// BREAKERS ONLY: a batch-fed sink must consume the whole range —
+/// `SinkFeed::Full` mid-batch is the same protocol violation it is in
+/// `drain_pipeline`, and the default loop hard-errors on it (never reached by
+/// the real breakers, which are structurally `NeedMore`). The capacity-one
+/// `RootAdapter` (the PG pull face) stays per-row by design.
+///
+/// Byte-identity: the default impl is literally the per-row feed loop the
+/// operator ran before (same emit, same accept, same order); overrides must
+/// keep the same per-row delegation in the same order — dispatch granularity
+/// is the ONLY change.
+pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
+    /// Feed staged rows `pos..n` through `emit` into the sink.
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        for i in pos..n {
+            if let Some(slot) = emit.emit(i, estate)? {
+                match self.accept(slot, estate)? {
+                    SinkFeed::NeedMore => {}
+                    // A breaker never fills; see `drain_pipeline`'s Paused arm.
+                    SinkFeed::Full => {
+                        return Err(Box::new(::types_error::PgError::error(
+                            "lane-v2 batch feed: breaker sink returned Full".to_string(),
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The pull adapter at the pipeline root — the PG boundary. PG pulls one
@@ -395,16 +473,20 @@ where
 /// agg_fill_hash_table, exec_sort's feed loop, nodeHashjoin's
 /// HJ_BUILD_HASHTABLE) for free; the node-side phase flag then flips the
 /// breaker to its `Source` face for pipeline N+1.
-pub(super) fn drain_pipeline<'mcx, S, O>(
+/// Generic (not dyn) over the sink so `Operator::consume_batch` +
+/// `BatchSink::accept_batch` monomorphize the whole feed loop — the
+/// batch-granular dispatch that displaces the per-row dyn `accept` calls.
+pub(super) fn drain_pipeline<'mcx, S, O, K>(
     node: &mut S::Node,
     src: &mut S,
     op: &mut O,
-    sink: &mut dyn Sink<'mcx>,
+    sink: &mut K,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()>
 where
     S: Source<'mcx>,
     O: Operator<'mcx, Node = S::Node>,
+    K: BatchSink<'mcx>,
 {
     loop {
         let batch = match op.pending(node) {
@@ -414,7 +496,7 @@ where
                 None => break,
             },
         };
-        match op.consume(node, batch, sink, estate)? {
+        match op.consume_batch(node, batch, sink, estate)? {
             OpStatus::NeedInput => {}
             OpStatus::Finished => break,
             // Breaker sinks never return `Full`; a pause here means a
