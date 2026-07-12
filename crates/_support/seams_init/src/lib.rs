@@ -141,6 +141,8 @@ pub fn init_all() {
     pgcrypto::init_seams();
     hstore::init_seams();
     pg_trgm::init_seams();
+    unaccent::init_seams();
+    pg_walinspect::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

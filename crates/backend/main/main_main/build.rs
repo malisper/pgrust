@@ -20,17 +20,26 @@ fn main() {
     let staged = profile_dir.join("share/extension");
     std::fs::create_dir_all(&staged).unwrap();
 
+    // Contrib text search data files (unaccent.rules, ...) stage the same way
+    // into share/tsearch_data/; ts_locale's get_tsearch_config_filename
+    // resolves the staged file first.
+    let staged_tsdata = profile_dir.join("share/tsearch_data");
+    std::fs::create_dir_all(&staged_tsdata).unwrap();
+
     for crate_entry in std::fs::read_dir(&contrib_dir).unwrap() {
-        let ext_dir = crate_entry.unwrap().path().join("extension");
-        if !ext_dir.is_dir() {
-            continue;
-        }
-        for f in std::fs::read_dir(&ext_dir).unwrap() {
-            let src = f.unwrap().path();
-            if !src.is_file() {
+        let crate_path = crate_entry.unwrap().path();
+        for (sub, staged) in [("extension", &staged), ("tsearch_data", &staged_tsdata)] {
+            let src_dir = crate_path.join(sub);
+            if !src_dir.is_dir() {
                 continue;
             }
-            copy_if_changed(&src, &staged.join(src.file_name().unwrap()));
+            for f in std::fs::read_dir(&src_dir).unwrap() {
+                let src = f.unwrap().path();
+                if !src.is_file() {
+                    continue;
+                }
+                copy_if_changed(&src, &staged.join(src.file_name().unwrap()));
+            }
         }
     }
 }
