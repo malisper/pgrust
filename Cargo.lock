@@ -7482,6 +7482,7 @@ dependencies = [
  "exectuples",
  "lanereg",
  "mcx",
+ "pg_locale",
  "types_core",
  "types_error",
  "types_nodes",
