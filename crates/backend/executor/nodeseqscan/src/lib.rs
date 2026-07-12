@@ -1321,6 +1321,20 @@ pub fn seq_scan_batch_lane_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u6
     (b.lane.is_some() && b.nwords > 0).then(|| &b.sel[..b.nwords as usize])
 }
 
+/// Footer value min/max covering EVERY row of the CURRENT staged window
+/// (cbstore granule zone entry; int-family columns only; `col` is the
+/// 0-based scan column). None = no zone metadata / heap scan. Consumers use
+/// it as a whole-window value proof (guard intervals, constant-key windows) —
+/// it covers all staged rows, so any row subset is covered too.
+#[inline]
+pub fn seq_scan_window_value_minmax(
+    node: &SeqScanState<'_>,
+    col: usize,
+) -> Option<(i64, i64)> {
+    let sd = node.ss.ss_currentScanDesc.as_ref()?;
+    ::tableam::table_scan_window_value_minmax(sd, col)
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
