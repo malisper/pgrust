@@ -551,6 +551,23 @@ pub fn exec_build_agg_trans_hashed_masked<'mcx>(
     )
 }
 
+/// [`exec_build_agg_trans_subplans`] over the `keep`-masked subset of `specs`
+/// (`keep` is parallel to `specs`): masked-out transitions get no steps, kept
+/// ones keep their ORIGINAL `spec.pergroup` fixed target — so the program can
+/// run beside a batched fold that covers the complement (lane-v2 plain-agg
+/// breaker residual program).
+pub fn exec_build_agg_trans_plain_masked<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    keep: &[bool],
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    debug_assert_eq!(specs.len(), keep.len());
+    build_agg_trans_masked(mcx, specs, Some(keep), PergroupMode::Fixed, agg_node, params, sub)
+}
+
 // The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
 fn agg_state_node(agg_node: FmNodePtr) -> NonNull<::types_fmgr::AggStateNode> {
     let p = agg_node
