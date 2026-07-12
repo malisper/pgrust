@@ -73,6 +73,8 @@ pub struct LVRelState<'a, 'mcx> {
 
     aggressive: bool,
     skipwithvm: bool,
+    // VACUUM VERBOSE: client-visible INFO instead of DEBUG2/LOG.
+    verbose: bool,
     consider_bypass_optimization: bool,
     do_index_vacuuming: bool,
     do_index_cleanup: bool,
@@ -86,6 +88,7 @@ pub struct LVRelState<'a, 'mcx> {
 
     rel_pages: BlockNumber,
     scanned_pages: BlockNumber,
+    removed_pages: BlockNumber,
     new_frozen_tuple_pages: BlockNumber,
     lpdead_item_pages: BlockNumber,
     nonempty_pages: BlockNumber,
@@ -127,9 +130,13 @@ pub fn heap_vacuum_rel<'mcx>(
     params: &VacuumParams,
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<()> {
-    if params.options & VACOPT_VERBOSE != 0 {
-        unported("heap_vacuum_rel: VERBOSE instrumentation");
-    }
+    let verbose = params.options & VACOPT_VERBOSE != 0;
+    let instrument_vac = verbose
+        || (miscinit::GetMyBackendType() == ::types_core::BackendType::AutovacWorker
+            && params.log_min_duration >= 0);
+    let ru0 = if instrument_vac { Some(pg_rusage::pg_rusage_init()) } else { None };
+    let startwalusage = ::instrument::pg_wal_usage();
+    let startbufferusage = ::instrument::pg_buffer_usage();
     debug_assert!(params.index_cleanup != VacOptValue::Unspecified);
     debug_assert!(!matches!(params.truncate, VacOptValue::Unspecified | VacOptValue::Auto));
 
@@ -182,6 +189,7 @@ pub fn heap_vacuum_rel<'mcx>(
         bstrategy,
         aggressive,
         skipwithvm,
+        verbose,
         consider_bypass_optimization,
         do_index_vacuuming,
         do_index_cleanup,
@@ -195,6 +203,7 @@ pub fn heap_vacuum_rel<'mcx>(
         skippedallvis: false,
         rel_pages,
         scanned_pages: 0,
+        removed_pages: 0,
         new_frozen_tuple_pages: 0,
         lpdead_item_pages: 0,
         nonempty_pages: 0,
@@ -220,6 +229,36 @@ pub fn heap_vacuum_rel<'mcx>(
         next_unskippable_allvis: false,
         next_unskippable_vmbuffer: VmBuffer::new(),
     };
+
+    // C snapshots db/namespace/rel names up front for instrumentation (the
+    // error-context callback itself is elided in this port).
+    let (dbname, relnamespace, relname) = if instrument_vac {
+        let dbname = dbcommands_seams::get_database_name::call(
+            init_small::globals::MyDatabaseId(),
+        )?
+        .unwrap_or_default();
+        let nspname = syscache_seams::pg_namespace_nspname::call(rel.rd_rel.relnamespace)?
+            .map(|n| String::from_utf8_lossy(n.name_str()).into_owned())
+            .unwrap_or_default();
+        (dbname, nspname, rel.name().to_string())
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
+    if verbose {
+        // C: aggressiveness gets its own dedicated VACUUM VERBOSE ereport.
+        elog::ereport(::types_error::INFO)
+            .errmsg(format!(
+                "{} \"{}.{}.{}\"",
+                if vacrel.aggressive { "aggressively vacuuming" } else { "vacuuming" },
+                dbname, relnamespace, relname
+            ))
+            .finish(::types_error::ErrorLocation::new(
+                "src/backend/access/heap/vacuumlazy.c",
+                815,
+                "heap_vacuum_rel",
+            ))?;
+    }
 
     lazy_check_wraparound_failsafe(&mut vacrel)?;
     dead_items_alloc(&mut vacrel, params.nworkers)?;
@@ -277,8 +316,7 @@ pub fn heap_vacuum_rel<'mcx>(
     if new_rel_allfrozen > new_rel_allvisible {
         new_rel_allfrozen = new_rel_allvisible;
     }
-    let _ = orig_rel_pages;
-    vacuum_seams::vac_update_relstats::call(
+    let (frozenxid_updated, minmulti_updated) = vacuum_seams::vac_update_relstats::call(
         rel,
         new_rel_pages,
         vacrel.new_live_tuples,
@@ -298,7 +336,249 @@ pub fn heap_vacuum_rel<'mcx>(
         starttime,
     );
     pgstat_progress_end_command();
+
+    if instrument_vac {
+        let endtime = timestamp_seams::get_current_timestamp::call();
+        if verbose
+            || params.log_min_duration == 0
+            || adt_timestamp::TimestampDifferenceExceeds(
+                starttime,
+                endtime,
+                params.log_min_duration,
+            )
+        {
+            vacuum_instrument_report(
+                &vacrel,
+                params,
+                verbose,
+                &dbname,
+                &relnamespace,
+                &relname,
+                starttime,
+                endtime,
+                ru0.as_ref().expect("instrument implies ru0"),
+                &startwalusage,
+                &startbufferusage,
+                orig_rel_pages,
+                new_rel_pages,
+                frozenxid_updated,
+                minmulti_updated,
+            )?;
+        }
+    }
     Ok(())
+}
+
+// The `instrument` report tail of heap_vacuum_rel (vacuumlazy.c:946): the
+// "finished vacuuming"/"automatic vacuum of table" multi-line summary at INFO
+// (VERBOSE) or LOG (autovacuum log_min_duration). Divergences recorded inline:
+// eager scanning is elided (always 0 eagerly scanned); the delay-time line
+// needs the vacuum-delay progress param (track_cost_delay_timing defaults
+// off); I/O timings come from the BufferUsage diff (the pgstat block-time
+// globals it mirrors).
+#[allow(clippy::too_many_arguments)]
+fn vacuum_instrument_report(
+    vacrel: &LVRelState<'_, '_>,
+    params: &VacuumParams,
+    verbose: bool,
+    dbname: &str,
+    relnamespace: &str,
+    relname: &str,
+    starttime: ::types_core::TimestampTz,
+    endtime: ::types_core::TimestampTz,
+    ru0: &pg_rusage::PgRUsage,
+    startwalusage: &::types_core::instrument::WalUsage,
+    startbufferusage: &::types_core::instrument::BufferUsage,
+    orig_rel_pages: BlockNumber,
+    new_rel_pages: BlockNumber,
+    frozenxid_updated: bool,
+    minmulti_updated: bool,
+) -> PgResult<()> {
+    use std::fmt::Write as _;
+
+    let (secs_dur, usecs_dur) = adt_timestamp::TimestampDifference(starttime, endtime);
+
+    let mut walusage = ::types_core::instrument::WalUsage::default();
+    ::instrument::wal_usage_accum_diff(&mut walusage, &::instrument::pg_wal_usage(), startwalusage);
+    let mut bufferusage = ::types_core::instrument::BufferUsage::default();
+    ::instrument::buffer_usage_accum_diff(
+        &mut bufferusage,
+        &::instrument::pg_buffer_usage(),
+        startbufferusage,
+    );
+
+    let total_blks_hit = bufferusage.shared_blks_hit + bufferusage.local_blks_hit;
+    let total_blks_read = bufferusage.shared_blks_read + bufferusage.local_blks_read;
+    let total_blks_dirtied = bufferusage.shared_blks_dirtied + bufferusage.local_blks_dirtied;
+
+    let mut buf = String::new();
+    if verbose {
+        debug_assert!(!params.is_wraparound);
+        let _ = writeln!(
+            buf,
+            "finished vacuuming \"{}.{}.{}\": index scans: {}",
+            dbname, relnamespace, relname, vacrel.num_index_scans
+        );
+    } else if params.is_wraparound {
+        let msg = if vacrel.aggressive {
+            "automatic aggressive vacuum to prevent wraparound of table"
+        } else {
+            "automatic vacuum to prevent wraparound of table"
+        };
+        let _ = writeln!(
+            buf,
+            "{} \"{}.{}.{}\": index scans: {}",
+            msg, dbname, relnamespace, relname, vacrel.num_index_scans
+        );
+    } else {
+        let msg = if vacrel.aggressive {
+            "automatic aggressive vacuum of table"
+        } else {
+            "automatic vacuum of table"
+        };
+        let _ = writeln!(
+            buf,
+            "{} \"{}.{}.{}\": index scans: {}",
+            msg, dbname, relnamespace, relname, vacrel.num_index_scans
+        );
+    }
+    let pct = |part: BlockNumber| {
+        if orig_rel_pages == 0 { 100.0 } else { 100.0 * part as f64 / orig_rel_pages as f64 }
+    };
+    let _ = writeln!(
+        buf,
+        "pages: {} removed, {} remain, {} scanned ({:.2}% of total), {} eagerly scanned",
+        vacrel.removed_pages,
+        new_rel_pages,
+        vacrel.scanned_pages,
+        pct(vacrel.scanned_pages),
+        0, // eager scanning elided in this port (heap_vacuum_eager_scan_setup)
+    );
+    let _ = writeln!(
+        buf,
+        "tuples: {} removed, {} remain, {} are dead but not yet removable",
+        vacrel.tuples_deleted, vacrel.new_rel_tuples as i64, vacrel.recently_dead_tuples
+    );
+    if vacrel.missed_dead_tuples > 0 {
+        let _ = writeln!(
+            buf,
+            "tuples missed: {} dead from {} pages not removed due to cleanup lock contention",
+            vacrel.missed_dead_tuples, vacrel.missed_dead_pages
+        );
+    }
+    let next_xid = varsup::ReadNextTransactionId()?;
+    let diff = next_xid.wrapping_sub(vacrel.cutoffs.OldestXmin) as i32;
+    let _ = writeln!(
+        buf,
+        "removable cutoff: {}, which was {} XIDs old when operation ended",
+        vacrel.cutoffs.OldestXmin, diff
+    );
+    if frozenxid_updated {
+        let diff = vacrel.NewRelfrozenXid.wrapping_sub(vacrel.cutoffs.relfrozenxid) as i32;
+        let _ = writeln!(
+            buf,
+            "new relfrozenxid: {}, which is {} XIDs ahead of previous value",
+            vacrel.NewRelfrozenXid, diff
+        );
+    }
+    if minmulti_updated {
+        let diff = vacrel.NewRelminMxid.wrapping_sub(vacrel.cutoffs.relminmxid) as i32;
+        let _ = writeln!(
+            buf,
+            "new relminmxid: {}, which is {} MXIDs ahead of previous value",
+            vacrel.NewRelminMxid, diff
+        );
+    }
+    let _ = writeln!(
+        buf,
+        "frozen: {} pages from table ({:.2}% of total) had {} tuples frozen",
+        vacrel.new_frozen_tuple_pages,
+        pct(vacrel.new_frozen_tuple_pages),
+        vacrel.tuples_frozen
+    );
+    let _ = writeln!(
+        buf,
+        "visibility map: {} pages set all-visible, {} pages set all-frozen ({} were all-visible)",
+        vacrel.vm_new_visible_pages,
+        vacrel.vm_new_visible_frozen_pages + vacrel.vm_new_frozen_pages,
+        vacrel.vm_new_frozen_pages
+    );
+    if vacrel.do_index_vacuuming {
+        if vacrel.nindexes == 0 || vacrel.num_index_scans == 0 {
+            buf.push_str("index scan not needed: ");
+        } else {
+            buf.push_str("index scan needed: ");
+        }
+        let _ = writeln!(
+            buf,
+            "{} pages from table ({:.2}% of total) had {} dead item identifiers removed",
+            vacrel.lpdead_item_pages,
+            pct(vacrel.lpdead_item_pages),
+            vacrel.lpdead_items
+        );
+    } else {
+        if !VacuumFailsafeActive() {
+            buf.push_str("index scan bypassed: ");
+        } else {
+            buf.push_str("index scan bypassed by failsafe: ");
+        }
+        let _ = writeln!(
+            buf,
+            "{} pages from table ({:.2}% of total) have {} dead item identifiers",
+            vacrel.lpdead_item_pages,
+            pct(vacrel.lpdead_item_pages),
+            vacrel.lpdead_items
+        );
+    }
+    for (i, istat) in vacrel.indstats.iter().enumerate() {
+        let Some(istat) = istat else { continue };
+        let _ = writeln!(
+            buf,
+            "index \"{}\": pages: {} in total, {} newly deleted, {} currently deleted, {} reusable",
+            vacrel.indrels.get(i).map(|r| r.name()).unwrap_or(""),
+            istat.num_pages,
+            istat.pages_newly_deleted,
+            istat.pages_deleted,
+            istat.pages_free
+        );
+    }
+    if guc_tables::vars::track_io_timing.read() {
+        let read_ms = bufferusage.shared_blk_read_time.get_millisec()
+            + bufferusage.local_blk_read_time.get_millisec();
+        let write_ms = bufferusage.shared_blk_write_time.get_millisec()
+            + bufferusage.local_blk_write_time.get_millisec();
+        let _ = writeln!(buf, "I/O timings: read: {:.3} ms, write: {:.3} ms", read_ms, write_ms);
+    }
+    let (mut read_rate, mut write_rate) = (0.0f64, 0.0f64);
+    if secs_dur > 0 || usecs_dur > 0 {
+        let dur = secs_dur as f64 + usecs_dur as f64 / 1_000_000.0;
+        read_rate = BLCKSZ as f64 * total_blks_read as f64 / (1024.0 * 1024.0) / dur;
+        write_rate = BLCKSZ as f64 * total_blks_dirtied as f64 / (1024.0 * 1024.0) / dur;
+    }
+    let _ = writeln!(
+        buf,
+        "avg read rate: {:.3} MB/s, avg write rate: {:.3} MB/s",
+        read_rate, write_rate
+    );
+    let _ = writeln!(
+        buf,
+        "buffer usage: {} hits, {} reads, {} dirtied",
+        total_blks_hit, total_blks_read, total_blks_dirtied
+    );
+    let _ = writeln!(
+        buf,
+        "WAL usage: {} records, {} full page images, {} bytes, {} buffers full",
+        walusage.wal_records, walusage.wal_fpi, walusage.wal_bytes, walusage.wal_buffers_full
+    );
+    let _ = write!(buf, "system usage: {}", pg_rusage::pg_rusage_show(ru0).as_str());
+
+    elog::ereport(if verbose { ::types_error::INFO } else { ::types_error::LOG })
+        .errmsg_internal(buf)
+        .finish(::types_error::ErrorLocation::new(
+            "src/backend/access/heap/vacuumlazy.c",
+            1146,
+            "heap_vacuum_rel",
+        ))
 }
 
 // C VacDeadItemsInfo (vacuum.h); DSM-resident under parallel vacuum.
@@ -1388,6 +1668,14 @@ fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
             if lock_retry
                 > VACUUM_TRUNCATE_LOCK_TIMEOUT_MS / VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS
             {
+                vacuum_verbose_msg(
+                    vacrel,
+                    format!(
+                        "\"{}\": stopping truncate due to conflicting lock request",
+                        vacrel.rel.name()
+                    ),
+                    3247,
+                )?;
                 return Ok(());
             }
             // C: WaitLatch(MyLatch, WL_TIMEOUT, 50ms) — no latch wakeups
@@ -1426,7 +1714,19 @@ fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 
         // rel_pages shrinks without touching reltuples: the truncated pages
         // held no tuples.
+        vacrel.removed_pages += orig_rel_pages - new_rel_pages;
         vacrel.rel_pages = new_rel_pages;
+
+        vacuum_verbose_msg(
+            vacrel,
+            format!(
+                "table \"{}\": truncated {} to {} pages",
+                vacrel.rel.name(),
+                orig_rel_pages,
+                new_rel_pages
+            ),
+            3317,
+        )?;
         orig_rel_pages = new_rel_pages;
 
         if !(new_rel_pages > vacrel.nonempty_pages && lock_waiter_detected) {
@@ -1455,6 +1755,11 @@ fn count_nondeletable_pages(
                     vacrel.rel,
                     types_rel::lock::AccessExclusiveLock,
                 )? {
+                    let msg = format!(
+                        "table \"{}\": suspending truncate due to conflicting lock request",
+                        vacrel.rel.name()
+                    );
+                    vacuum_verbose_msg(vacrel, msg, 3379)?;
                     *lock_waiter_detected = true;
                     return Ok(blkno);
                 }
@@ -1535,6 +1840,21 @@ pub fn init_seams() {
         }
         heap_vacuum_rel(mcx, rel, params, bstrategy)
     });
+}
+
+// ereport(vacrel->verbose ? INFO : DEBUG2, ...) sites in vacuumlazy.c.
+fn vacuum_verbose_msg(
+    vacrel: &LVRelState<'_, '_>,
+    msg: String,
+    line: i32,
+) -> PgResult<()> {
+    elog::ereport(if vacrel.verbose { ::types_error::INFO } else { ::types_error::DEBUG2 })
+        .errmsg(msg)
+        .finish(::types_error::ErrorLocation::new(
+            "src/backend/access/heap/vacuumlazy.c",
+            line,
+            "lazy_truncate_heap",
+        ))
 }
 
 #[cold]

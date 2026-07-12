@@ -43,6 +43,12 @@ catalog_storage = { path = "../../../catalog/catalog_storage" }
 lmgr = { path = "../../../storage/lmgr/lmgr" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 pgstat = { path = "../../../utils/activity/pgstat" }
+pg_rusage = { path = "../../../utils/misc/pg_rusage" }
+instrument = { path = "../../../executor/instrument" }
+dbcommands_seams = { path = "../../../commands/dbcommands_seams" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+varsup = { path = "../../transam/varsup" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 backend_progress = { path = "../../../utils/activity/backend_progress" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
