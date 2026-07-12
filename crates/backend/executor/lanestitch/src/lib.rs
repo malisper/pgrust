@@ -76,7 +76,8 @@ use types_error::PgResult;
 
 pub use interp::{eval_qual, eval_row};
 pub use spec::{
-    ArithOp, Batch, CmpOp, Lane, Program, SelVec, Step, MAX_COLS, MAX_REGS, MAX_ROWS, SEL_WORDS,
+    ArithOp, Batch, BoolTestKind, CmpOp, Lane, NullTestKind, Program, SelVec, Step, MAX_COLS,
+    MAX_REGS, MAX_ROWS, SEL_WORDS,
 };
 
 /// AIO-style availability gate + kill switch (PGRUST_LANESTITCH=0|off).
