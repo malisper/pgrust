@@ -598,6 +598,83 @@ pub fn cost_gather_merge(
     p.total_cost = startup_cost + run_cost + input_total_cost;
 }
 
+// cbstore column-fraction disk costing (pgrust-only, AMFLAG_CBSTORE-gated;
+// the Q38 sort-vs-hash fix): a cbstore seqscan opens with a plan-derived
+// column need-set and never touches the other columns' chunks, so the honest
+// disk term is the referenced columns' share of the part's on-disk bytes.
+// C's costing structure (pages you read x spc_seq_page_cost) is kept — only
+// the page count is corrected for a columnar AM, exactly as heap's page
+// count is honest for a row store. Referenced = the rel's reltarget +
+// baserestrictinfo (+ any pushed-down ppi clauses) Vars; a whole-row Var
+// reads everything. Heap rels (and footer-less cbstore) return 1.0.
+//
+// Why this matters beyond realism: the uncorrected all-columns disk term is
+// a large shared constant in every candidate plan's total, which at scale
+// compresses REAL differences (e.g. hash-vs-sort grouping) inside
+// add_path's 1% STD_FUZZ_FACTOR, where the sorted path wins the pathkey
+// tiebreak (CB Q38 @100M planned Sort+GroupAggregate ~17x slower than the
+// hash plan it fuzzily displaced).
+fn cbstore_scan_col_fraction(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    path_id: types_pathnodes::PathId,
+) -> f64 {
+    use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    {
+        let r = run.root.rel(rel);
+        if r.amflags & types_pathnodes::AMFLAG_CBSTORE == 0 || r.cbstore_col_bytes.is_empty() {
+            return 1.0;
+        }
+    }
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel).relid as i32;
+    let mut attrs = types_nodes::Bitmapset::empty();
+    let exprs =
+        types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel_reltarget(rel).exprs);
+    for &eid in exprs.iter() {
+        vars::pull_varattnos(mcx, *run.root.expr_node(eid), varno, &mut attrs)
+            .expect("pull_varattnos over reltarget");
+    }
+    let mut rids =
+        types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel(rel).baserestrictinfo);
+    if let Some(ppi) = run.root.path(path_id).base().param_info.as_deref() {
+        let ppi_clauses = types_pathnodes::relids::pgvec_clone_shallow(mcx, &ppi.ppi_clauses);
+        for &rid in ppi_clauses.iter() {
+            rids.push(rid);
+        }
+    }
+    for &rid in rids.iter() {
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        vars::pull_varattnos(mcx, clause, varno, &mut attrs)
+            .expect("pull_varattnos over baserestrictinfo");
+    }
+    // Whole-row reference reads every column.
+    if attrs.is_member(0 - FirstLowInvalidHeapAttributeNumber) {
+        return 1.0;
+    }
+    let col_bytes = &run.root.rel(rel).cbstore_col_bytes;
+    let mut needed: u64 = 0;
+    let mut total: u64 = 0;
+    for (i, &b) in col_bytes.iter().enumerate() {
+        total += b;
+        let attno = i as i32 + 1;
+        if attrs.is_member(attno - FirstLowInvalidHeapAttributeNumber) {
+            needed += b;
+        }
+    }
+    // A referenced attno past the footer's column count means the byte map
+    // does not describe this descriptor; fall back to C costing.
+    for m in 0..attrs.nwords() as i32 * 64 {
+        if attrs.is_member(m) && m + FirstLowInvalidHeapAttributeNumber > col_bytes.len() as i32 {
+            return 1.0;
+        }
+    }
+    if total == 0 {
+        return 1.0;
+    }
+    (needed as f64 / total as f64).clamp(0.0, 1.0)
+}
+
 pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
     let (relid, rtekind, reltablespace, pages, tuples, base_rows) = {
         let baserel = run.root.rel(rel);
@@ -619,7 +696,8 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
 
     let mut startup_cost = 0.0;
     let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
-    let disk_run_cost = spc_seq_page_cost * pages as f64;
+    let disk_run_cost =
+        spc_seq_page_cost * pages as f64 * cbstore_scan_col_fraction(run, rel, path_id);
 
     let qpqual_cost =
         get_restriction_qual_cost(run, rel, path_id).expect("cost_qual_eval over ppi_clauses");
