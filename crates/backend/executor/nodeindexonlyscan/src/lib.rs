@@ -21,7 +21,7 @@ use ::types_nodes::plannodes::IndexOnlyScan;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::ScanKeyData;
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
-use ::types_slot::{SlotData, TupleSlotKind};
+use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::types_tuple::itemptr::ItemPointerGetBlockNumber;
 use ::types_tuple::TupleDescData;
 use ::visibilitymap::VmBuffer;
@@ -50,6 +50,13 @@ pub struct IndexOnlyScanState<'mcx> {
     // Plan's indexid, kept for skeleton re-open (ioss_RelationDesc is closed
     // while parked).
     pub ioss_IndexOid: ::types_core::Oid,
+    // Lane-executor-v2 (`execmain::lanev2`): forward, non-mark eflags at init.
+    // False for a scrollable/backward or mergejoin-mark cursor — the lane
+    // refuses those. Default false (refuse); set by `exec_init_index_only_scan`.
+    // No page-batch cursor is needed: the drive advances one visible tuple per
+    // call (`index_only_scan_batch_next` returns 0 or 1), so it carries no
+    // state across the Volcano boundary.
+    batch_allowed: bool,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
@@ -192,6 +199,13 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
 }
 
 impl<'mcx> IndexOnlyScanState<'mcx> {
+    /// Lane-executor-v2: forward, non-mark eflags at init (false for a
+    /// scrollable/backward or mergejoin-mark cursor).
+    #[inline]
+    pub fn batch_allowed(&self) -> bool {
+        self.batch_allowed
+    }
+
     #[inline(never)]
     fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         let mcx = estate.es_query_cxt;
@@ -401,7 +415,7 @@ pub fn exec_init_index_only_scan<'mcx>(
     mcx: Mcx<'mcx>,
     node: &IndexOnlyScan<'mcx>,
     estate: &mut EStateData<'mcx>,
-    _eflags: i32,
+    eflags: i32,
 ) -> PgResult<IndexOnlyScanState<'mcx>> {
     let rel = estate
         .exec_get_range_table_relation(node.scan.scanrelid, false)?
@@ -413,7 +427,11 @@ pub fn exec_init_index_only_scan<'mcx>(
         node.indexid,
         ::nodeindexscan::index_lockmode(estate, node.scan.scanrelid),
     )?;
-    exec_init_index_only_scan_rel(mcx, node, estate, rel, index_rel)
+    let mut state = exec_init_index_only_scan_rel(mcx, node, estate, rel, index_rel)?;
+    // Lane-executor-v2: refuse the batched drive for a scrollable/backward or
+    // mergejoin-mark cursor. Byte-identity-safe (the lane just refuses).
+    state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
+    Ok(state)
 }
 
 /// C divergence: init over caller-opened relations, splitting
@@ -502,6 +520,8 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_VMBuffer: VmBuffer::new(),
         ioss_PlanNodeId: node.scan.plan.plan_node_id,
         ioss_ParallelAware: node.scan.plan.parallel_aware,
+        // Default refuse; `exec_init_index_only_scan` sets it from eflags.
+        batch_allowed: false,
     })
 }
 
@@ -735,7 +755,8 @@ pub fn exec_index_only_scan_initialize_worker<'mcx>(
 // ScanDirection is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware, ioss_IndexOid;
+    IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware, ioss_IndexOid,
+        batch_allowed;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
         ioss_OrderByKeys, ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir,
         ioss_VMBuffer },
