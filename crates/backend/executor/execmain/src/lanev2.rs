@@ -419,6 +419,16 @@ impl<'mcx> Operator<'mcx> for SeqScanFilterProject {
         node.set_lane_cursor(n, n);
         Ok(OpStatus::NeedInput)
     }
+
+    fn arm_sort_key(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> bool {
+        // The incumbent fused sort drive's matcher, shared: no qual, output
+        // column 0 is exactly one scan Var the SoA plan covers.
+        ::nodeseqscan::seq_scan_sortkey_direct(node, estate)
+    }
 }
 
 /// `SeqScanFilterProject`'s per-row body as a `BatchEmit` face: identical
@@ -438,6 +448,15 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     ) -> PgResult<Option<ExecSlotId>> {
         ::postgres_seams::check_for_interrupts::call()?;
         ::nodeseqscan::seq_scan_batch_emit(self.node, estate, i)
+    }
+
+    /// Direct sort-key read (armed by `arm_sort_key`): value/null straight
+    /// from the staged SoA key column — no per-row interrupt seam, exactly
+    /// the incumbent `SeqScanSortSource::emit_key` cadence (page-level CFI
+    /// inside the staging fetch covers the batch).
+    #[inline(always)]
+    fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
+        ::nodeseqscan::seq_scan_batch_key(self.node, i)
     }
 }
 
@@ -2249,9 +2268,14 @@ where
     O: Operator<'mcx, Node = S::Node>,
 {
     ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    // Direct sort-key feed (`exec_sort_batched`'s `key_direct` probe,
+    // mirrored): probed once per feed, BEFORE the first `produce` (arming
+    // decides what the staging pass stages), datum sorts only — exactly the
+    // incumbent's probe placement inside its `node.datumSort` arm.
+    let key_direct = ::nodesort::sort_lane_is_datum(sort) && op.arm_sort_key(scan, estate);
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = SortBreakerSink { sort };
+    let mut sink = SortBreakerSink { sort, key_direct };
     drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
     estate.es_direction = dir;
     Ok(())
@@ -2263,6 +2287,9 @@ where
 /// sort node rides in its sink.
 struct SortBreakerSink<'a, 'mcx> {
     sort: &'a mut ::nodesort::SortState<'mcx>,
+    /// Direct sort-key feed armed for this feed (datum sort whose key the
+    /// leaf serves straight from its staged column — `sort_feed`'s probe).
+    key_direct: bool,
 }
 
 impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
@@ -2293,9 +2320,29 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         n: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
-        ::nodesort::sort_lane_put_batch(self.sort, estate, pos, n, &mut |i, estate| {
-            emit.emit(i, estate)
-        })
+        struct Feed<'e, E>(&'e mut E);
+        impl<'mcx, E: BatchEmit<'mcx>> ::nodesort::SortLaneBatchFeed<'mcx> for Feed<'_, E> {
+            #[inline]
+            fn emit(
+                &mut self,
+                i: u32,
+                estate: &mut EStateData<'mcx>,
+            ) -> PgResult<Option<ExecSlotId>> {
+                self.0.emit(i, estate)
+            }
+            #[inline(always)]
+            fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
+                self.0.emit_key(i)
+            }
+        }
+        ::nodesort::sort_lane_put_batch(
+            self.sort,
+            estate,
+            pos,
+            n,
+            self.key_direct,
+            &mut Feed(emit),
+        )
     }
 }
 

@@ -126,6 +126,20 @@ pub(super) trait Operator<'mcx> {
     ) -> PgResult<OpStatus> {
         self.consume(node, batch, out, estate)
     }
+    /// Arm the direct sort-key feed on the operator's leaf (the lane mirror
+    /// of `SortFeedSource::key_direct`): probed ONCE by the sort breaker's
+    /// feed driver, BEFORE the first `produce` (arming decides what the
+    /// staging pass stages), and only for datum sorts. True arms
+    /// `BatchEmit::emit_key` — output column 0 served straight from the
+    /// leaf's staged column (value/null identical to `emit` +
+    /// `slot_getsomeattrs(1)`, no qual, same row order). Default: never arms.
+    fn arm_sort_key(
+        &mut self,
+        _node: &mut Self::Node,
+        _estate: &mut EStateData<'mcx>,
+    ) -> bool {
+        false
+    }
 }
 
 /// A pipeline endpoint. For scan-only pipelines this is the `RootAdapter`;
@@ -157,6 +171,14 @@ pub(super) trait BatchEmit<'mcx> {
         i: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<ExecSlotId>>;
+    /// Direct sort-key read for staged row `i` (`SortFeedSource::emit_key`'s
+    /// lane mirror): only meaningful after the owning operator's
+    /// `arm_sort_key` returned true for the feed. `None` = staged row not
+    /// covered (narrow-tuple fallback); the caller takes the full `emit`
+    /// path for that row. Default: never serves.
+    fn emit_key(&mut self, _i: u32) -> Option<(::datum::Datum, bool)> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3
