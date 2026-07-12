@@ -1523,6 +1523,14 @@ fn agg_arm<'mcx>(
     let AggPlanState { agg, outer } = aps;
     match outer {
         PlanStateNode::SeqScan(ss) => {
+            // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
+            // falls through to the UNCHANGED fused/per-tuple agg paths on
+            // refuse. Lane logic + refuse-set live in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(agg, ss, estate)? {
+                    return Ok(r);
+                }
+            }
             if seq_agg_fusible(agg, ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
             {

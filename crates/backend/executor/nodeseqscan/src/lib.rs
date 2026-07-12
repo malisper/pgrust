@@ -56,6 +56,14 @@ pub struct SeqScanState<'mcx> {
     // drive itself lives entirely in the `lanev2` module.
     lane_pos: u32,
     lane_n: u32,
+    // Lane-executor-v2 memoized STATIC fusibility verdict (plan shape + AM
+    // page-batch support), computed once at the first dispatch: the refuse
+    // verdict must be stable across Volcano calls — a mid-scan REFUSE→OWN
+    // flip would skip the staged remainder of the current page — and the
+    // fusibility cascade must not run per pulled tuple. Dynamic per-call
+    // gates (EPQ, direction) stay in the lane. None = not yet evaluated.
+    // Reset on park (rebind may change the backing scan).
+    lane_verdict: Option<bool>,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -190,6 +198,15 @@ impl<'mcx> SeqScanState<'mcx> {
     pub fn set_lane_cursor(&mut self, pos: u32, n: u32) {
         self.lane_pos = pos;
         self.lane_n = n;
+    }
+
+    /// Memoized static lane fusibility verdict; `None` = not yet evaluated.
+    pub fn lane_verdict(&self) -> Option<bool> {
+        self.lane_verdict
+    }
+
+    pub fn set_lane_verdict(&mut self, v: bool) {
+        self.lane_verdict = Some(v);
     }
 
     pub fn release_parallel(&mut self) {
@@ -608,6 +625,13 @@ pub fn seq_scan_batch_fetch<'mcx>(
     match node.ss.qual.as_deref_mut() {
         None => Ok(true),
         Some(q) => {
+            // Per-tuple result mcx for allocating/detoasting quals (C's
+            // ecxt_per_tuple_memory; the per-row ExprContext reset frees it) —
+            // mirrors exec_scan_impl's per-row arming. The compile-time arming
+            // is the init context, which would accumulate for the whole scan.
+            let per_tuple = estate.ecxt(node.ss.ps_ExprContext).per_tuple_mcx();
+            // SAFETY: reset-only context, outlives the plan.
+            unsafe { q.arm_result_mcx_raw(per_tuple) };
             let slot_id = node.ss.ss_ScanTupleSlot;
             let mut slots = ::execexpr::EvalSlots {
                 scan: Some(estate.slot_mut(slot_id)),
@@ -655,11 +679,20 @@ pub fn seq_scan_batch_emit<'mcx>(
     let Some(proj) = node.ss.ps_ProjInfo.as_mut() else {
         return Ok(Some(scan_id));
     };
+    // By-ref projection results (and callee scratch) must live in the
+    // per-tuple memory reset at the next emit — C projects into
+    // ecxt_per_tuple_memory; es_query_cxt is the ~26GB-over-one-scan leak
+    // shape (see exec_scan_impl's projection note).
+    // SAFETY: reset-only context, outlives the plan.
+    unsafe {
+        let per_tuple = estate.ecxt(node.ss.ps_ExprContext).per_tuple_mcx();
+        proj.pi_state.arm_result_mcx_raw(per_tuple);
+    }
     let mcx = estate.es_query_cxt;
     let result_id = proj.pi_result_slot;
     let (scan_slot, result_slot) = ::execscan::slot_pair(estate, scan_id, result_id);
     let mut slots = ::execexpr::EvalSlots { scan: Some(scan_slot), inner: None, outer: None };
-    ::execexpr::exec_project(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
+    ::execexpr::exec_project_prearmed(&mut proj.pi_state, &mut slots, result_slot, mcx)?;
     Ok(Some(result_id))
 }
 
@@ -979,6 +1012,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         bloom: None,
         lane_pos: 0,
         lane_n: 0,
+        lane_verdict: None,
     })
 }
 
@@ -1008,6 +1042,7 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.scan_batch = ScanBatchMode::Unknown;
     node.lane_pos = 0;
     node.lane_n = 0;
+    node.lane_verdict = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -1107,7 +1142,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n;
+        lane_pos, lane_n, lane_verdict;
         bloom, parallel
     },
     BatchSoa<'_> {
