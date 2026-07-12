@@ -23,7 +23,29 @@ pub const CB_VERSION_V4: u32 = 4;
 // memcmp), 0 = unknown. Append onto committed RGs invalidates to unknown
 // (the NDV precedent). v<=4 parts read as all-unknown.
 pub const CB_VERSION_V5: u32 = 5;
-pub const CB_VERSION: u32 = 5;
+// v6 (the codec-menu + cluster-key format):
+//  - ChunkHeader byte 24 (previously reserved-zero) is a per-chunk codec tag
+//    (see Codec). v<=5 chunks read as Codec::None, under which Lz4Text /
+//    Lz4Dict frames keep their historical LZ4 meaning — old banks stay
+//    readable chunk-for-chunk.
+//  - For/Raw chunks with codec != None store per-granule compressed frames
+//    (u32 raw_len | u32 comp_len | bytes, align4) at the granule directory's
+//    payload_off instead of the plain g*GRANULE_ROWS*width array.
+//  - Lz4Text / Lz4Dict with codec == Zstd carry ZSTD frames in the identical
+//    framing (the encoding names keep their shape meaning; the codec tag
+//    picks the compressor).
+//  - The footer appends a fixed-size cluster-key section after the v5
+//    sorted flags: u16 nkeys | CB_CLUSTER_KEY_MAX_COLS x u16 zero-based
+//    column indices (slots past nkeys are 0; nkeys = 0: none declared).
+//    Fixed-width because the footer parse sizes its read before it sees the
+//    body. v<=5 parts read as no-cluster-key.
+//  - RG_FLAG_CLUSTERED marks an RG whose rows were sorted by the declared
+//    cluster key at write time (per-RG sortedness; whole-part order is the
+//    v5 sorted flags' business).
+pub const CB_VERSION_V6: u32 = 6;
+pub const CB_VERSION: u32 = 6;
+pub const CB_CLUSTER_KEY_MAX_COLS: usize = 8;
+pub const CB_CLUSTER_KEY_SECTION_LEN: usize = 2 + CB_CLUSTER_KEY_MAX_COLS * 2;
 pub const CB_HEADER_LEN: u64 = 64;
 pub const CB_RG_MAGIC: u32 = 0x4342_5247; // "CBRG"
 pub const CB_RG_HEADER_LEN: usize = 32;
@@ -48,6 +70,10 @@ pub const RG_FLAG_FROZEN: u32 = 1;
 // RG_ROWS = 2^16 bound a per-RG |sum| by 2^79; folding <= 2^32 such RGs
 // stays under 2^127, so i128 sum accumulation can never overflow.
 pub const RG_FLAG_SUMS: u32 = 2;
+// v6: the RG's rows are non-decreasing under the part's declared cluster key
+// (footer cluster-key section) using the writer's column-class order
+// (ints/date/timestamp: signed value; text: payload memcmp).
+pub const RG_FLAG_CLUSTERED: u32 = 4;
 
 // Chunk sections between the granule directory and the payload, in this
 // order. Block zone maps: ngranules x BLOCKS_PER_GRANULE x (min i64, max
@@ -91,6 +117,28 @@ impl Encoding {
             4 => Encoding::RawText,
             5 => Encoding::Lz4Text,
             6 => Encoding::Lz4Dict,
+            _ => return None,
+        })
+    }
+}
+
+// v6 per-chunk codec tag (ChunkHeader byte 24). None on v<=5 chunks, under
+// which Lz4Text/Lz4Dict payloads are LZ4 (their historical meaning) and all
+// other encodings are uncompressed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Codec {
+    None = 0,
+    Lz4 = 1,
+    Zstd = 2,
+}
+
+impl Codec {
+    pub fn from_u8(v: u8) -> Option<Codec> {
+        Some(match v {
+            0 => Codec::None,
+            1 => Codec::Lz4,
+            2 => Codec::Zstd,
             _ => return None,
         })
     }
@@ -176,6 +224,9 @@ pub struct ChunkHeader {
     // FOR base / CONST value / DICT ndv / RawText 0.
     pub aux: i64,
     pub payload_len: u64,
+    // v6 codec tag (byte 24); v<=5 chunks wrote 0 there, so they decode as
+    // Codec::None with the legacy Lz4Text/Lz4Dict-means-LZ4 reading.
+    pub codec: Codec,
 }
 
 impl ChunkHeader {
@@ -186,7 +237,8 @@ impl ChunkHeader {
         put_u32(out, self.ngranules);
         put_i64(out, self.aux);
         put_u64(out, self.payload_len);
-        put_u64(out, 0);
+        out.push(self.codec as u8);
+        out.extend_from_slice(&[0u8; 7]);
     }
 
     pub fn decode(b: &[u8]) -> ChunkHeader {
@@ -197,6 +249,16 @@ impl ChunkHeader {
             ngranules: get_u32(b, 4),
             aux: get_i64(b, 8),
             payload_len: get_u64(b, 16),
+            codec: Codec::from_u8(b[24]).expect("cbstore: bad chunk codec"),
+        }
+    }
+
+    // The codec the payload's compressed frames actually use: v<=5 chunks
+    // carry Codec::None but their Lz4Text/Lz4Dict frames are LZ4.
+    pub fn frame_codec(&self) -> Codec {
+        match (self.codec, self.encoding) {
+            (Codec::None, Encoding::Lz4Text | Encoding::Lz4Dict) => Codec::Lz4,
+            (c, _) => c,
         }
     }
 }

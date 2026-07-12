@@ -312,14 +312,9 @@ pub fn DefineRelation<'mcx>(
         true,
         false,
     )?;
-    match relkind {
-        types_rel::RELKIND_PARTITIONED_TABLE => {
-            reloptions::partitioned_table_reloptions(reloptions.as_deref(), true)?;
-        }
-        _ => {
-            reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
-        }
-    }
+    // Reloptions validation moved below the access-method resolution: the
+    // cbstore AM owns its option namespace (cluster_key/codec/...), so the
+    // validator dispatches on the resolved relam, not just relkind.
     // PARTITION OF: the parent's partition descriptor changes — take an
     // exclusive lock (C parentLockmode).
     let parent_lockmode = if stmt.partbound.is_some() {
@@ -359,6 +354,18 @@ pub fn DefineRelation<'mcx>(
     } else {
         InvalidOid
     };
+
+    match relkind {
+        types_rel::RELKIND_PARTITIONED_TABLE => {
+            reloptions::partitioned_table_reloptions(reloptions.as_deref(), true)?;
+        }
+        types_rel::RELKIND_RELATION if reloptions::relam_is_cbstore(access_method_id) => {
+            reloptions::cbstore_reloptions(mcx, reloptions.as_deref(), true)?;
+        }
+        _ => {
+            reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
+        }
+    }
 
     // RangeVarGetAndCheckCreationNamespace resolve-only: CREATE ACL check and
     // oid-collision retry ride with the aclchk lane.

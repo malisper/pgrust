@@ -47,7 +47,7 @@ pub fn read_footer_rgs(
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>)> {
+) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>)> {
     let mut fixed = [0u8; 8];
     file.read_exact_at(&mut fixed, footer_off)?;
     let nrgs = get_u32(&fixed, 0) as usize;
@@ -58,11 +58,12 @@ pub fn read_footer_rgs(
     let ndv_len = if version >= CB_VERSION_V2 { ncols * 8 } else { 0 };
     let sums_len = if version >= CB_VERSION_V4 { nrgs * ncols * 16 } else { 0 };
     let sorted_len = if version >= CB_VERSION_V5 { ncols } else { 0 };
-    let body_len = 8 + nrgs * 24 + nrgs * ncols * 24 + ndv_len + sums_len + sorted_len + 16;
+    let ckey_len = if version >= CB_VERSION_V6 { CB_CLUSTER_KEY_SECTION_LEN } else { 0 };
+    let body_len = 8 + nrgs * 24 + nrgs * ncols * 24 + ndv_len + sums_len + sorted_len + ckey_len + 16;
     let mut buf = vec![0u8; body_len];
     file.read_exact_at(&mut buf, footer_off)?;
     parse_footer(&buf, nrgs, ncols, version, want_sums)
-        .map(|(rgs, ndv, sorted)| (rgs, footer_off + body_len as u64, ndv, sorted))
+        .map(|(rgs, ndv, sorted, ckey)| (rgs, footer_off + body_len as u64, ndv, sorted, ckey))
 }
 
 pub fn parse_footer(
@@ -71,7 +72,7 @@ pub fn parse_footer(
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>)> {
+) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>)> {
     let tail = buf.len() - 16;
     if get_u32(buf, tail + 12) != CB_FOOTER_MAGIC
         || get_u64(buf, tail) != buf.len() as u64
@@ -126,8 +127,21 @@ pub fn parse_footer(
     let mut sorted = vec![0u8; ncols];
     if version >= CB_VERSION_V5 {
         sorted.copy_from_slice(&buf[off..off + ncols]);
+        off += ncols;
     }
-    Ok((rgs, ndv, sorted))
+    // v6 cluster-key section; pre-v6 parts read as no-cluster-key.
+    let mut cluster_key = Vec::new();
+    if version >= CB_VERSION_V6 {
+        let nkeys = u16::from_le_bytes(buf[off..off + 2].try_into().unwrap()) as usize;
+        if nkeys > CB_CLUSTER_KEY_MAX_COLS {
+            return Err(Box::new(PgError::error("cbstore: corrupt footer".to_string())));
+        }
+        for k in 0..nkeys {
+            let o = off + 2 + k * 2;
+            cluster_key.push(u16::from_le_bytes(buf[o..o + 2].try_into().unwrap()));
+        }
+    }
+    Ok((rgs, ndv, sorted, cluster_key))
 }
 
 // Planner sizing: header + footer reads only (no SegMap mmap of the data
@@ -143,7 +157,7 @@ pub fn part_footer_rows(path: &str, ncols: usize) -> PgResult<Option<u64>> {
     if footer_off == 0 {
         return Ok(None);
     }
-    let (rgs, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (rgs, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(rgs.iter().map(|rg| rg.nrows as u64).sum()))
 }
 
@@ -160,7 +174,7 @@ pub fn part_footer_ndv(path: &str, ncols: usize) -> PgResult<Option<Vec<u64>>> {
     if footer_off == 0 || version < CB_VERSION_V2 {
         return Ok(None);
     }
-    let (_, _, ndv, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (_, _, ndv, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(ndv))
 }
 
@@ -173,6 +187,10 @@ pub struct Part {
     // v5 per-column sorted flags (1 = part rows non-decreasing); all-0 on
     // pre-v5 parts.
     pub sorted: Vec<u8>,
+    // v6 declared cluster key (zero-based column indexes, key order); empty
+    // on pre-v6 parts or when none was declared. Per-RG sortedness under it
+    // is RG_FLAG_CLUSTERED.
+    pub cluster_key: Vec<u16>,
     // File offset of the v4 per-RG sums section (0 = none): sums stay on
     // disk, CRC-validated with the footer at open, and are read through the
     // mmap only when a metadata-sum consumer asks (rg_sum).
@@ -192,7 +210,7 @@ impl Part {
         if footer_off == 0 {
             return Ok(None);
         }
-        let (rgs, _footer_end, _ndv, sorted) =
+        let (rgs, _footer_end, _ndv, sorted, cluster_key) =
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
         let Some(map) = SegMap::open(path)? else { return Ok(None) };
@@ -202,7 +220,7 @@ impl Part {
         } else {
             0
         };
-        Ok(Some(Part { map, rgs, ncols, footer_off, sorted, sums_off }))
+        Ok(Some(Part { map, rgs, ncols, footer_off, sorted, cluster_key, sums_off }))
     }
 
     // Footer sum for (rg, col); caller gates on RG_FLAG_SUMS (which only a
@@ -224,6 +242,27 @@ impl Part {
         let m = &self.rgs[rg];
         let base = (m.file_off + m.chunks[col].0) as usize;
         ChunkView::at(self.bytes(), base, m.nrows)
+    }
+}
+
+// Decompress one v6 frame (u32 raw_len | u32 comp_len | bytes) body into
+// `dst` (an arena_frame slice: raw_len payload + OUT_PAD slack). LZ4 goes
+// through the lane-v2-decode padded kernel (wild copies spill into the pad);
+// ZSTD writes exactly raw_len (the pad is untouched slack).
+pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], raw_len: usize) {
+    match codec {
+        Codec::Lz4 => {
+            crate::lz4dec::decompress_padded(src, dst, raw_len)
+                .unwrap_or_else(|e| panic!("cbstore: corrupt LZ4 frame: {e}"));
+        }
+        Codec::Zstd => {
+            let got = zstd::bulk::Decompressor::new()
+                .expect("cbstore: zstd decompressor init failed")
+                .decompress_to_buffer(src, &mut dst[..raw_len])
+                .expect("cbstore: corrupt ZSTD frame");
+            assert_eq!(got, raw_len, "cbstore: ZSTD frame length mismatch");
+        }
+        Codec::None => unreachable!("cbstore: decompress with Codec::None"),
     }
 }
 
@@ -299,6 +338,30 @@ impl<'a> ChunkView<'a> {
         (self.nrows as usize - lo).min(GRANULE_ROWS)
     }
 
+    // Granule g's plain fixed-width payload bytes (n rows x width): the
+    // in-file slice on unframed chunks, else the v6 granule frame
+    // decompressed into `arena` (u64-backed scratch, reused per granule).
+    fn fixed_granule_bytes<'s>(
+        &'s self,
+        g: usize,
+        n: usize,
+        arena: &'s mut Vec<u64>,
+    ) -> &'s [u8] {
+        let w = self.hdr.width as usize;
+        let p = self.payload();
+        if self.hdr.codec == Codec::None {
+            let lo = g * GRANULE_ROWS;
+            return &p[lo * w..(lo + n) * w];
+        }
+        let fo = self.granule(g).payload_off as usize;
+        let raw_len = get_u32(p, fo) as usize;
+        let comp_len = get_u32(p, fo + 4) as usize;
+        assert_eq!(raw_len, n * w, "cbstore: framed granule length mismatch");
+        let dst = arena_frame(arena, raw_len);
+        decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst, raw_len);
+        &dst[..raw_len]
+    }
+
     // Build the RG's dictionary Datum table once (keyed on dict.is_empty();
     // the caller clears it at RG boundaries). Lz4Dict decompresses the blob
     // into `arena` — the dict table (and every published Datum) points there
@@ -317,8 +380,7 @@ impl<'a> ChunkView<'a> {
             let raw_len = get_u32(blob, 0) as usize;
             let comp_len = get_u32(blob, 4) as usize;
             let dst = arena_frame(arena, raw_len);
-            crate::lz4dec::decompress_padded(&blob[8..8 + comp_len], dst, raw_len)
-                .unwrap_or_else(|e| panic!("cbstore: corrupt Lz4Dict frame: {e}"));
+            decompress_frame_into(self.hdr.frame_codec(), &blob[8..8 + comp_len], dst, raw_len);
             dst.as_ptr() as usize
         } else {
             blob.as_ptr() as usize
@@ -399,25 +461,28 @@ impl<'a> ChunkView<'a> {
             }
             Encoding::For => {
                 let base = self.hdr.aux;
+                // v6: framed chunks decompress the granule into `arena` and
+                // widen from there; unframed slices the file directly.
+                let src = self.fixed_granule_bytes(g, n, arena);
                 // Straight-line widen+add into spare capacity (asm-diff:
                 // per-element `push` carries a capacity check the
                 // autovectorizer can't hoist out of the loop).
                 let dst = &mut out.spare_capacity_mut()[..n];
                 match self.hdr.width {
                     1 => {
-                        for (d, &b) in dst.iter_mut().zip(&p[lo..lo + n]) {
+                        for (d, &b) in dst.iter_mut().zip(src) {
                             d.write(Datum::from_i64(base + b as i64));
                         }
                     }
                     2 => {
-                        for (d, c) in dst.iter_mut().zip(p[lo * 2..(lo + n) * 2].chunks_exact(2)) {
+                        for (d, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
                             d.write(Datum::from_i64(
                                 base + u16::from_le_bytes(c.try_into().unwrap()) as i64,
                             ));
                         }
                     }
                     4 => {
-                        for (d, c) in dst.iter_mut().zip(p[lo * 4..(lo + n) * 4].chunks_exact(4)) {
+                        for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
                             d.write(Datum::from_i64(
                                 base + u32::from_le_bytes(c.try_into().unwrap()) as i64,
                             ));
@@ -431,8 +496,9 @@ impl<'a> ChunkView<'a> {
             }
             Encoding::Raw => {
                 debug_assert_eq!(self.hdr.width, 8);
+                let src = self.fixed_granule_bytes(g, n, arena);
                 let dst = &mut out.spare_capacity_mut()[..n];
-                for (d, c) in dst.iter_mut().zip(p[lo * 8..(lo + n) * 8].chunks_exact(8)) {
+                for (d, c) in dst.iter_mut().zip(src.chunks_exact(8)) {
                     d.write(Datum::from_i64(i64::from_le_bytes(c.try_into().unwrap())));
                 }
                 // SAFETY: dst (the first `n` spare slots) was fully written above.
@@ -484,8 +550,7 @@ impl<'a> ChunkView<'a> {
                 let raw_len = get_u32(p, fo) as usize;
                 let comp_len = get_u32(p, fo + 4) as usize;
                 let dst = arena_frame(arena, raw_len);
-                crate::lz4dec::decompress_padded(&p[fo + 8..fo + 8 + comp_len], dst, raw_len)
-                    .unwrap_or_else(|e| panic!("cbstore: corrupt Lz4Text frame: {e}"));
+                decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst, raw_len);
                 let base = dst.as_ptr() as usize;
                 let dst = &mut out.spare_capacity_mut()[..n];
                 for (d, c) in dst.iter_mut().zip(p[lo * 4..(lo + n) * 4].chunks_exact(4)) {
@@ -553,6 +618,9 @@ mod tests {
             for c in 0..ncols {
                 f.push(sorted.get(c).copied().unwrap_or(0));
             }
+        }
+        if version >= CB_VERSION_V6 {
+            f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -666,7 +734,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, _) =
+        let (rgs, _, _, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 2, CB_VERSION_V4, true).unwrap();
         assert_eq!(rgs[0].flags & RG_FLAG_SUMS, RG_FLAG_SUMS);
         assert_eq!(rgs[0].sums, vec![-(1i128 << 70), 42]);
@@ -702,8 +770,9 @@ mod tests {
                 put_i128(&mut f, s);
             }
         }
-        // v5 sorted flags section (header stamps CB_VERSION = V5).
+        // v5 sorted flags + v6 cluster-key sections (header stamps CB_VERSION).
         f.extend_from_slice(&[0u8, 0u8]);
+        f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
@@ -735,7 +804,7 @@ mod tests {
         let path = tmp("sums3");
         write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V3, &[1, 1, 1], &[]);
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, sorted) =
+        let (rgs, _, _, sorted, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V3, true).unwrap();
         assert_eq!(sorted, vec![0, 0, 0]);
         for rg in &rgs {
@@ -750,7 +819,7 @@ mod tests {
     fn int_chunk(vals: &[i64]) -> (Vec<u8>, u32) {
         let ngranules = vals.len().div_ceil(GRANULE_ROWS) as u32;
         let mut body = Vec::new();
-        crate::writer::encode_int_chunk(&mut body, vals, ngranules);
+        crate::writer::encode_int_chunk(&mut body, vals, ngranules, &crate::writer::test_codec_ctx());
         (body, vals.len() as u32)
     }
 
@@ -892,6 +961,7 @@ mod tests {
             ngranules: (nrows.div_ceil(GRANULE_ROWS)) as u32,
             aux: base,
             payload_len: payload.len() as u64,
+            codec: Codec::None,
         };
         let cv = view(&payload, hdr, nrows as u32);
         let mut out = Vec::new();
@@ -947,6 +1017,7 @@ mod tests {
             ngranules: nrows.div_ceil(GRANULE_ROWS) as u32,
             aux: 0,
             payload_len: payload.len() as u64,
+            codec: Codec::None,
         };
         let cv = view(&payload, hdr, nrows as u32);
         let mut out = Vec::new();
@@ -993,6 +1064,7 @@ mod tests {
                 ngranules: nrows.div_ceil(GRANULE_ROWS) as u32,
                 aux: ndv as i64,
                 payload_len: payload.len() as u64,
+                codec: Codec::None,
             };
             let cv = view(&payload, hdr, nrows as u32);
             let mut codes = Vec::new();
@@ -1027,6 +1099,7 @@ mod tests {
             ngranules: nrows.div_ceil(GRANULE_ROWS) as u32,
             aux: 0,
             payload_len: payload.len() as u64,
+            codec: Codec::None,
         };
         let cv = ChunkView { part: &payload, hdr, gdir_off: 0, blockzm_off: 0, bloom_off: 0, payload_off: 0, nrows: nrows as u32 };
         let mut out = Vec::new();

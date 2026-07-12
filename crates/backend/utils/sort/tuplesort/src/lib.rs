@@ -76,6 +76,46 @@ pub fn init_seams() {
             Ok(out)
         },
     );
+    tuplesort_seams::cbstore_ingest_sort::set(|tup_desc, keys, work_mem| {
+        use tuplesort_seams::CbSortKeyKind;
+        assert!(!keys.is_empty());
+        let ssup: Vec<SortSupport> = keys
+            .iter()
+            .map(|&(attno, kind)| SortSupport {
+                ssup_collation: ::types_core::catalog::C_COLLATION_OID,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: attno,
+                comparator: match kind {
+                    CbSortKeyKind::Int16 => SortComparator::Int16,
+                    CbSortKeyKind::Int32 => SortComparator::Int32,
+                    CbSortKeyKind::Int64 => SortComparator::SignedI64,
+                    CbSortKeyKind::TextC => SortComparator::TextC,
+                },
+            })
+            .collect();
+        let ts = Tuplesort::begin_heap_with_keys(tup_desc, &ssup, work_mem, TUPLESORT_NONE);
+        Ok(Box::new(CbIngestSortImpl { ts }))
+    });
+}
+
+// cbstore ingest-sort seam impl: a heap tuplesort driven value-wise.
+struct CbIngestSortImpl {
+    ts: Tuplesort,
+}
+
+impl tuplesort_seams::CbIngestSort for CbIngestSortImpl {
+    fn put_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+        self.ts.putvalues(values, isnull)
+    }
+
+    fn sort(&mut self) -> PgResult<()> {
+        self.ts.performsort()
+    }
+
+    fn next_row(&mut self, values: &mut [Datum], isnull: &mut [bool]) -> PgResult<bool> {
+        self.ts.getvalues(true, values, isnull)
+    }
 }
 
 pub const TUPLESORT_NONE: i32 = 0;
@@ -1148,6 +1188,56 @@ impl Tuplesort {
                 minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
             };
             st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+        })
+    }
+
+    /// Heap-variant put straight from deformed values (the cbstore ingest-sort
+    /// seam; no slot exists on that path).
+    pub fn putvalues(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+        self.0.with_mut(|st| {
+            let SortVariant::Heap { tup_desc } = &st.variant else {
+                panic!("tuplesort_putvalues on a non-heap tuplesort")
+            };
+            let mtup = heaptuple::heap_form_minimal_tuple(
+                st.tuplecontext.mcx(),
+                tup_desc,
+                values,
+                isnull,
+                0,
+            )?;
+            let t_len = mtup.t_len() as usize;
+            let tuple = mtup.as_ptr().cast_mut().cast::<MinimalTupleData>();
+            // Ownership moves to tuplecontext (bulk-freed at end).
+            mem::forget(mtup);
+            let mut isnull1 = false;
+            // SAFETY: fresh live image formed under tup_desc just above.
+            let datum1 = unsafe {
+                minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
+            };
+            st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+        })
+    }
+
+    /// Heap-variant get into deformed-value buffers (len >= the descriptor's
+    /// natts). By-ref datums point into sort-owned memory, live until the
+    /// next call. false = drained.
+    pub fn getvalues(
+        &mut self,
+        forward: bool,
+        values: &mut [Datum],
+        isnull: &mut [bool],
+    ) -> PgResult<bool> {
+        self.0.with_mut(|st| {
+            let Some(stup) = st.gettuple_common(forward)? else {
+                return Ok(false);
+            };
+            let SortVariant::Heap { tup_desc } = &st.variant else {
+                panic!("tuplesort_getvalues on a non-heap tuplesort")
+            };
+            debug_assert!(!stup.tuple.is_null());
+            // SAFETY: live sort-owned minimal-tuple image under tup_desc.
+            unsafe { mgetattr::minimal_deform(stup.tuple, tup_desc, values, isnull) };
+            Ok(true)
         })
     }
 
