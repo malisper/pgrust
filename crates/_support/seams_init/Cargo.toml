@@ -282,6 +282,7 @@ test_decoding = { path = "../../contrib/test_decoding" }
 citext = { path = "../../contrib/citext" }
 uuid_ossp = { path = "../../contrib/uuid_ossp" }
 pg_prewarm = { path = "../../contrib/pg_prewarm" }
+file_fdw = { path = "../../contrib/file_fdw" }
 ltree = { path = "../../contrib/ltree" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
 hstore = { path = "../../contrib/hstore" }

@@ -1,0 +1,39 @@
+[package]
+name = "file_fdw"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "file_fdw"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_nodes = { path = "../../_support/types/nodes" }
+types_pathnodes = { path = "../../_support/types/pathnodes" }
+types_rel = { path = "../../_support/types/rel" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+elog = { path = "../../backend/utils/error/elog" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+acl_seams = { path = "../../backend/utils/adt/acl_seams" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+table = { path = "../../backend/access/table/table" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+exectuples = { path = "../../backend/executor/exectuples" }
+executils = { path = "../../backend/executor/executils" }
+nodeforeignscan = { path = "../../backend/executor/nodeforeignscan" }
+types_slot = { path = "../../_support/types/types_slot" }
+foreigncmds = { path = "../../backend/commands/foreigncmds" }
+commands_define = { path = "../../backend/commands/commands_define" }
+copy_cmd = { path = "../../backend/commands/copy" }
+commands_analyze = { path = "../../backend/commands/analyze" }
+planner = { path = "../../backend/optimizer/plan/planner" }
+vars = { path = "../../backend/optimizer/util/vars" }
+pg_prng = { path = "../../common/pg_prng" }
