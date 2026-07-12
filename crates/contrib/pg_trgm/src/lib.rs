@@ -48,7 +48,10 @@ const LIBRARY: &str = "pg_trgm";
 const DEFAULT_COLLATION_OID: types_core::Oid = 100;
 
 fn legacy_crc32(bytes: &[u8]) -> u32 {
-    crc32c::traditional_crc32(bytes)
+    // trgm_op.c compact_trigram uses INIT/COMP/FIN_LEGACY_CRC32 — the
+    // REFLECTED-table legacy variant (pg_crc.h), NOT the zlib/Ethernet one.
+    // (Train-6 audit blocker B1.)
+    crc32c::legacy_crc32_lexeme(bytes)
 }
 
 fn make_env() -> TrgmEnv<'static> {
@@ -183,7 +186,7 @@ fn fc_similarity_dist(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
 
 fn fc_similarity_op(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(Datum::from_bool(
-        similarity_value(fcinfo)? >= similarity_threshold() as f32,
+        similarity_value(fcinfo)? as f64 >= similarity_threshold(),
     ))
 }
 
@@ -206,17 +209,17 @@ macro_rules! fc_word_ops {
 
 fc_word_ops! {
     fc_word_similarity_op: swapped=false flags=WORD_SIMILARITY_CHECK_ONLY,
-        from_bool(|r: f32| r >= word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= word_similarity_threshold());
     fc_word_similarity_commutator_op: swapped=true flags=WORD_SIMILARITY_CHECK_ONLY,
-        from_bool(|r: f32| r >= word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= word_similarity_threshold());
     fc_word_similarity_dist_op: swapped=false flags=0,
         from_f32(|r: f32| 1.0 - r);
     fc_word_similarity_dist_commutator_op: swapped=true flags=0,
         from_f32(|r: f32| 1.0 - r);
     fc_strict_word_similarity_op: swapped=false flags=WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT,
-        from_bool(|r: f32| r >= strict_word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= strict_word_similarity_threshold());
     fc_strict_word_similarity_commutator_op: swapped=true flags=WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT,
-        from_bool(|r: f32| r >= strict_word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= strict_word_similarity_threshold());
     fc_strict_word_similarity_dist_op: swapped=false flags=WORD_SIMILARITY_STRICT,
         from_f32(|r: f32| 1.0 - r);
     fc_strict_word_similarity_dist_commutator_op: swapped=true flags=WORD_SIMILARITY_STRICT,
