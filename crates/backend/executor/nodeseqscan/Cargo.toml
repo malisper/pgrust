@@ -16,6 +16,9 @@ nodehash = { path = "../nodehash" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
 laneexec = { path = "../laneexec" }
+# strsearch contains-qual arm gate (collation resolution must succeed before
+# the kernel may stand in for the per-row matcher).
+pg_locale = { path = "../../utils/adt/pg_locale" }
 executils = { path = "../executils" }
 exectuples = { path = "../exectuples" }
 datum = { path = "../../../_support/types/datum" }

@@ -111,7 +111,19 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
 ) {
     if !::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
         let Some(q) = ss.ss.qual.as_deref() else { return };
-        let Some(c) = q.scan_cmp_const_clauses() else { return };
+        let Some(c) = q.scan_cmp_const_clauses() else {
+            // strsearch contains-LIKE kernel (single `col LIKE '%lit%'`
+            // clause census): varkey-staged text lane + one memmem bitmap
+            // pass per batch; every other admission stays per-row. The
+            // stitch arms below no-op on this shape (nquals = 0, unused
+            // deform plan), so the registration is this one call.
+            if q.scan_contains_clause().is_some()
+                && ::nodeseqscan::seq_scan_batch_soa_prepare_contains(ss, estate)
+            {
+                lane_trace(&format!("seqscan contains qual bitmap armed ({ctx})"));
+            }
+            return;
+        };
         let prefix = c.clauses[..c.n as usize]
             .iter()
             .map(|&(col, _, _)| col as i32 + 1)
