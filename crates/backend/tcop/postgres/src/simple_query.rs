@@ -144,7 +144,7 @@ pub fn pg_plan_queries<'mcx>(
                 utilityStmt: query.utilityStmt,
                 stmt_location: query.stmt_location,
                 stmt_len: query.stmt_len,
-                queryId: query.queryId,
+                queryId: types_nodes::SyncCell::new(query.queryId),
                 ..PlannedStmt::default()
             });
         } else {
