@@ -151,6 +151,17 @@ pub struct Scan<'mcx> {
 #[repr(C)]
 pub struct SeqScan<'mcx> {
     pub scan: Scan<'mcx>,
+    /// pgrust-only (no C field): the EXACT set of this scan's columns
+    /// (1-based attnos) the plan consumes — the pre-physical-tlist
+    /// pathtarget's Vars plus the scan clauses' Vars, captured at
+    /// create_seqscan_plan time. `use_physical_tlist` inflates the plan
+    /// tlist to every column (free for heap's lazy deform); a columnar AM
+    /// (cbstore) must not decode by that inflated tlist, and the executor
+    /// cannot reconstruct the real consumed set after the swap.
+    /// `None` = unknown (wholerow/system-column reference): consumers fall
+    /// back to walking the plan tlist. `Some(empty)` is meaningful — the
+    /// plan reads no columns (a qual-only count(*) scan).
+    pub cb_scan_cols: Option<Bitmapset<'mcx>>,
 }
 
 #[derive(Default)]

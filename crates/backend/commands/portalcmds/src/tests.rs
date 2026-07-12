@@ -561,6 +561,7 @@ fn mk_seqscan_pstmt<'mcx>(mcx: Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx>
     let scan_node = Node::mk(
         mcx,
         SeqScan {
+            cb_scan_cols: None,
             scan: Scan { plan: Plan { targetlist: tlist, ..Default::default() }, scanrelid: 1 },
         },
     )

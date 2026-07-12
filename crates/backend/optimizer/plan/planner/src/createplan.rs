@@ -641,11 +641,71 @@ fn create_seqscan_plan<'mcx>(
     }
 
     let mut plan = Node::build::<SeqScan<'mcx>>(mcx)?;
+    plan.cb_scan_cols = seqscan_consumed_cols(run, best_path, &qpqual)?;
     plan.scan.plan.targetlist = tlist;
     plan.scan.plan.qual = qpqual;
     plan.scan.scanrelid = scan_relid;
     copy_generic_path_info(run, &mut plan.scan.plan, best_path);
     Ok(plan.seal())
+}
+
+// pgrust-only (SeqScan::cb_scan_cols): the exact 1-based attno set this scan
+// must deliver — the path's OWN target (the rel's reltarget: exactly the
+// columns anything above the scan reads, per attr_needed bookkeeping) plus
+// the scan clauses' Vars. Captured HERE, before `use_physical_tlist` may
+// swap the plan tlist for the whole-row physical one, because the executor
+// cannot tell an inflated tlist from a genuine whole-row read. None =
+// wholerow/system-column reference (fall back to the plan-tlist walk).
+fn seqscan_consumed_cols<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    qpqual: &NodeList<'mcx>,
+) -> PgResult<Option<types_nodes::bitmapset::Bitmapset<'mcx>>> {
+    use nodes_core::NodeWalker as _;
+
+    let base = run.root.path(best_path).base();
+    let scanrelid = run.root.rel(base.parent).relid as i32;
+
+    struct Cx<'mcx> {
+        mcx: mcx::Mcx<'mcx>,
+        scanrelid: i32,
+        cols: types_nodes::bitmapset::Bitmapset<'mcx>,
+        opaque: bool,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for Cx<'mcx> {
+        fn visit(&mut self, n: Node<'mcx>) -> PgResult<bool> {
+            if n.node_tag() == NodeTag::T_Var {
+                let v = n.as_var().unwrap();
+                if v.varno == self.scanrelid && v.varlevelsup == 0 {
+                    if v.varattno <= 0 {
+                        // Wholerow (0) / system column (<0): the exact set is
+                        // not expressible — report unknown.
+                        self.opaque = true;
+                    } else {
+                        self.cols.add_member(self.mcx, v.varattno as i32)?;
+                    }
+                }
+                return Ok(false);
+            }
+            nodes_core::expression_tree_walker(n, self)
+        }
+    }
+    let mut cx =
+        Cx { mcx: run.mcx, scanrelid, cols: types_nodes::bitmapset::Bitmapset::empty(), opaque: false };
+    if let Some(pt) = base.pathtarget_id {
+        // Walk a snapshot of the expr ids: expr_node borrows root immutably
+        // while the walk only reads.
+        let n = run.root.pathtarget(pt).exprs.len();
+        for i in 0..n {
+            let eid = run.root.pathtarget(pt).exprs[i];
+            let node = *run.root.expr_node(eid);
+            cx.visit(node)?;
+        }
+    }
+    for n in qpqual.iter() {
+        cx.visit(n)?;
+    }
+    Ok(if cx.opaque { None } else { Some(cx.cols) })
 }
 
 // create_samplescan_plan (createplan.c): parameterized paths get
