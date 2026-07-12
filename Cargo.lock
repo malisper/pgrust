@@ -14070,6 +14070,7 @@ dependencies = [
  "pgstat",
  "pgtz",
  "pgvector",
+ "pgvector_hnsw",
  "plancache",
  "planner",
  "plpgsql",

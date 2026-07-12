@@ -796,11 +796,6 @@ pub fn insert_tuple_on_disk(
     )?;
 
     lmgr::UnlockPage(index, HNSW_UPDATE_LOCK, lockmode)?;
-    let _ = PgFxHashMap::<(BlockNumber, u16), ()>::with_capacity_and_hasher_in(
-        0,
-        Default::default(),
-        op_mcx,
-    );
     Ok(true)
 }
 
