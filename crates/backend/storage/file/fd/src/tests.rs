@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Once;
 
 use ::types_storage::File;
@@ -6,7 +6,6 @@ use ::types_storage::File;
 use crate::vfd::{self, with_fd};
 
 static SETUP: Once = Once::new();
-static WAL_SYNC_METHOD: AtomicI32 = AtomicI32::new(0);
 // Serializes the tests that chdir into a scratch data directory.
 static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -29,10 +28,6 @@ fn setup() {
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         pgstat_seams::pgstat_report_tempfile::set(|_| {});
-        guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
-            get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
-            set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
-        });
     });
     vfd::InitFileAccess();
 }
