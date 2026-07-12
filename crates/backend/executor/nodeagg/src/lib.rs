@@ -52,6 +52,7 @@ mod distinctset;
 mod gsets;
 mod hashgrouped;
 pub mod merge;
+pub mod pardistinct;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
@@ -60,11 +61,11 @@ pub use compact::{
     agg_hash_compact_try_arm_mk, CompactArm, MkComp, MkCompKind, MkShape,
 };
 pub use hashgrouped::{
-    agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_begin,
-    agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
-    agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
-    agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
-    HashGroupOrderKey,
+    agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_adopt_merged,
+    agg_hashgroup_begin, agg_hashgroup_economical, agg_hashgroup_emit_next,
+    agg_hashgroup_emitting, agg_hashgroup_finish_build, agg_hashgroup_next_rep,
+    agg_hashgroup_reset, agg_hashgroup_residual_active, agg_hashgroup_set_residual,
+    agg_hashgroup_state_active, HashGroupOrderKey,
 };
 pub use ::execgrouping::GroupKeyKind;
 
@@ -4080,6 +4081,172 @@ pub fn agg_plain_finish<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    plain_finish(node, estate)
+}
+
+// ===========================================================================
+// Lane-v2 parallel exact-DISTINCT partials (pardistinct.rs) — the leader-
+// side seams: spec derivation from the initialized aggregate slices, and
+// the plain-shape merged adoption. The grouped adoption lives in
+// hashgrouped.rs (it reuses that arm's Emit machinery wholesale).
+// ===========================================================================
+
+/// Derive the parallel-DISTINCT build recipe from this node's initialized
+/// aggregate slices. `desc` is the OUTER tuple descriptor (the row shape
+/// both the workers' scans and the GatherMerge stream produce). `None`
+/// refuses: any transition outside the exact-integer vocabulary
+/// (`pardistinct::vocab_kind` — `order_insensitive_exact_transfn` minus the
+/// Int128 family), any non-Var / FILTERed argument, or a non-integer group
+/// key type. The caller must have armed `force_distinct_set` (presorted
+/// entries count as set-mode).
+pub fn pd_derive_spec(
+    node: &AggStateData<'_>,
+    desc: &TupleDescData<'_>,
+) -> Option<std::sync::Arc<pardistinct::PdSpec>> {
+    use pardistinct::{PdInt, PdSetSpec, PdSpec, PdVocab};
+    const INT2OID: Oid = 21;
+    const INT4OID: Oid = 23;
+    const INT8OID: Oid = 20;
+    let int_kind = |t: Oid| match t {
+        INT2OID => Some(PdInt::I16),
+        INT4OID => Some(PdInt::I32),
+        INT8OID => Some(PdInt::I64),
+        _ => None,
+    };
+    // The aggregate's single plain-Var argument (0-based outer attno).
+    let arg_att = |ar: &::types_nodes::primnodes::Aggref<'_>| -> Option<u16> {
+        if ar.aggfilter.is_some() || ar.args.len() != 1 {
+            return None;
+        }
+        let tle = ar.args.iter().next()?.as_target_entry()?;
+        let v = tle.expr.as_var()?;
+        (v.varno == ::execexpr::OUTER_VAR
+            && v.varlevelsup == 0
+            && v.varattno >= 1
+            && (v.varattno as i32) <= desc.natts)
+            .then(|| (v.varattno - 1) as u16)
+    };
+    let mut max_att = 0i32;
+    let mut key_atts = Vec::with_capacity(node.plan.grpColIdx.len());
+    let mut key_kinds = Vec::with_capacity(node.plan.grpColIdx.len());
+    for &col in node.plan.grpColIdx {
+        if col < 1 || (col as i32) > desc.natts {
+            return None;
+        }
+        key_atts.push((col - 1) as u16);
+        key_kinds.push(int_kind(desc.attr((col - 1) as usize).atttypid)?);
+        max_att = max_att.max(col as i32);
+    }
+    if key_atts.len() > 32 {
+        return None;
+    }
+    // DISTINCT transitions, in pertrans_sort order (the emit re-installs
+    // merged sets into those slots).
+    let mut sets = Vec::with_capacity(node.pertrans_sort.len());
+    let mut set_transnos: Vec<usize> = Vec::with_capacity(node.pertrans_sort.len());
+    for ps in node.pertrans_sort.iter() {
+        let kind = ps.set_kind?;
+        if !ps.set_active(node.force_distinct_set) || ps.num_inputs != 1 {
+            return None;
+        }
+        let pa = node.peragg.iter().find(|pa| pa.transno as usize == ps.transno)?;
+        if !pa.aggref.aggorder.is_nil() || pa.aggref.aggdistinct.is_nil() {
+            return None;
+        }
+        let att = arg_att(pa.aggref)?;
+        // The set kind was established from this very argument at init; the
+        // width re-check keeps the extraction honest.
+        match kind {
+            distinctset::DistinctKeyKind::Int16
+            | distinctset::DistinctKeyKind::Int32
+            | distinctset::DistinctKeyKind::Int64 => {
+                int_kind(desc.attr(att as usize).atttypid)?;
+            }
+            distinctset::DistinctKeyKind::Bytes => {}
+        }
+        max_att = max_att.max(att as i32 + 1);
+        sets.push(PdSetSpec { att, kind });
+        set_transnos.push(ps.transno);
+    }
+    // Every remaining transno must be a vocabulary transition.
+    let mut vocab: Vec<PdVocab> = Vec::new();
+    let mut seen: Vec<bool> = vec![false; node.numtrans];
+    for t in &set_transnos {
+        seen[*t] = true;
+    }
+    for pa in node.peragg.iter() {
+        let transno = pa.transno as usize;
+        if seen[transno] {
+            continue;
+        }
+        seen[transno] = true;
+        let ar = pa.aggref;
+        if !ar.aggdistinct.is_nil() || !ar.aggorder.is_nil() {
+            return None;
+        }
+        let att = if ar.args.is_nil() {
+            None
+        } else {
+            let a = arg_att(ar)?;
+            max_att = max_att.max(a as i32 + 1);
+            Some((a, int_kind(desc.attr(a as usize).atttypid)?))
+        };
+        if ar.aggfilter.is_some() {
+            return None;
+        }
+        let kind = pardistinct::vocab_kind(ar.aggfnoid, att)?;
+        vocab.push(PdVocab { transno: transno as u32, kind });
+    }
+    if !seen.iter().all(|&s| s) {
+        return None;
+    }
+    Some(std::sync::Arc::new(PdSpec {
+        key_atts,
+        key_kinds,
+        vocab,
+        sets,
+        max_att,
+        worker_budget: distinct_set_budget() / 2,
+    }))
+}
+
+/// Vocab aggfnoids map through the transfn whitelist; re-exported check the
+/// leader arm uses to pair `pd_derive_spec` with its admission story.
+pub use pardistinct::{
+    pd_adopt_registry, pd_clear_thread_registry, pd_export_registry, pd_registry_get,
+    pd_registry_insert, pd_registry_nonempty, pd_registry_remove, pd_parallel_merge_grouped,
+    pd_parallel_merge_plain, PdBuilder, PdExport, PdFeed, PdHandoff, PdMerged,
+};
+
+/// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
+/// empty sets ARE the empty-input contract; finish emits the one row.
+pub fn agg_plain_adopt_empty<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    initialize_aggregates(node)?;
+    plain_finish(node, estate)
+}
+
+/// Plain-shape (nkeys == 0) merged adoption: install the merged
+/// exact-DISTINCT sets into the pertrans slots and finish through the
+/// unchanged plain finalize (set replay + finalfns + qual + project). The
+/// caller armed `force_distinct_set` and owns the one-row contract.
+pub fn agg_plain_adopt_merged<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut merged: pardistinct::PdMerged<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    debug_assert!(node.force_distinct_set);
+    debug_assert_eq!(merged.ngroups, 1);
+    debug_assert_eq!(merged.dsets.len(), node.pertrans_sort.len());
+    initialize_aggregates(node)?;
+    for (j, ps) in node.pertrans_sort.iter_mut().enumerate() {
+        debug_assert!(!ps.dset_degraded);
+        ps.dset = merged.dsets[j].take();
+    }
     plain_finish(node, estate)
 }
 
