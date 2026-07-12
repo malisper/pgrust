@@ -1084,7 +1084,13 @@ pub fn multi_insert<'mcx>(
             map.insert(oid, open_writer(rel, true)?);
         }
         let cw = map.get_mut(&oid).unwrap();
-        for slot in slots.iter() {
+        for slot in slots.iter_mut() {
+            // Deform before reading: buffer/heap-backed slots (CTAS from a
+            // heap table feeds the scan slot straight in) arrive with
+            // tts_nvalid == 0, and reading tts_values/tts_isnull raw off
+            // them fabricated NULLs on NULL-free data. No-op on the
+            // already-deformed COPY/INSERT..SELECT virtual slots.
+            exectuples::slot_getallattrs(slot);
             let base = slot.base();
             debug_assert!(base.tts_nvalid as usize >= cw.ncols);
             cw.ingest_row(&base.tts_values, &base.tts_isnull)?;
