@@ -639,15 +639,17 @@ pub fn seq_scan_batch_fetch<'mcx>(
         }
     }
     seq_scan_batch_store(node, estate, i);
+    let ecxt = node.ss.ps_ExprContext;
     match node.ss.qual.as_deref_mut() {
         None => Ok(true),
         Some(q) => {
-            // Per-tuple result mcx for allocating/detoasting quals (C's
-            // ecxt_per_tuple_memory; the per-row ExprContext reset frees it) —
-            // mirrors exec_scan_impl's per-row arming. The compile-time arming
-            // is the init context, which would accumulate for the whole scan.
-            let per_tuple = estate.ecxt(node.ss.ps_ExprContext).per_tuple_mcx();
-            // SAFETY: reset-only context, outlives the plan.
+            // Per-tuple result mcx for arg-detoasting quals (C's
+            // ecxt_per_tuple_memory; the emit-entry ExprContext reset frees
+            // it) — mirrors `exec_scan_impl`'s per-row arming; es_query_cxt
+            // would otherwise accumulate over the whole fused feed.
+            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
+            // SAFETY: reset-only context, arena-boxed (address-stable),
+            // outlives the plan.
             unsafe { q.arm_result_mcx_raw(per_tuple) };
             let slot_id = node.ss.ss_ScanTupleSlot;
             let mut slots = ::execexpr::EvalSlots {
@@ -692,17 +694,19 @@ pub fn seq_scan_batch_emit<'mcx>(
         return Ok(None);
     }
     let scan_id = node.ss.ss_ScanTupleSlot;
-    estate.ecxt_mut(node.ss.ps_ExprContext).ecxt_scantuple = Some(scan_id);
+    let ecxt = node.ss.ps_ExprContext;
+    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(scan_id);
     let Some(proj) = node.ss.ps_ProjInfo.as_mut() else {
         return Ok(Some(scan_id));
     };
     // By-ref projection results (and callee scratch) must live in the
-    // per-tuple memory reset at the next emit — C projects into
-    // ecxt_per_tuple_memory; es_query_cxt is the ~26GB-over-one-scan leak
-    // shape (see exec_scan_impl's projection note).
-    // SAFETY: reset-only context, outlives the plan.
+    // per-tuple memory reset at the next emit entry (C projects into
+    // ecxt_per_tuple_memory) — mirrors `exec_scan_impl`; es_query_cxt would
+    // otherwise accumulate over the whole fused feed.
+    // SAFETY: reset-only context, arena-boxed (address-stable), outlives the
+    // plan.
     unsafe {
-        let per_tuple = estate.ecxt(node.ss.ps_ExprContext).per_tuple_mcx();
+        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
         proj.pi_state.arm_result_mcx_raw(per_tuple);
     }
     let mcx = estate.es_query_cxt;

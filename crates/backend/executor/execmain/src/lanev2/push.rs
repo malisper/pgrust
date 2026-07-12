@@ -226,13 +226,16 @@ where
     }
 }
 
-/// The build-pipeline driver: drain the source through the operator chain
-/// into a pipeline-breaker sink to completion, then `finish()` the sink
-/// (= Finalize; the breaker delegates it to the row-path build — hashagg
-/// spill finish, tuplesort_performsort, …). Breaker sinks accept whole
-/// inputs (`SinkFeed::NeedMore`), so the pipeline never pauses: run in one
+/// The build-pipeline driver — pipeline N in full: drain the source through
+/// the operator chain into a pipeline-breaker sink to completion, then
+/// `finish()` the sink (= Finalize; the breaker delegates it to the row-path
+/// build — hashagg spill finish, `tuplesort_performsort`, hash build, …).
+/// Breaker sinks accept whole inputs (`SinkFeed::NeedMore`, never `Full`), so
+/// the pipeline never pauses: the whole feed runs inside one `exec_proc_node`
 /// call, mirroring C's build-before-first-probe order (nodeAgg's
-/// agg_fill_hash_table, nodeHashjoin's HJ_BUILD_HASHTABLE) for free.
+/// agg_fill_hash_table, exec_sort's feed loop, nodeHashjoin's
+/// HJ_BUILD_HASHTABLE) for free; the node-side phase flag then flips the
+/// breaker to its `Source` face for pipeline N+1.
 pub(super) fn drain_pipeline<'mcx, S, O>(
     node: &mut S::Node,
     src: &mut S,
@@ -255,11 +258,11 @@ where
         match op.consume(node, batch, sink, estate)? {
             OpStatus::NeedInput => {}
             OpStatus::Finished => break,
-            OpStatus::Paused => {
-                // Breaker sinks never return `Full`; a pause here means a
-                // non-breaker sink was wired into a build pipeline.
-                debug_assert!(false, "build pipeline paused: sink returned Full");
-            }
+            // Breaker sinks never return `Full`; a pause here means a
+            // non-breaker sink was wired into a build pipeline. A silent
+            // continue would spin forever on the paused operator, so this is
+            // a hard bug-panic in release too.
+            OpStatus::Paused => unreachable!("build pipeline paused: breaker sink returned Full"),
         }
     }
     sink.finish(estate)
