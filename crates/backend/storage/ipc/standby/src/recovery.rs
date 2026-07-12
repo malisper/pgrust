@@ -120,16 +120,15 @@ pub fn InitRecoveryTransactionEnvironment() -> PgResult<()> {
 }
 
 pub fn ShutdownRecoveryTransactionEnvironment() -> PgResult<()> {
+    // None = a FATAL before initialization; there is nothing to do.
     if RECOVERY_LOCKS.with(|s| s.borrow().is_none()) {
         return Ok(());
     }
 
-    // C: ExpireAllKnownAssignedTransactionIds(); StandbyReleaseAllLocks();
-    // destroy tables; VirtualXactLockTableCleanup().
-    panic!(
-        "ShutdownRecoveryTransactionEnvironment: ExpireAllKnownAssignedTransactionIds \
-         unported (procarray KnownAssignedXids, recovery phase 2)"
-    );
+    procarray::ExpireAllKnownAssignedTransactionIds()?;
+    StandbyReleaseAllLocks()?;
+    RECOVERY_LOCKS.with(|s| *s.borrow_mut() = None);
+    lock::VirtualXactLockTableCleanup()
 }
 
 // Returns 0 ("a time safely in the past") to mean wait forever, as C.
