@@ -630,7 +630,11 @@ pub fn procsignal_sigusr1_handler() {
         PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
     ] {
         if CheckProcSignal(conflict) {
-            unported_handler("HandleRecoveryConflictInterrupt (tcop/postgres.c)");
+            if postgres_seams::handle_recovery_conflict_interrupt::is_installed() {
+                postgres_seams::handle_recovery_conflict_interrupt::call(conflict as u32);
+            } else {
+                unported_handler("HandleRecoveryConflictInterrupt (tcop/postgres.c)");
+            }
         }
     }
 
