@@ -32,7 +32,6 @@ const BKPIMAGE_COMPRESS_ZSTD: u8 = 0x10;
 const XLR_INFO_MASK: u8 = 0x0F;
 
 fn lsn_fmt(lsn: XLogRecPtr) -> String {
-    // LSN_FORMAT_ARGS: %X/%X.
     format!("{:X}/{:X}", (lsn >> 32) as u32, lsn as u32)
 }
 
@@ -41,8 +40,6 @@ fn param_err(msg: impl Into<String>) -> Box<PgError> {
     Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-// GetCurrentLSN: the LSN up to which the server has WAL, determined like the
-// read_local_xlog_page_no_wait page_read callback does.
 fn GetCurrentLSN() -> XLogRecPtr {
     if !transam_xlog::RecoveryInProgress() {
         transam_xlog::GetFlushRecPtr(None)
@@ -51,7 +48,6 @@ fn GetCurrentLSN() -> XLogRecPtr {
     }
 }
 
-// ValidateInputLSNs: clamp end_lsn to the current LSN.
 fn ValidateInputLSNs(start_lsn: XLogRecPtr, end_lsn: &mut XLogRecPtr) -> PgResult<()> {
     let curr_lsn = GetCurrentLSN();
     if start_lsn > curr_lsn {
@@ -73,14 +69,10 @@ fn ValidateInputLSNs(start_lsn: XLogRecPtr, end_lsn: &mut XLogRecPtr) -> PgResul
     Ok(())
 }
 
-// InitXLogReaderState: WAL reader positioned at the first valid record at or
-// after `lsn`, reading this server's pg_wal without waiting.
 fn InitXLogReaderState<'m>(
     mcx: Mcx<'m>,
     lsn: XLogRecPtr,
 ) -> PgResult<(XLogReaderState<'m>, LocalPageRead)> {
-    // Reading WAL below the first page of the first segment isn't allowed:
-    // that is a bootstrap WAL page the page_read callback fails to read.
     if lsn < XLOG_BLCKSZ as u64 {
         return Err(param_err(format!("could not read WAL at LSN {}", lsn_fmt(lsn))));
     }
@@ -100,9 +92,6 @@ fn InitXLogReaderState<'m>(
     Ok((reader, routine))
 }
 
-// ReadNextXLogRecord: Ok(false) only at end of WAL (the no-wait private
-// flag); any other decode failure is an error, since we read only up to the
-// flushed LSN (which can still land mid-record).
 fn ReadNextXLogRecord(
     reader: &mut XLogReaderState<'_>,
     routine: &mut LocalPageRead,
@@ -133,7 +122,6 @@ fn bytea_datum(mcx: Mcx<'_>, data: &[u8]) -> PgResult<Datum> {
     ::types_fmgr::byref_result(mcx, &image)
 }
 
-// rm_identify result, or UNKNOWN with the rmgr's info bits.
 fn record_type(desc: &rmgr::RmgrData, info: u8) -> PgResult<String> {
     Ok(match (desc.rm_identify)(info) {
         Some(id) => id.to_string(),
@@ -141,8 +129,6 @@ fn record_type(desc: &rmgr::RmgrData, info: u8) -> PgResult<String> {
     })
 }
 
-// GetWALRecordInfo: the 11 output columns describing the reader's current
-// record. Keep in sync with GetWALBlockInfo.
 fn GetWALRecordInfo(
     mcx: Mcx<'_>,
     reader: &XLogReaderState<'_>,
@@ -190,7 +176,6 @@ fn GetWALRecordInfo(
     Ok((values, nulls))
 }
 
-// pg_get_wal_record_info(in_lsn) -> single composite row.
 fn fc_pg_get_wal_record_info(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -236,7 +221,6 @@ fn fc_pg_get_wal_record_info(
     Ok(d)
 }
 
-// GetWALRecordsInfo: rows for every record in [start_lsn, end_lsn].
 fn GetWALRecordsInfo(
     flinfo: &mut FmgrInfo,
     fcinfo: &mut Fcinfo,
@@ -296,7 +280,6 @@ fn fc_pg_get_wal_records_info_till_end_of_wal(
     GetWALRecordsInfo(flinfo, fcinfo, start_lsn, end_lsn)
 }
 
-// FillXLogStatsRow: one row of record counts and sizes for an rmgr or record.
 #[allow(clippy::too_many_arguments)]
 fn FillXLogStatsRow(
     mcx: Mcx<'_>,
@@ -330,18 +313,21 @@ fn FillXLogStatsRow(
     ])
 }
 
-// GetXLogSummaryStats: summary rows over the accumulated stats.
 fn GetXLogSummaryStats(
     mcx: Mcx<'_>,
     srf: &mut funcapi::MaterializedSRF<'_>,
     stats: &XLogStats,
     stats_per_record: bool,
 ) -> PgResult<()> {
-    // Each row shows its percentages of the total: first pass for totals.
+    // Totals pass over RmgrIdIsValid ids only (builtin + custom 128..=255;
+    // the gap between them is skipped, as in C).
     let mut total_count: u64 = 0;
     let mut total_rec_len: u64 = 0;
     let mut total_fpi_len: u64 = 0;
     for ri in 0..=RM_MAX_ID {
+        if !rmgr::RmgrIdIsBuiltin(ri as i32) && !rmgr::RmgrIdIsCustom(ri as i32) {
+            continue;
+        }
         total_count += stats.rmgr_stats[ri].count;
         total_rec_len += stats.rmgr_stats[ri].rec_len;
         total_fpi_len += stats.rmgr_stats[ri].fpi_len;
@@ -349,7 +335,6 @@ fn GetXLogSummaryStats(
     let total_len = total_rec_len + total_fpi_len;
 
     for ri in 0..=RM_MAX_ID {
-        // RmgrIdExists: only the builtin range is populated.
         if !rmgr::RmgrIdExists(ri as u8) {
             continue;
         }
@@ -358,11 +343,9 @@ fn GetXLogSummaryStats(
         if stats_per_record {
             for rj in 0..MAX_XLINFO_TYPES {
                 let s = &stats.record_stats[ri][rj];
-                // Skip undefined combinations and ones that didn't occur.
                 if s.count == 0 {
                     continue;
                 }
-                // The upper four bits in xl_info are the rmgr's.
                 let id = match (desc.rm_identify)((rj << 4) as u8) {
                     Some(id) => id.to_string(),
                     None => format!("UNKNOWN ({:x})", rj << 4),
@@ -401,7 +384,6 @@ fn GetXLogSummaryStats(
     Ok(())
 }
 
-// GetWalStats: WAL stats between start LSN and end LSN.
 fn GetWalStats(
     flinfo: &mut FmgrInfo,
     fcinfo: &mut Fcinfo,
@@ -462,8 +444,6 @@ fn fc_pg_get_wal_stats_till_end_of_wal(
     GetWalStats(flinfo, fcinfo, start_lsn, end_lsn, stats_per_record)
 }
 
-// GetWALBlockInfo: one row per block reference of the current record.
-// Keep in sync with GetWALRecordInfo.
 fn GetWALBlockInfo(
     mcx: Mcx<'_>,
     srf: &mut funcapi::MaterializedSRF<'_>,
@@ -527,7 +507,6 @@ fn GetWALBlockInfo(
         let mut nulls = [false; 20];
         let mut i = 0usize;
 
-        // start_lsn, end_lsn, prev_lsn, and blockid outputs
         values[i] = Datum::from_u64(reader.v.ReadRecPtr);
         i += 1;
         values[i] = Datum::from_u64(reader.v.EndRecPtr);
@@ -537,7 +516,6 @@ fn GetWALBlockInfo(
         values[i] = Datum::from_i16(block_id as i16);
         i += 1;
 
-        // relfile and block related outputs
         values[i] = Datum::from_oid(rnode.spcOid);
         i += 1;
         values[i] = Datum::from_oid(rnode.dbOid);
@@ -549,7 +527,6 @@ fn GetWALBlockInfo(
         values[i] = Datum::from_i64(blkno as i64);
         i += 1;
 
-        // xid, resource_manager, and record_type outputs
         values[i] = Datum::from_transaction_id(reader.XLogRecGetXid());
         i += 1;
         values[i] = text_datum(mcx, desc.rm_name.as_bytes())?;
@@ -557,7 +534,6 @@ fn GetWALBlockInfo(
         values[i] = text_datum(mcx, rec_type.as_bytes())?;
         i += 1;
 
-        // record_length, main_data_length, block_data_len, block_fpi_length
         values[i] = Datum::from_u32(reader.XLogRecGetTotalLen());
         i += 1;
         values[i] = Datum::from_u32(reader.XLogRecGetDataLen());
@@ -567,14 +543,12 @@ fn GetWALBlockInfo(
         values[i] = Datum::from_u32(block_fpi_len);
         i += 1;
 
-        // block_fpi_info (text array) output
         match block_fpi_info {
             Some(d) => values[i] = d,
             None => nulls[i] = true,
         }
         i += 1;
 
-        // description output (describes the WAL record)
         if rec_desc.len() > 0 {
             values[i] = text_datum(mcx, rec_desc.as_bytes())?;
         } else {
@@ -582,7 +556,6 @@ fn GetWALBlockInfo(
         }
         i += 1;
 
-        // block_data output
         match reader.XLogRecGetBlockData(block_id) {
             Some(data) if show_data => {
                 let owned = data.to_vec();
@@ -592,12 +565,14 @@ fn GetWALBlockInfo(
         }
         i += 1;
 
-        // block_fpi_data output
         if blk.has_image && show_data {
             let mut page = vec![0u8; BLCKSZ];
             if !reader.RestoreBlockImage(block_id, &mut page) {
                 return Err(Box::new(PgError::error(
-                    reader.errormsg().unwrap_or("could not restore block image").to_string(),
+                    reader
+                        .errormsg_buf_raw()
+                        .unwrap_or("could not restore block image")
+                        .to_string(),
                 )));
             }
             values[i] = bytea_datum(mcx, &page)?;
@@ -614,7 +589,6 @@ fn GetWALBlockInfo(
     Ok(())
 }
 
-// pg_get_wal_block_info: WAL record info unnested by block reference.
 fn fc_pg_get_wal_block_info(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
