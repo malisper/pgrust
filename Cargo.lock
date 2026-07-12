@@ -4809,6 +4809,7 @@ dependencies = [
  "indexcmds_seams",
  "init_small",
  "jit_deform",
+ "lanereg",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -7356,10 +7357,18 @@ dependencies = [
  "datum",
  "execexpr",
  "exectuples",
+ "lanereg",
  "mcx",
  "types_core",
  "types_nodes",
  "types_tuple",
+]
+
+[[package]]
+name = "lanereg"
+version = "0.0.0"
+dependencies = [
+ "types_core",
 ]
 
 [[package]]

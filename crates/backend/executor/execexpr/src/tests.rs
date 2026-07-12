@@ -3177,3 +3177,69 @@ fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
         assert!(r.isnull, "in-tree MULTIEXPR SubPlan yields NULL::record");
     });
 }
+
+// --- lanereg conformance (design §3a batch-function registry) ---------------
+// `CmpOp::for_fn_oid` and the JIT arithmetic admission are now driven by the
+// central `lanereg` census. These tests pin the registry-backed lookups to the
+// exact legacy OID tables, so the refactor is proven zero behavior change and
+// the registry cannot drift from this consumer.
+
+// The pre-registry 30-arm literal table, verbatim, as the golden oracle.
+fn legacy_for_fn_oid(oid: ::types_core::Oid) -> Option<CmpOp> {
+    Some(match oid {
+        65 => CmpOp::Int4Eq,
+        144 => CmpOp::Int4Ne,
+        66 => CmpOp::Int4Lt,
+        149 => CmpOp::Int4Le,
+        147 => CmpOp::Int4Gt,
+        150 => CmpOp::Int4Ge,
+        467 => CmpOp::Int8Eq,
+        468 => CmpOp::Int8Ne,
+        469 => CmpOp::Int8Lt,
+        471 => CmpOp::Int8Le,
+        470 => CmpOp::Int8Gt,
+        472 => CmpOp::Int8Ge,
+        63 => CmpOp::Int2Eq,
+        145 => CmpOp::Int2Ne,
+        64 => CmpOp::Int2Lt,
+        148 => CmpOp::Int2Le,
+        146 => CmpOp::Int2Gt,
+        151 => CmpOp::Int2Ge,
+        474 => CmpOp::Int84Eq,
+        475 => CmpOp::Int84Ne,
+        476 => CmpOp::Int84Lt,
+        478 => CmpOp::Int84Le,
+        477 => CmpOp::Int84Gt,
+        479 => CmpOp::Int84Ge,
+        852 => CmpOp::Int48Eq,
+        853 => CmpOp::Int48Ne,
+        854 => CmpOp::Int48Lt,
+        856 => CmpOp::Int48Le,
+        855 => CmpOp::Int48Gt,
+        857 => CmpOp::Int48Ge,
+        _ => return None,
+    })
+}
+
+#[test]
+fn for_fn_oid_matches_legacy_over_full_oid_sweep() {
+    // Covers every comparator OID plus the fold/arith OID neighborhoods, so a
+    // stray admission (or dropped one) anywhere in 0..=3000 fails loud.
+    for oid in 0u32..=3000 {
+        assert_eq!(
+            CmpOp::for_fn_oid(oid),
+            legacy_for_fn_oid(oid),
+            "for_fn_oid drifted from legacy at oid {oid}"
+        );
+    }
+}
+
+#[test]
+fn jit_inline_arith_matches_legacy_set() {
+    // The six arithmetic OIDs the JIT inlined before the registry migration.
+    let legacy: &[u32] = &[177, 181, 141, 463, 464, 465];
+    for oid in 0u32..=3000 {
+        let admitted = ::lanereg::jit_arith(oid).is_some();
+        assert_eq!(admitted, legacy.contains(&oid), "jit arith admission drifted at oid {oid}");
+    }
+}

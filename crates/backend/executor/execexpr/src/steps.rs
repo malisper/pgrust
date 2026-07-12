@@ -707,38 +707,53 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
+    // Admission now consulted from the central batch-function registry
+    // (`lanereg`, design §3a): the OID→comparator table lives there as the
+    // AotQualCmp tier entries; here we only decode the registry's neutral
+    // `CmpShape` into this crate's `CmpOp` selector. `lanereg::aot_qual_cmp`
+    // returns Some only for the in-tree AOT tier (the 5 int width families), so
+    // every shape it yields decodes; other widths (int24/oid/float — pending
+    // stitch tier) are never returned here. The `for_fn_oid_conformance` test
+    // pins this to the exact legacy 30-OID mapping (zero behavior change).
     pub fn for_fn_oid(oid: Oid) -> Option<CmpOp> {
-        Some(match oid {
-            65 => CmpOp::Int4Eq,
-            144 => CmpOp::Int4Ne,
-            66 => CmpOp::Int4Lt,
-            149 => CmpOp::Int4Le,
-            147 => CmpOp::Int4Gt,
-            150 => CmpOp::Int4Ge,
-            467 => CmpOp::Int8Eq,
-            468 => CmpOp::Int8Ne,
-            469 => CmpOp::Int8Lt,
-            471 => CmpOp::Int8Le,
-            470 => CmpOp::Int8Gt,
-            472 => CmpOp::Int8Ge,
-            63 => CmpOp::Int2Eq,
-            145 => CmpOp::Int2Ne,
-            64 => CmpOp::Int2Lt,
-            148 => CmpOp::Int2Le,
-            146 => CmpOp::Int2Gt,
-            151 => CmpOp::Int2Ge,
-            474 => CmpOp::Int84Eq,
-            475 => CmpOp::Int84Ne,
-            476 => CmpOp::Int84Lt,
-            478 => CmpOp::Int84Le,
-            477 => CmpOp::Int84Gt,
-            479 => CmpOp::Int84Ge,
-            852 => CmpOp::Int48Eq,
-            853 => CmpOp::Int48Ne,
-            854 => CmpOp::Int48Lt,
-            856 => CmpOp::Int48Le,
-            855 => CmpOp::Int48Gt,
-            857 => CmpOp::Int48Ge,
+        CmpOp::from_lanereg_shape(::lanereg::aot_qual_cmp(oid)?)
+    }
+
+    fn from_lanereg_shape(s: ::lanereg::CmpShape) -> Option<CmpOp> {
+        use ::lanereg::{CmpPred as P, CmpWidth as W};
+        Some(match (s.width, s.pred) {
+            (W::I4, P::Eq) => CmpOp::Int4Eq,
+            (W::I4, P::Ne) => CmpOp::Int4Ne,
+            (W::I4, P::Lt) => CmpOp::Int4Lt,
+            (W::I4, P::Le) => CmpOp::Int4Le,
+            (W::I4, P::Gt) => CmpOp::Int4Gt,
+            (W::I4, P::Ge) => CmpOp::Int4Ge,
+            (W::I8, P::Eq) => CmpOp::Int8Eq,
+            (W::I8, P::Ne) => CmpOp::Int8Ne,
+            (W::I8, P::Lt) => CmpOp::Int8Lt,
+            (W::I8, P::Le) => CmpOp::Int8Le,
+            (W::I8, P::Gt) => CmpOp::Int8Gt,
+            (W::I8, P::Ge) => CmpOp::Int8Ge,
+            (W::I2, P::Eq) => CmpOp::Int2Eq,
+            (W::I2, P::Ne) => CmpOp::Int2Ne,
+            (W::I2, P::Lt) => CmpOp::Int2Lt,
+            (W::I2, P::Le) => CmpOp::Int2Le,
+            (W::I2, P::Gt) => CmpOp::Int2Gt,
+            (W::I2, P::Ge) => CmpOp::Int2Ge,
+            (W::I84, P::Eq) => CmpOp::Int84Eq,
+            (W::I84, P::Ne) => CmpOp::Int84Ne,
+            (W::I84, P::Lt) => CmpOp::Int84Lt,
+            (W::I84, P::Le) => CmpOp::Int84Le,
+            (W::I84, P::Gt) => CmpOp::Int84Gt,
+            (W::I84, P::Ge) => CmpOp::Int84Ge,
+            (W::I48, P::Eq) => CmpOp::Int48Eq,
+            (W::I48, P::Ne) => CmpOp::Int48Ne,
+            (W::I48, P::Lt) => CmpOp::Int48Lt,
+            (W::I48, P::Le) => CmpOp::Int48Le,
+            (W::I48, P::Gt) => CmpOp::Int48Gt,
+            (W::I48, P::Ge) => CmpOp::Int48Ge,
+            // Widths the pending stitch tier adds but the AOT tier never
+            // yields (int24/int42/oid/float): not decodable to this CmpOp.
             _ => return None,
         })
     }

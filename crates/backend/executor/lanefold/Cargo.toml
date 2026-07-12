@@ -16,3 +16,4 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }
+lanereg = { path = "../lanereg" }

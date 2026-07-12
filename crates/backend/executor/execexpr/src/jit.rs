@@ -716,13 +716,19 @@ mod emit {
         if let Some(c) = CmpOp::for_fn_oid(fn_oid) {
             return Some(InlineOp::Cmp(c));
         }
-        Some(match fn_oid {
-            177 => InlineOp::Int4Pl,
-            181 => InlineOp::Int4Mi,
-            141 => InlineOp::Int4Mul,
-            463 => InlineOp::Int8Pl,
-            464 => InlineOp::Int8Mi,
-            465 => InlineOp::Int8Mul,
+        // The JIT arithmetic admission set now lives in the central registry
+        // (`lanereg`, design §3a) as the JitArith tier; decode its neutral
+        // ArithShape into this JIT's selector. Only W4/W8 × Add/Sub/Mul are
+        // in-tree JitArith, so every returned shape decodes.
+        let s = ::lanereg::jit_arith(fn_oid)?;
+        use ::lanereg::{ArithKind as K, ArithWidth as A};
+        Some(match (s.width, s.op) {
+            (A::W4, K::Add) => InlineOp::Int4Pl,
+            (A::W4, K::Sub) => InlineOp::Int4Mi,
+            (A::W4, K::Mul) => InlineOp::Int4Mul,
+            (A::W8, K::Add) => InlineOp::Int8Pl,
+            (A::W8, K::Sub) => InlineOp::Int8Mi,
+            (A::W8, K::Mul) => InlineOp::Int8Mul,
             _ => return None,
         })
     }

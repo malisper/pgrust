@@ -36,6 +36,7 @@ arrayutils = { path = "../../utils/adt/arrayutils" }
 detoast_seams = { path = "../../access/common/detoast_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 exectuples = { path = "../exectuples" }
+lanereg = { path = "../lanereg" }
 heaptoast = { path = "../../access/heap/heaptoast" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 nodes_core = { path = "../../nodes/nodes_core" }
