@@ -30,6 +30,7 @@ pg_locale = { path = "../../adt/pg_locale" }
 init_small = { path = "../../init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
+types_gist = { path = "../../../../_support/types/gist" }
 fmgr_seams = { path = "../../fmgr/fmgr_seams" }
 detoast_seams = { path = "../../../access/common/detoast_seams" }
 tuplesort_seams = { path = "../tuplesort_seams" }

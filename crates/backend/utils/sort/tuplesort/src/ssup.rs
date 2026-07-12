@@ -86,6 +86,10 @@ pub enum SortComparator {
     /// resolved once, invoked per comparison (C builds an fcinfo per call
     /// too). Needs an mcx-threaded apply; the mcx-less lane panics.
     Shim(ShimCmp),
+    /// Extension gist opclass comparator (btree_gist sortsupport procs),
+    /// installed through `types_gist::GistSortSupportShim`. mcx-threaded
+    /// lane only, like Shim.
+    GistOpclass(::types_gist::GistSsupCmp),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +220,10 @@ pub fn apply_cmp(cmp: SortComparator, x: Datum, y: Datum) -> i32 {
              (use apply_sort_comparator_in)",
             shim.fn_oid
         ),
+        SortComparator::GistOpclass(_) => panic!(
+            "gist opclass comparator reached an mcx-less comparator lane \
+             (use apply_sort_comparator_in)"
+        ),
     }
 }
 
@@ -268,6 +276,12 @@ fn shim_cmp(shim: ShimCmp, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> 
 pub fn apply_cmp_in(cmp: SortComparator, x: Datum, y: Datum, collation: Oid, mcx: Mcx<'_>) -> i32 {
     match cmp {
         SortComparator::Shim(shim) => shim_cmp(shim, x, y, collation, mcx),
+        SortComparator::GistOpclass(f) => match f(x, y, collation, mcx) {
+            Ok(r) => r,
+            // As shim_cmp: surface the PgError through the infallible qsort
+            // plumbing verbatim.
+            Err(e) => std::panic::panic_any(e),
+        },
         other => apply_cmp(other, x, y),
     }
 }
@@ -614,10 +628,29 @@ pub fn comparator_for_gist_index_col(opfamily: Oid, opcintype: Oid) -> PgResult<
             "missing support function {GIST_SORTSUPPORT_PROC_NUM}({opcintype},{opcintype}) \
              in opfamily {opfamily}"
         ),
-        other => panic!(
-            "unported: gist sortsupport comparator for proc {other} \
-             (gist_point_sortsupport z-order lane)"
-        ),
+        // Extension opclass (btree_gist): invoke the proc once with a shim
+        // "SortSupport"; it installs a leaf-key comparator fn.
+        other => {
+            let mut flinfo = ::fmgr_seams::fmgr_info::call(other)?;
+            let mut shim = ::types_gist::GistSortSupportShim {
+                ssup_collation: 0,
+                comparator: None,
+            };
+            let temp = ::mcx::MemoryContext::new("gist sortsupport resolve");
+            let mut frame = ::types_fmgr::LocalFcinfo::<1>::new(0);
+            frame.rearm(0);
+            // SAFETY: temp outlives the call; nothing retained from it.
+            unsafe { frame.set_result_mcx(temp.mcx()) };
+            frame.set_arg(
+                0,
+                Datum::from_usize(&mut shim as *mut ::types_gist::GistSortSupportShim as usize),
+            );
+            flinfo.invoke(&mut frame)?;
+            match shim.comparator {
+                Some(cmp) => Ok(SortComparator::GistOpclass(cmp)),
+                None => panic!("gist sortsupport proc {other} installed no comparator"),
+            }
+        }
     }
 }
 
