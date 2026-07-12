@@ -84,6 +84,24 @@ impl TupleHashEntryData {
         self.first_tuple = tuple;
     }
 
+    /// Assemble an entry outside the table — the lane compact-table handoff
+    /// export (nodeagg::merge): `tuple` is a handed-buffer image laid out
+    /// exactly like a relocated table entry (`[additionalsize][tuple]`),
+    /// `hash` was computed through the SAME table's
+    /// [`TupleHashTable::hash_slot`] so it merges against classic entries,
+    /// and `key`/`key_isnull` carry the byval kernel's key cache
+    /// (Expr-kernel tables ignore them; by-ref Text caches are excluded by
+    /// the compact admission).
+    #[inline]
+    pub fn from_parts(
+        tuple: NonNull<MinimalTupleData>,
+        hash: u32,
+        key: Datum,
+        key_isnull: bool,
+    ) -> TupleHashEntryData {
+        TupleHashEntryData { first_tuple: tuple, hash, key_isnull, key }
+    }
+
     /// The entry's pergroup prefix (entry_additional's per-entry form).
     #[inline]
     pub fn additional(&self, additionalsize: usize) -> Option<NonNull<u8>> {
