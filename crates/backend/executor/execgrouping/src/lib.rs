@@ -153,6 +153,11 @@ pub enum GroupKeyKind {
     /// == texteq, same gate as [`ProbeKernel::Text`]) — packable only through
     /// the dict/intern id lane.
     TextRaw,
+    /// numeric under hash_numeric/numeric_eq: VALUE equality (1.0 ≡ 1.00,
+    /// NaN ≡ NaN) — packable only through the canonical (mantissa, exp10)
+    /// key form (`adt_numeric::keypack`), which the compact-table feed
+    /// gates per value (unpackable/non-minimal-scale values demote).
+    Numeric,
     /// Anything else (float NaN/±0 hazards, numeric scale-equality, abstract
     /// exprs, non-kernel hash/eq pairs): refuses multi-key packing.
     Other,
@@ -181,6 +186,8 @@ fn group_key_kind(hash: Oid, eq: Oid, collid: Oid) -> GroupKeyKind {
         // timestamp_hash / timestamp_eq | timestamptz_eq (i64 microseconds;
         // both families share the representation and the hash proc)
         (2039, 2052) | (2039, 1152) => GroupKeyKind::Int { width: 8 },
+        // hash_numeric / numeric_eq (value equality; keypack canonical form)
+        (432, 1718) => GroupKeyKind::Numeric,
         // hashtext / texteq under a raw-bytes deterministic collation
         (400, 67) if ::varlena::text_collation_is_raw_bytes(collid).unwrap_or(false) => {
             GroupKeyKind::TextRaw

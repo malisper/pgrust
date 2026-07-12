@@ -96,6 +96,31 @@ fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::dat
     }
 }
 
+/// Multi-key packed state (the Q19-class arm): a projected scan whose tlist
+/// is bare Vars plus EXACTLY ONE computed column — a strict fmgr chain over
+/// one base scan column (`ScanProjExprKey` census) — where the agg groups by
+/// 2..N keys including the computed one. The computed key's grouping kind
+/// must be NUMERIC (`extract(minute FROM ts)`-class): its values derive per
+/// surviving row through the production fmgr and pack via the canonical
+/// numeric key form (`nodeagg::mk_numeric_datum_bits`); every other key is a
+/// bare-Var component packed from its base lane (Int/Numeric) or the
+/// dict/intern lane (TextRaw, cbstore). Unpackable numeric values (range /
+/// non-minimal display scale) DEMOTE: the compact table migrates to the C
+/// tuplehash and the batch replays per-row — never a lossy pack.
+pub(super) struct MultiKeyChain {
+    /// The computed key's chain (production fmgr entry points).
+    pub(super) chain: ::laneexec::ValueChain,
+    /// Base scan colno feeding the chain.
+    pub(super) input_base: u16,
+    /// The TextRaw component's tlist attno (agg-input space), when one
+    /// exists — `agg_hash_compact_try_arm_mk`'s dict_att.
+    pub(super) dict_input_att: Option<u16>,
+    /// Its base scan colno (the dict-lane registration target).
+    pub(super) dict_base: Option<u16>,
+    /// Pack scratch (the scan feed's shape, reused per batch).
+    pub(super) mks: super::MkScratch,
+}
+
 /// How the key lane is computed per batch.
 pub enum ExprKeyKind {
     /// Stitcher-vocabulary int arithmetic: a single-output lanestitch
@@ -112,6 +137,8 @@ pub enum ExprKeyKind {
         prog: Box<::laneexec::DictEvalProg>,
         gather_input: bool,
     },
+    /// Packed multi-key over a projected scan (see [`MultiKeyChain`]).
+    Multi(Box<MultiKeyChain>),
 }
 
 /// Per-node expr-key state, memoized on `AggPlanState` next to the lane
@@ -185,6 +212,11 @@ pub(super) fn decide_exprkey<'mcx>(
     // grouping key. Residual transitions are admitted (module doc).
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
     let Some(key_out) = ::nodeagg::agg_hash_staged_probe_col(agg) else {
+        // 2..N grouping keys: the packed multi-key arm (Q19-class). Its
+        // refusals tick the multikey taxonomy inside.
+        if ::nodeagg::agg_hash_key_cols(agg).len() >= 2 {
+            return decide_exprkey_mk(agg, ss, estate);
+        }
         return refused();
     };
     let proj = ss.ss.ps_ProjInfo.as_ref()?;
@@ -327,6 +359,7 @@ pub(super) fn decide_exprkey<'mcx>(
     }
     let mut gather_input = false;
     match &kind {
+        ExprKeyKind::Multi(_) => unreachable!("multi-key shapes decide in decide_exprkey_mk"),
         ExprKeyKind::Arith { ncols, .. } => prefix = prefix.max(*ncols as i32),
         ExprKeyKind::Dict { input_col, .. } => {
             prefix = prefix.max(*input_col as i32 + 1);
@@ -363,7 +396,7 @@ pub(super) fn decide_exprkey<'mcx>(
         }
         let dict_key = match &kind {
             ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
-            ExprKeyKind::Arith { .. } => None,
+            ExprKeyKind::Arith { .. } | ExprKeyKind::Multi(_) => None,
         };
         ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_key)
     } else {
@@ -382,6 +415,7 @@ pub(super) fn decide_exprkey<'mcx>(
     trace_feed(match &kind {
         ExprKeyKind::Arith { .. } => "agg-over-seqscan: expr-key feed armed (arith key)",
         ExprKeyKind::Dict { .. } => "agg-over-seqscan: expr-key feed armed (dict key)",
+        ExprKeyKind::Multi(_) => unreachable!("multi-key shapes decide in decide_exprkey_mk"),
     });
     Some(Box::new(ExprKeyState {
         natts,
@@ -389,6 +423,202 @@ pub(super) fn decide_exprkey<'mcx>(
         key_out,
         prefix,
         kind,
+        refused: false,
+        rows: Vec::new(),
+        keys: Vec::new(),
+        knull: Vec::new(),
+        hashes: Vec::new(),
+        hash1: Vec::new(),
+        key_vals: Vec::new(),
+        key_null: Vec::new(),
+        dg_epoch: None,
+        dg_slots: Vec::new(),
+    }))
+}
+
+/// The multi-key packed decide (Q19-class; see [`MultiKeyChain`]): mirrors
+/// `scan_mk_shape`'s admission over the PROJECTED coordinate space, WITHOUT
+/// arming the compact table (the decide phase holds `&AggStateData`; the
+/// build feed arms per build, exactly like the scan feed re-deciding per
+/// build). `None` = refused (multikey taxonomy ticked) — the caller keeps
+/// the per-row breaker feed, byte-identically.
+fn decide_exprkey_mk<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<Box<ExprKeyState>> {
+    if !super::multikey_enabled() {
+        return None;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+        None
+    };
+    // v1: cbstore only — text key components need dict lanes and the
+    // offset-free columnar arm stages every base component as decoded
+    // datums (a heap fixed-width prefix cannot stage varlena keys).
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return refused();
+    }
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    // The packed fold has no per-row leg: unguarded, no varlena guards, no
+    // residual transitions (the scan multi-key feed's exact gates).
+    if plan.guarded || !plan.vguards.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
+        return refused();
+    }
+    let proj = ss.ss.ps_ProjInfo.as_ref()?;
+    let result_slot = proj.pi_result_slot;
+    let natts = estate
+        .slot(result_slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()?
+        .attrs
+        .len();
+    let Some(xk) = proj.pi_state.scan_proj_expr_key() else { return refused() };
+    if xk.n as usize != natts {
+        return refused();
+    }
+    let key_out = xk.key_out;
+    // Component classification over agg-input (tlist) coordinates: the
+    // computed column must be one of the grouping keys and NUMERIC (the
+    // extract()-class census result type); every other key is a bare Var of
+    // a packable kind, at most one raw-bytes text key (dict/intern lane).
+    let key_cols = ::nodeagg::agg_hash_key_cols(agg);
+    let mut computed_is_key = false;
+    let mut dict_input_att: Option<u16> = None;
+    let mut fixed_total = 0usize;
+    let mut n_numeric = 0usize;
+    for &(att, kind) in &key_cols {
+        if att == key_out {
+            computed_is_key = true;
+            if kind != ::nodeagg::GroupKeyKind::Numeric {
+                return refused();
+            }
+            n_numeric += 1;
+            fixed_total += 8;
+            continue;
+        }
+        if xk.cols.get(att as usize).copied().flatten().is_none() {
+            return refused();
+        }
+        match kind {
+            ::nodeagg::GroupKeyKind::Int { width } => fixed_total += width as usize,
+            ::nodeagg::GroupKeyKind::Numeric => {
+                n_numeric += 1;
+                fixed_total += 8;
+            }
+            ::nodeagg::GroupKeyKind::TextRaw => {
+                if dict_input_att.is_some() {
+                    return refused();
+                }
+                // The fold must not read the dict component's SoA cells
+                // (stale under a dict-answered window — the dictgroup rule).
+                if plan.cols.iter().any(|&c| c == att) {
+                    return refused();
+                }
+                dict_input_att = Some(att);
+                fixed_total += 4;
+            }
+            _ => return refused(),
+        }
+    }
+    if !computed_is_key {
+        return refused();
+    }
+    // Width-negotiation preview (the build-time arm decides
+    // authoritatively): numeric components shrink 8 → 4 bytes when the
+    // image exceeds 16; a shape that cannot fit either way refuses now so
+    // the per-row breaker feed keeps the build.
+    if fixed_total > 16 && (n_numeric == 0 || fixed_total - n_numeric * 4 > 16) {
+        return refused();
+    }
+    // The computed key's chain: same census→spec mapping as the dict class;
+    // compile_value_chain owns the catalog gates (IMMUTABLE internal-
+    // language strict builtins, concrete types).
+    let mut calls = Vec::with_capacity(xk.ncalls as usize);
+    for c in &xk.calls[..xk.ncalls as usize] {
+        let Some(rettype) = ::laneexec::func_catalog_rettype(c.fn_oid) else {
+            return refused();
+        };
+        calls.push(::laneexec::DictCallSpec {
+            fn_oid: c.fn_oid,
+            collation: c.collation,
+            var_argno: c.var_argno as u16,
+            args: c.args[..c.nargs as usize].to_vec(),
+            rettype,
+        });
+    }
+    // The chain's result type must be the grouping key column's type
+    // (defense in depth — the tupledesc is plan authority).
+    let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
+        [key_out as usize]
+        .atttypid;
+    if calls.last().is_none_or(|c| c.rettype != keytype) {
+        return refused();
+    }
+    let chain = match ::laneexec::compile_value_chain(&calls) {
+        Ok(c) => c,
+        Err(_) => return refused(),
+    };
+    // Coordinate map + the fold/spill bare-Var rules (the single-key
+    // decide's exact checks).
+    let mut map: Vec<Option<u16>> = Vec::with_capacity(natts);
+    for j in 0..natts {
+        map.push(xk.cols[j]);
+    }
+    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+        return refused();
+    }
+    let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
+    if colnos_needed.len() != natts {
+        return refused();
+    }
+    let mut prefix = xk.input_col as i32 + 1;
+    for (c, &need) in colnos_needed.iter().enumerate() {
+        if !need || c == key_out as usize {
+            continue;
+        }
+        match map[c] {
+            Some(base) => prefix = prefix.max(base as i32 + 1),
+            None => return refused(),
+        }
+    }
+    if let Some(q) = ss.ss.qual.as_deref() {
+        match q.max_fetch(::execexpr::SlotSrc::Scan) {
+            Some(b) => prefix = prefix.max(b),
+            None => return refused(),
+        }
+    }
+    if prefix <= 0 {
+        return refused();
+    }
+    let dict_base =
+        dict_input_att.map(|att| map[att as usize].expect("TextRaw keys are bare Vars"));
+    // Staging arm: PREWHERE first on qual'd scans, then the offset-free
+    // columnar arm (dict registration on the text component's base column).
+    if ss.ss.qual.is_some() {
+        match ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {}
+        }
+    }
+    if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_base) {
+        return refused();
+    }
+    trace_feed("agg-over-seqscan: expr-key feed armed (multi-key packed)");
+    Some(Box::new(ExprKeyState {
+        natts,
+        map,
+        key_out,
+        prefix,
+        kind: ExprKeyKind::Multi(Box::new(MultiKeyChain {
+            chain,
+            input_base: xk.input_col,
+            dict_input_att,
+            dict_base,
+            mks: super::MkScratch::default(),
+        })),
         refused: false,
         rows: Vec::new(),
         keys: Vec::new(),
@@ -415,6 +645,7 @@ pub(super) fn exprkey_rearm<'mcx>(
         }
         let dict_key = match &xk.kind {
             ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
+            ExprKeyKind::Multi(m) => m.dict_base,
             ExprKeyKind::Arith { .. } => None,
         };
         ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, xk.prefix, dict_key)
@@ -455,7 +686,31 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             }
             ::nodeagg::CompactArm::Off => false,
         };
-    trace_feed(if compact {
+    // Multi-key arm: the packed compact table arms per build (mirrors the
+    // scan feed's scan_mk_shape sequence, which also re-decides per build).
+    // A non-armed build (spill risk under the current limits) runs whole
+    // batches per-row — the arrival machinery, byte-identical.
+    let mk_shape: Option<::nodeagg::MkShape> = if let ExprKeyKind::Multi(m) = &xk.kind {
+        match ::nodeagg::agg_hash_compact_try_arm_mk(agg, false, m.dict_input_att) {
+            ::nodeagg::CompactArm::Armed => {
+                Some(::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table"))
+            }
+            ::nodeagg::CompactArm::KeyKind => {
+                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+                None
+            }
+            ::nodeagg::CompactArm::SpillRisk => {
+                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactSpillRisk);
+                None
+            }
+            ::nodeagg::CompactArm::Off => None,
+        }
+    } else {
+        None
+    };
+    trace_feed(if mk_shape.is_some() {
+        "agg-over-seqscan: expr-key fold feed engaged (multi-key packed)"
+    } else if compact {
         "agg-over-seqscan: expr-key fold feed engaged (compact table)"
     } else {
         "agg-over-seqscan: expr-key fold feed engaged"
@@ -473,7 +728,18 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
-        exprkey_batch(agg, ss, xk, stage_slot, compact, &mut idxs, &mut groups, n, estate)?;
+        exprkey_batch(
+            agg,
+            ss,
+            xk,
+            stage_slot,
+            compact,
+            mk_shape.as_ref(),
+            &mut idxs,
+            &mut groups,
+            n,
+            estate,
+        )?;
     }
     ::nodeagg::agg_hash_build_finish(agg, estate)
 }
@@ -486,6 +752,7 @@ fn exprkey_batch<'mcx>(
     xk: &mut ExprKeyState,
     stage_slot: &mut Option<ExecSlotId>,
     compact: bool,
+    mk_shape: Option<&::nodeagg::MkShape>,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     n: u32,
@@ -540,9 +807,15 @@ fn exprkey_batch<'mcx>(
             xk.rows.push(i);
         }
     }
+    // Multi-key packed batches own everything from here (derive → pack →
+    // packed probe → fold); the single-key legs below never see them.
+    if matches!(xk.kind, ExprKeyKind::Multi(_)) {
+        return exprkey_mk_batch(agg, ss, xk, mk_shape, idxs, groups, n, estate);
+    }
     // Key-lane derivation.
     let mut dict_lane: Option<::exectuples::SoaDictLane> = None;
     match &mut xk.kind {
+        ExprKeyKind::Multi(_) => unreachable!("multi-key batches returned above"),
         ExprKeyKind::Arith { prog, ncols } => {
             let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                 .expect("expr-key batched route requires the armed SoA");
@@ -751,6 +1024,260 @@ fn exprkey_batch<'mcx>(
     // SAFETY: as the compact arm above — non-fallback staged rows, valid
     // lane values for every mapped plan column, pergroups installed by this
     // batch's probes, guarded plans proven above.
+    unsafe { agg_fold_staged(agg, &MapCols { soa, map: &xk.map }, idxs, groups) }
+}
+
+/// One multi-key packed batch (see [`MultiKeyChain`]): backstop check, the
+/// computed key derived per survivor through the production fmgr chain,
+/// the pack pre-pass over the survivors' component lanes (Int/Numeric from
+/// base lanes, the derived numeric from the chain lane, text through the
+/// per-epoch intern resolve), the packed compact-table probe, then the
+/// whole-batch fold over the remapped lanes.
+///
+/// Demote discipline: EVERY demotion here happens BEFORE any probe or
+/// transition ran for this batch — chain errors (refuse-and-replay: the
+/// per-row replay raises C's exact error at C's exact row), NULL derived
+/// keys, and unpackable numeric values (range / non-minimal display scale)
+/// all disarm the compact table (migrating its groups to the C tuplehash)
+/// and replay the WHOLE batch per-row, sticky thereafter.
+#[allow(clippy::too_many_arguments)]
+fn exprkey_mk_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut ExprKeyState,
+    mk_shape: Option<&::nodeagg::MkShape>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Not armed this build, or the runtime backstop migrated (before ANY
+    // per-batch work — a migration never splits a batch): whole batch (and
+    // every later one — the table stays disarmed) through the per-row leg.
+    let armed = mk_shape.is_some() && ::nodeagg::agg_hash_compact_backstop(agg, estate)?;
+    let Some(shape) = mk_shape.filter(|_| armed) else {
+        return per_row_batch(agg, ss, n, estate);
+    };
+    debug_assert!(!shape.nullable, "the expr-key multi-key arm is cbstore-only (no null byte)");
+    // Derive the computed key over the survivors. Errors: refuse-and-replay.
+    let mut derive_err = false;
+    let mut null_key = false;
+    {
+        let ExprKeyState { kind, rows, key_vals, key_null, .. } = &mut *xk;
+        let ExprKeyKind::Multi(m) = kind else {
+            unreachable!("mk batch requires the Multi kind")
+        };
+        m.chain.reset();
+        key_vals.clear();
+        key_vals.resize(n as usize, ::datum::Datum::null());
+        key_null.clear();
+        key_null.resize(n as usize, true);
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("expr-key batched route requires the armed SoA");
+        let col = m.input_base as usize;
+        let (values, isnull) = (soa.col_values(col), soa.col_isnull(col));
+        for &i in rows.iter() {
+            let i = i as usize;
+            let input = ::datum::NullableDatum { value: values[i], isnull: isnull[i] };
+            match m.chain.eval(input) {
+                Ok(nd) => {
+                    key_vals[i] = nd.value;
+                    key_null[i] = nd.isnull;
+                    null_key |= nd.isnull;
+                }
+                Err(_) => {
+                    // Discard the error: NO probe or transition ran; the
+                    // per-row replay's exec_project raises C's exact error
+                    // on C's exact row.
+                    derive_err = true;
+                    break;
+                }
+            }
+        }
+    }
+    if derive_err || null_key {
+        // NULL derived keys cannot pack without a null-bitmap byte
+        // (cbstore shapes carry none): same demote as an error, minus the
+        // replayed raise.
+        xk.refused = true;
+        trace_feed("expr-key multi-key demote: replaying batch per-row (sticky)");
+        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+        return per_row_batch(agg, ss, n, estate);
+    }
+    // Pack pre-pass, component-major over the survivors (scan_mk_batch's
+    // shape, remapped: components address tlist attnos; base lanes come
+    // through `map`, the computed component from the derived lane).
+    let mut unpackable = false;
+    {
+        let ExprKeyState { kind, rows, key_vals, map, key_out, .. } = &mut *xk;
+        let ExprKeyKind::Multi(m) = kind else {
+            unreachable!("mk batch requires the Multi kind")
+        };
+        let super::MkScratch { packbuf, keys1, keys2, epoch, code_ids, .. } = &mut m.mks;
+        packbuf.clear();
+        packbuf.resize(rows.len(), 0u128);
+        'comps: for comp in shape.comps.iter() {
+            let att = comp.att;
+            let off_bits = comp.off as u32 * 8;
+            match comp.kind {
+                ::nodeagg::MkCompKind::Numeric { width } if att == *key_out => {
+                    // The derived key lane. Unpackable values demote —
+                    // never a lossy pack (read-back byte-identity).
+                    for (k, &i) in rows.iter().enumerate() {
+                        match ::nodeagg::mk_numeric_datum_bits(key_vals[i as usize], width) {
+                            Some(bits) => packbuf[k] |= (bits as u128) << off_bits,
+                            None => {
+                                unpackable = true;
+                                break 'comps;
+                            }
+                        }
+                    }
+                }
+                ::nodeagg::MkCompKind::Numeric { width } => {
+                    // A bare-Var numeric key column from its base lane.
+                    let base = map[att as usize].expect("Var keys map to base lanes") as usize;
+                    let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                        .expect("expr-key batched route requires the armed SoA");
+                    let (values, isnull) = (soa.col_values(base), soa.col_isnull(base));
+                    for (k, &i) in rows.iter().enumerate() {
+                        let i = i as usize;
+                        debug_assert!(
+                            !isnull[i],
+                            "cbstore no-NULLs proof violated in a multi-key window"
+                        );
+                        match ::nodeagg::mk_numeric_datum_bits(values[i], width) {
+                            Some(bits) => packbuf[k] |= (bits as u128) << off_bits,
+                            None => {
+                                unpackable = true;
+                                break 'comps;
+                            }
+                        }
+                    }
+                }
+                ::nodeagg::MkCompKind::Int { width } => {
+                    let base = map[att as usize].expect("Var keys map to base lanes") as usize;
+                    let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                        .expect("expr-key batched route requires the armed SoA");
+                    let (values, isnull) = (soa.col_values(base), soa.col_isnull(base));
+                    let mask = if width == 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                    for (k, &i) in rows.iter().enumerate() {
+                        let i = i as usize;
+                        debug_assert!(
+                            !isnull[i],
+                            "cbstore no-NULLs proof violated in a multi-key window"
+                        );
+                        let v = match width {
+                            2 => values[i].as_i16() as i64,
+                            4 => values[i].as_i32() as i64,
+                            _ => values[i].as_i64(),
+                        };
+                        packbuf[k] |= (((v as u64) & mask) as u128) << off_bits;
+                    }
+                }
+                ::nodeagg::MkCompKind::Intern => {
+                    let base = map[att as usize].expect("Var keys map to base lanes") as usize;
+                    let mcx = estate.es_query_cxt;
+                    let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                        .and_then(|soa| soa.dict_lane(base));
+                    match lane {
+                        Some(lane) => {
+                            // Per-epoch code → intern-id resolve (the scan
+                            // feed's exact cache, epoch-rolled per RG).
+                            let ndict = lane.table.ndict as usize;
+                            if *epoch != Some(lane.table.epoch) {
+                                *epoch = Some(lane.table.epoch);
+                                code_ids.clear();
+                                code_ids.resize(ndict, None);
+                            }
+                            debug_assert!(code_ids.len() >= ndict);
+                            for (k, &i) in rows.iter().enumerate() {
+                                let code = lane.code(i as usize) as usize;
+                                debug_assert!(code < ndict, "filler contract: code < ndict");
+                                let id = match code_ids[code] {
+                                    Some(id) => id,
+                                    None => {
+                                        let d = lane.table.datum(code as u32);
+                                        // SAFETY: dict entries are live
+                                        // non-null text varlenas for the
+                                        // staged window (dict lane
+                                        // contract; kernel selection proved
+                                        // the column type).
+                                        let v = unsafe {
+                                            ::types_fmgr::datum_varlena_packed(d, mcx)
+                                        }?;
+                                        let id = ::nodeagg::agg_hash_compact_intern(
+                                            agg,
+                                            v.data(),
+                                        );
+                                        code_ids[code] = Some(id);
+                                        id
+                                    }
+                                };
+                                packbuf[k] |= (id as u128) << off_bits;
+                            }
+                        }
+                        None => {
+                            // Raw-answered window: per-row intern (correct,
+                            // colder — the scan feed's fallback rule).
+                            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                                .expect("expr-key batched route requires the armed SoA");
+                            let values = soa.col_values(base);
+                            debug_assert!(
+                                rows.iter().all(|&i| !soa.col_isnull(base)[i as usize]),
+                                "cbstore no-NULLs proof violated in a multi-key window"
+                            );
+                            for (k, &i) in rows.iter().enumerate() {
+                                let d = values[i as usize];
+                                // SAFETY: staged non-null live text varlena
+                                // (columnar fill stages decoded datums;
+                                // kernel selection proved the column type).
+                                let v =
+                                    unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                                let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                                packbuf[k] |= (id as u128) << off_bits;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !unpackable {
+            if shape.two_words {
+                keys2.clear();
+                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
+            } else {
+                keys1.clear();
+                keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
+            }
+        }
+    }
+    if unpackable {
+        xk.refused = true;
+        trace_feed("expr-key multi-key demote: numeric key unpackable (sticky)");
+        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+        return per_row_batch(agg, ss, n, estate);
+    }
+    // Packed probe + whole-batch fold over the remapped lanes.
+    {
+        let ExprKeyState { kind, rows, .. } = &mut *xk;
+        let ExprKeyKind::Multi(m) = kind else {
+            unreachable!("mk batch requires the Multi kind")
+        };
+        if shape.two_words {
+            ::nodeagg::agg_hash_compact_batch_mk2(agg, &m.mks.keys2, groups)?;
+        } else {
+            ::nodeagg::agg_hash_compact_batch_mk1(agg, &m.mks.keys1, groups)?;
+        }
+        idxs.clear();
+        idxs.extend_from_slice(rows);
+    }
+    let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+        .expect("expr-key batched route requires the armed SoA");
+    // SAFETY: every probed row is a non-fallback staged row with valid lane
+    // values for every mapped plan column (a dict component is never in
+    // `plan.cols` — admission); the plan is unguarded (admission); each
+    // pergroup was installed by the packed compact probe within this batch;
+    // the rest is agg_fold_staged's contract.
     unsafe { agg_fold_staged(agg, &MapCols { soa, map: &xk.map }, idxs, groups) }
 }
 
