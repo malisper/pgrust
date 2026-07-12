@@ -6416,6 +6416,7 @@ dependencies = [
 name = "guc_tables"
 version = "0.0.0"
 dependencies = [
+ "guc_seams",
  "types_error",
  "types_guc",
 ]

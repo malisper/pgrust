@@ -1526,12 +1526,25 @@ fn create_cbstore_sorted_paths<'mcx>(
 fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     let parallel_workers = {
         let r = run.root.rel(rel);
-        ::allpaths::compute_parallel_worker(
+        let computed = ::allpaths::compute_parallel_worker(
             r,
             r.pages as f64,
             -1.0,
             crate::gucs::max_parallel_workers_per_gather(),
-        )
+        );
+        // Stage-4 pool arming (guc_tables::lane_pool): a cbstore baserel in
+        // an armed session plans exactly the requested DOP (clamped to the
+        // gather GUC; the helper already clamped to available cores) — the
+        // plan's forced-plans posture, no shape rules. Heap rels and
+        // unarmed sessions keep the computed size untouched.
+        if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 {
+            match ::guc_tables::lane_pool::lane_parallel_pool_dop() {
+                dop if dop > 0 => dop.min(crate::gucs::max_parallel_workers_per_gather()),
+                _ => computed,
+            }
+        } else {
+            computed
+        }
     };
     if parallel_workers <= 0 {
         return Ok(());

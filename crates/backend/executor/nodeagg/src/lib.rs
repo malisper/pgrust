@@ -92,6 +92,11 @@ pub struct AggStateData<'mcx> {
     lanefold: Option<LaneFold<'mcx>>,
     // InstrCountFiltered1 target (HAVING rejections); set by instrument_node.
     pub instr_idx: Option<u32>,
+    // Sink::combine already ran for this build (spills finished, handoff
+    // installed): agg_hash_build_finish must not repeat either (a double
+    // handoff install would double-count the worker's groups). Cleared by
+    // finish for the next build (rescan).
+    hash_build_combined: bool,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -1212,6 +1217,7 @@ pub fn exec_init_agg<'mcx>(
         qual,
         lanefold,
         instr_idx: None,
+        hash_build_combined: false,
     })
 }
 
@@ -2987,15 +2993,39 @@ pub fn agg_hash_build_accept<'mcx>(
     Ok(())
 }
 
+/// Breaker `Sink::combine` (the Stage-4 seam, reserved since Phase 2 and
+/// landed with the pool): the partial build's cross-worker contribution —
+/// finish initial spills, then hand the whole table to the leader by pointer
+/// (merge handoff) when a finalize registered one. The leader's finalize
+/// combines the handed tables partition-parallel with the ported combinefn
+/// machinery (merge.rs), so this IS the combine half of combine-before-
+/// finish; `finish` then only flips the breaker to its Source face.
+/// Idempotence: guarded by `hash_build_combined` — a double install would
+/// double-count this worker's groups.
+pub fn agg_hash_build_combine<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if node.hash_build_combined {
+        return Ok(());
+    }
+    hashagg_finish_initial_spills(node, estate)?;
+    merge::maybe_install_handoff(node);
+    node.hash_build_combined = true;
+    Ok(())
+}
+
 /// Breaker `Sink::finish` (= Finalize): `agg_fill_hash_table_batched`'s
-/// post-drain tail — finish initial spills, install the merge handoff if one
-/// arose, flip the phase flag, park the iterator at the table head.
+/// post-drain tail — combine (spill finish + handoff install) unless a
+/// `Sink::combine` call already ran it, flip the phase flag, park the
+/// iterator at the table head. The combined flag resets here so a rescan's
+/// fresh build combines again.
 pub fn agg_hash_build_finish<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    hashagg_finish_initial_spills(node, estate)?;
-    merge::maybe_install_handoff(node);
+    agg_hash_build_combine(node, estate)?;
+    node.hash_build_combined = false;
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     ph.table_filled = true;
     ph.hashiter = 0;
@@ -4233,7 +4263,7 @@ mcx::forget_safe_struct!(
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
-        instr_idx;
+        instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual, lanefold },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds

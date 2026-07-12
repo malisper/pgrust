@@ -1594,7 +1594,9 @@ fn agg_hash_build_fold_feed<'mcx>(
             }
         }
     }
-    // Finalize (delegated): spill finish, merge handoff, phase flip.
+    // Combine-before-finish (delegated; the Stage-4 seam): spill finish +
+    // merge handoff, then the phase flip.
+    ::nodeagg::agg_hash_build_combine(agg, estate)?;
     ::nodeagg::agg_hash_build_finish(agg, estate)
 }
 
@@ -2204,6 +2206,13 @@ impl<'mcx> Sink<'mcx> for HashAggBuildSink<'_, 'mcx> {
     ) -> PgResult<SinkFeed> {
         ::nodeagg::agg_hash_build_accept(self.agg, estate, tuple)?;
         Ok(SinkFeed::NeedMore)
+    }
+
+    // Stage-4 combine seam: a parallel worker's partial build hands its
+    // whole table to the leader here (merge handoff); idempotent under the
+    // following finish (nodeagg's combined flag).
+    fn combine(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodeagg::agg_hash_build_combine(self.agg, estate)
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
@@ -4247,6 +4256,19 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
             StagedMode::Arrival => self.accept_unguarded(tuple, estate)?,
         }
         Ok(SinkFeed::NeedMore)
+    }
+
+    // Stage-4 combine seam (see HashAggBuildSink::combine): flush the staged
+    // tail first so the handed table is complete, then hand off; the
+    // following finish re-flushes nothing (flushes drain their staging) and
+    // skips the install (combined flag).
+    fn combine(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        match self.mode {
+            StagedMode::Guarded => self.flush_guarded(estate)?,
+            StagedMode::K2 { .. } => self.flush_k2(estate)?,
+            StagedMode::Arrival => self.flush_unguarded(estate)?,
+        }
+        ::nodeagg::agg_hash_build_combine(self.agg, estate)
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
