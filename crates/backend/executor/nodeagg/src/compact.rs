@@ -110,12 +110,63 @@ impl MkShape {
     }
 }
 
+/// The arithmetic of one reconstructable (redundant) grouping key
+/// (redundant-key lane, ClickBench Q36 class): `Var ± Const` int arithmetic
+/// over the representative key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedOp {
+    Add,
+    Sub,
+}
+
+/// One redundant grouping key: a deterministic `rep (op) konst` function of
+/// the representative key's value. The feed's per-batch range guard proves
+/// every grouped value overflow-free at the key's width, so emit-time
+/// reconstruction never errors and is byte-identical to the per-row
+/// int2/4/8 pl/mi result.
+#[derive(Clone, Copy, Debug)]
+pub struct RedDerived {
+    pub op: RedOp,
+    /// Canonical (sign-extended) constant at the key's width.
+    pub konst: i64,
+    /// The Var is the LEFT operand (`k - 1`); false = `1 - k`.
+    pub var_is_arg0: bool,
+}
+
+impl RedDerived {
+    /// The derived key's canonical value. Wrapping by design: the feed's
+    /// admission-time range guard proved `rep` inside the overflow-free
+    /// domain of every derived expression before any group was created.
+    #[inline]
+    pub fn eval(&self, rep: i64) -> i64 {
+        let (a, b) = if self.var_is_arg0 { (rep, self.konst) } else { (self.konst, rep) };
+        match self.op {
+            RedOp::Add => a.wrapping_add(b),
+            RedOp::Sub => a.wrapping_sub(b),
+        }
+    }
+}
+
+/// Reduced-key spec (redundant grouping-key elimination): the table probes
+/// on the SINGLE representative key (canonical `width`-byte int), and every
+/// other grouping key is reconstructed from it at read-back (retrieve /
+/// migrate / handoff export). `keys` is in key (hash_desc) order; exactly
+/// one entry is `None` — the representative itself.
+#[derive(Clone, Debug)]
+pub struct RedShape {
+    pub width: u8,
+    pub keys: Vec<Option<RedDerived>>,
+}
+
 /// Key mode of an armed compact table.
 pub(crate) enum CompactKeySpec {
     /// Single integer grouping key of `width` bytes (2/4/8) — compact v1.
     Single { width: u8 },
     /// Packed multi-key composite (multikey spike §2).
     Multi(MkShape),
+    /// Reduced multi-key: probe on the representative int key, reconstruct
+    /// the redundant keys at read-back (redundant-key lane).
+    Reduced(RedShape),
 }
 
 /// Per-node compact-table state, hosted in [`PerHashData`].
@@ -377,13 +428,94 @@ pub fn agg_hash_compact_try_arm_mk(
     CompactArm::Armed
 }
 
+/// Shared compact v1 gates for the single-word-key modes (Single/Reduced):
+/// kill switch, aggsplit/divisor, and the spill-eligibility estimate at half
+/// margin. `Ok(numgroups)` = admissible (the divided group estimate, for the
+/// layout choice); `Err` = the refusing verdict.
+fn compact_single_word_gates(node: &AggStateData<'_>) -> Result<u64, CompactArm> {
+    if !compact_enabled() {
+        return Err(CompactArm::Off);
+    }
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return Err(CompactArm::Off);
+    };
+    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    let additionalsize = ph.hashtable.additionalsize();
+    debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
+    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
+    if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
+        return Err(CompactArm::SpillRisk);
+    }
+    Ok(numgroups)
+}
+
+/// Read-only admission precheck for the REDUCED (redundant-key) mode: the
+/// compact v1 gates without installing a table. The decide phase runs this
+/// (it only holds `&AggStateData`); the feed arms for real per build with
+/// [`agg_hash_compact_try_arm_reduced`] — same gates, same verdict.
+pub fn agg_hash_compact_reduced_admissible(node: &AggStateData<'_>) -> CompactArm {
+    match compact_single_word_gates(node) {
+        Ok(_) => CompactArm::Armed,
+        Err(v) => v,
+    }
+}
+
+/// Decide + arm the compact table for a REDUCED-key build (redundant
+/// grouping-key elimination, Q36 class). The caller (the lane's expr-key
+/// feed) has already admitted the shape: 2..N int grouping keys where every
+/// non-representative key is a deterministic `Var ± Const` function of the
+/// representative, plus the feed half (unguarded-or-proven fold plan, no
+/// residuals, representative key staged). The table probes on the single
+/// representative word; read-back reconstructs the redundant keys.
+/// Idempotent per build.
+pub fn agg_hash_compact_try_arm_reduced(
+    node: &mut AggStateData<'_>,
+    shape: RedShape,
+) -> CompactArm {
+    let numgroups = match compact_single_word_gates(node) {
+        Ok(n) => n,
+        Err(v) => return v,
+    };
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    if ph.compact.is_some() {
+        return CompactArm::Armed;
+    }
+    debug_assert_eq!(shape.keys.len(), ph.hashtable.key_cols().len());
+    debug_assert_eq!(shape.keys.iter().filter(|d| d.is_none()).count(), 1);
+    debug_assert!(matches!(shape.width, 2 | 4 | 8));
+    let additionalsize = ph.hashtable.additionalsize();
+    // Same layout policy as compact v1 (single-word key).
+    let layout = if numgroups <= (1 << 20) {
+        ::lanetable::EntryLayout::Inline16
+    } else {
+        ::lanetable::EntryLayout::Salt8
+    };
+    ph.compact = Some(CompactHash {
+        table: ::lanetable::LaneAggTable::with_config(
+            ::lanetable::KeyRepr::Int,
+            additionalsize,
+            (numgroups as usize).min(1 << 20),
+            ::lanetable::HashKind::best(),
+            layout,
+        ),
+        key: CompactKeySpec::Reduced(shape),
+        intern: None,
+        keys: Vec::new(),
+        states: Vec::new(),
+        hashes: Vec::new(),
+        new_rows: Vec::new(),
+    });
+    CompactArm::Armed
+}
+
 /// The armed multi-key layout, cloned for the feed's packing loop. `None` =
 /// not armed, or armed in single-key mode.
 pub fn agg_hash_compact_mk_shape(node: &AggStateData<'_>) -> Option<MkShape> {
     let ph = node.perhash.as_ref()?;
     match &ph.compact.as_ref()?.key {
         CompactKeySpec::Multi(shape) => Some(shape.clone()),
-        CompactKeySpec::Single { .. } => None,
+        CompactKeySpec::Single { .. } | CompactKeySpec::Reduced(_) => None,
     }
 }
 
@@ -443,8 +575,14 @@ pub fn agg_hash_compact_batch<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     let CompactHash { table, key, keys: ckeys, states, hashes, new_rows, .. } = ch;
-    let CompactKeySpec::Single { width } = key else {
-        unreachable!("datum-lane batches require a single-key table")
+    // Single-word datum-lane probes: compact v1 and the reduced (redundant-
+    // key) mode — the latter's key lane is the representative key.
+    let width = match key {
+        CompactKeySpec::Single { width } => width,
+        CompactKeySpec::Reduced(shape) => &shape.width,
+        CompactKeySpec::Multi(_) => {
+            unreachable!("datum-lane batches require a single-word-key table")
+        }
     };
     ckeys.clear();
     states.clear();
@@ -640,6 +778,47 @@ fn compact_key_datum(ch: &CompactHash, width: u8, row: usize) -> Option<Datum> {
         4 => Datum::from_i32(k as i32),
         _ => Datum::from_i64(k),
     })
+}
+
+/// A canonical i64 as a width-typed int datum (byte-identical to the
+/// per-row path's int2/int4/int8 datum image).
+#[inline]
+fn int_width_datum(width: u8, v: i64) -> Datum {
+    match width {
+        2 => Datum::from_i16(v as i16),
+        4 => Datum::from_i32(v as i32),
+        _ => Datum::from_i64(v),
+    }
+}
+
+/// Reconstruct row `row`'s key datums (key order) for a REDUCED-key table:
+/// the representative from the stored key word, every redundant key
+/// re-evaluated from it (deterministic, overflow-free by the feed's range
+/// guard). The NULL group reconstructs to all-NULL keys — the strict ±
+/// operators map a NULL representative to NULL derived keys, exactly the
+/// per-row result.
+fn compact_key_datums_red(
+    ch: &CompactHash,
+    shape: &RedShape,
+    row: usize,
+    out: &mut Vec<(Datum, bool)>,
+) {
+    out.clear();
+    match ch.table.row_key_int(row) {
+        None => out.extend(core::iter::repeat_n((Datum::null(), true), shape.keys.len())),
+        Some(rep) => out.extend(shape.keys.iter().map(|d| {
+            let v = d.map_or(rep, |d| d.eval(rep));
+            debug_assert!(
+                match shape.width {
+                    2 => i16::try_from(v).is_ok(),
+                    4 => i32::try_from(v).is_ok(),
+                    _ => true,
+                },
+                "reduced-key range guard admitted an overflowing group"
+            );
+            (int_width_datum(shape.width, v), false)
+        })),
+    }
 }
 
 /// Unpack component `comp`'s raw bits from a row's ≤16-byte key image.
@@ -888,6 +1067,14 @@ pub(crate) fn compact_row_into_hashslot<'mcx>(
                 base.tts_isnull[j] = isnull;
             }
         }
+        CompactKeySpec::Reduced(shape) => {
+            compact_key_datums_red(ch, shape, row, mk_scratch);
+            let base = hashslot.base_mut();
+            for (j, &(d, isnull)) in mk_scratch.iter().enumerate() {
+                base.tts_values[j] = d;
+                base.tts_isnull[j] = isnull;
+            }
+        }
     }
     ::exectuples::exec_store_virtual_tuple(hashslot);
     Ok(())
@@ -903,7 +1090,7 @@ pub(crate) fn compact_export_entry_key(ch: &CompactHash, row: usize) -> (Datum, 
             Some(d) => (d, false),
             None => (Datum::null(), true),
         },
-        CompactKeySpec::Multi(_) => (Datum::null(), false),
+        CompactKeySpec::Multi(_) | CompactKeySpec::Reduced(_) => (Datum::null(), false),
     }
 }
 
@@ -1086,6 +1273,18 @@ pub(crate) fn compact_retrieve_next<'mcx>(
             // exactly like the C path's stored-tuple key bytes).
             let mut vals: Vec<(Datum, bool)> = Vec::with_capacity(shape.comps.len());
             compact_key_datums_mk(ch, shape, row, ph.table_ctx.mcx(), &mut vals)?;
+            let base = ph.first_slot.base_mut();
+            for (j, &(d, isnull)) in vals.iter().enumerate() {
+                let v = (ph.hash_grp_col_idx_input[j] - 1) as usize;
+                base.tts_values[v] = d;
+                base.tts_isnull[v] = isnull;
+            }
+        }
+        CompactKeySpec::Reduced(shape) => {
+            // Redundant keys reconstructed from the representative word —
+            // byval int datums, no materialization.
+            let mut vals: Vec<(Datum, bool)> = Vec::with_capacity(shape.keys.len());
+            compact_key_datums_red(ch, shape, row, &mut vals);
             let base = ph.first_slot.base_mut();
             for (j, &(d, isnull)) in vals.iter().enumerate() {
                 let v = (ph.hash_grp_col_idx_input[j] - 1) as usize;
