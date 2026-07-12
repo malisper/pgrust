@@ -4787,6 +4787,7 @@ dependencies = [
  "adt_jsonb",
  "adt_jsonpath",
  "adt_jsonpath_exec",
+ "adt_like",
  "adt_numeric",
  "adt_scalar",
  "adt_timestamp",
@@ -4814,10 +4815,12 @@ dependencies = [
  "lsyscache",
  "mbutils",
  "mcx",
+ "memchr",
  "miscinit_seams",
  "namespace_seams",
  "nodes_core",
  "numutils",
+ "pg_locale",
  "pgstat",
  "pgtz",
  "postgres_seams",
@@ -8011,6 +8014,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
 name = "mimalloc"
 version = "0.1.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9124,6 +9133,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "nodehash",
+ "pg_locale",
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",

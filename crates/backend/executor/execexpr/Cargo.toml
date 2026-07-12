@@ -24,6 +24,9 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_portal = { path = "../../../_support/types/portal" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+# memchr::memmem = the strsearch contains-qual kernel's substring search
+# (measured choice: notes/strsearch-parity-2026-07-12.md).
+memchr = "2"
 fmgr_core = { path = "../../utils/fmgr/fmgr_core" }
 adt_date = { path = "../../utils/adt/adt_date" }
 adt_datetime = { path = "../../utils/adt/adt_datetime" }
@@ -52,12 +55,18 @@ namespace_seams = { path = "../../catalog/namespace_seams" }
 syscache_seams = { path = "../../utils/cache/syscache_seams" }
 typcache_seams = { path = "../../utils/cache/typcache_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
+# strsearch contains-qual census: encoding gate (generic_match_text's arms).
+mbutils = { path = "../../utils/mb/mbutils" }
+wchar = { path = "../../../common/wchar" }
 
 [features]
 bench-internals = []
 
 [dev-dependencies]
 adt_float = { path = "../../utils/adt/float" }
+# strsearch contains-kernel parity-fuzz oracle (the real per-row matcher).
+adt_like = { path = "../../utils/adt/like" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
 adt_jsonpath = { path = "../../utils/adt/jsonpath" }
 mbutils = { path = "../../utils/mb/mbutils" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
