@@ -864,6 +864,21 @@ pub fn cbstore_reloptions<'mcx>(
                     }
                 }
             },
+            // Same name/range as the heap reloption (RELOPTS: 0..1024); the
+            // AlterTableGetRelOptionsLockLevel name lookup already grants it
+            // ShareUpdateExclusiveLock from the heap row.
+            "parallel_workers" => match guc::units::parse_int(value, 0) {
+                guc::units::ParseNum::Ok(v) if (0..=1024).contains(&v) => {
+                    out.parallel_workers = v
+                }
+                _ => {
+                    if validate {
+                        return Err(bad(format!(
+                            "invalid value for integer option \"parallel_workers\": {value} (valid: 0..1024)"
+                        )));
+                    }
+                }
+            },
             other => {
                 if validate {
                     return Err(bad(format!("unrecognized parameter \"{other}\"")));
