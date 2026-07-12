@@ -255,6 +255,19 @@ pub(super) trait TupleOp<'mcx> {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus>;
+    /// Upstream exhausted: flush any accumulated tail into `out` (the
+    /// sorted-agg operator's final open group). Ops that buffer nothing
+    /// across input tuples keep the default no-op. May return `Paused` (tail
+    /// tuple delivered, root full) — the drivers then hand it to PG exactly
+    /// like a mid-stream pause; the op must make a re-flush after that
+    /// idempotent (the sorted-agg op's `agg_done` does).
+    fn flush(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        Ok(OpStatus::Finished)
+    }
 }
 
 /// Splices a `TupleOp` between an upstream `Operator` and the pipeline sink
@@ -327,8 +340,19 @@ where
             None => match src.produce(node, estate)? {
                 Some(b) => b,
                 None => {
-                    root.finish(estate)?;
-                    return Ok(None);
+                    // Upstream exhausted: flush the TupleOp's tail (the
+                    // sorted-agg op's final group) before finishing the root.
+                    match top.flush(root, estate)? {
+                        OpStatus::Paused => {
+                            let t = root.take();
+                            debug_assert!(t.is_some(), "TupleOp paused on a non-full root");
+                            return Ok(t);
+                        }
+                        OpStatus::NeedInput | OpStatus::Finished => {
+                            root.finish(estate)?;
+                            return Ok(None);
+                        }
+                    }
                 }
             },
         };
@@ -381,6 +405,11 @@ where
                 unreachable!("chain build pipeline paused: breaker sink returned Full")
             }
         }
+    }
+    // Upstream exhausted: flush the TupleOp's tail into the breaker sink
+    // (breaker sinks never fill, so a flush cannot pause) before finishing.
+    if let OpStatus::Paused = top.flush(sink, estate)? {
+        unreachable!("chain build pipeline paused in flush: breaker sink returned Full")
     }
     sink.finish(estate)
 }

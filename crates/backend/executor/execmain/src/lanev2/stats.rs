@@ -15,8 +15,11 @@
 //!     is per `exec_proc_node` call (not node-memoized), so owned/refused
 //!     ticks are per-pull decisions. Counts are large but deterministic for a
 //!     fixed corpus.
-//!   * `AggBuild` — one OWNED tick per lane-owned hash-agg build (the
-//!     drain-the-scan-pipeline event); refusals per offered call.
+//!   * `AggBuild` — one OWNED tick per lane-owned agg feed event: a hash-agg
+//!     build (the drain-the-scan-pipeline event), a plain-agg fold drive, or
+//!     a sorted-agg stream start over a sort feed (index-order-fed sorted
+//!     streams have no build event; their engagement ticks under the
+//!     per-pull index classes as feed decisions). Refusals per offered call.
 //!   * `SortFeed` — one OWNED tick per lane-owned sort feed; structural
 //!     refusals once per memoized verdict; dynamic EPQ/backward per call.
 //!   * `Join` — one OWNED tick per lane-owned join build event; structural
@@ -130,9 +133,13 @@ pub(super) enum RefuseReason {
     /// Sort breaker: the child scan's own refuse-set refused (the specific
     /// reason is ticked under the child's class).
     ChildScanRefused = 16,
-    /// Agg breaker: not batch-drainable (grouping sets / DISTINCT-or-ordered
-    /// input / merge phase / subplan transitions / non-AGG_HASHED /
-    /// initplan params).
+    /// Agg-side shape refusal, per offered call: the hashed breaker's
+    /// batch-drainable gate (grouping sets / DISTINCT-or-ordered input /
+    /// merge phase / subplan transitions / non-AGG_HASHED / initplan params)
+    /// and the sorted streaming operator's admission
+    /// (`agg_sorted_lane_admissible`: grouping sets / merge /
+    /// within-aggregate internal sorts / subplan transitions / initplan
+    /// params / non-AGG_SORTED strategies at its arms).
     AggNotDrainable = 17,
     /// Admission economics (design §4): the legacy fused drive already owns
     /// this shape better than the v2 pipeline (fused agg batch drive; fused

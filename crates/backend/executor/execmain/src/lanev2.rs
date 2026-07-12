@@ -1678,6 +1678,334 @@ impl<'mcx> Operator<'mcx> for SortEmit {
 }
 
 // ===========================================================================
+// Sorted-agg (AGG_SORTED) streaming operator (Phase-2 breadth). NOT a
+// breaker: input arrives sorted on the grouping keys, so the node emits a
+// finalized group at each key boundary and never needs the whole input — it
+// sits as a mid-pipeline `TupleOp` between a lane-owned ordered feed and the
+// root pull-adapter:
+//
+//   Agg over Sort (two chained pipelines on the sort breaker):
+//     pipeline N   : scan source → filter/project → SortBreakerSink
+//     pipeline N+1 : SortEmitSourceCfi → SortEmit → SortedAggOp → RootAdapter
+//   Agg over IndexScan / IndexOnlyScan (order from the index, one pipeline):
+//     IndexScanSource → IndexScanEmit → SortedAggOp → RootAdapter
+//
+// The lane owns ONLY control flow; ALL semantics delegate to the row-path
+// nodeagg seam (`agg_sorted_*`): the group-boundary comparison is the ported
+// grouping-equality ExprState (NULL keys group together through it), the
+// per-row transition program, and the finalize/HAVING/project tail are
+// `agg_retrieve_sorted`'s own pieces over the node's own persort state
+// (first/pending slots + `have_pending`). Because the seam maintains exactly
+// the pull loop's node state — every call boundary has the current group
+// closed and at most a pending boundary tuple saved — a per-call fallback to
+// `exec_agg` (dynamic gates) is byte-safe in both directions.
+//
+// Per-tuple laziness holds: the capacity-one root buffers the boundary
+// group's row, pausing the pipeline (the child feed advances only to the
+// boundary tuple, which is saved in the pending slot before the pause).
+// End-of-stream uses the driver's `TupleOp::flush` hook to finalize the last
+// open group; `agg_done` (set exactly where the pull loop sets it) makes the
+// drained node stay drained.
+//
+// v1 is deliberately per-row (correctness first): the ordered feeds emit
+// one-row batches (sort read-back) or short TID runs, so there is no clean
+// whole-batch group-run fold seam here yet; the lanefold `fold_rows_grouped`
+// batching over contiguous group runs is a later, measured step.
+// ===========================================================================
+
+/// The sorted-agg streaming operator. `group_open` is call-local by
+/// construction: the only pauses are group-row emissions (capacity-one root),
+/// after which the group is already closed — so at every PG call boundary the
+/// open-group flag is false and the cross-call resume state is entirely the
+/// node's own `have_pending`/`agg_done`.
+struct SortedAggOp<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    group_open: bool,
+}
+
+impl<'mcx> SortedAggOp<'_, 'mcx> {
+    /// Start the next group from the saved pending boundary tuple.
+    fn begin_from_pending(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodeagg::agg_sorted_group_begin(self.agg, estate, None)?;
+        self.group_open = true;
+        Ok(())
+    }
+}
+
+impl<'mcx> TupleOp<'mcx> for SortedAggOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        // A saved boundary tuple whose group has not started: the resume
+        // after the pause that delivered the previous group's row.
+        !self.group_open && ::nodeagg::agg_sorted_have_pending(self.agg)
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        if !self.group_open {
+            // First row of the stream (or after a HAVING-rejected tail): the
+            // group prologue — copy, initialize, first transition.
+            debug_assert!(!::nodeagg::agg_sorted_have_pending(self.agg));
+            ::nodeagg::agg_sorted_group_begin(self.agg, estate, Some(tuple))?;
+            self.group_open = true;
+            return Ok(OpStatus::NeedInput);
+        }
+        if ::nodeagg::agg_sorted_same_group(self.agg, estate, tuple)? {
+            ::nodeagg::agg_sorted_accept(self.agg, estate, tuple)?;
+            return Ok(OpStatus::NeedInput);
+        }
+        // Group boundary: save the boundary row first (the pull loop's
+        // order), then finalize + HAVING + project the completed group.
+        ::nodeagg::agg_sorted_save_pending(self.agg, estate, tuple)?;
+        self.group_open = false;
+        match ::nodeagg::agg_sorted_emit(self.agg, estate)? {
+            Some(row) => match out.accept(row, estate)? {
+                SinkFeed::Full => Ok(OpStatus::Paused),
+                // Non-root sinks (none wired today): start the next group
+                // immediately, as the pull loop's next iteration would.
+                SinkFeed::NeedMore => {
+                    self.begin_from_pending(estate)?;
+                    Ok(OpStatus::NeedInput)
+                }
+            },
+            // HAVING rejected the group: no output row; start the next group
+            // from the pending boundary tuple (the pull loop's `continue`).
+            None => {
+                self.begin_from_pending(estate)?;
+                Ok(OpStatus::NeedInput)
+            }
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // The paused emit already delivered its row; resuming means starting
+        // the next group from the saved boundary tuple, then asking for more
+        // input.
+        debug_assert!(self.pending());
+        self.begin_from_pending(estate)?;
+        Ok(OpStatus::NeedInput)
+    }
+
+    fn flush(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // Input exhausted: agg_done first (the pull loop's fetch-None arms),
+        // then finalize the last open group, if any. Zero input rows emit
+        // nothing (C's sorted-agg contract — unlike AGG_PLAIN).
+        ::nodeagg::agg_sorted_input_done(self.agg);
+        if !self.group_open {
+            return Ok(OpStatus::Finished);
+        }
+        self.group_open = false;
+        match ::nodeagg::agg_sorted_emit(self.agg, estate)? {
+            Some(row) => match out.accept(row, estate)? {
+                SinkFeed::Full => Ok(OpStatus::Paused),
+                SinkFeed::NeedMore => Ok(OpStatus::Finished),
+            },
+            None => Ok(OpStatus::Finished),
+        }
+    }
+}
+
+/// Sort read-back source for the sorted-agg emit chain: `SortEmitSource`
+/// plus C's per-fetch CHECK_FOR_INTERRUPTS — each row the agg pulls from the
+/// sort is one `ExecSort` call in the per-tuple path, which checks at entry
+/// (the bare-sort pipeline's equivalent check lives at `try_own_sort`'s
+/// entry, once per pull).
+struct SortEmitSourceCfi;
+
+impl<'mcx> Source<'mcx> for SortEmitSourceCfi {
+    type Node = ::nodesort::SortState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        ::postgres_seams::check_for_interrupts::call()?;
+        Ok(::nodesort::sort_lane_next(node, estate)?.map(|_| Batch { n: 1 }))
+    }
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → Sort → scan`: the sort breaker
+/// feeds once (pipeline N), then the sorted-agg operator streams the
+/// read-back into one group row per PG pull. `None` = refused (caller falls
+/// to the per-tuple `exec_agg` over `exec_sort`, byte-safely — see the
+/// section doc on call-boundary state compatibility).
+#[inline]
+pub fn try_own_sorted_agg_over_sort<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (mirror the bare-sort breaker).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Backward);
+        return Ok(None);
+    }
+    // Agg-side admission (static shape; ticked per offered call, the hashed
+    // breaker's AggNotDrainable cadence).
+    if !::nodeagg::agg_sorted_lane_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    // Sort-side structural verdict — the bare-sort arm's memo, shared (the
+    // refusal ticks once per node whichever arm probes first).
+    let fusible = match s.lane_fusible {
+        Some(v) => v,
+        None => {
+            let refuse = sort_refuse_reason(s, estate)?;
+            if let Some(r) = refuse {
+                stats::tick_refused(ShapeClass::SortFeed, r);
+            }
+            let v = refuse.is_none();
+            s.lane_fusible = Some(v);
+            v
+        }
+    };
+    if !fusible {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    if !state.sort_done() {
+        // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
+        // emit chain's source checks per subsequent fetch).
+        ::postgres_seams::check_for_interrupts::call()?;
+        // One OWNED tick per lane-owned sort feed event, plus one per
+        // lane-owned sorted-agg stream start (both count feed/build EVENTS,
+        // once per (re)scan).
+        stats::tick_owned(ShapeClass::SortFeed);
+        stats::tick_owned(ShapeClass::AggBuild);
+        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        match &mut **outer {
+            crate::procnode::PlanStateNode::SeqScan(ss) => {
+                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
+            }
+            crate::procnode::PlanStateNode::IndexScan(is) => {
+                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
+            }
+            crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
+                state,
+                &mut **ios,
+                IndexOnlyScanSource,
+                IndexOnlyScanEmit,
+                outer_desc,
+                estate,
+            )?,
+            crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+                let b = &mut **b;
+                if !b.scan.initialized {
+                    crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+                }
+                sort_feed(
+                    state,
+                    &mut b.scan,
+                    BitmapHeapScanSource,
+                    BitmapHeapScanEmit,
+                    outer_desc,
+                    estate,
+                )?
+            }
+            _ => unreachable!("memoized sort verdict admitted a non-scan child"),
+        }
+    }
+    // Emit phase (every call): sort read-back → sorted-agg operator → root,
+    // one qual-passing group row per PG pull.
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step_chain(
+        state,
+        &mut SortEmitSourceCfi,
+        &mut SortEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → IndexScan` (index order feeds
+/// the grouping directly — no Sort node). Engagement accounting: the
+/// per-pull indexscan class ticks (owned per admitted feed decision, the
+/// class's documented cadence); agg-side refusals tick AggNotDrainable per
+/// offered call.
+#[inline]
+pub fn try_own_sorted_agg_over_index_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    is: &mut ::nodeindexscan::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !::nodeagg::agg_sorted_lane_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    // Child refuse-set verbatim (dynamic EPQ/direction gates included; ticks
+    // under the indexscan class, per call).
+    if !index_scan_fusible(is, estate) {
+        return Ok(None);
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step_chain(
+        is,
+        &mut IndexScanSource,
+        &mut IndexScanEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → IndexOnlyScan`. Accounting as
+/// the IndexScan arm (per-pull indexonlyscan class).
+#[inline]
+pub fn try_own_sorted_agg_over_index_only_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !::nodeagg::agg_sorted_lane_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    if !index_only_scan_fusible(ios, estate) {
+        return Ok(None);
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step_chain(
+        ios,
+        &mut IndexOnlyScanSource,
+        &mut IndexOnlyScanEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
+}
+
+// ===========================================================================
 // Hash-join pipeline breaker (Phase 2). The join spans two pipelines plus a
 // mid-pipeline streaming stage:
 //
