@@ -140,6 +140,7 @@ pub fn get_relation_info<'mcx>(
             let am_is_gist = am_kind == types_relscan::IndexAmKind::Gist;
             let am_is_brin = am_kind == types_relscan::IndexAmKind::Brin;
             let am_is_spgist = am_kind == types_relscan::IndexAmKind::Spgist;
+            let am_is_hnsw = am_kind == types_relscan::IndexAmKind::Hnsw;
             let ncolumns = ind.indnatts as i32;
             let nkeycolumns = ind.indnkeyatts as i32;
             let mut info = IndexOptInfo::new(mcx);
@@ -174,14 +175,18 @@ pub fn get_relation_info<'mcx>(
             // Per-AM IndexAmRoutine flags (bt/hash/gin/gist/brin handlers);
             // a partitioned index has no AM (C NULLifies these fields).
             if !is_partitioned_index {
-                info.amcanorderbyop = am_is_gist || am_is_spgist;
-                info.amoptionalkey =
-                    am_is_btree || am_is_gin || am_is_gist || am_is_spgist || am_is_brin;
+                info.amcanorderbyop = am_is_gist || am_is_spgist || am_is_hnsw;
+                info.amoptionalkey = am_is_btree
+                    || am_is_gin
+                    || am_is_gist
+                    || am_is_spgist
+                    || am_is_brin
+                    || am_is_hnsw;
                 info.amsearcharray = am_is_btree;
                 info.amsearchnulls = am_is_btree || am_is_gist || am_is_spgist || am_is_brin;
                 info.amcanparallel = am_is_btree;
                 info.amhasgettuple = !am_is_gin && !am_is_brin;
-                info.amhasgetbitmap = true;
+                info.amhasgetbitmap = !am_is_hnsw;
                 info.amcanmarkpos = am_is_btree;
 
                 // amcanorder arm: a non-ordering AM leaves the sort vectors

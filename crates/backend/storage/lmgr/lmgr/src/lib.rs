@@ -217,6 +217,33 @@ fn tuple_tag(rel: &RelationData<'_>, tid: &ItemPointerData) -> LOCKTAG {
     )
 }
 
+#[inline]
+fn page_tag(rel: &RelationData<'_>, blkno: types_core::BlockNumber) -> LOCKTAG {
+    LOCKTAG::page(
+        rel.rd_lockInfo.lockRelId.dbId,
+        rel.rd_lockInfo.lockRelId.relId,
+        blkno,
+    )
+}
+
+pub fn LockPage(
+    rel: &RelationData<'_>,
+    blkno: types_core::BlockNumber,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    acquire(page_tag(rel, blkno), lockmode, false)?;
+    Ok(())
+}
+
+pub fn UnlockPage(
+    rel: &RelationData<'_>,
+    blkno: types_core::BlockNumber,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    lock_seams::lock_release::call(page_tag(rel, blkno), lockmode, false)?;
+    Ok(())
+}
+
 pub fn LockTuple(
     rel: &RelationData<'_>,
     tid: &ItemPointerData,

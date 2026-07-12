@@ -104,6 +104,12 @@ pub struct SpGistOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HnswOptions {
+    pub m: i32,
+    pub ef_construction: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BrinOptions {
     pub pages_per_range: i32,
     pub autosummarize: bool,
@@ -119,6 +125,7 @@ pub enum RdOptions {
     Gist(GistOptions),
     SpGist(SpGistOptions),
     Brin(BrinOptions),
+    Hnsw(HnswOptions),
 }
 
 impl RdOptions {
@@ -148,7 +155,7 @@ impl RdOptions {
             RdOptions::Hash(o) => Some(o.fillfactor),
             RdOptions::Gist(o) => Some(o.fillfactor),
             RdOptions::SpGist(o) => Some(o.fillfactor),
-            RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_) => None,
+            RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_) | RdOptions::Hnsw(_) => None,
         }
     }
 
@@ -196,6 +203,14 @@ impl RdOptions {
     pub fn brin(&self) -> Option<&BrinOptions> {
         match self {
             RdOptions::Brin(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn hnsw(&self) -> Option<&HnswOptions> {
+        match self {
+            RdOptions::Hnsw(o) => Some(o),
             _ => None,
         }
     }

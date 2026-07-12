@@ -1,0 +1,42 @@
+[package]
+name = "pgvector_hnsw"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgvector_hnsw"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+datum = { path = "../../_support/types/datum" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_relscan = { path = "../../backend/access/index/relscan" }
+types_scan = { path = "../../_support/types/types_scan" }
+types_nbtree = { path = "../../_support/types/types_nbtree" }
+types_hnsw = { path = "../../_support/types/types_hnsw" }
+types_snapshot = { path = "../../_support/types/snapshot" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+bufmgr_seams = { path = "../../backend/storage/buffer/bufmgr_seams" }
+generic_xlog = { path = "../../backend/access/transam/generic_xlog" }
+xloginsert = { path = "../../backend/access/transam/xloginsert" }
+lmgr = { path = "../../backend/storage/lmgr/lmgr" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+pairingheap = { path = "../../backend/lib/pairingheap" }
+pg_prng = { path = "../../common/pg_prng" }
+init_small = { path = "../../backend/utils/init/init_small" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+elog = { path = "../../backend/utils/error/elog" }
+detoast = { path = "../../backend/access/common/detoast" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+vacuum_seams = { path = "../../backend/commands/vacuum_seams" }
+xact = { path = "../../backend/access/transam/xact" }
+transam_xlog_seams = { path = "../../backend/access/transam/transam_xlog_seams" }
+pgvector = { path = "../pgvector" }
+nbtree = { path = "../../backend/access/nbtree/nbtree" }

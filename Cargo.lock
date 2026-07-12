@@ -1313,6 +1313,7 @@ dependencies = [
  "heaptuple",
  "mcx",
  "nbt_validate",
+ "pgvector_hnsw",
  "spgist_validate",
  "syscache_seams",
  "types_core",
@@ -2564,6 +2565,7 @@ dependencies = [
  "pg_inherits",
  "pg_rusage",
  "pgstat",
+ "pgvector_hnsw_build",
  "predicate_seams",
  "readfuncs",
  "relcache",
@@ -6985,6 +6987,7 @@ dependencies = [
  "mcx",
  "nbtree",
  "pgstat",
+ "pgvector_hnsw",
  "predicate",
  "relation_seams",
  "snapmgr",
@@ -11325,6 +11328,90 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgvector"
+version = "0.0.0"
+dependencies = [
+ "adt_float",
+ "adt_numeric",
+ "arrayfuncs",
+ "datum",
+ "detoast",
+ "dfmgr",
+ "elog",
+ "guc",
+ "mcx",
+ "pqformat",
+ "ryu",
+ "stringinfo",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
+name = "pgvector_hnsw"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "detoast",
+ "elog",
+ "fmgr_seams",
+ "generic_xlog",
+ "guc_tables",
+ "init_small",
+ "lmgr",
+ "mcx",
+ "nbtree",
+ "pairingheap",
+ "pg_prng",
+ "pgvector",
+ "postgres_seams",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_hnsw",
+ "types_nbtree",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "vacuum_seams",
+ "xact",
+ "xloginsert",
+]
+
+[[package]]
+name = "pgvector_hnsw_build"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "elog",
+ "execindexing",
+ "init_small",
+ "mcx",
+ "pgvector_hnsw",
+ "postgres_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_hnsw",
+ "types_nodes",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "xloginsert",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11448,6 +11535,7 @@ dependencies = [
  "pathnode",
  "pg_inherits",
  "pg_locale",
+ "pgvector_hnsw",
  "planner_seams",
  "postgres_seams",
  "procarray_seams",
@@ -13981,6 +14069,7 @@ dependencies = [
  "pgcrypto",
  "pgstat",
  "pgtz",
+ "pgvector",
  "plancache",
  "planner",
  "plpgsql",
@@ -16775,6 +16864,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_hnsw"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
 name = "types_nbtree"
 version = "0.1.0"
 dependencies = [
@@ -16855,6 +16956,7 @@ dependencies = [
  "types_error",
  "types_gist",
  "types_hash",
+ "types_hnsw",
  "types_nbtree",
  "types_rel",
  "types_scan",

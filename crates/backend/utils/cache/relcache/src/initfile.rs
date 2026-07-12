@@ -501,6 +501,11 @@ fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
             put_i32(buf, o.pages_per_range);
             put_bool(buf, o.autosummarize);
         }
+        Some(RdOptions::Hnsw(o)) => {
+            put_u8(buf, 9);
+            put_i32(buf, o.m);
+            put_i32(buf, o.ef_construction);
+        }
     }
 }
 
@@ -574,6 +579,10 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
         8 => Some(Some(RdOptions::Brin(BrinOptions {
             pages_per_range: rd.i32()?,
             autosummarize: rd.boolean()?,
+        }))),
+        9 => Some(Some(RdOptions::Hnsw(types_rel::reloptions::HnswOptions {
+            m: rd.i32()?,
+            ef_construction: rd.i32()?,
         }))),
         _ => None,
     }
