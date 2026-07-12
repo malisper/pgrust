@@ -26,9 +26,9 @@ mod textlen;
 mod translate;
 
 pub use dicteval::{
-    compile_value as dicteval_compile_value, func_args_concrete,
+    compile_value as dicteval_compile_value, compile_value_chain, func_args_concrete,
     prepare_batch as dicteval_prepare_batch, ColView, DictCallSpec, DictEvalProg, DictExprSpec,
-    Prepared as DictEvalPrepared, DICTEVAL_MEMO_CAP,
+    Prepared as DictEvalPrepared, ValueChain, DICTEVAL_MEMO_CAP,
 };
 
 /// Inline (non-toasted) varlena admission probe for walker-side Const checks.

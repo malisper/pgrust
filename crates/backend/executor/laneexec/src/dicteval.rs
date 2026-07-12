@@ -213,16 +213,18 @@ pub fn compile_value(spec: &DictExprSpec) -> Result<Box<DictEvalProg>, &'static 
     }))
 }
 
-fn compile_kernel(
-    spec: &DictExprSpec,
-) -> Result<(DictKernel, bool, bool, Oid), &'static str> {
-    if spec.calls.is_empty() {
+// Per-call admission shared by the dict kernel and [`ValueChain`]: catalog
+// gates that make the fmgr-chain evaluation both safe (internal-language,
+// concrete types, arity) and semantics-preserving (IMMUTABLE, strict,
+// usable collation).
+fn validate_calls(calls: &[DictCallSpec]) -> Result<(), &'static str> {
+    if calls.is_empty() {
         return Err("empty call chain");
     }
     if !syscache_seams::lookup_pg_proc_shape::is_installed() {
         return Err("pg_proc seam not installed");
     }
-    for c in &spec.calls {
+    for c in calls {
         if c.args.len() > KERNEL_MAX_ARGS {
             return Err("too many args");
         }
@@ -270,6 +272,87 @@ fn compile_kernel(
             return Err("collation not usable");
         }
     }
+    Ok(())
+}
+
+// Resolve the validated calls into their production fmgr entry points.
+fn build_fmgr_calls(specs: &[DictCallSpec]) -> Result<Vec<FmgrCall>, &'static str> {
+    let mut calls = Vec::with_capacity(specs.len());
+    for c in specs {
+        let Ok(flinfo) = fmgr_core::fmgr_info(c.fn_oid) else {
+            return Err("fmgr resolution failed");
+        };
+        if flinfo.fn_retset {
+            return Err("set-returning");
+        }
+        calls.push(FmgrCall {
+            flinfo,
+            collation: c.collation,
+            var_argno: c.var_argno,
+            args: c.args.clone(),
+        });
+    }
+    Ok(calls)
+}
+
+/// A validated strict fmgr chain over an arbitrary input DATUM — the
+/// expr-key multi-key feed's derived-key evaluator (Q19's
+/// `extract(minute FROM EventTime)` class). Same catalog admission as the
+/// dict kernel ([`validate_calls`]); evaluation runs every call's production
+/// entry point per input, intermediates and results in the owned bump arena
+/// (the caller resets it once its consumers copied/packed the results out).
+pub struct ValueChain {
+    calls: Vec<FmgrCall>,
+    arena: MemoryContext,
+}
+
+/// Fail-closed compilation of a [`ValueChain`]; the reason string feeds the
+/// caller's refuse trace.
+pub fn compile_value_chain(specs: &[DictCallSpec]) -> Result<ValueChain, &'static str> {
+    validate_calls(specs)?;
+    Ok(ValueChain {
+        calls: build_fmgr_calls(specs)?,
+        arena: MemoryContext::new_bump("LaneValueChainContext"),
+    })
+}
+
+impl ValueChain {
+    /// Drop every result the chain produced (per-batch cadence: results are
+    /// consumed within the batch that derived them).
+    pub fn reset(&mut self) {
+        self.arena.reset();
+    }
+
+    /// Evaluate the chain over one input datum (feeds `calls[0]`'s var arg).
+    /// Strict by admission: a NULL input or intermediate short-circuits to
+    /// NULL without calling. Errors are C's own (production entry points).
+    pub fn eval(&mut self, input: NullableDatum) -> PgResult<NullableDatum> {
+        let mcx = self.arena.mcx();
+        let mut cur = input;
+        for call in self.calls.iter_mut() {
+            if cur.isnull {
+                return Ok(NullableDatum { value: Datum::null(), isnull: true });
+            }
+            let mut fcinfo = LocalFcinfo::<KERNEL_MAX_ARGS>::fresh(call.collation);
+            fcinfo.nargs = call.args.len() as i16;
+            for (i, a) in call.args.iter().enumerate() {
+                fcinfo.args[i] = *a;
+            }
+            fcinfo.args[call.var_argno as usize] = cur;
+            // SAFETY: the arena outlives the call; the caller's reset
+            // cadence (per batch) strictly follows its consumers.
+            unsafe { fcinfo.set_result_mcx(mcx) };
+            let d = call.flinfo.invoke(&mut fcinfo)?;
+            cur = NullableDatum { value: d, isnull: fcinfo.isnull };
+        }
+        Ok(cur)
+    }
+}
+
+fn compile_kernel(
+    spec: &DictExprSpec,
+) -> Result<(DictKernel, bool, bool, Oid), &'static str> {
+    validate_calls(&spec.calls)?;
     let rettype = spec.calls.last().unwrap().rettype;
     // Proof-carrying fast kernel: a lone length()/octet_length() call.
     if spec.calls.len() == 1 {
@@ -284,22 +367,7 @@ fn compile_kernel(
             _ => {}
         }
     }
-    let mut calls = Vec::with_capacity(spec.calls.len());
-    for c in &spec.calls {
-        let Ok(flinfo) = fmgr_core::fmgr_info(c.fn_oid) else {
-            return Err("fmgr resolution failed");
-        };
-        if flinfo.fn_retset {
-            return Err("set-returning");
-        }
-        calls.push(FmgrCall {
-            flinfo,
-            collation: c.collation,
-            var_argno: c.var_argno,
-            args: c.args.clone(),
-        });
-    }
-    Ok((DictKernel::Fmgr(calls), false, true, rettype))
+    Ok((DictKernel::Fmgr(build_fmgr_calls(&spec.calls)?), false, true, rettype))
 }
 
 /// Pseudo-type argument refusal for the walker: any call whose CATALOG
