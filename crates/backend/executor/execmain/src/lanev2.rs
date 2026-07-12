@@ -408,9 +408,20 @@ pub fn try_own_seq_scan<'mcx>(
         // byte-safe regardless of the dynamic gates, so the memoized-false
         // path is one branch; the admitted path still re-checks the
         // dynamic gates inside seq_scan_fusible every call.
+        // Refusal split (refusal-audit rider, 2026-07-14): a QUAL'D scan
+        // that failed to arm any staged kernel is "qual-not-vectorizable"
+        // (the walker/translate residual — the countable survivor of the
+        // dead fixed-width-prefix refusal); a kernel-less NO-QUAL scan is
+        // the plain admission-economics refuse. Stateless per pull off the
+        // memoized verdict.
+        let refused_reason = if ss.ss.qual.is_some() {
+            RefuseReason::QualNotVectorizable
+        } else {
+            RefuseReason::AdmissionEconomicsNoConsumer
+        };
         match ss.cb_standalone_verdict() {
             Some(false) => {
-                stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                stats::tick_refused(ShapeClass::CbScan, refused_reason);
                 return Ok(None);
             }
             Some(true) => {
@@ -430,7 +441,7 @@ pub fn try_own_seq_scan<'mcx>(
                 let armed = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
                 ss.set_cb_standalone_verdict(armed);
                 if !armed {
-                    stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                    stats::tick_refused(ShapeClass::CbScan, refused_reason);
                     return Ok(None);
                 }
             }

@@ -222,9 +222,18 @@ pub(super) enum RefuseReason {
     /// standalone ownership) — zero upside today. Re-evaluated when the
     /// design's "SRFs = expanding operator" phase item lands.
     SrfSetExpansion = 24,
+    /// cbstore standalone scan: the scan HAS a qual, but no staged kernel
+    /// armed for it — the PREWHERE walker/translate refused the shape
+    /// (anchored/underscore/escape LIKE classes, non-whitelisted comparators,
+    /// hybrid prefixes below the engagement gate). Split out of
+    /// `AdmissionEconomicsNoConsumer` at the likeband landing so the gates
+    /// can count the residual after the fixed-width-prefix refusal died
+    /// (refusal-audit rider, 2026-07-14). Per-PULL cadence on the memoized
+    /// verdict, like the cbscan admission row.
+    QualNotVectorizable = 25,
 }
 
-const N_REASONS: usize = 25;
+const N_REASONS: usize = 26;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -254,6 +263,7 @@ impl RefuseReason {
             RefuseReason::MultiBatch => "multi-batch",
             RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
             RefuseReason::SrfSetExpansion => "srf-set-expansion",
+            RefuseReason::QualNotVectorizable => "qual-not-vectorizable",
         }
     }
 
@@ -285,6 +295,7 @@ impl RefuseReason {
             MultiBatch,
             ChildNotLaneOwned,
             SrfSetExpansion,
+            QualNotVectorizable,
         ][i]
     }
 }

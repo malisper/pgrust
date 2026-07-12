@@ -8,7 +8,7 @@
 // drive would never visit under LIMIT/short-circuit).
 use adt_like::IcScratch;
 use datum::Datum;
-use exectuples::{SoaBatch, SoaDictLane};
+use exectuples::{SoaBatch, SoaDictLane, SoaTextSpan};
 use mcx::MemoryContext;
 use types_core::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID};
 use types_core::{Oid, OidIsValid};
@@ -145,6 +145,16 @@ impl SubstrFinder {
     fn find(&self, hay: &[u8]) -> bool {
         self.finder.find(hay).is_some()
     }
+
+    #[inline]
+    fn find_pos(&self, hay: &[u8]) -> Option<usize> {
+        self.finder.find(hay)
+    }
+
+    #[inline]
+    fn needle_len(&self) -> usize {
+        self.finder.needle().len()
+    }
 }
 
 /// Fail-closed classification of a LIKE pattern into a byte kernel: only
@@ -223,6 +233,8 @@ pub struct DictClause {
     // 2 no-match), filled on the first SURVIVING row that reaches a code —
     // the per-row drive's evaluation set, so error identity holds.
     memo_tri: Vec<u8>,
+    // First-engagement trace flag for the blob-wide contains path.
+    blob_logged: bool,
 }
 
 impl DictClause {
@@ -326,6 +338,7 @@ pub(crate) fn dict_clause_for(cl: &LaneCmpClause) -> Option<DictClause> {
         memo: Vec::new(),
         range: None,
         memo_tri: Vec::new(),
+        blob_logged: false,
     })
 }
 
@@ -502,7 +515,7 @@ pub(crate) fn eval_dict_clauses(
         }
         match soa.dict_lane(cl.col as usize) {
             Some(lane) => eval_dict_lane(cl, lane, nrows, sv)?,
-            None => eval_raw_rows(cl, soa, sv)?,
+            None => eval_raw_rows(cl, soa, nrows, sv)?,
         }
     }
     Ok(())
@@ -657,9 +670,37 @@ fn dict_partition_point(dict: &[Datum], pred: impl Fn(&[u8]) -> bool) -> PgResul
 // not to tag): the same production predicate per SURVIVING row — evaluation
 // set and order match the per-row drive for these rows, and the predicate is
 // non-erroring by admission, so eager evaluation stays unobservable.
-fn eval_raw_rows(cl: &mut DictClause, soa: &SoaBatch<'_>, sv: &mut SelVec) -> PgResult<()> {
+fn eval_raw_rows(
+    cl: &mut DictClause,
+    soa: &SoaBatch<'_>,
+    nrows: u32,
+    sv: &mut SelVec,
+) -> PgResult<()> {
     let values = soa.col_values(cl.col as usize);
     let isnull = soa.col_isnull(cl.col as usize);
+    // Blob-wide contains (likeband; the strsearch parity note's measured-best
+    // shape, 0.64-0.94x of CH's Volnitsky): when the AM published a
+    // contiguity witness for this window, run ONE memmem pass over the whole
+    // span and map hits back to rows, instead of one finder call per row.
+    // Engaged only on full-selection windows — the single-clause LIKE band
+    // shape (Q21/Q24 class); under a partial selection the per-row loop
+    // touches fewer bytes than the blob would. Occurrence set is identical
+    // to the per-row kernel (hits are validated against the owning row's
+    // payload bounds; boundary-straddling and header/padding hits resume at
+    // +1, per the parity note's boundary-rejection requirement).
+    if sv.count() == nrows {
+        if let (Some(LikeKernel::Contains(f)), Some(span)) =
+            (&cl.kernel, soa.text_span(cl.col as usize))
+        {
+            if eval_contains_blob(f, span, values, isnull, cl.op.negated(), nrows, sv) {
+                if !cl.blob_logged {
+                    cl.blob_logged = true;
+                    crate::log_blob_kernel(cl.col);
+                }
+                return Ok(());
+            }
+        }
+    }
     let snapshot = sv.clone();
     for i in snapshot.iter() {
         let idx = i as usize;
@@ -683,12 +724,172 @@ fn eval_raw_rows(cl: &mut DictClause, soa: &SoaBatch<'_>, sv: &mut SelVec) -> Pg
     Ok(())
 }
 
+/// One blob-wide memmem pass over a contiguous text-span window, mapping
+/// hits back to rows through the ascending pointer lane. True = the clause
+/// is fully answered into `sv`; false = bail (a non-inline image — never
+/// published by cbstore — was met before proving a row), and the per-row
+/// loop must run instead (raising its own error at the identical first row).
+///
+/// Identity argument (byte-exact vs the per-row kernel): memmem yields the
+/// leftmost occurrence at/after `pos`. A hit fully inside row r's payload
+/// marks r and resumes at row r+1's image start — skipping only bytes of a
+/// row already proven. A hit touching a header/padding byte or straddling a
+/// row boundary resumes one byte later — skipping nothing else. So the scan
+/// visits every occurrence that starts inside any row's payload, i.e. a row
+/// is marked iff its payload contains the needle — exactly `k.matches(s)`.
+fn eval_contains_blob(
+    f: &SubstrFinder,
+    span: SoaTextSpan,
+    values: &[Datum],
+    isnull: &[bool],
+    negated: bool,
+    nrows: u32,
+    sv: &mut SelVec,
+) -> bool {
+    let n = nrows as usize;
+    if n == 0 {
+        return true;
+    }
+    let base = span.base as usize;
+    // SAFETY: SoaTextSpan contract — one live readable span holding the
+    // window's images; values are ascending pointers into it.
+    let hay = unsafe { core::slice::from_raw_parts(span.base, span.len) };
+    let nlen = f.needle_len();
+    let mut hit = [0u64; crate::interp::SEL_WORDS];
+    let mut row = 0usize;
+    let mut pos = 0usize;
+    while pos < hay.len() {
+        let Some(h) = f.find_pos(&hay[pos..]) else { break };
+        let h = pos + h;
+        // Owning row: the last row whose image starts at or before the hit.
+        while row + 1 < n && values[row + 1].as_usize() - base <= h {
+            row += 1;
+        }
+        let Some(payload) = inline_varlena_payload(values[row]) else {
+            return false;
+        };
+        let pstart = payload.as_ptr() as usize - base;
+        let pend = pstart + payload.len();
+        if h >= pstart && h + nlen <= pend {
+            hit[row / 64] |= 1u64 << (row % 64);
+            row += 1;
+            if row >= n {
+                break;
+            }
+            pos = values[row].as_usize() - base;
+        } else {
+            pos = h + 1;
+        }
+    }
+    // Strict clause semantics over the (full) selection: NULL fails; else
+    // keep iff matched != negated.
+    let snapshot = sv.clone();
+    for i in snapshot.iter() {
+        let idx = i as usize;
+        if isnull[idx] {
+            sv.clear(i);
+            continue;
+        }
+        let matched = hit[idx / 64] & (1u64 << (idx % 64)) != 0;
+        if matched == negated {
+            sv.clear(i);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn shape_of(pat: &[u8]) -> Option<&'static str> {
         like_kernel_for(pat).map(|k| k.shape())
+    }
+
+    // Build a cbstore-shaped text blob: complete 4B-U varlena images,
+    // back-to-back, 4-byte aligned (the writer's push_varlena_image layout),
+    // plus the ascending pointer lane into it.
+    fn blob_of(rows: &[&[u8]]) -> (Vec<u8>, Vec<usize>) {
+        let mut blob = Vec::new();
+        let mut offs = Vec::new();
+        for r in rows {
+            offs.push(blob.len());
+            blob.extend_from_slice(&::datum::set_varsize_4b(4 + r.len()));
+            blob.extend_from_slice(r);
+            while blob.len() % 4 != 0 {
+                blob.push(0);
+            }
+        }
+        (blob, offs)
+    }
+
+    fn run_blob(rows: &[&[u8]], needle: &[u8], negated: bool) -> Vec<bool> {
+        let (blob, offs) = blob_of(rows);
+        let values: Vec<Datum> =
+            offs.iter().map(|&o| Datum::from_usize(blob.as_ptr() as usize + o)).collect();
+        let isnull = vec![false; rows.len()];
+        let span = SoaTextSpan { base: blob.as_ptr(), len: blob.len() };
+        let f = SubstrFinder::new(needle.to_vec());
+        let n = rows.len() as u32;
+        let mut sv = SelVec::all(n);
+        assert!(eval_contains_blob(&f, span, &values, &isnull, negated, n, &mut sv));
+        (0..n).map(|i| sv.contains(i)).collect()
+    }
+
+    #[test]
+    fn blob_contains_basic() {
+        let rows: &[&[u8]] = &[b"hello world", b"", b"worldly", b"say hell", b"w", b"aworld"];
+        assert_eq!(run_blob(rows, b"world", false), [true, false, true, false, false, true]);
+        assert_eq!(run_blob(rows, b"world", true), [false, true, false, true, true, false]);
+    }
+
+    #[test]
+    fn blob_rejects_boundary_straddle() {
+        // Row 1's 4B-U header first byte is (21+4)<<2 & 0xFF = 100 = b'd':
+        // the needle "ab\x64" occurs contiguously in the BLOB (row 0's tail
+        // "ab" + row 1's header byte) but inside no row's payload — the
+        // per-row kernel finds nothing, and the blob pass must agree.
+        let row1 = [b'z'; 21];
+        let rows: &[&[u8]] = &[b"xxab", &row1];
+        assert_eq!(run_blob(rows, b"ab\x64", false), [false, false]);
+        // Control: the same tail needle fully inside row 0 still hits.
+        assert_eq!(run_blob(rows, b"ab", false), [true, false]);
+    }
+
+    #[test]
+    fn blob_resumes_into_next_row() {
+        // Adjacent hits: accepting row r must not skip an occurrence in r+1.
+        let rows: &[&[u8]] = &[b"needle needle", b"needle", b"x", b"needle"];
+        assert_eq!(run_blob(rows, b"needle", false), [true, true, false, true]);
+    }
+
+    #[test]
+    fn blob_matches_perrow_kernel_differential() {
+        // Deterministic pseudo-random corpus: the blob verdict must equal
+        // the per-row finder verdict on every row, for every needle.
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let alphabet = b"abcd";
+        for _case in 0..200 {
+            let nrows = (next() % 17) as usize + 1;
+            let rows: Vec<Vec<u8>> = (0..nrows)
+                .map(|_| {
+                    let len = (next() % 24) as usize;
+                    (0..len).map(|_| alphabet[(next() % 4) as usize]).collect()
+                })
+                .collect();
+            let nlen = (next() % 5) as usize + 1;
+            let needle: Vec<u8> = (0..nlen).map(|_| alphabet[(next() % 4) as usize]).collect();
+            let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+            let f = SubstrFinder::new(needle.clone());
+            let want: Vec<bool> = rows.iter().map(|r| f.find(r)).collect();
+            assert_eq!(run_blob(&refs, &needle, false), want, "needle={needle:?} rows={rows:?}");
+        }
     }
 
     #[test]
