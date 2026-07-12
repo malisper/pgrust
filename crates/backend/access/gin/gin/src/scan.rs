@@ -134,6 +134,7 @@ fn fill_scan_key(
     partial_match: &[bool],
     jsp_ops: PgVec<'static, JspGinOp>,
     map_item_operand: PgVec<'static, i32>,
+    trgm_graph: Option<TrgmPackedGraph>,
 ) -> PgResult<()> {
     // SAFETY: vectors stored in work (kcx contract).
     let kcx = unsafe { work.kcx() };
@@ -159,6 +160,7 @@ fn fill_scan_key(
         },
         jspOps: jsp_ops,
         mapItemOperand: map_item_operand,
+        trgmGraph: trgm_graph,
         strategy,
         searchMode: search_mode,
         attnum,
@@ -250,6 +252,7 @@ pub(crate) fn ginNewScanKey(
             partial_match,
             map_item_operand,
             null_flags,
+            trgm_graph,
         } = extracted;
 
         if !(GIN_SEARCH_MODE_DEFAULT..=GIN_SEARCH_MODE_ALL).contains(&search_mode) {
@@ -286,6 +289,7 @@ pub(crate) fn ginNewScanKey(
             partial_match.as_slice(),
             jsp_ops,
             map_item_operand,
+            trgm_graph,
         )?;
 
         if search_mode != GIN_SEARCH_MODE_ALL {
@@ -333,6 +337,7 @@ pub(crate) fn ginNewScanKey(
             &[],
             empty_ops,
             empty_map,
+            None,
         )?;
     }
 

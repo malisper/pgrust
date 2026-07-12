@@ -258,6 +258,8 @@ pub struct ExtractedQuery<'m> {
     pub partial_match: PgVec<'m, bool>,
     pub map_item_operand: PgVec<'m, i32>,
     pub null_flags: PgVec<'m, bool>,
+    /// gin_trgm_ops ~ / ~* only (C's extra_data[0] regexp graph).
+    pub trgm_graph: Option<TrgmPackedGraph>,
 }
 
 pub(crate) fn extract_query<'m>(
@@ -282,6 +284,7 @@ pub(crate) fn extract_query<'m>(
                 partial_match: mcx::vec_new_in(mcx),
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags: mcx::vec_new_in(mcx),
+                trgm_graph: None,
             })
         }
         GinOpclass::TsvectorOps => {
@@ -294,6 +297,7 @@ pub(crate) fn extract_query<'m>(
                 partial_match: out.partial_match,
                 map_item_operand: out.map_item_operand,
                 null_flags: mcx::vec_new_in(mcx),
+                trgm_graph: None,
             })
         }
         GinOpclass::ArrayOps => {
@@ -336,11 +340,15 @@ pub(crate) fn extract_query<'m>(
                 partial_match: mcx::vec_new_in(mcx),
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags,
+                trgm_graph: None,
             })
         }
         GinOpclass::TrgmOps => {
-            let (keys, search_mode) =
-                gin_trgm_seams::trgm_extract_query::call(&image[4..], strategy)?;
+            let (keys, search_mode, trgm_graph) = gin_trgm_seams::trgm_extract_query::call(
+                &image[4..],
+                strategy,
+                col.support_collation,
+            )?;
             let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, keys.len())?;
             for k in keys {
                 entries.push(Datum::from_i32(k));
@@ -352,6 +360,7 @@ pub(crate) fn extract_query<'m>(
                 partial_match: mcx::vec_new_in(mcx),
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags: mcx::vec_new_in(mcx),
+                trgm_graph,
             })
         }
         GinOpclass::HstoreOps => {
@@ -364,6 +373,7 @@ pub(crate) fn extract_query<'m>(
                 partial_match: mcx::vec_new_in(mcx),
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags: mcx::vec_new_in(mcx),
+                trgm_graph: None,
             })
         }
     }
@@ -381,6 +391,7 @@ pub(crate) fn consistent(
     _query_categories: &[GinNullCategory],
     jsp_ops: &[JspGinOp],
     map_item_operand: &[i32],
+    trgm_graph: Option<&mut TrgmPackedGraph>,
     recheck: &mut bool,
 ) -> PgResult<bool> {
     match col.opclass {
@@ -423,7 +434,8 @@ pub(crate) fn consistent(
             Ok(res)
         }
         GinOpclass::TrgmOps => {
-            let (res, rc) = gin_trgm_seams::trgm_consistent::call(check, strategy, nkeys)?;
+            let (res, rc) =
+                gin_trgm_seams::trgm_consistent::call(check, strategy, nkeys, trgm_graph)?;
             *recheck = rc;
             Ok(res)
         }
@@ -447,6 +459,7 @@ pub(crate) fn tri_consistent(
     _query_categories: &[GinNullCategory],
     jsp_ops: &[JspGinOp],
     map_item_operand: &[i32],
+    trgm_graph: Option<&mut TrgmPackedGraph>,
 ) -> PgResult<GinTernaryValue> {
     match col.opclass {
         GinOpclass::JsonbOps => Ok(::adt_jsonb::gin::gin_triconsistent_jsonb(
@@ -506,7 +519,9 @@ pub(crate) fn tri_consistent(
             };
             Ok(res)
         }
-        GinOpclass::TrgmOps => gin_trgm_seams::trgm_triconsistent::call(check, strategy, nkeys),
+        GinOpclass::TrgmOps => {
+            gin_trgm_seams::trgm_triconsistent::call(check, strategy, nkeys, trgm_graph)
+        }
         // hstore has no C triconsistent; mirror ginlogic.c shimTriConsistentFn
         // over the bool consistent core, collapsing TRUE+recheck to MAYBE
         // (identical scan outcome to C's recheckCurItem propagation).

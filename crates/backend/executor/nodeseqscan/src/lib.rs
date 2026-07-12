@@ -1299,6 +1299,28 @@ pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option
     (b.qual_armed && !b.lane_requal).then_some(&b.sel[..])
 }
 
+/// PREWHERE lane program armed on the batch staging (cbstore scans). The
+/// staged SoA columns fill LAZILY under this arm (per-clause late
+/// materialization; the completing deform runs only for survivor windows), so
+/// a columnar reader above the scan must confine itself to SELECTED rows —
+/// unselected cells may be stale (see `seq_scan_batch_lane_sel`).
+#[inline]
+pub fn seq_scan_batch_lane_armed(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.lane.is_some())
+}
+
+/// Conservative staged-batch selection words when a PREWHERE lane owns the
+/// qual: bitmap hits plus forced fallback bits, INCLUDING requal-pending rows
+/// (hybrid lane quals re-run the full qual per survivor at fetch, so these
+/// bits are a superset of the true survivors — usable as a proof domain for
+/// batch-level guards over rows the consumer will touch, never as verdicts).
+/// None = no lane armed / nothing staged for the current batch.
+#[inline]
+pub fn seq_scan_batch_lane_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    (b.lane.is_some() && b.nwords > 0).then(|| &b.sel[..b.nwords as usize])
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
