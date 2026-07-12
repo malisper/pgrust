@@ -8485,6 +8485,7 @@ dependencies = [
  "types_resowner",
  "types_slot",
  "types_tuple",
+ "varlena",
  "waitevent_seams",
  "xact_seams",
 ]
