@@ -36,6 +36,7 @@
 //! enable the lane across the whole regression suite.
 
 mod push;
+mod stats;
 
 use std::sync::OnceLock;
 
@@ -45,6 +46,7 @@ use ::types_error::PgResult;
 use push::{
     drain_pipeline, pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source,
 };
+use stats::{RefuseReason, ShapeClass};
 
 /// Master switch for lane-v2. Default OFF; `PGRUST_LANE_V2=1` (or `on`) enables
 /// it. Resolved once per process (a boot-time decision, like
@@ -107,56 +109,79 @@ fn seq_scan_fusible<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // Dynamic per-call gates: these may legitimately vary call to call.
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Epq);
+        return Ok(false);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Backward);
         return Ok(false);
     }
     // Static verdict, memoized on the node at first evaluation: (a) stability
     // — a mid-scan REFUSE→OWN flip would silently skip the staged remainder
     // of the current page batch; (b) the fusibility cascade (expr walks + AM
     // probe) must not run once per pulled tuple on the Volcano hot path.
+    // Engagement accounting ticks exactly here — once per memoized decision.
     if let Some(v) = ss.lane_verdict() {
         return Ok(v);
     }
-    let v = seq_scan_fusible_static(ss, estate)?;
+    let refuse = seq_scan_refuse_reason(ss, estate)?;
+    let v = match refuse {
+        None => {
+            stats::tick_owned(ShapeClass::SeqScan);
+            true
+        }
+        Some(r) => {
+            stats::tick_refused(ShapeClass::SeqScan, r);
+            false
+        }
+    };
     ss.set_lane_verdict(v);
     Ok(v)
 }
 
 /// The call-invariant half of the SeqScan refuse-set: plan shape, init-time
 /// eflags, parallel wiring, instrumentation, and AM page-batch support.
-fn seq_scan_fusible_static<'mcx>(
+/// `None` = admitted; `Some(reason)` = refused (the caller ticks accounting).
+fn seq_scan_refuse_reason<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
-    if !ss.batch_allowed() || ss.ss.instr_idx.is_some() {
-        return Ok(false);
+) -> PgResult<Option<RefuseReason>> {
+    if !ss.batch_allowed() {
+        return Ok(Some(RefuseReason::ScrollMark));
+    }
+    if ss.ss.instr_idx.is_some() {
+        return Ok(Some(RefuseReason::Instrumented));
     }
     match ss.variant() {
         ::nodeseqscan::SeqScanVariant::Plain
         | ::nodeseqscan::SeqScanVariant::WithQual
         | ::nodeseqscan::SeqScanVariant::WithProject
         | ::nodeseqscan::SeqScanVariant::WithQualProject => {}
-        ::nodeseqscan::SeqScanVariant::PlainBloom | ::nodeseqscan::SeqScanVariant::Epq => {
-            return Ok(false)
+        ::nodeseqscan::SeqScanVariant::PlainBloom => {
+            return Ok(Some(RefuseReason::BloomVariant))
         }
+        ::nodeseqscan::SeqScanVariant::Epq => return Ok(Some(RefuseReason::Epq)),
     }
     if let Some(q) = ss.ss.qual.as_deref() {
         if q.has_subplan() || !q.param_exec_deps().is_empty() {
-            return Ok(false);
+            return Ok(Some(RefuseReason::SubplanParam));
         }
     }
     if let Some(p) = ss.ss.ps_ProjInfo.as_ref() {
         if p.pi_state.has_subplan() || !p.pi_state.param_exec_deps().is_empty() {
-            return Ok(false);
+            return Ok(Some(RefuseReason::SubplanParam));
         }
     }
     // AM must support the page-batch primitives (opens the scan desc once).
     // The parallel-admitting variant: only this lane routes through it; the
     // fused agg/sort/hash drives keep `seq_scan_batch_supported`'s
     // serial-only gate.
-    ::nodeseqscan::seq_scan_batch_supported_parallel(ss, estate)
+    Ok(if ::nodeseqscan::seq_scan_batch_supported_parallel(ss, estate)? {
+        None
+    } else {
+        Some(RefuseReason::NoPageBatch)
+    })
 }
 
 /// Push source: stages heap page batches (`seq_scan_next_pagebatch` — the
@@ -274,13 +299,39 @@ fn index_scan_fusible<'mcx>(
     is: &::nodeindexscan::IndexScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> bool {
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !is.batch_allowed()
-        || is.iss_ParallelAware
-        || is.ss.instr_idx.is_some()
-    {
-        return false;
+    // This gate is per-call (not node-memoized), so accounting ticks are
+    // per-pull decisions for this class — see `stats.rs` tick semantics.
+    match index_scan_refuse_reason(is, estate) {
+        None => {
+            stats::tick_owned(ShapeClass::IndexScan);
+            true
+        }
+        Some(r) => {
+            stats::tick_refused(ShapeClass::IndexScan, r);
+            false
+        }
+    }
+}
+
+/// `None` = admitted; `Some(reason)` = refused.
+fn index_scan_refuse_reason<'mcx>(
+    is: &::nodeindexscan::IndexScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<RefuseReason> {
+    if estate.es_epq_active {
+        return Some(RefuseReason::Epq);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        return Some(RefuseReason::Backward);
+    }
+    if !is.batch_allowed() {
+        return Some(RefuseReason::ScrollMark);
+    }
+    if is.iss_ParallelAware {
+        return Some(RefuseReason::ParallelGate);
+    }
+    if is.ss.instr_idx.is_some() {
+        return Some(RefuseReason::Instrumented);
     }
     // Same-block tidrun batching is only sound under an MVCC snapshot (matches
     // the fused-agg gate; non-MVCC keeps the per-tuple path).
@@ -289,17 +340,28 @@ fn index_scan_fusible<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
-        return false;
+        return Some(RefuseReason::NonMvccSnapshot);
     }
-    is.ss.qual.is_none()
-        && is.ss.ps_ProjInfo.is_none()
-        && is.iss_Runtime.is_none()
-        && is.iss_OrderBy.is_none()
-        && ::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir)
-        && is
-            .iss_RelationDesc
-            .as_ref()
-            .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+    if is.ss.qual.is_some() || is.ss.ps_ProjInfo.is_some() {
+        return Some(RefuseReason::ShapeQualProj);
+    }
+    if is.iss_Runtime.is_some() {
+        return Some(RefuseReason::RuntimeKeys);
+    }
+    if is.iss_OrderBy.is_some() {
+        return Some(RefuseReason::OrderByReorder);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir) {
+        return Some(RefuseReason::Backward);
+    }
+    if !is
+        .iss_RelationDesc
+        .as_ref()
+        .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+    {
+        return Some(RefuseReason::NonBtree);
+    }
+    None
 }
 
 /// Push source: stages a same-block TID run (`index_scan_next_tidrun`, which
@@ -399,30 +461,66 @@ fn index_only_scan_fusible<'mcx>(
     ios: &::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> bool {
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !ios.batch_allowed()
-        || ios.ioss_ParallelAware
-        || ios.ss.instr_idx.is_some()
-    {
-        return false;
+    // Per-call gate: accounting ticks are per-pull decisions for this class.
+    match index_only_scan_refuse_reason(ios, estate) {
+        None => {
+            stats::tick_owned(ShapeClass::IndexOnlyScan);
+            true
+        }
+        Some(r) => {
+            stats::tick_refused(ShapeClass::IndexOnlyScan, r);
+            false
+        }
+    }
+}
+
+/// `None` = admitted; `Some(reason)` = refused.
+fn index_only_scan_refuse_reason<'mcx>(
+    ios: &::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<RefuseReason> {
+    if estate.es_epq_active {
+        return Some(RefuseReason::Epq);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        return Some(RefuseReason::Backward);
+    }
+    if !ios.batch_allowed() {
+        return Some(RefuseReason::ScrollMark);
+    }
+    if ios.ioss_ParallelAware {
+        return Some(RefuseReason::ParallelGate);
+    }
+    if ios.ss.instr_idx.is_some() {
+        return Some(RefuseReason::Instrumented);
     }
     if !estate
         .es_snapshot
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
-        return false;
+        return Some(RefuseReason::NonMvccSnapshot);
     }
-    ios.ss.qual.is_none()
-        && ios.ss.ps_ProjInfo.is_none()
-        && ios.ioss_Runtime.is_none()
-        && ios.ioss_OrderByKeys.is_empty()
-        && ::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir)
-        && ios
-            .ioss_RelationDesc
-            .as_ref()
-            .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+    if ios.ss.qual.is_some() || ios.ss.ps_ProjInfo.is_some() {
+        return Some(RefuseReason::ShapeQualProj);
+    }
+    if ios.ioss_Runtime.is_some() {
+        return Some(RefuseReason::RuntimeKeys);
+    }
+    if !ios.ioss_OrderByKeys.is_empty() {
+        return Some(RefuseReason::OrderByReorder);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir) {
+        return Some(RefuseReason::Backward);
+    }
+    if !ios
+        .ioss_RelationDesc
+        .as_ref()
+        .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+    {
+        return Some(RefuseReason::NonBtree);
+    }
+    None
 }
 
 /// Push source: one VISIBLE index tuple per batch (`index_only_scan_batch_next`
@@ -518,22 +616,47 @@ fn bitmap_heap_scan_fusible<'mcx>(
     bhs: &::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> bool {
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || bhs.parallel_aware
-        || bhs.pstate.is_some()
-        || bhs.ss.instr_idx.is_some()
-    {
-        return false;
+    // Per-call gate: accounting ticks are per-pull decisions for this class.
+    match bitmap_heap_scan_refuse_reason(bhs, estate) {
+        None => {
+            stats::tick_owned(ShapeClass::BitmapHeapScan);
+            true
+        }
+        Some(r) => {
+            stats::tick_refused(ShapeClass::BitmapHeapScan, r);
+            false
+        }
+    }
+}
+
+/// `None` = admitted; `Some(reason)` = refused.
+fn bitmap_heap_scan_refuse_reason<'mcx>(
+    bhs: &::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<RefuseReason> {
+    if estate.es_epq_active {
+        return Some(RefuseReason::Epq);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        return Some(RefuseReason::Backward);
+    }
+    if bhs.parallel_aware || bhs.pstate.is_some() {
+        return Some(RefuseReason::ParallelGate);
+    }
+    if bhs.ss.instr_idx.is_some() {
+        return Some(RefuseReason::Instrumented);
     }
     if bhs
         .bitmapqualorig
         .as_deref()
         .is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
     {
-        return false;
+        return Some(RefuseReason::SubplanParam);
     }
-    bhs.ss.qual.is_none() && bhs.ss.ps_ProjInfo.is_none()
+    if bhs.ss.qual.is_some() || bhs.ss.ps_ProjInfo.is_some() {
+        return Some(RefuseReason::ShapeQualProj);
+    }
+    None
 }
 
 /// Push source: stages the next bitmap page's tuples
@@ -650,6 +773,9 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
             0
         };
         ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+        // One OWNED tick per lane-owned hash-agg build event (the gate's
+        // aggbuild floor counts builds, not calls).
+        stats::tick_owned(ShapeClass::AggBuild);
         let mut sink = HashAggBuildSink { agg: &mut *agg };
         drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     }
@@ -678,8 +804,11 @@ fn agg_over_seq_scan_fusible<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     if !::nodeagg::agg_hash_breaker_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
         return Ok(false);
     }
+    // A scan-side refusal ticks under the SeqScan class inside
+    // `seq_scan_fusible` (memoized), so it is counted once, not re-attributed.
     seq_scan_fusible(ss, estate)
 }
 
@@ -804,9 +933,12 @@ pub fn try_own_sort<'mcx>(
     // Dynamic gates, every call (cheap): EPQ can engage between calls on the
     // same node tree, and only forward pulls keep the tuplesort read-back
     // cursor in step.
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Backward);
         return Ok(None);
     }
     // Structural verdict, memoized at first call: the fusibility cascade must
@@ -815,7 +947,14 @@ pub fn try_own_sort<'mcx>(
     let fusible = match s.lane_fusible {
         Some(v) => v,
         None => {
-            let v = sort_fusible(s, estate)?;
+            // Refusal accounting ticks exactly here — once per memoized
+            // structural verdict (a child-scan refusal's specific reason is
+            // ticked under the child's class inside its fusible gate).
+            let refuse = sort_refuse_reason(s, estate)?;
+            if let Some(r) = refuse {
+                stats::tick_refused(ShapeClass::SortFeed, r);
+            }
+            let v = refuse.is_none();
             s.lane_fusible = Some(v);
             v
         }
@@ -828,6 +967,9 @@ pub fn try_own_sort<'mcx>(
 
     let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
     if !state.sort_done() {
+        // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
+        // floor counts feeds, not calls).
+        stats::tick_owned(ShapeClass::SortFeed);
         // Feed phase (pipeline N): drive the scan pipeline to exhaustion into
         // the breaker sink, then finalize (performsort) — all inside this one
         // call, exactly like `exec_sort`'s build leg.
@@ -884,26 +1026,29 @@ pub fn try_own_sort<'mcx>(
 /// matches no scan arm. The admitted checks are all init-stable, so the
 /// verdict is memoizable; the caller re-checks the dynamic EPQ/direction
 /// gates per call.
-fn sort_fusible<'mcx>(
+fn sort_refuse_reason<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
+) -> PgResult<Option<RefuseReason>> {
     if s.state.randomAccess {
-        return Ok(false);
+        return Ok(Some(RefuseReason::RandomAccess));
     }
-    match &mut *s.outer {
-        crate::procnode::PlanStateNode::SeqScan(ss) => seq_scan_fusible(ss, estate),
-        crate::procnode::PlanStateNode::IndexScan(is) => {
-            Ok(index_scan_fusible(is, estate))
-        }
+    let child_ok = match &mut *s.outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => seq_scan_fusible(ss, estate)?,
+        crate::procnode::PlanStateNode::IndexScan(is) => index_scan_fusible(is, estate),
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => {
-            Ok(index_only_scan_fusible(ios, estate))
+            index_only_scan_fusible(ios, estate)
         }
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
-            Ok(bitmap_heap_scan_fusible(&b.scan, estate))
+            bitmap_heap_scan_fusible(&b.scan, estate)
         }
-        _ => Ok(false),
-    }
+        _ => return Ok(Some(RefuseReason::NonScanChild)),
+    };
+    Ok(if child_ok {
+        None
+    } else {
+        Some(RefuseReason::ChildScanRefused)
+    })
 }
 
 /// Feed phase driver: build the tuplesort (`sort_lane_begin` — `exec_sort`'s
