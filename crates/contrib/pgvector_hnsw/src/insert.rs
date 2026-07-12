@@ -839,7 +839,7 @@ pub fn hnswinsert<'mcx>(
     if isnull.first().copied().unwrap_or(true) {
         return Ok(false);
     }
-    check_type_supported(index);
+    check_type_supported(index)?;
     let insert_ctx = mcx::MemoryContext::new_bump("Hnsw insert temporary context");
     let imcx = insert_ctx.mcx();
 
