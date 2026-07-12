@@ -114,6 +114,6 @@ fn options_map_and_clientcert() {
 fn auth_token_strings_are_not_requoted() {
     // hbafuncs.c:270-286: flattened database/role names are returned as the
     // raw token string, deliberately not re-quoted (e.g. "all" stays "all").
-    let tok = AuthToken { string: "all".to_string(), quoted: true };
+    let tok = AuthToken { string: "all".to_string(), quoted: true, regex: false };
     assert_eq!(tok.string, "all");
 }

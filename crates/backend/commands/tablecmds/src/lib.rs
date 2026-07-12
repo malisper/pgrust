@@ -698,6 +698,33 @@ pub fn DefineRelation<'mcx>(
         },
     };
 
+    // cbstore accepts only ClickBench's type surface; refuse at CREATE TABLE
+    // (docs/design/cbstore-impl.md §3).
+    if access_method_id != InvalidOid
+        && access_method_id != 2
+        && syscache_seams::pg_am_amname::call(access_method_id)?.as_deref() == Some("cbstore")
+    {
+        for i in 0..descriptor.natts as usize {
+            let att = descriptor.attr(i);
+            if att.attisdropped {
+                continue;
+            }
+            if cbstore::ColType::of_type_oid(att.atttypid).is_none() {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "cbstore does not support the type of column \"{}\" (type oid {})",
+                            String::from_utf8_lossy(att.attname.name_str()),
+                            att.atttypid
+                        ),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+        }
+    }
+
     // MergeAttributes' is_partition saved_columns pass (tablecmds.c:3031):
     // each column option must name an inherited column; generated-ness must
     // match the parent; a local raw default/generation expression overrides

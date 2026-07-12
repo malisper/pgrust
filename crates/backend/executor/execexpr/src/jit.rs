@@ -476,6 +476,11 @@ mod emit {
         Gt = 12,
         Le = 13,
         Vs = 6,
+        // Unsigned compares (oid comparators): HS/LO/HI/LS.
+        Hs = 2,
+        Lo = 3,
+        Hi = 8,
+        Ls = 9,
     }
 
     struct Emitter {
@@ -615,6 +620,11 @@ mod emit {
             self.raw(0x9B40_7C00 | (xm << 16) | (xn << 5) | xd);
         }
 
+        // SDIV Wd, Wn, Wm (int24div body; divisor pre-checked non-zero).
+        fn sdiv_w(&mut self, wd: u32, wn: u32, wm: u32) {
+            self.raw(0x1AC0_0C00 | (wm << 16) | (wn << 5) | wd);
+        }
+
         // CMP Xn, Wm SXTW (sext-compare, int4mul product check).
         fn cmp_x_w_sxtw(&mut self, rn: u32, rm: u32) {
             self.raw(0xEB20_C01F | (rm << 16) | (rn << 5));
@@ -698,9 +708,14 @@ mod emit {
         })
     }
 
-    // Inline-able strict-2 integer bodies: the CmpOp census set + int
-    // add/sub/mul with C-exact overflow semantics (overflow branches to the
-    // generic call, which raises the real ereport).
+    // Inline-able strict-2 integer bodies: the inline-supported subset of the
+    // CmpOp census (cmp_cond returns Some) + int add/sub/mul with C-exact
+    // overflow semantics (overflow branches to the generic call, which raises
+    // the real ereport) + int24div (zero divisor branches to the generic call
+    // for C's division-by-zero ereport). The int2/int4 mixed add/sub/mul
+    // reuse the Int4* arms verbatim: Datum int words are canonical
+    // (sign-extended), so the int2 operand's w-register view IS C's promoted
+    // int32, and the result type is int4 either way.
     #[derive(Clone, Copy)]
     enum InlineOp {
         Cmp(CmpOp),
@@ -710,40 +725,68 @@ mod emit {
         Int8Pl,
         Int8Mi,
         Int8Mul,
+        Int24Div,
     }
 
     fn inline_op(fn_oid: ::types_core::Oid) -> Option<InlineOp> {
         if let Some(c) = CmpOp::for_fn_oid(fn_oid) {
-            return Some(InlineOp::Cmp(c));
+            // Census comparators without an inline stencil (the float
+            // families: NaN-aware bodies, no single-cond compare) fall to the
+            // generic call emission, same as before their census admission.
+            return cmp_cond(c).map(|_| InlineOp::Cmp(c));
         }
-        Some(match fn_oid {
-            177 => InlineOp::Int4Pl,
-            181 => InlineOp::Int4Mi,
-            141 => InlineOp::Int4Mul,
-            463 => InlineOp::Int8Pl,
-            464 => InlineOp::Int8Mi,
-            465 => InlineOp::Int8Mul,
+        // The JIT arithmetic admission set now lives in the central registry
+        // (`lanereg`, design §3a) as the JitArith tier; decode its neutral
+        // ArithShape into this JIT's selector. Every in-tree JitArith shape
+        // (W4/W8/W24 × Add/Sub/Mul, W24 × Div) decodes.
+        let s = ::lanereg::jit_arith(fn_oid)?;
+        use ::lanereg::{ArithKind as K, ArithWidth as A};
+        Some(match (s.width, s.op) {
+            (A::W4 | A::W24, K::Add) => InlineOp::Int4Pl,
+            (A::W4 | A::W24, K::Sub) => InlineOp::Int4Mi,
+            (A::W4 | A::W24, K::Mul) => InlineOp::Int4Mul,
+            (A::W24, K::Div) => InlineOp::Int24Div,
+            (A::W8, K::Add) => InlineOp::Int8Pl,
+            (A::W8, K::Sub) => InlineOp::Int8Mi,
+            (A::W8, K::Mul) => InlineOp::Int8Mul,
             _ => return None,
         })
     }
 
-    fn cmp_cond(op: CmpOp) -> (bool, Cond) {
+    fn cmp_cond(op: CmpOp) -> Option<(bool, Cond)> {
         use CmpOp::*;
         // (wide compare?, condition); Int48/84 sign-extend the 32-bit side.
-        match op {
-            Int4Eq | Int2Eq => (false, Cond::Eq),
-            Int4Ne | Int2Ne => (false, Cond::Ne),
-            Int4Lt | Int2Lt => (false, Cond::Lt),
-            Int4Le | Int2Le => (false, Cond::Le),
-            Int4Gt | Int2Gt => (false, Cond::Gt),
-            Int4Ge | Int2Ge => (false, Cond::Ge),
+        // Int24/42 need no extend: Datum int words are canonical
+        // (sign-extended), so the narrow compare already sees C's promoted
+        // int32 on the int2 side. Oid compares the low word unsigned. The
+        // float comparators have no inline stencil (None): their NaN-aware
+        // total order is not a single-condition compare, so they keep the
+        // generic per-row call under the JIT (the AOT bitmap tier still owns
+        // their quals).
+        Some(match op {
+            Int4Eq | Int2Eq | Int24Eq | Int42Eq => (false, Cond::Eq),
+            Int4Ne | Int2Ne | Int24Ne | Int42Ne => (false, Cond::Ne),
+            Int4Lt | Int2Lt | Int24Lt | Int42Lt => (false, Cond::Lt),
+            Int4Le | Int2Le | Int24Le | Int42Le => (false, Cond::Le),
+            Int4Gt | Int2Gt | Int24Gt | Int42Gt => (false, Cond::Gt),
+            Int4Ge | Int2Ge | Int24Ge | Int42Ge => (false, Cond::Ge),
             Int8Eq | Int84Eq | Int48Eq => (true, Cond::Eq),
             Int8Ne | Int84Ne | Int48Ne => (true, Cond::Ne),
             Int8Lt | Int84Lt | Int48Lt => (true, Cond::Lt),
             Int8Le | Int84Le | Int48Le => (true, Cond::Le),
             Int8Gt | Int84Gt | Int48Gt => (true, Cond::Gt),
             Int8Ge | Int84Ge | Int48Ge => (true, Cond::Ge),
-        }
+            OidEq => (false, Cond::Eq),
+            OidNe => (false, Cond::Ne),
+            OidLt => (false, Cond::Lo),
+            OidLe => (false, Cond::Ls),
+            OidGt => (false, Cond::Hi),
+            OidGe => (false, Cond::Hs),
+            Float4Eq | Float4Ne | Float4Lt | Float4Le | Float4Gt | Float4Ge | Float8Eq
+            | Float8Ne | Float8Lt | Float8Le | Float8Gt | Float8Ge | Float48Eq | Float48Ne
+            | Float48Lt | Float48Le | Float48Gt | Float48Ge | Float84Eq | Float84Ne
+            | Float84Lt | Float84Le | Float84Gt | Float84Ge => return None,
+        })
     }
 
     fn cmp_extends(op: CmpOp) -> (bool, bool) {
@@ -950,7 +993,7 @@ mod emit {
         e.cbnz_w(14, nullout);
         match op {
             InlineOp::Cmp(c) => {
-                let (wide, cond) = cmp_cond(c);
+                let (wide, cond) = cmp_cond(c).expect("inline_op admitted a stencil-less CmpOp");
                 let (sxa, sxb) = cmp_extends(c);
                 let (mut lv, mut rv) = (v0, v1);
                 if sxa {
@@ -1032,6 +1075,24 @@ mod emit {
                 e.strb(31, 9, ND_ISNULL);
                 e.b(done);
                 bind_local(e, ovf);
+                emit_func_call(e, call, out, true, false);
+            }
+            InlineOp::Int24Div => {
+                // int.c int24div: a zero divisor raises division_by_zero (the
+                // generic call replays for C's exact ereport); otherwise the
+                // int16 dividend (canonical sign-extended word = C's promoted
+                // int32) over the int32 divisor cannot overflow int32
+                // (INT16_MIN / -1 = 32768), so the quotient needs no check —
+                // only the canonical sign-extension of the int4 result.
+                let divzero = e.new_local();
+                e.cbz_w(v1, divzero);
+                e.sdiv_w(15, v0, v1);
+                e.sxtw(15, 15);
+                e.ldr_lit(9, out);
+                e.str_x(15, 9, ND_VALUE);
+                e.strb(31, 9, ND_ISNULL);
+                e.b(done);
+                bind_local(e, divzero);
                 emit_func_call(e, call, out, true, false);
             }
         }

@@ -232,6 +232,15 @@ fn choose_next_subplan_for_worker<'mcx>(
     Ok(true)
 }
 
+/// Lane-executor-v2 seam: true iff this Append chooses subplans with the
+/// serial in-order chooser (`choose_next_subplan_locally`). The parallel
+/// Leader/Worker choosers claim subplans through the shared DSM table in a
+/// non-serial order, so the lane refuses them (execmain `lanev2` gate doc).
+/// Mode is assigned at DSM/worker init, before the node's first pull.
+pub fn lane_choose_local(node: &AppendState<'_>) -> bool {
+    matches!(node.mode, ChooseMode::Local)
+}
+
 fn choose_next_subplan<'mcx>(
     node: &mut AppendState<'mcx>,
     estate: &mut EStateData<'mcx>,

@@ -25,6 +25,7 @@ aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 execexpr = { path = "../execexpr" }
 execgrouping = { path = "../execgrouping" }
+lanefold = { path = "../lanefold" }
 execscan = { path = "../execscan" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }

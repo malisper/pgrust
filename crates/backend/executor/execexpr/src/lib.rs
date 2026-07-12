@@ -31,13 +31,16 @@ pub use compile::{
     exec_build_agg_qual, exec_build_agg_qual_subplans, exec_build_agg_trans,
     exec_build_window_projection_info, exec_build_window_projection_info_subplans,
     exec_build_agg_trans_gsets, exec_build_agg_trans_hashed,
-    exec_build_agg_trans_hashed_subplans, exec_build_agg_trans_mixed, exec_build_agg_trans_subplans,
+    exec_build_agg_trans_hashed_masked, exec_build_agg_trans_hashed_subplans,
+    exec_build_agg_trans_mixed, exec_build_agg_trans_plain_masked,
+    exec_build_agg_trans_subplans,
     exec_build_grouping_equal,
     exec_build_hash32_from_attrs, exec_build_hash32_from_exprs, exec_build_projection_info,
     exec_build_merge_projection_info_subplans, exec_build_projection_info_subplans,
     exec_init_expr, exec_init_expr_subplans,
     exec_init_expr_subplans_agg, exec_init_expr_with_case_test,
-    exec_init_qual, exec_init_qual_subplans, expr_type, AggBind, AggOrderedSpec, AggTransSpec,
+    exec_init_qual, exec_init_qual_subplans, expr_type, lane_scan_qual, AggBind, AggOrderedSpec,
+    AggTransSpec, LaneBoolTest, LaneClause, LaneCmpClause, LaneCmpRhs, LaneQualShape, LaneSuffix,
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{
@@ -47,7 +50,8 @@ pub use interp::{
 };
 pub use steps::{
     agg_count_star_advance, qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState,
-    GroupedColsCell, Kernel, OutRef, SlotSrc, Step,
+    GroupedColsCell, Kernel, OutRef, ProjArithOp, ScanCmpClauses, ScanProjCol, ScanProjCols,
+    SlotSrc, Step, SCAN_CMP_MAX_CLAUSES, SCAN_PROJ_MAX_COLS,
 };
 pub use types_portal::params::ParamBind;
 pub use xmlops::map_sql_value_to_xml_value;

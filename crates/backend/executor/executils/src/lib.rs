@@ -545,6 +545,41 @@ pub struct EcxtId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecSlotId(pub u32);
 
+/// Operator→operator page-batch seam for the lane executor (lane-executor-v2
+/// design §Architecture 1). A source stages a batch, then serves individual
+/// rows into an outer slot with its scan/build qual applied; the batched lane
+/// operators (fused agg, and — Phase 1 — the SeqScan-owning lane driver)
+/// consume batches through this trait instead of the per-tuple node recursion.
+/// Formerly `nodeagg::AggBatchSource` (agg-scoped); promoted here so both the
+/// agg consumer and the execmain lane driver share one seam. `nodeagg`
+/// re-exports it as `AggBatchSource` so the fused-agg path is unchanged.
+pub trait BatchSource<'mcx> {
+    /// Stage the next page batch; 0 = input exhausted.
+    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
+    /// Store staged tuple `i` into the outer slot and apply the scan qual;
+    /// false = filtered out.
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
+    fn outer_slot(&self) -> ExecSlotId;
+    fn has_qual(&self) -> bool;
+    /// True only when `next_batch` counts VISIBLE, qual-passing rows (the
+    /// storeless drain never calls `fetch_tuple`). Sources resolving
+    /// visibility or quals at fetch time must return false.
+    fn storeless_ok(&self) -> bool {
+        !self.has_qual()
+    }
+    /// Batched qual census over the staged batch: VISIBLE rows passing the
+    /// qual, any per-row-only rows resolved inside. None = the per-row drain
+    /// owns the batch. Only sources whose census preserves per-row qual
+    /// semantics (non-erroring kernel quals) may return Some.
+    fn qualifying_count(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _n: u32,
+    ) -> PgResult<Option<u32>> {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuxCxtId(pub u32);
 

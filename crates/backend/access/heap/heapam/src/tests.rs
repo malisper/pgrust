@@ -645,6 +645,108 @@ fn advance_block_wraps_and_honors_scanlimits() {
     quiesced();
 }
 
+// Lane-v2 parallel-worker safety: two scans sharing one parallel shared
+// state, driven through the batched page feed (`heap_getnextpagebatch`),
+// must partition the relation's blocks — union == all blocks, disjoint —
+// including a nonzero startblock (wraparound arithmetic) and the chunk
+// allocator's ramp-down composing with page-at-a-time batching.
+#[test]
+fn parallel_pagebatch_partitions_blocks_disjointly() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+
+    // (nblocks, preset startblock or InvalidBlockNumber → init picks 0).
+    // 7 @ start 3: wraparound 3,4,5,6,0,1,2 with chunk_size 1.
+    // 4096 @ start 0: chunk_size 2 (nextpower2(4096/2048)) with ramp-down
+    // to 1 inside the last 64-chunk window.
+    for (nblocks, startblock) in [(7u32, 3u32), (4096, InvalidBlockNumber)] {
+        let oid = fresh_oid();
+        register_table(
+            oid,
+            (0..nblocks)
+                .map(|i| build_page(&[Item::Tuple(tuple_image(10, 0, i as i32))], true))
+                .collect(),
+        );
+        let rel = test_relation(mcx, oid);
+
+        let pbscan = ParallelBlockTableScanDescData {
+            phs_nblocks: nblocks,
+            ..Default::default()
+        };
+        if startblock != InvalidBlockNumber {
+            // startblock_init only stores when unset; preset exercises the
+            // (nallocated + startblock) % nblocks wraparound arithmetic.
+            pbscan.phs_startblock.store(startblock, Ordering::SeqCst);
+        }
+        let pptr = NonNull::from(&pbscan);
+        // No STRAT/SYNC: parallel initscan derives SYNC from phs_syncscan
+        // anyway, and the fake bufmgr has no strategy seam.
+        let flags = SO_TYPE_SEQSCAN | SO_ALLOW_PAGEMODE;
+        let mut scans = [
+            heap_beginscan(mcx, &rel, mvcc_snapshot(mcx), 0, PgVec::new_in(mcx), Some(pptr), flags)
+                .unwrap(),
+            heap_beginscan(mcx, &rel, mvcc_snapshot(mcx), 0, PgVec::new_in(mcx), Some(pptr), flags)
+                .unwrap(),
+        ];
+        assert!(scans.iter().all(|s| s.rs_nblocks == nblocks));
+
+        // Uneven interleave (worker 0 drains two pages per turn) so chunk
+        // boundaries land mid-turn. Record per-worker blocks + global order.
+        let mut blocks: [Vec<BlockNumber>; 2] = [Vec::new(), Vec::new()];
+        let mut order: Vec<BlockNumber> = Vec::new();
+        let mut ntuples = 0u64;
+        let mut done = [false, false];
+        while !done[0] || !done[1] {
+            for w in 0..2 {
+                for _ in 0..=w {
+                    if done[w] {
+                        continue;
+                    }
+                    let n = heap_getnextpagebatch(&mut scans[w]).unwrap();
+                    if n == 0 {
+                        done[w] = true;
+                        continue;
+                    }
+                    blocks[w].push(scans[w].rs_cblock);
+                    order.push(scans[w].rs_cblock);
+                    ntuples += n as u64;
+                }
+            }
+        }
+
+        // Disjoint within and across workers; union covers every block.
+        let mut all = order.clone();
+        all.sort_unstable();
+        assert_eq!(all, (0..nblocks).collect::<Vec<_>>(), "nblocks={nblocks}");
+        assert_eq!(ntuples, nblocks as u64);
+        // Both workers actually participated.
+        assert!(!blocks[0].is_empty() && !blocks[1].is_empty());
+
+        if nblocks == 4096 {
+            // The chunk allocator engaged above size 1 and ramped down to 1
+            // by scan end (both scans hit the exhausted-nextpage path last).
+            for s in &scans {
+                assert_eq!(s.rs_parallelworkerdata.as_ref().unwrap().phsw_chunk_size, 1);
+            }
+            // chunk_size 2 shows up as same-worker consecutive block pairs.
+            assert!(blocks[0].windows(2).any(|p| p[1] == p[0] + 1));
+        } else {
+            // chunk_size 1: single-threaded, blocks are handed out strictly
+            // in shared-counter order — the wrapped sequence from startblock.
+            let expect: Vec<BlockNumber> =
+                (0..nblocks).map(|i| (i + startblock) % nblocks).collect();
+            assert_eq!(order, expect);
+        }
+
+        let [a, b] = scans;
+        heap_endscan(a).unwrap();
+        heap_endscan(b).unwrap();
+        quiesced();
+    }
+}
+
 #[test]
 fn tidrange_limits_and_empty_range() {
     install_seams();

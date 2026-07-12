@@ -329,6 +329,47 @@ fn make_pathkey_from_sortinfo<'mcx>(
     )))
 }
 
+// cbstore sorted-scan pathkeys (allpaths::create_cbstore_sorted_paths):
+// default ascending nulls-last pathkey for an admitted cbstore column Var;
+// EC lookup only (create_it=false — an EC nobody asked for is a pathkey
+// nobody can use, the index-path discipline).
+pub fn make_pathkey_from_sortinfo_existing<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    expr: Node<'mcx>,
+    rel: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<Option<PathKey>> {
+    let Some(v) = expr.as_var() else { return Ok(None) };
+    use types_core::catalog::{DATEOID, INT2OID, INT4OID, INT8OID, TEXTOID, TIMESTAMPOID,
+        VARCHAROID};
+    // Default btree "<" operators (fixed catalog oids).
+    let lt_op: u32 = match v.vartype {
+        INT2OID => 95,
+        INT4OID => 97,
+        INT8OID => 412,
+        DATEOID => 1095,
+        TIMESTAMPOID => 2062,
+        TEXTOID | VARCHAROID => 664,
+        _ => return Ok(None),
+    };
+    let Some((opfamily, opcintype, _cmptype)) =
+        lsyscache::amop::get_ordering_op_properties(lt_op)?
+    else {
+        return Ok(None);
+    };
+    make_pathkey_from_sortinfo(
+        run,
+        expr,
+        opfamily,
+        opcintype,
+        expr_collation(expr),
+        false,
+        false,
+        0,
+        rel,
+        false,
+    )
+}
+
 // build_index_pathkeys (pathkeys.c): key columns of an ordered (btree) index;
 // caller runs truncate_useless_pathkeys.
 pub fn build_index_pathkeys<'mcx>(

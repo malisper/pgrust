@@ -728,9 +728,12 @@ pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
                 pg.trans_value = Datum::from_usize(state as usize);
             }
             let mut e2 = *e;
-            e2.set_tuple(NonNull::new_unchecked(
-                dst.add(additionalsize).cast::<MinimalTupleData>(),
-            ));
+            // Verbatim image copy: relocate through the table so a by-ref
+            // cached key (Text probe kernel) is rebased, not left dangling.
+            ph.hashtable.relocate_entry(
+                &mut e2,
+                NonNull::new_unchecked(dst.add(additionalsize).cast::<MinimalTupleData>()),
+            );
             e2
         };
         entries.push(e2);

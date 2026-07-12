@@ -77,6 +77,7 @@ ruleutils_seams = { path = "../../utils/adt/ruleutils_seams" }
 format_type = { path = "../../utils/adt/format_type" }
 catalog_storage = { path = "../../catalog/catalog_storage" }
 tableam = { path = "../../access/table/tableam" }
+cbstore = { path = "../../access/cbstore" }
 adt_acl = { path = "../../utils/adt/acl" }
 aclchk = { path = "../../catalog/aclchk" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

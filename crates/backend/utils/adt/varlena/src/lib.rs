@@ -169,6 +169,30 @@ pub(crate) fn collation_is_c_known_pub(collid: Oid) -> bool {
     collation_is_c_known(collid)
 }
 
+/// hashtext (hashfunc.c) over detoasted text bytes — `fc_hashtext`'s core for
+/// executor step paths that carry no fcinfo (execgrouping's text probe
+/// kernel). Nondeterministic collations hash the pg_strnxfrm sort key,
+/// deterministic (incl. C-known) hash the raw bytes — bit-identical to the
+/// fmgr entry point.
+pub fn hashtext_bytes(collid: Oid, data: &[u8]) -> PgResult<u32> {
+    if let Some(h) = builtins::hashtext_nondeterministic(collid, data, None)? {
+        return Ok(h as u32);
+    }
+    Ok(::hashfn::hash_bytes(data))
+}
+
+/// Whether text hashing/equality under this collation reduces to raw bytes
+/// (hashtext = hash_any, texteq = length + memcmp): valid AND deterministic.
+/// Resolve-once gate for execgrouping's text probe kernel — the per-row fmgr
+/// entry points make exactly this decision per call, with the same inputs
+/// and the same catalog truth, so hoisting it is value-invisible.
+pub fn text_collation_is_raw_bytes(collid: Oid) -> PgResult<bool> {
+    if !OidIsValid(collid) {
+        return Ok(false);
+    }
+    collation_is_deterministic(collid)
+}
+
 pub fn texteq(t1: &[u8], t2: &[u8], collid: Oid) -> PgResult<bool> {
     check_collation_set(collid)?;
     if collation_is_c_known(collid) {
