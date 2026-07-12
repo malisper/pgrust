@@ -94,8 +94,12 @@ pub fn try_own_seq_scan<'mcx>(
 /// `exec_scan_extended` does, so those shapes must keep the old path.
 ///
 /// Disarms on: EPQ, a backward/mark cursor (init eflags) or a non-forward
-/// call, EXPLAIN ANALYZE (instrumented), parallel scan, the Bloom/EPQ
-/// variants, and AMs without page-batch support.
+/// call, EXPLAIN ANALYZE (instrumented), the Bloom/EPQ variants, and AMs
+/// without page-batch support. Parallel scans (leader or worker) are
+/// admitted: the batched page feed acquires blocks through the shared DSM
+/// block cursor (`parallel_next_block`), exactly as the per-tuple pagemode
+/// walk does, so per-worker page batches partition the relation without
+/// gaps or overlaps.
 fn seq_scan_fusible<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -103,7 +107,6 @@ fn seq_scan_fusible<'mcx>(
     if estate.es_epq_active
         || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
         || !ss.batch_allowed()
-        || ss.is_parallel()
         || ss.ss.instr_idx.is_some()
     {
         return Ok(false);
@@ -128,7 +131,10 @@ fn seq_scan_fusible<'mcx>(
         }
     }
     // AM must support the page-batch primitives (opens the scan desc once).
-    ::nodeseqscan::seq_scan_batch_supported(ss, estate)
+    // The parallel-admitting variant: only this lane routes through it; the
+    // fused agg/sort/hash drives keep `seq_scan_batch_supported`'s
+    // serial-only gate.
+    ::nodeseqscan::seq_scan_batch_supported_parallel(ss, estate)
 }
 
 /// Push source: stages heap page batches (`seq_scan_next_pagebatch` — the
