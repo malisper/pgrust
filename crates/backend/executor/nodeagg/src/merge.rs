@@ -1199,7 +1199,10 @@ fn install_raw_handoff<'mcx>(
     let mut ch = ph.compact.take().expect("raw install requires an armed table");
     let width = match &ch.key {
         crate::compact::CompactKeySpec::Single { width } => *width,
-        crate::compact::CompactKeySpec::Multi(_) => {
+        // Reduced is unreachable too: raw exchange admission requires the
+        // parallel handoff spec to carry exactly ONE key att, and the
+        // reduced lane's plan shape always has 2..N grouping keys.
+        crate::compact::CompactKeySpec::Multi(_) | crate::compact::CompactKeySpec::Reduced(_) => {
             unreachable!("raw exchange admission requires a single-int-key shape")
         }
     };
