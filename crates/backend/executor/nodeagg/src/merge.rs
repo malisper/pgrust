@@ -357,6 +357,12 @@ struct MergeRun {
     raw_pre: Option<Vec<::lanetable::LaneAggTable>>,
     // The single grouping key's attlen for datum synthesis (raw leg only).
     raw_key_len: i16,
+    // Parallel-finalize prepared emit: per-bucket fully-projected rows built
+    // by the merge claimers. Present ⇒ raw_pre present; retrieval drains
+    // these instead of running the per-group finalize/project tail (same
+    // bucket order, same within-bucket order — identical output order).
+    emit_pre: Option<Vec<EmitBuf>>,
+    emit_natts: usize,
 }
 
 // PGRUST_AGG_MERGE_NO_PARALLEL triage kill-switch: forces the increment-1
@@ -364,6 +370,146 @@ struct MergeRun {
 fn parallel_merge_disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("PGRUST_AGG_MERGE_NO_PARALLEL").is_some())
+}
+
+// PGRUST_AGG_FINALIZE_NO_PARALLEL triage kill-switch: forces the serial
+// per-group finalize/project retrieve on otherwise emit-qualified raw shapes.
+fn parallel_finalize_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("PGRUST_AGG_FINALIZE_NO_PARALLEL").is_some())
+}
+
+// --- Parallel finalize + prepared emit (the serial-emit tail, ratified
+// order-relaxation lane) ---
+//
+// After the raw exchange merge, groups live in 256 disjoint per-bucket
+// LaneAggTables — finalize is embarrassingly parallel by construction; only
+// the leader's emit ordering forced serialization (the radixexchange lane's
+// measured ~1.0s tail at 10M groups: per-group finalize_aggregates +
+// exec_project + slot churn on one thread). When the shape qualifies —
+// finalize is the identity (no finalfn, byval transtype: count/sum/min/max
+// over ints), no HAVING qual, and the projection is a pure column shuffle of
+// {the single grouping key, Aggref results} — each merge claimer finalizes
+// its buckets in the SAME parallel pass that merged them, materializing
+// fully-projected rows (all byval datums, self-contained) into per-bucket
+// EmitBufs. The leader's drain then memcpys row datums into the result slot:
+// no finalize, no projection interpreter, no per-row expr-context reset.
+// Emit order is bucket 0..255, insertion order within a bucket — byte-
+// identical to the serial raw retrieve's order, so this lane changes NO
+// observable ordering at all. Disqualified shapes (finalfns, HAVING,
+// expressions over aggregates) keep the serial per-group retrieve unchanged.
+
+// One output column of the prepared-emit projection.
+#[derive(Clone, Copy)]
+enum EmitCol {
+    // The single raw grouping key (NULL for the null group's row).
+    Key,
+    // Aggregate result = the byval transvalue of this transno (no finalfn).
+    Agg { transno: u32 },
+}
+
+struct EmitPlan {
+    cols: Vec<EmitCol>,
+}
+
+// One bucket's fully-projected output rows, row-major with stride
+// cols.len(). Byval datums only (the plan's qualification) — self-contained
+// across threads.
+#[derive(Default)]
+struct EmitBuf {
+    values: Vec<Datum>,
+    nulls: Vec<bool>,
+    nrows: usize,
+}
+
+// The emit-lane qualification (leader, consume boundary). None = the serial
+// per-group finalize/project retrieve runs unchanged.
+fn build_emit_plan(node: &AggStateData<'_>) -> Option<EmitPlan> {
+    if parallel_finalize_disabled() {
+        return None;
+    }
+    // HAVING quals and finalize skipping keep the classic per-group path.
+    if node.skip_final || node.qual.is_some() {
+        return None;
+    }
+    // Identity finalize only: no finalfn (result IS the transvalue), no
+    // direct args (ordered-set aggs can't be AGG_HASHED anyway), byval
+    // transtype so the handed datum is self-contained and no expanded-object
+    // read-only wrap applies. The raw exchange's combine whitelist already
+    // bounds this to int/bool/date-time count/sum/min/max shapes.
+    for pa in node.peragg.iter() {
+        if pa.finalfn.is_some()
+            || !pa.direct_args.is_empty()
+            || !node.trans_typ[pa.transno as usize].byval
+        {
+            return None;
+        }
+    }
+    let ph = node.perhash.as_ref()?;
+    let key_attno = *ph.hash_grp_col_idx_input.first()?;
+    let tlist = &node.plan.plan.targetlist;
+    let mut cols = Vec::with_capacity(tlist.len());
+    for n in tlist.iter() {
+        let te = n.as_target_entry()?;
+        if let Some(v) = te.expr.as_var() {
+            // The projection evaluates over first_slot (outer), where the
+            // retrieve places the key at hash_grp_col_idx_input[0]; any
+            // other Var would read an unset column — disqualify.
+            if v.varno == ::types_nodes::primnodes::OUTER_VAR && v.varattno == key_attno {
+                cols.push(EmitCol::Key);
+                continue;
+            }
+            return None;
+        }
+        if let Some(a) = te.expr.as_aggref() {
+            if a.aggno < 0 || a.aggno as usize >= node.peragg.len() {
+                return None;
+            }
+            cols.push(EmitCol::Agg { transno: node.peragg[a.aggno as usize].transno });
+            continue;
+        }
+        // Expressions over aggregates/keys keep the projection interpreter.
+        return None;
+    }
+    Some(EmitPlan { cols })
+}
+
+// One bucket's finalize+project, thread-native: rows in the merge table's
+// insertion order (the serial retrieve's exact order), columns per the plan.
+fn emit_bucket(plan: &EmitPlan, key_len: i16, t: &::lanetable::LaneAggTable) -> EmitBuf {
+    let natts = plan.cols.len();
+    let n = t.nrows();
+    let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
+    let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
+    for row in 0..n {
+        let key = t.row_key_int(row);
+        let states = t.row_states(row).cast_const().cast::<AggPerGroup>();
+        for c in &plan.cols {
+            match *c {
+                EmitCol::Key => match key {
+                    Some(k) => {
+                        values.push(raw_key_datum(key_len, k));
+                        nulls.push(false);
+                    }
+                    None => {
+                        values.push(Datum::null());
+                        nulls.push(true);
+                    }
+                },
+                // SAFETY: the row's state block holds numtrans pergroups
+                // (table config = additionalsize = the finalize's pergroup
+                // array); transno < numtrans by construction. Byval
+                // transvalues only (qualification), so the datum copy is
+                // self-contained.
+                EmitCol::Agg { transno } => unsafe {
+                    let pg = &*states.add(transno as usize);
+                    values.push(pg.trans_value);
+                    nulls.push(pg.trans_value_is_null);
+                },
+            }
+        }
+    }
+    EmitBuf { values, nulls, nrows: n }
 }
 
 // C advance_combine semantics, one incoming partial state (the
@@ -1348,7 +1494,10 @@ pub(crate) fn consume_handoff<'mcx>(
             ph.hashtable.hash_staged(&[Datum::null()], &[true], &mut v)?;
             v[0]
         };
-        let raw_pre = parallel_merge_raw(
+        // Parallel-finalize emit plan (order-relaxation lane): built here so
+        // the merge claimers finalize+project their buckets in the same pass.
+        let emit_plan = build_emit_plan(node);
+        let (raw_pre, emit_pre) = parallel_merge_raw(
             spec,
             ph.hashtable.entries(),
             &tables,
@@ -1356,10 +1505,16 @@ pub(crate) fn consume_handoff<'mcx>(
             &parts,
             additionalsize,
             null_hash,
+            emit_plan.as_ref(),
         )?;
         if let Some(t0) = t0 {
-            eprintln!("AGG_MERGE_STATS merge-wall-us={} mode=raw", t0.elapsed().as_micros());
+            eprintln!(
+                "AGG_MERGE_STATS merge-wall-us={} mode=raw emit={}",
+                t0.elapsed().as_micros(),
+                if emit_pre.is_some() { "pre" } else { "serial" },
+            );
         }
+        let emit_natts = emit_plan.map_or(0, |p| p.cols.len());
         node.merge.as_mut().unwrap().run = Some(MergeRun {
             tables,
             parts,
@@ -1372,6 +1527,8 @@ pub(crate) fn consume_handoff<'mcx>(
             raw_tables,
             raw_pre: Some(raw_pre),
             raw_key_len,
+            emit_pre,
+            emit_natts,
         });
         return Ok(());
     }
@@ -1402,6 +1559,8 @@ pub(crate) fn consume_handoff<'mcx>(
         raw_tables: Vec::new(),
         raw_pre: None,
         raw_key_len: 0,
+        emit_pre: None,
+        emit_natts: 0,
     });
     Ok(())
 }
@@ -1671,13 +1830,13 @@ pub(crate) fn agg_retrieve_merged<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    if node
-        .merge
-        .as_ref()
-        .and_then(|m| m.run.as_ref())
-        .is_some_and(|r| r.raw_pre.is_some())
-    {
-        return agg_retrieve_merged_raw(node, estate);
+    if let Some(r) = node.merge.as_ref().and_then(|m| m.run.as_ref()) {
+        if r.emit_pre.is_some() {
+            return agg_retrieve_emitted(node, estate);
+        }
+        if r.raw_pre.is_some() {
+            return agg_retrieve_merged_raw(node, estate);
+        }
     }
     let mcx = estate.es_query_cxt;
     loop {
@@ -1730,6 +1889,58 @@ pub(crate) fn agg_retrieve_merged<'mcx>(
         ::execexpr::exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
         return Ok(Some(node.ps_ResultTupleSlot));
     }
+}
+
+// The prepared-emit drain (parallel finalize): rows were fully finalized and
+// projected by the merge claimers into per-bucket EmitBufs — the serial path
+// is a datum memcpy into the result slot per row. Bucket 0..255, insertion
+// order within a bucket: the exact order agg_retrieve_merged_raw emits, so
+// engaging this lane changes no observable ordering. No per-row expr-context
+// reset: nothing on this path allocates per tuple (byval datums only).
+fn agg_retrieve_emitted<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let mcx = estate.es_query_cxt;
+    let next = {
+        let run = node
+            .merge
+            .as_mut()
+            .and_then(|m| m.run.as_mut())
+            .expect("emitted retrieve under a built run");
+        let bufs = run.emit_pre.as_ref().expect("emitted retrieve under a prepared run");
+        loop {
+            if run.bucket >= 256 {
+                break None;
+            }
+            let b = &bufs[run.bucket];
+            if run.out_pos >= b.nrows {
+                run.bucket += 1;
+                run.out_pos = 0;
+                continue;
+            }
+            let row = run.out_pos;
+            run.out_pos += 1;
+            break Some((run.bucket, row));
+        }
+    };
+    let Some((bucket, row)) = next else {
+        node.agg_done = true;
+        return Ok(None);
+    };
+    let run = node.merge.as_ref().and_then(|m| m.run.as_ref()).unwrap();
+    let natts = run.emit_natts;
+    let buf = &run.emit_pre.as_ref().unwrap()[bucket];
+    let base = row * natts;
+    let slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    exectuples::exec_clear_tuple(slot, mcx);
+    {
+        let sb = slot.base_mut();
+        sb.tts_values[..natts].copy_from_slice(&buf.values[base..base + natts]);
+        sb.tts_isnull[..natts].copy_from_slice(&buf.nulls[base..base + natts]);
+    }
+    exectuples::exec_store_virtual_tuple(slot);
+    Ok(Some(node.ps_ResultTupleSlot))
 }
 
 // The raw exchange's retrieve: buckets 0..255 in order, rows in insertion
@@ -2360,12 +2571,17 @@ struct RawParCtx<'a> {
     barrier: Barrier,
     // 256 bucket outputs; slot b is written only by the claimer that took b.
     out: Vec<UnsafeCell<::lanetable::LaneAggTable>>,
+    // Parallel finalize (order-relaxation lane): Some ⇒ each claimer also
+    // materializes bucket b's fully-projected rows into out_emit[b].
+    emit: Option<&'a EmitPlan>,
+    out_emit: Vec<UnsafeCell<EmitBuf>>,
 }
 
 // SAFETY: same argument as ParCtx — shared read-only sources; the only
-// mutation is each claimer's exclusive out[b] slot plus state payloads that
-// partition by bucket (an entry's bucket is a pure function of its kernel
-// hash on both classic and raw sides).
+// mutation is each claimer's exclusive out[b] slot (and out_emit[b], byval
+// datums only) plus state payloads that partition by bucket (an entry's
+// bucket is a pure function of its kernel hash on both classic and raw
+// sides).
 unsafe impl Sync for RawParCtx<'_> {}
 
 // Insert-or-combine one source state block into the bucket table.
@@ -2477,6 +2693,12 @@ fn raw_claim_loop(ctx: &RawParCtx<'_>) -> PgResult<usize> {
         if t.nrows() > 0 {
             merged += 1;
         }
+        if let Some(plan) = ctx.emit {
+            // Bucket b is fully merged — finalize+project it on this claimer.
+            let buf = emit_bucket(plan, ctx.key_att.attlen, &t);
+            // SAFETY: bucket b was claimed exclusively via the counter.
+            unsafe { *ctx.out_emit[b].get() = buf };
+        }
         // SAFETY: bucket b was claimed exclusively via the counter.
         unsafe { *ctx.out[b].get() = t };
     }
@@ -2491,7 +2713,8 @@ fn parallel_merge_raw(
     parts: &[Partition],
     additionalsize: usize,
     null_hash: u32,
-) -> PgResult<Vec<::lanetable::LaneAggTable>> {
+    emit: Option<&EmitPlan>,
+) -> PgResult<(Vec<::lanetable::LaneAggTable>, Option<Vec<EmitBuf>>)> {
     debug_assert_eq!(spec.atts.len(), 1);
     // Claimer pool sizing: the armed DOP + the leader (raw tables are many
     // small flushes, not one per worker).
@@ -2517,6 +2740,8 @@ fn parallel_merge_raw(
                 ))
             })
             .collect(),
+        emit,
+        out_emit: (0..256).map(|_| UnsafeCell::new(EmitBuf::default())).collect(),
     };
     let mut claims: Vec<usize> = Vec::with_capacity(nthreads + 1);
     let mut first_err: Option<Box<PgError>> = None;
@@ -2541,17 +2766,22 @@ fn parallel_merge_raw(
     if let Some(e) = first_err {
         return Err(e);
     }
+    let has_emit = ctx.emit.is_some();
+    let out_emit = ctx.out_emit;
     let pre: Vec<::lanetable::LaneAggTable> =
         ctx.out.into_iter().map(UnsafeCell::into_inner).collect();
+    let emit_pre =
+        has_emit.then(|| out_emit.into_iter().map(UnsafeCell::into_inner).collect());
     if merge_stats_enabled() {
         eprintln!(
-            "AGG_MERGE_STATS parallel: mode=raw claimers={} claims={:?} groups={}",
+            "AGG_MERGE_STATS parallel: mode=raw claimers={} claims={:?} groups={} emit={}",
             nthreads + 1,
             claims,
             pre.iter().map(::lanetable::LaneAggTable::nrows).sum::<usize>(),
+            if has_emit { "pre" } else { "serial" },
         );
     }
-    Ok(pre)
+    Ok((pre, emit_pre))
 }
 
 // Rescan: merged results reference handed buffers mutated in place by the
