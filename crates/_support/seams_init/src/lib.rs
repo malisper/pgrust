@@ -139,6 +139,7 @@ pub fn init_all() {
     pg_prewarm::init_seams();
     ltree::init_seams();
     pgcrypto::init_seams();
+    pg_stat_statements::init_seams();
     hstore::init_seams();
     pg_trgm::init_seams();
     session::init_seams();

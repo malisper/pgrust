@@ -162,7 +162,7 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
 
 // The entry stays in place; nested executor runs (SQL functions) register and
 // free their own boxed entries freely. Re-entry on the SAME handle panics.
-pub(crate) fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
+pub fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
     assert!(!h.is_null(), "execmain: NULL QueryDescHandle dereferenced");
     let (idx, generation) = decode(h);
     let ptr: *mut Entry = ENTRIES.with(|e| {
