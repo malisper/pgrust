@@ -448,7 +448,7 @@ fn iterate_word_similarity(
                         lower = tmp_lower;
                         count = tmp_count;
                     }
-                    if check_only && smlr_cur >= threshold as f32 {
+                    if check_only && smlr_cur as f64 >= threshold {
                         break;
                     }
                 }
@@ -464,7 +464,7 @@ fn iterate_word_similarity(
             }
 
             smlr_max = smlr_max.max(smlr_cur);
-            if check_only && smlr_max >= threshold as f32 {
+            if check_only && smlr_max as f64 >= threshold {
                 break;
             }
 
