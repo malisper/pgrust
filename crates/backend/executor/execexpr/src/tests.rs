@@ -3181,11 +3181,12 @@ fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
 // --- lanereg conformance (design §3a batch-function registry) ---------------
 // `CmpOp::for_fn_oid` and the JIT arithmetic admission are now driven by the
 // central `lanereg` census. These tests pin the registry-backed lookups to the
-// exact legacy OID tables, so the refactor is proven zero behavior change and
-// the registry cannot drift from this consumer.
+// exact golden OID tables (the legacy 30 comparator families plus the 42
+// censusgaps additions), so the registry cannot drift from this consumer.
 
-// The pre-registry 30-arm literal table, verbatim, as the golden oracle.
-fn legacy_for_fn_oid(oid: ::types_core::Oid) -> Option<CmpOp> {
+// The golden OID→CmpOp table: the pre-registry 30-arm literal table verbatim,
+// extended by the censusgaps int24/int42/oid/float families.
+fn golden_for_fn_oid(oid: ::types_core::Oid) -> Option<CmpOp> {
     Some(match oid {
         65 => CmpOp::Int4Eq,
         144 => CmpOp::Int4Ne,
@@ -3217,29 +3218,737 @@ fn legacy_for_fn_oid(oid: ::types_core::Oid) -> Option<CmpOp> {
         856 => CmpOp::Int48Le,
         855 => CmpOp::Int48Gt,
         857 => CmpOp::Int48Ge,
+        158 => CmpOp::Int24Eq,
+        164 => CmpOp::Int24Ne,
+        160 => CmpOp::Int24Lt,
+        166 => CmpOp::Int24Le,
+        162 => CmpOp::Int24Gt,
+        168 => CmpOp::Int24Ge,
+        159 => CmpOp::Int42Eq,
+        165 => CmpOp::Int42Ne,
+        161 => CmpOp::Int42Lt,
+        167 => CmpOp::Int42Le,
+        163 => CmpOp::Int42Gt,
+        169 => CmpOp::Int42Ge,
+        184 => CmpOp::OidEq,
+        185 => CmpOp::OidNe,
+        716 => CmpOp::OidLt,
+        717 => CmpOp::OidLe,
+        1638 => CmpOp::OidGt,
+        1639 => CmpOp::OidGe,
+        287 => CmpOp::Float4Eq,
+        288 => CmpOp::Float4Ne,
+        289 => CmpOp::Float4Lt,
+        290 => CmpOp::Float4Le,
+        291 => CmpOp::Float4Gt,
+        292 => CmpOp::Float4Ge,
+        293 => CmpOp::Float8Eq,
+        294 => CmpOp::Float8Ne,
+        295 => CmpOp::Float8Lt,
+        296 => CmpOp::Float8Le,
+        297 => CmpOp::Float8Gt,
+        298 => CmpOp::Float8Ge,
+        299 => CmpOp::Float48Eq,
+        300 => CmpOp::Float48Ne,
+        301 => CmpOp::Float48Lt,
+        302 => CmpOp::Float48Le,
+        303 => CmpOp::Float48Gt,
+        304 => CmpOp::Float48Ge,
+        305 => CmpOp::Float84Eq,
+        306 => CmpOp::Float84Ne,
+        307 => CmpOp::Float84Lt,
+        308 => CmpOp::Float84Le,
+        309 => CmpOp::Float84Gt,
+        310 => CmpOp::Float84Ge,
         _ => return None,
     })
 }
 
 #[test]
-fn for_fn_oid_matches_legacy_over_full_oid_sweep() {
+fn for_fn_oid_matches_golden_over_full_oid_sweep() {
     // Covers every comparator OID plus the fold/arith OID neighborhoods, so a
     // stray admission (or dropped one) anywhere in 0..=3000 fails loud.
     for oid in 0u32..=3000 {
         assert_eq!(
             CmpOp::for_fn_oid(oid),
-            legacy_for_fn_oid(oid),
-            "for_fn_oid drifted from legacy at oid {oid}"
+            golden_for_fn_oid(oid),
+            "for_fn_oid drifted from golden at oid {oid}"
         );
     }
 }
 
 #[test]
-fn jit_inline_arith_matches_legacy_set() {
-    // The six arithmetic OIDs the JIT inlined before the registry migration.
-    let legacy: &[u32] = &[177, 181, 141, 463, 464, 465];
+fn jit_inline_arith_matches_golden_set() {
+    // The six pre-registry arithmetic OIDs + the censusgaps int2/int4 mixed
+    // family (int24/int42 pl/mi/mul, int24div).
+    let golden: &[u32] = &[177, 181, 141, 463, 464, 465, 178, 179, 182, 183, 170, 171, 172];
     for oid in 0u32..=3000 {
         let admitted = ::lanereg::jit_arith(oid).is_some();
-        assert_eq!(admitted, legacy.contains(&oid), "jit arith admission drifted at oid {oid}");
+        assert_eq!(admitted, golden.contains(&oid), "jit arith admission drifted at oid {oid}");
     }
+}
+
+// --- censusgaps parity: the 42 new CmpOp families vs the ported per-row ------
+// functions, over boundary pools (INT_MIN/MAX, NaN/±0/±inf, NULL handling).
+// The ported fns (adt_int / adt_scalar / adt_float) are the audited C bodies,
+// so equality here IS C parity for the batch kernels.
+
+fn pool_i16() -> Vec<i16> {
+    vec![i16::MIN, i16::MIN + 1, -7, -1, 0, 1, 7, i16::MAX - 1, i16::MAX]
+}
+
+fn pool_i32() -> Vec<i32> {
+    vec![
+        i32::MIN,
+        i32::MIN + 1,
+        -32769,
+        -32768,
+        -7,
+        -1,
+        0,
+        1,
+        7,
+        32767,
+        32768,
+        i32::MAX - 1,
+        i32::MAX,
+    ]
+}
+
+fn pool_i64() -> Vec<i64> {
+    vec![
+        i64::MIN,
+        i64::MIN + 1,
+        i32::MIN as i64 - 1,
+        i32::MIN as i64,
+        -1,
+        0,
+        1,
+        i32::MAX as i64,
+        i32::MAX as i64 + 1,
+        i64::MAX - 1,
+        i64::MAX,
+    ]
+}
+
+fn pool_u32() -> Vec<u32> {
+    vec![0, 1, 2, 7, 0x7FFF_FFFE, 0x7FFF_FFFF, 0x8000_0000, 0x8000_0001, u32::MAX - 1, u32::MAX]
+}
+
+fn pool_f32() -> Vec<f32> {
+    vec![
+        f32::NAN,
+        -f32::NAN, // distinct NaN payload/sign: all NaNs must compare equal
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        1.5,
+        f32::MIN,
+        f32::MAX,
+        f32::MIN_POSITIVE,
+        1e-45, // subnormal
+        -1e-45,
+    ]
+}
+
+fn pool_f64() -> Vec<f64> {
+    vec![
+        f64::NAN,
+        -f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        1.5,
+        // straddle the f32 range so f32-vs-f64 cross compares see values a
+        // float4 cannot represent
+        f32::MAX as f64 * 2.0,
+        f32::MIN as f64 * 2.0,
+        f64::MIN,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        5e-324, // subnormal
+    ]
+}
+
+// eval + commuted parity in one pass: the kernel evaluates a fused
+// (const, var) call as commuted(cmp)(var, const), so for every op we also
+// assert op.eval(a, b) == op.commuted().eval(b, a).
+macro_rules! cmp_parity {
+    ($a:expr, $b:expr, $da:expr, $db:expr, $($op:path => $ported:expr;)*) => {{
+        $(
+            assert_eq!(
+                $op.eval($da, $db),
+                $ported,
+                "{:?} eval parity at ({:?}, {:?})", $op, $a, $b
+            );
+            assert_eq!(
+                $op.commuted().eval($db, $da),
+                $op.eval($da, $db),
+                "{:?} commuted parity at ({:?}, {:?})", $op, $a, $b
+            );
+        )*
+    }};
+}
+
+#[test]
+fn cmp_eval_int24_int42_matches_ported() {
+    for &a in &pool_i16() {
+        for &b in &pool_i32() {
+            let (da, db) = (Datum::from_i16(a), Datum::from_i32(b));
+            cmp_parity!(a, b, da, db,
+                CmpOp::Int24Eq => ::adt_int::int24eq(a, b);
+                CmpOp::Int24Ne => ::adt_int::int24ne(a, b);
+                CmpOp::Int24Lt => ::adt_int::int24lt(a, b);
+                CmpOp::Int24Le => ::adt_int::int24le(a, b);
+                CmpOp::Int24Gt => ::adt_int::int24gt(a, b);
+                CmpOp::Int24Ge => ::adt_int::int24ge(a, b);
+            );
+            let (da, db) = (Datum::from_i32(b), Datum::from_i16(a));
+            cmp_parity!(b, a, da, db,
+                CmpOp::Int42Eq => ::adt_int::int42eq(b, a);
+                CmpOp::Int42Ne => ::adt_int::int42ne(b, a);
+                CmpOp::Int42Lt => ::adt_int::int42lt(b, a);
+                CmpOp::Int42Le => ::adt_int::int42le(b, a);
+                CmpOp::Int42Gt => ::adt_int::int42gt(b, a);
+                CmpOp::Int42Ge => ::adt_int::int42ge(b, a);
+            );
+        }
+    }
+}
+
+#[test]
+fn cmp_eval_oid_matches_ported() {
+    for &a in &pool_u32() {
+        for &b in &pool_u32() {
+            let (da, db) = (Datum::from_u32(a), Datum::from_u32(b));
+            cmp_parity!(a, b, da, db,
+                CmpOp::OidEq => ::adt_scalar::oideq(a, b);
+                CmpOp::OidNe => ::adt_scalar::oidne(a, b);
+                CmpOp::OidLt => ::adt_scalar::oidlt(a, b);
+                CmpOp::OidLe => ::adt_scalar::oidle(a, b);
+                CmpOp::OidGt => ::adt_scalar::oidgt(a, b);
+                CmpOp::OidGe => ::adt_scalar::oidge(a, b);
+            );
+        }
+    }
+}
+
+#[test]
+fn cmp_eval_float_matches_ported() {
+    for &a in &pool_f32() {
+        for &b in &pool_f32() {
+            let (da, db) = (Datum::from_f32(a), Datum::from_f32(b));
+            cmp_parity!(a, b, da, db,
+                CmpOp::Float4Eq => ::adt_float::float4_eq(a, b);
+                CmpOp::Float4Ne => ::adt_float::float4_ne(a, b);
+                CmpOp::Float4Lt => ::adt_float::float4_lt(a, b);
+                CmpOp::Float4Le => ::adt_float::float4_le(a, b);
+                CmpOp::Float4Gt => ::adt_float::float4_gt(a, b);
+                CmpOp::Float4Ge => ::adt_float::float4_ge(a, b);
+            );
+        }
+    }
+    for &a in &pool_f64() {
+        for &b in &pool_f64() {
+            let (da, db) = (Datum::from_f64(a), Datum::from_f64(b));
+            cmp_parity!(a, b, da, db,
+                CmpOp::Float8Eq => ::adt_float::float8_eq(a, b);
+                CmpOp::Float8Ne => ::adt_float::float8_ne(a, b);
+                CmpOp::Float8Lt => ::adt_float::float8_lt(a, b);
+                CmpOp::Float8Le => ::adt_float::float8_le(a, b);
+                CmpOp::Float8Gt => ::adt_float::float8_gt(a, b);
+                CmpOp::Float8Ge => ::adt_float::float8_ge(a, b);
+            );
+        }
+    }
+    for &a in &pool_f32() {
+        for &b in &pool_f64() {
+            let (da, db) = (Datum::from_f32(a), Datum::from_f64(b));
+            cmp_parity!(a, b, da, db,
+                CmpOp::Float48Eq => ::adt_float::float48eq(a, b);
+                CmpOp::Float48Ne => ::adt_float::float48ne(a, b);
+                CmpOp::Float48Lt => ::adt_float::float48lt(a, b);
+                CmpOp::Float48Le => ::adt_float::float48le(a, b);
+                CmpOp::Float48Gt => ::adt_float::float48gt(a, b);
+                CmpOp::Float48Ge => ::adt_float::float48ge(a, b);
+            );
+            let (da, db) = (Datum::from_f64(b), Datum::from_f32(a));
+            cmp_parity!(b, a, da, db,
+                CmpOp::Float84Eq => ::adt_float::float84eq(b, a);
+                CmpOp::Float84Ne => ::adt_float::float84ne(b, a);
+                CmpOp::Float84Lt => ::adt_float::float84lt(b, a);
+                CmpOp::Float84Le => ::adt_float::float84le(b, a);
+                CmpOp::Float84Gt => ::adt_float::float84gt(b, a);
+                CmpOp::Float84Ge => ::adt_float::float84ge(b, a);
+            );
+        }
+    }
+}
+
+// Legacy int families: eval was already conformance-pinned; bind commuted()
+// over the boundary pools too so the (const, var) flip stays C-exact for
+// every census family.
+#[test]
+fn cmp_commuted_matches_swapped_args_int_families() {
+    use CmpOp::*;
+    let i16s = pool_i16();
+    let i32s = pool_i32();
+    let i64s = pool_i64();
+    for &op in &[Int2Eq, Int2Ne, Int2Lt, Int2Le, Int2Gt, Int2Ge] {
+        for &a in &i16s {
+            for &b in &i16s {
+                let (da, db) = (Datum::from_i16(a), Datum::from_i16(b));
+                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+            }
+        }
+    }
+    for &op in &[Int4Eq, Int4Ne, Int4Lt, Int4Le, Int4Gt, Int4Ge] {
+        for &a in &i32s {
+            for &b in &i32s {
+                let (da, db) = (Datum::from_i32(a), Datum::from_i32(b));
+                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+            }
+        }
+    }
+    for &op in &[Int8Eq, Int8Ne, Int8Lt, Int8Le, Int8Gt, Int8Ge] {
+        for &a in &i64s {
+            for &b in &i64s {
+                let (da, db) = (Datum::from_i64(a), Datum::from_i64(b));
+                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+            }
+        }
+    }
+    for &op in &[Int84Eq, Int84Ne, Int84Lt, Int84Le, Int84Gt, Int84Ge] {
+        for &a in &i64s {
+            for &b in &i32s {
+                let (da, db) = (Datum::from_i64(a), Datum::from_i32(b));
+                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+            }
+        }
+    }
+    for &op in &[Int48Eq, Int48Ne, Int48Lt, Int48Le, Int48Gt, Int48Ge] {
+        for &a in &i32s {
+            for &b in &i64s {
+                let (da, db) = (Datum::from_i32(a), Datum::from_i64(b));
+                assert_eq!(op.commuted().eval(db, da), op.eval(da, db), "{op:?} ({a}, {b})");
+            }
+        }
+    }
+}
+
+// Bitmap-kernel parity: for EVERY census comparator (all 72), the packed
+// selection word must equal the per-row `!isnull && op.eval(v, konst)` for
+// each konst in the family pool — including a >64-row batch so word packing
+// and tail lanes are exercised.
+#[test]
+fn qual_bitmap_matches_eval_for_all_census_ops() {
+    use crate::steps::qual_bitmap_cmp_const;
+    // (var-side pool, konst-side pool) per census op, as canonical Datums.
+    fn pools(op: CmpOp) -> (Vec<Datum>, Vec<Datum>) {
+        use CmpOp::*;
+        let i16d: Vec<Datum> = pool_i16().iter().map(|&v| Datum::from_i16(v)).collect();
+        let i32d: Vec<Datum> = pool_i32().iter().map(|&v| Datum::from_i32(v)).collect();
+        let i64d: Vec<Datum> = pool_i64().iter().map(|&v| Datum::from_i64(v)).collect();
+        let u32d: Vec<Datum> = pool_u32().iter().map(|&v| Datum::from_u32(v)).collect();
+        let f32d: Vec<Datum> = pool_f32().iter().map(|&v| Datum::from_f32(v)).collect();
+        let f64d: Vec<Datum> = pool_f64().iter().map(|&v| Datum::from_f64(v)).collect();
+        match op {
+            Int2Eq | Int2Ne | Int2Lt | Int2Le | Int2Gt | Int2Ge => (i16d.clone(), i16d),
+            Int4Eq | Int4Ne | Int4Lt | Int4Le | Int4Gt | Int4Ge => (i32d.clone(), i32d),
+            Int8Eq | Int8Ne | Int8Lt | Int8Le | Int8Gt | Int8Ge => (i64d.clone(), i64d),
+            Int84Eq | Int84Ne | Int84Lt | Int84Le | Int84Gt | Int84Ge => (i64d, i32d),
+            Int48Eq | Int48Ne | Int48Lt | Int48Le | Int48Gt | Int48Ge => (i32d, i64d),
+            Int24Eq | Int24Ne | Int24Lt | Int24Le | Int24Gt | Int24Ge => (i16d, i32d),
+            Int42Eq | Int42Ne | Int42Lt | Int42Le | Int42Gt | Int42Ge => (i32d, i16d),
+            OidEq | OidNe | OidLt | OidLe | OidGt | OidGe => (u32d.clone(), u32d),
+            Float4Eq | Float4Ne | Float4Lt | Float4Le | Float4Gt | Float4Ge => {
+                (f32d.clone(), f32d)
+            }
+            Float8Eq | Float8Ne | Float8Lt | Float8Le | Float8Gt | Float8Ge => {
+                (f64d.clone(), f64d)
+            }
+            Float48Eq | Float48Ne | Float48Lt | Float48Le | Float48Gt | Float48Ge => (f32d, f64d),
+            Float84Eq | Float84Ne | Float84Lt | Float84Le | Float84Gt | Float84Ge => (f64d, f32d),
+        }
+    }
+    for oid in 0u32..=3000 {
+        let Some(op) = CmpOp::for_fn_oid(oid) else { continue };
+        let (vpool, kpool) = pools(op);
+        // >64 rows: cycle the pool with a null every 5th row.
+        let n = 150usize;
+        let values: Vec<Datum> = (0..n).map(|i| vpool[i % vpool.len()]).collect();
+        let isnull: Vec<bool> = (0..n).map(|i| i % 5 == 4).collect();
+        for &konst in &kpool {
+            let mut sel = vec![0u64; n.div_ceil(64)];
+            qual_bitmap_cmp_const(op, konst, &values, &isnull, &mut sel);
+            for i in 0..n {
+                let want = !isnull[i] && op.eval(values[i], konst);
+                let got = sel[i / 64] >> (i % 64) & 1 == 1;
+                assert_eq!(got, want, "{op:?} row {i} konst {konst:?}");
+            }
+        }
+    }
+}
+
+// --- censusgaps engagement: fused qual kernels for the new families ----------
+
+fn mk_const_typed<'mcx>(mcx: Mcx<'mcx>, typ: u32, len: i16, v: Datum) -> Node<'mcx> {
+    Node::mk_const(mcx, typ, -1, 0, len as i32, v, false, true).unwrap()
+}
+
+// Tuple desc over arbitrary fixed-width byval columns: (typid, len) per att.
+fn desc_typed<'mcx>(mcx: Mcx<'mcx>, cols: &[(u32, i16)]) -> Rc<TupleDescData<'mcx>> {
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    for (i, &(typid, len)) in cols.iter().enumerate() {
+        let att = FormData_pg_attribute {
+            attnum: (i + 1) as i16,
+            atttypid: typid,
+            attlen: len,
+            attbyval: true,
+            attalign: match len {
+                2 => b's' as i8,
+                8 => b'd' as i8,
+                _ => TYPALIGN_INT,
+            },
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        };
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+    }
+    Rc::new(TupleDescData {
+        natts: cols.len() as i32,
+        tdtypeid: 0,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+fn virtual_slot_typed<'mcx>(
+    mcx: Mcx<'mcx>,
+    cols: &[(u32, i16, Option<Datum>)],
+) -> SlotData<'mcx> {
+    let shape: Vec<(u32, i16)> = cols.iter().map(|&(t, l, _)| (t, l)).collect();
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::Virtual,
+        Some(desc_typed(mcx, &shape)),
+    );
+    {
+        let base = slot.base_mut();
+        for (i, (_, _, v)) in cols.iter().enumerate() {
+            match v {
+                Some(x) => {
+                    base.tts_values[i] = *x;
+                    base.tts_isnull[i] = false;
+                }
+                None => {
+                    base.tts_values[i] = Datum::null();
+                    base.tts_isnull[i] = true;
+                }
+            }
+        }
+    }
+    exectuples::exec_store_virtual_tuple(&mut slot);
+    slot
+}
+
+fn run_qual_d<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut ExprState<'mcx>,
+    cols: &[(u32, i16, Option<Datum>)],
+) -> bool {
+    let mut slot = virtual_slot_typed(mcx, cols);
+    let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+    exec_qual(Some(state), &mut slots).unwrap()
+}
+
+// A float8 qual that previously refused the fused kernel (scalar fmgr per
+// row) now takes the AOT bitmap tier's kernel — the engagement smoke for the
+// censusgaps comparator families, NaN semantics included.
+#[test]
+fn fused_qual_kernel_float8_var_lt_const() {
+    const FLOAT8OID: u32 = 701;
+    with_mcx(|mcx| {
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, FLOAT8OID),
+            mk_const_typed(mcx, FLOAT8OID, 8, Datum::from_f64(1.5)),
+        )
+        .unwrap();
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 295, BOOLOID, args));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::Float8Lt, .. }
+        ));
+        let row = |v: Option<f64>| [(FLOAT8OID, 8i16, v.map(Datum::from_f64))];
+        assert!(run_qual_d(mcx, &mut state, &row(Some(1.0))));
+        assert!(run_qual_d(mcx, &mut state, &row(Some(-0.0))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(1.5))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(2.0))));
+        // NaN sorts greatest: NaN < 1.5 is false.
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(f64::NAN))));
+        assert!(run_qual_d(mcx, &mut state, &row(Some(f64::NEG_INFINITY))));
+        assert!(!run_qual_d(mcx, &mut state, &row(None)));
+    });
+}
+
+// (const float4) > (var float8): float48gt commutes to Float84Lt on the var.
+#[test]
+fn fused_qual_kernel_commuted_float48() {
+    const FLOAT4OID: u32 = 700;
+    const FLOAT8OID: u32 = 701;
+    with_mcx(|mcx| {
+        let args = NodeList::make2(
+            mcx,
+            mk_const_typed(mcx, FLOAT4OID, 4, Datum::from_f32(2.5)),
+            mk_scan_var(mcx, 1, FLOAT8OID),
+        )
+        .unwrap();
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 303, BOOLOID, args));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::QualScanVarCmpConst { cmp: CmpOp::Float84Lt, .. }
+        ));
+        let row = |v: Option<f64>| [(FLOAT8OID, 8i16, v.map(Datum::from_f64))];
+        assert!(run_qual_d(mcx, &mut state, &row(Some(1.0))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(2.5))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(3.0))));
+        // 2.5 > NaN is false (NaN sorts greatest).
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(f64::NAN))));
+    });
+}
+
+#[test]
+fn fused_qual_kernel_oid_unsigned() {
+    const OIDOID: u32 = 26;
+    with_mcx(|mcx| {
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, OIDOID),
+            mk_const_typed(mcx, OIDOID, 4, Datum::from_u32(0x8000_0000)),
+        )
+        .unwrap();
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 716, BOOLOID, args));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::OidLt, .. }
+        ));
+        // Unsigned order: 0x7FFFFFFF < 0x80000000 but NOT as signed i32.
+        let row = |v: Option<u32>| [(OIDOID, 4i16, v.map(Datum::from_u32))];
+        assert!(run_qual_d(mcx, &mut state, &row(Some(0x7FFF_FFFF))));
+        assert!(run_qual_d(mcx, &mut state, &row(Some(0))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(0x8000_0000))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(u32::MAX))));
+    });
+}
+
+#[test]
+fn fused_qual_kernel_int24_and_int42() {
+    const INT2OID: u32 = 21;
+    with_mcx(|mcx| {
+        // var int2 < const int4 (int24lt, oid 160).
+        let args = NodeList::make2(
+            mcx,
+            mk_scan_var(mcx, 1, INT2OID),
+            mk_int4_const(mcx, Some(100_000)),
+        )
+        .unwrap();
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 160, BOOLOID, args));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::QualScanVarCmpConst { attnum: 0, cmp: CmpOp::Int24Lt, .. }
+        ));
+        // Every int2 value is < 100000 after C's promotion.
+        let row = |v: Option<i16>| [(INT2OID, 2i16, v.map(Datum::from_i16))];
+        assert!(run_qual_d(mcx, &mut state, &row(Some(i16::MAX))));
+        assert!(run_qual_d(mcx, &mut state, &row(Some(i16::MIN))));
+        assert!(!run_qual_d(mcx, &mut state, &row(None)));
+        // (const int4) < (var int2): int42lt (oid 161) commutes to Int24Gt
+        // on the var.
+        let args = NodeList::make2(
+            mcx,
+            mk_int4_const(mcx, Some(-7)),
+            mk_scan_var(mcx, 1, INT2OID),
+        )
+        .unwrap();
+        let mut state = qual_state(mcx, mk_opexpr(mcx, 161, BOOLOID, args));
+        assert!(matches!(
+            state.kernel(),
+            Kernel::QualScanVarCmpConst { cmp: CmpOp::Int24Gt, .. }
+        ));
+        assert!(run_qual_d(mcx, &mut state, &row(Some(0))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(-7))));
+        assert!(!run_qual_d(mcx, &mut state, &row(Some(-8))));
+    });
+}
+
+// --- censusgaps JIT parity: the new inline stencils vs the interpreter -------
+// Mixed int2/int4 comparators + oid unsigned comparators + the int24/int42
+// arithmetic family (incl. int24div's division-by-zero and the overflow
+// replay paths), byte-compared JIT vs interpreter on (value, isnull) and on
+// error (message + sqlstate). Off-aarch64 the JIT never engages and this
+// degrades to interpreter self-comparison (same as jit_parity_fuzz).
+#[test]
+fn jit_parity_censusgaps_inline_ops() {
+    const INT2OID: u32 = 21;
+    const OIDOID: u32 = 26;
+    with_mcx(|mcx| {
+        // CASE WHEN <bool expr> THEN 1 ELSE 0 END: forces the Program kernel
+        // (jump skeleton) so the copy-and-patch emitter owns the FuncExpr.
+        fn wrap_bool<'mcx>(mcx: Mcx<'mcx>, cond: Node<'mcx>) -> Node<'mcx> {
+            let when = ::types_nodes::primnodes::CaseWhen {
+                expr: Some(cond),
+                result: Some(mk_int4_const(mcx, Some(1))),
+                location: -1,
+            };
+            let mut args = NodeList::nil();
+            args.lappend(mcx, Node::mk(mcx, when).unwrap()).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::CaseExpr {
+                    casetype: INT4OID,
+                    casecollid: 0,
+                    arg: None,
+                    args,
+                    defresult: Some(mk_int4_const(mcx, Some(0))),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        }
+        // (cmp fn oid, lhs var type, rhs var type)
+        let cmp_cases: &[(u32, u32, u32)] = &[
+            (158, INT2OID, INT4OID),
+            (164, INT2OID, INT4OID),
+            (160, INT2OID, INT4OID),
+            (166, INT2OID, INT4OID),
+            (162, INT2OID, INT4OID),
+            (168, INT2OID, INT4OID),
+            (159, INT4OID, INT2OID),
+            (165, INT4OID, INT2OID),
+            (161, INT4OID, INT2OID),
+            (167, INT4OID, INT2OID),
+            (163, INT4OID, INT2OID),
+            (169, INT4OID, INT2OID),
+            (184, OIDOID, OIDOID),
+            (185, OIDOID, OIDOID),
+            (716, OIDOID, OIDOID),
+            (717, OIDOID, OIDOID),
+            (1638, OIDOID, OIDOID),
+            (1639, OIDOID, OIDOID),
+        ];
+        // (arith fn oid, lhs var type, rhs var type); result compared against
+        // a constant so the arith output feeds an inline cmp (still Program
+        // under the CASE wrapper).
+        let arith_cases: &[(u32, u32, u32)] = &[
+            (178, INT2OID, INT4OID),
+            (179, INT4OID, INT2OID),
+            (182, INT2OID, INT4OID),
+            (183, INT4OID, INT2OID),
+            (170, INT2OID, INT4OID),
+            (171, INT4OID, INT2OID),
+            (172, INT2OID, INT4OID),
+        ];
+        // Row pool: int2-ranged values where the column is int2 (canonical
+        // datum invariant), full-range where int4/oid; 0 divisors and
+        // overflow-provoking pairs included. As u32 bit patterns, -1 is
+        // u32::MAX and i32::MIN is 0x80000000 — the unsigned boundary.
+        let a_pool: &[Option<i32>] = &[
+            None,
+            Some(0),
+            Some(1),
+            Some(-1),
+            Some(7),
+            Some(-7),
+            Some(i16::MAX as i32),
+            Some(i16::MIN as i32),
+        ];
+        let b_pool: &[Option<i32>] = &[
+            None,
+            Some(0),
+            Some(1),
+            Some(-1),
+            Some(7),
+            Some(-32768),
+            Some(32767),
+            Some(i32::MAX),
+            Some(i32::MIN),
+            Some(65537),
+        ];
+        // Canonical datum for a pool value at the column's declared type.
+        fn typed_datum(typ: u32, v: i32) -> Datum {
+            match typ {
+                21 => Datum::from_i16(v as i16),
+                26 => Datum::from_u32(v as u32),
+                _ => Datum::from_i32(v),
+            }
+        }
+        fn typed_eval<'mcx>(
+            mcx: Mcx<'mcx>,
+            state: &mut ExprState<'mcx>,
+            cols: &[(u32, i16, Option<Datum>)],
+        ) -> FuzzOutcome {
+            let mut slot = virtual_slot_typed(mcx, cols);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            match exec_eval_expr(state, &mut slots) {
+                Ok(nd) => Ok((nd.isnull, if nd.isnull { 0 } else { nd.value.as_usize() })),
+                Err(e) => Err((e.message.clone(), format!("{:?}", e.sqlstate))),
+            }
+        }
+        let len_of = |typ: u32| if typ == 21 { 2i16 } else { 4 };
+        let mut exercised = 0usize;
+        let mut run_case = |expr: Node<'_>, lt: u32, rt: u32| {
+            let mut interp = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            interp.arm_result_mcx(mcx);
+            crate::jit::session_begin(crate::jit::PGJIT_PERFORM | crate::jit::PGJIT_EXPR);
+            let mut jit = exec_init_expr(mcx, Some(expr), ParamBind::NONE).unwrap().unwrap();
+            jit.arm_result_mcx(mcx);
+            let _ = crate::jit::session_end();
+            if jit.jit.is_some() {
+                exercised += 1;
+            }
+            for &a in a_pool {
+                for &b in b_pool {
+                    let cols = [
+                        (lt, len_of(lt), a.map(|v| typed_datum(lt, v))),
+                        (rt, len_of(rt), b.map(|v| typed_datum(rt, v))),
+                    ];
+                    let want = typed_eval(mcx, &mut interp, &cols);
+                    let got = typed_eval(mcx, &mut jit, &cols);
+                    assert_eq!(got, want, "row ({a:?}, {b:?})");
+                }
+            }
+        };
+        for &(f, lt, rt) in cmp_cases {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, lt), mk_scan_var(mcx, 2, rt)).unwrap();
+            run_case(wrap_bool(mcx, mk_opexpr(mcx, f, BOOLOID, args)), lt, rt);
+        }
+        for &(f, lt, rt) in arith_cases {
+            let args =
+                NodeList::make2(mcx, mk_scan_var(mcx, 1, lt), mk_scan_var(mcx, 2, rt)).unwrap();
+            let arith = mk_opexpr(mcx, f, INT4OID, args);
+            let cmp_args =
+                NodeList::make2(mcx, arith, mk_int4_const(mcx, Some(6))).unwrap();
+            run_case(wrap_bool(mcx, mk_opexpr(mcx, 66, BOOLOID, cmp_args)), lt, rt);
+        }
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(
+            exercised,
+            cmp_cases.len() + arith_cases.len(),
+            "every censusgaps case must engage the JIT emitter on aarch64"
+        );
+        let _ = exercised;
+    });
 }

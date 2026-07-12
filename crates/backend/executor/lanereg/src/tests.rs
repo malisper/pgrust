@@ -22,9 +22,11 @@ fn every_cov_row_is_shape_consistent() {
     }
 }
 
-// The in-tree AOT qual comparator set: exactly the 30 int OIDs execexpr's
-// CmpOp::for_fn_oid admits, each with the correct (width, pred). This is the
-// golden set the execexpr conformance test binds `for_fn_oid` to.
+// The in-tree AOT qual comparator set: exactly the 72 OIDs execexpr's
+// CmpOp::for_fn_oid admits (the legacy 30 int families + the 42 censusgaps
+// additions: int24/int42/oid/float4/float8/float48/float84), each with the
+// correct (width, pred). This is the golden set the execexpr conformance test
+// binds `for_fn_oid` to.
 #[test]
 fn aot_qual_cmp_golden_set() {
     let golden: &[(Oid, CmpWidth, CmpPred)] = &[
@@ -33,12 +35,19 @@ fn aot_qual_cmp_golden_set() {
         (63, I2, Eq), (145, I2, Ne), (64, I2, Lt), (148, I2, Le), (146, I2, Gt), (151, I2, Ge),
         (474, I84, Eq), (475, I84, Ne), (476, I84, Lt), (478, I84, Le), (477, I84, Gt), (479, I84, Ge),
         (852, I48, Eq), (853, I48, Ne), (854, I48, Lt), (856, I48, Le), (855, I48, Gt), (857, I48, Ge),
+        (158, I24, Eq), (164, I24, Ne), (160, I24, Lt), (166, I24, Le), (162, I24, Gt), (168, I24, Ge),
+        (159, I42, Eq), (165, I42, Ne), (161, I42, Lt), (167, I42, Le), (163, I42, Gt), (169, I42, Ge),
+        (184, Oid, Eq), (185, Oid, Ne), (716, Oid, Lt), (717, Oid, Le), (1638, Oid, Gt), (1639, Oid, Ge),
+        (287, F4, Eq), (288, F4, Ne), (289, F4, Lt), (290, F4, Le), (291, F4, Gt), (292, F4, Ge),
+        (293, F8, Eq), (294, F8, Ne), (295, F8, Lt), (296, F8, Le), (297, F8, Gt), (298, F8, Ge),
+        (299, F48, Eq), (300, F48, Ne), (301, F48, Lt), (302, F48, Le), (303, F48, Gt), (304, F48, Ge),
+        (305, F84, Eq), (306, F84, Ne), (307, F84, Lt), (308, F84, Le), (309, F84, Gt), (310, F84, Ge),
     ];
     for &(oid, w, p) in golden {
         assert_eq!(aot_qual_cmp(oid), Some(CmpShape { width: w, pred: p }), "oid {oid}");
     }
     let in_tree_aot = ENTRIES.iter().filter(|e| aot_qual_cmp(e.oid).is_some()).count();
-    assert_eq!(in_tree_aot, golden.len(), "AOT in-tree set drifted from the golden 30");
+    assert_eq!(in_tree_aot, golden.len(), "AOT in-tree set drifted from the golden 72");
 }
 
 #[test]
@@ -50,6 +59,14 @@ fn jit_arith_golden_set() {
         (463, ArithWidth::W8, ArithKind::Add),
         (464, ArithWidth::W8, ArithKind::Sub),
         (465, ArithWidth::W8, ArithKind::Mul),
+        // censusgaps: the int2/int4 mixed family the JIT now inlines.
+        (178, ArithWidth::W24, ArithKind::Add),
+        (179, ArithWidth::W24, ArithKind::Add),
+        (182, ArithWidth::W24, ArithKind::Sub),
+        (183, ArithWidth::W24, ArithKind::Sub),
+        (170, ArithWidth::W24, ArithKind::Mul),
+        (171, ArithWidth::W24, ArithKind::Mul),
+        (172, ArithWidth::W24, ArithKind::Div),
     ];
     for &(oid, w, op) in golden {
         assert_eq!(jit_arith(oid), Some(ArithShape { width: w, op }), "oid {oid}");
@@ -73,15 +90,25 @@ fn fold_in_tree_golden_set() {
 
 #[test]
 fn drift_findings() {
-    // stencil-but-no-census: int24(6)+int42(6)+oid(6)+float4/8/48/84(24) = 42.
+    // censusgaps closed all three cross-tier drift classes:
+    // - stencil-but-no-census (was 42): every stitch-vocabulary comparator now
+    //   has the in-tree AOT qual tier.
     let stencil = ENTRIES.iter().filter(|e| drift_of(e).contains(&Drift::StencilNoCensus)).count();
-    assert_eq!(stencil, 42);
-    // fold-affine-but-no-jit: int24/int42 pl/mi/mul + int24div = 7.
+    assert_eq!(stencil, 0);
+    // - fold-affine-but-no-jit (was 7): the int24/int42 mixed arith family is
+    //   now JIT-inlined too.
     let fa = ENTRIES.iter().filter(|e| drift_of(e).contains(&Drift::FoldAffineNoJit)).count();
-    assert_eq!(fa, 7);
-    // jit-but-no-fold-affine: int8 pl/mi/mul = 3.
+    assert_eq!(fa, 0);
+    // - jit-but-no-fold-affine (was 3): int8 pl/mi/mul carry a documented
+    //   FoldAffine REFUSAL (i128 interval proofs missing), not silent drift.
     let jf = ENTRIES.iter().filter(|e| drift_of(e).contains(&Drift::JitNoFoldAffine)).count();
-    assert_eq!(jf, 3);
+    assert_eq!(jf, 0);
+    let refused: Vec<_> = ENTRIES
+        .iter()
+        .filter(|e| e.cov.iter().any(|c| c.is_refused()))
+        .map(|e| e.oid)
+        .collect();
+    assert_eq!(refused, vec![463, 464, 465], "documented refusals: int8 pl/mi/mul fold-affine");
 }
 
 // The coverage report is a checked-in artifact regenerated from the registry.

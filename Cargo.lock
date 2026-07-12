@@ -4780,6 +4780,7 @@ dependencies = [
  "aclchk_seams",
  "adt_date",
  "adt_datetime",
+ "adt_float",
  "adt_formatting",
  "adt_int",
  "adt_json",
