@@ -1307,7 +1307,9 @@ fn prepare_projection_slot<'mcx>(
 
 fn initialize_aggregates_sets(node: &mut AggStateData<'_>, num_reset: usize) {
     for setno in 0..num_reset {
-        crate::restart_pertrans_sortstates(&mut node.pertrans_sort, setno)
+        // Grouping sets never admit set-mode (init gates on
+        // !has_grouping_sets), so force is always false here.
+        crate::restart_pertrans_sortstates(&mut node.pertrans_sort, setno, false)
             .expect("sortstate restart");
     }
     let gs = node.gsets.as_mut().expect("grouping-sets retrieve");
