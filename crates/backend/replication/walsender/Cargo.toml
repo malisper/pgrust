@@ -52,6 +52,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_storage = { path = "../../../_support/types/types_storage" }
 varlena = { path = "../../utils/adt/varlena" }
 xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
 walsender_config = { path = "../walsender_config" }
 walsender_seams = { path = "../walsender_seams" }
 xact = { path = "../../access/transam/xact" }

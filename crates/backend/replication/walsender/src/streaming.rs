@@ -104,7 +104,9 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
 
     let mut flush_tli: TimeLineID = 0;
     let flush_ptr: XLogRecPtr = if am_cascading {
-        panic!("walsender: cascading-standby streaming needs walreceiver (replication-p1 P2)");
+        let (ptr, tli) = crate::GetStandbyFlushRecPtr();
+        flush_tli = tli;
+        ptr
     } else {
         transam_xlog::GetFlushRecPtr(Some(&mut flush_tli))
     };
@@ -185,7 +187,19 @@ pub fn XLogSendPhysical(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
     let send_rqst_ptr: XLogRecPtr = if crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get()) {
         panic!("walsender: historic-timeline streaming unported (replication-p1 P4)");
     } else if am_cascading() {
-        panic!("walsender: cascading-standby streaming needs walreceiver (replication-p1 P2)");
+        // Streaming the latest timeline on a cascading standby.
+        let (ptr, send_rqst_tli) = crate::GetStandbyFlushRecPtr();
+        let became_historic = if !transam_xlog::RecoveryInProgress() {
+            // We have been promoted; the current timeline became historic.
+            crate::AM_CASCADING_WALSENDER.with(|c| c.set(false));
+            true
+        } else {
+            crate::SEND_TIME_LINE.with(|c| c.get()) != send_rqst_tli
+        };
+        if became_historic {
+            panic!("walsender: timeline switch while cascading unported (replication-p1 P4)");
+        }
+        ptr
     } else {
         // Streaming the current timeline on a primary: send everything flushed.
         transam_xlog::GetFlushRecPtr(None)

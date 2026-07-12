@@ -251,3 +251,35 @@ fn rekey_wakeup_registry_follows_task_pid() {
     WakeupOtherProc(first_pid);
     assert!(!pipe_byte_pending(), "wake by the dead pid hit this thread");
 }
+
+// The walreceiver's WaitLatchOrSocket shape: latch + inert PM-death + socket
+// in one throwaway set; data arriving mid-wait must wake before the timeout.
+#[test]
+fn latch_plus_socket_wakes_on_late_socket_data() {
+    setup_backend();
+    let latch = owned_latch();
+    let (a, b) = socketpair();
+    let set = CreateWaitEventSet(3).unwrap();
+    AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET, Some(latch), None).unwrap();
+    AddWaitEventToSet(set, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET, None, None).unwrap();
+    AddWaitEventToSet(set, WL_SOCKET_READABLE, a, None, None).unwrap();
+
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let one = [1u8];
+        // SAFETY: write to the live socketpair peer.
+        unsafe { libc::write(b, one.as_ptr().cast(), 1) };
+    });
+
+    let start = std::time::Instant::now();
+    let mut occurred = [WaitEvent::default(); 3];
+    let n = WaitEventSetWait(set, 5000, &mut occurred, 0).unwrap();
+    writer.join().unwrap();
+    assert!(start.elapsed().as_millis() < 3000, "timed out instead of waking on socket");
+    assert_eq!(n, 1);
+    assert_eq!(occurred[0].events & WL_SOCKET_READABLE, WL_SOCKET_READABLE);
+
+    FreeWaitEventSet(set);
+    // SAFETY: closing our socketpair.
+    unsafe { libc::close(a); libc::close(b); }
+}

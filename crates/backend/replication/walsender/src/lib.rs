@@ -436,6 +436,25 @@ fn unported(cmdtag: &str, increment: u32) -> ! {
     panic!("walsender: {cmdtag} unported (replication-p1 increment {increment})");
 }
 
+// GetStandbyFlushRecPtr (xlog.c:6653): what a cascading standby may send —
+// everything replayed, plus anything the walreceiver streamed on the replay
+// timeline. Hosted here while transam_xlog is frozen (recovery-standby lanes);
+// reads through the installed seams, exactly the two C callees.
+pub(crate) fn GetStandbyFlushRecPtr() -> (types_core::XLogRecPtr, TimeLineID) {
+    let (receive_ptr, _latest_chunk_start, receive_tli) =
+        if walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::is_installed() {
+            walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::call()
+        } else {
+            (0, 0, 0)
+        };
+    let (replay_ptr, replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
+    let mut result = replay_ptr;
+    if receive_tli == replay_tli && receive_ptr > replay_ptr {
+        result = receive_ptr;
+    }
+    (result, replay_tli)
+}
+
 // IdentifySystem (walsender.c:395).
 fn IdentifySystem(mcx: mcx::Mcx<'_>) -> PgResult<()> {
     let sysid = format!("{}", transam_xlog::GetSystemIdentifier());
@@ -445,7 +464,9 @@ fn IdentifySystem(mcx: mcx::Mcx<'_>) -> PgResult<()> {
 
     let mut curr_tli: TimeLineID = 0;
     let logptr = if am_cascading {
-        panic!("IdentifySystem: GetStandbyFlushRecPtr unported (replication-p1 increment 3)");
+        let (ptr, tli) = GetStandbyFlushRecPtr();
+        curr_tli = tli;
+        ptr
     } else {
         transam_xlog::GetFlushRecPtr(Some(&mut curr_tli))
     };

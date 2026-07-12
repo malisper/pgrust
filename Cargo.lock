@@ -18093,6 +18093,7 @@ dependencies = [
  "types_guc",
  "types_storage",
  "varlena",
+ "walreceiverfuncs_seams",
  "walsender_config",
  "walsender_seams",
  "xact",
