@@ -1088,7 +1088,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     rec.src.redo_start_lsn = cf.checkPointCopy.redo;
     rec.src.redo_start_tli = cf.checkPointCopy.ThisTimeLineID;
 
-    let mut was_shutdown;
+    let was_shutdown;
     let mut have_backup_label = false;
     let mut have_tblspc_map = false;
     let mut backup_from_standby = false;
