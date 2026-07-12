@@ -255,6 +255,23 @@ pub(super) trait TupleOp<'mcx> {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus>;
+    /// The upstream source is exhausted — the `Finished`-vs-more-phases
+    /// seam. An op with a post-exhaustion phase (the right-fill hash join's
+    /// unmatched-BUILD fill scan, HJ_FILL_INNER_TUPLES) flips into
+    /// source-of-fill-rows mode here and pushes into the SAME sink:
+    /// `Paused` = downstream full mid-fill (position node-resident;
+    /// `pending()` must report true so the driver `resume`s the fill on the
+    /// next round), anything else = nothing further will ever be produced
+    /// (the driver then finishes the sink). Called (possibly repeatedly —
+    /// implementations must be idempotent once drained) whenever the source
+    /// reports exhaustion. Default: no post-exhaustion phase.
+    fn source_exhausted(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        Ok(OpStatus::Finished)
+    }
 }
 
 /// Splices a `TupleOp` between an upstream `Operator` and the pipeline sink
@@ -327,8 +344,24 @@ where
             None => match src.produce(node, estate)? {
                 Some(b) => b,
                 None => {
-                    root.finish(estate)?;
-                    return Ok(None);
+                    // The Finished-vs-more-phases seam: a TupleOp with a
+                    // post-exhaustion phase (right-fill hash join) keeps
+                    // producing into the root here.
+                    match top.source_exhausted(root, estate)? {
+                        OpStatus::Paused => {
+                            let t = root.take();
+                            debug_assert!(t.is_some(), "TupleOp paused on a non-full root");
+                            return Ok(t);
+                        }
+                        _ => {
+                            debug_assert!(
+                                root.buffered.is_none(),
+                                "post-exhaustion phase done with a buffered tuple"
+                            );
+                            root.finish(estate)?;
+                            return Ok(None);
+                        }
+                    }
                 }
             },
         };
@@ -370,7 +403,17 @@ where
             Some(b) => b,
             None => match src.produce(node, estate)? {
                 Some(b) => b,
-                None => break,
+                None => {
+                    // Post-exhaustion phase (right-fill hash join): the
+                    // TupleOp keeps producing into the breaker sink, which
+                    // never fills, so the fill runs to completion here.
+                    if top.source_exhausted(sink, estate)? == OpStatus::Paused {
+                        unreachable!(
+                            "chain build pipeline paused: breaker sink returned Full"
+                        )
+                    }
+                    break;
+                }
             },
         };
         let mut mid = TupleOpSink { op: top, out: sink };
