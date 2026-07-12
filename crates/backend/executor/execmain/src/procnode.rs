@@ -95,6 +95,11 @@ pub struct AppendNode<'mcx> {
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
     /// Original appendplans index per substate (initial pruning skips some).
     pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
+    /// Lane-executor-v2 append verdict, memoized at first offer (verdict
+    /// stability: a lane-driven child carries a staged-batch cursor across
+    /// the Volcano boundary); the dynamic gates (EPQ, direction, parallel
+    /// mode) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 pub struct MergeAppendNode<'mcx> {
@@ -1051,7 +1056,7 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::Append(::mcx::alloc_in(
                 mcx,
-                AppendNode { state, substates, subplan_origin },
+                AppendNode { state, substates, subplan_origin, lane_fusible: None },
             )?)
         }
         NodeTag::T_MergeAppend => {
@@ -1433,6 +1438,14 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: the no-FROM row / the
+    // projection stream over the sort breaker): falls through to the
+    // UNCHANGED exec_result on refuse. Lane logic + refuse-set in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_result(rs, estate)? {
+            return Ok(r);
+        }
+    }
     exec_result(rs, estate)
 }
 
@@ -1441,6 +1454,13 @@ fn project_set_arm<'mcx>(
     ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2: ProjectSet is REFUSED wholesale — a documented
+    // refuse-set entry (the SRF multi-call protocol is per-tuple stateful and
+    // has no lane-owned child shape to chain onto; see the ProjectSet section
+    // of `lanev2.rs`). Accounting tick only; always the unchanged body.
+    if crate::lanev2::enabled() {
+        crate::lanev2::refuse_project_set();
+    }
     exec_project_set(ps, estate)
 }
 
@@ -1688,6 +1708,20 @@ fn agg_arm<'mcx>(
             // exec_nest_loop on refuse. Lane logic + refuse-set in `lanev2`.
             if crate::lanev2::enabled() {
                 if let Some(r) = crate::lanev2::try_own_agg_over_nest_loop(agg, nl, estate)? {
+                    return Ok(r);
+                }
+            }
+        }
+        PlanStateNode::SubqueryScan(sqs) => {
+            // Lane-executor-v2 dispatch hook (wave-4 glue: hash-agg breaker
+            // over a SubqueryScan over lane scans — pipelines chaining
+            // through the subquery boundary). Falls through to the UNCHANGED
+            // per-tuple agg over exec_scan on refuse. Lane logic + refuse-set
+            // in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_subquery_scan(agg, sqs, estate)?
+                {
                     return Ok(r);
                 }
             }
@@ -2176,6 +2210,14 @@ fn group_arm<'mcx>(
     g: &mut PgBox<'mcx, GroupNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: streaming sorted grouping
+    // over the sort breaker): falls through to the UNCHANGED exec_group on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_group(g, estate)? {
+            return Ok(r);
+        }
+    }
     let g = &mut **g;
     let outer = &mut g.outer;
     ::nodegroup::exec_group(&mut g.state, estate, |e| exec_proc_node(outer, e))
@@ -2278,7 +2320,16 @@ fn append_arm<'mcx>(
     a: &mut PgBox<'mcx, AppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    let AppendNode { state, substates, subplan_origin: _ } = &mut **a;
+    // Lane-executor-v2 dispatch hook (wave 5: the serial Append over
+    // lane-fusible scan children — the node's own exec_append body over lane
+    // child pipelines): falls through to the UNCHANGED exec_append on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_append(a, estate)? {
+            return Ok(r);
+        }
+    }
+    let AppendNode { state, substates, .. } = &mut **a;
     ::nodeappend::exec_append(state, estate, |e, i| exec_proc_node(&mut substates[i], e))
 }
 
@@ -2298,6 +2349,14 @@ fn subquery_scan_arm<'mcx>(
     s: &mut PgBox<'mcx, SubqueryScanNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: pass-through
+    // filter/project over the sort breaker): falls through to the UNCHANGED
+    // exec_scan on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_subquery_scan(s, estate)? {
+            return Ok(r);
+        }
+    }
     ::execscan::exec_scan(&mut **s, estate)
 }
 
@@ -3480,7 +3539,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer, lane_fusible; outer_desc },
     IncrementalSortNode<'_> { state, outer },
-    AppendNode<'_> { state, substates, subplan_origin },
+    AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },

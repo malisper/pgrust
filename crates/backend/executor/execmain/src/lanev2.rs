@@ -2063,8 +2063,9 @@ pub fn try_own_sort<'mcx>(
 /// Structural sort-breaker verdict, memoized at first call: the fusibility
 /// cascade must not run once per pulled tuple, and a mid-stream verdict flip
 /// would desync the staged-batch cursors. Shared by the bare sort hook and
-/// the Limit/Unique-over-sort chains (which admit exactly the sort shapes the
-/// breaker admits).
+/// the Limit/Unique-over-sort chains and the wave-4 chains over the sort
+/// breaker (Group / Result / SubqueryScan) — all of which admit exactly the
+/// sort shapes the breaker admits.
 fn sort_lane_fusible_memo<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -2090,7 +2091,8 @@ fn sort_lane_fusible_memo<'mcx>(
 /// pipeline to exhaustion into the breaker sink, then finalize (performsort)
 /// — all inside one call, exactly like `exec_sort`'s build leg. `sort_Done`
 /// is the phase flag; a rescan clears it and re-enters here. Shared by the
-/// bare sort hook and the Limit/Unique-over-sort chains.
+/// bare sort hook, the Limit/Unique-over-sort chains, and the wave-4 chains
+/// over the sort breaker.
 fn sort_feed_if_needed<'mcx>(
     state: &mut ::nodesort::SortState<'mcx>,
     outer: &mut crate::procnode::PlanStateNode<'mcx>,
@@ -2274,10 +2276,16 @@ impl<'mcx> Source<'mcx> for SortEmitSource {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<Batch>> {
         // C's per-ExecSort-call CHECK_FOR_INTERRUPTS: when a chained consumer
-        // (Unique dedup, Limit's offset skip) drains several sorted tuples in
-        // one PG pull, C would enter ExecSort once per tuple — keep that
-        // cadence here rather than once per pull (§9).
-        ::postgres_seams::check_for_interrupts::call()?;
+        // (Unique dedup, Limit's offset skip, Group's duplicate skip,
+        // Result's stream) drains several sorted tuples in one PG pull, C
+        // would enter ExecSort once per tuple — keep that cadence here
+        // rather than once per pull (§9). Pending-gated, exactly C's
+        // CHECK_FOR_INTERRUPTS macro: the unconditional seam call per
+        // produced tuple measured +17% on the distinct-count shape (q9),
+        // where the agg parent pulls this source once per input row.
+        if ::init_small::globals::InterruptPending() {
+            ::postgres_seams::check_for_interrupts::call()?;
+        }
         Ok(::nodesort::sort_lane_next(node, estate)?.map(|_| Batch { n: 1 }))
     }
 }
@@ -4469,4 +4477,684 @@ pub fn try_own_unique<'mcx>(
         ::nodeunique::lane_unique_eof(state, estate);
     }
     Ok(Some(r))
+}
+
+// ===========================================================================
+// Wave-4 streaming glue (Volcano-tail triage, 2026-07-12): three small
+// streaming operators hosted where the lane already owns the neighboring
+// pipeline — never a new layer over a refused child (admission economics,
+// design §4; the Limit/Unique precedent):
+//
+//   Group        adjacent-row grouping over the SORT breaker's emit — a
+//                mid-pipeline `TupleOp` running `exec_group`'s own per-tuple
+//                body (`nodegroup::lane_group_feed`: the same
+//                grouping-equality program, first-tuple copy, HAVING qual and
+//                projection — reused, not reimplemented); state = the
+//                node-resident first-tuple slot + have-first/grp_done flags,
+//                so a Volcano fallback at any call boundary is byte-safe.
+//                NOTE: Group the NODE only — AGG_SORTED / the agg breaker
+//                admission are owned elsewhere (wave-4 charter split).
+//   Result       the gating/projection node: `resconstantqual` evaluated
+//                once (C's rs_checkqual arm, via `noderesult`'s seams), then
+//                either the degenerate no-child pipeline (the single no-FROM
+//                row) or the child stream projected row-by-row through a
+//                `TupleOp` over the sort breaker's emit.
+//   SubqueryScan a pass-through filter/project `TupleOp` over the child
+//                pipeline (`execscan::lane_scan_accept` — `exec_scan_impl`'s
+//                per-tuple qual/proj body, subplan/param arms included):
+//                bare over the sort breaker, and spliced mid-pipeline in the
+//                agg-over-subquery-over-scan composition so lane pipelines
+//                chain through subquery boundaries end to end.
+//
+// Refused shapes (each byte-safe on the Volcano fallback): EPQ and
+// non-forward pulls (dynamic gates, ticked per offered call); instrumented
+// nodes (EXPLAIN ANALYZE keeps per-node counters — for the chained shapes an
+// instrumented tree wraps every node so the child never matches the Sort/scan
+// arms, and the Result no-FROM arm gates on the estate's instrumentation
+// explicitly); any child that is not a lane-owned pipeline
+// (`child-not-lane-owned`; the child's own refusal reason ticks under the
+// child's class). Group/Result/SubqueryScan quals and projections run the
+// nodes' OWN evaluation arms (subplan-aware where the node's Volcano body is
+// — noderesult and execscan host subplans/params; nodegroup's body is reused
+// verbatim), so no subplan-param refusal is needed at this layer.
+// ===========================================================================
+
+/// The Group node as a mid-pipeline streaming operator: one sorted tuple in,
+/// 0..1 projected group heads out, never pends (no intra-tuple expansion) and
+/// never finishes early.
+struct GroupOp<'a, 'mcx> {
+    group: &'a mut ::nodegroup::GroupState<'mcx>,
+}
+
+impl<'mcx> TupleOp<'mcx> for GroupOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        match ::nodegroup::lane_group_feed(self.group, estate, tuple)? {
+            None => Ok(OpStatus::NeedInput),
+            Some(result) => Ok(match out.accept(result, estate)? {
+                SinkFeed::Full => OpStatus::Paused,
+                SinkFeed::NeedMore => OpStatus::NeedInput,
+            }),
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        unreachable!("GroupOp never pends")
+    }
+}
+
+/// Try to let the lane own a `Group` over the sort breaker — streaming
+/// adjacent-row grouping on the sorted emit. `None` = refused; `exec_group`
+/// drives the same GroupState byte-safely at any call boundary.
+#[inline]
+pub fn try_own_group<'mcx>(
+    g: &mut ::mcx::PgBox<'mcx, crate::procnode::GroupNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (Group init asserts !BACKWARD && !MARK, so a
+    // non-forward pull should be impossible — gate anyway, like the sort).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::Group, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::Group, RefuseReason::Backward);
+        return Ok(None);
+    }
+    let g = &mut **g;
+    // Sorted grouping's input comes from a Sort in the lane-ownable plans
+    // (a presorted index path arrives as a standalone scan, which refuses
+    // ownership — C's shape there IS the Volcano Group). Instrumented trees
+    // wrap every node, so EXPLAIN ANALYZE never matches the Sort arm.
+    let crate::procnode::PlanStateNode::Sort(s) = &mut g.outer else {
+        stats::tick_refused(ShapeClass::Group, RefuseReason::ChildNotLaneOwned);
+        return Ok(None);
+    };
+    if !sort_lane_fusible_memo(s, estate)? {
+        stats::tick_refused(ShapeClass::Group, RefuseReason::ChildNotLaneOwned);
+        return Ok(None);
+    }
+    // C's ExecGroup entry interrupt check (conditional, exactly the Volcano
+    // entry's), then the drained guard, then the first child pull's ExecSort
+    // entry CFI.
+    ::nodegroup::lane_group_cfi()?;
+    if ::nodegroup::lane_group_done(&g.state) {
+        return Ok(Some(None));
+    }
+    ::postgres_seams::check_for_interrupts::call()?;
+    let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+    // One OWNED tick per lane-owned group drive start (= the underlying sort
+    // feed event; rescan re-feeds and re-ticks, like the sortfeed class).
+    if !sstate.sort_done() {
+        stats::tick_owned(ShapeClass::Group);
+    }
+    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
+    let mut op = GroupOp { group: &mut g.state };
+    let mut root = RootAdapter::new(None);
+    let r =
+        pull_step_chain(sstate, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?;
+    if r.is_none() {
+        // exec_group's child-exhausted arm: the node stays drained.
+        ::nodegroup::lane_group_eof(&mut g.state);
+    }
+    Ok(Some(r))
+}
+
+/// The Result node's per-row projection as a mid-pipeline streaming operator:
+/// one child row in, exactly one projected row out (Result has no per-row
+/// qual — C's ExecResult projects every child row). Never pends, never
+/// finishes early.
+struct ResultOp<'a, 'mcx> {
+    ps: &'a mut crate::procnode::PlanStateBase<'mcx>,
+}
+
+impl<'mcx> TupleOp<'mcx> for ResultOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // exec_result's per-call body over one pushed child row: per-tuple
+        // context reset, stage the outer tuple, project (param hoist +
+        // subplan-aware arm inside the seam).
+        let ecxt = self.ps.ps_ExprContext.expect("ResultState without ExprContext");
+        estate.reset_expr_context(ecxt);
+        estate.ecxt_mut(ecxt).ecxt_outertuple = Some(tuple);
+        let result = crate::noderesult::lane_result_project(self.ps, estate)?;
+        Ok(match out.accept(result, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        unreachable!("ResultOp never pends")
+    }
+}
+
+/// Try to let the lane own a `Result`: the no-FROM single-row arm (degenerate
+/// no-child pipeline), or the projection stream over the sort breaker. The
+/// one-time `resconstantqual` gate runs BEFORE the child is ever fed, via
+/// `noderesult::lane_result_gate` — C's rs_checkqual arm verbatim, so a
+/// refusal after the gate ran is still byte-safe (`exec_result` sees the
+/// same consumed rs_checkqual / rs_done state its own first call would have
+/// left).
+#[inline]
+pub fn try_own_result<'mcx>(
+    rs: &mut crate::noderesult::ResultState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates.
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::ResultNode, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::ResultNode, RefuseReason::Backward);
+        return Ok(None);
+    }
+    // EXPLAIN ANALYZE refuses by policy (§4). The no-FROM arm has no child
+    // whose Instrumented wrapper would break the match, so gate on the
+    // estate's instrumentation table directly (non-empty exactly when the
+    // plan is instrumented).
+    if !estate.es_instrumentation.is_empty() {
+        stats::tick_refused(ShapeClass::ResultNode, RefuseReason::Instrumented);
+        return Ok(None);
+    }
+    match rs.outer.as_deref_mut() {
+        None => {
+            // The no-FROM row: exec_result's childless body, statement for
+            // statement (entry CFI → one-time gate → per-call ctx reset →
+            // drained guard → mark done + project the single row).
+            crate::cfi()?;
+            // One OWNED tick per lane-owned Result execution: the call that
+            // consumes the gate and/or emits; the drained tail calls after it
+            // don't re-tick.
+            if rs.rs_checkqual || !rs.rs_done {
+                stats::tick_owned(ShapeClass::ResultNode);
+            }
+            if rs.rs_checkqual && !crate::noderesult::lane_result_gate(rs, estate)? {
+                return Ok(Some(None));
+            }
+            let ecxt = rs.ps.ps_ExprContext.expect("ResultState without ExprContext");
+            estate.reset_expr_context(ecxt);
+            if rs.rs_done {
+                return Ok(Some(None));
+            }
+            rs.rs_done = true;
+            Ok(Some(Some(crate::noderesult::lane_result_project(&mut rs.ps, estate)?)))
+        }
+        Some(crate::procnode::PlanStateNode::Sort(_)) => {
+            // Child admission BEFORE any state effect. (Instrumented trees
+            // wrap every node, so an instrumented Sort never matches — the
+            // estate gate above already refused anyway.)
+            {
+                let Some(crate::procnode::PlanStateNode::Sort(s)) = rs.outer.as_deref_mut()
+                else {
+                    unreachable!("matched above")
+                };
+                if !sort_lane_fusible_memo(s, estate)? {
+                    stats::tick_refused(ShapeClass::ResultNode, RefuseReason::ChildNotLaneOwned);
+                    return Ok(None);
+                }
+            }
+            // exec_result entry: CFI, then the one-time gate (C evaluates it
+            // before the child is ever pulled; false = the sort is never fed).
+            crate::cfi()?;
+            if rs.rs_checkqual && !crate::noderesult::lane_result_gate(rs, estate)? {
+                return Ok(Some(None));
+            }
+            if rs.rs_done {
+                return Ok(Some(None));
+            }
+            let crate::noderesult::ResultState { ps, outer, .. } = rs;
+            let Some(crate::procnode::PlanStateNode::Sort(s)) = outer.as_deref_mut() else {
+                unreachable!("matched above")
+            };
+            // C's first child pull enters ExecSort: entry CFI, then the feed.
+            ::postgres_seams::check_for_interrupts::call()?;
+            let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+            // One OWNED tick per lane-owned Result child-feed event.
+            if !sstate.sort_done() {
+                stats::tick_owned(ShapeClass::ResultNode);
+            }
+            sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
+            let mut op = ResultOp { ps };
+            let mut root = RootAdapter::new(None);
+            Ok(Some(pull_step_chain(
+                sstate,
+                &mut SortEmitSource,
+                &mut SortEmit,
+                &mut op,
+                &mut root,
+                estate,
+            )?))
+        }
+        Some(_) => {
+            stats::tick_refused(ShapeClass::ResultNode, RefuseReason::ChildNotLaneOwned);
+            Ok(None)
+        }
+    }
+}
+
+/// The SubqueryScan node as a mid-pipeline streaming operator: one subplan
+/// row in, 0..1 filtered/projected rows out, via `execscan::lane_scan_accept`
+/// — `exec_scan_impl`'s per-tuple qual/projection body (subplan/param arms
+/// included), over the same node state (`ss_ScanTupleSlot` repointed at the
+/// subplan's slot exactly as `SubqueryNext` does). Never pends, never
+/// finishes early.
+struct SubqueryScanOp<'a, 'mcx> {
+    ss: &'a mut ::execscan::ScanState<'mcx>,
+}
+
+impl<'mcx> TupleOp<'mcx> for SubqueryScanOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // exec_scan_fetch's conditional per-tuple interrupt check (§9: same
+        // cadence as the per-tuple driver this replaces).
+        if ::init_small::globals::InterruptPending() {
+            ::postgres_seams::check_for_interrupts::call()?;
+        }
+        // SubqueryNext: the subplan's slot goes to the driver uncopied.
+        self.ss.ss_ScanTupleSlot = tuple;
+        match ::execscan::lane_scan_accept(self.ss, estate, tuple)? {
+            None => Ok(OpStatus::NeedInput),
+            Some(result) => Ok(match out.accept(result, estate)? {
+                SinkFeed::Full => OpStatus::Paused,
+                SinkFeed::NeedMore => OpStatus::NeedInput,
+            }),
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        unreachable!("SubqueryScanOp never pends")
+    }
+}
+
+/// Try to let the lane own a bare `SubqueryScan` over the sort breaker —
+/// the pass-through filter/project stream on the sorted emit. `None` =
+/// refused; `exec_scan` drives the same ScanState byte-safely.
+#[inline]
+pub fn try_own_subquery_scan<'mcx>(
+    s: &mut ::mcx::PgBox<'mcx, crate::procnode::SubqueryScanNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates. EPQ substitutes test tuples in the fetch
+    // (exec_scan_epq); the lane refuses it wholesale (§4).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Backward);
+        return Ok(None);
+    }
+    let s = &mut **s;
+    if s.ss.instr_idx.is_some() {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Instrumented);
+        return Ok(None);
+    }
+    let crate::procnode::PlanStateNode::Sort(sort) = &mut *s.subplan else {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::ChildNotLaneOwned);
+        return Ok(None);
+    };
+    if !sort_lane_fusible_memo(sort, estate)? {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::ChildNotLaneOwned);
+        return Ok(None);
+    }
+    // C's first fetch: exec_scan_fetch's conditional CFI runs per tuple in
+    // the TupleOp; the subplan pull enters ExecSort — entry CFI here.
+    ::postgres_seams::check_for_interrupts::call()?;
+    let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = sort;
+    // One OWNED tick per lane-owned feed event (the child sort feed).
+    if !sstate.sort_done() {
+        stats::tick_owned(ShapeClass::SubqueryScan);
+    }
+    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
+    // End-of-stream mirrors exec_scan_impl's projected-slot clear.
+    let clear_on_finish = s.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
+    let mut op = SubqueryScanOp { ss: &mut s.ss };
+    let mut root = RootAdapter::new(clear_on_finish);
+    Ok(Some(pull_step_chain(
+        sstate,
+        &mut SortEmitSource,
+        &mut SortEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
+}
+
+/// Feed pipeline for the agg-over-subquery composition: lane scan source →
+/// scalar filter/project → SubqueryScanOp (pass-through filter/project) →
+/// the hash-agg breaker sink, to exhaustion — dispatched over the admitted
+/// scan child types (join-probe-drain shape).
+fn subquery_feed_drain_dispatch<'mcx>(
+    sqs: &mut crate::procnode::SubqueryScanNode<'mcx>,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let crate::procnode::SubqueryScanNode { ss, subplan } = sqs;
+    let mut op = SubqueryScanOp { ss };
+    match &mut **subplan {
+        crate::procnode::PlanStateNode::SeqScan(ss2) => drain_pipeline_chain(
+            ss2,
+            &mut SeqScanSource,
+            &mut SeqScanFilterProject,
+            &mut op,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexScan(is) => {
+            drain_pipeline_chain(is, &mut IndexScanSource, &mut IndexScanEmit, &mut op, sink, estate)
+        }
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => drain_pipeline_chain(
+            &mut **ios,
+            &mut IndexOnlyScanSource,
+            &mut IndexOnlyScanEmit,
+            &mut op,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            drain_pipeline_chain(
+                &mut b.scan,
+                &mut BitmapHeapScanSource,
+                &mut BitmapHeapScanEmit,
+                &mut op,
+                sink,
+                estate,
+            )
+        }
+        _ => unreachable!("composition admitted a non-scan subquery child"),
+    }
+}
+
+/// Try to let the lane own `Agg(hashed) → SubqueryScan → scan` — lane
+/// pipelines chaining through a subquery boundary. Two pipelines on one
+/// breaker node:
+///
+///   1. build: scan source → filter/project → SubqueryScanOp → HashAggBuildSink
+///   2. emit:  HashAggSource → HashAggEmit → RootAdapter (one group per pull)
+///
+/// The agg reads the SUBQUERY's output slot (not the scan slot), so the
+/// lanefold/SoA fold feed does not apply — the build is the per-row breaker
+/// feed. No admission-economics refuse is needed: the legacy fused
+/// `exec_agg_batched` arms never match a SubqueryScan outer, so there is no
+/// faster drive to preempt. `None` = refused (the caller falls to the
+/// per-tuple `exec_agg` over `exec_scan`, byte-identically).
+#[inline]
+pub fn try_own_agg_over_subquery_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    sqs: &mut ::mcx::PgBox<'mcx, crate::procnode::SubqueryScanNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates, ticked under the subqueryscan class (the
+    // composition's feed hangs off the subquery's drive).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Backward);
+        return Ok(None);
+    }
+    if !::nodeagg::agg_hash_breaker_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    let sqs = &mut **sqs;
+    if sqs.ss.instr_idx.is_some() {
+        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Instrumented);
+        return Ok(None);
+    }
+    // The subquery's child must be a lane-fusible scan (the Phase-1 refuse-
+    // sets, verbatim; the specific child reason ticks under its class).
+    if let Some(r) = scan_child_fusible(&mut sqs.subplan, estate)? {
+        stats::tick_refused(ShapeClass::SubqueryScan, r);
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // Build phase (once, lazily): drain the scan → subquery chain into the
+    // breaker sink, then finalize (delegated). `table_filled` is the phase
+    // flag; a rescan rebuild clears it and re-enters here.
+    if !::nodeagg::agg_hash_table_filled(agg) {
+        // One OWNED tick per lane-owned build event, on both classes the
+        // event engages (aggbuild counts builds; subqueryscan counts feeds).
+        stats::tick_owned(ShapeClass::AggBuild);
+        stats::tick_owned(ShapeClass::SubqueryScan);
+        {
+            let mut agg_sink = HashAggBuildSink { agg: &mut *agg };
+            subquery_feed_drain_dispatch(sqs, &mut agg_sink, estate)?;
+        }
+        // End-of-scan parity with exec_scan_impl: the projected slot is
+        // cleared when the subquery's stream ends (byte-invisible; keeps the
+        // node state identical to the per-tuple driver's).
+        if let Some(p) = sqs.ss.ps_ProjInfo.as_ref() {
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(p.pi_result_slot), mcx);
+        }
+    }
+    // Emit phase (every call): one qual-passing group per PG pull, in C's
+    // retrieve order.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
+// ===========================================================================
+// Append hosting (wave 5, 2026-07-12): the serial Append as a lane
+// concatenation point — the node's OWN `exec_append` body drives, verbatim
+// (subplan choice, `as_begun`, runtime pruning via `choose_next_subplan_
+// locally`/`identify_valid_subplans`, and the conditional per-fetch CFI are
+// all C's, reused not reimplemented — the wave-4 house rule); only the
+// `fetch_subplan` closure changes, pulling one tuple per fetch from the
+// CHILD's lane pipeline (`pull_step` over the Phase-1 scan stages) instead of
+// `exec_proc_node`. Child N's pipeline exhausting returns `None` to
+// `exec_append`, which advances to child N+1 — C's exact
+// child-EOF-then-advance order for free. Each child's cross-call position
+// (staged page batch + cursor) is node-resident, so the one-tuple-per-pull
+// Volcano boundary is safe, and each child's output slot goes to the parent
+// exactly as `exec_append` would hand it (Append projects nothing; children
+// with differing physical descs already carry their own planner-installed
+// projections, which run inside the child pipelines — byte-identical).
+//
+// Refuse-set (each byte-safe on the Volcano fallback):
+//   * parallel Append (Leader/Worker choosers over the shared DSM claim
+//     table) — non-serial subplan order; the lane refuses anything not
+//     provably ordering-identical serially (`lane_choose_local`). Ticked per
+//     offered call (the mode is worker/DSM-init-assigned).
+//   * async-capable subplans — unported (`exec_init_append` panics), so no
+//     gate is needed; recorded here for the C-diff reader.
+//   * dynamic EPQ / non-forward pulls (§4 model-incompatible; per call).
+//   * any child that is not a lane-fusible Phase-1 scan
+//     (`scan_child_fusible`, verbatim — the child's specific refusal reason
+//     ticks under the child's class). v1 policy: MIXED children refuse the
+//     WHOLE Append — a per-child owned/Volcano split would need per-child
+//     verdict pinning across the shared `exec_append` drive for no measured
+//     upside; future work when a real mixed shape shows up.
+//
+// Runtime partition pruning is ADMITTED: the pruning arms run inside the
+// reused `exec_append`/`choose_next_subplan_locally` body itself, so the
+// subplan order is C's by construction. The structural verdict conservatively
+// probes ALL initialized children (a superset of what pruning may run) —
+// probing opens each child scan's descriptor once, which C's lazy first-pull
+// open would skip for pruned/LIMIT-cut children: pgstat-only divergence,
+// same accepted class as the hash-join build-side probe (design §9 F5).
+// ===========================================================================
+
+/// One PG pull's worth from a lane-owned scan child pipeline — the
+/// `fetch_subplan` face of the hosted Append (join_probe_pull_dispatch's
+/// shape, without a mid-pipeline op). The child's staged batch + cursor are
+/// node-resident, so consecutive fetches resume exactly.
+fn lane_scan_pull_dispatch<'mcx>(
+    child: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    match child {
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            // End-of-stream mirrors ExecScanExtended's projected-slot clear
+            // (try_own_seq_scan's shape).
+            let clear_on_finish = ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
+            let mut root = RootAdapter::new(clear_on_finish);
+            pull_step(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut root, estate)
+        }
+        crate::procnode::PlanStateNode::IndexScan(is) => {
+            let mut root = RootAdapter::new(None);
+            pull_step(is, &mut IndexScanSource, &mut IndexScanEmit, &mut root, estate)
+        }
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => {
+            let mut root = RootAdapter::new(None);
+            pull_step(&mut **ios, &mut IndexOnlyScanSource, &mut IndexOnlyScanEmit, &mut root, estate)
+        }
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            let mut root = RootAdapter::new(None);
+            pull_step(&mut b.scan, &mut BitmapHeapScanSource, &mut BitmapHeapScanEmit, &mut root, estate)
+        }
+        _ => unreachable!("memoized append verdict admitted a non-scan child"),
+    }
+}
+
+/// Structural Append verdict, memoized on the node at first offer (verdict
+/// stability: a lane-driven child carries a staged-batch cursor across the
+/// Volcano boundary, so ownership must not flip mid-stream; the child scan
+/// verdicts are themselves memoized). ALL children must pass the Phase-1
+/// scan refuse-sets — mixed children refuse the whole Append (v1 policy,
+/// module doc). Owned accounting ticks exactly here — once per memoized
+/// admission (per Append node per (re)init, the seqscan class cadence).
+fn append_lane_fusible_memo<'mcx>(
+    a: &mut crate::procnode::AppendNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if let Some(v) = a.lane_fusible {
+        return Ok(v);
+    }
+    let mut refuse: Option<RefuseReason> = None;
+    for child in a.substates.iter_mut() {
+        if let Some(r) = scan_child_fusible(child, estate)? {
+            refuse = Some(r);
+            break;
+        }
+    }
+    match refuse {
+        None => stats::tick_owned(ShapeClass::Append),
+        Some(r) => stats::tick_refused(ShapeClass::Append, r),
+    }
+    let v = refuse.is_none();
+    a.lane_fusible = Some(v);
+    Ok(v)
+}
+
+/// Try to let the lane own a serial `Append` over lane-fusible scan children.
+/// `Some` = the lane drove this call (via the node's own `exec_append` body
+/// over lane child pipelines); `None` = refused (caller runs the unchanged
+/// `exec_append` over `exec_proc_node` children, byte-identically).
+#[inline]
+pub fn try_own_append<'mcx>(
+    a: &mut ::mcx::PgBox<'mcx, crate::procnode::AppendNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (mirror the sort/join breakers). Backward local
+    // Append pulls exist in C only under BACKWARD eflags, which the children
+    // refuse structurally (ScrollMark) — gate anyway.
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::Append, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::Append, RefuseReason::Backward);
+        return Ok(None);
+    }
+    let a = &mut **a;
+    // Parallel Append: the Leader/Worker choosers claim subplans through the
+    // shared DSM table in a non-serial order — Volcano keeps it. The mode is
+    // assigned at DSM/worker init (before the node's first pull), but gate
+    // per call (one flag load) rather than memoize an init-order assumption.
+    if !::nodeappend::lane_choose_local(&a.state) {
+        stats::tick_refused(ShapeClass::Append, RefuseReason::ParallelGate);
+        return Ok(None);
+    }
+    if !append_lane_fusible_memo(a, estate)? {
+        return Ok(None);
+    }
+    let crate::procnode::AppendNode { state, substates, .. } = a;
+    Ok(Some(::nodeappend::exec_append(state, estate, |e, i| {
+        lane_scan_pull_dispatch(&mut substates[i], e)
+    })?))
+}
+
+// ===========================================================================
+// ProjectSet: DOCUMENTED WHOLESALE REFUSE (wave-5 evaluation, 2026-07-12).
+//
+// Verdict: do NOT host. The SRF tlist expansion is per-tuple stateful in
+// three ways the lane would have to carry, for zero engagement:
+//   * the multi-call protocol itself — `pending_srf_tuples` resumes a
+//     half-emitted expansion across `exec_proc_node` calls, `args_valid`
+//     pins evaluated arg datums across those calls (query-context armed),
+//     and `elemdone` tracks per-element ExprMultipleResult state;
+//   * SFRM_Materialize mode parks the whole set in a tuplestore read back
+//     one row per call — a second, per-element cross-call cursor;
+//   * `ExecProjectSRF` interleaves per-tuple context resets between (not
+//     within) expansions — a batched drive would need the exact reset
+//     points replayed to keep by-ref datum lifetimes identical.
+// An expanding-`TupleOp` hosting (the join-probe pause/resume shape over
+// `pending_srf_tuples`) is model-compatible in principle, but it could only
+// chain over a lane-owned child pipeline — and ProjectSet children in
+// practice are bare scans, which refuse standalone ownership (admission
+// economics, STANDALONE_SCAN_NO_UPSIDE), so the hook would engage nowhere.
+// Reusing `exec_project_set`'s own body per-tuple would add a lane layer
+// over a refused child — exactly the shape §4's economics forbid. Refuse,
+// and re-evaluate when the design's "SRFs = expanding operator" phase item
+// lands (design doc §4 "Everything else is hostable, staged deliberately").
+// ===========================================================================
+
+/// Tick the documented ProjectSet wholesale refuse (module doc above; the
+/// `project_set_arm` dispatch hook calls this and always falls through to
+/// the unchanged `exec_project_set`).
+#[inline]
+pub fn refuse_project_set() {
+    stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::SrfSetExpansion);
 }

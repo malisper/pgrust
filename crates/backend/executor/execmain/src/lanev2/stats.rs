@@ -29,6 +29,22 @@
 //!     owns: bind params → rescan the inner → drain the expansion);
 //!     structural refusals once per memoized verdict; dynamic EPQ/backward
 //!     per call.
+//!   * `Group` — one OWNED tick per lane-owned group-over-sort drive start
+//!     (the underlying sort-feed event); refusals per offered call (the
+//!     child-Sort verdict itself is memoized on the Sort node, so the
+//!     per-call cascade is one flag load).
+//!   * `ResultNode` — one OWNED tick per lane-owned Result execution (the
+//!     no-FROM row / one-time-gate consumption, or the child feed event);
+//!     refusals per offered call.
+//!   * `SubqueryScan` — one OWNED tick per lane-owned feed event (the
+//!     child sort feed for the bare hook; the agg build event for the
+//!     agg-over-subquery composition); refusals per offered call.
+//!   * `Append` — one OWNED tick per memoized structural verdict (per Append
+//!     node per (re)init, like the seqscan class); structural child refusals
+//!     once per memoized verdict, dynamic EPQ/backward/parallel gates per
+//!     offered call.
+//!   * `ProjectSet` — never owned (a documented wholesale refuse, design §4);
+//!     one REFUSED tick per offered call.
 //!
 //! Overhead: with the lane OFF nothing here ever runs (the dispatch hooks gate
 //! on `lanev2::enabled()` before any lane code). With the lane ON but
@@ -63,9 +79,14 @@ pub(super) enum ShapeClass {
     SortFeed = 5,
     Join = 6,
     NestLoop = 7,
+    Group = 8,
+    ResultNode = 9,
+    SubqueryScan = 10,
+    Append = 11,
+    ProjectSet = 12,
 }
 
-const N_CLASSES: usize = 8;
+const N_CLASSES: usize = 13;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -77,6 +98,11 @@ impl ShapeClass {
         ShapeClass::SortFeed,
         ShapeClass::Join,
         ShapeClass::NestLoop,
+        ShapeClass::Group,
+        ShapeClass::ResultNode,
+        ShapeClass::SubqueryScan,
+        ShapeClass::Append,
+        ShapeClass::ProjectSet,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -89,6 +115,11 @@ impl ShapeClass {
             ShapeClass::SortFeed => "sortfeed",
             ShapeClass::Join => "join",
             ShapeClass::NestLoop => "nestloop",
+            ShapeClass::Group => "group",
+            ShapeClass::ResultNode => "result",
+            ShapeClass::SubqueryScan => "subqueryscan",
+            ShapeClass::Append => "append",
+            ShapeClass::ProjectSet => "projectset",
         }
     }
 }
@@ -169,9 +200,23 @@ pub(super) enum RefuseReason {
     /// Hash-join breaker: the completed build's final nbatch > 1 (spill);
     /// the probe is refused before any lane tuple is emitted.
     MultiBatch = 22,
+    /// Wave-4 streaming glue (Group / Result / SubqueryScan): the node's
+    /// child is not a lane-owned pipeline this hook can chain onto — wrong
+    /// node type, or a lane-ownable child whose own refuse-set refused (the
+    /// specific reason ticks under the child's class).
+    ChildNotLaneOwned = 23,
+    /// ProjectSet: refused wholesale (documented refuse, design §4). The SRF
+    /// ValuePerCall/Materialize multi-call protocol is per-tuple stateful
+    /// (`pending_srf_tuples` resume, `args_valid` arg pinning, Materialize
+    /// tuplestore read-back); an expanding-`TupleOp` hosting is model-
+    /// compatible in principle but has no lane-owned child shape to chain
+    /// onto in practice (ProjectSet children are scans, which refuse
+    /// standalone ownership) — zero upside today. Re-evaluated when the
+    /// design's "SRFs = expanding operator" phase item lands.
+    SrfSetExpansion = 24,
 }
 
-const N_REASONS: usize = 23;
+const N_REASONS: usize = 25;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -199,6 +244,8 @@ impl RefuseReason {
             RefuseReason::TinyInputFloor => "tiny-input-floor",
             RefuseReason::JoinShape => "join-shape",
             RefuseReason::MultiBatch => "multi-batch",
+            RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
+            RefuseReason::SrfSetExpansion => "srf-set-expansion",
         }
     }
 
@@ -228,6 +275,8 @@ impl RefuseReason {
             TinyInputFloor,
             JoinShape,
             MultiBatch,
+            ChildNotLaneOwned,
+            SrfSetExpansion,
         ][i]
     }
 }
