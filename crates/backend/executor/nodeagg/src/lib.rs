@@ -544,6 +544,9 @@ struct PerHashData<'mcx> {
     // Lane-v2 compact-row table (Stage 2.2) when armed for this build; the
     // C tuplehash above stays the fallback + oracle (compact.rs module doc).
     compact: Option<compact::CompactHash>,
+    // Stage-4 §4.4 radix exchange (merge.rs): the worker-side bounded-table
+    // state, lazily resolved off the handoff registry on the first probe.
+    exchange: merge::ExchangeState,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1831,6 +1834,7 @@ fn init_perhash<'mcx>(
         hash_mem_limit: mem_limit,
         table_filled: false,
         compact: None,
+        exchange: merge::ExchangeState::Unresolved,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -3624,6 +3628,19 @@ pub fn agg_is_done(node: &AggStateData<'_>) -> bool {
     node.agg_done
 }
 
+/// Stage-4 §4.4 exchange bound at a staged-batch boundary (merge.rs): the
+/// staged K2 probes hand out pergroup pointers the caller holds for the
+/// whole batch, so an over-cap flush must run BEFORE the batch's first
+/// probe. The compact path (backstop) and the per-row path
+/// (`lookup_hash_entry`) carry their own hook; this is the C-staged feeds'.
+/// One enum-discriminant test when unengaged.
+pub fn agg_hash_exchange_boundary<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    merge::exchange_maybe_flush(node, estate)
+}
+
 /// Build→Probe phase flag for the breaker: the hash table's `table_filled`
 /// IS the phase (exactly C's cross-call state; no new field).
 pub fn agg_hash_table_filled(node: &AggStateData<'_>) -> bool {
@@ -4981,6 +4998,10 @@ fn lookup_hash_entry<'mcx>(
     estate: &mut EStateData<'mcx>,
     outer_id: ExecSlotId,
 ) -> PgResult<bool> {
+    // Stage-4 §4.4 exchange bound (merge.rs): flush BEFORE the probe so the
+    // pergroup pointer handed to this row's transition program stays live.
+    // One enum-discriminant test on unengaged builds.
+    merge::exchange_maybe_flush(node, estate)?;
     let mcx = estate.es_query_cxt;
     let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
@@ -5188,6 +5209,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
         ph.hashtable.reset();
         ph.table_ctx.reset();
         compact::compact_reset(ph);
+        // Fresh build: the exchange re-resolves (a spill-disabled Off must
+        // not leak into the rebuilt table's run).
+        ph.exchange = merge::ExchangeState::Unresolved;
     }
     if let Some(ps) = node.persort.as_mut() {
         ps.have_pending = false;
@@ -5240,6 +5264,9 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         ph.hashtable.reset();
         ph.table_ctx.reset();
         compact::compact_reset(ph);
+        // Fresh build: the exchange re-resolves (a spill-disabled Off must
+        // not leak into the rebuilt table's run).
+        ph.exchange = merge::ExchangeState::Unresolved;
         // SAFETY: sole access path to the node during the reset.
         unsafe { node.agg_node.as_mut() }.reset();
         return;
@@ -5318,7 +5345,8 @@ mcx::forget_safe_struct!(
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
         hash_mem_limit, table_filled, hashiter, spill;
-        hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact },
+        hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
+        exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,

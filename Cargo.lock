@@ -2261,6 +2261,7 @@ dependencies = [
  "adt_date",
  "adt_datetime",
  "adt_enum",
+ "adt_float",
  "adt_network",
  "adt_numeric",
  "adt_timestamp",

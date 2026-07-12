@@ -104,11 +104,18 @@ pub struct AggTableHandoff {
     // Leader-decided per-transno state plan; the worker install relocates
     // internal states by it. Immutable after construction.
     kinds: Vec<CombineKind>,
+    // Stage-4 §4.4 radix exchange: Some(cap) = the leader admitted the
+    // high-NDV exchange for this shape (bucket-parallel merge qualified +
+    // pool armed + plan NDV over the floor), and workers bound their partial
+    // tables at `cap` entries, installing radix-partitioned flushes mid-fill.
+    // None = classic one-table-per-worker handoff. Immutable after
+    // construction (workers read it through the registry).
+    exchange_cap: Option<u32>,
 }
 
 impl AggTableHandoff {
-    fn new(kinds: Vec<CombineKind>) -> AggTableHandoff {
-        AggTableHandoff { slots: Mutex::new(Vec::new()), kinds }
+    fn new(kinds: Vec<CombineKind>, exchange_cap: Option<u32>) -> AggTableHandoff {
+        AggTableHandoff { slots: Mutex::new(Vec::new()), kinds, exchange_cap }
     }
 
     fn install(&self, t: HandedAggTable) {
@@ -608,7 +615,18 @@ pub(crate) fn init_finalize_merge<'mcx>(
     let key_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(hash_desc));
 
-    let handoff = Arc::new(AggTableHandoff::new(kinds.clone()));
+    // Stage-4 §4.4 exchange admission (leader-decided, workers read it off
+    // the handoff): requires the bucket-parallel merge (a serial leader-side
+    // bucket merge over cap-flushed O(N) entries would be a regression, and
+    // the classic path is strictly better there) and the NDV floor over the
+    // finalize's plan-time group estimate — footer-HLL-honest on never-
+    // ANALYZEd cbstore since the cbparallelstats lane. Low-NDV shapes keep
+    // classic behavior byte-for-byte (their tables never reach the cap even
+    // when admitted, but the floor keeps the planner and executor aligned).
+    let exchange_cap = (par.is_some()
+        && ::guc_tables::lane_pool::agg_exchange_admits(node.numGroups as f64))
+    .then(|| ::guc_tables::lane_pool::agg_exchange_cap() as u32);
+    let handoff = Arc::new(AggTableHandoff::new(kinds.clone(), exchange_cap));
     let registry_key = partial as *const Agg<'_> as usize;
     registry_insert(registry_key, &handoff);
     Ok(Some(FinalizeMerge {
@@ -738,9 +756,23 @@ pub(crate) fn maybe_install_handoff<'mcx>(
             return Ok(());
         }
         if ph.compact.is_some() {
-            return install_compact_handoff(node, estate, &handoff, id);
+            return install_compact_handoff(node, estate, &handoff, id, false).map(|_| ());
         }
     }
+    install_classic_handoff(node, &handoff, id, false).map(|_| ())
+}
+
+// The classic C-table install body, shared by the fill-completion handoff
+// above and the exchange's mid-fill flush (`exchange_maybe_flush`). `flush`
+// = mid-fill: additionally reset the entry context so the memory the images
+// occupied is actually reclaimed (hash_agg_check_limits counts it; the
+// fill-end install leaves it for query-end reclamation exactly as before).
+fn install_classic_handoff<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    handoff: &Arc<AggTableHandoff>,
+    id: i32,
+    flush: bool,
+) -> PgResult<usize> {
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let kinds = &handoff.kinds;
     let additionalsize = ph.hashtable.additionalsize();
@@ -792,14 +824,28 @@ pub(crate) fn maybe_install_handoff<'mcx>(
         .then(|| partition_entries(&entries));
     if merge_stats_enabled() {
         eprintln!(
-            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={}",
+            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={} flush={flush}",
             entries.len(),
             parts.is_some(),
         );
     }
     handoff.install(HandedAggTable { entries, additionalsize, parts, _buf: buf });
     ph.hashtable.reset();
-    Ok(())
+    if flush {
+        // Mid-fill flush: the images were copied out above; reclaim their
+        // context so the bounded table's memory footprint stays bounded too.
+        // (Transvalue states in the aggcontext are relocated copies as well,
+        // but the aggcontext hosts other node-lifetime allocations and is
+        // never reset mid-run — the exchange budget in ExchangeState covers
+        // its growth.)
+        ph.table_ctx.reset();
+        // ngroups_current counts the CURRENT table (the refill loop resets
+        // it the same way); without this the ngroups spill gate would fire
+        // on a bounded table at exactly the high-NDV shapes the exchange
+        // exists for.
+        ph.hash_ngroups_current = 0;
+    }
+    Ok(bytes)
 }
 
 // The compact table's handoff export (Stage 2.2 × Stage 4, the G4
@@ -823,13 +869,14 @@ fn install_compact_handoff<'mcx>(
     estate: &mut EStateData<'mcx>,
     handoff: &Arc<AggTableHandoff>,
     id: i32,
-) -> PgResult<()> {
+    flush: bool,
+) -> PgResult<usize> {
     let mcx = estate.es_query_cxt;
     let kinds = &handoff.kinds;
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     debug_assert!(!ph.spill.mode, "compact builds never enter spill mode");
     let additionalsize = ph.hashtable.additionalsize();
-    let ch = ph.compact.take().expect("compact install requires an armed table");
+    let mut ch = ph.compact.take().expect("compact install requires an armed table");
     let nrows = ch.table.nrows();
     let desc = ph
         .hashslot
@@ -929,12 +976,160 @@ fn install_compact_handoff<'mcx>(
         ::guc_tables::lane_pool::lane_parallel_pool_armed().then(|| partition_entries(&entries));
     if merge_stats_enabled() {
         eprintln!(
-            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={} src=compact",
+            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={} src=compact flush={flush}",
             entries.len(),
             parts.is_some(),
         );
     }
     handoff.install(HandedAggTable { entries, additionalsize, parts, _buf: buf });
+    if flush {
+        // Exchange mid-fill flush: the groups were copied out above; re-arm
+        // the SAME table emptied (reset keeps repr/hash/layout/state width).
+        // The intern table survives untouched — Intern component ids stay
+        // scan-stable, and the flushed tuples materialized their text at
+        // reconstruction so they reference nothing table-owned.
+        ch.table.reset();
+        ph.compact = Some(ch);
+    }
+    Ok(bytes)
+}
+
+// --- Stage-4 §4.4 radix exchange: worker-side bounded partial tables ---
+//
+// The worker-side half of the exchange (the leader half is the existing
+// bucket-claim parallel merge, unchanged): when the leader admitted the
+// exchange on the handoff, the partial build bounds its table at `cap`
+// entries and, on reaching the bound, installs the table radix-partitioned
+// (the classic/compact install bodies verbatim, `flush=true`) and continues
+// into the emptied table. Group ownership at the final aggregation is then
+// disjoint per bucket claimer, per-worker builds stay cache-resident instead
+// of DRAM-random-probing G-sized tables, and the merge's per-bucket probe
+// tables are G/256-sized — the Leis'14 radix-partitioned-output shape the
+// Stage-0.4 prototype demanded for the O(T·G) merge wall.
+
+// Worker-side exchange runtime, hosted in PerHashData. Resolution is lazy
+// (first probe of the build): ExecInitAgg of the participating leader's
+// partial node runs before init_finalize_merge registers the handoff.
+pub(crate) enum ExchangeState {
+    Unresolved,
+    Off,
+    On {
+        handoff: Arc<AggTableHandoff>,
+        cap: u32,
+        // Handed-buffer bytes this build has installed: the exchange's
+        // work_mem discipline (the flushes outlive the table, so the bounded
+        // table alone is not the build's footprint). Over the hash_mem limit
+        // the exchange turns Off and the classic growth/spill/refusal
+        // machinery takes over untouched.
+        installed_bytes: usize,
+    },
+}
+
+#[cold]
+#[inline(never)]
+fn exchange_resolve(node: &mut AggStateData<'_>) {
+    let state = 'r: {
+        if node.plan.aggsplit != AGGSPLIT_INITIAL_SERIAL
+            || node.plan.aggstrategy != AGG_HASHED
+        {
+            break 'r ExchangeState::Off;
+        }
+        let Some(handoff) = registry_get(node.plan as *const Agg<'_> as usize) else {
+            break 'r ExchangeState::Off;
+        };
+        match handoff.exchange_cap {
+            Some(cap) => ExchangeState::On { handoff, cap, installed_bytes: 0 },
+            None => ExchangeState::Off,
+        }
+    };
+    node.perhash.as_mut().expect("hashed Agg has perhash").exchange = state;
+}
+
+/// The exchange bound for this build (compact-arm sizing hook): a bounded
+/// table cannot become spill-eligible, so the arm gates/sizes by the cap
+/// instead of the full plan-time group estimate.
+pub(crate) fn exchange_cap_for_build(node: &mut AggStateData<'_>) -> Option<u32> {
+    if matches!(
+        node.perhash.as_ref().expect("hashed Agg has perhash").exchange,
+        ExchangeState::Unresolved
+    ) {
+        exchange_resolve(node);
+    }
+    match node.perhash.as_ref().expect("hashed Agg has perhash").exchange {
+        ExchangeState::On { cap, .. } => Some(cap),
+        _ => None,
+    }
+}
+
+/// The exchange's bound check — called BEFORE the row/batch probes
+/// (`lookup_hash_entry` top; compact backstop), so no caller-held group
+/// pointer is ever invalidated by a flush.
+#[inline]
+pub(crate) fn exchange_maybe_flush<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    match &ph.exchange {
+        ExchangeState::Off => Ok(()),
+        ExchangeState::Unresolved => {
+            // First probe of the build: the table is empty — resolve only.
+            exchange_resolve(node);
+            Ok(())
+        }
+        ExchangeState::On { cap, .. } => {
+            let cap = *cap as usize;
+            let over = match &ph.compact {
+                Some(ch) => ch.table.len() >= cap,
+                None => ph.hashtable.entries().len() >= cap,
+            };
+            if !over {
+                return Ok(());
+            }
+            exchange_flush(node, estate)
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn exchange_flush<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    // A spilled build stops exchanging: its remaining groups follow the
+    // classic spill/emission path (and the fill-end install refuses).
+    // Already-installed flushes stay correct — each flush removed those
+    // groups' states from the table, so tape/table/handed contributions are
+    // disjoint deltas the finalize's combines add up. (Under the cap the
+    // table itself never trips the limits; this arms only when the
+    // aggcontext's transvalue growth does.)
+    if ph.spill.mode || ph.spill.ever_spilled {
+        node.perhash.as_mut().unwrap().exchange = ExchangeState::Off;
+        return Ok(());
+    }
+    let ExchangeState::On { handoff, .. } = &ph.exchange else {
+        unreachable!("exchange_flush under ExchangeState::On")
+    };
+    let handoff = Arc::clone(handoff);
+    let hash_mem_limit = ph.hash_mem_limit;
+    let id = node.plan.plan.plan_node_id;
+    let bytes = if ph.compact.is_some() {
+        install_compact_handoff(node, estate, &handoff, id, true)?
+    } else {
+        install_classic_handoff(node, &handoff, id, true)?
+    };
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    if let ExchangeState::On { installed_bytes, .. } = &mut ph.exchange {
+        *installed_bytes += bytes;
+        // Budget discipline: handed buffers are this build's real footprint.
+        // Over the limit, stop exchanging — the table then grows classically
+        // and the existing spill machinery owns the memory bound.
+        if *installed_bytes > hash_mem_limit {
+            ph.exchange = ExchangeState::Off;
+        }
+    }
     Ok(())
 }
 
@@ -1664,7 +1859,14 @@ fn parallel_merge(
         }
     }
 
-    let nthreads = tables.len();
+    // Claimer pool size: one per handed table (the launched worker count on
+    // the classic engaged path) plus the leader. Exchange flushes install
+    // MANY small tables per worker, so an armed pool clamps to its DOP —
+    // spawning a thread per flush would oversubscribe the node.
+    let nthreads = match ::guc_tables::lane_pool::lane_parallel_pool_dop() {
+        dop if dop > 0 => tables.len().min(dop as usize),
+        _ => tables.len(),
+    };
     let claimers = nthreads + 1;
     let ctx = ParCtx {
         spec,
