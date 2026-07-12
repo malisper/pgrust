@@ -32,6 +32,12 @@ fn collect_rows(fcinfo: &Fcinfo) -> PgResult<PreparedRows> {
     tupdesc::TupleDescInitEntry(&mut desc, 5, Some("dbid"), OIDOID, -1, 0)?;
     desc.tdtypeid = RECORDOID;
     desc.tdtypmod = -1;
+    // C: BlessTupleDesc — register the anonymous record typmod so the
+    // function scan (and record_out) can resolve the returned datums.
+    // Dormant in regress (max_prepared_transactions=0 keeps the view empty);
+    // load-bearing on a promoted standby with file-restored prepared xacts
+    // (009_twophase #12: 'record type has not been registered').
+    ::typcache_seams::assign_record_type_typmod::call(&mut desc)?;
 
     let rows = prepared_xact_rows();
     let mut tuples = Vec::with_capacity(rows.len());

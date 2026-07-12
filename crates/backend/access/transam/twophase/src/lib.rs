@@ -62,6 +62,7 @@ pub fn init_seams() {
     seams::prescan_prepared_transactions::set(PrescanPreparedTransactions);
     seams::prescan_prepared_transactions_xids::set(recovery::PrescanPreparedTransactionsXids);
     seams::standby_recover_prepared_transactions::set(recovery::StandbyRecoverPreparedTransactions);
+    seams::two_phase_get_xid_by_virtual_xid::set(recovery::TwoPhaseGetXidByVirtualXID);
     seams::recover_prepared_transactions::set(RecoverPreparedTransactions);
     seams::check_point_two_phase::set(CheckPointTwoPhase);
     seams::finish_prepared_transaction::set(FinishPreparedTransaction);

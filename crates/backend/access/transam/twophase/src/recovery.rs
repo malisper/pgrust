@@ -275,6 +275,40 @@ fn prescan_prepared_transactions_impl() -> PgResult<(TransactionId, Vec<Transact
     Ok((result, xids))
 }
 
+/// `TwoPhaseGetXidByVirtualXID(vxid, &have_more)` (twophase.c:852).
+pub fn TwoPhaseGetXidByVirtualXID(
+    proc_number: ::types_core::ProcNumber,
+    lxid: u32,
+) -> PgResult<(TransactionId, bool)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut result = ::types_core::InvalidTransactionId;
+    let mut have_more = false;
+
+    let st = TwoPhaseState();
+    lock_twophase_state(lwlock::LW_SHARED);
+    for i in 0..st.num_prep_xacts.get() {
+        let g = st.gxact(st.prep_xact(i));
+        if !g.valid.get() {
+            continue;
+        }
+        let proc = lmgr_proc::GetPGProcByNumber(g.pgprocno.get());
+        // Startup process sets proc->vxid.procNumber to INVALID_PROC_NUMBER,
+        // so redo-restored gxacts never match (C asserts !inredo on match).
+        if proc.vxid.procNumber.load(Relaxed) == proc_number
+            && proc.vxid.lxid.load(Relaxed) == lxid
+        {
+            debug_assert!(!g.inredo.get());
+            if result != ::types_core::InvalidTransactionId {
+                have_more = true;
+                break;
+            }
+            result = g.xid.get();
+        }
+    }
+    unlock_twophase_state();
+    Ok((result, have_more))
+}
+
 /// `StandbyRecoverPreparedTransactions`: pg_subtrans setup during hot standby.
 pub fn StandbyRecoverPreparedTransactions() -> PgResult<()> {
     lock_twophase_state(LW_EXCLUSIVE);
