@@ -510,3 +510,78 @@ pub fn vector_cmp_internal(a: &VecView<'_>, b: &VecView<'_>) -> i32 {
     }
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> Result<Vec<f32>, String> {
+        let mut x = Box::new([0.0f32; VECTOR_MAX_DIM]);
+        match parse_vector(s.as_bytes(), -1, &mut x) {
+            Ok(n) => Ok(x[..n].to_vec()),
+            Err(e) => Err(e.message().to_string()),
+        }
+    }
+
+    #[test]
+    fn parse_basics() {
+        assert_eq!(parse("[1,2,3]").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(parse("[1.,2.,3.]").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(parse(" [ 1,  2 ,    3  ] ").unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(parse("[1e-46,1]").unwrap(), vec![0.0, 1.0]);
+        assert_eq!(parse("[1.5e+38,-1.5e+38]").unwrap(), vec![1.5e38, -1.5e38]);
+    }
+
+    #[test]
+    fn parse_errors() {
+        assert!(parse("[hello,1]").unwrap_err().contains("invalid input syntax"));
+        assert!(parse("[NaN,1]").unwrap_err().contains("NaN not allowed"));
+        assert!(parse("[Infinity,1]").unwrap_err().contains("infinite value not allowed"));
+        assert!(parse("[4e38,1]").unwrap_err().contains("\"4e38\" is out of range"));
+        assert!(parse("[]").unwrap_err().contains("at least 1 dimension"));
+        assert!(parse("[1,2,3").unwrap_err().contains("invalid input syntax"));
+        assert!(parse("[1,2,3]x").unwrap_err().contains("invalid input syntax"));
+        assert!(parse("1,2,3").unwrap_err().contains("invalid input syntax"));
+    }
+
+    #[test]
+    fn cmp_matches_c() {
+        let cx = mcx::MemoryContext::new_bump("t");
+        let m = cx.mcx();
+        let mk = |vals: &[f32]| {
+            let mut b = VecBuilder::new(m, vals.len()).unwrap();
+            for (i, v) in vals.iter().enumerate() {
+                b.set(i, *v);
+            }
+            b.image()
+        };
+        let a = mk(&[1.0, 2.0]);
+        let b = mk(&[1.0, 2.0, 3.0]);
+        let va = VecView::from_payload(&a[4..]).unwrap();
+        let vb = VecView::from_payload(&b[4..]).unwrap();
+        assert_eq!(vector_cmp_internal(&va, &vb), -1);
+        assert_eq!(vector_cmp_internal(&vb, &va), 1);
+        assert_eq!(vector_cmp_internal(&va, &va), 0);
+    }
+
+    #[test]
+    fn distance_kernels() {
+        let cx = mcx::MemoryContext::new_bump("t");
+        let m = cx.mcx();
+        let mk = |vals: &[f32]| {
+            let mut b = VecBuilder::new(m, vals.len()).unwrap();
+            for (i, v) in vals.iter().enumerate() {
+                b.set(i, *v);
+            }
+            b.image()
+        };
+        let a = mk(&[0.0, 0.0]);
+        let b = mk(&[3.0, 4.0]);
+        let va = VecView::from_payload(&a[4..]).unwrap();
+        let vb = VecView::from_payload(&b[4..]).unwrap();
+        assert_eq!(l2_squared_distance(&va, &vb), 25.0);
+        assert_eq!(inner_product(&va, &vb), 0.0);
+        assert_eq!(l1_distance(&va, &vb), 7.0);
+        assert_eq!(vector_norm(&vb), 5.0);
+    }
+}
