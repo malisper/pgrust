@@ -1,6 +1,6 @@
 use crate::layout::*;
 use bufmgr::{
-    BufferGetBlockNumber, LockBuffer, MarkBufferDirty, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE,
+    LockBuffer, MarkBufferDirty, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE,
     BUFFER_LOCK_SHARE,
 };
 use datum::Datum;
@@ -225,6 +225,14 @@ pub fn update_meta_page(
 
 // ---- element working set for on-disk operations ----
 
+// Droppy payloads (nested PgVec) skip the no-drop arena helpers (skey_vec
+// precedent); the bump arena still backs the allocation.
+pub fn droppy_vec<'m, T>(mcx: Mcx<'m>, cap: usize) -> PgVec<'m, T> {
+    let mut v: PgVec<'m, T> = PgVec::new_in(mcx);
+    let _ = v.try_reserve(cap);
+    v
+}
+
 pub struct Element<'t> {
     pub blkno: BlockNumber,
     pub offno: u16,
@@ -260,10 +268,7 @@ pub struct ElementPool<'t> {
 
 impl<'t> ElementPool<'t> {
     pub fn new(mcx: Mcx<'t>) -> Self {
-        ElementPool {
-            mcx,
-            elems: mcx::vec_with_capacity_in_infallible(mcx, 16),
-        }
+        ElementPool { mcx, elems: droppy_vec(mcx, 16) }
     }
 
     pub fn from_block(&mut self, blkno: BlockNumber, offno: u16) -> u32 {
@@ -984,8 +989,7 @@ pub fn find_element_neighbors<'t>(
     // Allocate the per-layer neighbor arrays (HnswInitNeighbors).
     {
         let pmcx = pool.mcx;
-        let mut arrays: PgVec<'t, NeighborArray<'t>> =
-            mcx::vec_with_capacity_in_infallible(pmcx, (level + 1) as usize);
+        let mut arrays: PgVec<'t, NeighborArray<'t>> = droppy_vec(pmcx, (level + 1) as usize);
         for lc in (0..=level).rev() {
             let lm = hnsw_get_layer_m(m, lc);
             arrays.push(NeighborArray {

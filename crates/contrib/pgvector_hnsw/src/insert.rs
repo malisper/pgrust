@@ -1,7 +1,7 @@
 use crate::layout::*;
 use crate::utils::*;
 use bufmgr::{
-    LockBuffer, MarkBufferDirty, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE,
+    LockBuffer, MarkBufferDirty, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE,
 };
 use datum::Datum;
 use generic_xlog::{GenericXLogAbort, GenericXLogFinish, GenericXLogStart, GenericXLogState};
@@ -205,8 +205,8 @@ fn add_element_on_disk(
 
     let mut buf: Buffer;
     let mut page: *mut u8;
-    let mut nbuf: Buffer;
-    let mut npage: *mut u8;
+    let nbuf: Buffer;
+    let npage: *mut u8;
     let mut state: Option<PgBox<'_, GenericXLogState>> = None;
 
     loop {
