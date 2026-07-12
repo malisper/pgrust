@@ -379,6 +379,94 @@ impl<'mcx> DistinctSet<'mcx> {
     }
 
     // ------------------------------------------------------------------
+    // Parallel-partial export/import (pardistinct.rs). Plain-data views of
+    // the held values, and a values-only constructor for merged results.
+    // ------------------------------------------------------------------
+
+    /// (image offset, content length, content hash) of stored value `i`.
+    /// The CONTENT starts `VARHDRSZ` bytes past the image offset.
+    #[inline]
+    pub(crate) fn bytes_span(&self, i: usize) -> (u32, u32, u32) {
+        let s = &self.spans[i];
+        (s.off, s.len, s.hash)
+    }
+
+    /// Content bytes for a `bytes_span` result.
+    #[inline]
+    pub(crate) fn bytes_content(&self, off: u32, len: u32) -> &[u8] {
+        &self.blob[off as usize + varatt::VARHDRSZ..off as usize + varatt::VARHDRSZ + len as usize]
+    }
+
+    /// Take the integer values out (the parallel union's per-partition
+    /// export; the set is spent afterwards).
+    #[inline]
+    pub(crate) fn take_ints(&mut self) -> Vec<i64> {
+        debug_assert!(self.spill.is_none());
+        self.table.clear();
+        core::mem::take(&mut self.ints)
+    }
+
+    /// Rebind an UNSPILLED set to another lifetime (the parallel merge
+    /// builds sets on plain scoped threads, then hands them to the node's
+    /// `'mcx` pertrans slots). Every field but `spill` is lifetime-free.
+    pub(crate) fn unspilled_into<'b>(self) -> DistinctSet<'b> {
+        debug_assert!(self.spill.is_none());
+        DistinctSet {
+            table: self.table,
+            ints: self.ints,
+            blob: self.blob,
+            spans: self.spans,
+            seen_null: self.seen_null,
+            spill: None,
+        }
+    }
+
+    /// Build a REPLAY-ONLY set from already-deduplicated values (the
+    /// parallel merge's output). The probe table is left empty — inserting
+    /// into such a set would break dedup; the finalize replay only reads
+    /// `ints()` / `bytes_datum()` / `seen_null`. `spans` are
+    /// (content offset in `content_blob`, content length, content hash).
+    pub(crate) fn from_values(
+        kind: DistinctKeyKind,
+        ints: Vec<i64>,
+        content_blob: Vec<u8>,
+        spans: Vec<(u32, u32, u32)>,
+        seen_null: bool,
+    ) -> DistinctSet<'mcx> {
+        let mut set: DistinctSet<'mcx> = DistinctSet::new();
+        set.seen_null = seen_null;
+        match kind {
+            DistinctKeyKind::Bytes => {
+                debug_assert!(ints.is_empty());
+                // Rebuild canonical 4B-header images (replay hands live
+                // varlena pointers to the transfn).
+                let mut blob =
+                    Vec::with_capacity(content_blob.len() + spans.len() * (varatt::VARHDRSZ + 8));
+                let mut out_spans = Vec::with_capacity(spans.len());
+                for &(off, len, hash) in &spans {
+                    let pad = (8 - (blob.len() & 7)) & 7;
+                    blob.resize(blob.len() + pad, 0);
+                    let img_off = blob.len();
+                    let word =
+                        varatt::set_varsize_4b_word((len as usize + varatt::VARHDRSZ) as u32);
+                    blob.extend_from_slice(&word.to_ne_bytes());
+                    blob.extend_from_slice(
+                        &content_blob[off as usize..off as usize + len as usize],
+                    );
+                    out_spans.push(BytesSpan { off: img_off as u32, len, hash });
+                }
+                set.blob = blob;
+                set.spans = out_spans;
+            }
+            _ => {
+                debug_assert!(spans.is_empty());
+                set.ints = ints;
+            }
+        }
+        set
+    }
+
+    // ------------------------------------------------------------------
     // v2 spill (section doc above `SpillState`).
     // ------------------------------------------------------------------
 

@@ -183,40 +183,7 @@ pub fn exec_gather_merge<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     crate::cfi()?;
 
-    if !node.initialized {
-        let gm = node.plan;
-        if gm.num_workers > 0 && estate.es_use_parallel_mode {
-            match node.pei.as_mut() {
-                None => {
-                    node.pei = Some(exec_init_parallel_plan(
-                        gm.plan.lefttree.expect("GatherMerge without an outer plan"),
-                        outer,
-                        estate,
-                        &gm.initParam,
-                        gm.num_workers,
-                        node.tuples_needed,
-                    )?)
-                }
-                Some(pei) => exec_parallel_reinitialize(outer, estate, pei, &gm.initParam)?,
-            }
-            let pei = node.pei.as_mut().expect("just initialized");
-            parallel::LaunchParallelWorkers(pei.pcxt)?;
-            node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
-            execparallel::account_workers(estate, pei.pcxt);
-
-            if node.nworkers_launched > 0 {
-                exec_parallel_create_readers(pei);
-                node.reader = core::mem::take(&mut pei.reader);
-            } else {
-                node.reader = Vec::new();
-            }
-            node.nreaders = node.reader.len();
-        }
-        if leader_participation() || node.nreaders == 0 {
-            node.need_to_scan_locally = true;
-        }
-        node.initialized = true;
-    }
+    gather_merge_ensure_launched(node, outer, estate)?;
 
     let ecxt = node.ps.ps_ExprContext.expect("GatherMergeState without ExprContext");
     estate.reset_expr_context(ecxt);
@@ -234,6 +201,54 @@ pub fn exec_gather_merge<'mcx>(
         ::execexpr::exec_project(proj, slots, result.unwrap(), mcx)
     })?;
     Ok(Some(result_slot))
+}
+
+/// The one-time worker launch half of `ExecGatherMerge` (the `!initialized`
+/// arm), extracted so the lane-v2 parallel-DISTINCT drive can launch the
+/// workers BEFORE it runs the leader's own partial build (lanev2
+/// `try_own_*_agg_over_gather_merge`; the drive then clears
+/// `need_to_scan_locally` and reads stray rows through the normal pulls).
+pub(crate) fn gather_merge_ensure_launched<'mcx>(
+    node: &mut GatherMergeState<'mcx>,
+    outer: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if node.initialized {
+        return Ok(());
+    }
+    let gm = node.plan;
+    if gm.num_workers > 0 && estate.es_use_parallel_mode {
+        match node.pei.as_mut() {
+            None => {
+                node.pei = Some(exec_init_parallel_plan(
+                    gm.plan.lefttree.expect("GatherMerge without an outer plan"),
+                    outer,
+                    estate,
+                    &gm.initParam,
+                    gm.num_workers,
+                    node.tuples_needed,
+                )?)
+            }
+            Some(pei) => exec_parallel_reinitialize(outer, estate, pei, &gm.initParam)?,
+        }
+        let pei = node.pei.as_mut().expect("just initialized");
+        parallel::LaunchParallelWorkers(pei.pcxt)?;
+        node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
+        execparallel::account_workers(estate, pei.pcxt);
+
+        if node.nworkers_launched > 0 {
+            exec_parallel_create_readers(pei);
+            node.reader = core::mem::take(&mut pei.reader);
+        } else {
+            node.reader = Vec::new();
+        }
+        node.nreaders = node.reader.len();
+    }
+    if leader_participation() || node.nreaders == 0 {
+        node.need_to_scan_locally = true;
+    }
+    node.initialized = true;
+    Ok(())
 }
 
 /// `gather_merge_init` (nodeGatherMerge.c).

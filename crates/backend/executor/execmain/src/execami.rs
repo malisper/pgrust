@@ -140,6 +140,9 @@ pub fn exec_re_scan<'mcx>(
         // ExecReScanSort: child rescanned only when the sort must be redone
         // (chgParam NULL until the Param lanes land).
         PlanStateNode::Sort(s) => {
+            // Lane-v2 parallel-DISTINCT worker verdict: a rescan rebuilds
+            // the fragment against a fresh handoff registration.
+            s.pd_state = None;
             if ::nodesort::exec_rescan_sort(&mut s.state, estate)? {
                 exec_re_scan(&mut s.outer, estate)?;
             }
