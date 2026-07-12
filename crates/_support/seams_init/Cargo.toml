@@ -271,6 +271,7 @@ syslogger = { path = "../../backend/postmaster/syslogger" }
 launcher = { path = "../../backend/replication/launcher" }
 walsender_config = { path = "../../backend/replication/walsender_config" }
 walsender = { path = "../../backend/replication/walsender" }
+syncrep = { path = "../../backend/replication/syncrep" }
 walreceiver = { path = "../../backend/replication/walreceiver" }
 walreceiverfuncs = { path = "../../backend/replication/walreceiverfuncs" }
 basebackup = { path = "../../backend/backup/basebackup" }

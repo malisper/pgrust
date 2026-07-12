@@ -14431,6 +14431,7 @@ dependencies = [
  "subtrans",
  "superuser",
  "sync",
+ "syncrep",
  "syncscan",
  "syslogger",
  "table",
@@ -15838,6 +15839,28 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "syncrep"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc",
+ "guc_tables",
+ "init_small",
+ "latch",
+ "lmgr_proc",
+ "lwlock",
+ "ps_status_seams",
+ "syncrep_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "walsender",
+ "walsender_config",
 ]
 
 [[package]]
@@ -18075,6 +18098,7 @@ dependencies = [
  "interrupt",
  "ipc_seams",
  "latch",
+ "latch_seams",
  "libc",
  "lwlock",
  "mcx",
@@ -18088,6 +18112,7 @@ dependencies = [
  "slot",
  "snapbuild",
  "stringinfo",
+ "syncrep_seams",
  "tcop_dest",
  "timeline",
  "timeline_seams",

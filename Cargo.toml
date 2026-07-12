@@ -373,6 +373,7 @@ members = [
     "crates/backend/replication/repl_scanner",
     "crates/backend/replication/repl_gram",
     "crates/backend/replication/walsender",
+    "crates/backend/replication/syncrep",
     "crates/backend/replication/walsender_seams",
     "crates/backend/replication/logical_worker_seams",
     "crates/backend/storage/ipc/standby",

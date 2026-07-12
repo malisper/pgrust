@@ -15,6 +15,7 @@ condition_variable = { path = "../../storage/lmgr/condition_variable" }
 guc_file = { path = "../../utils/misc/guc_file" }
 interrupt = { path = "../../postmaster/interrupt" }
 latch = { path = "../../storage/ipc/latch" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
 pqcomm = { path = "../../libpq/pqcomm" }
 stringinfo = { path = "../../../_support/types/stringinfo" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
@@ -40,6 +41,7 @@ ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 repl_gram = { path = "../repl_gram" }
 resowner = { path = "../../utils/resowner/resowner" }
 slot = { path = "../slot" }
+syncrep_seams = { path = "../syncrep_seams" }
 snapbuild = { path = "../logical/snapbuild" }
 tcop_dest = { path = "../../tcop/dest" }
 timeline = { path = "../../access/transam/timeline" }

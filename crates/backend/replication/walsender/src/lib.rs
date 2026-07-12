@@ -124,7 +124,17 @@ pub struct WalSndCtlData {
     pub wal_flush_cv: ConditionVariable,
     pub wal_replay_cv: ConditionVariable,
     pub wal_confirm_rcv_cv: ConditionVariable,
+    // SyncRep state (walsender_private.h). All [SyncRepLock] except
+    // sync_standbys_status, which is read lock-free (see SyncRepWaitForLSN)
+    // and written under the lock.
+    pub sync_rep_queue: [types_storage::storage::SyncCell<types_storage::storage::proclist_head>;
+        NUM_SYNC_REP_WAIT_MODE],
+    pub sync_rep_lsn: [std::sync::atomic::AtomicU64; NUM_SYNC_REP_WAIT_MODE],
+    pub sync_standbys_status: std::sync::atomic::AtomicU32,
 }
+
+// syncrep.h wait-mode slots in WalSndCtl.lsn[] / SyncRepQueue[].
+pub const NUM_SYNC_REP_WAIT_MODE: usize = 3;
 
 static WAL_SND_CTL: OnceLock<WalSndCtlData> = OnceLock::new();
 
@@ -138,8 +148,25 @@ pub fn WalSndCtl() -> &'static WalSndCtlData {
             wal_flush_cv: ConditionVariable::new(),
             wal_replay_cv: ConditionVariable::new(),
             wal_confirm_rcv_cv: ConditionVariable::new(),
+            sync_rep_queue: std::array::from_fn(|_| {
+                types_storage::storage::SyncCell::new(
+                    types_storage::storage::proclist_head::default(),
+                )
+            }),
+            sync_rep_lsn: Default::default(),
+            sync_standbys_status: std::sync::atomic::AtomicU32::new(0),
         }
     })
+}
+
+/// am_cascading_walsender (walsender.c global); syncrep's priority gate.
+pub fn am_cascading_walsender_now() -> bool {
+    AM_CASCADING_WALSENDER.get()
+}
+
+/// MyWalSnd's index into WalSndCtl().walsnds; -1 = NULL (syncrep's is_me test).
+pub fn my_walsnd_index() -> i32 {
+    MY_WAL_SND.get()
 }
 
 pub(crate) fn my_walsnd() -> &'static Mutex<WalSnd> {
@@ -220,24 +247,32 @@ pub fn WalSndGetStateString(state: WalSndState) -> &'static str {
 }
 
 // pg_stat_get_wal_senders' shared-memory scan half (walsender.c:3914); the SQL
-// function body lives in pgstatfuncs. SyncRep note: SyncRepInitConfig is
-// unported, so no walsender ever carries sync_standby_priority > 0 and
-// SyncRepGetCandidateStandbys would return an empty set — is_sync_standby is
-// false and the method default (priority) holds. Stay loud if a nonzero
-// priority ever appears before the syncrep port lands.
+// function body lives in pgstatfuncs. The sync-standby classification comes
+// from syncrep's SyncRepGetCandidateStandbys via seam (empty when syncrep is
+// not linked or synchronous_standby_names is unset — C-identical).
 fn pg_stat_wal_senders_snapshot() -> Vec<walsender_seams::WalSndStatRow> {
     let ctl = WalSndCtl();
+    let candidates: Vec<(i32, i32)> =
+        if syncrep_seams::sync_rep_candidate_indexes::is_installed() {
+            syncrep_seams::sync_rep_candidate_indexes::call().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    let method_is_priority = if syncrep_seams::sync_rep_method_is_priority::is_installed() {
+        syncrep_seams::sync_rep_method_is_priority::call()
+    } else {
+        true
+    };
     let mut rows = Vec::new();
-    for slot in ctl.walsnds.iter() {
+    for (i, slot) in ctl.walsnds.iter().enumerate() {
         let w = slot.lock().expect("walsnd mutex");
         if w.pid == 0 {
             continue;
         }
-        assert_eq!(
-            w.sync_standby_priority, 0,
-            "pg_stat_get_wal_senders: sync_standby_priority set but \
-             SyncRepGetCandidateStandbys unported (syncrep.c)"
-        );
+        // Stale-data protection: match both walsnd_index and pid (C comment).
+        let is_sync_standby = candidates
+            .iter()
+            .any(|&(idx, pid)| idx == i as i32 && pid == w.pid);
         rows.push(walsender_seams::WalSndStatRow {
             pid: w.pid,
             state: WalSndGetStateString(w.state),
@@ -249,8 +284,8 @@ fn pg_stat_wal_senders_snapshot() -> Vec<walsender_seams::WalSndStatRow> {
             flush_lag: w.flushLag,
             apply_lag: w.applyLag,
             sync_priority: w.sync_standby_priority,
-            is_sync_standby: false,
-            syncrep_method_is_priority: true,
+            is_sync_standby,
+            syncrep_method_is_priority: method_is_priority,
             reply_time: w.replyTime,
         });
     }
@@ -938,5 +973,10 @@ pub fn init_seams() {
     walsender_seams::init_wal_sender::set(InitWalSender);
     walsender_seams::wal_snd_error_cleanup::set(WalSndErrorCleanup);
     walsender_seams::wal_snd_wakeup::set(wakeup::WalSndWakeup);
+    // WalSndLastCycleHandler (walsender.c:3475).
+    walsender_seams::wal_snd_last_cycle_handler::set(|| {
+        GOT_SIGUSR2.set(true);
+        latch_seams::set_latch_my_latch::call();
+    });
     walsender_seams::pg_stat_wal_senders_snapshot::set(pg_stat_wal_senders_snapshot);
 }
