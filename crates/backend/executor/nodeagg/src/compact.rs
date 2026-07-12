@@ -99,11 +99,24 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
         return CompactArm::SpillRisk;
     }
+    // Entry layout by planner group estimate (pod A/B, tableresidual note):
+    // Inline16 single-load entries win 14-25% on the two-phase production
+    // shape at ≤1e6 groups but lose ~6-9% at the 8.4M-group band (2x entry
+    // bytes turn DRAM-bound), so big estimates keep Salt8. Underestimates
+    // are bounded by the runtime migration backstop (half hash_mem), which
+    // caps how large an Inline16 table can actually grow.
+    let layout = if numgroups <= (1 << 20) {
+        ::lanetable::EntryLayout::Inline16
+    } else {
+        ::lanetable::EntryLayout::Salt8
+    };
     ph.compact = Some(CompactHash {
-        table: ::lanetable::LaneAggTable::new(
+        table: ::lanetable::LaneAggTable::with_config(
             ::lanetable::KeyRepr::Int,
             additionalsize,
             (numgroups as usize).min(1 << 20),
+            ::lanetable::HashKind::best(),
+            layout,
         ),
         width,
         keys: Vec::new(),
