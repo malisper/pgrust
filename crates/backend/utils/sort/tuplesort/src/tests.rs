@@ -1960,3 +1960,155 @@ mod gist_point_zorder {
         }
     }
 }
+
+pub(super) mod cbstore_ingest {
+    use super::*;
+    use ::types_tuple::TYPALIGN_INT;
+
+    // int8 + text descriptor (the cbstore ingest shape: by-val ints, inline
+    // 4B-U varlenas).
+    pub(super) fn i64_text_desc(mcx: Mcx<'static>) -> Rc<TupleDescData<'static>> {
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        for (i, (typid, len, byval, align)) in
+            [(20u32, 8i16, true, ::types_tuple::TYPALIGN_DOUBLE), (25, -1, false, TYPALIGN_INT)]
+                .iter()
+                .enumerate()
+        {
+            let att = FormData_pg_attribute {
+                attnum: (i + 1) as i16,
+                atttypid: *typid,
+                attlen: *len,
+                attbyval: *byval,
+                attalign: *align,
+                attstorage: ::types_tuple::TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
+        Rc::new(TupleDescData {
+            natts: 2,
+            tdtypeid: 2249,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    pub(super) fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    // putvalues/getvalues (the cbstore_ingest_sort seam machinery): rows come
+    // back key-sorted (text C-order primary, i64 tiebreak) and deform exactly.
+    #[test]
+    fn putvalues_getvalues_sorts_rows() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [
+            SortSupport {
+                ssup_collation: ::types_core::catalog::C_COLLATION_OID,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 2,
+                comparator: SortComparator::TextC,
+            },
+            SortSupport {
+                ssup_collation: 0,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 1,
+                comparator: SortComparator::SignedI64,
+            },
+        ];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 1024, TUPLESORT_NONE);
+        let mut seed = 42u64;
+        let mut rows: Vec<(i64, Vec<u8>)> = (0..2000)
+            .map(|_| {
+                let k = lcg(&mut seed);
+                ((k % 1000) as i64 - 500, format!("k{:03}", k % 250).into_bytes())
+            })
+            .collect();
+        let mut keep = Vec::new();
+        for (i, t) in rows.iter() {
+            let vals = [Datum::from_i64(*i), text_datum(t, &mut keep)];
+            ts.putvalues(&vals, &[false, false]).unwrap();
+        }
+        ts.performsort().unwrap();
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        let mut values = [Datum::null(); 2];
+        let mut isnull = [false; 2];
+        while ts.getvalues(true, &mut values, &mut isnull).unwrap() {
+            assert!(!isnull[0] && !isnull[1]);
+            let p = values[1].as_usize() as *const u8;
+            // 4B-U inline image copied out before the next call.
+            let len = unsafe { ((p as *const u32).read_unaligned() >> 2) as usize };
+            let bytes = unsafe { std::slice::from_raw_parts(p.add(4), len - 4) }.to_vec();
+            got.push((values[0].as_i64(), bytes));
+        }
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        assert_eq!(got, rows);
+    }
+}
+
+mod cbstore_ingest_large {
+    use super::*;
+    use super::cbstore_ingest::*;
+
+    #[test]
+    fn putvalues_getvalues_sorts_67k_rows() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [
+            SortSupport {
+                ssup_collation: ::types_core::catalog::C_COLLATION_OID,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 2,
+                comparator: SortComparator::TextC,
+            },
+            SortSupport {
+                ssup_collation: 0,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 1,
+                comparator: SortComparator::SignedI64,
+            },
+        ];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 65536, TUPLESORT_NONE);
+        let mut seed = 7u64;
+        let mut rows: Vec<(i64, Vec<u8>)> = (0..66770)
+            .map(|_| {
+                let k = lcg(&mut seed);
+                ((k % 1000) as i64, format!("k{:04}", k % 300).into_bytes())
+            })
+            .collect();
+        let mut keep = Vec::new();
+        for (i, t) in rows.iter() {
+            let vals = [Datum::from_i64(*i), text_datum(t, &mut keep)];
+            ts.putvalues(&vals, &[false, false]).unwrap();
+        }
+        ts.performsort().unwrap();
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        let mut values = [Datum::null(); 2];
+        let mut isnull = [false; 2];
+        while ts.getvalues(true, &mut values, &mut isnull).unwrap() {
+            let p = values[1].as_usize() as *const u8;
+            let len = unsafe { ((p as *const u32).read_unaligned() >> 2) as usize };
+            let bytes = unsafe { std::slice::from_raw_parts(p.add(4), len - 4) }.to_vec();
+            got.push((values[0].as_i64(), bytes));
+        }
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        assert_eq!(got.len(), rows.len());
+        for (i, (g, r)) in got.iter().zip(rows.iter()).enumerate() {
+            assert_eq!(g, r, "row {i}");
+        }
+    }
+}

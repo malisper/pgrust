@@ -30,3 +30,6 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 inval = { path = "../../utils/cache/inval" }
 zstd = "0.13"
 tuplesort_seams = { version = "0.0.0", path = "../../utils/sort/tuplesort_seams" }
+
+[dev-dependencies]
+tuplesort = { path = "../../utils/sort/tuplesort" }

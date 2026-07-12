@@ -2871,6 +2871,7 @@ dependencies = [
  "snapmgr",
  "tableam_vocab",
  "transam_seams",
+ "tuplesort",
  "tuplesort_seams",
  "types_core",
  "types_error",

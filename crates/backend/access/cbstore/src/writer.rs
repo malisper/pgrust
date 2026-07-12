@@ -212,6 +212,10 @@ enum ColBuilder {
 pub struct CbWriter {
     file: SegFile,
     xid: TransactionId,
+    // Command that opened this writer: buffered ingest is per-statement
+    // (tuple_insert buffers until the statement-end flush), so a writer left
+    // behind by an errored statement must not leak rows into the next one.
+    cid: ::types_core::CommandId,
     frozen: bool,
     ncols: usize,
     coltypes: Vec<ColType>,
@@ -285,7 +289,8 @@ fn open_writer(rel: &::types_rel::Relation<'_>, frozen_ok: bool) -> PgResult<CbW
     let fingerprint = schema_fingerprint(
         &rel.rd_att.attrs.iter().map(|a| (a.atttypid, a.attlen)).collect::<Vec<_>>(),
     );
-    let mut w = open_writer_inner(file, xid, frozen_ok, coltypes, fingerprint, opts)?;
+    let cid = xact_seams::get_current_command_id::call(false)?;
+    let mut w = open_writer_inner(file, xid, cid, frozen_ok, coltypes, fingerprint, opts)?;
     if !w.opts.cluster_key.is_empty() {
         let keys: Vec<(i16, CbSortKeyKind)> =
             w.opts.cluster_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
@@ -307,6 +312,7 @@ fn open_writer(rel: &::types_rel::Relation<'_>, frozen_ok: bool) -> PgResult<CbW
 fn open_writer_inner(
     file: SegFile,
     xid: TransactionId,
+    cid: ::types_core::CommandId,
     frozen_ok: bool,
     coltypes: Vec<ColType>,
     fingerprint: u64,
@@ -317,6 +323,7 @@ fn open_writer_inner(
     let mut w = CbWriter {
         file,
         xid,
+        cid,
         // Freeze-on-load: first write into a file created by our own
         // transaction (empty part) makes RGs all-visible-on-commit.
         frozen: false,
@@ -1062,9 +1069,14 @@ pub fn multi_insert<'mcx>(
 ) -> PgResult<()> {
     let oid = rel.rd_id;
     let xid = xact_seams::get_current_transaction_id::call()?;
+    let cid = xact_seams::get_current_command_id::call(false)?;
     WRITERS.with(|w| {
         let mut map = w.borrow_mut();
-        let stale = map.get(&oid).is_some_and(|cw| cw.xid != xid);
+        // Evict writers from another transaction OR another command: buffered
+        // ingest is per-statement (the statement-end flush publishes it), so
+        // a writer abandoned by an errored statement must not leak its rows
+        // into a later statement of the same transaction.
+        let stale = map.get(&oid).is_some_and(|cw| cw.xid != xid || cw.cid != cid);
         if stale {
             map.remove(&oid);
         }
@@ -1085,10 +1097,13 @@ pub fn tuple_insert<'mcx>(
     rel: &::types_rel::Relation<'mcx>,
     slot: &mut ::types_slot::SlotData<'mcx>,
 ) -> PgResult<()> {
-    // Correctness-only single-row path: one RG per statement-less insert.
+    // Single-row inserts buffer like COPY: the row joins the per-(xid, cid)
+    // ingest writer and the statement-end flush (ExecModifyTable's cbstore
+    // finish, or COPY's finish_bulk_insert) publishes RG-sized seals. The
+    // old finish-per-row form sealed ONE ROW GROUP PER ROW on INSERT..SELECT
+    // (24 GB for 2M rows), each with a full footer rewrite.
     let mut slots = [slot];
-    multi_insert(rel, &mut slots)?;
-    finish_bulk_insert(rel)
+    multi_insert(rel, &mut slots)
 }
 
 pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
@@ -1115,7 +1130,7 @@ mod sorted_flag_tests {
 
     fn writer_at(path: &str, coltypes: Vec<ColType>) -> CbWriter {
         let opts = CbWriterOpts::plain(coltypes.len());
-        open_writer_inner(SegFile::open_rw(path).unwrap(), 1, true, coltypes, 0x5aa5, opts).unwrap()
+        open_writer_inner(SegFile::open_rw(path).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts).unwrap()
     }
 
     // 4B-U inline varlena image; returns the backing buffer + datum.
@@ -1275,5 +1290,317 @@ mod dict_sort_tests {
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert!(matches!(hdr.encoding, Encoding::RawText | Encoding::Lz4Text));
         assert_eq!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use crate::reader::ChunkView;
+
+    fn decode_ints(body: &[u8], nrows: usize) -> Vec<i64> {
+        let cv = ChunkView::at(body, 0, nrows as u32);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut got = Vec::new();
+        for g in 0..cv.hdr.ngranules as usize {
+            cv.decode_granule(g, &mut out, &mut dict, &mut arena);
+            got.extend(out.iter().map(|d| d.as_i64()));
+        }
+        got
+    }
+
+    // Repetitive (compressible) i64s across 2.5 granules; force each codec
+    // and prove framed round-trips + the codec tag.
+    #[test]
+    fn int_frames_roundtrip_lz4_and_zstd() {
+        let n = GRANULE_ROWS * 2 + GRANULE_ROWS / 2;
+        let vals: Vec<i64> = (0..n as i64).map(|i| 1_000_000 + (i % 97) * 3).collect();
+        for choice in [CodecChoice::Lz4, CodecChoice::Zstd] {
+            let cc = CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT };
+            let mut body = Vec::new();
+            let (min, max) =
+                encode_int_chunk(&mut body, &vals, n.div_ceil(GRANULE_ROWS) as u32, &cc);
+            assert_eq!((min, max), (1_000_000, 1_000_000 + 96 * 3));
+            let cv = ChunkView::at(&body, 0, n as u32);
+            let want = if choice == CodecChoice::Lz4 { Codec::Lz4 } else { Codec::Zstd };
+            assert_eq!(cv.hdr.codec, want, "{choice:?}");
+            assert_eq!(decode_ints(&body, n), vals, "{choice:?}");
+        }
+    }
+
+    // Auto keeps the plain zero-decode lane on incompressible data.
+    #[test]
+    fn auto_keeps_plain_on_incompressible_ints() {
+        let n = GRANULE_ROWS;
+        let vals: Vec<i64> = (0..n as u64).map(|i| crate::hll::mix64(i) as i64).collect();
+        let mut body = Vec::new();
+        encode_int_chunk(&mut body, &vals, 1, &test_codec_ctx());
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(cv.hdr.payload_len, (n * cv.hdr.width as usize) as u64);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Auto picks a codec on compressible data and the >=10%-win gate holds.
+    #[test]
+    fn auto_compresses_compressible_ints() {
+        let n = GRANULE_ROWS * 2;
+        let vals: Vec<i64> = (0..n as i64).map(|i| i / 64).collect();
+        let mut body = Vec::new();
+        encode_int_chunk(&mut body, &vals, 2, &test_codec_ctx());
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_ne!(cv.hdr.codec, Codec::None);
+        assert!(cv.hdr.payload_len as usize * 10 <= n * cv.hdr.width as usize * 9);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Plain choice = the v5 byte behavior (no frames anywhere).
+    #[test]
+    fn plain_choice_writes_v5_shape() {
+        let n = GRANULE_ROWS;
+        let vals: Vec<i64> = (0..n as i64).map(|i| i / 64).collect();
+        let cc = CodecCtx { choice: CodecChoice::Plain, zstd_level: ZSTD_LEVEL_DEFAULT };
+        let mut body = Vec::new();
+        encode_int_chunk(&mut body, &vals, 1, &cc);
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // ZSTD text frames: low-NDV rows force the dict lane; the compressed
+    // dict blob round-trips under the zstd tag.
+    #[test]
+    fn zstd_dict_text_roundtrip() {
+        let rows: Vec<Vec<u8>> = (0..4096)
+            .map(|i| format!("value-{:02}-{}", i % 7, "x".repeat(2000)).into_bytes())
+            .collect();
+        let refs: Vec<&[u8]> = rows.iter().map(|v| &v[..]).collect();
+        let mut tb = TextBuilder { offs: Vec::new(), blob: Vec::new() };
+        for r in &refs {
+            tb.offs.push((tb.blob.len() as u32, r.len() as u32));
+            tb.blob.extend_from_slice(r);
+        }
+        let cc = CodecCtx { choice: CodecChoice::Zstd, zstd_level: ZSTD_LEVEL_DEFAULT };
+        let mut body = Vec::new();
+        encode_text_chunk(&mut body, &tb, 1, &cc);
+        let cv = ChunkView::at(&body, 0, rows.len() as u32);
+        assert_eq!(cv.hdr.encoding, Encoding::Lz4Dict);
+        assert_eq!(cv.hdr.codec, Codec::Zstd);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        cv.decode_granule(0, &mut out, &mut dict, &mut arena);
+        for (i, d) in out.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(*d).unwrap(), &refs[i][..], "row {i}");
+        }
+    }
+
+    // Old-bank read-compat at the chunk level: a legacy Lz4Text image with
+    // codec byte 0 (the v<=5 writer's layout) must decode as LZ4.
+    #[test]
+    fn legacy_lz4text_codec0_decodes() {
+        let n = 512usize;
+        let rows: Vec<Vec<u8>> =
+            (0..n).map(|i| format!("legacy-{}-{}", i % 5, "pad".repeat(16)).into_bytes()).collect();
+        // Old-writer layout: header (codec byte 0) | granule dir | offsets |
+        // one LZ4 frame per granule.
+        let mut gblob = Vec::new();
+        let mut offs = Vec::with_capacity(n);
+        for r in &rows {
+            offs.push(gblob.len() as u32);
+            push_varlena_image(&mut gblob, r);
+        }
+        let comp = lz4_flex::compress(&gblob);
+        let mut body = Vec::new();
+        ChunkHeader {
+            encoding: Encoding::Lz4Text,
+            width: 4,
+            flags: 0,
+            ngranules: 1,
+            aux: gblob.len() as i64,
+            payload_len: (n * 4 + frame_len(comp.len())) as u64,
+            codec: Codec::None, // legacy tag byte
+        }
+        .encode(&mut body);
+        put_u64(&mut body, (n * 4) as u64);
+        put_i64(&mut body, 0);
+        put_i64(&mut body, 0);
+        while body.len() % 64 != 0 {
+            body.push(0);
+        }
+        for &o in &offs {
+            put_u32(&mut body, o);
+        }
+        push_frame(&mut body, gblob.len(), &comp);
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(cv.hdr.frame_codec(), Codec::Lz4);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        cv.decode_granule(0, &mut out, &mut dict, &mut arena);
+        for (i, d) in out.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(*d).unwrap(), &rows[i][..], "row {i}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cluster_key_tests {
+    use super::*;
+
+    fn seams_once() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(::tuplesort::init_seams);
+    }
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-ckey-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    // int8 + text tupdesc matching ColType::[I64, Text].
+    fn tup_desc() -> std::rc::Rc<::types_tuple::TupleDescData<'static>> {
+        use ::types_tuple::*;
+        let m: &'static ::mcx::MemoryContext =
+            Box::leak(Box::new(::mcx::MemoryContext::new("cbstore-ckey-test")));
+        let mcx = m.mcx();
+        let mut attrs = ::mcx::PgVec::new_in(mcx);
+        let mut compact = ::mcx::PgVec::new_in(mcx);
+        for (i, (typid, len, byval, align)) in
+            [(20u32, 8i16, true, TYPALIGN_DOUBLE), (25, -1, false, TYPALIGN_INT)]
+                .iter()
+                .enumerate()
+        {
+            let att = FormData_pg_attribute {
+                attnum: (i + 1) as i16,
+                atttypid: *typid,
+                attlen: *len,
+                attbyval: *byval,
+                attalign: *align,
+                attstorage: TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
+        std::rc::Rc::new(TupleDescData {
+            natts: 2,
+            tdtypeid: 2249,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    // The 3.1 ordering property: rows ingested in adversarial order come out
+    // key-sorted (text C-order, then i64), RGs carry RG_FLAG_CLUSTERED, the
+    // footer records the declared key, and the v5 sorted flags read exact.
+    #[test]
+    fn cluster_key_sorts_ingest_and_stamps_metadata() {
+        seams_once();
+        let path = tmp("sort");
+        let coltypes = vec![ColType::I64, ColType::Text];
+        let mut opts = CbWriterOpts::plain(2);
+        // Key: (text col 1, int col 0) — cross-column and cross-class.
+        opts.cluster_key = vec![(1, CbSortKeyKind::TextC), (0, CbSortKeyKind::Int64)];
+        let mut w = open_writer_inner(
+            SegFile::open_rw(&path).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts,
+        )
+        .unwrap();
+        let keys: Vec<(i16, CbSortKeyKind)> =
+            w.opts.cluster_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
+        w.sorter =
+            Some(::tuplesort_seams::cbstore_ingest_sort::call(tup_desc(), &keys, 65536).unwrap());
+
+        // > 1 RG of rows, adversarial order (descending + interleaved).
+        let n = RG_ROWS + 1234;
+        let mut rows: Vec<(i64, Vec<u8>)> = (0..n)
+            .map(|i| {
+                let r = crate::hll::mix64(i as u64);
+                ((r % 1000) as i64, format!("k{:04}", r % 300).into_bytes())
+            })
+            .collect();
+        let mut keep = Vec::new();
+        for (v, t) in &rows {
+            let vals = [Datum::from_i64(*v), text_datum(t, &mut keep)];
+            w.ingest_row(&vals, &[false, false]).unwrap();
+        }
+        // Nothing sealed before the drain: rows live in the sorter.
+        assert_eq!(w.rgs.len(), 0);
+        assert_eq!(w.nbuf, 0);
+        w.finish().unwrap();
+
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.cluster_key, vec![1, 0]);
+        assert_eq!(part.total_rows(), n as u64);
+        assert!(part.rgs.len() >= 2);
+        for rg in &part.rgs {
+            assert_ne!(rg.flags & RG_FLAG_CLUSTERED, 0);
+        }
+        // Text key column is whole-part sorted; int is not (tiebreak only).
+        assert_eq!(part.sorted, vec![0, 1]);
+
+        // Read every row back and compare against the host-sorted oracle.
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let (mut out_i, mut out_t) = (Vec::new(), Vec::new());
+        let (mut dict, mut arena) = (Vec::new(), Vec::new());
+        let (mut dict2, mut arena2) = (Vec::new(), Vec::new());
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        for rg in 0..part.rgs.len() {
+            let ints = part.chunk(rg, 0);
+            let texts = part.chunk(rg, 1);
+            // Dict tables are per-RG (build_dict contract: caller clears at
+            // RG boundaries).
+            dict.clear();
+            dict2.clear();
+            for g in 0..ints.hdr.ngranules as usize {
+                ints.decode_granule(g, &mut out_i, &mut dict, &mut arena);
+                texts.decode_granule(g, &mut out_t, &mut dict2, &mut arena2);
+                assert_eq!(out_i.len(), out_t.len());
+                for (i, t) in out_i.iter().zip(out_t.iter()) {
+                    got.push((i.as_i64(), crate::varlena_bytes(*t).unwrap().to_vec()));
+                }
+            }
+        }
+        assert_eq!(got.len(), rows.len());
+        // Multiset equality by full row; order equality by the key columns
+        // (equal-key rows may permute in payload—here the whole row IS the
+        // key, so exact equality holds).
+        for (i, (g, r)) in got.iter().zip(rows.iter()).enumerate() {
+            assert_eq!(g, r, "row {i} of {}", rows.len());
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // No cluster key: ingest_row appends directly (no sorter detour).
+    #[test]
+    fn no_cluster_key_appends_directly() {
+        seams_once();
+        let path = tmp("nokey");
+        let mut w = open_writer_inner(
+            SegFile::open_rw(&path).unwrap(), 1, 0, true,
+            vec![ColType::I64, ColType::Text], 0x5aa5, CbWriterOpts::plain(2),
+        )
+        .unwrap();
+        assert!(w.sorter.is_none());
+        let mut keep = Vec::new();
+        let vals = [Datum::from_i64(7), text_datum(b"x", &mut keep)];
+        w.ingest_row(&vals, &[false, false]).unwrap();
+        assert_eq!(w.nbuf, 1);
+        w.finish().unwrap();
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.cluster_key, Vec::<u16>::new());
+        assert_eq!(part.rgs[0].flags & RG_FLAG_CLUSTERED, 0);
+        std::fs::remove_file(&path).unwrap();
     }
 }
