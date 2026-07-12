@@ -1,0 +1,18 @@
+[package]
+name = "lanestitch"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "lanestitch"
+path = "src/lib.rs"
+
+# The copy-and-patch stencil stitcher for lane-executor-v2 (Phase 3).
+# Standalone + parity-tested now, wired into the pipeline later — the
+# lanefold pattern. Deps are the value/error currency (datum, types_error)
+# plus the shared production W^X code arena (jit_deform::install_code).
+[dependencies]
+datum = { path = "../../../_support/types/datum" }
+types_error = { path = "../../../_support/types/types_error" }
+jit_deform = { path = "../../../_support/jit_deform" }
