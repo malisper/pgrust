@@ -7,7 +7,7 @@
 use ::datum::Datum;
 use ::types_core::xact::FullTransactionId;
 use ::types_core::{
-    uint16, BlockNumber, OffsetNumber, TransactionId, XLogRecPtr, BLCKSZ,
+    uint16, BlockNumber, OffsetNumber, Oid, TransactionId, XLogRecPtr, BLCKSZ,
 };
 use ::types_storage::bufpage::{PageMut, PageRef, SizeOfPageHeaderData};
 
@@ -356,13 +356,16 @@ impl gistxlogPage {
 }
 
 // The closed opclass set (gistproc) never dereferences C's rel/page members;
-// leafness of the source page is threaded instead.
+// leafness of the source page is threaded instead. rel_natts stands in for
+// C's entry->rel->rd_att->natts (btree_gist penalty scaling): 0 everywhere
+// except the copies call_penalty stamps.
 #[derive(Clone, Copy, Debug)]
 pub struct GISTENTRY {
     pub key: Datum,
     pub offset: OffsetNumber,
     pub leafkey: bool,
     pub page_is_leaf: bool,
+    pub rel_natts: u16,
 }
 
 impl GISTENTRY {
@@ -373,6 +376,7 @@ impl GISTENTRY {
             offset,
             leafkey,
             page_is_leaf,
+            rel_natts: 0,
         }
     }
 }
@@ -384,8 +388,21 @@ impl Default for GISTENTRY {
             offset: 0,
             leafkey: false,
             page_is_leaf: false,
+            rel_natts: 0,
         }
     }
+}
+
+// PrepareSortSupportFromGistIndexRel handshake for non-builtin opclasses: the
+// sortsupport proc receives a pointer to this shim (its "SortSupport") and
+// installs a leaf-key comparator; tuplesort applies it with the column's
+// collation on its mcx-threaded lane.
+pub type GistSsupCmp =
+    fn(Datum, Datum, Oid, ::mcx::Mcx<'_>) -> ::types_error::PgResult<i32>;
+
+pub struct GistSortSupportShim {
+    pub ssup_collation: Oid,
+    pub comparator: Option<GistSsupCmp>,
 }
 
 pub struct GistEntryVector {

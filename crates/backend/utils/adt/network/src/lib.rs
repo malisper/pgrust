@@ -335,6 +335,18 @@ pub fn cidr_set_masklen_internal(src: InetRef<'_>, bits: i32) -> InetValue {
     dst
 }
 
+// convert_network_to_scalar (network.c), inet/cidr arm; IPv6 uses only the
+// first 5 address bytes.
+pub fn convert_network_to_scalar(ip: InetRef<'_>) -> f64 {
+    let len = if ip.family == PGSQL_AF_INET { 4 } else { 5 };
+    let mut res = ip.family as f64;
+    for i in 0..len {
+        res *= 256.0;
+        res += ip.addr[i] as f64;
+    }
+    res
+}
+
 pub fn network_cmp_internal(a1: InetRef<'_>, a2: InetRef<'_>) -> i32 {
     if a1.family == a2.family {
         let order = bitncmp(a1.addr, a2.addr, a1.bits.min(a2.bits) as i32);

@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-mod qsort;
+pub mod qsort;
 
 use ::adt_float::float8_cmp_internal;
 use ::adt_geo::{adjust_box, box_contain_box, box_ov, point_eq_point, rt_box_union, FPeq, FPge, FPgt, FPle, FPlt, PolyRef};

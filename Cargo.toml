@@ -643,6 +643,7 @@ members = [
     "crates/contrib/pgcrypto",
     "crates/contrib/hstore",
     "crates/contrib/pg_trgm",
+    "crates/contrib/btree_gist",
     "crates/backend/catalog/pg_db_role_setting_seams",
     "crates/backend/utils/init/postinit",
     "crates/backend/postmaster/pmchild_seams",

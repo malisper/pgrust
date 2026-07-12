@@ -286,6 +286,7 @@ ltree = { path = "../../contrib/ltree" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
+btree_gist = { path = "../../contrib/btree_gist" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
