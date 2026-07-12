@@ -82,6 +82,10 @@ pub(crate) struct ParallelExecShared {
     // worker threads adopt it before their run (leader-registered at
     // ExecInitAgg, keyed by partial Agg plan-node address).
     agg_handoff: ::nodeagg::merge::AggHandoffExport,
+    // Lane-v2 parallel-DISTINCT partials handoff snapshot (nodeagg
+    // pardistinct; leader-registered at the Agg drive, keyed by the Sort
+    // plan-node address).
+    pd_handoff: ::nodeagg::PdExport,
     instrumentation: Option<SharedInstrumentation>,
     usage: Mutex<Vec<(BufferUsage, WalUsage)>>,
 }
@@ -477,6 +481,7 @@ pub fn exec_init_parallel_plan<'mcx>(
         queues: Mutex::new(Vec::new()),
         nodes: Mutex::new(nodes),
         agg_handoff: ::nodeagg::merge::export_registry(),
+        pd_handoff: ::nodeagg::pd_export_registry(),
         instrumentation: instrumented.then(|| SharedInstrumentation {
             instrument_options: estate.es_instrument,
             workers: Mutex::new((0..nworkers).map(|_| None).collect()),
@@ -718,6 +723,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         .unwrap_or_default();
 
     ::nodeagg::merge::adopt_registry(&exec.agg_handoff);
+    ::nodeagg::pd_adopt_registry(&exec.pd_handoff);
 
     let mut run = || -> PgResult<()> {
         crate::execmain::executor_start_seam(qd, exec.eflags)?;
@@ -888,6 +894,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         Ok(r) => r,
         Err(payload) => {
             ::nodeagg::merge::clear_thread_registry();
+            ::nodeagg::pd_clear_thread_registry();
             querydesc::release_query_desc_seam(qd);
             types_portal::params::free(params);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -897,6 +904,7 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         }
     };
     ::nodeagg::merge::clear_thread_registry();
+    ::nodeagg::pd_clear_thread_registry();
     if result.is_err() {
         querydesc::release_query_desc_seam(qd);
     } else {
