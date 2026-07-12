@@ -4288,13 +4288,20 @@ fn sort_topk_ties_invisible(
             return false;
         }
         use ::types_core::catalog::{
-            BOOLOID, C_COLLATION_OID, DATEOID, INT2OID, INT4OID, INT8OID, OIDOID, TEXTOID,
-            TIMESTAMPOID, TIMESTAMPTZOID, VARCHAROID,
+            BOOLOID, DATEOID, INT2OID, INT4OID, INT8OID, OIDOID, TEXTOID, TIMESTAMPOID,
+            TIMESTAMPTZOID, VARCHAROID,
         };
         let byte_eq = match outer_desc.attr((k - 1) as usize).atttypid {
             INT2OID | INT4OID | INT8OID | OIDOID | BOOLOID | DATEOID | TIMESTAMPOID
             | TIMESTAMPTZOID => true,
-            TEXTOID | VARCHAROID => plan.collations[i] == C_COLLATION_OID,
+            // Deterministic collations only compare equal on identical bytes
+            // (C's varstr_cmp strcmp tiebreak, kept by the ported comparator
+            // and the varstr_cmp_locale seam); this resolves the DEFAULT
+            // collation through the database locale (the CB banks are
+            // initdb'd --no-locale with no per-column COLLATE).
+            TEXTOID | VARCHAROID => {
+                ::varlena::text_collation_is_raw_bytes(plan.collations[i]).unwrap_or(false)
+            }
             _ => false,
         };
         if !byte_eq {

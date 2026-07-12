@@ -37,6 +37,7 @@ execpartition = { path = "../execpartition" }
 partprune = { path = "../../partitioning/partprune" }
 instrument = { path = "../instrument" }
 execexpr = { path = "../execexpr" }
+varlena = { path = "../../utils/adt/varlena" }
 execscan = { path = "../execscan" }
 execgrouping = { path = "../execgrouping" }
 nodefunctionscan = { path = "../nodefunctionscan" }
