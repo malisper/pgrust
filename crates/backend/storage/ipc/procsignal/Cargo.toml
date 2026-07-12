@@ -22,6 +22,7 @@ shmem_seams = { path = "../shmem_seams" }
 async_seams = { path = "../../../commands/async_seams" }
 parallel_seams = { path = "../../../access/transam/parallel_seams" }
 sinval_seams = { path = "../sinval_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }
 condition_variable_seams = { path = "../../lmgr/condition_variable_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }

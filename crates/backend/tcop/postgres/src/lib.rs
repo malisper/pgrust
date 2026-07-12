@@ -8,6 +8,7 @@ use core::cell::Cell;
 
 use ::elog::ereport;
 use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATAL};
+use ::types_storage::storage::ProcSignalReason;
 
 pub mod extended_query;
 pub mod main_loop;
@@ -176,6 +177,152 @@ pub fn HandleRecoveryConflictInterrupt(reason: u32) {
     init_small::globals::SetInterruptPending(true);
 }
 
+// errdetail_recovery_conflict (postgres.c:2553).
+fn errdetail_recovery_conflict(reason: ProcSignalReason) -> &'static str {
+    use ProcSignalReason::*;
+    match reason {
+        PROCSIG_RECOVERY_CONFLICT_BUFFERPIN => "User was holding shared buffer pin for too long.",
+        PROCSIG_RECOVERY_CONFLICT_LOCK => "User was holding a relation lock for too long.",
+        PROCSIG_RECOVERY_CONFLICT_TABLESPACE => {
+            "User was or might have been using tablespace that must be dropped."
+        }
+        PROCSIG_RECOVERY_CONFLICT_SNAPSHOT => {
+            "User query might have needed to see row versions that must be removed."
+        }
+        PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT => {
+            "User was using a logical replication slot that must be invalidated."
+        }
+        PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK => {
+            "User transaction caused buffer deadlock with recovery."
+        }
+        PROCSIG_RECOVERY_CONFLICT_DATABASE => {
+            "User was connected to a database that must be dropped."
+        }
+        _ => "",
+    }
+}
+
+// ProcessRecoveryConflictInterrupt (postgres.c:3101) — one conflict reason.
+// C's switch-with-fallthroughs rendered as sequential gates.
+fn ProcessRecoveryConflictInterrupt(reason: ProcSignalReason) -> PgResult<()> {
+    use init_small::globals as g;
+    use ProcSignalReason::*;
+
+    // STARTUP_DEADLOCK: if we aren't waiting for a lock we can never deadlock.
+    if reason == PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK
+        && lock::GetAwaitedLockHashcode().is_none()
+    {
+        return Ok(());
+    }
+
+    if matches!(
+        reason,
+        PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK | PROCSIG_RECOVERY_CONFLICT_BUFFERPIN
+    ) {
+        // BUFFERPIN: nothing to do unless we block the Startup process.
+        // STARTUP_DEADLOCK: if the startup process is not waiting for a
+        // buffer pin (i.e. also waiting for locks), have ProcSleep check
+        // for deadlocks.
+        if !bufmgr::HoldingBufferPinThatDelaysRecovery() {
+            if reason == PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK
+                && lmgr_proc::GetStartupBufferPinWaitBufId() < 0
+            {
+                lmgr_proc::CheckDeadLockAlert();
+            }
+            return Ok(());
+        }
+        if let Some(procno) = lmgr_proc::MyProc() {
+            lmgr_proc::GetPGProcByNumber(procno)
+                .recoveryConflictPending
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Fall through to error handling.
+    }
+
+    if matches!(
+        reason,
+        PROCSIG_RECOVERY_CONFLICT_LOCK
+            | PROCSIG_RECOVERY_CONFLICT_TABLESPACE
+            | PROCSIG_RECOVERY_CONFLICT_SNAPSHOT
+    ) && !xact::IsTransactionOrTransactionBlock()
+    {
+        // No longer in a transaction: ignore.
+        return Ok(());
+    }
+
+    if reason != PROCSIG_RECOVERY_CONFLICT_DATABASE
+        && (reason == PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT || !xact::IsSubTransaction())
+    {
+        // Not in a subtransaction (or the always-ERROR logical-slot case):
+        // an ERROR can resolve the conflict.
+        if xact::IsAbortedTransactionBlockState() {
+            // Already aborted: no cancel needed. (Aborted subtransactions
+            // must still go FATAL, hence the check placement.)
+            return Ok(());
+        }
+
+        // Idle-in-transaction sessions (DoingCommandRead) drop through to
+        // FATAL to dislodge them.
+        if !DoingCommandRead() {
+            if g::QueryCancelHoldoffCount() != 0 {
+                // Mid-message read: re-arm and defer (FE/BE sync), as in
+                // ProcessInterrupts' QueryCancelPending arm.
+                RECOVERY_CONFLICT_PENDING_REASONS.with(|c| c.set(c.get() | (1 << reason as u32)));
+                g::SetInterruptPending(true);
+                return Ok(());
+            }
+
+            lmgr_proc::LockErrorCleanup()?;
+            pgstat::database::pgstat_report_recovery_conflict(reason);
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE)
+                .errmsg("canceling statement due to conflict with recovery")
+                .errdetail(errdetail_recovery_conflict(reason))
+                .into_error()
+                .with_error_location(loc(3222, "ProcessRecoveryConflictInterrupt"))
+                .into());
+        }
+    }
+
+    // Retry impossible (database dropped) or ERROR could not resolve it:
+    // terminate the session.
+    pgstat::database::pgstat_report_recovery_conflict(reason);
+    Err(ereport(FATAL)
+        .errcode(if reason == PROCSIG_RECOVERY_CONFLICT_DATABASE {
+            types_error::ERRCODE_DATABASE_DROPPED
+        } else {
+            types_error::ERRCODE_T_R_SERIALIZATION_FAILURE
+        })
+        .errmsg("terminating connection due to conflict with recovery")
+        .errdetail(errdetail_recovery_conflict(reason))
+        .errhint(
+            "In a moment you should be able to reconnect to the database and repeat \
+             your command.",
+        )
+        .into_error()
+        .with_error_location(loc(3244, "ProcessRecoveryConflictInterrupt"))
+        .into())
+}
+
+// ProcessRecoveryConflictInterrupts (postgres.c:3259).
+fn ProcessRecoveryConflictInterrupts() -> PgResult<()> {
+    debug_assert!(!elog::config::proc_exit_inprogress());
+    debug_assert_eq!(init_small::globals::InterruptHoldoffCount(), 0);
+
+    let first = types_storage::storage::PROCSIG_RECOVERY_CONFLICT_FIRST as u32;
+    let last = types_storage::storage::PROCSIG_RECOVERY_CONFLICT_LAST as u32;
+    for r in first..=last {
+        let bit = 1u32 << r;
+        if RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get) & bit != 0 {
+            RECOVERY_CONFLICT_PENDING_REASONS.with(|c| c.set(c.get() & !bit));
+            // SAFETY: r is within the ProcSignalReason repr range.
+            let reason: ProcSignalReason = unsafe { std::mem::transmute(r) };
+            ProcessRecoveryConflictInterrupt(reason)?;
+        }
+    }
+    Ok(())
+}
+
 #[cold]
 #[inline(never)]
 pub fn ProcessInterrupts() -> PgResult<()> {
@@ -304,12 +451,8 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         }
     }
 
-    let conflict_reasons = RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get);
-    if conflict_reasons != 0 {
-        panic!(
-            "ProcessInterrupts: RecoveryConflictPending (reasons bitmask {conflict_reasons:#x}) \
-             but ProcessRecoveryConflictInterrupts is not ported (standby/recovery lane)"
-        );
+    if RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get) != 0 {
+        ProcessRecoveryConflictInterrupts()?;
     }
 
     if g::IdleInTransactionSessionTimeoutPending() {
