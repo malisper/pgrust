@@ -114,6 +114,93 @@ fn comparator_whitelist_families() {
     assert_eq!(lane_cmp_for_fn_oid(999_999, false), None);
 }
 
+// Census conformance (ne-admission audit): the translate whitelist must admit
+// every comparator the central lanereg registry censuses (both operand
+// orders), and every Ne family in particular — a census/whitelist drift here
+// is exactly the class of gap that parks a `col <> const` scan qual on the
+// per-row drive. Direction matters: translate ⊇ census (translate may carry
+// extra type-alias oids only when they are censused too — the date/timestamp
+// aliases joined the census with this branch).
+#[test]
+fn translate_whitelist_covers_lanereg_census() {
+    let mut censused = 0u32;
+    for oid in 0u32..=3000 {
+        if let Some(shape) = lanereg::aot_qual_cmp(oid) {
+            censused += 1;
+            assert!(
+                lane_cmp_for_fn_oid(oid, false).is_some(),
+                "censused comparator oid {oid} ({:?}) refused by translate",
+                shape
+            );
+            assert!(
+                lane_cmp_for_fn_oid(oid, true).is_some(),
+                "censused comparator oid {oid} ({:?}) refused commuted",
+                shape
+            );
+            // The whitelist's predicate must agree with the census shape for
+            // the Ne rows (the audited class).
+            if shape.pred == lanereg::CmpPred::Ne {
+                let op = lane_cmp_for_fn_oid(oid, false).unwrap();
+                assert!(
+                    format!("{op:?}").ends_with("Ne"),
+                    "oid {oid}: census says Ne, translate maps to {op:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(censused, 90, "census size drifted; re-audit the whitelist");
+}
+
+// Ne admission end-to-end at the translate layer: `a <> 5 AND b8 <> 0`
+// engages without a requal tail, Ne clauses cost-class as range (2), fold a
+// zone src (evaluated, never wrongly pruned — the driver decides
+// eligibility), and evaluate with strict-NULL parity against the oracle.
+#[test]
+fn ne_translates_and_evals_with_nulls() {
+    const F_INT4NE: u32 = 144;
+    const F_INT8NE: u32 = 468;
+    let ctx = MemoryContext::new("lane-ne-eval");
+    let mcx = ctx.mcx();
+    let s = shape(
+        vec![
+            cmp_clause(0, F_INT4NE, false, LaneCmpRhs::Const(Datum::from_i32(5))),
+            cmp_clause(1, F_INT8NE, false, LaneCmpRhs::Const(Datum::from_i64(0))),
+        ],
+        LaneSuffix::None,
+    );
+    let mut lq = translate_scan_qual(&s, false).expect("ne qual engages");
+    assert!(!lq.requal);
+    assert_eq!(lq.nclauses, 2);
+    assert_eq!(lq.nstaged(), 2);
+    for k in 0..2 {
+        let zs = lq.staged_zone_src(k).expect("single-col ne folds a zone src");
+        assert!(zs.fn_oid == F_INT4NE || zs.fn_oid == F_INT8NE);
+    }
+    let mut soa = SoaBatch::new_in(mcx, 2);
+    let n = 64usize;
+    soa.begin(n as u32);
+    let mut rows = Vec::new();
+    for i in 0..n {
+        let a = (i as i32 % 9) - 2; // hits 5 periodically
+        let a_null = i % 7 == 0;
+        let b = (i as i64 % 4) - 1; // hits 0 periodically
+        let b_null = i % 11 == 0;
+        soa.col_values_mut(0)[i] = Datum::from_i32(a);
+        soa.col_isnull_mut(0)[i] = a_null;
+        soa.col_values_mut(1)[i] = Datum::from_i64(b);
+        soa.col_isnull_mut(1)[i] = b_null;
+        rows.push((a, a_null, b, b_null));
+    }
+    let mut sel = [0u64; SOA_BM_WORDS];
+    eval_lane_qual(&mut lq, &soa, n as u32, &mut sel).unwrap();
+    for (i, &(a, a_null, b, b_null)) in rows.iter().enumerate() {
+        // Strict comparators: a NULL operand yields NULL, which fails the
+        // qual exactly like false.
+        let want = !a_null && a != 5 && !b_null && b != 0;
+        assert_eq!(bm_contains(&sel, i), want, "row {i}: {rows:?}");
+    }
+}
+
 // ------------------------------------------------------------ translation
 
 #[test]
