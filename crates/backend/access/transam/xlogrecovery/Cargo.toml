@@ -32,6 +32,18 @@ varsup = { path = "../varsup" }
 pmsignal = { path = "../../../storage/ipc/pmsignal" }
 startup_seams = { path = "../../../postmaster/startup_seams" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+latch = { path = "../../../storage/ipc/latch" }
+condition_variable = { path = "../../../storage/lmgr/condition_variable" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+xact = { path = "../xact" }
+adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+adt_pg_lsn = { path = "../../../utils/adt/pg_lsn" }
+slot = { path = "../../../replication/slot" }
+xlogarchive = { path = "../xlogarchive" }
+checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+ipc = { path = "../../../storage/ipc/ipc" }
 libc = "0.2"
 
 bufmgr = { path = "../../../storage/buffer/bufmgr" }

@@ -12431,6 +12431,7 @@ dependencies = [
  "types_error",
  "types_guc",
  "types_startup",
+ "xlogrecovery_seams",
  "xlogutils",
 ]
 
@@ -12782,8 +12783,10 @@ dependencies = [
  "superuser_seams",
  "syncrep_seams",
  "timeout_seams",
+ "timestamp_seams",
  "transam_seams",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -12793,6 +12796,7 @@ dependencies = [
  "waitevent_seams",
  "xact",
  "xact_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -12803,6 +12807,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -17964,6 +17969,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "walreceiverfuncs_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "walsender"
 version = "0.0.0"
 dependencies = [
@@ -18436,6 +18450,8 @@ dependencies = [
  "aclchk_seams",
  "adt_bool",
  "adt_float",
+ "adt_pg_lsn",
+ "adt_timestamp",
  "aio_seams",
  "async_seams",
  "autovacuum_seams",
@@ -18447,9 +18463,11 @@ dependencies = [
  "catalog_index_seams",
  "catalog_seams",
  "catalog_storage_seams",
+ "checkpointer_seams",
  "clog",
  "combocid_seams",
  "commit_ts_seams",
+ "condition_variable",
  "condition_variable_seams",
  "controldata_utils",
  "crc32c",
@@ -18467,7 +18485,9 @@ dependencies = [
  "heaptuple",
  "init_small",
  "inval",
+ "ipc",
  "ipc_seams",
+ "latch",
  "latch_seams",
  "libc",
  "lmgr_proc",
@@ -18493,6 +18513,7 @@ dependencies = [
  "postgres_seams",
  "predicate_seams",
  "procarray",
+ "procarray_seams",
  "pruneheap_seams",
  "ps_status_seams",
  "relcache_seams",
@@ -18502,6 +18523,7 @@ dependencies = [
  "s_lock_seams",
  "shmem",
  "sinval_seams",
+ "slot",
  "smgr",
  "snapbuild_seams",
  "snapmgr",
@@ -18536,9 +18558,11 @@ dependencies = [
  "types_tuple",
  "varsup",
  "waitevent_seams",
+ "walreceiverfuncs_seams",
  "walsender_config",
  "walsummarizer_seams",
  "xact",
+ "xlogarchive",
  "xloginsert",
  "xloginsert_seams",
  "xlogprefetcher",

@@ -37,6 +37,7 @@ pub struct EndOfWalRecoveryInfo {
     pub lastPage: Box<[u8]>,
     pub abortedRecPtr: XLogRecPtr,
     pub missingContrecPtr: XLogRecPtr,
+    pub recoveryStopReason: String,
     pub recovery_signal_file_found: bool,
     pub standby_signal_file_found: bool,
 }
@@ -98,4 +99,58 @@ seam_core::seam!(
     // GetXLogReceiptTime(&rtime, &fromStream) (xlogrecovery.c); receipt-time
     // tracking is unported there, so this stays loud until that lane lands.
     pub fn get_xlog_receipt_time() -> (types_core::TimestampTz, bool)
+);
+
+seam_core::seam!(
+    // GetLatestXTime() (xlogrecovery.c).
+    pub fn get_latest_x_time() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
+    // StandbyMode (xlogrecovery.c global).
+    pub fn standby_mode() -> bool
+);
+
+seam_core::seam!(
+    // StandbyModeRequested (xlogrecovery.c global).
+    pub fn standby_mode_requested() -> bool
+);
+
+seam_core::seam!(
+    // HotStandbyActive() (xlogrecovery.c).
+    pub fn hot_standby_active() -> bool
+);
+
+seam_core::seam!(
+    // GetRecoveryPauseState() (xlogrecovery.c).
+    pub fn get_recovery_pause_state() -> i32
+);
+
+seam_core::seam!(
+    // SetRecoveryPause(recoveryPause) (xlogrecovery.c).
+    pub fn set_recovery_pause(recovery_pause: bool)
+);
+
+seam_core::seam!(
+    // WakeupRecovery() (xlogrecovery.c): SetLatch(recoveryWakeupLatch).
+    pub fn wakeup_recovery()
+);
+
+seam_core::seam!(
+    // CheckPromoteSignal() (xlogrecovery.c).
+    pub fn check_promote_signal() -> bool
+);
+
+seam_core::seam!(
+    // RecoveryRequiresIntParameter(param, curr, min) (xlogrecovery.c).
+    pub fn recovery_requires_int_parameter(
+        param_name: &str,
+        curr_value: i32,
+        min_value: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // StartupRequestWalReceiverRestart() (xlogrecovery.c).
+    pub fn startup_request_wal_receiver_restart()
 );

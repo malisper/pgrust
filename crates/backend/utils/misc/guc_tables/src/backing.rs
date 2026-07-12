@@ -338,6 +338,50 @@ string_var!(
     set_recovery_target_lsn_string,
     Some("")
 );
+string_var!(
+    CELL_recoveryRestoreCommand,
+    recoveryRestoreCommand,
+    set_recoveryRestoreCommand,
+    Some("")
+);
+string_var!(
+    CELL_archiveCleanupCommand,
+    archiveCleanupCommand,
+    set_archiveCleanupCommand,
+    Some("")
+);
+string_var!(
+    CELL_recoveryEndCommand,
+    recoveryEndCommand,
+    set_recoveryEndCommand,
+    Some("")
+);
+string_var!(CELL_PrimaryConnInfo, PrimaryConnInfo, set_PrimaryConnInfo, Some(""));
+string_var!(CELL_PrimarySlotName, PrimarySlotName, set_PrimarySlotName, Some(""));
+bool_var!(
+    B_recoveryTargetInclusive,
+    recoveryTargetInclusive,
+    set_recoveryTargetInclusive,
+    true
+);
+bool_var!(
+    B_wal_receiver_create_temp_slot,
+    wal_receiver_create_temp_slot,
+    set_wal_receiver_create_temp_slot,
+    false
+);
+int_var!(
+    I_recoveryTargetAction,
+    recoveryTargetAction,
+    set_recoveryTargetAction,
+    0
+); // RECOVERY_TARGET_ACTION_PAUSE
+int_var!(
+    I_recovery_min_apply_delay,
+    recovery_min_apply_delay,
+    set_recovery_min_apply_delay,
+    0
+);
 string_var!(CELL_cluster_name, cluster_name, set_cluster_name, Some(""));
 
 // be-secure.c file-scope SSL GUC globals, homed here until be_secure owns

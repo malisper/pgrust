@@ -36,7 +36,7 @@ pub fn log_startup_progress_interval() -> i32 {
 }
 
 fn WakeupRecovery() {
-    panic!("WakeupRecovery: recoveryWakeupLatch unported (xlogrecovery's wait loop)");
+    xlogrecovery_seams::wakeup_recovery::call();
 }
 
 /// SIGUSR2 handler body (promotion trigger).
@@ -211,4 +211,9 @@ pub fn init_seams() {
     startup_seams::begin_startup_progress_phase::set(begin_startup_progress_phase);
     startup_seams::register_startup_progress_timeout::set(register_startup_progress_timeout);
     startup_seams::process_startup_proc_interrupts::set(ProcessStartupProcInterrupts);
+    startup_seams::is_promote_signaled::set(IsPromoteSignaled);
+    startup_seams::reset_promote_signaled::set(ResetPromoteSignaled);
+    startup_seams::disable_startup_progress_timeout::set(disable_startup_progress_timeout);
+    startup_seams::pre_restore_command::set(PreRestoreCommand);
+    startup_seams::post_restore_command::set(PostRestoreCommand);
 }

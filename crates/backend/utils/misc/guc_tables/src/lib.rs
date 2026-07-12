@@ -554,6 +554,42 @@ fn install_guc_tables_owned_vars() {
         get: backing::recovery_target_lsn_string,
         set: backing::set_recovery_target_lsn_string,
     });
+    vars::recoveryRestoreCommand.install(GucVarAccessors {
+        get: backing::recoveryRestoreCommand,
+        set: backing::set_recoveryRestoreCommand,
+    });
+    vars::archiveCleanupCommand.install(GucVarAccessors {
+        get: backing::archiveCleanupCommand,
+        set: backing::set_archiveCleanupCommand,
+    });
+    vars::recoveryEndCommand.install(GucVarAccessors {
+        get: backing::recoveryEndCommand,
+        set: backing::set_recoveryEndCommand,
+    });
+    vars::PrimaryConnInfo.install(GucVarAccessors {
+        get: backing::PrimaryConnInfo,
+        set: backing::set_PrimaryConnInfo,
+    });
+    vars::PrimarySlotName.install(GucVarAccessors {
+        get: backing::PrimarySlotName,
+        set: backing::set_PrimarySlotName,
+    });
+    vars::recoveryTargetInclusive.install(GucVarAccessors {
+        get: backing::recoveryTargetInclusive,
+        set: backing::set_recoveryTargetInclusive,
+    });
+    vars::wal_receiver_create_temp_slot.install(GucVarAccessors {
+        get: backing::wal_receiver_create_temp_slot,
+        set: backing::set_wal_receiver_create_temp_slot,
+    });
+    vars::recoveryTargetAction.install(GucVarAccessors {
+        get: backing::recoveryTargetAction,
+        set: backing::set_recoveryTargetAction,
+    });
+    vars::recovery_min_apply_delay.install(GucVarAccessors {
+        get: backing::recovery_min_apply_delay,
+        set: backing::set_recovery_min_apply_delay,
+    });
     vars::cluster_name.install(GucVarAccessors {
         get: backing::cluster_name,
         set: backing::set_cluster_name,
