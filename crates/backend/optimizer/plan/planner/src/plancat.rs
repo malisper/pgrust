@@ -329,6 +329,23 @@ pub fn get_relation_info<'mcx>(
         } else {
             PgVec::new_in(run.mcx)
         };
+        // Ingest-time per-column NDV for no-pg_statistic group-key
+        // estimation (selfuncs::add_unique_group_var); footer-less parts
+        // leave it empty (ratio fallback = prior behavior).
+        let col_ndv = if is_cbstore && ::costsize::gucs::cbstore_footer_ndv_est() {
+            match ::tableam::cbstore_footer_ndv(&relation)? {
+                Some(v) => {
+                    let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
+                    for b in v {
+                        pv.push(b);
+                    }
+                    pv
+                }
+                None => PgVec::new_in(run.mcx),
+            }
+        } else {
+            PgVec::new_in(run.mcx)
+        };
         let r = run.root.rel_mut(rel);
         r.serverid = 0;
         r.has_fdwroutine = false;
@@ -338,6 +355,7 @@ pub fn get_relation_info<'mcx>(
             r.amflags |= types_pathnodes::AMFLAG_CBSTORE;
             r.cbstore_sorted_attnos = sorted_attnos;
             r.cbstore_col_bytes = col_bytes;
+            r.cbstore_col_ndv = col_ndv;
         } else {
             // Heap AM always provides scan_bitmap/scan_tid_range.
             r.amflags |= AMFLAG_HAS_TID_RANGE;
