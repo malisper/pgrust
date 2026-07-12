@@ -608,6 +608,125 @@ impl LaneAggTable {
         }
     }
 
+    /// Fused probe+fold driver — the CH raw-emplace loop shape (hash inline,
+    /// one pass, no places[] round trip). `fold(states, ordinal, is_new)`
+    /// runs once per key IN INPUT ORDER; new groups' states are zeroed.
+    ///
+    /// Why this exists (pod perf, tableresidual note): the per-row
+    /// [`Self::probe_int`] shape makes LLVM reload the table's hash-kind /
+    /// layout / mask / base pointers from memory EVERY row — the caller's
+    /// fold stores through `*mut u8` may alias `self` as far as alias
+    /// analysis can prove. This driver hoists the entry-array and row-store
+    /// raw parts into locals (SSA values, immune to stores through unknown
+    /// pointers) and re-hoists only after an insert (which may grow or
+    /// convert the table). Inserts are once-per-group, so the steady-state
+    /// loop is pure register traffic + the two data-dependent loads.
+    pub fn probe_fold_int(&mut self, keys: &[i64], mut fold: impl FnMut(*mut u8, u32, bool)) {
+        debug_assert_eq!(self.repr, KeyRepr::Int);
+        // hash_int / hash_int_crc are zero-sized fn items: each arm
+        // monomorphizes the loop with the hash inlined.
+        match (self.hash, self.slot_words == 2) {
+            (HashKind::Fmix, false) => self.probe_fold_run::<false>(keys, hash_int, &mut fold),
+            (HashKind::Fmix, true) => self.probe_fold_run::<true>(keys, hash_int, &mut fold),
+            (HashKind::Crc, false) => self.probe_fold_run::<false>(keys, hash_int_crc, &mut fold),
+            (HashKind::Crc, true) => self.probe_fold_run::<true>(keys, hash_int_crc, &mut fold),
+        }
+    }
+
+    fn probe_fold_run<const INLINE: bool>(
+        &mut self,
+        keys: &[i64],
+        hf: impl Fn(u64) -> u64 + Copy,
+        fold: &mut impl FnMut(*mut u8, u32, bool),
+    ) {
+        let kw = self.key_words;
+        let mut i = 0usize;
+        'rehoist: while i < keys.len() {
+            // Hoisted raw parts (re-derived after every insert: grow /
+            // two-level conversion / row-chunk allocation all happen there).
+            let bp: *mut EntrySet = match &mut self.buckets {
+                Some(bs) => bs.as_mut_ptr(),
+                None => core::ptr::null_mut(),
+            };
+            let (sp_entries, sp_mask) = {
+                let s = &mut self.single;
+                (s.entries.as_mut_ptr(), s.mask)
+            };
+            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_shift = self.rows.chunk_shift;
+            let rows_cmask = self.rows.chunk_mask;
+            let rows_stride = self.rows.stride_words;
+            let members = self.total_members;
+            let salt_on = !INLINE && members > SALT_DISABLE_MAX_ENTRIES;
+            while i < keys.len() {
+                // SAFETY: i < keys.len().
+                let key = unsafe { *keys.get_unchecked(i) };
+                let hash = hf(key as u64);
+                let (e_ptr, mask) = if bp.is_null() {
+                    (sp_entries, sp_mask)
+                } else {
+                    // SAFETY: two-level tables have exactly 256 buckets.
+                    let set = unsafe { &mut *bp.add(bucket_of(hash)) };
+                    (set.entries.as_mut_ptr(), set.mask)
+                };
+                let salted = if salt_on { salt_of(hash) } else { 0 };
+                let mut pos = (hash as usize) & mask;
+                let hit: Option<*mut u64> = loop {
+                    if INLINE {
+                        // SAFETY: masked slot index, 2 words per slot.
+                        let sp = unsafe { e_ptr.add(pos * 2) };
+                        // SAFETY: in-bounds slot words.
+                        let (k, r) = unsafe { (*sp, *sp.add(1)) };
+                        if r == 0 {
+                            break None;
+                        }
+                        if k as i64 == key {
+                            let row = (r - 1) as usize;
+                            // SAFETY: live row (chunked storage; parts
+                            // hoisted above, stable since the last insert).
+                            break Some(unsafe {
+                                row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                            });
+                        }
+                    } else {
+                        // SAFETY: masked entry index.
+                        let e = unsafe { *e_ptr.add(pos) };
+                        if e == 0 {
+                            break None;
+                        }
+                        if salted == 0 || (e & !REF_MASK) == salted {
+                            let row = ((e & REF_MASK) - 1) as usize;
+                            // SAFETY: live row.
+                            let p = unsafe {
+                                row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                            };
+                            // SAFETY: word 0 is the key word.
+                            if unsafe { *p } as i64 == key {
+                                break Some(p);
+                            }
+                        }
+                    }
+                    pos = (pos + 1) & mask;
+                };
+                match hit {
+                    Some(p) => {
+                        // SAFETY: states follow the key words.
+                        fold(unsafe { p.add(kw).cast() }, i as u32, false);
+                        i += 1;
+                    }
+                    None => {
+                        // Insert leg (cold; may grow/convert/allocate) —
+                        // fold, then re-hoist every raw part.
+                        let pr = self.insert_int(key, hash, pos);
+                        fold(pr.states, i as u32, true);
+                        i += 1;
+                        continue 'rehoist;
+                    }
+                }
+            }
+        }
+    }
+
     #[inline(never)]
     fn insert_int(&mut self, key: i64, hash: u64, mut pos: usize) -> Probe {
         let sw = self.slot_words;
@@ -655,6 +774,24 @@ impl LaneAggTable {
         new_out: &mut Vec<u32>,
     ) {
         debug_assert_eq!(self.repr, KeyRepr::Int);
+        out.reserve(keys.len());
+        // Below the prefetch engage point (or with prefetch off) the table
+        // is cache-resident and per-probe LOOP OVERHEAD dominates — route
+        // through the fused hoisted-locals driver (tableresidual note: the
+        // per-row probe shape reloads table fields from memory every row).
+        // Both prefetch idioms are L2-gated off there by construction, so
+        // this changes no prefetch behavior.
+        let engaged = mode != PrefetchMode::None
+            && self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES;
+        if !engaged {
+            self.probe_fold_int(keys, |states, i, is_new| {
+                out.push(states);
+                if is_new {
+                    new_out.push(i);
+                }
+            });
+            return;
+        }
         hashes.clear();
         hashes.reserve(keys.len());
         // Hash-kind branch hoisted out of the loop (the OnceLock/enum test
@@ -671,24 +808,13 @@ impl LaneAggTable {
                 }
             }
         }
-        out.reserve(keys.len());
         match mode {
-            PrefetchMode::None => {
-                for (i, (&k, &h)) in keys.iter().zip(hashes.iter()).enumerate() {
-                    let pr = self.probe_int(k, h);
-                    out.push(pr.states);
-                    if pr.is_new {
-                        new_out.push(i as u32);
-                    }
-                }
-            }
+            PrefetchMode::None => unreachable!("handled by the fused driver"),
             PrefetchMode::PreTouch => {
                 // DuckDB: branchless pre-touch of every row's bucket entry —
-                // gated to tables larger than L2 (DuckDB's thread-local
-                // tables are cache-sized so it never needs this gate; ours
-                // grows unbounded and a cache-resident pre-touch is pure
-                // overhead — CH's own prefetch-gate reasoning).
-                if self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES {
+                // engaged-only (a cache-resident pre-touch is pure overhead;
+                // CH's own prefetch-gate reasoning).
+                {
                     let sw = self.slot_words;
                     let mut sink = 0u64;
                     for &h in hashes.iter() {
@@ -709,17 +835,6 @@ impl LaneAggTable {
                 }
             }
             PrefetchMode::Adaptive => {
-                let engage = self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES;
-                if !engage {
-                    for (i, (&k, &h)) in keys.iter().zip(hashes.iter()).enumerate() {
-                        let pr = self.probe_int(k, h);
-                        out.push(pr.states);
-                        if pr.is_new {
-                            new_out.push(i as u32);
-                        }
-                    }
-                    return;
-                }
                 // CH PrefetchingHelper: time the first iterations, solve the
                 // look-ahead, clamp to [4, 32].
                 let sample = keys.len().min(100);
@@ -1009,6 +1124,25 @@ impl LaneAggTable {
         self.null_row = None;
         self.total_members = 0;
     }
+}
+
+/// Raw-parts row pointer (probe_fold_run's hoisted twin of
+/// [`RowStore::row_ptr`]).
+///
+/// SAFETY: caller holds `row < nrows` for the store whose parts these are,
+/// and no chunk allocation happened since the parts were read.
+#[inline(always)]
+unsafe fn row_ptr_raw(
+    chunks: *const Box<[u64]>,
+    shift: u32,
+    cmask: usize,
+    stride: usize,
+    row: usize,
+) -> *mut u64 {
+    let c = row >> shift;
+    let s = row & cmask;
+    // SAFETY: per the function contract.
+    unsafe { (*chunks.add(c)).as_ptr().add(s * stride) as *mut u64 }
 }
 
 /// Kind-dispatched integer hash (the single dispatch point for probes and
