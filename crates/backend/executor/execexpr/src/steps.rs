@@ -504,6 +504,25 @@ pub struct AggPerGroup {
 
 ::mcx::forget_safe_nodrop!(AggPerGroup, CmpOp);
 
+/// Clause cap for [`ScanCmpClauses`] (the lane-v2 batched-qual census).
+pub const SCAN_CMP_MAX_CLAUSES: usize = 4;
+
+/// AND-of-(scan Var CMP non-null Const) clause census for the lane-v2
+/// batched qual tiers (AOT bitmap passes / the stitched-JIT body): one
+/// `(attnum, cmp, konst)` per clause, in clause order. Selected at ready
+/// time from the PRISTINE step program — before the interpreter peephole
+/// (`fuse_program`) rewrites the shapes — so it stays valid whether the
+/// program later interprets fused, interprets unfused, or JITs. Every
+/// admitted clause is an in-core int comparator (strict, non-erroring,
+/// non-volatile) over one scan Var and one compile-time non-null Const, so
+/// AND-of-bitmaps equals `exec_qual` exactly (NULL clause result = row
+/// fails; short-circuit is unobservable).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanCmpClauses {
+    pub clauses: [(u16, CmpOp, Datum); SCAN_CMP_MAX_CLAUSES],
+    pub n: u8,
+}
+
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);
 
 // C ExprEvalStep.d.func minus the FmgrInfo pointer: fn_addr/fcinfo are the
@@ -943,6 +962,9 @@ pub struct ExprState<'mcx> {
     pub(crate) frames: PgVec<'mcx, FuncFrame<'mcx>>,
     pub(crate) saop_tables: PgVec<'mcx, SaopTable<'mcx>>,
     pub(crate) kernel: Kernel,
+    // Multi-clause scan-Var-cmp-Const census (lane-v2 batched qual tiers);
+    // the 1-clause case lives in `kernel` as QualScanVarCmpConst.
+    pub(crate) scan_cmp_clauses: Option<ScanCmpClauses>,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
     // access carries no Rust borrow provenance.
@@ -993,6 +1015,7 @@ impl<'mcx> ExprState<'mcx> {
                 frames: PgVec::new_in(mcx),
                 saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
+                scan_cmp_clauses: None,
                 flags: 0,
                 resnd,
                 innermost_case: None,
@@ -1113,6 +1136,23 @@ impl<'mcx> ExprState<'mcx> {
 
     pub fn is_qual(&self) -> bool {
         self.flags & EEO_FLAG_IS_QUAL != 0
+    }
+
+    /// The qual as an AND of scan-Var-CMP-Const clauses
+    /// (1..=SCAN_CMP_MAX_CLAUSES), or None. 1 clause = the fused kernel;
+    /// 2+ = the ready-time census. Non-erroring, non-volatile, subplan- and
+    /// param-free by construction (in-core int comparators, strict 2-arg
+    /// calls, compile-time non-null Consts).
+    pub fn scan_cmp_const_clauses(&self) -> Option<ScanCmpClauses> {
+        if let Kernel::QualScanVarCmpConst { attnum, konst, cmp } = self.kernel {
+            let mut c = ScanCmpClauses {
+                clauses: [(0, CmpOp::Int4Eq, Datum::null()); SCAN_CMP_MAX_CLAUSES],
+                n: 1,
+            };
+            c.clauses[0] = (attnum, cmp, konst);
+            return Some(c);
+        }
+        self.scan_cmp_clauses
     }
 
     #[inline]
