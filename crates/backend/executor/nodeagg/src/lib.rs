@@ -2999,6 +2999,15 @@ pub fn agg_lanefold_plan<'a, 'mcx>(
     node.lanefold.as_ref().map(|lf| &lf.plan)
 }
 
+/// The node's agg (transvalue) memory context — where by-ref transvalues are
+/// datumCopy'd (C's curaggcontext; execexpr's `agg_datum_copy` target). The
+/// lane-v2 fold feed passes this to `lanefold::fold_rows_grouped` so str-kind
+/// transvalue copies land exactly where the per-row program's would.
+pub fn agg_aggcontext<'a, 'mcx>(node: &'a AggStateData<'mcx>) -> ::mcx::Mcx<'a> {
+    // SAFETY: node-lifetime arena-boxed AggStateNode installed at init.
+    unsafe { node.agg_node.as_ref() }.aggcontext()
+}
+
 /// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
 /// program split — prepare/lookup per row (spill-mode misses spill the tuple
 /// identically), then only the RESIDUAL transitions (the transnos classify

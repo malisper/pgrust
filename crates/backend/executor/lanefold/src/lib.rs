@@ -13,7 +13,10 @@
 //   Fold-coverage tier 2 adds MIN/MAX(float4/float8) (float.c larger/smaller
 //   with NaN-greatest, last-tied-wins bit semantics), bool_and/bool_or/every
 //   (booland/boolor_statefunc), and bit_and/bit_or(int2/int4/int8) — all
-//   strict NULL-init transfns, all TYPE-level non-erroring.
+//   strict NULL-init transfns, all TYPE-level non-erroring. Tier 3 adds
+//   MIN/MAX(text/varchar/bpchar) under the memcmp collation tier (C/POSIX
+//   only) with a per-batch inline-varlena proof (vguards) and C's exact
+//   datumCopy-into-aggcontext transvalue discipline.
 // - The TYPE-level non-erroring proof (`safe_interval`/`type_proof`): an
 //   admitted expression is only folded unchecked when every value of the
 //   Var's type width provably lands inside int4 — otherwise the admission
@@ -73,10 +76,11 @@ use ::execexpr::{AggPerGroup, AggTransSpec, OUTER_VAR};
 use ::exectuples::SoaBatch;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::catalog::{
-    BOOLOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, TIMESTAMPOID,
-    TIMESTAMPTZOID,
+    BOOLOID, BPCHAROID, C_COLLATION_OID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
+    INT8OID, POSIX_COLLATION_OID, TEXTOID, TIMESTAMPOID, TIMESTAMPTZOID, VARCHAROID,
 };
 use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::types_nodes::node_tree::Node;
 
 #[cfg(test)]
@@ -118,6 +122,18 @@ const F_INT4AND: Oid = 1898;
 const F_INT4OR: Oid = 1899;
 const F_INT8AND: Oid = 1904;
 const F_INT8OR: Oid = 1905;
+// Fold-coverage tier 3: text/bpchar MIN/MAX (varlena.c text_larger/smaller,
+// varchar.c bpchar_larger/smaller). Strict + NULL-init per pg_aggregate.
+// Collation-dependent: admitted ONLY under a provably-memcmp collation (C /
+// POSIX — varstr_cmp's non-locale fast path, which cannot error or call into
+// libc/ICU); every other inputcollid refuses at classify. Varlena inputs are
+// additionally DATA-gated per batch: the fold reads payload bytes in place,
+// so compressed/external datums demote the whole batch to the checked
+// per-row program (which detoasts exactly as C does).
+const F_TEXT_LARGER: Oid = 458;
+const F_TEXT_SMALLER: Oid = 459;
+const F_BPCHAR_LARGER: Oid = 1063;
+const F_BPCHAR_SMALLER: Oid = 1064;
 
 const F_INT4MUL: Oid = 141;
 const F_INT24MUL: Oid = 170;
@@ -167,6 +183,11 @@ pub enum LaneWidth {
     F32,
     F64,
     Bool,
+    // Varlena pointer lane (fold-coverage tier 3, text/bpchar MIN/MAX): the
+    // lane value is the in-page varlena datum pointer. Never integer-guarded,
+    // never affine-transformed; every Var-width lane instead carries a vguard
+    // (inline-form batch proof) — see LanePlan::vguards.
+    Var,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -198,6 +219,25 @@ pub enum LaneKind {
     // equals C's native-width op).
     BitAnd,
     BitOr,
+    // text_larger/text_smaller (varlena.c): strict, NULL init, C-collation
+    // memcmp + length tiebreak (varstrfastcmp_c). C returns arg1 only on a
+    // STRICT win (cmp > 0 / < 0), so every tie — including equal-payload
+    // datums with different header forms (short vs 4B) — takes the SECOND
+    // argument: last-tied-wins on datum identity, associative on datums
+    // (the last element of the winning tie class survives any grouping).
+    // The winning input datum is datumCopy'd into the agg context exactly at
+    // C's ExecAggCopyTransValue points (copy iff the returned datum is not
+    // the stored transvalue).
+    StrMin,
+    StrMax,
+    // bpchar_larger/bpchar_smaller (varchar.c): strict, NULL init,
+    // trailing-blank-trimmed C-collation compare (bcTruelen + varstr_cmp).
+    // OPPOSITE tie rule from text: C returns arg1 on cmp >= 0 / <= 0, so
+    // ties keep the FIRST argument (the stored transvalue survives a tie;
+    // first-tied-wins is likewise associative). Ties here include strings
+    // differing only in trailing blanks — the survivor keeps ITS padding.
+    BpMin,
+    BpMax,
 }
 
 impl LaneWidth {
@@ -207,8 +247,9 @@ impl LaneWidth {
             LaneWidth::I32 => (i32::MIN as i64, i32::MAX as i64),
             LaneWidth::I64 => (i64::MIN, i64::MAX),
             // Datum lanes are never guarded (classify admits them only under
-            // TYPE-level-safe folds over bare Vars).
-            LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
+            // TYPE-level-safe folds over bare Vars); Var lanes carry vguards
+            // instead of integer intervals.
+            LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
         }
     }
 }
@@ -315,12 +356,19 @@ pub struct LanePlan<'mcx> {
     // is not guarded), in trans order, so check_guards' demote-on-first-fail
     // order is deterministic.
     pub guards: PgVec<'mcx, GuardEntry>,
+    // Varlena lane columns (str MIN/MAX inputs), deduped, in trans order: the
+    // per-batch inline-form proof check_guards must run — every selected
+    // non-null datum must be a plain inline varlena (1B short or 4B
+    // uncompressed) or the whole batch demotes to the checked per-row
+    // program (which detoasts compressed/external datums exactly as C does).
+    pub vguards: PgVec<'mcx, u16>,
     pub cols: PgVec<'mcx, u16>,
     // Transnos classify refused: the caller keeps its checked per-row
     // transition program for these.
     pub resid: PgVec<'mcx, usize>,
-    // Any admitted transition carries a data-level Guard (check_guards must
-    // run per batch before the fold).
+    // Any admitted transition carries a data-level proof obligation (integer
+    // Guard interval or varlena vguard): check_guards must run per batch
+    // before the fold.
     pub guarded: bool,
 }
 
@@ -408,6 +456,7 @@ fn width_of(vartype: Oid) -> Option<LaneWidth> {
         FLOAT4OID => Some(LaneWidth::F32),
         FLOAT8OID => Some(LaneWidth::F64),
         BOOLOID => Some(LaneWidth::Bool),
+        TEXTOID | VARCHAROID | BPCHAROID => Some(LaneWidth::Var),
         _ => None,
     }
 }
@@ -421,6 +470,37 @@ pub fn classify_var(expr: Node<'_>, expected: Oid) -> Option<(u16, LaneWidth)> {
         return None;
     }
     Some((v.varattno as u16 - 1, width_of(v.vartype)?))
+}
+
+// Str-fold arg admission. text_larger/smaller's argument is a text Var, a
+// varchar Var under the parser's binary-coercion RelabelType (min/max(varchar)
+// resolve to the text aggregates), or a text Var under a collation-only
+// RelabelType (eval_const_expressions rewrites `v COLLATE "C"` that way) —
+// a relabel changes only the type/collation label, never the datum bytes,
+// and the comparison collation is the Aggref's inputcollid (already gated).
+// bpchar has its own transfn pair and admits only a bare bpchar Var. No
+// OpExpr shapes ever admit for varlena lanes.
+fn classify_str_var(expr: Node<'_>, expected: Oid) -> Option<(u16, LaneWidth)> {
+    let expr = match expr.as_relabel_type() {
+        Some(r) if r.resulttype == expected => r.arg,
+        Some(_) => return None,
+        None => expr,
+    };
+    if expected == TEXTOID {
+        return classify_var(expr, TEXTOID).or_else(|| classify_var(expr, VARCHAROID));
+    }
+    classify_var(expr, expected)
+}
+
+// The provably-memcmp collation tier: C (950) and POSIX (951) resolve in
+// varstr_cmp's non-locale fast path (varstrfastcmp_c — pure memcmp + length
+// tiebreak, cannot error, allocate, or call libc/ICU). DEFAULT (100) may
+// alias a C-semantics database collation but refuses: classify has no
+// catalog access and the OID whitelist must stay self-contained; libc/ICU
+// collations refuse because their per-row comparison can allocate and (ICU)
+// error mid-batch, which the fold cannot replay at C's row.
+fn str_collation_safe(collid: Oid) -> bool {
+    collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID
 }
 
 fn classify_arg(expr: Node<'_>, expected: Oid) -> Option<LaneArg> {
@@ -493,6 +573,18 @@ pub fn classify_trans(
         let tle = spec.args.iter().next()?.as_target_entry()?;
         Some((classify_arg(tle.expr, expected)?, width_of(expected)?))
     };
+    // Varlena str arg: bare Var (or the text-over-varchar relabel), Var-width
+    // lane, no transform, no integer guard (the vguard is per-column, built
+    // by classify()).
+    let varg = |expected: Oid| -> Option<(LaneArg, LaneWidth)> {
+        if !str_collation_safe(spec.inputcollid) || spec.args.len() != 1 {
+            return None;
+        }
+        let tle = spec.args.iter().next()?.as_target_entry()?;
+        let (col, width) = classify_str_var(tle.expr, expected)?;
+        let (addend, mulk, divk) = PLAIN;
+        Some((LaneArg { col, width, addend, mulk, divk, guard: None }, LaneWidth::Var))
+    };
     let mk = |kind, (a, res_width): (LaneArg, LaneWidth)| {
         let guard = a
             .guard
@@ -563,6 +655,15 @@ pub fn classify_trans(
         F_INT4OR => mk(LaneKind::BitOr, arg(INT4OID)?),
         F_INT8AND => mk(LaneKind::BitAnd, arg(INT8OID)?),
         F_INT8OR => mk(LaneKind::BitOr, arg(INT8OID)?),
+        // Fold-coverage tier 3 (strict + NULL-init per pg_aggregate): text /
+        // bpchar MIN/MAX, admitted only under the memcmp collation tier
+        // (varg's str_collation_safe gate) over bare varlena Vars. The
+        // vguard obligation (inline-form batch proof) attaches per column in
+        // classify().
+        F_TEXT_LARGER => mk(LaneKind::StrMax, varg(TEXTOID)?),
+        F_TEXT_SMALLER => mk(LaneKind::StrMin, varg(TEXTOID)?),
+        F_BPCHAR_LARGER => mk(LaneKind::BpMax, varg(BPCHAROID)?),
+        F_BPCHAR_SMALLER => mk(LaneKind::BpMin, varg(BPCHAROID)?),
         _ => None,
     }
 }
@@ -601,9 +702,17 @@ pub fn classify<'mcx>(
             cols.push(t.col);
         }
     }
+    // Varlena lanes carry the per-batch inline-form proof obligation (one
+    // entry per distinct str column).
+    let mut vguards: PgVec<'mcx, u16> = PgVec::new_in(mcx);
+    for t in trans.iter() {
+        if t.width == LaneWidth::Var && !vguards.contains(&t.col) {
+            vguards.push(t.col);
+        }
+    }
     let (cse, cse_members, cse_skip) = build_cse(mcx, &trans);
-    let guarded = !guards.is_empty();
-    Some(LanePlan { trans, cse, cse_members, cse_skip, guards, cols, resid, guarded })
+    let guarded = !guards.is_empty() || !vguards.is_empty();
+    Some(LanePlan { trans, cse, cse_members, cse_skip, guards, vguards, cols, resid, guarded })
 }
 
 /// CSE schedule over classified transitions. SumBase: Sum/AvgAccum cluster by
@@ -646,12 +755,12 @@ pub fn build_cse<'mcx>(
                 },
                 ti,
             ),
-            // CountStar/CountAny cluster below; the tier-2 datum-lane kinds
-            // (FMin/FMax/BoolAnd/BoolOr/BitAnd/BitOr) are excluded from CSE:
-            // SumBase's derivation is ring arithmetic (inapplicable), and the
-            // MinMax scan share is conservatively not extended to the
-            // tie-sensitive float rule or the bitwise folds — they keep their
-            // independent per-trans kernels.
+            // CountStar/CountAny cluster below; the tier-2/3 datum-lane kinds
+            // (FMin/FMax/BoolAnd/BoolOr/BitAnd/BitOr/Str*/Bp*) are excluded
+            // from CSE: SumBase's derivation is ring arithmetic
+            // (inapplicable), and the MinMax scan share is conservatively not
+            // extended to the tie-sensitive float/str rules or the bitwise
+            // folds — they keep their independent per-trans kernels.
             _ => {}
         }
     }
@@ -698,8 +807,8 @@ fn lane_value(values: &[Datum], width: LaneWidth, i: usize) -> i64 {
         LaneWidth::I32 => values[i].as_i32() as i64,
         LaneWidth::I64 => values[i].as_i64(),
         // Datum-lane kinds read the datum word directly, never through the
-        // integer lane read (and are never guarded).
-        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
+        // integer lane read (and are never integer-guarded).
+        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
     }
 }
 
@@ -816,22 +925,29 @@ fn cse_delta(t: &LaneTrans, c: i64, s: i64) -> i64 {
 
 /// Whole-batch ungrouped fold: apply every admitted transition over the
 /// selected rows of the staged batch, CSE groups first, then the ungrouped
-/// per-trans kernels.
+/// per-trans kernels. `aggcxt` is the agg (transvalue) memory context — where
+/// C's ExecAggCopyTransValue copies by-ref transvalues; only the str kinds
+/// allocate (their datumCopy on a strict install/replace), and only they can
+/// fail (OOM), so integer/float/bool plans never see the Err path.
 ///
 /// # Safety
 /// `pergroup_base` is the node's once-allocated pergroup array covering every
 /// transno in the plan; rows selected by `rows` carry valid lane values in
 /// `cols` for every plan column (`rows` has one bit per staged row,
 /// `nrows <= rows.len() * 64`); AvgAccum pergroups hold a live
-/// `new_int8_transarray`-shaped transvalue. If the plan is guarded, the
-/// caller must have run `check_guards` on this batch and gotten `Pass`.
+/// `new_int8_transarray`-shaped transvalue; str-kind (Var-width) lanes carry
+/// live varlena datum pointers, and their non-empty pergroup transvalues are
+/// live inline varlenas (this fold's own aggcxt copies). If the plan is
+/// guarded, the caller must have run `check_guards` on this batch and gotten
+/// `Pass`.
 pub unsafe fn fold_batch(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
     rows: &[u64],
     nrows: usize,
     pergroup_base: NonNull<AggPerGroup>,
-) {
+    aggcxt: Mcx<'_>,
+) -> PgResult<()> {
     let nsel: u32 = rows.iter().map(|w| w.count_ones()).sum();
     for g in plan.cse.iter() {
         let members = &plan.cse_members[g.start as usize..(g.start + g.len) as usize];
@@ -1025,8 +1141,40 @@ pub unsafe fn fold_batch(
                     bit_advance(t, pg, v, want_and);
                 }
             }
+            // Batch pre-fold in row order, then one advance: legal because
+            // both str tie rules (text last-tied-wins, bpchar first-tied-
+            // wins) are associative on datum identity (see str_keep). The
+            // single advance also matches C's allocation pattern for the
+            // ungrouped case only in TOTAL bytes surviving (one copy of the
+            // final winner); AGG_PLAIN has no memory-fed spill decisions, so
+            // the intermediate-copy difference is unobservable.
+            LaneKind::StrMin | LaneKind::StrMax | LaneKind::BpMin | LaneKind::BpMax => {
+                let mut m: Option<Datum> = None;
+                for_each_row(rows, |i| {
+                    if !isnull[i] {
+                        let d = values[i];
+                        // SAFETY: vguard-passed batch — inline varlenas.
+                        m = Some(match m {
+                            None => d,
+                            Some(p) => {
+                                if unsafe { str_keep(t.kind, p, d) } {
+                                    p
+                                } else {
+                                    d
+                                }
+                            }
+                        });
+                    }
+                });
+                if let Some(d) = m {
+                    // SAFETY: vguard-passed batch (inline varlenas), live
+                    // pergroup + aggcxt (caller contract).
+                    unsafe { str_advance(t, pg, d, aggcxt)? };
+                }
+            }
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -1043,8 +1191,17 @@ pub enum GuardCheck {
 /// Per-batch data-level proof for every guarded transition. The zone bounds
 /// cover the staged window's whole granule (a superset of the selected rows),
 /// so a zone pass is conservative; the lane pass is exact — its failure is
-/// exactly "the would-error mask is non-empty".
-pub fn check_guards(
+/// exactly "the would-error mask is non-empty". Varlena vguards (str lanes)
+/// have no zone tier: the exact lane pass verifies every selected non-null
+/// datum is a plain inline varlena (1B short or 4B uncompressed) — a
+/// compressed or external datum demotes the whole batch to the checked
+/// per-row program, which detoasts exactly as C does.
+///
+/// # Safety
+/// For every vguard column, rows selected by `rows` with a false isnull bit
+/// carry lane values that are live varlena datum pointers readable through
+/// their first header byte.
+pub unsafe fn check_guards(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
     rows: &[u64],
@@ -1066,6 +1223,27 @@ pub fn check_guards(
             if !isnull[i] {
                 let v = lane_value(values, g.width, i);
                 ok &= g.lo <= v && v <= g.hi;
+            }
+        });
+        if !ok {
+            return GuardCheck::Demote;
+        }
+        data = true;
+    }
+    for &c in plan.vguards.iter() {
+        let values = cols.col_values(c as usize);
+        let isnull = cols.col_isnull(c as usize);
+        let mut ok = true;
+        for_each_row(rows, |i| {
+            if !isnull[i] {
+                let p = values[i].as_usize() as *const u8;
+                // SAFETY: selected non-null varlena lane pointer readable at
+                // its header byte (caller contract).
+                ok &= unsafe {
+                    (::types_tuple::varatt::varatt_is_1b(p)
+                        && !::types_tuple::varatt::varatt_is_1b_e(p))
+                        || ::types_tuple::varatt::varatt_is_4b_u(p)
+                };
             }
         });
         if !ok {
@@ -1102,7 +1280,7 @@ fn store_res(t: &LaneTrans, v: i64) -> Datum {
         LaneWidth::I16 => Datum::from_i16(v as i16),
         LaneWidth::I32 => Datum::from_i32(v as i32),
         LaneWidth::I64 => Datum::from_i64(v),
-        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
+        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
     }
 }
 
@@ -1112,7 +1290,7 @@ fn load_res(t: &LaneTrans, pg: &AggPerGroup) -> i64 {
         LaneWidth::I16 => pg.trans_value.as_i16() as i64,
         LaneWidth::I32 => pg.trans_value.as_i32() as i64,
         LaneWidth::I64 => pg.trans_value.as_i64(),
-        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
+        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
     }
 }
 
@@ -1214,10 +1392,92 @@ fn bit_advance(t: &LaneTrans, pg: &mut AggPerGroup, v: i64, want_and: bool) {
     }
 }
 
+// VARDATA_ANY/VARSIZE_ANY_EXHDR over an inline varlena (1B short or 4B
+// uncompressed) — the only forms a vguard-passed lane or an aggcxt transvalue
+// copy can hold.
+//
+// # Safety
+// `d` is a live varlena datum pointer in one of the two inline forms.
+#[inline(always)]
+unsafe fn str_payload<'a>(d: Datum) -> &'a [u8] {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if ::types_tuple::varatt::varatt_is_1b(p) {
+            core::slice::from_raw_parts(p.add(1), ::types_tuple::varatt::varsize_1b(p) - 1)
+        } else {
+            debug_assert!(::types_tuple::varatt::varatt_is_4b_u(p));
+            core::slice::from_raw_parts(p.add(4), ::types_tuple::varatt::varsize_4b(p) - 4)
+        }
+    }
+}
+
+// The str transfn's keep-vs-replace decision against the current winner.
+// text_larger/smaller (varlena.c): result = (text_cmp >/< 0) ? arg1 : arg2 —
+// the state survives only a STRICT win, so every tie (equal payloads under
+// memcmp+length, whatever the header forms) takes the SECOND argument:
+// last-tied-wins on datum identity. bpchar_larger/smaller (varchar.c):
+// result = (cmp >=/<= 0) ? arg1 : arg2 over bcTruelen-trimmed operands — the
+// state SURVIVES a tie (first-tied-wins), and ties include strings differing
+// only in trailing blanks. Both rules are associative on datum identity (the
+// last/first element of the winning tie class survives any grouping), which
+// is what legalizes the batch pre-fold + single advance.
+//
+// # Safety
+// As `str_payload`, for both datums.
+#[inline(always)]
+unsafe fn str_keep(kind: LaneKind, cur: Datum, v: Datum) -> bool {
+    // SAFETY: forwarded caller contract.
+    let (a, b) = unsafe { (str_payload(cur), str_payload(v)) };
+    match kind {
+        // varstrfastcmp_c IS varstr_cmp's C/POSIX-collation result (memcmp +
+        // length tiebreak) — the admission gate proved the collation.
+        LaneKind::StrMax => ::varlena::varstrfastcmp_c(a, b) > 0,
+        LaneKind::StrMin => ::varlena::varstrfastcmp_c(a, b) < 0,
+        LaneKind::BpMax => ::varlena::bpcharfastcmp_c(a, b) >= 0,
+        LaneKind::BpMin => ::varlena::bpcharfastcmp_c(a, b) <= 0,
+        _ => unreachable!(),
+    }
+}
+
+// Strict str larger/smaller advance: C returns one of the two argument
+// datums, and advance_transition_function datumCopies the result into the
+// agg context whenever it is not the stored transvalue (ExecAggCopyTransValue
+// — ported as execexpr's agg_plain_trans_byref/agg_init_group discipline:
+// copy on install, copy on replace, never on keep; the bump aggcontext
+// reclaims replaced copies at group reset instead of C's pfree). Copying the
+// input datum verbatim (agg_datum_copy = datumCopy: VARSIZE_ANY bytes)
+// preserves its exact header form, so transvalue bytes — and the allocation
+// SEQUENCE, which feeds hash-agg memory accounting and therefore spill
+// decisions — match the per-row path exactly.
+//
+// # Safety
+// As `str_keep`; `aggcxt` is the live agg context; `pg` is the transition's
+// live pergroup cell.
+#[inline(always)]
+unsafe fn str_advance(
+    t: &LaneTrans,
+    pg: &mut AggPerGroup,
+    d: Datum,
+    aggcxt: Mcx<'_>,
+) -> PgResult<()> {
+    // SAFETY: forwarded caller contract (inline varlena datum, live aggcxt).
+    unsafe {
+        if pg.no_trans_value {
+            pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+            pg.trans_value_is_null = false;
+            pg.no_trans_value = false;
+        } else if !pg.trans_value_is_null && !str_keep(t.kind, pg.trans_value, d) {
+            pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+        }
+    }
+    Ok(())
+}
+
 ::mcx::forget_safe_nodrop!(LaneTrans, CseGroup, GuardEntry);
 // SAFETY census: every field is an arena PgVec of no-drop elements (or bool).
 ::mcx::forget_safe_struct!(
-    LanePlan<'_> { trans, cse, cse_members, cse_skip, guards, cols, resid, guarded },
+    LanePlan<'_> { trans, cse, cse_members, cse_skip, guards, vguards, cols, resid, guarded },
 );
 
 #[inline(always)]
@@ -1241,14 +1501,19 @@ fn for_each_row(rows: &[u64], mut f: impl FnMut(usize)) {
 /// `groups[k]` is the live pergroup array the hash lookup installed for row
 /// `idxs[k]` of this batch (entries are never moved or freed within a batch;
 /// spill mode only redirects NEW groups); `idxs` rows carry valid lane values
-/// for every plan column; AvgAccum pergroups hold a live transarray. Guarded
-/// plans require a prior `check_guards` `Pass` on this batch.
+/// for every plan column; AvgAccum pergroups hold a live transarray; str-kind
+/// lanes and pergroups as in `fold_batch`. Guarded plans require a prior
+/// `check_guards` `Pass` on this batch. The str kinds advance per row (no
+/// batch pre-fold): each improvement datumCopies into `aggcxt` exactly where
+/// the per-row program would, keeping hash-agg memory accounting — and so
+/// spill decisions — byte-identical.
 pub unsafe fn fold_rows_grouped(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
     idxs: &[u32],
     groups: &[NonNull<AggPerGroup>],
-) {
+    aggcxt: Mcx<'_>,
+) -> PgResult<()> {
     debug_assert_eq!(idxs.len(), groups.len());
     for t in plan.trans.iter() {
         let transno = t.transno as usize;
@@ -1292,7 +1557,13 @@ pub unsafe fn fold_rows_grouped(
                     let v = xform(t, lane_value(values, t.width, i));
                     bit_advance(t, pg, v, t.kind == LaneKind::BitAnd);
                 }
+                LaneKind::StrMin | LaneKind::StrMax | LaneKind::BpMin | LaneKind::BpMax => {
+                    // SAFETY: vguard-passed batch + live aggcxt (caller
+                    // contract).
+                    unsafe { str_advance(t, pg, values[i], aggcxt)? };
+                }
             }
         }
     }
+    Ok(())
 }

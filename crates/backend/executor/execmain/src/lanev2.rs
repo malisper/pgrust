@@ -866,9 +866,18 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         // feeds alike.
         stats::tick_owned(ShapeClass::AggBuild);
         if c == AggLaneChoice::Fold {
-            let force = ::nodeagg::agg_lanefold_plan(agg)
-                .is_some_and(|plan| !plan.cols.is_empty());
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+            if let Some(vcol) =
+                ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
+            {
+                // Varlena lane: re-arm the varkey staging (idempotent; the
+                // decide-phase probe already proved it arms).
+                let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol);
+                debug_assert!(armed, "varlane re-arm is idempotent");
+            } else {
+                let force = ::nodeagg::agg_lanefold_plan(agg)
+                    .is_some_and(|plan| !plan.cols.is_empty());
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+            }
             agg_hash_build_fold_feed(agg, ss, estate)?;
         } else {
             ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
@@ -893,7 +902,20 @@ fn decide_agg_lane<'mcx>(
 ) -> PgResult<AggLaneChoice> {
     let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
         Some(plan) if ss.ss.ps_ProjInfo.is_none() => {
-            if plan.cols.is_empty() {
+            if !plan.vguards.is_empty() {
+                // Varlena (str MIN/MAX) lanes: feedable only when the plan
+                // reads EXACTLY the one varlena column (the varkey pass
+                // stages one column; the fixed-width prefix deform cannot
+                // host attlen == -1). Mixed fixed+varlena lane sets refuse —
+                // exactly the shapes the prefix probe below already refuses
+                // today (the varlena read sits inside the prefix).
+                match lanefold_varlane_col(plan) {
+                    Some(vcol) => {
+                        ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol)
+                    }
+                    None => false,
+                }
+            } else if plan.cols.is_empty() {
                 true
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
@@ -923,6 +945,38 @@ fn decide_agg_lane<'mcx>(
     Ok(AggLaneChoice::PerRow)
 }
 
+/// The varlena-lane fold feed's single staged column, when the plan is that
+/// shape: every lane read is the one varlena (str MIN/MAX) column. Any other
+/// varlena-bearing plan (mixed fixed+varlena lane sets) returns None and the
+/// fold refuses — the SoA prefix deform cannot stage an `attlen == -1` column
+/// and the varkey pass stages exactly one.
+fn lanefold_varlane_col(plan: &::lanefold::LanePlan<'_>) -> Option<u16> {
+    match (&plan.vguards[..], &plan.cols[..]) {
+        ([v], [c]) if v == c => Some(*v),
+        _ => None,
+    }
+}
+
+/// `LaneCols` remap for the varlena lane feed: the varkey pass stages the
+/// single varlena column's per-row datum pointers into SoA column 0, while
+/// the plan addresses that column by its scan attno.
+struct VarLaneCols<'a, 'mcx> {
+    soa: &'a ::exectuples::SoaBatch<'mcx>,
+    col: u16,
+}
+
+impl ::lanefold::LaneCols for VarLaneCols<'_, '_> {
+    fn col_values(&self, c: usize) -> &[::datum::Datum] {
+        debug_assert_eq!(c, self.col as usize);
+        self.soa.col_values(0)
+    }
+
+    fn col_isnull(&self, c: usize) -> &[bool] {
+        debug_assert_eq!(c, self.col as usize);
+        self.soa.col_isnull(0)
+    }
+}
+
 /// `LaneCols` for a fold plan that reads no lane columns (pure `count(*)`
 /// transitions): the kernels never call these.
 struct NoCols;
@@ -948,9 +1002,12 @@ impl ::lanefold::LaneCols for NoCols {
 ///
 /// Byte-identity: the same rows flow through the same qual and the same
 /// prepare/lookup/spill per-row machinery in the same order; only the
-/// transition arithmetic is batched, and every fold kernel is commutative and
-/// bit-for-bit equal to C's transition semantics (lanefold's tested
-/// contract), so transvalues — and therefore output bytes — are identical.
+/// transition arithmetic is batched, and every fold kernel is either
+/// commutative or (the str kinds) applied per row in row order, bit-for-bit
+/// equal to C's transition semantics (lanefold's tested contract) — str
+/// transvalue copies land in the agg context at exactly the per-row path's
+/// datumCopy points, so hash-agg memory accounting and spill decisions are
+/// unchanged too. Transvalues — and therefore output bytes — are identical.
 fn agg_hash_build_fold_feed<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
@@ -958,6 +1015,14 @@ fn agg_hash_build_fold_feed<'mcx>(
 ) -> PgResult<()> {
     let mut idxs: Vec<u32> = Vec::new();
     let mut groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>> = Vec::new();
+    // Varlena-lane plans read their one column through the varkey staging at
+    // SoA column 0 (see lanefold_varlane_col / VarLaneCols). The decide phase
+    // admitted Fold only for the single-column varlena shape.
+    let vcol = {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+        debug_assert!(plan.vguards.is_empty() || lanefold_varlane_col(plan).is_some());
+        lanefold_varlane_col(plan)
+    };
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
@@ -988,8 +1053,21 @@ fn agg_hash_build_fold_feed<'mcx>(
                 if n % 64 != 0 {
                     rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
-                demote = ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
-                    == ::lanefold::GuardCheck::Demote;
+                // SAFETY: selected rows are staged non-fallback rows, whose
+                // lane values are live page datum pointers (varkey staging /
+                // prefix deform contract) — vguard columns readable at their
+                // varlena header byte.
+                demote = unsafe {
+                    match vcol {
+                        Some(c) => ::lanefold::check_guards(
+                            plan,
+                            &VarLaneCols { soa, col: c },
+                            &rows[..nwords],
+                            |_| None,
+                        ),
+                        None => ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None),
+                    }
+                } == ::lanefold::GuardCheck::Demote;
             }
         }
         if demote {
@@ -1018,23 +1096,37 @@ fn agg_hash_build_fold_feed<'mcx>(
         }
         if !idxs.is_empty() {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            let aggcxt = ::nodeagg::agg_aggcontext(agg);
             // SAFETY: `groups[k]` is the live pergroup array the probe just
             // installed for staged row `idxs[k]` (hash entries and their
             // additional blocks are allocation-stable for the table's
             // lifetime; spill mode only redirects NEW groups to the tapes —
             // spilled rows never reach `groups`); non-fallback rows carry
             // valid deformed lane values for every plan column (the SoA
-            // prefix covers the evaltrans fetch bound); AvgAccum pergroups
-            // hold the catalog's `{0,0}` int8[2] transarray, datum-copied per
-            // group at entry initialization; guarded plans passed
-            // `check_guards` above.
-            match ::nodeseqscan::seq_scan_batch_soa(ss) {
-                Some(soa) => unsafe {
-                    ::lanefold::fold_rows_grouped(plan, soa, &idxs, &groups)
+            // prefix covers the evaltrans fetch bound; varlena lanes are
+            // page datum pointers from the varkey staging, pinned for the
+            // staged batch); AvgAccum pergroups hold the catalog's `{0,0}`
+            // int8[2] transarray, datum-copied per group at entry
+            // initialization; str pergroups hold this fold's own aggcxt
+            // copies; guarded plans passed `check_guards` above.
+            match (::nodeseqscan::seq_scan_batch_soa(ss), vcol) {
+                (Some(soa), Some(c)) => unsafe {
+                    ::lanefold::fold_rows_grouped(
+                        plan,
+                        &VarLaneCols { soa, col: c },
+                        &idxs,
+                        &groups,
+                        aggcxt,
+                    )?
                 },
-                None => {
+                (Some(soa), None) => unsafe {
+                    ::lanefold::fold_rows_grouped(plan, soa, &idxs, &groups, aggcxt)?
+                },
+                (None, _) => {
                     debug_assert!(plan.cols.is_empty());
-                    unsafe { ::lanefold::fold_rows_grouped(plan, &NoCols, &idxs, &groups) }
+                    unsafe {
+                        ::lanefold::fold_rows_grouped(plan, &NoCols, &idxs, &groups, aggcxt)?
+                    }
                 }
             }
         }
