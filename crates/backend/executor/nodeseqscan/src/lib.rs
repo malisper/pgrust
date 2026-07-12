@@ -561,6 +561,40 @@ pub fn seq_scan_batch_supported_parallel<'mcx>(
     Ok(::tableam::table_scan_supports_pagebatch_parallel(scandesc))
 }
 
+/// Metadata-aggregate admission (lane-v2 metaagg arm): a BARE cbstore scan —
+/// variant Plain (no qual, no projection), no zone-mappable quals — over an
+/// AM that carries footer metadata. v1 requires literally no qual: a qual
+/// (even one fully staged as zone quals) keeps the scan drive. Opens the
+/// scan desc.
+pub fn seq_scan_meta_agg_ok<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if node.variant != SeqScanVariant::Plain
+        || node.ss.qual.is_some()
+        || !node.cb_scan.as_deref().is_some_and(|cb| cb.zone.is_empty())
+    {
+        return Ok(false);
+    }
+    node.ensure_scandesc(estate)?;
+    Ok(::tableam::table_scan_supports_meta_count(
+        node.ss.ss_currentScanDesc.as_ref().unwrap(),
+    ))
+}
+
+/// Metadata MIN/MAX/COUNT/SUM one-shot answer; None = the scan drive owns it
+/// (parallel scan, uncovered column type, or a heap AM). Consumes no scan
+/// position.
+pub fn seq_scan_meta_agg<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    cols: &[u16],
+    sum_cols: &[u16],
+) -> PgResult<Option<::tableam::MetaAggScan>> {
+    node.ensure_scandesc(estate)?;
+    ::tableam::table_scan_meta_agg(node.ss.ss_currentScanDesc.as_ref().unwrap(), cols, sum_cols)
+}
+
 /// Arm SoA batch deform of the `prefix`-column prefix for the fused drive;
 /// stays disarmed (per-row lazy deform) unless the prefix is all fixed-width.
 /// `multi`: admit multi-clause kernel quals (AND of scan-Var-CMP-Const) to

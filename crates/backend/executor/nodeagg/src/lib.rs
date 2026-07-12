@@ -90,6 +90,11 @@ pub struct AggStateData<'mcx> {
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     // Lane-v2 hash-agg breaker fold state (None = lane off / nothing admits).
     lanefold: Option<LaneFold<'mcx>>,
+    // Lane-v2 metadata-answer plan (cbstore footer answers): Some iff EVERY
+    // transition is footer-answerable (lanefold::classify_meta) on an
+    // AGG_PLAIN node the lane fold gate admitted. Consumed by the execmain
+    // metaagg arm via agg_meta_plan/exec_agg_meta.
+    meta_aggs: Option<PgVec<'mcx, ::lanefold::MetaTrans>>,
     // InstrCountFiltered1 target (HAVING rejections); set by instrument_node.
     pub instr_idx: Option<u32>,
 }
@@ -1185,6 +1190,23 @@ pub fn exec_init_agg<'mcx>(
         None
     };
 
+    // Metadata-answer plan (lane-v2 metaagg arm, cbstore footer answers):
+    // classified only under the SAME node-shape gate the lanefold plan
+    // passed (lane on, single set, no sorted transitions, subplan- and
+    // param-free program — `lanefold.is_some()` implies all of it), plus
+    // AGG_PLAIN and a finalizing phase. classify_meta admits a subset of
+    // classify's transitions and requires ALL of them, so a Some here
+    // implies the lanefold plan is Some with an empty resid. skip_final
+    // (partial-agg phase) is refused: exec_agg_meta writes finalize-ready
+    // end states through the normal plain_finish tail, and partial plain
+    // aggs only arise under Gather, whose parallel scans the meta scan
+    // refuses anyway.
+    let meta_aggs = if lanefold.is_some() && node.aggstrategy == AGG_PLAIN && !skip_final {
+        ::lanefold::classify_meta(mcx, &specs)
+    } else {
+        None
+    };
+
     Ok(AggStateData {
         plan: node,
         ps_ExprContext,
@@ -1211,6 +1233,7 @@ pub fn exec_init_agg<'mcx>(
         pertrans_sort,
         qual,
         lanefold,
+        meta_aggs,
         instr_idx: None,
     })
 }
@@ -3167,6 +3190,119 @@ pub fn agg_plain_finish<'mcx>(
     plain_finish(node, estate)
 }
 
+/// Metadata-answerable transitions (lane-v2 metaagg arm); None = not
+/// answerable (the fold/per-row drives own the node).
+pub fn agg_meta_plan<'a>(node: &'a AggStateData<'_>) -> Option<&'a [::lanefold::MetaTrans]> {
+    node.meta_aggs.as_deref()
+}
+
+/// Metadata-answered plain agg: per-transition end states written from AM
+/// metadata (footer row counts + zone maps + footer sums), finalized through
+/// the normal plain path — the STANDARD for metadata-answered aggregates:
+/// end states only, the real finalfns do the finalize (parity by
+/// construction; notes/q4-avg-quarantine-resolution.md proved the Sum128 →
+/// avg finalize exact). `minmax` maps scan column -> (min, max) over visible
+/// rows, exact by the zone-map contract; `sums` maps scan column -> exact
+/// i128 sum over visible rows; `rows` = visible row count. rows == 0 leaves
+/// every transition at its init state (count 0, sum/min/max NULL) — the
+/// empty-input scan result.
+pub fn exec_agg_meta<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rows: u64,
+    minmax: &[(u16, i64, i64)],
+    sums: &[(u16, i128)],
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    if node.agg_done {
+        return Ok(None);
+    }
+    initialize_aggregates(node)?;
+    if rows > 0 {
+        let metas = node.meta_aggs.as_deref().expect("meta arm requires a meta plan");
+        for t in metas {
+            // Affine derivation over the exact footer sum: mod-2^64 equal to
+            // the per-row wrapped fold (SumBase legality argument); i128
+            // cannot overflow — |S| < 2^96 by the RG_FLAG_SUMS bound and
+            // |coeff| <= 2^31.
+            let sum = |col: u16| -> i128 {
+                let s = sums
+                    .iter()
+                    .find(|e| e.0 == col)
+                    .expect("meta arm supplies every sum column")
+                    .1;
+                t.mulk as i128 * s + t.addend as i128 * rows as i128
+            };
+            // SAFETY: transno indexes the node's once-allocated pergroup
+            // array (classify_meta transnos come from its spec list).
+            let pg = unsafe { &mut *node.pergroup_base.as_ptr().add(t.transno as usize) };
+            let v = match t.kind {
+                ::lanefold::MetaKind::Count => rows as i64,
+                ::lanefold::MetaKind::Min | ::lanefold::MetaKind::Max => {
+                    let &(_, mn, mx) = minmax
+                        .iter()
+                        .find(|e| e.0 == t.col)
+                        .expect("meta arm supplies every min/max column");
+                    if t.kind == ::lanefold::MetaKind::Min { mn } else { mx }
+                }
+                // i128 narrows wrapping — the lane fold's i64 wrapping-add
+                // contract (C -fwrapv parity for int2/int4_sum).
+                ::lanefold::MetaKind::Sum => sum(t.col) as i64,
+                ::lanefold::MetaKind::AvgAccum => {
+                    // End state of N int2/int4_avg_accum calls over the
+                    // aggcontext initval copy ('{0,0}' int8[2]).
+                    assert!(!pg.trans_value_is_null, "avg transarray is never NULL");
+                    let arr = pg.trans_value.as_usize() as *mut u8;
+                    // SAFETY: aggcontext-lived initval copy, shape validated.
+                    unsafe {
+                        assert!(
+                            ::types_tuple::varatt::varatt_is_4b_u(arr)
+                                && ::types_tuple::varatt::varsize_4b(arr)
+                                    == ::lanefold::INT8_TRANSARRAY_SIZE
+                                && arr.add(8).cast::<i32>().read() == 0,
+                            "expected 2-element int8 array"
+                        );
+                        let td =
+                            arr.add(::lanefold::ARR_OVERHEAD_NONULLS_1).cast::<i64>();
+                        *td = rows as i64;
+                        *td.add(1) = sum(t.col) as i64;
+                    }
+                    continue;
+                }
+                ::lanefold::MetaKind::Sum128 => {
+                    // End state of N int8_avg_accum calls: a fresh
+                    // aggcontext Int128AggState (the transfn's own
+                    // first-call allocation shape).
+                    use ::adt_numeric::aggregates::Int128AggState;
+                    // SAFETY: agg_node is live for the node's lifetime.
+                    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
+                    let layout = core::alloc::Layout::new::<Int128AggState>();
+                    let raw = ::mcx::Allocator::allocate(&aggctx, layout)
+                        .map_err(|_| aggctx.oom(layout.size()))?;
+                    let p = raw.cast::<Int128AggState>().as_ptr();
+                    // SAFETY: fresh allocation of the exact layout.
+                    unsafe {
+                        p.write(Int128AggState {
+                            calc_sum_x2: false,
+                            n: rows as i64,
+                            sum_x: sum(t.col),
+                            sum_x2: 0,
+                        });
+                    }
+                    pg.trans_value = Datum::from_usize(p as usize);
+                    pg.trans_value_is_null = false;
+                    pg.no_trans_value = false;
+                    continue;
+                }
+            };
+            pg.trans_value = Datum::from_i64(v);
+            pg.trans_value_is_null = false;
+            pg.no_trans_value = false;
+        }
+    }
+    plain_finish(node, estate)
+}
+
 // ===========================================================================
 // Lane-v2 sorted-agg (AGG_SORTED) streaming-operator delegation seam. The
 // lane hosts AGG_SORTED as a mid-pipeline operator (execmain/src/lanev2.rs
@@ -4235,7 +4371,7 @@ mcx::forget_safe_struct!(
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
         instr_idx;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual, lanefold },
+        pertrans_sort, qual, lanefold, meta_aggs },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },
