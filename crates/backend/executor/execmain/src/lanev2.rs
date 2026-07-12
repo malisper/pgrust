@@ -42,7 +42,9 @@ use std::sync::OnceLock;
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
-use push::{drain_pipeline, pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source};
+use push::{
+    drain_pipeline, pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source,
+};
 
 /// Master switch for lane-v2. Default OFF; `PGRUST_LANE_V2=1` (or `on`) enables
 /// it. Resolved once per process (a boot-time decision, like
@@ -749,6 +751,233 @@ struct HashAggEmit;
 
 impl<'mcx> Operator<'mcx> for HashAggEmit {
     type Node = ::nodeagg::AggStateData<'mcx>;
+
+    fn pending(&self, _node: &Self::Node) -> Option<Batch> {
+        None
+    }
+
+    fn consume(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert_eq!(batch.n, 1);
+        Ok(match out.accept(node.ps_ResultTupleSlot, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
+    }
+}
+
+// ===========================================================================
+// Sort pipeline-breaker (Phase 2 operator→operator seam). ONE node
+// implementing `Sink` for pipeline N (the feed: scan source → scalar
+// filter/project → sort sink) and `Source` for pipeline N+1 (the read-back:
+// sort source → RootAdapter), chained by a per-node Feed→Emit phase flag —
+// which is exactly the row path's `sort_Done`, so `exec_rescan_sort` resets
+// the phase (and delegates tuplesort rescan semantics) unchanged, and falling
+// back to `exec_sort` at any call boundary is byte-safe (same node state).
+//
+// Everything delegates to the row-path `Tuplesort` (design §8: default =
+// delegate finalize/read-back to the row-path state): `Sink::accept` =
+// `tuplesort_puttupleslot`/`putdatum`, `Sink::finish` =
+// `tuplesort_performsort`, `Source::produce` = `tuplesort_gettupleslot`/
+// `getdatum` — via `nodesort`'s lane seam, over the SAME `SortState` the
+// per-tuple `exec_sort` / fused `exec_sort_batched` use. Output order is
+// therefore C's exactly, by construction. The feed is the Phase-1 scan
+// pipeline (same sources, same per-row scalar emit) with the breaker as its
+// sink instead of the root adapter, so the put sequence equals the per-tuple
+// feed's — byte-identical.
+// ===========================================================================
+
+/// Try to let the lane own a `Sort` over a lane-fusible scan child. `Some` =
+/// the lane drove this call; `None` = refused (caller runs the unchanged
+/// `exec_sort`/`exec_sort_batched` paths — byte-safe even mid-stream, since
+/// both drive the same node state).
+#[inline]
+pub fn try_own_sort<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic gates, every call (cheap): EPQ can engage between calls on the
+    // same node tree, and only forward pulls keep the tuplesort read-back
+    // cursor in step.
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    // Structural verdict, memoized at first call: the fusibility cascade must
+    // not run once per pulled tuple, and a mid-stream verdict flip would
+    // desync the staged-batch cursors.
+    let fusible = match s.lane_fusible {
+        Some(v) => v,
+        None => {
+            let v = sort_fusible(s, estate)?;
+            s.lane_fusible = Some(v);
+            v
+        }
+    };
+    if !fusible {
+        return Ok(None);
+    }
+    // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
+    ::postgres_seams::check_for_interrupts::call()?;
+
+    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    if !state.sort_done() {
+        // Feed phase (pipeline N): drive the scan pipeline to exhaustion into
+        // the breaker sink, then finalize (performsort) — all inside this one
+        // call, exactly like `exec_sort`'s build leg.
+        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        match &mut **outer {
+            crate::procnode::PlanStateNode::SeqScan(ss) => {
+                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
+            }
+            crate::procnode::PlanStateNode::IndexScan(is) => {
+                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
+            }
+            crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
+                state,
+                &mut **ios,
+                IndexOnlyScanSource,
+                IndexOnlyScanEmit,
+                outer_desc,
+                estate,
+            )?,
+            crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+                let b = &mut **b;
+                // The bitmap must be built before the heap drive — the same
+                // setup the bitmap arm runs before offering the scan.
+                if !b.scan.initialized {
+                    crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+                }
+                sort_feed(
+                    state,
+                    &mut b.scan,
+                    BitmapHeapScanSource,
+                    BitmapHeapScanEmit,
+                    outer_desc,
+                    estate,
+                )?
+            }
+            _ => unreachable!("memoized sort verdict admitted a non-scan child"),
+        }
+    }
+    // Emit phase (pipeline N+1): the breaker's Source face streams the
+    // tuplesort read-back through the root pull-adapter, one tuple per call.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(state, &mut SortEmitSource, &mut SortEmit, &mut root, estate)?))
+}
+
+/// Structural refuse-set for the sort breaker. Sort-side: refuse
+/// `randomAccess` (EXEC_FLAG_REWIND/BACKWARD/MARK at init — scrollable and
+/// backward cursors plus the mergejoin-outer mark/restore protocol need
+/// tuplesort random access the forward-only emit pipeline doesn't drive);
+/// bounded (top-N) IS admitted — `sort_lane_begin` applies
+/// ALLOWBOUNDED/set_bound exactly as `exec_sort`. Child-side: the Phase-1
+/// scan refuse-sets, verbatim (the feed is the Phase-1 scan pipeline with the
+/// breaker as its sink) — these also cover EXPLAIN ANALYZE, since an
+/// instrumented tree wraps every node in the `Instrumented` variant, which
+/// matches no scan arm. The admitted checks are all init-stable, so the
+/// verdict is memoizable; the caller re-checks the dynamic EPQ/direction
+/// gates per call.
+fn sort_fusible<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if s.state.randomAccess {
+        return Ok(false);
+    }
+    match &mut *s.outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => seq_scan_fusible(ss, estate),
+        crate::procnode::PlanStateNode::IndexScan(is) => {
+            Ok(index_scan_fusible(is, estate))
+        }
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => {
+            Ok(index_only_scan_fusible(ios, estate))
+        }
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            Ok(bitmap_heap_scan_fusible(&b.scan, estate))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Feed phase driver: build the tuplesort (`sort_lane_begin` — `exec_sort`'s
+/// construction verbatim), then run pipeline N to exhaustion into the breaker
+/// sink. Mirrors `exec_sort`'s build leg in forcing a forward child read for
+/// the feed's duration (restored on success; an error aborts the query).
+fn sort_feed<'mcx, S, O>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    scan: &mut S::Node,
+    mut src: S,
+    mut op: O,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let mut sink = SortBreakerSink { sort };
+    drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
+    estate.es_direction = dir;
+    Ok(())
+}
+
+/// The breaker's `Sink` face (pipeline N endpoint). Holds the sort node by
+/// `&mut` — the driver threads the SCAN node, so a breaker spanning two nodes
+/// needs no driver rework: pipeline N's threaded node is the scan, and the
+/// sort node rides in its sink.
+struct SortBreakerSink<'a, 'mcx> {
+    sort: &'a mut ::nodesort::SortState<'mcx>,
+}
+
+impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodesort::sort_lane_put(self.sort, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodesort::sort_lane_finish(self.sort, estate)
+    }
+}
+
+/// The breaker's `Source` face (pipeline N+1): each produce streams the next
+/// tuple of the tuplesort read-back into `ps_ResultTupleSlot` (one-row
+/// batches, like the IndexOnlyScan source — always consumed within the
+/// producing driver round, so no node-resident cursor is needed; the
+/// tuplesort's own read cursor is the cross-call position).
+struct SortEmitSource;
+
+impl<'mcx> Source<'mcx> for SortEmitSource {
+    type Node = ::nodesort::SortState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        Ok(::nodesort::sort_lane_next(node, estate)?.map(|_| Batch { n: 1 }))
+    }
+}
+
+/// Push operator for the emit pipeline: pushes the staged result slot.
+struct SortEmit;
+
+impl<'mcx> Operator<'mcx> for SortEmit {
+    type Node = ::nodesort::SortState<'mcx>;
 
     fn pending(&self, _node: &Self::Node) -> Option<Batch> {
         None
