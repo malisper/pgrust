@@ -5177,6 +5177,7 @@ dependencies = [
  "types_startup",
  "types_storage",
  "types_tuple",
+ "varlena",
  "varsup",
  "waitevent_seams",
  "waiteventset",
