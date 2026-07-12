@@ -884,6 +884,18 @@ impl<'mcx> TupleHashTable<'mcx> {
         !matches!(self.kernel, ProbeKernel::Expr)
     }
 
+    /// The single grouping key's integer width in bytes (2/4/8) when this
+    /// table probes through an integer kernel — the lane-v2 compact-table
+    /// (lanetable) admission input. `None` = Text/Expr kernel.
+    pub fn staged_probe_int_width(&self) -> Option<u8> {
+        match self.kernel {
+            ProbeKernel::Int2 { .. } => Some(2),
+            ProbeKernel::Int4 { .. } => Some(4),
+            ProbeKernel::Int8 { .. } => Some(8),
+            ProbeKernel::Text { .. } | ProbeKernel::Expr => None,
+        }
+    }
+
     /// K2 batched hashing: `TupleHashTableHash` over a staged key lane in one
     /// tight loop, bit-identical per element to [`Self::hash_slot`] over a
     /// slot carrying the same value. Kernel tables only

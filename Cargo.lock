@@ -7439,6 +7439,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lanetable"
+version = "0.0.0"
+
+[[package]]
 name = "large_object"
 version = "0.0.0"
 dependencies = [
@@ -8457,6 +8461,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "lanefold",
+ "lanetable",
  "lsyscache",
  "mcx",
  "mcxt_stats",
