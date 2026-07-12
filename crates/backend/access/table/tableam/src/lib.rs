@@ -1115,15 +1115,13 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
         TableScanDesc::Heap(h) => {
             (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0 && h.rs_base.rs_parallel.is_none()
         }
-        // HARVEST DEVIATION (was `true` on the old branch): the old fused
-        // nodeseqscan cbstore drives were deliberately NOT harvested; the
-        // lane-v2 batch consumers were built against heap page batches and
-        // have no cbstore arming yet. Until the CbstoreSource tranche wires
-        // the lane pipeline, every cbstore scan takes the per-row Volcano
-        // drive (`getnextslot`) — the lane-OFF oracle. The window/batch
-        // primitives below (`table_scan_getnextpagebatch`,
-        // `table_scan_batch_*`, `table_scan_window_*`) are harvested and
-        // ready; flip this to `true` when the Source lands.
+        // DELIBERATELY false (was `true` on the old branch): this is the
+        // INCUMBENT fused drives' gate (fused agg/sort/hash batched paths in
+        // the row executor) plus the lane's admission-economics probe. The
+        // lane-v2 pipeline owns cbstore batching through the PARALLEL
+        // variant below instead; keeping the incumbents off cbstore keeps
+        // lane-OFF the pure per-row Volcano drive (`getnextslot`) — the
+        // byte-parity oracle for every cbstore lane path (phase4 design §6).
         TableScanDesc::Cbstore(_) => false,
     }
 }
@@ -1139,9 +1137,13 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
 pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool {
     match scan {
         TableScanDesc::Heap(h) => (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0,
-        // Not until the lane-v2 CbstoreSource tranche lands (see
-        // table_scan_supports_pagebatch).
-        TableScanDesc::Cbstore(_) => false,
+        // The CbstoreSource tranche: the lane owns cbstore scan staging
+        // (`next_window` windows <= WINDOW_ROWS, RG/granule/block pruning
+        // inside produce). Serial and parallel both admit — the window feed
+        // claims row groups through the shared `phs_nallocated` cursor
+        // exactly as the per-tuple drive does, partitioning RGs across
+        // workers without gaps or overlaps.
+        TableScanDesc::Cbstore(_) => true,
     }
 }
 

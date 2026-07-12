@@ -178,16 +178,49 @@ enum ScanFeedShape<'a, 'mcx> {
 
 /// Arm the scan staging a lane feed consumes, per feed shape. Idempotent at
 /// every site (re-preparing the same shape is a no-op; the bitmap arm
-/// early-returns once armed). This is the single place the upcoming cbstore
-/// staging variant extends: today every shape stages heap page batches
-/// through `nodeseqscan`'s SoA seam; a cbstore-backed scan will arm its
-/// column-window staging here, behind the same shape parameter, leaving the
-/// feed sites untouched.
+/// early-returns once armed). This is the single seam the cbstore staging
+/// variant (CbstoreSource tranche) plugs into: every arm below stages
+/// through `nodeseqscan`'s SoA seam, whose batch primitives dispatch on the
+/// scan's AM inside `tableam` — heap scans stage page batches
+/// (`heap_getnextpagebatch` + `heap_batch_deform_soa`), cbstore scans stage
+/// column windows (`next_window` + `batch_deform`, <= WINDOW_ROWS <=
+/// SOA_MAX_ROWS, RG/granule/block pruning inside the staging call) — so the
+/// feed sites stay untouched and one arm serves both source kinds. The
+/// cbstore-only differences live below the seam: the fill honors
+/// `lane_fill_wanted`/`dict_want` (dict-lane publication), the store slot is
+/// the scan's virtual slot (`store_slot`, needed columns only), and the
+/// prefix publish is a virtual-slot no-op.
 fn arm_scan_staging<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     shape: ScanFeedShape<'_, 'mcx>,
-) {
+) -> PgResult<()> {
+    // PREWHERE v1 (cbstore scans with a qual, phase4 design §3): try the
+    // lane-qual arm FIRST — it subsumes the kernel-bitmap arms (staged
+    // clauses cheapest-first with zone folds + per-clause late
+    // materialization, the dict text tier, hybrid requal tails) over the
+    // same forced full-prefix deform, widened to the feed's own SoA ask.
+    // Varlane fold shapes keep their dedicated varkey staging (the two
+    // stagings are structurally exclusive). Refusal falls through to the
+    // heap-shaped arms below, byte-safely.
+    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        let min_prefix = match &shape {
+            ScanFeedShape::RowFeed { .. } => 0,
+            ScanFeedShape::HashAggFold { agg } | ScanFeedShape::HashAggPerRow { agg } => {
+                if ss.ss.ps_ProjInfo.is_none() {
+                    fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            ScanFeedShape::FoldPrefix { agg } => fused_agg_soa_prefix(agg, ss).unwrap_or(0),
+        };
+        let varlane = matches!(&shape, ScanFeedShape::HashAggFold { agg }
+            if ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col).is_some());
+        if !varlane && ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, min_prefix)? {
+            return Ok(());
+        }
+    }
     match shape {
         ScanFeedShape::RowFeed { ctx, stitch } => {
             arm_seq_scan_qual_bitmap(ss, estate, ctx, stitch);
@@ -280,6 +313,7 @@ fn arm_scan_staging<'mcx>(
             ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
         }
     }
+    Ok(())
 }
 
 /// Decide-phase admission probe: arm the forced fold prefix NOW so an
@@ -291,9 +325,9 @@ fn probe_arm_fold_prefix<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> bool {
-    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg });
-    ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+) -> PgResult<bool> {
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
+    Ok(::nodeseqscan::seq_scan_batch_soa(ss).is_some())
 }
 
 // ===========================================================================
@@ -336,13 +370,61 @@ pub fn try_own_seq_scan<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
-    // Per-PULL tick cadence (this hook runs once per exec_proc_node call).
-    if STANDALONE_SCAN_NO_UPSIDE {
+    // Standalone scan ownership: refused for heap (STANDALONE_SCAN_NO_UPSIDE
+    // — the incumbent row drive carries the identical kernels), but ADMITTED
+    // for cbstore scans WITH AN ARMED QUAL KERNEL: the documented exception
+    // (phase4 design §7 / design-doc §4 "shrinks when standalone scans gain
+    // a kernel the row drive lacks"). The incumbent cbstore per-row drive
+    // (`getnextslot`) has NO SoA staging, NO kernel-qual bitmap and NO
+    // dict/PREWHERE tier, so lane ownership of a QUAL'D scan is staged-
+    // kernel upside. A kernel-less cbstore scan (no qual, or an unarmable
+    // one) is the heap case exactly — per-pull capacity-one adapter overhead
+    // with nothing to vectorize — and REFUSES: bench-gated 2026-07-12 on the
+    // 2M-row cbstore microbench, where unconditional admission ran
+    // count-star 1.33x, group-int (sorted-agg pull feed) 1.21x and
+    // merge-join-agg 1.10x lane-ON vs lane-OFF while the qual'd shapes won
+    // 0.45-0.84x; the qual-armed gate keeps the wins and returns the rest
+    // to the per-row drive. Per-PULL tick cadence (once per call).
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    if STANDALONE_SCAN_NO_UPSIDE && !is_cb {
         stats::tick_refused(ShapeClass::SeqScan, RefuseReason::AdmissionEconomicsNoConsumer);
         return Ok(None);
     }
-    if !seq_scan_fusible(ss, estate)? {
+    if is_cb {
+        // Memoized per node: the arm outcome is static, and a refused scan
+        // must not re-run the fusibility + arm cascade per pulled tuple
+        // (measured +20% on kernel-less count(*) shapes). A refusal is
+        // byte-safe regardless of the dynamic gates, so the memoized-false
+        // path is one branch; the admitted path still re-checks the
+        // dynamic gates inside seq_scan_fusible every call.
+        match ss.cb_standalone_verdict() {
+            Some(false) => {
+                stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                return Ok(None);
+            }
+            Some(true) => {
+                if !seq_scan_fusible(ss, estate)? {
+                    return Ok(None);
+                }
+            }
+            None => {
+                // First call: never memoize on a dynamic-gate refusal.
+                if !seq_scan_fusible(ss, estate)? {
+                    return Ok(None);
+                }
+                // Arm the qual staging (PREWHERE lane or kernel bitmap).
+                // Stitch stays off: tier-2 bodies are drain-pipeline-only,
+                // and this is a per-pull feed.
+                arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false })?;
+                let armed = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ss.set_cb_standalone_verdict(armed);
+                if !armed {
+                    stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                    return Ok(None);
+                }
+            }
+        }
+    } else if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
     }
     debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
@@ -377,13 +459,20 @@ fn seq_scan_fusible<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
+    // Engagement class: cbstore scans are counted apart (their admission
+    // economics and corpus differ — see ShapeClass::CbScan).
+    let class = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        ShapeClass::CbScan
+    } else {
+        ShapeClass::SeqScan
+    };
     // Dynamic per-call gates: these may legitimately vary call to call.
     if estate.es_epq_active {
-        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Epq);
+        stats::tick_refused(class, RefuseReason::Epq);
         return Ok(false);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Backward);
+        stats::tick_refused(class, RefuseReason::Backward);
         return Ok(false);
     }
     // Static verdict, memoized on the node at first evaluation: (a) stability
@@ -397,11 +486,11 @@ fn seq_scan_fusible<'mcx>(
     let refuse = seq_scan_refuse_reason(ss, estate)?;
     let v = match refuse {
         None => {
-            stats::tick_owned(ShapeClass::SeqScan);
+            stats::tick_owned(class);
             true
         }
         Some(r) => {
-            stats::tick_refused(ShapeClass::SeqScan, r);
+            stats::tick_refused(class, r);
             false
         }
     };
@@ -1261,7 +1350,7 @@ fn decide_agg_lane<'mcx>(
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
                 // width column) is known BEFORE committing to ownership.
-                probe_arm_fold_prefix(agg, ss, estate)
+                probe_arm_fold_prefix(agg, ss, estate)?
             }
         }
         _ => false,
@@ -1594,13 +1683,22 @@ fn decide_plain_agg_lane<'mcx>(
     // already advances those per batch with zero per-row work (the storeless
     // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
     // Deliberate refuse-set entry.
+    //
+    // cbstore note (v1 scope cut, phase4 design §7): for a cbstore scan the
+    // incumbent fused drive is gated OFF (`table_scan_supports_pagebatch` is
+    // false — lane-OFF stays the per-row Volcano oracle), so this refuse
+    // leaves count(*)-only plain aggs on the per-row drive. Hosting them
+    // needs the count-only whole-granule batch shape (n up to GRANULE_ROWS
+    // > SOA_BM_WORDS*64: this feed's bitmap scratch and the fold's armed-SoA
+    // requirement both refuse it) or the deferred MetaAggScan footer answer
+    // — both explicit §7 re-entry points, not v1.
     if plan.cols.is_empty() {
         return refuse();
     }
     // Probe-arm the deform now so an unarmable prefix (non-fixed-width
     // column) is known BEFORE committing: the plain fold reads the SoA lanes
     // directly, so a disarmed deform keeps the incumbent.
-    if !probe_arm_fold_prefix(agg, ss, estate) {
+    if !probe_arm_fold_prefix(agg, ss, estate)? {
         return refuse();
     }
     Ok(AggLaneChoice::Fold)
@@ -1639,7 +1737,7 @@ fn agg_plain_fold_feed<'mcx>(
     // Same one-deform staging as the hashed fold feed; the deform is FORCED
     // (count(*)-only plans were refused, so the fold always reads lane
     // columns). Re-preparing with the same shape is a no-op.
-    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg });
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
@@ -1788,10 +1886,10 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // Staging arm per feed shape (see `arm_scan_staging` — the one seam for
     // deform + bitmap + stitched-tier setup across the feed sites).
     if c == AggLaneChoice::Fold {
-        arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg });
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
         agg_hash_build_fold_feed(agg, ss, stage_slot, estate)
     } else {
-        arm_scan_staging(ss, estate, ScanFeedShape::HashAggPerRow { agg });
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggPerRow { agg })?;
         let mut sink = HashAggBuildSink { agg };
         drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
     }
@@ -2227,7 +2325,7 @@ fn sort_feed_if_needed<'mcx>(
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true });
+            arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
             sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -2960,7 +3058,7 @@ fn join_build_dispatch<'mcx>(
                 ss,
                 estate,
                 ScanFeedShape::RowFeed { ctx: "join build feed", stitch: true },
-            );
+            )?;
             join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -2996,7 +3094,7 @@ fn join_probe_drain_dispatch<'mcx>(
                 ss,
                 estate,
                 ScanFeedShape::RowFeed { ctx: "join probe drain", stitch: true },
-            );
+            )?;
             drain_pipeline_chain(
                 ss,
                 &mut SeqScanSource,
@@ -3061,7 +3159,7 @@ fn join_probe_pull_dispatch<'mcx>(
                 ss,
                 estate,
                 ScanFeedShape::RowFeed { ctx: "join probe pull", stitch: false },
-            );
+            )?;
             pull_step_chain(
                 ss,
                 &mut SeqScanSource,

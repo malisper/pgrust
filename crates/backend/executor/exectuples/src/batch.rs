@@ -612,6 +612,10 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
     let h = match slot {
         SlotData::BufferHeap(b) => &mut b.base,
         SlotData::Heap(h) => h,
+        // Columnar-AM (cbstore) scans use virtual slots the AM's
+        // batch_store_slot fully populates; the prefix publish is a no-op
+        // (and MUST be: dict-answered / fill-skipped SoA cells are stale).
+        SlotData::Virtual(_) => return true,
         _ => unreachable!("soa_store_prefix on non-heap slot"),
     };
     let ncols = soa.ncols as usize;
