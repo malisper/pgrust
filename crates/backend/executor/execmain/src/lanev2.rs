@@ -2816,9 +2816,67 @@ fn scan_k2_shape<'mcx>(
     Some(ScanK2 { key_col, needed, natts })
 }
 
-/// One page batch through the scan feed's K2 deferred probe: (1) the per-row
-/// scalar emit (qual) collecting survivors — exactly the arrival loop's emit
-/// sequence; (2) one tight batched-hash loop over the survivors' staged key
+/// Survivor collection for the deferred-probe batch arms (K2 / dict-group /
+/// multi-key), colagg: when the staged batch is slot-free decidable
+/// (`seq_scan_batch_slotfree_filter` — no projection; no qual, or the armed
+/// bitmap IS the whole qual with no requal tail), read the verdicts straight
+/// off the batch state instead of running the per-row emit — the emit would
+/// materialize every row into the scan slot only for the arm to discard it
+/// (keys and transition inputs both read the staged SoA lanes). One
+/// per-batch ExprContext reset stands in for the emit's per-row reset
+/// cadence (nothing on these arms allocates per-tuple memory per row).
+/// Same rows, same ascending order as the emit loop by construction; every
+/// other batch keeps the per-row emit sequence, byte-identically.
+///
+/// Callers admit ALL-LANE batches only (no fallback rows), so the bitmap's
+/// forced-fallback re-check discipline is vacuous here.
+fn scan_collect_survivors<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    n: u32,
+    rows: &mut Vec<u32>,
+) -> PgResult<()> {
+    rows.clear();
+    match ::nodeseqscan::seq_scan_batch_slotfree_filter(ss) {
+        Some(::nodeseqscan::SlotFreeFilter::All) => {
+            estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
+            rows.extend(0..n);
+        }
+        Some(::nodeseqscan::SlotFreeFilter::Bitmap) => {
+            debug_assert!(::nodeseqscan::seq_scan_batch_soa(ss)
+                .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0)));
+            estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
+            let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss)
+                .expect("Bitmap filter implies an armed whole-qual sel");
+            let nwords = (n as usize).div_ceil(64);
+            let tail_mask =
+                if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
+            for w in 0..nwords {
+                let mut bits = sel[w];
+                if w == nwords - 1 {
+                    bits &= tail_mask;
+                }
+                while bits != 0 {
+                    rows.push(w as u32 * 64 + bits.trailing_zeros());
+                    bits &= bits - 1;
+                }
+            }
+        }
+        None => {
+            for i in 0..n {
+                if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
+                    rows.push(i);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One page batch through the scan feed's K2 deferred probe: (1) survivor
+/// collection (`scan_collect_survivors` — slot-free off the batch state when
+/// decidable, the arrival loop's exact per-row emit sequence otherwise);
+/// (2) one tight batched-hash loop over the survivors' staged key
 /// lane (bit-identical per element to the per-row `hash_slot`, by the probe-
 /// kernel contract); (3) the IN-ORDER probe of every survivor through the
 /// same C-ported tuplehash lookup (kernel `find_staged` fast path for the
@@ -2843,12 +2901,7 @@ fn scan_k2_batch<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let ScanK2Scratch { rows, keys, knull, hashes } = k2s;
-    rows.clear();
-    for i in 0..n {
-        if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
-            rows.push(i);
-        }
-    }
+    scan_collect_survivors(ss, estate, n, rows)?;
     // Stage-2.1 dict-group window (registered key + a dict-answered window):
     // group on the u32 codes through the per-epoch direct-indexed map — no
     // per-row hashing/probing at all. A Raw-answered window (non-dict key
@@ -3312,9 +3365,10 @@ fn scan_mk_shape<'mcx>(
 /// One page batch through the packed multi-key feed. Sequence per the
 /// section header: (1) backstop check BEFORE any per-row work — a migration
 /// returns `false` and the caller runs the WHOLE batch (emit included)
-/// through the arrival leg, so the qual runs exactly once per row; (2) the
-/// per-row scalar emit collecting survivors (the arrival loop's exact emit
-/// sequence); (3) the pack pre-pass over the survivors' staged component
+/// through the arrival leg, so the qual runs exactly once per row; (2)
+/// survivor collection (`scan_collect_survivors` — slot-free when decidable,
+/// the arrival loop's exact per-row emit sequence otherwise); (3) the pack
+/// pre-pass over the survivors' staged component
 /// lanes into the reused packed-key scratch (dict components through the
 /// per-epoch intern resolve); (4) the compact-table batch probe + new-group
 /// seeding; (5) the whole-batch fold.
@@ -3361,12 +3415,7 @@ fn scan_mk_batch<'mcx>(
         return Ok(false);
     }
     let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids } = mks;
-    rows.clear();
-    for i in 0..n {
-        if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
-            rows.push(i);
-        }
-    }
+    scan_collect_survivors(ss, estate, n, rows)?;
     // Pack pre-pass, component-major over the survivors (each component
     // lane streams once), into the REUSED u128 accumulator.
     packbuf.clear();
