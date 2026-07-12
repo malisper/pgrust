@@ -62,7 +62,7 @@ pub fn read_footer_rgs(
     want_sums: bool,
 ) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>)> {
     let total_len = file.total_len();
-    if footer_off < CB_HEADER_LEN || footer_off + 8 > total_len {
+    if footer_off < CB_HEADER_LEN || footer_off.checked_add(8).is_none_or(|e| e > total_len) {
         return Err(Box::new(PgError::error(
             "cbstore: corrupt part (footer offset out of bounds)".to_string(),
         )));
