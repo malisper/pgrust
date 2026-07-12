@@ -2262,7 +2262,7 @@ where
     ::nodesort::sort_lane_begin(sort, outer_desc)?;
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = SortBreakerSink { sort, topk };
+    let mut sink = SortBreakerSink { sort, topk: topk.map(TopkCutState::new) };
     drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
     estate.es_direction = dir;
     Ok(())
@@ -2446,7 +2446,31 @@ struct SortBreakerSink<'a, 'mcx> {
     sort: &'a mut ::nodesort::SortState<'mcx>,
     /// Armed streaming top-k cutoff (see the invariant block above); `None`
     /// = feed unfiltered.
-    topk: Option<TopkCut>,
+    topk: Option<TopkCutState>,
+}
+
+/// Per-feed pre-filter state: the armed spec + the zero-cut back-off. On the
+/// adversarial shape (e.g. descending input under an ASC top-k, where every
+/// row beats the boundary) the filter can never cut anything and its
+/// per-batch mask would be pure overhead; consecutive zero-cut batches back
+/// the filter off exponentially (skip 2, 4, … up to 256 batches between
+/// attempts), and any batch that cuts a row resets it. A skipped batch takes
+/// the exact unfiltered path — correctness is untouched either way (pure
+/// skip optimization), this only bounds the overhead of never-winning feeds.
+struct TopkCutState {
+    cut: TopkCut,
+    /// Batches to feed unfiltered before the next filter attempt.
+    skip: u32,
+    /// Consecutive zero-cut filter attempts (drives the back-off width).
+    fails: u32,
+}
+
+impl TopkCutState {
+    const MAX_BACKOFF_SHIFT: u32 = 8; // cap: retry every 256 batches
+
+    fn new(cut: TopkCut) -> TopkCutState {
+        TopkCutState { cut, skip: 0, fails: 0 }
+    }
 }
 
 impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
@@ -2482,30 +2506,43 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         // boundary on the leading key) before any emit or tuplesort put.
         // The mask computation completes before the put loop (the lane
         // borrow ends), and survivors take the EXACT unfiltered put path.
-        if let Some(cut) = self.topk {
-            if let Some(sel) = topk_keep_mask(cut, self.sort, &*emit, n) {
+        if let Some(tk) = self.topk.as_mut() {
+            if tk.skip > 0 {
+                tk.skip -= 1;
+            } else if let Some(sel) = topk_keep_mask(tk.cut, self.sort, &*emit, n) {
                 // The skipped rows' per-row CFIs (emit-side and the
                 // tuplesort discard's) are elided; keep the lane's
                 // page-batch cadence floor of one check per staged batch.
                 ::postgres_seams::check_for_interrupts::call()?;
-                if stats::armed() {
-                    let kept: u32 = (pos..n)
-                        .map(|i| ((sel[(i / 64) as usize] >> (i % 64)) & 1) as u32)
-                        .sum();
-                    stats::tick_topkcut_rows((n - pos) as u64, (n - pos - kept) as u64);
+                let kept: u32 = (pos..n)
+                    .map(|i| ((sel[(i / 64) as usize] >> (i % 64)) & 1) as u32)
+                    .sum();
+                let cut_rows = n - pos - kept;
+                if cut_rows == 0 {
+                    // Nothing cuttable at the current boundary: back off.
+                    tk.fails = (tk.fails + 1).min(TopkCutState::MAX_BACKOFF_SHIFT);
+                    tk.skip = 1u32 << tk.fails;
+                    // All bits set over pos..n — the put loop below would be
+                    // the unfiltered feed with a dead bit test; fall through
+                    // to the plain path instead.
+                } else {
+                    tk.fails = 0;
+                    if stats::armed() {
+                        stats::tick_topkcut_rows((n - pos) as u64, cut_rows as u64);
+                    }
+                    return ::nodesort::sort_lane_put_batch(
+                        self.sort,
+                        estate,
+                        pos,
+                        n,
+                        &mut |i, estate| {
+                            if sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
+                                return Ok(None);
+                            }
+                            emit.emit(i, estate)
+                        },
+                    );
                 }
-                return ::nodesort::sort_lane_put_batch(
-                    self.sort,
-                    estate,
-                    pos,
-                    n,
-                    &mut |i, estate| {
-                        if sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
-                            return Ok(None);
-                        }
-                        emit.emit(i, estate)
-                    },
-                );
             }
         }
         ::nodesort::sort_lane_put_batch(self.sort, estate, pos, n, &mut |i, estate| {
