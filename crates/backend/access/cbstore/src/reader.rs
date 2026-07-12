@@ -8,6 +8,28 @@ use crate::format::*;
 use crate::segfile::{SegFile, SegMap};
 use crate::writer::FooterRg;
 
+// LZ4 frame decode target inside the u64-backed arena: `raw_len` payload
+// bytes + the decoder's OUT_PAD tail slack (wild-copy spill scratch, never
+// published). The arena is grown monotonically and NEVER shrunk/cleared, so
+// (a) reuse across granules skips the zero-fill (the old clear+resize path
+// memset the whole buffer before every decompress — a full extra touch of
+// the output), and (b) every byte handed to the decoder is initialized.
+// Base stays 8-aligned for the varlena images.
+fn arena_frame(arena: &mut Vec<u64>, raw_len: usize) -> &mut [u8] {
+    let words = (raw_len + crate::lz4dec::OUT_PAD).div_ceil(8);
+    if arena.len() < words {
+        arena.resize(words, 0);
+    }
+    // SAFETY: u64 backing reinterpreted as raw_len + OUT_PAD initialized
+    // bytes (len >= words holds by the resize above).
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            arena.as_mut_ptr().cast::<u8>(),
+            raw_len + crate::lz4dec::OUT_PAD,
+        )
+    }
+}
+
 pub fn read_header(hdr: &[u8]) -> PgResult<(u64, u64, u32)> {
     let version = get_u32(hdr, 8);
     if get_u64(hdr, 0) != CB_MAGIC || !(CB_VERSION_V1..=CB_VERSION).contains(&version) {
@@ -224,19 +246,21 @@ impl Part {
 }
 
 // Decompress one v6 frame (u32 raw_len | u32 comp_len | bytes) body into
-// `dst` (dst.len() == raw_len). Codec must be a concrete compressor.
-pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8]) {
+// `dst` (an arena_frame slice: raw_len payload + OUT_PAD slack). LZ4 goes
+// through the lane-v2-decode padded kernel (wild copies spill into the pad);
+// ZSTD writes exactly raw_len (the pad is untouched slack).
+pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], raw_len: usize) {
     match codec {
         Codec::Lz4 => {
-            let got = lz4_flex::decompress_into(src, dst).expect("cbstore: corrupt LZ4 frame");
-            assert_eq!(got, dst.len(), "cbstore: LZ4 frame length mismatch");
+            crate::lz4dec::decompress_padded(src, dst, raw_len)
+                .unwrap_or_else(|e| panic!("cbstore: corrupt LZ4 frame: {e}"));
         }
         Codec::Zstd => {
             let got = zstd::bulk::Decompressor::new()
                 .expect("cbstore: zstd decompressor init failed")
-                .decompress_to_buffer(src, dst)
+                .decompress_to_buffer(src, &mut dst[..raw_len])
                 .expect("cbstore: corrupt ZSTD frame");
-            assert_eq!(got, dst.len(), "cbstore: ZSTD frame length mismatch");
+            assert_eq!(got, raw_len, "cbstore: ZSTD frame length mismatch");
         }
         Codec::None => unreachable!("cbstore: decompress with Codec::None"),
     }
@@ -333,13 +357,9 @@ impl<'a> ChunkView<'a> {
         let raw_len = get_u32(p, fo) as usize;
         let comp_len = get_u32(p, fo + 4) as usize;
         assert_eq!(raw_len, n * w, "cbstore: framed granule length mismatch");
-        arena.clear();
-        arena.resize(raw_len.div_ceil(8), 0);
-        // SAFETY: u64 backing reinterpreted as its raw_len byte prefix.
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut(arena.as_mut_ptr().cast::<u8>(), raw_len) };
-        decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst);
-        dst
+        let dst = arena_frame(arena, raw_len);
+        decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst, raw_len);
+        &dst[..raw_len]
     }
 
     // Build the RG's dictionary Datum table once (keyed on dict.is_empty();
@@ -359,14 +379,8 @@ impl<'a> ChunkView<'a> {
         let blob_base = if self.hdr.encoding == Encoding::Lz4Dict {
             let raw_len = get_u32(blob, 0) as usize;
             let comp_len = get_u32(blob, 4) as usize;
-            arena.clear();
-            arena.resize(raw_len.div_ceil(8), 0);
-            // SAFETY: u64 backing reinterpreted as its raw_len byte prefix;
-            // base stays 8-aligned for the images.
-            let dst = unsafe {
-                std::slice::from_raw_parts_mut(arena.as_mut_ptr().cast::<u8>(), raw_len)
-            };
-            decompress_frame_into(self.hdr.frame_codec(), &blob[8..8 + comp_len], dst);
+            let dst = arena_frame(arena, raw_len);
+            decompress_frame_into(self.hdr.frame_codec(), &blob[8..8 + comp_len], dst, raw_len);
             dst.as_ptr() as usize
         } else {
             blob.as_ptr() as usize
@@ -535,14 +549,8 @@ impl<'a> ChunkView<'a> {
                 let fo = self.granule(g).payload_off as usize;
                 let raw_len = get_u32(p, fo) as usize;
                 let comp_len = get_u32(p, fo + 4) as usize;
-                arena.clear();
-                arena.resize(raw_len.div_ceil(8), 0);
-                // SAFETY: u64 backing reinterpreted as its raw_len byte
-                // prefix; base stays 8-aligned for the varlena images.
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(arena.as_mut_ptr().cast::<u8>(), raw_len)
-                };
-                decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst);
+                let dst = arena_frame(arena, raw_len);
+                decompress_frame_into(self.hdr.frame_codec(), &p[fo + 8..fo + 8 + comp_len], dst, raw_len);
                 let base = dst.as_ptr() as usize;
                 let dst = &mut out.spare_capacity_mut()[..n];
                 for (d, c) in dst.iter_mut().zip(p[lo * 4..(lo + n) * 4].chunks_exact(4)) {
