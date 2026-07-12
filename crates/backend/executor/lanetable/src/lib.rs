@@ -89,6 +89,11 @@ pub fn hash_int(mut k: u64) -> u64 {
 /// choice (order already relaxed).
 #[inline]
 pub fn hash_bytes(b: &[u8]) -> u64 {
+    // Short-key fast path (the GROUP BY-dominant case: SearchEngineID-class
+    // 1-8 byte strings): one packed word, two mix rounds, no loop setup.
+    if b.len() <= 8 {
+        return hash_int(hash_int(0x9E37_79B9_7F4A_7C15 ^ (b.len() as u64) ^ pack8(b)));
+    }
     let mut h: u64 = 0x9E37_79B9_7F4A_7C15 ^ (b.len() as u64);
     let mut chunks = b.chunks_exact(8);
     for c in &mut chunks {
@@ -97,9 +102,7 @@ pub fn hash_bytes(b: &[u8]) -> u64 {
     }
     let rem = chunks.remainder();
     if !rem.is_empty() {
-        let mut w = [0u8; 8];
-        w[..rem.len()].copy_from_slice(rem);
-        h = hash_int(h ^ u64::from_le_bytes(w));
+        h = hash_int(h ^ pack8(rem));
     }
     hash_int(h)
 }
@@ -110,9 +113,17 @@ pub fn hash_bytes(b: &[u8]) -> u64 {
 #[inline(always)]
 pub fn pack8(b: &[u8]) -> u64 {
     debug_assert!(b.len() <= 8);
-    let mut w = [0u8; 8];
-    w[..b.len()].copy_from_slice(b);
-    u64::from_le_bytes(w)
+    // Shift-composed byte loads, NOT copy_from_slice: a dynamic-length
+    // sub-8-byte copy lowers to a real memcpy call — measured dominating the
+    // str8 probe loop on the pod rig.
+    let mut w = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        // SAFETY: i < b.len().
+        w |= (unsafe { *b.get_unchecked(i) } as u64) << (8 * i);
+        i += 1;
+    }
+    w
 }
 
 /// Length of a [`pack8`]-packed key — CH's clz recovery (`toStringView`): the
