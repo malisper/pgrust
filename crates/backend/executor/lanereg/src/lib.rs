@@ -449,28 +449,28 @@ pub static ENTRIES: &[BatchFn] = &[
     // date.c's comparators are plain int compares (the same fact laneexec's
     // translate whitelist and the cbstore zone-qual extraction already
     // carry). Registered here so the central census matches the consumers.
-    cmp_aot(1086, "date_eq", I4, Eq),
-    cmp_aot(1091, "date_ne", I4, Ne),
-    cmp_aot(1087, "date_lt", I4, Lt),
-    cmp_aot(1088, "date_le", I4, Le),
-    cmp_aot(1089, "date_gt", I4, Gt),
-    cmp_aot(1090, "date_ge", I4, Ge),
+    cmp_aot_saop(1086, "date_eq", I4, Eq),
+    cmp_aot_saop(1091, "date_ne", I4, Ne),
+    cmp_aot_saop(1087, "date_lt", I4, Lt),
+    cmp_aot_saop(1088, "date_le", I4, Le),
+    cmp_aot_saop(1089, "date_gt", I4, Gt),
+    cmp_aot_saop(1090, "date_ge", I4, Ge),
     // === timestamp comparators — AOT qual (ne-admission census close) ===
     // int64 microseconds; TIMESTAMP_NOBEGIN/NOEND are i64::MIN/MAX —
     // timestamp_cmp_internal is a plain int compare (timestamp.c parity).
-    cmp_aot(2052, "timestamp_eq", I8, Eq),
-    cmp_aot(2053, "timestamp_ne", I8, Ne),
-    cmp_aot(2054, "timestamp_lt", I8, Lt),
-    cmp_aot(2055, "timestamp_le", I8, Le),
-    cmp_aot(2057, "timestamp_gt", I8, Gt),
-    cmp_aot(2056, "timestamp_ge", I8, Ge),
+    cmp_aot_saop(2052, "timestamp_eq", I8, Eq),
+    cmp_aot_saop(2053, "timestamp_ne", I8, Ne),
+    cmp_aot_saop(2054, "timestamp_lt", I8, Lt),
+    cmp_aot_saop(2055, "timestamp_le", I8, Le),
+    cmp_aot_saop(2057, "timestamp_gt", I8, Gt),
+    cmp_aot_saop(2056, "timestamp_ge", I8, Ge),
     // === timestamptz comparators — same int64 bodies (timestamp.c) ===
-    cmp_aot(1152, "timestamptz_eq", I8, Eq),
-    cmp_aot(1153, "timestamptz_ne", I8, Ne),
-    cmp_aot(1154, "timestamptz_lt", I8, Lt),
-    cmp_aot(1155, "timestamptz_le", I8, Le),
-    cmp_aot(1157, "timestamptz_gt", I8, Gt),
-    cmp_aot(1156, "timestamptz_ge", I8, Ge),
+    cmp_aot_saop(1152, "timestamptz_eq", I8, Eq),
+    cmp_aot_saop(1153, "timestamptz_ne", I8, Ne),
+    cmp_aot_saop(1154, "timestamptz_lt", I8, Lt),
+    cmp_aot_saop(1155, "timestamptz_le", I8, Le),
+    cmp_aot_saop(1157, "timestamptz_gt", I8, Gt),
+    cmp_aot_saop(1156, "timestamptz_ge", I8, Ge),
     // === arithmetic: int4 add/sub/mul — JIT + fold-affine (in-tree) + stitch ===
     arith(177, "int4pl", ArithWidth::W4, ArithKind::Add, COV_ARITH_INT4),
     arith(181, "int4mi", ArithWidth::W4, ArithKind::Sub, COV_ARITH_INT4),
