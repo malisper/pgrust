@@ -93,53 +93,87 @@ pub fn exec_group<'mcx, F>(
 where
     F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
 {
-    if init_small::globals::InterruptPending() {
-        postgres_seams::check_for_interrupts::call()?;
-    }
+    lane_group_cfi()?;
     if node.grp_done {
         return Ok(None);
     }
-
-    if !node.have_first {
+    loop {
         let Some(outer_id) = fetch_outer(estate)? else {
-            node.grp_done = true;
+            lane_group_eof(node);
             return Ok(None);
         };
-        node.store_first(estate, outer_id)?;
-        if node.check_qual(estate)? {
-            return node.project(estate);
+        if let Some(result) = lane_group_feed(node, estate, outer_id)? {
+            return Ok(Some(result));
         }
     }
+}
 
-    loop {
-        let matched_id = loop {
-            let Some(outer_id) = fetch_outer(estate)? else {
-                node.grp_done = true;
-                return Ok(None);
-            };
-            let Some(eq) = node.eq.as_mut() else {
-                // Zero grouping columns: the whole input is one group.
-                continue;
-            };
-            // SAFETY: per-tuple context outlives the eval; reset per input
-            // tuple (C ExecQualAndReset).
-            unsafe { eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx()) };
-            estate.reset_expr_context(node.ps_ExprContext);
-            let outer_slot = estate.slot_mut(outer_id);
-            let mut slots = EvalSlots {
-                scan: None,
-                inner: Some(&mut node.firsttuple_slot),
-                outer: Some(&mut *outer_slot),
-            };
-            if !exec_qual(Some(eq), &mut slots)? {
-                break outer_id;
-            }
+// ===========================================================================
+// Lane-executor-v2 streaming-group seam. The lane's GroupOp lives in
+// `execmain/src/lanev2.rs`; the per-tuple body below IS `exec_group`'s (the
+// Volcano loop above calls the same functions), so the lane runs the SAME
+// grouping-equality program, first-tuple copy, qual, and projection — no
+// reimplementation, and a Volcano fallback at any call boundary sees exactly
+// C's state (grp_done / have_first / the retained first-tuple slot).
+// ===========================================================================
+
+/// C's ExecGroup entry interrupt check (conditional, exactly the Volcano
+/// entry's), exposed for the lane driver.
+pub fn lane_group_cfi() -> PgResult<()> {
+    if init_small::globals::InterruptPending() {
+        postgres_seams::check_for_interrupts::call()?;
+    }
+    Ok(())
+}
+
+/// `exec_group`'s top-of-call drained guard (`grp_done`), for the lane driver.
+pub fn lane_group_done(node: &GroupState<'_>) -> bool {
+    node.grp_done
+}
+
+/// One incoming (sorted) outer tuple — `exec_group`'s per-tuple body: the
+/// first tuple, or one whose grouping keys differ from the retained
+/// first-of-group tuple, starts a new group (copied into the first-tuple
+/// slot); the group head then runs the HAVING qual and, on pass, is projected
+/// and returned (`Some(result slot)`). A same-group duplicate — or a group
+/// head failing the qual — emits nothing (`None`). Zero grouping columns
+/// (every key proved constant) = one group: every tuple after the first is a
+/// duplicate, exactly the Volcano loop's `eq == None` continue.
+pub fn lane_group_feed<'mcx>(
+    node: &mut GroupState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<Option<ExecSlotId>> {
+    if node.have_first {
+        let Some(eq) = node.eq.as_mut() else {
+            // Zero grouping columns: the whole input is one group.
+            return Ok(None);
         };
-        node.store_first(estate, matched_id)?;
-        if node.check_qual(estate)? {
-            return node.project(estate);
+        // SAFETY: per-tuple context outlives the eval; reset per input
+        // tuple (C ExecQualAndReset).
+        unsafe { eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx()) };
+        estate.reset_expr_context(node.ps_ExprContext);
+        let outer_slot = estate.slot_mut(outer_id);
+        let mut slots = EvalSlots {
+            scan: None,
+            inner: Some(&mut node.firsttuple_slot),
+            outer: Some(&mut *outer_slot),
+        };
+        if exec_qual(Some(eq), &mut slots)? {
+            return Ok(None);
         }
     }
+    node.store_first(estate, outer_id)?;
+    if node.check_qual(estate)? {
+        return node.project(estate);
+    }
+    Ok(None)
+}
+
+/// `exec_group`'s child-exhausted arm: mark the node drained (no slot
+/// clearing — C's ExecGroup returns NULL leaving the retained tuple as-is).
+pub fn lane_group_eof(node: &mut GroupState<'_>) {
+    node.grp_done = true;
 }
 
 impl<'mcx> GroupState<'mcx> {
