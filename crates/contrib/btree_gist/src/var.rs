@@ -177,17 +177,24 @@ pub fn bin_union<T: VarOps>(
         }
     };
 
-    match u {
+    let replacement = match u {
         Some(cur) => {
             let ro = key_readable(cur);
-            let new_lower = if T::cmp(ro.lower, eo.lower, ctx)? > 0 { Some(eo.lower) } else { None };
-            let new_upper = if T::cmp(ro.upper, eo.upper, ctx)? < 0 { Some(eo.upper) } else { None };
-            if new_lower.is_some() || new_upper.is_some() {
-                let img = key_copy(new_lower.unwrap_or(ro.lower), new_upper.unwrap_or(ro.upper));
-                *u = Some(img);
+            let low = T::cmp(ro.lower, eo.lower, ctx)? > 0;
+            let up = T::cmp(ro.upper, eo.upper, ctx)? < 0;
+            if low || up {
+                Some(key_copy(
+                    if low { eo.lower } else { ro.lower },
+                    if up { eo.upper } else { ro.upper },
+                ))
+            } else {
+                None
             }
         }
-        None => *u = Some(key_copy(eo.lower, eo.upper)),
+        None => Some(key_copy(eo.lower, eo.upper)),
+    };
+    if let Some(img) = replacement {
+        *u = Some(img);
     }
     Ok(())
 }
