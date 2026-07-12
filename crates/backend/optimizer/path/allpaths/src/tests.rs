@@ -88,6 +88,40 @@ fn small_rel_gate_skipped_for_non_baserel() {
 }
 
 #[test]
+fn cbstore_rg_sizing_scales_linearly() {
+    let _g = test_lock();
+    with_rel(|rel| {
+        // Below 4 RGs (~262k rows) a plain baserel plans serial.
+        assert_eq!(compute_cbstore_parallel_worker(rel, 0.0, 16), 0);
+        assert_eq!(compute_cbstore_parallel_worker(rel, 65_536.0, 16), 0);
+        assert_eq!(compute_cbstore_parallel_worker(rel, 196_608.0, 16), 0);
+        // 4 RGs = 1 worker; linear in claim units from there.
+        assert_eq!(compute_cbstore_parallel_worker(rel, 262_144.0, 16), 1);
+        assert_eq!(compute_cbstore_parallel_worker(rel, 1_000_000.0, 16), 4);
+        assert_eq!(compute_cbstore_parallel_worker(rel, 4_000_000.0, 16), 15);
+        // 10M rows = 153 RGs -> 38 pre-clamp: machine-sized on big banks.
+        assert_eq!(compute_cbstore_parallel_worker(rel, 10_000_000.0, 16), 16);
+        assert_eq!(compute_cbstore_parallel_worker(rel, 10_000_000.0, 64), 38);
+    });
+}
+
+#[test]
+fn cbstore_reloption_overrides_and_child_skips_gate() {
+    let _g = test_lock();
+    with_rel(|rel| {
+        rel.rel_parallel_workers = 3;
+        assert_eq!(compute_cbstore_parallel_worker(rel, 10_000_000.0, 16), 3);
+        assert_eq!(compute_cbstore_parallel_worker(rel, 10_000_000.0, 2), 2);
+        rel.rel_parallel_workers = 0;
+        assert_eq!(compute_cbstore_parallel_worker(rel, 10_000_000.0, 16), 0);
+        rel.rel_parallel_workers = -1;
+        // Inheritance children skip the small-rel gate (C parity).
+        rel.reloptkind = RELOPT_OTHER_MEMBER_REL;
+        assert_eq!(compute_cbstore_parallel_worker(rel, 65_536.0, 16), 1);
+    });
+}
+
+#[test]
 fn guc_changes_move_thresholds() {
     let _g = test_lock();
     let save = gucs::min_parallel_table_scan_size();

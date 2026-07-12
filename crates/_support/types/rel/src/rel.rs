@@ -185,8 +185,14 @@ impl<'mcx> RelationData<'mcx> {
 
     #[inline]
     pub fn get_parallel_workers(&self, defaultpw: i32) -> i32 {
-        match self.rd_options.as_ref().and_then(|o| o.std()) {
-            Some(opts) => opts.parallel_workers,
+        // C's RelationGetParallelWorkers reads StdRdOptions; cbstore carries
+        // the same option in its own parse struct (same -1 = unset contract).
+        match self.rd_options.as_ref() {
+            Some(o) => match o {
+                crate::reloptions::RdOptions::Std(opts) => opts.parallel_workers,
+                crate::reloptions::RdOptions::Cbstore(opts) => opts.parallel_workers,
+                _ => defaultpw,
+            },
             None => defaultpw,
         }
     }

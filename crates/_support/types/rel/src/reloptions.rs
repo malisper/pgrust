@@ -127,6 +127,11 @@ pub const CBSTORE_CODEC_COLS_MAX: usize = 2048;
 pub struct CbstoreOptions {
     pub codec: CbstoreCodec,
     pub zstd_level: i32,
+    // Same contract as StdRdOptions.parallel_workers (-1 = unset): pins the
+    // planner's worker count for scans of this relation, overriding the
+    // row-group-based default sizing (C's compute_parallel_worker honors
+    // the reloption first; cbstore does too).
+    pub parallel_workers: i32,
     cluster_key_len: u16,
     cluster_key_buf: [u8; CBSTORE_CLUSTER_KEY_MAX],
     codec_cols_len: u16,
@@ -138,6 +143,7 @@ impl Default for CbstoreOptions {
         CbstoreOptions {
             codec: CbstoreCodec::Auto,
             zstd_level: 3,
+            parallel_workers: -1,
             cluster_key_len: 0,
             cluster_key_buf: [0; CBSTORE_CLUSTER_KEY_MAX],
             codec_cols_len: 0,

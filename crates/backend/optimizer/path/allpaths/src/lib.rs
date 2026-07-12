@@ -69,3 +69,50 @@ pub fn compute_parallel_worker(
 
     parallel_workers.min(max_workers)
 }
+
+// cbstore's parallel claim unit is one row group (cbstore::format::RG_ROWS;
+// the shared phs_nallocated cursor advances one RG per claim).
+pub const CBSTORE_RG_ROWS: f64 = 65_536.0;
+
+// Minimum claim units per worker: below this, worker startup + tqueue setup
+// can't amortize and the shared cursor degenerates to single-claim workers.
+pub const CBSTORE_RGS_PER_WORKER: f64 = 4.0;
+
+/// cbstore analog of `compute_parallel_worker`'s heap-pages arm.
+///
+/// C's intent is "relation size decides worker count, reloption overrides":
+/// heap sizes with a log3 ladder over pages because heap workers share one
+/// block-range cursor and the ladder is deliberately conservative for
+/// row-store scans. cbstore's scan geometry is different — the parallel
+/// claim unit is a whole row group (RG_ROWS = 65536 rows) and per-RG decode
+/// is embarrassingly parallel — so the mapping is linear in claim units:
+///
+///   nrg     = ceil(tuples / RG_ROWS)
+///   workers = clamp(nrg / CBSTORE_RGS_PER_WORKER, 1, max_workers)
+///
+/// with C's small-table gate expressed in cbstore units: a plain baserel
+/// under CBSTORE_RGS_PER_WORKER row groups (< ~262k rows) plans serial
+/// (inheritance children skip the gate, as C skips min_parallel_table_scan_
+/// size for them, since siblings combine). A 10M-row bank (153 RGs) sizes
+/// to 38 pre-clamp — i.e. machine-sized DOP on big banks, vs the page
+/// ladder's 6 (heap-page heuristics over compressed bytes undercount the
+/// available scan parallelism ~2.7x there; the ARMED16 audit leg measured
+/// the healthy band gaining ~1.9x at DOP 16).
+///
+/// `rel_parallel_workers` (the parallel_workers reloption) overrides the
+/// computation entirely, exactly as in C.
+pub fn compute_cbstore_parallel_worker(
+    rel: &RelOptInfo<'_>,
+    tuples: f64,
+    max_workers: i32,
+) -> i32 {
+    if rel.rel_parallel_workers != -1 {
+        return rel.rel_parallel_workers.min(max_workers);
+    }
+    let nrg = (tuples / CBSTORE_RG_ROWS).ceil().max(0.0);
+    if rel.reloptkind == RELOPT_BASEREL && nrg < CBSTORE_RGS_PER_WORKER {
+        return 0;
+    }
+    let workers = (nrg / CBSTORE_RGS_PER_WORKER).floor() as i32;
+    workers.max(1).min(max_workers)
+}
