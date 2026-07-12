@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
+walsender_seams = { path = "../../../replication/walsender_seams" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
