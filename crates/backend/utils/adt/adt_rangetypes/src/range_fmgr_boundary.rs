@@ -937,11 +937,13 @@ pub fn int8range_subdiff<'mcx>(
 
 /// `numrange_subdiff(PG_FUNCTION_ARGS)` (rangetypes.c:1703).
 pub fn numrange_subdiff<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    let v1 = getarg_datum(fcinfo, 0);
-    let v2 = getarg_datum(fcinfo, 1);
+    // `numeric` is by-reference: detoasted images cross on `ref_args`, not the
+    // bare placeholder word (see `stage_elem_arg`).
+    let v1 = stage_elem_arg(mcx, fcinfo, 0, false)?;
+    let v2 = stage_elem_arg(mcx, fcinfo, 1, false)?;
     Ok(float8_datum(crate::range_canonical_subdiff_hash::numrange_subdiff(v1, v2)?))
 }
 

@@ -667,6 +667,36 @@ mod tests {
         assert!(call_range_pred(3850, &e1));
     }
 
+    /// `numrange_subdiff(numeric, numeric)` must stage by-reference element
+    /// args off the `ref_args` lane; reading the bare placeholder word faults
+    /// (issue #23: `SELECT numrange_subdiff(1,1)`).
+    #[test]
+    fn numrange_subdiff_stages_byref_numeric_args() {
+        install_test_typcache();
+        use numeric_seams as ns;
+        if !ns::numeric_subdiff::is_installed() {
+            ns::numeric_subdiff::set(|v1, v2| {
+                assert!(v1.as_usize() > 0xff, "v1 should be a staged pointer");
+                assert!(v2.as_usize() > 0xff, "v2 should be a staged pointer");
+                Ok(0.0)
+            });
+        }
+        register_rangetypes_builtins();
+        let mut fcinfo = FunctionCallInfoBaseData::new(None, 2, 0, None, None);
+        fcinfo.args = vec![
+            NullableDatum::value(Datum::null()),
+            NullableDatum::value(Datum::null()),
+        ];
+        let dummy = vec![0u8; 8];
+        fcinfo.ref_args = vec![
+            Some(RefPayload::Varlena(dummy.clone())),
+            Some(RefPayload::Varlena(dummy)),
+        ];
+        let native = fmgr_core::native_builtin(3924).expect("numrange_subdiff registered");
+        let result = native(&mut fcinfo).expect("numrange_subdiff ok");
+        assert_eq!(result.as_f64(), 0.0);
+    }
+
     /// Empty vs. finite: `range_eq` false, `range_cmp` orders empty first (C:
     /// an empty range sorts before any non-empty range, -1), `range_contains`
     /// (finite contains empty) true. All short-circuit on the EMPTY flag.
