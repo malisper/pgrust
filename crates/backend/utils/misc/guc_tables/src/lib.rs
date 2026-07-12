@@ -7,6 +7,7 @@
 
 pub mod backing;
 pub mod consts;
+pub mod gather_fair;
 pub mod hooks;
 pub mod lane_pool;
 pub mod option_sets;
