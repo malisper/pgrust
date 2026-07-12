@@ -8,7 +8,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_DIVISION_BY_ZERO, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 
-use crate::spec::{ArithOp, Batch, Program, SelVec, Step, MAX_REGS, MAX_ROWS};
+use crate::spec::{ArithOp, Batch, BoolTestKind, NullTestKind, Program, SelVec, Step, MAX_REGS, MAX_ROWS};
 
 #[cold]
 #[inline(never)]
@@ -16,26 +16,59 @@ pub(crate) fn division_by_zero() -> Box<PgError> {
     Box::new(PgError::error("division by zero").with_sqlstate(ERRCODE_DIVISION_BY_ZERO))
 }
 
+// Width-specific out-of-range messages, byte-identical to C int.c / int8.c
+// (int2 -> "smallint", int4 -> "integer", int8 -> "bigint"); the stitched
+// tier never fabricates these — refuse-and-replay routes through here so the
+// replay raises C's exact message on C's row.
 #[cold]
 #[inline(never)]
-pub(crate) fn int_out_of_range() -> Box<PgError> {
-    Box::new(
-        PgError::error("integer out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-    )
+fn out_of_range(width: u8) -> Box<PgError> {
+    let msg = match width {
+        2 => "smallint out of range",
+        8 => "bigint out of range",
+        _ => "integer out of range",
+    };
+    Box::new(PgError::error(msg).with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
 }
 
+/// int.c / int8.c parity: checked add/sub/mul (width-exact overflow) and the
+/// div traps (zero divisor + MIN/-1). Reads and writes at the op's width; the
+/// Datum image stays canonically sign-extended (from_iN).
 #[inline(always)]
-fn arith_eval(op: ArithOp, a: i32, b: i32) -> PgResult<i32> {
-    // int.c parity: checked ops, INT_MIN/-1 division overflow included.
+fn arith_eval(op: ArithOp, a: Datum, b: Datum) -> PgResult<Datum> {
+    use ArithOp::*;
+    let w = op.width();
+    let oor = || out_of_range(w);
     match op {
-        ArithOp::Add4 => a.checked_add(b).ok_or_else(int_out_of_range),
-        ArithOp::Sub4 => a.checked_sub(b).ok_or_else(int_out_of_range),
-        ArithOp::Mul4 => a.checked_mul(b).ok_or_else(int_out_of_range),
-        ArithOp::Div4 => {
-            if b == 0 {
+        Add2 => (a.as_i16().checked_add(b.as_i16())).map(Datum::from_i16).ok_or_else(oor),
+        Sub2 => (a.as_i16().checked_sub(b.as_i16())).map(Datum::from_i16).ok_or_else(oor),
+        Mul2 => (a.as_i16().checked_mul(b.as_i16())).map(Datum::from_i16).ok_or_else(oor),
+        Div2 => {
+            let (x, y) = (a.as_i16(), b.as_i16());
+            if y == 0 {
                 return Err(division_by_zero());
             }
-            a.checked_div(b).ok_or_else(int_out_of_range)
+            x.checked_div(y).map(Datum::from_i16).ok_or_else(oor)
+        }
+        Add4 => (a.as_i32().checked_add(b.as_i32())).map(Datum::from_i32).ok_or_else(oor),
+        Sub4 => (a.as_i32().checked_sub(b.as_i32())).map(Datum::from_i32).ok_or_else(oor),
+        Mul4 => (a.as_i32().checked_mul(b.as_i32())).map(Datum::from_i32).ok_or_else(oor),
+        Div4 => {
+            let (x, y) = (a.as_i32(), b.as_i32());
+            if y == 0 {
+                return Err(division_by_zero());
+            }
+            x.checked_div(y).map(Datum::from_i32).ok_or_else(oor)
+        }
+        Add8 => (a.as_i64().checked_add(b.as_i64())).map(Datum::from_i64).ok_or_else(oor),
+        Sub8 => (a.as_i64().checked_sub(b.as_i64())).map(Datum::from_i64).ok_or_else(oor),
+        Mul8 => (a.as_i64().checked_mul(b.as_i64())).map(Datum::from_i64).ok_or_else(oor),
+        Div8 => {
+            let (x, y) = (a.as_i64(), b.as_i64());
+            if y == 0 {
+                return Err(division_by_zero());
+            }
+            x.checked_div(y).map(Datum::from_i64).ok_or_else(oor)
         }
     }
 }
@@ -73,10 +106,54 @@ pub fn eval_row(prog: &Program, batch: &Batch<'_>, i: u32) -> PgResult<bool> {
                 regs[out as usize] = if a.isnull || b.isnull {
                     NullableDatum::null()
                 } else {
-                    NullableDatum {
-                        value: Datum::from_i32(arith_eval(op, a.value.as_i32(), b.value.as_i32())?),
-                        isnull: false,
+                    NullableDatum { value: arith_eval(op, a.value, b.value)?, isnull: false }
+                };
+            }
+            Step::NullTest { a, out, kind } => {
+                let r = regs[a as usize];
+                let v = match kind {
+                    NullTestKind::IsNull => r.isnull,
+                    NullTestKind::IsNotNull => !r.isnull,
+                };
+                regs[out as usize] = NullableDatum { value: Datum::from_bool(v), isnull: false };
+            }
+            Step::BoolTest { a, out, kind } => {
+                let r = regs[a as usize];
+                // Truthy = non-NULL bool datum reading true (DatumGetBool).
+                let is_true = !r.isnull && r.value.as_bool();
+                let is_false = !r.isnull && !r.value.as_bool();
+                let v = match kind {
+                    BoolTestKind::IsTrue => is_true,
+                    BoolTestKind::IsNotTrue => !is_true,
+                    BoolTestKind::IsFalse => is_false,
+                    BoolTestKind::IsNotFalse => !is_false,
+                };
+                regs[out as usize] = NullableDatum { value: Datum::from_bool(v), isnull: false };
+            }
+            Step::SaopAny { a, out, op, arr } => {
+                // Strict-OR ScalarArrayOpExpr three-valued result: scan for a
+                // non-NULL matching element (short-circuits true); a NULL
+                // scalar or a NULL element with no match yields NULL.
+                let scalar = regs[a as usize];
+                let elems = &prog.arrays[arr as usize];
+                let mut res = false;
+                let mut resnull = false;
+                for e in elems {
+                    if scalar.isnull || e.isnull {
+                        resnull = true;
+                        continue;
                     }
+                    if op.eval(scalar.value, e.value) {
+                        res = true;
+                        break;
+                    }
+                }
+                regs[out as usize] = if res {
+                    NullableDatum { value: Datum::from_bool(true), isnull: false }
+                } else if resnull {
+                    NullableDatum::null()
+                } else {
+                    NullableDatum { value: Datum::from_bool(false), isnull: false }
                 };
             }
             Step::Qual { a } => {
