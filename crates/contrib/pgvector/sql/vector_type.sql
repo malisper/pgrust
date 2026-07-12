@@ -141,6 +141,11 @@ SELECT subvector('[1,2,3,4,5]'::vector, -1, 2);
 SELECT subvector('[1,2,3,4,5]'::vector, 2147483647, 10);
 SELECT subvector('[1,2,3,4,5]'::vector, 3, 2147483647);
 SELECT subvector('[1,2,3,4,5]'::vector, -2147483644, 2147483647);
+-- negative computed dim (end < clamped start): must be the 22000
+-- "at least 1 dimension" error, not the 54000 max-dimension one
+SELECT subvector('[1,2,3,4,5]'::vector, -5, 3);
+SELECT subvector('[1,2,3,4,5]'::vector, -10, 5);
+SELECT subvector('[1,2,3,4,5]'::vector, -2147483648, 10);
 
 SELECT avg(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]']) v;
 SELECT avg(v) FROM unnest(ARRAY['[1,2,3]'::vector, '[3,5,7]', NULL]) v;

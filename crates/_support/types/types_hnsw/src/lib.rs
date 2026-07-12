@@ -1,7 +1,6 @@
 //! hnsw.h vocabulary (pgvector): scan state lives here so relscan's
 //! IndexScanOpaque can hold it without a cycle through the AM crates.
 
-use mcx::PgVec;
 use types_core::{BlockNumber, Oid};
 use types_fmgr::FmgrInfo;
 use types_tuple::itemptr::ItemPointerData;
@@ -74,13 +73,22 @@ pub struct HnswScanElement {
     pub distance: f64,
 }
 
-pub struct DistanceMinHeap<'mcx> {
-    pub items: PgVec<'mcx, HnswScanElement>,
+// Owned (global-allocator) storage: this heap persists across hnswgettuple
+// calls inside one scan, and C keeps it in so->tmpCtx which hnswrescan
+// resets — dropping/reassigning it must actually free.
+pub struct DistanceMinHeap {
+    pub items: Vec<HnswScanElement>,
 }
 
-impl<'mcx> DistanceMinHeap<'mcx> {
-    pub fn new(mcx: mcx::Mcx<'mcx>) -> Self {
-        DistanceMinHeap { items: mcx::vec_with_capacity_in_infallible(mcx, 0) }
+impl Default for DistanceMinHeap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DistanceMinHeap {
+    pub fn new() -> Self {
+        DistanceMinHeap { items: Vec::new() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -140,11 +148,14 @@ pub struct HnswScanOpaqueData<'mcx> {
     // Approximates C MemoryContextMemAllocated(tmpCtx) for the iterative cap.
     pub mem_used: usize,
     pub iterative: i32,
-    pub value: Option<PgVec<'mcx, u8>>,
+    // value/w/visited/discarded live in C's so->tmpCtx, which hnswrescan
+    // resets; here they are globally-allocated owned values so reassignment
+    // in hnswrescan/hnswendscan frees them (bounded memory across rescans).
+    pub value: Option<Vec<u8>>,
     pub support: HnswSupport,
     pub max_dimensions: i32,
     pub norm_is_l2: bool,
-    pub w: PgVec<'mcx, HnswScanElement>,
-    pub visited: mcx::PgFxHashMap<'mcx, (BlockNumber, u16), ()>,
-    pub discarded: Option<DistanceMinHeap<'mcx>>,
+    pub w: Vec<HnswScanElement>,
+    pub visited: std::collections::HashSet<(BlockNumber, u16), rustc_hash::FxBuildHasher>,
+    pub discarded: Option<DistanceMinHeap>,
 }

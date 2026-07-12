@@ -436,7 +436,14 @@ pub fn fc_subvector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<
     } else if start > adim {
         check_dim(0)?;
     }
-    let dim = (end - start) as usize;
+    // C's CheckDim takes a signed dim: a negative (end - start) must raise
+    // the 22000 "at least 1 dimension" error, not wrap through usize into
+    // the 54000 max-dimension branch.
+    let dim = end - start;
+    if dim < 1 {
+        check_dim(0)?;
+    }
+    let dim = dim as usize;
     check_dim(dim)?;
     let mut r = VecBuilder::new(fcinfo.result_mcx(), dim)?;
     for i in 0..dim {

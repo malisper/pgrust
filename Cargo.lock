@@ -11608,6 +11608,7 @@ dependencies = [
  "execindexing",
  "init_small",
  "mcx",
+ "pgvector",
  "pgvector_hnsw",
  "postgres_seams",
  "types_core",
@@ -17103,6 +17104,7 @@ version = "0.1.0"
 dependencies = [
  "datum",
  "mcx",
+ "rustc-hash",
  "types_core",
  "types_error",
  "types_fmgr",
