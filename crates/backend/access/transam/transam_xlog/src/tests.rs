@@ -310,6 +310,41 @@ fn insert_flush_smoke() {
     // Flush and verify on disk.
     XLogFlush(end2).unwrap();
     assert!(!XLogNeedsFlush(end2));
+
+    // Pinning: the flush tail must request a walsender wakeup even under
+    // open_sync/open_datasync wal_sync_method (C signals WalSndWakeupRequest
+    // OUTSIDE the sync-method guard, xlog.c:2553 — no explicit fsync happens
+    // on that path but walsenders still need the wakeup).
+    {
+        use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+        static WAKEUPS: AtomicUsize = AtomicUsize::new(0);
+        static MWS: AtomicI32 = AtomicI32::new(10);
+        walsender_seams::wal_snd_wakeup::set(|_, _| {
+            WAKEUPS.fetch_add(1, Ordering::Relaxed);
+        });
+        guc_tables::vars::max_wal_senders.install_if_absent(guc_tables::GucVarAccessors {
+            get: || MWS.load(Ordering::Relaxed),
+            set: |v| MWS.store(v, Ordering::Relaxed),
+        });
+        let saved_method = guc_tables::vars::wal_sync_method.read();
+        guc_tables::vars::wal_sync_method.write(WAL_SYNC_METHOD_OPEN_DSYNC);
+        let body3: Vec<u8> = (0..32u8).collect();
+        let tot_len3 = SizeOfXLogRecord + body3.len();
+        let mut hdr3 = [0u8; 24];
+        hdr3[0..4].copy_from_slice(&(tot_len3 as u32).to_ne_bytes());
+        hdr3[16] = XLOG_NOOP;
+        hdr3[17] = RM_XLOG_ID;
+        let body_crc3 = crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, &body3);
+        hdr3[20..24].copy_from_slice(&body_crc3.to_ne_bytes());
+        let end3 = XLogInsertRecord(&mut hdr3, &[&body3], 0, 0, 0, false).unwrap();
+        let before = WAKEUPS.load(Ordering::Relaxed);
+        XLogFlush(end3).unwrap();
+        assert!(
+            WAKEUPS.load(Ordering::Relaxed) > before,
+            "flush under open_datasync must still wake walsenders (xlog.c:2553)"
+        );
+        guc_tables::vars::wal_sync_method.write(saved_method);
+    }
     let segpath = dir.join(format!("pg_wal/{}", XLogFileName(1, XLByteToSeg(end_of_log, seg), seg)));
     let file = std::fs::read(&segpath).unwrap_or_else(|e| {
         let names: Vec<_> = std::fs::read_dir(dir.join("pg_wal")).unwrap().map(|x| x.unwrap().file_name()).collect();

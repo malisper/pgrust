@@ -581,8 +581,12 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                 fd::ReserveExternalFD()?;
             }
             issue_xlog_fsync(OPEN_LOG_FILE.get(), OPEN_LOG_SEG_NO.get(), tli)?;
-            WalSndWakeupRequest();
         }
+        // C signals the walsender wakeup OUTSIDE the sync-method guard
+        // (xlog.c:2553): with wal_sync_method=open/open_dsync the flush
+        // advances without an explicit fsync and walsenders must still be
+        // woken, or sync-rep/catchup waits stall until the next write.
+        WalSndWakeupRequest();
         LOGWRT_RESULT.set((lw_write, lw_write));
     }
 
