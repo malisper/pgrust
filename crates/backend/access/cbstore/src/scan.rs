@@ -971,6 +971,11 @@ impl<'mcx> CbScanDescData<'mcx> {
     }
 
     /// Fused-sort varlena key feed: staged text Datums into SoA column 0.
+    /// When the consumer opted into dict codes (`set_dict_want(0)` — the
+    /// distinct-set text key feed) a dict-encoded window answers with the
+    /// zero-gather dict lane instead (same identity discipline as
+    /// `batch_deform_col`: epoch = rg index, stable for the pinned scan);
+    /// the datum/isnull cells stay stale per the `set_dict_lane` contract.
     pub fn batch_stage_varkey(&mut self, key: usize, soa: &mut ::exectuples::SoaBatch<'_>) {
         let n = self.staged_rows;
         soa.begin(n as u32);
@@ -978,6 +983,21 @@ impl<'mcx> CbScanDescData<'mcx> {
         let cd = &self.cols[key];
         if cd.is_dict {
             let codes = &cd.codes[self.staged_lo..self.staged_lo + n];
+            if soa.dict_want(0) {
+                soa.set_dict_lane(
+                    0,
+                    ::exectuples::SoaDictLane {
+                        codes: codes.as_ptr(),
+                        table: ::exectuples::SoaDictTable {
+                            dict: cd.dict.as_ptr(),
+                            ndict: cd.dict.len() as u32,
+                            epoch: self.rg as u64,
+                            sorted: cd.dict_sorted,
+                        },
+                    },
+                );
+                return;
+            }
             for (out, &code) in soa.col_values_mut(0).iter_mut().zip(codes) {
                 *out = cd.dict[code as usize];
             }
