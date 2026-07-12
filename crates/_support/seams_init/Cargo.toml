@@ -286,6 +286,8 @@ ltree = { path = "../../contrib/ltree" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
+unaccent = { path = "../../contrib/unaccent" }
+pg_walinspect = { path = "../../contrib/pg_walinspect" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
