@@ -438,6 +438,22 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         statemachine::PostmasterStateMachine()?;
     }
 
+    // pg_ctl promote: forward SIGUSR2 to the startup process while it is
+    // still recovering (postmaster.c:3883-3895); startup unlinks the file.
+    if with_pm(|pm| {
+        pm.startup.is_some()
+            && matches!(
+                pm.pm_state,
+                PMState::PM_STARTUP | PMState::PM_RECOVERY | PMState::PM_HOT_STANDBY
+            )
+    }) && xlogrecovery_seams::check_promote_signal::is_installed()
+        && xlogrecovery_seams::check_promote_signal::call()
+    {
+        if let Some(startup) = with_pm(|pm| pm.startup) {
+            statemachine::signal_child(&startup, libc::SIGUSR2);
+        }
+    }
+
     Ok(())
 }
 
