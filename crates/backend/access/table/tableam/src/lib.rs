@@ -1147,6 +1147,15 @@ pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool 
     }
 }
 
+/// Total committed cbstore rows (footer metadata; no decode) — the lane's
+/// tiny-input admission floor. None = heap (the floor is cbstore-only today).
+pub fn table_scan_cb_total_rows(scan: &TableScanDesc<'_>) -> Option<u64> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => Some(c.total_rows()),
+    }
+}
+
 /// Relation size at scan start (heap rs_nblocks): the deform-JIT page gate.
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {

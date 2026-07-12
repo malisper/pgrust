@@ -214,8 +214,10 @@ pub(super) enum RefuseReason {
     /// ownership is pure adapter overhead (`STANDALONE_SCAN_NO_UPSIDE`).
     /// Ticked per pull at the standalone `try_own_*` scan hooks.
     AdmissionEconomicsNoConsumer = 19,
-    /// Dynamic tiny-input row-floor (§4 endgame refuse-set).
-    #[allow(dead_code)]
+    /// Dynamic tiny-input row-floor (§4 endgame refuse-set): the relation is
+    /// too small for lane ownership to recover its own admission-probe cost
+    /// (armed 2026-07-12 at the cbstore standalone hook — the memoized tiny
+    /// verdict is taken BEFORE the qual-translate/arm cascade runs).
     TinyInputFloor = 20,
     /// Join-side shape refuse (hash-join breaker and NestLoop TupleOp) —
     /// non-INNER faces (hash join), joinqual/otherqual residuals (hash
@@ -275,9 +277,16 @@ pub(super) enum RefuseReason {
     /// (refusal-audit rider, 2026-07-14). Per-PULL cadence on the memoized
     /// verdict, like the cbscan admission row.
     QualNotVectorizable = 30,
+    /// Plain-agg (ungrouped) plans whose transitions read NO input columns —
+    /// pure count(*)-style census shapes. Deliberately refused by the cbstore
+    /// per-row breaker-feed admission (lane-v2-noqualfeed): the census answer
+    /// needs no data decode at all (heap: the incumbent fused drive's
+    /// storeless advance; cbstore: the MetaAggScan footer path / the empty
+    /// needed-set per-row walk), so a batch-decoded feed has nothing to win.
+    CountOnlyCensus = 31,
 }
 
-const N_REASONS: usize = 31;
+const N_REASONS: usize = 32;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -313,6 +322,7 @@ impl RefuseReason {
             RefuseReason::MetaShape => "meta-shape",
             RefuseReason::MetaRuntime => "meta-runtime",
             RefuseReason::QualNotVectorizable => "qual-not-vectorizable",
+            RefuseReason::CountOnlyCensus => "count-only-census",
         }
     }
 
@@ -350,6 +360,7 @@ impl RefuseReason {
             MetaShape,
             MetaRuntime,
             QualNotVectorizable,
+            CountOnlyCensus,
         ][i]
     }
 }
