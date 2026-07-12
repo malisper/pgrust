@@ -183,7 +183,14 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
         return CompactArm::Off;
     };
-    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    let mut numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    // Stage-4 §4.4 exchange: a bounded table holds at most `cap` groups at a
+    // time (over-cap flushes into the handoff), so the spill-eligibility
+    // gate and the layout/capacity sizing work off the cap — high-NDV
+    // partial builds keep the compact table instead of refusing SpillRisk.
+    if let Some(cap) = crate::merge::exchange_cap_for_build(node) {
+        numgroups = numgroups.min(cap as u64);
+    }
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     if ph.compact.is_some() {
         return CompactArm::Armed;
@@ -251,7 +258,11 @@ pub fn agg_hash_compact_try_arm_mk(
     let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
         return CompactArm::Off;
     };
-    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    let mut numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    // Stage-4 §4.4 exchange: gate/size by the bound, as in the single-key arm.
+    if let Some(cap) = crate::merge::exchange_cap_for_build(node) {
+        numgroups = numgroups.min(cap as u64);
+    }
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     if ph.compact.is_some() {
         return CompactArm::Armed;
@@ -458,6 +469,11 @@ pub fn agg_hash_compact_backstop<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
+    // Stage-4 §4.4 exchange bound (merge.rs): an over-cap table flushes into
+    // the finalize handoff radix-partitioned and continues emptied. BEFORE
+    // the probes, same contract as the migration below — no caller-held
+    // group pointer survives a batch boundary.
+    crate::merge::exchange_maybe_flush(node, estate)?;
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     {

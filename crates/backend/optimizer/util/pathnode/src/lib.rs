@@ -1690,6 +1690,20 @@ pub fn create_agg_path<'mcx>(
         sub_rows,
         sub_width,
     )?;
+    // Stage-4 §4.4 radix-exchange recost (no-op unless the executor's own
+    // admission says the exchange engages on this shape — see costsize).
+    costsize::cost_agg_lane_exchange_adjust(
+        run,
+        id,
+        aggstrategy,
+        aggsplit,
+        subpath_id,
+        aggcosts,
+        num_groups,
+        sub_rows,
+        sub_width,
+        sub_total,
+    );
 
     let target = run.root.pathtarget(target_id);
     let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
