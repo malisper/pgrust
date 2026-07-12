@@ -532,6 +532,43 @@ pub struct ValuesScan<'mcx> {
     pub values_lists: NodeList<'mcx>,
 }
 
+/// `operation` is `CMD_SELECT` for plain scans; direct-modify pushdown sets
+/// UPDATE/DELETE (`resultRelation` then names the modify target's RT index).
+#[repr(C)]
+pub struct ForeignScan<'mcx> {
+    pub scan: Scan<'mcx>,
+    pub operation: CmdType,
+    pub resultRelation: Index,
+    pub checkAsUser: Oid,
+    pub fs_server: Oid,
+    pub fdw_exprs: NodeList<'mcx>,
+    pub fdw_private: NodeList<'mcx>,
+    pub fdw_scan_tlist: NodeList<'mcx>,
+    pub fdw_recheck_quals: NodeList<'mcx>,
+    pub fs_relids: Bitmapset<'mcx>,
+    pub fs_base_relids: Bitmapset<'mcx>,
+    pub fsSystemCol: bool,
+}
+
+impl Default for ForeignScan<'_> {
+    fn default() -> Self {
+        ForeignScan {
+            scan: Scan::default(),
+            operation: CmdType::CMD_SELECT,
+            resultRelation: 0,
+            checkAsUser: Oid::default(),
+            fs_server: Oid::default(),
+            fdw_exprs: NodeList::default(),
+            fdw_private: NodeList::default(),
+            fdw_scan_tlist: NodeList::default(),
+            fdw_recheck_quals: NodeList::default(),
+            fs_relids: Bitmapset::default(),
+            fs_base_relids: Bitmapset::default(),
+            fsSystemCol: false,
+        }
+    }
+}
+
 /// Per-key arrays are C's `pg_node_attr(array_size(numCols))` parallel arrays.
 #[derive(Default)]
 #[repr(C)]
@@ -994,6 +1031,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for RecursiveUnion<'mcx> {
 unsafe impl<'mcx> NodeVariant<'mcx> for ValuesScan<'mcx> {
     const TAG: NodeTag = NodeTag::T_ValuesScan;
 }
+unsafe impl<'mcx> NodeVariant<'mcx> for ForeignScan<'mcx> {
+    const TAG: NodeTag = NodeTag::T_ForeignScan;
+}
 unsafe impl<'mcx> NodeVariant<'mcx> for Sort<'mcx> {
     const TAG: NodeTag = NodeTag::T_Sort;
 }
@@ -1088,6 +1128,8 @@ unsafe impl<'mcx> PlanVariant<'mcx> for WorkTableScan<'mcx> {}
 unsafe impl<'mcx> PlanVariant<'mcx> for RecursiveUnion<'mcx> {}
 // SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
 unsafe impl<'mcx> PlanVariant<'mcx> for ValuesScan<'mcx> {}
+// SAFETY: repr(C), Plan first via the Scan base (offsets asserted below).
+unsafe impl<'mcx> PlanVariant<'mcx> for ForeignScan<'mcx> {}
 // SAFETY: repr(C), Plan first (offsets asserted below), tag in is_plan_tag.
 unsafe impl<'mcx> PlanVariant<'mcx> for Sort<'mcx> {}
 // SAFETY: repr(C), Plan first via the Sort base (offsets asserted below).
@@ -1201,6 +1243,10 @@ const _: () = {
     assert!(
         offset_of!(NodeRep<ValuesScan>, payload) == offset_of!(NodeRep<Plan>, payload)
     );
+    assert!(offset_of!(ForeignScan, scan) == 0);
+    assert!(
+        offset_of!(NodeRep<ForeignScan>, payload) == offset_of!(NodeRep<Plan>, payload)
+    );
     assert!(offset_of!(Sort, plan) == 0);
     assert!(offset_of!(NodeRep<Sort>, payload) == offset_of!(NodeRep<Plan>, payload));
     assert!(offset_of!(IncrementalSort, sort) == 0);
@@ -1268,6 +1314,7 @@ fn is_plan_tag(tag: NodeTag) -> bool {
             | NodeTag::T_WorkTableScan
             | NodeTag::T_RecursiveUnion
             | NodeTag::T_ValuesScan
+            | NodeTag::T_ForeignScan
             | NodeTag::T_Sort
             | NodeTag::T_IncrementalSort
             | NodeTag::T_Group
@@ -1384,6 +1431,11 @@ impl<'mcx> Node<'mcx> {
 
     #[inline]
     pub fn as_values_scan(self) -> Option<&'mcx ValuesScan<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_foreign_scan(self) -> Option<&'mcx ForeignScan<'mcx>> {
         self.as_variant()
     }
 
