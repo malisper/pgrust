@@ -167,8 +167,9 @@ impl<'mcx> SeqScanState<'mcx> {
         self.parallel_aware
     }
 
-    /// Parallel leader or worker: the lane-v2 driver refuses parallel scans
-    /// for now (Phase 2 adds parallel-worker safety).
+    /// Parallel leader or worker. (The lane-v2 SeqScan drive now admits
+    /// parallel scans — the batched page feed rides the shared DSM block
+    /// cursor; kept for gates that still refuse parallel.)
     pub fn is_parallel(&self) -> bool {
         self.parallel_aware || self.parallel.is_some()
     }
@@ -340,6 +341,22 @@ pub fn seq_scan_batch_supported<'mcx>(
     node.ensure_scandesc(estate)?;
     let scandesc = node.ss.ss_currentScanDesc.as_ref().unwrap();
     Ok(::tableam::table_scan_supports_pagebatch(scandesc))
+}
+
+/// As `seq_scan_batch_supported`, but also admits parallel scan descriptors
+/// (the batched page feed routes block acquisition through the shared DSM
+/// block cursor). Lane-v2 SeqScan drive only — the fused agg/sort/hash
+/// drives keep the conservative serial-only gate.
+pub fn seq_scan_batch_supported_parallel<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if matches!(node.variant, SeqScanVariant::Epq) {
+        return Ok(false);
+    }
+    node.ensure_scandesc(estate)?;
+    let scandesc = node.ss.ss_currentScanDesc.as_ref().unwrap();
+    Ok(::tableam::table_scan_supports_pagebatch_parallel(scandesc))
 }
 
 /// Arm SoA batch deform of the `prefix`-column prefix for the fused drive;
