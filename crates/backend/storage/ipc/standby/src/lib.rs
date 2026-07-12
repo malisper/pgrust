@@ -20,7 +20,7 @@ use elog::elog;
 use types_core::{Oid, XLogRecPtr, XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK};
 use types_error::{PgResult, DEBUG2};
 use types_storage::sinval::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
-use types_storage::storage::xl_standby_lock;
+use types_storage::storage::{xl_standby_lock, SUBXIDS_IN_ARRAY, SUBXIDS_MISSING};
 
 // rmgrlist.h / standbydefs.h; RM_STANDBY_ID is test-pinned to 8 in rmgr.
 const RM_STANDBY_ID: u8 = 8;
@@ -218,10 +218,32 @@ pub fn standby_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<
             Ok(())
         }
         XLOG_RUNNING_XACTS => {
-            panic!(
-                "standby_redo: ProcArrayApplyRecoveryInfo unported \
-                 (procarray KnownAssignedXids, recovery phase 2)"
-            )
+            let xcnt = i32::from_ne_bytes(data[0..4].try_into().unwrap());
+            let subxcnt = i32::from_ne_bytes(data[4..8].try_into().unwrap());
+            let subxid_overflow = data[8] != 0;
+            let next_xid = u32::from_ne_bytes(data[12..16].try_into().unwrap());
+            let oldest_running_xid = u32::from_ne_bytes(data[16..20].try_into().unwrap());
+            let latest_completed_xid = u32::from_ne_bytes(data[20..24].try_into().unwrap());
+
+            let cx = mcx::MemoryContext::new("RunningXactsRedo");
+            let total = (xcnt + subxcnt) as usize;
+            let mut xids = mcx::vec_with_capacity_in(cx.mcx(), total)?;
+            for i in 0..total {
+                let base = MIN_SIZE_OF_XACT_RUNNING_XACTS + i * 4;
+                xids.push(u32::from_ne_bytes(data[base..base + 4].try_into().unwrap()));
+            }
+            let running = procarray::RunningTransactionsData {
+                xcnt,
+                subxcnt,
+                subxid_status: if subxid_overflow { SUBXIDS_MISSING } else { SUBXIDS_IN_ARRAY },
+                nextXid: next_xid,
+                oldestRunningXid: oldest_running_xid,
+                // Not carried by xl_running_xacts; unused on the redo side.
+                oldestDatabaseRunningXid: oldest_running_xid,
+                latestCompletedXid: latest_completed_xid,
+                xids,
+            };
+            procarray::ProcArrayApplyRecoveryInfo(&running)
         }
         XLOG_INVALIDATIONS => {
             let dbId = u32::from_ne_bytes(data[0..4].try_into().unwrap());
@@ -271,5 +293,6 @@ pub fn init_seams() {
     standby_seams::resolve_recovery_conflict_with_snapshot_full_xid::set(
         ResolveRecoveryConflictWithSnapshotFullXid,
     );
+    procarray::procarray_seams::standby_release_old_locks::set(StandbyReleaseOldLocks);
     recovery::install_guc_backings();
 }

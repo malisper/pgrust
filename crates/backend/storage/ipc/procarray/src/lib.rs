@@ -22,8 +22,17 @@ use types_storage::storage::{
     PROC_VACUUM_STATE_MASK, PROC_XMIN_FLAGS,
 };
 
+mod known_assigned;
 mod running;
+pub use known_assigned::{
+    ExpireAllKnownAssignedTransactionIds, ExpireOldKnownAssignedTransactionIds,
+    ExpireTreeKnownAssignedTransactionIds, KnownAssignedTransactionIdsIdleMaintenance,
+    ProcArrayApplyRecoveryInfo, ProcArrayApplyXidAssignment, ProcArrayInitRecovery,
+    RecordKnownAssignedTransactionIds,
+};
+pub use procarray_seams;
 pub use running::{GetRunningTransactionData, RunningTransactions};
+pub use types_storage::storage::RunningTransactionsData;
 
 #[cfg(test)]
 mod tests;
@@ -40,14 +49,23 @@ fn XidGenLock() -> &'static lwlock::LWLock {
     lwlock::main_lock(XID_GEN_LOCK)
 }
 
-// ProcArrayStruct minus KnownAssignedXids (recovery half, phase 2 —
-// notes/procarray-scope.md).
 pub struct ProcArrayStruct {
     numProcs: SyncCell<i32>,          // [PAL]
     maxProcs: i32,
     replication_slot_xmin: SyncCell<TransactionId>, // [PAL]
     replication_slot_catalog_xmin: SyncCell<TransactionId>, // [PAL]
     pgprocnos: &'static [SyncCell<i32>], // [PAL]
+    // KnownAssignedXids ring (startup process is the only writer). Adds
+    // publish head with Release, no lock; readers hold PAL shared and load
+    // head with Acquire (C's pg_write_barrier/pg_read_barrier pairing).
+    // Removal/compression/num/tail/lastOverflowedXid writes hold PAL exclusive.
+    maxKnownAssignedXids: i32,
+    numKnownAssignedXids: std::sync::atomic::AtomicI32,
+    tailKnownAssignedXids: std::sync::atomic::AtomicI32,
+    headKnownAssignedXids: std::sync::atomic::AtomicI32,
+    lastOverflowedXid: SyncCell<TransactionId>, // [PAL]
+    knownAssignedXids: &'static [std::sync::atomic::AtomicU32],
+    knownAssignedXidsValid: &'static [std::sync::atomic::AtomicBool],
 }
 
 // SAFETY: SyncCell fields are serialized by ProcArrayLock as documented.
@@ -176,7 +194,7 @@ pub fn ProcArrayInstallRestoredXmin(
     Ok(result)
 }
 
-fn TransactionIdAdvance(xid: &mut TransactionId) {
+pub(crate) fn TransactionIdAdvance(xid: &mut TransactionId) {
     *xid = xid.wrapping_add(1);
     if *xid < FirstNormalTransactionId {
         *xid = FirstNormalTransactionId;
@@ -214,7 +232,7 @@ fn FullTransactionIdNewer(a: FullTransactionId, b: FullTransactionId) -> FullTra
     b
 }
 
-fn FullXidRelativeTo(rel: FullTransactionId, xid: TransactionId) -> FullTransactionId {
+pub(crate) fn FullXidRelativeTo(rel: FullTransactionId, xid: TransactionId) -> FullTransactionId {
     let rel_xid = rel.xid();
     debug_assert!(TransactionIdIsValid(xid));
     debug_assert!(TransactionIdIsValid(rel_xid));
@@ -237,12 +255,30 @@ pub fn ProcArrayShmemInit() {
         .collect::<Vec<_>>()
         .leak();
 
+    // TOTAL_MAX_CACHED_SUBXIDS.
+    let max_kax = (PGPROC_MAX_CACHED_SUBXIDS + 1) * max_procs;
+    let known_assigned_xids: &'static [std::sync::atomic::AtomicU32] = (0..max_kax)
+        .map(|_| std::sync::atomic::AtomicU32::new(0))
+        .collect::<Vec<_>>()
+        .leak();
+    let known_assigned_xids_valid: &'static [std::sync::atomic::AtomicBool] = (0..max_kax)
+        .map(|_| std::sync::atomic::AtomicBool::new(false))
+        .collect::<Vec<_>>()
+        .leak();
+
     let array: &'static ProcArrayStruct = Box::leak(Box::new(ProcArrayStruct {
         numProcs: SyncCell::new(0),
         maxProcs: max_procs as i32,
         replication_slot_xmin: SyncCell::new(InvalidTransactionId),
         replication_slot_catalog_xmin: SyncCell::new(InvalidTransactionId),
         pgprocnos,
+        maxKnownAssignedXids: max_kax as i32,
+        numKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
+        tailKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
+        headKnownAssignedXids: std::sync::atomic::AtomicI32::new(0),
+        lastOverflowedXid: SyncCell::new(InvalidTransactionId),
+        knownAssignedXids: known_assigned_xids,
+        knownAssignedXidsValid: known_assigned_xids_valid,
     }));
 
     PROC_ARRAY
@@ -263,6 +299,13 @@ pub fn ProcArrayShmemResetAfterCrash() {
     array.replication_slot_catalog_xmin.set(InvalidTransactionId);
     for slot in array.pgprocnos.iter() {
         slot.set(-1);
+    }
+    array.numKnownAssignedXids.store(0, Relaxed);
+    array.tailKnownAssignedXids.store(0, Relaxed);
+    array.headKnownAssignedXids.store(0, Relaxed);
+    array.lastOverflowedXid.set(InvalidTransactionId);
+    for v in array.knownAssignedXidsValid.iter() {
+        v.store(false, Relaxed);
     }
 }
 
@@ -919,10 +962,19 @@ pub fn GetSnapshotData<'m>(snapshot: &mut SnapshotData<'m>, mcx: Mcx<'m>) -> PgR
             }
         }
     } else {
-        panic!(
-            "GetSnapshotData in recovery is not ported: KnownAssignedXids \
-             (src/backend/storage/ipc/procarray.c, phase 2)"
+        let subxip_ptr = snapshot.subxip.as_mut_ptr();
+        debug_assert!(arrayP.maxKnownAssignedXids as usize <= snapshot.subxip.capacity());
+        subcount = known_assigned::KnownAssignedXidsGetAndSetXmin(
+            // SAFETY: at most maxKnownAssignedXids entries are produced and
+            // subxip has TOTAL_MAX_CACHED_SUBXIDS capacity, reserved above.
+            |i, kxid| unsafe { subxip_ptr.add(i).write(kxid) },
+            &mut xmin,
+            xmax,
         );
+
+        if TransactionIdPrecedesOrEquals(xmin, arrayP.lastOverflowedXid.get()) {
+            suboverflowed = true;
+        }
     }
 
     let replication_slot_xmin = arrayP.replication_slot_xmin.get();
@@ -1043,13 +1095,7 @@ pub fn TransactionIdIsInProgress(xid: TransactionId) -> PgResult<bool> {
 
 #[inline(never)]
 fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
-    if transam_xlog_seams::recovery_in_progress::call() {
-        panic!(
-            "TransactionIdIsInProgress in recovery is not ported: KnownAssignedXids \
-             (src/backend/storage/ipc/procarray.c, phase 2)"
-        );
-    }
-
+    let recovery = transam_xlog_seams::recovery_in_progress::call();
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let myprocno = MyProc().expect("TransactionIdIsInProgress requires MyProc");
@@ -1059,7 +1105,11 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
         let mut xids = cell.borrow_mut();
         xids.clear();
         if xids.capacity() == 0 {
-            xids.reserve_exact(arrayP.maxProcs as usize);
+            xids.reserve_exact(if recovery {
+                GetMaxSnapshotSubxidCount()
+            } else {
+                arrayP.maxProcs as usize
+            });
         }
 
         LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno)?;
@@ -1108,6 +1158,17 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
             }
         }
 
+        if recovery {
+            debug_assert!(xids.is_empty());
+            if known_assigned::KnownAssignedXidExists(xid) {
+                LWLockRelease(ProcArrayLock())?;
+                return Ok(true);
+            }
+            if TransactionIdPrecedesOrEquals(xid, arrayP.lastOverflowedXid.get()) {
+                known_assigned::KnownAssignedXidsGet(|_, kxid| xids.push(kxid), xid);
+            }
+        }
+
         LWLockRelease(ProcArrayLock())?;
 
         if xids.is_empty() {
@@ -1147,12 +1208,7 @@ thread_local! {
 }
 
 fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
-    if transam_xlog_seams::recovery_in_progress::call() {
-        panic!(
-            "ComputeXidHorizons in recovery is not ported: KnownAssignedXids \
-             (src/backend/storage/ipc/procarray.c, phase 2)"
-        );
-    }
+    let in_recovery = transam_xlog_seams::recovery_in_progress::call();
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let my_proc = GetPGProcByNumber(MyProc().expect("ComputeXidHorizons requires MyProc"));
@@ -1203,12 +1259,26 @@ fn ComputeXidHorizons() -> PgResult<ComputeXidHorizonsResult> {
         if proc.databaseId.load(Relaxed) == my_database_id
             || my_database_id == types_core::InvalidOid
             || (status_flags & PROC_AFFECTS_ALL_HORIZONS) != 0
+            || in_recovery
         {
             h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, xmin);
         }
     }
 
+    let kaxmin = if in_recovery {
+        known_assigned::KnownAssignedXidsGetOldestXmin()
+    } else {
+        InvalidTransactionId
+    };
+
     LWLockRelease(ProcArrayLock())?;
+
+    if in_recovery {
+        h.oldest_considered_running = TransactionIdOlder(h.oldest_considered_running, kaxmin);
+        h.shared_oldest_nonremovable =
+            TransactionIdOlder(h.shared_oldest_nonremovable, kaxmin);
+        h.data_oldest_nonremovable = TransactionIdOlder(h.data_oldest_nonremovable, kaxmin);
+    }
 
     h.shared_oldest_nonremovable =
         TransactionIdOlder(h.shared_oldest_nonremovable, slot_xmin);
@@ -1649,6 +1719,22 @@ pub fn init_seams() {
         GetOldestTransactionIdConsideredRunning().expect("GetOldestTransactionIdConsideredRunning")
     });
     procarray_seams::have_virtual_xids_delaying_chkpt::set(HaveVirtualXIDsDelayingChkpt);
+    procarray_seams::record_known_assigned_transaction_ids::set(RecordKnownAssignedTransactionIds);
+    procarray_seams::expire_tree_known_assigned_transaction_ids::set(
+        ExpireTreeKnownAssignedTransactionIds,
+    );
+    procarray_seams::proc_array_apply_xid_assignment::set(ProcArrayApplyXidAssignment);
+    procarray_seams::proc_array_init_recovery::set(ProcArrayInitRecovery);
+    procarray_seams::proc_array_apply_recovery_info::set(ProcArrayApplyRecoveryInfo);
+    procarray_seams::expire_all_known_assigned_transaction_ids::set(
+        ExpireAllKnownAssignedTransactionIds,
+    );
+    procarray_seams::expire_old_known_assigned_transaction_ids::set(
+        ExpireOldKnownAssignedTransactionIds,
+    );
+    procarray_seams::known_assigned_transaction_ids_idle_maintenance::set(
+        KnownAssignedTransactionIdsIdleMaintenance,
+    );
     // Tests pre-install controllable global-vis fakes; keep them.
     if !procarray_seams::global_vis_test_for::is_installed() {
         procarray_seams::global_vis_test_for::set(GlobalVisTestFor);

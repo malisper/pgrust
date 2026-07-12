@@ -21,6 +21,9 @@ xact = { path = "../../../access/transam/xact" }
 transam_seams = { path = "../../../access/transam/transam_seams" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+twophase_seams = { path = "../../../access/transam/twophase_seams" }
+xlogutils = { path = "../../../access/transam/xlogutils" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 varsup = { path = "../../../access/transam/varsup" }
 types_rel = { path = "../../../../_support/types/rel" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
