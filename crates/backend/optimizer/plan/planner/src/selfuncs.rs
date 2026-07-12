@@ -1802,8 +1802,7 @@ pub fn amcostestimate(
     }
 }
 
-// hnswcostestimate (pgvector hnsw.c). DIVERGENCE: PG18's path.disabled_nodes
-// bump for orderby-less scans is rendered as infinite cost only.
+// hnswcostestimate (pgvector hnsw.c).
 fn hnswcostestimate(
     run: &mut PlannerRun<'_>,
     path_id: types_pathnodes::PathId,
@@ -1829,6 +1828,8 @@ fn hnswcostestimate(
     };
 
     if !has_orderbys {
+        // "On disable_cost" (PG18): never use the index without an order.
+        run.root.path_mut(path_id).base_mut().disabled_nodes = 2;
         return Ok(AmCostEstimate {
             index_startup_cost: f64::INFINITY,
             index_total_cost: f64::INFINITY,
