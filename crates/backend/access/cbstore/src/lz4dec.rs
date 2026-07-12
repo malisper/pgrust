@@ -57,6 +57,80 @@ pub fn decompress_padded(input: &[u8], out: &mut [u8], raw_len: usize) -> Result
     let mut ip = 0usize;
     let mut op = 0usize;
     loop {
+        // Fast path (the reference decoder's "shortcut", CH-style): a short
+        // literal run (< 15) + a short match at offset >= 16 — the dominant
+        // sequence shape on text — handled with two blind wide copies.
+        // Margins: token(1) + wild 16 B literal load + offset(2) need
+        // ip + 19 <= ilen; output wild stores (16 B literal, 2x16 B match)
+        // stay under raw_len + OUT_PAD because op <= raw_len and
+        // lit <= 14 / mlen <= 18 are checked before the cursor advances.
+        if ip + 19 <= ilen {
+            let token = input[ip];
+            let lit = (token >> 4) as usize;
+            if lit < 15 {
+                // SAFETY: ip + 1 + 16 <= ilen (margin above); op + 16 <=
+                // raw_len + OUT_PAD (op <= raw_len invariant).
+                unsafe {
+                    let src = input.as_ptr().add(ip + 1);
+                    let dst = out.as_mut_ptr().add(op);
+                    core::ptr::copy_nonoverlapping(src, dst, 16);
+                }
+                let op_end = op + lit;
+                if op_end > raw_len {
+                    return Err(ERR_OUT);
+                }
+                ip += 1 + lit;
+                op = op_end;
+                // ip + 2 <= ilen (and ip < ilen, so this can't be the
+                // terminal literal run): lit <= 14 means ip <= old_ip + 15,
+                // and the ip + 19 margin leaves >= 4 bytes — frames end via
+                // the general path below.
+                let offset =
+                    u16::from_le_bytes(input[ip..ip + 2].try_into().unwrap()) as usize;
+                ip += 2;
+                // One unsigned compare for (offset != 0 && offset <= op).
+                if offset.wrapping_sub(1) >= op {
+                    return Err(ERR_OFFSET);
+                }
+                let mlen = (token & 0x0F) as usize + 4;
+                if mlen < 19 {
+                    let op_end = op + mlen;
+                    if op_end > raw_len {
+                        return Err(ERR_OUT);
+                    }
+                    if offset >= 16 {
+                        // SAFETY: two sequential 16 B copies; each pair of
+                        // src/dst ranges is disjoint (distance = offset >=
+                        // 16), and the second load may only re-read bytes
+                        // the first store just wrote (correct match bytes).
+                        // Stores end <= op + 32 <= raw_len + OUT_PAD.
+                        unsafe {
+                            let base = out.as_mut_ptr();
+                            let src = base.add(op - offset);
+                            let dst = base.add(op);
+                            core::ptr::copy_nonoverlapping(src, dst, 16);
+                            core::ptr::copy_nonoverlapping(src.add(16), dst.add(16), 16);
+                        }
+                        op = op_end;
+                        continue;
+                    }
+                    // Small offset: the specialized overlap kernels.
+                    // SAFETY: contract checked above (0 < offset <= op,
+                    // op + mlen <= raw_len).
+                    unsafe {
+                        copy_match(out.as_mut_ptr(), op, offset, mlen);
+                    }
+                    op = op_end;
+                    continue;
+                }
+                // Long match (extension bytes): rejoin the general path
+                // after the literals, with the token's nibble re-read there.
+                match match_tail(input, &mut ip, out, &mut op, raw_len, token, offset) {
+                    Ok(()) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
         if ip >= ilen {
             // A block must end on a literal run inside the loop body; running
             // off the input without hitting that return is a truncation.
@@ -111,37 +185,55 @@ pub fn decompress_padded(input: &[u8], out: &mut [u8], raw_len: usize) -> Result
         if ip + 2 > ilen {
             return Err(ERR_TRUNC);
         }
-        let offset = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
+        let offset = u16::from_le_bytes(input[ip..ip + 2].try_into().unwrap()) as usize;
         ip += 2;
-        if offset == 0 || offset > op {
+        if offset.wrapping_sub(1) >= op {
             return Err(ERR_OFFSET);
         }
-        let mut mlen = (token & 0x0F) as usize + 4;
-        if mlen == 19 {
-            loop {
-                if ip >= ilen {
-                    return Err(ERR_TRUNC);
-                }
-                let b = input[ip];
-                ip += 1;
-                mlen = mlen.checked_add(b as usize).ok_or(ERR_LEN)?;
-                if b != 255 {
-                    break;
-                }
+        match_tail(input, &mut ip, out, &mut op, raw_len, token, offset)?;
+    }
+}
+
+/// Match-length extension + validated copy, shared by the fast path's long-
+/// match spill and the general path. `offset` is already validated
+/// (0 < offset <= op).
+#[inline(always)]
+fn match_tail(
+    input: &[u8],
+    ip: &mut usize,
+    out: &mut [u8],
+    op: &mut usize,
+    raw_len: usize,
+    token: u8,
+    offset: usize,
+) -> Result<(), Lz4Error> {
+    let ilen = input.len();
+    let mut mlen = (token & 0x0F) as usize + 4;
+    if mlen == 19 {
+        loop {
+            if *ip >= ilen {
+                return Err(ERR_TRUNC);
+            }
+            let b = input[*ip];
+            *ip += 1;
+            mlen = mlen.checked_add(b as usize).ok_or(ERR_LEN)?;
+            if b != 255 {
+                break;
             }
         }
-        let op_end = op.checked_add(mlen).ok_or(ERR_LEN)?;
-        if op_end > raw_len {
-            return Err(ERR_OUT);
-        }
-        // SAFETY: 0 < offset <= op (source fully inside written output),
-        // op + mlen <= raw_len and out.len() >= raw_len + OUT_PAD (wild
-        // stores stay inside the slice; see copy_match's invariants).
-        unsafe {
-            copy_match(out.as_mut_ptr(), op, offset, mlen);
-        }
-        op = op_end;
     }
+    let op_end = op.checked_add(mlen).ok_or(ERR_LEN)?;
+    if op_end > raw_len {
+        return Err(ERR_OUT);
+    }
+    // SAFETY: 0 < offset <= op (source fully inside written output),
+    // op + mlen <= raw_len and out.len() >= raw_len + OUT_PAD (wild
+    // stores stay inside the slice; see copy_match's invariants).
+    unsafe {
+        copy_match(out.as_mut_ptr(), *op, offset, mlen);
+    }
+    *op = op_end;
+    Ok(())
 }
 
 /// Copy `ceil(len/32)*32` bytes from src to dst in 32 B strides.
@@ -173,14 +265,18 @@ unsafe fn copy_match(out: *mut u8, op: usize, offset: usize, len: usize) {
     let dst0 = out.add(op);
     let src0 = out.add(op - offset);
     if offset >= 16 {
-        // Non-overlapping at 16 B granularity: plain wide strides.
+        // Non-overlapping at 16 B granularity: 32 B per iteration as two
+        // sequential 16 B copies (the second may re-read bytes the first
+        // just wrote — correct match bytes — so offset >= 16 suffices).
+        // Stores end < dst0 + len + 32 <= raw_len + OUT_PAD.
         let mut src = src0;
         let mut dst = dst0;
         let end = dst0.add(len);
         loop {
             core::ptr::copy_nonoverlapping(src, dst, 16);
-            src = src.add(16);
-            dst = dst.add(16);
+            core::ptr::copy_nonoverlapping(src.add(16), dst.add(16), 16);
+            src = src.add(32);
+            dst = dst.add(32);
             if dst >= end {
                 return;
             }
@@ -193,8 +289,9 @@ unsafe fn copy_match(out: *mut u8, op: usize, offset: usize, len: usize) {
         }
         2 | 4 | 8 => {
             // Power-of-two period p dividing 16: stage one 16 B pattern and
-            // stamp it; every stride lands phase-aligned (16 % p == 0).
-            // The hot case for sorted/delta int columns (u16/u32/u64 runs).
+            // stamp it 32 B per iteration; every stride lands phase-aligned
+            // (16 % p == 0). The hot case for sorted/delta int columns
+            // (u16/u32/u64 runs). Stores end < len + 32 past dst0: in-pad.
             let mut pat = [0u8; 16];
             for (i, b) in pat.iter_mut().enumerate() {
                 *b = *src0.add(i % offset);
@@ -203,7 +300,8 @@ unsafe fn copy_match(out: *mut u8, op: usize, offset: usize, len: usize) {
             let end = dst0.add(len);
             loop {
                 core::ptr::copy_nonoverlapping(pat.as_ptr(), dst, 16);
-                dst = dst.add(16);
+                core::ptr::copy_nonoverlapping(pat.as_ptr(), dst.add(16), 16);
+                dst = dst.add(32);
                 if dst >= end {
                     return;
                 }
