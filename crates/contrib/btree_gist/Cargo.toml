@@ -1,0 +1,33 @@
+[package]
+name = "btree_gist"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "btree_gist"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_gist = { path = "../../_support/types/gist" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+detoast = { path = "../../backend/access/common/detoast" }
+gistproc = { path = "../../backend/access/gist/gistproc" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+varchar = { package = "adt_varchar", path = "../../backend/utils/adt/varchar" }
+adt_numeric = { path = "../../backend/utils/adt/numeric" }
+adt_varbit = { path = "../../backend/utils/adt/varbit" }
+adt_network = { path = "../../backend/utils/adt/network" }
+adt_date = { path = "../../backend/utils/adt/adt_date" }
+adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
+adt_datetime = { path = "../../backend/utils/adt/adt_datetime" }
+adt_enum = { path = "../../backend/utils/adt/adt_enum" }
+adt_float = { path = "../../backend/utils/adt/float" }
+format_type = { path = "../../backend/utils/adt/format_type" }

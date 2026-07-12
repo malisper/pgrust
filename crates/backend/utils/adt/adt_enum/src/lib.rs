@@ -113,6 +113,16 @@ fn enum_cmp_internal(
     typcache_seams::compare_values_of_enum::call(typeoid, arg1, arg2)
 }
 
+// btree_gist's CallerFInfoFunctionCall2(enum_cmp, ...) surface: same
+// engine, caller-owned flinfo carries the fn_extra type-OID memo.
+pub fn enum_cmp_with_flinfo(
+    arg1: Oid,
+    arg2: Oid,
+    flinfo: Option<&mut FmgrInfo>,
+) -> PgResult<i32> {
+    enum_cmp_internal(arg1, arg2, flinfo)
+}
+
 pub(crate) fn cmp_via(
     fcinfo: &types_fmgr::FunctionCallInfoBaseData,
     flinfo: Option<&mut FmgrInfo>,

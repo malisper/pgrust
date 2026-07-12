@@ -54,3 +54,4 @@ typcache_seams = { path = "../../utils/cache/typcache_seams" }
 rewrite_manip = { path = "../../rewrite/rewrite_manip" }
 regproc_seams = { path = "../../utils/adt/regproc_seams" }
 tablespace_seams = { path = "../../commands/tablespace_seams" }
+relcache_build_seams = { path = "../../utils/cache/relcache_build_seams" }

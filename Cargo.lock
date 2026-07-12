@@ -2255,6 +2255,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "btree_gist"
+version = "0.0.0"
+dependencies = [
+ "adt_date",
+ "adt_datetime",
+ "adt_enum",
+ "adt_network",
+ "adt_numeric",
+ "adt_timestamp",
+ "adt_varbit",
+ "adt_varchar",
+ "datum",
+ "detoast",
+ "dfmgr",
+ "format_type",
+ "gistproc",
+ "mbutils",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "bufmask"
 version = "0.1.0"
 dependencies = [
@@ -10126,6 +10153,7 @@ dependencies = [
  "rel_vocab",
  "relation",
  "relcache",
+ "relcache_build_seams",
  "rewrite_manip",
  "syscache_seams",
  "table",
@@ -13955,6 +13983,7 @@ dependencies = [
  "brin_build",
  "brin_funcs",
  "brin_minmax_multi",
+ "btree_gist",
  "bufmgr",
  "cache_syscache",
  "catalog",
@@ -16545,6 +16574,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_gist",
  "types_hash",
  "types_nbtree",
  "types_rel",

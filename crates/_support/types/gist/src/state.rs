@@ -115,13 +115,18 @@ impl<'mcx> GistState<'mcx> {
         add: &GISTENTRY,
     ) -> PgResult<f32> {
         let mut penalty: f32 = 0.0;
+        // C's entry->rel is live inside penalty procs (btree_gist reads
+        // rd_att->natts); stamp the stand-in on local copies.
+        let natts = self.leafTupdesc.natts as u16;
+        let orig = GISTENTRY { rel_natts: natts, ..*orig };
+        let add = GISTENTRY { rel_natts: natts, ..*add };
         self.frame3.rearm(self.supportCollation[attno]);
         // SAFETY: as call_compress.
         unsafe { self.frame3.set_result_mcx(mcx) };
         self.frame3
-            .set_arg(0, Datum::from_usize(orig as *const GISTENTRY as usize));
+            .set_arg(0, Datum::from_usize(&orig as *const GISTENTRY as usize));
         self.frame3
-            .set_arg(1, Datum::from_usize(add as *const GISTENTRY as usize));
+            .set_arg(1, Datum::from_usize(&add as *const GISTENTRY as usize));
         self.frame3
             .set_arg(2, Datum::from_usize(&mut penalty as *mut f32 as usize));
         self.penaltyFn[attno].invoke(&mut self.frame3)?;
