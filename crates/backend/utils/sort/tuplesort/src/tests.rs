@@ -213,6 +213,52 @@ fn bounded_top_n_heapsort_used_and_correct() {
     }
 }
 
+// Lane top-k cutoff boundary accessor: None until the bounded heap fills
+// (TSS_BOUNDED), then always the WORST surviving top-k member (the k-th
+// boundary), monotonically tightening — and every value strictly worse than
+// the boundary on the (only) key is exactly what puttuple_bounded discards.
+#[test]
+fn topk_boundary_tracks_kth_worst_and_tightens() {
+    let mut ts =
+        Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, TUPLESORT_ALLOWBOUNDED);
+    ts.set_bound(3);
+    assert_eq!(ts.topk_boundary(), None, "no boundary before any put");
+    let mut kept: Vec<i32> = Vec::new();
+    let mut seed = 1234u64;
+    let mut last_boundary: Option<i32> = None;
+    for i in 0..5000 {
+        let v = (lcg(&mut seed) % 100_000) as i32 - 50_000;
+        ts.putdatum(Datum::from_i32(v), false).unwrap();
+        kept.push(v);
+        kept.sort_unstable();
+        kept.truncate(3);
+        match ts.topk_boundary() {
+            None => {
+                // The heap-mode transition happens once memtuples outgrows
+                // 2*bound; before that the boundary is unavailable and the
+                // pre-filter must stay disengaged.
+                assert!(i < 16, "boundary still None after the bounded transition");
+            }
+            Some((d, isnull)) => {
+                assert!(!isnull);
+                let b = d.as_i32();
+                assert_eq!(b, kept[2], "boundary = current 3rd-best (worst survivor)");
+                if let Some(prev) = last_boundary {
+                    assert!(b <= prev, "ASC boundary only tightens");
+                }
+                last_boundary = Some(b);
+            }
+        }
+    }
+    ts.performsort().unwrap();
+    let mut out = Vec::new();
+    while out.len() < 3 {
+        let Some(nd) = ts.getdatum(true).unwrap() else { break };
+        out.push(nd.value.as_i32());
+    }
+    assert_eq!(out, kept);
+}
+
 #[test]
 fn bounded_larger_than_input_falls_back_to_quicksort() {
     let input: Vec<Option<i32>> = vec![Some(3), Some(1), Some(2)];

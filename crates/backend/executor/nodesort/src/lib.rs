@@ -496,6 +496,16 @@ where
     Ok(())
 }
 
+/// Streaming top-k cutoff boundary for the lane's sort-feed pre-filter: the
+/// current k-th (worst surviving) tuple's leading-key datum while the
+/// tuplesort's bounded heap is full; `None` before the heap fills or for
+/// unbounded sorts. See `Tuplesort::topk_boundary` for the by-value-only
+/// soundness contract.
+#[inline]
+pub fn sort_lane_topk_boundary(node: &SortState<'_>) -> Option<(Datum, bool)> {
+    node.tuplesortstate.as_ref()?.topk_boundary()
+}
+
 /// Finalize leg (breaker `Sink::finish`): `performsort` + the EXPLAIN sort
 /// stats + the built flags — `exec_sort`'s build-leg tail verbatim. Flips
 /// `sort_Done`, the breaker's Feed→Emit phase flag.

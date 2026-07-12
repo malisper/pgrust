@@ -84,9 +84,15 @@ pub(super) enum ShapeClass {
     SubqueryScan = 10,
     Append = 11,
     ProjectSet = 12,
+    /// Streaming top-k cutoff pre-filter on the sort breaker feed: OWNED =
+    /// one tick per sort feed the pre-filter ARMED on (engagement evidence
+    /// for the internal fast path; never a refusal class — non-admission
+    /// just feeds the sort unfiltered). Row-level effect is reported by the
+    /// `counter` dump lines (`topkcut-rows-seen` / `topkcut-rows-cut`).
+    TopkCut = 13,
 }
 
-const N_CLASSES: usize = 13;
+const N_CLASSES: usize = 14;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -103,6 +109,7 @@ impl ShapeClass {
         ShapeClass::SubqueryScan,
         ShapeClass::Append,
         ShapeClass::ProjectSet,
+        ShapeClass::TopkCut,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -120,6 +127,7 @@ impl ShapeClass {
             ShapeClass::SubqueryScan => "subqueryscan",
             ShapeClass::Append => "append",
             ShapeClass::ProjectSet => "projectset",
+            ShapeClass::TopkCut => "topkcut",
         }
     }
 }
@@ -282,6 +290,14 @@ impl RefuseReason {
 }
 
 static OWNED: [AtomicU64; N_CLASSES] = [const { AtomicU64::new(0) }; N_CLASSES];
+
+/// Row-level top-k cutoff effect counters (informational `counter` dump
+/// lines; the gate's floor/allowlist machinery reads only owned/refused).
+/// `SEEN` counts rows offered to an armed, engaged pre-filter (bounded heap
+/// full + key lane staged); `CUT` counts the rows it discarded without a
+/// tuplesort put.
+static TOPKCUT_ROWS_SEEN: AtomicU64 = AtomicU64::new(0);
+static TOPKCUT_ROWS_CUT: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -315,6 +331,25 @@ pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
     arm_dump_on_thread_exit();
 }
 
+/// Accounting armed? Callers may gate row-counting work (a per-batch
+/// popcount) on this before calling `tick_topkcut_rows`.
+#[inline]
+pub(super) fn armed() -> bool {
+    stats_dir().is_some()
+}
+
+/// Record one engaged top-k pre-filter batch: `seen` rows offered, `cut`
+/// rows discarded ahead of the tuplesort.
+#[inline]
+pub(super) fn tick_topkcut_rows(seen: u64, cut: u64) {
+    if stats_dir().is_none() {
+        return;
+    }
+    TOPKCUT_ROWS_SEEN.fetch_add(seen, Relaxed);
+    TOPKCUT_ROWS_CUT.fetch_add(cut, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
 /// TLS drop guard: any backend thread that ticked dumps the cumulative totals
 /// on its way out (backend exit = thread exit in this server). Dump-on-exit
 /// keeps the hot path free of I/O and needs no exit-callback registration.
@@ -340,6 +375,8 @@ fn arm_dump_on_thread_exit() {
 /// writer's snapshot is also the latest one). Lines:
 ///   `owned\t<class>\t<count>`            (every class, zeros included)
 ///   `refused\t<class>\t<reason>\t<count>` (nonzero only)
+///   `counter\t<name>\t<count>`            (informational row-level totals;
+///                                          the gate aggregation ignores them)
 fn dump() {
     let Some(dir) = stats_dir() else { return };
     static DUMP_LOCK: Mutex<()> = Mutex::new(());
@@ -368,6 +405,14 @@ fn dump() {
             }
         }
     }
+    out.push_str(&format!(
+        "counter\ttopkcut-rows-seen\t{}\n",
+        TOPKCUT_ROWS_SEEN.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkcut-rows-cut\t{}\n",
+        TOPKCUT_ROWS_CUT.load(Relaxed)
+    ));
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
     let tmp_path = dir.join(format!(
