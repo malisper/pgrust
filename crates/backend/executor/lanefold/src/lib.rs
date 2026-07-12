@@ -42,8 +42,8 @@
 // STRIPPED (cbstore/lane-v1 wiring that does not exist on lane-executor-v2):
 // - Dict-coded windows: DictEval derived lanes, the dict-group memo, textlen
 //   lanes, and the per-(code, group) text MIN/MAX memo (`TextMmLane`).
-// - Metadata-answered transitions (`classify_meta`/`MetaTrans`): footer row
-//   counts / zone-map / footer-sum answers are cbstore-only.
+//   (The metadata-answered transitions — `classify_meta`/`MetaTrans` — were
+//   re-harvested 2026-07-12 for the lane-v2 metaagg arm; see below.)
 // - The exact-DISTINCT hash sets (`DistinctSet`) and the parallel
 //   partial-distinct sharding — separate machinery from the transition fold.
 // - The specialized group-probe `KeyTable`, projected-scan column remaps, the
@@ -691,6 +691,103 @@ pub fn classify_trans(
         F_BPCHAR_SMALLER => mk(LaneKind::BpMin, varg(BPCHAROID)?),
         _ => None,
     }
+}
+
+// ===========================================================================
+// Metadata-answerable transitions (re-harvested from the lane-v1 metacount /
+// footer-sums work; value-correctness proven end-to-end in
+// notes/q4-avg-quarantine-resolution.md): COUNT(*) / COUNT(bare Var) — equal
+// on cbstore, which stores no NULLs (writer::append_row errors on NULL) —
+// MIN/MAX over a bare int-family Var, answered from footer row counts and
+// zone maps, and SUM/AVG over an int-family Var with an affine divk==1
+// transform, answered from footer i128 sums as mulk*S + addend*N (the
+// agg-rewrite-cse SumBase derivation lifted to part metadata). Guarded
+// transforms carry the interval for the admission site's footer-minmax
+// re-proof.
+// ===========================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MetaKind {
+    Count,
+    Min,
+    Max,
+    // sum(int2/int4): i64 datum end state (NULL over zero rows).
+    Sum,
+    // avg/sum(int2/int4): int8[2] {count,sum} transarray end state.
+    AvgAccum,
+    // sum/avg(int8) via int8_avg_accum: Int128AggState end state.
+    Sum128,
+}
+
+impl MetaKind {
+    pub fn needs_sum(self) -> bool {
+        matches!(self, MetaKind::Sum | MetaKind::AvgAccum | MetaKind::Sum128)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct MetaTrans {
+    pub kind: MetaKind,
+    pub col: u16,
+    pub transno: u16,
+    // Sum/AvgAccum affine coefficients (0/1 identities elsewhere): the
+    // metadata fold is mulk*S + addend*N over the footer sum S and visible
+    // row count N.
+    pub addend: i32,
+    pub mulk: i32,
+    // Data-level guard interval: the admission site must prove the visible
+    // rows' footer (min, max) sits inside [lo, hi] or refuse the meta arm
+    // (the scan path would raise C's int4 overflow error per row).
+    pub guard: Option<(i64, i64)>,
+}
+
+/// Metadata-answerable plan: `Some` iff EVERY transition is footer-answerable
+/// (all-or-nothing — the meta arm answers the whole node from metadata or not
+/// at all; there is no per-transition residual feed with zero rows staged).
+pub fn classify_meta<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+) -> Option<PgVec<'mcx, MetaTrans>> {
+    let mut out: PgVec<'mcx, MetaTrans> = PgVec::new_in(mcx);
+    for (transno, spec) in specs.iter().enumerate() {
+        let (t, g) = classify_trans(spec, transno)?;
+        let plain = (t.addend, t.mulk, t.divk) == (0, 1, 1) && g.is_none();
+        // Min/Max require the FULL plain shape: a mulk/divk transform is
+        // monotone but not identity, so the zone-map entry is not the
+        // transformed aggregate's answer (min(v*3) != min(v)). Sum/AvgAccum
+        // admit affine transforms with divk == 1 (the agg-rewrite-cse
+        // composition): the metadata fold derives mulk*S + addend*N in the
+        // same mod-2^64 ring as the SumBase derivation, and a data-level
+        // guard re-proves against the footer min/max over every visible row
+        // (the admission site refuses the arm when the interval fails).
+        // Integer division is not linear — divk != 1 refuses. Int128AvgAccum
+        // is bare-Var-only by classify_arg (int8 has no OpExpr admission),
+        // so `plain` always holds where it classifies. The lane-v1 tiers
+        // with no part-metadata answer refuse: floats (zone entries carry
+        // i64-widened INT-family decode values, not float order), bools,
+        // bitwise and/or (not derivable from min/max/sum), and the varlena
+        // str tier (text zone entries carry byte lengths).
+        let affine = t.divk == 1;
+        let int_minmax = matches!(t.width, LaneWidth::I16 | LaneWidth::I32 | LaneWidth::I64);
+        let kind = match t.kind {
+            LaneKind::CountStar | LaneKind::CountAny => MetaKind::Count,
+            LaneKind::Min if plain && int_minmax => MetaKind::Min,
+            LaneKind::Max if plain && int_minmax => MetaKind::Max,
+            LaneKind::Sum if affine => MetaKind::Sum,
+            LaneKind::AvgAccum if affine => MetaKind::AvgAccum,
+            LaneKind::Int128AvgAccum if plain => MetaKind::Sum128,
+            _ => return None,
+        };
+        out.push(MetaTrans {
+            kind,
+            col: t.col,
+            transno: t.transno,
+            addend: t.addend,
+            mulk: t.mulk,
+            guard: g.map(|g| (g.lo, g.hi)),
+        });
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Min/max NULL-init strictness requires strict transfns; every admitted

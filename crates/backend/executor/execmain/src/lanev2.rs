@@ -1270,6 +1270,13 @@ pub enum AggLaneChoice {
     /// lanefold whole-batch transition kernels (residual transitions
     /// per-row).
     Fold,
+    /// Lane answers the whole AGG_PLAIN node from cbstore part metadata
+    /// (footer row counts + zone maps + footer sums) — zero rows staged, end
+    /// states finalized by the real finalfns (the metaagg arm; phase4 §7
+    /// re-entry, armed 2026-07-14). Structural admission only: the per-call
+    /// runtime gates (MVCC snapshot, AM answerability, guard-interval
+    /// re-proof) fall back to the per-row drive byte-identically.
+    Meta,
 }
 
 ::mcx::forget_safe_nodrop!(AggLaneChoice);
@@ -1633,6 +1640,18 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
             c
         }
     };
+    // Metadata-answer arm: the whole node from cbstore footers, zero rows
+    // staged. Runtime gates (MVCC snapshot / AM answerability / guard
+    // re-proof) are re-checked per call; a runtime refusal falls back to the
+    // per-row Volcano drive byte-identically (it may raise C's overflow
+    // error at C's row — exactly what the guard re-proof protects).
+    if c == AggLaneChoice::Meta {
+        // exec_agg's top-of-call guard (exec_agg_meta re-checks it too).
+        if ::nodeagg::agg_is_done(agg) {
+            return Ok(Some(None));
+        }
+        return try_meta_agg_answer(agg, ss, estate);
+    }
     if c != AggLaneChoice::Fold {
         return Ok(None);
     }
@@ -1669,6 +1688,13 @@ fn decide_plain_agg_lane<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
         Ok(AggLaneChoice::Refuse)
     };
+    // Metadata-answer arm first (phase4 §7 re-entry, armed 2026-07-14): a
+    // bare cbstore scan under an all-footer-answerable transition set
+    // answers from part metadata — strictly cheaper than any fold feed, so
+    // it preempts the fold decision below wherever it admits.
+    if meta_agg_admissible(agg, ss, estate)? {
+        return Ok(AggLaneChoice::Meta);
+    }
     let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
         return refuse();
     };
@@ -1683,14 +1709,14 @@ fn decide_plain_agg_lane<'mcx>(
     // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
     // Deliberate refuse-set entry.
     //
-    // cbstore note (v1 scope cut, phase4 design §7): for a cbstore scan the
-    // incumbent fused drive is gated OFF (`table_scan_supports_pagebatch` is
-    // false — lane-OFF stays the per-row Volcano oracle), so this refuse
-    // leaves count(*)-only plain aggs on the per-row drive. Hosting them
-    // needs the count-only whole-granule batch shape (n up to GRANULE_ROWS
-    // > SOA_BM_WORDS*64: this feed's bitmap scratch and the fold's armed-SoA
-    // requirement both refuse it) or the deferred MetaAggScan footer answer
-    // — both explicit §7 re-entry points, not v1.
+    // cbstore note (phase4 design §7): the MetaAggScan footer answer above
+    // now hosts the bare-cbstore count(*) shape (and every other
+    // all-footer-answerable set); a cbstore count(*) reaching THIS refuse
+    // has a qual/projection/uncovered transition and stays on the per-row
+    // drive (the incumbent fused drive is gated OFF for cbstore —
+    // `table_scan_supports_pagebatch` false — so lane-OFF remains the
+    // per-row Volcano oracle). The count-only whole-granule batch shape (n
+    // up to GRANULE_ROWS > SOA_BM_WORDS*64) stays a §7 re-entry point.
     if plan.cols.is_empty() {
         return refuse();
     }
@@ -1701,6 +1727,109 @@ fn decide_plain_agg_lane<'mcx>(
         return refuse();
     }
     Ok(AggLaneChoice::Fold)
+}
+
+/// Metadata-answer arm kill switch: default ON when the lane is on;
+/// `PGRUST_LANE_V2_METAAGG=0`/`off` disarms (A/B tooling — both sides are
+/// value-identical by exec_agg_meta's end-state contract, so the switch is
+/// byte-identity-safe like `PGRUST_LANE_V2_K2`).
+fn metaagg_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_METAAGG").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Structural admission for the metadata-answer arm, evaluated once per
+/// memoized per-node choice: a BARE cbstore scan (variant Plain — no qual,
+/// no projection — and no zone quals; v1 requires literally no qual) under
+/// an AGG_PLAIN node whose EVERY transition is footer-answerable
+/// (`classify_meta`: count(*)/count(col)/min/max over bare int-family Vars,
+/// sum/avg over affine divk==1 int transforms; FILTER/DISTINCT/ORDER BY and
+/// the float/bool/bitwise/text tiers refuse). Ticks the metaagg class only
+/// for cbstore-backed scans — heap plain aggs are out of the arm's scope
+/// (heap has no part metadata) and fall through silently.
+fn meta_agg_admissible<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return Ok(false);
+    }
+    if !metaagg_enabled() {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::EnvOff);
+        return Ok(false);
+    }
+    if ::nodeagg::agg_meta_plan(agg).is_none()
+        || !::nodeseqscan::seq_scan_meta_agg_ok(ss, estate)?
+    {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaShape);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Per-call runtime half of the metadata-answer arm. `Ok(Some(_))` = the
+/// node was answered from footers (one finalized row or a drained None);
+/// `Ok(None)` = runtime refusal — the caller falls through to the per-row
+/// Volcano drive byte-identically.
+fn try_meta_agg_answer<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // RG xmin visibility folds against the scan snapshot: MVCC only (the
+    // same gate the fused metacount arm carried on the old branch).
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::NonMvccSnapshot);
+        return Ok(None);
+    }
+    let metas = ::nodeagg::agg_meta_plan(agg).expect("Meta choice requires a meta plan");
+    // Guarded sum cols join the minmax request: the guard re-proof below
+    // needs the visible rows' exact (min, max).
+    let cols: Vec<u16> = metas
+        .iter()
+        .filter(|t| {
+            matches!(t.kind, ::lanefold::MetaKind::Min | ::lanefold::MetaKind::Max)
+                || t.guard.is_some()
+        })
+        .map(|t| t.col)
+        .collect();
+    let mut sum_cols: Vec<u16> =
+        metas.iter().filter(|t| t.kind.needs_sum()).map(|t| t.col).collect();
+    sum_cols.sort_unstable();
+    sum_cols.dedup();
+    let Some(res) = ::nodeseqscan::seq_scan_meta_agg(ss, estate, &cols, &sum_cols)? else {
+        // AM declined: parallel scan desc or an uncovered column type.
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaRuntime);
+        return Ok(None);
+    };
+    // Data-level guard re-proof against the visible rows' footer min/max: a
+    // failed interval falls through to the ordinary drives, whose per-row
+    // program raises C's int4 overflow error at C's row. rows == 0 passes
+    // vacuously (empty minmax stays (MAX, MIN)).
+    let guards_ok = res.rows == 0
+        || metas.iter().all(|t| match t.guard {
+            None => true,
+            Some((lo, hi)) => res
+                .minmax
+                .iter()
+                .find(|e| e.0 == t.col)
+                .is_some_and(|&(_, mn, mx)| lo <= mn && mx <= hi),
+        });
+    if !guards_ok {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaRuntime);
+        return Ok(None);
+    }
+    // One OWNED tick per metadata-answered execution event.
+    stats::tick_owned(ShapeClass::MetaAgg);
+    lane_trace(&format!("metaagg: footer answer, rows={}", res.rows));
+    Ok(Some(::nodeagg::exec_agg_meta(agg, estate, res.rows, &res.minmax, &res.sums)?))
 }
 
 /// Feed for the plain fold drive: per staged page batch, compose the row
