@@ -42,7 +42,6 @@ backend_startup = { path = "../../tcop/backend_startup" }
 be_secure = { path = "../../libpq/be_secure" }
 bgworker = { path = "../bgworker" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
-pg_prng = { path = "../../../common/pg_prng" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }

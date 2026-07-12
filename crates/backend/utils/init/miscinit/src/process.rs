@@ -28,6 +28,21 @@ pub fn InitProcessGlobals(my_proc_pid: i32) {
     let ts = timestamp_seams::get_current_timestamp::call();
     g::SetMyStartTimestamp(ts);
     g::SetMyStartTime(timestamptz_to_time_t(ts));
+
+    // C InitProcessGlobals: pg_prng_strong_seed(&pg_global_prng_state), with
+    // the pid/start-timestamp mix as the fallback seed. pg_global_prng_state
+    // is backend-private in C and thread-local here, so every backend/aux
+    // thread (and every wretain task re-init, which re-enters here) must
+    // seed its own copy — an unseeded xoroshiro state is the all-zero fixed
+    // point and every draw returns 0 (found via hnsw builds drawing the max
+    // level for every element).
+    let mut seed_bytes = [0u8; 8];
+    let rseed = if pg_strong_random::pg_strong_random(&mut seed_bytes) {
+        u64::from_ne_bytes(seed_bytes)
+    } else {
+        ((my_proc_pid as u64) << 48) ^ ((ts as u64) << 16) ^ ((ts as u64) >> 20)
+    };
+    pg_prng::global_prng(|prng| prng.seed(rseed));
 }
 
 const PG_UNIX_EPOCH_OFFSET_SECS: i64 = 946_684_800;

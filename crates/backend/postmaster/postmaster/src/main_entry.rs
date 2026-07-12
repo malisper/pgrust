@@ -22,20 +22,9 @@ const WAL_LEVEL_MINIMAL: i32 = 0;
 const ARCHIVE_MODE_OFF: i32 = 0;
 
 pub fn InitProcessGlobals() {
+    // miscinit's InitProcessGlobals carries C's whole body, including the
+    // strong-seed of the (thread-local) global PRNG.
     miscinit::InitProcessGlobals(std::process::id() as i32);
-
-    let mut seed_bytes = [0u8; 8];
-    // SAFETY: getentropy fills the 8-byte stack buffer or fails; both handled.
-    let strong = unsafe {
-        libc::getentropy(seed_bytes.as_mut_ptr() as *mut libc::c_void, seed_bytes.len()) == 0
-    };
-    let rseed = if strong {
-        u64::from_ne_bytes(seed_bytes)
-    } else {
-        let ts = init_small::globals::MyStartTimestamp() as u64;
-        (init_small::globals::MyProcPid() as u64) ^ (ts << 12) ^ (ts >> 20)
-    };
-    pg_prng::global_prng(|prng| prng.seed(rseed));
 }
 
 fn getInstallationPaths(argv0: &str) {
