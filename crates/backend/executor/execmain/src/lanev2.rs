@@ -1620,6 +1620,15 @@ fn decide_plain_agg_lane<'mcx>(
     // already advances those per batch with zero per-row work (the storeless
     // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
     // Deliberate refuse-set entry.
+    //
+    // cbstore note (v1 scope cut, phase4 design §7): for a cbstore scan the
+    // incumbent fused drive is gated OFF (`table_scan_supports_pagebatch` is
+    // false — lane-OFF stays the per-row Volcano oracle), so this refuse
+    // leaves count(*)-only plain aggs on the per-row drive. Hosting them
+    // needs the count-only whole-granule batch shape (n up to GRANULE_ROWS
+    // > SOA_BM_WORDS*64: this feed's bitmap scratch and the fold's armed-SoA
+    // requirement both refuse it) or the deferred MetaAggScan footer answer
+    // — both explicit §7 re-entry points, not v1.
     if plan.cols.is_empty() {
         return refuse();
     }
