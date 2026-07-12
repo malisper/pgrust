@@ -42,3 +42,23 @@ seam_core::seam!(
     // XLogArchiveCleanup (xlogarchive.c).
     pub fn xlog_archive_cleanup(xlog: &str)
 );
+
+seam_core::seam!(
+    // XLogArchiveIsReady (xlogarchive.c).
+    pub fn xlog_archive_is_ready(xlog: &str) -> bool
+);
+
+seam_core::seam!(
+    // XLogArchiveIsReadyOrDone (xlogarchive.c).
+    pub fn xlog_archive_is_ready_or_done(xlog: &str) -> bool
+);
+
+seam_core::seam!(
+    // ExecuteRecoveryCommand (xlogarchive.c).
+    pub fn execute_recovery_command(
+        command: &str,
+        command_name: &str,
+        fail_on_signal: bool,
+        wait_event_info: u32,
+    ) -> PgResult<()>
+);
