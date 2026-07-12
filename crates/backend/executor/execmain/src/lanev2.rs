@@ -2309,8 +2309,9 @@ where
 //     lets through rows the tuplesort then judges itself.
 //   * Skipping a row skips its emit body, so admission requires the emit to
 //     be observation-free per row: NO scan qual (a qual evaluation C would
-//     have run — including its possible error — must not be elided) and no
-//     projection beyond the pure Var-copy kernel. Under that shape a
+//     have run — including its possible error — must not be elided) and
+//     only pure-Var projections (the single Var-copy kernel or the all-Var
+//     census list — never a computing column). Under that shape a
 //     skipped row's only C-side effects were the tuplesort compare+discard
 //     (and its per-row CHECK_FOR_INTERRUPTS; the filtered path keeps one
 //     CFI per staged batch, the lane's page-level cadence floor).
@@ -2360,7 +2361,8 @@ fn topk_keep_op(cmp: ::execexpr::CmpOp) -> Option<::execexpr::CmpOp> {
 /// Admission + arming for the top-k cutoff over a seqscan-fed bounded sort.
 /// `None` = not admitted; the feed runs unfiltered (never a lane refusal).
 /// Admits: bounded sort; leading sort key resolvable to a scan column (no
-/// projection, or the lone `JustAssignVar` Var-copy); NO scan qual (skipped
+/// projection, the lone `JustAssignVar` Var-copy, or an all-Var census
+/// projection); NO scan qual (skipped
 /// rows must have no observable per-row evaluation — see the invariant
 /// block); leading-key order operator inside the by-value kernel compare
 /// vocabulary (int2/4/8, oid, float4/8; ASC and DESC, any NULLS placement);
@@ -2391,7 +2393,23 @@ fn topk_cut_arm<'mcx>(
                 attnum,
                 resultnum: 0,
             } if oc == 1 => attnum,
-            _ => return None,
+            _ => {
+                // Multi-column projections admit only the pure Var-copy list
+                // (the ready-time scan-projection census, subplan/param-free
+                // by construction, with NO arith columns): a skipped row
+                // skips its projection, and only Var passthroughs are
+                // guaranteed observation-free (an elided arith evaluation
+                // could elide C's error). The sort's leading input column
+                // then maps through the census to its scan attnum.
+                let cols = p.pi_state.scan_proj_cols()?;
+                if cols.any_arith() || (oc as usize) > cols.n as usize {
+                    return None;
+                }
+                match cols.cols[(oc - 1) as usize] {
+                    ::execexpr::ScanProjCol::Var { attnum } => attnum,
+                    _ => return None,
+                }
+            }
         },
     };
     // Kernel admission: order operator -> its comparison-function kernel ->
