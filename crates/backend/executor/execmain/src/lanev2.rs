@@ -1440,11 +1440,15 @@ impl<'mcx> Operator<'mcx> for SortEmit {
 // value is authoritative — and checking after a fully delegated build is
 // byte-safe precisely because the build is bit-equal to the row path's.
 //
-// Refused join shapes (assert-refuse set; each needs its own byte-verified
-// staging): LEFT/RIGHT/FULL/SEMI/ANTI/RIGHT_SEMI/RIGHT_ANTI (null-fill faces
-// + match-driven skips), joinqual/otherqual residuals, multi-batch (above),
-// parallel hash, instrumented, subplan/param-bearing hash or projection
-// exprs, non-lane-fusible scan children on either side.
+// Admitted join types: the outer-driven ones — INNER, LEFT, SEMI, ANTI —
+// with joinqual/otherqual residuals evaluated scalar-within-lane through the
+// row path's exact `eval_probe_qual` (LEFT/ANTI null-fill emits happen
+// inside `lane_probe_next`'s HJ_FILL_OUTER_TUPLE arm, exactly where C emits
+// them). Refused join shapes (assert-refuse set; each needs its own
+// byte-verified staging): RIGHT/FULL/RIGHT_SEMI/RIGHT_ANTI (they need the
+// unmatched-BUILD scan phase, HJ_FILL_INNER_TUPLES), multi-batch (above),
+// parallel hash, instrumented, subplan/param-bearing hash, residual-qual or
+// projection exprs, non-lane-fusible scan children on either side.
 // ===========================================================================
 
 /// The breaker's `Sink` face (build pipeline endpoint). Holds the join +
@@ -1685,9 +1689,10 @@ fn join_probe_pull_dispatch<'mcx>(
 /// first evaluation (verdict stability: a lane-owned join must stay
 /// lane-owned — `lane_join_untouched` in the verdict guarantees the row path
 /// never drove this node before the lane, and memoization guarantees the
-/// lane drives it ever after). Join side: `lane_join_admissible` (INNER, no
-/// residual quals, uninstrumented, subplan/param-free) + serial hash +
-/// subplan/param-free build hash. Child side: the Phase-1 scan refuse-sets
+/// lane drives it ever after). Join side: `lane_join_admissible`
+/// (INNER/LEFT/SEMI/ANTI, subplan/param-free residual quals admitted,
+/// uninstrumented, subplan/param-free hash + projection exprs) + serial hash
+/// + subplan/param-free build hash. Child side: the Phase-1 scan refuse-sets
 /// on BOTH children. The caller re-checks the dynamic EPQ/direction gates
 /// per call.
 fn hash_join_lane_fusible<'mcx>(
@@ -1808,7 +1813,8 @@ pub fn try_own_hash_join<'mcx>(
     Ok(Some(join_probe_pull_dispatch(state, hstate, outer, estate)?))
 }
 
-/// Try to let the lane own `Agg(hashed) → HashJoin(inner) → scans` — the
+/// Try to let the lane own `Agg(hashed) → HashJoin(admitted type) → scans`
+/// — the
 /// first breaker-to-breaker composition. Three pipelines on two breaker
 /// nodes, all phase flags node-resident row-path state:
 ///
@@ -1865,8 +1871,10 @@ pub fn try_own_agg_over_hash_join<'mcx>(
         }
         match ::nodehashjoin::lane_join_phase(state, hstate) {
             ::nodehashjoin::LaneJoinPhase::EmptyDone => {
-                // Inner join over an empty build: emits nothing, and the
-                // outer child is never pulled (C's early return). The agg
+                // A non-fill-outer join (INNER/SEMI) over an empty build:
+                // emits nothing, and the outer child is never pulled (C's
+                // early return; LEFT/ANTI never take this phase — their
+                // empty build proceeds to the probe and null-fills). The agg
                 // finalizes over an empty input.
                 stats::tick_owned(ShapeClass::AggBuild);
                 let mut sink = HashAggBuildSink { agg: &mut *agg };
