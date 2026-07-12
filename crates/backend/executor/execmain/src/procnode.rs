@@ -242,6 +242,11 @@ pub struct NestLoopNode<'mcx> {
     pub state: ::nodenestloop::NestLoopState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
+    /// Lane-executor-v2 NestLoop verdict, memoized at first call (the
+    /// structural fusibility cascade must not run per pulled tuple, and the
+    /// verdict must be stable — a lane-owned join stays lane-owned); the
+    /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 // The inner Hash sub-node: its own HashState + the real inner scan child.
@@ -896,6 +901,7 @@ pub fn exec_init_node<'mcx>(
                 state,
                 outer: ::mcx::alloc_in(mcx, outer)?,
                 inner: ::mcx::alloc_in(mcx, inner)?,
+                lane_fusible: None,
             })
         }
         NodeTag::T_HashJoin => {
@@ -1630,6 +1636,17 @@ fn agg_arm<'mcx>(
                 }
             }
         }
+        PlanStateNode::NestLoop(nl) => {
+            // Lane-executor-v2 dispatch hook (§4: hash-agg breaker over the
+            // NestLoop TupleOp over a lane outer scan; the inner stays
+            // Volcano). Falls through to the UNCHANGED per-tuple agg over
+            // exec_nest_loop on refuse. Lane logic + refuse-set in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_agg_over_nest_loop(agg, nl, estate)? {
+                    return Ok(r);
+                }
+            }
+        }
         _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
@@ -2264,7 +2281,15 @@ fn named_tuplestore_scan_arm<'mcx>(
 
 #[inline(never)]
 fn nest_loop_arm<'mcx>(nl: &mut NestLoopNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    let NestLoopNode { state, outer, inner } = nl;
+    // Lane-executor-v2 dispatch hook (§4 NestLoop TupleOp over a lane outer
+    // scan; the inner stays Volcano): falls through to the UNCHANGED
+    // exec_nest_loop on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_nest_loop(nl, estate)? {
+            return Ok(r);
+        }
+    }
+    let NestLoopNode { state, outer, inner, .. } = nl;
     ::nodenestloop::exec_nest_loop(state, &mut **outer, &mut **inner, estate)
 }
 
@@ -3403,7 +3428,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     LimitNode<'_> { state, outer },
     UniqueNode<'_> { state, outer },
     GroupNode<'_> { state, outer },
-    NestLoopNode<'_> { state, outer, inner },
+    NestLoopNode<'_> { state, outer, inner, lane_fusible },
     HashSubNode<'_> { state, child },
     HashJoinNode<'_> { state, outer, hash, probe_batch, lane_fusible },
     MergeJoinNode<'_> { state, outer, inner },

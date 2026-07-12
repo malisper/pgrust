@@ -1813,6 +1813,299 @@ pub fn try_own_hash_join<'mcx>(
     Ok(Some(join_probe_pull_dispatch(state, hstate, outer, estate)?))
 }
 
+// ===========================================================================
+// NestLoop hosting (the deferred §4 bundle). The join is a mid-pipeline
+// streaming `TupleOp` — NOT a breaker: one outer row in, 0..K joined rows
+// out.
+//
+//   pipeline: outer scan source → scalar filter/project → NestLoopProbe
+//             (TupleOp) → sink (RootAdapter, or the hash-agg breaker)
+//
+// Per accepted outer row the op runs C's need-new-outer arm
+// (`nodenestloop::lane_accept_outer`): bind the outer tuple, assign the
+// join's exec params (nestParams → PARAM_EXEC slots), and RESCAN the inner
+// child; the expansion then streams each inner row through the joinqual /
+// otherqual / projection (`lane_probe_next` = `exec_nest_loop`'s own loop
+// body, LEFT/SEMI/ANTI arms included). The INNER child stays a Volcano
+// child, driven per-row through the same `NestLoopChild` calls the row path
+// uses (scalar-within-lane, per the design's allowance) — so exec-param-
+// driven runtime keys on an inner index scan are evaluated in
+// `exec_rescan_index_scan`'s preamble exactly as C's ExecReScan path does,
+// AUTOMATICALLY. The Phase-1 lane scan gates therefore KEEP refusing runtime
+// keys (`iss_Runtime`/`ioss_Runtime`) for LANE-OWNED scans: that relaxation
+// belongs to the inner-as-lane-pipeline follow-up, where the lane would have
+// to drive the rescan preamble itself. Expansion position across the Volcano
+// pull boundary is the node's own `nl_NeedNewOuter`/`nl_MatchedOuter` — C's
+// cross-call state; no new fields.
+//
+// Admission economics (design §4): NestLoop per-tuple in Volcano is already
+// cheap; the lane's value is OWNERSHIP CONTINUITY — the outer side stays a
+// lane pipeline feeding breakers above. The hooks engage (a) under the
+// hash-agg breaker (`try_own_agg_over_nest_loop` — a lane consumer above,
+// no fused competitor exists for this shape) and (b) bare
+// (`try_own_nest_loop`) where the outer is a lane-fusible scan the join
+// pipeline then owns — the bare hash-join precedent; there is no legacy
+// fused NestLoop drive to preempt. Refused (assert-refuse set):
+// instrumented, subplan/param-bearing joinqual/otherqual/projection,
+// row-path-touched nodes (verdict stability), non-lane-fusible outer
+// children, EPQ, non-forward. The inner child is unconstrained — it runs
+// the identical Volcano calls at the identical points either way.
+// ===========================================================================
+
+/// The NestLoop join as a mid-pipeline `TupleOp`: accept stages one outer
+/// row (param assignment + inner rescan — C's per-outer-row prologue), then
+/// the expansion streams the inner drain through the row-path joinqual /
+/// projection arms into the downstream sink. Expansion position is
+/// node-resident on the join state (`nl_NeedNewOuter`).
+struct NestLoopProbe<'a, 'mcx> {
+    nl: &'a mut ::nodenestloop::NestLoopState<'mcx>,
+    inner: &'a mut crate::procnode::PlanStateNode<'mcx>,
+}
+
+impl<'mcx> NestLoopProbe<'_, 'mcx> {
+    fn emit(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        while let Some(j) = ::nodenestloop::lane_probe_next(self.nl, self.inner, estate)? {
+            if let SinkFeed::Full = out.accept(j, estate)? {
+                return Ok(OpStatus::Paused);
+            }
+        }
+        Ok(OpStatus::NeedInput)
+    }
+}
+
+impl<'mcx> TupleOp<'mcx> for NestLoopProbe<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        ::nodenestloop::lane_probe_pending(self.nl)
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        ::nodenestloop::lane_accept_outer(self.nl, self.inner, estate, tuple)?;
+        self.emit(out, estate)
+    }
+
+    fn resume(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        self.emit(out, estate)
+    }
+}
+
+/// One PG pull through outer scan → filter/project → `top` → root adapter,
+/// dispatched over the admitted lane-scan child types (join_probe dispatch
+/// shape, generic over the mid-pipeline op).
+fn scan_chain_pull_dispatch<'mcx>(
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    top: &mut dyn TupleOp<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let mut root = RootAdapter::new(None);
+    match outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => pull_step_chain(
+            ss,
+            &mut SeqScanSource,
+            &mut SeqScanFilterProject,
+            top,
+            &mut root,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexScan(is) => pull_step_chain(
+            is,
+            &mut IndexScanSource,
+            &mut IndexScanEmit,
+            top,
+            &mut root,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => pull_step_chain(
+            &mut **ios,
+            &mut IndexOnlyScanSource,
+            &mut IndexOnlyScanEmit,
+            top,
+            &mut root,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            pull_step_chain(
+                &mut b.scan,
+                &mut BitmapHeapScanSource,
+                &mut BitmapHeapScanEmit,
+                top,
+                &mut root,
+                estate,
+            )
+        }
+        _ => unreachable!("memoized lane verdict admitted a non-scan outer child"),
+    }
+}
+
+/// Full drain of outer scan → filter/project → `top` → breaker sink, same
+/// dispatch as `scan_chain_pull_dispatch`.
+fn scan_chain_drain_dispatch<'mcx>(
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    top: &mut dyn TupleOp<'mcx>,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    match outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => drain_pipeline_chain(
+            ss,
+            &mut SeqScanSource,
+            &mut SeqScanFilterProject,
+            top,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexScan(is) => drain_pipeline_chain(
+            is,
+            &mut IndexScanSource,
+            &mut IndexScanEmit,
+            top,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => drain_pipeline_chain(
+            &mut **ios,
+            &mut IndexOnlyScanSource,
+            &mut IndexOnlyScanEmit,
+            top,
+            sink,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+            }
+            drain_pipeline_chain(
+                &mut b.scan,
+                &mut BitmapHeapScanSource,
+                &mut BitmapHeapScanEmit,
+                top,
+                sink,
+                estate,
+            )
+        }
+        _ => unreachable!("memoized lane verdict admitted a non-scan outer child"),
+    }
+}
+
+/// Structural refuse-set for the lane NestLoop, memoized on the node at
+/// first evaluation (verdict stability: a lane-owned join must stay
+/// lane-owned — `lane_nest_loop_untouched` in the verdict guarantees the row
+/// path never drove this node before the lane, and memoization guarantees
+/// the lane drives it ever after). Join side: `lane_nest_loop_admissible`
+/// (all four ported join types; uninstrumented; subplan/param-free quals +
+/// projection). Outer side: the Phase-1 scan refuse-sets. The INNER side is
+/// deliberately unconstrained — it stays a Volcano child driven through the
+/// identical `NestLoopChild` calls. The caller re-checks the dynamic
+/// EPQ/direction gates per call.
+fn nest_loop_lane_fusible<'mcx>(
+    nl: &mut crate::procnode::NestLoopNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if let Some(v) = nl.lane_fusible {
+        return Ok(v);
+    }
+    let v = nest_loop_fusible_static(nl, estate)?;
+    nl.lane_fusible = Some(v);
+    Ok(v)
+}
+
+fn nest_loop_fusible_static<'mcx>(
+    nl: &mut crate::procnode::NestLoopNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let crate::procnode::NestLoopNode { state, outer, .. } = nl;
+    if !::nodenestloop::lane_nest_loop_admissible(state)
+        || !::nodenestloop::lane_nest_loop_untouched(state, estate)
+    {
+        return Ok(false);
+    }
+    scan_child_fusible(outer, estate)
+}
+
+/// Try to let the lane own a bare `NestLoop` (no lane consumer above): one
+/// joined tuple per PG pull through the chain, the mid-inner-drain position
+/// riding C's own `nl_NeedNewOuter` across the pull boundary. `None` =
+/// refused (caller runs the unchanged `exec_nest_loop` — byte-safe: an
+/// untouched-only verdict means the row path owns the node's whole life).
+#[inline]
+pub fn try_own_nest_loop<'mcx>(
+    nl: &mut crate::procnode::NestLoopNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (mirrors the sort/hash-join breakers).
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    if !nest_loop_lane_fusible(nl, estate)? {
+        return Ok(None);
+    }
+    // C's CHECK_FOR_INTERRUPTS at ExecNestLoop entry.
+    ::postgres_seams::check_for_interrupts::call()?;
+    let crate::procnode::NestLoopNode { state, outer, inner, .. } = nl;
+    let mut probe = NestLoopProbe { nl: state, inner };
+    Ok(Some(scan_chain_pull_dispatch(outer, &mut probe, estate)?))
+}
+
+/// Try to let the lane own `Agg(hashed) → NestLoop → lane outer scan` (the
+/// inner stays Volcano): two pipelines on one breaker node —
+///
+///   1. build: outer scan → filter/project → NestLoopProbe → HashAggBuildSink
+///   2. emit:  HashAggSource → HashAggEmit → RootAdapter (one group per pull)
+///
+/// `None` = refused (caller falls to the per-tuple `exec_agg` over
+/// `exec_nest_loop`, byte-identically).
+#[inline]
+pub fn try_own_agg_over_nest_loop<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    nl: &mut crate::procnode::NestLoopNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    if !::nodeagg::agg_hash_breaker_admissible(agg) || !nest_loop_lane_fusible(nl, estate)? {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // Build phase (once, lazily; a rescan rebuild clears `table_filled` and
+    // re-enters — the whole-NestLoop rescan resets `nl_NeedNewOuter` and the
+    // outer scan's staged cursor, so the feed restarts coherently).
+    if !::nodeagg::agg_hash_table_filled(agg) {
+        let crate::procnode::NestLoopNode { state, outer, inner, .. } = nl;
+        let mut probe = NestLoopProbe { nl: state, inner };
+        let mut sink = HashAggBuildSink { agg: &mut *agg };
+        scan_chain_drain_dispatch(outer, &mut probe, &mut sink, estate)?;
+    }
+    // Emit phase (every call): one qual-passing group per PG pull, in C's
+    // retrieve order.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
 /// Try to let the lane own `Agg(hashed) → HashJoin(inner) → scans` — the
 /// first breaker-to-breaker composition. Three pipelines on two breaker
 /// nodes, all phase flags node-resident row-path state:
