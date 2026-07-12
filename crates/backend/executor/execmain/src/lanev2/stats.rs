@@ -104,9 +104,16 @@ pub(super) enum ShapeClass {
     /// just feeds the sort unfiltered). Row-level effect is reported by the
     /// `counter` dump lines (`topkcut-rows-seen` / `topkcut-rows-cut`).
     TopkCut = 15,
+    /// Zone-ordered adaptive top-N traversal on a cbstore-fed bounded sort
+    /// (docs/design/cbstore-zone-adaptive.md): OWNED = one tick per sort
+    /// feed the adaptive granule order ARMED on (never a refusal class —
+    /// non-admission keeps the physical-order feed). Demotions (ambiguous
+    /// boundary tie observed → exact physical re-feed) are the
+    /// `adaptivetopk-demoted` counter dump line.
+    AdaptiveTopk = 16,
 }
 
-const N_CLASSES: usize = 16;
+const N_CLASSES: usize = 17;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -126,6 +133,7 @@ impl ShapeClass {
         ShapeClass::CbScan,
         ShapeClass::MetaAgg,
         ShapeClass::TopkCut,
+        ShapeClass::AdaptiveTopk,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -146,6 +154,7 @@ impl ShapeClass {
             ShapeClass::CbScan => "cbscan",
             ShapeClass::MetaAgg => "metaagg",
             ShapeClass::TopkCut => "topkcut",
+            ShapeClass::AdaptiveTopk => "adaptivetopk",
         }
     }
 }
@@ -392,6 +401,9 @@ static OWNED: [AtomicU64; N_CLASSES] = [const { AtomicU64::new(0) }; N_CLASSES];
 /// tuplesort put.
 static TOPKCUT_ROWS_SEEN: AtomicU64 = AtomicU64::new(0);
 static TOPKCUT_ROWS_CUT: AtomicU64 = AtomicU64::new(0);
+/// Zone-adaptive top-N demotions: the tracked feed observed an
+/// arrival-order-sensitive tie at the LIMIT cut and re-fed physical-order.
+static ADAPTIVE_TOPK_DEMOTED: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -430,6 +442,17 @@ pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
 #[inline]
 pub(super) fn armed() -> bool {
     stats_dir().is_some()
+}
+
+/// Record one zone-adaptive top-N demotion (ambiguous boundary tie →
+/// physical re-feed).
+#[inline]
+pub(super) fn tick_adaptive_topk_demoted() {
+    if stats_dir().is_none() {
+        return;
+    }
+    ADAPTIVE_TOPK_DEMOTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
 }
 
 /// Record one engaged top-k pre-filter batch: `seen` rows offered, `cut`
@@ -506,6 +529,10 @@ fn dump() {
     out.push_str(&format!(
         "counter\ttopkcut-rows-cut\t{}\n",
         TOPKCUT_ROWS_CUT.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tadaptivetopk-demoted\t{}\n",
+        ADAPTIVE_TOPK_DEMOTED.load(Relaxed)
     ));
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));

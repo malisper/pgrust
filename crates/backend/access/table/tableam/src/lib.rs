@@ -1214,6 +1214,16 @@ pub fn table_scan_arm_adaptive_order(
     }
 }
 
+/// Drop an armed adaptive traversal (consumer demotion back to the physical
+/// claim order); the caller must rescan before pulling again. No-op when
+/// unarmed or not cbstore.
+pub fn table_scan_disarm_adaptive_order(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.disarm_adaptive_order(),
+    }
+}
+
 /// Consumer bound feedback for an armed adaptive scan (top-k heap floor or
 /// running MIN/MAX best); no-op when unarmed.
 pub fn table_scan_update_scan_bound(scan: &mut TableScanDesc<'_>, key: ::datum::Datum) {
