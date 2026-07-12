@@ -1408,7 +1408,12 @@ pub fn exec_init_agg<'mcx>(
             const F_INT8EQ: Oid = 467;
             ok &= match lsyscache::get_opcode(op)? {
                 F_BOOLEQ | F_INT2EQ | F_INT4EQ | F_INT8EQ => true,
-                F_TEXTEQ => {
+                // Text keys serve only the narrow-sort arm (the sorted-fold
+                // arm's raw compare is by-value-width only), so probe the
+                // collation only where that arm can engage — and unit
+                // harnesses without the collation syscache seam never build
+                // internal-sort entries, so they never reach the lookup.
+                F_TEXTEQ if !pertrans_sort.is_empty() => {
                     let coll = node.grpCollations[i];
                     coll != 0 && lsyscache::get_collation_isdeterministic(coll)?
                 }
