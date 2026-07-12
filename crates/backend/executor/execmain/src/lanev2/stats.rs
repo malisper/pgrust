@@ -231,9 +231,21 @@ pub(super) enum RefuseReason {
     /// REFUSES the compact table (the C table spills; distinct-spill is v2,
     /// per the plan's 2.2 item). Ticked per build decision.
     CompactSpillRisk = 26,
+    /// Stage-2.1 dict-code grouping (cbstore dict-group feed): the offered
+    /// cbstore K2 fold shape cannot host dict-code grouping — varlena-guard
+    /// (str MIN/MAX) fold plans, an unarmable columnar prefix, or a staging
+    /// consumer conflict. Mode-choice observability inside a still-lane-owned
+    /// build (like the compact rows); ticked once per build decision.
+    DictGroupShape = 27,
+    /// Multi-key packed grouping (multikey spike §2.4): the 2..N-key shape
+    /// is not packable — a non-Int/non-dict-text component, widths past the
+    /// 16-byte image, a missing dict-lane registration for the text
+    /// component, or an unstageable key column. Mode-choice observability
+    /// inside a still-lane-owned build; ticked once per build decision.
+    MultiKeyShape = 28,
 }
 
-const N_REASONS: usize = 27;
+const N_REASONS: usize = 29;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -265,6 +277,8 @@ impl RefuseReason {
             RefuseReason::SrfSetExpansion => "srf-set-expansion",
             RefuseReason::CompactKeyKind => "compact-key-kind",
             RefuseReason::CompactSpillRisk => "compact-spill-risk",
+            RefuseReason::DictGroupShape => "dictgroup-shape",
+            RefuseReason::MultiKeyShape => "multikey-shape",
         }
     }
 
@@ -298,6 +312,8 @@ impl RefuseReason {
             SrfSetExpansion,
             CompactKeyKind,
             CompactSpillRisk,
+            DictGroupShape,
+            MultiKeyShape,
         ][i]
     }
 }
