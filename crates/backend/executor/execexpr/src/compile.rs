@@ -5348,7 +5348,15 @@ fn select_scan_proj_expr_key(state: &ExprState<'_>) -> Option<crate::steps::Scan
                             prev_out = *fout;
                             ncalls += 1;
                         }
-                        Some(Step::AssignTmp { resultnum }) if ncalls > 0 => {
+                        // Varlena-typed tlist expressions assign via
+                        // ASSIGN_TMP_MAKE_RO (C ExecBuildProjectionInfo's
+                        // typlen == -1 arm); MakeReadOnly is identity on the
+                        // flat varlena results the admitted internal-builtin
+                        // chains produce (fmgr results, never expanded).
+                        Some(
+                            Step::AssignTmp { resultnum }
+                            | Step::AssignTmpMakeRo { resultnum },
+                        ) if ncalls > 0 => {
                             if *resultnum != idx || !state.is_result(prev_out) {
                                 return None;
                             }
