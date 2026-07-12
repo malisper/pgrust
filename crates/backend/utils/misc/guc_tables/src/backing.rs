@@ -30,6 +30,13 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     (log_executor_stats_cell, bool, log_executor_stats, set_log_executor_stats, false),
     (log_statement_stats_cell, bool, log_statement_stats, set_log_statement_stats, false),
     (row_security_cell, bool, row_security, set_row_security, true),
+    // pgrust.lane_executor (pgrust-only): the lane-v2 push executor's master
+    // gate. This TLS cell IS the state lanev2::enabled() (and nodeagg's
+    // mirror) reads, so the GUC assign path (set_pgrust_lane_executor)
+    // re-evaluates the gate for the session's next query. Boot default ON
+    // (2026-07-14); PGRUST_LANE_V2=0|off at boot flips the startup default
+    // (PGC_S_ENV_VAR, initialize_guc_options_from_environment).
+    (pgrust_lane_executor_cell, bool, pgrust_lane_executor, set_pgrust_lane_executor, true),
     (check_function_bodies_cell, bool, check_function_bodies, set_check_function_bodies, true),
     (default_with_oids_cell, bool, default_with_oids, set_default_with_oids, false),
     (current_role_is_superuser_cell, bool, current_role_is_superuser, set_current_role_is_superuser, false),

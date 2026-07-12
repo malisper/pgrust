@@ -97,13 +97,11 @@ struct LaneFold<'mcx> {
     resid: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
-// Mirrors execmain `lanev2::enabled()` (the byte-identity-safe env-var gate);
-// duplicated because nodeagg cannot depend on execmain (crate cycle).
+// Mirrors execmain `lanev2::enabled()` (the pgrust.lane_executor GUC's
+// session backing cell); duplicated because nodeagg cannot depend on
+// execmain (crate cycle) — both read the same guc_tables backing.
 fn lane_v2_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("0") | Ok("off"))
-    })
+    ::guc_tables::backing::pgrust_lane_executor()
 }
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
