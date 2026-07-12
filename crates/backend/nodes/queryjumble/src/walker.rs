@@ -1556,6 +1556,13 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             js.f_str(e.extname);
             list(js, &e.options)?;
         }
+        NodeTag::T_AlterExtensionContentsStmt => {
+            let e = cast!(r::AlterExtensionContentsStmt);
+            js.f_str(e.extname);
+            js.f_i32(e.action);
+            js.f_u32(e.objtype as u32);
+            node(js, e.object)?;
+        }
         NodeTag::T_CreateFdwStmt => {
             let e = cast!(r::CreateFdwStmt);
             js.f_str(e.fdwname);
