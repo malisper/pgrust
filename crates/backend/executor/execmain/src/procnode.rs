@@ -263,7 +263,7 @@ pub struct HashJoinNode<'mcx> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ProbeBatchMode {
+pub(crate) enum ProbeBatchMode {
     Unknown,
     Off,
     On,
@@ -304,6 +304,12 @@ impl<'mcx> ProbeBatch<'mcx> {
             flt_seen: 0,
             flt_drop: 0,
         }
+    }
+
+    /// The fused probe drive's once-decided mode — read by the lane-v2 join
+    /// hook's admission-economics gate (never preempt the fused drive).
+    pub(crate) fn mode(&self) -> ProbeBatchMode {
+        self.mode
     }
 
     // Rescan invalidates the staged page; the fusibility verdict survives.
@@ -2278,11 +2284,13 @@ fn hash_join_arm<'mcx>(
             probe_batch_probe(state, &mut **outer, estate, probe_batch)?
         };
     }
-    // Lane-executor-v2 dispatch hook (Phase-2 join breaker, bare): only where
-    // the legacy fused probe drive does NOT engage (admission economics —
-    // never preempt the faster existing path). Falls through to the UNCHANGED
+    // Lane-executor-v2 dispatch hook (Phase-2 join breaker, bare). The
+    // admission-economics gate — engage only where the legacy fused probe
+    // drive does NOT (never preempt the faster existing path) — lives inside
+    // `try_own_hash_join` (via `ProbeBatch::mode()`) so its refusals are
+    // ticked in the lane accounting. Falls through to the UNCHANGED
     // exec_hash_join on refuse. Lane logic + refuse-set live in `lanev2`.
-    if hj.probe_batch.mode == ProbeBatchMode::Off && crate::lanev2::enabled() {
+    if crate::lanev2::enabled() {
         if let Some(r) = crate::lanev2::try_own_hash_join(hj, estate)? {
             return Ok(r);
         }
