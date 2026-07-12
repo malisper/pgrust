@@ -15,6 +15,7 @@ tableam = { path = "../../access/table/tableam" }
 nodehash = { path = "../nodehash" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
+laneexec = { path = "../laneexec" }
 executils = { path = "../executils" }
 exectuples = { path = "../exectuples" }
 datum = { path = "../../../_support/types/datum" }

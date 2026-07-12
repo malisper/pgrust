@@ -9188,6 +9188,7 @@ dependencies = [
  "hashfn",
  "heapam_visibility_seams",
  "jit_deform",
+ "laneexec",
  "lanestitch",
  "mcx",
  "miscinit_seams",
