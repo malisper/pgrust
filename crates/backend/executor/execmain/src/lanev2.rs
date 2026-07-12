@@ -4672,9 +4672,15 @@ fn try_hashgroup_build<'mcx>(
         ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
     )?;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    // Force a forward child read for the feed's duration (`sort_feed`'s
+    // discipline — this drain replaces the sort's own feed).
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
     let mut sink = HashGroupDistinctSink { agg, sort, outer_desc, nkeys: k, degraded: false };
-    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    let fed = drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
     let degraded = sink.degraded;
+    estate.es_direction = dir;
+    fed?;
     if degraded {
         return Ok(HgBuild::Degraded);
     }
