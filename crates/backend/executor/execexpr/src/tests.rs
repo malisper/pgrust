@@ -3185,7 +3185,10 @@ fn multiexpr_subplan_compiles_to_setup_steps_and_dummy_const() {
 // censusgaps additions), so the registry cannot drift from this consumer.
 
 // The golden OID→CmpOp table: the pre-registry 30-arm literal table verbatim,
-// extended by the censusgaps int24/int42/oid/float families.
+// extended by the censusgaps int24/int42/oid/float families and the
+// ne-admission census-close date/timestamp/timestamptz aliases (plain int
+// compares incl. infinity sentinels — date.c / timestamp.c; the mapping
+// laneexec's translate whitelist has carried since the harvest).
 fn golden_for_fn_oid(oid: ::types_core::Oid) -> Option<CmpOp> {
     Some(match oid {
         65 => CmpOp::Int4Eq,
@@ -3260,6 +3263,20 @@ fn golden_for_fn_oid(oid: ::types_core::Oid) -> Option<CmpOp> {
         308 => CmpOp::Float84Le,
         309 => CmpOp::Float84Gt,
         310 => CmpOp::Float84Ge,
+        // date (int32 days)
+        1086 => CmpOp::Int4Eq,
+        1091 => CmpOp::Int4Ne,
+        1087 => CmpOp::Int4Lt,
+        1088 => CmpOp::Int4Le,
+        1089 => CmpOp::Int4Gt,
+        1090 => CmpOp::Int4Ge,
+        // timestamp / timestamptz (int64 microseconds)
+        2052 | 1152 => CmpOp::Int8Eq,
+        2053 | 1153 => CmpOp::Int8Ne,
+        2054 | 1154 => CmpOp::Int8Lt,
+        2055 | 1155 => CmpOp::Int8Le,
+        2057 | 1157 => CmpOp::Int8Gt,
+        2056 | 1156 => CmpOp::Int8Ge,
         _ => return None,
     })
 }
