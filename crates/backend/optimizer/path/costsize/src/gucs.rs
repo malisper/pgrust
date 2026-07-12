@@ -79,6 +79,22 @@ pub fn cbstore_gather_sort_tuple_cost() -> f64 {
     DEFAULT_CBSTORE_GATHER_SORT_TUPLE_COST
 }
 
+/// Column-fraction seqscan disk costing on cbstore (pgrust-only, the Q38
+/// sort-vs-hash costing fix): the disk term of a cbstore seqscan is scaled
+/// by the referenced columns' share of the part's on-disk bytes — C's
+/// pages*seq_page_cost structure kept, with an honest page count for a
+/// columnar AM whose scan open takes a plan-derived column need-set.
+/// `PGRUST_CBSTORE_COLFRAC_COST=0`/`off` disables for A/B.
+pub fn cbstore_colfrac_cost() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_CBSTORE_COLFRAC_COST").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// Footer sorted-column scan pathkeys (was GUC `cbstore_scan_pathkeys`,
 /// default on). `PGRUST_CBSTORE_SCAN_PATHKEYS=0`/`off` disables for A/B.
 pub fn cbstore_scan_pathkeys() -> bool {

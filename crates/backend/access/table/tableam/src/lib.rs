@@ -995,6 +995,13 @@ pub fn cbstore_footer_sorted(rel: &Relation<'_>) -> PgResult<Option<Vec<bool>>> 
     ::cbstore::footer_sorted(rel)
 }
 
+// Per-column on-disk chunk bytes from the cbstore part footer (planner
+// column-fraction seqscan disk costing); None while the table has no
+// committed footer.
+pub fn cbstore_footer_col_bytes(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>> {
+    ::cbstore::footer_col_bytes(rel)
+}
+
 // cbstore's AM-specific sample acquisition (C table_relation_analyze lets the
 // AM supply the whole acquirefunc): row-group enumeration + random row fetch.
 pub fn cbstore_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {

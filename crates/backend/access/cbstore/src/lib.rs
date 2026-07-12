@@ -75,6 +75,31 @@ pub fn footer_sorted(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<boo
     Ok(part_cache::cached_part(rel)?.map(|p| p.sorted.iter().map(|&s| s == 1).collect()))
 }
 
+// Per-column on-disk chunk bytes summed over the part's committed row
+// groups (planner column-fraction seqscan disk costing). Within an RG the
+// column chunks are laid out contiguously in column order
+// (writer flush: chunk_off is the running body offset), so column i's bytes
+// are the offset delta to column i+1's chunk; the last column runs to the
+// end of the RG body (the next RG's file_off, or this footer's offset for
+// the newest RG). Stale interior footers left by earlier COPY batches
+// inflate at most the last column of each batch's tail RG — noise at
+// costing precision. None while the table has no committed footer.
+pub fn footer_col_bytes(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<u64>>> {
+    let Some(part) = part_cache::cached_part(rel)? else { return Ok(None) };
+    let ncols = part.ncols;
+    let mut out = vec![0u64; ncols];
+    for (r, rg) in part.rgs.iter().enumerate() {
+        let rg_end = part.rgs.get(r + 1).map_or(part.footer_off, |next| next.file_off);
+        let body_len = rg_end.saturating_sub(rg.file_off);
+        for i in 0..ncols {
+            let start = rg.chunks[i].0.min(body_len);
+            let end = if i + 1 < ncols { rg.chunks[i + 1].0 } else { body_len };
+            out[i] += end.min(body_len).saturating_sub(start);
+        }
+    }
+    Ok(Some(out))
+}
+
 pub fn unsupported(what: &str) -> Box<PgError> {
     Box::new(
         PgError::error(format!("cbstore does not support {what}"))
