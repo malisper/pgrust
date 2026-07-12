@@ -193,7 +193,33 @@ fn arm_scan_staging<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     shape: ScanFeedShape<'_, 'mcx>,
-) {
+) -> PgResult<()> {
+    // PREWHERE v1 (cbstore scans with a qual, phase4 design §3): try the
+    // lane-qual arm FIRST — it subsumes the kernel-bitmap arms (staged
+    // clauses cheapest-first with zone folds + per-clause late
+    // materialization, the dict text tier, hybrid requal tails) over the
+    // same forced full-prefix deform, widened to the feed's own SoA ask.
+    // Varlane fold shapes keep their dedicated varkey staging (the two
+    // stagings are structurally exclusive). Refusal falls through to the
+    // heap-shaped arms below, byte-safely.
+    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        let min_prefix = match &shape {
+            ScanFeedShape::RowFeed { .. } => 0,
+            ScanFeedShape::HashAggFold { agg } | ScanFeedShape::HashAggPerRow { agg } => {
+                if ss.ss.ps_ProjInfo.is_none() {
+                    fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            ScanFeedShape::FoldPrefix { agg } => fused_agg_soa_prefix(agg, ss).unwrap_or(0),
+        };
+        let varlane = matches!(&shape, ScanFeedShape::HashAggFold { agg }
+            if ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col).is_some());
+        if !varlane && ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, min_prefix)? {
+            return Ok(());
+        }
+    }
     match shape {
         ScanFeedShape::RowFeed { ctx, stitch } => {
             arm_seq_scan_qual_bitmap(ss, estate, ctx, stitch);
@@ -286,6 +312,7 @@ fn arm_scan_staging<'mcx>(
             ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
         }
     }
+    Ok(())
 }
 
 /// Decide-phase admission probe: arm the forced fold prefix NOW so an
@@ -297,9 +324,9 @@ fn probe_arm_fold_prefix<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> bool {
-    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg });
-    ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+) -> PgResult<bool> {
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
+    Ok(::nodeseqscan::seq_scan_batch_soa(ss).is_some())
 }
 
 // ===========================================================================
@@ -362,7 +389,7 @@ pub fn try_own_seq_scan<'mcx>(
     // re-arm per pull; the heap standalone path never gets here). Stitch stays
     // off: tier-2 bodies are drain-pipeline-only, and this is a per-pull feed.
     if ::nodeseqscan::seq_scan_is_cbstore(ss) {
-        arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false });
+        arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false })?;
     }
     debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
     // Assemble the scan-only push pipeline. Stages are stateless unit structs
@@ -1287,7 +1314,7 @@ fn decide_agg_lane<'mcx>(
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
                 // width column) is known BEFORE committing to ownership.
-                probe_arm_fold_prefix(agg, ss, estate)
+                probe_arm_fold_prefix(agg, ss, estate)?
             }
         }
         _ => false,
@@ -1635,7 +1662,7 @@ fn decide_plain_agg_lane<'mcx>(
     // Probe-arm the deform now so an unarmable prefix (non-fixed-width
     // column) is known BEFORE committing: the plain fold reads the SoA lanes
     // directly, so a disarmed deform keeps the incumbent.
-    if !probe_arm_fold_prefix(agg, ss, estate) {
+    if !probe_arm_fold_prefix(agg, ss, estate)? {
         return refuse();
     }
     Ok(AggLaneChoice::Fold)
@@ -1674,7 +1701,7 @@ fn agg_plain_fold_feed<'mcx>(
     // Same one-deform staging as the hashed fold feed; the deform is FORCED
     // (count(*)-only plans were refused, so the fold always reads lane
     // columns). Re-preparing with the same shape is a no-op.
-    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg });
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
@@ -1823,10 +1850,10 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // Staging arm per feed shape (see `arm_scan_staging` — the one seam for
     // deform + bitmap + stitched-tier setup across the feed sites).
     if c == AggLaneChoice::Fold {
-        arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg });
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
         agg_hash_build_fold_feed(agg, ss, stage_slot, estate)
     } else {
-        arm_scan_staging(ss, estate, ScanFeedShape::HashAggPerRow { agg });
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggPerRow { agg })?;
         let mut sink = HashAggBuildSink { agg };
         drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
     }
@@ -2262,7 +2289,7 @@ fn sort_feed_if_needed<'mcx>(
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true });
+            arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
             sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -2995,7 +3022,7 @@ fn join_build_dispatch<'mcx>(
                 ss,
                 estate,
                 ScanFeedShape::RowFeed { ctx: "join build feed", stitch: true },
-            );
+            )?;
             join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -3031,7 +3058,7 @@ fn join_probe_drain_dispatch<'mcx>(
                 ss,
                 estate,
                 ScanFeedShape::RowFeed { ctx: "join probe drain", stitch: true },
-            );
+            )?;
             drain_pipeline_chain(
                 ss,
                 &mut SeqScanSource,
@@ -3096,7 +3123,7 @@ fn join_probe_pull_dispatch<'mcx>(
                 ss,
                 estate,
                 ScanFeedShape::RowFeed { ctx: "join probe pull", stitch: false },
-            );
+            )?;
             pull_step_chain(
                 ss,
                 &mut SeqScanSource,
