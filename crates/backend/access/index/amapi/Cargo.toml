@@ -14,6 +14,7 @@ types_relscan = { path = "../relscan" }
 types_gist = { path = "../../../../_support/types/gist" }
 gin_vocab = { path = "../../gin/gin_vocab" }
 syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+pgvector_hnsw = { path = "../../../../contrib/pgvector_hnsw" }
 nbt_validate = { path = "../../nbtree/nbt_validate" }
 hash_validate = { path = "../../hash/hash_validate" }
 spgist_validate = { path = "../../spgist/spgist_validate" }

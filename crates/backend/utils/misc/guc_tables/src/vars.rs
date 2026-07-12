@@ -305,6 +305,11 @@ pub static pgss_track: GucEnumVar = GucSlot::new("pgss_track");
 pub static pgss_track_utility: GucBoolVar = GucSlot::new("pgss_track_utility");
 pub static pgss_track_planning: GucBoolVar = GucSlot::new("pgss_track_planning");
 pub static pgss_save: GucBoolVar = GucSlot::new("pgss_save");
+// pgvector hnsw.* (contrib GUCs, defined statically; C defines them at module load).
+pub static hnsw_ef_search: GucIntVar = GucSlot::new("hnsw_ef_search");
+pub static hnsw_iterative_scan: GucEnumVar = GucSlot::new("hnsw_iterative_scan");
+pub static hnsw_max_scan_tuples: GucIntVar = GucSlot::new("hnsw_max_scan_tuples");
+pub static hnsw_scan_mem_multiplier: GucRealVar = GucSlot::new("hnsw_scan_mem_multiplier");
 pub static pg_krb_caseins_users: GucBoolVar = GucSlot::new("pg_krb_caseins_users");
 pub static pg_krb_server_keyfile: GucStringVar = GucSlot::new("pg_krb_server_keyfile");
 pub static pgstat_fetch_consistency: GucEnumVar = GucSlot::new("pgstat_fetch_consistency");

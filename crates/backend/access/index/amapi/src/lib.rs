@@ -33,8 +33,19 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> IndexAmKind {
         F_GISTHANDLER => IndexAmKind::Gist,
         F_SPGHANDLER => IndexAmKind::Spgist,
         F_BRINHANDLER => IndexAmKind::Brin,
-        other => unported_handler(other),
+        other => resolve_extension_handler(other),
     }
+}
+
+// Non-builtin amhandler (extension AM): map by the handler proc's C symbol.
+// Catalog access is fine here — bootstrap only reaches the builtin arms.
+fn resolve_extension_handler(amhandler: Oid) -> IndexAmKind {
+    if let Ok(Some(name)) = syscache_seams::pg_proc_proname::call(amhandler) {
+        if name.name_str() == b"hnswhandler" {
+            return IndexAmKind::Hnsw;
+        }
+    }
+    unported_handler(amhandler)
 }
 
 pub fn GetIndexAmRoutineByAmId(amoid: Oid, noerror: bool) -> PgResult<Option<IndexAmKind>> {
@@ -102,6 +113,7 @@ pub fn IndexAmTranslateStrategy(
         IndexAmKind::Spgist => COMPARE_INVALID,
         // amtranslatestrategy == NULL.
         IndexAmKind::Brin => COMPARE_INVALID,
+        IndexAmKind::Hnsw => COMPARE_INVALID,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -143,6 +155,7 @@ pub fn IndexAmTranslateCompareType(
         IndexAmKind::Spgist => InvalidStrategy,
         // amtranslatecmptype == NULL.
         IndexAmKind::Brin => InvalidStrategy,
+        IndexAmKind::Hnsw => InvalidStrategy,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -187,6 +200,7 @@ pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
         IndexAmKind::Brin => brin_validate::brinvalidate(opclassoid),
         IndexAmKind::Gist => gist_validate::gistvalidate(opclassoid),
         IndexAmKind::Gin => gin_validate::ginvalidate(opclassoid),
+        IndexAmKind::Hnsw => pgvector_hnsw::hnswvalidate(opclassoid),
         #[allow(unreachable_patterns)]
         other => panic!("unported: amvalidate for index AM {other:?}"),
     }
@@ -214,6 +228,7 @@ pub fn am_adjust_members(
         IndexAmKind::Gin => ginadjustmembers(opfamilyoid, opclassoid, operators, functions),
         // C brinhandler sets amadjustmembers = NULL.
         IndexAmKind::Brin => Ok(()),
+        IndexAmKind::Hnsw => Ok(()),
         #[allow(unreachable_patterns)]
         other => panic!("unported: amadjustmembers for index AM {other:?}"),
     }
@@ -335,7 +350,7 @@ pub fn amparallelvacuumoptions(kind: IndexAmKind) -> u8 {
         IndexAmKind::Btree | IndexAmKind::Gist | IndexAmKind::Spgist => {
             VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP
         }
-        IndexAmKind::Hash => VACUUM_OPTION_PARALLEL_BULKDEL,
+        IndexAmKind::Hash | IndexAmKind::Hnsw => VACUUM_OPTION_PARALLEL_BULKDEL,
         IndexAmKind::Gin => VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP,
         IndexAmKind::Brin => VACUUM_OPTION_PARALLEL_CLEANUP,
         #[allow(unreachable_patterns)]
@@ -398,9 +413,20 @@ fn resolve_index_am_kind(amoid: Oid) -> Option<IndexAmKind> {
     let tuple = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid))).ok()??;
     let amhandler = SysCacheGetAttrNotNull(AMOID, &tuple, Anum_pg_am_amhandler)
         .map(|d| d.as_oid())
-        .ok();
+        .ok()?;
     ReleaseSysCache(tuple);
-    amhandler.map(GetIndexAmRoutine)
+    if !matches!(
+        amhandler,
+        F_BTHANDLER | F_HASHHANDLER | F_GINHANDLER | F_GISTHANDLER | F_SPGHANDLER | F_BRINHANDLER
+    ) {
+        // Extension AM: identify by the handler proc's C symbol.
+        let name = syscache_seams::pg_proc_proname::call(amhandler).ok()??;
+        return match name.name_str() {
+            b"hnswhandler" => Some(IndexAmKind::Hnsw),
+            _ => None,
+        };
+    }
+    Some(GetIndexAmRoutine(amhandler))
 }
 
 pub fn init_seams() {

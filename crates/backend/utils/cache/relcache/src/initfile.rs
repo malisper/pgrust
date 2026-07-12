@@ -520,6 +520,11 @@ fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
             put_u16(buf, cc.len() as u16);
             buf.extend_from_slice(cc);
         }
+        Some(RdOptions::Hnsw(o)) => {
+            put_u8(buf, 10);
+            put_i32(buf, o.m);
+            put_i32(buf, o.ef_construction);
+        }
     }
 }
 
@@ -616,6 +621,10 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
             }
             Some(Some(RdOptions::Cbstore(o)))
         }
+        10 => Some(Some(RdOptions::Hnsw(types_rel::reloptions::HnswOptions {
+            m: rd.i32()?,
+            ef_construction: rd.i32()?,
+        }))),
         _ => None,
     }
 }
