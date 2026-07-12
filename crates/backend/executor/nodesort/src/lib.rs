@@ -472,6 +472,20 @@ pub fn sort_lane_put<'mcx>(
     }
 }
 
+/// `sort_lane_put` over a caller-owned slot (not estate-registered): the
+/// hash-grouped distinct arm's degrade dump feeds each group's stored
+/// representative row through its own outer-format slot. Heap sorts only —
+/// the narrowed sort is always a heap sort (>= 2 plan sort keys).
+pub fn sort_lane_put_slot<'mcx>(
+    node: &mut SortState<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    slot: &mut ::types_slot::SlotData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(!node.datumSort);
+    let ts = node.tuplesortstate.as_mut().expect("sort_lane_put_slot before sort_lane_begin");
+    ts.puttupleslot(slot, mcx)
+}
+
 /// True when this sort's outer shape sorts bare datums (single-column
 /// outer). Callers use it to gate the direct-key feed probe — the arming
 /// mirror of `exec_sort_batched`, which probes `key_direct` only inside its

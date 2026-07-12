@@ -50,6 +50,7 @@ mod tests;
 mod compact;
 mod distinctset;
 mod gsets;
+mod hashgrouped;
 pub mod merge;
 
 pub use compact::{
@@ -57,6 +58,13 @@ pub use compact::{
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
     agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_try_arm,
     agg_hash_compact_try_arm_mk, CompactArm, MkComp, MkCompKind, MkShape,
+};
+pub use hashgrouped::{
+    agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_begin,
+    agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
+    agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
+    agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
+    HashGroupOrderKey,
 };
 pub use ::execgrouping::GroupKeyKind;
 
@@ -129,6 +137,11 @@ pub struct AggStateData<'mcx> {
     // handoff install would double-count the worker's groups). Cleared by
     // finish for the next build (rescan).
     hash_build_combined: bool,
+    // Lane-v2 hash-grouped exact-DISTINCT arm (hashgrouped.rs): Some while
+    // the arm holds group state (building / emitting / degraded residual).
+    // While it exists, group-boundary aggcontext resets are SKIPPED — the
+    // table's by-ref transvalues live in aggcontext (module doc).
+    hashgroup: Option<Box<hashgrouped::HashGroupedState<'mcx>>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -1449,6 +1462,7 @@ pub fn exec_init_agg<'mcx>(
         meta_aggs,
         instr_idx: None,
         hash_build_combined: false,
+        hashgroup: None,
     })
 }
 
@@ -2556,6 +2570,14 @@ fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
                 no_trans_value: init.isnull,
             });
         }
+    }
+    // Hash-grouped-arm degrade residue (hashgrouped.rs): a beginning group
+    // with saved partial state gets it installed OVER the fresh init — this
+    // seam is shared by the lane emit chain and the C pull-loop fallback, so
+    // both resume the degraded node identically. No-op unless the arm
+    // degraded on this node.
+    if node.hashgroup.is_some() {
+        hashgrouped::residual_preload(node)?;
     }
     Ok(())
 }
@@ -4286,8 +4308,13 @@ pub fn agg_sorted_group_begin<'mcx>(
     let mcx = estate.es_query_cxt;
     estate.reset_expr_context(node.ps_ExprContext);
     // SAFETY: sole access path to the node during the reset (the frames'
-    // copies are raw and dormant between evaluations).
-    unsafe { node.agg_node.as_mut() }.reset();
+    // copies are raw and dormant between evaluations). SKIPPED while the
+    // hash-grouped arm's degrade residue exists: other groups' by-ref
+    // transvalues live in aggcontext until the residue drains
+    // (hashgrouped.rs module doc; memory stays bounded by the residue).
+    if !hashgrouped::agg_hashgroup_state_active(node) {
+        unsafe { node.agg_node.as_mut() }.reset();
+    }
     {
         let AggStateData { persort, .. } = node;
         let ps = persort.as_mut().expect("sorted Agg has persort");
@@ -4759,8 +4786,12 @@ where
     while !node.agg_done {
         estate.reset_expr_context(node.ps_ExprContext);
         // SAFETY: sole access path to the node during the reset (the frames'
-        // copies are raw and dormant between evaluations).
-        unsafe { node.agg_node.as_mut() }.reset();
+        // copies are raw and dormant between evaluations). SKIPPED while the
+        // hash-grouped arm's degrade residue exists (see
+        // agg_sorted_group_begin — the same guard, fallback side).
+        if !hashgrouped::agg_hashgroup_state_active(node) {
+            unsafe { node.agg_node.as_mut() }.reset();
+        }
 
         {
             let AggStateData { persort, .. } = node;
@@ -5132,6 +5163,7 @@ fn agg_retrieve_hash_table<'mcx>(
 pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     node.qual = None;
     node.merge = None;
+    hashgrouped::agg_hashgroup_reset(node);
     if let Some(ph) = node.perhash.as_mut() {
         hashagg_reset_spill_state(ph, node.plan.numGroups as f64);
     }
@@ -5162,6 +5194,9 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
 pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
+    // Hash-grouped-arm state (any phase) rebuilds from scratch: drop it so
+    // the aggcontext reset below can free its by-ref transvalues safely.
+    hashgrouped::agg_hashgroup_reset(node);
     merge::reset_merge_for_rescan(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
@@ -5200,6 +5235,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
 pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EStateData<'mcx>) {
     let numgroups = node.plan.numGroups as f64;
     node.agg_done = false;
+    // Hash-grouped-arm state (any phase) rebuilds from scratch (see
+    // exec_rescan_agg_chg).
+    hashgrouped::agg_hashgroup_reset(node);
     // Merged results combine into the handed buffers in place, so a rescan
     // rebuilds from a fresh worker run instead of reusing the filled table.
     let merged = merge::reset_merge_for_rescan(node);
@@ -5325,7 +5363,7 @@ mcx::forget_safe_struct!(
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual, lanefold, meta_aggs },
+        pertrans_sort, qual, lanefold, meta_aggs, hashgroup },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },
