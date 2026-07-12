@@ -2857,6 +2857,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "cbstore"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "init_small",
+ "inval",
+ "laneexec",
+ "libc",
+ "lz4_flex",
+ "mcx",
+ "relpath",
+ "snapmgr",
+ "tableam_vocab",
+ "transam_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7353,6 +7380,32 @@ name = "keywords"
 version = "0.1.0"
 
 [[package]]
+name = "laneexec"
+version = "0.1.0"
+dependencies = [
+ "adt_like",
+ "datum",
+ "elog_seams",
+ "execexpr",
+ "exectuples",
+ "fmgr_core",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "memchr",
+ "pg_locale",
+ "regex",
+ "regexp_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "lanefold"
 version = "0.0.0"
 dependencies = [
@@ -7874,6 +7927,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "main_main"
 version = "0.0.0"
 dependencies = [
@@ -8009,6 +8071,12 @@ dependencies = [
  "digest",
  "opaque-debug",
 ]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mimalloc"
@@ -9120,10 +9188,12 @@ dependencies = [
  "hashfn",
  "heapam_visibility_seams",
  "jit_deform",
+ "laneexec",
  "lanestitch",
  "mcx",
  "miscinit_seams",
  "nodehash",
+ "nodes_core",
  "predicate_seams",
  "procarray_seams",
  "pruneheap_seams",
@@ -11466,6 +11536,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tableam",
+ "tableam_vocab",
  "tablesample",
  "tidbitmap",
  "typcache",
@@ -15559,6 +15630,8 @@ version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
  "catalog_storage",
+ "cbstore",
+ "datum",
  "elog_seams",
  "exectuples",
  "format_type",
@@ -15639,6 +15712,7 @@ dependencies = [
  "catalog_namespace",
  "catalog_storage",
  "catalog_toasting",
+ "cbstore",
  "clauses",
  "coerce",
  "commands_amcmds",
@@ -16577,6 +16651,12 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typcache"
