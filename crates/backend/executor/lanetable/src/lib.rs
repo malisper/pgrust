@@ -155,24 +155,39 @@ const BYTES_KEY_WORDS: usize = 3;
 struct RowStore {
     chunks: Vec<Box<[u64]>>,
     stride_words: usize,
-    rows_per_chunk: usize,
+    // Power-of-two rows per chunk as shift/mask — row_ptr is the probe hot
+    // path's dependent load chain; a runtime div here costs ~2x on the
+    // DRAM-bound curve.
+    chunk_shift: u32,
+    chunk_mask: usize,
     nrows: usize,
 }
 
 impl RowStore {
     fn new(stride_words: usize) -> RowStore {
         debug_assert!(stride_words >= 1);
-        // ~256 KiB chunks (power-of-two row counts keep the index math to
-        // shift/mask when stride allows; plain div is fine — cold path).
+        // ~256 KiB chunks; power-of-two row counts keep the index math to
+        // shift/mask.
         let rows_per_chunk = ((1usize << 15) / stride_words).next_power_of_two().max(64);
-        RowStore { chunks: Vec::new(), stride_words, rows_per_chunk, nrows: 0 }
+        RowStore {
+            chunks: Vec::new(),
+            stride_words,
+            chunk_shift: rows_per_chunk.trailing_zeros(),
+            chunk_mask: rows_per_chunk - 1,
+            nrows: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn rows_per_chunk(&self) -> usize {
+        self.chunk_mask + 1
     }
 
     #[inline(always)]
     fn row_ptr(&self, row: usize) -> *mut u64 {
         debug_assert!(row < self.nrows);
-        let c = row / self.rows_per_chunk;
-        let s = row % self.rows_per_chunk;
+        let c = row >> self.chunk_shift;
+        let s = row & self.chunk_mask;
         // SAFETY: row < nrows ⇒ chunk exists and slot is within the chunk.
         unsafe { self.chunks.get_unchecked(c).as_ptr().add(s * self.stride_words) as *mut u64 }
     }
@@ -181,16 +196,16 @@ impl RowStore {
     #[inline]
     fn alloc(&mut self) -> usize {
         let row = self.nrows;
-        if row == self.chunks.len() * self.rows_per_chunk {
+        if row == self.chunks.len() * self.rows_per_chunk() {
             self.chunks
-                .push(vec![0u64; self.rows_per_chunk * self.stride_words].into_boxed_slice());
+                .push(vec![0u64; self.rows_per_chunk() * self.stride_words].into_boxed_slice());
         }
         self.nrows += 1;
         row
     }
 
     fn mem_used(&self) -> usize {
-        self.chunks.len() * self.rows_per_chunk * self.stride_words * 8
+        self.chunks.len() * self.rows_per_chunk() * self.stride_words * 8
     }
 
     fn clear(&mut self) {
@@ -350,11 +365,12 @@ impl LaneAggTable {
 
     // -- Int keys ----------------------------------------------------------
 
-    /// Probe/insert one canonical i64 key with its [`hash_int`] hash.
+    /// Probe/insert one canonical i64 key with its [`hash_int`] hash. The
+    /// hit path carries NO growth checks (CH shape: grow only on emplace) —
+    /// the insert leg checks/grows first and re-probes.
     #[inline]
     pub fn probe_int(&mut self, key: i64, hash: u64) -> Probe {
         debug_assert_eq!(self.repr, KeyRepr::Int);
-        self.maybe_grow(hash);
         let salted = if self.salt_enabled() { salt_of(hash) } else { 0 };
         let set = self.set_for(hash);
         let mask = set.mask;
@@ -384,7 +400,16 @@ impl LaneAggTable {
     }
 
     #[inline(never)]
-    fn insert_int(&mut self, key: i64, hash: u64, pos: usize) -> Probe {
+    fn insert_int(&mut self, key: i64, hash: u64, mut pos: usize) -> Probe {
+        if self.grow_if_needed(hash) {
+            // Layout changed: recompute the insert position (the key is
+            // known absent — this probe already missed).
+            let set = self.set_for(hash);
+            pos = (hash as usize) & set.mask;
+            while unsafe { *set.entries.get_unchecked(pos) } != 0 {
+                pos = (pos + 1) & set.mask;
+            }
+        }
         let row = self.rows.alloc();
         let p = self.rows.row_ptr(row);
         // SAFETY: fresh zeroed row of stride key_words + state words.
@@ -430,14 +455,20 @@ impl LaneAggTable {
                 }
             }
             PrefetchMode::PreTouch => {
-                // DuckDB: branchless pre-touch of every row's bucket entry.
-                let mut sink = 0u64;
-                for &h in hashes.iter() {
-                    let set = self.set_for(h);
-                    // SAFETY: masked index.
-                    sink ^= unsafe { *set.entries.get_unchecked((h as usize) & set.mask) };
+                // DuckDB: branchless pre-touch of every row's bucket entry —
+                // gated to tables larger than L2 (DuckDB's thread-local
+                // tables are cache-sized so it never needs this gate; ours
+                // grows unbounded and a cache-resident pre-touch is pure
+                // overhead — CH's own prefetch-gate reasoning).
+                if self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES {
+                    let mut sink = 0u64;
+                    for &h in hashes.iter() {
+                        let set = self.set_for(h);
+                        // SAFETY: masked index.
+                        sink ^= unsafe { *set.entries.get_unchecked((h as usize) & set.mask) };
+                    }
+                    std::hint::black_box(sink);
                 }
-                std::hint::black_box(sink);
                 for (i, (&k, &h)) in keys.iter().zip(hashes.iter()).enumerate() {
                     let pr = self.probe_int(k, h);
                     out.push(pr.states);
@@ -503,7 +534,6 @@ impl LaneAggTable {
     #[inline]
     pub fn probe_bytes(&mut self, key: &[u8], hash: u64) -> Probe {
         debug_assert_eq!(self.repr, KeyRepr::Bytes);
-        self.maybe_grow(hash);
         let salted = if self.salt_enabled() { salt_of(hash) } else { 0 };
         let klen = key.len() as u64;
         let packed = if key.len() <= 8 { pack8(key) } else { 0 };
@@ -547,7 +577,15 @@ impl LaneAggTable {
     }
 
     #[inline(never)]
-    fn insert_bytes(&mut self, key: &[u8], hash: u64, pos: usize, packed: u64) -> Probe {
+    fn insert_bytes(&mut self, key: &[u8], hash: u64, mut pos: usize, packed: u64) -> Probe {
+        if self.grow_if_needed(hash) {
+            // Layout changed: recompute (key known absent — probe missed).
+            let set = self.set_for(hash);
+            pos = (hash as usize) & set.mask;
+            while unsafe { *set.entries.get_unchecked(pos) } != 0 {
+                pos = (pos + 1) & set.mask;
+            }
+        }
         let w0 = if key.len() <= 8 {
             packed
         } else {
@@ -605,18 +643,22 @@ impl LaneAggTable {
         }
     }
 
-    /// Pre-insert growth gate: grow the target entry set when its fill
-    /// crosses 0.5 (growth keeps every probe ≤ a handful of steps at these
-    /// fills — CH's own bet), converting to two-level at the CH threshold.
-    #[inline(always)]
-    fn maybe_grow(&mut self, hash: u64) {
+    /// Pre-INSERT growth gate (never on the hit path): grow the target
+    /// entry set when its fill would cross 0.5 (CH's bet: low fill keeps
+    /// probes ~1 step), converting to two-level at the CH threshold.
+    /// Returns true when any layout changed (caller re-derives positions).
+    fn grow_if_needed(&mut self, hash: u64) -> bool {
+        let mut changed = false;
         if self.buckets.is_none() && self.total_members + 1 > TWO_LEVEL_THRESHOLD {
             self.convert_two_level();
+            changed = true;
         }
         let set = self.set_for(hash);
         if set.needs_grow() {
             self.grow_set(hash);
+            changed = true;
         }
+        changed
     }
 
     #[cold]
