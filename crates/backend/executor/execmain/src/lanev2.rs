@@ -727,6 +727,11 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
         ::nodeseqscan::seq_scan_batch_key(self.node, i)
     }
+
+    #[inline]
+    fn topk_key_lane(&self, n: u32) -> Option<(&[::datum::Datum], &[bool], &[u64])> {
+        ::nodeseqscan::seq_scan_topk_key_lane(self.node, n)
+    }
 }
 
 // ===========================================================================
@@ -2976,10 +2981,15 @@ fn sort_feed_if_needed<'mcx>(
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
             arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
-            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
+            // Streaming top-k cutoff (bounded sorts over an admitted
+            // qual-less seqscan; None = feed unfiltered, exactly as before).
+            // Composes with the direct-key put: the keep-mask filters first,
+            // then the direct-key arm reads only surviving rows.
+            let topk = topk_cut_arm(state, ss, estate);
+            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate, topk)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
-            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)
+            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate, None)
         }
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
@@ -2988,6 +2998,7 @@ fn sort_feed_if_needed<'mcx>(
             IndexOnlyScanEmit,
             outer_desc,
             estate,
+            None,
         ),
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
@@ -3003,6 +3014,7 @@ fn sort_feed_if_needed<'mcx>(
                 BitmapHeapScanEmit,
                 outer_desc,
                 estate,
+                None,
             )
         }
         _ => unreachable!("memoized sort verdict admitted a non-scan child"),
@@ -3071,6 +3083,7 @@ fn sort_feed<'mcx, S, O>(
     mut op: O,
     outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
     estate: &mut EStateData<'mcx>,
+    topk: Option<TopkCut>,
 ) -> PgResult<()>
 where
     S: Source<'mcx>,
@@ -3084,10 +3097,198 @@ where
     let key_direct = ::nodesort::sort_lane_is_datum(sort) && op.arm_sort_key(scan, estate);
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = SortBreakerSink { sort, key_direct };
+    let mut sink = SortBreakerSink { sort, key_direct, topk: topk.map(TopkCutState::new) };
     drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
     estate.es_direction = dir;
     Ok(())
+}
+
+// ===========================================================================
+// Streaming top-k cutoff on the sort-breaker feed (cbstore-v2 plan §2.8;
+// ClickHouse PartialSortingTransform's threshold filter, our shape). For a
+// bounded (top-N) sort, once the tuplesort's bounded heap is FULL every
+// further put is compare-against-the-k-th-boundary-and-usually-discard. The
+// pre-filter hoists that discard in front of the breaker: each staged batch
+// is compared VECTORIZED (the existing `qual_bitmap_cmp_const` kernel, with
+// the tuplesort's live k-th boundary datum as the "const") against the
+// staged leading-key lane, and rows that cannot make the top k are skipped
+// without an emit or a tuplesort put.
+//
+// CORRECTNESS INVARIANT (the proof the admission rules exist to keep): the
+// pre-filter may skip EXACTLY rows the tuplesort itself would discard with
+// no observable side effect. Piecewise:
+//   * A bounded tuplesort in TSS_BOUNDED discards an incoming tuple iff
+//     full_cmp(tuple, root) >= 0, where `root` (the bounded heap's top under
+//     the reversed comparator) is the current WORST surviving member and
+//     `full_cmp` is the full multi-key comparator (tuplesort.rs
+//     `puttuple_bounded`).
+//   * The pre-filter discards row R iff R's LEADING key is STRICTLY worse
+//     than the boundary's leading key: `keep = R.k1 <op-order> boundary.k1
+//     OR ties` — implemented as the non-strict keep compare (ASC keeps
+//     `k1 <= b`, DESC keeps `k1 >= b`). Strictly-worse on the leading key
+//     forces full_cmp(R, root) > 0 regardless of later keys — the multi-key
+//     comparator is lexicographic — so every skipped row is a row tuplesort
+//     would discard. Leading-key TIES ALWAYS PASS (they can still win on
+//     later keys); equal-or-better rows always pass. Datum-sort ties also
+//     pass and the tuplesort re-judges them — a pure subset, never a
+//     different verdict.
+//   * NULL leading keys are never pre-filtered (the keep mask ORs the
+//     lane's null bits): a NULL's rank depends on NULLS FIRST/LAST, and the
+//     tuplesort's own comparator is the authority. A NULL boundary disables
+//     the batch's pre-filter entirely (nothing compares strictly-worse
+//     against NULL through the kernel; conservative pass-through).
+//   * Deform-fallback rows (no staged lane value) always pass.
+//   * The boundary only TIGHTENS as puts replace the root (the reversed
+//     heap's top is monotonically non-worsening in forward order), so the
+//     once-per-batch boundary snapshot is stale-but-conservative: it only
+//     lets through rows the tuplesort then judges itself.
+//   * Skipping a row skips its emit body, so admission requires the emit to
+//     be observation-free per row: NO scan qual (a qual evaluation C would
+//     have run — including its possible error — must not be elided) and
+//     only pure-Var projections (the single Var-copy kernel or the all-Var
+//     census list — never a computing column). Under that shape a
+//     skipped row's only C-side effects were the tuplesort compare+discard
+//     (and its per-row CHECK_FOR_INTERRUPTS; the filtered path keeps one
+//     CFI per staged batch, the lane's page-level cadence floor).
+//   * By-value leading keys only (the CmpOp kernel families): the boundary
+//     datum read from the heap root must not dangle when a later put in the
+//     same batch evicts the root's tuple.
+// Net: the same rows reach the tuplesort as would have survived its own
+// bounded discards, in the same order, and the sorted output is
+// byte-identical. This is a pure skip optimization with zero refusal
+// surface — non-admission simply feeds the sort unfiltered, exactly as
+// before.
+// ===========================================================================
+
+/// Armed pre-filter spec: the vectorized KEEP comparison (`key <= boundary`
+/// for ASC / `key >= boundary` for DESC, in the leading key's kernel
+/// family). Rows failing it (non-null, staged) are strictly worse than the
+/// k-th boundary on the leading key and are skipped.
+#[derive(Clone, Copy)]
+struct TopkCut {
+    keep: ::execexpr::CmpOp,
+}
+
+/// Map the sort's leading-key ORDER operator (the `<` or `>` operator's
+/// kernel image) to the non-strict KEEP compare of the same family. `None`
+/// refuses: cross-width families never appear as sort operators (both sides
+/// are the key's own type) and everything else is outside the kernel
+/// vocabulary.
+fn topk_keep_op(cmp: ::execexpr::CmpOp) -> Option<::execexpr::CmpOp> {
+    use ::execexpr::CmpOp::*;
+    Some(match cmp {
+        Int2Lt => Int2Le,
+        Int2Gt => Int2Ge,
+        Int4Lt => Int4Le,
+        Int4Gt => Int4Ge,
+        Int8Lt => Int8Le,
+        Int8Gt => Int8Ge,
+        OidLt => OidLe,
+        OidGt => OidGe,
+        Float4Lt => Float4Le,
+        Float4Gt => Float4Ge,
+        Float8Lt => Float8Le,
+        Float8Gt => Float8Ge,
+        _ => return None,
+    })
+}
+
+/// Admission + arming for the top-k cutoff over a seqscan-fed bounded sort.
+/// `None` = not admitted; the feed runs unfiltered (never a lane refusal).
+/// Admits: bounded sort; leading sort key resolvable to a scan column (no
+/// projection, the lone `JustAssignVar` Var-copy, or an all-Var census
+/// projection); NO scan qual (skipped
+/// rows must have no observable per-row evaluation — see the invariant
+/// block); leading-key order operator inside the by-value kernel compare
+/// vocabulary (int2/4/8, oid, float4/8; ASC and DESC, any NULLS placement);
+/// and the key column stageable by the fixed-width SoA prefix deform.
+fn topk_cut_arm<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<TopkCut> {
+    if !state.bounded {
+        return None;
+    }
+    let plan = state.plan;
+    if plan.numCols < 1 || plan.sortColIdx.is_empty() {
+        return None;
+    }
+    // Resolve the sort's leading INPUT column (1-based over the scan's
+    // output) to a scan attnum (0-based).
+    let oc = plan.sortColIdx[0];
+    if oc < 1 {
+        return None;
+    }
+    let attnum = match ss.ss.ps_ProjInfo.as_ref() {
+        None => (oc - 1) as u16,
+        Some(p) => match p.pi_state.kernel() {
+            ::execexpr::Kernel::JustAssignVar {
+                src: ::execexpr::SlotSrc::Scan,
+                attnum,
+                resultnum: 0,
+            } if oc == 1 => attnum,
+            _ => {
+                // Multi-column projections admit only the pure Var-copy list
+                // (the ready-time scan-projection census, subplan/param-free
+                // by construction, with NO arith columns): a skipped row
+                // skips its projection, and only Var passthroughs are
+                // guaranteed observation-free (an elided arith evaluation
+                // could elide C's error). The sort's leading input column
+                // then maps through the census to its scan attnum.
+                let cols = p.pi_state.scan_proj_cols()?;
+                if cols.any_arith() || (oc as usize) > cols.n as usize {
+                    return None;
+                }
+                match cols.cols[(oc - 1) as usize] {
+                    ::execexpr::ScanProjCol::Var { attnum } => attnum,
+                    _ => return None,
+                }
+            }
+        },
+    };
+    // Kernel admission: order operator -> its comparison-function kernel ->
+    // the keep compare. `get_opcode` is one syscache read per feed.
+    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
+    let keep = topk_keep_op(::execexpr::CmpOp::for_fn_oid(opfn)?)?;
+    // Key-lane staging (refuses qual-bearing scans and foreign SoA arming).
+    if !::nodeseqscan::seq_scan_topk_key_arm(ss, estate, attnum) {
+        return None;
+    }
+    stats::tick_owned(ShapeClass::TopkCut);
+    lane_trace("topk cutoff armed (sort feed)");
+    Some(TopkCut { keep })
+}
+
+/// Compute the keep mask for one staged batch, or `None` when the pre-filter
+/// is not engaged for this batch (heap not yet full, NULL boundary, or no
+/// staged key lane). Bits: `keep = (!isnull && key KEEP-cmp boundary) ||
+/// isnull || fallback` over staged rows `0..n`; bits at `n..` are garbage
+/// and never consulted.
+fn topk_keep_mask<'mcx, E: BatchEmit<'mcx>>(
+    cut: TopkCut,
+    sort: &::nodesort::SortState<'mcx>,
+    emit: &E,
+    n: u32,
+) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+    let (boundary, bnull) = ::nodesort::sort_lane_topk_boundary(sort)?;
+    if bnull {
+        return None;
+    }
+    let (values, isnull, fallback) = emit.topk_key_lane(n)?;
+    debug_assert!(values.len() == n as usize && isnull.len() == n as usize);
+    let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
+    ::execexpr::qual_bitmap_cmp_const(cut.keep, boundary, values, isnull, &mut sel);
+    // NULL keys and deform-fallback rows always pass through to the
+    // tuplesort's own comparator.
+    for (w, (nch, fb)) in isnull.chunks(64).zip(fallback).enumerate() {
+        let mut nulls = 0u64;
+        for (j, &isn) in nch.iter().enumerate() {
+            nulls |= (isn as u64) << j;
+        }
+        sel[w] |= nulls | fb;
+    }
+    Some(sel)
 }
 
 /// The breaker's `Sink` face (pipeline N endpoint). Holds the sort node by
@@ -3099,6 +3300,33 @@ struct SortBreakerSink<'a, 'mcx> {
     /// Direct sort-key feed armed for this feed (datum sort whose key the
     /// leaf serves straight from its staged column — `sort_feed`'s probe).
     key_direct: bool,
+    /// Armed streaming top-k cutoff (see the invariant block above); `None`
+    /// = feed unfiltered.
+    topk: Option<TopkCutState>,
+}
+
+/// Per-feed pre-filter state: the armed spec + the zero-cut back-off. On the
+/// adversarial shape (e.g. descending input under an ASC top-k, where every
+/// row beats the boundary) the filter can never cut anything and its
+/// per-batch mask would be pure overhead; consecutive zero-cut batches back
+/// the filter off exponentially (skip 2, 4, … up to 256 batches between
+/// attempts), and any batch that cuts a row resets it. A skipped batch takes
+/// the exact unfiltered path — correctness is untouched either way (pure
+/// skip optimization), this only bounds the overhead of never-winning feeds.
+struct TopkCutState {
+    cut: TopkCut,
+    /// Batches to feed unfiltered before the next filter attempt.
+    skip: u32,
+    /// Consecutive zero-cut filter attempts (drives the back-off width).
+    fails: u32,
+}
+
+impl TopkCutState {
+    const MAX_BACKOFF_SHIFT: u32 = 8; // cap: retry every 256 batches
+
+    fn new(cut: TopkCut) -> TopkCutState {
+        TopkCutState { cut, skip: 0, fails: 0 }
+    }
 }
 
 impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
@@ -3129,7 +3357,23 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         n: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
-        struct Feed<'e, E>(&'e mut E);
+        struct Feed<'e, E> {
+            emit: &'e mut E,
+            /// Streaming top-k keep mask (None = unfiltered feed): cut rows
+            /// answer `emit` with None (the qual-filtered path) and `emit_key`
+            /// with None (which routes them through `emit`, filtering them) —
+            /// mask first, then the direct-key put on survivors.
+            sel: Option<&'e [u64; ::exectuples::SOA_BM_WORDS]>,
+        }
+        impl<'e, E> Feed<'e, E> {
+            #[inline(always)]
+            fn cut(&self, i: u32) -> bool {
+                match self.sel {
+                    Some(sel) => sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0,
+                    None => false,
+                }
+            }
+        }
         impl<'mcx, E: BatchEmit<'mcx>> ::nodesort::SortLaneBatchFeed<'mcx> for Feed<'_, E> {
             #[inline]
             fn emit(
@@ -3137,11 +3381,59 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
                 i: u32,
                 estate: &mut EStateData<'mcx>,
             ) -> PgResult<Option<ExecSlotId>> {
-                self.0.emit(i, estate)
+                if self.cut(i) {
+                    return Ok(None);
+                }
+                self.emit.emit(i, estate)
             }
             #[inline(always)]
             fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
-                self.0.emit_key(i)
+                if self.cut(i) {
+                    // Cut row: fall back to `emit`, which filters it.
+                    return None;
+                }
+                self.emit.emit_key(i)
+            }
+        }
+        // Streaming top-k cutoff: once the bounded heap is full, discard the
+        // batch's cannot-make-top-k rows (strictly worse than the k-th
+        // boundary on the leading key) before any emit or tuplesort put.
+        // The mask computation completes before the put loop (the lane
+        // borrow ends), and survivors take the EXACT unfiltered put path
+        // (including the direct-key arm when q9triage's probe armed it).
+        if let Some(tk) = self.topk.as_mut() {
+            if tk.skip > 0 {
+                tk.skip -= 1;
+            } else if let Some(sel) = topk_keep_mask(tk.cut, self.sort, &*emit, n) {
+                // The skipped rows' per-row CFIs (emit-side and the
+                // tuplesort discard's) are elided; keep the lane's
+                // page-batch cadence floor of one check per staged batch.
+                ::postgres_seams::check_for_interrupts::call()?;
+                let kept: u32 = (pos..n)
+                    .map(|i| ((sel[(i / 64) as usize] >> (i % 64)) & 1) as u32)
+                    .sum();
+                let cut_rows = n - pos - kept;
+                if cut_rows == 0 {
+                    // Nothing cuttable at the current boundary: back off.
+                    tk.fails = (tk.fails + 1).min(TopkCutState::MAX_BACKOFF_SHIFT);
+                    tk.skip = 1u32 << tk.fails;
+                    // All bits set over pos..n — the put loop below would be
+                    // the unfiltered feed with a dead bit test; fall through
+                    // to the plain path instead.
+                } else {
+                    tk.fails = 0;
+                    if stats::armed() {
+                        stats::tick_topkcut_rows((n - pos) as u64, cut_rows as u64);
+                    }
+                    return ::nodesort::sort_lane_put_batch(
+                        self.sort,
+                        estate,
+                        pos,
+                        n,
+                        self.key_direct,
+                        &mut Feed { emit, sel: Some(&sel) },
+                    );
+                }
             }
         }
         ::nodesort::sort_lane_put_batch(
@@ -3150,7 +3442,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
             pos,
             n,
             self.key_direct,
-            &mut Feed(emit),
+            &mut Feed { emit, sel: None },
         )
     }
 }
@@ -3430,10 +3722,12 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
         match &mut **outer {
             crate::procnode::PlanStateNode::SeqScan(ss) => {
-                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
+                // A sort under a sorted agg is never bounded (no LIMIT
+                // pushdown crosses the agg): no top-k cutoff to arm.
+                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate, None)?
             }
             crate::procnode::PlanStateNode::IndexScan(is) => {
-                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
+                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate, None)?
             }
             crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
                 state,
@@ -3442,6 +3736,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
                 IndexOnlyScanEmit,
                 outer_desc,
                 estate,
+                None,
             )?,
             crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
                 let b = &mut **b;
@@ -3455,6 +3750,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
                     BitmapHeapScanEmit,
                     outer_desc,
                     estate,
+                    None,
                 )?
             }
             _ => unreachable!("memoized sort verdict admitted a non-scan child"),

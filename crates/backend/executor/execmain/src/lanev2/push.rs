@@ -179,6 +179,16 @@ pub(super) trait BatchEmit<'mcx> {
     fn emit_key(&mut self, _i: u32) -> Option<(::datum::Datum, bool)> {
         None
     }
+
+    /// Staged leading-sort-key lane of the current batch for the sort
+    /// breaker's streaming top-k cutoff: `(values, isnull, fallback_words)`
+    /// over the first `n` staged rows, or `None` when no key lane is staged
+    /// (the default — only the seqscan emit face arms one). The sink may
+    /// consult this only when its own top-k pre-filter was armed against the
+    /// SAME node (the arm and the emit face are wired together per feed).
+    fn topk_key_lane(&self, _n: u32) -> Option<(&[::datum::Datum], &[bool], &[u64])> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3

@@ -1128,6 +1128,30 @@ impl Tuplesort {
         })
     }
 
+    /// Streaming top-k cutoff boundary (lane-v2 sort-feed pre-filter; no C
+    /// counterpart — a pure read of bounded-heap state). While the bounded
+    /// heap is full (`TSS_BOUNDED`, entered at `make_bounded_heap`), the heap
+    /// root `memtuples[0]` is the WORST surviving top-k member under the
+    /// reversed comparator — the current k-th boundary. Returns its leading
+    /// sort-key datum (`datum1`, authentic: `set_bound` disarms abbreviation)
+    /// and null flag; `None` outside `TSS_BOUNDED` (heap not yet full, or not
+    /// a bounded sort).
+    ///
+    /// SOUND FOR BY-VALUE LEADING KEYS ONLY: for by-ref keys `datum1` points
+    /// into the root's stored tuple, which is freed the moment a later put
+    /// evicts it (`puttuple_bounded_replace`). The lane admits only by-value
+    /// kernel families, so the returned Datum is a plain value copy.
+    pub fn topk_boundary(&self) -> Option<(Datum, bool)> {
+        self.0.with(|st| {
+            if st.status != TupSortStatus::Bounded {
+                return None;
+            }
+            debug_assert!(st.bounded && st.have_datum1 && st.abbrev.is_none());
+            let root = st.memtuples.first()?;
+            Some((root.datum1, root.isnull1))
+        })
+    }
+
     /// `tuplesort_reset`: recycle the batch, keep keys + memtuples capacity.
     pub fn reset(&mut self) {
         self.0.with_mut(|st| {
