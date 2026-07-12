@@ -874,6 +874,7 @@ fn agg_hash_build_fold_feed<'mcx>(
         }
         if !idxs.is_empty() {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            let aggcx = ::nodeagg::agg_aggcontext(agg);
             // SAFETY: `groups[k]` is the live pergroup array the probe just
             // installed for staged row `idxs[k]` (hash entries and their
             // additional blocks are allocation-stable for the table's
@@ -882,15 +883,19 @@ fn agg_hash_build_fold_feed<'mcx>(
             // valid deformed lane values for every plan column (the SoA
             // prefix covers the evaltrans fetch bound); AvgAccum pergroups
             // hold the catalog's `{0,0}` int8[2] transarray, datum-copied per
-            // group at entry initialization; guarded plans passed
+            // group at entry initialization; Int128AvgAccum pergroups are
+            // NULL or hold the aggcontext state the transfn chain installed,
+            // and `aggcx` is that same aggcontext; guarded plans passed
             // `check_guards` above.
             match ::nodeseqscan::seq_scan_batch_soa(ss) {
                 Some(soa) => unsafe {
-                    ::lanefold::fold_rows_grouped(plan, soa, &idxs, &groups)
+                    ::lanefold::fold_rows_grouped(plan, soa, &idxs, &groups, aggcx)?
                 },
                 None => {
                     debug_assert!(plan.cols.is_empty());
-                    unsafe { ::lanefold::fold_rows_grouped(plan, &NoCols, &idxs, &groups) }
+                    unsafe {
+                        ::lanefold::fold_rows_grouped(plan, &NoCols, &idxs, &groups, aggcx)?
+                    }
                 }
             }
         }

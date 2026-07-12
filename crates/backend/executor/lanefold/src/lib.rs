@@ -7,8 +7,9 @@
 //
 // KEPT (the vertical slice's core):
 // - The `classify_trans` transfn-oid whitelist: COUNT(*)/COUNT(any),
-//   SUM/AVG(int2/int4), MIN/MAX(int2/int4/int8/date/timestamp/timestamptz),
-//   over a bare outer Var or an admitted affine OpExpr
+//   SUM/AVG(int2/int4), SUM/AVG(int8) (Phase-3 extension: int8_avg_accum's
+//   Int128AggState carrier), MIN/MAX(int2/int4/int8/date/timestamp/
+//   timestamptz), over a bare outer Var or an admitted affine OpExpr
 //   (`(v / divk) * mulk + addend` from int24pl/int42mi/int4mul/int24div/...).
 // - The TYPE-level non-erroring proof (`safe_interval`/`type_proof`): an
 //   admitted expression is only folded unchecked when every value of the
@@ -53,17 +54,23 @@
 // 1. If `plan.guarded`, run `check_guards(&plan, &cols, rows, zone_minmax)`;
 //    on `GuardCheck::Demote` run the WHOLE batch through the checked per-row
 //    program (never mix a partial fold with per-row transitions).
-// 2. Ungrouped (one group): `fold_batch(&plan, &cols, rows, nrows, pergroup)`.
+// 2. Ungrouped (one group): `fold_batch(&plan, &cols, rows, nrows, pergroup,
+//    aggcx)`.
 // 3. Grouped: after the per-row hash probe snapshots each row's pergroup
-//    pointer, `fold_rows_grouped(&plan, &cols, &idxs, &groups)`.
+//    pointer, `fold_rows_grouped(&plan, &cols, &idxs, &groups, aggcx)`.
 // AvgAccum pergroups must be initialized with `new_int8_transarray` (C's
 // non-null initval); Sum/Min/Max start `no_trans_value`/NULL per C.
+// Int128AvgAccum (sum/avg(int8)) needs no pre-init: its INTERNAL
+// Int128AggState is lazily allocated by the fold in `aggcx` — the SAME
+// aggcontext the per-row `int8_avg_accum` reaches via fcinfo->context, so
+// fold-fed and demoted/residual batches accumulate into one shared state.
 //
 // Anything not admitted classifies out (fail-open, per transition): the
 // breaker falls back to its per-row transition program for that agg shape.
 
 use core::ptr::NonNull;
 
+use ::adt_numeric::aggregates::{do_int128_accum, Int128AggState};
 use ::datum::Datum;
 use ::execexpr::{AggPerGroup, AggTransSpec, OUTER_VAR};
 use ::exectuples::SoaBatch;
@@ -72,6 +79,7 @@ use ::types_core::catalog::{
     DATEOID, INT2OID, INT4OID, INT8OID, TIMESTAMPOID, TIMESTAMPTZOID,
 };
 use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::types_nodes::node_tree::Node;
 
 #[cfg(test)]
@@ -83,6 +91,7 @@ const F_INT2_SUM: Oid = 1840;
 const F_INT4_SUM: Oid = 1841;
 const F_INT2_AVG_ACCUM: Oid = 1962;
 const F_INT4_AVG_ACCUM: Oid = 1963;
+const F_INT8_AVG_ACCUM: Oid = 2746;
 const F_INT4LARGER: Oid = 768;
 const F_INT4SMALLER: Oid = 769;
 const F_INT2LARGER: Oid = 770;
@@ -149,6 +158,12 @@ pub enum LaneKind {
     Sum,
     // int2/int4_avg_accum: in-place {count,sum} int8[2] transarray.
     AvgAccum,
+    // int8_avg_accum (sum(int8) AND avg(int8) share it): INTERNAL
+    // Int128AggState {n, sum_x} pointer, NULL initval, NOT strict — C
+    // allocates the state in the aggcontext on the group's FIRST transfn
+    // call (null-input rows included) and accumulates only non-null inputs
+    // (numeric.c int8_avg_accum -> do_int128_accum, HAVE_INT128 arm).
+    Int128AvgAccum,
     // strict byval larger/smaller with signed total order.
     Min,
     Max,
@@ -482,6 +497,17 @@ pub fn classify_trans(
         F_INT4_SUM if spec.init_value_is_null => mk(LaneKind::Sum, arg(INT4OID)?),
         F_INT2_AVG_ACCUM if !spec.init_value_is_null => mk(LaneKind::AvgAccum, arg(INT2OID)?),
         F_INT4_AVG_ACCUM if !spec.init_value_is_null => mk(LaneKind::AvgAccum, arg(INT4OID)?),
+        // sum(int8)/avg(int8): bare int8 Var only (classify_arg's OpExpr
+        // admissions are int4-result-only), so no transform and no guard.
+        // TYPE-level non-erroring proof: the transition is
+        // `state.n += 1; state.sum_x += (i128)v` — unchecked int128
+        // arithmetic in C too, and int128 accumulation of int8 terms cannot
+        // reach the rails for any feasible rowcount (2^63-max terms need
+        // > 2^64 rows to leave i128), so the fold can never raise an error
+        // C's per-row evaluation wouldn't.
+        F_INT8_AVG_ACCUM if spec.init_value_is_null => {
+            mk(LaneKind::Int128AvgAccum, arg(INT8OID)?)
+        }
         F_INT2LARGER => mk(LaneKind::Max, arg(INT2OID)?),
         F_INT2SMALLER => mk(LaneKind::Min, arg(INT2OID)?),
         F_INT4LARGER => mk(LaneKind::Max, arg(INT4OID)?),
@@ -538,7 +564,9 @@ pub fn classify<'mcx>(
 }
 
 /// CSE schedule over classified transitions. SumBase: Sum/AvgAccum cluster by
-/// (col, divk) — addend/mulk live in the per-member derivation; a CountAny
+/// (col, divk) — addend/mulk live in the per-member derivation (Int128AvgAccum
+/// stays OUT: its carrier is i128, not the i64 SumBase pass; sum(int8) +
+/// avg(int8) over one column fold as independent per-trans kernels); a CountAny
 /// joins any cluster on its col (the non-null count is transform-independent),
 /// else CountAnys cluster by col alone. MinMax: exact structural duplicates
 /// (same kind/col/transform) share one batch scan. Groups need >= 2 members
@@ -684,6 +712,55 @@ fn avg_apply(pg: &mut AggPerGroup, c: i64, delta: i64) {
     }
 }
 
+// C int8_avg_accum's makePolyNumAggState arm (numeric.c 5911): get the
+// group's aggcontext-lived Int128AggState, allocating it on the group's
+// first transfn call. The caller invokes this exactly when C would call the
+// (non-strict) transfn — once per selected row, NULL inputs included — so
+// the allocated-vs-NULL state distinction stays bit-equal to the per-row
+// program even for all-NULL groups (observable through int8_avg_serialize
+// under a partial-agg finalize: NULL trans vs an n=0 state serialize
+// differently). `no_trans_value` is deliberately left untouched: the
+// per-row non-strict byval trans step (execexpr agg_trans_byval) never
+// writes it, and a fold-then-demote group must present the exact pergroup
+// image the per-row program produces.
+#[inline]
+fn int128_state(pg: &mut AggPerGroup, aggcx: Mcx<'_>) -> PgResult<*mut Int128AggState> {
+    if !pg.trans_value_is_null {
+        return Ok(pg.trans_value.as_usize() as *mut Int128AggState);
+    }
+    const { assert!(!core::mem::needs_drop::<Int128AggState>()) }
+    let layout = core::alloc::Layout::new::<Int128AggState>();
+    let raw =
+        ::mcx::Allocator::allocate(&aggcx, layout).map_err(|_| aggcx.oom(layout.size()))?;
+    let p = raw.cast::<Int128AggState>().as_ptr();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(Int128AggState::new(false)) };
+    pg.trans_value = Datum::from_usize(p as usize);
+    pg.trans_value_is_null = false;
+    Ok(p)
+}
+
+// (non-null count, Σv as i128) over selected rows of an int8 lane. The i128
+// batch sum is EXACT (never wraps): |Σ| <= nrows * 2^63 << 2^127 for any
+// batch a staged window can hold, so adding it to the running state.sum_x
+// once is bit-equal to C's per-row `sum_x += (int128)v` sequence (int128
+// addition is associative when no step overflows, and the running sum has
+// C's own overflow envelope — leaving i128 needs > 2^64 max-magnitude rows,
+// infeasible; C's accumulation is equally unchecked).
+#[inline(always)]
+fn sum128_selected(t: &LaneTrans, values: &[Datum], isnull: &[bool], rows: &[u64]) -> (i64, i128) {
+    debug_assert_eq!((t.addend, t.mulk, t.divk), (0, 1, 1), "bare-Var admission only");
+    let mut c = 0i64;
+    let mut s = 0i128;
+    for_each_row(rows, |i| {
+        if !isnull[i] {
+            c += 1;
+            s += lane_value(values, t.width, i) as i128;
+        }
+    });
+    (c, s)
+}
+
 /// One {count,sum} int8[2] transarray in `mcx`, header shaped exactly as C
 /// construct_array produces it (4B varlena, 1-D, dataoffset 0 = no nulls,
 /// int8 elems, dim 2, lbound 1) — the AvgAccum pergroup's non-null initval.
@@ -745,15 +822,19 @@ fn cse_delta(t: &LaneTrans, c: i64, s: i64) -> i64 {
 /// transno in the plan; rows selected by `rows` carry valid lane values in
 /// `cols` for every plan column (`rows` has one bit per staged row,
 /// `nrows <= rows.len() * 64`); AvgAccum pergroups hold a live
-/// `new_int8_transarray`-shaped transvalue. If the plan is guarded, the
-/// caller must have run `check_guards` on this batch and gotten `Pass`.
+/// `new_int8_transarray`-shaped transvalue; Int128AvgAccum pergroups are
+/// either NULL or hold a live aggcontext `Int128AggState` pointer, and
+/// `aggcx` IS that aggcontext (the arena the per-row transfn reaches via
+/// fcinfo->context). If the plan is guarded, the caller must have run
+/// `check_guards` on this batch and gotten `Pass`.
 pub unsafe fn fold_batch(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
     rows: &[u64],
     nrows: usize,
     pergroup_base: NonNull<AggPerGroup>,
-) {
+    aggcx: Mcx<'_>,
+) -> PgResult<()> {
     let nsel: u32 = rows.iter().map(|w| w.count_ones()).sum();
     for g in plan.cse.iter() {
         let members = &plan.cse_members[g.start as usize..(g.start + g.len) as usize];
@@ -856,6 +937,23 @@ pub unsafe fn fold_batch(
                     avg_apply(pg, c, s);
                 }
             }
+            LaneKind::Int128AvgAccum => {
+                // C calls the non-strict transfn once per SELECTED row (NULL
+                // inputs included), so any selected row allocates the state;
+                // only the non-null inputs accumulate (see sum128_selected
+                // for the reassociation proof).
+                let (c, s) = sum128_selected(t, values, isnull, rows);
+                if nsel > 0 {
+                    let st = int128_state(pg, aggcx)?;
+                    // SAFETY: aggcontext-lived state installed by
+                    // int128_state or the per-row transfn chain (caller
+                    // contract); sole reference during the fold.
+                    unsafe {
+                        (*st).n += c;
+                        (*st).sum_x += s;
+                    }
+                }
+            }
             LaneKind::Min | LaneKind::Max => {
                 let mut m: Option<i64> = None;
                 let want_max = t.kind == LaneKind::Max;
@@ -880,6 +978,7 @@ pub unsafe fn fold_batch(
             }
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -983,14 +1082,17 @@ fn for_each_row(rows: &[u64], mut f: impl FnMut(usize)) {
 /// `groups[k]` is the live pergroup array the hash lookup installed for row
 /// `idxs[k]` of this batch (entries are never moved or freed within a batch;
 /// spill mode only redirects NEW groups); `idxs` rows carry valid lane values
-/// for every plan column; AvgAccum pergroups hold a live transarray. Guarded
+/// for every plan column; AvgAccum pergroups hold a live transarray;
+/// Int128AvgAccum pergroups are NULL or hold a live aggcontext
+/// `Int128AggState` pointer, with `aggcx` that same aggcontext. Guarded
 /// plans require a prior `check_guards` `Pass` on this batch.
 pub unsafe fn fold_rows_grouped(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
     idxs: &[u32],
     groups: &[NonNull<AggPerGroup>],
-) {
+    aggcx: Mcx<'_>,
+) -> PgResult<()> {
     debug_assert_eq!(idxs.len(), groups.len());
     for t in plan.trans.iter() {
         let transno = t.transno as usize;
@@ -1006,6 +1108,29 @@ pub unsafe fn fold_rows_grouped(
         }
         let (values, isnull) =
             (cols.col_values(t.col as usize), cols.col_isnull(t.col as usize));
+        if t.kind == LaneKind::Int128AvgAccum {
+            // Dedicated row loop: the non-strict transfn runs for NULL
+            // inputs too (state alloc on the group's first row of any
+            // nullness — C parity), so this kind must not take the shared
+            // skip-null path below.
+            debug_assert_eq!((t.addend, t.mulk, t.divk), (0, 1, 1), "bare-Var admission only");
+            for (&i, &g) in idxs.iter().zip(groups.iter()) {
+                let i = i as usize;
+                // SAFETY: caller contract.
+                let pg = unsafe { &mut *g.as_ptr().add(transno) };
+                let st = int128_state(pg, aggcx)?;
+                if !isnull[i] {
+                    // SAFETY: aggcontext-lived state from int128_state or
+                    // the per-row transfn chain; sole reference here —
+                    // bit-identical by construction (the per-row path's own
+                    // transition body).
+                    unsafe {
+                        do_int128_accum(&mut *st, lane_value(values, t.width, i) as i128)
+                    };
+                }
+            }
+            continue;
+        }
         for (&i, &g) in idxs.iter().zip(groups.iter()) {
             let i = i as usize;
             if isnull[i] {
@@ -1015,7 +1140,7 @@ pub unsafe fn fold_rows_grouped(
             let pg = unsafe { &mut *g.as_ptr().add(transno) };
             let v = xform(t, lane_value(values, t.width, i));
             match t.kind {
-                LaneKind::CountStar => unreachable!(),
+                LaneKind::CountStar | LaneKind::Int128AvgAccum => unreachable!(),
                 LaneKind::CountAny => count_apply(pg, 1),
                 LaneKind::Sum => sum_apply(pg, v),
                 LaneKind::AvgAccum => avg_apply(pg, 1, v),
@@ -1025,4 +1150,5 @@ pub unsafe fn fold_rows_grouped(
             }
         }
     }
+    Ok(())
 }

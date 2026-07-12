@@ -2999,6 +2999,16 @@ pub fn agg_lanefold_plan<'a, 'mcx>(
     node.lanefold.as_ref().map(|lf| &lf.plan)
 }
 
+/// The node's aggcontext arena — C's curaggcontext, the context transfns
+/// reach via fcinfo->context (`AggCheckCallContext`). The lane fold allocates
+/// INTERNAL transition states (lanefold `Int128AvgAccum`) here so fold-fed
+/// and per-row/demoted batches accumulate into one shared state.
+pub fn agg_aggcontext<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
+    // SAFETY: agg_node is the node's own arena-boxed AggStateNode, live for
+    // the node's lifetime; no &mut to it is formed during this borrow.
+    unsafe { node.agg_node.as_ref() }.aggcontext()
+}
+
 /// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
 /// program split — prepare/lookup per row (spill-mode misses spill the tuple
 /// identically), then only the RESIDUAL transitions (the transnos classify
