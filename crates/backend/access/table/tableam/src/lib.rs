@@ -986,6 +986,20 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
     }
 }
 
+/// As `table_scan_supports_pagebatch`, but also admits parallel scan
+/// descriptors: the batched page feed (`heap_getnextpagebatch` →
+/// `pagemode_next_page` → `heap_fetch_next_buffer`) acquires blocks through
+/// `parallel_next_block` — the shared DSM block cursor — exactly as the
+/// per-tuple pagemode walk does, so page-at-a-time batching partitions blocks
+/// across workers without gaps or overlaps. The strict gate above stays for
+/// the fused agg/sort/hash drives until each is audited under parallel; only
+/// the lane-v2 SeqScan drive routes here.
+pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool {
+    match scan {
+        TableScanDesc::Heap(h) => (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0,
+    }
+}
+
 /// Relation size at scan start (heap rs_nblocks): the deform-JIT page gate.
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {
