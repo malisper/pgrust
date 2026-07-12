@@ -1554,7 +1554,13 @@ fn agg_arm<'mcx>(
             // refuse. Lane logic + refuse-set live in `lanev2`.
             if crate::lanev2::enabled() {
                 if let Some(r) =
-                    crate::lanev2::try_own_agg_over_seq_scan(agg, ss, lane_choice, estate)?
+                    crate::lanev2::try_own_agg_over_seq_scan(
+                        agg,
+                        ss,
+                        lane_choice,
+                        lane_stage_slot,
+                        estate,
+                    )?
                 {
                     return Ok(r);
                 }

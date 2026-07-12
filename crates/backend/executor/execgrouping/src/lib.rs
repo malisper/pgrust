@@ -105,6 +105,7 @@ const _: () = assert!(core::mem::size_of::<TupleHashEntryData>() == 24);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProbeKernel {
     Expr,
+    Int2 { att: u16 },
     Int4 { att: u16 },
     Int8 { att: u16 },
     /// Single text/varchar key under a DETERMINISTIC collation (resolved once
@@ -130,6 +131,8 @@ impl ProbeKernel {
         {
             let att = (col - 1) as u16;
             match (*hash, *eq) {
+                // hashint2 / int2eq
+                (449, 63) => return ProbeKernel::Int2 { att },
                 (450, 65) => return ProbeKernel::Int4 { att },
                 (949, 467) => return ProbeKernel::Int8 { att },
                 // hashtext / texteq (text and varchar keys), raw-bytes
@@ -489,6 +492,16 @@ impl<'mcx> TupleHashTable<'mcx> {
     pub fn hash_slot(&mut self, input_slot: &mut SlotData<'mcx>) -> PgResult<u32> {
         // NULL hashes as 0, as EEOP_HASHDATUM_FIRST does.
         match self.kernel {
+            ProbeKernel::Int2 { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                let h = if isnull {
+                    0
+                } else {
+                    // C hashint2: hash_uint32((int32) int16-value).
+                    ::hashfn::hash_bytes_uint32(key.as_i16() as i32 as u32)
+                };
+                Ok(::hashfn::murmurhash32(h))
+            }
             ProbeKernel::Int4 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
                 let h = if isnull { 0 } else { ::hashfn::hash_bytes_uint32(key.as_u32()) };
@@ -531,6 +544,16 @@ impl<'mcx> TupleHashTable<'mcx> {
         // Kernel match = NOT DISTINCT over the entry's cached key datum.
         let entry_hash = |ix: u32| entries[ix as usize].hash;
         let found = match *kernel {
+            ProbeKernel::Int2 { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                hashtab.find(hash, entry_hash, |ix| {
+                    let e = &entries[ix as usize];
+                    Ok(match (isnull, e.key_isnull) {
+                        (false, false) => e.key.as_i16() == key.as_i16(),
+                        (a, b) => a & b,
+                    })
+                })?
+            }
             ProbeKernel::Int4 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
                 hashtab.find(hash, entry_hash, |ix| {
@@ -622,7 +645,9 @@ impl<'mcx> TupleHashTable<'mcx> {
         core::mem::forget(tup);
 
         let (key, key_isnull) = match self.kernel {
-            ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } => kernel_key(input_slot, att),
+            ProbeKernel::Int2 { att } | ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } => {
+                kernel_key(input_slot, att)
+            }
             // Text caches the key datum INSIDE the stored image (a pointer
             // into the input slot would dangle once the slot advances):
             // deform the just-created copy once per NEW GROUP; stable in
@@ -677,6 +702,10 @@ impl<'mcx> TupleHashTable<'mcx> {
         slot_mcx: Mcx<'mcx>,
     ) -> PgResult<bool> {
         match self.kernel {
+            ProbeKernel::Int2 { .. } => Ok(match (input_key.1, entry.key_isnull) {
+                (false, false) => input_key.0.as_i16() == entry.key.as_i16(),
+                (a, b) => a & b,
+            }),
             ProbeKernel::Int4 { .. } => Ok(match (input_key.1, entry.key_isnull) {
                 (false, false) => input_key.0.as_i32() == entry.key.as_i32(),
                 (a, b) => a & b,
@@ -721,9 +750,10 @@ impl<'mcx> TupleHashTable<'mcx> {
     /// caller must keep the slot live across the `match_tuple` call.
     pub fn kernel_key_of(&self, input_slot: &mut SlotData<'mcx>) -> (Datum, bool) {
         match self.kernel {
-            ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } | ProbeKernel::Text { att, .. } => {
-                kernel_key(input_slot, att)
-            }
+            ProbeKernel::Int2 { att }
+            | ProbeKernel::Int4 { att }
+            | ProbeKernel::Int8 { att }
+            | ProbeKernel::Text { att, .. } => kernel_key(input_slot, att),
             ProbeKernel::Expr => (Datum::null(), true),
         }
     }
@@ -779,6 +809,13 @@ impl<'mcx> TupleHashTable<'mcx> {
         let TupleHashTable { entries, hashtab, kernel, .. } = self;
         let entry_hash = |ix: u32| entries[ix as usize].hash;
         match *kernel {
+            ProbeKernel::Int2 { .. } => hashtab.find(hash, entry_hash, |ix| {
+                let e = &entries[ix as usize];
+                Ok(match (isnull, e.key_isnull) {
+                    (false, false) => e.key.as_i16() == key.as_i16(),
+                    (a, b) => a & b,
+                })
+            }),
             ProbeKernel::Int4 { .. } => hashtab.find(hash, entry_hash, |ix| {
                 let e = &entries[ix as usize];
                 Ok(match (isnull, e.key_isnull) {
@@ -864,6 +901,16 @@ impl<'mcx> TupleHashTable<'mcx> {
         out.clear();
         out.reserve(keys.len());
         match self.kernel {
+            ProbeKernel::Int2 { .. } => {
+                for (&k, &n) in keys.iter().zip(isnull) {
+                    let h = if n {
+                        0
+                    } else {
+                        ::hashfn::hash_bytes_uint32(k.as_i16() as i32 as u32)
+                    };
+                    out.push(::hashfn::murmurhash32(h));
+                }
+            }
             ProbeKernel::Int4 { .. } => {
                 for (&k, &n) in keys.iter().zip(isnull) {
                     let h = if n { 0 } else { ::hashfn::hash_bytes_uint32(k.as_u32()) };
