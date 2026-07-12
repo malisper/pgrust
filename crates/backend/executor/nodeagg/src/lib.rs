@@ -53,9 +53,12 @@ mod gsets;
 pub mod merge;
 
 pub use compact::{
-    agg_hash_compact_armed, agg_hash_compact_batch, agg_hash_compact_disarm,
-    agg_hash_compact_try_arm, CompactArm,
+    agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
+    agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
+    agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_try_arm,
+    agg_hash_compact_try_arm_mk, CompactArm, MkComp, MkCompKind, MkShape,
 };
+pub use ::execgrouping::GroupKeyKind;
 
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
@@ -463,9 +466,9 @@ fn distinct_set_kind(
 // C AggStatePerTransData's transtypeLen/transtypeByVal pair, indexed by
 // transno (drives the initval datumCopy at group init).
 #[derive(Clone, Copy)]
-struct TransTyp {
-    len: i16,
-    byval: bool,
+pub(crate) struct TransTyp {
+    pub(crate) len: i16,
+    pub(crate) byval: bool,
 }
 
 // AGG_SORTED state: firstSlot/grp_firstTuple as two swappable minimal slots
@@ -4007,6 +4010,24 @@ pub fn agg_hash_staged_probe_col(node: &AggStateData<'_>) -> Option<u16> {
         Some((ph.hash_grp_col_idx_input[0] - 1) as u16)
     } else {
         None
+    }
+}
+
+/// Multi-key admission input (multikey spike §2.4): the grouping key
+/// columns' (0-based INPUT colno, packing classification) pairs, in key
+/// order. Empty = not a hashed agg.
+pub fn agg_hash_key_cols(
+    node: &AggStateData<'_>,
+) -> Vec<(u16, ::execgrouping::GroupKeyKind)> {
+    match node.perhash.as_ref() {
+        Some(ph) => ph
+            .hashtable
+            .key_cols()
+            .iter()
+            .enumerate()
+            .map(|(j, kc)| ((ph.hash_grp_col_idx_input[j] - 1) as u16, kc.kind))
+            .collect(),
+        None => Vec::new(),
     }
 }
 
