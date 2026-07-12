@@ -85,10 +85,17 @@ fn detoast_datum<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<mcx::PgVec<'mcx, u8
     detoast::detoast_attr(mcx, raw)
 }
 
+// C: TextDatumGetCString — the element datum is a full varlena (header
+// included); open_image strips the 1B/4B header or detoasts, yielding the
+// payload alone. Routing the full detoast_attr image into text_to_cstring
+// (which takes a post-VARDATA_ANY payload) prepended the 4-byte header to
+// every option name/value ('option "@\0\0\0include-xids" is unknown').
 fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
-    let img = detoast_datum(mcx, d)?;
-    let bytes = varlena::text_to_cstring(mcx, &img)?;
-    Ok(String::from_utf8_lossy(&bytes[..bytes.len().saturating_sub(1)]).into_owned())
+    let ptr = d.as_usize() as *const u8;
+    // SAFETY: a live varlena readable through its full VARSIZE_ANY.
+    let raw = unsafe { core::slice::from_raw_parts(ptr, types_tuple::varatt::varsize_any(ptr)) };
+    let payload = varlena::open_image(mcx, raw)?;
+    Ok(String::from_utf8_lossy(payload.as_bytes()).into_owned())
 }
 
 fn pg_logical_slot_get_changes_guts(
@@ -396,3 +403,25 @@ pub const LOGICALFUNCS_BUILTINS: &[FmgrBuiltin] = &[
         fc_pg_logical_slot_peek_binary_changes,
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The option-array elements arrive as full varlenas; the payload must
+    // exclude the header (006_logical_decoding: 'option "@\0\0\0include-xids"
+    // is unknown' when the 4B header leaked into the option name).
+    #[test]
+    fn text_datum_payload_excludes_varlena_header() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        // 4B-header form, as deconstruct_array yields for "include-xids".
+        let t = varlena::cstring_to_text(mcx, b"include-xids").unwrap();
+        let d = Datum::from_usize(t.as_bytes().as_ptr() as usize);
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), "include-xids");
+        // 1B short form for a 1-byte value like "0".
+        let short = [((2usize << 1) | 1) as u8, b'0'];
+        let d = Datum::from_usize(short.as_ptr() as usize);
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), "0");
+    }
+}

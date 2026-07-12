@@ -196,6 +196,16 @@ pub fn with_pm<R>(f: impl FnOnce(&mut PostmasterState) -> R) -> R {
     PM.with(|pm| f(&mut pm.borrow_mut()))
 }
 
+// C reads/writes its PM-equivalent globals with no aliasing check, so a
+// FATAL raised while a `with_pm` borrow is live (e.g. from deep inside
+// listen_server_port's lock-file reclaim) and drained synchronously by
+// proc_exit's on_proc_exit callbacks can re-enter here on the same thread.
+// try_borrow_mut degrades to a no-op in that case instead of panicking the
+// exit callback (the process is exiting anyway; the OS reclaims the fds).
+pub fn try_with_pm<R>(f: impl FnOnce(&mut PostmasterState) -> R) -> Option<R> {
+    PM.with(|pm| pm.try_borrow_mut().ok().map(|mut guard| f(&mut guard)))
+}
+
 // C `volatile sig_atomic_t` pending flags: real signal handlers run on an
 // arbitrary thread under the thread model, so these are process statics.
 pub static PENDING_PM_SHUTDOWN_REQUEST: AtomicBool = AtomicBool::new(false);
