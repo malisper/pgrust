@@ -1769,8 +1769,8 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan,
             e.cmp_w_imm(12, if force { 0 } else { SVE_SURVIVOR_CROSSOVER });
             e.b_cond(Cond::Lo, lneon);
             emit_sve_extract(e);
-            for c in &generics {
-                emit_dense_clause(e, ctx, prog, c);
+            for (gi, c) in generics.iter().enumerate() {
+                emit_dense_clause(e, ctx, prog, c, gi > 0);
             }
             e.b(lmerge);
             e.bind(lneon);
@@ -1903,26 +1903,35 @@ fn emit_sve_extract(e: &mut Emitter) {
 
 /// One non-vector clause over the extracted survivor list: the dense-index
 /// twin of emit_bits_clause (identical fail path; ascending row order is
-/// COMPACT's — the same order the bit iteration walks). Rows a prior dense
-/// clause failed re-check their pass-word bit and skip.
-fn emit_dense_clause(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, shape: &ClauseShape) {
-    e.str_x(31, 31, SPILL_BITS); // cursor j = 0
+/// COMPACT's — the same order the bit iteration walks). Loop state lives in
+/// the otherwise-unused callee-saved x22 (cursor) / x24 (count) — clause
+/// stencils only clobber x8-x16, so no per-survivor spill traffic. Only
+/// clauses AFTER the first re-check the pass-word bit (a prior dense clause
+/// may have cleared it; the first clause sees the extraction's exact list).
+fn emit_dense_clause(
+    e: &mut Emitter,
+    ctx: &Ctx<'_>,
+    prog: &Program,
+    shape: &ClauseShape,
+    recheck: bool,
+) {
+    e.movz_x(22, 0); // cursor
+    e.ldr_x(24, 31, SURV_CNT);
     let head = e.new_label();
     let done = e.new_label();
     let fail = e.new_label();
     e.bind(head);
-    e.ldr_x(10, 31, SPILL_BITS);
-    e.ldr_x(12, 31, SURV_CNT);
-    e.cmp_x_x(10, 12);
+    e.cmp_x_x(22, 24);
     e.b_cond(Cond::Ge, done);
-    e.add_x_imm(11, 10, 1);
-    e.str_x(11, 31, SPILL_BITS);
     e.add_x_imm(12, 31, SURV_BUF);
-    e.ldr_w_idx2(13, 12, 10); // block-relative survivor index
-    e.ldr_x(14, 31, SPILL_MASK);
-    e.lsrv_x(14, 14, 13);
-    e.and_x_1(14, 14);
-    e.cbz_x(14, head); // failed by an earlier dense clause
+    e.ldr_w_idx2(13, 12, 22); // block-relative survivor index
+    e.add_x_imm(22, 22, 1);
+    if recheck {
+        e.ldr_x(14, 31, SPILL_MASK);
+        e.lsrv_x(14, 14, 13);
+        e.and_x_1(14, 14);
+        e.cbz_x(14, head); // failed by an earlier dense clause
+    }
     e.ldr_x(15, 31, SPILL_BASE);
     e.add_x(ROW, 15, 13);
     let cctx = ctx.with_row_labels(fail, head);
