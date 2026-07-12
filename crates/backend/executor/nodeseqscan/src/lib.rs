@@ -10,8 +10,9 @@ use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgVec};
 use ::tableam::{
     table_beginscan, table_beginscan_parallel, table_endscan, table_parallelscan_initialize,
-    table_parallelscan_reinitialize, table_rescan, table_scan_getnextslot, table_slot_callbacks,
-    ParallelTableScanDescShared,
+    table_parallelscan_reinitialize, table_rescan, table_scan_arm_adaptive_order,
+    table_scan_disarm_adaptive_order, table_scan_getnextslot, table_scan_update_scan_bound,
+    table_slot_callbacks, ParallelTableScanDescShared,
 };
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_nodes::plannodes::SeqScan;
@@ -1091,6 +1092,63 @@ pub fn seq_scan_topk_key_arm<'mcx>(
         return false;
     }
     arm_key_soa(node, estate, attnum)
+}
+
+/// Arm zone-ordered adaptive granule traversal for a bounded-sort (top-N)
+/// feed: the cbstore scan visits granules by the sort key's zone bound
+/// (`min` ascending for ASC, `max` descending for DESC) and stops once the
+/// consumer-fed boundary strictly dominates the next bound
+/// (docs/design/cbstore-zone-adaptive.md). `attnum` is the 0-based scan
+/// column of the sort's LEADING key.
+///
+/// Skipped granules elide their rows' per-row qual evaluation and emit body,
+/// so admission requires both to be observation-free: no scan qual at all,
+/// or a staged whole-qual kernel bitmap (`qual_armed && !lane_requal` — the
+/// kernel/stitch/PREWHERE vocabularies are non-erroring, volatile-free
+/// comparisons by construction; hybrid-requal feeds re-run the full
+/// error-capable qual per survivor and are refused). The projection side is
+/// the caller's admission (pure-Var shapes only, the topk-cut resolution).
+/// The AM arm itself refuses parallel scans, non-cbstore AMs, text keys and
+/// non-exact zone encodings. False = not armed; the physical-order feed
+/// proceeds untouched.
+pub fn seq_scan_adaptive_topk_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    attnum: u16,
+    desc: bool,
+) -> PgResult<bool> {
+    if node.ss.qual.is_some()
+        && !node.batch_soa.as_deref().is_some_and(|b| b.qual_armed && !b.lane_requal)
+    {
+        return Ok(false);
+    }
+    let Some(scan) = node.ss.ss_currentScanDesc.as_mut() else {
+        return Ok(false);
+    };
+    table_scan_arm_adaptive_order(scan, attnum as usize, desc, /* strict */ false)
+}
+
+/// Consumer bound feedback for an armed adaptive traversal: the bounded
+/// sort's current k-th boundary LEADING-key datum (by-value; the lane admits
+/// int-family keys only). No-op when no adaptive order is armed.
+#[inline]
+pub fn seq_scan_adaptive_push_bound(node: &mut SeqScanState<'_>, key: ::datum::Datum) {
+    if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
+        table_scan_update_scan_bound(scan, key);
+    }
+}
+
+/// Demote an armed adaptive traversal back to the physical-order drive and
+/// rescan (the zone-adaptive feed observed an arrival-order-sensitive
+/// boundary tie): disarm at the AM, then `exec_rescan_seq_scan` so the
+/// re-feed restages from row zero in physical claim order.
+pub fn seq_scan_adaptive_disarm_rescan<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
+        table_scan_disarm_adaptive_order(scan);
+    }
+    exec_rescan_seq_scan(node, estate)
 }
 
 /// The staged key lane of the CURRENT page batch for the top-k cutoff

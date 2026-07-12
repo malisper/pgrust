@@ -793,6 +793,11 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     fn topk_key_lane(&self, n: u32) -> Option<(&[::datum::Datum], &[bool], &[u64])> {
         ::nodeseqscan::seq_scan_topk_key_lane(self.node, n)
     }
+
+    #[inline]
+    fn push_topk_bound(&mut self, key: ::datum::Datum) {
+        ::nodeseqscan::seq_scan_adaptive_push_bound(self.node, key);
+    }
 }
 
 // ===========================================================================
@@ -3761,7 +3766,17 @@ fn sort_feed_if_needed<'mcx>(
         }
         stats::tick_owned(ShapeClass::SortFeed);
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        sort_feed(state, &mut aps.agg, HashAggSource, HashAggEmit, outer_desc, None, estate, None)?;
+        sort_feed(
+            state,
+            &mut aps.agg,
+            HashAggSource,
+            HashAggEmit,
+            outer_desc,
+            None,
+            estate,
+            None,
+            false,
+        )?;
         return Ok(true);
     }
     // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
@@ -3771,16 +3786,61 @@ fn sort_feed_if_needed<'mcx>(
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
             arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
+            // Zone-adaptive top-N granule order (cbstore bounded sorts; None
+            // = physical order, exactly as before). Armed BEFORE topk_cut_arm
+            // so both read the staged qual state the staging arm left.
+            let adaptive = adaptive_topk_arm(state, &outer_desc, ss)?;
+            let tracked = adaptive.is_some_and(|a| a.tracked);
             // Streaming top-k cutoff (bounded sorts over an admitted
             // qual-less seqscan; None = feed unfiltered, exactly as before).
             // Composes with the direct-key put: the keep-mask filters first,
             // then the direct-key arm reads only surviving rows.
             let topk = topk_cut_arm(state, ss, estate);
-            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, narrow, estate, topk)?
+            sort_feed(
+                state,
+                ss,
+                SeqScanSource,
+                SeqScanFilterProject,
+                outer_desc.clone(),
+                narrow,
+                estate,
+                topk,
+                tracked,
+            )?;
+            // Tracked adaptive feed: an arrival-order-sensitive tie at the
+            // LIMIT cut (selection OR retained-tie order) demotes — fresh
+            // tuplesort, adaptive disarmed, full physical-order re-feed,
+            // reproducing the never-adaptive feed byte-for-byte.
+            if tracked && ::nodesort::sort_lane_topk_tie_ambiguous(state) {
+                stats::tick_adaptive_topk_demoted();
+                lane_trace("adaptive topk demoted (ambiguous boundary tie): physical re-feed");
+                ::nodesort::sort_lane_reset_for_refeed(state);
+                ::nodeseqscan::seq_scan_adaptive_disarm_rescan(ss, estate)?;
+                let topk = topk_cut_arm(state, ss, estate);
+                sort_feed(
+                    state,
+                    ss,
+                    SeqScanSource,
+                    SeqScanFilterProject,
+                    outer_desc,
+                    narrow,
+                    estate,
+                    topk,
+                    false,
+                )?;
+            }
         }
-        crate::procnode::PlanStateNode::IndexScan(is) => {
-            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, narrow, estate, None)?
-        }
+        crate::procnode::PlanStateNode::IndexScan(is) => sort_feed(
+            state,
+            is,
+            IndexScanSource,
+            IndexScanEmit,
+            outer_desc,
+            narrow,
+            estate,
+            None,
+            false,
+        )?,
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
             &mut **ios,
@@ -3790,6 +3850,7 @@ fn sort_feed_if_needed<'mcx>(
             narrow,
             estate,
             None,
+            false,
         )?,
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
@@ -3807,6 +3868,7 @@ fn sort_feed_if_needed<'mcx>(
                 narrow,
                 estate,
                 None,
+                false,
             )?
         }
         _ => unreachable!("memoized sort verdict admitted a non-scan child"),
@@ -3898,6 +3960,7 @@ fn sort_feed<'mcx, S, O>(
     narrow_keys: Option<usize>,
     estate: &mut EStateData<'mcx>,
     topk: Option<TopkCut>,
+    tie_track: bool,
 ) -> PgResult<()>
 where
     S: Source<'mcx>,
@@ -3906,6 +3969,11 @@ where
     match narrow_keys {
         Some(k) => ::nodesort::sort_lane_begin_narrowed(sort, outer_desc, k)?,
         None => ::nodesort::sort_lane_begin(sort, outer_desc)?,
+    }
+    // Zone-adaptive tracked mode: record boundary-tie events so the caller
+    // can demote before any output escapes (see the adaptive block above).
+    if tie_track {
+        ::nodesort::sort_lane_topk_tie_track_arm(sort);
     }
     // Direct sort-key feed (`exec_sort_batched`'s `key_direct` probe,
     // mirrored): probed once per feed, BEFORE the first `produce` (arming
@@ -4010,6 +4078,53 @@ fn topk_keep_op(cmp: ::execexpr::CmpOp) -> Option<::execexpr::CmpOp> {
     })
 }
 
+/// Resolve the sort's leading INPUT column (1-based over the scan's output)
+/// to a scan attnum (0-based), through an observation-free projection only:
+/// no projection, the lone `JustAssignVar` Var-copy, or an all-Var census
+/// projection with no arith columns. `None` = not resolvable under those
+/// shapes (computing projections are refused: a row skipped by a top-k
+/// pre-filter or a zone-adaptive granule skip elides its projection, and
+/// only Var passthroughs are guaranteed observation-free — an elided arith
+/// evaluation could elide C's error).
+fn sort_leading_key_scan_attnum<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<u16> {
+    let plan = state.plan;
+    if plan.numCols < 1 || plan.sortColIdx.is_empty() {
+        return None;
+    }
+    let oc = plan.sortColIdx[0];
+    if oc < 1 {
+        return None;
+    }
+    match ss.ss.ps_ProjInfo.as_ref() {
+        None => Some((oc - 1) as u16),
+        Some(p) => match p.pi_state.kernel() {
+            ::execexpr::Kernel::JustAssignVar {
+                src: ::execexpr::SlotSrc::Scan,
+                attnum,
+                resultnum: 0,
+            } if oc == 1 => Some(attnum),
+            _ => {
+                // Multi-column projections admit only the pure Var-copy list
+                // (the ready-time scan-projection census, subplan/param-free
+                // by construction, with NO arith columns). The sort's leading
+                // input column then maps through the census to its scan
+                // attnum.
+                let cols = p.pi_state.scan_proj_cols()?;
+                if cols.any_arith() || (oc as usize) > cols.n as usize {
+                    return None;
+                }
+                match cols.cols[(oc - 1) as usize] {
+                    ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                    _ => None,
+                }
+            }
+        },
+    }
+}
+
 /// Admission + arming for the top-k cutoff over a seqscan-fed bounded sort.
 /// `None` = not admitted; the feed runs unfiltered (never a lane refusal).
 /// Admits: bounded sort; leading sort key resolvable to a scan column (no
@@ -4027,46 +4142,10 @@ fn topk_cut_arm<'mcx>(
     if !state.bounded {
         return None;
     }
-    let plan = state.plan;
-    if plan.numCols < 1 || plan.sortColIdx.is_empty() {
-        return None;
-    }
-    // Resolve the sort's leading INPUT column (1-based over the scan's
-    // output) to a scan attnum (0-based).
-    let oc = plan.sortColIdx[0];
-    if oc < 1 {
-        return None;
-    }
-    let attnum = match ss.ss.ps_ProjInfo.as_ref() {
-        None => (oc - 1) as u16,
-        Some(p) => match p.pi_state.kernel() {
-            ::execexpr::Kernel::JustAssignVar {
-                src: ::execexpr::SlotSrc::Scan,
-                attnum,
-                resultnum: 0,
-            } if oc == 1 => attnum,
-            _ => {
-                // Multi-column projections admit only the pure Var-copy list
-                // (the ready-time scan-projection census, subplan/param-free
-                // by construction, with NO arith columns): a skipped row
-                // skips its projection, and only Var passthroughs are
-                // guaranteed observation-free (an elided arith evaluation
-                // could elide C's error). The sort's leading input column
-                // then maps through the census to its scan attnum.
-                let cols = p.pi_state.scan_proj_cols()?;
-                if cols.any_arith() || (oc as usize) > cols.n as usize {
-                    return None;
-                }
-                match cols.cols[(oc - 1) as usize] {
-                    ::execexpr::ScanProjCol::Var { attnum } => attnum,
-                    _ => return None,
-                }
-            }
-        },
-    };
+    let attnum = sort_leading_key_scan_attnum(state, ss)?;
     // Kernel admission: order operator -> its comparison-function kernel ->
     // the keep compare. `get_opcode` is one syscache read per feed.
-    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
+    let opfn = ::lsyscache::get_opcode(state.plan.sortOperators[0]).ok()?;
     let keep = topk_keep_op(::execexpr::CmpOp::for_fn_oid(opfn)?)?;
     // Key-lane staging (refuses qual-bearing scans and foreign SoA arming).
     if !::nodeseqscan::seq_scan_topk_key_arm(ss, estate, attnum) {
@@ -4075,6 +4154,154 @@ fn topk_cut_arm<'mcx>(
     stats::tick_owned(ShapeClass::TopkCut);
     lane_trace("topk cutoff armed (sort feed)");
     Some(TopkCut { keep })
+}
+
+// ===========================================================================
+// Zone-ordered adaptive top-N traversal (cbstore; cbstore-v2 plan, design in
+// docs/design/cbstore-zone-adaptive.md). For `ORDER BY x LIMIT k` over a
+// cbstore scan, the granule directory's footer min/max gives a partial order
+// on x: visiting granules best-first (zone min ascending for ASC / max
+// descending for DESC) and feeding the bounded sort's k-th boundary back to
+// the scan lets the scan STOP at the first granule whose bound the boundary
+// strictly dominates — every remaining granule is at least as dominated
+// (ClickHouse-style read-in-order early termination, but zone-map-driven, so
+// it works on non-cluster-key columns).
+//
+// CORRECTNESS: a bound-skipped granule contains only rows STRICTLY worse
+// than the current boundary on the LEADING key — rows the bounded tuplesort
+// would discard with no observable side effect (topkcut's invariant, granule-
+// granular; equality never skips, `strict=false` at the AM). Observation-
+// freedom of the elided per-row work is the arm's admission: pure-Var
+// projections (the shared resolution) and no qual / whole-qual staged
+// kernels (non-erroring vocabularies; `seq_scan_adaptive_topk_arm`).
+//
+// TIE EXACTNESS is the residual risk: the adaptive order changes ARRIVAL
+// order at the bounded heap, and both the survivor selection at a boundary
+// full-key tie and the emit order among retained full-key ties are arrival-
+// dependent (heap-shape effects). Two modes:
+//   * ties-invisible (every non-junk output column IS a sort key column of
+//     a byte-equality type): any legal tie selection/order prints identical
+//     bytes — nothing to track.
+//   * tracked: the tuplesort's tie tracking (armed via `sort_lane_topk_tie_
+//     track_arm`) records boundary-tie discards/evictions and the finish-
+//     time output scan finds retained ties; if EITHER fires, the feed
+//     DEMOTES — fresh tuplesort, adaptive disarmed, full physical-order
+//     re-feed — reproducing the never-adaptive feed byte-for-byte.
+// Net: lane-on output is byte-identical to lane-off in both modes.
+// ===========================================================================
+
+/// Armed adaptive top-N traversal for the current sort feed. `tracked` =
+/// boundary-tie tracking armed (some visible output byte is not determined
+/// by the sort keys; the feed demotes on an observed ambiguous tie).
+#[derive(Clone, Copy)]
+struct AdaptiveTopk {
+    tracked: bool,
+}
+
+/// Kill switch: `PGRUST_LANE_ADAPTIVE_TOPK=0|off` disables the adaptive
+/// top-N arm (byte-identical A/B gate channel); default on, resolved once.
+fn adaptive_topk_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_LANE_ADAPTIVE_TOPK")
+            .is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off"))
+    })
+}
+
+/// Bound cap: beyond this a top-N is scan-shaped anyway (the early-stop
+/// upside shrinks as k grows) and the demotion re-feed risk isn't worth it.
+const ADAPTIVE_TOPK_MAX_BOUND: i64 = 1 << 16;
+
+/// Admission + arming for the zone-adaptive traversal over a seqscan-fed
+/// bounded sort. `None` = not armed (never a lane refusal — the feed runs in
+/// physical order exactly as before). Admits: bounded sort with a sane
+/// bound; leading sort key resolvable to a scan column through an
+/// observation-free projection (the shared topk-cut resolution); leading
+/// order operator in the int-family kernel vocabulary (maps ASC/DESC; float
+/// and cross-width never appear as sort operators on admitted columns);
+/// scan-side qual observation-freedom plus the AM's own gates (cbstore,
+/// serial, exact int-family zone entries) inside
+/// `seq_scan_adaptive_topk_arm`.
+fn adaptive_topk_arm<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+) -> PgResult<Option<AdaptiveTopk>> {
+    if !adaptive_topk_enabled() {
+        return Ok(None);
+    }
+    if !state.bounded || state.bound <= 0 || state.bound > ADAPTIVE_TOPK_MAX_BOUND {
+        return Ok(None);
+    }
+    let Some(attnum) = sort_leading_key_scan_attnum(state, ss) else {
+        return Ok(None);
+    };
+    let Ok(opfn) = ::lsyscache::get_opcode(state.plan.sortOperators[0]) else {
+        return Ok(None);
+    };
+    use ::execexpr::CmpOp::*;
+    let desc = match ::execexpr::CmpOp::for_fn_oid(opfn) {
+        Some(Int2Lt | Int4Lt | Int8Lt | OidLt) => false,
+        Some(Int2Gt | Int4Gt | Int8Gt | OidGt) => true,
+        _ => return Ok(None),
+    };
+    if !::nodeseqscan::seq_scan_adaptive_topk_arm(ss, attnum, desc)? {
+        return Ok(None);
+    }
+    let tracked = !sort_topk_ties_invisible(state, outer_desc);
+    stats::tick_owned(ShapeClass::AdaptiveTopk);
+    lane_trace(if tracked {
+        "adaptive topk armed (sort feed, tie-tracked)"
+    } else {
+        "adaptive topk armed (sort feed, ties invisible)"
+    });
+    Ok(Some(AdaptiveTopk { tracked }))
+}
+
+/// True when every visible output byte is determined by the sort keys:
+/// every NON-JUNK targetlist column is itself a sort key column, and every
+/// sort key's comparator equality implies byte equality of the keyed column
+/// (by-value int-family types; text/varchar only under the C collation,
+/// where the comparator is memcmp+len). Under that shape any legal
+/// selection/order of a full-key tie group prints identical bytes, so the
+/// adaptive feed needs no tie tracking.
+fn sort_topk_ties_invisible(
+    state: &::nodesort::SortState<'_>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+) -> bool {
+    let plan = state.plan;
+    let nkeys = plan.numCols as usize;
+    if plan.sortColIdx.len() < nkeys || plan.collations.len() < nkeys {
+        return false;
+    }
+    let keys = &plan.sortColIdx[..nkeys];
+    for tle in plan.plan.targetlist.iter() {
+        let Some(te) = tle.as_target_entry() else {
+            return false;
+        };
+        if !te.resjunk && !keys.contains(&te.resno) {
+            return false;
+        }
+    }
+    for (i, &k) in keys.iter().enumerate() {
+        if k < 1 || k as usize > outer_desc.natts as usize {
+            return false;
+        }
+        use ::types_core::catalog::{
+            BOOLOID, C_COLLATION_OID, DATEOID, INT2OID, INT4OID, INT8OID, OIDOID, TEXTOID,
+            TIMESTAMPOID, TIMESTAMPTZOID, VARCHAROID,
+        };
+        let byte_eq = match outer_desc.attr((k - 1) as usize).atttypid {
+            INT2OID | INT4OID | INT8OID | OIDOID | BOOLOID | DATEOID | TIMESTAMPOID
+            | TIMESTAMPTZOID => true,
+            TEXTOID | VARCHAROID => plan.collations[i] == C_COLLATION_OID,
+            _ => false,
+        };
+        if !byte_eq {
+            return false;
+        }
+    }
+    true
 }
 
 /// Compute the keep mask for one staged batch, or `None` when the pre-filter
@@ -4218,6 +4445,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         // The mask computation completes before the put loop (the lane
         // borrow ends), and survivors take the EXACT unfiltered put path
         // (including the direct-key arm when q9triage's probe armed it).
+        let mut filtered = None;
         if let Some(tk) = self.topk.as_mut() {
             if tk.skip > 0 {
                 tk.skip -= 1;
@@ -4242,25 +4470,38 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
                     if stats::armed() {
                         stats::tick_topkcut_rows((n - pos) as u64, cut_rows as u64);
                     }
-                    return ::nodesort::sort_lane_put_batch(
-                        self.sort,
-                        estate,
-                        pos,
-                        n,
-                        self.key_direct,
-                        &mut Feed { emit, sel: Some(&sel) },
-                    );
+                    filtered = Some(sel);
                 }
             }
         }
-        ::nodesort::sort_lane_put_batch(
-            self.sort,
-            estate,
-            pos,
-            n,
-            self.key_direct,
-            &mut Feed { emit, sel: None },
-        )
+        match filtered {
+            Some(sel) => ::nodesort::sort_lane_put_batch(
+                self.sort,
+                estate,
+                pos,
+                n,
+                self.key_direct,
+                &mut Feed { emit, sel: Some(&sel) },
+            )?,
+            None => ::nodesort::sort_lane_put_batch(
+                self.sort,
+                estate,
+                pos,
+                n,
+                self.key_direct,
+                &mut Feed { emit, sel: None },
+            )?,
+        }
+        // Zone-adaptive bound feedback: hand the (possibly just-tightened)
+        // k-th boundary leading-key datum to the scan before it stages the
+        // next window. No-op unless the scan armed the adaptive order (the
+        // emit face's default and the AM's unarmed path both drop it); a
+        // NULL boundary never feeds (cbstore stores no NULLs — conservative
+        // guard only).
+        if let Some((bkey, false)) = ::nodesort::sort_lane_topk_boundary(self.sort) {
+            emit.push_topk_bound(bkey);
+        }
+        Ok(())
     }
 }
 

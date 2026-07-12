@@ -436,6 +436,14 @@ impl<'mcx> CbScanDescData<'mcx> {
         ad.bound = Some(v);
     }
 
+    /// Drop an armed adaptive traversal (the consumer demoted to the
+    /// physical-order drive, e.g. a top-k boundary-tie demotion). The caller
+    /// must rescan (`reset_position`) before pulling again: the physical
+    /// rg/granule cursors were not maintained while the adaptive drive ran.
+    pub fn disarm_adaptive_order(&mut self) {
+        self.adaptive = None;
+    }
+
     fn claim_next_rg(&mut self) -> usize {
         match self.rs_base.rs_parallel {
             Some(p) => {

@@ -200,6 +200,12 @@ pub(super) trait BatchEmit<'mcx> {
     fn topk_key_lane(&self, _n: u32) -> Option<(&[::datum::Datum], &[bool], &[u64])> {
         None
     }
+
+    /// Consumer bound feedback for a zone-adaptive top-N scan: the bounded
+    /// sort's current k-th boundary LEADING-key datum (by-value; the arm
+    /// admits int-family keys only). Default no-op; only the seqscan emit
+    /// face forwards it to the AM, where an unarmed scan ignores it.
+    fn push_topk_bound(&mut self, _key: ::datum::Datum) {}
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3
