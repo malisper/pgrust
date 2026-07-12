@@ -86,7 +86,7 @@ fn stitch_saop_covers_exactly_the_nonfloat_comparators() {
         .iter()
         .filter(|e| e.tier(Tier::StitchSaop).is_some_and(|c| c.is_intree()))
         .count();
-    assert_eq!(n, 48, "stitch-saop set drifted from the 48 non-float comparators");
+    assert_eq!(n, 66, "stitch-saop set drifted from the 66 non-float comparators");
 }
 
 #[test]
