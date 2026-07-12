@@ -225,6 +225,9 @@ pub struct CbScanDescData<'mcx> {
     // Forced-off knobs (byte-identical A/B gates): read once per scan.
     block_zm_enabled: bool,
     bloom_enabled: bool,
+    // Staging window width (rows per staged batch): WINDOW_ROWS unless
+    // overridden by PGRUST_CB_WINDOW_ROWS (see env_window_rows).
+    window_rows: usize,
     // Post-qual materialization (cbstore_prewhere): granule decode is
     // per-column on demand — the SoA deform pulls only the columns it fills
     // and store_slot completes the needed set for surviving rows only.
@@ -250,6 +253,30 @@ pub struct CbScanDescData<'mcx> {
 
 fn env_off(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("on"))
+}
+
+// Staging window width (rows per staged batch), default WINDOW_ROWS.
+// PGRUST_CB_WINDOW_ROWS overrides for the batch-granularity measurement
+// sweep; accepted values are powers of two in [32, WINDOW_ROWS] that divide
+// BLOCK_ROWS (the block-skip arithmetic stays exact). The ceiling is
+// WINDOW_ROWS because every staged window deforms into an SoaBatch whose
+// capacity is the compile-time SOA_MAX_ROWS (291) — wider windows need the
+// deferred wide staging capacity (phase4 design §7 "count-only whole-granule
+// batches / Batch{n} > SOA width"). Anything else falls back to the default.
+fn env_window_rows() -> usize {
+    match std::env::var("PGRUST_CB_WINDOW_ROWS") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n)
+                if n.is_power_of_two()
+                    && (32..=WINDOW_ROWS).contains(&n)
+                    && BLOCK_ROWS % n == 0 =>
+            {
+                n
+            }
+            _ => WINDOW_ROWS,
+        },
+        Err(_) => WINDOW_ROWS,
+    }
 }
 
 impl<'mcx> CbScanDescData<'mcx> {
@@ -294,6 +321,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             block_mask: !0,
             block_zm_enabled: !env_off("CBSTORE_DISABLE_BLOCK_ZM"),
             bloom_enabled: !env_off("CBSTORE_DISABLE_BLOOM"),
+            window_rows: env_window_rows(),
             lazy: false,
             all_ready: (u32::MAX, u32::MAX, u64::MAX),
             rs_temp_snapshot: None,
@@ -743,7 +771,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                 self.granules_scanned += 1;
                 self.win = 0;
             }
-            let lo = self.win * WINDOW_ROWS;
+            let lo = self.win * self.window_rows;
             if lo >= self.granule_rows {
                 self.granule += 1;
                 self.decoded = false;
@@ -751,7 +779,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             }
             if self.block_mask & (1 << (lo / BLOCK_ROWS)) == 0 {
                 self.blocks_pruned += 1;
-                self.win = (lo / BLOCK_ROWS + 1) * WINDOWS_PER_BLOCK;
+                self.win = (lo / BLOCK_ROWS + 1) * (BLOCK_ROWS / self.window_rows);
                 continue;
             }
             // Count-only scans (no needed columns => no SoA batch can be
@@ -764,11 +792,11 @@ impl<'mcx> CbScanDescData<'mcx> {
                 self.staged_lo = 0;
                 self.staged_rows = self.granule_rows;
                 self.row_cursor = 0;
-                self.win = WINDOWS_PER_GRANULE;
+                self.win = GRANULE_ROWS / self.window_rows;
                 return Ok(self.staged_rows as u32);
             }
             self.staged_lo = lo;
-            self.staged_rows = (self.granule_rows - lo).min(WINDOW_ROWS);
+            self.staged_rows = (self.granule_rows - lo).min(self.window_rows);
             self.row_cursor = 0;
             self.win += 1;
             return Ok(self.staged_rows as u32);
@@ -782,19 +810,19 @@ impl<'mcx> CbScanDescData<'mcx> {
     fn next_window_adaptive(&mut self) -> PgResult<u32> {
         loop {
             if self.decoded {
-                let lo = self.win * WINDOW_ROWS;
+                let lo = self.win * self.window_rows;
                 if lo >= self.granule_rows {
                     self.decoded = false;
                     continue;
                 }
                 if self.block_mask & (1 << (lo / BLOCK_ROWS)) == 0 {
                     self.blocks_pruned += 1;
-                    self.win = (lo / BLOCK_ROWS + 1) * WINDOWS_PER_BLOCK;
+                    self.win = (lo / BLOCK_ROWS + 1) * (BLOCK_ROWS / self.window_rows);
                     continue;
                 }
                 self.windows_staged += 1;
                 self.staged_lo = lo;
-                self.staged_rows = (self.granule_rows - lo).min(WINDOW_ROWS);
+                self.staged_rows = (self.granule_rows - lo).min(self.window_rows);
                 self.row_cursor = 0;
                 self.win += 1;
                 return Ok(self.staged_rows as u32);
