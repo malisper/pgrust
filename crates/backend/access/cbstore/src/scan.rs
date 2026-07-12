@@ -220,9 +220,23 @@ impl<'mcx> CbScanDescData<'mcx> {
     pub fn new(rs_base: TableScanDescData<'mcx>) -> PgResult<CbScanDescData<'mcx>> {
         let rel = &rs_base.rs_rd;
         let coltypes = crate::writer::coltypes_of(rel)?;
-        let ncols = coltypes.len();
         let part = crate::part_cache::cached_part(rel)?;
-        Ok(CbScanDescData {
+        Ok(Self::new_with_part(rs_base, part, coltypes))
+    }
+
+    /// TEST SUPPORT (dict-tier round-trip): the scan over an explicitly
+    /// opened Part + coltypes, bypassing Relation-based part-cache/coltype
+    /// resolution. The staging drive (next_window / batch_deform /
+    /// staged_dict_lane / store_slot / getnextslot) is byte-identical to a
+    /// TAM scan's; `new` is exactly this over `cached_part`/`coltypes_of`.
+    #[doc(hidden)]
+    pub fn new_with_part(
+        rs_base: TableScanDescData<'mcx>,
+        part: Option<std::rc::Rc<Part>>,
+        coltypes: Vec<ColType>,
+    ) -> CbScanDescData<'mcx> {
+        let ncols = coltypes.len();
+        CbScanDescData {
             rs_base,
             part,
             coltypes,
@@ -256,7 +270,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             blocks_pruned: 0,
             windows_staged: 0,
             granules_bound_skipped: 0,
-        })
+        }
     }
 
     pub fn set_needed_attrs(&mut self, needed: &[bool]) {
@@ -822,12 +836,13 @@ impl<'mcx> CbScanDescData<'mcx> {
             if !self.needed[c] {
                 continue;
             }
-            // HARVEST NOTE (lane-v2): the old branch's lane-read-only fill
-            // skip (`soa.lane_fill_wanted`) and zero-decode dict-lane answer
-            // (`soa.set_dict_lane`) are trimmed here — the lane-v2 SoaBatch
-            // does not carry that surface yet (the exectuples dict-lane
-            // tranche re-adds it). Dictionary identity is still first-class
-            // on the scan surface via `staged_dict_lane`.
+            // Lane-read-only skip (lane_fill_skip): on lane-armed scans no
+            // SoA consumer reads unmasked columns' Datum cells (consumers
+            // read the slot store_slot populates; the SoA publish is a
+            // no-op on virtual slots) — their fill is dead work.
+            if !soa.lane_fill_wanted(c) {
+                continue;
+            }
             self.batch_deform_col(c, soa);
         }
     }
@@ -841,11 +856,29 @@ impl<'mcx> CbScanDescData<'mcx> {
         self.ensure_col(c);
         let cd = &self.cols[c];
         if cd.is_dict {
-            // Dict-coded chunk with no dict-lane consumer on this branch
-            // yet: one-instruction escape, gather dict[code] into the Datum
-            // cells. Zero-decode publication returns with the exectuples
-            // dict-lane tranche (see `staged_dict_lane`).
             let codes = &cd.codes[self.staged_lo..self.staged_lo + n];
+            if soa.dict_want(c) {
+                // Zero-decode dict lane: codes + RG dictionary + epoch =
+                // rg index (dict content per RG is immutable and the scan
+                // pins its Rc<Part>, so the epoch key is stable across
+                // rescans). Values/isnull cells stay stale per the
+                // set_dict_lane contract.
+                soa.set_dict_lane(
+                    c,
+                    ::exectuples::SoaDictLane {
+                        codes: codes.as_ptr(),
+                        table: ::exectuples::SoaDictTable {
+                            dict: cd.dict.as_ptr(),
+                            ndict: cd.dict.len() as u32,
+                            epoch: self.rg as u64,
+                            sorted: cd.dict_sorted,
+                        },
+                    },
+                );
+                return;
+            }
+            // No dict-lane consumer for this column: one-instruction
+            // escape, gather dict[code] into the Datum cells.
             for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
                 *out = cd.dict[code as usize];
             }
