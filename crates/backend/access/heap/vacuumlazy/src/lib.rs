@@ -1527,6 +1527,12 @@ pub fn init_seams() {
     // rd_tableam->relation_vacuum: installed here, not by tableam — heap is
     // the only AM and a tableam-side install cycles through heapam_handler.
     tableam_seams::table_relation_vacuum::set(|mcx, rel, params, bstrategy| {
+        // cbstore: immutable append-only row groups — VACUUM is a no-op
+        // (docs/design/cbstore-impl.md §7.2); autovacuum must never walk
+        // cbstore bytes as heap pages.
+        if tableam_vocab::is_cbstore_am_oid(rel.rd_rel.relam) {
+            return Ok(());
+        }
         heap_vacuum_rel(mcx, rel, params, bstrategy)
     });
 }

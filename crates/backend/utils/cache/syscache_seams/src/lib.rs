@@ -830,6 +830,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // pg_am.amname by AMOID (cbstore registration probe); None mirrors
+    // !HeapTupleIsValid.
+    pub fn pg_am_amname(amoid: Oid) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
     pub fn lookup_pg_publication_oid(pubname: &str) -> PgResult<Oid>
 );
 

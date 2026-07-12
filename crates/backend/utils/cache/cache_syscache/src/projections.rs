@@ -333,6 +333,28 @@ fn pg_am_amhandler_lookup(amoid: Oid) -> PgResult<Option<Oid>> {
     Ok(Some(amhandler))
 }
 
+fn pg_am_amname_lookup(amoid: Oid) -> PgResult<Option<String>> {
+    const ANUM_PG_AM_AMNAME: i32 = 2;
+    let Some(tuple) = SearchSysCache1(AMOID, SysCacheKey::Value(Datum::from_oid(amoid)))? else {
+        return Ok(None);
+    };
+    let t = tuple.tuple();
+    let d = getattr(&t, AMOID, ANUM_PG_AM_AMNAME);
+    // SAFETY: amname is a NameData column; the datum points at its
+    // NUL-terminated 64-byte buffer inside the pinned tuple image.
+    let name = unsafe {
+        let p = d.as_usize() as *const u8;
+        let mut len = 0usize;
+        while len < 64 && *p.add(len) != 0 {
+            len += 1;
+        }
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len)).to_owned()
+    };
+    drop(t);
+    ReleaseSysCache(tuple);
+    Ok(Some(name))
+}
+
 fn pg_constraint_fk_target(tuple: &HeapTupleData<'_>) -> Option<Oid> {
     if getattr(tuple, CONSTROID, ANUM_PG_CONSTRAINT_CONTYPE).as_i8() != CONSTRAINT_FOREIGN {
         return None;
@@ -2766,6 +2788,7 @@ pub(crate) fn install() {
     syscache_seams::pg_index_indoption_element::set(pg_index_indoption_element);
     syscache_seams::pg_am_amtype::set(pg_am_amtype_lookup);
     syscache_seams::pg_am_amhandler::set(pg_am_amhandler_lookup);
+    syscache_seams::pg_am_amname::set(pg_am_amname_lookup);
     syscache_seams::lookup_pg_amop_by_operator::set(lookup_pg_amop_by_operator);
     syscache_seams::lookup_pg_amop_by_strategy::set(lookup_pg_amop_by_strategy);
     syscache_seams::lookup_pg_amop_members_by_operator::set(lookup_pg_amop_members_by_operator);
