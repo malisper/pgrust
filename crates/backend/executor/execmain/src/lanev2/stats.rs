@@ -22,6 +22,16 @@
 //!   * `Join` — one OWNED tick per lane-owned join build event; structural
 //!     refusals once per memoized verdict; dynamic EPQ/backward,
 //!     fused-probe-drive economics, and multi-batch spill refusals per call.
+//!   * `Group` — one OWNED tick per lane-owned group-over-sort drive start
+//!     (the underlying sort-feed event); refusals per offered call (the
+//!     child-Sort verdict itself is memoized on the Sort node, so the
+//!     per-call cascade is one flag load).
+//!   * `ResultNode` — one OWNED tick per lane-owned Result execution (the
+//!     no-FROM row / one-time-gate consumption, or the child feed event);
+//!     refusals per offered call.
+//!   * `SubqueryScan` — one OWNED tick per lane-owned feed event (the
+//!     child sort feed for the bare hook; the agg build event for the
+//!     agg-over-subquery composition); refusals per offered call.
 //!
 //! Overhead: with the lane OFF nothing here ever runs (the dispatch hooks gate
 //! on `lanev2::enabled()` before any lane code). With the lane ON but
@@ -55,9 +65,12 @@ pub(super) enum ShapeClass {
     AggBuild = 4,
     SortFeed = 5,
     Join = 6,
+    Group = 7,
+    ResultNode = 8,
+    SubqueryScan = 9,
 }
 
-const N_CLASSES: usize = 7;
+const N_CLASSES: usize = 10;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -68,6 +81,9 @@ impl ShapeClass {
         ShapeClass::AggBuild,
         ShapeClass::SortFeed,
         ShapeClass::Join,
+        ShapeClass::Group,
+        ShapeClass::ResultNode,
+        ShapeClass::SubqueryScan,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -79,6 +95,9 @@ impl ShapeClass {
             ShapeClass::AggBuild => "aggbuild",
             ShapeClass::SortFeed => "sortfeed",
             ShapeClass::Join => "join",
+            ShapeClass::Group => "group",
+            ShapeClass::ResultNode => "result",
+            ShapeClass::SubqueryScan => "subqueryscan",
         }
     }
 }
@@ -153,9 +172,14 @@ pub(super) enum RefuseReason {
     /// Hash-join breaker: the completed build's final nbatch > 1 (spill);
     /// the probe is refused before any lane tuple is emitted.
     MultiBatch = 22,
+    /// Wave-4 streaming glue (Group / Result / SubqueryScan): the node's
+    /// child is not a lane-owned pipeline this hook can chain onto — wrong
+    /// node type, or a lane-ownable child whose own refuse-set refused (the
+    /// specific reason ticks under the child's class).
+    ChildNotLaneOwned = 23,
 }
 
-const N_REASONS: usize = 23;
+const N_REASONS: usize = 24;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -183,6 +207,7 @@ impl RefuseReason {
             RefuseReason::TinyInputFloor => "tiny-input-floor",
             RefuseReason::JoinShape => "join-shape",
             RefuseReason::MultiBatch => "multi-batch",
+            RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
         }
     }
 
@@ -212,6 +237,7 @@ impl RefuseReason {
             TinyInputFloor,
             JoinShape,
             MultiBatch,
+            ChildNotLaneOwned,
         ][i]
     }
 }
