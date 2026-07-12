@@ -2881,9 +2881,6 @@ fn scan_k2_batch<'mcx>(
         // pergroup was installed by the compact probe within this batch.
         return unsafe { agg_fold_staged(agg, soa, idxs, groups) };
     }
-    // Stage-4 §4.4 exchange bound, before the batch's first staged probe
-    // (the probes below hand out pergroup pointers held for the whole batch).
-    ::nodeagg::agg_hash_exchange_boundary(agg, estate)?;
     ::nodeagg::agg_hash_hash_staged(agg, keys, knull, hashes)?;
     idxs.clear();
     groups.clear();
@@ -5886,8 +5883,6 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
             unreachable!("flush_k2 outside K2 mode")
         };
         let kc = key_col as usize;
-        // Stage-4 §4.4 exchange bound, before the batch's first staged probe.
-        ::nodeagg::agg_hash_exchange_boundary(self.agg, estate)?;
         {
             let StagedFoldAggSink { agg, lanes, hashes, .. } = &mut *self;
             ::nodeagg::agg_hash_hash_staged(

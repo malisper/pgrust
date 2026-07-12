@@ -3628,19 +3628,6 @@ pub fn agg_is_done(node: &AggStateData<'_>) -> bool {
     node.agg_done
 }
 
-/// Stage-4 §4.4 exchange bound at a staged-batch boundary (merge.rs): the
-/// staged K2 probes hand out pergroup pointers the caller holds for the
-/// whole batch, so an over-cap flush must run BEFORE the batch's first
-/// probe. The compact path (backstop) and the per-row path
-/// (`lookup_hash_entry`) carry their own hook; this is the C-staged feeds'.
-/// One enum-discriminant test when unengaged.
-pub fn agg_hash_exchange_boundary<'mcx>(
-    node: &mut AggStateData<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
-    merge::exchange_maybe_flush(node, estate)
-}
-
 /// Build→Probe phase flag for the breaker: the hash table's `table_filled`
 /// IS the phase (exactly C's cross-call state; no new field).
 pub fn agg_hash_table_filled(node: &AggStateData<'_>) -> bool {
@@ -4998,10 +4985,6 @@ fn lookup_hash_entry<'mcx>(
     estate: &mut EStateData<'mcx>,
     outer_id: ExecSlotId,
 ) -> PgResult<bool> {
-    // Stage-4 §4.4 exchange bound (merge.rs): flush BEFORE the probe so the
-    // pergroup pointer handed to this row's transition program stays live.
-    // One enum-discriminant test on unengaged builds.
-    merge::exchange_maybe_flush(node, estate)?;
     let mcx = estate.es_query_cxt;
     let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
