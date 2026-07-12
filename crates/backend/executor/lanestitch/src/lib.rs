@@ -93,6 +93,14 @@ pub fn available() -> bool {
     false
 }
 
+/// True = the SVE2 stencil tier is active for new compiles: SVE + SVE2 in
+/// HWCAP (boot-time getauxval probe), the vector length within the emitted
+/// bodies' slack bound, and not pinned off (PGRUST_LANESTITCH_SVE2=0|off).
+/// Apple Silicon and non-SVE Graviton read false and keep the NEON tier.
+pub fn sve2_active() -> bool {
+    matches!(stitch::simd_tier(), stitch::SimdTier::Sve2 { .. })
+}
+
 // The per-batch params block the body reads. Lane binding: p0 = the Datum
 // values array, isnull = the bool bytes array.
 #[repr(C)]
@@ -169,6 +177,8 @@ pub struct StitchedProgram {
     ncols: usize,
     used_cols: Vec<u16>,
     simd: bool,
+    sve_survivors: bool,
+    sve_match_clauses: usize,
     refused: Cell<bool>,
     /// Wall-clock nanos spent in classification + emission + install
     /// (the µs-class stitch budget the tests assert).
@@ -191,12 +201,15 @@ impl StitchedProgram {
         // SAFETY: block holds a complete body starting at base, RX-mapped
         // and icache-flushed by install_code.
         let entry: PipelineFn = unsafe { core::mem::transmute(block.base()) };
+        let (sve_survivors, sve_match_clauses) = stitch::plan_sve2_info(prog, &plan);
         Some(StitchedProgram {
             block,
             entry,
             ncols,
             used_cols: plan.used_cols.clone(),
             simd: stitch::plan_is_simd(&plan),
+            sve_survivors,
+            sve_match_clauses,
             refused: Cell::new(false),
             stitch_nanos: t0.elapsed().as_nanos() as u64,
             code_bytes: words.len() * 4,
@@ -318,6 +331,19 @@ impl StitchedProgram {
     /// the n % 64 tail). Test/telemetry introspection.
     pub fn is_simd(&self) -> bool {
         self.simd
+    }
+
+    /// True = the body carries the adaptive SVE COMPACT survivor-extraction
+    /// path (SVE2 tier + a SIMD body with non-vector clauses). Whether a
+    /// given block takes it is decided at runtime by the measured survivor
+    /// crossover. Test/telemetry introspection.
+    pub fn has_sve_survivor_path(&self) -> bool {
+        self.sve_survivors
+    }
+
+    /// Number of IN-list clauses this body runs on the SVE2 MATCH stencil.
+    pub fn sve_match_clauses(&self) -> usize {
+        self.sve_match_clauses
     }
 
     pub fn entry_addr(&self) -> usize {

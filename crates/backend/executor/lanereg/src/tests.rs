@@ -13,7 +13,7 @@ fn every_cov_row_is_shape_consistent() {
     for e in ENTRIES {
         for c in e.cov {
             match (c.tier, &e.shape) {
-                (Tier::AotQualCmp | Tier::StitchCmp, Shape::Cmp(_)) => {}
+                (Tier::AotQualCmp | Tier::StitchCmp | Tier::StitchSaop, Shape::Cmp(_)) => {}
                 (Tier::JitArith | Tier::StitchArith | Tier::FoldAffine, Shape::Arith(_)) => {}
                 (Tier::Fold, Shape::Fold(_)) => {}
                 (t, s) => panic!("OID {} ({}): tier {:?} inconsistent with shape {:?}", e.oid, e.name, t, s),
@@ -48,6 +48,35 @@ fn aot_qual_cmp_golden_set() {
     }
     let in_tree_aot = ENTRIES.iter().filter(|e| aot_qual_cmp(e.oid).is_some()).count();
     assert_eq!(in_tree_aot, golden.len(), "AOT in-tree set drifted from the golden 72");
+}
+
+// The stitch-saop set: exactly the non-float comparator rows (the lanestitch
+// SaopQ stencil admits every whitelisted non-float comparator; float element
+// compares refuse — no NaN-exact scalar cond). The SVE2 MATCH sub-tier
+// (lane-v2-sve2tier) further gates at admission time on Eq relation +
+// u16-domain elements + the register budget, inside the same coverage row.
+#[test]
+fn stitch_saop_covers_exactly_the_nonfloat_comparators() {
+    for e in ENTRIES {
+        let saop = e.tier(Tier::StitchSaop).is_some_and(|c| c.is_intree());
+        match e.shape {
+            Shape::Cmp(CmpShape { width, .. }) => {
+                let is_float = matches!(width, F4 | F8 | F48 | F84);
+                assert_eq!(saop, !is_float, "OID {} ({}): stitch-saop drift", e.oid, e.name);
+                if saop {
+                    let cov = e.tier(Tier::StitchSaop).unwrap();
+                    assert_eq!(cov.guard, GuardTier::NonErroring);
+                    assert_eq!(cov.coll, CollGate::NotApplicable);
+                }
+            }
+            _ => assert!(!saop, "OID {} ({}): stitch-saop on a non-comparator", e.oid, e.name),
+        }
+    }
+    let n = ENTRIES
+        .iter()
+        .filter(|e| e.tier(Tier::StitchSaop).is_some_and(|c| c.is_intree()))
+        .count();
+    assert_eq!(n, 48, "stitch-saop set drifted from the 48 non-float comparators");
 }
 
 #[test]
