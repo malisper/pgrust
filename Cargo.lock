@@ -6091,7 +6091,9 @@ dependencies = [
 name = "gin_trgm_seams"
 version = "0.1.0"
 dependencies = [
+ "gin_vocab",
  "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -11068,10 +11070,14 @@ dependencies = [
  "detoast",
  "dfmgr",
  "gin_trgm_seams",
+ "gin_vocab",
  "guc",
  "mbutils",
  "mcx",
+ "regex",
+ "regex_core",
  "reloptions",
+ "rustc-hash",
  "ts_locale",
  "types_core",
  "types_error",
