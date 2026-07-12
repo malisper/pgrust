@@ -1679,11 +1679,18 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::Sort(s) => {
-            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
-            // over the sort breaker): falls through to the UNCHANGED
-            // per-tuple exec_agg over exec_sort on refuse. Lane logic +
-            // refuse-set live in `lanev2`.
+            // Lane-executor-v2 dispatch hooks: the skip-sort exact-DISTINCT
+            // drive (AGG_PLAIN whose every transition replays from a set —
+            // the Sort's only observable effect is the dedup, so it is
+            // skipped), then the sorted-agg streaming operator over the sort
+            // breaker. Both fall through to the UNCHANGED per-tuple exec_agg
+            // over exec_sort on refuse. Lane logic + refuse-sets in `lanev2`.
             if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_plain_distinct_agg_over_sort(agg, s, estate)?
+                {
+                    return Ok(r);
+                }
                 if let Some(r) = crate::lanev2::try_own_sorted_agg_over_sort(agg, s, estate)? {
                     return Ok(r);
                 }
