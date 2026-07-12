@@ -247,6 +247,174 @@ where
     }
 }
 
+// ===========================================================================
+// Lane-executor-v2 seam (design §4: NestLoop hosting). The wiring lives in
+// `execmain/src/lanev2.rs`; these entry points delegate to the SAME per-row
+// arms `exec_nest_loop` runs (`eval_join_qual` / `project_join_tuple`) over
+// the SAME `NestLoopState` cross-call flags (`nl_NeedNewOuter` /
+// `nl_MatchedOuter` — C's own state machine; no new fields), so falling back
+// to `exec_nest_loop` at any call boundary resumes from coherent node state,
+// and the lane's join output (outer order × inner rescan order) is C's
+// exactly. The INNER child stays a Volcano child: the lane drives it through
+// the same `NestLoopChild` calls (`exec_proc` / `rescan` / `rescan_with_chg`)
+// at the same points, so exec-param-driven runtime keys on an inner index
+// scan are (re)evaluated in the rescan preamble exactly as C's ExecReScan
+// path does — automatically, with no lane-side special case.
+// ===========================================================================
+
+/// Structural admission, join side. All four ported join types (INNER / LEFT
+/// / SEMI / ANTI) are admitted — the lane emit is `exec_nest_loop`'s own loop
+/// body, fill arm included (init asserts RIGHT/FULL never reach this node).
+/// Refused: instrumented (`js_instr` is `Some` iff es_instrument != 0 at
+/// init), and subplan- / initplan-param-bearing joinqual / otherqual /
+/// projection — the lane's ecxt-reset cadence is per outer row rather than
+/// per Volcano pull (memory-only for plain computation), so suspension
+/// hosting and the pending-initplan hoist stay on the row path.
+pub fn lane_nest_loop_admissible(node: &NestLoopState<'_>) -> bool {
+    node.js_instr.is_none()
+        && node
+            .joinqual
+            .as_deref()
+            .is_none_or(|q| !q.has_subplan() && q.param_exec_deps().is_empty())
+        && node
+            .otherqual
+            .as_deref()
+            .is_none_or(|q| !q.has_subplan() && q.param_exec_deps().is_empty())
+        && !node.proj.has_subplan()
+        && node.proj.param_exec_deps().is_empty()
+}
+
+/// True while no drive (lane or row-path) has touched this join: the lane
+/// verdict is memoized at first engagement, so admitting only an untouched
+/// node guarantees the lane owns the node's whole life (never a mid-stream
+/// takeover from row-path-left state — the outer scan would already be
+/// mid-stream in per-tuple mode). Join-untouched implies both children are
+/// untouched: this join is their only puller.
+pub fn lane_nest_loop_untouched<'mcx>(
+    node: &NestLoopState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    node.nl_NeedNewOuter
+        && !node.nl_MatchedOuter
+        && estate.ecxt(node.ps_ExprContext).ecxt_outertuple.is_none()
+}
+
+/// Current outer row's inner drain unfinished? (`nl_NeedNewOuter` is C's own
+/// cross-call flag, so a paused expansion resumes exactly across the Volcano
+/// pull boundary, as `ExecNestLoop`'s own cross-call state does.)
+#[inline]
+pub fn lane_probe_pending(node: &NestLoopState<'_>) -> bool {
+    !node.nl_NeedNewOuter
+}
+
+/// Accept one outer row: `exec_nest_loop`'s nl_NeedNewOuter arm minus the
+/// outer pull (the row arrives pushed) — bind the outer tuple into the join
+/// ecxt, assign the join's exec params from it (nestParams → PARAM_EXEC
+/// slots), and RESCAN the inner Volcano child with the changed-param set,
+/// exactly the row path's per-outer-row prologue.
+pub fn lane_accept_outer<'mcx, I: NestLoopChild<'mcx>>(
+    node: &mut NestLoopState<'mcx>,
+    inner: &mut I,
+    estate: &mut EStateData<'mcx>,
+    outer_slot: ExecSlotId,
+) -> PgResult<()> {
+    cfi()?;
+    debug_assert!(node.nl_NeedNewOuter, "accept with a pending inner drain");
+    let ecxt = node.ps_ExprContext;
+    estate.reset_expr_context(ecxt);
+    estate.ecxt_mut(ecxt).ecxt_outertuple = Some(outer_slot);
+    node.nl_NeedNewOuter = false;
+    node.nl_MatchedOuter = false;
+    if node.nest_params.is_empty() {
+        inner.rescan(estate)
+    } else {
+        // Bind the outer Vars into their PARAM_EXEC slots, then rescan the
+        // inner with the changed-param set (exec_nest_loop's arm, verbatim).
+        for &NestParamSlot { paramno, attno } in node.nest_params.iter() {
+            let mut isnull = false;
+            let value = exectuples::slot_getattr(
+                &mut estate.es_tupleTable[outer_slot.0 as usize],
+                attno as i32,
+                &mut isnull,
+            );
+            let prm = &mut estate.es_param_exec_vals[paramno as usize];
+            prm.value = value;
+            prm.isnull = isnull;
+        }
+        let inner_plan = node.plan.join.plan.righttree.expect("nestloop inner plan");
+        inner.rescan_with_chg(inner_plan, estate, &node.nest_param_set)
+    }
+}
+
+/// Next joined tuple for the accepted outer row: `exec_nest_loop`'s loop body
+/// with the outer pull replaced by `Ok(None)` (the lane feeds the next outer
+/// through `lane_accept_outer`). Same inner pulls, same qual evaluations,
+/// same projection, same LEFT/ANTI fill arm, same SEMI / ANTI / single-match
+/// (inner_unique) state transitions, in the same order — byte-identical
+/// output by construction.
+pub fn lane_probe_next<'mcx, I: NestLoopChild<'mcx>>(
+    node: &mut NestLoopState<'mcx>,
+    inner: &mut I,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    if node.nl_NeedNewOuter {
+        return Ok(None);
+    }
+    cfi()?;
+    let ecxt = node.ps_ExprContext;
+    loop {
+        let inner_slot = inner.exec_proc(estate)?;
+        estate.ecxt_mut(ecxt).ecxt_innertuple = inner_slot;
+
+        if inner_slot.is_none() {
+            node.nl_NeedNewOuter = true;
+            if !node.nl_MatchedOuter && node.nl_fill_outer {
+                let null_inner = node.nl_NullInnerTupleSlot.expect("null inner slot");
+                estate.ecxt_mut(ecxt).ecxt_innertuple = Some(null_inner);
+                let pass = eval_join_qual(node.otherqual.as_deref_mut(), estate, ecxt)?;
+                if pass {
+                    let result_slot = node.ps_ResultTupleSlot;
+                    let proj = &mut *node.proj;
+                    project_join_tuple(estate, ecxt, result_slot, proj)?;
+                    return Ok(Some(result_slot));
+                }
+                estate.instr_count_filtered2(node.js_instr);
+                estate.reset_expr_context(ecxt);
+            }
+            return Ok(None);
+        }
+
+        let matched = eval_join_qual(node.joinqual.as_deref_mut(), estate, ecxt)?;
+        if matched {
+            node.nl_MatchedOuter = true;
+            // An antijoin never returns a matched tuple.
+            if node.plan.join.jointype == JoinType::JOIN_ANTI {
+                node.nl_NeedNewOuter = true;
+                return Ok(None);
+            }
+            if node.js_single_match {
+                node.nl_NeedNewOuter = true;
+            }
+            let pass = eval_join_qual(node.otherqual.as_deref_mut(), estate, ecxt)?;
+            if pass {
+                let result_slot = node.ps_ResultTupleSlot;
+                let proj = &mut *node.proj;
+                project_join_tuple(estate, ecxt, result_slot, proj)?;
+                return Ok(Some(result_slot));
+            }
+            estate.instr_count_filtered2(node.js_instr);
+        } else {
+            estate.instr_count_filtered1(node.js_instr);
+        }
+        estate.reset_expr_context(ecxt);
+        if node.nl_NeedNewOuter {
+            // single-match emit denied by otherqual: the row path's loop pulls
+            // a new outer; the lane's next outer arrives via accept.
+            return Ok(None);
+        }
+    }
+}
+
 /// `ExecEndNestLoop`: child-only teardown; the caller ends the children.
 pub fn exec_end_nest_loop(node: &mut NestLoopState<'_>) {
     node.joinqual = None;
