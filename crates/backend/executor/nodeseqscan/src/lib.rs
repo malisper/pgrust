@@ -1075,20 +1075,77 @@ fn stitch_cmp(
         E::Int48Le => S::Int48Le,
         E::Int48Gt => S::Int48Gt,
         E::Int48Ge => S::Int48Ge,
+        E::Int24Eq => S::Int24Eq,
+        E::Int24Ne => S::Int24Ne,
+        E::Int24Lt => S::Int24Lt,
+        E::Int24Le => S::Int24Le,
+        E::Int24Gt => S::Int24Gt,
+        E::Int24Ge => S::Int24Ge,
+        E::Int42Eq => S::Int42Eq,
+        E::Int42Ne => S::Int42Ne,
+        E::Int42Lt => S::Int42Lt,
+        E::Int42Le => S::Int42Le,
+        E::Int42Gt => S::Int42Gt,
+        E::Int42Ge => S::Int42Ge,
+        E::OidEq => S::OidEq,
+        E::OidNe => S::OidNe,
+        E::OidLt => S::OidLt,
+        E::OidLe => S::OidLe,
+        E::OidGt => S::OidGt,
+        E::OidGe => S::OidGe,
+        E::Float4Eq => S::Float4Eq,
+        E::Float4Ne => S::Float4Ne,
+        E::Float4Lt => S::Float4Lt,
+        E::Float4Le => S::Float4Le,
+        E::Float4Gt => S::Float4Gt,
+        E::Float4Ge => S::Float4Ge,
+        E::Float8Eq => S::Float8Eq,
+        E::Float8Ne => S::Float8Ne,
+        E::Float8Lt => S::Float8Lt,
+        E::Float8Le => S::Float8Le,
+        E::Float8Gt => S::Float8Gt,
+        E::Float8Ge => S::Float8Ge,
+        E::Float48Eq => S::Float48Eq,
+        E::Float48Ne => S::Float48Ne,
+        E::Float48Lt => S::Float48Lt,
+        E::Float48Le => S::Float48Le,
+        E::Float48Gt => S::Float48Gt,
+        E::Float48Ge => S::Float48Ge,
+        E::Float84Eq => S::Float84Eq,
+        E::Float84Ne => S::Float84Ne,
+        E::Float84Lt => S::Float84Lt,
+        E::Float84Le => S::Float84Le,
+        E::Float84Gt => S::Float84Gt,
+        E::Float84Ge => S::Float84Ge,
     };
     // The const operand's own width per comparator family (the b side).
     let k = match cmp {
-        E::Int2Eq | E::Int2Ne | E::Int2Lt | E::Int2Le | E::Int2Gt | E::Int2Ge => {
+        E::Int2Eq | E::Int2Ne | E::Int2Lt | E::Int2Le | E::Int2Gt | E::Int2Ge
+        | E::Int42Eq | E::Int42Ne | E::Int42Lt | E::Int42Le | E::Int42Gt | E::Int42Ge => {
             ::datum::Datum::from_i16(konst.as_i16())
         }
         E::Int4Eq | E::Int4Ne | E::Int4Lt | E::Int4Le | E::Int4Gt | E::Int4Ge
-        | E::Int84Eq | E::Int84Ne | E::Int84Lt | E::Int84Le | E::Int84Gt | E::Int84Ge => {
+        | E::Int84Eq | E::Int84Ne | E::Int84Lt | E::Int84Le | E::Int84Gt | E::Int84Ge
+        | E::Int24Eq | E::Int24Ne | E::Int24Lt | E::Int24Le | E::Int24Gt | E::Int24Ge => {
             ::datum::Datum::from_i32(konst.as_i32())
         }
         E::Int8Eq | E::Int8Ne | E::Int8Lt | E::Int8Le | E::Int8Gt | E::Int8Ge
         | E::Int48Eq | E::Int48Ne | E::Int48Lt | E::Int48Le | E::Int48Gt | E::Int48Ge => {
             ::datum::Datum::from_i64(konst.as_i64())
         }
+        // Oid: sign-extend the u32 image (the stitcher's canonical-datum
+        // contract — makes the 2x64 unsigned NEON compares exact).
+        E::OidEq | E::OidNe | E::OidLt | E::OidLe | E::OidGt | E::OidGe => {
+            ::datum::Datum::from_i32(konst.as_u32() as i32)
+        }
+        // Float consts: raw bit patterns at the const's own width (low-word
+        // f32 / full-word f64 — the b side of each family).
+        E::Float4Eq | E::Float4Ne | E::Float4Lt | E::Float4Le | E::Float4Gt | E::Float4Ge
+        | E::Float84Eq | E::Float84Ne | E::Float84Lt | E::Float84Le | E::Float84Gt
+        | E::Float84Ge => ::datum::Datum::from_f32(konst.as_f32()),
+        E::Float8Eq | E::Float8Ne | E::Float8Lt | E::Float8Le | E::Float8Gt | E::Float8Ge
+        | E::Float48Eq | E::Float48Ne | E::Float48Lt | E::Float48Le | E::Float48Gt
+        | E::Float48Ge => ::datum::Datum::from_f64(konst.as_f64()),
     };
     (op, k)
 }

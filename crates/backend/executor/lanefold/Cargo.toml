@@ -19,3 +19,4 @@ types_tuple = { path = "../../../_support/types/types_tuple" }
 varlena = { path = "../../utils/adt/varlena" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }
+lanereg = { path = "../lanereg" }
