@@ -7481,6 +7481,7 @@ dependencies = [
  "execexpr",
  "exectuples",
  "lanereg",
+ "mbutils_seams",
  "mcx",
  "types_core",
  "types_error",

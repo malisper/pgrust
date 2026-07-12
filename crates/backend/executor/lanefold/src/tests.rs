@@ -1441,6 +1441,7 @@ fn plan_subset<'mcx>(
         cse_skip,
         guards: ::mcx::PgVec::new_in(mcx),
         vguards: ::mcx::PgVec::new_in(mcx),
+        uguards: ::mcx::PgVec::new_in(mcx),
         cols: ::mcx::PgVec::new_in(mcx),
         resid: ::mcx::PgVec::new_in(mcx),
         guarded: false,
@@ -2267,4 +2268,338 @@ fn affine_oid_set_matches_lanereg_census() {
             "oid {oid} must carry a documented FoldAffine refusal"
         );
     }
+}
+
+// ---- strlenfold tier: SUM/AVG/MIN/MAX over length()/octet_length() --------
+
+const F_TEXTLEN_T: Oid = 1257;
+const F_OCTETLEN_T: Oid = 1374;
+
+// The encoding seams are process-global set-once; every strlen test funnels
+// through this UTF-8 installation (the fleet database encoding). The
+// max_length==1 (byte-count textlen) arm is admission-equivalent to the
+// octet_length arm and is covered there.
+fn install_utf8_seams() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        ::mbutils_seams::pg_database_encoding_max_length::set(|| 4);
+        ::mbutils_seams::get_database_encoding::set(|| PG_UTF8);
+    });
+}
+
+fn mk_len_fn(mcx: Mcx<'static>, funcid: Oid, arg: Node<'static>) -> Node<'static> {
+    let mut f = Node::build::<::types_nodes::primnodes::FuncExpr>(mcx).unwrap();
+    f.funcid = funcid;
+    f.funcresulttype = INT4OID;
+    f.args = NodeList::make1(mcx, arg).unwrap();
+    f.seal()
+}
+
+// UTF-8 length corpus: ASCII, empty, 2/3/4-byte chars, high-codepoint mixes,
+// both inline header forms.
+fn len_corpus() -> Vec<Option<Datum>> {
+    vec![
+        Some(vl_short(b"http://a.example/x?q=1")),
+        Some(vl_short("héllo".as_bytes())),          // 2-byte char
+        None,
+        Some(vl_short("日本語のページ".as_bytes())), // 3-byte chars
+        Some(vl_4b("🦀 crab & 🚀 rocket".as_bytes())), // 4-byte chars
+        Some(vl_short(b"")),
+        Some(vl_4b(&[b'a'; 300])),                    // 4B header, long ASCII
+        Some(vl_short("mixé💡x".as_bytes())),
+        None,
+        Some(vl_short(b"plain")),
+    ]
+}
+
+// Independent oracle: std's chars().count() — NOT the fold's byte arithmetic.
+fn oracle_charlen(d: Datum) -> i64 {
+    let p = vl_payload(d);
+    core::str::from_utf8(&p).expect("corpus is valid UTF-8").chars().count() as i64
+}
+
+fn oracle_bytelen(d: Datum) -> i64 {
+    vl_payload(d).len() as i64
+}
+
+// Drive classify + check_guards + fold_batch over a one-varlena-column batch
+// and assert byte parity against reference_fold fed with INDEPENDENTLY
+// computed lengths (the C-semantics per-row reference over the oracle's
+// values).
+fn run_fold_len(
+    mcx: Mcx<'static>,
+    specs: &[AggTransSpec<'_, 'static>],
+    data: &[Option<Datum>],
+    sel: impl Fn(usize) -> bool + Copy,
+    oracle: impl Fn(Datum) -> i64,
+) -> (LanePlan<'static>, Vec<AggPerGroup>) {
+    let plan = classify(mcx, specs).expect("plan admits");
+    let rows_datum: Vec<Vec<Option<Datum>>> = data.iter().map(|d| vec![*d]).collect();
+    let cols = TestCols::from_datum_rows(1, &rows_datum);
+    let rows = selmask(data.len(), sel);
+    assert!(plan.guarded, "length lanes always carry the vguard obligation");
+    // SAFETY: lanes hold live inline varlena datums built by vl_short/vl_4b.
+    let gc = unsafe { check_guards(&plan, &cols, &rows, |_| None) };
+    assert_eq!(gc, GuardCheck::Pass { zone: false, data: true });
+    let mut pgs = pergroups_for(mcx, &plan, specs.len());
+    // SAFETY: pgs covers every transno; the lane covers every row; vguard
+    // (and uguard) proven above.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, data.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let lens: Vec<Vec<Option<i64>>> =
+        data.iter().map(|d| vec![d.map(&oracle)]).collect();
+    let want = reference_fold(mcx, &plan, &lens, sel, specs.len());
+    assert_parity(&plan, &pgs, &want);
+    (plan, pgs)
+}
+
+#[test]
+fn classify_strlen_admission() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    // Every textlen alias oid admits; the arg may be a text Var or the
+    // varchar binary-coercion relabel.
+    for fnoid in [1257u32, 1317, 1369, 1381] {
+        let args = arg_list(mcx, mk_len_fn(mcx, fnoid, mk_var(mcx, 1, TEXTV)));
+        let spec = mk_spec(1963, false, &args); // avg(int4)
+        let (t, g) = classify_trans(&spec, 0).expect("admits");
+        assert_eq!(t.kind, LaneKind::AvgAccum);
+        assert_eq!(t.width, LaneWidth::VarLenChars, "UTF-8 encoding: char-count lane");
+        assert_eq!(t.res_width, LaneWidth::I32);
+        assert_eq!((t.addend, t.mulk, t.divk), (0, 1, 1));
+        assert!(g.is_none(), "no integer guard: [0, 2^30) is int4 by type");
+    }
+    // octet_length: byte-count lane, encoding-independent.
+    let a_oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let (t, _) = classify_trans(&mk_spec(1841, true, &a_oct), 0).expect("sum admits");
+    assert_eq!((t.kind, t.width), (LaneKind::Sum, LaneWidth::VarLenBytes));
+    // varchar under the relabel.
+    let rel = Node::mk_relabel_type(
+        mcx,
+        mk_var(mcx, 2, VARCHARV),
+        TEXTV,
+        -1,
+        0,
+        ::types_nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+    )
+    .unwrap();
+    let a_rel = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, rel));
+    let (t, _) = classify_trans(&mk_spec(768, true, &a_rel), 0).expect("max admits");
+    assert_eq!((t.kind, t.width, t.col), (LaneKind::Max, LaneWidth::VarLenChars, 1));
+    // MIN/MAX/bit over length admit too (the whole int4 arg family).
+    for (fnoid, kind) in [(769u32, LaneKind::Min), (1898, LaneKind::BitAnd), (1899, LaneKind::BitOr)] {
+        let a = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+        let (t, _) = classify_trans(&mk_spec(fnoid, true, &a), 0).expect("admits");
+        assert_eq!((t.kind, t.width), (kind, LaneWidth::VarLenChars));
+    }
+    // Plan-level obligations: char lanes carry vguard AND uguard; octet
+    // lanes carry only the vguard.
+    let a_char = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [mk_spec(1963, false, &a_char), mk_spec(1841, true, &a_oct)];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert!(plan.guarded && plan.guards.is_empty());
+    assert_eq!(&plan.vguards[..], &[0]);
+    assert_eq!(&plan.uguards[..], &[0]);
+    assert_eq!(&plan.cols[..], &[0]);
+    let specs_oct = [mk_spec(1841, true, &a_oct)];
+    let plan_oct = classify(mcx, &specs_oct).expect("admits");
+    assert_eq!(&plan_oct.vguards[..], &[0]);
+    assert!(plan_oct.uguards.is_empty(), "byte-count lanes need no UTF-8 proof");
+}
+
+#[test]
+fn classify_strlen_refusals() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let refuse = |args: &NodeList<'static>| {
+        assert!(classify_trans(&mk_spec(1963, false, args), 0).is_none());
+    };
+    // bpcharlen (bcTruelen semantics) and arbitrary int4 fns refuse.
+    refuse(&arg_list(mcx, mk_len_fn(mcx, 1372, mk_var(mcx, 1, BPCHARV))));
+    refuse(&arg_list(mcx, mk_len_fn(mcx, 1081, mk_var(mcx, 1, TEXTV))));
+    // Arg must be a text/varchar lane Var: bpchar Var, int Var, Const refuse.
+    refuse(&arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, BPCHARV))));
+    refuse(&arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, INT4OID))));
+    let konst =
+        Node::mk_const(mcx, TEXTV, -1, 0, -1, Datum::null(), true, false).unwrap();
+    refuse(&arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, konst)));
+    // A set-returning marker refuses.
+    let mut f = Node::build::<::types_nodes::primnodes::FuncExpr>(mcx).unwrap();
+    f.funcid = F_TEXTLEN_T;
+    f.funcresulttype = INT4OID;
+    f.funcretset = true;
+    f.args = NodeList::make1(mcx, mk_var(mcx, 1, TEXTV)).unwrap();
+    let srf = f.seal();
+    refuse(&arg_list(mcx, srf));
+    // length() composed inside an OpExpr does not admit (bare-only tier).
+    let len = mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV));
+    let konst4 = Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(1), false, true).unwrap();
+    let mut op = Node::build::<OpExpr>(mcx).unwrap();
+    op.opfuncid = 177; // int4pl
+    op.opresulttype = INT4OID;
+    op.args = NodeList::make2(mcx, len, konst4).unwrap();
+    let composed = op.seal();
+    refuse(&arg_list(mcx, composed));
+    // int2-result transfns never see the int4-only length admission.
+    let a_len = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    assert!(classify_trans(&mk_spec(770, true, &a_len), 0).is_none(), "int2larger");
+    // Length aggs are never footer-answerable (metaagg refuses the plan).
+    let specs = [mk_spec(1963, false, &a_len)];
+    assert!(classify_meta(mcx, &specs).is_none());
+}
+
+#[test]
+fn fold_strlen_parity_multibyte() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let data = len_corpus();
+    // AVG + SUM + MIN + MAX + COUNT(*) over length(col0): exercises the
+    // SumBase CSE cluster (avg+sum share one charlen pass) and the MinMax
+    // kernels over the charlen read.
+    let a1 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a2 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a3 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a4 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let empty = NodeList::default();
+    let specs = [
+        mk_spec(1963, false, &a1),  // avg(length(x))
+        mk_spec(1841, true, &a2),   // sum(length(x))
+        mk_spec(769, true, &a3),    // min(length(x))
+        mk_spec(768, true, &a4),    // max(length(x))
+        mk_spec(1219, false, &empty), // count(*)
+    ];
+    // All rows selected, then a sparse selection.
+    let (plan, _) = run_fold_len(mcx, &specs, &data, |_| true, oracle_charlen);
+    assert!(plan.resid.is_empty());
+    assert_eq!(
+        plan.cse.iter().filter(|g| g.kind == CseGroupKind::SumBase).count(),
+        1,
+        "avg+sum share one SumBase charlen pass"
+    );
+    run_fold_len(mcx, &specs, &data, |i| i % 3 != 1, oracle_charlen);
+    // Nothing selected: strict aggs stay in their init state.
+    run_fold_len(mcx, &specs, &data, |_| false, oracle_charlen);
+}
+
+#[test]
+fn fold_octetlen_parity_and_no_cse_across_widths() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let data = len_corpus();
+    let a_oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [mk_spec(1841, true, &a_oct)];
+    run_fold_len(mcx, &specs, &data, |_| true, oracle_bytelen);
+    // sum(length(x)) + sum(octet_length(x)): same column, DIFFERENT lane
+    // reads — the SumBase key must keep them apart.
+    let a_char = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a_oct2 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs2 = [mk_spec(1841, true, &a_char), mk_spec(1841, true, &a_oct2)];
+    let plan = classify(mcx, &specs2).expect("admits");
+    assert!(plan.cse.is_empty(), "char and byte lanes must not share a SumBase pass");
+    // And parity still holds per-transition (mixed oracle checked by hand).
+    let rows_datum: Vec<Vec<Option<Datum>>> = data.iter().map(|d| vec![*d]).collect();
+    let cols = TestCols::from_datum_rows(1, &rows_datum);
+    let rows = selmask(data.len(), |_| true);
+    // SAFETY: live inline varlena lanes (corpus construction).
+    assert_eq!(
+        unsafe { check_guards(&plan, &cols, &rows, |_| None) },
+        GuardCheck::Pass { zone: false, data: true }
+    );
+    let mut pgs = pergroups_for(mcx, &plan, 2);
+    // SAFETY: guard-passed batch, pergroups cover both transnos.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, data.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let sum_chars: i64 = data.iter().flatten().map(|&d| oracle_charlen(d)).sum();
+    let sum_bytes: i64 = data.iter().flatten().map(|&d| oracle_bytelen(d)).sum();
+    assert_eq!(pgs[0].trans_value.as_i64(), sum_chars);
+    assert_eq!(pgs[1].trans_value.as_i64(), sum_bytes);
+}
+
+#[test]
+fn strlen_guard_demotes() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let a_char = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [mk_spec(1963, false, &a_char)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let gc = |data: &[Option<Datum>], sel: &dyn Fn(usize) -> bool| {
+        let rows_datum: Vec<Vec<Option<Datum>>> = data.iter().map(|d| vec![*d]).collect();
+        let cols = TestCols::from_datum_rows(1, &rows_datum);
+        let rows = selmask(data.len(), sel);
+        // SAFETY: selected non-null datums are readable at their header
+        // byte (vl_* builders and the fakes below all are).
+        unsafe { check_guards(&plan, &cols, &rows, |_| None) }
+    };
+    // Non-inline forms demote (vguard tier, same as the str MIN/MAX lanes).
+    let comp = vec![Some(vl_short(b"ok")), Some(vl_4b_compressed_fake())];
+    assert_eq!(gc(&comp, &|_| true), GuardCheck::Demote);
+    let ext = vec![Some(vl_external_fake())];
+    assert_eq!(gc(&ext, &|_| true), GuardCheck::Demote);
+    // Invalid UTF-8 demotes (uguard tier): lone lead byte, bare continuation,
+    // overlong encoding, truncated trailing char.
+    for bad in [&b"a\xC3(z"[..], b"\x80", b"\xC0\xAF", b"ab\xE2\x82"] {
+        let data = vec![Some(vl_short(b"fine")), Some(vl_short(bad))];
+        assert_eq!(gc(&data, &|_| true), GuardCheck::Demote, "bad bytes {bad:?}");
+    }
+    // Embedded NUL demotes: C textlen NUL-stops, the count kernel must not
+    // silently diverge.
+    let nul = vec![Some(vl_short(b"ab\0cd"))];
+    assert_eq!(gc(&nul, &|_| true), GuardCheck::Demote);
+    // The proof domain is the selection: unselected/NULL bad rows pass.
+    let mixed = vec![Some(vl_short("héllo".as_bytes())), Some(vl_short(b"\x80")), None];
+    assert_eq!(gc(&mixed, &|i| i != 1), GuardCheck::Pass { zone: false, data: true });
+    // Byte-count lanes carry NO uguard: invalid UTF-8 passes for octet_length.
+    let a_oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs_oct = [mk_spec(1841, true, &a_oct)];
+    let plan_oct = classify(mcx, &specs_oct).expect("admits");
+    let data = vec![Some(vl_short(b"\x80\x00\xFF"))];
+    let rows_datum: Vec<Vec<Option<Datum>>> = data.iter().map(|d| vec![*d]).collect();
+    let cols = TestCols::from_datum_rows(1, &rows_datum);
+    let rows = selmask(1, |_| true);
+    // SAFETY: live inline varlena lane.
+    assert_eq!(
+        unsafe { check_guards(&plan_oct, &cols, &rows, |_| None) },
+        GuardCheck::Pass { zone: false, data: true }
+    );
+}
+
+#[test]
+fn fold_rows_grouped_strlen_parity() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let data = len_corpus();
+    let a1 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a2 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [mk_spec(1963, false, &a1), mk_spec(768, true, &a2)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let rows_datum: Vec<Vec<Option<Datum>>> = data.iter().map(|d| vec![*d]).collect();
+    let cols = TestCols::from_datum_rows(1, &rows_datum);
+    // Two groups: rows alternate.
+    let mut pg_a = pergroups_for(mcx, &plan, specs.len());
+    let mut pg_b = pergroups_for(mcx, &plan, specs.len());
+    let idxs: Vec<u32> = (0..data.len() as u32).collect();
+    let groups: Vec<NonNull<AggPerGroup>> = (0..data.len())
+        .map(|i| {
+            NonNull::new(if i % 2 == 0 { pg_a.as_mut_ptr() } else { pg_b.as_mut_ptr() }).unwrap()
+        })
+        .collect();
+    let rows = selmask(data.len(), |_| true);
+    // SAFETY: live inline varlena lanes; guard proven before the fold.
+    unsafe {
+        assert_eq!(
+            check_guards(&plan, &cols, &rows, |_| None),
+            GuardCheck::Pass { zone: false, data: true }
+        );
+        fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx).expect("fold");
+    }
+    let lens: Vec<Vec<Option<i64>>> = data.iter().map(|d| vec![d.map(oracle_charlen)]).collect();
+    let want_a = reference_fold(mcx, &plan, &lens, |i| i % 2 == 0, specs.len());
+    let want_b = reference_fold(mcx, &plan, &lens, |i| i % 2 == 1, specs.len());
+    assert_parity(&plan, &pg_a, &want_a);
+    assert_parity(&plan, &pg_b, &want_b);
 }
