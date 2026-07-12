@@ -863,6 +863,13 @@ impl<'mcx> CbScanDescData<'mcx> {
         self.part.as_ref().map_or(0, |p| (p.bytes().len() / 8192) as u32)
     }
 
+    /// Total committed rows across the scan's Part (footer metadata only —
+    /// no decode). The lane's tiny-input admission floor reads this before
+    /// running any arm cascade.
+    pub fn total_rows(&self) -> u64 {
+        self.part.as_ref().map_or(0, |p| p.rgs.iter().map(|rg| rg.nrows as u64).sum())
+    }
+
     /// Footer value min/max of the staged window's granule for column `c`;
     /// int-encoded chunks only (text granule entries carry byte lengths).
     /// The bounds cover the whole granule — a superset of any staged window

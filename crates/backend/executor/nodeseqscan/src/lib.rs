@@ -76,6 +76,11 @@ pub struct SeqScanState<'mcx> {
     // compile) per feed event or rescan — the refusal-audit "admission-
     // attempt tax" (coordinator rider, 2026-07-14). Never set on success.
     cb_prewhere_refused: bool,
+    // The memoized-false standalone verdict's REASON split: true = the
+    // tiny-input row floor refused (before any arm cascade ran), so the
+    // per-pull refusal accounting ticks tiny-input-floor instead of
+    // admission-economics. Reset with cb_standalone on park.
+    cb_tiny: bool,
     // cbstore relations only: plan-derived column need-set + zone-mappable
     // conjuncts, installed on the scan desc at open (cbstore-impl.md §7.3).
     cb_scan: Option<std::boxed::Box<CbScanInfo>>,
@@ -391,6 +396,16 @@ impl<'mcx> SeqScanState<'mcx> {
 
     pub fn set_cb_standalone_verdict(&mut self, v: bool) {
         self.cb_standalone = Some(v);
+    }
+
+    /// The memoized-false standalone verdict was the tiny-input floor's (the
+    /// per-pull accounting attributes the refusal to the right reason).
+    pub fn cb_standalone_tiny(&self) -> bool {
+        self.cb_tiny
+    }
+
+    pub fn set_cb_standalone_tiny(&mut self) {
+        self.cb_tiny = true;
     }
 
     pub fn release_parallel(&mut self) {
@@ -2563,6 +2578,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         lane_verdict: None,
         cb_standalone: None,
         cb_prewhere_refused: false,
+        cb_tiny: false,
         cb_scan,
     })
 }
@@ -2575,6 +2591,18 @@ fn rel_am_is_cbstore(rel: &Relation<'_>) -> bool {
 /// engagement class ticks on this).
 pub fn seq_scan_is_cbstore(node: &SeqScanState<'_>) -> bool {
     node.cb_scan.is_some()
+}
+
+/// Total committed rows of a cbstore scan's Part (footer metadata only; opens
+/// the scan descriptor if needed — the same open the drive does anyway).
+/// None = heap. The lane's tiny-input admission floor reads this BEFORE the
+/// arm cascade runs.
+pub fn seq_scan_cb_total_rows<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<u64>> {
+    node.ensure_scandesc(estate)?;
+    Ok(::tableam::table_scan_cb_total_rows(node.ss.ss_currentScanDesc.as_ref().unwrap()))
 }
 
 // Plan-derived need-set + zone-mappable conjuncts for a cbstore scan.
@@ -2760,6 +2788,7 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.lane_verdict = None;
     node.cb_standalone = None;
     node.cb_prewhere_refused = false;
+    node.cb_tiny = false;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -2861,7 +2890,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused;
+        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny;
         bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
