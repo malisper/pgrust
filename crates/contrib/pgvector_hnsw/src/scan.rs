@@ -47,8 +47,8 @@ pub fn hnswbeginscan<'mcx>(
         support,
         max_dimensions: HNSW_MAX_DIM as i32,
         norm_is_l2: false,
-        w: mcx::vec_with_capacity_in_infallible(mcx, 0),
-        visited: PgFxHashMap::with_capacity_and_hasher_in(0, Default::default(), mcx),
+        w: Vec::new(),
+        visited: Default::default(),
         discarded: None,
     };
     relation_get_index_scan(
@@ -88,44 +88,50 @@ pub fn hnswrescan(
     so.tuples = 0;
     so.mem_used = 0;
     so.previous_distance = f64::NEG_INFINITY;
+    // C: MemoryContextReset(so->tmpCtx) — value/w/visited/discarded live
+    // there. These are owned allocations, so reassignment frees them and
+    // memory stays bounded across arbitrarily many rescans.
     so.value = None;
-    so.w = mcx::vec_with_capacity_in_infallible(so.mcx, 0);
-    so.visited = PgFxHashMap::with_capacity_and_hasher_in(0, Default::default(), so.mcx);
+    so.w = Vec::new();
+    so.visited = Default::default();
     so.discarded = None;
     Ok(())
 }
 
 pub fn hnswendscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     let so = opaque(scan);
-    so.w = mcx::vec_with_capacity_in_infallible(so.mcx, 0);
-    so.visited = PgFxHashMap::with_capacity_and_hasher_in(0, Default::default(), so.mcx);
+    so.value = None;
+    so.w = Vec::new();
+    so.visited = Default::default();
     so.discarded = None;
     Ok(())
 }
 
 // GetScanValue: detoast, then normalize for cosine-family opclasses.
-fn get_scan_value<'mcx>(
-    so_mcx: Mcx<'mcx>,
+// Scratch goes in a local bump (C allocates in tmpCtx); the returned image
+// is owned so it frees at the next rescan.
+fn get_scan_value(
     support: &mut HnswSupport,
     orderby: &ScanKeyData,
-) -> PgResult<Option<PgVec<'mcx, u8>>> {
+) -> PgResult<Option<Vec<u8>>> {
     if orderby.sk_flags & SK_ISNULL != 0 {
         return Ok(None);
     }
+    let tmp = mcx::MemoryContext::new_bump("hnsw scan value");
+    let tmcx = tmp.mcx();
     let d = orderby.sk_argument;
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null vector varlena datum.
     let raw = unsafe {
         core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p))
     };
-    let flat = detoast::detoast_attr(so_mcx, raw)?;
-    let mut img: PgVec<'mcx, u8> = mcx::vec_with_capacity_in_infallible(so_mcx, flat.len());
-    let _ = mcx::vec_append_bytes(&mut img, &flat);
+    let flat = detoast::detoast_attr(tmcx, raw)?;
 
     if support.normprocinfo.is_some() {
-        img = norm_value(so_mcx, &img)?;
+        let normed = norm_value(tmcx, &flat)?;
+        return Ok(Some(normed.to_vec()));
     }
-    Ok(Some(img))
+    Ok(Some(flat.to_vec()))
 }
 
 // HnswNormValue for the vector opclasses: l2_normalize applied in place.
@@ -247,15 +253,15 @@ fn get_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     so.tuples = tuples;
     so.support = support;
 
-    so.w = mcx::vec_with_capacity_in_infallible(so.mcx, w.len());
+    so.w = Vec::with_capacity(w.len());
     for sc in w.iter() {
         so.w.push(pool_elem_to_scan(&pool, sc));
     }
     for key in visited0.keys() {
-        so.visited.insert(*key, ());
+        so.visited.insert(*key);
     }
     if let Some(dh) = discarded {
-        let mut out = DistanceMinHeap::new(so.mcx);
+        let mut out = DistanceMinHeap::new();
         for sc in dh.items.iter() {
             out.push(pool_elem_to_scan(&pool, sc));
         }
@@ -276,7 +282,7 @@ fn resume_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Hnsw(so) => &mut **so,
         _ => unreachable!(),
     };
-    so.w = mcx::vec_with_capacity_in_infallible(so.mcx, 0);
+    so.w = Vec::new();
     let batch_size = guc_tables::vars::hnsw_ef_search.read();
     if so.discarded.as_ref().is_none_or(|d| d.is_empty()) {
         return Ok(());
@@ -315,7 +321,7 @@ fn resume_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         Default::default(),
         tmcx,
     );
-    for k in so.visited.keys() {
+    for k in so.visited.iter() {
         visited.insert(*k, ());
     }
 
@@ -340,12 +346,12 @@ fn resume_scan_items(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     so.tuples = tuples;
     so.support = support;
 
-    so.w = mcx::vec_with_capacity_in_infallible(so.mcx, w.len());
+    so.w = Vec::with_capacity(w.len());
     for sc in w.iter() {
         so.w.push(pool_elem_to_scan(&pool, sc));
     }
     for key in visited.keys() {
-        so.visited.insert(*key, ());
+        so.visited.insert(*key);
     }
     let out = so.discarded.as_mut().expect("checked");
     for sc in discarded.items.iter() {
@@ -382,7 +388,7 @@ pub fn hnswgettuple(
                 _ => unreachable!(),
             };
             let mut support = so.support.clone();
-            so.value = get_scan_value(so.mcx, &mut support, &orderby)?;
+            so.value = get_scan_value(&mut support, &orderby)?;
             so.support = support;
         }
 

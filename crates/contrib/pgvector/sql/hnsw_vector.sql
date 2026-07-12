@@ -78,6 +78,41 @@ RESET hnsw.iterative_scan;
 RESET hnsw.ef_search;
 DROP TABLE t;
 
+-- duplicates: the in-memory build merges exact duplicates into one element
+-- (up to 10 heap tids); duplicates must not be flushed as orphan tuples.
+-- 1000-dim rows make each element+neighbor pair fill its own page, so the
+-- index size pins the element count independent of random levels.
+
+CREATE TABLE t (id int, val vector(1000));
+INSERT INTO t SELECT i, ('[' || repeat('7,', 999) || '7]')::vector FROM generate_series(1, 10) i;
+CREATE INDEX dup_idx ON t USING hnsw (val vector_l2_ops);
+SELECT pg_relation_size('dup_idx') / current_setting('block_size')::int AS pages;
+SELECT COUNT(*) FROM (SELECT id FROM t ORDER BY val <-> ('[' || repeat('7,', 999) || '7]')::vector LIMIT 20) s;
+DROP TABLE t;
+
+-- duplicates mixed with distinct values
+
+CREATE TABLE t (val vector(3));
+INSERT INTO t (val) VALUES ('[1,1,1]'), ('[1,1,1]'), ('[2,2,2]'), ('[1,1,1]'), ('[3,3,3]');
+CREATE INDEX ON t USING hnsw (val vector_l2_ops);
+SELECT val FROM t ORDER BY val <-> '[1,1,1]';
+SELECT COUNT(*) FROM (SELECT val FROM t ORDER BY val <-> '[0,0,0]') s;
+DROP TABLE t;
+
+-- rescan: nested-loop inner index scans re-enter hnswrescan
+
+CREATE TABLE q (qv vector(3));
+INSERT INTO q VALUES ('[0,0,0]'), ('[1,2,3]'), ('[2,2,2]');
+CREATE TABLE t (val vector(3));
+INSERT INTO t (val) VALUES ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]');
+CREATE INDEX ON t USING hnsw (val vector_l2_ops);
+SELECT q.qv, s.val FROM q, LATERAL (SELECT val FROM t ORDER BY val <-> q.qv LIMIT 2) s;
+SET hnsw.iterative_scan = relaxed_order;
+SELECT q.qv, s.val FROM q, LATERAL (SELECT val FROM t ORDER BY val <-> q.qv LIMIT 2) s;
+RESET hnsw.iterative_scan;
+DROP TABLE q;
+DROP TABLE t;
+
 -- unlogged
 
 CREATE UNLOGGED TABLE t (val vector(3));

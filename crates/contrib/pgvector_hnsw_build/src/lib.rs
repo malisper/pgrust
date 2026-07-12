@@ -48,8 +48,13 @@ struct MemElement<'g> {
 
 struct Graph<'g> {
     mcx: Mcx<'g>,
-    // Insertion list; C's graph->head prepends, flush iterates newest-first.
+    // Element arena; ids are indices. Duplicates stay allocated here (as in
+    // C's graphCtx) but are only reachable through `head` if non-duplicate.
     elems: Vec<MemElement<'g>>,
+    // C's graph->head insertion list: AddElementInMemory links only
+    // non-duplicate elements, and the flush walks this list. C prepends and
+    // iterates head-first; we push and iterate in reverse (newest-first).
+    head: Vec<u32>,
     entry_point: Option<u32>,
     memory_used: usize,
     memory_total: usize,
@@ -227,12 +232,14 @@ fn check_element_closer_mem(
     Ok(true)
 }
 
-// SelectNeighbors (in-memory).
+// SelectNeighbors (in-memory). C's candidate list holds pointers into the
+// caller's neighbor array, so e->closer updates land in that array; we take
+// `c` mutably and write the computed closer flags back by origin index.
 #[allow(clippy::too_many_arguments)]
 fn select_neighbors_mem(
     graph: &Graph<'_>,
     support: &mut HnswSupport,
-    c: &[MemCandidate],
+    c: &mut [MemCandidate],
     lm: i32,
     closer_set: &mut bool,
     new_candidate: Option<usize>,
@@ -248,6 +255,8 @@ fn select_neighbors_mem(
 
     let mut w: Vec<MemCandidate> = c.iter().map(mem_candidate_clone).collect();
     let mut w_is_new: Vec<bool> = vec![false; w.len()];
+    // Origin index into `c` for closer-flag write-back.
+    let mut w_src: Vec<usize> = (0..w.len()).collect();
     if let Some(nc) = new_candidate {
         w_is_new[nc] = true;
     }
@@ -261,8 +270,10 @@ fn select_neighbors_mem(
         });
         let neww: Vec<MemCandidate> = order.iter().map(|&i| mem_candidate_clone(&w[i])).collect();
         let newn: Vec<bool> = order.iter().map(|&i| w_is_new[i]).collect();
+        let news: Vec<usize> = order.iter().map(|&i| w_src[i]).collect();
         w = neww;
         w_is_new = newn;
+        w_src = news;
     }
 
     let must_calculate = !*closer_set;
@@ -273,6 +284,7 @@ fn select_neighbors_mem(
     while !w.is_empty() && (out.len() as i32) < lm {
         let mut e = w.pop().expect("nonempty");
         let e_is_new = w_is_new.pop().expect("nonempty");
+        let e_src = w_src.pop().expect("nonempty");
 
         if must_calculate {
             e.closer = check_element_closer_mem(graph, support, &e, out)?;
@@ -294,6 +306,9 @@ fn select_neighbors_mem(
                 added.push(mem_candidate_clone(&e));
             }
         }
+
+        // C writes e->closer through the shared pointer; mirror into `c`.
+        c[e_src].closer = e.closer;
 
         if e.closer {
             out.push(e);
@@ -354,7 +369,7 @@ fn find_element_neighbors_mem(
             bs.m,
         )?;
 
-        let lw: Vec<MemCandidate> = w
+        let mut lw: Vec<MemCandidate> = w
             .iter()
             .map(|(e, d)| MemCandidate { element: *e, distance: *d as f32, closer: false })
             .collect();
@@ -365,7 +380,7 @@ fn find_element_neighbors_mem(
         select_neighbors_mem(
             &bs.graph,
             &mut support,
-            &lw,
+            &mut lw,
             lm,
             &mut closer_set,
             None,
@@ -386,6 +401,58 @@ fn find_element_neighbors_mem(
         lc -= 1;
     }
     bs.support = support;
+    Ok(())
+}
+
+// HnswUpdateConnection (in-memory): link `new_element` into `neighbors`.
+// C's SelectNeighbors candidate list aliases neighbors->items, so the closer
+// flags it computes persist in the array (and the replacement newHc carries
+// its computed flag); mirror both write-backs here.
+fn update_connection_mem(
+    graph: &Graph<'_>,
+    support: &mut HnswSupport,
+    neighbors: &mut Vec<MemCandidate>,
+    closer_set: &mut bool,
+    new_element: u32,
+    distance: f32,
+    lm: i32,
+) -> PgResult<()> {
+    let new_hc = MemCandidate { element: new_element, distance, closer: false };
+    if (neighbors.len() as i32) < lm {
+        neighbors.push(new_hc);
+        return Ok(());
+    }
+
+    // Shrink connections.
+    let mut c: Vec<MemCandidate> = neighbors.iter().map(mem_candidate_clone).collect();
+    c.push(new_hc);
+    let new_idx = c.len() - 1;
+    let mut pruned: Option<MemCandidate> = None;
+    let mut selected: Vec<MemCandidate> = Vec::new();
+    select_neighbors_mem(
+        graph,
+        support,
+        &mut c,
+        lm,
+        closer_set,
+        Some(new_idx),
+        Some(&mut pruned),
+        true,
+        &mut selected,
+    )?;
+    // Closer flags computed in place land in the neighbor array even on the
+    // pruned==NULL early return (c[0..len] is index-aligned with neighbors).
+    for (slot, cand) in neighbors.iter_mut().zip(c.iter()) {
+        slot.closer = cand.closer;
+    }
+    // Should not happen (C returns without linking).
+    let Some(pruned) = pruned else { return Ok(()) };
+    for slot in neighbors.iter_mut() {
+        if slot.element == pruned.element {
+            *slot = mem_candidate_clone(&c[new_idx]);
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -413,37 +480,16 @@ fn update_neighbors_mem(bs: &mut BuildState<'_, '_, '_>, e: u32) -> PgResult<()>
             let mut closer_set =
                 bs.graph.elems[hc.element as usize].neighbors[n_layer_idx].closer_set;
 
-            // HnswUpdateConnection (in-memory).
-            let new_hc = MemCandidate { element: e, distance: hc.distance, closer: false };
-            if (neighbors.len() as i32) < lm {
-                neighbors.push(new_hc);
-            } else {
-                let mut c: Vec<MemCandidate> =
-                    neighbors.iter().map(mem_candidate_clone).collect();
-                c.push(mem_candidate_clone(&new_hc));
-                let new_idx = c.len() - 1;
-                let mut pruned: Option<MemCandidate> = None;
-                let mut selected: Vec<MemCandidate> = Vec::new();
-                select_neighbors_mem(
-                    &bs.graph,
-                    &mut support,
-                    &c,
-                    lm,
-                    &mut closer_set,
-                    Some(new_idx),
-                    Some(&mut pruned),
-                    true,
-                    &mut selected,
-                )?;
-                if let Some(pruned) = pruned {
-                    for slot in neighbors.iter_mut() {
-                        if slot.element == pruned.element {
-                            *slot = mem_candidate_clone(&new_hc);
-                            break;
-                        }
-                    }
-                }
-            }
+            update_connection_mem(
+                &bs.graph,
+                &mut support,
+                &mut neighbors,
+                &mut closer_set,
+                e,
+                hc.distance,
+                lm,
+            )?;
+
             let na = &mut bs.graph.elems[hc.element as usize].neighbors[n_layer_idx];
             na.items = neighbors;
             na.closer_set = closer_set;
@@ -490,6 +536,8 @@ fn insert_tuple_in_memory(bs: &mut BuildState<'_, '_, '_>, element: u32) -> PgRe
     if find_duplicate_mem(bs, element)? {
         return Ok(());
     }
+    // AddElementInMemory: only non-duplicates join the flush list.
+    bs.graph.head.push(element);
     update_neighbors_mem(bs, element)?;
     let promote = match entry_point {
         None => true,
@@ -621,7 +669,8 @@ fn create_graph_pages(bs: &mut BuildState<'_, '_, '_>) -> PgResult<()> {
     let mut buf = new_buffer(bs.index, bs.fork_num)?;
     init_page(buf);
 
-    let order: Vec<usize> = (0..bs.graph.elems.len()).rev().collect();
+    // C iterates graph->head (non-duplicates only), newest-first.
+    let order: Vec<usize> = bs.graph.head.iter().rev().map(|&e| e as usize).collect();
     for i in order {
         let (etup_size, ntup_size) = {
             let e = &bs.graph.elems[i];
@@ -707,7 +756,8 @@ fn create_graph_pages(bs: &mut BuildState<'_, '_, '_>) -> PgResult<()> {
 // WriteNeighborTuples.
 fn write_neighbor_tuples(bs: &mut BuildState<'_, '_, '_>) -> PgResult<()> {
     let mut ntup: Vec<u8> = Vec::new();
-    let order: Vec<usize> = (0..bs.graph.elems.len()).rev().collect();
+    // Same head-list walk as create_graph_pages: duplicates have no tuples.
+    let order: Vec<usize> = bs.graph.head.iter().rev().map(|&e| e as usize).collect();
     for i in order {
         postgres_seams::check_for_interrupts::call()?;
         let (neighbor_page, neighbor_offno, ntup_size) = {
@@ -751,6 +801,7 @@ fn flush_pages(bs: &mut BuildState<'_, '_, '_>) -> PgResult<()> {
     bs.graph.flushed = true;
     // C resets graphCtx; the arena is dropped with the build state.
     bs.graph.elems.clear();
+    bs.graph.head.clear();
     bs.graph.entry_point = None;
     Ok(())
 }
@@ -883,6 +934,7 @@ fn init_build_state<'a, 'g, 'mcx>(
         graph: Graph {
             mcx: gmcx,
             elems: Vec::new(),
+            head: Vec::new(),
             entry_point: None,
             memory_used: 0,
             memory_total: init_small::globals::maintenance_work_mem() as usize * 1024,
@@ -965,4 +1017,110 @@ pub fn hnswbuildempty(index: &Relation<'_>) -> PgResult<()> {
     let mcx_owner = mcx::MemoryContext::new_bump("hnsw buildempty");
     build_index(mcx_owner.mcx(), None, index, None, ForkNumber::INIT_FORKNUM)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // C HnswUpdateConnection mutates neighbors->items[i].closer through the
+    // shared candidate-list pointers; these tests pin that the in-memory port
+    // writes the computed closer flags (and the flagged newHc) back into the
+    // neighbor array instead of leaving stale flags for later pruning.
+
+    fn support() -> HnswSupport {
+        HnswSupport {
+            procinfo: types_fmgr::FmgrInfo::new(
+                pgvector::funcs::fc_vector_l2_squared_distance,
+                1,
+                2,
+                true,
+                false,
+            ),
+            normprocinfo: None,
+            collation: 0,
+        }
+    }
+
+    fn graph_1d<'g>(mcx: Mcx<'g>, xs: &[f32]) -> Graph<'g> {
+        let mut elems = Vec::new();
+        for &x in xs {
+            let mut b = pgvector::vec::VecBuilder::new(mcx, 1).unwrap();
+            b.set(0, x);
+            elems.push(MemElement {
+                heaptids: [ItemPointerData::invalid(); HNSW_HEAPTIDS],
+                heaptids_len: 0,
+                level: 0,
+                version: 1,
+                value: b.image(),
+                neighbors: Vec::new(),
+                blkno: INVALID_BLOCK,
+                offno: INVALID_OFFSET,
+                neighbor_page: INVALID_BLOCK,
+                neighbor_offno: INVALID_OFFSET,
+            });
+        }
+        Graph {
+            mcx,
+            elems,
+            head: Vec::new(),
+            entry_point: None,
+            memory_used: 0,
+            memory_total: usize::MAX,
+            flushed: false,
+            indtuples: 0.0,
+        }
+    }
+
+    // New candidate survives selection: the pruned slot is replaced by the
+    // newHc carrying its computed closer=true, and the surviving original
+    // neighbor's recomputed closer=true is written back.
+    #[test]
+    fn update_connection_writes_back_closer_flags_on_replace() {
+        let owner = mcx::MemoryContext::new_bump("test");
+        let mcx = owner.mcx();
+        // element 0 at 1.0, element 1 at 1.1, element 2 (new) at -1.05;
+        // owner is conceptually at 0.0, distances squared below.
+        let graph = graph_1d(mcx, &[1.0, 1.1, -1.05]);
+        let mut sp = support();
+        // Stale flags deliberately wrong (false); C recomputes in place.
+        let mut neighbors = vec![
+            MemCandidate { element: 0, distance: 1.0, closer: false },
+            MemCandidate { element: 1, distance: 1.21, closer: false },
+        ];
+        let mut closer_set = false;
+        update_connection_mem(&graph, &mut sp, &mut neighbors, &mut closer_set, 2, 1.1025, 2)
+            .unwrap();
+        assert!(closer_set, "sortCandidates=true sets closerSet");
+        // Selection keeps 0 (closer) and new 2 (closer vs {0}: d(2,0)^2=4.2 > 1.1025);
+        // 1 is never popped (r fills first), pruned = leftover 1 → replaced by newHc.
+        let flags: Vec<(u32, bool)> =
+            neighbors.iter().map(|n| (n.element, n.closer)).collect();
+        assert_eq!(flags, vec![(0, true), (2, true)]);
+    }
+
+    // New candidate is itself pruned (kept-neighbor case): no replacement,
+    // but the surviving array must carry the freshly computed flags —
+    // including a false flag for the not-closer neighbor (wd-kept).
+    #[test]
+    fn update_connection_writes_back_closer_flags_without_replace() {
+        let owner = mcx::MemoryContext::new_bump("test");
+        let mcx = owner.mcx();
+        // 0 at 1.0, 1 at 1.1, new 2 at 1.2: 1 and 2 are both not-closer to 0;
+        // wd-fill keeps 1, prunes the new candidate 2.
+        let graph = graph_1d(mcx, &[1.0, 1.1, 1.2]);
+        let mut sp = support();
+        // Stale flags deliberately wrong (true).
+        let mut neighbors = vec![
+            MemCandidate { element: 0, distance: 1.0, closer: true },
+            MemCandidate { element: 1, distance: 1.21, closer: true },
+        ];
+        let mut closer_set = false;
+        update_connection_mem(&graph, &mut sp, &mut neighbors, &mut closer_set, 2, 1.44, 2)
+            .unwrap();
+        assert!(closer_set);
+        let flags: Vec<(u32, bool)> =
+            neighbors.iter().map(|n| (n.element, n.closer)).collect();
+        assert_eq!(flags, vec![(0, true), (1, false)]);
+    }
 }

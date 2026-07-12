@@ -27,3 +27,6 @@ init_small = { path = "../../backend/utils/init/init_small" }
 elog = { path = "../../backend/utils/error/elog" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 pgvector_hnsw = { path = "../pgvector_hnsw" }
+
+[dev-dependencies]
+pgvector = { path = "../pgvector" }
