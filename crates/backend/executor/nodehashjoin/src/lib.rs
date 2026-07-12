@@ -103,6 +103,17 @@ pub struct HashJoinState<'mcx> {
     dense_cols: Option<DenseCols>,
     dense_on: bool,
     hj_CurDense: u32,
+    // Lane-owned probe prefilter: the build's ProbeBloom (the same object
+    // the row path pushes to the outer scan drive), armed by
+    // `lane_probe_filter_arm` under the row path's exact push conditions.
+    // A miss on the outer hash proves the bucket walk finds nothing (false
+    // positives only) — never armed under hj_fill_outer, so no null-fill
+    // decision is ever skipped. Counters drive the row path's
+    // measure-then-disarm (drop < seen/8 at the 1024 cadence). Exempt Rc:
+    // released on disarm/rebuild and in exec_end_hash_join.
+    lane_filter: Option<Rc<::nodehash::ProbeBloom<'mcx>>>,
+    lane_flt_seen: u32,
+    lane_flt_drop: u32,
 }
 
 impl<'mcx> HashJoinState<'mcx> {
@@ -324,6 +335,9 @@ pub fn exec_init_hash_join<'mcx>(
         dense_cols,
         dense_on: false,
         hj_CurDense: ::nodehash::DENSE_END,
+        lane_filter: None,
+        lane_flt_seen: 0,
+        lane_flt_drop: 0,
     };
     Ok((hjstate, hash_state))
 }
@@ -967,6 +981,7 @@ pub fn exec_end_hash_join<'mcx>(
     node.hashclauses = None;
     node.joinqual = None;
     node.otherqual = None;
+    node.lane_filter = None;
     node.proj.release_frames();
     node.outer_hash_expr.release_frames();
     node.ps_ResultTupleDesc = None;
@@ -1224,15 +1239,19 @@ pub fn lane_join_untouched(node: &HashJoinState<'_>, hs: &HashState<'_>) -> bool
 /// Build-phase entry: `exec_hash_join`'s HJ_BUILD_HASHTABLE table creation,
 /// verbatim — same `want_filter` (bloom sizing counts identically toward the
 /// table's space accounting, so nbatch growth points match the row path) and
-/// same dense key-track arming. The lane never *uses* the bloom (its probe
-/// runs no prefilter; results are prefilter-invariant) but must create the
-/// table identically so a spill-refuse fallback resumes bit-equal state.
+/// same dense key-track arming. The lane probe consumes the bloom through
+/// `lane_probe_filter_arm` (the row path's push, retargeted at the lane's
+/// own probe feed); a rebuild disarms any stale filter here, exactly as the
+/// row path's `set_hash_filter(None)` push does.
 pub fn lane_build_begin<'mcx>(
     node: &mut HashJoinState<'mcx>,
     hs: &mut HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(hs.table.is_none());
+    // Rebuild disarms a stale filter (row path: the unconditional
+    // set_hash_filter push after HJ_BUILD_HASHTABLE).
+    node.lane_filter = None;
     let want_filter = !node.hj_fill_outer
         && node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_some();
     hs.table = Some(::nodehash::exec_hash_table_create(hs, estate, want_filter)?);
@@ -1279,6 +1298,35 @@ pub fn lane_build_finish<'mcx>(
     node.hj_OuterNotEmpty = false;
     node.hj_JoinState = HJ_NEED_NEW_OUTER;
     Ok(LaneBuildDone { empty: false, nbatch: table.nbatch })
+}
+
+/// Arm the lane probe's bloom prefilter — the row path's post-build
+/// `set_hash_filter` push, retargeted at the lane's own probe feed. Exact
+/// legacy push gate: never under `hj_fill_outer` (LEFT/FULL/ANTI must
+/// null-fill unmatched outers — a bloom-missed outer still emits, so those
+/// types must reach the FILL arm with the bucket scan run; `want_filter`
+/// never sizes a bloom for them either), never when the dense seat is on (a
+/// dense miss is already exact), only with the Hash32Var columnar cover
+/// (the same gate that sized the bloom), and only through
+/// `take_probe_filter`'s runtime gate (single-batch build, density <= 0.25).
+/// For every armed type (INNER/SEMI/RIGHT/RIGHT_SEMI/RIGHT_ANTI) a bloom
+/// miss on the outer hash proves the bucket walk finds no hashvalue match:
+/// nothing would be emitted for that outer AND no inner match flag would be
+/// set, so skipping the bucket scan is result-identical by construction.
+/// The lane driver calls this once per completed build, only where the row
+/// path's own push seat would also arm (SeqScan outer drives).
+pub fn lane_probe_filter_arm<'mcx>(node: &mut HashJoinState<'mcx>, hs: &mut HashState<'mcx>) {
+    debug_assert!(node.lane_filter.is_none(), "rebuild disarm ran in lane_build_begin");
+    if node.hj_fill_outer || node.dense_on {
+        return;
+    }
+    if node.outer_hash_expr.hash32var_low32(::execexpr::SlotSrc::Inner).is_none() {
+        return;
+    }
+    let Some(table) = hs.table.as_mut() else { return };
+    node.lane_filter = table.take_probe_filter();
+    node.lane_flt_seen = 0;
+    node.lane_flt_drop = 0;
 }
 
 /// Intra-row expansion pending? (One outer row -> K matches; the position —
@@ -1366,6 +1414,28 @@ pub fn lane_probe_accept<'mcx>(
         .value
         .as_u32();
         node.hj_CurHashValue = h;
+        if let Some(f) = node.lane_filter.as_deref() {
+            node.lane_flt_seen = node.lane_flt_seen.wrapping_add(1);
+            if !f.test(h) {
+                // A miss proves the bucket walk finds no hashvalue match:
+                // no emission and no inner match flag for this outer. The
+                // filter never arms under hj_fill_outer, so skipping
+                // HJ_SCAN_BUCKET skips only the bucket scan — HJ_NEED_NEW_
+                // OUTER is exactly where an empty bucket walk lands
+                // (found=false → FILL arm → no fill_outer emit → advance).
+                debug_assert!(!node.hj_fill_outer, "bloom armed on a fill-outer join");
+                node.lane_flt_drop += 1;
+                node.hj_OuterNotEmpty = true;
+                node.hj_JoinState = HJ_NEED_NEW_OUTER;
+                return Ok(());
+            }
+            // Row path's adaptive disarm, at its 1024 cadence: a
+            // near-passthrough filter (drop < seen/8) costs more than it
+            // saves on non-selective joins.
+            if node.lane_flt_seen & 1023 == 0 && node.lane_flt_drop < node.lane_flt_seen / 8 {
+                node.lane_filter = None;
+            }
+        }
         let table = hs.table.as_ref().expect("hash table built");
         let (bucketno, batchno) = table.get_bucket_and_batch(h);
         debug_assert_eq!(batchno, 0, "lane join admitted a multi-batch probe");
@@ -1596,7 +1666,7 @@ mcx::forget_safe_struct!(
         hj_NullOuterTupleSlot, hj_JoinState, hj_CurHashValue, hj_CurBucketNo,
         hj_CurTuple, hj_MatchedOuter, hj_OuterNotEmpty, hj_OuterTupleSlot,
         outer_saved_scratch, inner_saved_scratch, hash_instr, js_instr,
-        dense_cols, dense_on, hj_CurDense;
+        dense_cols, dense_on, hj_CurDense, lane_flt_seen, lane_flt_drop;
         ps_ResultTupleDesc, proj, hashclauses, joinqual, otherqual,
-        outer_hash_expr },
+        outer_hash_expr, lane_filter },
 );
