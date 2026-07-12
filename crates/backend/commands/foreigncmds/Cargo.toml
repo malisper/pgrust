@@ -43,4 +43,5 @@ funcapi = { path = "../../utils/fmgr/funcapi" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 detoast = { path = "../../access/common/detoast" }
 xact = { path = "../../access/transam/xact" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
 foreigncmds_seams = { path = "../foreigncmds_seams" }

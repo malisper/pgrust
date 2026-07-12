@@ -84,6 +84,7 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
                 }
                 // Inherited TRUNCATE checks permissions on the parent only.
                 truncate_check_rel(
+                    mcx,
                     childrelid,
                     child.rd_rel.relkind,
                     child.namespace(),
@@ -147,7 +148,7 @@ fn ExecuteTruncateGuts<'mcx>(
                     NOTICE,
                     format!("truncate cascades to table \"{}\"", rel.name()),
                 ))?;
-                truncate_check_rel(relid, rel.rd_rel.relkind, rel.namespace(), rel.name())?;
+                truncate_check_rel(mcx, relid, rel.rd_rel.relkind, rel.namespace(), rel.name())?;
                 truncate_check_perms(relid, rel.rd_rel.relkind, rel.name())?;
                 truncate_check_activity(&rel)?;
                 if heapam::relation_is_logically_logged(&rel) {
@@ -327,20 +328,43 @@ fn RangeVarCallbackForTruncate<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()
     genam::systable_endscan(mcx, scan)?;
     pg_class.close(types_rel::AccessShareLock)?;
 
-    truncate_check_rel(relOid, relkind, relnamespace, &relname)?;
+    truncate_check_rel(mcx, relOid, relkind, relnamespace, &relname)?;
     truncate_check_perms(relOid, relkind, &relname)
 }
 
-fn truncate_check_rel(relid: Oid, relkind: u8, relnamespace: Oid, relname: &str) -> PgResult<()> {
+fn truncate_check_rel(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    relkind: u8,
+    relnamespace: Oid,
+    relname: &str,
+) -> PgResult<()> {
+    if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        // C resolves the routine first, so a handlerless wrapper errors
+        // "foreign-data wrapper ... has no handler" before this 0A000; no
+        // in-tree FDW models ExecForeignTruncate, so resolution otherwise
+        // always falls through to the cannot-truncate error.
+        let serverid = foreigncmds::foreign::GetForeignServerIdByRelId(relid)?;
+        let _routine = foreigncmds::foreign::GetFdwRoutineByServerId(mcx, serverid)?;
+        return Err(Box::new(
+            PgError::new(ERROR, format!("cannot truncate foreign table \"{relname}\""))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     if relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE {
         return Err(Box::new(
             PgError::new(ERROR, format!("\"{relname}\" is not a table"))
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE),
         ));
     }
+    // C exempts pg_largeobject during pg_upgrade (relfilenode carryover);
+    // object-access hooks (InvokeObjectTruncateHook) are elided repo-wide.
     let is_system =
         catalog::IsCatalogRelationOid(relid) || catalog::IsToastNamespace(relnamespace);
-    if is_system && !init_small::globals::allowSystemTableMods() {
+    if is_system
+        && !init_small::globals::allowSystemTableMods()
+        && (!init_small::globals::IsBinaryUpgrade() || relid != catalog::LargeObjectRelationId)
+    {
         return Err(Box::new(
             PgError::new(
                 ERROR,

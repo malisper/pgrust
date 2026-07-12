@@ -32,19 +32,19 @@ use types_nodes::parsenodes::{
     ATAlterConstraint, AccessPriv, AlterCollationStmt, AlterDatabaseRefreshCollStmt,
     AlterDatabaseSetStmt, AlterDatabaseStmt, AlterDefaultPrivilegesStmt, AlterDomainStmt,
     AlterEventTrigStmt, AlterFunctionStmt, AlterObjectSchemaStmt, AlterOpFamilyStmt,
-    AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt, AlterSystemStmt,
-    AlterRoleStmt, AlterSubscriptionStmt, AlterTableCmd, AlterTableMoveAllStmt,
-    AlterTableSpaceOptionsStmt, AlterTableStmt, CTECycleClause, CTESearchClause, CheckPointStmt,
-    ClosePortalStmt,
-    ClusterStmt, CommentStmt, CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt,
-    CreateConversionStmt, CreateEventTrigStmt, CreateFunctionStmt, CreateOpClassItem,
-    CreateOpClassStmt, CreateOpFamilyStmt, CreatePLangStmt, CreatePolicyStmt,
-    CreatePublicationStmt, CreateRoleStmt, CreateSchemaStmt, CreateSubscriptionStmt,
-    CreateTableSpaceStmt, CreateTransformStmt, CreatedbStmt, DeallocateStmt, DeclareCursorStmt,
-    DefElem, DefineStmt, DiscardStmt, DoStmt, DropOwnedStmt, DropRoleStmt, DropStmt,
-    DropSubscriptionStmt, DropTableSpaceStmt, DropdbStmt, ExecuteStmt, ExplainStmt, FetchStmt,
-    FunctionParameter, GrantRoleStmt, GrantStmt, GroupingSet, ListenStmt, LoadStmt, LockStmt,
-    NotifyStmt, ObjectWithArgs, PrepareStmt, PublicationObjSpec, PublicationTable, Query,
+    AlterOperatorStmt, AlterOwnerStmt, AlterPolicyStmt, AlterPublicationStmt, AlterRoleSetStmt,
+    AlterRoleStmt, AlterSubscriptionStmt, AlterSystemStmt, AlterTableCmd,
+    AlterTableMoveAllStmt, AlterTableSpaceOptionsStmt, AlterTableStmt, CTECycleClause,
+    CTESearchClause, CheckPointStmt, ClosePortalStmt, ClusterStmt, CommentStmt,
+    CommonTableExpr, CopyStmt, CreateAmStmt, CreateCastStmt, CreateConversionStmt,
+    CreateEventTrigStmt, CreateFunctionStmt, CreateOpClassItem, CreateOpClassStmt,
+    CreateOpFamilyStmt, CreatePLangStmt, CreatePolicyStmt, CreatePublicationStmt,
+    CreateRoleStmt, CreateSchemaStmt, CreateSubscriptionStmt, CreateTableSpaceStmt,
+    CreateTransformStmt, CreatedbStmt, DeallocateStmt, DeclareCursorStmt, DefElem, DefineStmt,
+    DiscardStmt, DoStmt, DropOwnedStmt, DropRoleStmt, DropStmt, DropSubscriptionStmt,
+    DropTableSpaceStmt, DropdbStmt, ExecuteStmt, ExplainStmt, FetchStmt, FunctionParameter,
+    GrantRoleStmt, GrantStmt, GroupingSet, ListenStmt, LoadStmt, LockStmt, NotifyStmt,
+    ObjectWithArgs, PrepareStmt, PublicationObjSpec, PublicationTable, Query,
     RTEPermissionInfo, RangeTblEntry, RangeTblFunction, ReassignOwnedStmt, ReindexStmt,
     RenameStmt, ReplicaIdentityStmt, ReturnStmt, RoleSpec, RowMarkClause, SecLabelStmt,
     SetOperationStmt, SortGroupClause, TableSampleClause, TransactionStmt, TruncateStmt,
@@ -73,9 +73,9 @@ use types_nodes::rawnodes::{
 };
 use types_nodes::plannodes::{
     Agg, Append, AppendRelInfo, BitmapAnd, BitmapHeapScan, BitmapIndexScan, BitmapOr, CteScan,
-    FunctionScan, Gather, GatherMerge, Group, Hash, HashJoin, IncrementalSort, IndexOnlyScan,
-    IndexScan, Join, Limit, LockRows, Material, Memoize, MergeAppend, MergeJoin, ModifyTable,
-    NamedTuplestoreScan, NestLoop, NestLoopParam, PartitionPruneInfo,
+    ForeignScan, FunctionScan, Gather, GatherMerge, Group, Hash, HashJoin, IncrementalSort,
+    IndexOnlyScan, IndexScan, Join, Limit, LockRows, Material, Memoize, MergeAppend, MergeJoin,
+    ModifyTable, NamedTuplestoreScan, NestLoop, NestLoopParam, PartitionPruneInfo,
     PartitionPruneStepCombine, PartitionPruneStepOp, PartitionedRelPruneInfo, Plan,
     PlanInvalItem, PlanRowMark, PlannedStmt, ProjectSet, RecursiveUnion, Result, SampleScan,
     Scan, SeqScan, SetOp, Sort, SubqueryScan, TableFuncScan, TidRangeScan, TidScan, Unique,
@@ -196,10 +196,6 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<AlterRoleSetStmt>().expect("AlterRoleSetStmt");
             Node::mk(mcx, copy_AlterRoleSetStmt(mcx, s)?)?
         }
-        NodeTag::T_AlterSystemStmt => {
-            let s = node.as_variant::<AlterSystemStmt>().expect("AlterSystemStmt");
-            Node::mk(mcx, copy_AlterSystemStmt(mcx, s)?)?
-        }
         NodeTag::T_AlterRoleStmt => {
             let s = node.as_variant::<AlterRoleStmt>().expect("AlterRoleStmt");
             Node::mk(mcx, copy_AlterRoleStmt(mcx, s)?)?
@@ -216,6 +212,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<AlterSubscriptionStmt>().expect("AlterSubscriptionStmt");
             Node::mk(mcx, copy_AlterSubscriptionStmt(mcx, s)?)?
         }
+        NodeTag::T_AlterSystemStmt => {
+            let s = node.as_variant::<AlterSystemStmt>().expect("AlterSystemStmt");
+            Node::mk(mcx, copy_AlterSystemStmt(mcx, s)?)?
+        }
         NodeTag::T_AlterTSConfigurationStmt => {
             let s = node.as_variant::<AlterTSConfigurationStmt>().expect("AlterTSConfigurationStmt");
             Node::mk(mcx, copy_AlterTSConfigurationStmt(mcx, s)?)?
@@ -228,13 +228,13 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
             let s = node.as_variant::<AlterTableCmd>().expect("AlterTableCmd");
             Node::mk(mcx, copy_AlterTableCmd(mcx, s)?)?
         }
-        NodeTag::T_AlterTableSpaceOptionsStmt => {
-            let s = node.as_variant::<AlterTableSpaceOptionsStmt>().expect("AlterTableSpaceOptionsStmt");
-            Node::mk(mcx, copy_AlterTableSpaceOptionsStmt(mcx, s)?)?
-        }
         NodeTag::T_AlterTableMoveAllStmt => {
             let s = node.as_variant::<AlterTableMoveAllStmt>().expect("AlterTableMoveAllStmt");
             Node::mk(mcx, copy_AlterTableMoveAllStmt(mcx, s)?)?
+        }
+        NodeTag::T_AlterTableSpaceOptionsStmt => {
+            let s = node.as_variant::<AlterTableSpaceOptionsStmt>().expect("AlterTableSpaceOptionsStmt");
+            Node::mk(mcx, copy_AlterTableSpaceOptionsStmt(mcx, s)?)?
         }
         NodeTag::T_AlterTableStmt => {
             let s = node.as_variant::<AlterTableStmt>().expect("AlterTableStmt");
@@ -595,6 +595,10 @@ pub(crate) fn copy_generated<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Optio
         NodeTag::T_FieldStore => {
             let s = node.as_variant::<FieldStore>().expect("FieldStore");
             Node::mk(mcx, copy_FieldStore(mcx, s)?)?
+        }
+        NodeTag::T_ForeignScan => {
+            let s = node.as_variant::<ForeignScan>().expect("ForeignScan");
+            Node::mk(mcx, copy_ForeignScan(mcx, s)?)?
         }
         NodeTag::T_FromExpr => {
             let s = node.as_variant::<FromExpr>().expect("FromExpr");
@@ -1618,12 +1622,6 @@ pub(crate) fn copy_AlterPublicationStmt<'d>(mcx: Mcx<'d>, s: &AlterPublicationSt
     })
 }
 
-pub(crate) fn copy_AlterSystemStmt<'d>(mcx: Mcx<'d>, s: &AlterSystemStmt<'_>) -> PgResult<AlterSystemStmt<'d>> {
-    Ok(AlterSystemStmt {
-        setstmt: mk_ref(mcx, copy_VariableSetStmt(mcx, s.setstmt)?)?,
-    })
-}
-
 pub(crate) fn copy_AlterRoleSetStmt<'d>(mcx: Mcx<'d>, s: &AlterRoleSetStmt<'_>) -> PgResult<AlterRoleSetStmt<'d>> {
     Ok(AlterRoleSetStmt {
         role: match s.role { Some(v) => Some(mk_ref(mcx, copy_RoleSpec(mcx, v)?)?), None => None },
@@ -1667,6 +1665,12 @@ pub(crate) fn copy_AlterSubscriptionStmt<'d>(mcx: Mcx<'d>, s: &AlterSubscription
     })
 }
 
+pub(crate) fn copy_AlterSystemStmt<'d>(mcx: Mcx<'d>, s: &AlterSystemStmt<'_>) -> PgResult<AlterSystemStmt<'d>> {
+    Ok(AlterSystemStmt {
+        setstmt: mk_ref(mcx, copy_VariableSetStmt(mcx, s.setstmt)?)?,
+    })
+}
+
 pub(crate) fn copy_AlterTSConfigurationStmt<'d>(mcx: Mcx<'d>, s: &AlterTSConfigurationStmt<'_>) -> PgResult<AlterTSConfigurationStmt<'d>> {
     Ok(AlterTSConfigurationStmt {
         kind: s.kind,
@@ -1699,14 +1703,6 @@ pub(crate) fn copy_AlterTableCmd<'d>(mcx: Mcx<'d>, s: &AlterTableCmd<'_>) -> PgR
     })
 }
 
-pub(crate) fn copy_AlterTableSpaceOptionsStmt<'d>(mcx: Mcx<'d>, s: &AlterTableSpaceOptionsStmt<'_>) -> PgResult<AlterTableSpaceOptionsStmt<'d>> {
-    Ok(AlterTableSpaceOptionsStmt {
-        tablespacename: opt_str_in(mcx, s.tablespacename)?,
-        options: copy_node_list(mcx, &s.options)?,
-        isReset: s.isReset,
-    })
-}
-
 pub(crate) fn copy_AlterTableMoveAllStmt<'d>(mcx: Mcx<'d>, s: &AlterTableMoveAllStmt<'_>) -> PgResult<AlterTableMoveAllStmt<'d>> {
     Ok(AlterTableMoveAllStmt {
         orig_tablespacename: opt_str_in(mcx, s.orig_tablespacename)?,
@@ -1714,6 +1710,14 @@ pub(crate) fn copy_AlterTableMoveAllStmt<'d>(mcx: Mcx<'d>, s: &AlterTableMoveAll
         roles: copy_node_list(mcx, &s.roles)?,
         new_tablespacename: opt_str_in(mcx, s.new_tablespacename)?,
         nowait: s.nowait,
+    })
+}
+
+pub(crate) fn copy_AlterTableSpaceOptionsStmt<'d>(mcx: Mcx<'d>, s: &AlterTableSpaceOptionsStmt<'_>) -> PgResult<AlterTableSpaceOptionsStmt<'d>> {
+    Ok(AlterTableSpaceOptionsStmt {
+        tablespacename: opt_str_in(mcx, s.tablespacename)?,
+        options: copy_node_list(mcx, &s.options)?,
+        isReset: s.isReset,
     })
 }
 
@@ -2591,6 +2595,23 @@ pub(crate) fn copy_FieldStore<'d>(mcx: Mcx<'d>, s: &FieldStore<'_>) -> PgResult<
         newvals: copy_node_list(mcx, &s.newvals)?,
         fieldnums: IntList::from_slice(mcx, s.fieldnums.as_slice())?,
         resulttype: s.resulttype,
+    })
+}
+
+pub(crate) fn copy_ForeignScan<'d>(mcx: Mcx<'d>, s: &ForeignScan<'_>) -> PgResult<ForeignScan<'d>> {
+    Ok(ForeignScan {
+        scan: copy_Scan(mcx, &s.scan)?,
+        operation: s.operation,
+        resultRelation: s.resultRelation,
+        checkAsUser: s.checkAsUser,
+        fs_server: s.fs_server,
+        fdw_exprs: copy_node_list(mcx, &s.fdw_exprs)?,
+        fdw_private: copy_node_list(mcx, &s.fdw_private)?,
+        fdw_scan_tlist: copy_node_list(mcx, &s.fdw_scan_tlist)?,
+        fdw_recheck_quals: copy_node_list(mcx, &s.fdw_recheck_quals)?,
+        fs_relids: copy_bms(mcx, &s.fs_relids)?,
+        fs_base_relids: copy_bms(mcx, &s.fs_base_relids)?,
+        fsSystemCol: s.fsSystemCol,
     })
 }
 

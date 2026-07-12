@@ -85,7 +85,9 @@ pub(crate) struct FdState {
     pub have_xact_temporary_files: bool,
     pub temporary_files_size: u64,
     pub temporary_files_allowed: bool,
-    pub allocated_descs: Vec<AllocateDesc>,
+    /// Stable-index slots: C's FreeFile searches by FILE*, so its
+    /// compaction is invisible; index handles require tombstones instead.
+    pub allocated_descs: Vec<Option<AllocateDesc>>,
     pub max_allocated_descs: i32,
     pub temp_file_counter: i64,
     // None mirrors C's `numTempTableSpaces == -1`.
@@ -293,7 +295,7 @@ pub(crate) fn ReleaseLruFile(fd: &mut FdState) -> PgResult<bool> {
 }
 
 pub(crate) fn ReleaseLruFiles(fd: &mut FdState) -> PgResult<()> {
-    while fd.nfile + fd.allocated_descs.len() as i32 + num_external_fds() >= max_safe_fds() {
+    while fd.nfile + occupied_descs(fd) + num_external_fds() >= max_safe_fds() {
         if !ReleaseLruFile(fd)? {
             break;
         }
@@ -704,4 +706,8 @@ pub mod resowner {
         )
         .expect("ResourceOwnerForgetFile");
     }
+}
+
+pub(crate) fn occupied_descs(fd: &FdState) -> i32 {
+    fd.allocated_descs.iter().flatten().count() as i32
 }

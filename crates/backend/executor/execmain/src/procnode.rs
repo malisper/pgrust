@@ -73,6 +73,7 @@ pub enum PlanStateNode<'mcx> {
     NamedTuplestoreScan(PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>),
     Gather(PgBox<'mcx, GatherNode<'mcx>>),
     GatherMerge(PgBox<'mcx, GatherMergeNode<'mcx>>),
+    ForeignScan(PgBox<'mcx, ::nodeforeignscan::ForeignScanState<'mcx>>),
     // Last variant: existing discriminants keep their values, so the
     // uninstrumented jump-table dispatch compiles unchanged.
     Instrumented(PgBox<'mcx, InstrumentedNode<'mcx>>),
@@ -362,6 +363,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::TidRangeScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::FunctionScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::ValuesScan(vs) => Some(vs.ss.ps_ExprContext),
+            PlanStateNode::ForeignScan(fs) => Some(fs.ss.ps_ExprContext),
             PlanStateNode::TableFuncScan(ts) => Some(ts.ss.ps_ExprContext),
             PlanStateNode::CteScan(cs) => Some(cs.ss.ps_ExprContext),
             PlanStateNode::IndexScan(is) => Some(is.ss.ps_ExprContext),
@@ -425,6 +427,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             | PlanStateNode::FunctionScan(_)
             | PlanStateNode::TableFuncScan(_)
             | PlanStateNode::ValuesScan(_)
+            | PlanStateNode::ForeignScan(_)
             | PlanStateNode::CteScan(_)
             | PlanStateNode::IndexScan(_)
             | PlanStateNode::IndexOnlyScan(_)
@@ -548,6 +551,16 @@ pub fn exec_init_node<'mcx>(
                 estate,
             )?;
             PlanStateNode::ValuesScan(::mcx::alloc_in(mcx, state)?)
+        }
+        NodeTag::T_ForeignScan => {
+            let mcx = estate.es_query_cxt;
+            let state = ::nodeforeignscan::exec_init_foreign_scan(
+                mcx,
+                node.as_foreign_scan().unwrap(),
+                estate,
+                eflags,
+            )?;
+            PlanStateNode::ForeignScan(::mcx::alloc_in(mcx, state)?)
         }
         NodeTag::T_CteScan => {
             let mcx = estate.es_query_cxt;
@@ -1292,7 +1305,6 @@ pub fn exec_init_node<'mcx>(
         tag => unported_nodes!(tag, {
             T_ValuesScan => "nodeValuesscan.c",
             T_NamedTuplestoreScan => "nodeNamedtuplestorescan.c",
-            T_ForeignScan => "nodeForeignscan.c",
             T_CustomScan => "nodeCustom.c",
             T_Material => "nodeMaterial.c",
             T_WindowAgg => "nodeWindowAgg.c",
@@ -1351,6 +1363,7 @@ fn scan_state_of<'a, 'mcx>(
         PlanStateNode::SampleScan(ss) => Some(&mut ss.ss),
         PlanStateNode::FunctionScan(fs) => Some(&mut fs.ss),
         PlanStateNode::ValuesScan(vs) => Some(&mut vs.ss),
+        PlanStateNode::ForeignScan(fs) => Some(&mut fs.ss),
         PlanStateNode::TableFuncScan(ts) => Some(&mut ts.ss),
         PlanStateNode::CteScan(cs) => Some(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => Some(&mut wts.ss),
@@ -1381,6 +1394,7 @@ pub fn exec_proc_node<'mcx>(
         PlanStateNode::SampleScan(ss) => sample_scan_arm(ss, estate),
         PlanStateNode::FunctionScan(fs) => function_scan_arm(fs, estate),
         PlanStateNode::ValuesScan(vs) => values_scan_arm(vs, estate),
+        PlanStateNode::ForeignScan(fs) => foreign_scan_arm(fs, estate),
         PlanStateNode::TableFuncScan(ts) => table_func_scan_arm(ts, estate),
         PlanStateNode::CteScan(cs) => cte_scan_arm(cs, estate),
         PlanStateNode::IndexScan(is) => index_scan_arm(is, estate),
@@ -1513,6 +1527,14 @@ fn values_scan_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     ::nodevaluesscan::exec_values_scan(vs, estate)
+}
+
+#[inline(never)]
+fn foreign_scan_arm<'mcx>(
+    fs: &mut PgBox<'mcx, ::nodeforeignscan::ForeignScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> ProcResult {
+    ::nodeforeignscan::exec_foreign_scan(fs, estate)
 }
 
 #[inline(never)]
@@ -2823,6 +2845,10 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             ::nodevaluesscan::exec_end_values_scan(vs);
             end_scan(&mut vs.ss)
         }
+        PlanStateNode::ForeignScan(fs) => {
+            fs.fdw_state = None;
+            end_scan(&mut fs.ss)
+        }
         PlanStateNode::TableFuncScan(ts) => end_scan(&mut ts.ss),
         PlanStateNode::CteScan(cs) => end_scan(&mut cs.ss),
         PlanStateNode::WorkTableScan(wts) => end_scan(&mut wts.ss),
@@ -2956,9 +2982,112 @@ pub fn planstate_instr_extra<'mcx>(
         }
         PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
         PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
+        // Result's outer child is optional (gating Result has one).
+        PlanStateNode::Result(r) => match r.outer.as_mut() {
+            Some(o) => walk!(&mut **o),
+            None => None,
+        },
         PlanStateNode::WorkTableScan(_)
         | PlanStateNode::NamedTuplestoreScan(_)
-        | PlanStateNode::Result(_)
+        | PlanStateNode::SeqScan(_)
+        | PlanStateNode::SampleScan(_)
+        | PlanStateNode::FunctionScan(_)
+        | PlanStateNode::TableFuncScan(_)
+        | PlanStateNode::ValuesScan(_)
+        | PlanStateNode::ForeignScan(_)
+        | PlanStateNode::CteScan(_)
+        | PlanStateNode::IndexScan(_)
+        | PlanStateNode::TidScan(_)
+        | PlanStateNode::TidRangeScan(_)
+        | PlanStateNode::IndexOnlyScan(_)
+        | PlanStateNode::BitmapIndexScan(_) => None,
+    }
+}
+
+/// show_foreignscan_info's drive: find the ForeignScanState by plan_node_id
+/// (plain EXPLAIN has no Instrumented wrappers, so the match reads the
+/// state's plan) and run the provider's explain callback on it.
+/// None = no such node in this tree.
+pub fn planstate_foreign_explain<'mcx>(
+    node: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_node_id: i32,
+    costs: bool,
+    emit: &mut dyn FnMut(&str, ::types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
+) -> Option<PgResult<()>> {
+    macro_rules! walk {
+        ($($child:expr),+) => {{
+            $(if let Some(x) = planstate_foreign_explain($child, estate, plan_node_id, costs, emit) {
+                return Some(x);
+            })+
+            None
+        }};
+    }
+    match node {
+        PlanStateNode::ForeignScan(fs) => (fs.plan.scan.plan.plan_node_id == plan_node_id)
+            .then(|| ::nodeforeignscan::explain_foreign_scan(fs, estate, costs, emit)),
+        PlanStateNode::Instrumented(w) => {
+            planstate_foreign_explain(&mut w.inner, estate, plan_node_id, costs, emit)
+        }
+        PlanStateNode::Agg(aps) => walk!(&mut aps.outer),
+        PlanStateNode::ProjectSet(ps) => walk!(&mut ps.outer),
+        PlanStateNode::WindowAgg(w) => walk!(&mut w.outer),
+        PlanStateNode::Sort(s) => walk!(&mut *s.outer),
+        PlanStateNode::IncrementalSort(s) => walk!(&mut s.outer),
+        PlanStateNode::Material(m) => walk!(&mut *m.outer),
+        PlanStateNode::Memoize(m) => walk!(&mut *m.outer),
+        PlanStateNode::Unique(u) => walk!(&mut u.outer),
+        PlanStateNode::Group(g) => walk!(&mut g.outer),
+        PlanStateNode::Limit(l) => walk!(&mut *l.outer),
+        PlanStateNode::NestLoop(nl) => walk!(&mut *nl.outer, &mut *nl.inner),
+        PlanStateNode::MergeJoin(mj) => walk!(&mut *mj.outer, &mut *mj.inner),
+        PlanStateNode::HashJoin(hj) => {
+            let hj = &mut **hj;
+            walk!(&mut *hj.outer, &mut *hj.hash.child)
+        }
+        PlanStateNode::BitmapHeapScan(b) => walk!(&mut b.bitmapqual),
+        PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
+            for sub in bc.substates.iter_mut() {
+                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, costs, emit) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        PlanStateNode::Append(a) => {
+            for sub in a.substates.iter_mut() {
+                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, costs, emit) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        PlanStateNode::MergeAppend(m) => {
+            for sub in m.substates.iter_mut() {
+                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, costs, emit) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        PlanStateNode::SubqueryScan(s) => walk!(&mut *s.subplan),
+        PlanStateNode::Gather(g) => walk!(&mut *g.outer),
+        PlanStateNode::GatherMerge(gm) => walk!(&mut *gm.outer),
+        PlanStateNode::SetOp(s) => walk!(&mut s.outer, &mut s.inner),
+        PlanStateNode::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            walk!(&mut ru.outer, &mut ru.inner)
+        }
+        PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
+        PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
+        // Result's outer child is optional (gating Result has one), and a
+        // pseudoconstant qual on a foreign table plans Result->ForeignScan.
+        PlanStateNode::Result(r) => match r.outer.as_mut() {
+            Some(o) => walk!(&mut **o),
+            None => None,
+        },
+        PlanStateNode::WorkTableScan(_)
+        | PlanStateNode::NamedTuplestoreScan(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::SampleScan(_)
         | PlanStateNode::FunctionScan(_)
@@ -3048,6 +3177,7 @@ fn exec_end_node_inner<'mcx>(
             ::nodevaluesscan::exec_end_values_scan(vs);
             Ok(())
         }
+        PlanStateNode::ForeignScan(fs) => ::nodeforeignscan::exec_end_foreign_scan(fs, estate),
         PlanStateNode::TableFuncScan(ts) => {
             ::nodetablefuncscan::exec_end_table_func_scan(ts);
             Ok(())
@@ -3210,6 +3340,7 @@ pub fn exec_shutdown_node<'mcx>(
         | PlanStateNode::FunctionScan(_)
         | PlanStateNode::TableFuncScan(_)
         | PlanStateNode::ValuesScan(_)
+        | PlanStateNode::ForeignScan(_)
         | PlanStateNode::CteScan(_)
         | PlanStateNode::WorkTableScan(_)
         | PlanStateNode::NamedTuplestoreScan(_)
@@ -3586,7 +3717,8 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
 );
 ::mcx::forget_safe_enum!(
     PlanStateNode<'_> {
-        Result(x), SeqScan(x), SampleScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x), CteScan(x),
+        Result(x), SeqScan(x), SampleScan(x), FunctionScan(x), TableFuncScan(x), ValuesScan(x),
+        ForeignScan(x), CteScan(x),
         IndexScan(x), TidScan(x), TidRangeScan(x), IndexOnlyScan(x), Agg(x), Sort(x), Material(x),
         IncrementalSort(x), Unique(x), Group(x), Limit(x), BitmapHeapScan(x),
         BitmapIndexScan(x), Append(x), MergeAppend(x), SubqueryScan(x), SetOp(x), LockRows(x),

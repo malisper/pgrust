@@ -257,6 +257,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // show_foreignscan_info (explain.c): drive the ForeignScan node's
+    // provider ExplainForeignScan; properties cross as (label, value) pairs
+    // (types_nodes::FdwExplainProp — C passes ExplainState, which would
+    // cycle the crate graph).
+    pub fn query_desc_foreign_explain<'e>(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+        costs: bool,
+        emit: &'e mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     pub fn exec_clean_type_from_tl<'p, 'a>(
         pstmt: &'p PlannedStmt<'a>,
     ) -> PgResult<Rc<TupleDescData<'static>>>
