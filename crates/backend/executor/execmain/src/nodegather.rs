@@ -308,10 +308,7 @@ fn leader_wait_reporting(
                 ::shm_mq::stall::describe_queue(reader.mq())
             ));
         }
-        // LOG never unwinds; the wait continues untouched either way.
-        let _ = ::elog::ereport(::types_error::LOG).errmsg(msg).finish(
-            ::types_error::ErrorLocation::new("nodeGather.c", 0, "gather_stall_report"),
-        );
+        ::shm_mq::stall::log_stall_report(msg);
     })?;
     ::parallel::gtrace("l.wait.end");
     latch::ResetLatch(latch);
