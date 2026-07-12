@@ -84,7 +84,8 @@ use ::exectuples::SoaBatch;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::catalog::{
     BOOLOID, BPCHAROID, C_COLLATION_OID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
-    INT8OID, POSIX_COLLATION_OID, TEXTOID, TIMESTAMPOID, TIMESTAMPTZOID, VARCHAROID,
+    DEFAULT_COLLATION_OID, INT8OID, POSIX_COLLATION_OID, TEXTOID, TIMESTAMPOID,
+    TIMESTAMPTZOID, VARCHAROID,
 };
 use ::types_core::Oid;
 use ::types_error::PgResult;
@@ -508,13 +509,24 @@ fn classify_str_var(expr: Node<'_>, expected: Oid) -> Option<(u16, LaneWidth)> {
 
 // The provably-memcmp collation tier: C (950) and POSIX (951) resolve in
 // varstr_cmp's non-locale fast path (varstrfastcmp_c — pure memcmp + length
-// tiebreak, cannot error, allocate, or call libc/ICU). DEFAULT (100) may
-// alias a C-semantics database collation but refuses: classify has no
-// catalog access and the OID whitelist must stay self-contained; libc/ICU
-// collations refuse because their per-row comparison can allocate and (ICU)
-// error mid-batch, which the fold cannot replay at C's row.
+// tiebreak, cannot error, allocate, or call libc/ICU). DEFAULT (100) admits
+// exactly when the database default locale resolves collate-C (q22coexist:
+// C's lc_collate_is_c(DEFAULT) — varstr_cmp then takes the SAME
+// varstrfastcmp_c path, so the fold comparator is bit-identical). The
+// resolution reads the backend-init-installed default locale (a thread-local
+// Cell — no catalog access, so classify stays self-contained) and
+// fail-closes when uninstalled (unit-test contexts). Non-C-resolving
+// DEFAULT and libc/ICU collations refuse: their per-row comparison can
+// allocate and (ICU) error mid-batch, which the fold cannot replay at C's
+// row.
 fn str_collation_safe(collid: Oid) -> bool {
-    collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID
+    if collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID {
+        return true;
+    }
+    collid == DEFAULT_COLLATION_OID
+        && ::pg_locale::default_locale_installed()
+        && ::pg_locale::pg_newlocale_from_collation(collid)
+            .is_ok_and(|l| l.collate_is_c && l.deterministic)
 }
 
 fn classify_arg(expr: Node<'_>, expected: Oid) -> Option<LaneArg> {
