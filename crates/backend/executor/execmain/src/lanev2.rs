@@ -146,6 +146,155 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
     }
 }
 
+/// The feed shapes that arm heap-scan staging (kernel-qual selection bitmap,
+/// SoA prefix deform, stitched tiers, varlane staging) on a SeqScan before a
+/// lane pipeline drives it. `arm_scan_staging` is the ONE seam owning the
+/// arming decision + staging setup across every feed site (agg fold /
+/// per-row build feeds, sort feed, join build and probe feeds), so a second
+/// staging backend (cbstore column windows) plugs in by matching the scan's
+/// source kind inside that helper — not by growing per-site variants.
+enum ScanFeedShape<'a, 'mcx> {
+    /// Row-emit feed with no SoA lane reader above the scan: arm the
+    /// kernel-qual selection bitmap, and on drain pipelines (`stitch`) the
+    /// tier-2 stitched body + projection stitching. `ctx` labels the
+    /// lane-trace line.
+    RowFeed { ctx: &'static str, stitch: bool },
+    /// Hash-agg FOLD drain feed: varlane staging, or the fused full-prefix
+    /// deform (forced when the fold reads lane columns or K2 wants the key;
+    /// the kernel-qual bitmap is detected inside the prefix), falling back
+    /// to the qual-only bitmap when the prefix is unarmable; stitched tiers
+    /// armed (drain pipeline).
+    HashAggFold { agg: &'a ::nodeagg::AggStateData<'mcx> },
+    /// Hash-agg PER-ROW drain feed: unforced fused prefix (bitmap detected
+    /// inside), qual-only bitmap fallback; stitched tiers armed.
+    HashAggPerRow { agg: &'a ::nodeagg::AggStateData<'mcx> },
+    /// Forced fold-prefix deform ONLY (no bitmap fallback, no stitch arm):
+    /// the plain-agg fold feed, and the decide-phase admission probes (via
+    /// `probe_arm_fold_prefix`). Reaches only unprojected scans (the fold
+    /// deciders refuse projected ones before choosing Fold).
+    FoldPrefix { agg: &'a ::nodeagg::AggStateData<'mcx> },
+}
+
+/// Arm the scan staging a lane feed consumes, per feed shape. Idempotent at
+/// every site (re-preparing the same shape is a no-op; the bitmap arm
+/// early-returns once armed). This is the single place the upcoming cbstore
+/// staging variant extends: today every shape stages heap page batches
+/// through `nodeseqscan`'s SoA seam; a cbstore-backed scan will arm its
+/// column-window staging here, behind the same shape parameter, leaving the
+/// feed sites untouched.
+fn arm_scan_staging<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    shape: ScanFeedShape<'_, 'mcx>,
+) {
+    match shape {
+        ScanFeedShape::RowFeed { ctx, stitch } => {
+            arm_seq_scan_qual_bitmap(ss, estate, ctx, stitch);
+        }
+        ScanFeedShape::HashAggFold { agg } => {
+            // Arm the SoA page-batch deform + kernel-qual bitmap for the
+            // fused drive when the whole read prefix is knowable
+            // (unprojected scans only: with a projection the agg reads
+            // output columns, which are not commensurable with scan-column
+            // prefixes). ONE deform serves both consumers:
+            // `seq_scan_batch_soa_prepare` detects the kernel qual inside
+            // the prefix and arms the selection bitmap on the same staged
+            // SoA the fold lanes read. When no prefix is knowable
+            // (projected / shape-unknown), fall back to the qual-only bitmap
+            // arm so a kernel-shaped filter still vectorizes (survivors
+            // deform lazily per-row). The fold feed FORCES the deform when
+            // the fold reads lane columns (the <3-column break-even is a
+            // deform+gather artifact; the fold consumes the columns
+            // directly).
+            let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
+                fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+            } else {
+                0
+            };
+            if let Some(vcol) =
+                ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
+            {
+                // Varlena lane: re-arm the varkey staging (idempotent; the
+                // decide-phase probe already proved it arms).
+                let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol);
+                debug_assert!(armed, "varlane re-arm is idempotent");
+            } else if soa_prefix > 0 {
+                // Force the SoA deform when the fold reads lane columns, OR when
+                // the K2 deferred probe could host this shape (the K2 key lane
+                // must be staged even for count(*)-only plans, whose fold reads
+                // nothing — the prefix covers grouping columns, so arming stages
+                // the key). A non-fixed-width prefix still refuses to arm, and
+                // the feed then keeps the arrival probe — byte-safe either way.
+                let force = ::nodeagg::agg_lanefold_plan(agg)
+                    .is_some_and(|plan| !plan.cols.is_empty())
+                    || scan_k2_wanted(agg);
+                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                    // Full-prefix deform unarmable (non-fixed-width column in
+                    // the prefix) or declined (break-even). A column-reading
+                    // fold plan cannot get here — `decide_agg_lane` probe-armed
+                    // this exact prefix before choosing Fold — so the SoA has
+                    // no fold reader and the qual-only bitmap arm is safe.
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
+                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                    lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
+                }
+            } else {
+                // Fold with no knowable prefix = a plan reading no lane
+                // columns (count(*)-only); the bitmap is the only SoA user.
+                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed", true);
+            }
+            // Tier-2 arm for the fused-deform-armed bitmap (drain feed);
+            // idempotent, no-op when the bitmap is not armed.
+            ::nodeseqscan::seq_scan_stitch_arm(ss);
+        }
+        ScanFeedShape::HashAggPerRow { agg } => {
+            // Same prefix bound and fallbacks as the fold arm (comment
+            // there), but the per-row feed reads no SoA columns, so the
+            // deform is never forced.
+            let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
+                fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+            } else {
+                0
+            };
+            if soa_prefix > 0 {
+                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false, true);
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                    // Unarmable/declined full prefix; the per-row feed reads
+                    // no SoA columns, so fall back to the qual-only bitmap.
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only", true);
+                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                    lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
+                }
+            } else {
+                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed", true);
+            }
+            // Tier-2 arm for the fused-deform-armed bitmap (drain feed).
+            ::nodeseqscan::seq_scan_stitch_arm(ss);
+        }
+        ScanFeedShape::FoldPrefix { agg } => {
+            let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
+        }
+    }
+}
+
+/// Decide-phase admission probe: arm the forced fold prefix NOW so an
+/// unarmable prefix (non-fixed-width column) is known BEFORE committing to
+/// ownership. Returns whether the SoA deform armed. Shared by the hashed and
+/// plain fold deciders; the plain fold feed re-arms the identical shape (a
+/// no-op) through `ScanFeedShape::FoldPrefix`.
+fn probe_arm_fold_prefix<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg });
+    ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+}
+
 // ===========================================================================
 // Standalone scan ownership: DELIBERATELY REFUSED (admission economics,
 // design §4; measured on the integration bench 2026-07-11, q9-class).
@@ -1111,9 +1260,7 @@ fn decide_agg_lane<'mcx>(
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
                 // width column) is known BEFORE committing to ownership.
-                let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
-                ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+                probe_arm_fold_prefix(agg, ss, estate)
             }
         }
         _ => false,
@@ -1452,9 +1599,7 @@ fn decide_plain_agg_lane<'mcx>(
     // Probe-arm the deform now so an unarmable prefix (non-fixed-width
     // column) is known BEFORE committing: the plain fold reads the SoA lanes
     // directly, so a disarmed deform keeps the incumbent.
-    let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
-    if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+    if !probe_arm_fold_prefix(agg, ss, estate) {
         return refuse();
     }
     Ok(AggLaneChoice::Fold)
@@ -1493,8 +1638,7 @@ fn agg_plain_fold_feed<'mcx>(
     // Same one-deform staging as the hashed fold feed; the deform is FORCED
     // (count(*)-only plans were refused, so the fold always reads lane
     // columns). Re-preparing with the same shape is a no-op.
-    let soa_prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, true, true);
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg });
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
@@ -1636,82 +1780,17 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     if ::nodeagg::agg_hash_table_filled(agg) {
         return Ok(());
     }
-    // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
-    // drive when the whole read prefix is knowable (unprojected scans
-    // only: with a projection the agg reads output columns, which are not
-    // commensurable with scan-column prefixes). ONE deform serves both
-    // consumers: `seq_scan_batch_soa_prepare` detects the kernel qual
-    // inside the prefix and arms the selection bitmap on the same staged
-    // SoA the fold lanes read. When no prefix is knowable (projected /
-    // shape-unknown), fall back to the qual-only bitmap arm so a
-    // kernel-shaped filter still vectorizes (survivors deform lazily
-    // per-row). The fold feed FORCES the deform when the fold reads lane
-    // columns (the <3-column break-even is a deform+gather artifact; the
-    // fold consumes the columns directly).
-    let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
-        fused_agg_soa_prefix(agg, ss).unwrap_or(0)
-    } else {
-        0
-    };
     // One OWNED tick per lane-owned hash-agg build event (the gate's
     // aggbuild floor counts builds, not calls) — fold-fed and per-row
     // feeds alike.
     stats::tick_owned(ShapeClass::AggBuild);
+    // Staging arm per feed shape (see `arm_scan_staging` — the one seam for
+    // deform + bitmap + stitched-tier setup across the feed sites).
     if c == AggLaneChoice::Fold {
-        if let Some(vcol) =
-            ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
-        {
-            // Varlena lane: re-arm the varkey staging (idempotent; the
-            // decide-phase probe already proved it arms).
-            let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol);
-            debug_assert!(armed, "varlane re-arm is idempotent");
-        } else if soa_prefix > 0 {
-            // Force the SoA deform when the fold reads lane columns, OR when
-            // the K2 deferred probe could host this shape (the K2 key lane
-            // must be staged even for count(*)-only plans, whose fold reads
-            // nothing — the prefix covers grouping columns, so arming stages
-            // the key). A non-fixed-width prefix still refuses to arm, and
-            // the feed then keeps the arrival probe — byte-safe either way.
-            let force = ::nodeagg::agg_lanefold_plan(agg)
-                .is_some_and(|plan| !plan.cols.is_empty())
-                || scan_k2_wanted(agg);
-            let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
-            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-                // Full-prefix deform unarmable (non-fixed-width column in
-                // the prefix) or declined (break-even). A column-reading
-                // fold plan cannot get here — `decide_agg_lane` probe-armed
-                // this exact prefix before choosing Fold — so the SoA has
-                // no fold reader and the qual-only bitmap arm is safe.
-                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
-            } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-                lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
-            }
-        } else {
-            // Fold with no knowable prefix = a plan reading no lane
-            // columns (count(*)-only); the bitmap is the only SoA user.
-            arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed", true);
-        }
-        // Tier-2 arm for the fused-deform-armed bitmap (drain feed);
-        // idempotent, no-op when the bitmap is not armed.
-        ::nodeseqscan::seq_scan_stitch_arm(ss);
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg });
         agg_hash_build_fold_feed(agg, ss, stage_slot, estate)
     } else {
-        if soa_prefix > 0 {
-            let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false, true);
-            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-                // Unarmable/declined full prefix; the per-row feed reads
-                // no SoA columns, so fall back to the qual-only bitmap.
-                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only", true);
-            } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-                lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
-            }
-        } else {
-            arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed", true);
-        }
-        // Tier-2 arm for the fused-deform-armed bitmap (drain feed).
-        ::nodeseqscan::seq_scan_stitch_arm(ss);
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggPerRow { agg });
         let mut sink = HashAggBuildSink { agg };
         drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
     }
@@ -2147,7 +2226,7 @@ fn sort_feed_if_needed<'mcx>(
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "sort feed", true);
+            arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true });
             sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -2876,7 +2955,11 @@ fn join_build_dispatch<'mcx>(
     stats::tick_owned(ShapeClass::Join);
     match child {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "join build feed", true);
+            arm_scan_staging(
+                ss,
+                estate,
+                ScanFeedShape::RowFeed { ctx: "join build feed", stitch: true },
+            );
             join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -2908,7 +2991,11 @@ fn join_probe_drain_dispatch<'mcx>(
     let mut probe = JoinProbe { hj, hs };
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "join probe drain", true);
+            arm_scan_staging(
+                ss,
+                estate,
+                ScanFeedShape::RowFeed { ctx: "join probe drain", stitch: true },
+            );
             drain_pipeline_chain(
                 ss,
                 &mut SeqScanSource,
@@ -2964,10 +3051,16 @@ fn join_probe_pull_dispatch<'mcx>(
     let mut root = RootAdapter::new(None);
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            // Per-pull entry: `arm_seq_scan_qual_bitmap` early-returns once
-            // armed (one load+test), and the first pull arms BEFORE any
-            // batch is staged, so a staged batch always matches its bitmap.
-            arm_seq_scan_qual_bitmap(ss, estate, "join probe pull", false);
+            // Per-pull entry: the bitmap arm early-returns once armed (one
+            // load+test), and the first pull arms BEFORE any batch is
+            // staged, so a staged batch always matches its bitmap. No
+            // stitch: pull-one-tuple pipelines keep the AOT bitmap tier
+            // (stitched segments exist only on drain pipelines).
+            arm_scan_staging(
+                ss,
+                estate,
+                ScanFeedShape::RowFeed { ctx: "join probe pull", stitch: false },
+            );
             pull_step_chain(
                 ss,
                 &mut SeqScanSource,
