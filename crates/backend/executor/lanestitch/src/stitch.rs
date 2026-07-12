@@ -61,6 +61,10 @@ pub(crate) struct ParamsLayout {
     pub nrows: u32,
 }
 
+/// Upper bound on SaopAny array length (the stencil unrolls one compare
+/// block per element; larger arrays refuse and stay on the interpreter).
+pub(crate) const MAX_SAOP_ELEMS: usize = 128;
+
 /// Body exit codes (x0): 0 = batch fully consumed; RC_REFUSE = an erroring
 /// stencil tripped (overflow / zero divisor) — the driver must replay the
 /// batch on the interpreter (refuse-and-replay).
@@ -107,6 +111,9 @@ fn step_io(s: &Step) -> ([Option<u8>; 2], Option<u8>) {
         Step::Cmp { a, b, out, .. } | Step::Arith { a, b, out, .. } => {
             ([Some(a), Some(b)], Some(out))
         }
+        Step::NullTest { a, out, .. }
+        | Step::BoolTest { a, out, .. }
+        | Step::SaopAny { a, out, .. } => ([Some(a), None], Some(out)),
         Step::Qual { a } => ([Some(a), None], None),
     }
 }
@@ -326,6 +333,30 @@ pub(crate) fn plan_clauses(prog: &Program, ncols: usize) -> Option<Plan> {
                                 return None;
                             }
                             has_arith = true;
+                            written.push(out);
+                        }
+                        Step::NullTest { a, out, .. } | Step::BoolTest { a, out, .. } => {
+                            if reg_bad(a) || reg_bad(out) || !reads_ok(&written, a) {
+                                return None;
+                            }
+                            written.push(out);
+                        }
+                        Step::SaopAny { a, out, op, arr } => {
+                            // Old-lane admission surface: strict-OR const-array
+                            // ANY over a fixed-width by-value comparator. Float
+                            // element compares have no NaN-exact scalar cond —
+                            // refuse (fail closed). Non-existent array refuses.
+                            if reg_bad(a) || reg_bad(out) || !reads_ok(&written, a) {
+                                return None;
+                            }
+                            if is_float_cmp(op) || (arr as usize) >= prog.arrays.len() {
+                                return None;
+                            }
+                            // Code-size bound: an unrolled per-element stencil,
+                            // so cap the array (fail closed above it).
+                            if prog.arrays[arr as usize].len() > MAX_SAOP_ELEMS {
+                                return None;
+                            }
                             written.push(out);
                         }
                         Step::Qual { a } => {
@@ -593,6 +624,48 @@ fn emit_cmp_konst_tail(e: &mut Emitter, ctx: &Ctx<'_>, op: CmpOp, konst: Datum) 
     e.b_cond(cond.inv(), ctx.row_fail);
 }
 
+/// The strict-OR ScalarArrayOpExpr stencil: unrolls one compare per element
+/// into a running match word (res) and a running null word (resnull), then
+/// collapses to the register-file result (value = res; isnull = resnull &&
+/// !res). Non-erroring — the whitelisted comparators never trap. Reads x9-x16
+/// scratch only.
+fn emit_saop(e: &mut Emitter, _ctx: &Ctx<'_>, prog: &Program, a: u8, out: u8, op: CmpOp, arr: u16) {
+    let elems = &prog.arrays[arr as usize];
+    let (wide, cond) = cmp_cond(op);
+    let lscalarnull = e.new_label();
+    let lcombine = e.new_label();
+    e.movz_x(14, 0); // res = false
+    e.movz_x(15, 0); // resnull = false
+    e.ldrb(10, 31, rn(a)); // scalar isnull byte
+    e.cbnz_w(10, lscalarnull);
+    e.ldr_x(12, 31, rv(a)); // scalar value
+    for elem in elems {
+        if elem.isnull {
+            e.movz_x(15, 1); // a NULL element can only contribute NULL
+        } else {
+            e.ldr_lit(9, elem.value.as_usize() as u64);
+            if wide {
+                e.cmp_x_x(12, 9);
+            } else {
+                e.cmp_w_w(12, 9);
+            }
+            e.cset_x(16, cond);
+            e.orr_x(14, 14, 16); // res |= (scalar op elem)
+        }
+    }
+    e.b(lcombine);
+    e.bind(lscalarnull);
+    // Scalar NULL: every strict compare is NULL — the array being non-empty
+    // makes the whole result NULL (else it stays false).
+    if !elems.is_empty() {
+        e.movz_x(15, 1);
+    }
+    e.bind(lcombine);
+    e.str_x(14, 31, rv(out));
+    e.bic_x(9, 15, 14); // isnull = resnull & !res
+    e.strb(9, 31, rn(out));
+}
+
 /// Generic register-file stencils: exhaustive over the vocabulary.
 fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
     match *step {
@@ -647,7 +720,11 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
         Step::Arith { op, a, b, out } => {
             // Refuse-and-replay: any trap condition exits the body with
             // RC_REFUSE — no stitched error construction (the interpreter
-            // replay owns error identity and position).
+            // replay owns error identity and position). Width-dispatched:
+            // int2 range-checks with sxth, int4 with sxtw, int8 with the
+            // V flag (add/sub) or smulh (mul); every div refuses on the
+            // zero and MIN/-1 traps and lets the replay pick the message.
+            use ArithOp::*;
             let lnull = e.new_label();
             let ldone = e.new_label();
             e.ldrb(10, 31, rn(a));
@@ -656,23 +733,47 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
             e.cbnz_w(10, lnull);
             e.ldr_x(12, 31, rv(a));
             e.ldr_x(13, 31, rv(b));
+            let width = op.width();
             match op {
-                ArithOp::Add4 => {
+                // ---- int2 (smallint): compute in w-regs, range-check i16.
+                Add2 | Sub2 | Mul2 => {
+                    match op {
+                        Add2 => e.adds_w(14, 12, 13),
+                        Sub2 => e.subs_w(14, 12, 13),
+                        _ => e.mul_w(14, 12, 13),
+                    }
+                    // Two i16 operands never overflow i32 under add/sub/mul,
+                    // so the i16 range is the only trap: sxth != value.
+                    e.sxth_w(15, 14);
+                    e.cmp_w_w(14, 15);
+                    e.b_cond(Cond::Ne, ctx.refuse);
+                }
+                Div2 => {
+                    e.cbz_w(13, ctx.refuse);
+                    let ldiv = e.new_label();
+                    e.cmn_w_imm(13, 1); // b == -1?
+                    e.b_cond(Cond::Ne, ldiv);
+                    e.movn_w(15, 0x7FFF); // i16::MIN
+                    e.cmp_w_w(12, 15);
+                    e.b_cond(Cond::Eq, ctx.refuse);
+                    e.bind(ldiv);
+                    e.sdiv_w(14, 12, 13);
+                }
+                // ---- int4 (integer).
+                Add4 => {
                     e.adds_w(14, 12, 13);
                     e.b_cond(Cond::Vs, ctx.refuse);
                 }
-                ArithOp::Sub4 => {
+                Sub4 => {
                     e.subs_w(14, 12, 13);
                     e.b_cond(Cond::Vs, ctx.refuse);
                 }
-                ArithOp::Mul4 => {
+                Mul4 => {
                     e.smull(14, 12, 13);
                     e.cmp_x_w_sxtw(14, 14);
                     e.b_cond(Cond::Ne, ctx.refuse);
                 }
-                ArithOp::Div4 => {
-                    // int.c parity: b==0 or MIN/-1 both refuse (replay
-                    // decides division-by-zero vs out-of-range).
+                Div4 => {
                     e.cbz_w(13, ctx.refuse);
                     let ldiv = e.new_label();
                     e.cmn_w_imm(13, 1);
@@ -683,9 +784,41 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
                     e.bind(ldiv);
                     e.sdiv_w(14, 12, 13);
                 }
+                // ---- int8 (bigint): full-width x-reg ops.
+                Add8 => {
+                    e.adds_x(14, 12, 13);
+                    e.b_cond(Cond::Vs, ctx.refuse);
+                }
+                Sub8 => {
+                    e.subs_x(14, 12, 13);
+                    e.b_cond(Cond::Vs, ctx.refuse);
+                }
+                Mul8 => {
+                    // Overflow iff the signed high half != the sign-replicate
+                    // of the low half (the standard smulh check).
+                    e.mul_x(14, 12, 13);
+                    e.smulh(15, 12, 13);
+                    e.asr_x_63(16, 14);
+                    e.cmp_x_x(15, 16);
+                    e.b_cond(Cond::Ne, ctx.refuse);
+                }
+                Div8 => {
+                    e.cbz_x(13, ctx.refuse);
+                    let ldiv = e.new_label();
+                    e.cmn_x_imm(13, 1); // b == -1?
+                    e.b_cond(Cond::Ne, ldiv);
+                    // a == i64::MIN? negating it overflows (cmp xzr, a sets V).
+                    e.cmp_x_x(31, 12);
+                    e.b_cond(Cond::Vs, ctx.refuse);
+                    e.bind(ldiv);
+                    e.sdiv_x(14, 12, 13);
+                }
             }
-            // Datum int words are canonical sign-extended (from_i32 parity).
-            e.sxtw(14, 14);
+            // int2/int4 results canonicalize to the full word via sxtw
+            // (from_iN parity); int8 already fills the word.
+            if width != 8 {
+                e.sxtw(14, 14);
+            }
             e.str_x(14, 31, rv(out));
             e.strb(31, 31, rn(out));
             e.b(ldone);
@@ -694,6 +827,50 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
             e.movz_w(14, 1);
             e.strb(14, 31, rn(out));
             e.bind(ldone);
+        }
+        Step::NullTest { a, out, kind } => {
+            // Non-erroring, non-NULL: out.value = (isnull ? / !isnull ?), a
+            // pure function of the operand's null byte.
+            e.ldrb(10, 31, rn(a));
+            e.cmp_x_imm(10, 0);
+            let cond = match kind {
+                crate::spec::NullTestKind::IsNull => Cond::Ne,
+                crate::spec::NullTestKind::IsNotNull => Cond::Eq,
+            };
+            e.cset_x(14, cond);
+            e.str_x(14, 31, rv(out));
+            e.strb(31, 31, rn(out));
+        }
+        Step::BoolTest { a, out, kind } => {
+            // Non-erroring, non-NULL BooleanTest collapse. nn = !isnull,
+            // truthy = (value != 0) (DatumGetBool). Each kind is one AND/OR
+            // of nn/notnull with truthy/falsy.
+            use crate::spec::BoolTestKind::*;
+            e.ldrb(10, 31, rn(a)); // isnull byte (0/1)
+            e.ldr_x(11, 31, rv(a)); // value word
+            e.cmp_x_imm(10, 0);
+            // nn/notnull selector.
+            let null_cond = match kind {
+                IsTrue | IsFalse => Cond::Eq, // nn = isnull == 0
+                IsNotTrue | IsNotFalse => Cond::Ne, // notnull = isnull != 0
+            };
+            e.cset_x(12, null_cond);
+            e.cmp_x_imm(11, 0);
+            // truthy/falsy selector.
+            let val_cond = match kind {
+                IsTrue | IsNotFalse => Cond::Ne, // value != 0 (truthy)
+                IsFalse | IsNotTrue => Cond::Eq,  // value == 0 (falsy)
+            };
+            e.cset_x(13, val_cond);
+            match kind {
+                IsTrue | IsFalse => e.and_x(14, 12, 13),
+                IsNotTrue | IsNotFalse => e.orr_x(14, 12, 13),
+            }
+            e.str_x(14, 31, rv(out));
+            e.strb(31, 31, rn(out));
+        }
+        Step::SaopAny { a, out, op, arr } => {
+            emit_saop(e, ctx, prog, a, out, op, arr);
         }
         Step::Qual { a } => {
             e.ldrb(10, 31, rn(a));
