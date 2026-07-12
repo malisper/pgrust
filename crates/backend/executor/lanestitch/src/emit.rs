@@ -492,6 +492,152 @@ impl Emitter {
         self.raw(0x0E01_3C00 | (vn << 5) | rd);
     }
 
+    // ---- GPR helpers for the SVE2 tier (clang-pinned in the test table).
+
+    // UBFX Xd, Xn, #lsb, #8 (extract one pass-word byte).
+    pub fn ubfx_x_byte(&mut self, rd: u32, rn: u32, lsb: u32) {
+        debug_assert!(lsb <= 56);
+        self.raw(0xD340_0000 | (lsb << 16) | ((lsb + 7) << 10) | (rn << 5) | rd);
+    }
+
+    // LSR Xd, Xn, Xm (LSRV — pass-word bit test by variable index).
+    pub fn lsrv_x(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x9AC0_2400 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // LSR Xd, Xn, #sh
+    pub fn lsr_x_imm(&mut self, rd: u32, rn: u32, sh: u32) {
+        debug_assert!(sh < 64);
+        self.raw(0xD340_FC00 | (sh << 16) | (rn << 5) | rd);
+    }
+
+    // AND Xd, Xn, #1
+    pub fn and_x_1(&mut self, rd: u32, rn: u32) {
+        self.raw(0x9240_0000 | (rn << 5) | rd);
+    }
+
+    // LDR Wt, [Xn, Xm, LSL #2] (survivor-index buffer read).
+    pub fn ldr_w_idx2(&mut self, rt: u32, rn: u32, rm: u32) {
+        self.raw(0xB860_7800 | (rm << 16) | (rn << 5) | rt);
+    }
+
+    // ADD Xd, Xn, Xm, LSL #2 (u32 cursor advance by CNTP count).
+    pub fn add_x_lsl2(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x8B00_0800 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // SUB SP, SP, #imm / ADD SP, SP, #imm (frame setup; imm 16-aligned).
+    pub fn sub_sp_imm(&mut self, imm12: u32) {
+        debug_assert!(imm12 <= 4095 && imm12 % 16 == 0);
+        self.raw(0xD100_03FF | (imm12 << 10));
+    }
+
+    pub fn add_sp_imm(&mut self, imm12: u32) {
+        debug_assert!(imm12 <= 4095 && imm12 % 16 == 0);
+        self.raw(0x9100_03FF | (imm12 << 10));
+    }
+
+    // ---- NEON additions for the SVE2 tier.
+
+    // CNT Vd.8b, Vn.8b (pass-word popcount for the adaptive gate).
+    pub fn cnt_8b(&mut self, rd: u32, rn: u32) {
+        self.raw(0x0E20_5800 | (rn << 5) | rd);
+    }
+
+    // ZIP1 Vd.2d, Vn.2d, Vm.2d (pack two 4-candidate u64s into one
+    // 8-candidate 128-bit MATCH segment). NEON writes zero the upper SVE
+    // bits of the z register (architectural), so segment 0 is the only
+    // populated MATCH segment at any VL.
+    pub fn zip1_2d(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x4EC0_3800 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // ---- SVE/SVE2 stencil encodings (fixed 32-bit words; ptrue-pattern
+    // governance and mul-vl-free addressing keep the bodies VL-agnostic —
+    // spike doctrine, notes/sve2-spike-2026-07-14.md "Graviton5-forward").
+    // Every word clang-pinned in the test table below.
+
+    // PTRUE Pd.S (pattern ALL).
+    pub fn ptrue_s_all(&mut self, pd: u32) {
+        self.raw(0x2598_E3E0 | pd);
+    }
+
+    // PTRUE Pd.H, VL8 (governs exactly the 8-row group at any VL).
+    pub fn ptrue_h_vl8(&mut self, pd: u32) {
+        self.raw(0x2558_E100 | pd);
+    }
+
+    // PTRUE Pd.B, VL8
+    pub fn ptrue_b_vl8(&mut self, pd: u32) {
+        self.raw(0x2518_E100 | pd);
+    }
+
+    // DUP Zd.B, Wn (broadcast one pass-word byte).
+    pub fn dup_z_b_w(&mut self, zd: u32, rn: u32) {
+        self.raw(0x0520_3800 | (rn << 5) | zd);
+    }
+
+    // AND Zd.D, Zn.D, Zm.D (bitwise, unpredicated).
+    pub fn and_z(&mut self, zd: u32, zn: u32, zm: u32) {
+        self.raw(0x0420_3000 | (zm << 16) | (zn << 5) | zd);
+    }
+
+    // CMPNE Pd.B, Pg/Z, Zn.B, #0
+    pub fn cmpne_b_imm0(&mut self, pd: u32, pg: u32, zn: u32) {
+        self.raw(0x2500_8010 | (pg << 10) | (zn << 5) | pd);
+    }
+
+    // PUNPKLO Pd.H, Pn.B / PUNPKHI Pd.H, Pn.B (predicate widen).
+    pub fn punpklo(&mut self, pd: u32, pn: u32) {
+        self.raw(0x0530_4000 | (pn << 5) | pd);
+    }
+
+    pub fn punpkhi(&mut self, pd: u32, pn: u32) {
+        self.raw(0x0531_4000 | (pn << 5) | pd);
+    }
+
+    // INDEX Zd.S, #imm1, #imm2 (block-relative row-id vector).
+    pub fn index_s_imm(&mut self, zd: u32, imm1: u32, imm2: u32) {
+        debug_assert!(imm1 <= 15 && imm2 <= 15);
+        self.raw(0x04A0_4000 | (imm2 << 16) | (imm1 << 5) | zd);
+    }
+
+    // ADD Zd.S, Zd.S, #imm8
+    pub fn add_z_s_imm(&mut self, zd: u32, imm8: u32) {
+        debug_assert!(imm8 <= 255);
+        self.raw(0x25A0_C000 | (imm8 << 5) | zd);
+    }
+
+    // COMPACT Zd.S, Pg, Zn.S (dense survivor-index extraction).
+    pub fn compact_s(&mut self, zd: u32, pg: u32, zn: u32) {
+        self.raw(0x05A1_8000 | (pg << 10) | (zn << 5) | zd);
+    }
+
+    // CNTP Xd, Pg, Pn.S
+    pub fn cntp_s(&mut self, rd: u32, pg: u32, pn: u32) {
+        self.raw(0x25A0_8000 | (pg << 10) | (pn << 5) | rd);
+    }
+
+    // ST1W { Zt.S }, Pg, [Xn] (truncating u32 survivor-index store).
+    pub fn st1w_s(&mut self, zt: u32, pg: u32, rn: u32) {
+        self.raw(0xE540_E000 | (pg << 10) | (rn << 5) | zt);
+    }
+
+    // MATCH Pd.H, Pg/Z, Zn.H, Zm.H (SVE2 — 8 IN-list candidates per instr).
+    pub fn match_h(&mut self, pd: u32, pg: u32, zn: u32, zm: u32) {
+        self.raw(0x4560_8000 | (zm << 16) | (pg << 10) | (zn << 5) | pd);
+    }
+
+    // ORR Pd.B, Pg/Z, Pn.B, Pm.B (accumulate MATCH predicates).
+    pub fn orr_p(&mut self, pd: u32, pg: u32, pn: u32, pm: u32) {
+        self.raw(0x2580_4000 | (pm << 16) | (pg << 10) | (pn << 5) | pd);
+    }
+
+    // MOV Zd.H, Pg/Z, #-1 (CPY imm, zeroing — predicate to h-lane mask).
+    pub fn cpy_z_h_neg1(&mut self, zd: u32, pg: u32) {
+        self.raw(0x0550_1FE0 | (pg << 16) | zd);
+    }
+
     pub fn ret(&mut self) {
         self.raw(0xD65F_03C0);
     }
@@ -623,6 +769,34 @@ mod tests {
             (|e| e.orr_8b(2, 3, 4), 0x0EA41C62, "orr v2.8b, v3.8b, v4.8b"),
             (|e| e.addv_b_8b(2, 3), 0x0E31B862, "addv b2, v3.8b"),
             (|e| e.umov_w_b0(2, 3), 0x0E013C62, "umov w2, v3.b[0]"),
+            // ---- SVE2 tier (clang -march=armv8-a+sve2, objdump-verified).
+            (|e| e.ubfx_x_byte(12, 9, 8), 0xD3483D2C, "ubfx x12, x9, #8, #8"),
+            (|e| e.lsrv_x(14, 14, 13), 0x9ACD25CE, "lsr x14, x14, x13"),
+            (|e| e.lsr_x_imm(13, 13, 2), 0xD342FDAD, "lsr x13, x13, #2"),
+            (|e| e.and_x_1(14, 14), 0x924001CE, "and x14, x14, #1"),
+            (|e| e.ldr_w_idx2(13, 12, 10), 0xB86A798D, "ldr w13, [x12, x10, lsl #2]"),
+            (|e| e.add_x_lsl2(11, 11, 12), 0x8B0C096B, "add x11, x11, x12, lsl #2"),
+            (|e| e.sub_sp_imm(624), 0xD109C3FF, "sub sp, sp, #624"),
+            (|e| e.add_sp_imm(624), 0x9109C3FF, "add sp, sp, #624"),
+            (|e| e.cnt_8b(0, 0), 0x0E205800, "cnt v0.8b, v0.8b"),
+            (|e| e.zip1_2d(18, 18, 16), 0x4ED03A52, "zip1 v18.2d, v18.2d, v16.2d"),
+            (|e| e.ptrue_s_all(0), 0x2598E3E0, "ptrue p0.s"),
+            (|e| e.ptrue_h_vl8(1), 0x2558E101, "ptrue p1.h, vl8"),
+            (|e| e.ptrue_b_vl8(2), 0x2518E102, "ptrue p2.b, vl8"),
+            (|e| e.dup_z_b_w(0, 12), 0x05203980, "mov z0.b, w12"),
+            (|e| e.and_z(0, 0, 30), 0x043E3000, "and z0.d, z0.d, z30.d"),
+            (|e| e.cmpne_b_imm0(3, 2, 0), 0x25008813, "cmpne p3.b, p2/z, z0.b, #0"),
+            (|e| e.punpklo(4, 3), 0x05304064, "punpklo p4.h, p3.b"),
+            (|e| e.punpkhi(6, 4), 0x05314086, "punpkhi p6.h, p4.b"),
+            (|e| e.index_s_imm(6, 0, 1), 0x04A14006, "index z6.s, #0, #1"),
+            (|e| e.index_s_imm(7, 4, 1), 0x04A14087, "index z7.s, #4, #1"),
+            (|e| e.add_z_s_imm(6, 8), 0x25A0C106, "add z6.s, z6.s, #8"),
+            (|e| e.compact_s(4, 5, 6), 0x05A194C4, "compact z4.s, p5, z6.s"),
+            (|e| e.cntp_s(12, 0, 5), 0x25A080AC, "cntp x12, p0, p5.s"),
+            (|e| e.st1w_s(4, 0, 11), 0xE540E164, "st1w { z4.s }, p0, [x11]"),
+            (|e| e.match_h(3, 1, 16, 18), 0x45728603, "match p3.h, p1/z, z16.h, z18.h"),
+            (|e| e.orr_p(3, 1, 3, 4), 0x25844463, "orr p3.b, p1/z, p3.b, p4.b"),
+            (|e| e.cpy_z_h_neg1(17, 3), 0x05531FF1, "mov z17.h, p3/z, #-1"),
         ];
         for (emit, want, asm) in cases {
             let mut e = Emitter::new();
