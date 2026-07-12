@@ -28,8 +28,7 @@ pub struct ForeignScanState<'mcx> {
     pub fdw_state: Option<Box<dyn core::any::Any>>,
 }
 
-/// C FdwRoutine's exec half. `iterate` fills `ss.ss_ScanTupleSlot`, false =
-/// EOF (slot cleared); `explain` emits FdwExplainProp, not C's ExplainState.
+/// C FdwRoutine's exec half; `iterate` fills the scan slot (false = EOF).
 pub struct FdwExecRoutine {
     pub begin:
         for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>, i32) -> PgResult<()>,
@@ -38,8 +37,7 @@ pub struct FdwExecRoutine {
     pub rescan:
         for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
     pub end: for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
-    /// The `bool` is C's `es->costs` (the only ExplainState field file_fdw
-    /// reads; the full state can't cross the crate boundary).
+    /// Emits FdwExplainProp, not ExplainState; the `bool` is C's es->costs.
     pub explain: Option<
         for<'mcx> fn(
             &mut ForeignScanState<'mcx>,

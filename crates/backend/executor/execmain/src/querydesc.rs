@@ -450,9 +450,43 @@ pub(crate) fn query_desc_foreign_explain_seam(
     with_qd(h, |qd| {
         let Some(exec) = qd.exec.as_mut() else { return Ok(()) };
         exec.with_mut(|d| {
-            let Some(ps) = d.planstate.as_mut() else { return Ok(()) };
-            crate::procnode::planstate_foreign_explain(ps, &mut d.estate, plan_node_id, costs, emit)
-                .unwrap_or(Ok(()))
+            let estate = &mut d.estate;
+            if let Some(ps) = d.planstate.as_mut() {
+                if let Some(x) = crate::procnode::planstate_foreign_explain(
+                    ps,
+                    estate,
+                    plan_node_id,
+                    costs,
+                    emit,
+                ) {
+                    return x;
+                }
+            }
+            // InitPlans/SubPlans hang off es_subplanstates, not the main tree.
+            for i in 0..estate.es_subplanstates.len() {
+                let cell = estate.es_subplanstates[i];
+                // SAFETY: cells are arena-live *mut Option<PlanStateNode>
+                // installed by InitPlan; disjoint from everything the walk
+                // reaches through estate.
+                let sub = unsafe { &mut *cell.0.cast::<Option<PlanStateNode>>().as_ptr() };
+                if let Some(ps) = sub.as_mut() {
+                    if let Some(x) = crate::procnode::planstate_foreign_explain(
+                        ps,
+                        estate,
+                        plan_node_id,
+                        costs,
+                        emit,
+                    ) {
+                        return x;
+                    }
+                }
+            }
+            // EXPLAIN found this ForeignScan in the plan tree, so a miss here
+            // is a walker coverage gap; C reaches the state directly.
+            panic!(
+                "planstate_foreign_explain: ForeignScan plan_node_id \
+                 {plan_node_id} not found in the planstate tree"
+            );
         })
     })
 }

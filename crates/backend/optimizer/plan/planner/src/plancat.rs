@@ -301,7 +301,19 @@ pub fn get_relation_info<'mcx>(
     crate::extended_stats::get_relation_statistics(run, rel, relation.rd_id)?;
 
     if relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        // C's restrict_nonsystem_relation_kind guard: no such GUC yet.
+        // C: restrict_nonsystem_relation_kind guard (no built-in foreign
+        // tables exist, so C's FirstNormalObjectId Assert is vacuous).
+        if guc_tables::backing::restrict_nonsystem_relation_kind()
+            & guc_tables::consts::RESTRICT_RELKIND_FOREIGN_TABLE
+            != 0
+        {
+            return Err(Box::new(
+                types_error::PgError::error(
+                    "access to non-system foreign table is restricted".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            ));
+        }
         let serverid =
             foreigncmds_seams::get_foreign_server_id_by_rel_id::call(relation_object_id)?;
         let routine = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, relation_object_id)?;

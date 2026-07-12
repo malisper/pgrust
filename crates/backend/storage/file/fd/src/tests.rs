@@ -612,3 +612,34 @@ fn file_close_is_idempotent_no_freelist_aliasing() {
     crate::io::FileClose(a).unwrap();
     crate::io::FileClose(b).unwrap();
 }
+
+// The motivating stable-slot regression: the old swap_remove registry moved
+// the last desc into the freed slot, so freeing the LOWER of two live
+// AllocateFile indices left the higher handle aliased to the wrong desc.
+#[test]
+fn allocated_desc_indices_stable_across_out_of_order_free() {
+    setup();
+    let dir = scratch_dir("descstable");
+    let pa = format!("{dir}/a");
+    let pb = format!("{dir}/b");
+    std::fs::write(&pa, b"aaa").unwrap();
+    std::fs::write(&pb, b"bbb").unwrap();
+
+    let a = crate::desc::AllocateFile(&pa, "r").unwrap();
+    let b = crate::desc::AllocateFile(&pb, "r").unwrap();
+    assert!(a < b);
+
+    crate::desc::FreeFile(a).unwrap();
+
+    let read = crate::desc::with_allocated_stdio(b, |f| {
+        use std::io::Read;
+        let mut s = String::new();
+        f.read_to_string(&mut s).unwrap();
+        s
+    })
+    .expect("higher handle resolves after freeing the lower");
+    assert_eq!(read, "bbb");
+
+    crate::desc::FreeFile(b).unwrap();
+    with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
+}

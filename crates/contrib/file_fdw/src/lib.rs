@@ -3,9 +3,6 @@
 //! validator accepts the option (C parity), the scan/analyze paths are loud.
 #![allow(non_snake_case)]
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::{
@@ -60,20 +57,16 @@ fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("file_fdw.c", 0, funcname)
 }
 
-// FileFdwPlanState (file_fdw.c). Divergence: RelOptInfo.fdw_private is a
-// NodeId (expr-arena handle) that can't carry this struct, so the rel-size ->
-// paths handoff goes through a backend-local stash keyed by table oid
-// (planning is single-threaded; paths always follows rel-size for the rel).
+// FileFdwPlanState (file_fdw.c). As in C it rides RelOptInfo.fdw_private
+// (per-RelOptInfo identity: self-joins and nested subplans each get their
+// own), encoded as a value-node list since fdw_private is an expr-arena
+// NodeId; it is freed with the planner run.
 #[derive(Clone)]
 struct FileFdwPlanState {
     filename: String,
     is_program: bool,
     pages: BlockNumber,
     ntuples: f64,
-}
-
-thread_local! {
-    static PLAN_STATES: RefCell<HashMap<Oid, FileFdwPlanState>> = RefCell::new(HashMap::new());
 }
 
 // FileFdwExecutionState (file_fdw.c). SAFETY (lifetime restamp): every 'static
@@ -410,8 +403,45 @@ fn file_get_foreign_rel_size(
         ntuples: 0.0,
     };
     estimate_size(run, rel_id, &mut state)?;
-    PLAN_STATES.with(|m| m.borrow_mut().insert(foreigntableid, state));
+    let mcx = run.mcx;
+    let mut items: NodeList<'_> = NodeList::nil();
+    items.lappend(mcx, Node::mk_string(mcx, str_in(mcx, &state.filename)?)?)?;
+    items.lappend(mcx, Node::mk_boolean(mcx, state.is_program)?)?;
+    items.lappend(mcx, Node::mk_float(mcx, str_in(mcx, &state.pages.to_string())?)?)?;
+    items.lappend(mcx, Node::mk_float(mcx, str_in(mcx, &format!("{:?}", state.ntuples))?)?)?;
+    let node = Node::mk_list(mcx, items)?;
+    run.root.rel_mut(rel_id).fdw_private = run.intern_expr(node);
     Ok(())
+}
+
+// Decode fileGetForeignRelSize's fdw_private value-node list; the shape is
+// ours alone, so any mismatch is LOUD.
+fn decode_plan_state(node: Node<'_>) -> FileFdwPlanState {
+    let items = node.as_list().expect("file_fdw fdw_private: value-node list");
+    let mut it = items.iter();
+    let filename = it
+        .next()
+        .and_then(|n| n.as_string())
+        .expect("file_fdw fdw_private: filename")
+        .sval
+        .to_string();
+    let is_program =
+        it.next().and_then(|n| n.as_boolean()).expect("file_fdw fdw_private: is_program").boolval;
+    let pages: f64 = it
+        .next()
+        .and_then(|n| n.as_float())
+        .expect("file_fdw fdw_private: pages")
+        .fval
+        .parse()
+        .expect("file_fdw fdw_private: pages parses");
+    let ntuples: f64 = it
+        .next()
+        .and_then(|n| n.as_float())
+        .expect("file_fdw fdw_private: ntuples")
+        .fval
+        .parse()
+        .expect("file_fdw fdw_private: ntuples parses");
+    FileFdwPlanState { filename, is_program, pages: pages as BlockNumber, ntuples }
 }
 
 // check_selective_binary_conversion (file_fdw.c). Some(columns) = convert
@@ -489,9 +519,10 @@ fn file_get_foreign_paths(
     foreigntableid: Oid,
 ) -> PgResult<()> {
     let mcx = run.mcx;
-    let fdw_private = PLAN_STATES
-        .with(|m| m.borrow().get(&foreigntableid).cloned())
-        .expect("fileGetForeignRelSize stashed the plan state");
+    let fdw_private = {
+        let id = run.root.rel(rel_id).fdw_private;
+        decode_plan_state(*run.root.expr_node(id))
+    };
 
     let mut coptions: PgVec<'_, types_pathnodes::NodeId> = PgVec::new_in(mcx);
     if let Some(columns) = check_selective_binary_conversion(run, rel_id, foreigntableid)? {

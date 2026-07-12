@@ -117,3 +117,45 @@ SELECT count(*) FROM pg_foreign_data_wrapper;
 SELECT count(*) FROM pg_foreign_server;
 SELECT count(*) FROM pg_user_mapping;
 SELECT count(*) FROM pg_foreign_table;
+
+-- Audit pins (contrib-fdw fix lane).
+-- M5: handlerless wrapper resolves the routine before the truncate 0A000.
+CREATE FOREIGN DATA WRAPPER pin_fdw;
+CREATE SERVER pin_s FOREIGN DATA WRAPPER pin_fdw;
+CREATE FOREIGN TABLE pin_ft (a int) SERVER pin_s;
+TRUNCATE pin_ft;
+-- M1: restrict_nonsystem_relation_kind refuses planning foreign-table access
+-- (before the no-handler surface: plancat's restricted error wins).
+SET restrict_nonsystem_relation_kind = 'foreign-table';
+SELECT * FROM pin_ft;
+EXPLAIN SELECT * FROM pin_ft;
+RESET restrict_nonsystem_relation_kind;
+SELECT * FROM pin_ft;
+
+-- file_fdw-backed pins (handler present).
+CREATE EXTENSION file_fdw;
+CREATE SERVER pin_file_s FOREIGN DATA WRAPPER file_fdw;
+COPY (SELECT g, repeat('x', 10) FROM generate_series(1, 100) g)
+  TO '/tmp/pgrust_fdw_e2e_pin.csv' (FORMAT csv);
+CREATE FOREIGN TABLE pin_file (a int, b text) SERVER pin_file_s
+  OPTIONS (filename '/tmp/pgrust_fdw_e2e_pin.csv', format 'csv');
+-- M1: the restricted error also beats the handler-present scan.
+SET restrict_nonsystem_relation_kind = 'foreign-table';
+SELECT count(*) FROM pin_file;
+RESET restrict_nonsystem_relation_kind;
+-- M5 fall-through: handler present but no ExecForeignTruncate.
+TRUNCATE pin_file;
+-- M2: Foreign File shows through a gating Result (pseudoconstant qual).
+EXPLAIN (COSTS OFF) SELECT a FROM pin_file WHERE now() > 'epoch'::timestamptz;
+-- M3: Foreign File shows inside an InitPlan.
+EXPLAIN (COSTS OFF) SELECT (SELECT count(*) FROM pin_file);
+-- M4: self-join keeps per-instance size estimates (widths differ, so the
+-- no-stats ntuples fallback differs per instance; costs must match C).
+EXPLAIN SELECT x.a FROM pin_file x, pin_file y WHERE x.a = y.a AND y.b <> '';
+
+DROP FOREIGN TABLE pin_file;
+DROP SERVER pin_file_s;
+DROP EXTENSION file_fdw;
+DROP FOREIGN TABLE pin_ft;
+DROP SERVER pin_s;
+DROP FOREIGN DATA WRAPPER pin_fdw;

@@ -2955,9 +2955,13 @@ pub fn planstate_instr_extra<'mcx>(
         }
         PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
         PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
+        // Result's outer child is optional (gating Result has one).
+        PlanStateNode::Result(r) => match r.outer.as_mut() {
+            Some(o) => walk!(&mut **o),
+            None => None,
+        },
         PlanStateNode::WorkTableScan(_)
         | PlanStateNode::NamedTuplestoreScan(_)
-        | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::SampleScan(_)
         | PlanStateNode::FunctionScan(_)
@@ -3049,9 +3053,14 @@ pub fn planstate_foreign_explain<'mcx>(
         }
         PlanStateNode::LockRows(l) => walk!(&mut *l.outer),
         PlanStateNode::ModifyTable(mps) => walk!(&mut mps.subplan),
+        // Result's outer child is optional (gating Result has one), and a
+        // pseudoconstant qual on a foreign table plans Result->ForeignScan.
+        PlanStateNode::Result(r) => match r.outer.as_mut() {
+            Some(o) => walk!(&mut **o),
+            None => None,
+        },
         PlanStateNode::WorkTableScan(_)
         | PlanStateNode::NamedTuplestoreScan(_)
-        | PlanStateNode::Result(_)
         | PlanStateNode::SeqScan(_)
         | PlanStateNode::SampleScan(_)
         | PlanStateNode::FunctionScan(_)

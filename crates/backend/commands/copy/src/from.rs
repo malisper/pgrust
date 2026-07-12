@@ -123,6 +123,27 @@ pub fn BeginCopyFrom<'mcx, 's>(
     let attnumlist = CopyGetAttnums(mcx, tup_desc, Some(rel), attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
 
+    let force_notnull_flags = force_flags(
+        mcx,
+        tup_desc,
+        Some(rel),
+        &attnumlist,
+        opts.force_notnull,
+        opts.force_notnull_all,
+        "FORCE_NOT_NULL",
+    )?;
+    let force_null_flags = force_flags(
+        mcx,
+        tup_desc,
+        Some(rel),
+        &attnumlist,
+        opts.force_null,
+        opts.force_null_all,
+        "FORCE_NULL",
+    )?;
+
+    // C builds these after the force_notnull/force_null flags (observable as
+    // error precedence when several option lists name un-referenced columns).
     let convert_select_flags = if opts.convert_selectively {
         let mut flags = vec_from_elem_in(mcx, false, num_phys_attrs);
         let empty = NodeList::nil();
@@ -144,25 +165,6 @@ pub fn BeginCopyFrom<'mcx, 's>(
     } else {
         None
     };
-
-    let force_notnull_flags = force_flags(
-        mcx,
-        tup_desc,
-        Some(rel),
-        &attnumlist,
-        opts.force_notnull,
-        opts.force_notnull_all,
-        "FORCE_NOT_NULL",
-    )?;
-    let force_null_flags = force_flags(
-        mcx,
-        tup_desc,
-        Some(rel),
-        &attnumlist,
-        opts.force_null,
-        opts.force_null_all,
-        "FORCE_NULL",
-    )?;
 
     let file_encoding = if opts.file_encoding < 0 {
         mbutils::pg_get_client_encoding()
