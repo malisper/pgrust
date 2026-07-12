@@ -332,6 +332,13 @@ fn RangeVarCallbackForTruncate<'mcx>(mcx: Mcx<'mcx>, relOid: Oid) -> PgResult<()
 }
 
 fn truncate_check_rel(relid: Oid, relkind: u8, relnamespace: Oid, relname: &str) -> PgResult<()> {
+    // C asks the FDW for ExecForeignTruncate; no in-tree FDW models it.
+    if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        return Err(Box::new(
+            PgError::new(ERROR, format!("cannot truncate foreign table \"{relname}\""))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     if relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE {
         return Err(Box::new(
             PgError::new(ERROR, format!("\"{relname}\" is not a table"))

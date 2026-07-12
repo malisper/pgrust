@@ -1224,7 +1224,8 @@ pub fn add_row_identity_var<'mcx>(
     processed_tlist_append(run, tle)
 }
 
-// add_row_identity_columns (appendinfo.c); the FDW wholerow leg stays loud.
+// add_row_identity_columns (appendinfo.c). The FDW leg is C's default
+// wholerow arm: no in-tree FDW installs AddForeignUpdateTargets.
 pub fn add_row_identity_columns<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rtindex: u32,
@@ -1249,7 +1250,8 @@ pub fn add_row_identity_columns<'mcx>(
         )?;
         add_row_identity_var(run, var, rtindex, "ctid")?;
     } else if relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        panic!("add_row_identity_columns (appendinfo.c): FDW row identity; FDW lane");
+        let var = mk_var(mcx, rtindex, 0, types_core::catalog::RECORDOID, -1, 0)?;
+        add_row_identity_var(run, var, rtindex, "wholerow")?;
     }
     Ok(())
 }

@@ -1169,6 +1169,23 @@ fn check_valid_result_rel<'mcx>(
         }
         return Ok(());
     }
+    if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        // C asks the FDW's routine for the operation's callback; no in-tree
+        // FDW models any of them, so the per-operation error is invariant.
+        let verb = match operation {
+            CmdType::CMD_INSERT => "insert into",
+            CmdType::CMD_UPDATE => "update",
+            CmdType::CMD_DELETE => "delete from",
+            _ => panic!("CheckValidResultRel (execMain.c): {operation:?} on a foreign table"),
+        };
+        return Err(Box::new(
+            PgError::error(format!(
+                "cannot {verb} foreign table \"{}\"",
+                String::from_utf8_lossy(rel.rd_rel.relname.name_str())
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     if rel.rd_rel.relkind != RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_PARTITIONED_TABLE
     {
@@ -5647,9 +5664,20 @@ fn exec_insert<'mcx>(
             }
             // C ExecInitPartitionInfo's CheckValidResultRel(leaf, CMD_INSERT,
             // onConflictAction): ONCONFLICT_UPDATE requires the leaf to also
-            // support UPDATE; the CMD_INSERT leg is a no-op.
+            // support UPDATE; the plain-table CMD_INSERT leg is a no-op, and
+            // a foreign leaf always errors (no in-tree ExecForeignInsert).
             if !mt.leaf_ri_checked[idx] {
                 mt.leaf_ri_checked[idx] = true;
+                let lrel = mt.router.as_ref().expect("router built above").leaf_rel(idx);
+                if lrel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "cannot insert into foreign table \"{}\"",
+                            String::from_utf8_lossy(lrel.rd_rel.relname.name_str())
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
                 if mt.plan.onConflictAction
                     == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32
                 {

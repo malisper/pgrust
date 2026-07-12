@@ -222,13 +222,14 @@ fn transient_files_track_and_close() {
     let path = format!("{dir}/t");
     std::fs::write(&path, b"x").unwrap();
 
-    let before = with_fd(|fd| fd.allocated_descs.len());
+    let occupied = || with_fd(|fd| crate::vfd::occupied_descs(fd));
+    let before = occupied();
     let fd1 = crate::desc::OpenTransientFile(&path, libc::O_RDWR).unwrap();
     assert!(fd1 >= 0);
-    assert_eq!(with_fd(|fd| fd.allocated_descs.len()), before + 1);
+    assert_eq!(occupied(), before + 1);
     assert_eq!(crate::desc::TransientFileRawFd(fd1), Some(fd1));
     assert_eq!(crate::desc::CloseTransientFile(fd1), 0);
-    assert_eq!(with_fd(|fd| fd.allocated_descs.len()), before);
+    assert_eq!(occupied(), before);
 
     let missing = crate::desc::OpenTransientFile(&format!("{dir}/absent"), libc::O_RDONLY).unwrap();
     assert_eq!(missing, -1);
@@ -322,11 +323,11 @@ fn subxact_reassigns_or_frees_descs() {
     std::fs::write(&path, b"x").unwrap();
 
     let td = crate::desc::OpenTransientFile(&path, libc::O_RDWR).unwrap();
-    let idx = with_fd(|fd| fd.allocated_descs.len() - 1);
-    with_fd(|fd| fd.allocated_descs[idx].create_subid = 7);
+    let idx = with_fd(|fd| fd.allocated_descs.iter().rposition(Option::is_some).unwrap());
+    with_fd(|fd| fd.allocated_descs[idx].as_mut().unwrap().create_subid = 7);
 
     crate::sync::AtEOSubXact_Files(true, 7, 3);
-    assert_eq!(with_fd(|fd| fd.allocated_descs[idx].create_subid), 3);
+    assert_eq!(with_fd(|fd| fd.allocated_descs[idx].as_ref().unwrap().create_subid), 3);
 
     crate::sync::AtEOSubXact_Files(false, 3, 1);
     assert!(crate::desc::TransientFileRawFd(td).is_none());

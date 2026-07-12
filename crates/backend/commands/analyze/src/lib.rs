@@ -59,6 +59,38 @@ pub struct VacuumParams {
     pub options: i32,
 }
 
+/// `AcquireSampleRowsFunc` (fdwapi.h), shaped like this crate's native
+/// `acquire_sample_rows` row sink plus C's elevel.
+pub type AcquireSampleRowsFn = for<'mcx> fn(
+    Mcx<'mcx>,
+    &Relation<'mcx>,
+    types_error::ErrorLevel,
+    &mut PgVec<'mcx, HeapTupleData<'mcx>>,
+    i32,
+    &mut f64,
+    &mut f64,
+) -> PgResult<i32>;
+
+/// `AnalyzeForeignTable` (fdwapi.h): the analyze half of the FdwRoutine,
+/// keyed by FdwKind (planner fdwplan.rs precedent). `None` = the provider
+/// declines (C's `return false`): analyze_rel warns and skips.
+pub struct FdwAnalyzeRoutine {
+    pub analyze_foreign_table: for<'mcx> fn(
+        Mcx<'mcx>,
+        &Relation<'mcx>,
+    )
+        -> PgResult<Option<(AcquireSampleRowsFn, BlockNumber)>>,
+}
+
+static FDW_ANALYZE_ROUTINES: [std::sync::OnceLock<&'static FdwAnalyzeRoutine>;
+    types_nodes::NUM_FDW_KINDS] = [const { std::sync::OnceLock::new() }; types_nodes::NUM_FDW_KINDS];
+
+pub fn install_fdw_analyze_routine(kind: types_nodes::FdwKind, r: &'static FdwAnalyzeRoutine) {
+    if FDW_ANALYZE_ROUTINES[kind.index()].set(r).is_err() {
+        panic!("install_fdw_analyze_routine: FdwAnalyzeRoutine already installed for {kind:?}");
+    }
+}
+
 enum ComputeStats {
     Scalar,
     Distinct,
@@ -270,6 +302,7 @@ pub fn analyze_rel(
         return Ok(());
     }
     let relkind = onerel.rd_rel.relkind;
+    let mut acquirefunc: Option<AcquireSampleRowsFn> = None;
     let relpages = match relkind {
         RELKIND_RELATION | RELKIND_MATVIEW => bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
             &onerel,
@@ -277,7 +310,27 @@ pub fn analyze_rel(
         )?,
         RELKIND_PARTITIONED_TABLE => 0,
         RELKIND_FOREIGN_TABLE => {
-            panic!("analyze_rel (analyze.c): foreign-table ANALYZE (FDW AnalyzeForeignTable lane)")
+            let kind = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, onerel.rd_id)?;
+            let ok = match FDW_ANALYZE_ROUTINES[kind.index()].get() {
+                Some(r) => (r.analyze_foreign_table)(mcx, &onerel)?,
+                None => None,
+            };
+            match ok {
+                Some((f, pages)) => {
+                    acquirefunc = Some(f);
+                    pages
+                }
+                None => {
+                    elog::ereport(types_error::WARNING)
+                        .errmsg(format!(
+                            "skipping \"{}\" --- cannot analyze this foreign table",
+                            onerel.name()
+                        ))
+                        .finish(types_error::ErrorLocation::new("analyze.c", 0, "analyze_rel"))?;
+                    onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+                    return Ok(());
+                }
+            }
         }
         _ => {
             if params.options & VACOPT_VACUUM == 0 {
@@ -296,10 +349,10 @@ pub fn analyze_rel(
     pgstat_progress_start_command(PROGRESS_COMMAND_ANALYZE, onerel.rd_id);
 
     if relkind != RELKIND_PARTITIONED_TABLE {
-        do_analyze_rel(mcx, &onerel, va_cols, params, relpages, false, in_outer_xact)?;
+        do_analyze_rel(mcx, &onerel, va_cols, params, acquirefunc, relpages, false, in_outer_xact)?;
     }
     if onerel.rd_rel.relhassubclass {
-        do_analyze_rel(mcx, &onerel, va_cols, params, relpages, true, in_outer_xact)?;
+        do_analyze_rel(mcx, &onerel, va_cols, params, acquirefunc, relpages, true, in_outer_xact)?;
     }
 
     onerel.close(NO_LOCK)?;
@@ -308,11 +361,13 @@ pub fn analyze_rel(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_analyze_rel<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
     va_cols: &types_nodes::NodeList<'_>,
     params: &VacuumParams,
+    acquirefunc: Option<AcquireSampleRowsFn>,
     relpages: BlockNumber,
     inh: bool,
     in_outer_xact: bool,
@@ -455,6 +510,13 @@ fn do_analyze_rel<'mcx>(
             &mut totalrows,
             &mut totaldeadrows,
         )?
+    } else if let Some(f) = acquirefunc {
+        let elevel = if params.options & VACOPT_VERBOSE != 0 {
+            types_error::INFO
+        } else {
+            types_error::DEBUG2
+        };
+        f(anl_mcx, onerel, elevel, &mut rows, targrows, &mut totalrows, &mut totaldeadrows)?
     } else {
         acquire_sample_rows(
             anl_mcx,
@@ -541,7 +603,13 @@ fn do_analyze_rel<'mcx>(
     pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_FINALIZE_ANALYZE);
 
     if !inh {
-        let (relallvisible, relallfrozen) = visibilitymap::visibilitymap_count(onerel)?;
+        // Storage-less relkinds (foreign tables) have no visibility map.
+        let (relallvisible, relallfrozen) =
+            if types_rel::pg_class::RELKIND_HAS_STORAGE(onerel.rd_rel.relkind) {
+                visibilitymap::visibilitymap_count(onerel)?
+            } else {
+                (0, 0)
+            };
         xact::CommandCounterIncrement()?;
         vacuum_seams::vac_update_relstats::call(
             onerel,

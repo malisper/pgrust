@@ -264,6 +264,7 @@ seam_core::seam!(
     pub fn query_desc_foreign_explain<'e>(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
+        costs: bool,
         emit: &'e mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
     ) -> PgResult<()>
 );

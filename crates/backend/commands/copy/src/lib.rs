@@ -23,7 +23,7 @@ mod to;
 #[cfg(test)]
 mod tests;
 
-pub use from::{BeginCopyFrom, CopyFrom, EndCopyFrom};
+pub use from::{copy_from_error_context, BeginCopyFrom, CopyFrom, CopyFromState, EndCopyFrom};
 pub use to::{BeginCopyTo, DoCopyTo, EndCopyTo};
 #[doc(hidden)]
 pub use fromparse::bench_internals;
@@ -86,6 +86,7 @@ pub struct CopyFormatOptions<'s> {
     pub force_null: Option<&'s NodeList<'s>>,
     pub force_null_all: bool,
     pub convert_selectively: bool,
+    pub convert_select: Option<&'s NodeList<'s>>,
     pub on_error: CopyOnErrorChoice,
     pub log_verbosity: CopyLogVerbosityChoice,
     pub reject_limit: i64,
@@ -534,7 +535,7 @@ fn def_log_verbosity_choice(
     ))
 }
 
-// defGetCopyRejectLimitOption (copy.c); the Sconst (file_fdw) arm is loud.
+// defGetCopyRejectLimitOption (copy.c); the T_Float defGetInt64 arm is loud.
 fn def_reject_limit(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<i64> {
     let reject_limit = match d.arg {
         None => {
@@ -546,11 +547,13 @@ fn def_reject_limit(d: &types_nodes::parsenodes::DefElem<'_>) -> PgResult<i64> {
                 .with_sqlstate(ERRCODE_SYNTAX_ERROR),
             ))
         }
-        Some(n) => match n.as_integer() {
-            Some(i) => i.ival as i64,
-            None => panic!(
-                "defGetCopyRejectLimitOption (copy.c): non-Integer REJECT_LIMIT arm \
-                 (pg_strtoint64/defGetInt64) not ported"
+        Some(n) => match (n.as_integer(), n.as_string()) {
+            (Some(i), _) => i.ival as i64,
+            // The reloptions form (file_fdw): pg_strtoint64 over the text.
+            (None, Some(s)) => numutils::pg_strtoint64(s.sval)?,
+            (None, None) => panic!(
+                "defGetCopyRejectLimitOption (copy.c): T_Float REJECT_LIMIT arm \
+                 (defGetInt64) not ported"
             ),
         },
     };
@@ -606,6 +609,7 @@ pub fn ProcessCopyOptions<'s>(
         force_null: None,
         force_null_all: false,
         convert_selectively: false,
+        convert_select: None,
         on_error: CopyOnErrorChoice::Stop,
         log_verbosity: CopyLogVerbosityChoice::Default,
         reject_limit: 0,
@@ -710,6 +714,7 @@ pub fn ProcessCopyOptions<'s>(
                     return Err(conflicting_option(src, d.location));
                 }
                 opts.convert_selectively = true;
+                opts.convert_select = d.arg.and_then(|a| a.as_list());
                 if !(d.arg.is_none() || d.arg.is_some_and(|a| a.as_list().is_some())) {
                     return Err(Box::new(
                         PgError::error(format!(

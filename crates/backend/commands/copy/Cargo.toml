@@ -48,6 +48,7 @@ wchar = { path = "../../../common/wchar" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 table = { path = "../../access/table/table" }
+numutils = { path = "../../utils/adt/numutils" }
 tableam = { path = "../../access/table/tableam" }
 tableam_vocab = { path = "../../access/table/tableam_vocab" }
 heapam = { path = "../../access/heap/heapam" }

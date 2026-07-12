@@ -69,6 +69,7 @@ pub struct CopyFromState<'mcx, 's> {
     pub(crate) attnames: PgVec<'mcx, NameData>,
     pub(crate) force_notnull_flags: PgVec<'mcx, bool>,
     pub(crate) force_null_flags: PgVec<'mcx, bool>,
+    pub(crate) convert_select_flags: Option<PgVec<'mcx, bool>>,
     // Per physical attribute; defmap lists attrs absent from attnumlist whose
     // default fills the column, defaults[] carries per-row DEFAULT markers.
     pub(crate) defexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, execexpr::ExprState<'mcx>>>>,
@@ -85,6 +86,21 @@ pub struct CopyFromState<'mcx, 's> {
 impl CopyFromState<'_, '_> {
     pub(crate) fn attname(&self, m: usize) -> String {
         String::from_utf8_lossy(self.attnames[m].name_str()).into_owned()
+    }
+
+    pub fn num_errors(&self) -> u64 {
+        self.num_errors
+    }
+
+    /// `cstate->escontext->error_occurred` (file_fdw's soft-error probe).
+    pub fn soft_error_occurred(&self) -> bool {
+        self.escontext.as_ref().is_some_and(|n| n.ctx.error_occurred())
+    }
+
+    pub fn reset_soft_error(&mut self) {
+        if let Some(n) = self.escontext.as_mut() {
+            n.ctx.reset_error_occurred();
+        }
     }
 }
 
@@ -103,12 +119,31 @@ pub fn BeginCopyFrom<'mcx, 's>(
     source_text: Option<&str>,
 ) -> PgResult<CopyFromState<'mcx, 's>> {
     let opts = ProcessCopyOptions(true, options, source_text)?;
-    if opts.convert_selectively {
-        unported("convert_selectively (file_fdw-only option)");
-    }
     let tup_desc = &rel.rd_att;
     let attnumlist = CopyGetAttnums(mcx, tup_desc, Some(rel), attnamelist)?;
     let num_phys_attrs = tup_desc.natts as usize;
+
+    let convert_select_flags = if opts.convert_selectively {
+        let mut flags = vec_from_elem_in(mcx, false, num_phys_attrs);
+        let empty = NodeList::nil();
+        let sel = CopyGetAttnums(mcx, tup_desc, Some(rel), opts.convert_select.unwrap_or(&empty))?;
+        for &attnum in sel.iter() {
+            if !attnumlist.contains(&attnum) {
+                let att = tup_desc.attr(attnum as usize - 1);
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "selected column \"{}\" not referenced by COPY",
+                        String::from_utf8_lossy(att.attname.name_str())
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_COLUMN_REFERENCE),
+                ));
+            }
+            flags[attnum as usize - 1] = true;
+        }
+        Some(flags)
+    } else {
+        None
+    };
 
     let force_notnull_flags = force_flags(
         mcx,
@@ -282,6 +317,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
         attnames,
         force_notnull_flags,
         force_null_flags,
+        convert_select_flags,
         defexprs,
         defmap,
         defaults: vec_from_elem_in(mcx, false, num_phys_attrs),
@@ -391,9 +427,14 @@ pub fn CopyFrom<'mcx>(
         }
         ti_options |= tableam_vocab::TABLE_INSERT_FROZEN;
     }
-    // C dispatches through ri_FdwRoutine here (BeginForeignInsert).
+    // C dispatches through ri_FdwRoutine (BeginForeignInsert) after
+    // CheckValidResultRel; no in-tree FDW models ExecForeignInsert, so the
+    // CheckValidResultRel error is the invariant outcome.
     if relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        unported("FROM into foreign tables (FDW lane)");
+        return Err(Box::new(
+            PgError::error(format!("cannot insert into foreign table \"{}\"", rel.name()))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     // C forces CIM_SINGLE on a partitioned target with BEFORE/INSTEAD row
     // triggers (copyfrom.c:995-1005) or statement-level transition tables
@@ -456,7 +497,7 @@ pub fn CopyFrom<'mcx>(
             }
             Ok(n)
         }
-        Err(e) => Err(copy_from_error_context(cstate, rel, e)),
+        Err(e) => Err(copy_from_error_context(cstate, e)),
     }
 }
 
@@ -855,7 +896,15 @@ fn copy_from_partitioned_body<'mcx>(
         if leaf_trig[leaf].is_none() {
             let lrel = router.leaf_rel(leaf);
             if lrel.rd_rel.relkind != RELKIND_RELATION {
-                panic!("CopyFrom: foreign-table partition as COPY target not ported (FDW lane)");
+                // CheckValidResultRel (execMain.c): no in-tree FDW models
+                // ExecForeignInsert, so a routed foreign leaf always errors.
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "cannot insert into foreign table \"{}\"",
+                        lrel.name()
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
             }
             if lrel
                 .rd_att
@@ -1242,12 +1291,11 @@ fn flush_multi_insert<'mcx>(
 // attached on Err propagation instead of via error_context_stack.
 #[cold]
 #[inline(never)]
-fn copy_from_error_context(
+pub fn copy_from_error_context(
     cstate: &CopyFromState<'_, '_>,
-    rel: &Relation<'_>,
     e: Box<PgError>,
 ) -> Box<PgError> {
-    let relname = rel.name();
+    let relname = &cstate.relname;
     let lineno = cstate.cur_lineno;
     if cstate.opts.binary {
         // C's binary arm: the raw data is not usefully displayable.
