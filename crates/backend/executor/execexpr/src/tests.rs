@@ -3952,3 +3952,168 @@ fn jit_parity_censusgaps_inline_ops() {
         let _ = exercised;
     });
 }
+
+// --- strsearch contains-LIKE qual census + kernel (lane-v2) -----------------
+
+fn text_datum_4b(bytes: &[u8]) -> Datum {
+    let mut v = vec![0u8; 4 + bytes.len()];
+    let word = ::types_tuple::varatt::set_varsize_4b_word((4 + bytes.len()) as u32);
+    v[..4].copy_from_slice(&word.to_ne_bytes());
+    v[4..].copy_from_slice(bytes);
+    Datum::from_usize(Box::leak(v.into_boxed_slice()).as_ptr() as usize)
+}
+
+fn mk_textlike_qual<'mcx>(mcx: Mcx<'mcx>, pattern: &[u8]) -> PgBox<'mcx, ExprState<'mcx>> {
+    // texts ~~ '%…%' with a valid input collation (C = 950): OpExpr over
+    // textlike (fn 850), scan Var arg0, non-null text Const arg1.
+    let args = NodeList::make2(
+        mcx,
+        mk_scan_var(mcx, 1, TEXTOID_T),
+        Node::mk_const(mcx, TEXTOID_T, -1, 950, -1, text_datum_4b(pattern), false, false)
+            .unwrap(),
+    )
+    .unwrap();
+    let op = Node::mk(
+        mcx,
+        OpExpr {
+            opno: 1209,
+            opfuncid: 850,
+            opresulttype: BOOLOID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 950,
+            args,
+            location: -1,
+        },
+    )
+    .unwrap();
+    qual_state(mcx, op)
+}
+
+#[test]
+fn contains_census_admits_contains_class_patterns() {
+    with_mcx(|mcx| {
+        let state = mk_textlike_qual(mcx, b"%abc%");
+        let c = state.scan_contains_clause().expect("contains-class pattern admits");
+        assert_eq!(c.attnum, 0);
+        assert_eq!(c.collation, 950);
+        assert_eq!(c.needle(), b"abc");
+        // Multi-% runs collapse; multibyte literals admit.
+        let state = mk_textlike_qual(mcx, "%%причал%%%".as_bytes());
+        let c = state.scan_contains_clause().expect("wildcard runs + multibyte admit");
+        assert_eq!(c.needle(), "причал".as_bytes());
+    });
+}
+
+#[test]
+fn contains_census_refuses_non_contains_patterns() {
+    with_mcx(|mcx| {
+        for pat in [
+            &b"abc%"[..],     // anchored prefix
+            b"%abc",          // anchored suffix
+            b"abc",           // exact
+            b"%a_c%",         // underscore class
+            b"%a\\bc%",       // escape class
+            b"%a%c%",         // multi-segment
+            b"%%",            // empty literal (matches-everything class)
+            b"%",             // ditto
+        ] {
+            let state = mk_textlike_qual(mcx, pat);
+            assert!(
+                state.scan_contains_clause().is_none(),
+                "pattern {:?} must refuse",
+                String::from_utf8_lossy(pat)
+            );
+        }
+    });
+}
+
+#[test]
+fn qual_bitmap_contains_matches_perrow_like_oracle() {
+    // Parity fuzz: the batched kernel's bits vs the REAL per-row matcher
+    // (match_text::<Utf8Cs>, the kernel a UTF-8 database's textlike runs)
+    // over random haystacks (ASCII + multibyte UTF-8 + empties + NULLs) and
+    // random needles of length 1..=24. Also proves the undecidable arm: a
+    // toast-pointer header must yield an `undecided` bit, never a decision.
+    let mut s = 0x243F_6A88_85A3_08D3u64;
+    let mut lcg = move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s
+    };
+    let alphabet: Vec<char> =
+        "abcdefgxyz0123456789 /:.?=&причалЯндексбßé中文".chars().collect();
+    for round in 0..200 {
+        let needle_len = 1 + (lcg() as usize) % 6;
+        let needle: String =
+            (0..needle_len).map(|_| alphabet[(lcg() as usize) % alphabet.len()]).collect();
+        let pattern = format!("%{needle}%");
+        let nrows = 64 + (lcg() as usize) % 130;
+        let mut values = vec![Datum::null(); nrows];
+        let mut isnull = vec![false; nrows];
+        let mut owners: Vec<Box<[u8]>> = Vec::new();
+        for i in 0..nrows {
+            match lcg() % 8 {
+                0 => isnull[i] = true,
+                1 if round % 2 == 0 => {
+                    // Undecidable: 1B_E toast-pointer header (0x01 tag byte).
+                    let raw: Box<[u8]> = vec![0x01, 18, 0, 0].into_boxed_slice();
+                    values[i] = Datum::from_usize(raw.as_ptr() as usize);
+                    owners.push(raw);
+                }
+                _ => {
+                    let len = (lcg() as usize) % 40;
+                    let text: String =
+                        (0..len).map(|_| alphabet[(lcg() as usize) % alphabet.len()]).collect();
+                    let b = text.as_bytes();
+                    let mut v = vec![0u8; 4 + b.len()];
+                    let word =
+                        ::types_tuple::varatt::set_varsize_4b_word((4 + b.len()) as u32);
+                    v[..4].copy_from_slice(&word.to_ne_bytes());
+                    v[4..].copy_from_slice(b);
+                    let raw = v.into_boxed_slice();
+                    values[i] = Datum::from_usize(raw.as_ptr() as usize);
+                    owners.push(raw);
+                }
+            }
+        }
+        let nwords = nrows.div_ceil(64);
+        let mut sel = vec![0u64; nwords];
+        let mut undecided = vec![0u64; nwords];
+        // SAFETY: every non-null value is a live 4B varlena (or a 1B_E
+        // header the kernel must classify undecidable without reading past).
+        unsafe {
+            crate::steps::qual_bitmap_contains(
+                needle.as_bytes(),
+                &values,
+                &isnull,
+                &mut sel,
+                &mut undecided,
+            );
+        }
+        for i in 0..nrows {
+            let bit = sel[i / 64] >> (i % 64) & 1 == 1;
+            let und = undecided[i / 64] >> (i % 64) & 1 == 1;
+            if isnull[i] {
+                assert!(!bit && !und, "NULL row {i} must fail, not defer");
+                continue;
+            }
+            let p = values[i].as_usize() as *const u8;
+            let is_toast = unsafe { *p == 0x01 };
+            if is_toast {
+                assert!(und && !bit, "toast row {i} must defer to the per-row path");
+                continue;
+            }
+            assert!(!und);
+            let len = unsafe { ::types_tuple::varatt::varsize_4b(p) } - 4;
+            let text = unsafe { core::slice::from_raw_parts(p.add(4), len) };
+            let oracle = ::adt_like::utf8_match_text(
+                text,
+                pattern.as_bytes(),
+                Some(&::pg_locale::C_LOCALE),
+            )
+            .unwrap()
+                == 1;
+            assert_eq!(bit, oracle, "row {i} needle {needle:?} text {text:?}");
+        }
+    }
+}
