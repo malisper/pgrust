@@ -270,6 +270,19 @@ fn compact_migrate<'mcx>(
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.take().expect("migration requires an armed table");
+    {
+        // Same switch as lanev2's trace helpers (observability only).
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| {
+            matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+        }) {
+            eprintln!(
+                "[lanev2] compact table migrating to C tuplehash ({} groups, {} bytes)",
+                ch.table.len(),
+                ch.table.mem_used()
+            );
+        }
+    }
     let additionalsize = ph.hashtable.additionalsize();
     debug_assert!(!ph.spill.mode, "compact builds never enter spill mode");
     for row in 0..ch.table.nrows() {
