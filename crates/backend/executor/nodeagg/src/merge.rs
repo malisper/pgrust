@@ -83,6 +83,12 @@ enum CombineKind {
 pub struct HandedAggTable {
     entries: Vec<TupleHashEntryData>,
     additionalsize: usize,
+    // Stage-4 pool: radix partition (top-8 hash bits) computed on the WORKER
+    // thread at install when the lane pool is armed, so the leader's consume
+    // boundary starts bucket-claiming immediately instead of running T
+    // serial counting sorts over O(T·G) entries first (the Stage-0.4
+    // prototype's merge-wall correction). None = leader partitions (classic).
+    parts: Option<Partition>,
     _buf: Vec<u128>,
 }
 
@@ -738,10 +744,20 @@ pub(crate) fn maybe_install_handoff(node: &mut AggStateData<'_>) {
         };
         entries.push(e2);
     }
+    // Stage-4 pool: pre-partition on the worker thread (parallel across
+    // workers) so the leader's merge boundary is bucket-claim-ready. Armed
+    // sessions only — unarmed heap parallel agg keeps the classic
+    // leader-side partitioning byte-for-byte.
+    let parts = ::guc_tables::lane_pool::lane_parallel_pool_armed()
+        .then(|| partition_entries(&entries));
     if merge_stats_enabled() {
-        eprintln!("AGG_MERGE_STATS install: node={id} entries={} bytes={bytes}", entries.len());
+        eprintln!(
+            "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={}",
+            entries.len(),
+            parts.is_some(),
+        );
     }
-    handoff.install(HandedAggTable { entries, additionalsize, _buf: buf });
+    handoff.install(HandedAggTable { entries, additionalsize, parts, _buf: buf });
     ph.hashtable.reset();
 }
 
@@ -771,12 +787,19 @@ pub(crate) fn consume_handoff<'mcx>(
     if ph.spill.ever_spilled {
         return replay_handed_rows(node, estate, tables);
     }
+    let t0 = merge_stats_enabled().then(std::time::Instant::now);
     let additionalsize = ph.hashtable.additionalsize();
+    let mut tables = tables;
     let mut parts = Vec::with_capacity(tables.len() + 1);
     parts.push(partition_entries(ph.hashtable.entries()));
-    for t in &tables {
+    for t in &mut tables {
         debug_assert!(t.additionalsize == additionalsize);
-        parts.push(partition_entries(&t.entries));
+        // Worker-partitioned handoff (Stage-4 pool): reuse; else partition
+        // here, exactly as before.
+        parts.push(match t.parts.take() {
+            Some(p) => p,
+            None => partition_entries(&t.entries),
+        });
     }
     let pre = match &m.par {
         Some(spec) if !parallel_merge_disabled() => {
@@ -784,6 +807,15 @@ pub(crate) fn consume_handoff<'mcx>(
         }
         _ => None,
     };
+    if let Some(t0) = t0 {
+        // Merge-wall probe for the G4 merge-fraction gate: partition reuse +
+        // the bucket-claim merge, leader-observed.
+        eprintln!(
+            "AGG_MERGE_STATS merge-wall-us={} mode={}",
+            t0.elapsed().as_micros(),
+            if pre.is_some() { "parallel" } else { "serial-buckets-deferred" },
+        );
+    }
     node.merge.as_mut().unwrap().run = Some(MergeRun {
         tables,
         parts,

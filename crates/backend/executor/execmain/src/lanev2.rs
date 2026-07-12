@@ -1448,7 +1448,27 @@ fn agg_hash_build_fold_feed<'mcx>(
     // key, with the key and every spill-replay column staged in the armed
     // SoA lanes. `None` = the per-row arrival probe (byte-identical).
     let k2 = scan_k2_shape(agg, ss, estate);
-    trace_feed(if k2.is_some() {
+    // Stage-2.2 compact-table arming, per build, on top of the K2 shape
+    // (nodeagg::compact module doc: int-width key kernel, AGGSPLIT_SIMPLE,
+    // not spill-eligible by estimate; runtime backstop migrates to the C
+    // table). Non-armed verdicts tick their observability reasons; the
+    // build itself stays lane-owned either way.
+    let compact = k2.is_some()
+        && match ::nodeagg::agg_hash_compact_try_arm(agg) {
+            ::nodeagg::CompactArm::Armed => true,
+            ::nodeagg::CompactArm::KeyKind => {
+                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactKeyKind);
+                false
+            }
+            ::nodeagg::CompactArm::SpillRisk => {
+                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactSpillRisk);
+                false
+            }
+            ::nodeagg::CompactArm::Off => false,
+        };
+    trace_feed(if compact {
+        "agg-over-seqscan: staged fold feed engaged (compact table)"
+    } else if k2.is_some() {
         "agg-over-seqscan: staged fold feed engaged (k2 probe)"
     } else {
         "agg-over-seqscan: staged fold feed engaged"
@@ -1534,6 +1554,11 @@ fn agg_hash_build_fold_feed<'mcx>(
                 )?;
                 continue;
             }
+            // A fallback-bearing batch routes through the arrival probe (the
+            // C table): the compact table must hand its groups over FIRST so
+            // every group lives in exactly one table (states carried over
+            // byte-for-byte; no-op when not armed).
+            ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
         }
         idxs.clear();
         groups.clear();
@@ -1570,7 +1595,9 @@ fn agg_hash_build_fold_feed<'mcx>(
             }
         }
     }
-    // Finalize (delegated): spill finish, merge handoff, phase flip.
+    // Combine-before-finish (delegated; the Stage-4 seam): spill finish +
+    // merge handoff, then the phase flip.
+    ::nodeagg::agg_hash_build_combine(agg, estate)?;
     ::nodeagg::agg_hash_build_finish(agg, estate)
 }
 
@@ -2011,6 +2038,24 @@ fn scan_k2_batch<'mcx>(
             knull.push(kn[i as usize]);
         }
     }
+    // Stage-2.2 compact-table batch (nodeagg::compact): probe + new-group
+    // init inside the compact table — PG hashing bypassed entirely — and the
+    // usual whole-batch fold over the returned pergroups. `false` = the
+    // runtime backstop migrated the table into the C tuplehash BEFORE this
+    // batch; fall through to the staged probe below (same rows, same order,
+    // the migrated groups' states carried over byte-for-byte).
+    if ::nodeagg::agg_hash_compact_armed(agg)
+        && ::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)?
+    {
+        idxs.clear();
+        idxs.extend_from_slice(rows);
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("K2 scan feed requires the armed SoA");
+        // SAFETY: as the staged-probe fold below — every probed row is
+        // non-fallback with valid lane values for every plan column; each
+        // pergroup was installed by the compact probe within this batch.
+        return unsafe { agg_fold_staged(agg, soa, idxs, groups) };
+    }
     ::nodeagg::agg_hash_hash_staged(agg, keys, knull, hashes)?;
     idxs.clear();
     groups.clear();
@@ -2162,6 +2207,13 @@ impl<'mcx> Sink<'mcx> for HashAggBuildSink<'_, 'mcx> {
     ) -> PgResult<SinkFeed> {
         ::nodeagg::agg_hash_build_accept(self.agg, estate, tuple)?;
         Ok(SinkFeed::NeedMore)
+    }
+
+    // Stage-4 combine seam: a parallel worker's partial build hands its
+    // whole table to the leader here (merge handoff); idempotent under the
+    // following finish (nodeagg's combined flag).
+    fn combine(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodeagg::agg_hash_build_combine(self.agg, estate)
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
@@ -4205,6 +4257,19 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
             StagedMode::Arrival => self.accept_unguarded(tuple, estate)?,
         }
         Ok(SinkFeed::NeedMore)
+    }
+
+    // Stage-4 combine seam (see HashAggBuildSink::combine): flush the staged
+    // tail first so the handed table is complete, then hand off; the
+    // following finish re-flushes nothing (flushes drain their staging) and
+    // skips the install (combined flag).
+    fn combine(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        match self.mode {
+            StagedMode::Guarded => self.flush_guarded(estate)?,
+            StagedMode::K2 { .. } => self.flush_k2(estate)?,
+            StagedMode::Arrival => self.flush_unguarded(estate)?,
+        }
+        ::nodeagg::agg_hash_build_combine(self.agg, estate)
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
