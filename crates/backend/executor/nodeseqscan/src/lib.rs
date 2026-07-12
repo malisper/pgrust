@@ -228,7 +228,9 @@ struct ProjStitch<'mcx> {
 /// staging returns to the qual-only col deform and the per-row projection
 /// path (exactly the pre-projstitch lane). Ratchet only with a measurement.
 const PROJ_MIN_SELECTIVITY_PCT: u64 = 20;
-const PROJ_ADAPT_ROWS: u64 = 65536;
+// 16k rows: >=1.6k survivors even at the 10% floor case — ample signal; the
+// widened-deform probe window stays ~0.2% of a 10M-row scan.
+const PROJ_ADAPT_ROWS: u64 = 16384;
 
 /// Tier-2 row floor (the batchexec POC admission number): the stitched body
 /// engages only once ~2048 rows have flowed through the armed qual — OLTP-
