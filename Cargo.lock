@@ -4780,6 +4780,7 @@ dependencies = [
  "aclchk_seams",
  "adt_date",
  "adt_datetime",
+ "adt_float",
  "adt_formatting",
  "adt_int",
  "adt_json",
@@ -4809,6 +4810,7 @@ dependencies = [
  "indexcmds_seams",
  "init_small",
  "jit_deform",
+ "lanereg",
  "lsyscache",
  "mbutils",
  "mcx",
@@ -7358,12 +7360,20 @@ dependencies = [
  "datum",
  "execexpr",
  "exectuples",
+ "lanereg",
  "mcx",
  "types_core",
  "types_error",
  "types_nodes",
  "types_tuple",
  "varlena",
+]
+
+[[package]]
+name = "lanereg"
+version = "0.0.0"
+dependencies = [
+ "types_core",
 ]
 
 [[package]]

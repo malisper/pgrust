@@ -184,6 +184,7 @@ members = [
     "crates/backend/executor/execexpr",
     "crates/backend/executor/lanefold",
     "crates/backend/executor/lanestitch",
+    "crates/backend/executor/lanereg",
     "crates/backend/executor/executils",
     "crates/backend/executor/instrument",
     "crates/backend/executor/execjunk",
