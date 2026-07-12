@@ -1016,36 +1016,52 @@ fn agg_hash_build_fold_feed<'mcx>(
                 groups.push(pg);
             }
         }
-        if !idxs.is_empty() {
-            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
-            let aggcx = ::nodeagg::agg_aggcontext(agg);
-            // SAFETY: `groups[k]` is the live pergroup array the probe just
-            // installed for staged row `idxs[k]` (hash entries and their
-            // additional blocks are allocation-stable for the table's
-            // lifetime; spill mode only redirects NEW groups to the tapes —
-            // spilled rows never reach `groups`); non-fallback rows carry
-            // valid deformed lane values for every plan column (the SoA
-            // prefix covers the evaltrans fetch bound); AvgAccum pergroups
-            // hold the catalog's `{0,0}` int8[2] transarray, datum-copied per
-            // group at entry initialization; Int128AvgAccum pergroups are
-            // NULL or hold the aggcontext state the transfn chain installed,
-            // and `aggcx` is that same aggcontext; guarded plans passed
-            // `check_guards` above.
-            match ::nodeseqscan::seq_scan_batch_soa(ss) {
-                Some(soa) => unsafe {
-                    ::lanefold::fold_rows_grouped(plan, soa, &idxs, &groups, aggcx)?
-                },
-                None => {
-                    debug_assert!(plan.cols.is_empty());
-                    unsafe {
-                        ::lanefold::fold_rows_grouped(plan, &NoCols, &idxs, &groups, aggcx)?
-                    }
-                }
+        // SAFETY: non-fallback rows carry valid deformed lane values for
+        // every plan column (the SoA prefix covers the evaltrans fetch
+        // bound); guarded plans passed `check_guards` above; the rest is
+        // `agg_fold_staged`'s per-feed contract.
+        match ::nodeseqscan::seq_scan_batch_soa(ss) {
+            Some(soa) => unsafe { agg_fold_staged(agg, soa, &idxs, &groups)? },
+            None => {
+                debug_assert!(
+                    ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
+                );
+                unsafe { agg_fold_staged(agg, &NoCols, &idxs, &groups)? }
             }
         }
     }
     // Finalize (delegated): spill finish, merge handoff, phase flip.
     ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// Shared fold tail for the staged fold feeds (seqscan page batches and the
+/// joined-row staging buffer): the admitted transitions run whole-batch over
+/// the probed rows' pergroup snapshots via `lanefold::fold_rows_grouped`,
+/// generic over the staged-lanes source (`LaneCols`).
+///
+/// # Safety
+/// `groups[k]` is the live pergroup array the probe just installed for staged
+/// row `idxs[k]` (hash entries and their additional blocks are
+/// allocation-stable for the table's lifetime; spill mode only redirects NEW
+/// groups to the tapes — spilled rows never reach `groups`); `cols` covers
+/// every staged row for every plan column; AvgAccum pergroups hold the
+/// catalog's `{0,0}` int8[2] transarray, datum-copied per group at entry
+/// initialization; Int128AvgAccum pergroups are NULL or hold the aggcontext
+/// state the transfn chain installed, and `agg_aggcontext` is that same
+/// aggcontext; guarded plans passed `check_guards` on this batch.
+unsafe fn agg_fold_staged<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    cols: &impl ::lanefold::LaneCols,
+    idxs: &[u32],
+    groups: &[core::ptr::NonNull<::execexpr::AggPerGroup>],
+) -> PgResult<()> {
+    if idxs.is_empty() {
+        return Ok(());
+    }
+    let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+    let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // SAFETY: caller contract (above) is exactly fold_rows_grouped's.
+    unsafe { ::lanefold::fold_rows_grouped(plan, cols, idxs, groups, aggcx) }
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
@@ -1818,13 +1834,430 @@ pub fn try_own_hash_join<'mcx>(
     Ok(Some(join_probe_pull_dispatch(state, hstate, outer, estate)?))
 }
 
+// ===========================================================================
+// Staged joined-row fold feed (the agg-over-join composition's batched build
+// feed). The join probe streams one joined row at a time — there is no page
+// batch and no SoA deform on the agg's outer side — so the composition's agg
+// breaker previously fed per-row (`HashAggBuildSink`), leaving the lanefold
+// kernels disengaged. This sink stages joined rows into `LaneCols`-compatible
+// arrays and folds the admitted transitions per staged batch (~the page-batch
+// row cap) via the shared fold tail (`agg_fold_staged`), in two modes:
+//
+// * UNGUARDED plans (no data-level Guard — the common case): the group probe
+//   + residual transitions run per row AT ARRIVAL against the incoming joined
+//   slot (exactly the per-row sink's own call), snapshotting the pergroup;
+//   only the fold lanes (`plan.cols` — always byval int-family by classify
+//   construction) are staged, and the flush is just the whole-batch fold.
+//   No replay slot, no datum copies: strictly the per-row sink minus the
+//   admitted transitions' interpreted per-row steps. This mirrors the seqscan
+//   fold feed's probe-then-fold split (residuals per-row inside the batch,
+//   commutative fold after) — bit-identical by the lanefold contract.
+//
+// * GUARDED plans (int2/int4 OpExpr admissions carrying a Guard interval):
+//   the guard must be re-proven BEFORE any probe/transition runs, and a
+//   Demote must run the WHOLE batch through the checked per-row program — so
+//   nothing may run at arrival. The sink stages every build-relevant column
+//   (fold lanes + group keys + residual inputs — exactly the `colnos_needed`
+//   set the hashagg spill projection keeps), and per batch: `check_guards`
+//   (data-scan tier — join output has no zone map), Demote → replay every
+//   staged row through `agg_hash_build_accept` (raises C's error at C's
+//   row), else replay → probe/residual per row → fold. The replay slot
+//   presents the same needed-column values in the same row order the per-row
+//   sink would (unneeded columns NULL — the spill projection's own
+//   treatment), so probe sequence, spill decisions, residual transitions,
+//   and error rows are identical.
+//
+// Memory: the lanes are fixed-capacity (STAGE_ROWS), reused across batches;
+// by-ref staged values on the guarded path (e.g. text group keys — they may
+// point into per-tuple memory the probe resets row to row) are datum-copied
+// into a dedicated bump context that is reset after every staged batch —
+// per-batch, fixed-size, no unbounded growth.
+// ===========================================================================
+
+/// Staging window for the joined-row fold feed: the page-batch row cap, so a
+/// staged join batch matches the seqscan fold feed's batch magnitude (and the
+/// guard bitmask reuses `SOA_BM_WORDS`).
+const STAGE_ROWS: usize = ::exectuples::SOA_MAX_ROWS;
+
+/// `LaneCols` over the staged joined-row window: per-column value/isnull
+/// lanes indexed by the join output's 0-based attno. Only the needed columns
+/// are populated; the fold reads only `plan.cols`, a subset.
+struct StagedLanes {
+    values: Vec<Vec<::datum::Datum>>,
+    isnull: Vec<Vec<bool>>,
+}
+
+impl ::lanefold::LaneCols for StagedLanes {
+    fn col_values(&self, c: usize) -> &[::datum::Datum] {
+        &self.values[c]
+    }
+
+    fn col_isnull(&self, c: usize) -> &[bool] {
+        &self.isnull[c]
+    }
+}
+
+/// The composition breaker's fold-armed `Sink` face (two modes, see the
+/// section comment): unguarded = probe at arrival + staged fold lanes;
+/// guarded = full staging with per-batch guard proof / Demote replay.
+/// `finish` flushes the tail window and runs the delegated build finalize.
+struct StagedFoldAggSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    /// Guarded mode (any admitted transition carries a Guard interval).
+    guarded: bool,
+    /// Fold lanes (`plan.cols`) + their arrival deform bound — the unguarded
+    /// mode's whole staging set (byval by classify construction).
+    fold_cols: Vec<u16>,
+    fold_bound: i32,
+    /// Replay slot (virtual, the join output's tupledesc): guarded mode
+    /// re-presents each staged row here for the probe/residual/demote
+    /// machinery. Unset in unguarded mode.
+    stage_slot: Option<ExecSlotId>,
+    natts: usize,
+    /// Guarded-mode deform bound for the incoming joined slot
+    /// (`max_colno_needed`).
+    max_colno: i32,
+    /// Guarded mode: 0-based attnos of the needed columns (`colnos_needed`),
+    /// with each column's attlen for the by-ref datum copy (attbyval columns
+    /// skip the copy). Empty in unguarded mode (only fold lanes stage).
+    needed: Vec<(u16, i16, bool)>,
+    lanes: StagedLanes,
+    nstaged: usize,
+    /// Per-batch arena for by-ref staged values (guarded mode); reset after
+    /// every flush.
+    stage_cxt: Option<::mcx::MemoryContext>,
+    idxs: Vec<u32>,
+    groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+}
+
+/// Staged-feed admission inputs for the composition. `None` = the composition
+/// keeps the per-row sink (no fold plan, or the join output does not line up
+/// with the agg's outer shape — defensive, they are the same tlist by
+/// construction).
+struct StagedFeedShape {
+    guarded: bool,
+    fold_cols: Vec<u16>,
+    fold_bound: i32,
+    /// Guarded mode only (empty otherwise): each needed column's 0-based
+    /// attno, attlen, attbyval.
+    needed: Vec<(u16, i16, bool)>,
+    max_colno: i32,
+    natts: usize,
+}
+
+fn staged_feed_shape<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    join_result_slot: ExecSlotId,
+    estate: &EStateData<'mcx>,
+) -> Option<StagedFeedShape> {
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    let desc = estate.slot(join_result_slot).base().tts_tupleDescriptor.as_ref()?;
+    let natts = desc.attrs.len();
+    let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
+    if colnos_needed.len() != natts {
+        return None;
+    }
+    debug_assert!(plan.cols.iter().all(|&c| colnos_needed[c as usize]));
+    let fold_cols: Vec<u16> = plan.cols.iter().copied().collect();
+    let fold_bound = fold_cols.iter().map(|&c| c as i32 + 1).max().unwrap_or(0);
+    let guarded = plan.guarded;
+    let needed: Vec<(u16, i16, bool)> = if guarded {
+        colnos_needed
+            .iter()
+            .enumerate()
+            .filter(|&(_, &n)| n)
+            .map(|(c, _)| (c as u16, desc.attrs[c].attlen, desc.attrs[c].attbyval))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(StagedFeedShape { guarded, fold_cols, fold_bound, needed, max_colno, natts })
+}
+
+impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
+    /// Construction for an admitted shape (`staged_feed_shape` returned the
+    /// inputs). The guarded replay slot is memoized across rescan rebuilds (a
+    /// fresh extra slot per rebuild would grow es_tupleTable per rescan).
+    fn new(
+        agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+        join_result_slot: ExecSlotId,
+        stage_slot_memo: &mut Option<ExecSlotId>,
+        shape: StagedFeedShape,
+        estate: &mut EStateData<'mcx>,
+    ) -> Self {
+        let StagedFeedShape { guarded, fold_cols, fold_bound, needed, max_colno, natts } =
+            shape;
+        let (stage_slot, stage_cxt) = if guarded {
+            let slot = match *stage_slot_memo {
+                Some(s) => s,
+                None => {
+                    let desc =
+                        estate.slot(join_result_slot).base().tts_tupleDescriptor.clone();
+                    let s = estate
+                        .exec_init_extra_tuple_slot(desc, ::types_slot::TupleSlotKind::Virtual);
+                    *stage_slot_memo = Some(s);
+                    s
+                }
+            };
+            let cxt = estate
+                .es_query_cxt
+                .context()
+                .new_child_bump("lane-v2 staged join feed");
+            (Some(slot), Some(cxt))
+        } else {
+            (None, None)
+        };
+        let mut lanes = StagedLanes {
+            values: vec![Vec::new(); natts],
+            isnull: vec![Vec::new(); natts],
+        };
+        // Guarded mode stages every needed column; unguarded stages only the
+        // fold lanes.
+        let staged: Vec<u16> = if guarded {
+            needed.iter().map(|&(c, _, _)| c).collect()
+        } else {
+            fold_cols.clone()
+        };
+        for &c in &staged {
+            lanes.values[c as usize].reserve_exact(STAGE_ROWS);
+            lanes.isnull[c as usize].reserve_exact(STAGE_ROWS);
+        }
+        StagedFoldAggSink {
+            agg,
+            guarded,
+            fold_cols,
+            fold_bound,
+            stage_slot,
+            natts,
+            max_colno,
+            needed,
+            lanes,
+            nstaged: 0,
+            stage_cxt,
+            idxs: Vec::new(),
+            groups: Vec::new(),
+        }
+    }
+
+    /// Re-present staged row `k` in the replay slot: needed columns carry the
+    /// staged values, unneeded columns are NULL (the spill projection's own
+    /// treatment, so a spilled staged row is byte-identical).
+    fn replay_row(&self, k: usize, estate: &mut EStateData<'mcx>) {
+        let mcx = estate.es_query_cxt;
+        let slot = estate.slot_mut(self.stage_slot.expect("guarded mode has a replay slot"));
+        ::exectuples::exec_clear_tuple(slot, mcx);
+        {
+            let base = slot.base_mut();
+            for c in 0..self.natts {
+                base.tts_values[c] = ::datum::Datum::null();
+                base.tts_isnull[c] = true;
+            }
+            for &(c, _, _) in &self.needed {
+                let c = c as usize;
+                base.tts_values[c] = self.lanes.values[c][k];
+                base.tts_isnull[c] = self.lanes.isnull[c][k];
+            }
+        }
+        ::exectuples::exec_store_virtual_tuple(slot);
+    }
+
+    /// Unguarded accept: stage the fold lanes (byval — plain datum copies),
+    /// then run the group probe + residual transitions NOW against the
+    /// incoming joined slot — exactly the per-row sink's call — snapshotting
+    /// the pergroup for the batch fold.
+    fn accept_unguarded(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        {
+            let slot = estate.slot_mut(tuple);
+            ::exectuples::slot_getsomeattrs(slot, self.fold_bound);
+            let base = slot.base();
+            for &c in &self.fold_cols {
+                let c = c as usize;
+                self.lanes.values[c].push(base.tts_values[c]);
+                self.lanes.isnull[c].push(base.tts_isnull[c]);
+            }
+        }
+        let k = self.nstaged;
+        self.nstaged += 1;
+        if let Some(pg) = ::nodeagg::agg_hash_build_probe_resid(self.agg, estate, tuple)? {
+            self.idxs.push(k as u32);
+            self.groups.push(pg);
+        }
+        if self.nstaged == STAGE_ROWS {
+            self.flush_unguarded(estate)?;
+        }
+        Ok(())
+    }
+
+    /// Unguarded flush: just the whole-batch fold over the snapshotted
+    /// pergroups (the probe/residuals already ran at arrival).
+    fn flush_unguarded(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let _ = estate;
+        // SAFETY: staged fold lanes cover every plan column for all staged
+        // rows (`idxs` indexes this window); the plan is unguarded, so no
+        // guard proof is required; the rest is agg_fold_staged's contract
+        // (the probe just installed each snapshot within this batch).
+        unsafe { agg_fold_staged(self.agg, &self.lanes, &self.idxs, &self.groups)? }
+        for &c in &self.fold_cols {
+            let c = c as usize;
+            self.lanes.values[c].clear();
+            self.lanes.isnull[c].clear();
+        }
+        self.idxs.clear();
+        self.groups.clear();
+        self.nstaged = 0;
+        Ok(())
+    }
+
+    /// Guarded accept: stage every needed column (nothing may run before the
+    /// batch guard proof — a Demote must replay the WHOLE batch through the
+    /// checked per-row program).
+    fn accept_guarded(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        {
+            let slot = estate.slot_mut(tuple);
+            ::exectuples::slot_getsomeattrs(slot, self.max_colno);
+        }
+        for i in 0..self.needed.len() {
+            let (c, attlen, byval) = self.needed[i];
+            let c = c as usize;
+            let base = estate.slot(tuple).base();
+            let (v, isnull) = (base.tts_values[c], base.tts_isnull[c]);
+            // By-ref values may point into per-tuple memory the probe resets
+            // row to row (and heap pages the outer scan unpins): copy into
+            // the per-batch arena so the staged window is self-contained.
+            let v = if isnull || byval {
+                v
+            } else {
+                let cxt = self.stage_cxt.as_ref().expect("guarded mode has a stage cxt");
+                crate::nodesubplan::datum_copy_in(cxt.mcx(), v, attlen)?
+            };
+            self.lanes.values[c].push(v);
+            self.lanes.isnull[c].push(isnull);
+        }
+        self.nstaged += 1;
+        if self.nstaged == STAGE_ROWS {
+            self.flush_guarded(estate)?;
+        }
+        Ok(())
+    }
+
+    /// Guarded flush: one CHECK_FOR_INTERRUPTS per batch (design §9
+    /// batch-operator cadence), the guard proof re-run per batch, then the
+    /// replayed probe/residual + fold — or the whole batch through the
+    /// checked per-row program on Demote.
+    fn flush_guarded(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let n = self.nstaged;
+        if n == 0 {
+            return Ok(());
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        let stage_slot = self.stage_slot.expect("guarded mode has a replay slot");
+        // Re-prove per staged batch. Join output has no zone map, so the
+        // proof always runs the exact data-scan tier over the staged lanes.
+        // Every staged row is selected (the join emits only qual-passing
+        // rows).
+        let demote = {
+            let plan =
+                ::nodeagg::agg_lanefold_plan(self.agg).expect("staged feed without a plan");
+            let nwords = n.div_ceil(64);
+            let mut rows = [u64::MAX; ::exectuples::SOA_BM_WORDS];
+            if n % 64 != 0 {
+                rows[nwords - 1] = (1u64 << (n % 64)) - 1;
+            }
+            ::lanefold::check_guards(plan, &self.lanes, &rows[..nwords], |_| None)
+                == ::lanefold::GuardCheck::Demote
+        };
+        if demote {
+            // The WHOLE batch runs the checked per-row program (never mixing
+            // a partial fold with per-row transitions — lanefold contract);
+            // it raises C's error at C's row.
+            for k in 0..n {
+                self.replay_row(k, estate);
+                ::nodeagg::agg_hash_build_accept(self.agg, estate, stage_slot)?;
+            }
+        } else {
+            self.idxs.clear();
+            self.groups.clear();
+            for k in 0..n {
+                self.replay_row(k, estate);
+                if let Some(pg) =
+                    ::nodeagg::agg_hash_build_probe_resid(self.agg, estate, stage_slot)?
+                {
+                    self.idxs.push(k as u32);
+                    self.groups.push(pg);
+                }
+            }
+            // SAFETY: staged lanes cover every plan column for all staged
+            // rows (plan.cols ⊆ colnos_needed); the guard proof passed on
+            // this batch; the rest is agg_fold_staged's contract.
+            unsafe { agg_fold_staged(self.agg, &self.lanes, &self.idxs, &self.groups)? }
+        }
+        for &(c, _, _) in &self.needed {
+            let c = c as usize;
+            self.lanes.values[c].clear();
+            self.lanes.isnull[c].clear();
+        }
+        self.nstaged = 0;
+        self.stage_cxt.as_mut().expect("guarded mode has a stage cxt").reset();
+        Ok(())
+    }
+}
+
+impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        if self.guarded {
+            self.accept_guarded(tuple, estate)?;
+        } else {
+            self.accept_unguarded(tuple, estate)?;
+        }
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.guarded {
+            self.flush_guarded(estate)?;
+        } else {
+            self.flush_unguarded(estate)?;
+        }
+        ::nodeagg::agg_hash_build_finish(self.agg, estate)
+    }
+}
+
+/// Engagement trace for the composition feeds, env-gated
+/// (`PGRUST_LANE_V2_TRACE=1`): one line per build-feed engagement on stderr.
+/// Diagnostics only — never affects execution.
+fn trace_feed(msg: &str) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    }) {
+        eprintln!("[lanev2] {msg}");
+    }
+}
+
 /// Try to let the lane own `Agg(hashed) → HashJoin(inner) → scans` — the
 /// first breaker-to-breaker composition. Three pipelines on two breaker
 /// nodes, all phase flags node-resident row-path state:
 ///
 ///   1. build:  inner scan → filter/project → HashJoinBuildSink
-///   2. probe:  outer scan → filter/project → JoinProbe → HashAggBuildSink
+///   2. probe:  outer scan → filter/project → JoinProbe → agg build sink
 ///   3. emit:   HashAggSource → HashAggEmit → RootAdapter (one group per pull)
+///
+/// The probe-pipeline sink is the staged fold feed (`StagedFoldAggSink`) when
+/// the agg carries a lanefold plan — the batched joined-row feed — and the
+/// per-row `HashAggBuildSink` otherwise. `stage_slot` memoizes the staged
+/// feed's replay slot across rescan rebuilds.
 ///
 /// `None` = refused (caller falls to the per-tuple `exec_agg` over
 /// `exec_hash_join`, byte-identically — including after a lane-delegated
@@ -1833,6 +2266,7 @@ pub fn try_own_hash_join<'mcx>(
 pub fn try_own_agg_over_hash_join<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    stage_slot: &mut Option<ExecSlotId>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Dynamic per-call gates, ticked under the join class (the composition's
@@ -1890,8 +2324,30 @@ pub fn try_own_agg_over_hash_join<'mcx>(
                 // One OWNED tick per lane-owned agg build event (here the
                 // build is fed by the join probe drain).
                 stats::tick_owned(ShapeClass::AggBuild);
-                let mut sink = HashAggBuildSink { agg: &mut *agg };
-                join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
+                // Batched joined-row feed when the agg carries a fold plan;
+                // the per-row breaker sink otherwise.
+                match staged_feed_shape(agg, state.ps_ResultTupleSlot, estate) {
+                    Some(shape) => {
+                        trace_feed(if shape.guarded {
+                            "agg-over-join: staged fold feed engaged (guarded)"
+                        } else {
+                            "agg-over-join: staged fold feed engaged"
+                        });
+                        let mut sink = StagedFoldAggSink::new(
+                            agg,
+                            state.ps_ResultTupleSlot,
+                            stage_slot,
+                            shape,
+                            estate,
+                        );
+                        join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
+                    }
+                    None => {
+                        trace_feed("agg-over-join: per-row sink (no fold plan)");
+                        let mut sink = HashAggBuildSink { agg: &mut *agg };
+                        join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
+                    }
+                }
             }
             ::nodehashjoin::LaneJoinPhase::Build => unreachable!("build ran above"),
         }
