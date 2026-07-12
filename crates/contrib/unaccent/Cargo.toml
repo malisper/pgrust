@@ -1,0 +1,26 @@
+[package]
+name = "unaccent"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "unaccent"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+elog = { path = "../../backend/utils/error/elog" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+wchar = { path = "../../common/wchar" }
+ts_locale = { path = "../../backend/tsearch/ts_locale" }
+ts_cache = { path = "../../backend/utils/cache/ts_cache" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
+varlena = { path = "../../backend/utils/adt/varlena" }

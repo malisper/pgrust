@@ -11319,6 +11319,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_walinspect"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heaptuple",
+ "mcx",
+ "postgres_seams",
+ "rmgr",
+ "rmgrdesc",
+ "stringinfo",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "xlogreader",
+ "xlogreader_seams",
+ "xlogrecovery",
+ "xlogstats",
+]
+
+[[package]]
 name = "pgarch"
 version = "0.0.0"
 dependencies = [
@@ -14166,6 +14190,7 @@ dependencies = [
  "pg_subscription",
  "pg_trgm",
  "pg_upgrade_support",
+ "pg_walinspect",
  "pgarch",
  "pgcrypto",
  "pgstat",
@@ -14257,6 +14282,7 @@ dependencies = [
  "typcache",
  "typecmds",
  "types_fmgr",
+ "unaccent",
  "user",
  "utility",
  "uuid_ossp",
@@ -17179,6 +17205,27 @@ dependencies = [
  "pg_path",
  "pgtz",
  "xact_seams",
+]
+
+[[package]]
+name = "unaccent"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "elog",
+ "libc",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "syscache_seams",
+ "ts_cache",
+ "ts_locale",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
