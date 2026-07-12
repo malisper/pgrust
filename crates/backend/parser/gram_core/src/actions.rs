@@ -5179,6 +5179,20 @@ impl<'mcx> Parser<'mcx> {
                 }
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
+            // set_rest_more: SCHEMA Sconst -> SET search_path.
+            215 => {
+                let mut n = Node::build::<VariableSetStmt>(mcx)?;
+                n.kind = VariableSetKind::VAR_SET_VALUE;
+                n.name = Some("search_path");
+                let s = Node::mk_a_const(
+                    mcx,
+                    Some(ValUnion::String(types_nodes::String { sval: view.v(2).str_val() })),
+                    view.l(2),
+                )?;
+                n.args = NodeList::make1(mcx, s)?;
+                n.location = view.l(2);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
             217 => {
                 let mut n = Node::build::<VariableSetStmt>(mcx)?;
                 n.kind = VariableSetKind::VAR_SET_VALUE;
