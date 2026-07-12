@@ -90,6 +90,12 @@ pub(crate) fn log_dict_kernel(col: u16, shape: &str) {
     log(format!("lane_executor: dict kernel compiled (col {col}, {shape})"));
 }
 
+// First-engagement marker: the contains kernel ran blob-wide over a
+// contiguous text-span window (likeband; once per clause per scan).
+pub(crate) fn log_blob_kernel(col: u16) {
+    log(format!("lane_executor: blob contains kernel engaged (col {col})"));
+}
+
 // Arm-time marker: DictEval progs admitted onto a surface (dict-pushdown §7).
 pub fn log_dicteval_armed(surface: &str, n: u32, nfallible: u32) {
     log(format!("lane_executor: dicteval armed ({surface}, {n} progs, {nfallible} lazy-fallible)"));

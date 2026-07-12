@@ -26,12 +26,41 @@ struct ColDecode {
     is_dict: bool,
     // CHUNK_FLAG_DICT_SORTED: codes are byte-rank order (dict range preds).
     dict_sorted: bool,
+    // Text-blob contiguity (likeband blob kernel): the decoded granule's
+    // datums are ascending pointers into ONE readable span (RawText mmap
+    // blob / Lz4Text decode arena) — the staged window may publish a
+    // SoaTextSpan witness so blob-wide substring kernels run one search over
+    // the whole span.
+    contig_text: bool,
     // (rg, granule) this column's buffers hold; granule content per key is
     // immutable, so a matching key is valid across rescans. NONE_KEY = none.
     gkey: (u32, u32),
 }
 
 const NONE_KEY: (u32, u32) = (u32::MAX, u32::MAX);
+
+/// Blob-span witness for a staged text window (likeband): the window's
+/// images are complete 4B-U varlena values laid out back-to-back (4-byte
+/// alignment padding) in one readable span, and the window's datums are
+/// STRICTLY ascending pointers into it. Re-proved per window (the writer
+/// never reorders/dedups the text blob, but the hit→row mapping depends on
+/// it — verify, don't assume); an unprovable window returns None and the
+/// consumer stays per-row.
+fn staged_text_span(ds: &[Datum]) -> Option<::exectuples::SoaTextSpan> {
+    let first = ds.first()?.as_usize();
+    let mut prev = first;
+    for d in &ds[1..] {
+        let p = d.as_usize();
+        if p <= prev {
+            return None;
+        }
+        prev = p;
+    }
+    // SAFETY: cbstore text datums point at live complete varlena images
+    // (decode contract); `prev` is the window's last (highest) image.
+    let end = prev + unsafe { ::types_tuple::varatt::varsize_any(prev as *const u8) };
+    Some(::exectuples::SoaTextSpan { base: first as *const u8, len: end - first })
+}
 
 // Exact granule fallback for metadata SUM (RGs without valid footer sums):
 // Const granules fold aux * rows; other int encodings decode and fold the
@@ -67,6 +96,7 @@ fn new_col_decode() -> ColDecode {
         codes: Vec::new(),
         is_dict: false,
         dict_sorted: false,
+        contig_text: false,
         gkey: NONE_KEY,
     }
 }
@@ -82,8 +112,14 @@ fn decode_col(part: &Part, rg: usize, g: usize, c: usize, cd: &mut ColDecode) {
     let chunk = part.chunk(rg, c);
     cd.is_dict = chunk.decode_granule_codes(g, &mut cd.codes, &mut cd.dict, &mut cd.arena);
     cd.dict_sorted = cd.is_dict && chunk.hdr.flags & CHUNK_FLAG_DICT_SORTED != 0;
+    cd.contig_text = false;
     if !cd.is_dict {
         chunk.decode_granule(g, &mut cd.datums, &mut cd.dict, &mut cd.arena);
+        // Blob contiguity witness: both text encodings decode the granule's
+        // rows into one span (RawText: the chunk's mmap blob; Lz4Text: the
+        // per-granule decompress arena) with row-order offsets.
+        cd.contig_text =
+            matches!(chunk.hdr.encoding, Encoding::RawText | Encoding::Lz4Text);
     }
     cd.gkey = (rg as u32, g as u32);
 }
@@ -884,6 +920,17 @@ impl<'mcx> CbScanDescData<'mcx> {
             }
         } else {
             soa.col_values_mut(c).copy_from_slice(self.staged_col(c));
+            // Blob-span witness (likeband): a text window's images sit
+            // ascending inside one readable span (RawText mmap blob /
+            // Lz4Text arena) — publish it so the contains-LIKE kernel can
+            // run ONE blob-wide search instead of a per-row loop. The
+            // ascending proof is re-verified per window (<= SOA window
+            // rows, trivial); an unprovable layout just stays per-row.
+            if cd.contig_text {
+                if let Some(span) = staged_text_span(self.staged_col(c)) {
+                    soa.set_text_span(c, span);
+                }
+            }
         }
         soa.col_isnull_mut(c).fill(false);
     }
@@ -909,6 +956,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     pub fn staged_col(&self, c: usize) -> &[Datum] {
         &self.cols[c].datums[self.staged_lo..self.staged_lo + self.staged_rows]
     }
+
 
     /// STABLE DICTIONARY IDENTITY of the staged window's column `c`, when
     /// the chunk is dict-encoded and already decoded (codes-only decode):
