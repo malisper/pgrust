@@ -172,6 +172,12 @@ struct BatchSoa<'mcx> {
     // FULL original qual per row at fetch. Exact-bitmap consumers
     // (`seq_scan_batch_qual_sel`, the qual census) refuse these batches.
     lane_requal: bool,
+    // Dict-GROUP consumer column (cbstore dict-code grouping, cbstore-v2
+    // plan Stage 2.1): the agg feed reads this column as codes+dict past the
+    // qual, so the post-qual gather-to-Raw must SKIP it (the feed is the
+    // dict-code consumer PREWHERE v1 said didn't exist yet). None = every
+    // dict-answered qual lane gathers back to Raw as before.
+    dict_group: Option<u16>,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
@@ -642,6 +648,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 proj: None,
                 lane: None,
                 lane_requal: false,
+                dict_group: None,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -752,6 +759,94 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
     }
 }
 
+/// Dict-GROUP columnar arm (cbstore-v2 plan Stage 2.1 — dict-code
+/// execution): arm the SoA staging for a lane agg feed whose (single)
+/// grouping key is column `key` of a cbstore scan, with `dict_want` set on
+/// the key so the AM's batch fill answers dict-encoded windows as
+/// codes+dict (zero decode) for the feed's per-epoch code grouping. The
+/// plan is the OFFSET-FREE columnar plan (`SoaDeformPlan::columnar`) —
+/// cbstore's `batch_deform` stages decoded Datums per column and never
+/// reads tuple offsets, so varlena columns (the text grouping key) are
+/// stageable where the heap fixed-width-prefix plan refuses.
+/// Windows whose key chunk is NOT dict-encoded fill Raw (real Datums in the
+/// key lane) — the consumer takes `dict_lane(key) == None` as "this window
+/// is Raw", per the `set_dict_want` contract.
+///
+/// Idempotent: a matching armed batch is kept (PREWHERE may have installed
+/// its lane qual on it in between — the dict-group registration survives,
+/// and the post-qual gather-to-Raw skips the registered column). Refuses —
+/// fail-open to the per-row paths — when another staging consumer owns the
+/// batch (sort key feed / varkey staging).
+pub fn seq_scan_cb_dictgroup_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+    key: u16,
+) -> bool {
+    if node.cb_scan.is_none() || prefix <= 0 || (key as i32) >= prefix {
+        return false;
+    }
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        if b.dict_group == Some(key) && b.plan.ncols() as i32 >= prefix {
+            return true;
+        }
+        if b.key_col.is_some() || b.varkey.is_some() {
+            return false;
+        }
+        // A live PREWHERE lane owns the batch: register the dict-group
+        // consumer on it when its forced full prefix covers the ask (the
+        // fill answers the key as codes+dict from the next window on; the
+        // gather-to-Raw skip keeps the codes up past the qual).
+        if b.lane.is_some() && b.plan.ncols() as i32 >= prefix {
+            b.soa.set_dict_want(key);
+            b.dict_group = Some(key);
+            return true;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let Some(plan) = ::exectuples::SoaDeformPlan::columnar(mcx, prefix as usize) else {
+        return false;
+    };
+    let mut soa = ::exectuples::SoaBatch::new_in(mcx, plan.ncols());
+    soa.set_dict_want(key);
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa,
+            plan,
+            qual_armed: false,
+            qual_only: false,
+            key_col: None,
+            varkey: None,
+            key_read_col: 0,
+            publish: false,
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            stitch: None,
+            proj: None,
+            lane: None,
+            lane_requal: false,
+            dict_group: Some(key),
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    lane_trace("cbstore dict-group staging armed");
+    true
+}
+
+/// The registered dict-group consumer column, when the dict-group arm (or a
+/// PREWHERE co-arm) holds. The agg feed re-checks this per build — a rebuilt
+/// batch (a later consumer re-armed the staging) drops the registration and
+/// the feed falls back to the Raw key path, byte-safely.
+#[inline]
+pub fn seq_scan_batch_dictgroup_col(node: &SeqScanState<'_>) -> Option<u16> {
+    node.batch_soa.as_deref().and_then(|b| b.dict_group)
+}
+
 /// Arm the fused-sort direct key feed: output column 0 must be exactly one
 /// scan Var (bare single-column scan or a lone `JustAssignVar` projection)
 /// the fixed-width SoA plan covers, no qual. False leaves the per-row path.
@@ -812,6 +907,7 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
+                dict_group: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -862,6 +958,7 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
+                dict_group: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1013,17 +1110,23 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                     if b.sel[..nwords].iter().any(|&w| w != 0) {
                         // Survivors: complete the deform to the full fill
                         // set (idempotent per column; dict-wanted columns
-                        // re-answer as lanes and gather below).
+                        // re-answer as lanes and gather below — except a
+                        // registered dict-code consumer's column, whose
+                        // codes the dict-group feed reads directly).
                         ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
                         for c in lq.dict_cols() {
-                            b.soa.gather_dict_lane(c as usize);
+                            if b.dict_group != Some(c) {
+                                b.soa.gather_dict_lane(c as usize);
+                            }
                         }
                     }
                 } else {
                     ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
                     ::laneexec::eval_lane_qual(lq, &b.soa, n, &mut b.sel)?;
                     for c in lq.dict_cols() {
-                        b.soa.gather_dict_lane(c as usize);
+                        if b.dict_group != Some(c) {
+                            b.soa.gather_dict_lane(c as usize);
+                        }
                     }
                 }
                 // cbstore stages no fallback rows; keep the OR for the
@@ -2507,7 +2610,7 @@ mcx::forget_safe_struct!(
     // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, lane_requal, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
+        nquals, lane_requal, dict_group, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );
