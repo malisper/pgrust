@@ -95,18 +95,22 @@ fn set_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()
                 set_dummy_rel_pathlist(run, rel)?;
                 return Ok(());
             }
-            assert!(
-                rte.relkind == types_rel::RELKIND_RELATION
-                    || rte.relkind == types_rel::RELKIND_TOASTVALUE
-                    || rte.relkind == types_rel::RELKIND_SEQUENCE
-                    || rte.relkind == types_rel::RELKIND_MATVIEW,
-                "set_rel_size relkind {}",
-                rte.relkind
-            );
-            if rte.tablesample.is_some() {
-                set_tablesample_rel_size(run, rel, rti)?;
+            if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                set_foreign_size(run, rel, rti)?;
             } else {
-                set_plain_rel_size(run, rel)?;
+                assert!(
+                    rte.relkind == types_rel::RELKIND_RELATION
+                        || rte.relkind == types_rel::RELKIND_TOASTVALUE
+                        || rte.relkind == types_rel::RELKIND_SEQUENCE
+                        || rte.relkind == types_rel::RELKIND_MATVIEW,
+                    "set_rel_size relkind {}",
+                    rte.relkind
+                );
+                if rte.tablesample.is_some() {
+                    set_tablesample_rel_size(run, rel, rti)?;
+                } else {
+                    set_plain_rel_size(run, rel)?;
+                }
             }
         }
         RTEKind::RTE_FUNCTION => {
@@ -459,7 +463,9 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
     } else {
         match rte.rtekind {
             RTEKind::RTE_RELATION => {
-                if rte.tablesample.is_some() {
+                if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                    set_foreign_pathlist(run, rel, rti)?;
+                } else if rte.tablesample.is_some() {
                     set_tablesample_rel_pathlist(run, rel)?;
                 } else {
                     set_plain_rel_pathlist(run, rel)?;
@@ -1327,6 +1333,28 @@ fn set_plain_rel_size(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     Ok(())
 }
 
+// set_foreign_size (allpaths.c): the FDW adjusts the default estimates, but
+// may not zero rows or leave tuples insane relative to rows (reltuples -1).
+fn set_foreign_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    crate::costsize::set_foreign_size_estimates(run, rel)?;
+    let relid = run.rte(rti).relid;
+    let kind = run.root.rel(rel).fdwroutine.expect("foreign rel has fdwroutine");
+    (crate::fdwplan::fdw_plan_routine(kind).get_foreign_rel_size)(run, rel, relid)?;
+    let rows = crate::costsize::clamp_row_est(run.root.rel(rel).rows);
+    let r = run.root.rel_mut(rel);
+    r.rows = rows;
+    r.tuples = r.tuples.max(rows);
+    Ok(())
+}
+
+// set_foreign_pathlist (allpaths.c).
+fn set_foreign_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
+    let relid = run.rte(rti).relid;
+    let kind = run.root.rel(rel).fdwroutine.expect("foreign rel has fdwroutine");
+    (crate::fdwplan::fdw_plan_routine(kind).get_foreign_paths)(run, rel, relid)?;
+    Ok(())
+}
+
 // set_tablesample_rel_size (allpaths.c): the TSM's size estimate overwrites
 // the whole-rel pages/tuples (SampleScan is the only path considered).
 fn set_tablesample_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
@@ -1381,6 +1409,19 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
                     if !crate::is_parallel_safe_opt(run, Some(arg))? {
                         return Ok(());
                     }
+                }
+            }
+            // A ForeignScan in a worker needs explicit FDW support.
+            if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
+                let kind =
+                    run.root.rel(rel).fdwroutine.expect("foreign rel has fdwroutine");
+                match crate::fdwplan::fdw_plan_routine(kind).is_foreign_scan_parallel_safe {
+                    Some(safe) => {
+                        if !safe(run, rel)? {
+                            return Ok(());
+                        }
+                    }
+                    None => return Ok(()),
                 }
             }
         }

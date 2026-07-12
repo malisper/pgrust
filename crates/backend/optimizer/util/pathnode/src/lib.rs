@@ -111,6 +111,7 @@ pub fn is_projection_capable_pathtype(pathtype: u16) -> bool {
         t if t == tag16(NodeTag::T_WorkTableScan) => true,
         t if t == tag16(NodeTag::T_SubqueryScan) => true,
         t if t == tag16(NodeTag::T_ValuesScan) => true,
+        t if t == tag16(NodeTag::T_ForeignScan) => true,
         t if t == tag16(NodeTag::T_FunctionScan) => true,
         t if t == tag16(NodeTag::T_TableFuncScan) => true,
         t if t == tag16(NodeTag::T_SetOp) => false,
@@ -1240,6 +1241,49 @@ pub fn create_gather_merge_path<'mcx>(
     }));
     costsize::cost_gather_merge(run, id, rel_id, input_disabled, input_startup, input_total, rows);
     id
+}
+
+// create_foreignscan_path (pathnode.c): called by an FDW's GetForeignPaths,
+// never by core; the FDW supplies rows and costs.
+#[allow(clippy::too_many_arguments)]
+pub fn create_foreignscan_path<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel_id: RelId,
+    target: Option<PtId>,
+    rows: f64,
+    disabled_nodes: i32,
+    startup_cost: f64,
+    total_cost: f64,
+    pathkeys: PgVec<'mcx, PathKey>,
+    required_outer: &Relids<'mcx>,
+    fdw_outerpath: Option<PathId>,
+    fdw_restrictinfo: PgVec<'mcx, RinfoId>,
+    fdw_private: PgVec<'mcx, types_pathnodes::NodeId>,
+) -> PgResult<PathId> {
+    debug_assert!(matches!(
+        run.root.rel(rel_id).reloptkind,
+        types_pathnodes::RELOPT_BASEREL | types_pathnodes::RELOPT_OTHER_MEMBER_REL
+    ));
+    let param_info = get_baserel_parampathinfo(run, rel_id, required_outer)?;
+    let mut path = base_path(run, NodeTag::T_ForeignPath, NodeTag::T_ForeignScan, rel_id);
+    if let Some(t) = target {
+        path.pathtarget_id = Some(t);
+    }
+    path.param_info = param_info;
+    path.parallel_aware = false;
+    path.parallel_safe = run.root.rel(rel_id).consider_parallel;
+    path.parallel_workers = 0;
+    path.rows = rows;
+    path.disabled_nodes = disabled_nodes;
+    path.startup_cost = startup_cost;
+    path.total_cost = total_cost;
+    path.pathkeys = pathkeys;
+    Ok(run.root.alloc_path(PathNode::ForeignPath(types_pathnodes::ForeignPath {
+        path,
+        fdw_outerpath,
+        fdw_restrictinfo,
+        fdw_private,
+    })))
 }
 
 // create_samplescan_path (pathnode.c); result is always unordered.

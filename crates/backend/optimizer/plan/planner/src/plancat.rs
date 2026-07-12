@@ -36,14 +36,9 @@ pub fn get_relation_info<'mcx>(
 
     let relation = table::table_open(mcx, relation_object_id, NoLock)?;
     let relkind = relation.rd_rel.relkind;
-    if relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        // C: GetFdwRoutineForRelation. The seam errors for a handler-less
-        // FDW and is loud past that (no FDW implementations exist).
-        foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, relation_object_id)?;
-        unreachable!("get_fdw_routine_by_rel_id returned");
-    }
     if !(relkind_has_table_am(relkind)
         || relkind == RELKIND_SEQUENCE
+        || relkind == types_rel::RELKIND_FOREIGN_TABLE
         || relkind == types_rel::RELKIND_PARTITIONED_TABLE)
     {
         panic!("get_relation_info (plancat.c): relkind {relkind}; M2 foreign lane");
@@ -305,10 +300,18 @@ pub fn get_relation_info<'mcx>(
 
     crate::extended_stats::get_relation_statistics(run, rel, relation.rd_id)?;
 
-    {
+    if relkind == types_rel::RELKIND_FOREIGN_TABLE {
+        // C's restrict_nonsystem_relation_kind guard: no such GUC yet.
+        let serverid =
+            foreigncmds_seams::get_foreign_server_id_by_rel_id::call(relation_object_id)?;
+        let routine = foreigncmds_seams::get_fdw_routine_by_rel_id::call(mcx, relation_object_id)?;
+        let r = run.root.rel_mut(rel);
+        r.serverid = serverid;
+        r.fdwroutine = Some(routine);
+    } else {
         let r = run.root.rel_mut(rel);
         r.serverid = 0;
-        r.has_fdwroutine = false;
+        r.fdwroutine = None;
         // Heap AM always provides scan_bitmap/scan_tid_range.
         r.amflags |= AMFLAG_HAS_TID_RANGE;
     }
@@ -755,9 +758,13 @@ pub fn estimate_rel_size(
             };
             return Ok((reported_pages, tuples, allvisfrac));
         }
-        if relkind == RELKIND_SEQUENCE || relkind == types_rel::RELKIND_PARTITIONED_TABLE {
-            // C final else arm: just use whatever's in pg_class (partitioned
-            // tables are storageless; reached with ONLY / zero partitions).
+        if relkind == RELKIND_SEQUENCE
+            || relkind == types_rel::RELKIND_FOREIGN_TABLE
+            || relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        {
+            // C foreign-table + final else arms: just use whatever's in
+            // pg_class (partitioned tables are storageless; reached with
+            // ONLY / zero partitions).
             return Ok((rel.rd_rel.relpages as BlockNumber, rel.rd_rel.reltuples as f64, 0.0));
         }
         panic!("estimate_rel_size (plancat.c): relkind {relkind}; M2 lane");

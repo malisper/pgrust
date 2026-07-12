@@ -76,6 +76,9 @@ pub fn exec_re_scan<'mcx>(
             ::nodefunctionscan::exec_rescan_function_scan(fs, estate)
         }
         PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate),
+        PlanStateNode::ForeignScan(fs) => {
+            ::nodeforeignscan::exec_rescan_foreign_scan(fs, estate)
+        }
         PlanStateNode::TableFuncScan(ts) => {
             ::nodetablefuncscan::exec_rescan_table_func_scan(ts, estate)
         }
@@ -429,6 +432,9 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             ::nodefunctionscan::exec_rescan_function_scan_chg(fs, estate, chg)?
         }
         PlanStateNode::ValuesScan(vs) => ::nodevaluesscan::exec_rescan_values_scan(vs, estate)?,
+        PlanStateNode::ForeignScan(fs) => {
+            ::nodeforeignscan::exec_rescan_foreign_scan(fs, estate)?
+        }
         // C drops the tuplestore whenever chgParam is non-NULL.
         PlanStateNode::TableFuncScan(ts) => {
             ::nodetablefuncscan::exec_rescan_table_func_scan_chg(ts, estate)?

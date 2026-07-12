@@ -26,7 +26,7 @@ mod tags;
 
 pub use bitmapset::{bitmapword, Bitmapset, BmsComparison, BmsMembership, BITS_PER_BITMAPWORD};
 pub use equal::{equal, equal_opt, NodeEqual};
-pub use fdw::{FdwKind, FdwRoutine, NUM_FDW_KINDS};
+pub use fdw::{FdwExplainProp, FdwKind, FdwRoutine, NUM_FDW_KINDS};
 pub use jointype::JoinType;
 pub use list::{IntList, List, ListFlavor, NodeList, OidList, OptNodeList, XidList};
 pub use node_tree::{BitString, Boolean, Float, Integer, Node, NodeMut, NodeVariant, String};

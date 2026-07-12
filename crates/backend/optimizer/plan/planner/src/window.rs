@@ -553,7 +553,7 @@ pub(crate) fn create_window_paths<'mcx>(
                 input.serverid,
                 input.userid,
                 input.useridiscurrent,
-                input.has_fdwroutine,
+                input.fdwroutine,
                 input.consider_parallel,
             )
         };
@@ -565,7 +565,7 @@ pub(crate) fn create_window_paths<'mcx>(
         w.serverid = serverid;
         w.userid = userid;
         w.useridiscurrent = useridiscurrent;
-        w.has_fdwroutine = has_fdw;
+        w.fdwroutine = has_fdw;
         w.pathtarget_id = Some(output_target);
     }
 

@@ -936,6 +936,19 @@ pub fn set_result_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResu
     set_baserel_size_estimates(run, rel)
 }
 
+// set_foreign_size_estimates (costsize.c): rows is a bogus default for the
+// FDW's GetForeignRelSize to replace.
+pub fn set_foreign_size_estimates(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+    debug_assert!(run.root.rel(rel).relid > 0);
+    run.root.rel_mut(rel).rows = 1000.0;
+    let quals =
+        types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &run.root.rel(rel).baserestrictinfo);
+    let qcost = cost_qual_eval(run, &quals)?;
+    run.root.rel_mut(rel).baserestrictcost = qcost;
+    set_rel_width(run, rel)?;
+    Ok(())
+}
+
 // cost_resultscan (costsize.c).
 pub fn cost_resultscan(
     run: &mut PlannerRun<'_>,

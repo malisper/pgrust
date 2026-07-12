@@ -5017,6 +5017,7 @@ dependencies = [
  "nodebitmapheapscan",
  "nodebitmapindexscan",
  "nodectescan",
+ "nodeforeignscan",
  "nodefunctionscan",
  "nodegroup",
  "nodehash",
@@ -5659,6 +5660,7 @@ dependencies = [
  "fmgr_core",
  "foreigncmds_seams",
  "funcapi",
+ "guc_tables",
  "heaptuple",
  "lsyscache",
  "mbutils",
@@ -5690,6 +5692,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -8506,6 +8509,18 @@ dependencies = [
 [[package]]
 name = "nodeforeignscan"
 version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "executils",
+ "foreigncmds_seams",
+ "mcx",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+]
 
 [[package]]
 name = "nodefunctionscan"
