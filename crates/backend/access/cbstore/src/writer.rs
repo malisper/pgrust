@@ -10,7 +10,7 @@ use ::tuplesort_seams::{CbIngestSort, CbSortKeyKind};
 
 use crate::format::*;
 use crate::hll::Hll;
-use crate::reader::read_header;
+use crate::reader::read_header_opt;
 use crate::segfile::SegFile;
 use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use crate::varlena_bytes;
@@ -280,12 +280,23 @@ pub fn coltypes_of(rel: &::types_rel::Relation<'_>) -> PgResult<Vec<ColType>> {
         .collect()
 }
 
-fn open_writer(rel: &::types_rel::Relation<'_>, frozen_ok: bool) -> PgResult<CbWriter> {
+fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     let coltypes = coltypes_of(rel)?;
     let opts = writer_opts_of(rel, &coltypes)?;
     let path = crate::rel_main_path(rel);
     let file = SegFile::open_rw(&path)?;
     let xid = xact_seams::get_current_transaction_id::call()?;
+    // RG_FLAG_FROZEN bypasses the per-RG xmin visibility gate entirely, so
+    // it is only sound when an abort of the writing (sub)transaction also
+    // unlinks the file (or its whole relfilenode) it froze into. C parity:
+    // copyfrom.c's FREEZE precheck demands the rel be created OR truncated
+    // in the CURRENT subtransaction. A pre-existing empty part must NOT
+    // freeze — a `BEGIN; COPY; ROLLBACK` publish into it would otherwise
+    // stay visible forever.
+    let cur_subid = xact_seams::get_current_sub_transaction_id::call();
+    let frozen_ok = cur_subid != ::types_core::InvalidSubTransactionId
+        && (rel.rd_createSubid.get() == cur_subid
+            || rel.rd_newRelfilelocatorSubid.get() == cur_subid);
     let fingerprint = schema_fingerprint(
         &rel.rd_att.attrs.iter().map(|a| (a.atttypid, a.attlen)).collect::<Vec<_>>(),
     );
@@ -354,32 +365,65 @@ fn open_writer_inner(
         draining_clustered: false,
     };
     w.reset_builders();
+    // Empty part; also a part whose header page is still a zero hole (a
+    // pre-header-first writer aborted mid-COPY before ever publishing) —
+    // both mean "no committed row group can exist", so both (re)initialize.
+    let mut init_header = len < CB_HEADER_LEN;
     if len >= CB_HEADER_LEN {
         let mut hdr = [0u8; CB_HEADER_LEN as usize];
         w.file.read_exact_at(&mut hdr, 0)?;
-        let (footer_off, fp, version) = read_header(&hdr)?;
-        if fp != w.fingerprint {
-            return Err(Box::new(PgError::error(
-                "cbstore: schema fingerprint mismatch".to_string(),
-            )));
-        }
-        if footer_off != 0 {
-            let (rgs, footer_end, _ndv, _sorted, _ckey) =
-                crate::reader::read_footer_rgs(&mut w.file, footer_off, w.ncols, version, true)?;
-            if !rgs.is_empty() {
-                w.ndv = None;
-                w.sorted = None;
+        match read_header_opt(&hdr)? {
+            None => init_header = true,
+            Some((footer_off, fp, version)) => {
+                if fp != w.fingerprint {
+                    return Err(Box::new(PgError::error(
+                        "cbstore: schema fingerprint mismatch".to_string(),
+                    )));
+                }
+                if footer_off != 0 {
+                    let (rgs, footer_end, _ndv, _sorted, _ckey) = crate::reader::read_footer_rgs(
+                        &mut w.file,
+                        footer_off,
+                        w.ncols,
+                        version,
+                        true,
+                    )?;
+                    if !rgs.is_empty() {
+                        w.ndv = None;
+                        w.sorted = None;
+                    }
+                    w.rgs = rgs;
+                    w.write_off = align64(footer_end.max(footer_off));
+                }
             }
-            w.rgs = rgs;
-            w.write_off = align64(footer_end.max(footer_off));
         }
-    } else {
+    }
+    if init_header {
         w.frozen = frozen_ok;
+        // Header-first ingest (abort safety): publish a valid empty-part
+        // header (footer_off = 0) BEFORE any row-group bytes hit the file.
+        // An abort mid-COPY then leaves a readable empty part plus dead
+        // bytes past the header — not a zero hole that wedges every later
+        // read_header. Durable up front so a crash-kill mid-COPY restarts
+        // into the same readable state.
+        w.write_header(0)?;
+        w.file.pad_and_sync(CB_HEADER_LEN)?;
     }
     Ok(w)
 }
 
 impl CbWriter {
+    fn write_header(&mut self, footer_off: u64) -> PgResult<()> {
+        let mut hdr = Vec::with_capacity(CB_HEADER_LEN as usize);
+        put_u64(&mut hdr, CB_MAGIC);
+        put_u32(&mut hdr, CB_VERSION);
+        put_u32(&mut hdr, self.ncols as u32);
+        put_u64(&mut hdr, footer_off);
+        put_u64(&mut hdr, self.fingerprint);
+        hdr.resize(CB_HEADER_LEN as usize, 0);
+        self.file.write_all_at(&hdr, 0)
+    }
+
     fn reset_builders(&mut self) {
         self.builders = self
             .coltypes
@@ -605,14 +649,7 @@ impl CbWriter {
         // Data + footer durable before the publish (impl doc §5); segment
         // tails padded to BLCKSZ multiples for md's block accounting.
         self.file.pad_and_sync(self.write_off)?;
-        let mut hdr = Vec::with_capacity(CB_HEADER_LEN as usize);
-        put_u64(&mut hdr, CB_MAGIC);
-        put_u32(&mut hdr, CB_VERSION);
-        put_u32(&mut hdr, self.ncols as u32);
-        put_u64(&mut hdr, footer_off);
-        put_u64(&mut hdr, self.fingerprint);
-        hdr.resize(CB_HEADER_LEN as usize, 0);
-        self.file.write_all_at(&hdr, 0)?;
+        self.write_header(footer_off)?;
         self.file.sync_data()?;
         Ok(())
     }
@@ -1096,7 +1133,7 @@ pub fn multi_insert<'mcx>(
             map.remove(&oid);
         }
         if !map.contains_key(&oid) {
-            map.insert(oid, open_writer(rel, true)?);
+            map.insert(oid, open_writer(rel)?);
         }
         let cw = map.get_mut(&oid).unwrap();
         for slot in slots.iter_mut() {
@@ -1133,8 +1170,112 @@ pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
         let Some(mut cw) = w.borrow_mut().remove(&oid) else {
             return Ok(());
         };
+        // Never publish a writer abandoned by an errored statement (or a
+        // rolled-back subtransaction): a later statement's flush must drop
+        // it, not commit its buffered rows. Mirror of multi_insert's stale
+        // eviction; probes without get_current_transaction_id so a row-less
+        // statement doesn't force an xid assignment.
+        if !xact_seams::transaction_id_is_current_transaction_id::call(cw.xid)
+            || cw.cid != xact_seams::get_current_command_id::call(false)?
+        {
+            return Ok(());
+        }
         cw.finish()
     })
+}
+
+#[cfg(test)]
+mod abortsafe_tests {
+    use super::*;
+    use crate::reader::{part_footer_rows, Part};
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-abortsafe-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    fn put_ints(w: &mut CbWriter, n: usize) {
+        for i in 0..n {
+            w.append_row(&[Datum::from_i64(i as i64)], &[false]).unwrap();
+        }
+    }
+
+    // Abort mid-ingest on a fresh part (writer dropped without finish, row
+    // groups already sealed to disk): header-first init keeps the part
+    // readable as EMPTY, and a later committed load reads back exactly its
+    // own rows.
+    #[test]
+    fn abort_mid_ingest_fresh_part_stays_readable() {
+        let path = tmp("fresh-abort");
+        let mut w = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        put_ints(&mut w, RG_ROWS + 5); // one RG sealed to disk + 5 buffered
+        drop(w); // statement error: no finish, no publish
+        assert!(std::fs::metadata(&path).unwrap().len() > CB_HEADER_LEN);
+        assert_eq!(part_footer_rows(&path, 1).unwrap(), None);
+        assert!(Part::open(&path, 1).unwrap().is_none());
+
+        let mut w2 = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        put_ints(&mut w2, 3);
+        w2.finish().unwrap();
+        assert_eq!(part_footer_rows(&path, 1).unwrap(), Some(3));
+        assert_eq!(Part::open(&path, 1).unwrap().unwrap().total_rows(), 3);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // Legacy corruption shape (pre-header-first writers): row-group bytes on
+    // disk with a zero hole where the header belongs. Reads treat it as an
+    // empty part instead of erroring forever, and a writer reopen heals it.
+    #[test]
+    fn legacy_zero_header_hole_heals() {
+        let path = tmp("zero-hole");
+        std::fs::write(&path, vec![0u8; 200_000]).unwrap();
+        assert_eq!(part_footer_rows(&path, 1).unwrap(), None);
+        assert!(Part::open(&path, 1).unwrap().is_none());
+
+        let mut w = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        put_ints(&mut w, 7);
+        w.finish().unwrap();
+        assert_eq!(part_footer_rows(&path, 1).unwrap(), Some(7));
+        assert_eq!(Part::open(&path, 1).unwrap().unwrap().total_rows(), 7);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // A header whose footer_off points past EOF (torn state) must produce a
+    // clean error on every read path — never a huge alloc or a slice panic.
+    #[test]
+    fn torn_footer_pointer_errors_cleanly() {
+        let path = tmp("torn-footer");
+        let mut hdr = Vec::new();
+        put_u64(&mut hdr, CB_MAGIC);
+        put_u32(&mut hdr, CB_VERSION);
+        put_u32(&mut hdr, 1);
+        put_u64(&mut hdr, 1 << 40); // footer_off far past EOF
+        put_u64(&mut hdr, 0x5aa5);
+        hdr.resize(CB_HEADER_LEN as usize, 0);
+        std::fs::write(&path, &hdr).unwrap();
+        assert!(part_footer_rows(&path, 1).is_err());
+        assert!(Part::open(&path, 1).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // Header-first: opening a writer over an empty part publishes a valid
+    // empty header immediately (readers concurrent with the first COPY see
+    // an empty part, and an abort at ANY later point leaves it readable).
+    #[test]
+    fn writer_open_initializes_header() {
+        let path = tmp("init-hdr");
+        let w = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        drop(w);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() as u64 >= CB_HEADER_LEN);
+        let (footer_off, fp, version) =
+            crate::reader::read_header(&bytes[..CB_HEADER_LEN as usize]).unwrap();
+        assert_eq!((footer_off, fp, version), (0, 0x5aa5, CB_VERSION));
+        std::fs::remove_file(&path).unwrap();
+    }
 }
 
 #[cfg(test)]
