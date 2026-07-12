@@ -57,3 +57,10 @@ seam_core::seam!(
     // registry entry to the current MyProcPid.
     pub fn rekey_wakeup_registry()
 );
+
+seam_core::seam!(
+    // Diagnostics only (MQ stall self-reports): the wakeup-pipe registry
+    // entry (write fd) for `pid`, plus the registry length. A missing entry
+    // for a live waiter's pid is the lost-wakeup ("deaf worker") signature.
+    pub fn wakeup_registry_snapshot(pid: i32) -> (Option<i32>, usize)
+);

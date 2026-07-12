@@ -540,6 +540,9 @@ impl ShmMqHandle {
         let nbytes = data.len();
         let mut sent: usize = 0;
         let ringsize = self.mqh_queue.mq_ring_size;
+        // Stall self-report clock for the full-ring wait; ring progress
+        // resets it. Untouched unless this call blocks.
+        let mut stall = stall::StallDetector::new();
 
         while sent < nbytes {
             let rb = self.mqh_queue.bytes_read();
@@ -586,7 +589,14 @@ impl ShmMqHandle {
                 if nowait {
                     return Ok((ShmMqResult::WouldBlock, sent));
                 }
-                wait_on_my_latch(self.my_latch, WAIT_EVENT_MQ_SEND)?;
+                let mq = &self.mqh_queue;
+                let pending = self.mqh_send_pending;
+                stall::wait_on_my_latch_reporting(
+                    self.my_latch,
+                    WAIT_EVENT_MQ_SEND,
+                    &mut stall,
+                    &mut |waited_ms| stall::report_queue_stall(mq, "send", pending, waited_ms),
+                )?;
             } else {
                 let offset = (wb % ringsize as u64) as usize;
                 let sendnow = usize::min(available, ringsize - offset);
@@ -605,6 +615,7 @@ impl ShmMqHandle {
                 sent += sendnow;
                 debug_assert!(sent == nbytes || sendnow == maxalign(sendnow));
                 self.mqh_send_pending += maxalign(sendnow);
+                stall.reset();
             }
         }
 
@@ -617,6 +628,9 @@ impl ShmMqHandle {
         nowait: bool,
     ) -> PgResult<(ShmMqResult, usize, *const u8)> {
         let ringsize = self.mqh_queue.mq_ring_size;
+        // Stall self-report clock for this blocked read; any return is
+        // progress (stall.rs). Untouched on the nowait/data-ready paths.
+        let mut stall = stall::StallDetector::new();
 
         loop {
             let written = self.mqh_queue.bytes_written();
@@ -651,7 +665,14 @@ impl ShmMqHandle {
             if nowait {
                 return Ok((ShmMqResult::WouldBlock, 0, ptr::null()));
             }
-            wait_on_my_latch(self.my_latch, WAIT_EVENT_MQ_RECEIVE)?;
+            let mq = &self.mqh_queue;
+            let pending = self.mqh_consume_pending;
+            stall::wait_on_my_latch_reporting(
+                self.my_latch,
+                WAIT_EVENT_MQ_RECEIVE,
+                &mut stall,
+                &mut |waited_ms| stall::report_queue_stall(mq, "receive", pending, waited_ms),
+            )?;
         }
     }
 }
@@ -725,6 +746,8 @@ unsafe fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
     std::slice::from_raw_parts(ptr, len)
 }
+
+pub mod stall;
 
 #[cfg(test)]
 mod tests;
