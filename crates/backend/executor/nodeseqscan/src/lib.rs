@@ -724,6 +724,48 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
     // the caller's arms rebuild their own staging.
     let prefix = (lq.max_attnum as i32 + 1).max(min_prefix);
     seq_scan_batch_soa_prepare(node, estate, prefix, false, true, true);
+    if node.batch_soa.is_none() {
+        // Text-qual staging (likeband): the fixed-width prefix refused — a
+        // text column sits inside the qual prefix (the LIKE band's Q21-class
+        // shape). That proof is a heap tuple-walk requirement only; the
+        // cbstore window deform fills ANY column type per column
+        // (`batch_deform_col` publishes decoded pointer Datums for text) and
+        // the staged evaluators already consume them (dict lanes /
+        // `eval_raw_rows` over the Raw pointer lane). Arm the same lane over
+        // a VIRTUAL prefix plan carrying only the column count: this
+        // function is unreachable for heap scans (`cb_scan` gate above), the
+        // cbstore deform consumes exactly `ncols()`, and the slot publish is
+        // the virtual-slot no-op — the missing offset chain is never walked.
+        let mcx = estate.es_query_cxt;
+        node.batch_soa =
+            ::exectuples::SoaDeformPlan::virtual_prefix(mcx, prefix as usize).map(|plan| {
+                ::mcx::PgBox::new_in(
+                    BatchSoa {
+                        soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+                        plan,
+                        qual_armed: true,
+                        qual_only: false,
+                        key_col: None,
+                        varkey: None,
+                        key_read_col: 0,
+                        publish: true,
+                        quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                            ::execexpr::SCAN_CMP_MAX_CLAUSES],
+                        nquals: 0,
+                        contains: None,
+                        stitch: None,
+                        proj: None,
+                        lane: None,
+                        lane_requal: false,
+                        sel: [0; ::exectuples::SOA_BM_WORDS],
+                        nwords: 0,
+                        cur_word: 0,
+                        cur_bits: 0,
+                    },
+                    mcx,
+                )
+            });
+    }
     match node.batch_soa.as_deref_mut() {
         Some(b) => {
             b.qual_armed = true;
@@ -866,6 +908,8 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             contains: None,
             stitch: None,
             proj: None,
+            lane: None,
+            lane_requal: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,

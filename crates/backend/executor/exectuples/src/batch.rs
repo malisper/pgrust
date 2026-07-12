@@ -62,6 +62,27 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     pub fn unused(mcx: Mcx<'mcx>) -> SoaDeformPlan<'mcx> {
         SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx), jit: None }
     }
+
+    /// Columnar-AM virtual prefix plan (likeband): carries ONLY the column
+    /// count — no offset chain, no fixed-width proof. The cbstore window
+    /// deform consumes exactly `ncols()` (`batch_deform` fills any column
+    /// type, text included, from decoded pointer Datums), and its slot
+    /// publish is the virtual-slot no-op, so nothing ever walks the missing
+    /// offsets. The heap tuple-walk deform must never see one of these —
+    /// `is_virtual` guards it (heap scans dispatch to `heap_batch_deform_soa`,
+    /// which asserts a real plan).
+    pub fn virtual_prefix(mcx: Mcx<'mcx>, ncols: usize) -> Option<SoaDeformPlan<'mcx>> {
+        if ncols == 0 || ncols > u16::MAX as usize {
+            return None;
+        }
+        Some(SoaDeformPlan { ncols: ncols as u16, end_off: 0, offs: PgVec::new_in(mcx), jit: None })
+    }
+
+    /// True for `virtual_prefix` plans (no offset chain despite `ncols > 0`).
+    #[inline]
+    pub fn is_virtual(&self) -> bool {
+        self.ncols > 0 && self.offs.is_empty()
+    }
 }
 
 /// Identity + content handle of one per-row-group dictionary (cbstore dict
@@ -499,6 +520,7 @@ pub fn soa_deform_columns(
     atts: &[CompactAttribute],
     qual_col_only: Option<u16>,
 ) {
+    debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
     let n = soa.nrows as usize;
     let ncols = plan.ncols as usize;
     let (first, last) = match qual_col_only {
