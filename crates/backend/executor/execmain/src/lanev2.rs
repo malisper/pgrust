@@ -2302,8 +2302,36 @@ fn agg_plain_fold_feed<'mcx>(
 /// transition program (`agg_plain_build_accept`, set collect included);
 /// finish = nothing (the drive runs the delegated `agg_plain_finish` after
 /// the drain, mirroring the fold drive's retrieve step).
+///
+/// `key_direct` (v2, the batched-insert lever): when the node's one
+/// transition is a set-mode integer DISTINCT over exactly outer column 0
+/// (`agg_plain_distinct_direct_shape`) AND the scan armed the direct key
+/// staging (`seq_scan_sortkey_direct` — the sort breaker's own matcher/
+/// staging, shared), `accept_batch` serves each staged row's key straight
+/// off the SoA column and hands the whole batch to one staged set insert
+/// (batched hashing + row-order probes) — no per-row transition program, no
+/// per-row collect scan. Narrow-tuple fallback rows keep the full per-row
+/// path. Value identity: the per-row program's entire effect for the
+/// admitted shape is "park outer col 0 + set-insert", and set insertion
+/// order is replay-invisible (the admission's order-insensitivity grant).
 struct PlainDistinctAggBuildSink<'a, 'mcx> {
     agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    key_direct: bool,
+    keys: Vec<::datum::Datum>,
+    ints: Vec<i64>,
+    hashes: Vec<u64>,
+}
+
+impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
+    fn new(agg: &'a mut ::nodeagg::AggStateData<'mcx>, key_direct: bool) -> Self {
+        PlainDistinctAggBuildSink {
+            agg,
+            key_direct,
+            keys: Vec::new(),
+            ints: Vec::new(),
+            hashes: Vec::new(),
+        }
+    }
 }
 
 impl<'mcx> Sink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
@@ -2321,7 +2349,49 @@ impl<'mcx> Sink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
     }
 }
 
-impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {}
+impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if !self.key_direct {
+            // Default per-row delegation loop, verbatim.
+            for i in pos..n {
+                if let Some(slot) = emit.emit(i, estate)? {
+                    ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
+                }
+            }
+            return Ok(());
+        }
+        // Direct staged-key feed (page-level CFI in the staging fetch —
+        // the sort breaker's emit_key cadence).
+        self.keys.clear();
+        let mut saw_null = false;
+        for i in pos..n {
+            match emit.emit_key(i) {
+                Some((d, false)) => self.keys.push(d),
+                Some((_, true)) => saw_null = true,
+                None => {
+                    // Narrow-tuple fallback row: the full per-row path.
+                    if let Some(slot) = emit.emit(i, estate)? {
+                        ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
+                    }
+                }
+            }
+        }
+        ::nodeagg::agg_plain_distinct_insert_batch(
+            self.agg,
+            estate,
+            &self.keys,
+            saw_null,
+            &mut self.ints,
+            &mut self.hashes,
+        )
+    }
+}
 
 /// Try to let the lane own an AGG_PLAIN exact-DISTINCT `Agg` over a
 /// `SeqScan` (section doc above). `Some(result)` = the lane drove this call;
@@ -2348,14 +2418,24 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     // one call).
     stats::tick_owned(ShapeClass::AggBuild);
     trace_feed("plain-agg distinct-set drive engaged");
-    // Kernel-shaped quals vectorize via the staged selection bitmap; the
-    // set feed itself is per-row (the DISTINCT park is per-row by nature).
-    arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set feed", true);
-    ::nodeseqscan::seq_scan_stitch_arm(ss);
+    // v2 batched-insert arm: single integer set-mode DISTINCT over exactly
+    // outer column 0 with the scan's direct key staging (no qual, covered
+    // column — the sort breaker's own matcher). Probed BEFORE the first
+    // produce, exactly as `sort_feed` probes: arming decides staging.
+    let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
+        && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+    if key_direct {
+        trace_feed("distinct-set direct key feed armed");
+    } else {
+        // Kernel-shaped quals vectorize via the staged selection bitmap; the
+        // set feed itself is per-row (the DISTINCT park is per-row).
+        arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set feed", true);
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
+    }
     // initialize_aggregates (delegated): fresh initval pergroups + cleared
     // sets; a rescan re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
-    let mut sink = PlainDistinctAggBuildSink { agg };
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     // Retrieve (delegated): set replay + finalize + HAVING + project — one
     // row (or none, when the var-free HAVING rejects it), setting agg_done.
@@ -2429,10 +2509,20 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
         unreachable!("matched SeqScan above")
     };
-    arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
-    ::nodeseqscan::seq_scan_stitch_arm(ss);
+    // v2 batched-insert arm (the over-SeqScan drive's twin; the Sort node's
+    // tlist is its child's, so outer column 0 through the skipped Sort IS
+    // scan output column 0 — the same column `seq_scan_sortkey_direct`
+    // proves is one covered scan Var with no qual).
+    let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
+        && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+    if key_direct {
+        trace_feed("distinct-set direct key feed armed");
+    } else {
+        arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
+    }
     ::nodeagg::agg_plain_build_begin(agg)?;
-    let mut sink = PlainDistinctAggBuildSink { agg };
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
@@ -3491,7 +3581,7 @@ pub fn try_own_sort<'mcx>(
     ::postgres_seams::check_for_interrupts::call()?;
 
     let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-    if !sort_feed_if_needed(state, &mut **outer, outer_desc, estate)? {
+    if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
         // Feed-time refuse (agg-over-join multi-batch spill), before any
         // sort-side effect: the Volcano fallback resumes byte-identically.
         return Ok(None);
@@ -3546,6 +3636,7 @@ fn sort_feed_if_needed<'mcx>(
     state: &mut ::nodesort::SortState<'mcx>,
     outer: &mut crate::procnode::PlanStateNode<'mcx>,
     outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    narrow: Option<usize>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     if state.sort_done() {
@@ -3598,7 +3689,7 @@ fn sort_feed_if_needed<'mcx>(
         }
         stats::tick_owned(ShapeClass::SortFeed);
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        sort_feed(state, &mut aps.agg, HashAggSource, HashAggEmit, outer_desc, estate, None)?;
+        sort_feed(state, &mut aps.agg, HashAggSource, HashAggEmit, outer_desc, None, estate, None)?;
         return Ok(true);
     }
     // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
@@ -3613,10 +3704,10 @@ fn sort_feed_if_needed<'mcx>(
             // Composes with the direct-key put: the keep-mask filters first,
             // then the direct-key arm reads only surviving rows.
             let topk = topk_cut_arm(state, ss, estate);
-            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate, topk)?
+            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, narrow, estate, topk)?
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
-            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate, None)?
+            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, narrow, estate, None)?
         }
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
@@ -3624,6 +3715,7 @@ fn sort_feed_if_needed<'mcx>(
             IndexOnlyScanSource,
             IndexOnlyScanEmit,
             outer_desc,
+            narrow,
             estate,
             None,
         )?,
@@ -3640,6 +3732,7 @@ fn sort_feed_if_needed<'mcx>(
                 BitmapHeapScanSource,
                 BitmapHeapScanEmit,
                 outer_desc,
+                narrow,
                 estate,
                 None,
             )?
@@ -3720,12 +3813,17 @@ fn scan_child_fusible<'mcx>(
 /// construction verbatim), then run pipeline N to exhaustion into the breaker
 /// sink. Mirrors `exec_sort`'s build leg in forcing a forward child read for
 /// the feed's duration (restored on success; an error aborts the query).
+/// `narrow_keys`: `Some(k)` = the grouped exact-DISTINCT order-relaxation
+/// arm — begin the tuplesort with only the first `k` sort keys
+/// (`sort_lane_begin_narrowed`; the caller proved the dropped suffix is
+/// observation-free). `None` = `exec_sort`'s construction verbatim.
 fn sort_feed<'mcx, S, O>(
     sort: &mut ::nodesort::SortState<'mcx>,
     scan: &mut S::Node,
     mut src: S,
     mut op: O,
     outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    narrow_keys: Option<usize>,
     estate: &mut EStateData<'mcx>,
     topk: Option<TopkCut>,
 ) -> PgResult<()>
@@ -3733,7 +3831,10 @@ where
     S: Source<'mcx>,
     O: Operator<'mcx, Node = S::Node>,
 {
-    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    match narrow_keys {
+        Some(k) => ::nodesort::sort_lane_begin_narrowed(sort, outer_desc, k)?,
+        None => ::nodesort::sort_lane_begin(sort, outer_desc)?,
+    }
     // Direct sort-key feed (`exec_sort_batched`'s `key_direct` probe,
     // mirrored): probed once per feed, BEFORE the first `produce` (arming
     // decides what the staging pass stages), datum sorts only — exactly the
@@ -4328,9 +4429,52 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     }
     // Agg-side admission (static shape; ticked per offered call, the hashed
     // breaker's AggNotDrainable cadence).
-    if !::nodeagg::agg_sorted_lane_admissible(agg) {
-        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
-        return Ok(None);
+    //
+    // Grouped narrow-sort arm (v2, the ClickBench Q9/Q10 shape): an
+    // AGG_SORTED node whose DISTINCT aggregates ride the plan Sort's
+    // distinct-arg SUFFIX keys (aggpresorted adjacent-dedup) fails the plain
+    // admission — but when every internal-sort entry is set-CAPABLE, every
+    // transition is order-insensitive-exact, and the Sort's key prefix is
+    // exactly the grouping columns, the suffix's only observable effect is
+    // intra-group row order, which nothing observes once the drive arms
+    // set-mode. The drive then feeds the sort with the comparator NARROWED
+    // to the group prefix (`sort_lane_begin_narrowed`) and the exact sets
+    // replace the dedup: byte-identical output (same groups, same group
+    // order, same exact values), with the suffix compares and the per-row
+    // dedup calls deleted. Armed only BEFORE the sort is built (arming
+    // decides the feed's construction); the sticky force keeps the plain
+    // admission true on later calls and any per-tuple fallback value-safe.
+    let mut narrow: Option<usize> = None;
+    let plain_admissible = ::nodeagg::agg_sorted_lane_admissible(agg);
+    // Probe the narrow shape when the plain admission failed (the arm's
+    // first engagement) OR when a prior call armed it (a rescan-rebuilt sort
+    // must narrow again — the sticky force makes the plain admission true).
+    if !plain_admissible || ::nodeagg::agg_distinct_set_forced(agg) {
+        let sp = s.state.plan;
+        let k = ::nodeagg::agg_plan_group_cols(agg).len();
+        let ok = ::nodeagg::agg_sorted_distinct_narrow_admissible(agg)
+            && !s.state.sort_done()
+            && !s.state.bounded
+            && k >= 1
+            && (sp.numCols as usize) > k
+            && sp.sortColIdx.len() >= k
+            && {
+                // Prefix == group columns as a MULTISET (order within the
+                // prefix is free: grouping adjacency only needs the rows
+                // prefix-sorted, whichever prefix order).
+                let mut a: Vec<i16> = sp.sortColIdx[..k].to_vec();
+                let mut b: Vec<i16> = ::nodeagg::agg_plan_group_cols(agg).to_vec();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            };
+        if !plain_admissible && !ok {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+            return Ok(None);
+        }
+        if ok {
+            narrow = Some(k);
+        }
     }
     // Sort-side structural verdict — the bare-sort arm's memo, shared (the
     // refusal ticks once per node whichever arm probes first).
@@ -4358,10 +4502,17 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
         ::postgres_seams::check_for_interrupts::call()?;
+        if narrow.is_some() {
+            // Arm set-mode BEFORE any input (sticky; the arming doc), then
+            // build the narrowed sort below (the shared feed threads the
+            // narrow-key count into `sort_feed`).
+            ::nodeagg::agg_sorted_force_distinct_set(agg);
+            trace_feed("sorted-agg distinct-set narrowed sort feed armed");
+        }
         // The shared feed (a sort under a sorted agg is never bounded — no
         // LIMIT pushdown crosses the agg — so its seqscan arm's top-k probe
         // no-ops; false = the agg-child arm's spill refuse, byte-safe).
-        if !sort_feed_if_needed(state, &mut **outer, outer_desc, estate)? {
+        if !sort_feed_if_needed(state, &mut **outer, outer_desc, narrow, estate)? {
             return Ok(None);
         }
         // One OWNED tick per lane-owned sorted-agg stream start (feed/build
@@ -6208,7 +6359,7 @@ pub fn try_own_limit<'mcx>(
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
             let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-            if !sort_feed_if_needed(state, &mut **outer, outer_desc, estate)? {
+            if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
                 // Agg-over-join multi-batch spill refuse, before any lane
                 // tuple or sort-side effect: exec_limit over the per-tuple
                 // sort/agg/join resumes byte-identically (the recompute above
@@ -6305,7 +6456,7 @@ pub fn try_own_unique<'mcx>(
     ::nodeunique::lane_unique_cfi()?;
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
-    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
         return Ok(None);
     }
     let mut op = UniqueOp { unique: state };
@@ -6439,7 +6590,7 @@ pub fn try_own_group<'mcx>(
     // feed event; rescan re-feeds and re-ticks, like the sortfeed class) —
     // after the feed, so a feed-time refuse never ticks owned.
     let feeding = !sstate.sort_done();
-    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
         return Ok(None);
     }
     if feeding {
@@ -6582,7 +6733,7 @@ pub fn try_own_result<'mcx>(
             // One OWNED tick per lane-owned Result child-feed event — after
             // the feed, so a feed-time refuse never ticks owned.
             let feeding = !sstate.sort_done();
-            if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+            if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
                 return Ok(None);
             }
             if feeding {
@@ -6690,7 +6841,7 @@ pub fn try_own_subquery_scan<'mcx>(
     // One OWNED tick per lane-owned feed event (the child sort feed) — after
     // the feed, so a feed-time refuse never ticks owned.
     let feeding = !sstate.sort_done();
-    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
         return Ok(None);
     }
     if feeding {

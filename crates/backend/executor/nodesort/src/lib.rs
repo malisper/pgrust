@@ -418,6 +418,36 @@ pub fn sort_lane_begin<'mcx>(
     Ok(())
 }
 
+/// `sort_lane_begin` with the comparator NARROWED to the first `nkeys` sort
+/// keys (the lane's grouped exact-DISTINCT order-relaxation arm: the dropped
+/// suffix keys' only observable effect was intra-group row order, which the
+/// caller has proven nothing downstream observes). The tuplesort still
+/// stores whole input rows — only the compare narrows. Callers must have
+/// refused `bounded` (a top-N bound over a narrowed comparator is a
+/// different top-N) and `randomAccess` stays refused by the breaker gate.
+pub fn sort_lane_begin_narrowed<'mcx>(
+    node: &mut SortState<'mcx>,
+    outer_desc: Rc<TupleDescData<'static>>,
+    nkeys: usize,
+) -> PgResult<()> {
+    debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
+    debug_assert!(!node.bounded && !node.randomAccess);
+    debug_assert!(nkeys >= 1 && nkeys < node.plan.numCols as usize);
+    debug_assert!(!node.datumSort, "narrowing implies >=2 sort keys => heap sort");
+    let work_mem = init_small::globals::work_mem();
+    let ts = Tuplesort::begin_heap(
+        outer_desc,
+        &node.plan.sortColIdx[..nkeys],
+        &node.plan.sortOperators[..nkeys],
+        &node.plan.collations[..nkeys],
+        &node.plan.nullsFirst[..nkeys],
+        work_mem,
+        TUPLESORT_NONE,
+    )?;
+    node.tuplesortstate = Some(ts);
+    Ok(())
+}
+
 /// Feed leg (breaker `Sink::accept`): put one outer tuple. Datum sorts take
 /// `putdatum` for BOTH by-ref and by-val keys: by-ref must copy (exactly as
 /// `exec_sort`), and the by-val batch putter is a closure-scoped lever the
