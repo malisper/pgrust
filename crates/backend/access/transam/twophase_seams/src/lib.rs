@@ -74,6 +74,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PrescanPreparedTransactions(&xids, &nxids) (twophase.c): oldestActiveXid
+    // plus the valid prepared-xact XIDs, for the hot-standby fake running-xacts
+    // snapshot (StartupXLOG / xlog_redo shutdown-checkpoint arms).
+    pub fn prescan_prepared_transactions_xids() -> PgResult<(TransactionId, Vec<TransactionId>)>
+);
+
+seam_core::seam!(
+    // StandbyRecoverPreparedTransactions() (twophase.c): pg_subtrans entries
+    // for prepared transactions during hot-standby init.
+    pub fn standby_recover_prepared_transactions() -> PgResult<()>
+);
+
+seam_core::seam!(
     // RecoverPreparedTransactions() (twophase.c).
     pub fn recover_prepared_transactions() -> PgResult<()>
 );
