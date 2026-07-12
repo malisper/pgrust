@@ -667,6 +667,21 @@ pub fn parallel_query_main(shared: &parallel::ParallelShared) -> PgResult<()> {
         ledger,
     ));
 
+    // Stall-injection test hook (env-gated, inert in production): worker 0
+    // sleeps latch-deaf after attaching its queue, so the leader's blocking
+    // receive on this queue crosses the stall-report threshold and the
+    // self-report fires, then the query completes normally
+    // (scripts/parallel-repeat-wedge-e2e.sh).
+    if me == 0 {
+        if let Some(ms) = std::env::var("PGRUST_TEST_MQ_STALL_INJECT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
     // SAFETY: leader-arena pstmt, alive until the leader joins this thread.
     let pstmt: &PlannedStmt<'_> = unsafe { &*exec.pstmt.0 };
     let params = match &exec.param_extern {

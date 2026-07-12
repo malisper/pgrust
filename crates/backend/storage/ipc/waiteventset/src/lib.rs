@@ -135,6 +135,17 @@ pub fn RekeyWakeupRegistry() {
     }
 }
 
+/// Diagnostics for MQ stall self-reports: the registry write fd for `pid`
+/// (None = no mapping, i.e. a SetLatch aimed at that pid wakes nobody) plus
+/// the registry length. Cold path only — takes the registry lock.
+pub fn WakeupRegistrySnapshot(pid: i32) -> (Option<i32>, usize) {
+    let registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    (
+        registry.iter().find(|(p, _)| *p == pid).map(|(_, w)| *w),
+        registry.len(),
+    )
+}
+
 fn wakeup_read_fd() -> i32 {
     WAKEUP_PIPE
         .get()
@@ -486,4 +497,5 @@ pub fn init_seams() {
     s::wakeup_my_proc::set(WakeupMyProc);
     s::wakeup_other_proc::set(WakeupOtherProc);
     s::rekey_wakeup_registry::set(RekeyWakeupRegistry);
+    s::wakeup_registry_snapshot::set(WakeupRegistrySnapshot);
 }
