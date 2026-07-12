@@ -418,9 +418,13 @@ fn wal_read_raise_error() -> PgResult<()> {
 // static void WalSndLoop(WalSndSendDataCallback send_data). Only physical is
 // ported, so the send callback is XLogSendPhysical directly (no fn pointer).
 pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
+    // WALSENDER_STATS_FLUSH_INTERVAL (walsender.c:100), ms.
+    const WALSENDER_STATS_FLUSH_INTERVAL: i64 = 1000;
+
     // Initialize the last reply timestamp; that enables timeout processing.
     crate::LAST_REPLY_TIMESTAMP.with(|c| c.set(get_ts()));
     set_waiting_for_ping_response(false);
+    let mut last_flush: TimestampTz = 0;
 
     loop {
         reset_my_latch();
@@ -477,6 +481,23 @@ pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
             if pqcomm::pq_is_send_pending() {
                 wake_events |= WL_SOCKET_WRITEABLE;
             }
+
+            // Report IO statistics, if needed (walsender.c:2923): the wal_read
+            // counts otherwise sit in backend-local pending state forever
+            // (pg_stat_io's walsender/wal rows stay 0 — 001_stream_rep #35).
+            if adt_timestamp::TimestampDifferenceExceeds(
+                last_flush,
+                now,
+                WALSENDER_STATS_FLUSH_INTERVAL as i32,
+            ) {
+                pgstat::io::pgstat_flush_io(false);
+                let _ = pgstat::backend::pgstat_flush_backend(
+                    false,
+                    pgstat::backend::PGSTAT_BACKEND_FLUSH_IO,
+                );
+                last_flush = now;
+            }
+
             WalSndWait(wake_events, sleeptime, WAIT_EVENT_WAL_SENDER_MAIN)?;
         }
     }

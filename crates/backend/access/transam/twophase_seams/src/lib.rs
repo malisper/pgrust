@@ -118,3 +118,13 @@ seam_core::seam!(
     // rmgr -> rmgrdesc -> standby).
     pub fn standby_transaction_id_is_prepared(xid: TransactionId) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // TwoPhaseGetXidByVirtualXID(vxid, &have_more) (twophase.c:852): the XID
+    // of a valid prepared xact whose backend-time vxid matches, plus C's
+    // have_more (a second match exists). Args are (procNumber, lxid).
+    pub fn two_phase_get_xid_by_virtual_xid(
+        proc_number: ProcNumber,
+        lxid: u32,
+    ) -> PgResult<(TransactionId, bool)>
+);
