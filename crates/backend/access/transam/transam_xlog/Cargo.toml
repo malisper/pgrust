@@ -24,6 +24,7 @@ lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 latch = { path = "../../../storage/ipc/latch" }
 procarray = { path = "../../../storage/ipc/procarray" }
 init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }

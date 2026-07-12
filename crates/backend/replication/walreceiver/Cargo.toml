@@ -1,0 +1,48 @@
+[package]
+name = "walreceiver"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "walreceiver"
+path = "src/lib.rs"
+
+[dependencies]
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+auxprocess = { path = "../../postmaster/auxprocess" }
+elog = { path = "../../utils/error/elog" }
+guc_file = { path = "../../utils/misc/guc_file" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+interrupt = { path = "../../postmaster/interrupt" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+libc = "0.2"
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
+mcx = { path = "../../../_support/mcx" }
+miscinit = { path = "../../utils/init/miscinit" }
+pg_b64 = { path = "../../../common/base64" }
+pg_md5 = { path = "../../../common/md5" }
+pgstat = { path = "../../utils/activity/pgstat" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+procarray = { path = "../../storage/ipc/procarray" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+saslprep = { path = "../../../common/saslprep" }
+scram_common = { path = "../../../common/scram_common" }
+timeline = { path = "../../access/transam/timeline" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+varsup = { path = "../../access/transam/varsup" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+walreceiverfuncs = { path = "../walreceiverfuncs" }
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
+walsender_seams = { path = "../walsender_seams" }
+xlogarchive = { path = "../../access/transam/xlogarchive" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }

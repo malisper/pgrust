@@ -74,7 +74,8 @@ pub fn latch_ref(latch: LatchHandle) -> &'static Latch {
         }
         LatchKind::Proc(procno) => lmgr_proc_seams::proc_latch::call(procno),
         LatchKind::RecoveryWakeup => {
-            panic!("latch_ref: recoveryWakeupLatch owner (xlogrecovery) is not ported")
+            static RECOVERY_WAKEUP: Latch = Latch::new(true, 0);
+            &RECOVERY_WAKEUP
         }
     }
 }

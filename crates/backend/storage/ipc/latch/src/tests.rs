@@ -416,10 +416,11 @@ fn set_latch_my_latch_panics_when_null() {
 }
 
 #[test]
-fn recovery_wakeup_handle_panics_loudly() {
+fn recovery_wakeup_handle_resolves_shared_slot() {
     let _g = TEST_LOCK.lock().unwrap();
-    let result = catch_unwind(|| latch_ref(LatchHandle::recovery_wakeup()));
-    assert!(result.is_err());
+    let l = latch_ref(LatchHandle::recovery_wakeup());
+    assert!(l.is_shared.load(std::sync::atomic::Ordering::Acquire));
+    assert!(std::ptr::eq(l, latch_ref(LatchHandle::recovery_wakeup())));
 }
 
 #[test]

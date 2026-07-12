@@ -354,6 +354,7 @@ pub fn init_seams() {
     s::xlog_archiving_active::set(XLogArchivingActive);
     s::restore_archived_file::set(RestoreArchivedFile);
     s::xlog_archive_check_done::set(XLogArchiveCheckDone);
+    s::xlog_archive_is_busy::set(XLogArchiveIsBusy);
     s::keep_file_restored_from_archive::set(KeepFileRestoredFromArchive);
     s::xlog_archive_cleanup::set(XLogArchiveCleanup);
     s::xlog_archive_is_ready::set(XLogArchiveIsReady);
