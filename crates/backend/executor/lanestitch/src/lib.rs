@@ -193,22 +193,36 @@ impl StitchedProgram {
         batch: &Batch<'_>,
         sel: &mut SelVec,
     ) -> PgResult<RunOutcome> {
-        debug_assert_eq!(sel.nrows, batch.nrows);
+        self.run_lanes(prog, batch.nrows, &batch.lanes, sel)
+    }
+
+    /// [`run`](Self::run) over a bare lane-view slice — the zero-allocation
+    /// pipeline entry (the caller keeps its views in a stack array instead
+    /// of building a `Batch`'s `Vec` per staged page).
+    pub fn run_lanes(
+        &self,
+        prog: &Program,
+        nrows: u32,
+        lane_views: &[Lane<'_>],
+        sel: &mut SelVec,
+    ) -> PgResult<RunOutcome> {
+        debug_assert_eq!(sel.nrows, nrows);
         debug_assert!(sel.is_all(), "run requires an all-ones sel (only failures store)");
+        let interp_batch = || Batch { nrows, lanes: lane_views.to_vec() };
         if self.refused.get() {
-            interp::eval_qual(prog, batch, sel)?;
+            interp::eval_qual(prog, &interp_batch(), sel)?;
             return Ok(RunOutcome::InterpretedSticky);
         }
         // Per-batch fail-open: drifted staging interprets this batch.
-        if batch.nrows as usize > MAX_ROWS || batch.lanes.len() < self.ncols {
-            interp::eval_qual(prog, batch, sel)?;
+        if nrows as usize > MAX_ROWS || lane_views.len() < self.ncols {
+            interp::eval_qual(prog, &interp_batch(), sel)?;
             return Ok(RunOutcome::InterpretedDrift);
         }
-        let n = batch.nrows as usize;
+        let n = nrows as usize;
         for &col in &self.used_cols {
-            let lane = &batch.lanes[col as usize];
+            let lane = &lane_views[col as usize];
             if lane.values.len() < n || lane.isnull.len() < n {
-                interp::eval_qual(prog, batch, sel)?;
+                interp::eval_qual(prog, &interp_batch(), sel)?;
                 return Ok(RunOutcome::InterpretedDrift);
             }
         }
@@ -217,12 +231,11 @@ impl StitchedProgram {
             isnull: core::ptr::null(),
         });
         for &col in &self.used_cols {
-            let lane = &batch.lanes[col as usize];
+            let lane = &lane_views[col as usize];
             lanes[col as usize] =
                 LaneParam { p0: lane.values.as_ptr().cast(), isnull: lane.isnull.as_ptr().cast() };
         }
-        let mut params =
-            JitParams { lanes, sel: sel.words.as_mut_ptr(), nrows: batch.nrows as u64 };
+        let mut params = JitParams { lanes, sel: sel.words.as_mut_ptr(), nrows: nrows as u64 };
         // SAFETY: body compiled for ncols-lane batches; every used lane
         // pointer covers nrows rows (checked above); sel covers MAX_ROWS
         // bits >= nrows; the body only reads lanes and clears sel bits.
@@ -238,8 +251,8 @@ impl StitchedProgram {
         // interpreter raises C's exact error on C's row. Sticky: this
         // program's data errors; stop stitching it.
         self.refused.set(true);
-        *sel = SelVec::all(batch.nrows);
-        interp::eval_qual(prog, batch, sel)?;
+        *sel = SelVec::all(nrows);
+        interp::eval_qual(prog, &interp_batch(), sel)?;
         // Defensive completeness: if the replay did NOT error (can only
         // happen if a trap condition raced with... nothing — lanes are
         // immutable for the call; kept because fail-open must never turn
