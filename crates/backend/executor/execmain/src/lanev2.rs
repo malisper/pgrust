@@ -1,6 +1,16 @@
 //! Lane executor v2 — the operator→operator batched execution lane (production
 //! rebuild). See `docs/design/lane-executor-v2.md`.
 //!
+//! Control model: **push** (Source → Operator → Sink), with a pull adapter at
+//! the pipeline root because PostgreSQL's executor is Volcano/pull — the lane
+//! is a push island that doles one tuple per `exec_proc_node` call out of the
+//! root adapter's capacity-one buffer. The skeleton (traits + driver + root
+//! adapter) lives in `lanev2/push.rs`; this file owns the per-scan refuse-sets
+//! and the scan pipelines (source + scalar filter/project operator). The
+//! conversion changes ONLY who calls whom: the batch staging primitives, the
+//! one-row-at-a-time scalar emit, their order, and the refuse-sets are exactly
+//! the Phase-1 pull drive's — byte-identical output.
+//!
 //! ALL substantive lane logic lives in this module, kept deliberately separate
 //! from the byte-identical Volcano row-executor spine (`procnode.rs`,
 //! `nodeseqscan`, `nodeagg`, …). The existing executor is touched in only a
@@ -11,10 +21,10 @@
 //!   * `nodeseqscan::SeqScanState` — a two-`u32` page-batch cursor + accessors
 //!     (the one-tuple-per-call drive needs its position to survive the Volcano
 //!     call boundary, so this state must live on the node);
-//!   * `executils::BatchSource` — the shared seam trait (it cannot live here:
-//!     `nodeagg` re-exports it as `AggBatchSource`, and `nodeagg` cannot depend
-//!     on `execmain` without a crate cycle, so the trait sits in the shared
-//!     `executils` seam both crates already depend on).
+//!   * `executils::BatchSource` — the shared pull seam trait (it cannot live
+//!     here: `nodeagg` re-exports it as `AggBatchSource`, and `nodeagg` cannot
+//!     depend on `execmain` without a crate cycle, so the trait sits in the
+//!     shared `executils` seam both crates already depend on).
 //! Disabling or deleting the lane is therefore local: drop this module + the
 //! thin hook, and the C-identical executor is exactly as before.
 //!
@@ -25,10 +35,14 @@
 //! byte-identity-safe. The completeness-gate run sets `PGRUST_LANE_V2=1` to
 //! enable the lane across the whole regression suite.
 
+mod push;
+
 use std::sync::OnceLock;
 
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
+
+use push::{pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source};
 
 /// Master switch for lane-v2. Default OFF; `PGRUST_LANE_V2=1` (or `on`) enables
 /// it. Resolved once per process (a boot-time decision, like
@@ -41,8 +55,15 @@ pub fn enabled() -> bool {
     })
 }
 
-/// Phase 1 (first vertical slice): try to let the lane *own* a `SeqScan`
-/// (scan→filter→project, scalar-within-lane over row batches).
+// ===========================================================================
+// SeqScan ownership (Phase 1 first vertical slice, now push-driven). The
+// pipeline is source → filter/project operator → root pull-adapter, over the
+// same `BatchSource`-seam primitives the pull drive used
+// (`seq_scan_next_pagebatch` / `seq_scan_batch_emit`).
+// ===========================================================================
+
+/// Try to let the lane *own* a `SeqScan` (scan→filter→project,
+/// scalar-within-lane over row batches).
 ///
 /// `Some(result)` = the lane drove this call (`result` is the tuple-or-end,
 /// the ordinary `ExecProcNode` return); `None` = refused, and the caller must
@@ -55,11 +76,18 @@ pub fn try_own_seq_scan<'mcx>(
     if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
     }
-    Ok(Some(drive_seq_scan(ss, estate)?))
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    // Assemble the scan-only push pipeline. Stages are stateless unit structs
+    // (cross-call position is node-resident), so per-call assembly is free.
+    // End-of-stream mirrors ExecScanExtended's projected-slot clear (the
+    // non-projected path returns end-of-scan without clearing).
+    let clear_on_finish = ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
+    let mut root = RootAdapter::new(clear_on_finish);
+    Ok(Some(pull_step(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut root, estate)?))
 }
 
-/// Refuse-set for the lane-v2 SeqScan driver (false → the caller falls through
-/// to `exec_seq_scan`, byte-identically). Admits Plain / WithQual /
+/// Refuse-set for the lane-v2 SeqScan pipeline (false → the caller falls
+/// through to `exec_seq_scan`, byte-identically). Admits Plain / WithQual /
 /// WithProject / WithQualProject over a page-batch-supporting AM, and only
 /// when the qual and projection are subplan-free and param-free: the generic
 /// per-row emit path runs neither initplan params nor subplan quals, whereas
@@ -103,56 +131,81 @@ fn seq_scan_fusible<'mcx>(
     ::nodeseqscan::seq_scan_batch_supported(ss, estate)
 }
 
-/// The lane's SeqScan drive. Pulls row batches through the `BatchSource` seam
-/// primitives (`seq_scan_next_pagebatch` / `seq_scan_batch_fetch`, the same
-/// ones `SeqScanBatchSource: BatchSource` wraps) and emits one row per call
-/// via `seq_scan_batch_emit` — which is `ExecScanExtended`'s body over a
-/// staged batch row (reset per-tuple context, store + apply the scan qual
-/// scalar-per-row via `execexpr`, project). Same tuples, same order, same
-/// qual/proj/NULL semantics as `exec_seq_scan` → BYTE-IDENTICAL.
+/// Push source: stages heap page batches (`seq_scan_next_pagebatch` — the
+/// same `BatchSource`-seam primitive `SeqScanBatchSource` wraps). Staging
+/// resets the node-resident consume cursor: a fresh batch replaces the staged
+/// rows.
+struct SeqScanSource;
+
+impl<'mcx> Source<'mcx> for SeqScanSource {
+    type Node = ::nodeseqscan::SeqScanState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(node, estate)?;
+        node.set_lane_cursor(0, n);
+        Ok((n > 0).then_some(Batch { n }))
+    }
+}
+
+/// Push operator: the scan's scalar filter→project segment. Consumes the
+/// staged batch row-by-row via `seq_scan_batch_emit` — `ExecScanExtended`'s
+/// body over a staged batch row (reset per-tuple context, store + apply the
+/// scan qual scalar-per-row via `execexpr`, project) — pushing each surviving
+/// output slot into the sink. Filter and projection stay fused within this
+/// one segment operator per the operator-model decision (design §1): the push
+/// conversion inverts driver control, never the fused per-row segment. Same
+/// tuples, same order, same qual/proj/NULL semantics as `exec_seq_scan` →
+/// BYTE-IDENTICAL.
 ///
-/// The one-tuple-per-call cursor over the staged page batch lives on the node
-/// (`SeqScanState::lane_cursor`), so the drive survives the Volcano per-call
-/// boundary.
-fn drive_seq_scan<'mcx>(
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<ExecSlotId>> {
-    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
-    loop {
-        let (mut pos, mut n) = ss.lane_cursor();
-        if pos >= n {
-            n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
-            pos = 0;
-            ss.set_lane_cursor(pos, n);
-            if n == 0 {
-                // End of scan: mirror ExecScanExtended's projected-slot clear
-                // (the non-projected path returns None without clearing).
-                if let Some(proj) = ss.ss.ps_ProjInfo.as_ref() {
-                    let mcx = estate.es_query_cxt;
-                    let result_id = proj.pi_result_slot;
-                    ::exectuples::exec_clear_tuple(estate.slot_mut(result_id), mcx);
-                }
-                return Ok(None);
+/// The consume position over the staged page batch lives on the node
+/// (`SeqScanState::lane_cursor`), so a `Paused` pipeline survives the Volcano
+/// per-call boundary.
+struct SeqScanFilterProject;
+
+impl<'mcx> Operator<'mcx> for SeqScanFilterProject {
+    type Node = ::nodeseqscan::SeqScanState<'mcx>;
+
+    fn pending(&self, node: &Self::Node) -> Option<Batch> {
+        let (pos, n) = node.lane_cursor();
+        (pos < n).then_some(Batch { n })
+    }
+
+    fn consume(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        loop {
+            let (pos, n) = node.lane_cursor();
+            debug_assert_eq!(n, batch.n);
+            if pos >= n {
+                return Ok(OpStatus::NeedInput);
             }
-        }
-        // Match the per-tuple path's interrupt cadence: `exec_scan_fetch`
-        // runs `check_for_interrupts` once per tuple attempt. Skipping it in
-        // the batched drive would process pending interrupts / cache
-        // invalidations at a different cadence than the code the lane
-        // replaces; keep it identical.
-        ::postgres_seams::check_for_interrupts::call()?;
-        let i = pos;
-        ss.set_lane_cursor(pos + 1, n);
-        if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
-            return Ok(Some(slot));
+            // Match the per-tuple path's interrupt cadence: `exec_scan_fetch`
+            // runs `check_for_interrupts` once per tuple attempt. Skipping it
+            // in the batched drive would process pending interrupts / cache
+            // invalidations at a different cadence than the code the lane
+            // replaces; keep it identical.
+            ::postgres_seams::check_for_interrupts::call()?;
+            node.set_lane_cursor(pos + 1, n);
+            if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(node, estate, pos)? {
+                if let SinkFeed::Full = out.accept(slot, estate)? {
+                    return Ok(OpStatus::Paused);
+                }
+            }
         }
     }
 }
 
 // ===========================================================================
-// IndexScan ownership (Phase 1 breadth). Mirrors the SeqScan lane above,
-// driving the SAME batch primitives the fused-agg path uses
+// IndexScan ownership (Phase 1 breadth, now push-driven). Same pipeline shape
+// over the SAME batch primitives the fused-agg path uses
 // (`index_scan_next_tidrun` / `index_scan_batch_fetch`). The admitted shape is
 // deliberately narrow — no qual, no projection, no runtime keys, forward btree
 // — so the node's output is exactly the stored scan tuple: `exec_index_scan`
@@ -170,10 +223,12 @@ pub fn try_own_index_scan<'mcx>(
     if !index_scan_fusible(is, estate) {
         return Ok(None);
     }
-    Ok(Some(drive_index_scan(is, estate)?))
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(is, &mut IndexScanSource, &mut IndexScanEmit, &mut root, estate)?))
 }
 
-/// Refuse-set for the lane-v2 IndexScan driver. Admits only the shape the
+/// Refuse-set for the lane-v2 IndexScan pipeline. Admits only the shape the
 /// fused-agg index arm admits (no qual / no projection / no runtime keys /
 /// forward index order / btree AM / MVCC), plus the lane-specific disarms:
 /// EPQ, a non-forward call, a scrollable/backward or mergejoin-mark cursor
@@ -212,46 +267,73 @@ fn index_scan_fusible<'mcx>(
             .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
 }
 
-/// The lane's IndexScan drive. Stages a same-block TID run
-/// (`index_scan_next_tidrun`) and replays it one visible tuple per call
+/// Push source: stages a same-block TID run (`index_scan_next_tidrun`, which
+/// runs `check_for_interrupts` per run, matching the fused-agg drive this
+/// reuses). Staging resets the node-resident consume cursor.
+struct IndexScanSource;
+
+impl<'mcx> Source<'mcx> for IndexScanSource {
+    type Node = ::nodeindexscan::IndexScanState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        let n = ::nodeindexscan::index_scan_next_tidrun(node, estate)?;
+        node.set_lane_cursor(0, n);
+        Ok((n > 0).then_some(Batch { n }))
+    }
+}
+
+/// Push operator: replays the staged TID run one visible tuple at a time
 /// (`index_scan_batch_fetch`, sequential: entry `i>0` advances the AM cursor,
 /// so the run is consumed 0,1,2,… without gaps). No qual/projection → the
-/// emitted slot is the stored scan tuple. The run cursor lives on the node
+/// pushed tuple is the stored scan slot. The run position lives on the node
 /// (`IndexScanState::lane_cursor`) to survive the Volcano call boundary.
-fn drive_index_scan<'mcx>(
-    is: &mut ::nodeindexscan::IndexScanState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<ExecSlotId>> {
-    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
-    let scan_id = is.ss.ss_ScanTupleSlot;
-    loop {
-        let (mut pos, mut n) = is.lane_cursor();
-        if pos >= n {
-            // `index_scan_next_tidrun` runs `check_for_interrupts` per run,
-            // matching the fused-agg drive this reuses.
-            n = ::nodeindexscan::index_scan_next_tidrun(is, estate)?;
-            pos = 0;
-            is.set_lane_cursor(pos, n);
-            if n == 0 {
-                return Ok(None);
+struct IndexScanEmit;
+
+impl<'mcx> Operator<'mcx> for IndexScanEmit {
+    type Node = ::nodeindexscan::IndexScanState<'mcx>;
+
+    fn pending(&self, node: &Self::Node) -> Option<Batch> {
+        let (pos, n) = node.lane_cursor();
+        (pos < n).then_some(Batch { n })
+    }
+
+    fn consume(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        let scan_id = node.ss.ss_ScanTupleSlot;
+        loop {
+            let (pos, n) = node.lane_cursor();
+            debug_assert_eq!(n, batch.n);
+            if pos >= n {
+                return Ok(OpStatus::NeedInput);
             }
-        }
-        let i = pos;
-        is.set_lane_cursor(pos + 1, n);
-        if ::nodeindexscan::index_scan_batch_fetch(is, estate, i)? {
-            return Ok(Some(scan_id));
+            node.set_lane_cursor(pos + 1, n);
+            if ::nodeindexscan::index_scan_batch_fetch(node, estate, pos)? {
+                if let SinkFeed::Full = out.accept(scan_id, estate)? {
+                    return Ok(OpStatus::Paused);
+                }
+            }
         }
     }
 }
 
 // ===========================================================================
-// IndexOnlyScan ownership. `index_only_scan_batch_next` advances to the next
-// VISIBLE index tuple (VM probe / heap fallback / predicate lock — C's
-// IndexOnlyNext order) and returns 0 or 1; `index_only_scan_batch_store`
-// stages `xs_itup` into the scan slot. One tuple per call, so the drive is
-// stateless across the Volcano boundary (no cursor). Narrow shape (no qual /
-// no projection / no runtime keys / forward btree) → the output is the stored
-// scan tuple, identical to `exec_index_only_scan`.
+// IndexOnlyScan ownership (push-driven). `index_only_scan_batch_next` advances
+// to the next VISIBLE index tuple (VM probe / heap fallback / predicate lock —
+// C's IndexOnlyNext order) and returns 0 or 1; `index_only_scan_batch_store`
+// stages `xs_itup` into the scan slot. The source produces one-row batches, so
+// a batch never outlives the driver round that produced it — no node-resident
+// cursor. Narrow shape (no qual / no projection / no runtime keys / forward
+// btree) → the output is the stored scan tuple, identical to
+// `exec_index_only_scan`.
 // ===========================================================================
 
 /// Try to let the lane own an `IndexOnlyScan`.
@@ -263,13 +345,15 @@ pub fn try_own_index_only_scan<'mcx>(
     if !index_only_scan_fusible(ios, estate) {
         return Ok(None);
     }
-    Ok(Some(drive_index_only_scan(ios, estate)?))
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(ios, &mut IndexOnlyScanSource, &mut IndexOnlyScanEmit, &mut root, estate)?))
 }
 
-/// Refuse-set for the lane-v2 IndexOnlyScan driver (mirrors the fused-agg IOS
-/// arm + the lane disarms). `!batch_allowed` refuses a scrollable/backward or
-/// mergejoin-mark cursor; `ioss_OrderByKeys` non-empty refuses amcanorderbyop
-/// (distance-ordered) scans.
+/// Refuse-set for the lane-v2 IndexOnlyScan pipeline (mirrors the fused-agg
+/// IOS arm + the lane disarms). `!batch_allowed` refuses a scrollable/backward
+/// or mergejoin-mark cursor; `ioss_OrderByKeys` non-empty refuses
+/// amcanorderbyop (distance-ordered) scans.
 fn index_only_scan_fusible<'mcx>(
     ios: &::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &EStateData<'mcx>,
@@ -300,31 +384,66 @@ fn index_only_scan_fusible<'mcx>(
             .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
 }
 
-/// The lane's IndexOnlyScan drive: one visible index tuple per call.
-fn drive_index_only_scan<'mcx>(
-    ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<ExecSlotId>> {
-    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
-    // `index_only_scan_batch_next` runs `check_for_interrupts` per tuple.
-    let n = ::nodeindexonlyscan::index_only_scan_batch_next(ios, estate)?;
-    if n == 0 {
-        return Ok(None);
+/// Push source: one VISIBLE index tuple per batch (`index_only_scan_batch_next`
+/// runs `check_for_interrupts` per tuple).
+struct IndexOnlyScanSource;
+
+impl<'mcx> Source<'mcx> for IndexOnlyScanSource {
+    type Node = ::nodeindexonlyscan::IndexOnlyScanState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        let n = ::nodeindexonlyscan::index_only_scan_batch_next(node, estate)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        debug_assert_eq!(n, 1);
+        Ok(Some(Batch { n }))
     }
-    debug_assert_eq!(n, 1);
-    ::nodeindexonlyscan::index_only_scan_batch_store(ios, estate)?;
-    Ok(Some(ios.ss.ss_ScanTupleSlot))
+}
+
+/// Push operator: stages `xs_itup` into the scan slot and pushes it. One-row
+/// batches are always fully consumed within the producing driver round, so
+/// `pending` is statically `None` (the drive is stateless across the Volcano
+/// boundary — no cursor).
+struct IndexOnlyScanEmit;
+
+impl<'mcx> Operator<'mcx> for IndexOnlyScanEmit {
+    type Node = ::nodeindexonlyscan::IndexOnlyScanState<'mcx>;
+
+    fn pending(&self, _node: &Self::Node) -> Option<Batch> {
+        None
+    }
+
+    fn consume(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert_eq!(batch.n, 1);
+        ::nodeindexonlyscan::index_only_scan_batch_store(node, estate)?;
+        Ok(match out.accept(node.ss.ss_ScanTupleSlot, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
+    }
 }
 
 // ===========================================================================
-// BitmapHeapScan ownership. The bitmap must be built before the drive — the
-// dispatch hook keeps the arm's existing `bitmap_table_scan_setup_dispatch`
-// call, then offers the (already-initialized) scan to the lane. The drive
-// mirrors the SeqScan lane over the page-batch primitives
-// (`bitmap_scan_next_pagebatch` / `bitmap_scan_batch_fetch`, random-access by
-// `i`); `bitmap_scan_batch_fetch` applies the page recheck (`bitmapqualorig`)
-// internally on lossy/recheck pages, exactly as `BitmapHeapNext` does. Narrow
-// shape (no scan qual / no projection) → the output is the stored scan tuple.
+// BitmapHeapScan ownership (push-driven). The bitmap must be built before the
+// pipeline runs — the dispatch hook keeps the arm's existing
+// `bitmap_table_scan_setup_dispatch` call, then offers the
+// (already-initialized) scan to the lane. Same pipeline shape as the SeqScan
+// lane over the page-batch primitives (`bitmap_scan_next_pagebatch` /
+// `bitmap_scan_batch_fetch`, random-access by `i`); `bitmap_scan_batch_fetch`
+// applies the page recheck (`bitmapqualorig`) internally on lossy/recheck
+// pages, exactly as `BitmapHeapNext` does. Narrow shape (no scan qual / no
+// projection) → the output is the stored scan tuple.
 // ===========================================================================
 
 /// Try to let the lane own a `BitmapHeapScan`. The caller must have already
@@ -337,10 +456,12 @@ pub fn try_own_bitmap_heap_scan<'mcx>(
     if !bitmap_heap_scan_fusible(bhs, estate) {
         return Ok(None);
     }
-    Ok(Some(drive_bitmap_heap_scan(bhs, estate)?))
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(bhs, &mut BitmapHeapScanSource, &mut BitmapHeapScanEmit, &mut root, estate)?))
 }
 
-/// Refuse-set for the lane-v2 BitmapHeapScan driver (mirrors the fused-agg
+/// Refuse-set for the lane-v2 BitmapHeapScan pipeline (mirrors the fused-agg
 /// bitmap arm: no scan qual / no projection). Disarms EPQ, non-forward,
 /// parallel (aware or a worker attached to shared state), and EXPLAIN ANALYZE.
 /// Also refuses when the page recheck qual (`bitmapqualorig`) carries a subplan
@@ -370,31 +491,58 @@ fn bitmap_heap_scan_fusible<'mcx>(
     bhs.ss.qual.is_none() && bhs.ss.ps_ProjInfo.is_none()
 }
 
-/// The lane's BitmapHeapScan drive. Stages the next page's tuples
-/// (`bitmap_scan_next_pagebatch`) and emits each surviving row
-/// (`bitmap_scan_batch_fetch`, which applies the page recheck on lossy pages).
-/// The page-batch cursor lives on the node (`BitmapHeapScanState::lane_cursor`).
-fn drive_bitmap_heap_scan<'mcx>(
-    bhs: &mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<ExecSlotId>> {
-    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
-    let scan_id = bhs.ss.ss_ScanTupleSlot;
-    loop {
-        let (mut pos, mut n) = bhs.lane_cursor();
-        if pos >= n {
-            // `bitmap_scan_next_pagebatch` runs `check_for_interrupts` per page.
-            n = ::nodebitmapheapscan::bitmap_scan_next_pagebatch(bhs, estate)?;
-            pos = 0;
-            bhs.set_lane_cursor(pos, n);
-            if n == 0 {
-                return Ok(None);
+/// Push source: stages the next bitmap page's tuples
+/// (`bitmap_scan_next_pagebatch` runs `check_for_interrupts` per page).
+/// Staging resets the node-resident consume cursor.
+struct BitmapHeapScanSource;
+
+impl<'mcx> Source<'mcx> for BitmapHeapScanSource {
+    type Node = ::nodebitmapheapscan::BitmapHeapScanState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        let n = ::nodebitmapheapscan::bitmap_scan_next_pagebatch(node, estate)?;
+        node.set_lane_cursor(0, n);
+        Ok((n > 0).then_some(Batch { n }))
+    }
+}
+
+/// Push operator: pushes each surviving row of the staged page
+/// (`bitmap_scan_batch_fetch` applies the page recheck on lossy pages). The
+/// page-batch position lives on the node (`BitmapHeapScanState::lane_cursor`).
+struct BitmapHeapScanEmit;
+
+impl<'mcx> Operator<'mcx> for BitmapHeapScanEmit {
+    type Node = ::nodebitmapheapscan::BitmapHeapScanState<'mcx>;
+
+    fn pending(&self, node: &Self::Node) -> Option<Batch> {
+        let (pos, n) = node.lane_cursor();
+        (pos < n).then_some(Batch { n })
+    }
+
+    fn consume(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        let scan_id = node.ss.ss_ScanTupleSlot;
+        loop {
+            let (pos, n) = node.lane_cursor();
+            debug_assert_eq!(n, batch.n);
+            if pos >= n {
+                return Ok(OpStatus::NeedInput);
             }
-        }
-        let i = pos;
-        bhs.set_lane_cursor(pos + 1, n);
-        if ::nodebitmapheapscan::bitmap_scan_batch_fetch(bhs, estate, i)? {
-            return Ok(Some(scan_id));
+            node.set_lane_cursor(pos + 1, n);
+            if ::nodebitmapheapscan::bitmap_scan_batch_fetch(node, estate, pos)? {
+                if let SinkFeed::Full = out.accept(scan_id, estate)? {
+                    return Ok(OpStatus::Paused);
+                }
+            }
         }
     }
 }
