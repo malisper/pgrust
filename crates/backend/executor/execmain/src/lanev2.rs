@@ -34,8 +34,11 @@
 //! `PGRUST_JIT_DEFORM` switch and is byte-identity-safe (no `pg_settings` /
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
+mod exprkey;
 mod push;
 mod stats;
+
+pub use exprkey::ExprKeyState;
 
 use std::sync::OnceLock;
 
@@ -1389,6 +1392,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     choice: &mut Option<AggLaneChoice>,
     stage_slot: &mut Option<ExecSlotId>,
+    xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // AGG_PLAIN (ungrouped) routes to the plain drive: no breaker needed (a
@@ -1421,7 +1425,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     let c = match *choice {
         Some(c) => c,
         None => {
-            let c = decide_agg_lane(agg, ss, estate)?;
+            let c = decide_agg_lane(agg, ss, xk, estate)?;
             *choice = Some(c);
             c
         }
@@ -1434,7 +1438,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, estate)?;
+    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
@@ -1448,8 +1452,18 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
 fn decide_agg_lane<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggLaneChoice> {
+    // Projected scans: the expression-group-key arm (exprkey module) — the
+    // scan computes the (single) grouping key, everything else bare Vars.
+    // Refusal (reason ticked there) keeps the per-row/refuse economics below.
+    if ss.ss.ps_ProjInfo.is_some() && ::nodeagg::agg_lanefold_plan(agg).is_some() {
+        *xk = exprkey::decide_exprkey(agg, ss, estate);
+        if xk.is_some() {
+            return Ok(AggLaneChoice::Fold);
+        }
+    }
     let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
         Some(plan) if ss.ss.ps_ProjInfo.is_none() => {
             if !plan.vguards.is_empty() {
@@ -2435,6 +2449,7 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     c: AggLaneChoice,
     stage_slot: &mut Option<ExecSlotId>,
+    xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
@@ -2448,6 +2463,13 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // Staging arm per feed shape (see `arm_scan_staging` — the one seam for
     // deform + bitmap + stitched-tier setup across the feed sites).
     if c == AggLaneChoice::Fold {
+        if let Some(xk) = xk.as_deref_mut() {
+            // Expression-group-key feed (projected scans; exprkey module).
+            // A staging rebuild that lost the arm falls back per-row inside
+            // the feed's per-batch route — byte-safe either way.
+            let _ = exprkey::exprkey_rearm(xk, ss, estate);
+            return exprkey::exprkey_build_fold_feed(agg, ss, xk, stage_slot, estate);
+        }
         arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
         agg_hash_build_fold_feed(agg, ss, stage_slot, estate)
     } else {
@@ -2994,7 +3016,7 @@ fn try_arm_cb_multikey_dict<'mcx>(
             return refused();
         }
         let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
-        if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix) {
+        if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None) {
             return refused();
         }
         return true;
@@ -3555,6 +3577,7 @@ fn sort_feed_if_needed<'mcx>(
                         ss,
                         c,
                         &mut aps.lane_stage_slot,
+                        &mut aps.lane_exprkey,
                         estate,
                     )?;
                     true
@@ -6113,7 +6136,7 @@ fn agg_child_fusible<'mcx>(
             let c = match aps.lane_choice {
                 Some(c) => c,
                 None => {
-                    let c = decide_agg_lane(&aps.agg, ss, estate)?;
+                    let c = decide_agg_lane(&aps.agg, ss, &mut aps.lane_exprkey, estate)?;
                     aps.lane_choice = Some(c);
                     c
                 }
@@ -6211,6 +6234,7 @@ pub fn try_own_limit<'mcx>(
                             ss,
                             c,
                             &mut aps.lane_stage_slot,
+                            &mut aps.lane_exprkey,
                             estate,
                         )?;
                         true
