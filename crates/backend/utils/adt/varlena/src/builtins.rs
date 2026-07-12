@@ -166,29 +166,33 @@ fc_byteacmp! {
     fc_byteacmp: byteacmp -> from_i32;
 }
 
-// C returns one of the input pointers — so do the larger/smaller wrappers.
+// C returns one of the PG_GETARG_TEXT_PP pointers — the DETOASTED (packed)
+// image, never the raw compressed/external arg datum. Returning the raw arg
+// (the old shape) leaked compressed transvalues into MIN/MAX transitions,
+// breaking lanefold's inline-transvalue contract (q22coexist toast smoke)
+// and diverging from C's transvalue bytes/memory accounting.
 pub fn fc_text_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null text varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(
+    Ok(Datum::from_usize(
         if crate::text_cmp(a.data(), b.data(), fcinfo.get_collation())? > 0 {
-            fcinfo.arg(0)
+            a.as_ptr()
         } else {
-            fcinfo.arg(1)
-        },
-    )
+            b.as_ptr()
+        } as usize,
+    ))
 }
 
 pub fn fc_text_smaller(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: catalog args are non-null text varlenas (strict fn).
     let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(
+    Ok(Datum::from_usize(
         if crate::text_cmp(a.data(), b.data(), fcinfo.get_collation())? < 0 {
-            fcinfo.arg(0)
+            a.as_ptr()
         } else {
-            fcinfo.arg(1)
-        },
-    )
+            b.as_ptr()
+        } as usize,
+    ))
 }
 
 pub fn fc_bytea_larger(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
