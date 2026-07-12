@@ -52,7 +52,10 @@ fn no_hash_function(eq_opr: Oid) -> Box<PgError> {
 }
 
 // key/key_isnull: first key datum cached at insert (datum1 idea); valid only
-// under a byval ProbeKernel, whose match skips the stored-tuple deform.
+// under a probe kernel, whose match skips the stored-tuple deform. Byval
+// kernels cache the value; the Text kernel caches a pointer INTO the stored
+// `first_tuple` image (stable until reset; relocations must go through
+// `TupleHashTable::relocate_entry`, which rebases it).
 #[derive(Clone, Copy)]
 pub struct TupleHashEntryData {
     first_tuple: NonNull<MinimalTupleData>,
@@ -73,7 +76,9 @@ impl TupleHashEntryData {
     }
 
     /// Repoint at a relocated image (table-handoff copy; the new image must
-    /// carry the same additionalsize prefix).
+    /// carry the same additionalsize prefix). Callers relocating entries of a
+    /// table whose kernel may cache a by-ref key must go through
+    /// [`TupleHashTable::relocate_entry`], which rebases the cache.
     #[inline]
     pub fn set_tuple(&mut self, tuple: NonNull<MinimalTupleData>) {
         self.first_tuple = tuple;
@@ -102,15 +107,39 @@ enum ProbeKernel {
     Expr,
     Int4 { att: u16 },
     Int8 { att: u16 },
+    /// Single text/varchar key under a DETERMINISTIC collation (resolved once
+    /// at build — `varlena::text_collation_is_raw_bytes`): C-exact
+    /// hashtext = hash_any(raw bytes) and texteq = length + memcmp, inline
+    /// (detoast included), no compiled-program walk and no per-row collation
+    /// probing. Entries cache the key datum INSIDE the stored `first_tuple`
+    /// image (deformed once per new group), so matches skip the per-probe
+    /// stored-tuple store + deform entirely. Nondeterministic or invalid
+    /// collations keep the Expr path (bit-identical semantics + C's errors).
+    Text { att: u16 },
 }
 
 impl ProbeKernel {
-    fn select(key_col_idx: &[i16], eqfuncoids: &[Oid], hashfunctions: &[Oid]) -> ProbeKernel {
-        if let ([col], [eq], [hash]) = (key_col_idx, eqfuncoids, hashfunctions) {
+    fn select(
+        key_col_idx: &[i16],
+        eqfuncoids: &[Oid],
+        hashfunctions: &[Oid],
+        collations: &[Oid],
+    ) -> ProbeKernel {
+        if let ([col], [eq], [hash], [collid]) =
+            (key_col_idx, eqfuncoids, hashfunctions, collations)
+        {
             let att = (col - 1) as u16;
             match (*hash, *eq) {
                 (450, 65) => return ProbeKernel::Int4 { att },
                 (949, 467) => return ProbeKernel::Int8 { att },
+                // hashtext / texteq (text and varchar keys), raw-bytes
+                // collations only. A determinism-probe error falls back to
+                // Expr, whose per-row program raises C's error at C's row.
+                (400, 67) => {
+                    if ::varlena::text_collation_is_raw_bytes(*collid).unwrap_or(false) {
+                        return ProbeKernel::Text { att };
+                    }
+                }
                 _ => {}
             }
         }
@@ -416,7 +445,7 @@ pub fn build_tuple_hash_table<'mcx>(
         entries: vec_with_capacity_in(metacxt, nbuckets)?,
         hashtab: SimpleHashIndex::with_nelements(nbuckets),
         additionalsize,
-        kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions),
+        kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions, collations),
         tab_hash_expr,
         tab_eq_func,
         tableslot,
@@ -470,6 +499,15 @@ impl<'mcx> TupleHashTable<'mcx> {
                 let h = if isnull { 0 } else { ::hashfn::hash_bytes_uint32(hashint8_fold(key)) };
                 Ok(::hashfn::murmurhash32(h))
             }
+            ProbeKernel::Text { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                let h = if isnull {
+                    0
+                } else {
+                    text_kernel_hash(key, *self.entries.allocator())?
+                };
+                Ok(::hashfn::murmurhash32(h))
+            }
             ProbeKernel::Expr => {
                 let mut slots = EvalSlots { scan: None, inner: Some(input_slot), outer: None };
                 let r = exec_eval_expr(&mut self.tab_hash_expr, &mut slots)?;
@@ -511,6 +549,35 @@ impl<'mcx> TupleHashTable<'mcx> {
                         (false, false) => e.key.as_i64() == key.as_i64(),
                         (a, b) => a & b,
                     })
+                })?
+            }
+            ProbeKernel::Text { att } => {
+                let (key, isnull) = kernel_key(input_slot, att);
+                let det_mcx = *entries.allocator();
+                // Detoast the input side once per probe, not per candidate.
+                // SAFETY: non-null live text varlena (key column type is
+                // text/varchar by kernel selection).
+                let a = if isnull {
+                    None
+                } else {
+                    Some(unsafe { ::types_fmgr::datum_varlena_packed(key, det_mcx) }?)
+                };
+                hashtab.find(hash, entry_hash, |ix| {
+                    let e = &entries[ix as usize];
+                    // Cached-key match: NOT DISTINCT over the datum cached
+                    // inside the stored image (raw-bytes collation → texteq
+                    // is length + memcmp).
+                    match (&a, e.key_isnull) {
+                        (Some(a), false) => {
+                            // SAFETY: e.key points into the live stored image
+                            // (insert caches it; relocate_entry rebases it).
+                            let b =
+                                unsafe { ::types_fmgr::datum_varlena_packed(e.key, det_mcx) }?;
+                            Ok(a.data() == b.data())
+                        }
+                        (None, true) => Ok(true),
+                        _ => Ok(false),
+                    }
                 })?
             }
             ProbeKernel::Expr => hashtab.find(hash, entry_hash, |ix| {
@@ -556,6 +623,21 @@ impl<'mcx> TupleHashTable<'mcx> {
 
         let (key, key_isnull) = match self.kernel {
             ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } => kernel_key(input_slot, att),
+            // Text caches the key datum INSIDE the stored image (a pointer
+            // into the input slot would dangle once the slot advances):
+            // deform the just-created copy once per NEW GROUP; stable in
+            // table_mcx until reset, rebased by relocate_entry on handoff.
+            ProbeKernel::Text { att } => {
+                // SAFETY: first_tuple is the live image created just above.
+                unsafe {
+                    exectuples::exec_store_minimal_tuple_ptr(
+                        &mut self.tableslot,
+                        slot_mcx,
+                        first_tuple,
+                    )
+                };
+                kernel_key(&mut self.tableslot, att)
+            }
             ProbeKernel::Expr => (Datum::null(), true),
         };
         let ix = self.entries.len() as u32;
@@ -603,6 +685,18 @@ impl<'mcx> TupleHashTable<'mcx> {
                 (false, false) => input_key.0.as_i64() == entry.key.as_i64(),
                 (a, b) => a & b,
             }),
+            ProbeKernel::Text { .. } => match (input_key.1, entry.key_isnull) {
+                (false, false) => {
+                    let det_mcx = *self.entries.allocator();
+                    // SAFETY: both sides are non-null live text varlenas —
+                    // the input key per `kernel_key_of`'s caller contract,
+                    // the entry's cached key inside its live stored image.
+                    let a = unsafe { ::types_fmgr::datum_varlena_packed(input_key.0, det_mcx) }?;
+                    let b = unsafe { ::types_fmgr::datum_varlena_packed(entry.key, det_mcx) }?;
+                    Ok(a.data() == b.data())
+                }
+                (a, b) => Ok(a & b),
+            },
             ProbeKernel::Expr => {
                 // SAFETY: caller keeps entry images live (insert contract).
                 unsafe {
@@ -622,10 +716,14 @@ impl<'mcx> TupleHashTable<'mcx> {
         }
     }
 
-    /// The kernel's cached-key extraction for `match_tuple` callers.
+    /// The kernel's cached-key extraction for `match_tuple` callers. For the
+    /// Text kernel the returned datum points into the slot's tuple — the
+    /// caller must keep the slot live across the `match_tuple` call.
     pub fn kernel_key_of(&self, input_slot: &mut SlotData<'mcx>) -> (Datum, bool) {
         match self.kernel {
-            ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } => kernel_key(input_slot, att),
+            ProbeKernel::Int4 { att } | ProbeKernel::Int8 { att } | ProbeKernel::Text { att, .. } => {
+                kernel_key(input_slot, att)
+            }
             ProbeKernel::Expr => (Datum::null(), true),
         }
     }
@@ -669,11 +767,149 @@ impl<'mcx> TupleHashTable<'mcx> {
         unsafe { Some(NonNull::new_unchecked(t.sub(self.additionalsize))) }
     }
 
+    /// K2 slot-free find over a staged key (kernel tables only): the `lookup`
+    /// find leg with the key already in hand — no hashslot presentation, no
+    /// slot deform. `None` = miss (the caller presents the key in a slot and
+    /// runs the full `lookup` for the insert/spill leg — rare per batch).
+    /// Bit-identical match semantics to `lookup`'s kernel arms.
+    ///
+    /// Contract (like `hash_staged`): a non-null staged datum is a live value
+    /// of the kernel's key type.
+    pub fn find_staged(&self, key: Datum, isnull: bool, hash: u32) -> PgResult<Option<u32>> {
+        let TupleHashTable { entries, hashtab, kernel, .. } = self;
+        let entry_hash = |ix: u32| entries[ix as usize].hash;
+        match *kernel {
+            ProbeKernel::Int4 { .. } => hashtab.find(hash, entry_hash, |ix| {
+                let e = &entries[ix as usize];
+                Ok(match (isnull, e.key_isnull) {
+                    (false, false) => e.key.as_i32() == key.as_i32(),
+                    (a, b) => a & b,
+                })
+            }),
+            ProbeKernel::Int8 { .. } => hashtab.find(hash, entry_hash, |ix| {
+                let e = &entries[ix as usize];
+                Ok(match (isnull, e.key_isnull) {
+                    (false, false) => e.key.as_i64() == key.as_i64(),
+                    (a, b) => a & b,
+                })
+            }),
+            ProbeKernel::Text { .. } => {
+                let det_mcx = *entries.allocator();
+                // Detoast the input side once per probe, not per candidate.
+                // SAFETY: non-null live text varlena (fn contract).
+                let a = if isnull {
+                    None
+                } else {
+                    Some(unsafe { ::types_fmgr::datum_varlena_packed(key, det_mcx) }?)
+                };
+                hashtab.find(hash, entry_hash, |ix| {
+                    let e = &entries[ix as usize];
+                    match (&a, e.key_isnull) {
+                        (Some(a), false) => {
+                            // SAFETY: e.key points into the live stored image.
+                            let b =
+                                unsafe { ::types_fmgr::datum_varlena_packed(e.key, det_mcx) }?;
+                            Ok(a.data() == b.data())
+                        }
+                        (None, true) => Ok(true),
+                        _ => Ok(false),
+                    }
+                })
+            }
+            ProbeKernel::Expr => unreachable!("staged find requires a probe kernel"),
+        }
+    }
+
+    /// Repoint an entry at a relocated VERBATIM copy of its image
+    /// (table-handoff install), rebasing the Text kernel's cached key pointer
+    /// into the new image (the copy preserves byte layout, so the key's
+    /// offset from the tuple start is invariant). Byval caches are untouched.
+    pub fn relocate_entry(
+        &self,
+        e: &mut TupleHashEntryData,
+        new_tuple: NonNull<MinimalTupleData>,
+    ) {
+        if matches!(self.kernel, ProbeKernel::Text { .. }) && !e.key_isnull {
+            let off = e
+                .key
+                .as_usize()
+                .wrapping_sub(e.first_tuple.as_ptr() as usize);
+            e.key = Datum::from_usize((new_tuple.as_ptr() as usize).wrapping_add(off));
+        }
+        e.set_tuple(new_tuple);
+    }
+
+    /// True when this table's probe kernel supports the lane-v2 K2 staged
+    /// batched hash pre-pass: a single-column Int4/Int8/Text kernel whose
+    /// hash needs no compiled-program walk (Expr tables refuse — batching
+    /// their per-row program would win nothing).
+    pub fn staged_probe_supported(&self) -> bool {
+        !matches!(self.kernel, ProbeKernel::Expr)
+    }
+
+    /// K2 batched hashing: `TupleHashTableHash` over a staged key lane in one
+    /// tight loop, bit-identical per element to [`Self::hash_slot`] over a
+    /// slot carrying the same value. Kernel tables only
+    /// ([`Self::staged_probe_supported`]).
+    ///
+    /// Safety contract (inline, like `kernel_key`): non-null staged datums
+    /// must be live values of the kernel's key type.
+    pub fn hash_staged(
+        &self,
+        keys: &[Datum],
+        isnull: &[bool],
+        out: &mut Vec<u32>,
+    ) -> PgResult<()> {
+        debug_assert_eq!(keys.len(), isnull.len());
+        out.clear();
+        out.reserve(keys.len());
+        match self.kernel {
+            ProbeKernel::Int4 { .. } => {
+                for (&k, &n) in keys.iter().zip(isnull) {
+                    let h = if n { 0 } else { ::hashfn::hash_bytes_uint32(k.as_u32()) };
+                    out.push(::hashfn::murmurhash32(h));
+                }
+            }
+            ProbeKernel::Int8 { .. } => {
+                for (&k, &n) in keys.iter().zip(isnull) {
+                    let h = if n { 0 } else { ::hashfn::hash_bytes_uint32(hashint8_fold(k)) };
+                    out.push(::hashfn::murmurhash32(h));
+                }
+            }
+            ProbeKernel::Text { .. } => {
+                let mcx = *self.entries.allocator();
+                for (&k, &n) in keys.iter().zip(isnull) {
+                    let h = if n { 0 } else { text_kernel_hash(k, mcx)? };
+                    out.push(::hashfn::murmurhash32(h));
+                }
+            }
+            ProbeKernel::Expr => unreachable!("staged hashing requires a probe kernel"),
+        }
+        Ok(())
+    }
+
     /// C `ResetTupleHashTable`; the caller resets the entry context.
     pub fn reset(&mut self) {
         self.entries.clear();
         self.hashtab.clear();
     }
+}
+
+/// The Text kernel's hashtext core over a live text datum: detoast
+/// (`pg_detoast_datum_packed`; external/compressed images land in `mcx` — the
+/// same metacxt the Expr path's armed result mcx uses, per the divergence
+/// note in `build_tuple_hash_table`) + raw-bytes hash_any — bit-identical to
+/// the fmgr `hashtext` under the kernel's resolved-once raw-bytes collation
+/// gate.
+///
+/// Safety contract (inline, not `unsafe fn`, mirroring `kernel_key`): the
+/// datum must be a non-null live text/varchar varlena — kernel selection
+/// (hashtext/texteq operator pair) proves the key column's type.
+#[inline]
+fn text_kernel_hash(key: Datum, mcx: Mcx<'_>) -> PgResult<u32> {
+    // SAFETY: non-null live text varlena (fn contract above).
+    let v = unsafe { ::types_fmgr::datum_varlena_packed(key, mcx) }?;
+    Ok(::hashfn::hash_bytes(v.data()))
 }
 
 #[inline(always)]
