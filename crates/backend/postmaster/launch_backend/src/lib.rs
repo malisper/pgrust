@@ -404,10 +404,15 @@ pub fn postmaster_child_launch(
 // C backends run on the process stack (RLIMIT_STACK); a raised-from-rlimit
 // max_stack_depth needs the same real budget here, so child threads reserve
 // the finite rlimit (env RUST_MIN_STACK still wins when larger; std ignores
-// it once stack_size() is explicit). Unlimited/unknown rlimit reserves 64MiB.
+// it once stack_size() is explicit). Unlimited/unknown rlimit reserves 16MiB
+// (or the max_stack_depth budget + slop when the GUC was raised above that):
+// reserve is address space only, but 64MiB x max_connections=500 was 32 GB
+// of VSZ for zero benefit under `ulimit -s unlimited`.
 fn child_thread_stack_size() -> usize {
     let rlim = stack_depth::get_stack_depth_rlimit();
-    let rlim = if rlim > 0 && rlim < isize::MAX { rlim as usize } else { 64 << 20 };
+    let unlimited_reserve =
+        (16usize << 20).max(stack_depth::max_stack_depth_bytes().max(0) as usize + (2 << 20));
+    let rlim = if rlim > 0 && rlim < isize::MAX { rlim as usize } else { unlimited_reserve };
     let min_stack = std::env::var("RUST_MIN_STACK")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
