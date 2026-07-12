@@ -55,8 +55,9 @@ pub mod merge;
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
-    agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_try_arm,
-    agg_hash_compact_try_arm_mk, CompactArm, MkComp, MkCompKind, MkShape,
+    agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_reduced_admissible,
+    agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk, agg_hash_compact_try_arm_reduced,
+    CompactArm, MkComp, MkCompKind, MkShape, RedDerived, RedOp, RedShape,
 };
 pub use ::execgrouping::GroupKeyKind;
 
