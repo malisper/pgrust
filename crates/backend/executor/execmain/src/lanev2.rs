@@ -3753,6 +3753,15 @@ fn sort_feed_if_needed<'mcx>(
                         estate,
                     )?
                 }
+                crate::procnode::PlanStateNode::Gather(g) => {
+                    agg_gather_build_if_needed(
+                        &mut aps.agg,
+                        &mut **g,
+                        &mut aps.lane_stage_slot,
+                        estate,
+                    )?;
+                    true
+                }
                 _ => unreachable!("agg_child_fusible admitted a non-lane agg feed"),
             };
             if !built {
@@ -6367,6 +6376,10 @@ fn agg_child_fusible<'mcx>(
             Ok(c != AggLaneChoice::Refuse)
         }
         crate::procnode::PlanStateNode::HashJoin(hj) => hash_join_lane_fusible(hj, estate),
+        // Agg-over-gather: no child-side structural gate — the build reuses
+        // `exec_gather` verbatim (section header), so every gather shape the
+        // breaker-admissible agg sits on is drivable.
+        crate::procnode::PlanStateNode::Gather(_) => Ok(agg_gather_enabled()),
         _ => Ok(false),
     }
 }
@@ -6469,6 +6482,15 @@ pub fn try_own_limit<'mcx>(
                             &mut aps.lane_stage_slot,
                             estate,
                         )?
+                    }
+                    crate::procnode::PlanStateNode::Gather(g) => {
+                        agg_gather_build_if_needed(
+                            &mut aps.agg,
+                            &mut **g,
+                            &mut aps.lane_stage_slot,
+                            estate,
+                        )?;
+                        true
                     }
                     _ => unreachable!("agg_child_fusible admitted a non-lane agg feed"),
                 };
@@ -7050,6 +7072,164 @@ pub fn try_own_agg_over_subquery_scan<'mcx>(
             ::exectuples::exec_clear_tuple(estate.slot_mut(p.pi_result_slot), mcx);
         }
     }
+    // Emit phase (every call): one qual-passing group per PG pull, in C's
+    // retrieve order.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
+// ===========================================================================
+// Agg-over-Gather hosting (lane-v2-aggovergather): the leader-side
+// HashAggregate above a Gather — the plan shape the planner picks when
+// partial-aggregation costing does not win (common at 10M+: many-group
+// GROUP BYs) — as a lane breaker build fed by the GATHER MACHINERY AS A
+// SOURCE. The workers stay row-path (they only scan/filter/project into the
+// shm_mq); the leader's half becomes lane pipelines on the one breaker node:
+//
+//   1. build: exec_gather (REUSED VERBATIM, per pull: worker launch,
+//      round-robin nowait queue reads, leader participation, projection) →
+//      staged fold sink / per-row breaker sink
+//   2. emit:  HashAggSource → HashAggEmit → RootAdapter (one group per pull)
+//
+// The Append house rule applies: the node's OWN drive body is reused, not
+// reimplemented — worker launch/teardown, tqueue reads, latch waits,
+// leader-participation pulls (`exec_proc_node` on the partial plan — the
+// leader's local child stays row-path; parallel-aware scans refuse the lane
+// via the parallel gate), deferred-rescan chgParam, and the per-pull CFI are
+// all `exec_gather`'s. Only the consumer changes: each returned slot feeds
+// the breaker sink instead of returning through the Volcano boundary, so the
+// agg consumes C's rows in C's arrival order and the built table is
+// byte-identical to `exec_agg` over `exec_gather`'s.
+//
+// Feed choice mirrors the agg-over-join composition: the staged fold feed
+// (`StagedFoldAggSink` — batched transition folds; K2's deferred batched
+// probe when the grouping key is single and kernel-hostable) when the agg
+// carries a lanefold plan, the per-row `HashAggBuildSink` otherwise. Staged
+// by-ref values are copied into the per-batch arena at accept, so the
+// funnel slot's transport-lifetime tuple (live only until the next queue
+// receive) is never held across rows.
+//
+// Refuse-set (each byte-safe on the Volcano fallback):
+//   * agg-side: `agg_hash_breaker_admissible`, verbatim (grouping sets /
+//     DISTINCT / ordered-set / merge-phase — notably the parallel FINALIZE
+//     half of a partial-agg plan, whose AGGSPLIT deserialization the breaker
+//     does not own; ticked under aggbuild per offered call).
+//   * dynamic EPQ / non-forward pulls (§4 model-incompatible; per call).
+//   * GatherMerge stays Volcano: the planner puts a hash agg above
+//     GatherMerge only when the merge order is useful elsewhere — no such
+//     CB shape exists; a sorted GroupAggregate over GatherMerge is a
+//     different (sorted-agg) breaker and refuses via the dispatch match.
+//   * kill switch `PGRUST_LANE_V2_AGGGATHER=0` (A/B tooling; default ON).
+//
+// EXPLAIN is unchanged (no planner surface); EXPLAIN ANALYZE trees wrap
+// every node in the `Instrumented` variant and never reach the hook.
+// ===========================================================================
+
+/// Agg-over-Gather kill switch: on by default under the lane;
+/// `PGRUST_LANE_V2_AGGGATHER=0`/`off` forces the Volcano fallback.
+fn agg_gather_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_AGGGATHER").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Drain the gather stream to exhaustion into a breaker sink — pipeline 1's
+/// driver with `exec_gather` as the source (the node's own drive, reused
+/// verbatim; its per-pull CFI is the loop's interrupt cadence). `finish`
+/// runs the sink's finalize tail (staged flush + build finalize).
+fn gather_drain<'mcx>(
+    g: &mut crate::procnode::GatherNode<'mcx>,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    while let Some(slot) = crate::nodegather::exec_gather(&mut g.state, &mut g.outer, estate)? {
+        let fed = sink.accept(slot, estate)?;
+        debug_assert_eq!(fed, SinkFeed::NeedMore, "a breaker sink consumes its whole input");
+        let _ = fed;
+    }
+    sink.finish(estate)
+}
+
+/// Build phase of the agg-over-gather composition, once, lazily: drain the
+/// gather stream into the breaker sink (staged fold feed when the agg
+/// carries a fold plan; the per-row sink otherwise), then finalize
+/// (delegated). `table_filled` is the phase flag; a rescan rebuild clears it
+/// (`exec_rescan_gather` reset the gather side, workers relaunch on the
+/// first pull) and re-enters here. Shared by the bare composition hook and
+/// the Sort-/Limit-over-agg chains. Unlike the join composition there is no
+/// feed-time refuse: the gather stream has no spill analog, so the build
+/// always completes.
+fn agg_gather_build_if_needed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    g: &mut crate::procnode::GatherNode<'mcx>,
+    stage_slot: &mut Option<ExecSlotId>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if ::nodeagg::agg_hash_table_filled(agg) {
+        return Ok(());
+    }
+    // One OWNED tick per lane-owned build event, on both classes the event
+    // engages (aggbuild counts builds; gather counts feeds).
+    stats::tick_owned(ShapeClass::AggBuild);
+    stats::tick_owned(ShapeClass::Gather);
+    // The gather's output slot: the projected result slot when the Gather
+    // carries a projection, else the funnel slot (worker rows; leader-local
+    // rows arrive in the leader plan's own slot with the same descriptor —
+    // the sinks deform from the slot each accept).
+    let out_slot = g.state.ps.ps_ResultTupleSlot.unwrap_or(g.state.funnel_slot);
+    match staged_feed_shape(agg, out_slot, estate) {
+        Some(shape) => {
+            trace_feed(match shape.mode {
+                StagedMode::Guarded => "agg-over-gather: staged fold feed engaged (guarded)",
+                StagedMode::K2 { .. } => "agg-over-gather: staged fold feed engaged (k2 probe)",
+                StagedMode::Arrival => "agg-over-gather: staged fold feed engaged",
+            });
+            let mut sink = StagedFoldAggSink::new(agg, out_slot, stage_slot, shape, estate);
+            gather_drain(g, &mut sink, estate)
+        }
+        None => {
+            trace_feed("agg-over-gather: per-row sink (no fold plan)");
+            let mut sink = HashAggBuildSink { agg };
+            gather_drain(g, &mut sink, estate)
+        }
+    }
+}
+
+/// Try to let the lane own `Agg(hashed) → Gather → (row-path parallel
+/// workers)` — the leader-side aggregation shape (see the section header for
+/// the model, the reuse rule, and the refuse-set). `None` = refused (the
+/// caller falls to the per-tuple `exec_agg` over `exec_gather`,
+/// byte-identically).
+#[inline]
+pub fn try_own_agg_over_gather<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    g: &mut ::mcx::PgBox<'mcx, crate::procnode::GatherNode<'mcx>>,
+    stage_slot: &mut Option<ExecSlotId>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !agg_gather_enabled() {
+        return Ok(None);
+    }
+    // Dynamic per-call gates, ticked under the gather class (the
+    // composition's feed hangs off the gather's drive).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::Gather, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::Gather, RefuseReason::Backward);
+        return Ok(None);
+    }
+    if !::nodeagg::agg_hash_breaker_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    agg_gather_build_if_needed(agg, &mut **g, stage_slot, estate)?;
     // Emit phase (every call): one qual-passing group per PG pull, in C's
     // retrieve order.
     let mut root = RootAdapter::new(None);
