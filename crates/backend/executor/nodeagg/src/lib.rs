@@ -3012,9 +3012,12 @@ pub fn agg_lanefold_plan<'a, 'mcx>(
 }
 
 /// The node's aggcontext arena — C's curaggcontext, the context transfns
-/// reach via fcinfo->context (`AggCheckCallContext`). The lane fold allocates
-/// INTERNAL transition states (lanefold `Int128AvgAccum`) here so fold-fed
-/// and per-row/demoted batches accumulate into one shared state.
+/// reach via fcinfo->context (`AggCheckCallContext`) and where by-ref
+/// transvalues are datumCopy'd (execexpr's `agg_datum_copy` target). The lane
+/// fold allocates INTERNAL transition states (lanefold `Int128AvgAccum`) here
+/// so fold-fed and per-row/demoted batches accumulate into one shared state,
+/// and str-kind transvalue copies land exactly where the per-row program's
+/// would.
 pub fn agg_aggcontext<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
     // SAFETY: agg_node is the node's own arena-boxed AggStateNode, live for
     // the node's lifetime; no &mut to it is formed during this borrow.
@@ -3034,7 +3037,6 @@ pub fn agg_hash_needed_cols<'a>(node: &'a AggStateData<'_>) -> (&'a [bool], i32)
     let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
     (&ph.spill.colnos_needed, ph.spill.max_colno_needed)
 }
-
 /// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
 /// program split — prepare/lookup per row (spill-mode misses spill the tuple
 /// identically), then only the RESIDUAL transitions (the transnos classify
