@@ -535,6 +535,34 @@ pub fn seq_scan_batch_key<'mcx>(
     Some((b.soa.col_values(c)[i as usize], b.soa.col_isnull(c)[i as usize]))
 }
 
+/// Kernel-qual selection bitmap armed on the batch SoA — the lane-v2
+/// filtered-scan fast path (also true under the fused full-prefix deform,
+/// where one deform serves both the qual bitmap and the fold lanes).
+#[inline(always)]
+pub fn seq_scan_batch_qual_bitmap_armed(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.qual_armed)
+}
+
+/// Bitmap computed for the CURRENTLY staged page batch (armed + a non-empty
+/// selection word set). False for a batch staged before arming — the caller
+/// must keep the per-row walk for that batch.
+#[inline(always)]
+pub fn seq_scan_batch_qual_bitmap_ready(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.qual_armed && b.nwords > 0)
+}
+
+/// Pop the next selection-bitmap survivor of the staged batch (ascending
+/// staged-row index): bitmap hits plus forced fallback bits — the SoA prefix
+/// deform skipped those rows, so `seq_scan_batch_fetch` re-checks them
+/// per-row. The iterator cursor is node-resident (`cur_word`/`cur_bits`),
+/// surviving the Volcano call boundary; `exec_rescan_seq_scan` resets it.
+#[inline(always)]
+pub fn seq_scan_batch_next_selected(node: &mut SeqScanState<'_>) -> Option<u32> {
+    let b = node.batch_soa.as_deref_mut()?;
+    debug_assert!(b.qual_armed);
+    b.next_selected()
+}
+
 /// Staged SoA batch when the full-prefix deform is armed (columnar readers).
 #[inline]
 pub fn seq_scan_batch_soa<'a, 'mcx>(
